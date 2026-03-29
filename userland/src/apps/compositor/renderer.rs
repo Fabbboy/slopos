@@ -301,6 +301,8 @@ impl Renderer {
             5 | 6 => self.draw_cursor_ew(buf, mx, my, clip),
             7 | 10 => self.draw_cursor_nwse(buf, mx, my, clip),
             8 | 9 => self.draw_cursor_nesw(buf, mx, my, clip),
+            11 => self.draw_cursor_grab(buf, mx, my, clip),
+            12 => self.draw_cursor_grabbing(buf, mx, my, clip),
             _ => self.draw_cursor_default(buf, mx, my, clip),
         }
     }
@@ -479,6 +481,55 @@ impl Renderer {
             [1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],
         ];
         self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
+    }
+
+    /// Open hand cursor (grab/ready to drag). 15×16, hotspot at (6,1).
+    fn draw_cursor_grab(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const W: usize = 15;
+        const H: usize = 16;
+        #[rustfmt::skip]
+        const BITMAP: [[u8; W]; H] = [
+            [0,0,0,1,1,0,1,1,0,0,0,0,0,0,0],
+            [0,0,1,2,2,1,2,2,1,0,0,0,0,0,0],
+            [0,0,1,2,2,1,2,2,1,1,1,0,0,0,0],
+            [0,0,1,2,2,1,2,2,1,2,2,1,0,0,0],
+            [0,0,1,2,2,1,2,2,1,2,2,1,1,0,0],
+            [1,1,1,2,2,1,2,2,1,2,2,1,2,1,0],
+            [1,2,1,2,2,2,2,2,2,2,2,2,2,1,0],
+            [1,2,1,2,2,2,2,2,2,2,2,2,2,1,0],
+            [0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
+            [0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
+            [0,0,1,2,2,2,2,2,2,2,2,1,0,0,0],
+            [0,0,1,2,2,2,2,2,2,2,2,1,0,0,0],
+            [0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
+            [0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
+            [0,0,0,0,1,2,2,2,2,1,0,0,0,0,0],
+            [0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+        ];
+        self.draw_cursor_bitmap::<W, H>(buf, mx - 6, my - 1, &BITMAP, clip);
+    }
+
+    /// Closed fist cursor (grabbing/active drag). 13×13, hotspot at (5,3).
+    fn draw_cursor_grabbing(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const W: usize = 13;
+        const H: usize = 13;
+        #[rustfmt::skip]
+        const BITMAP: [[u8; W]; H] = [
+            [0,0,1,1,0,1,1,0,1,1,0,0,0],
+            [0,1,2,2,1,2,2,1,2,2,1,0,0],
+            [0,1,2,2,1,2,2,1,2,2,1,1,0],
+            [1,1,2,2,2,2,2,2,2,2,1,2,1],
+            [1,2,2,2,2,2,2,2,2,2,2,2,1],
+            [1,2,2,2,2,2,2,2,2,2,2,2,1],
+            [0,1,2,2,2,2,2,2,2,2,2,1,0],
+            [0,1,2,2,2,2,2,2,2,2,2,1,0],
+            [0,0,1,2,2,2,2,2,2,2,1,0,0],
+            [0,0,1,2,2,2,2,2,2,2,1,0,0],
+            [0,0,0,1,2,2,2,2,2,1,0,0,0],
+            [0,0,0,1,2,2,2,2,2,1,0,0,0],
+            [0,0,0,0,1,1,1,1,1,0,0,0,0],
+        ];
+        self.draw_cursor_bitmap::<W, H>(buf, mx - 5, my - 3, &BITMAP, clip);
     }
 
     /// Generic bitmap cursor renderer. 0=transparent, 1=border(black), 2=fill(white).
@@ -877,6 +928,20 @@ fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {
             y0: my - 7,
             x1: mx + 7,
             y1: my + 7,
+        },
+        // Grab — open hand (15×16, hotspot at (6,1))
+        11 => DamageRect {
+            x0: mx - 6,
+            y0: my - 1,
+            x1: mx + 8,
+            y1: my + 14,
+        },
+        // Grabbing — closed fist (13×13, hotspot at (5,3))
+        12 => DamageRect {
+            x0: mx - 5,
+            y0: my - 3,
+            x1: mx + 7,
+            y1: my + 9,
         },
         // Default arrow (12×17, top-left hotspot)
         _ => DamageRect {

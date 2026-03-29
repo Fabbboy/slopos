@@ -2,7 +2,7 @@
 
 ## 0. Progress Summary
 
-> **Last updated**: 2026-03-29 (Phase 5b scroll wheel complete)
+> **Last updated**: 2026-03-29 (Phase 5 grab-hand cursor complete)
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
@@ -10,11 +10,11 @@
 | **Phase 2** — Alpha Blending | ✅ **Complete** | 100% | Blend math in `gfx/src/blend.rs` + compositor wiring in commit `51c3c7a`. Drop shadows (12px spread, quadratic falloff) and semi-transparent title bars (0xD0 alpha tint) active. Damage tracking includes shadow bounds. |
 | **Phase 3** — AA Primitives | ✅ **Complete** | 100% | `line_aa`, `circle_aa`, `rounded_rect`, `rounded_rect_filled` all landed in `gfx/src/canvas_ops.rs`. Aliased primitives preserved. |
 | **Phase 4** — macOS Chrome | ✅ **Complete** | 100% | Full rip-and-replace in commit `27b29e7`. Menu bar (24px, clock, active app name), dock (magnification, running dots, pinned/running separator), traffic-light window decorations (12px circles, hover glyphs, 8px corner radius). Old taskbar/start menu deleted. App ID system (`SYSCALL_SURFACE_SET_APP_ID`) added. |
-| **Phase 5** — Window Interactions | 🟡 **Partial** | ~90% | Window move ✅, resize ✅, 8 directional resize cursors ✅, Super+LMB move ✅, scroll wheel ✅. Remaining: grab-hand cursor. |
+| **Phase 5** — Window Interactions | ✅ **Complete** | 100% | Window move ✅, resize ✅, 8 directional resize cursors ✅, Super+LMB move ✅, scroll wheel ✅, grab-hand cursor ✅ (CSS/W3C two-cursor model: open hand on title-bar hover, closed fist during drag). 13 cursor shapes total. |
 | **Phase 5b** — Scroll Wheel & Axis Events | ✅ **Complete** | 100% | PS/2 IntelliMouse (ImPS/2 + ImExPS/2) probe, 4-byte packets, `PointerAxis` ABI event (value120 model), shell scroll-by-line. Traditional scroll direction. Partial-row rendering artifact fixed. Touchpad architecture documented for future phase. |
 | **Phase 6** — Widget Toolkit | ❌ **Not started** | 0% | No `widgets/` directory exists. |
 
-**Next milestone**: Phase 5 remaining (grab-hand cursor) or Phase 6 (widget toolkit).
+**Next milestone**: Phase 6 (widget toolkit).
 
 ---
 
@@ -53,7 +53,7 @@ Transform SlopOS from its current 1990s-era Windows-style compositor into a mode
 | **PS/2 mouse** | ⚠️ No scroll | `drivers/src/ps2/mouse.rs` — 3-byte packets, no IntelliMouse scroll |
 | **Window resize** | ✅ Working | wlroots SSD model: `start_resize`/`update_resize`/`stop_resize` in `compositor/input.rs`, edge detection in `decorations.rs`, Configure events via `SYSCALL_SEND_CONFIGURE` (151), frame/buffer separation in `compositor_context.rs`, Wayland content model in `renderer.rs`, deferred SHM destruction in `mm/shared_memory.rs`, min size 200×150. Shell handles resize with realloc + unconditional redraw. |
 | **Window move** | ✅ Working | Title-bar drag via `start_drag`/`update_drag`/`stop_drag` + Super+LMB on content area (wlroots/Sway pattern, commit `28e4260`) |
-| **Cursor shapes** | ✅ 11 shapes | Default, Text, Pointer, N/S/E/W/NW/NE/SW/SE resize — defined in `abi/src/window.rs`, rendered as pixel-art bitmaps in `renderer.rs` |
+| **Cursor shapes** | ✅ 13 shapes | Default, Text, Pointer, N/S/E/W/NW/NE/SW/SE resize, Grab, Grabbing — defined in `abi/src/window.rs`, rendered as pixel-art bitmaps in `renderer.rs` |
 | **Theme system** | ⚠️ Windows-style | `userland/src/theme.rs` — "Dark Roulette Theme", Windows 10/11 dark palette |
 | **Pixel formats** | ✅ 6 formats | ARGB8888, XRGB8888, RGB888, BGR888, RGBA8888, BGRA8888 |
 | **Shared memory** | ✅ Wayland-style | `mm/src/shared_memory.rs` — 64 buffers, acquire/release/refcount |
@@ -369,7 +369,7 @@ Supporting changes:
 
 ---
 
-### Phase 5: Window Interactions — 🟡 PARTIAL (~75%)
+### Phase 5: Window Interactions — ✅ COMPLETE
 **Goal**: Make windows movable, resizable, and scrollable.
 
 **Acceptance criteria**:
@@ -411,7 +411,12 @@ Files substantially modified:
 - `video/src/compositor_context.rs` — `set_window_size()` (lines 570-588), frame dims in `SurfaceState`, exported in `surface_enumerate_windows()`
 - `mm/src/shared_memory.rs` — `shm_destroy()` deferred destruction (lines 516-600) — owner mappings removed, compositor read-only mapping keeps pages alive
 
-**Remaining work**: Grab-hand cursor (stretch goal).
+**Grab-hand cursor** (CSS/W3C two-cursor model):
+- ✅ `CURSOR_SHAPE_GRAB` (11) — open hand on title-bar hover ("ready to grab")
+- ✅ `CURSOR_SHAPE_GRABBING` (12) — closed fist during active drag (title-bar or Super+LMB)
+- ✅ Pixel-art bitmaps: grab (15x16, hotspot at fingertips), grabbing (13x13, hotspot at knuckles)
+- ✅ Follows Wayland `wp_cursor_shape_v1` naming (GRAB/GRABBING), beats Sway (single cursor) and Redox OS (no grab cursor at all)
+- ✅ Wired via existing `compositor_cursor_override` — no new syscalls needed
 
 **Scroll wheel**: Implemented in Phase 5b below.
 
@@ -615,13 +620,13 @@ Phase 2 (Alpha Blending) ─ ✅ COMPLETE ───────────┤
                                                   ├──▶ Phase 4 (macOS Chrome) ✅ COMPLETE
 Phase 3 (AA Primitives) ── ✅ COMPLETE ───────────┘         │
                                                             │
-                           Phase 5 (Interactions) 🟡 ◀──────┘
-                                   │       (move ✅, resize ✅, cursors ✅, scroll ❌)
+                           Phase 5 (Interactions) ✅ ◀──────┘
+                                   │       (move ✅, resize ✅, cursors ✅, scroll ✅, grab ✅)
                                    ▼
                            Phase 6 (Widgets) ❌
 ```
 
-Phases 1–4 are **done** — all rendering foundations and macOS chrome are in place. Phase 5 is ~75% complete: move, resize, and cursor shapes are fully implemented. Only scroll wheel remains (PS/2 IntelliMouse 4-byte protocol). Phase 6 (widget toolkit) is fully unblocked but not started.
+Phases 1–5 are **done** — all rendering foundations, macOS chrome, and window interactions are complete. Phase 6 (widget toolkit) is fully unblocked but not started.
 
 ---
 

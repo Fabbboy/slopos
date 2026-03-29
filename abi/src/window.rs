@@ -17,6 +17,8 @@ pub const CURSOR_SHAPE_NW_RESIZE: u8 = 7;
 pub const CURSOR_SHAPE_NE_RESIZE: u8 = 8;
 pub const CURSOR_SHAPE_SW_RESIZE: u8 = 9;
 pub const CURSOR_SHAPE_SE_RESIZE: u8 = 10;
+pub const CURSOR_SHAPE_GRAB: u8 = 11;
+pub const CURSOR_SHAPE_GRABBING: u8 = 12;
 
 /// Fixed-size application identifier following the Wayland `set_app_id()` convention.
 /// Apps declare their identity (e.g. "org.slopos.shell") and the compositor uses

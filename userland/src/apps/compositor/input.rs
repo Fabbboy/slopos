@@ -1,5 +1,5 @@
 use slopos_abi::input::MODIFIER_SUPER;
-use slopos_abi::window::CURSOR_SHAPE_DEFAULT;
+use slopos_abi::window::{CURSOR_SHAPE_DEFAULT, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING};
 
 use crate::program_registry;
 use crate::syscall::{UserWindowInfo, input, process, tty, window};
@@ -491,11 +491,13 @@ impl InputHandler {
         self.drag_task = window.task_id;
         self.drag_offset_x = self.mouse_x - window.x;
         self.drag_offset_y = self.mouse_y - window.y;
+        self.compositor_cursor_override = CURSOR_SHAPE_GRABBING;
     }
 
     fn stop_drag(&mut self) {
         self.dragging = false;
         self.drag_task = 0;
+        self.compositor_cursor_override = CURSOR_SHAPE_DEFAULT;
     }
 
     fn update_drag(&mut self) {
@@ -643,6 +645,18 @@ impl InputHandler {
                 && self.mouse_y >= frame_y
                 && self.mouse_y < w.y + w.effective_height() as i32
             {
+                // Title bar hover → open hand (grab) for non-maximized windows
+                if w.state != 2
+                    && decorations::hit_test_title_bar(
+                        w.x,
+                        frame_y,
+                        w.effective_width(),
+                        self.mouse_x,
+                        self.mouse_y,
+                    )
+                {
+                    self.compositor_cursor_override = CURSOR_SHAPE_GRAB;
+                }
                 return;
             }
         }
