@@ -204,6 +204,24 @@ pub fn input_request_close(task_id: u32, timestamp_ms: u64) -> bool {
     }
 }
 
+/// Enqueue a configure (resize) event for a task.
+/// Called by compositor when a window resize operation completes.
+pub fn input_send_configure(task_id: u32, width: u32, height: u32, timestamp_ms: u64) -> bool {
+    if task_id == 0 {
+        return false;
+    }
+
+    let mut mgr = INPUT_MANAGER.lock();
+    if let Some(idx) = mgr.find_or_create_queue(task_id) {
+        mgr.queues[idx]
+            .events
+            .push_overwrite(InputEvent::configure(width, height, timestamp_ms));
+        true
+    } else {
+        false
+    }
+}
+
 /// Get current keyboard focus task ID
 pub fn input_get_keyboard_focus() -> u32 {
     INPUT_MANAGER.lock().keyboard_focus

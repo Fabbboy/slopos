@@ -14,6 +14,7 @@ slopos_service_core::define_service! {
         get_display_info() -> Option<DisplayInfo>;
         surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32;
         surface_set_window_position(task_id: u32, x: i32, y: i32) -> CompositorResult;
+        surface_set_window_size(task_id: u32, width: u32, height: u32) -> CompositorResult;
         surface_set_window_state(task_id: u32, state: u8) -> CompositorResult;
         surface_set_cursor_shape(task_id: u32, shape: u8) -> CompositorResult;
         surface_raise_window(task_id: u32) -> CompositorResult;

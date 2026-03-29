@@ -123,9 +123,12 @@ struct SurfaceState {
     task_id: u32,
     /// Token referencing client's shared memory buffer
     shm_token: u32,
-    /// Surface dimensions (from client's buffer)
+    /// Buffer dimensions (from client's last surface_attach)
     width: u32,
     height: u32,
+    /// Frame dimensions (set by compositor during resize; 0 = use width/height)
+    frame_width: u32,
+    frame_height: u32,
     /// Damage accumulated since last commit (pending state)
     pending_damage: DamageTracker,
     /// Damage from last commit (committed state, visible to compositor)
@@ -171,6 +174,8 @@ impl SurfaceState {
             shm_token,
             width,
             height,
+            frame_width: 0,
+            frame_height: 0,
             pending_damage: DamageTracker::new(),
             committed_damage: DamageTracker::new(),
             dirty: true,
@@ -376,6 +381,11 @@ pub fn register_surface_for_task(
     Ok(())
 }
 
+/// Number of active surfaces (0 = compositor not running or all windows closed).
+pub fn surface_count() -> usize {
+    CONTEXT.lock().surface_count
+}
+
 /// Unregister a surface for a task (called on task exit or surface destruction).
 pub fn unregister_surface_for_task(task_id: u32) {
     let mut ctx = CONTEXT.lock();
@@ -419,8 +429,15 @@ pub fn drain_queue() {
                 height,
                 shm_token,
             } => {
-                // Skip if already registered
-                if ctx.find_surface(task_id).is_some() {
+                // Re-attach path: update buffer metadata (resize, buffer swap)
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
+                    surface.shm_token = shm_token;
+                    surface.width = width;
+                    surface.height = height;
+                    // Sync frame dims to committed buffer size
+                    surface.frame_width = 0;
+                    surface.frame_height = 0;
+                    surface.dirty = true;
                     processed += 1;
                     continue;
                 }
@@ -543,6 +560,26 @@ pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> Result<(), C
     if let Some(surface) = ctx.get_surface_mut(task_id) {
         surface.window_x = x;
         surface.window_y = y;
+        surface.dirty = true;
+        Ok(())
+    } else {
+        Err(CompositorError::SurfaceNotFound)
+    }
+}
+
+/// Set window frame size (for resize). IMMEDIATE - called by COMPOSITOR only.
+/// Updates the frame geometry without touching the buffer dimensions.
+/// The renderer uses frame_width/frame_height for decorations and
+/// width/height (committed buffer size) for content blitting.
+pub fn surface_set_window_size(
+    task_id: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), CompositorError> {
+    let mut ctx = CONTEXT.lock();
+    if let Some(surface) = ctx.get_surface_mut(task_id) {
+        surface.frame_width = width;
+        surface.frame_height = height;
         surface.dirty = true;
         Ok(())
     } else {
@@ -680,6 +717,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.damage_regions = regions;
             info.title = surface.title;
             info.app_id = surface.app_id;
+            info.frame_width = surface.frame_width;
+            info.frame_height = surface.frame_height;
         }
     }
     emit_count as u32

@@ -13,6 +13,7 @@ pub enum Event {
     KeyPress { scancode: u8, ascii: u8 },
     KeyRelease { scancode: u8, ascii: u8 },
     CloseRequest,
+    Configure { width: u32, height: u32 },
     Other,
 }
 
@@ -38,6 +39,10 @@ impl Event {
                 ascii: raw.key_ascii(),
             },
             InputEventType::CloseRequest => Event::CloseRequest,
+            InputEventType::Configure => Event::Configure {
+                width: raw.configure_width(),
+                height: raw.configure_height(),
+            },
             _ => Event::Other,
         }
     }

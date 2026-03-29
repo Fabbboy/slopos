@@ -108,8 +108,8 @@ impl Renderer {
                     buf,
                     window.x,
                     frame_y,
-                    window.width,
-                    window.height,
+                    window.effective_width(),
+                    window.effective_height(),
                     title,
                     focused,
                     sig_hovered,
@@ -155,13 +155,18 @@ impl Renderer {
                     signal_hovered_task,
                     mouse_x,
                     mouse_y,
-                    cursor_shape,
                     surface_cache,
                     system_bar,
                     shelf,
                     active_app_name,
                     uptime_secs,
                 );
+            }
+            let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
+            for rect in damage_regions {
+                if intersect_rect(rect, &cursor_rect).is_some() {
+                    self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
+                }
             }
             RenderMode::Partial
         }
@@ -178,7 +183,6 @@ impl Renderer {
         signal_hovered_task: u32,
         mouse_x: i32,
         mouse_y: i32,
-        cursor_shape: u8,
         surface_cache: &mut ClientSurfaceCache,
         system_bar: &mut SystemBar,
         shelf: &mut LauncherShelf,
@@ -210,11 +214,13 @@ impl Renderer {
                 self.draw_window_shadow(buf, &window, damage);
             }
 
+            let ew = window.effective_width() as i32;
+            let eh = window.effective_height() as i32;
             let content_rect = DamageRect {
                 x0: window.x,
                 y0: window.y,
-                x1: window.x + window.width as i32 - 1,
-                y1: window.y + window.height as i32 - 1,
+                x1: window.x + ew - 1,
+                y1: window.y + eh - 1,
             };
             if intersect_rect(damage, &content_rect).is_some() {
                 self.draw_window_content(buf, &window, damage, surface_cache);
@@ -224,7 +230,7 @@ impl Renderer {
             let title_rect = DamageRect {
                 x0: window.x,
                 y0: frame_y,
-                x1: window.x + window.width as i32 - 1,
+                x1: window.x + ew - 1,
                 y1: window.y - 1,
             };
             if intersect_rect(damage, &title_rect).is_some() {
@@ -235,8 +241,8 @@ impl Renderer {
                     buf,
                     window.x,
                     frame_y,
-                    window.width,
-                    window.height,
+                    window.effective_width(),
+                    window.effective_height(),
                     title,
                     focused,
                     sig_hovered,
@@ -278,11 +284,7 @@ impl Renderer {
             );
         }
 
-        // 5. Cursor
-        let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
-        if intersect_rect(damage, &cursor_rect).is_some() {
-            self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, damage);
-        }
+        // Cursor is drawn once after all partial regions (see render()).
     }
 
     fn draw_cursor(
@@ -295,6 +297,10 @@ impl Renderer {
     ) {
         match cursor_shape {
             1 => self.draw_cursor_text(buf, mx, my, clip),
+            3 | 4 => self.draw_cursor_ns(buf, mx, my, clip),
+            5 | 6 => self.draw_cursor_ew(buf, mx, my, clip),
+            7 | 10 => self.draw_cursor_nwse(buf, mx, my, clip),
+            8 | 9 => self.draw_cursor_nesw(buf, mx, my, clip),
             _ => self.draw_cursor_default(buf, mx, my, clip),
         }
     }
@@ -379,9 +385,142 @@ impl Renderer {
         );
     }
 
+    /// Vertical double-arrow cursor (N/S resize). 9×17, hotspot centered.
+    fn draw_cursor_ns(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const W: usize = 9;
+        const H: usize = 17;
+        #[rustfmt::skip]
+        const BITMAP: [[u8; W]; H] = [
+            [0,0,0,0,1,0,0,0,0],
+            [0,0,0,1,2,1,0,0,0],
+            [0,0,1,2,2,2,1,0,0],
+            [0,1,2,2,2,2,2,1,0],
+            [1,2,2,2,2,2,2,2,1],
+            [1,1,1,1,2,1,1,1,1],
+            [0,0,0,1,2,1,0,0,0],
+            [0,0,0,1,2,1,0,0,0],
+            [0,0,0,1,2,1,0,0,0],
+            [0,0,0,1,2,1,0,0,0],
+            [0,0,0,1,2,1,0,0,0],
+            [1,1,1,1,2,1,1,1,1],
+            [1,2,2,2,2,2,2,2,1],
+            [0,1,2,2,2,2,2,1,0],
+            [0,0,1,2,2,2,1,0,0],
+            [0,0,0,1,2,1,0,0,0],
+            [0,0,0,0,1,0,0,0,0],
+        ];
+        self.draw_cursor_bitmap::<W, H>(buf, mx - 4, my - 8, &BITMAP, clip);
+    }
+
+    /// Horizontal double-arrow cursor (E/W resize). 17×9, hotspot centered.
+    fn draw_cursor_ew(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const W: usize = 17;
+        const H: usize = 9;
+        #[rustfmt::skip]
+        const BITMAP: [[u8; W]; H] = [
+            [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0],
+            [0,0,0,1,1,0,0,0,0,0,0,0,1,1,0,0,0],
+            [0,0,1,2,1,0,0,0,0,0,0,0,1,2,1,0,0],
+            [0,1,2,2,1,1,1,1,1,1,1,1,1,2,2,1,0],
+            [1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1],
+            [0,1,2,2,1,1,1,1,1,1,1,1,1,2,2,1,0],
+            [0,0,1,2,1,0,0,0,0,0,0,0,1,2,1,0,0],
+            [0,0,0,1,1,0,0,0,0,0,0,0,1,1,0,0,0],
+            [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0],
+        ];
+        self.draw_cursor_bitmap::<W, H>(buf, mx - 8, my - 4, &BITMAP, clip);
+    }
+
+    /// Diagonal double-arrow cursor (NW/SE resize). 15×15, hotspot centered.
+    fn draw_cursor_nwse(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const W: usize = 15;
+        const H: usize = 15;
+        #[rustfmt::skip]
+        const BITMAP: [[u8; W]; H] = [
+            [1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],
+            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
+            [1,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
+            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
+            [1,2,1,2,2,2,1,0,0,0,0,0,0,0,0],
+            [1,1,0,1,2,2,2,1,0,0,0,0,0,0,0],
+            [0,0,0,0,1,2,2,2,1,0,0,0,0,0,0],
+            [0,0,0,0,0,1,2,2,2,1,0,0,0,0,0],
+            [0,0,0,0,0,0,1,2,2,2,1,0,0,0,0],
+            [0,0,0,0,0,0,0,1,2,2,2,1,0,1,1],
+            [0,0,0,0,0,0,0,0,1,2,2,2,1,2,1],
+            [0,0,0,0,0,0,0,0,0,1,2,2,2,2,1],
+            [0,0,0,0,0,0,0,0,0,0,1,2,2,2,1],
+            [0,0,0,0,0,0,0,0,0,0,1,2,2,2,1],
+            [0,0,0,0,0,0,0,0,0,1,1,1,1,1,1],
+        ];
+        self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
+    }
+
+    /// Diagonal double-arrow cursor (NE/SW resize). 15×15, hotspot centered.
+    fn draw_cursor_nesw(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const W: usize = 15;
+        const H: usize = 15;
+        #[rustfmt::skip]
+        const BITMAP: [[u8; W]; H] = [
+            [0,0,0,0,0,0,0,0,0,1,1,1,1,1,1],
+            [0,0,0,0,0,0,0,0,0,1,2,2,2,2,1],
+            [0,0,0,0,0,0,0,0,0,0,1,2,2,2,1],
+            [0,0,0,0,0,0,0,0,0,1,2,2,2,2,1],
+            [0,0,0,0,0,0,0,0,1,2,2,2,1,2,1],
+            [0,0,0,0,0,0,0,1,2,2,2,1,0,1,1],
+            [0,0,0,0,0,0,1,2,2,2,1,0,0,0,0],
+            [0,0,0,0,0,1,2,2,2,1,0,0,0,0,0],
+            [0,0,0,0,1,2,2,2,1,0,0,0,0,0,0],
+            [1,1,0,1,2,2,2,1,0,0,0,0,0,0,0],
+            [1,2,1,2,2,2,1,0,0,0,0,0,0,0,0],
+            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
+            [1,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
+            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
+            [1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],
+        ];
+        self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
+    }
+
+    /// Generic bitmap cursor renderer. 0=transparent, 1=border(black), 2=fill(white).
+    fn draw_cursor_bitmap<const W: usize, const H: usize>(
+        &self,
+        buf: &mut DrawBuffer,
+        ox: i32,
+        oy: i32,
+        bitmap: &[[u8; W]; H],
+        clip: &DamageRect,
+    ) {
+        const BORDER: Color32 = Color32::rgb(0x00, 0x00, 0x00);
+        for row in 0..H {
+            let py = oy + row as i32;
+            let mut col = 0;
+            while col < W {
+                let pixel = bitmap[row][col];
+                if pixel == 0 {
+                    col += 1;
+                    continue;
+                }
+                let color = if pixel == 1 { BORDER } else { COLOR_CURSOR };
+                let start = col;
+                while col < W && bitmap[row][col] == pixel {
+                    col += 1;
+                }
+                gfx::fill_rect_clipped(
+                    buf,
+                    ox + start as i32,
+                    py,
+                    (col - start) as i32,
+                    1,
+                    color,
+                    clip,
+                );
+            }
+        }
+    }
+
     fn draw_window_shadow(&self, buf: &mut DrawBuffer, window: &UserWindowInfo, clip: &DamageRect) {
-        let ww = window.width as i32;
-        let wh = window.height as i32 + TITLE_BAR_HEIGHT;
+        let ww = window.effective_width() as i32;
+        let wh = window.effective_height() as i32 + TITLE_BAR_HEIGHT;
         let sx = window.x;
         let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
         let spread = SHADOW_SPREAD;
@@ -498,8 +637,18 @@ impl Renderer {
         surface_cache: &mut ClientSurfaceCache,
     ) {
         let bytes_pp = self.output_bytes_pp as usize;
-        let src_pitch = (window.width as usize) * bytes_pp;
-        let buffer_size = src_pitch * (window.height as usize);
+
+        // Use BUFFER dimensions (not frame dimensions) for content blit.
+        // During resize, frame_width/frame_height may be larger than the
+        // actual SHM buffer; using them for pitch would cause corruption.
+        let buf_w = window.width;
+        let buf_h = window.height;
+        let src_pitch = (buf_w as usize) * bytes_pp;
+        let buffer_size = src_pitch * (buf_h as usize);
+
+        // Frame dimensions for the content area rect (may be larger during resize)
+        let frame_w = window.effective_width() as i32;
+        let frame_h = window.effective_height() as i32;
 
         let cache_index = match surface_cache.get_or_create_index(
             window.task_id,
@@ -522,49 +671,84 @@ impl Renderer {
         };
 
         let dst_pitch = self.output_pitch;
-        let buf_width = buf.width() as i32;
-        let buf_height = buf.height() as i32;
+        let out_w = buf.width() as i32;
+        let out_h = buf.height() as i32;
 
-        // window.y from the kernel is the content top (title bar is above it).
-        let window_rect = DamageRect {
+        // Frame rect (the full content area the compositor allocated)
+        let frame_rect = DamageRect {
             x0: window.x,
             y0: window.y,
-            x1: window.x + window.width as i32 - 1,
-            y1: window.y + window.height as i32 - 1,
-        };
-        let Some(draw_rect) = intersect_rect(clip, &window_rect) else {
-            return;
+            x1: window.x + frame_w - 1,
+            y1: window.y + frame_h - 1,
         };
 
-        let x0 = draw_rect.x0.max(0);
-        let y0 = draw_rect.y0.max(0);
-        let x1 = (draw_rect.x1 + 1).min(buf_width);
-        let y1 = (draw_rect.y1 + 1).min(buf_height);
-
-        if x0 >= x1 || y0 >= y1 {
+        // During active resize (frame dims != buffer dims), the client buffer
+        // has stale content at the old size. Blitting it produces visual noise
+        // at the window edges (e.g., text characters from the old layout showing
+        // as white lines at the new edge).  Show placeholder until the client
+        // re-renders at the matching size.
+        let resizing = frame_w != buf_w as i32 || frame_h != buf_h as i32;
+        if resizing {
+            let placeholder_rect = DamageRect {
+                x0: window.x,
+                y0: window.y,
+                x1: window.x + frame_w - 1,
+                y1: window.y + frame_h - 1,
+            };
+            if let Some(r) = intersect_rect(clip, &placeholder_rect) {
+                gfx::fill_rect_clipped(
+                    buf,
+                    r.x0,
+                    r.y0,
+                    r.x1 - r.x0 + 1,
+                    r.y1 - r.y0 + 1,
+                    COLOR_WINDOW_PLACEHOLDER,
+                    clip,
+                );
+            }
+            let _ = frame_rect;
             return;
         }
 
-        let src_start_x = (x0 - window.x) as usize;
-        let src_start_y = (y0 - window.y) as usize;
+        // Normal path: buffer matches frame, blit content directly.
+        let content_rect = DamageRect {
+            x0: window.x,
+            y0: window.y,
+            x1: window.x + (buf_w as i32) - 1,
+            y1: window.y + (buf_h as i32) - 1,
+        };
 
-        let dst_data = buf.data_mut();
+        // Blit the content (clipped to both the clip rect and the content rect)
+        if let Some(draw_rect) = intersect_rect(clip, &content_rect) {
+            let x0 = draw_rect.x0.max(0);
+            let y0 = draw_rect.y0.max(0);
+            let x1 = (draw_rect.x1 + 1).min(out_w);
+            let y1 = (draw_rect.y1 + 1).min(out_h);
 
-        for row in 0..(y1 - y0) as usize {
-            let src_row = src_start_y + row;
-            let dst_row = (y0 as usize) + row;
+            if x0 < x1 && y0 < y1 {
+                let src_start_x = (x0 - window.x) as usize;
+                let src_start_y = (y0 - window.y) as usize;
+                let dst_data = buf.data_mut();
 
-            let src_off = src_row * src_pitch + src_start_x * bytes_pp;
-            let dst_off = dst_row * dst_pitch + (x0 as usize) * bytes_pp;
-            let copy_width = ((x1 - x0) as usize) * bytes_pp;
+                for row in 0..(y1 - y0) as usize {
+                    let src_row = src_start_y + row;
+                    let dst_row = (y0 as usize) + row;
 
-            let src_end = src_off + copy_width;
-            let dst_end = dst_off + copy_width;
+                    let src_off = src_row * src_pitch + src_start_x * bytes_pp;
+                    let dst_off = dst_row * dst_pitch + (x0 as usize) * bytes_pp;
+                    let copy_width = ((x1 - x0) as usize) * bytes_pp;
 
-            if src_end <= src_data.len() && dst_end <= dst_data.len() {
-                dst_data[dst_off..dst_end].copy_from_slice(&src_data[src_off..src_end]);
+                    let src_end = src_off + copy_width;
+                    let dst_end = dst_off + copy_width;
+
+                    if src_end <= src_data.len() && dst_end <= dst_data.len() {
+                        dst_data[dst_off..dst_end].copy_from_slice(&src_data[src_off..src_end]);
+                    }
+                }
             }
         }
+
+        let _ = frame_rect;
     }
 
     fn draw_window_placeholder(
@@ -573,10 +757,15 @@ impl Renderer {
         window: &UserWindowInfo,
         clip: &DamageRect,
     ) {
+        static PH_LOGGED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !PH_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::syscall::tty::write(b"DEBUG: draw_window_placeholder called!\n");
+        }
         let wx = window.x;
         let wy = window.y;
-        let ww = window.width as i32;
-        let wh = window.height as i32;
+        let ww = window.effective_width() as i32;
+        let wh = window.effective_height() as i32;
 
         gfx::fill_rect_clipped(buf, wx, wy, ww, wh, COLOR_WINDOW_PLACEHOLDER, clip);
 
@@ -632,8 +821,8 @@ fn title_to_str(title: &[u8; 32]) -> &str {
 fn shadow_bounds(window: &UserWindowInfo) -> DamageRect {
     let sx = window.x;
     let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
-    let ww = window.width as i32;
-    let wh = window.height as i32 + TITLE_BAR_HEIGHT;
+    let ww = window.effective_width() as i32;
+    let wh = window.effective_height() as i32 + TITLE_BAR_HEIGHT;
     DamageRect {
         x0: sx - SHADOW_SPREAD,
         y0: sy - SHADOW_SPREAD,
@@ -644,12 +833,35 @@ fn shadow_bounds(window: &UserWindowInfo) -> DamageRect {
 
 fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {
     match cursor_shape {
+        // Text beam
         1 => DamageRect {
             x0: mx - 2,
             y0: my - 8,
             x1: mx + 2,
             y1: my + 7,
         },
+        // NS resize (9×17 centered)
+        3 | 4 => DamageRect {
+            x0: mx - 4,
+            y0: my - 8,
+            x1: mx + 4,
+            y1: my + 8,
+        },
+        // EW resize (17×9 centered)
+        5 | 6 => DamageRect {
+            x0: mx - 8,
+            y0: my - 4,
+            x1: mx + 8,
+            y1: my + 4,
+        },
+        // NWSE / NESW resize (15×15 centered)
+        7 | 8 | 9 | 10 => DamageRect {
+            x0: mx - 7,
+            y0: my - 7,
+            x1: mx + 7,
+            y1: my + 7,
+        },
+        // Default arrow (12×17, top-left hotspot)
         _ => DamageRect {
             x0: mx,
             y0: my,

@@ -150,6 +150,18 @@ pub fn set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
 }
 
 #[inline(always)]
+pub fn set_window_size(task_id: u32, width: u32, height: u32) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_SET_WINDOW_SIZE,
+            task_id as u64,
+            width as u64,
+            height as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
 pub fn set_window_state(task_id: u32, state: u8) -> i64 {
     unsafe { syscall2(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64) as i64 }
 }

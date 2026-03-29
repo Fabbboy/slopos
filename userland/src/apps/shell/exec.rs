@@ -412,6 +412,11 @@ fn forward_compositor_keyboard() {
     let mut events = [InputEvent::default(); 8];
     let count = input::poll_batch(&mut events) as usize;
     for i in 0..count.min(8) {
+        if events[i].event_type == InputEventType::Configure {
+            let new_w = events[i].configure_width() as i32;
+            let new_h = events[i].configure_height() as i32;
+            super::display::shell_console_resize(new_w, new_h);
+        }
         if events[i].event_type == InputEventType::KeyPress {
             let ascii = events[i].key_ascii();
             if ascii != 0 {

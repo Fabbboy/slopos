@@ -101,6 +101,41 @@ impl Surface {
         let _ = window::surface_commit();
     }
 
+    /// Resize the surface by allocating a new SHM buffer and re-attaching.
+    ///
+    /// The kernel's `shm_destroy` defers page-free if the compositor still
+    /// holds a read-only mapping, so this is safe against use-after-free.
+    pub fn resize(&mut self, new_width: u32, new_height: u32) -> Result<(), SurfaceError> {
+        if new_width == 0 || new_height == 0 {
+            return Err(SurfaceError::BadSize);
+        }
+        if new_width == self.width && new_height == self.height {
+            return Ok(());
+        }
+
+        let new_pitch = (new_width as usize)
+            .checked_mul(self.bytes_pp as usize)
+            .ok_or(SurfaceError::BadSize)?;
+        let buffer_size = new_pitch
+            .checked_mul(new_height as usize)
+            .ok_or(SurfaceError::BadSize)?;
+
+        let new_shm = ShmBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
+        new_shm
+            .attach_surface(new_width, new_height)
+            .map_err(|_| SurfaceError::AttachFailed)?;
+
+        // Old ShmBuffer dropped here. shm_destroy defers the page free
+        // if the compositor still holds a read-only mapping — safe by design.
+        self.shm = new_shm;
+
+        self.width = new_width;
+        self.height = new_height;
+        self.pitch = new_pitch;
+
+        Ok(())
+    }
+
     #[inline]
     pub fn width(&self) -> u32 {
         self.width

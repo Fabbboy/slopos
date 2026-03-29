@@ -150,6 +150,11 @@ fn input_loop(
                 InputEventType::PointerButtonRelease => {
                     button_state &= !events[i].pointer_button_code();
                 }
+                InputEventType::Configure => {
+                    let new_w = events[i].configure_width() as i32;
+                    let new_h = events[i].configure_height() as i32;
+                    super::display::shell_console_resize(new_w, new_h);
+                }
                 _ => {}
             }
         }

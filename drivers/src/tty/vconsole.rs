@@ -398,6 +398,15 @@ pub(crate) struct VConsoleState {
     dirty_rows: u128,
 }
 
+/// Framebuffer ownership flag (Linux DRM/KMS master model).
+///
+/// When true, the compositor owns the hardware framebuffer.  The vconsole
+/// continues rendering to its shadow buffer (maintaining terminal state)
+/// but `flush_dirty()` becomes a no-op — no pixels reach the display.
+/// On compositor death the flag is cleared and `flush_dirty()` resumes,
+/// restoring the kernel console.
+static COMPOSITOR_OWNS_FB: AtomicBool = AtomicBool::new(false);
+
 static SERIAL_MIRROR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 impl VConsoleState {
@@ -1315,6 +1324,9 @@ impl VConsoleState {
     }
 
     fn render_cell_direct_to_fb(&self, row: u16, col: u16, cell: &Cell) {
+        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) {
+            return;
+        }
         let Some(fb) = self.fb else { return };
         let Some(atlas) = atlas::global() else {
             return;
@@ -1396,6 +1408,9 @@ impl VConsoleState {
     }
 
     pub(crate) fn render_cell_to_fb(&self, row: u16, col: u16) {
+        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) {
+            return;
+        }
         let Some(fb) = self.fb else {
             return;
         };
@@ -1446,6 +1461,11 @@ impl VConsoleState {
 
     fn flush_dirty(&mut self) {
         if self.dirty_rows == 0 {
+            return;
+        }
+        // Compositor owns the framebuffer — keep dirty bits so they can be
+        // flushed on compositor_release_fb(), but don't touch the hardware.
+        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) {
             return;
         }
         let dirty = self.dirty_rows;
@@ -1798,6 +1818,29 @@ pub fn scroll_view_down(lines: usize) {
     }
     let mut state = VCONSOLE_STATE.lock();
     state.redraw_from_scrollback();
+}
+
+/// Transfer framebuffer ownership to the compositor (Linux `DRM_IOCTL_SET_MASTER` equivalent).
+///
+/// The vconsole continues rendering to its shadow buffer so terminal state
+/// is preserved, but stops copying to the hardware framebuffer.  This
+/// eliminates the race between vconsole text rendering and compositor
+/// damage-based presentation.
+pub fn compositor_acquire_fb() {
+    COMPOSITOR_OWNS_FB.store(true, Ordering::Release);
+}
+
+/// Return framebuffer ownership to the vconsole (compositor crash recovery).
+///
+/// Re-enables `flush_dirty()` and immediately blits the shadow buffer to
+/// restore the kernel console display, matching Linux's fbcon re-bind on
+/// DRM master drop.
+pub fn compositor_release_fb() {
+    COMPOSITOR_OWNS_FB.store(false, Ordering::Release);
+    // Full shadow → FB blit to restore the console display.
+    let mut state = VCONSOLE_STATE.lock();
+    state.mark_all_dirty();
+    state.flush_dirty();
 }
 
 pub fn set_serial_mirror(enabled: bool) {

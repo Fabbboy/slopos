@@ -652,7 +652,9 @@ pub const FONT_FORMAT_COVERAGE: u64 = 1;
 
 // Syscall numbers 145-148 are in active use (OPENPTY, TTY_READ, TTY_WRITE, OPEN_TTY_FD).
 pub const SYSCALL_SURFACE_SET_APP_ID: u64 = 149;
-pub const SYSCALL_TABLE_SIZE: usize = 150;
+pub const SYSCALL_SET_WINDOW_SIZE: u64 = 150;
+pub const SYSCALL_SEND_CONFIGURE: u64 = 151;
+pub const SYSCALL_TABLE_SIZE: usize = 152;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

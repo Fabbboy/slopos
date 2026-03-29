@@ -57,6 +57,17 @@ pub fn request_close(target_task_id: u32) -> i64 {
     unsafe { syscall1(SYSCALL_INPUT_REQUEST_CLOSE, target_task_id as u64) as i64 }
 }
 
+pub fn send_configure(target_task_id: u32, width: u32, height: u32) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_SEND_CONFIGURE,
+            target_task_id as u64,
+            width as u64,
+            height as u64,
+        ) as i64
+    }
+}
+
 pub fn get_pointer_pos() -> (i32, i32) {
     let result = unsafe { syscall0(SYSCALL_INPUT_GET_POINTER_POS) };
     let x = (result >> 32) as i32;

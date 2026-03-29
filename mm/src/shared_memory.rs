@@ -531,23 +531,33 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
         return -1;
     }
 
+    // Unmap ONLY the owner's own mapping(s), not other processes'.
+    // This follows the same deferred-destruction pattern as cleanup_task:
+    // if other mappings exist (e.g. compositor's read-only mapping), we
+    // set owner_task = 0 and let the last shm_unmap trigger the page free.
     let buffer_size = registry.buffers[slot].size;
     let pages = registry.buffers[slot].pages;
     let phys_addr = registry.buffers[slot].phys_addr;
 
-    let mut vaddrs_to_free: [(VirtAddr, u32); MAX_MAPPINGS_PER_BUFFER] =
+    let mut owner_vaddrs: [(VirtAddr, u32); MAX_MAPPINGS_PER_BUFFER] =
         [(VirtAddr::NULL, 0); MAX_MAPPINGS_PER_BUFFER];
-    let mut vaddr_count = 0;
+    let mut owner_vaddr_count = 0;
+    let mut cleared = 0u8;
 
-    for mapping in registry.buffers[slot].mappings.iter() {
-        if mapping.active {
-            vaddrs_to_free[vaddr_count] = (mapping.virt_addr, mapping.task_id);
-            vaddr_count += 1;
+    let buffer = &mut registry.buffers[slot];
+    for mapping in buffer.mappings.iter_mut() {
+        if mapping.active && mapping.task_id == process_id {
+            owner_vaddrs[owner_vaddr_count] = (mapping.virt_addr, mapping.task_id);
+            owner_vaddr_count += 1;
+            *mapping = ShmMapping::empty();
+            cleared += 1;
         }
     }
+    buffer.mapping_count = buffer.mapping_count.saturating_sub(cleared);
 
-    for i in 0..vaddr_count {
-        let (vaddr, map_task_id) = vaddrs_to_free[i];
+    // Unmap owner pages from page tables
+    for i in 0..owner_vaddr_count {
+        let (vaddr, map_task_id) = owner_vaddrs[i];
         let page_dir = process_vm_get_page_dir(map_task_id);
         if !page_dir.is_null() {
             for j in 0..pages {
@@ -557,26 +567,34 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
         }
     }
 
-    for mapping in registry.buffers[slot].mappings.iter_mut() {
-        *mapping = ShmMapping::empty();
-    }
-
-    for i in 0..pages {
-        free_page_frame(phys_addr.offset((i as u64) * PAGE_SIZE_4KB));
-    }
-
-    registry.buffers[slot] = SharedBuffer::empty();
-
-    for i in 0..vaddr_count {
-        let (vaddr, _) = vaddrs_to_free[i];
+    // Return owner vaddrs to the free list
+    for i in 0..owner_vaddr_count {
+        let (vaddr, _) = owner_vaddrs[i];
         registry.free_vaddr(vaddr, buffer_size);
     }
 
-    klog_debug!(
-        "shm_destroy: destroyed token={} for process={}",
-        token,
-        process_id
-    );
+    // If no other mappings remain, free immediately.
+    // Otherwise, defer: set owner_task = 0, and the last shm_unmap
+    // from other processes will free the pages (lines 482-494).
+    if registry.buffers[slot].mapping_count == 0 {
+        for i in 0..pages {
+            free_page_frame(phys_addr.offset((i as u64) * PAGE_SIZE_4KB));
+        }
+        klog_debug!(
+            "shm_destroy: destroyed token={} for process={}",
+            token,
+            process_id
+        );
+        registry.buffers[slot] = SharedBuffer::empty();
+    } else {
+        registry.buffers[slot].owner_task = 0;
+        klog_debug!(
+            "shm_destroy: deferred token={} for process={} (mappings={})",
+            token,
+            process_id,
+            registry.buffers[slot].mapping_count
+        );
+    }
 
     0
 }

@@ -78,8 +78,8 @@ impl WindowBounds {
         Self {
             x: w.x,
             y: w.y,
-            width: w.width,
-            height: w.height,
+            width: w.effective_width(),
+            height: w.effective_height(),
             visible: w.state != WINDOW_STATE_MINIMIZED,
         }
     }

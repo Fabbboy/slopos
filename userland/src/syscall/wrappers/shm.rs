@@ -22,7 +22,7 @@ impl ShmBuffer {
         let token = NonZeroU32::new(token_raw).ok_or(ShmError::AllocationFailed)?;
 
         let ptr_raw = memory::shm_map(token_raw, SHM_ACCESS_RW);
-        if ptr_raw == 0 {
+        if ptr_raw == 0 || (ptr_raw as i64) < 0 {
             memory::shm_destroy(token_raw);
             return Err(ShmError::MappingFailed);
         }
@@ -89,7 +89,7 @@ impl ShmBufferRef {
         }
 
         let ptr_raw = memory::shm_map(token, SHM_ACCESS_RO);
-        if ptr_raw == 0 {
+        if ptr_raw == 0 || (ptr_raw as i64) < 0 {
             return Err(ShmError::MappingFailed);
         }
 
@@ -147,7 +147,9 @@ impl CachedShmMapping {
         }
 
         let vaddr = memory::shm_map(token, SHM_ACCESS_RO);
-        if vaddr == 0 {
+        // shm_map returns 0 on some failures and negative errno on others.
+        // Any value with the sign bit set is an error.
+        if vaddr == 0 || (vaddr as i64) < 0 {
             return None;
         }
 

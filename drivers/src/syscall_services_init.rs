@@ -13,6 +13,7 @@ static INPUT_SERVICES: InputServices = InputServices {
     set_pointer_focus: input_event::input_set_pointer_focus,
     set_pointer_focus_with_offset: input_event::input_set_pointer_focus_with_offset,
     request_close: input_event::input_request_close,
+    send_configure: input_event::input_send_configure,
     get_pointer_focus: input_event::input_get_pointer_focus,
     get_pointer_position: input_event::input_get_pointer_position,
     get_button_state: input_event::input_get_button_state,

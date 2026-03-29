@@ -44,6 +44,16 @@ impl Window {
         let _ = window::surface_set_app_id(app_id);
     }
 
+    /// Resize the window's backing surface to a new size.
+    ///
+    /// Allocates a new SHM buffer, re-attaches to the compositor, and
+    /// requests a redraw. Called automatically on `Event::Configure`.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), SurfaceError> {
+        self.surface.resize(width, height)?;
+        self.redraw_needed = true;
+        Ok(())
+    }
+
     /// Request a redraw on the next frame.
     #[inline]
     pub fn request_redraw(&mut self) {

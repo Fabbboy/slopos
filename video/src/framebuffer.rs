@@ -234,6 +234,16 @@ fn copy_rect_from_shm(
     true
 }
 
+/// Release compositor's framebuffer ownership, restoring the vconsole.
+/// Called when the compositor task dies (crash recovery path).
+pub fn release_compositor_fb() {
+    COMPOSITOR_FB_ACQUIRED.store(false, core::sync::atomic::Ordering::Relaxed);
+    slopos_drivers::tty::vconsole::compositor_release_fb();
+}
+
+static COMPOSITOR_FB_ACQUIRED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     fb_flip_from_shm_damage(shm_phys, size, core::ptr::null(), 0)
 }
@@ -244,6 +254,11 @@ pub fn fb_flip_from_shm_damage(
     damage: *const slopos_abi::damage::DamageRect,
     damage_count: u32,
 ) -> c_int {
+    // On first compositor flip, take framebuffer ownership from the vconsole.
+    if !COMPOSITOR_FB_ACQUIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        slopos_drivers::tty::vconsole::compositor_acquire_fb();
+    }
+
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return -1,
@@ -278,13 +293,17 @@ pub fn fb_flip_from_shm_damage(
     // SAFETY: kernel syscall path validates this pointer and length before calling us.
     let regions = unsafe { core::slice::from_raw_parts(damage, region_count) };
 
+    let mut any_failed = false;
     for rect in regions {
         if !rect.is_valid() {
             continue;
         }
         if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
-            return -1;
+            any_failed = true;
+            // Continue processing remaining rects instead of aborting —
+            // partial presentation is better than no presentation.
         }
     }
-    framebuffer_flush()
+    let flush = framebuffer_flush();
+    if any_failed { -1 } else { flush }
 }

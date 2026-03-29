@@ -9,6 +9,7 @@ slopos_service_core::define_service! {
         set_pointer_focus(task_id: u32, timestamp_ms: u64);
         set_pointer_focus_with_offset(task_id: u32, x: i32, y: i32, timestamp_ms: u64);
         request_close(task_id: u32, timestamp_ms: u64) -> bool;
+        send_configure(task_id: u32, width: u32, height: u32, timestamp_ms: u64) -> bool;
         get_pointer_focus() -> u32;
         get_pointer_position() -> (i32, i32);
         get_button_state() -> u8;

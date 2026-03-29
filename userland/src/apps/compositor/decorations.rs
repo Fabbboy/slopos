@@ -100,6 +100,103 @@ pub fn hit_test_title_bar(window_x: i32, window_y: i32, window_w: u32, px: i32, 
     in_bar && !hit_test_signal_group(window_x, window_y, px, py)
 }
 
+/// Detect if `(px, py)` is in a resize grab zone around the window.
+///
+/// The grab zone is the shadow region outside the window frame (content +
+/// title bar). Uses the labwc `ssd_get_resizing_type()` algorithm: corners
+/// take priority over edges, with adaptive corner thresholds.
+///
+/// `window_y` is the content top (kernel's `window.y`); the title bar
+/// extends above it.
+pub fn hit_test_resize_edge(
+    window_x: i32,
+    window_y: i32,
+    window_w: u32,
+    window_h: u32,
+    px: i32,
+    py: i32,
+) -> super::input::ResizeEdge {
+    use super::input::ResizeEdge;
+
+    let ww = window_w as i32;
+    let wh = window_h as i32;
+
+    // Frame bounds (content + title bar)
+    let frame_x0 = window_x;
+    let frame_y0 = window_y - theme::TITLE_BAR_HEIGHT;
+    let frame_x1 = window_x + ww - 1;
+    let frame_y1 = window_y + wh - 1;
+
+    // Extended bounds (frame + shadow spread = grab zone)
+    let spread = theme::SHADOW_SPREAD;
+    let ext_x0 = frame_x0 - spread;
+    let ext_y0 = frame_y0 - spread;
+    let ext_x1 = frame_x1 + spread;
+    let ext_y1 = frame_y1 + spread;
+
+    // Outside the extended bounds entirely?
+    if px < ext_x0 || px > ext_x1 || py < ext_y0 || py > ext_y1 {
+        return ResizeEdge::NONE;
+    }
+
+    // Inside the frame rect? Not a resize zone.
+    if px >= frame_x0 && px <= frame_x1 && py >= frame_y0 && py <= frame_y1 {
+        return ResizeEdge::NONE;
+    }
+
+    // Cursor is in the shadow region. Classify edges.
+    let frame_w = ww;
+    let frame_h = wh + theme::TITLE_BAR_HEIGHT;
+    let corner_range = {
+        let r = theme::WINDOW_CORNER_RADIUS * 3; // ~24px
+        let max_w = frame_w / 2;
+        let max_h = frame_h / 2;
+        let mut cr = r;
+        if cr > max_w {
+            cr = max_w;
+        }
+        if cr > max_h {
+            cr = max_h;
+        }
+        cr
+    };
+
+    let near_left = px < frame_x0 + corner_range;
+    let near_right = px > frame_x1 - corner_range;
+    let near_top = py < frame_y0 + corner_range;
+    let near_bottom = py > frame_y1 - corner_range;
+
+    // Corners first (higher priority)
+    if near_top && near_left {
+        return ResizeEdge::TOP_LEFT;
+    }
+    if near_top && near_right {
+        return ResizeEdge::TOP_RIGHT;
+    }
+    if near_bottom && near_left {
+        return ResizeEdge::BOTTOM_LEFT;
+    }
+    if near_bottom && near_right {
+        return ResizeEdge::BOTTOM_RIGHT;
+    }
+
+    // Single edges
+    if py < frame_y0 {
+        return ResizeEdge::TOP;
+    }
+    if py > frame_y1 {
+        return ResizeEdge::BOTTOM;
+    }
+    if px < frame_x0 {
+        return ResizeEdge::LEFT;
+    }
+    if px > frame_x1 {
+        return ResizeEdge::RIGHT;
+    }
+
+    ResizeEdge::NONE
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

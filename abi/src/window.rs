@@ -9,6 +9,14 @@ pub const MAX_BUFFER_AGE: u8 = 8;
 pub const CURSOR_SHAPE_DEFAULT: u8 = 0;
 pub const CURSOR_SHAPE_TEXT: u8 = 1;
 pub const CURSOR_SHAPE_POINTER: u8 = 2;
+pub const CURSOR_SHAPE_N_RESIZE: u8 = 3;
+pub const CURSOR_SHAPE_S_RESIZE: u8 = 4;
+pub const CURSOR_SHAPE_W_RESIZE: u8 = 5;
+pub const CURSOR_SHAPE_E_RESIZE: u8 = 6;
+pub const CURSOR_SHAPE_NW_RESIZE: u8 = 7;
+pub const CURSOR_SHAPE_NE_RESIZE: u8 = 8;
+pub const CURSOR_SHAPE_SW_RESIZE: u8 = 9;
+pub const CURSOR_SHAPE_SE_RESIZE: u8 = 10;
 
 /// Fixed-size application identifier following the Wayland `set_app_id()` convention.
 /// Apps declare their identity (e.g. "org.slopos.shell") and the compositor uses
@@ -59,6 +67,10 @@ pub struct WindowInfo {
     pub damage_regions: [DamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [u8; 32],
     pub app_id: AppId,
+    /// Frame width set by compositor during resize (0 = same as width).
+    pub frame_width: u32,
+    /// Frame height set by compositor during resize (0 = same as height).
+    pub frame_height: u32,
 }
 
 impl WindowInfo {
@@ -97,6 +109,26 @@ impl WindowInfo {
         self.app_id.as_str()
     }
 
+    /// Effective frame width (for decorations/damage). Falls back to buffer width.
+    #[inline]
+    pub fn effective_width(&self) -> u32 {
+        if self.frame_width > 0 {
+            self.frame_width
+        } else {
+            self.width
+        }
+    }
+
+    /// Effective frame height (for decorations/damage). Falls back to buffer height.
+    #[inline]
+    pub fn effective_height(&self) -> u32 {
+        if self.frame_height > 0 {
+            self.frame_height
+        } else {
+            self.height
+        }
+    }
+
     #[inline]
     pub fn damage_regions(&self) -> &[DamageRect] {
         if self.is_full_damage() {
@@ -124,6 +156,8 @@ impl Default for WindowInfo {
             damage_regions: [DamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
             title: [0; 32],
             app_id: AppId::EMPTY,
+            frame_width: 0,
+            frame_height: 0,
         }
     }
 }

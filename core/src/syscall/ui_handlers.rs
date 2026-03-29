@@ -234,6 +234,22 @@ define_syscall!(syscall_input_request_close(ctx, args) requires(compositor) {
     ctx.ok(0)
 });
 
+define_syscall!(syscall_send_configure(ctx, args) requires(compositor) {
+    let target_task_id = args.arg0_u32();
+    let width = args.arg1 as u32;
+    let height = args.arg2 as u32;
+    if target_task_id == 0 || target_task_id == INVALID_TASK_ID {
+        return ctx.err();
+    }
+
+    let timestamp_ms = platform::get_time_ms();
+    if !input::send_configure(target_task_id, width, height, timestamp_ms) {
+        return ctx.err();
+    }
+
+    ctx.ok(0)
+});
+
 define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {
     let _ = task_id;
     let src_ptr = args.arg0;
@@ -387,6 +403,13 @@ define_syscall!(syscall_set_window_position(ctx, args) requires(compositor) {
     let x = args.arg1_i32();
     let y = args.arg2_i32();
     ctx.from_result(video::surface_set_window_position(target_task_id, x, y))
+});
+
+define_syscall!(syscall_set_window_size(ctx, args) requires(compositor) {
+    let target_task_id = args.arg0_u32();
+    let width = args.arg1 as u32;
+    let height = args.arg2 as u32;
+    ctx.from_result(video::surface_set_window_size(target_task_id, width, height))
 });
 
 define_syscall!(syscall_set_window_state(ctx, args) requires(compositor) {

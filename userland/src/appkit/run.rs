@@ -91,6 +91,12 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
         for raw in &raw_buf[..count] {
             let event = Event::from_raw(raw);
             win.track_pointer(&event);
+
+            // Auto-handle resize before dispatching to the app.
+            if let Event::Configure { width, height } = event {
+                let _ = win.resize(width, height);
+            }
+
             if app.on_event(&mut win, event) == ControlFlow::Exit {
                 std::process::exit(0);
             }

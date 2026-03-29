@@ -35,6 +35,15 @@ pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
     })?
 }
 
+pub fn resize(new_width: u32, new_height: u32) -> bool {
+    let slot = unsafe { &mut *SURFACE.get() };
+    if let Some(surface) = slot.as_mut() {
+        surface.resize(new_width, new_height).is_ok()
+    } else {
+        false
+    }
+}
+
 pub fn present_full() {
     let slot = unsafe { &*SURFACE.get() };
     if let Some(surface) = slot.as_ref() {

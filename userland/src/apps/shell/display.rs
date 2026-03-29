@@ -791,6 +791,64 @@ pub fn shell_console_init() {
     DISPLAY.bg.set(SHELL_BG_COLOR);
 }
 
+/// Resize the shell display to new pixel dimensions.
+/// Called when a Configure event arrives from the compositor.
+pub fn shell_console_resize(new_width: i32, new_height: i32) {
+    if !DISPLAY.enabled.get() || new_width <= 0 || new_height <= 0 {
+        return;
+    }
+
+    // Resize the backing surface
+    if !super::surface::resize(new_width as u32, new_height as u32) {
+        return;
+    }
+
+    let old_cols = DISPLAY.cols.get();
+    let old_rows = DISPLAY.rows.get();
+
+    DISPLAY.width.set(new_width);
+    DISPLAY.height.set(new_height);
+    DISPLAY
+        .pitch
+        .set((new_width as usize) * (DISPLAY.bytes_pp.get() as usize));
+
+    let new_cols = new_width / font::cell_width();
+    let new_rows = new_height / font::cell_height();
+    DISPLAY
+        .cols
+        .set(new_cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
+    DISPLAY
+        .rows
+        .set(new_rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
+
+    if DISPLAY.cols.get() <= 0 || DISPLAY.rows.get() <= 0 {
+        DISPLAY.enabled.set(false);
+        return;
+    }
+
+    // Clamp cursor to new bounds
+    if DISPLAY.cursor_col.get() >= DISPLAY.cols.get() {
+        DISPLAY.cursor_col.set(DISPLAY.cols.get() - 1);
+    }
+
+    // Redraw if dimensions actually changed
+    if old_cols != DISPLAY.cols.get() || old_rows != DISPLAY.rows.get() {
+        // Fill the new surface with bg, re-render visible scrollback rows
+        surface::draw(|buf| {
+            let bg = DISPLAY.bg.get();
+            gfx::fill_rect(buf, 0, 0, new_width, new_height, bg);
+
+            let rows = DISPLAY.rows.get();
+            let view_top = DISPLAY.view_top.get();
+            for screen_row in 0..rows {
+                let logical = view_top + screen_row;
+                draw_row_from_scrollback(buf, &DISPLAY, logical, screen_row);
+            }
+        });
+        shell_console_commit();
+    }
+}
+
 pub fn shell_console_clear() {
     if DISPLAY.enabled.get() {
         console_clear(&DISPLAY);

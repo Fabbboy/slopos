@@ -32,6 +32,8 @@ pub enum InputEventType {
     PointerLeave = 6,
     /// Window manager requests this app to close gracefully
     CloseRequest = 7,
+    /// Compositor notifies app of a new configured size (resize)
+    Configure = 8,
 }
 
 impl InputEventType {
@@ -47,6 +49,7 @@ impl InputEventType {
             5 => Some(Self::PointerEnter),
             6 => Some(Self::PointerLeave),
             7 => Some(Self::CloseRequest),
+            8 => Some(Self::Configure),
             _ => None,
         }
     }
@@ -180,6 +183,19 @@ impl InputEvent {
         }
     }
 
+    /// Create a configure event (window resize notification)
+    pub fn configure(width: u32, height: u32, timestamp_ms: u64) -> Self {
+        Self {
+            event_type: InputEventType::Configure,
+            _padding: [0; 3],
+            timestamp_ms,
+            data: InputEventData {
+                data0: width,
+                data1: height,
+            },
+        }
+    }
+
     /// Extract scancode from key event
     #[inline]
     pub fn key_scancode(&self) -> u8 {
@@ -208,5 +224,17 @@ impl InputEvent {
     #[inline]
     pub fn pointer_button_code(&self) -> u8 {
         (self.data.data0 & 0xFF) as u8
+    }
+
+    /// Extract width from configure event
+    #[inline]
+    pub fn configure_width(&self) -> u32 {
+        self.data.data0
+    }
+
+    /// Extract height from configure event
+    #[inline]
+    pub fn configure_height(&self) -> u32 {
+        self.data.data1
     }
 }

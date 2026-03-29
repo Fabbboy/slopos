@@ -90,6 +90,7 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
     roulette_draw: video_roulette_draw,
     surface_enumerate_windows: compositor_context::surface_enumerate_windows,
     surface_set_window_position: compositor_context::surface_set_window_position,
+    surface_set_window_size: compositor_context::surface_set_window_size,
     surface_set_window_state: compositor_context::surface_set_window_state,
     surface_set_cursor_shape: compositor_context::surface_set_cursor_shape,
     surface_raise_window: compositor_context::surface_raise_window,
@@ -111,6 +112,12 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
 
 fn task_cleanup_callback(task_id: u32) {
     compositor_context::unregister_surface_for_task(task_id);
+
+    // If all surfaces are gone (compositor died), return framebuffer
+    // ownership to the vconsole so the kernel console is visible again.
+    if compositor_context::surface_count() == 0 {
+        framebuffer::release_compositor_fb();
+    }
 }
 
 // =============================================================================

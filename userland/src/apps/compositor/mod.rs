@@ -42,8 +42,12 @@ struct WindowManager {
 
     first_frame: bool,
     output_damage: DamageTracker,
+    /// Unfulfilled damage from a failed fb_flip — carried forward until
+    /// successfully presented (Wayland buffer-age pattern).
+    pending_damage: DamageTracker,
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
     prev_uptime_secs: u64,
+    prev_cursor_shape: u8,
 }
 
 impl WindowManager {
@@ -63,8 +67,10 @@ impl WindowManager {
             shelf,
             first_frame: true,
             output_damage: DamageTracker::new(),
+            pending_damage: DamageTracker::new(),
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             prev_uptime_secs: u64::MAX, // force first-frame clock damage
+            prev_cursor_shape: 0,
         }
     }
 
@@ -88,6 +94,18 @@ impl WindowManager {
             .sync_running_apps(&self.windows, self.window_count);
 
         self.output_damage.clear();
+
+        // Carry forward unfulfilled damage from a previous failed flip.
+        if self.pending_damage.is_dirty() {
+            for rect in self.pending_damage.regions() {
+                self.output_damage
+                    .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
+            }
+            if self.pending_damage.is_full_damage() {
+                self.output_damage.set_full_damage();
+            }
+            self.pending_damage.clear();
+        }
 
         for i in 0..self.window_count as usize {
             let window = self.windows[i];
@@ -252,7 +270,9 @@ impl WindowManager {
     }
 
     fn add_cursor_damage_at(&mut self, x: i32, y: i32) {
-        self.output_damage.add_rect(x - 3, y - 9, x + 12, y + 17);
+        // Conservative rect covering ALL cursor shapes:
+        // default arrow (12×17 at x,y) and resize arrows (up to 17×17 centered).
+        self.output_damage.add_rect(x - 9, y - 9, x + 12, y + 17);
     }
 
     /// Add damage for a window's title bar + shadow area by task_id.
@@ -340,12 +360,48 @@ pub fn compositor_user_main() {
         wm.input.update_pointer_focus(&wm.windows, wm.window_count);
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
+        // Shelf height for maximize: pill + bottom margin + running dots
+        let shelf_h = SHELF_ICON_SIZE
+            + 2 * SHELF_PILL_PADDING_Y
+            + SHELF_BOTTOM_MARGIN
+            + SHELF_DOT_DIAMETER
+            + SHELF_DOT_MARGIN_Y;
         wm.input.handle_mouse_events(
+            fb_info.width as i32,
             fb_info.height as i32,
+            shelf_h,
             &wm.windows,
             wm.window_count,
             &wm.shelf,
         );
+
+        // Update resize cursor hover feedback (must run after handle_mouse_events).
+        wm.input.update_resize_cursor(&wm.windows, wm.window_count);
+
+        // Compute effective cursor shape early so we can detect shape changes
+        // and add damage before the render decision.
+        let cursor_shape = if wm.input.compositor_cursor_override != 0 {
+            wm.input.compositor_cursor_override
+        } else {
+            let mut shape = 0u8;
+            for i in (0..wm.window_count as usize).rev() {
+                if wm.windows[i].state == WINDOW_STATE_MINIMIZED {
+                    continue;
+                }
+                if wm.input.hit_test_content_area(&wm.windows[i]) {
+                    shape = wm.windows[i].cursor_shape;
+                    break;
+                }
+            }
+            shape
+        };
+
+        // When cursor shape changes, damage the cursor position so the old
+        // shape gets erased and the new one gets drawn.
+        if cursor_shape != wm.prev_cursor_shape {
+            wm.add_cursor_damage_at(wm.input.mouse_x, wm.input.mouse_y);
+            wm.prev_cursor_shape = cursor_shape;
+        }
 
         // After all input: if focus moved, damage both the old and new
         // title bars.  No flags to manage — just compare the snapshot.
@@ -391,20 +447,6 @@ pub fn compositor_user_main() {
 
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
-
-                let cursor_shape = {
-                    let mut shape = 0u8;
-                    for i in (0..wm.window_count as usize).rev() {
-                        if wm.windows[i].state == WINDOW_STATE_MINIMIZED {
-                            continue;
-                        }
-                        if wm.input.hit_test_content_area(&wm.windows[i]) {
-                            shape = wm.windows[i].cursor_shape;
-                            break;
-                        }
-                    }
-                    shape
-                };
 
                 // Determine the active app name for the system bar.
                 let active_app_name =
@@ -457,6 +499,17 @@ pub fn compositor_user_main() {
             if flip_result {
                 let present_time = time_origin.elapsed().as_millis() as u64;
                 window::mark_frames_done(present_time);
+            } else {
+                // Flip failed — save damage for retry on next frame.
+                // The back buffer is correct; the framebuffer is stale.
+                if mode == RenderMode::Full {
+                    wm.pending_damage.set_full_damage();
+                } else {
+                    for rect in &damage_snapshot[..damage_count] {
+                        wm.pending_damage
+                            .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
+                    }
+                }
             }
 
             let frame_time = frame_start.elapsed().as_millis() as u64;
