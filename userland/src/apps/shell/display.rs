@@ -803,9 +803,6 @@ pub fn shell_console_resize(new_width: i32, new_height: i32) {
         return;
     }
 
-    let old_cols = DISPLAY.cols.get();
-    let old_rows = DISPLAY.rows.get();
-
     DISPLAY.width.set(new_width);
     DISPLAY.height.set(new_height);
     DISPLAY
@@ -831,22 +828,20 @@ pub fn shell_console_resize(new_width: i32, new_height: i32) {
         DISPLAY.cursor_col.set(DISPLAY.cols.get() - 1);
     }
 
-    // Redraw if dimensions actually changed
-    if old_cols != DISPLAY.cols.get() || old_rows != DISPLAY.rows.get() {
-        // Fill the new surface with bg, re-render visible scrollback rows
-        surface::draw(|buf| {
-            let bg = DISPLAY.bg.get();
-            gfx::fill_rect(buf, 0, 0, new_width, new_height, bg);
-
-            let rows = DISPLAY.rows.get();
-            let view_top = DISPLAY.view_top.get();
-            for screen_row in 0..rows {
-                let logical = view_top + screen_row;
-                draw_row_from_scrollback(buf, &DISPLAY, logical, screen_row);
-            }
-        });
-        shell_console_commit();
+    // Adjust view_top so the cursor/input line stays visible after
+    // the row count changes — same as kitty/alacritty on terminal resize.
+    let max_top = (DISPLAY.total_lines.get() - DISPLAY.rows.get()).max(0);
+    if DISPLAY.follow.get() || DISPLAY.view_top.get() > max_top {
+        DISPLAY.view_top.set(max_top);
     }
+
+    // Always redraw: surface::resize() allocated a new blank buffer.
+    // Skipping the redraw (e.g., when only pixel dims changed but cell
+    // count didn't) leaves the buffer black.
+    surface::draw(|buf| {
+        redraw_view(buf, &DISPLAY);
+    });
+    shell_console_commit();
 }
 
 pub fn shell_console_clear() {
