@@ -7,13 +7,36 @@ use crate::syscall::{InputEvent, InputEventType};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
-    PointerMotion { x: i32, y: i32 },
-    PointerPress { button: u8 },
-    PointerRelease { button: u8 },
-    KeyPress { scancode: u8, ascii: u8 },
-    KeyRelease { scancode: u8, ascii: u8 },
+    PointerMotion {
+        x: i32,
+        y: i32,
+    },
+    PointerPress {
+        button: u8,
+    },
+    PointerRelease {
+        button: u8,
+    },
+    /// Pointer axis (scroll) event.
+    /// `axis`: 0 = vertical, 1 = horizontal (see `POINTER_AXIS_*` in ABI).
+    /// `value_v120`: scroll amount in value120 units (+-120 = one wheel click).
+    PointerAxis {
+        axis: u32,
+        value_v120: i32,
+    },
+    KeyPress {
+        scancode: u8,
+        ascii: u8,
+    },
+    KeyRelease {
+        scancode: u8,
+        ascii: u8,
+    },
     CloseRequest,
-    Configure { width: u32, height: u32 },
+    Configure {
+        width: u32,
+        height: u32,
+    },
     Other,
 }
 
@@ -42,6 +65,10 @@ impl Event {
             InputEventType::Configure => Event::Configure {
                 width: raw.configure_width(),
                 height: raw.configure_height(),
+            },
+            InputEventType::PointerAxis => Event::PointerAxis {
+                axis: raw.axis_id(),
+                value_v120: raw.axis_value_v120(),
             },
             _ => Event::Other,
         }

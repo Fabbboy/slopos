@@ -2,7 +2,7 @@
 
 ## 0. Progress Summary
 
-> **Last updated**: 2026-03-29 (Phase 5 resize + cursors verified)
+> **Last updated**: 2026-03-29 (Phase 5b scroll wheel complete)
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
@@ -10,10 +10,11 @@
 | **Phase 2** — Alpha Blending | ✅ **Complete** | 100% | Blend math in `gfx/src/blend.rs` + compositor wiring in commit `51c3c7a`. Drop shadows (12px spread, quadratic falloff) and semi-transparent title bars (0xD0 alpha tint) active. Damage tracking includes shadow bounds. |
 | **Phase 3** — AA Primitives | ✅ **Complete** | 100% | `line_aa`, `circle_aa`, `rounded_rect`, `rounded_rect_filled` all landed in `gfx/src/canvas_ops.rs`. Aliased primitives preserved. |
 | **Phase 4** — macOS Chrome | ✅ **Complete** | 100% | Full rip-and-replace in commit `27b29e7`. Menu bar (24px, clock, active app name), dock (magnification, running dots, pinned/running separator), traffic-light window decorations (12px circles, hover glyphs, 8px corner radius). Old taskbar/start menu deleted. App ID system (`SYSCALL_SURFACE_SET_APP_ID`) added. |
-| **Phase 5** — Window Interactions | 🟡 **Partial** | ~75% | Window move ✅, resize ✅ (wlroots SSD model, 8-edge detection, Wayland content model, throttled Configure events), 8 directional resize cursors ✅, Super+LMB move ✅. Remaining: scroll wheel, grab-hand cursor. |
+| **Phase 5** — Window Interactions | 🟡 **Partial** | ~90% | Window move ✅, resize ✅, 8 directional resize cursors ✅, Super+LMB move ✅, scroll wheel ✅. Remaining: grab-hand cursor. |
+| **Phase 5b** — Scroll Wheel & Axis Events | ✅ **Complete** | 100% | PS/2 IntelliMouse (ImPS/2 + ImExPS/2) probe, 4-byte packets, `PointerAxis` ABI event (value120 model), shell scroll-by-line. Traditional scroll direction. Partial-row rendering artifact fixed. Touchpad architecture documented for future phase. |
 | **Phase 6** — Widget Toolkit | ❌ **Not started** | 0% | No `widgets/` directory exists. |
 
-**Next milestone**: Phase 5 remaining (scroll wheel via PS/2 IntelliMouse protocol).
+**Next milestone**: Phase 5 remaining (grab-hand cursor) or Phase 6 (widget toolkit).
 
 ---
 
@@ -393,10 +394,7 @@ Supporting changes:
   - ✅ Default (arrow), Text (I-beam), Pointer (hand), N/S/E/W/NW/NE/SW/SE resize — `abi/src/window.rs:9-19`
   - ✅ 8 directional resize cursor bitmaps (pixel-art arrows) embedded in `renderer.rs:388-482`
   - ✅ Hover feedback: `update_resize_cursor()` in `input.rs:606-649` updates cursor on z-order hit-test each frame
-- [ ] **Scroll wheel**: PS/2 IntelliMouse 4-byte protocol
-  - Mouse driver sends scroll events via `input_route_pointer_button()` or new scroll event type
-  - `InputEventType::Scroll` added to ABI
-  - Compositor forwards scroll events to focused window
+- [x] **Scroll wheel**: PS/2 IntelliMouse 4-byte protocol — see Phase 5b below
 
 **What was built** (commits `29c3fcd`, `e5556e8`, `2c8dceb`, `28e4260`):
 
@@ -413,12 +411,9 @@ Files substantially modified:
 - `video/src/compositor_context.rs` — `set_window_size()` (lines 570-588), frame dims in `SurfaceState`, exported in `surface_enumerate_windows()`
 - `mm/src/shared_memory.rs` — `shm_destroy()` deferred destruction (lines 516-600) — owner mappings removed, compositor read-only mapping keeps pages alive
 
-**Remaining work**:
-- `drivers/src/ps2/mouse.rs` — 4-byte IntelliMouse packet support, scroll events
-- `abi/src/input.rs` — add `Scroll` event type (or reuse pointer button codes 4/5)
-- Compositor scroll event forwarding to focused window
+**Remaining work**: Grab-hand cursor (stretch goal).
 
-**Estimated remaining effort**: ~200-300 lines (scroll wheel only).
+**Scroll wheel**: Implemented in Phase 5b below.
 
 **QA scenario**:
 1. Run `just build` — must compile with zero errors.
@@ -428,9 +423,77 @@ Files substantially modified:
 5. **PASS condition — window resize**: Move the cursor to the right edge of a window — cursor changes to a horizontal resize arrow. Click and drag — the window width changes. The app content re-renders at the new size. Repeat for bottom edge (vertical resize) and bottom-right corner (diagonal resize). Minimum size (200×150) is enforced — dragging smaller snaps to minimum. During resize growth, a placeholder gap is visible until the client re-renders. During resize shrink, content is cropped at the frame edge.
 6. **PASS condition — resize cursor feedback**: Hovering each window edge/corner shows the appropriate directional resize cursor (8 directions). Cursor reverts to default arrow when leaving the resize zone. Maximized or minimized windows do not show resize cursors.
 7. **PASS condition — shell resize**: Resize a shell/terminal window. The terminal recalculates columns/rows and redraws with the new dimensions. No black screen or stale content.
-8. **PASS condition — scroll wheel**: *(Not yet testable — PS/2 IntelliMouse not implemented.)*
+8. **PASS condition — scroll wheel**: Scroll wheel up/down on a terminal window scrolls history. Each click scrolls one line. No partial-row artifacts at the bottom of the terminal.
 9. **FAIL condition**: Windows cannot be moved by dragging title bar, OR resize does nothing, OR cursor never changes shape, OR shell shows black screen after resize.
 10. Run `just test` — all existing kernel tests must still pass.
+
+---
+
+### Phase 5b: Scroll Wheel & Pointer Axis Events — ✅ COMPLETE
+**Goal**: Gold-standard scroll support via PS/2 IntelliMouse protocol with a Wayland-inspired axis event model.
+
+**Research basis**: Linux `psmouse-base.c`, Redox `ps2d`, QEMU `ps2.c`, Wayland `wl_pointer.axis_value120`, `libinput` scroll model.
+
+#### 5b.1 Design Rationale
+
+**Value120 model** (from Wayland/Windows): ±120 = one physical wheel detent. 120 has many integer factors, ideal for subdivision without floating point. Future high-res mice send ±15/±30, touchpad two-finger scroll sends smooth arbitrary values. Clients accumulate to ±120 for discrete line-scroll or consume raw values for pixel-smooth scroll.
+
+**`PointerAxis` event, not button 4/5**: X11's synthetic button 4/5 hack prevented smooth/horizontal/per-pixel scroll. SlopOS uses continuous signed axis events from day one.
+
+**Separate events per dimension**: One `PointerAxis` per axis follows the Wayland frame model. ImExPS/2 can report vertical + horizontal in one packet — two separate events.
+
+**Traditional scroll direction**: Wheel up = content scrolls up (shows history). Matches traditional desktop convention.
+
+#### 5b.2 What Was Built
+
+**PS/2 driver** (`drivers/src/ps2/mod.rs`, `mouse.rs`):
+- `DEV_CMD_SET_SAMPLE_RATE` (0xF3), `DEV_CMD_GET_ID` (0xF2), `write_aux_set_sample_rate()` helper
+- ImPS/2 probe: magic sequence 200-100-80 → GET_ID → expect 3
+- ImExPS/2 probe: magic sequence 200-200-80 → GET_ID → expect 4
+- 4-byte packet state machine with byte 3 scroll parsing (ImPS/2: 4-bit signed Z; ImExPS/2: multiplexed vertical/horizontal/buttons via bits 7:6)
+- Scroll events emitted as `input_route_pointer_axis()` with value120 encoding
+- Falls back to 3-byte packets if probe fails
+
+**ABI** (`abi/src/input.rs`):
+- `InputEventType::PointerAxis = 9`
+- `POINTER_AXIS_VERTICAL = 0`, `POINTER_AXIS_HORIZONTAL = 1`
+- `InputEvent::pointer_axis()` constructor, `axis_id()`, `axis_value_v120()` accessors
+
+**Kernel routing** (`drivers/src/input_event.rs`):
+- `input_route_pointer_axis()` — routes to pointer-focused task (same path as button events)
+
+**Userland** (`userland/src/appkit/event.rs`, `apps/shell/`):
+- `Event::PointerAxis` variant in appkit for windowed apps
+- Shell: scroll wheel scrolls terminal history line-by-line with value120 accumulator
+- `shell_console_scroll_lines()` + partial-row artifact fix in `scroll_view()`
+
+**Packet format reference**:
+
+| Protocol | Byte 3 encoding |
+|----------|----------------|
+| **ImPS/2** (type 3) | Lower 4 bits = signed Z scroll (-8..+7), upper 4 = sign extension |
+| **ImExPS/2** (type 4) | Bits 7:6 select mode: `00`/`11` = 4-bit Z + buttons 4/5; `10` = 6-bit vertical; `01` = 6-bit horizontal |
+
+#### 5b.3 Touchpad Architecture (Future)
+
+The `PointerAxis` ABI is designed so touchpad scroll produces the same events — touchpad support adds a new *producer* without changing consumers.
+
+**Detection priority chain** (Linux `psmouse-base.c` order):
+1. Synaptics: identity query via sliced command, check byte 1 == `0x47`
+2. ALPS: `E8-E7-E7-E7-E9`, match against known signatures
+3. Elantech: Synaptics-like probe + version query
+4. Fallback: standard/IntelliMouse (current implementation)
+
+**Two-finger scroll** (libinput model): W=0 indicates two fingers → compute average delta, apply distance threshold, angle-snap to 90°, convert to value120, emit `PointerAxis`. **Edge scroll**: single finger on right edge → vertical delta → `PointerAxis`. Estimated ~800-1200 lines. Not testable in QEMU (no touchpad emulation).
+
+#### 5b.4 QA Scenario
+
+1. `just build` — zero errors
+2. `VIDEO=1 just boot` — serial log shows `PS/2 mouse: detected type 3` or `type 4`
+3. Scroll wheel on terminal window scrolls history up/down, one line per click
+4. No partial-row artifacts at bottom of terminal after scroll up + down
+5. Mouse movement, buttons, drag, resize, Super+LMB all unaffected
+6. `just test` — all 2265 tests pass
 
 ---
 

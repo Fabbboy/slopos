@@ -19,6 +19,10 @@ pub const MODIFIER_ALT: u8 = 1 << 2;
 pub const MODIFIER_SUPER: u8 = 1 << 3;
 pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
 
+/// Axis identifiers for PointerAxis events (Wayland wl_pointer.axis convention)
+pub const POINTER_AXIS_VERTICAL: u32 = 0;
+pub const POINTER_AXIS_HORIZONTAL: u32 = 1;
+
 /// Type of input event
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,6 +46,8 @@ pub enum InputEventType {
     CloseRequest = 7,
     /// Compositor notifies app of a new configured size (resize)
     Configure = 8,
+    /// Pointer axis (scroll wheel) event
+    PointerAxis = 9,
 }
 
 impl InputEventType {
@@ -58,6 +64,7 @@ impl InputEventType {
             6 => Some(Self::PointerLeave),
             7 => Some(Self::CloseRequest),
             8 => Some(Self::Configure),
+            9 => Some(Self::PointerAxis),
             _ => None,
         }
     }
@@ -78,6 +85,7 @@ impl InputEventType {
                 | Self::PointerButtonRelease
                 | Self::PointerEnter
                 | Self::PointerLeave
+                | Self::PointerAxis
         )
     }
 }
@@ -202,6 +210,36 @@ impl InputEvent {
                 data1: height,
             },
         }
+    }
+
+    /// Create a pointer axis (scroll) event.
+    ///
+    /// `axis`: `POINTER_AXIS_VERTICAL` (0) or `POINTER_AXIS_HORIZONTAL` (1)
+    /// `value_v120`: scroll amount in value120 units (±120 = one wheel click).
+    ///               Positive = down/right, negative = up/left.
+    pub fn pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) -> Self {
+        Self {
+            event_type: InputEventType::PointerAxis,
+            _padding: [0; 3],
+            timestamp_ms,
+            data: InputEventData {
+                data0: axis,
+                data1: value_v120 as u32,
+            },
+        }
+    }
+
+    /// Extract axis identifier from a PointerAxis event (0 = vertical, 1 = horizontal)
+    #[inline]
+    pub fn axis_id(&self) -> u32 {
+        self.data.data0
+    }
+
+    /// Extract scroll value in value120 units from a PointerAxis event.
+    /// ±120 = one physical wheel click.
+    #[inline]
+    pub fn axis_value_v120(&self) -> i32 {
+        self.data.data1 as i32
     }
 
     /// Extract scancode from key event

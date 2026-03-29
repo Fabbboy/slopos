@@ -93,6 +93,10 @@ pub const DEV_CMD_RESET: u8 = 0xFF;
 pub const DEV_CMD_DEFAULTS: u8 = 0xF6;
 pub const DEV_CMD_ENABLE: u8 = 0xF4;
 pub const DEV_CMD_DISABLE: u8 = 0xF5;
+/// Set sample rate — takes a 1-byte rate argument (mouse-only)
+pub const DEV_CMD_SET_SAMPLE_RATE: u8 = 0xF3;
+/// Get device ID — returns the device type (0=standard, 3=ImPS/2, 4=ImExPS/2)
+pub const DEV_CMD_GET_ID: u8 = 0xF2;
 pub const DEV_ACK: u8 = 0xFA;
 pub const DEV_RESEND: u8 = 0xFE;
 /// Device self-test passed response
@@ -214,6 +218,32 @@ pub fn read_data_nowait() -> u8 {
 pub fn write_aux(cmd: u8) {
     write_command(CMD_WRITE_AUX);
     write_data(cmd);
+}
+/// Send SET_SAMPLE_RATE to the mouse with the given rate value.
+///
+/// The protocol requires two ACKs: one for the command byte (0xF3),
+/// one for the rate byte.  Both are sent via the AUX path.
+pub fn write_aux_set_sample_rate(rate: u8) -> bool {
+    if !write_aux_acked(DEV_CMD_SET_SAMPLE_RATE) {
+        return false;
+    }
+    // Rate byte is sent as a second data byte, also needs ACK
+    write_aux(rate);
+    match read_aux_data() {
+        Some(DEV_ACK) => true,
+        Some(other) => {
+            klog_warn!(
+                "PS/2 mouse: expected ACK for rate {}, got 0x{:02x}",
+                rate,
+                other
+            );
+            false
+        }
+        None => {
+            klog_warn!("PS/2 mouse: timeout waiting for ACK to rate {}", rate);
+            false
+        }
+    }
 }
 /// Read the controller configuration byte.
 pub fn read_config() -> u8 {

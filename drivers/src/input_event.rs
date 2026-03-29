@@ -330,6 +330,24 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
     }
 }
 
+/// Route a pointer axis (scroll) event to the pointer-focused task.
+///
+/// `axis`: 0 = vertical, 1 = horizontal (see `POINTER_AXIS_*` constants in ABI)
+/// `value_v120`: scroll amount in value120 units (±120 = one wheel click)
+pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
+    let mut mgr = INPUT_MANAGER.lock();
+    let focus = mgr.pointer_focus;
+    if focus == 0 {
+        return;
+    }
+
+    if let Some(idx) = mgr.find_or_create_queue(focus) {
+        mgr.queues[idx]
+            .events
+            .push_overwrite(InputEvent::pointer_axis(axis, value_v120, timestamp_ms));
+    }
+}
+
 // =============================================================================
 // Public API - Client Operations (Syscalls)
 // =============================================================================

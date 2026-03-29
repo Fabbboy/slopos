@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 
 use super::buffers;
 use super::completion;
+use slopos_abi::input::POINTER_AXIS_VERTICAL;
+
 use super::display::{
     DISPLAY, shell_console_clear, shell_console_follow_bottom, shell_console_page_down,
-    shell_console_page_up, shell_redraw_input, shell_write,
+    shell_console_page_up, shell_console_scroll_lines, shell_redraw_input, shell_write,
 };
 use super::history;
 use super::parser::{SHELL_MAX_TOKENS, shell_parse_line};
@@ -48,6 +50,7 @@ const MOUSE_EVENT_BUF_SIZE: usize = 8;
 static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
     super::SyncUnsafeCell::new([0; super::PROMPT_BUF_MAX]);
 static PROMPT_COLORS_LEN: super::SyncUnsafeCell<usize> = super::SyncUnsafeCell::new(0);
+static SCROLL_ACCUM: super::SyncUnsafeCell<i32> = super::SyncUnsafeCell::new(0);
 
 pub fn read_command_line(
     tokens: &mut [*const u8; SHELL_MAX_TOKENS],
@@ -154,6 +157,19 @@ fn input_loop(
                     let new_w = events[i].configure_width() as i32;
                     let new_h = events[i].configure_height() as i32;
                     super::display::shell_console_resize(new_w, new_h);
+                }
+                InputEventType::PointerAxis => {
+                    if events[i].axis_id() == POINTER_AXIS_VERTICAL {
+                        let accum = unsafe { &mut *SCROLL_ACCUM.get() };
+                        *accum += events[i].axis_value_v120();
+                        let lines = *accum / 120;
+                        *accum %= 120;
+                        if lines != 0 {
+                            // Negative value = scroll up (show history),
+                            // positive = scroll down (show newer).
+                            shell_console_scroll_lines(lines);
+                        }
+                    }
                 }
                 _ => {}
             }

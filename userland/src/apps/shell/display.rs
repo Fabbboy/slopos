@@ -595,6 +595,7 @@ fn scroll_view(display: &DisplayState, delta: i32) {
             let shift = abs_delta * font::cell_height();
             let width = display.width.get();
             let height = display.height.get();
+            let content_height = rows * font::cell_height();
 
             if actual_delta < 0 {
                 buf.blit(0, 0, 0, shift, width, height - shift);
@@ -609,6 +610,20 @@ fn scroll_view(display: &DisplayState, delta: i32) {
                 for row in start..rows {
                     draw_row_from_scrollback(buf, display, view_top + row, row);
                 }
+            }
+
+            // Clear any partial-row pixels below the last full row.
+            // height may not be divisible by cell_height, so the blit
+            // can leave stale content in the remainder strip.
+            if content_height < height {
+                gfx::fill_rect(
+                    buf,
+                    0,
+                    content_height,
+                    width,
+                    height - content_height,
+                    display.bg.get(),
+                );
             }
         } else {
             redraw_view(buf, display);
@@ -951,6 +966,13 @@ pub fn shell_console_page_up() {
 pub fn shell_console_page_down() {
     if DISPLAY.enabled.get() {
         console_page_down(&DISPLAY);
+        shell_console_commit();
+    }
+}
+
+pub fn shell_console_scroll_lines(lines: i32) {
+    if DISPLAY.enabled.get() && lines != 0 {
+        scroll_view(&DISPLAY, lines);
         shell_console_commit();
     }
 }
