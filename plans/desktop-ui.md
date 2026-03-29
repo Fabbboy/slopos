@@ -2,7 +2,7 @@
 
 ## 0. Progress Summary
 
-> **Last updated**: 2026-03-28 (Phase 4 verified complete)
+> **Last updated**: 2026-03-29 (Phase 5 resize + cursors verified)
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
@@ -10,10 +10,10 @@
 | **Phase 2** — Alpha Blending | ✅ **Complete** | 100% | Blend math in `gfx/src/blend.rs` + compositor wiring in commit `51c3c7a`. Drop shadows (12px spread, quadratic falloff) and semi-transparent title bars (0xD0 alpha tint) active. Damage tracking includes shadow bounds. |
 | **Phase 3** — AA Primitives | ✅ **Complete** | 100% | `line_aa`, `circle_aa`, `rounded_rect`, `rounded_rect_filled` all landed in `gfx/src/canvas_ops.rs`. Aliased primitives preserved. |
 | **Phase 4** — macOS Chrome | ✅ **Complete** | 100% | Full rip-and-replace in commit `27b29e7`. Menu bar (24px, clock, active app name), dock (magnification, running dots, pinned/running separator), traffic-light window decorations (12px circles, hover glyphs, 8px corner radius). Old taskbar/start menu deleted. App ID system (`SYSCALL_SURFACE_SET_APP_ID`) added. |
-| **Phase 5** — Window Interactions | 🟡 **Partial** | ~15% | Window move/drag works. No resize, no scroll wheel, no new cursor shapes. |
+| **Phase 5** — Window Interactions | 🟡 **Partial** | ~75% | Window move ✅, resize ✅ (wlroots SSD model, 8-edge detection, Wayland content model, throttled Configure events), 8 directional resize cursors ✅, Super+LMB move ✅. Remaining: scroll wheel, grab-hand cursor. |
 | **Phase 6** — Widget Toolkit | ❌ **Not started** | 0% | No `widgets/` directory exists. |
 
-**Next milestone**: Begin Phase 5 (window resize, scroll wheel, cursor shapes).
+**Next milestone**: Phase 5 remaining (scroll wheel via PS/2 IntelliMouse protocol).
 
 ---
 
@@ -50,9 +50,9 @@ Transform SlopOS from its current 1990s-era Windows-style compositor into a mode
 | **Window surfaces** | ✅ SHM-backed | `userland/src/appkit/surface.rs` — DrawBuffer, present_full/present_region |
 | **Event loop** | ✅ Working | `userland/src/appkit/run.rs` — WindowedApp trait, poll→dispatch→redraw→yield |
 | **PS/2 mouse** | ⚠️ No scroll | `drivers/src/ps2/mouse.rs` — 3-byte packets, no IntelliMouse scroll |
-| **Window resize** | ❌ None | No resize protocol, no drag handles, no resize negotiation |
-| **Window move** | ✅ Working | `compositor/input.rs` — title-bar drag via `start_drag`/`update_drag`/`stop_drag` |
-| **Cursor shapes** | ⚠️ Limited | Arrow + text beam only — no resize cursors, no grab hand (raw `u8`, no enum) |
+| **Window resize** | ✅ Working | wlroots SSD model: `start_resize`/`update_resize`/`stop_resize` in `compositor/input.rs`, edge detection in `decorations.rs`, Configure events via `SYSCALL_SEND_CONFIGURE` (151), frame/buffer separation in `compositor_context.rs`, Wayland content model in `renderer.rs`, deferred SHM destruction in `mm/shared_memory.rs`, min size 200×150. Shell handles resize with realloc + unconditional redraw. |
+| **Window move** | ✅ Working | Title-bar drag via `start_drag`/`update_drag`/`stop_drag` + Super+LMB on content area (wlroots/Sway pattern, commit `28e4260`) |
+| **Cursor shapes** | ✅ 11 shapes | Default, Text, Pointer, N/S/E/W/NW/NE/SW/SE resize — defined in `abi/src/window.rs`, rendered as pixel-art bitmaps in `renderer.rs` |
 | **Theme system** | ⚠️ Windows-style | `userland/src/theme.rs` — "Dark Roulette Theme", Windows 10/11 dark palette |
 | **Pixel formats** | ✅ 6 formats | ARGB8888, XRGB8888, RGB888, BGR888, RGBA8888, BGRA8888 |
 | **Shared memory** | ✅ Wayland-style | `mm/src/shared_memory.rs` — 64 buffers, acquire/release/refcount |
@@ -368,7 +368,7 @@ Supporting changes:
 
 ---
 
-### Phase 5: Window Interactions — 🟡 PARTIAL
+### Phase 5: Window Interactions — 🟡 PARTIAL (~75%)
 **Goal**: Make windows movable, resizable, and scrollable.
 
 **Acceptance criteria**:
@@ -376,42 +376,61 @@ Supporting changes:
   - ✅ Compositor tracks drag state via `start_drag()`/`update_drag()`/`stop_drag()` in `compositor/input.rs`
   - ✅ Window position updates in real-time via `window::set_window_position()`
   - ✅ Damage tracking handles the moving window's old and new positions
-- [ ] **Window resize**: Drag window edges or corners to resize
-  - Compositor defines 8px resize grab zones at window edges
-  - Cursor changes to resize arrows when hovering grab zones
-  - Resize is negotiated: compositor sends new size to app, app re-renders at new size
-  - Needs new syscall or surface protocol for resize events
-  - Minimum window size enforced (200×150 or configurable)
+- [x] **Super+LMB interactive move**: Hold Super + left-click on window content to move (commit `28e4260`)
+  - ✅ wlroots/Sway modifier-based interaction pattern
+  - ✅ Reuses existing drag state machine — no new syscalls needed
+- [x] **Window resize**: Drag window edges or corners to resize
+  - ✅ wlroots SSD model: `start_resize()`/`update_resize()`/`stop_resize()` state machine in `compositor/input.rs:507-602`
+  - ✅ Edge detection via labwc `ssd_get_resizing_type()` algorithm in `decorations.rs:111-198` — 12px shadow grab zone, corner range = `WINDOW_CORNER_RADIUS × 3`, corners take priority
+  - ✅ Two new syscalls: `SYSCALL_SET_WINDOW_SIZE` (150) sets frame dimensions, `SYSCALL_SEND_CONFIGURE` (151) notifies client of new size
+  - ✅ Frame/buffer separation: `WindowInfo` has both `width/height` (committed buffer) and `frame_width/frame_height` (resize target) in `abi/src/window.rs:54-130`
+  - ✅ Wayland content model in `renderer.rs:685-766` — always blit last committed buffer clipped to `min(buffer, frame)`, fill gap with placeholder color during grow
+  - ✅ Throttled Configure events (~100ms during drag, final on release) in `input.rs:565`
+  - ✅ Minimum window size enforced: 200×150 (`theme.rs:31-32`)
+  - ✅ Client-side handling: `appkit/surface.rs:108-137` allocates new SHM buffer + re-attaches; old buffer uses deferred destruction (`mm/shared_memory.rs:516-600`) if compositor still has a read-only mapping
+  - ✅ Shell resize: `shell/display.rs:796-845` recalculates cols/rows, unconditionally redraws (fixes black screen on cell-count-unchanged resize), clamps cursor, adjusts view_top (commit `2c8dceb`)
+- [x] **Cursor shapes**: 11 shapes (exceeds the planned 6)
+  - ✅ Default (arrow), Text (I-beam), Pointer (hand), N/S/E/W/NW/NE/SW/SE resize — `abi/src/window.rs:9-19`
+  - ✅ 8 directional resize cursor bitmaps (pixel-art arrows) embedded in `renderer.rs:388-482`
+  - ✅ Hover feedback: `update_resize_cursor()` in `input.rs:606-649` updates cursor on z-order hit-test each frame
 - [ ] **Scroll wheel**: PS/2 IntelliMouse 4-byte protocol
   - Mouse driver sends scroll events via `input_route_pointer_button()` or new scroll event type
   - `InputEventType::Scroll` added to ABI
   - Compositor forwards scroll events to focused window
-- [ ] **Cursor shapes**: At minimum 6 shapes
-  - Default (arrow), Text (I-beam), Resize-NS, Resize-EW, Resize-NWSE, Resize-NESW
-  - Cursor bitmaps embedded in compositor
-  - `set_cursor_shape()` syscall already exists — extend with new shapes
 
-**Files to modify**:
+**What was built** (commits `29c3fcd`, `e5556e8`, `2c8dceb`, `28e4260`):
+
+Files substantially modified:
+- `userland/src/apps/compositor/input.rs` — `ResizeEdge` bitfield (lines 19-73), `InputHandler` resize state (lines 75-124), resize state machine (lines 507-602), hover cursor update (lines 606-649), Super+LMB move (line 419)
+- `userland/src/apps/compositor/decorations.rs` — `hit_test_resize_edge()` (lines 111-198) — labwc algorithm with shadow grab zone + adaptive corner ranges
+- `userland/src/apps/compositor/renderer.rs` — Wayland content model (lines 685-766), 8 directional resize cursor bitmaps (lines 388-482), placeholder gap fill for frame > buffer
+- `userland/src/apps/shell/display.rs` — `shell_console_resize()` (lines 796-845) — unconditional redraw, view_top adjustment
+- `userland/src/appkit/surface.rs` — `resize()` (lines 108-137) — new SHM buffer alloc + deferred destruction of old
+- `abi/src/window.rs` — `WindowInfo` frame_width/frame_height fields, `effective_width()`/`effective_height()` methods, 8 new cursor shape constants
+- `abi/src/input.rs` — `InputEvent::configure()` constructor (lines 194-205), `InputEventType::Configure` (value 8)
+- `abi/src/syscall/numbers.rs` — `SYSCALL_SET_WINDOW_SIZE` (150), `SYSCALL_SEND_CONFIGURE` (151)
+- `core/src/syscall/ui_handlers.rs` — `syscall_set_window_size()`, `syscall_send_configure()` handlers
+- `video/src/compositor_context.rs` — `set_window_size()` (lines 570-588), frame dims in `SurfaceState`, exported in `surface_enumerate_windows()`
+- `mm/src/shared_memory.rs` — `shm_destroy()` deferred destruction (lines 516-600) — owner mappings removed, compositor read-only mapping keeps pages alive
+
+**Remaining work**:
 - `drivers/src/ps2/mouse.rs` — 4-byte IntelliMouse packet support, scroll events
 - `abi/src/input.rs` — add `Scroll` event type (or reuse pointer button codes 4/5)
-- `userland/src/apps/compositor/input.rs` — resize/move drag handling, edge detection
-- `userland/src/apps/compositor/renderer.rs` — resize grab zone visualization (optional)
-- `userland/src/apps/compositor/mod.rs` — resize negotiation protocol
-- `userland/src/appkit/window.rs` — resize event handling, surface reallocation
-- `userland/src/appkit/event.rs` — add resize/scroll event variants
-- `video/src/compositor_context.rs` — possibly extend surface protocol for resize
+- Compositor scroll event forwarding to focused window
 
-**Estimated effort**: 600–900 lines.
+**Estimated remaining effort**: ~200-300 lines (scroll wheel only).
 
 **QA scenario**:
 1. Run `just build` — must compile with zero errors.
 2. Run `VIDEO=1 just boot` — open a GUI app window.
 3. **PASS condition — window move**: Click and hold on the window title bar, drag the mouse. The window follows the cursor in real-time. Release the mouse — the window stays at the new position. No ghost artifacts at the old position (damage tracking handles cleanup).
-4. **PASS condition — window resize**: Move the cursor to the right edge of a window — cursor changes to a horizontal resize arrow. Click and drag — the window width changes. The app content re-renders at the new size. Repeat for bottom edge (vertical resize) and bottom-right corner (diagonal resize). Minimum size (200×150) is enforced — dragging smaller snaps to minimum.
-5. **PASS condition — scroll wheel**: In any scrollable content area, roll the mouse scroll wheel. Content scrolls up/down. Serial log shows scroll events being delivered (check for `Scroll` or button 4/5 in debug output).
-6. **PASS condition — cursor shapes**: Cursor changes to resize arrows when hovering window edges. Cursor is the normal arrow when hovering over window content or the desktop background. Cursor is a text I-beam when hovering a text input area (if one exists).
-7. **FAIL condition**: Windows cannot be moved by dragging title bar, OR resize does nothing, OR scroll wheel has no effect, OR cursor never changes shape.
-8. Run `just test` — all existing kernel tests must still pass.
+4. **PASS condition — Super+LMB move**: Hold Super key and left-click anywhere on window content, drag. The window follows the cursor. This works even when the cursor is not on the title bar.
+5. **PASS condition — window resize**: Move the cursor to the right edge of a window — cursor changes to a horizontal resize arrow. Click and drag — the window width changes. The app content re-renders at the new size. Repeat for bottom edge (vertical resize) and bottom-right corner (diagonal resize). Minimum size (200×150) is enforced — dragging smaller snaps to minimum. During resize growth, a placeholder gap is visible until the client re-renders. During resize shrink, content is cropped at the frame edge.
+6. **PASS condition — resize cursor feedback**: Hovering each window edge/corner shows the appropriate directional resize cursor (8 directions). Cursor reverts to default arrow when leaving the resize zone. Maximized or minimized windows do not show resize cursors.
+7. **PASS condition — shell resize**: Resize a shell/terminal window. The terminal recalculates columns/rows and redraws with the new dimensions. No black screen or stale content.
+8. **PASS condition — scroll wheel**: *(Not yet testable — PS/2 IntelliMouse not implemented.)*
+9. **FAIL condition**: Windows cannot be moved by dragging title bar, OR resize does nothing, OR cursor never changes shape, OR shell shows black screen after resize.
+10. Run `just test` — all existing kernel tests must still pass.
 
 ---
 
@@ -495,9 +514,9 @@ These are not planned for the initial implementation but should be kept in mind 
 |------|--------|------------|
 | TTF parser complexity (tables, edge cases) | ✅ **Resolved** | Implemented with Inter Regular + JetBrains Mono. Supports cmap Format 4, simple + compound glyphs. No hinting, no ligatures, no complex shaping — exactly as planned. |
 | Alpha blending performance | ✅ **Resolved** | Wired into compositor (`51c3c7a`). Damage tracking includes shadow bounds. No frame-rate regressions reported. Fast-path for fully opaque pixels. |
-| Compositor architecture debt | ⚠️ **Upcoming** | The rip-and-replace of taskbar/start menu is still ahead (Phase 4). The underlying SHM + damage + surface architecture is sound and stays. |
+| Compositor architecture debt | ✅ **Resolved** | macOS chrome rip-and-replace complete (Phase 4). Underlying SHM + damage + surface architecture extended cleanly for resize (frame/buffer separation, deferred destruction). |
 | Font file loading from ext2 | ✅ **Resolved** | Proven working — compositor loads `Inter-Regular.ttf` from `/usr/share/fonts/` at startup. Build script automates deployment. |
-| Window resize complexity | ⚠️ **Unchanged** | Still the hardest protocol ahead. No ABI exists yet. Need `InputEventType::Resize` + surface reallocation + min-size enforcement. |
+| Window resize complexity | ✅ **Resolved** | Full wlroots SSD model landed across 4 commits (`29c3fcd`, `e5556e8`, `2c8dceb`, `28e4260`). Frame/buffer separation, Configure events, deferred SHM destruction, Wayland content model, 8-edge detection, throttled events, min-size enforcement. Shell handles resize cleanly. |
 | Glyph cache memory | ✅ **Resolved** | LRU with 512 entries. At 16px, ~256 bytes/glyph = ~128KB max. Well within budget. |
 
 ---
@@ -530,16 +549,16 @@ These are not planned for the initial implementation but should be kept in mind 
 Phase 1 (Fonts) ───────── ✅ COMPLETE ─────────┐
                                                   │
 Phase 2 (Alpha Blending) ─ ✅ COMPLETE ───────────┤
-                                                  ├──▶ Phase 4 (macOS Chrome) ❌
+                                                  ├──▶ Phase 4 (macOS Chrome) ✅ COMPLETE
 Phase 3 (AA Primitives) ── ✅ COMPLETE ───────────┘         │
                                                             │
                            Phase 5 (Interactions) 🟡 ◀──────┘
-                                   │       (move done, resize/scroll/cursors TODO)
+                                   │       (move ✅, resize ✅, cursors ✅, scroll ❌)
                                    ▼
                            Phase 6 (Widgets) ❌
 ```
 
-Phases 1, 2, and 3 are **done** — all rendering foundations are in place. Phase 4 (macOS chrome) is the **next milestone** and is fully unblocked. Phase 5 has window-move but the rest depends on Phase 4's new chrome. Phase 6 depends on everything.
+Phases 1–4 are **done** — all rendering foundations and macOS chrome are in place. Phase 5 is ~75% complete: move, resize, and cursor shapes are fully implemented. Only scroll wheel remains (PS/2 IntelliMouse 4-byte protocol). Phase 6 (widget toolkit) is fully unblocked but not started.
 
 ---
 
