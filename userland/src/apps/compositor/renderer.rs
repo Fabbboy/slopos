@@ -682,43 +682,20 @@ impl Renderer {
             y1: window.y + frame_h - 1,
         };
 
-        // During active resize (frame dims != buffer dims), the client buffer
-        // has stale content at the old size. Blitting it produces visual noise
-        // at the window edges (e.g., text characters from the old layout showing
-        // as white lines at the new edge).  Show placeholder until the client
-        // re-renders at the matching size.
-        let resizing = frame_w != buf_w as i32 || frame_h != buf_h as i32;
-        if resizing {
-            let placeholder_rect = DamageRect {
-                x0: window.x,
-                y0: window.y,
-                x1: window.x + frame_w - 1,
-                y1: window.y + frame_h - 1,
-            };
-            if let Some(r) = intersect_rect(clip, &placeholder_rect) {
-                gfx::fill_rect_clipped(
-                    buf,
-                    r.x0,
-                    r.y0,
-                    r.x1 - r.x0 + 1,
-                    r.y1 - r.y0 + 1,
-                    COLOR_WINDOW_PLACEHOLDER,
-                    clip,
-                );
-            }
-            let _ = frame_rect;
-            return;
-        }
+        // Wayland model: always show the last committed buffer, clipped to
+        // the frame boundary.  During shrink the content is cropped; during
+        // grow a placeholder fills the gap.  No timing-dependent "resizing"
+        // flag — the compositor never shows an inconsistent state.
+        let visible_w = (buf_w as i32).min(frame_w);
+        let visible_h = (buf_h as i32).min(frame_h);
 
-        // Normal path: buffer matches frame, blit content directly.
         let content_rect = DamageRect {
             x0: window.x,
             y0: window.y,
-            x1: window.x + (buf_w as i32) - 1,
-            y1: window.y + (buf_h as i32) - 1,
+            x1: window.x + visible_w - 1,
+            y1: window.y + visible_h - 1,
         };
 
-        // Blit the content (clipped to both the clip rect and the content rect)
         if let Some(draw_rect) = intersect_rect(clip, &content_rect) {
             let x0 = draw_rect.x0.max(0);
             let y0 = draw_rect.y0.max(0);
@@ -745,6 +722,46 @@ impl Renderer {
                         dst_data[dst_off..dst_end].copy_from_slice(&src_data[src_off..src_end]);
                     }
                 }
+            }
+        }
+
+        // Fill gap between committed content and frame (grow case).
+        if frame_w > buf_w as i32 {
+            let strip = DamageRect {
+                x0: window.x + buf_w as i32,
+                y0: window.y,
+                x1: window.x + frame_w - 1,
+                y1: window.y + frame_h - 1,
+            };
+            if intersect_rect(clip, &strip).is_some() {
+                gfx::fill_rect_clipped(
+                    buf,
+                    strip.x0,
+                    strip.y0,
+                    strip.x1 - strip.x0 + 1,
+                    strip.y1 - strip.y0 + 1,
+                    COLOR_WINDOW_PLACEHOLDER,
+                    clip,
+                );
+            }
+        }
+        if frame_h > buf_h as i32 {
+            let strip = DamageRect {
+                x0: window.x,
+                y0: window.y + buf_h as i32,
+                x1: window.x + frame_w - 1,
+                y1: window.y + frame_h - 1,
+            };
+            if intersect_rect(clip, &strip).is_some() {
+                gfx::fill_rect_clipped(
+                    buf,
+                    strip.x0,
+                    strip.y0,
+                    strip.x1 - strip.x0 + 1,
+                    strip.y1 - strip.y0 + 1,
+                    COLOR_WINDOW_PLACEHOLDER,
+                    clip,
+                );
             }
         }
 
