@@ -17,6 +17,8 @@ struct ModifierState {
     ctrl_left: bool,
     alt_left: bool,
     caps_lock: bool,
+    super_left: bool,
+    super_right: bool,
 }
 
 impl ModifierState {
@@ -27,11 +29,17 @@ impl ModifierState {
             ctrl_left: false,
             alt_left: false,
             caps_lock: false,
+            super_left: false,
+            super_right: false,
         }
     }
 
     fn is_shift(&self) -> bool {
         self.shift_left || self.shift_right
+    }
+
+    fn is_super(&self) -> bool {
+        self.super_left || self.super_right
     }
 }
 
@@ -228,6 +236,23 @@ pub fn handle_scancode(scancode: u8) {
     // Extended keys (preceded by 0xE0).
     if state.extended_code {
         state.extended_code = false;
+        // Super (Logo/Windows) keys: track press AND release for modifier state.
+        // Left Super = 0x5B, Right Super = 0x5C (PS/2 scan code set 1).
+        match make_code {
+            0x5B => {
+                state.modifiers.super_left = is_press;
+                drop(state);
+                input_route_key_event(scancode, 0, is_press, slopos_utils::clock::uptime_ms());
+                return;
+            }
+            0x5C => {
+                state.modifiers.super_right = is_press;
+                drop(state);
+                input_route_key_event(scancode, 0, is_press, slopos_utils::clock::uptime_ms());
+                return;
+            }
+            _ => {}
+        }
         if !is_press {
             return;
         }
@@ -314,6 +339,33 @@ pub fn handle_scancode(scancode: u8) {
 
 pub fn get_scancode() -> u8 {
     STATE.lock().scancode_buffer.try_pop().unwrap_or(0)
+}
+
+/// Return the current keyboard modifier state as a bitfield.
+///
+/// Bit layout matches `slopos_abi::input::MODIFIER_*` constants:
+///   bit 0 = Shift, bit 1 = Ctrl, bit 2 = Alt,
+///   bit 3 = Super (Logo), bit 4 = Caps Lock.
+pub fn get_modifier_state() -> u8 {
+    let state = STATE.lock();
+    let m = &state.modifiers;
+    let mut bits: u8 = 0;
+    if m.is_shift() {
+        bits |= 1;
+    }
+    if m.ctrl_left {
+        bits |= 1 << 1;
+    }
+    if m.alt_left {
+        bits |= 1 << 2;
+    }
+    if m.is_super() {
+        bits |= 1 << 3;
+    }
+    if m.caps_lock {
+        bits |= 1 << 4;
+    }
+    bits
 }
 
 pub fn poll_wait_enter() {

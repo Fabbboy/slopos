@@ -11,6 +11,14 @@ pub const CLIPBOARD_MAX_SIZE: usize = 4096;
 pub const INPUT_FOCUS_KEYBOARD: u32 = 0;
 pub const INPUT_FOCUS_POINTER: u32 = 1;
 
+/// Keyboard modifier bitfield (returned by `SYSCALL_INPUT_GET_MODIFIER_STATE`).
+/// Follows the Wayland `wlr_keyboard_modifier` convention.
+pub const MODIFIER_SHIFT: u8 = 1 << 0;
+pub const MODIFIER_CTRL: u8 = 1 << 1;
+pub const MODIFIER_ALT: u8 = 1 << 2;
+pub const MODIFIER_SUPER: u8 = 1 << 3;
+pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
+
 /// Type of input event
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

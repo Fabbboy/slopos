@@ -79,6 +79,10 @@ pub fn get_button_state() -> u8 {
     unsafe { syscall0(SYSCALL_INPUT_GET_BUTTON_STATE) as u8 }
 }
 
+pub fn get_modifier_state() -> u8 {
+    unsafe { syscall0(SYSCALL_INPUT_GET_MODIFIER_STATE) as u8 }
+}
+
 #[inline(always)]
 pub fn drain_queue() {
     unsafe {

@@ -220,6 +220,11 @@ define_syscall!(syscall_input_get_button_state(ctx, args) requires(compositor) {
     ctx.ok(buttons as u64)
 });
 
+define_syscall!(syscall_input_get_modifier_state(ctx, args) requires(compositor) {
+    let modifiers = input::get_modifier_state();
+    ctx.ok(modifiers as u64)
+});
+
 define_syscall!(syscall_input_request_close(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     if target_task_id == 0 || target_task_id == INVALID_TASK_ID {

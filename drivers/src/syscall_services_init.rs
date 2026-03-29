@@ -17,6 +17,7 @@ static INPUT_SERVICES: InputServices = InputServices {
     get_pointer_focus: input_event::input_get_pointer_focus,
     get_pointer_position: input_event::input_get_pointer_position,
     get_button_state: input_event::input_get_button_state,
+    get_modifier_state: input_event::input_get_modifier_state,
     clipboard_copy: input_event::clipboard_copy,
     clipboard_paste: input_event::clipboard_paste,
 };

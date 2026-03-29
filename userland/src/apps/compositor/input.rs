@@ -1,3 +1,4 @@
+use slopos_abi::input::MODIFIER_SUPER;
 use slopos_abi::window::CURSOR_SHAPE_DEFAULT;
 
 use crate::program_registry;
@@ -415,6 +416,15 @@ impl InputHandler {
 
             // 5. Content area
             if self.hit_test_content_area(&window) {
+                // Super+LMB on content: interactive move (wlroots/Sway pattern).
+                // The modifier check is done once per click, not per frame.
+                let mods = input::get_modifier_state();
+                if mods & MODIFIER_SUPER != 0 && window.state != 2 {
+                    self.start_drag(&window);
+                    window::raise_window(window.task_id);
+                    self.set_focused(window.task_id);
+                    return;
+                }
                 window::raise_window(window.task_id);
                 input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
                 self.set_focused(window.task_id);

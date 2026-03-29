@@ -37,13 +37,13 @@ use crate::syscall::signal::{
 pub use crate::syscall::ui_handlers::{
     syscall_buffer_age, syscall_clipboard_copy, syscall_clipboard_paste, syscall_drain_queue,
     syscall_enumerate_windows, syscall_fb_flip, syscall_fb_info, syscall_input_get_button_state,
-    syscall_input_get_pointer_pos, syscall_input_has_events, syscall_input_poll,
-    syscall_input_poll_batch, syscall_input_request_close, syscall_input_set_focus,
-    syscall_input_set_focus_with_offset, syscall_mark_frames_done, syscall_open_tty_fd,
-    syscall_openpty, syscall_poll_frame_done, syscall_raise_window, syscall_random_next,
-    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin, syscall_send_configure,
-    syscall_set_cursor_shape, syscall_set_window_position, syscall_set_window_size,
-    syscall_set_window_state, syscall_shm_acquire, syscall_shm_create,
+    syscall_input_get_modifier_state, syscall_input_get_pointer_pos, syscall_input_has_events,
+    syscall_input_poll, syscall_input_poll_batch, syscall_input_request_close,
+    syscall_input_set_focus, syscall_input_set_focus_with_offset, syscall_mark_frames_done,
+    syscall_open_tty_fd, syscall_openpty, syscall_poll_frame_done, syscall_raise_window,
+    syscall_random_next, syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
+    syscall_send_configure, syscall_set_cursor_shape, syscall_set_window_position,
+    syscall_set_window_size, syscall_set_window_state, syscall_shm_acquire, syscall_shm_create,
     syscall_shm_create_with_format, syscall_shm_destroy, syscall_shm_get_formats, syscall_shm_map,
     syscall_shm_poll_released, syscall_shm_release, syscall_shm_unmap, syscall_surface_attach,
     syscall_surface_commit, syscall_surface_damage, syscall_surface_frame,
@@ -174,6 +174,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET] => syscall_input_set_focus_with_offset, "input_set_focus_with_offset";
     [SYSCALL_INPUT_GET_POINTER_POS]      => syscall_input_get_pointer_pos,      "input_get_pointer_pos";
     [SYSCALL_INPUT_GET_BUTTON_STATE]     => syscall_input_get_button_state,     "input_get_button_state";
+    [SYSCALL_INPUT_GET_MODIFIER_STATE]   => syscall_input_get_modifier_state,   "input_get_modifier_state";
     [SYSCALL_INPUT_REQUEST_CLOSE]        => syscall_input_request_close,        "input_request_close";
     [SYSCALL_CLIPBOARD_COPY]             => syscall_clipboard_copy,             "clipboard_copy";
     [SYSCALL_CLIPBOARD_PASTE]            => syscall_clipboard_paste,            "clipboard_paste";

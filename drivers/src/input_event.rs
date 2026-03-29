@@ -245,6 +245,12 @@ pub fn input_get_button_state() -> u8 {
     INPUT_MANAGER.lock().pointer_buttons
 }
 
+/// Get current keyboard modifier state (Shift/Ctrl/Alt/Super/CapsLock).
+/// Delegates to the PS/2 keyboard driver which tracks physical key state.
+pub fn input_get_modifier_state() -> u8 {
+    crate::ps2::keyboard::get_modifier_state()
+}
+
 // =============================================================================
 // Public API - Event Routing (Called from IRQ handlers)
 // =============================================================================
