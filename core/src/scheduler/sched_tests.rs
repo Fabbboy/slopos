@@ -1640,10 +1640,17 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
         return TestResult::Fail;
     }
 
+    // Use a wake_tick far in the future so that real timer interrupts
+    // (which call wake_due_sleepers with the current tick) never collect
+    // our entry before the test explicitly wakes it.  With wake_tick=100
+    // the entry was already "due" by the time the test ran, creating a
+    // race between the timer handler and the test's block/wake sequence.
+    const FAR_FUTURE: u64 = u64::MAX / 2;
+
     for round in 0..64 {
         let _ = task_set_state(task_id, TaskStatus::Running);
 
-        if !super::sleep::test_insert_sleep_entry(task_id, 100) {
+        if !super::sleep::test_insert_sleep_entry(task_id, FAR_FUTURE) {
             klog_info!("SCHED_TEST: sleep queue insert failed at round {}", round);
             task_terminate(task_id);
             return TestResult::Fail;
@@ -1655,7 +1662,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
             return TestResult::Fail;
         }
 
-        super::sleep::wake_due_sleepers(200);
+        super::sleep::wake_due_sleepers(FAR_FUTURE + 1);
 
         if task_is_blocked(task_ptr) {
             klog_info!("SCHED_TEST: task stuck in Blocked after wake — race bug");
