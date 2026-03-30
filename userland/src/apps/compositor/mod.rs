@@ -4,13 +4,12 @@ mod hover;
 mod input;
 pub mod menu_bar;
 mod output;
+pub mod protocol;
 mod renderer;
 mod surface_cache;
 
 use crate::gfx::{DamageRect, DamageTracker};
-use crate::syscall::{
-    DisplayInfo, UserWindowInfo, core as sys_core, input as sys_input, tty, window,
-};
+use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, tty, window};
 use crate::theme::*;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,6 +20,7 @@ use output::{
     CompositorOutput, FrameMetrics, RenderMode, WINDOW_STATE_MINIMIZED, WindowBounds,
     estimate_present_bytes,
 };
+use protocol::ProtocolBridge;
 use renderer::Renderer;
 use surface_cache::ClientSurfaceCache;
 
@@ -40,6 +40,14 @@ struct WindowManager {
     system_bar: menu_bar::SystemBar,
     shelf: dock::LauncherShelf,
 
+    /// Protocol bridge for AF_UNIX socket-based clients (None if bind failed).
+    protocol: Option<Box<ProtocolBridge>>,
+
+    /// Monotonic serial counter for protocol input events (Wayland convention).
+    protocol_serial: u32,
+    /// Task ID of the protocol surface that last had pointer focus (for enter/leave).
+    protocol_pointer_focus: u32,
+
     first_frame: bool,
     output_damage: DamageTracker,
     /// Unfulfilled damage from a failed fb_flip — carried forward until
@@ -54,6 +62,7 @@ impl WindowManager {
     fn new() -> Self {
         let mut shelf = dock::LauncherShelf::new();
         shelf.init_defaults();
+        let protocol = ProtocolBridge::new().map(Box::new);
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
@@ -65,6 +74,9 @@ impl WindowManager {
             surface_cache: ClientSurfaceCache::new(),
             system_bar: menu_bar::SystemBar::new(),
             shelf,
+            protocol,
+            protocol_serial: 0,
+            protocol_pointer_focus: 0,
             first_frame: true,
             output_damage: DamageTracker::new(),
             pending_damage: DamageTracker::new(),
@@ -79,7 +91,12 @@ impl WindowManager {
         self.prev_window_count = self.window_count;
         let saved_bounds = self.prev_window_bounds;
 
-        let raw_count = window::enumerate_windows(&mut self.windows);
+        // Populate window list from ProtocolBridge local state.
+        let raw_count = if let Some(ref proto) = self.protocol {
+            proto.get_windows(&mut self.windows) as i64
+        } else {
+            0
+        };
         self.window_count = if raw_count > 0 {
             (raw_count as usize).min(MAX_WINDOWS) as u32
         } else {
@@ -329,7 +346,19 @@ pub fn compositor_user_main() {
     wm.renderer
         .set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
 
+    // Tell the protocol bridge the display dimensions so it can send
+    // OutputInfo to new clients on accept.
+    if let Some(ref mut proto) = wm.protocol {
+        proto.set_display_info(
+            output.width,
+            output.height,
+            fb_info.format as u32,
+            output.pitch as u32,
+        );
+    }
+
     let pixel_format = fb_info.format;
+    let mut readiness = crate::readiness::ReadinessNotifier::acquire();
 
     const TARGET_FRAME_MS: u64 = 16;
     let mut frame_count: u32 = 0;
@@ -339,10 +368,18 @@ pub fn compositor_user_main() {
     loop {
         let frame_start = Instant::now();
 
-        window::drain_queue();
-        sys_input::drain_queue();
+        if let Some(ref mut proto) = wm.protocol {
+            proto.accept_clients();
+            proto.process_requests();
+        }
 
-        wm.input.update_mouse();
+        // Signal readiness after the first accept pass so any
+        // connections queued during init are already handled.
+        if let Some(n) = readiness.take() {
+            n.signal_ready();
+        }
+
+        wm.input.update_from_raw_events();
         wm.refresh_windows();
         // Snapshot focus *before* any input processing so we can detect
         // changes from any source (sync, mouse click, shelf, spawn) in a
@@ -366,6 +403,10 @@ pub fn compositor_user_main() {
             + SHELF_BOTTOM_MARGIN
             + SHELF_DOT_DIAMETER
             + SHELF_DOT_MARGIN_Y;
+        // Temporarily take the protocol bridge out so we can pass it mutably
+        // into InputHandler methods without borrowing all of `wm`.
+        let mut proto_box = wm.protocol.take();
+        let proto_ref = proto_box.as_deref_mut();
         wm.input.handle_mouse_events(
             fb_info.width as i32,
             fb_info.height as i32,
@@ -373,10 +414,64 @@ pub fn compositor_user_main() {
             &wm.windows,
             wm.window_count,
             &wm.shelf,
+            proto_ref,
         );
+        wm.protocol = proto_box;
 
         // Update resize cursor hover feedback (must run after handle_mouse_events).
         wm.input.update_resize_cursor(&wm.windows, wm.window_count);
+
+        // Forward raw input events to protocol clients.
+        if let Some(ref mut proto) = wm.protocol {
+            // Determine pointer focus for protocol surfaces: find the topmost
+            // protocol surface under the cursor.
+            let mut new_ptr_focus: u32 = 0;
+            for i in (0..wm.window_count as usize).rev() {
+                let w = wm.windows[i];
+                if w.state == WINDOW_STATE_MINIMIZED {
+                    continue;
+                }
+                if wm.input.hit_test_content_area(&w) {
+                    new_ptr_focus = w.task_id;
+                    break;
+                }
+            }
+
+            // Send pointer enter/leave events on focus transitions.
+            if new_ptr_focus != wm.protocol_pointer_focus {
+                if wm.protocol_pointer_focus != 0 {
+                    wm.protocol_serial = wm.protocol_serial.wrapping_add(1);
+                    proto
+                        .send_pointer_leave_for_task(wm.protocol_pointer_focus, wm.protocol_serial);
+                }
+                if new_ptr_focus != 0 {
+                    wm.protocol_serial = wm.protocol_serial.wrapping_add(1);
+                    proto.send_pointer_enter_for_task(
+                        new_ptr_focus,
+                        wm.protocol_serial,
+                        wm.input.mouse_x,
+                        wm.input.mouse_y,
+                    );
+                }
+                wm.protocol_pointer_focus = new_ptr_focus;
+            }
+
+            // Forward raw events to focused protocol surfaces.
+            let raw_events = wm.input.raw_events();
+            if !raw_events.is_empty() {
+                let kbd_focus = wm.input.focused_task();
+                let mods = wm.input.modifier_state();
+                proto.forward_input_events(
+                    raw_events,
+                    new_ptr_focus,
+                    kbd_focus,
+                    wm.input.mouse_x,
+                    wm.input.mouse_y,
+                    mods,
+                    &mut wm.protocol_serial,
+                );
+            }
+        }
 
         // Compute effective cursor shape early so we can detect shape changes
         // and add damage before the render decision.
@@ -498,7 +593,12 @@ pub fn compositor_user_main() {
             frame_count = frame_count.saturating_add(1);
             if flip_result {
                 let present_time = time_origin.elapsed().as_millis() as u64;
-                window::mark_frames_done(present_time);
+
+                // Send frame_done events to protocol clients.
+                if let Some(ref mut proto) = wm.protocol {
+                    proto.mark_frames_done(present_time);
+                    proto.clear_dirty();
+                }
             } else {
                 // Flip failed — save damage for retry on next frame.
                 // The back buffer is correct; the framebuffer is stale.
@@ -527,10 +627,37 @@ pub fn compositor_user_main() {
             wm.first_frame = false;
         }
 
+        // Flush protocol client buffers and clean up disconnected clients.
+        if let Some(ref mut proto) = wm.protocol {
+            proto.cleanup_disconnected();
+            proto.flush_all();
+        }
+
         let frame_elapsed = frame_start.elapsed();
         let target_frame = Duration::from_millis(TARGET_FRAME_MS);
         if frame_elapsed < target_frame {
-            thread::sleep(target_frame - frame_elapsed);
+            let remaining_ms = (target_frame - frame_elapsed).as_millis() as i64;
+
+            // Instead of sleeping, poll for protocol activity.
+            // This wakes the compositor when client data arrives,
+            // matching the Wayland event-driven dispatch pattern.
+            if let Some(ref mut proto) = wm.protocol {
+                let mut poll_fds = [slopos_abi::syscall::types::UserPollFd::default(); 33];
+                let poll_count = proto.server_poll_fds(&mut poll_fds);
+
+                if poll_count > 0 {
+                    let result =
+                        crate::syscall::fs::poll(&mut poll_fds[..poll_count], remaining_ms);
+
+                    // If data arrived, process requests immediately
+                    if result.unwrap_or(0) > 0 {
+                        proto.accept_clients();
+                        proto.process_requests();
+                    }
+                }
+            } else {
+                thread::sleep(target_frame - frame_elapsed);
+            }
         }
     }
 }

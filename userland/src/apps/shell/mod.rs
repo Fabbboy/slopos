@@ -298,15 +298,16 @@ pub fn shell_user_main() {
 fn shell_interactive_main() {
     use slopos_abi::signal::SIGINT;
 
-    use crate::syscall::window;
+    use crate::appkit::protocol_client;
     use crate::syscall::{fs, process};
 
+    protocol_client::init();
     display::shell_console_init();
     display::shell_console_clear();
 
-    window::surface_set_title("SlopOS Shell");
-    window::surface_set_app_id("org.slopos.shell");
-    window::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
+    surface::set_title("SlopOS Shell");
+    surface::set_app_id("org.slopos.shell");
+    surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
 
     cwd_set(b"/");
     env::initialize_defaults();

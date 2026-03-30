@@ -397,7 +397,7 @@ fn print_background_job_started(job_id: u16, pid: u32) {
 /// TTY and called `kill()` directly — breaking ISIG semantics, preventing
 /// child stdin reads, and only handling Ctrl+C (not Ctrl+Z/Ctrl+\).
 fn forward_compositor_keyboard() {
-    use crate::syscall::{InputEvent, InputEventType, input};
+    use crate::syscall::{InputEvent, InputEventType};
 
     if !super::display::DISPLAY.enabled.get() {
         return;
@@ -410,7 +410,7 @@ fn forward_compositor_keyboard() {
 
     // Forward keyboard bytes to PTY master → slave ldisc processes them.
     let mut events = [InputEvent::default(); 8];
-    let count = input::poll_batch(&mut events) as usize;
+    let count = super::input::poll_protocol_events(&mut events);
     for i in 0..count.min(8) {
         if events[i].event_type == InputEventType::Configure {
             let new_w = events[i].configure_width() as i32;

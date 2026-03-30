@@ -76,45 +76,14 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     loop {
         run_bottom_halves();
 
-        let mut ready_count = 0u64;
         let mut regs = [PollRegInfo::NONE; SELECT_MAX_FDS];
         let mut reg_count = 0usize;
         let mut pipe_fds = [(0i32, 0u16); SELECT_MAX_FDS];
         let mut pipe_fd_count = 0usize;
 
-        for idx in 0..nfds {
-            let user_ptr = try_or_err!(
-                ctx,
-                UserPtr::<UserPollFd>::try_new(
-                    base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64
-                )
-            );
-            let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
-            if pfd.fd < 0 {
-                pfd.revents = 0;
-            } else {
-                pfd.revents = file_poll_fd(pid, pfd.fd as c_int, pfd.events);
-                if pfd.revents != 0 {
-                    ready_count += 1;
-                }
-            }
-            try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
-        }
+        slopos_kernel_services::driver_runtime::prepare_to_wait();
 
-        if ready_count > 0 {
-            return ctx.ok(ready_count);
-        }
-
-        if timeout_ms == 0 {
-            return ctx.ok(0);
-        }
-        if timeout_ms > 0 {
-            let now = slopos_kernel_services::platform::get_time_ms();
-            if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
-                return ctx.ok(0);
-            }
-        }
-
+        // STEP 1: Register on wait queues BEFORE checking readiness.
         for idx in 0..nfds {
             let user_ptr = try_or_err!(
                 ctx,
@@ -135,33 +104,80 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        let pipe_registered = if pipe_fd_count > 0 {
-            file_poll_register_pipes(pid, &pipe_fds[..pipe_fd_count])
-        } else {
-            0
-        };
+        if pipe_fd_count > 0 {
+            file_poll_register_pipes(pid, &pipe_fds[..pipe_fd_count]);
+        }
 
+        // STEP 2: Check readiness AFTER registration — no race window.
+        let mut ready_count = 0u64;
+        for idx in 0..nfds {
+            let user_ptr = try_or_err!(
+                ctx,
+                UserPtr::<UserPollFd>::try_new(
+                    base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64
+                )
+            );
+            let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
+            if pfd.fd < 0 {
+                pfd.revents = 0;
+            } else {
+                pfd.revents = file_poll_fd(pid, pfd.fd as c_int, pfd.events);
+                if pfd.revents != 0 {
+                    ready_count += 1;
+                }
+            }
+            try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
+        }
+
+        // Cleanup helper: unregister + finish_wait.
+        macro_rules! cleanup {
+            () => {
+                slopos_kernel_services::driver_runtime::finish_wait();
+                for reg in &regs[..reg_count] {
+                    file_poll_unregister_fd(reg);
+                }
+                if pipe_fd_count > 0 {
+                    file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
+                }
+            };
+        }
+
+        if ready_count > 0 {
+            cleanup!();
+            return ctx.ok(ready_count);
+        }
+
+        if timeout_ms == 0 {
+            cleanup!();
+            return ctx.ok(0);
+        }
+        if timeout_ms > 0 {
+            let now = slopos_kernel_services::platform::get_time_ms();
+            if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
+                cleanup!();
+                return ctx.ok(0);
+            }
+        }
+
+        // STEP 3: Nothing ready — sleep. If data arrived between
+        // registration and here, unblock_task already flipped us to
+        // Running via the WillBlock guard, so sleep returns immediately.
         let sleep_ms = if timeout_ms < 0 {
             100u32
         } else {
-            let remaining =
-                timeout_ms - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
+            let remaining = timeout_ms
+                - (slopos_kernel_services::platform::get_time_ms()
+                    .wrapping_sub(start_ms) as i64);
             (remaining.max(0) as u32).min(100)
         };
 
-        if reg_count > 0 || pipe_registered > 0 {
+        if reg_count > 0 || pipe_fd_count > 0 {
             slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
-        for reg in &regs[..reg_count] {
-            file_poll_unregister_fd(reg);
-        }
-
-        if pipe_registered > 0 {
-            file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
-        }
+        cleanup!();
 
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return ctx.err_with(ERRNO_EINTR as u64);

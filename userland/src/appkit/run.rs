@@ -5,10 +5,12 @@
 //! are monomorphized (no trait objects).
 
 use crate::gfx::DrawBuffer;
-use crate::syscall::{InputEvent, core as sys_core, tty};
+use crate::syscall::{core as sys_core, tty};
+use slopos_protocol::types::Event as ProtocolEvent;
 
 use super::event::Event;
-use super::window::{self, Window};
+use super::protocol_client;
+use super::window::{EVENT_BUF_LEN, Window};
 
 /// Instructs the event loop what to do after processing an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +67,10 @@ pub trait WindowedApp {
 /// This function never returns normally; it calls `std::process::exit(0)` on
 /// `ControlFlow::Exit`.
 pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
+    // Connect to the compositor protocol socket. Retries internally
+    // since the compositor may still be starting.
+    protocol_client::init();
+
     let mut win = match Window::new(width, height) {
         Ok(w) => w,
         Err(e) => {
@@ -83,22 +89,26 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
 
     let refresh_interval = app.refresh_interval_ms();
     let mut last_refresh = sys_core::get_time_ms();
-    let mut raw_buf = [InputEvent::default(); window::EVENT_BUF_LEN];
 
     loop {
-        let count = win.poll_events_raw(&mut raw_buf);
+        let mut proto_buf = [ProtocolEvent::FrameDone {
+            surface: 0,
+            timestamp_ms: 0,
+        }; EVENT_BUF_LEN];
+        let count = win.poll_protocol_events(&mut proto_buf);
 
-        for raw in &raw_buf[..count] {
-            let event = Event::from_raw(raw);
-            win.track_pointer(&event);
+        for pe in &proto_buf[..count] {
+            if let Some(event) = Event::from_protocol(pe) {
+                win.track_pointer(&event);
 
-            // Auto-handle resize before dispatching to the app.
-            if let Event::Configure { width, height } = event {
-                let _ = win.resize(width, height);
-            }
+                // Auto-handle resize before dispatching to the app.
+                if let Event::Configure { width, height } = event {
+                    let _ = win.resize(width, height);
+                }
 
-            if app.on_event(&mut win, event) == ControlFlow::Exit {
-                std::process::exit(0);
+                if app.on_event(&mut win, event) == ControlFlow::Exit {
+                    std::process::exit(0);
+                }
             }
         }
 

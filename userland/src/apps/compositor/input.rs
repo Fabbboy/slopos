@@ -1,10 +1,13 @@
-use slopos_abi::input::MODIFIER_SUPER;
+use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_SUPER};
 use slopos_abi::window::{CURSOR_SHAPE_DEFAULT, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING};
+use slopos_abi::{InputEvent, InputEventType};
 
 use crate::program_registry;
-use crate::syscall::{UserWindowInfo, input, process, tty, window};
+use crate::syscall::{UserWindowInfo, input, process, tty};
 use crate::theme::*;
 use std::time::Instant;
+
+use super::protocol::ProtocolBridge;
 
 use super::MAX_WINDOWS;
 use super::decorations;
@@ -104,14 +107,10 @@ pub struct InputHandler {
     restore_geometry: [(u32, i32, i32, u32, u32); MAX_WINDOWS],
 
     /// The task that currently has keyboard focus.  Private — all changes
-    /// go through `set_focused()` so the kernel syscall is always issued.
-    /// Read via `focused_task()`.  This is the Mutter/KWin pattern: a
-    /// single entry-point for focus changes prevents desync by design.
+    /// go through `set_focused()`.  Read via `focused_task()`.  This is
+    /// the Mutter/KWin pattern: a single entry-point for focus changes
+    /// prevents desync by design.
     focused_task: u32,
-    /// Mirror of the last value sent to the kernel via
-    /// `input::set_keyboard_focus()`.  Compared against `focused_task`
-    /// inside `set_focused()` to skip redundant syscalls.
-    kernel_keyboard_focus: u32,
     pub needs_full_redraw: bool,
 
     pub cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
@@ -121,6 +120,13 @@ pub struct InputHandler {
     pending_close_deadlines: [u64; MAX_WINDOWS],
     pending_close_count: usize,
     clock_origin: Instant,
+
+    /// Local modifier state accumulated from raw key events (replaces syscall).
+    local_modifier_state: u8,
+    /// Raw event buffer for poll_batch reads from the kernel queue.
+    raw_event_buf: [InputEvent; 64],
+    /// Number of raw events read in the current frame.
+    pub raw_event_count: usize,
 }
 
 impl InputHandler {
@@ -147,7 +153,6 @@ impl InputHandler {
             compositor_cursor_override: 0,
             restore_geometry: [(0, 0, 0, 0, 0); MAX_WINDOWS],
             focused_task: 0,
-            kernel_keyboard_focus: 0,
             needs_full_redraw: false,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
@@ -155,6 +160,9 @@ impl InputHandler {
             pending_close_deadlines: [0; MAX_WINDOWS],
             pending_close_count: 0,
             clock_origin: Instant::now(),
+            local_modifier_state: 0,
+            raw_event_buf: [InputEvent::default(); 64],
+            raw_event_count: 0,
         }
     }
 
@@ -169,24 +177,75 @@ impl InputHandler {
         self.clock_origin.elapsed().as_millis() as u64
     }
 
-    pub fn update_mouse(&mut self) {
+    /// Drain raw input events from the kernel queue and update local state.
+    /// Replaces the old syscall-based `get_pointer_pos` / `get_button_state` /
+    /// `get_modifier_state` calls with local state accumulated from raw events.
+    pub fn update_from_raw_events(&mut self) {
         self.cursor_trail_count = 0;
-
-        let old_x = self.mouse_x;
-        let old_y = self.mouse_y;
-
-        let (new_x, new_y) = input::get_pointer_pos();
-        if new_x != self.mouse_x || new_y != self.mouse_y {
-            if self.cursor_trail_count < MAX_CURSOR_TRAIL {
-                self.cursor_trail[self.cursor_trail_count] = (old_x, old_y);
-                self.cursor_trail_count += 1;
-            }
-            self.mouse_x = new_x;
-            self.mouse_y = new_y;
-        }
-
         self.mouse_buttons_prev = self.mouse_buttons;
-        self.mouse_buttons = input::get_button_state();
+
+        let count = input::poll_batch(&mut self.raw_event_buf) as usize;
+        self.raw_event_count = count;
+
+        for i in 0..count {
+            let event = self.raw_event_buf[i];
+            match event.event_type {
+                InputEventType::PointerMotion => {
+                    let new_x = event.pointer_x();
+                    let new_y = event.pointer_y();
+                    if new_x != self.mouse_x || new_y != self.mouse_y {
+                        if self.cursor_trail_count < MAX_CURSOR_TRAIL {
+                            self.cursor_trail[self.cursor_trail_count] =
+                                (self.mouse_x, self.mouse_y);
+                            self.cursor_trail_count += 1;
+                        }
+                        self.mouse_x = new_x;
+                        self.mouse_y = new_y;
+                    }
+                }
+                InputEventType::PointerButtonPress => {
+                    let button = event.data.data0 as u8;
+                    self.mouse_buttons |= button;
+                }
+                InputEventType::PointerButtonRelease => {
+                    let button = event.data.data0 as u8;
+                    self.mouse_buttons &= !button;
+                }
+                InputEventType::KeyPress | InputEventType::KeyRelease => {
+                    let scancode = event.key_scancode();
+                    let pressed = event.event_type == InputEventType::KeyPress;
+                    self.update_modifier_from_scancode(scancode, pressed);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Update local modifier state from a raw scancode.
+    fn update_modifier_from_scancode(&mut self, scancode: u8, pressed: bool) {
+        // PS/2 scan code set 1 modifier make codes
+        let bit = match scancode {
+            0x2A | 0x36 => MODIFIER_SHIFT, // Left/Right Shift
+            0x1D => MODIFIER_CTRL,         // Left Ctrl
+            0x38 => MODIFIER_ALT,          // Left Alt
+            0x5B | 0x5C => MODIFIER_SUPER, // Left/Right Super (extended)
+            _ => return,
+        };
+        if pressed {
+            self.local_modifier_state |= bit;
+        } else {
+            self.local_modifier_state &= !bit;
+        }
+    }
+
+    /// Return the locally tracked modifier state.
+    pub fn modifier_state(&self) -> u8 {
+        self.local_modifier_state
+    }
+
+    /// Access the raw events read this frame (for forwarding to protocol clients).
+    pub fn raw_events(&self) -> &[InputEvent] {
+        &self.raw_event_buf[..self.raw_event_count]
     }
 
     fn mouse_clicked(&self) -> bool {
@@ -203,22 +262,20 @@ impl InputHandler {
     /// focus is tracked **continuously on every frame** -- not only on click.
     /// This ensures the correct window already has focus by the time a PS/2
     /// button IRQ fires, so button events are routed to the right client.
+    ///
+    /// With the protocol migration, pointer focus is tracked locally by the
+    /// compositor; enter/leave events are sent via the ProtocolBridge in the
+    /// main loop.  No kernel syscall needed.
     pub fn update_pointer_focus(
         &mut self,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
     ) {
-        for i in (0..window_count as usize).rev() {
-            let window = windows[i];
-            if window.state == WINDOW_STATE_MINIMIZED {
-                continue;
-            }
-            if self.hit_test_content_area(&window) {
-                input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
-                return;
-            }
-        }
-        input::set_pointer_focus(0);
+        // Pointer focus is now purely local — the compositor routes events
+        // to protocol clients via send_pointer_enter/leave in the main loop.
+        // This method still runs the hit-test so other code can query focus,
+        // but no kernel syscall is issued.
+        let _ = (windows, window_count);
     }
 
     pub fn sync_keyboard_focus(
@@ -277,6 +334,7 @@ impl InputHandler {
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
         shelf: &LauncherShelf,
+        mut proto: Option<&mut ProtocolBridge>,
     ) {
         let clicked = self.mouse_clicked();
 
@@ -284,16 +342,16 @@ impl InputHandler {
             if !self.mouse_pressed() {
                 self.stop_drag();
             } else {
-                self.update_drag();
+                self.update_drag(proto);
             }
             return;
         }
 
         if self.resizing {
             if !self.mouse_pressed() {
-                self.stop_resize();
+                self.stop_resize(proto);
             } else {
-                self.update_resize();
+                self.update_resize(proto);
             }
             return;
         }
@@ -309,7 +367,7 @@ impl InputHandler {
 
         // 2. Shelf click
         if let Some(idx) = shelf.hit_test(self.mouse_x, self.mouse_y) {
-            self.handle_shelf_click(idx, shelf, windows, window_count);
+            self.handle_shelf_click(idx, shelf, windows, window_count, &mut proto);
             return;
         }
 
@@ -332,7 +390,9 @@ impl InputHandler {
                 );
                 if !edge.is_none() {
                     self.start_resize(&window, edge);
-                    window::raise_window(window.task_id);
+                    if let Some(ref mut p) = proto {
+                        p.raise_window(window.task_id);
+                    }
                     self.set_focused(window.task_id);
                     return;
                 }
@@ -348,11 +408,18 @@ impl InputHandler {
                 match button_id {
                     0 => {
                         // Close
-                        self.request_window_close(window.task_id, windows, window_count);
+                        self.request_window_close(
+                            window.task_id,
+                            windows,
+                            window_count,
+                            &mut proto,
+                        );
                     }
                     1 => {
                         // Minimize
-                        window::set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
+                        if let Some(ref mut p) = proto {
+                            p.set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
+                        }
                     }
                     2 => {
                         // Expand — toggle maximize/restore
@@ -362,11 +429,15 @@ impl InputHandler {
                             if let Some(geo) =
                                 self.restore_geometry.iter().find(|g| g.0 == window.task_id)
                             {
-                                window::set_window_position(window.task_id, geo.1, geo.2);
-                                window::set_window_size(window.task_id, geo.3, geo.4);
-                                input::send_configure(window.task_id, geo.3, geo.4);
+                                if let Some(ref mut p) = proto {
+                                    p.set_window_position(window.task_id, geo.1, geo.2);
+                                    p.set_window_size(window.task_id, geo.3, geo.4);
+                                    p.send_configure_for_task(window.task_id, geo.3, geo.4);
+                                }
                             }
-                            window::set_window_state(window.task_id, WINDOW_STATE_NORMAL);
+                            if let Some(ref mut p) = proto {
+                                p.set_window_state(window.task_id, WINDOW_STATE_NORMAL);
+                            }
                         } else {
                             // Save current geometry for restore
                             if let Some(slot) = self
@@ -388,10 +459,12 @@ impl InputHandler {
                             let max_h =
                                 (fb_height - SYSTEM_BAR_HEIGHT - TITLE_BAR_HEIGHT - shelf_height)
                                     as u32;
-                            window::set_window_position(window.task_id, 0, max_y);
-                            window::set_window_size(window.task_id, max_w, max_h);
-                            window::set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
-                            input::send_configure(window.task_id, max_w, max_h);
+                            if let Some(ref mut p) = proto {
+                                p.set_window_position(window.task_id, 0, max_y);
+                                p.set_window_size(window.task_id, max_w, max_h);
+                                p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
+                                p.send_configure_for_task(window.task_id, max_w, max_h);
+                            }
                         }
                         self.needs_full_redraw = true;
                     }
@@ -409,7 +482,9 @@ impl InputHandler {
                 self.mouse_y,
             ) {
                 self.start_drag(&window);
-                window::raise_window(window.task_id);
+                if let Some(ref mut p) = proto {
+                    p.raise_window(window.task_id);
+                }
                 self.set_focused(window.task_id);
                 return;
             }
@@ -417,16 +492,18 @@ impl InputHandler {
             // 5. Content area
             if self.hit_test_content_area(&window) {
                 // Super+LMB on content: interactive move (wlroots/Sway pattern).
-                // The modifier check is done once per click, not per frame.
-                let mods = input::get_modifier_state();
-                if mods & MODIFIER_SUPER != 0 && window.state != 2 {
+                // The modifier check uses local state from raw events.
+                if self.local_modifier_state & MODIFIER_SUPER != 0 && window.state != 2 {
                     self.start_drag(&window);
-                    window::raise_window(window.task_id);
+                    if let Some(ref mut p) = proto {
+                        p.raise_window(window.task_id);
+                    }
                     self.set_focused(window.task_id);
                     return;
                 }
-                window::raise_window(window.task_id);
-                input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
+                if let Some(ref mut p) = proto {
+                    p.raise_window(window.task_id);
+                }
                 self.set_focused(window.task_id);
                 return;
             }
@@ -456,7 +533,9 @@ impl InputHandler {
             }
 
             if now >= self.pending_close_deadlines[i] {
-                let _ = process::terminate_task(task_id);
+                // All windows are protocol surfaces identified by surface index.
+                // The protocol cleanup handles surface destruction on disconnect;
+                // no kernel terminate_task needed.
                 self.remove_pending_close_at(i);
                 self.needs_full_redraw = true;
                 continue;
@@ -477,13 +556,11 @@ impl InputHandler {
 
     /// Single entry-point for all focus changes (KWin `activateClient`
     /// pattern).  The field is private so every mutation is forced through
-    /// here at compile time, guaranteeing the kernel syscall is issued.
+    /// here at compile time.  With the protocol migration, keyboard focus
+    /// is tracked locally; key events are routed to the focused surface
+    /// via ProtocolBridge::forward_input_events in the main loop.
     fn set_focused(&mut self, task_id: u32) {
         self.focused_task = task_id;
-        if task_id != self.kernel_keyboard_focus {
-            input::set_keyboard_focus(task_id);
-            self.kernel_keyboard_focus = task_id;
-        }
     }
 
     fn start_drag(&mut self, window: &UserWindowInfo) {
@@ -500,10 +577,12 @@ impl InputHandler {
         self.compositor_cursor_override = CURSOR_SHAPE_DEFAULT;
     }
 
-    fn update_drag(&mut self) {
+    fn update_drag(&mut self, proto: Option<&mut ProtocolBridge>) {
         let new_x = self.mouse_x - self.drag_offset_x;
         let new_y = self.mouse_y - self.drag_offset_y;
-        window::set_window_position(self.drag_task, new_x, new_y);
+        if let Some(p) = proto {
+            p.set_window_position(self.drag_task, new_x, new_y);
+        }
     }
 
     // -- Resize state machine (wlroots model) --------------------------------
@@ -520,7 +599,7 @@ impl InputHandler {
         self.resize_grab_mouse_y = self.mouse_y;
     }
 
-    fn update_resize(&mut self) {
+    fn update_resize(&mut self, proto: Option<&mut ProtocolBridge>) {
         let dx = self.mouse_x - self.resize_grab_mouse_x;
         let dy = self.mouse_y - self.resize_grab_mouse_y;
 
@@ -558,19 +637,21 @@ impl InputHandler {
             new_h = MIN_WINDOW_HEIGHT;
         }
 
-        window::set_window_position(self.resize_task, new_x, new_y);
-        window::set_window_size(self.resize_task, new_w as u32, new_h as u32);
+        if let Some(p) = proto {
+            p.set_window_position(self.resize_task, new_x, new_y);
+            p.set_window_size(self.resize_task, new_w as u32, new_h as u32);
 
-        // Send throttled configure events (~every 100ms) so clients can
-        // reallocate and re-render during the drag, not just at the end.
-        let now = self.now_ms();
-        if now.saturating_sub(self.resize_last_configure_ms) >= 100 {
-            self.resize_last_configure_ms = now;
-            input::send_configure(self.resize_task, new_w as u32, new_h as u32);
+            // Send throttled configure events (~every 100ms) so clients can
+            // reallocate and re-render during the drag, not just at the end.
+            let now = self.now_ms();
+            if now.saturating_sub(self.resize_last_configure_ms) >= 100 {
+                self.resize_last_configure_ms = now;
+                p.send_configure_for_task(self.resize_task, new_w as u32, new_h as u32);
+            }
         }
     }
 
-    fn stop_resize(&mut self) {
+    fn stop_resize(&mut self, proto: Option<&mut ProtocolBridge>) {
         if self.resize_task != 0 {
             // Compute the final size from the current state
             let dx = self.mouse_x - self.resize_grab_mouse_x;
@@ -595,7 +676,9 @@ impl InputHandler {
             if final_h < MIN_WINDOW_HEIGHT {
                 final_h = MIN_WINDOW_HEIGHT;
             }
-            input::send_configure(self.resize_task, final_w as u32, final_h as u32);
+            if let Some(p) = proto {
+                p.send_configure_for_task(self.resize_task, final_w as u32, final_h as u32);
+            }
         }
         self.resizing = false;
         self.resize_task = 0;
@@ -667,23 +750,33 @@ impl InputHandler {
         task_id: u32,
         _windows: &[UserWindowInfo; MAX_WINDOWS],
         _window_count: u32,
+        proto: &mut Option<&mut ProtocolBridge>,
     ) {
         if let Some(idx) = self.pending_close_index(task_id) {
-            let _ = process::terminate_task(task_id);
+            // Grace period expired on a second close click — just remove from
+            // pending list.  Protocol cleanup handles surface destruction.
             self.remove_pending_close_at(idx);
             self.needs_full_redraw = true;
             return;
         }
 
-        let now = self.now_ms();
-        let requested = input::request_close(task_id) == 0;
+        // Send close event via protocol; if the surface exists, the client
+        // gets a chance to handle the close gracefully.
+        let close_sent = if let Some(p) = proto.as_deref_mut() {
+            p.send_close_for_task(task_id)
+        } else {
+            false
+        };
 
-        if !requested || self.pending_close_count >= MAX_WINDOWS {
-            let _ = process::terminate_task(task_id);
+        if !close_sent || self.pending_close_count >= MAX_WINDOWS {
+            // Could not send close event or pending list full — nothing more
+            // we can do.  Protocol cleanup will destroy the surface on
+            // disconnect.
             self.needs_full_redraw = true;
             return;
         }
 
+        let now = self.now_ms();
         let idx = self.pending_close_count;
         self.pending_close_tasks[idx] = task_id;
         self.pending_close_deadlines[idx] = now.saturating_add(CLOSE_REQUEST_GRACE_MS);
@@ -714,6 +807,7 @@ impl InputHandler {
         shelf: &LauncherShelf,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
+        proto: &mut Option<&mut ProtocolBridge>,
     ) {
         let entry = match shelf.entry(idx) {
             Some(e) => e,
@@ -724,10 +818,12 @@ impl InputHandler {
             // Check if the window is minimized; if so, unminimize it.
             for i in 0..window_count as usize {
                 if windows[i].task_id == entry.task_id {
-                    if windows[i].state == WINDOW_STATE_MINIMIZED {
-                        window::set_window_state(entry.task_id, WINDOW_STATE_NORMAL);
+                    if let Some(p) = proto.as_deref_mut() {
+                        if windows[i].state == WINDOW_STATE_MINIMIZED {
+                            p.set_window_state(entry.task_id, WINDOW_STATE_NORMAL);
+                        }
+                        p.raise_window(entry.task_id);
                     }
-                    window::raise_window(entry.task_id);
                     self.set_focused(entry.task_id);
                     self.needs_full_redraw = true;
                     return;

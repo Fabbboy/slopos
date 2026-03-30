@@ -33,6 +33,7 @@ pub mod syscall;
 pub mod task;
 pub mod tty_error;
 pub mod unicode;
+pub mod unix;
 pub mod video_traits;
 pub mod window;
 

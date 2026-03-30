@@ -2,10 +2,12 @@ use core::cmp;
 use core::ffi::c_void;
 use core::ptr;
 
+use crate::appkit::protocol_client;
 use crate::runtime;
 use crate::syscall::core as sys_core;
-use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs, input};
+use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs};
 use slopos_abi::syscall::{LocalFlags, POLLIN};
+use slopos_protocol::types::Event as ProtocolEvent;
 use std::time::{Duration, Instant};
 
 use super::buffers;
@@ -129,7 +131,7 @@ fn input_loop(
         line_row = super::display::shell_console_get_cursor().1;
 
         let mut events = [InputEvent::default(); MOUSE_EVENT_BUF_SIZE];
-        let count = input::poll_batch(&mut events) as usize;
+        let count = poll_protocol_events(&mut events);
         let mut key_event: Option<u8> = None;
         for i in 0..count.min(MOUSE_EVENT_BUF_SIZE) {
             match events[i].event_type {
@@ -165,11 +167,12 @@ fn input_loop(
                         let lines = *accum / 120;
                         *accum %= 120;
                         if lines != 0 {
-                            // Negative value = scroll up (show history),
-                            // positive = scroll down (show newer).
                             shell_console_scroll_lines(lines);
                         }
                     }
+                }
+                InputEventType::CloseRequest => {
+                    std::process::exit(0);
                 }
                 _ => {}
             }
@@ -484,7 +487,7 @@ fn input_loop(
                     let hi = hi.min(len);
                     if lo < hi {
                         buffers::with_line_buf(|buf| {
-                            input::clipboard_copy(&buf[lo..hi]);
+                            let _ = protocol_client::client().clipboard_copy(&buf[lo..hi]);
                         });
                     }
                     sel = InputSelection::NONE;
@@ -501,7 +504,7 @@ fn input_loop(
                     delete_selection(&mut sel, &mut len, &mut cursor_pos);
                 }
                 let mut paste_buf = [0u8; 256];
-                let pasted = input::clipboard_paste(&mut paste_buf);
+                let pasted = protocol_clipboard_paste(&mut paste_buf);
                 if pasted > 0 {
                     let mut filtered = [0u8; 256];
                     let mut flen = 0;
@@ -722,4 +725,91 @@ fn redraw(
             selection,
         );
     });
+}
+
+/// Poll protocol events from the compositor and convert them to InputEvents.
+pub(crate) fn poll_protocol_events(events: &mut [InputEvent]) -> usize {
+    let client = protocol_client::client();
+    let mut count = 0usize;
+    while count < events.len() {
+        match client.poll_event() {
+            Ok(Some(evt)) => {
+                if let Some(input_evt) = protocol_event_to_input_event(&evt) {
+                    events[count] = input_evt;
+                    count += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    count
+}
+
+/// Convert a compositor protocol event into a kernel InputEvent.
+fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
+    match evt {
+        ProtocolEvent::Key {
+            time,
+            scancode,
+            ascii,
+            pressed,
+        } => Some(InputEvent::key(
+            if *pressed {
+                InputEventType::KeyPress
+            } else {
+                InputEventType::KeyRelease
+            },
+            *scancode as u8,
+            *ascii as u8,
+            *time as u64,
+        )),
+        ProtocolEvent::PointerMotion { time, x, y } => {
+            Some(InputEvent::pointer_motion(*x, *y, *time as u64))
+        }
+        ProtocolEvent::PointerButton {
+            time,
+            button,
+            pressed,
+        } => Some(InputEvent::pointer_button(
+            *pressed,
+            *button as u8,
+            *time as u64,
+        )),
+        ProtocolEvent::PointerEnter { x, y, .. } => {
+            Some(InputEvent::pointer_enter_leave(true, *x, *y, 0))
+        }
+        ProtocolEvent::PointerLeave { .. } => Some(InputEvent::pointer_enter_leave(false, 0, 0, 0)),
+        ProtocolEvent::PointerAxis { axis, value, time } => {
+            Some(InputEvent::pointer_axis(*axis, *value, *time as u64))
+        }
+        ProtocolEvent::Configure { width, height, .. } => {
+            Some(InputEvent::configure(*width, *height, 0))
+        }
+        ProtocolEvent::Close { .. } => Some(InputEvent::close_request(0)),
+        _ => None,
+    }
+}
+
+/// Request clipboard paste from the compositor and wait for the result.
+fn protocol_clipboard_paste(buf: &mut [u8]) -> usize {
+    let client = protocol_client::client();
+    if client.clipboard_paste().is_err() {
+        return 0;
+    }
+    // Poll for PasteResult event (with a short timeout via limited iterations).
+    for _ in 0..100 {
+        match client.poll_event() {
+            Ok(Some(ProtocolEvent::PasteResult { data, len })) => {
+                let copy = (len as usize).min(buf.len());
+                buf[..copy].copy_from_slice(&data[..copy]);
+                return copy;
+            }
+            Ok(Some(_)) => continue, // Skip non-paste events
+            Ok(None) => {
+                sys_core::yield_now();
+            }
+            Err(_) => return 0,
+        }
+    }
+    0
 }

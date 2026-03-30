@@ -1,0 +1,20 @@
+[package]
+name = "slopos-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SlopOS display protocol wire format library"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-slibc = { workspace = true }

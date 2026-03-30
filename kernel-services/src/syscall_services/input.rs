@@ -16,5 +16,6 @@ slopos_service_core::define_service! {
         get_modifier_state() -> u8;
         clipboard_copy(src: &[u8]) -> usize;
         clipboard_paste(dst: &mut [u8]) -> usize;
+        register_compositor(task_id: u32);
     }
 }

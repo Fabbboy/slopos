@@ -29,6 +29,7 @@
 //! ```
 
 pub mod event;
+pub mod protocol_client;
 pub mod run;
 pub mod surface;
 pub mod window;

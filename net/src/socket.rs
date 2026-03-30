@@ -16,6 +16,8 @@ pub enum SocketInner {
     Icmp(IcmpSocketInner),
     Tcp(TcpSocketInner),
     Raw(RawSocketInner),
+    /// AF_UNIX stream socket — actual state lives in `unix_socket::UNIX_STATE`.
+    Unix(UnixSocketInner),
 }
 
 pub struct UdpSocketInner;
@@ -32,6 +34,13 @@ pub struct TcpSocketInner {
 }
 
 pub struct RawSocketInner;
+
+/// AF_UNIX socket — the real state (ring buffers, wait queues) lives in
+/// `unix_socket::UNIX_STATE`.  This struct only records which unix slot
+/// and which side of the pair this FD represents.
+pub struct UnixSocketInner {
+    pub unix_idx: u32,
+}
 
 /// Socket status and mode flags.
 ///
@@ -1576,7 +1585,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                 sock.state = SocketState::Connected;
                 return 0;
             }
-            SocketInner::Raw(_) => return errno_i32(ERRNO_EPROTONOSUPPORT),
+            SocketInner::Raw(_) | SocketInner::Unix(_) => return errno_i32(ERRNO_EPROTONOSUPPORT),
         }
     };
     // Table lock released — send the SYN without holding the socket table lock,

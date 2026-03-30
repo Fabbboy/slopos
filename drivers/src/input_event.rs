@@ -70,6 +70,9 @@ struct InputManager {
     /// Pointer events will be translated from screen coords to window-local coords
     window_offset_x: i32,
     window_offset_y: i32,
+    /// Task ID of the compositor (set on first drain/poll from a TASK_FLAG_COMPOSITOR task).
+    /// When non-zero, all raw input events are routed exclusively to this queue.
+    compositor_task_id: u32,
 }
 
 impl InputManager {
@@ -83,6 +86,7 @@ impl InputManager {
             pointer_buttons: 0,
             window_offset_x: 0,
             window_offset_y: 0,
+            compositor_task_id: 0,
         }
     }
 
@@ -255,23 +259,28 @@ pub fn input_get_modifier_state() -> u8 {
 // Public API - Event Routing (Called from IRQ handlers)
 // =============================================================================
 
-/// Route a keyboard event to the focused task
+/// Route a keyboard event to the compositor (or focused task if no compositor).
 ///
 /// Called from IRQ context (keyboard interrupt handler). IrqMutex handles
 /// interrupt safety automatically.
 pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_ms: u64) {
-    if KEYBOARD_FOCUS_FAST.load(Ordering::Acquire) == 0 {
-        return;
-    }
-
     let mut mgr = INPUT_MANAGER.lock();
-    let focus = mgr.keyboard_focus;
 
-    if focus == 0 {
-        return;
-    }
+    // Route to compositor if registered, otherwise fall back to keyboard focus
+    let target = if mgr.compositor_task_id != 0 {
+        mgr.compositor_task_id
+    } else {
+        if KEYBOARD_FOCUS_FAST.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let focus = mgr.keyboard_focus;
+        if focus == 0 {
+            return;
+        }
+        focus
+    };
 
-    if let Some(idx) = mgr.find_or_create_queue(focus) {
+    if let Some(idx) = mgr.find_or_create_queue(target) {
         let event_type = if pressed {
             InputEventType::KeyPress
         } else {
@@ -286,13 +295,26 @@ pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_m
     }
 }
 
-/// Route a pointer motion event to the focused task (called from mouse IRQ).
-/// Coordinates are translated from screen coords to window-local coords.
+/// Route a pointer motion event to the compositor (or focused task if no compositor).
+/// When routing to compositor, coordinates are in screen space (no translation).
+/// When falling back to per-task routing, coordinates are window-local.
 pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     let mut mgr = INPUT_MANAGER.lock();
     mgr.pointer_x = x;
     mgr.pointer_y = y;
 
+    let comp_id = mgr.compositor_task_id;
+    if comp_id != 0 {
+        // Route to compositor in screen coordinates — it handles translation
+        if let Some(idx) = mgr.find_or_create_queue(comp_id) {
+            mgr.queues[idx]
+                .events
+                .push_overwrite(InputEvent::pointer_motion(x, y, timestamp_ms));
+        }
+        return;
+    }
+
+    // Legacy fallback: route to pointer-focused task with window-local coords
     let focus = mgr.pointer_focus;
     if focus == 0 {
         return;
@@ -308,7 +330,7 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     }
 }
 
-/// Route a pointer button event to the focused task (called from mouse IRQ).
+/// Route a pointer button event to the compositor (or focused task if no compositor).
 pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) {
     let mut mgr = INPUT_MANAGER.lock();
 
@@ -318,6 +340,17 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
         mgr.pointer_buttons &= !button;
     }
 
+    let comp_id = mgr.compositor_task_id;
+    if comp_id != 0 {
+        if let Some(idx) = mgr.find_or_create_queue(comp_id) {
+            mgr.queues[idx]
+                .events
+                .push_overwrite(InputEvent::pointer_button(pressed, button, timestamp_ms));
+        }
+        return;
+    }
+
+    // Legacy fallback
     let focus = mgr.pointer_focus;
     if focus == 0 {
         return;
@@ -330,12 +363,24 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
     }
 }
 
-/// Route a pointer axis (scroll) event to the pointer-focused task.
+/// Route a pointer axis (scroll) event to the compositor (or focused task if no compositor).
 ///
 /// `axis`: 0 = vertical, 1 = horizontal (see `POINTER_AXIS_*` constants in ABI)
 /// `value_v120`: scroll amount in value120 units (±120 = one wheel click)
 pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
     let mut mgr = INPUT_MANAGER.lock();
+
+    let comp_id = mgr.compositor_task_id;
+    if comp_id != 0 {
+        if let Some(idx) = mgr.find_or_create_queue(comp_id) {
+            mgr.queues[idx]
+                .events
+                .push_overwrite(InputEvent::pointer_axis(axis, value_v120, timestamp_ms));
+        }
+        return;
+    }
+
+    // Legacy fallback
     let focus = mgr.pointer_focus;
     if focus == 0 {
         return;
@@ -346,6 +391,19 @@ pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
             .events
             .push_overwrite(InputEvent::pointer_axis(axis, value_v120, timestamp_ms));
     }
+}
+
+// =============================================================================
+// Public API - Compositor Registration
+// =============================================================================
+
+/// Register a task as the compositor. All raw input events will be routed
+/// exclusively to its queue from this point on.
+pub fn input_register_compositor(task_id: u32) {
+    let mut mgr = INPUT_MANAGER.lock();
+    mgr.compositor_task_id = task_id;
+    // Pre-create the queue so IRQ handlers always find it
+    let _ = mgr.find_or_create_queue(task_id);
 }
 
 // =============================================================================

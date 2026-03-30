@@ -29,6 +29,9 @@ pub const USER_NET_MAX_MEMBERS: usize = 32;
 // Socket ABI types
 // =============================================================================
 
+/// Address family: Unix domain sockets.
+pub const AF_UNIX: u16 = 1;
+
 /// Address family: IPv4 Internet protocols.
 pub const AF_INET: u16 = 2;
 

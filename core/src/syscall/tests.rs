@@ -2504,5 +2504,177 @@ slopos_testing::define_test_suite!(
         test_fork_child_inherits_dev_tty,
         // EXTPROC & vhangup
         test_vhangup_syscall_in_dispatch_table,
+        // AF_UNIX sockets
+        test_unix_socket_send_recv_basic,
+        test_unix_socket_poll_after_send,
+        test_unix_socket_poll_before_send,
     ]
 );
+
+// =============================================================================
+// AF_UNIX Socket Tests
+// =============================================================================
+
+fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
+    use slopos_net::unix_socket;
+    use slopos_net::unix_socket_file_ops::UNIX_SOCKET_FILE_OPS;
+
+    let path = b"/test/sock";
+
+    let srv_idx = unix_socket::unix_create();
+    if srv_idx < 0 {
+        return None;
+    }
+    if unix_socket::unix_bind(srv_idx as u32, path) != 0 {
+        unix_socket::unix_close(srv_idx as u32);
+        return None;
+    }
+    if unix_socket::unix_listen(srv_idx as u32, 4) != 0 {
+        unix_socket::unix_close(srv_idx as u32);
+        return None;
+    }
+    unix_socket::unix_set_nonblocking(srv_idx as u32, true);
+
+    let cli_idx = unix_socket::unix_create();
+    if cli_idx < 0 {
+        unix_socket::unix_close(srv_idx as u32);
+        return None;
+    }
+    if unix_socket::unix_connect(cli_idx as u32, path) != 0 {
+        unix_socket::unix_close(cli_idx as u32);
+        unix_socket::unix_close(srv_idx as u32);
+        return None;
+    }
+
+    let accepted_idx = unix_socket::unix_accept(srv_idx as u32);
+    if accepted_idx < 0 {
+        unix_socket::unix_close(cli_idx as u32);
+        unix_socket::unix_close(srv_idx as u32);
+        return None;
+    }
+
+    let tag: u32 = 0x8000_0000;
+    let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        &UNIX_SOCKET_FILE_OPS,
+        (accepted_idx as u32 | tag) as usize,
+    );
+    let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        &UNIX_SOCKET_FILE_OPS,
+        (cli_idx as u32 | tag) as usize,
+    );
+
+    unix_socket::unix_close(srv_idx as u32);
+
+    if srv_fd < 0 || cli_fd < 0 {
+        return None;
+    }
+    Some((srv_fd, cli_fd))
+}
+
+pub fn test_unix_socket_send_recv_basic() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return TestResult::Fail,
+    };
+
+    let payload = b"hello";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write wrong count");
+
+    let mut out = [0u8; 16];
+    let nread = file_read_fd(
+        pid,
+        cli_fd,
+        &mut KernelIoBuf::new(&mut out[..payload.len()]),
+    );
+    assert_eq_test!(nread as usize, payload.len(), "read wrong count");
+    assert_test!(&out[..payload.len()] == payload, "payload mismatch");
+
+    assert_eq_test!(file_close_fd(pid, srv_fd), 0);
+    assert_eq_test!(file_close_fd(pid, cli_fd), 0);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_unix_socket_poll_after_send() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return TestResult::Fail,
+    };
+
+    let revents_before = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents_before & POLLIN) == 0, "readable before send");
+
+    let payload = b"test";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write wrong count");
+
+    let revents_after = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents_after & POLLIN) != 0, "NOT readable after send");
+
+    assert_eq_test!(file_close_fd(pid, srv_fd), 0);
+    assert_eq_test!(file_close_fd(pid, cli_fd), 0);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_unix_socket_poll_before_send() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return TestResult::Fail,
+    };
+
+    // Register poll waiter. In the test harness, current_task() may not
+    // match the user task that owns the FD — skip if registration fails.
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+    if !reg.registered {
+        file_close_fd(pid, srv_fd);
+        file_close_fd(pid, cli_fd);
+        task_terminate(task_id);
+        return TestResult::Skipped;
+    }
+
+    // Server sends — should wake registered waiter.
+    let payload = b"wake";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write wrong count");
+
+    // Data should be readable.
+    let revents = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!(
+        (revents & POLLIN) != 0,
+        "NOT readable after send with waiter"
+    );
+
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+
+    let mut out = [0u8; 16];
+    let nread = file_read_fd(
+        pid,
+        cli_fd,
+        &mut KernelIoBuf::new(&mut out[..payload.len()]),
+    );
+    assert_eq_test!(nread as usize, payload.len(), "read wrong count");
+
+    assert_eq_test!(file_close_fd(pid, srv_fd), 0);
+    assert_eq_test!(file_close_fd(pid, cli_fd), 0);
+    task_terminate(task_id);
+    TestResult::Pass
+}
