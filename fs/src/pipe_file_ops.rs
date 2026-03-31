@@ -156,8 +156,8 @@ impl FileOps for PipeReadOps {
             }
 
             if need_block {
-                pipe::reader_wq(pipe_id).enqueue_current();
                 prepare_to_wait();
+                pipe::reader_wq(pipe_id).enqueue_current();
                 block_current_task();
                 finish_wait();
                 pipe::reader_wq(pipe_id).remove_current();
@@ -251,8 +251,8 @@ impl FileOps for PipeWriteOps {
                     return Errno::EAGAIN.as_isize();
                 }
                 if scheduler_is_enabled() != 0 {
-                    pipe::writer_wq(pipe_id).enqueue_current();
                     prepare_to_wait();
+                    pipe::writer_wq(pipe_id).enqueue_current();
                     block_current_task();
                     finish_wait();
                     pipe::writer_wq(pipe_id).remove_current();
@@ -318,8 +318,8 @@ impl FileOps for PipeWriteOps {
             }
 
             if need_block {
-                pipe::writer_wq(pipe_id).enqueue_current();
                 prepare_to_wait();
+                pipe::writer_wq(pipe_id).enqueue_current();
                 block_current_task();
                 finish_wait();
                 pipe::writer_wq(pipe_id).remove_current();

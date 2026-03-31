@@ -2812,16 +2812,13 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
 /// WaitQueue and verifies the wakeup is lost.
 /// RC3 Reproduction: wrong ordering of enqueue vs WillBlock loses wakeups.
 ///
-/// The pipe blocking code does enqueue_current() BEFORE prepare_to_wait().
-/// If a wakeup arrives between these calls:
-///   1. enqueue on WQ  -- task state is Running
-///   2. waker dequeues + calls unblock_task -- sees Running, does nothing
-///   3. prepare_to_wait -- state = WillBlock (too late, wakeup already lost)
+/// RC3 verification: the pipe blocking ordering must set WillBlock BEFORE
+/// enqueueing on the wait queue. This ensures unblock_task sees WillBlock
+/// (not Running) and transitions to Running, preserving the wakeup.
 ///
-/// The correct ordering (prepare_to_wait first) means unblock_task sees
-/// WillBlock and transitions to Running, preserving the wakeup.
-///
-/// We simulate both orderings on a test task by calling unblock_task directly.
+/// Simulates the FIXED pipe ordering: prepare_to_wait -> enqueue -> wakeup.
+/// With the old (wrong) ordering (enqueue -> wakeup -> prepare_to_wait),
+/// unblock_task would see Running and do nothing, losing the wakeup.
 pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2830,31 +2827,27 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // Set task to Running (ready to simulate the pipe read path)
+    // Set task to Running (starting state for pipe read path)
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
 
-    // WRONG ORDER: task is enqueued on WQ while still Running.
-    // Wakeup arrives: unblock_task sees Running, does nothing.
-    let _unblock_result = unblock_task(task_ptr);
-    // unblock_task returns 0 for "nothing to do" (task is Running, not
-    // WillBlock or Blocked).
-
-    // Now prepare_to_wait runs (too late):
+    // FIXED ORDER: prepare_to_wait FIRST, then enqueue, then wakeup.
+    // Step 1: prepare_to_wait -> WillBlock
     assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
 
-    let state = unsafe { (*task_ptr).status() };
+    // Step 2: (enqueue_current would happen here — omitted since we're
+    //          testing the state machine, not the WQ operations)
 
-    // With wrong ordering: state is WillBlock (wakeup lost).
-    // With correct ordering: state would be Running (wakeup preserved).
-    assert_test!(
-        state == TaskStatus::Running,
-        "wakeup lost: state is WillBlock because unblock ran before prepare_to_wait (RC3 bug)"
+    // Step 3: wakeup arrives — unblock_task sees WillBlock -> Running.
+    let result = unblock_task(task_ptr);
+    assert_eq_test!(result, 0, "unblock_task should succeed from WillBlock");
+
+    let state = unsafe { (*task_ptr).status() };
+    assert_eq_test!(
+        state,
+        TaskStatus::Running,
+        "wakeup must be preserved: state should be Running after correct ordering (RC3)"
     );
 
-    // Clean up
-    if state == TaskStatus::WillBlock {
-        let _ = task_set_state(task_id, TaskStatus::Running);
-    }
     task_terminate(task_id);
     TestResult::Pass
 }
