@@ -172,7 +172,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         };
 
         if reg_count > 0 || pipe_fd_count > 0 {
-            slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
+            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
@@ -331,6 +331,8 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             }
         }
 
+        slopos_kernel_services::driver_runtime::prepare_to_wait();
+
         for fd in 0..nfds {
             let want_r = args.arg1 != 0 && fdset_test(&read_in[..bytes_len], fd);
             let want_w = args.arg2 != 0 && fdset_test(&write_in[..bytes_len], fd);
@@ -375,10 +377,12 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         };
 
         if reg_count > 0 || pipe_registered > 0 {
-            slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
+            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
+
+        slopos_kernel_services::driver_runtime::finish_wait();
 
         for reg in &regs[..reg_count] {
             file_poll_unregister_fd(reg);
