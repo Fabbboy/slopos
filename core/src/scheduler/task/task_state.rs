@@ -57,6 +57,43 @@ pub fn task_set_state_with_reason(
     apply_state_transition(task_ref, new_status, reason)
 }
 
+/// Atomically transition from `expected` to `target`.
+///
+/// Returns 0 on success, -1 if the current state does not match `expected`
+/// or the transition is invalid.
+pub fn task_try_transition_from(task_id: u32, expected: TaskStatus, target: TaskStatus) -> c_int {
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return -1;
+    }
+    let task_ref = unsafe { &*task };
+    if task_ref.status() == TaskStatus::Invalid {
+        return -1;
+    }
+    transition_to_c_int(task_ref.try_transition_from(expected, target))
+}
+
+/// Atomically transition from `expected` to `new_status`, setting block reason.
+pub fn task_set_state_from_with_reason(
+    task_id: u32,
+    expected: TaskStatus,
+    new_status: TaskStatus,
+    reason: BlockReason,
+) -> c_int {
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return -1;
+    }
+    let task_ref = unsafe { &mut *task };
+    if task_ref.status() == TaskStatus::Invalid {
+        return -1;
+    }
+    match new_status {
+        TaskStatus::Blocked => transition_to_c_int(task_ref.block_from(expected, reason)),
+        _ => transition_to_c_int(task_ref.try_transition_from(expected, new_status)),
+    }
+}
+
 pub fn task_get_state(task: *const Task) -> TaskStatus {
     if task.is_null() {
         return TaskStatus::Invalid;

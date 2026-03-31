@@ -514,6 +514,40 @@ impl Task {
             .is_ok()
     }
 
+    /// Atomically transition from `expected` to `target`.
+    ///
+    /// Unlike [`try_transition_to`], this CAS only succeeds when the current
+    /// state is exactly `expected`. This is critical for wakeup-safe blocking:
+    /// `try_transition_from(WillBlock, Blocked)` fails if a concurrent
+    /// `unblock_task` already set the state to `Running`.
+    #[inline]
+    pub fn try_transition_from(&self, expected: TaskStatus, target: TaskStatus) -> bool {
+        if !expected.can_transition_to(target) {
+            return false;
+        }
+        self.state_atomic
+            .compare_exchange(
+                expected.as_u8(),
+                target.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Block from a specific expected state, setting the block reason.
+    ///
+    /// Returns `true` only if the CAS `expected → Blocked` succeeded.
+    #[inline]
+    pub fn block_from(&mut self, expected: TaskStatus, reason: BlockReason) -> bool {
+        if self.try_transition_from(expected, TaskStatus::Blocked) {
+            self.block_reason = reason;
+            true
+        } else {
+            false
+        }
+    }
+
     #[inline]
     pub fn mark_ready(&self) -> bool {
         self.try_transition_to(TaskStatus::Ready)

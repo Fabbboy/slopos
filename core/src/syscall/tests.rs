@@ -40,14 +40,15 @@ use slopos_mm::user_ptr::UserPtr;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use slopos_utils::klog_info;
 
-use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
+use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown, unblock_task};
 use crate::scheduler::task::{
     init_task_manager, task_clone, task_create, task_find_by_id, task_fork, task_set_state,
-    task_shutdown_all, task_terminate,
+    task_set_state_with_reason, task_shutdown_all, task_terminate, task_try_transition_from,
 };
 use crate::scheduler::{per_cpu, task};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
+use slopos_abi::task::BlockReason;
 use slopos_fs::fileio::{
     file_close_fd, file_fcntl_fd, file_open_for_process, file_pipe_create, file_poll_fd,
     file_read_fd, file_write_fd, fileio_clone_table_for_process, fileio_destroy_table_for_process,
@@ -2678,3 +2679,285 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
     task_terminate(task_id);
     TestResult::Pass
 }
+
+// =============================================================================
+// Poll/Wakeup Race Condition Tests
+// =============================================================================
+//
+// These tests reproduce the three root causes of the poll wakeup race
+// described in plans/kernel-poll-wakeup-race.md.
+//
+// RC1: sleep_current_task_ms ignores the WillBlock protocol
+// RC2: block_current_task has a TOCTOU between WillBlock check and blocking CAS
+// RC3: Pipe blocking code enqueues on WQ before setting WillBlock
+
+/// RC1 Reproduction: sleep_current_task_ms blocks even after a wakeup signal.
+///
+/// The WillBlock protocol says: if a wakeup arrives (WillBlock->Running), the
+/// task should NOT be re-blocked. But sleep_current_task_ms calls
+/// task_set_state_with_reason(Blocked) which succeeds from Running (because
+/// Running->Blocked is a valid state machine transition), destroying the wakeup.
+///
+/// This test calls sleep_current_task_ms on the CURRENT task after simulating
+/// a wakeup. With the bug, the task sleeps for the full duration.
+/// RC1 Reproduction: sleep_current_task_ms's internal CAS allows re-blocking
+/// after a wakeup has already set the task to Running.
+///
+/// sleep_current_task_ms calls task_set_state_with_reason(Blocked, Sleep)
+/// which uses try_transition_to(Blocked). This CAS reads current state fresh
+/// and succeeds from Running (because Running->Blocked is a valid transition),
+/// destroying the wakeup signal that moved the task from WillBlock to Running.
+///
+/// We simulate the exact state sequence on a test task:
+///   WillBlock (prepare_to_wait) -> Running (wakeup) -> Blocked (sleep CAS)
+/// The final Blocked state proves the wakeup was lost.
+pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+
+    // Phase 1: simulate prepare_to_wait -> WillBlock
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+
+    // Phase 2: simulate unblock_task -> Running (wakeup arrived)
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+
+    // Phase 3: this is the CAS that sleep_current_task_ms performs internally.
+    // It should fail because the wakeup already moved us to Running, but
+    // try_transition_to(Blocked) succeeds from Running.
+    let _result = task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep);
+
+    let state = unsafe { (*task_ptr).status() };
+
+    // Correct behavior: the task should still be Running (wakeup preserved).
+    // BUG: _result == 0 and state == Blocked (wakeup destroyed by sleep CAS).
+    assert_test!(
+        state != TaskStatus::Blocked,
+        "sleep CAS re-blocked task after wakeup (Running->Blocked succeeded, RC1 bug)"
+    );
+
+    if state == TaskStatus::Blocked {
+        let _ = task_set_state(task_id, TaskStatus::Running);
+    }
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// RC2 Reproduction: TOCTOU in blocking CAS allows re-block after wakeup.
+///
+/// block_current_task (and block_current_task_with_timeout) check
+/// task_is_will_block separately from the blocking CAS. Between the check
+/// and the CAS, try_transition_to(Blocked) reads the state fresh and succeeds
+/// from Running (because Running->Blocked is a valid state machine transition).
+///
+/// We simulate the interleaving on a non-current task:
+///   1. Set WillBlock (prepare_to_wait)
+///   2. Set Running (wakeup arrives between check and CAS)
+///   3. Call task_set_state_with_reason(Blocked, Sleep) -- simulates what
+///      the blocking CAS does internally
+///   4. Assert the task is NOT Blocked (wakeup should have prevented it)
+///
+/// This test FAILS because the CAS succeeds from Running.
+pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+
+    // Phase 1: simulate prepare_to_wait
+    assert_eq_test!(
+        task_set_state(task_id, TaskStatus::Running),
+        0,
+        "set Running"
+    );
+    assert_eq_test!(
+        task_set_state(task_id, TaskStatus::WillBlock),
+        0,
+        "set WillBlock"
+    );
+
+    // Phase 2: simulate unblock_task (wakeup arrives on another CPU)
+    assert_eq_test!(
+        task_set_state(task_id, TaskStatus::Running),
+        0,
+        "wakeup sets Running"
+    );
+
+    // Phase 3: simulate the blocking CAS that block_current_task/
+    // block_current_task_with_timeout performs internally.
+    // This is what happens in the TOCTOU gap: the check passed (WillBlock),
+    // but now the CAS reads Running and succeeds (Running->Blocked is valid).
+    let _result = task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep);
+
+    let state = unsafe { (*task_ptr).status() };
+
+    // The correct behavior: blocking should fail because the wakeup already
+    // moved the task to Running. The task should still be Running.
+    assert_test!(
+        state != TaskStatus::Blocked,
+        "task was re-blocked after wakeup (TOCTOU: Running->Blocked succeeded, RC2 bug)"
+    );
+
+    // Clean up
+    if state == TaskStatus::Blocked {
+        let _ = task_set_state(task_id, TaskStatus::Running);
+    }
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// RC3 Reproduction: wrong enqueue ordering loses wakeup.
+///
+/// The pipe blocking code does:
+///   enqueue_current() -> prepare_to_wait() -> block_current_task()
+///
+/// If a wakeup arrives between enqueue and prepare_to_wait, unblock_task
+/// sees the task is Running (not WillBlock) and does nothing. Then
+/// prepare_to_wait sets WillBlock, and block_current_task blocks the task.
+/// The wakeup is lost. With the correct ordering (prepare_to_wait first),
+/// unblock_task would see WillBlock and set Running, preventing the block.
+///
+/// This test simulates the wrong ordering on the current task using a
+/// WaitQueue and verifies the wakeup is lost.
+/// RC3 Reproduction: wrong ordering of enqueue vs WillBlock loses wakeups.
+///
+/// The pipe blocking code does enqueue_current() BEFORE prepare_to_wait().
+/// If a wakeup arrives between these calls:
+///   1. enqueue on WQ  -- task state is Running
+///   2. waker dequeues + calls unblock_task -- sees Running, does nothing
+///   3. prepare_to_wait -- state = WillBlock (too late, wakeup already lost)
+///
+/// The correct ordering (prepare_to_wait first) means unblock_task sees
+/// WillBlock and transitions to Running, preserving the wakeup.
+///
+/// We simulate both orderings on a test task by calling unblock_task directly.
+pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+
+    // Set task to Running (ready to simulate the pipe read path)
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+
+    // WRONG ORDER: task is enqueued on WQ while still Running.
+    // Wakeup arrives: unblock_task sees Running, does nothing.
+    let _unblock_result = unblock_task(task_ptr);
+    // unblock_task returns 0 for "nothing to do" (task is Running, not
+    // WillBlock or Blocked).
+
+    // Now prepare_to_wait runs (too late):
+    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+
+    let state = unsafe { (*task_ptr).status() };
+
+    // With wrong ordering: state is WillBlock (wakeup lost).
+    // With correct ordering: state would be Running (wakeup preserved).
+    assert_test!(
+        state == TaskStatus::Running,
+        "wakeup lost: state is WillBlock because unblock ran before prepare_to_wait (RC3 bug)"
+    );
+
+    // Clean up
+    if state == TaskStatus::WillBlock {
+        let _ = task_set_state(task_id, TaskStatus::Running);
+    }
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Verifies the correct WQ ordering preserves wakeups (regression guard).
+///
+/// With the correct ordering (prepare_to_wait -> enqueue -> wake), unblock_task
+/// sees WillBlock and transitions to Running. The wakeup is preserved.
+/// Verifies that the correct ordering (WillBlock before wakeup) preserves
+/// the wakeup signal. This is the positive counterpart to the RC3 test.
+pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+
+    // CORRECT ORDER: set WillBlock first, then wakeup arrives.
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+
+    // Wakeup: unblock_task sees WillBlock -> transitions to Running.
+    let result = unblock_task(task_ptr);
+    assert_eq_test!(result, 0, "unblock_task should succeed");
+
+    let state = unsafe { (*task_ptr).status() };
+    assert_eq_test!(
+        state,
+        TaskStatus::Running,
+        "wakeup should be preserved with correct ordering"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Verifies that try_transition_from(WillBlock, Blocked) rejects a task
+/// whose state is Running (wakeup already arrived).
+///
+/// This is the primitive that fixes RC2: instead of try_transition_to(Blocked)
+/// which accepts Running->Blocked, the fixed block_current_task uses
+/// try_transition_from(WillBlock, Blocked) which only accepts WillBlock->Blocked.
+pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+
+    // Set up: WillBlock -> Running (wakeup)
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+
+    // The fix primitive: CAS(WillBlock, Blocked) must FAIL when state is Running
+    let result = task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked);
+    assert_test!(
+        result != 0,
+        "try_transition_from(WillBlock, Blocked) should fail when state is Running"
+    );
+
+    // The task should still be Running
+    let state = unsafe { (*task_ptr).status() };
+    assert_eq_test!(state, TaskStatus::Running, "state should still be Running");
+
+    // Verify the CAS succeeds from the correct state
+    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+    let result2 = task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked);
+    assert_test!(
+        result2 == 0,
+        "try_transition_from(WillBlock, Blocked) should succeed when state IS WillBlock"
+    );
+    let state2 = unsafe { (*task_ptr).status() };
+    assert_eq_test!(state2, TaskStatus::Blocked, "state should be Blocked");
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::define_test_suite!(
+    poll_wakeup_race,
+    [
+        test_sleep_ms_cas_overwrites_wakeup,
+        test_block_current_task_toctou_allows_reblock,
+        test_wq_wrong_order_wakeup_lost,
+        test_wq_correct_order_wakeup_preserved,
+        test_try_transition_from_rejects_wrong_state,
+    ]
+);
