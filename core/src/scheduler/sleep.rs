@@ -197,7 +197,15 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
         if !queue.upsert(task_id, wake_tick) {
             return -1;
         }
-        if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+        // Only block from Running state. WillBlock-aware callers must use
+        // block_current_task_with_timeout instead.
+        if task_set_state_from_with_reason(
+            task_id,
+            TaskStatus::Running,
+            TaskStatus::Blocked,
+            BlockReason::Sleep,
+        ) != 0
+        {
             queue.remove(task_id);
             return -1;
         }

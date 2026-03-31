@@ -910,23 +910,23 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    if task_is_will_block(task) {
-        let task_id = unsafe { (*task).task_id };
-        let _ = task_set_state(task_id, TaskStatus::Running);
+    let task_id = unsafe { (*task).task_id };
+
+    // Try WillBlock -> Running (task declared intent to block but hasn't yet).
+    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
         return 0;
     }
 
-    if task_is_blocked(task) {
-        if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
-            if task_is_terminated(task) || task_is_invalid(task) {
-                return -1;
-            }
-            return 0;
-        }
+    // Try Blocked -> Ready (task is fully blocked, wake it).
+    if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         return schedule_task(task);
     }
 
+    // Task is in some other state (Running, Ready, Terminated) — nothing to do.
+    if task_is_terminated(task) || task_is_invalid(task) {
+        return -1;
+    }
     0
 }
 
