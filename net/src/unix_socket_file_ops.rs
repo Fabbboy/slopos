@@ -82,6 +82,14 @@ impl FileOps for UnixSocketFileOps {
         let _ = unix_socket::unix_close(raw_idx(handle));
     }
 
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let (revents, registered) = unix_socket::unix_poll_fused(raw_idx(handle), events);
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+        }
+    }
+
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         unix_socket::unix_poll_events(raw_idx(handle), events)
     }

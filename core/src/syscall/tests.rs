@@ -3019,6 +3019,210 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     TestResult::Pass
 }
 
+/// Compositor handshake: listen → connect(backlog) → accept → send → poll.
+///
+/// Exercises the EXACT code path of the compositor-shell handshake:
+/// 1. Server binds and listens (compositor socket activation)
+/// 2. Client connects (goes to backlog, no accept yet)
+/// 3. Server accepts (gets side-B FD)
+/// 4. Server sends OutputInfo-sized payload through side-B
+/// 5. Client polls for POLLIN on its side-A socket
+///
+/// This catches bugs where the accept/send path fails to make data
+/// visible to the client's poll/readiness check.
+pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
+    use slopos_net::unix_socket;
+    use slopos_net::unix_socket_file_ops::UNIX_SOCKET_FILE_OPS;
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let path = b"/test/compositor-handshake";
+    let tag: u32 = 0x8000_0000;
+
+    // ── Server: bind + listen (like compositor socket activation) ──
+    let listen_idx = unix_socket::unix_create();
+    assert_test!(listen_idx >= 0, "listen socket create");
+    assert_eq_test!(unix_socket::unix_bind(listen_idx as u32, path), 0, "bind");
+    assert_eq_test!(unix_socket::unix_listen(listen_idx as u32, 4), 0, "listen");
+    unix_socket::unix_set_nonblocking(listen_idx as u32, true);
+
+    // ── Client: connect (goes to backlog, no accept yet) ──
+    let cli_idx = unix_socket::unix_create();
+    assert_test!(cli_idx >= 0, "client socket create");
+    let rc = unix_socket::unix_connect(cli_idx as u32, path);
+    assert_eq_test!(rc, 0, "connect");
+
+    // Open FD for client side (like kernel does after connect syscall)
+    let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        &UNIX_SOCKET_FILE_OPS,
+        (cli_idx as u32 | tag) as usize,
+    );
+    assert_test!(cli_fd >= 0, "cli fd open");
+
+    // ── Verify: client socket has no data yet ──
+    let revents0 = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!(
+        (revents0 & POLLIN) == 0,
+        "client should have no data before server accept+send"
+    );
+
+    // ── Server: accept (gets side-B) ──
+    let accepted_idx = unix_socket::unix_accept(listen_idx as u32);
+    assert_test!(accepted_idx >= 0, "accept");
+
+    let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        &UNIX_SOCKET_FILE_OPS,
+        (accepted_idx as u32 | tag) as usize,
+    );
+    assert_test!(srv_fd >= 0, "srv fd open");
+
+    // ── Server: send OutputInfo-sized payload (like compositor does) ──
+    // OutputInfo is 4 x u32 = 16 bytes. With 4-byte length prefix = 20 bytes.
+    let payload = b"OutputInfo-simul";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "server write failed");
+
+    // ── Client: poll for POLLIN (like shell's wait_recv) ──
+    let revents1 = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!(
+        (revents1 & POLLIN) != 0,
+        "client poll must see POLLIN after server send"
+    );
+
+    // ── Client: read the data ──
+    let mut out = [0u8; 32];
+    let nread = file_read_fd(
+        pid,
+        cli_fd,
+        &mut KernelIoBuf::new(&mut out[..payload.len()]),
+    );
+    assert_eq_test!(nread as usize, payload.len(), "read count");
+    assert_test!(&out[..payload.len()] == payload, "payload mismatch");
+
+    // Cleanup
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    unix_socket::unix_close(listen_idx as u32);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// WillBlock wakeup through unix socket write.
+///
+/// Exercises the exact wakeup path that syscall_poll relies on:
+/// 1. prepare_to_wait → current task = WillBlock
+/// 2. Register current task on client socket's RECV_WQS
+/// 3. Server writes data → unix_send → RECV_WQS[peer].wake_all() → unblock_task
+/// 4. unblock_task CAS(WillBlock, Running) → current task = Running
+///
+/// NOTE: prepare_to_wait and enqueue_current operate on the CURRENT task
+/// (the test runner), not a separately created user task. This matches
+/// the real syscall_poll path where the calling task polls on its own FDs.
+pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
+    use crate::scheduler::scheduler::{prepare_to_wait, scheduler_get_current_task};
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    // The WillBlock wakeup path requires scheduler_get_current_task() to be
+    // valid. In the test harness (pre-scheduler), current_task is null, so
+    // prepare_to_wait/enqueue_current are no-ops. Skip this test.
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        file_close_fd(pid, srv_fd);
+        file_close_fd(pid, cli_fd);
+        task_terminate(task_id);
+        return TestResult::Skipped;
+    }
+
+    let current_id = unsafe { (*current).task_id };
+
+    // Ensure current task is Running so prepare_to_wait can set WillBlock.
+    let current_state = unsafe { (*current).status() };
+    if current_state != TaskStatus::Running {
+        let _ = task_set_state(current_id, TaskStatus::Running);
+    }
+
+    // Phase 1: prepare_to_wait → WillBlock
+    prepare_to_wait();
+    let state_after_ptw = unsafe { (*current).status() };
+    assert_eq_test!(state_after_ptw, TaskStatus::WillBlock, "STEP1");
+
+    // Phase 2: register + check readiness
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+    assert_test!(reg.registered, "STEP2: register");
+    let revents = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents & POLLIN) == 0, "STEP2: no data before write");
+
+    // Phase 3: write data → RECV_WQS[peer].wake_all() → unblock_task
+    let payload = b"wake-test";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "STEP3: write");
+
+    // Phase 4: verify wakeup
+    let state_after = unsafe { (*current).status() };
+    assert_eq_test!(state_after, TaskStatus::Running, "STEP4: must be Running");
+
+    let revents_after = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents_after & POLLIN) != 0, "STEP4: POLLIN");
+
+    // Cleanup
+    slopos_kernel_services::driver_runtime::finish_wait();
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Verifies that Ready → WillBlock is a valid transition.
+///
+/// When a task is preempted by the scheduler (Running → Ready) and then
+/// resumes in the poll loop, prepare_to_wait must be able to set WillBlock
+/// from Ready. Without this transition, prepare_to_wait silently fails
+/// and the poll handler busy-loops until timeout.
+pub fn test_ready_to_willblock_transition() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task ptr");
+
+    // Set task to Ready (simulating scheduler preemption).
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
+
+    // Ready → WillBlock must succeed.
+    assert_eq_test!(
+        task_set_state(task_id, TaskStatus::WillBlock),
+        0,
+        "Ready -> WillBlock must be a valid transition"
+    );
+    let state = unsafe { (*task_ptr).status() };
+    assert_eq_test!(state, TaskStatus::WillBlock, "should be WillBlock");
+
+    // Also verify WillBlock → Running (wakeup) still works from this path.
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_testing::define_test_suite!(
     poll_wakeup_race,
     [
@@ -3028,5 +3232,8 @@ slopos_testing::define_test_suite!(
         test_wq_correct_order_wakeup_preserved,
         test_try_transition_from_rejects_wrong_state,
         test_unix_socket_poll_syscall_e2e,
+        test_compositor_handshake_listen_accept_send_poll,
+        test_unix_send_wakes_willblock_poll_waiter,
+        test_ready_to_willblock_transition,
     ]
 );

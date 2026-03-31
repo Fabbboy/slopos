@@ -179,6 +179,26 @@ impl FileOps for PipeReadOps {
         pipe_dup_reader(handle as u32)
     }
 
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let pipe_id = handle as u32;
+        let revents = {
+            let mut pipe_state = pipe::PIPE_STATE.lock();
+            match pipe::slot_mut(&mut pipe_state, pipe_id) {
+                Some(slot) => slot.revents(true, false, events),
+                None => POLLERR,
+            }
+        };
+        let registered = if revents == 0 {
+            pipe::reader_wq(pipe_id).enqueue_current()
+        } else {
+            false
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+        }
+    }
+
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let pipe_id = handle as u32;
         let mut pipe_state = pipe::PIPE_STATE.lock();
@@ -335,6 +355,26 @@ impl FileOps for PipeWriteOps {
 
     fn dup(&self, handle: usize) -> Option<usize> {
         pipe_dup_writer(handle as u32)
+    }
+
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let pipe_id = handle as u32;
+        let revents = {
+            let mut pipe_state = pipe::PIPE_STATE.lock();
+            match pipe::slot_mut(&mut pipe_state, pipe_id) {
+                Some(slot) => slot.revents(false, true, events),
+                None => POLLERR | POLLHUP,
+            }
+        };
+        let registered = if revents == 0 {
+            pipe::writer_wq(pipe_id).enqueue_current()
+        } else {
+            false
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+        }
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {

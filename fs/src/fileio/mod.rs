@@ -500,6 +500,19 @@ impl FileOps for LocalTtyOps {
         }
     }
 
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let revents = tty::poll_events(TtyIndex(handle as u8), events);
+        let registered = if revents == 0 {
+            tty::poll_enqueue(TtyIndex(handle as u8))
+        } else {
+            false
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+        }
+    }
+
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         tty::poll_events(TtyIndex(handle as u8), events)
     }

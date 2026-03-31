@@ -127,6 +127,73 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
     });
 }
 
+/// Fused poll: register waiter + check readiness in one call.
+///
+/// Replaces the separate `file_poll_register_fd` + `file_poll_fd` pattern.
+/// Delegates to `FileOps::poll_fused()` which implementations can override
+/// to perform registration and readiness check under a single subsystem lock.
+pub fn file_poll_fused(
+    process_id: u32,
+    fd: c_int,
+    events: u16,
+) -> slopos_abi::file_ops::FusedPollResult {
+    use slopos_abi::file_ops::FusedPollResult;
+    with_tables(|kernel, processes, open_files, _| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return FusedPollResult {
+                revents: POLLNVAL,
+                registered: false,
+            };
+        };
+        if !table.in_use {
+            return FusedPollResult {
+                revents: POLLNVAL,
+                registered: false,
+            };
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let result = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
+            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
+            .and_then(|open_file| {
+                open_file
+                    .ops
+                    .map(|ops| ops.poll_fused(open_file.handle, events))
+            })
+            .unwrap_or(FusedPollResult {
+                revents: POLLNVAL,
+                registered: false,
+            });
+        drop(guard);
+        result
+    })
+}
+
+/// Unregister from a wait queue after fused poll.
+///
+/// Calls `poll_unwait()` for the given FD. Safe to call even if
+/// `poll_fused` did not register (no-op in that case).
+pub fn file_poll_unfused(process_id: u32, fd: c_int) {
+    with_tables(|kernel, processes, open_files, _| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return;
+        };
+        if !table.in_use {
+            return;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        if let Some(open_file) = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
+            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
+        {
+            if let Some(ops) = open_file.ops {
+                ops.poll_unwait(open_file.handle);
+            }
+        }
+        drop(guard);
+    });
+}
+
 pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {

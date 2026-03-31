@@ -627,8 +627,13 @@ pub fn compositor_user_main() {
             wm.first_frame = false;
         }
 
-        // Flush protocol client buffers and clean up disconnected clients.
+        // Accept connections + flush/cleanup BEFORE the frame-timing poll.
+        // This is critical: after signal_ready(), the shell may connect during
+        // the first frame's rendering. Without this, the connection sits in
+        // the backlog until the NEXT loop iteration's accept_clients() at the
+        // top — which may be > 10s if the first frame is slow (desktop render).
         if let Some(ref mut proto) = wm.protocol {
+            proto.accept_clients();
             proto.cleanup_disconnected();
             proto.flush_all();
         }

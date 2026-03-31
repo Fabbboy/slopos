@@ -24,11 +24,17 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the compositor and wait for the OutputInfo bootstrap event.
+    /// Connect to the compositor (non-blocking, Wayland-style).
     ///
-    /// The compositor sends `OutputInfo` immediately upon accepting the
-    /// connection. We block on `poll()` until it arrives (up to 10 s),
-    /// so the returned `Client` is fully initialized with display geometry.
+    /// Like `wl_display_connect()`, this only opens the socket — it does
+    /// NOT wait for any server response.  The `connect()` succeeds via
+    /// the kernel's listen backlog even if the compositor hasn't called
+    /// `accept()` yet.
+    ///
+    /// Display geometry (`OutputInfo`) is received lazily: call
+    /// [`ensure_output_info()`] before the first operation that needs it
+    /// (typically surface creation).  By that point the compositor has
+    /// had time to accept the connection and push the event.
     pub fn connect(path: &[u8]) -> Result<Self, ProtocolError> {
         let fd = Sys::socket(AF_UNIX as i32, slopos_abi::net::SOCK_STREAM as i32, 0)
             .map_err(|_| ProtocolError::Io)?;
@@ -47,15 +53,11 @@ impl Client {
 
         let conn = Connection::new(fd);
 
-        let mut client = Self {
+        Ok(Self {
             conn,
             output: OutputInfo::default(),
             next_id: 1,
-        };
-
-        client.recv_output_info()?;
-
-        Ok(client)
+        })
     }
 
     fn allocate_id(&mut self) -> u32 {
@@ -264,8 +266,44 @@ impl Client {
         }
     }
 
-    /// Wait for the OutputInfo bootstrap event from the compositor.
-    fn recv_output_info(&mut self) -> Result<(), ProtocolError> {
+    /// Block until OutputInfo has been received (like `wl_display_roundtrip`).
+    ///
+    /// The compositor pushes `OutputInfo` immediately upon accepting the
+    /// connection.  This method uses a non-blocking `recv()` first (data
+    /// is usually already buffered by the time any app needs geometry),
+    /// falling back to a blocking `wait_recv()` only if it hasn't arrived.
+    ///
+    /// Call this before the first operation that needs display geometry
+    /// (typically surface creation).
+    pub fn ensure_output_info(&mut self) -> Result<(), ProtocolError> {
+        if self.output.width > 0 {
+            return Ok(());
+        }
+
+        // Fast path: data may already be in the socket buffer — try a
+        // non-blocking recv before resorting to poll().  This avoids the
+        // kernel poll path entirely in the common case where the compositor
+        // has already accepted and pushed OutputInfo.
+        if let Some(event) = self.conn.recv::<Event>()? {
+            if let Event::OutputInfo {
+                width,
+                height,
+                format,
+                pitch,
+            } = event
+            {
+                self.output = OutputInfo {
+                    width,
+                    height,
+                    format,
+                    pitch,
+                };
+                return Ok(());
+            }
+            return Err(ProtocolError::MalformedMessage);
+        }
+
+        // Slow path: data not yet buffered.  Block via poll().
         let event = self.conn.wait_recv::<Event>(10_000)?;
         if let Event::OutputInfo {
             width,

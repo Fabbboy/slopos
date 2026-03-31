@@ -106,6 +106,19 @@ impl FileOps for TtyFileOps {
         }
     }
 
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let revents = self.poll_events(handle, events);
+        let registered = if revents == 0 {
+            self.poll_wait(handle)
+        } else {
+            false
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+        }
+    }
+
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         match validated_tty_index(handle) {
             Ok(idx) => tty::poll_events(idx, events),

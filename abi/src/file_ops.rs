@@ -3,6 +3,20 @@
 use crate::fs::UserFsStat;
 use crate::io::{IoBufRead, IoBufWrite};
 
+/// Result of a fused poll operation: readiness bits + registration status.
+///
+/// Returned by [`FileOps::poll_fused`].  The fused poll pattern (modeled on
+/// Linux's `->poll()` callback) combines wait-queue registration and readiness
+/// checking in a single call, eliminating the race window between separate
+/// `poll_wait` and `poll_events` calls.
+#[derive(Debug, Clone, Copy)]
+pub struct FusedPollResult {
+    /// POLL* bitmask of currently ready events.
+    pub revents: u16,
+    /// `true` if the caller was registered on a wait queue for wakeup.
+    pub registered: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FileKind {
@@ -39,17 +53,43 @@ pub trait FileOps: Send + Sync {
         Some(handle)
     }
 
+    /// Fused poll: register waiter + check readiness in one call.
+    ///
+    /// Modeled on Linux's `->poll()` file operation.  Implementations
+    /// should register the current task on the appropriate wait queue
+    /// AND check readiness under the same subsystem lock, eliminating
+    /// the race window that exists when these are separate calls.
+    ///
+    /// The default delegates to the legacy `poll_wait` + `poll_events`
+    /// methods for backward compatibility during incremental migration.
+    fn poll_fused(&self, handle: usize, events: u16) -> FusedPollResult {
+        let registered = if events != 0 {
+            self.poll_wait(handle)
+        } else {
+            false
+        };
+        let revents = self.poll_events(handle, events);
+        FusedPollResult {
+            revents,
+            registered,
+        }
+    }
+
     /// Returns POLL* bitmask of ready events.
+    ///
+    /// **Legacy** — prefer `poll_fused` for new code.
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let _ = (handle, events);
         0
     }
 
+    /// **Legacy** — prefer `poll_fused` for new code.
     fn poll_wait(&self, handle: usize) -> bool {
         let _ = handle;
         false
     }
 
+    /// **Legacy** — prefer `poll_fused` for new code.
     fn poll_unwait(&self, handle: usize) {
         let _ = handle;
     }

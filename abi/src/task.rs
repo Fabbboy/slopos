@@ -58,7 +58,7 @@ impl TaskStatus {
     pub const fn can_transition_to(self, target: Self) -> bool {
         match self {
             Self::Invalid => matches!(target, Self::Ready),
-            Self::Ready => matches!(target, Self::Running | Self::Terminated),
+            Self::Ready => matches!(target, Self::Running | Self::Terminated | Self::WillBlock),
             Self::Running => {
                 matches!(
                     target,

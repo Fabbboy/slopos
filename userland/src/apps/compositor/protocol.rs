@@ -177,7 +177,8 @@ impl ProtocolBridge {
                         },
                     );
                 }
-                _ => break,
+                Ok(None) => break,
+                Err(_) => break,
             }
         }
     }

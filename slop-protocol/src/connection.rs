@@ -240,6 +240,15 @@ impl Connection {
         }
     }
 
+    /// Consume the connection and return the raw FD without closing it.
+    ///
+    /// The caller takes ownership of the FD and is responsible for closing it.
+    pub fn into_raw_fd(self) -> i32 {
+        let fd = self.fd;
+        core::mem::forget(self);
+        fd
+    }
+
     fn compact_buf(&mut self) {
         if self.read_pos == 0 {
             return;
@@ -250,5 +259,11 @@ impl Connection {
         }
         self.read_len = remaining;
         self.read_pos = 0;
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let _ = Sys::close(self.fd);
     }
 }

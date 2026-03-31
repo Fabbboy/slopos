@@ -49,6 +49,11 @@ impl Surface {
         }
 
         let client = protocol_client::client();
+        // Lazy sync point: receive OutputInfo if we haven't yet.
+        // By this point the compositor has had time to accept + push it.
+        client
+            .ensure_output_info()
+            .map_err(|_| SurfaceError::AttachFailed)?;
         let pixel_format =
             PixelFormat::from_u32(client.display_format()).unwrap_or(PixelFormat::Argb8888);
 

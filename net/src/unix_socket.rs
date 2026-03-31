@@ -796,22 +796,122 @@ pub fn unix_poll_events(idx: u32, requested: u16) -> u16 {
     }
 }
 
-/// Enqueue the current task on this socket's recv wait queue for poll().
+/// Fused poll: check readiness AND decide wait queue under a single lock.
+///
+/// This is the Linux `->poll()` pattern.  The `UNIX_STATE` lock is held
+/// across both the readiness check and the wait-queue decision, closing
+/// the race window where data could arrive between separate register and
+/// check calls.  Registration itself happens after the lock is released
+/// (to avoid lock-ordering issues with the WaitQueue's internal lock).
+pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
+    let i = idx as usize;
+    if i >= MAX_UNIX_SOCKETS {
+        return (0, false);
+    }
+
+    // ── Single lock acquisition: readiness + WQ decision ───────────
+    let (revents, wq_idx, is_listener) = {
+        let state = UNIX_STATE.lock();
+        let slot = &state.slots[i];
+        if !slot.valid {
+            return (0, false);
+        }
+
+        let is_listener = slot.state == UnixState::Listening;
+        let revents = match slot.state {
+            UnixState::Listening => {
+                if slot.backlog_len > 0 && (requested & POLLIN) != 0 {
+                    POLLIN
+                } else {
+                    0
+                }
+            }
+            UnixState::Connected => {
+                let mut rev = 0u16;
+                let peer = slot.peer_idx as usize;
+                let side = slot.side;
+                let (a_idx, _) = match side {
+                    PairSide::A => (i, peer),
+                    PairSide::B => (peer, i),
+                };
+                if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].valid {
+                    let a_slot = &state.slots[a_idx];
+                    let rbuf = match side {
+                        PairSide::A => &a_slot.buf_b_to_a,
+                        PairSide::B => &a_slot.buf_a_to_b,
+                    };
+                    let wbuf = match side {
+                        PairSide::A => &a_slot.buf_a_to_b,
+                        PairSide::B => &a_slot.buf_b_to_a,
+                    };
+                    if !rbuf.is_empty() && (requested & POLLIN) != 0 {
+                        rev |= POLLIN;
+                    }
+                    if wbuf.has_space() && (requested & POLLOUT) != 0 {
+                        rev |= POLLOUT;
+                    }
+                }
+                if slot.peer_closed {
+                    rev |= POLLHUP;
+                    if (requested & POLLIN) != 0 {
+                        rev |= POLLIN;
+                    }
+                }
+                rev
+            }
+            _ => 0,
+        };
+
+        (revents, i, is_listener)
+    };
+    // ── Lock released ──────────────────────────────────────────────
+
+    // Only register if nothing is ready (Linux convention: skip
+    // registration when we already have events to return).
+    let registered = if revents == 0 {
+        if is_listener {
+            ACCEPT_WQS[wq_idx].enqueue_current()
+        } else {
+            RECV_WQS[wq_idx].enqueue_current()
+        }
+    } else {
+        false
+    };
+
+    (revents, registered)
+}
+
+/// Enqueue the current task on the appropriate wait queue for poll().
+///
+/// Listener sockets register on `ACCEPT_WQS` (woken by `unix_connect`),
+/// connected sockets register on `RECV_WQS` (woken by peer `unix_send`).
 pub fn unix_poll_register(idx: u32) -> bool {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return false;
     }
-    RECV_WQS[i].enqueue_current()
+    let is_listener = {
+        let state = UNIX_STATE.lock();
+        state.slots[i].valid && state.slots[i].state == UnixState::Listening
+    };
+    if is_listener {
+        ACCEPT_WQS[i].enqueue_current()
+    } else {
+        RECV_WQS[i].enqueue_current()
+    }
 }
 
-/// Remove the current task from this socket's recv wait queue.
+/// Remove the current task from the appropriate poll wait queue.
 pub fn unix_poll_unregister(idx: u32) {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return;
     }
+    // Remove from both — the task is on at most one, and remove is a no-op
+    // if the task isn't present.  This avoids needing to re-check socket
+    // state (which may have changed between register and unregister).
     RECV_WQS[i].remove_current();
+    ACCEPT_WQS[i].remove_current();
 }
 
 /// Set or clear non-blocking mode on a Unix socket.

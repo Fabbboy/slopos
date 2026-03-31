@@ -72,6 +72,19 @@ impl FileOps for SocketFileOps {
         let _ = socket::socket_close(handle as u32);
     }
 
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let revents = self.poll_events(handle, events);
+        let registered = if revents == 0 {
+            self.poll_wait(handle)
+        } else {
+            false
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+        }
+    }
+
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let socket_idx = handle as u32;
         let readable = socket::socket_poll_readable(socket_idx) as u16;

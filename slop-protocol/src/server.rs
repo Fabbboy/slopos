@@ -115,8 +115,8 @@ impl Server {
 
     /// Disconnect and clean up a client slot.
     pub fn disconnect(&mut self, client: usize) {
-        if let Some(c) = self.clients[client].take() {
-            let _ = Sys::close(c.conn.fd());
+        if self.clients[client].take().is_some() {
+            // Connection::drop closes the FD automatically.
             self.client_count -= 1;
         }
     }
