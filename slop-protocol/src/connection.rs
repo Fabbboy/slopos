@@ -127,37 +127,64 @@ impl Connection {
     }
 
     /// Block via poll() until the socket has data to read.
+    /// Retries automatically if interrupted by a signal (EINTR).
     fn poll_readable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
-        let mut pfd = UserPollFd {
-            fd: self.fd,
-            events: POLLIN,
-            revents: 0,
-        };
-        let result = crate::raw_poll(&mut pfd, 1, timeout_ms as i64);
-        if result <= 0 {
-            return Err(ProtocolError::Timeout);
+        const EINTR: i32 = -4;
+        let mut remaining = timeout_ms;
+        loop {
+            let mut pfd = UserPollFd {
+                fd: self.fd,
+                events: POLLIN,
+                revents: 0,
+            };
+            let result = crate::raw_poll(&mut pfd, 1, remaining as i64);
+            if result == EINTR {
+                // Interrupted by signal — retry with reduced timeout.
+                let step = 10i32.min(remaining);
+                remaining -= step;
+                if remaining <= 0 {
+                    return Err(ProtocolError::Timeout);
+                }
+                continue;
+            }
+            if result <= 0 {
+                return Err(ProtocolError::Timeout);
+            }
+            if pfd.revents & POLLIN == 0 {
+                return Err(ProtocolError::Timeout);
+            }
+            return Ok(());
         }
-        if pfd.revents & POLLIN == 0 {
-            return Err(ProtocolError::Timeout);
-        }
-        Ok(())
     }
 
     /// Block via poll() until the socket is ready for writing.
+    /// Retries automatically if interrupted by a signal (EINTR).
     fn poll_writable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
-        let mut pfd = UserPollFd {
-            fd: self.fd,
-            events: POLLOUT,
-            revents: 0,
-        };
-        let result = crate::raw_poll(&mut pfd, 1, timeout_ms as i64);
-        if result <= 0 {
-            return Err(ProtocolError::Timeout);
+        const EINTR: i32 = -4;
+        let mut remaining = timeout_ms;
+        loop {
+            let mut pfd = UserPollFd {
+                fd: self.fd,
+                events: POLLOUT,
+                revents: 0,
+            };
+            let result = crate::raw_poll(&mut pfd, 1, remaining as i64);
+            if result == EINTR {
+                let step = 10i32.min(remaining);
+                remaining -= step;
+                if remaining <= 0 {
+                    return Err(ProtocolError::Timeout);
+                }
+                continue;
+            }
+            if result <= 0 {
+                return Err(ProtocolError::Timeout);
+            }
+            if pfd.revents & POLLOUT == 0 {
+                return Err(ProtocolError::Timeout);
+            }
+            return Ok(());
         }
-        if pfd.revents & POLLOUT == 0 {
-            return Err(ProtocolError::Timeout);
-        }
-        Ok(())
     }
 
     /// Try to decode one frame from the read buffer without any I/O.
