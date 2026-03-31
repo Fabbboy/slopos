@@ -8,7 +8,8 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TaskStatus, task_find_by_id, task_is_blocked, task_is_invalid,
-    task_is_terminated, task_is_will_block, task_set_state_with_reason,
+    task_is_terminated, task_is_will_block, task_set_state_from_with_reason,
+    task_set_state_with_reason,
 };
 use slopos_kernel_services::platform;
 
@@ -238,8 +239,8 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
         return;
     }
 
-    // Only block if still in WillBlock (set by prepare_to_wait).
-    // If Running, the wakeup already arrived — do not re-block.
+    // Fast-path: if wakeup already arrived (Running), skip entirely.
+    // This is an optimization only — the CAS below is the authority.
     if !task_is_will_block(current) {
         return;
     }
@@ -250,14 +251,16 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
         return;
     }
 
-    // Re-check after sleep queue registration (wakeup could have
-    // arrived between the first check and here).
-    if !task_is_will_block(current) {
-        cancel_sleep(task_id);
-        return;
-    }
-
-    if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
+    // If a concurrent unblock_task set Running between the fast-path check
+    // and here, the CAS fails — the wakeup is preserved.
+    if task_set_state_from_with_reason(
+        task_id,
+        TaskStatus::WillBlock,
+        TaskStatus::Blocked,
+        BlockReason::Sleep,
+    ) != 0
+    {
         cancel_sleep(task_id);
         return;
     }

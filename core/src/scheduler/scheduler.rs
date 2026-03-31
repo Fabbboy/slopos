@@ -29,7 +29,7 @@ use super::task::{
     TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskStatus, task_get_info, task_is_blocked,
     task_is_invalid, task_is_ready, task_is_running, task_is_terminated, task_is_will_block,
     task_pointer_is_valid, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_set_state, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -863,14 +863,12 @@ pub fn block_current_task() {
         return;
     }
 
-    // Only block if still in WillBlock (set by prepare_to_wait).
-    // If Running, the wakeup already arrived — do not re-block.
-    if !task_is_will_block(current) {
-        return;
-    }
-
     let task_id = unsafe { (*current).task_id };
-    if task_set_state(task_id, TaskStatus::Blocked) != 0 {
+
+    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
+    // If a concurrent unblock_task already set Running, the CAS fails and
+    // we return immediately — the wakeup is preserved.
+    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked) != 0 {
         return;
     }
     unschedule_task(current);
