@@ -2871,6 +2871,154 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     TestResult::Pass
 }
 
+/// E2E: call syscall_poll on a unix socket, write data, verify poll returns.
+///
+/// This exercises the full kernel poll path: prepare_to_wait, WQ registration,
+/// readiness check, block_current_task_with_timeout, wakeup via unix_send.
+/// Runs in two variants:
+///   1. Data already buffered before poll — poll must return immediately.
+///   2. No data, short timeout — poll must return 0 (timeout) within margin.
+pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
+    use crate::syscall::fs::syscall_poll;
+    use slopos_abi::syscall::UserPollFd;
+
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task ptr");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    // Need a user-space page for the pollfd struct.
+    let upage = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Skipped;
+        }
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    // ------------------------------------------------------------------
+    // Variant 1: write data FIRST, then poll — must return immediately.
+    // ------------------------------------------------------------------
+    let payload = b"e2e-test";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write failed");
+
+    let pfd = UserPollFd {
+        fd: cli_fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    assert_test!(user_copy_out(pid, upage, &pfd), "copy pollfd to user");
+
+    // Call syscall_poll: frame.rdi = pollfd_ptr, rsi = nfds, rdx = timeout_ms
+    let mut frame = zero_frame();
+    frame.rdi = upage; // pollfd array pointer
+    frame.rsi = 1; // nfds = 1
+    frame.rdx = 5000; // timeout_ms = 5000 (should not matter, data ready)
+
+    let start = slopos_kernel_services::platform::get_time_ms();
+    let _ = with_user_process_context(pid, || syscall_poll(task_ptr, &mut frame));
+    let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start);
+
+    // poll should return 1 (one fd ready)
+    assert_eq_test!(frame.rax, 1, "poll should report 1 ready fd");
+    assert_test!(
+        elapsed < 200,
+        "poll with buffered data should return quickly"
+    );
+
+    // Verify revents
+    if let Some(result_pfd) = user_copy_in::<UserPollFd>(pid, upage) {
+        assert_test!(
+            (result_pfd.revents & POLLIN) != 0,
+            "poll should set POLLIN on readable socket"
+        );
+    }
+
+    // Drain the data
+    let mut out = [0u8; 16];
+    let _ = file_read_fd(
+        pid,
+        cli_fd,
+        &mut KernelIoBuf::new(&mut out[..payload.len()]),
+    );
+
+    // ------------------------------------------------------------------
+    // Variant 2: no data, timeout=100ms — poll must return 0 (timeout).
+    // ------------------------------------------------------------------
+    let pfd_empty = UserPollFd {
+        fd: cli_fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    assert_test!(user_copy_out(pid, upage, &pfd_empty), "copy empty pollfd");
+
+    let mut frame2 = zero_frame();
+    frame2.rdi = upage;
+    frame2.rsi = 1;
+    frame2.rdx = 100; // 100ms timeout
+
+    let start2 = slopos_kernel_services::platform::get_time_ms();
+    let _ = with_user_process_context(pid, || syscall_poll(task_ptr, &mut frame2));
+    let elapsed2 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start2);
+
+    // poll should return 0 (timeout, no data)
+    assert_eq_test!(frame2.rax, 0, "poll with no data should timeout");
+    // Should take roughly 100ms (allow 50-500ms margin for timer granularity)
+    assert_test!(
+        elapsed2 >= 50 && elapsed2 <= 500,
+        "poll timeout duration out of range"
+    );
+
+    // ------------------------------------------------------------------
+    // Variant 3: write data while poll is "in progress" (simulated).
+    // We write data, then immediately call poll with a long timeout.
+    // If data is already there, poll returns instantly. This simulates
+    // the compositor handshake pattern.
+    // ------------------------------------------------------------------
+    let payload2 = b"OutputInfo-sim";
+    let written2 = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload2));
+    assert_eq_test!(written2 as usize, payload2.len(), "write2 failed");
+
+    let pfd3 = UserPollFd {
+        fd: cli_fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    assert_test!(user_copy_out(pid, upage, &pfd3), "copy pollfd3");
+
+    let mut frame3 = zero_frame();
+    frame3.rdi = upage;
+    frame3.rsi = 1;
+    frame3.rdx = 10_000; // 10s timeout (mimics compositor wait_recv)
+
+    let start3 = slopos_kernel_services::platform::get_time_ms();
+    let _ = with_user_process_context(pid, || syscall_poll(task_ptr, &mut frame3));
+    let elapsed3 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start3);
+
+    assert_eq_test!(frame3.rax, 1, "poll should find data immediately");
+    assert_test!(
+        elapsed3 < 200,
+        "poll with pre-buffered data must not sleep (compositor handshake pattern)"
+    );
+
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_testing::define_test_suite!(
     poll_wakeup_race,
     [
@@ -2879,5 +3027,6 @@ slopos_testing::define_test_suite!(
         test_wq_wrong_order_wakeup_lost,
         test_wq_correct_order_wakeup_preserved,
         test_try_transition_from_rejects_wrong_state,
+        test_unix_socket_poll_syscall_e2e,
     ]
 );
