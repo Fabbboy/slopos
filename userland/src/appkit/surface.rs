@@ -49,7 +49,6 @@ impl Surface {
         }
 
         let client = protocol_client::client();
-        let _ = client.ensure_output_info();
         let pixel_format =
             PixelFormat::from_u32(client.display_format()).unwrap_or(PixelFormat::Argb8888);
 

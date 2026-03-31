@@ -26,8 +26,9 @@ pub struct Client {
 impl Client {
     /// Connect to the compositor and wait for the OutputInfo bootstrap event.
     ///
-    /// The socket is non-blocking from the start. The wait for OutputInfo
-    /// uses `poll()` internally — no mode switching.
+    /// The compositor sends `OutputInfo` immediately upon accepting the
+    /// connection. We block on `poll()` until it arrives (up to 10 s),
+    /// so the returned `Client` is fully initialized with display geometry.
     pub fn connect(path: &[u8]) -> Result<Self, ProtocolError> {
         let fd = Sys::socket(AF_UNIX as i32, slopos_abi::net::SOCK_STREAM as i32, 0)
             .map_err(|_| ProtocolError::Io)?;
@@ -46,11 +47,15 @@ impl Client {
 
         let conn = Connection::new(fd);
 
-        Ok(Self {
+        let mut client = Self {
             conn,
             output: OutputInfo::default(),
             next_id: 1,
-        })
+        };
+
+        client.recv_output_info()?;
+
+        Ok(client)
     }
 
     fn allocate_id(&mut self) -> u32 {
@@ -259,10 +264,8 @@ impl Client {
         }
     }
 
-    pub fn ensure_output_info(&mut self) -> Result<(), ProtocolError> {
-        if self.output.width > 0 {
-            return Ok(());
-        }
+    /// Wait for the OutputInfo bootstrap event from the compositor.
+    fn recv_output_info(&mut self) -> Result<(), ProtocolError> {
         let event = self.conn.wait_recv::<Event>(10_000)?;
         if let Event::OutputInfo {
             width,
