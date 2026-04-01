@@ -53,15 +53,16 @@ pub trait FileOps: Send + Sync {
         Some(handle)
     }
 
-    /// Fused poll: register waiter + check readiness in one call.
+    /// Poll: register waiter then check readiness (Linux pattern).
     ///
     /// Modeled on Linux's `->poll()` file operation.  Implementations
-    /// should register the current task on the appropriate wait queue
-    /// AND check readiness under the same subsystem lock, eliminating
-    /// the race window that exists when these are separate calls.
+    /// MUST register the current task on the wait queue BEFORE checking
+    /// readiness so that any wakeup arriving after registration is
+    /// guaranteed to find the task.  The readiness check after
+    /// registration acts as its own "triggered" verification.
     ///
-    /// The default delegates to the legacy `poll_wait` + `poll_events`
-    /// methods for backward compatibility during incremental migration.
+    /// The default delegates to `poll_wait` (register) then
+    /// `poll_events` (check) for backward compatibility.
     fn poll_fused(&self, handle: usize, events: u16) -> FusedPollResult {
         let registered = if events != 0 {
             self.poll_wait(handle)

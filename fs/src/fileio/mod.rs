@@ -501,12 +501,9 @@ impl FileOps for LocalTtyOps {
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        // Register FIRST, then check readiness (Linux pattern).
+        let registered = tty::poll_enqueue(TtyIndex(handle as u8));
         let revents = tty::poll_events(TtyIndex(handle as u8), events);
-        let registered = if revents == 0 {
-            tty::poll_enqueue(TtyIndex(handle as u8))
-        } else {
-            false
-        };
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,

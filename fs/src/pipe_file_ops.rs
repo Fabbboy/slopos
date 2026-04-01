@@ -181,17 +181,14 @@ impl FileOps for PipeReadOps {
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let pipe_id = handle as u32;
+        // Register FIRST, then check readiness (Linux pattern).
+        let registered = pipe::reader_wq(pipe_id).enqueue_current();
         let revents = {
             let mut pipe_state = pipe::PIPE_STATE.lock();
             match pipe::slot_mut(&mut pipe_state, pipe_id) {
                 Some(slot) => slot.revents(true, false, events),
                 None => POLLERR,
             }
-        };
-        let registered = if revents == 0 {
-            pipe::reader_wq(pipe_id).enqueue_current()
-        } else {
-            false
         };
         slopos_abi::file_ops::FusedPollResult {
             revents,
@@ -359,17 +356,14 @@ impl FileOps for PipeWriteOps {
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let pipe_id = handle as u32;
+        // Register FIRST, then check readiness (Linux pattern).
+        let registered = pipe::writer_wq(pipe_id).enqueue_current();
         let revents = {
             let mut pipe_state = pipe::PIPE_STATE.lock();
             match pipe::slot_mut(&mut pipe_state, pipe_id) {
                 Some(slot) => slot.revents(false, true, events),
                 None => POLLERR | POLLHUP,
             }
-        };
-        let registered = if revents == 0 {
-            pipe::writer_wq(pipe_id).enqueue_current()
-        } else {
-            false
         };
         slopos_abi::file_ops::FusedPollResult {
             revents,

@@ -796,29 +796,54 @@ pub fn unix_poll_events(idx: u32, requested: u16) -> u16 {
     }
 }
 
-/// Fused poll: check readiness AND decide wait queue under a single lock.
+/// Fused poll: register on wait queue THEN check readiness.
 ///
-/// This is the Linux `->poll()` pattern.  The `UNIX_STATE` lock is held
-/// across both the readiness check and the wait-queue decision, closing
-/// the race window where data could arrive between separate register and
-/// check calls.  Registration itself happens after the lock is released
-/// (to avoid lock-ordering issues with the WaitQueue's internal lock).
+/// Follows the Linux `sock_poll_wait` + readiness-check pattern: the
+/// task is placed on the wait queue BEFORE the readiness snapshot so
+/// that any wakeup firing after registration is guaranteed to find us.
+/// The readiness check after registration acts as its own "triggered"
+/// verification — if data arrived between registration and the check,
+/// we see it and return immediately.
+///
+/// The caller (`syscall_poll`) sets `WillBlock` via `prepare_to_wait()`
+/// before calling this function.  If `wake_all` → `unblock_task` fires
+/// between registration and `block_current_task_with_timeout`, the CAS
+/// `WillBlock → Blocked` fails and the task stays Running.
 pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return (0, false);
     }
 
-    // ── Single lock acquisition: readiness + WQ decision ───────────
-    let (revents, wq_idx, is_listener) = {
+    // ── Phase 1: Peek socket type for WQ selection ─────────────────
+    let is_listener = {
+        let state = UNIX_STATE.lock();
+        let slot = &state.slots[i];
+        if !slot.valid {
+            return (0, false);
+        }
+        slot.state == UnixState::Listening
+    };
+
+    // ── Phase 2: Register FIRST (Linux sock_poll_wait pattern) ─────
+    // By the time the readiness check below runs, the task is already
+    // visible to wake_all().  This eliminates the lost-wakeup race
+    // where data arrived between a check and a late registration.
+    let registered = if is_listener {
+        ACCEPT_WQS[i].enqueue_current()
+    } else {
+        RECV_WQS[i].enqueue_current()
+    };
+
+    // ── Phase 3: Check readiness AFTER registration ────────────────
+    let revents = {
         let state = UNIX_STATE.lock();
         let slot = &state.slots[i];
         if !slot.valid {
             return (0, false);
         }
 
-        let is_listener = slot.state == UnixState::Listening;
-        let revents = match slot.state {
+        match slot.state {
             UnixState::Listening => {
                 if slot.backlog_len > 0 && (requested & POLLIN) != 0 {
                     POLLIN
@@ -860,22 +885,7 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
                 rev
             }
             _ => 0,
-        };
-
-        (revents, i, is_listener)
-    };
-    // ── Lock released ──────────────────────────────────────────────
-
-    // Only register if nothing is ready (Linux convention: skip
-    // registration when we already have events to return).
-    let registered = if revents == 0 {
-        if is_listener {
-            ACCEPT_WQS[wq_idx].enqueue_current()
-        } else {
-            RECV_WQS[wq_idx].enqueue_current()
         }
-    } else {
-        false
     };
 
     (revents, registered)

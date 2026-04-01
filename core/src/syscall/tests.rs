@@ -3223,6 +3223,155 @@ pub fn test_ready_to_willblock_transition() -> TestResult {
     TestResult::Pass
 }
 
+/// Demonstrates the check-first-register-second race (the OLD broken pattern).
+///
+/// Manually simulates the sequence that unix_poll_fused used to execute:
+/// 1. Check readiness (empty) — under UNIX_STATE lock
+/// 2. Data arrives + wake_all fires — nobody on the queue yet
+/// 3. Register on the queue — too late, wakeup already fired
+///
+/// The task should still be WillBlock because unblock_task was never
+/// called (wake_all found nobody to dequeue).  This proves the race
+/// existed by construction.
+pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
+    use crate::scheduler::scheduler::{prepare_to_wait, scheduler_get_current_task};
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        file_close_fd(pid, srv_fd);
+        file_close_fd(pid, cli_fd);
+        task_terminate(task_id);
+        return TestResult::Skipped;
+    }
+
+    let current_id = unsafe { (*current).task_id };
+    if unsafe { (*current).status() } != TaskStatus::Running {
+        let _ = task_set_state(current_id, TaskStatus::Running);
+    }
+
+    // Step 1: prepare_to_wait → WillBlock
+    prepare_to_wait();
+    assert_eq_test!(
+        unsafe { (*current).status() },
+        TaskStatus::WillBlock,
+        "WillBlock"
+    );
+
+    // Step 2: Check readiness WITHOUT registering (old broken order)
+    let revents = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents & POLLIN) == 0, "no data yet");
+
+    // Step 3: Data arrives — wake_all fires with nobody on the queue!
+    let payload = b"race-demo";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write");
+
+    // Step 4: NOW register (too late — wakeup already fired)
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+
+    // The task should STILL be WillBlock because wake_all found nobody
+    // on the queue and never called unblock_task on our task.
+    let state = unsafe { (*current).status() };
+    assert_eq_test!(
+        state,
+        TaskStatus::WillBlock,
+        "wakeup lost — still WillBlock"
+    );
+
+    // Cleanup
+    slopos_kernel_services::driver_runtime::finish_wait();
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Proves the register-first-then-check order preserves wakeups.
+///
+/// Simulates the FIXED pattern (Linux sock_poll_wait order):
+/// 1. Register on the queue FIRST
+/// 2. Data arrives + wake_all fires — finds the task on the queue
+/// 3. unblock_task CAS(WillBlock → Running) — wakeup preserved
+/// 4. Check readiness — sees data
+///
+/// This is the exact invariant that the fixed poll_fused implements.
+pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
+    use crate::scheduler::scheduler::{prepare_to_wait, scheduler_get_current_task};
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        file_close_fd(pid, srv_fd);
+        file_close_fd(pid, cli_fd);
+        task_terminate(task_id);
+        return TestResult::Skipped;
+    }
+
+    let current_id = unsafe { (*current).task_id };
+    if unsafe { (*current).status() } != TaskStatus::Running {
+        let _ = task_set_state(current_id, TaskStatus::Running);
+    }
+
+    // Step 1: prepare_to_wait → WillBlock
+    prepare_to_wait();
+    assert_eq_test!(
+        unsafe { (*current).status() },
+        TaskStatus::WillBlock,
+        "WillBlock"
+    );
+
+    // Step 2: Register FIRST (the Linux pattern)
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+    assert_test!(reg.registered, "register");
+
+    // Step 3: Data arrives — wake_all finds us on the queue!
+    let payload = b"race-fix";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write");
+
+    // Step 4: Wakeup preserved — unblock_task CAS(WillBlock → Running)
+    let state = unsafe { (*current).status() };
+    assert_eq_test!(state, TaskStatus::Running, "wakeup preserved — Running");
+
+    // Step 5: Readiness check sees the data
+    let revents = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents & POLLIN) != 0, "POLLIN");
+
+    // Cleanup
+    slopos_kernel_services::driver_runtime::finish_wait();
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_testing::define_test_suite!(
     poll_wakeup_race,
     [
@@ -3235,5 +3384,7 @@ slopos_testing::define_test_suite!(
         test_compositor_handshake_listen_accept_send_poll,
         test_unix_send_wakes_willblock_poll_waiter,
         test_ready_to_willblock_transition,
+        test_poll_fused_gap_demonstrates_race,
+        test_poll_fused_register_first_catches_wakeup,
     ]
 );

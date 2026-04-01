@@ -86,12 +86,9 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         let mut reg_count = 0usize;
 
         for idx in 0..nfds {
-            let user_ptr = try_or_err!(
-                ctx,
-                UserPtr::<UserPollFd>::try_new(
-                    base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64
-                )
-            );
+            let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
+                base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
+            ));
             let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
             if pfd.fd < 0 {
                 pfd.revents = 0;

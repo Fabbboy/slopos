@@ -28,9 +28,9 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         }
     }
 
-    // Clobber frame.rax with a safe negative sentinel.  If the handler
-    // panics or misses a return path, userland gets -EINVAL rather than
-    // the raw syscall number interpreted as a character.
+    // Clobber frame.rax with a safe negative sentinel so that a handler
+    // that forgets to write a return value does not leak stale register
+    // contents to userland.
     unsafe {
         (*frame).rax = slopos_abi::syscall::ERRNO_EINVAL as u64;
     }
