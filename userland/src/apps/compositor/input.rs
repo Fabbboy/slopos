@@ -121,8 +121,9 @@ pub struct InputHandler {
     pending_close_count: usize,
     clock_origin: Instant,
 
-    /// Local modifier state accumulated from raw key events (replaces syscall).
     local_modifier_state: u8,
+    /// Edge-triggered: buttons that fired a press event this frame.
+    mouse_down: u8,
     /// Raw event buffer for poll_batch reads from the kernel queue.
     raw_event_buf: [InputEvent; 64],
     /// Number of raw events read in the current frame.
@@ -161,6 +162,7 @@ impl InputHandler {
             pending_close_count: 0,
             clock_origin: Instant::now(),
             local_modifier_state: 0,
+            mouse_down: 0,
             raw_event_buf: [InputEvent::default(); 64],
             raw_event_count: 0,
         }
@@ -183,6 +185,7 @@ impl InputHandler {
     pub fn update_from_raw_events(&mut self) {
         self.cursor_trail_count = 0;
         self.mouse_buttons_prev = self.mouse_buttons;
+        self.mouse_down = 0;
 
         let count = input::poll_batch(&mut self.raw_event_buf) as usize;
         self.raw_event_count = count;
@@ -206,6 +209,7 @@ impl InputHandler {
                 InputEventType::PointerButtonPress => {
                     let button = event.data.data0 as u8;
                     self.mouse_buttons |= button;
+                    self.mouse_down |= button;
                 }
                 InputEventType::PointerButtonRelease => {
                     let button = event.data.data0 as u8;
@@ -249,7 +253,7 @@ impl InputHandler {
     }
 
     fn mouse_clicked(&self) -> bool {
-        (self.mouse_buttons & 0x01) != 0 && (self.mouse_buttons_prev & 0x01) == 0
+        (self.mouse_down & 0x01) != 0 && (self.mouse_buttons_prev & 0x01) == 0
     }
 
     fn mouse_pressed(&self) -> bool {

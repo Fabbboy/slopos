@@ -3,6 +3,8 @@
 //! Listens on `/run/compositor`, accepts client connections, and translates
 //! typed protocol requests into local surface state.
 
+use core::num::NonZeroU32;
+
 use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
 use slopos_protocol::server::Server;
@@ -890,7 +892,8 @@ impl ProtocolBridge {
         for i in 0..write_count {
             let s = &self.surfaces[indices[i]];
             let mut info = WindowInfo::default();
-            info.task_id = indices[i] as u32;
+            // SAFETY: surface index + 1 is always > 0 (MAX_SURFACES << u32::MAX).
+            info.task_id = NonZeroU32::new(indices[i] as u32 + 1).unwrap().get();
             info.x = s.window_x;
             info.y = s.window_y;
             info.width = s.width;
@@ -1027,7 +1030,7 @@ impl ProtocolBridge {
     }
 
     fn task_id_to_surface_idx(&self, task_id: u32) -> Option<usize> {
-        let idx = task_id as usize;
+        let idx = (NonZeroU32::new(task_id)?.get() - 1) as usize;
         if idx < MAX_SURFACES && self.surfaces[idx].active {
             Some(idx)
         } else {
