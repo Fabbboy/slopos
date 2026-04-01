@@ -258,6 +258,18 @@ impl PerCpuScheduler {
     #[inline]
     pub fn set_current_task(&self, task: *mut Task) {
         self.current_task_atomic.store(task, Ordering::Release);
+        // Keep pcr.syscall_pid in sync so copy_from_user always resolves
+        // the correct process page directory — even after preemption.
+        let pid = if task.is_null() {
+            slopos_abi::task::INVALID_PROCESS_ID
+        } else {
+            unsafe { (*task).process_id }
+        };
+        unsafe {
+            slopos_arch::pcr::current_pcr()
+                .syscall_pid
+                .store(pid, Ordering::Release);
+        }
     }
 
     #[inline]

@@ -73,18 +73,9 @@ pub(crate) fn is_scheduling_active() -> bool {
 use slopos_mm::paging::paging_get_kernel_directory;
 use slopos_mm::process_vm::{process_vm_get_cr3_phys, process_vm_sync_kernel_mappings};
 use slopos_mm::tlb;
-use slopos_mm::user_copy;
 
 use super::ffi_boundary::kernel_stack_top;
 use super::switch_asm::{fpu_restore, fpu_save, switch_registers};
-
-fn current_task_process_id() -> u32 {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return crate::task::INVALID_PROCESS_ID;
-    }
-    unsafe { (*task).process_id }
-}
 
 fn get_default_time_slice() -> u64 {
     SCHED_DEFAULT_TIME_SLICE as u64
@@ -1043,8 +1034,6 @@ fn deferred_reschedule_callback() {
 pub fn init_scheduler() -> c_int {
     SCHEDULER_ENABLED.store(0, Ordering::Release);
     PREEMPTION_ENABLED.store(SCHEDULER_PREEMPTION_DEFAULT, Ordering::Release);
-
-    user_copy::register_current_task_provider(current_task_process_id);
 
     per_cpu::init_all_percpu_schedulers();
     reset_sleep_queue();

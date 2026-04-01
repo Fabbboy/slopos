@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr;
-use slopos_sync::{InitFlag, IrqMutex};
+use slopos_sync::InitFlag;
 
 use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
 use crate::paging::paging_is_user_accessible;
@@ -11,60 +11,27 @@ use crate::process_vm::process_vm_get_page_dir;
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
 
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
-static CURRENT_TASK_PROVIDER: IrqMutex<Option<fn() -> u32>> = IrqMutex::new(None);
 
-/// Reads the syscall PID from per-CPU storage (SMP-safe).
-fn syscall_process_id_provider() -> u32 {
-    // SAFETY: Accessing atomic field on current CPU's PCR.
+/// Read the current process ID from the per-CPU PCR.
+///
+/// The scheduler updates `pcr.syscall_pid` on every context switch
+/// (via `CpuScheduler::set_current_task`), so this always reflects
+/// the actually-running task — the same pattern as Linux's `current`.
+#[inline]
+fn current_process_id() -> u32 {
+    // SAFETY: reading an atomic on the current CPU's PCR.
     unsafe { pcr::current_pcr() }
         .syscall_pid
         .load(Ordering::Acquire)
 }
 
-pub fn register_current_task_provider(provider: fn() -> u32) {
-    *CURRENT_TASK_PROVIDER.lock() = Some(provider);
-}
-
-/// RAII guard that restores the previous task provider on drop.
-/// Ensures the provider cannot leak across syscall boundaries, even if
-/// the handler panics or takes an early-return path.
-pub struct SyscallProviderGuard {
-    original: Option<fn() -> u32>,
-}
-
-impl Drop for SyscallProviderGuard {
-    fn drop(&mut self) {
-        let mut guard = CURRENT_TASK_PROVIDER.lock();
-        *guard = self.original;
-    }
-}
-
-/// Sets the syscall PID in per-CPU storage (SMP-safe).
-/// Returns an RAII guard that restores the previous provider on drop.
-pub fn set_syscall_process_id(pid: u32) -> SyscallProviderGuard {
-    // SAFETY: Accessing atomic field on current CPU's PCR.
-    unsafe { pcr::current_pcr() }
-        .syscall_pid
-        .store(pid, Ordering::Release);
-    let mut guard = CURRENT_TASK_PROVIDER.lock();
-    let original = *guard;
-    *guard = Some(syscall_process_id_provider);
-    SyscallProviderGuard { original }
-}
-
-/// Restore the task provider explicitly. Prefer using the RAII guard from
-/// `set_syscall_process_id` instead; this exists for backward compatibility.
-pub fn restore_task_provider(provider: Option<fn() -> u32>) {
-    let mut guard = CURRENT_TASK_PROVIDER.lock();
-    *guard = provider;
-}
-
-fn current_process_id() -> u32 {
-    let guard = CURRENT_TASK_PROVIDER.lock();
-    if let Some(cb) = *guard {
-        cb()
-    } else {
-        slopos_abi::task::INVALID_PROCESS_ID
+/// Override the per-CPU process ID.  Used only by test harnesses that
+/// need to set up a synthetic process context for `copy_from_user`.
+/// Production code never calls this — the scheduler maintains the
+/// value via context switches.
+pub fn set_test_process_id(pid: u32) {
+    unsafe {
+        pcr::current_pcr().syscall_pid.store(pid, Ordering::Release);
     }
 }
 

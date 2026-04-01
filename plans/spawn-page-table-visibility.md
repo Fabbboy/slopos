@@ -204,4 +204,33 @@ Failure rate with current code: ~40-60% of boots (4-6 out of 10).
 - **Poll wakeup race** (commit `fa6ee82`): register-before-check in all poll_fused impls
 - **Spawn Blocked→Ready** (same commit): task reset to Blocked before post-create writes, Ready published after all writes with Release ordering
 
-These fixes are correct and should stay. The page table visibility issue is a separate bug.
+These fixes are correct and should stay.
+
+## RESOLVED: Per-CPU `syscall_pid` Clobbered by Preemption
+
+**Actual root cause**: NOT a page table visibility race. The real bug was in
+`copy_from_user`'s process ID lookup.
+
+`syscall_handle()` (dispatch.rs:39) called `set_syscall_process_id(pid)` which
+stored the PID in `pcr.syscall_pid` and overrode `CURRENT_TASK_PROVIDER` to
+read from that per-CPU field.  When a syscall handler was preempted (e.g., by
+`run_bottom_halves()` or `prepare_to_wait()` enabling interrupts), the next
+task's syscall on the same CPU overwrote `pcr.syscall_pid`.  On resume,
+`copy_from_user` read the WRONG PID, looked up the WRONG page directory, and
+`validate_user_pages` failed because the user address was not mapped in the
+other process's page tables.
+
+**Diagnosis evidence**: VALIDATE_FAIL showed `pid=2` (compositor) and
+`dir=0x...060` for an address that was clearly in pid=3's (shell) stack.
+The poll handler's own `pid` variable (from the task struct) was correct
+(pid=3), proving the per-CPU lookup diverged from the actual task.
+
+**Fix**: Removed the `set_syscall_process_id(pid)` call from `syscall_handle`.
+The scheduler already registers `current_task_process_id` as the provider at
+init time (scheduler.rs:1047).  This reads from `scheduler_get_current_task()`
+which follows `pcr.current_task` — a value correctly updated on every context
+switch.  This is the Linux `current->mm` pattern: always follow the actual
+running task, never a stale per-CPU cache.
+
+**Verification**: 60/60 boots pass (0% failure rate, down from ~50%).
+All 2279 kernel tests pass.

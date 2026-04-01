@@ -35,9 +35,6 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         (*frame).rax = slopos_abi::syscall::ERRNO_EINVAL as u64;
     }
 
-    let pid = unsafe { (*task).process_id };
-    let _provider_guard = slopos_mm::user_copy::set_syscall_process_id(pid);
-
     let entry = syscall_lookup(sysno);
     if entry.is_null() {
         klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);

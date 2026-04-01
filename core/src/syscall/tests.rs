@@ -35,7 +35,7 @@ use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
 use slopos_mm::paging::map_page_4kb_in_dir;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
-use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_syscall_process_id};
+use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use slopos_utils::klog_info;
@@ -133,8 +133,9 @@ fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
     if slopos_mm::paging::switch_page_directory(page_dir) != 0 {
         return None;
     }
-    let _guard = set_syscall_process_id(pid);
+    set_test_process_id(pid);
     let out = f();
+    set_test_process_id(slopos_abi::task::INVALID_PROCESS_ID);
     let kernel_dir = slopos_mm::paging::paging_get_kernel_directory();
     if !kernel_dir.is_null() {
         let _ = slopos_mm::paging::switch_page_directory(kernel_dir);
