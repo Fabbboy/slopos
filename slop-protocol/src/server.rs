@@ -99,23 +99,23 @@ impl Server {
 
     /// Read one request from a client (non-blocking).
     pub fn recv_request(&mut self, client: usize) -> Result<Option<Request>, ProtocolError> {
-        match &mut self.clients[client] {
-            Some(c) if c.active => c.conn.recv::<Request>(),
+        match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => c.conn.recv::<Request>(),
             _ => Ok(None),
         }
     }
 
     /// Send an event to a client (immediate flush, no write buffer).
     pub fn send_event(&mut self, client: usize, event: &Event) -> Result<(), ProtocolError> {
-        match &self.clients[client] {
-            Some(c) if c.active => c.conn.send(event),
+        match self.clients.get(client) {
+            Some(Some(c)) if c.active => c.conn.send(event),
             _ => Err(ProtocolError::Disconnected),
         }
     }
 
     /// Check if a client is still connected.
     pub fn is_connected(&self, client: usize) -> bool {
-        matches!(&self.clients[client], Some(c) if c.active)
+        matches!(self.clients.get(client), Some(Some(c)) if c.active)
     }
 
     /// Probe a client for disconnection without consuming any messages.
@@ -124,8 +124,8 @@ impl Server {
     /// If EOF is detected, marks the client as disconnected and returns
     /// `true`.  Any data received is buffered for the next `recv_request`.
     pub fn probe_disconnected(&mut self, client: usize) -> bool {
-        match &mut self.clients[client] {
-            Some(c) if c.active => {
+        match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => {
                 if c.conn.probe_disconnected() {
                     c.active = false;
                     true
@@ -139,9 +139,10 @@ impl Server {
 
     /// Disconnect and clean up a client slot.
     pub fn disconnect(&mut self, client: usize) {
-        if self.clients[client].take().is_some() {
-            // Connection::drop closes the FD automatically.
-            self.client_count = self.client_count.saturating_sub(1);
+        if let Some(slot) = self.clients.get_mut(client) {
+            if slot.take().is_some() {
+                self.client_count = self.client_count.saturating_sub(1);
+            }
         }
     }
 

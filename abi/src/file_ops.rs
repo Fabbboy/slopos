@@ -68,11 +68,11 @@ pub trait FileOps: Send + Sync {
     /// The default delegates to `poll_wait` (register) then
     /// `poll_events` (check) for backward compatibility.
     fn poll_fused(&self, handle: usize, events: u16) -> FusedPollResult {
-        let registered = if events != 0 {
-            self.poll_wait(handle)
-        } else {
-            false
-        };
+        // Always register, even when events==0.  Linux does the same:
+        // poll_wait() is unconditional; the events mask only filters
+        // wakeups on the wake side (pollwake key check).  Callers with
+        // events==0 still need wakeup on POLLHUP/POLLERR.
+        let registered = self.poll_wait(handle);
         let revents = self.poll_events(handle, events);
         FusedPollResult {
             revents,

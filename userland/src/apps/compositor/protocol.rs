@@ -362,8 +362,8 @@ impl ProtocolBridge {
     ) {
         if let Some(idx) = self.find_surface(client_idx, surface_id) {
             let surface = &mut self.surfaces[idx];
-            if (surface.pending_damage_count as usize) < MAX_PENDING_DAMAGE {
-                let di = surface.pending_damage_count as usize;
+            let di = surface.pending_damage_count as usize;
+            if di < MAX_PENDING_DAMAGE {
                 surface.pending_damage[di] = DamageRect {
                     x0: x,
                     y0: y,
@@ -371,6 +371,17 @@ impl ProtocolBridge {
                     y1: y + h - 1,
                 };
                 surface.pending_damage_count += 1;
+            } else {
+                // Too many damage rects — collapse to full-surface damage.
+                // This matches the Wayland compositor pattern: when precise
+                // tracking is exhausted, fall back to repainting everything.
+                surface.pending_damage[0] = DamageRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: surface.width.saturating_sub(1) as i32,
+                    y1: surface.height.saturating_sub(1) as i32,
+                };
+                surface.pending_damage_count = 1;
             }
         }
     }

@@ -62,8 +62,13 @@ impl Client {
 
     fn allocate_id(&mut self) -> u32 {
         let id = self.next_id;
-        // Wrapping add, but skip 0 to avoid collisions with sentinel values.
-        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.next_id = self.next_id.wrapping_add(1);
+        // Skip 0: many protocol paths use 0 as "no object" sentinel.
+        // Wrapping from u32::MAX reuses ID 1, which is safe because
+        // 4 billion allocations will never happen in a single session.
+        if self.next_id == 0 {
+            self.next_id = 1;
+        }
         id
     }
 
@@ -292,23 +297,30 @@ impl Client {
     /// is usually already buffered by the time any app needs geometry),
     /// falling back to a blocking `wait_recv()` only if it hasn't arrived.
     ///
-    /// Call this before the first operation that needs display geometry
-    /// (typically surface creation).
+    /// Total wait is capped at 10 seconds.  Call this before the first
+    /// operation that needs display geometry (typically surface creation).
     pub fn ensure_output_info(&mut self) -> Result<(), ProtocolError> {
         if self.output.width > 0 {
             return Ok(());
         }
 
-        // Loop until we receive OutputInfo, discarding any stale events
-        // (e.g. FrameDone, Error) that arrived before it.
-        //
-        // Fast path first: data may already be in the socket buffer.
-        for _ in 0..64 {
+        // Total deadline: 10 seconds from now.  Each blocking wait uses
+        // the remaining time, so we never exceed the deadline regardless
+        // of how many non-OutputInfo events arrive.
+        const TOTAL_TIMEOUT_MS: u64 = 10_000;
+        let start = crate::timestamp_ms();
+        let deadline = start.saturating_add(TOTAL_TIMEOUT_MS);
+
+        loop {
             let event = match self.conn.recv::<Event>()? {
                 Some(e) => e,
                 None => {
-                    // Slow path: block via poll().
-                    self.conn.wait_recv::<Event>(10_000)?
+                    let now = crate::timestamp_ms();
+                    if now >= deadline {
+                        return Err(ProtocolError::Timeout);
+                    }
+                    let remaining = (deadline - now) as i32;
+                    self.conn.wait_recv::<Event>(remaining)?
                 }
             };
             if let Event::OutputInfo {
@@ -326,9 +338,8 @@ impl Client {
                 };
                 return Ok(());
             }
-            // Not OutputInfo — discard and try again.
+            // Not OutputInfo — discard and try again within the deadline.
         }
-        Err(ProtocolError::Timeout)
     }
 
     // ── Convenience accessors ─────────────────────────────────────────────

@@ -93,7 +93,10 @@ pub fn is_initialized() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Maximum number of deferred destroy requests that can be queued.
-const PENDING_DESTROY_CAP: usize = 32;
+///
+/// Sized to handle the worst case: all MAX_SURFACES (32) destroyed in one
+/// frame plus re-queued entries from a failed prior flush (another 32).
+const PENDING_DESTROY_CAP: usize = 64;
 
 struct PendingDestroy {
     entries: [(u32, u32); PENDING_DESTROY_CAP], // (toplevel_id, surface_id)
@@ -123,6 +126,11 @@ pub fn queue_destroy(toplevel_id: u32, surface_id: u32) {
         if idx < PENDING_DESTROY_CAP {
             q.entries[idx] = (toplevel_id, surface_id);
             q.count = idx + 1;
+        } else {
+            // Queue full — destroy is lost.  This indicates a bug:
+            // flush_pending_destroys() is not being called frequently enough
+            // or a pathological number of surfaces are being dropped at once.
+            crate::syscall::tty::write(b"warn: destroy queue full, surface leak\n");
         }
     }
 }
