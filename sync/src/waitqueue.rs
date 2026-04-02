@@ -178,9 +178,15 @@ impl WaitQueue {
                 let mut inner = self.inner.lock();
                 // Re-check condition under lock to close the race window.
                 if condition() {
+                    inner.remove_task(task);
                     finish_wait();
                     return true;
                 }
+                // Remove any stale entry from a prior iteration before
+                // re-enqueuing.  A timeout wakeup does not dequeue us,
+                // so without this we'd leak duplicate entries and
+                // eventually exhaust the 32-slot capacity.
+                inner.remove_task(task);
                 if !inner.enqueue(task) {
                     // Queue full — cannot wait.
                     finish_wait();

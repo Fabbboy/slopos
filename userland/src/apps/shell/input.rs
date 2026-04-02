@@ -54,6 +54,61 @@ static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
 static PROMPT_COLORS_LEN: super::SyncUnsafeCell<usize> = super::SyncUnsafeCell::new(0);
 static SCROLL_ACCUM: super::SyncUnsafeCell<i32> = super::SyncUnsafeCell::new(0);
 
+// ---------------------------------------------------------------------------
+// Deferred event queue: events received during clipboard paste are buffered
+// here and drained on the next call to `poll_protocol_events`.
+// ---------------------------------------------------------------------------
+
+const DEFERRED_CAPACITY: usize = 16;
+
+struct DeferredQueue {
+    buf: [InputEvent; DEFERRED_CAPACITY],
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl DeferredQueue {
+    const fn new() -> Self {
+        // SAFETY: InputEvent is #[repr(C)] with all-zero-bit-pattern valid
+        // (Default sets event_type to KeyPress which is 0, and all other
+        // fields to zero).  We need `zeroed()` here because `InputEvent`
+        // does not implement `Copy` in a const context for array init.
+        Self {
+            buf: unsafe { core::mem::zeroed() },
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, evt: InputEvent) {
+        if self.count >= DEFERRED_CAPACITY {
+            return; // full -- drop oldest-style would complicate things; just drop newest
+        }
+        self.buf[self.tail] = evt;
+        self.tail = (self.tail + 1) % DEFERRED_CAPACITY;
+        self.count += 1;
+    }
+
+    fn pop(&mut self) -> Option<InputEvent> {
+        if self.count == 0 {
+            return None;
+        }
+        let evt = self.buf[self.head];
+        self.head = (self.head + 1) % DEFERRED_CAPACITY;
+        self.count -= 1;
+        Some(evt)
+    }
+}
+
+static DEFERRED: super::SyncUnsafeCell<DeferredQueue> =
+    super::SyncUnsafeCell::new(DeferredQueue::new());
+
+fn with_deferred<R>(f: impl FnOnce(&mut DeferredQueue) -> R) -> R {
+    f(unsafe { &mut *DEFERRED.get() })
+}
+
 pub fn read_command_line(
     tokens: &mut [*const u8; SHELL_MAX_TOKENS],
     prompt: &[u8],
@@ -504,9 +559,7 @@ fn input_loop(
                     delete_selection(&mut sel, &mut len, &mut cursor_pos);
                 }
                 let mut paste_buf = [0u8; 256];
-                let mut deferred_events = [InputEvent::default(); 8];
-                let (pasted, _deferred_n) =
-                    protocol_clipboard_paste(&mut paste_buf, &mut deferred_events);
+                let pasted = protocol_clipboard_paste(&mut paste_buf);
                 if pasted > 0 {
                     let mut filtered = [0u8; 256];
                     let mut flen = 0;
@@ -730,9 +783,27 @@ fn redraw(
 }
 
 /// Poll protocol events from the compositor and convert them to InputEvents.
+///
+/// Drains the deferred queue first (events stashed during clipboard paste),
+/// then polls fresh events from the compositor socket.
 pub(crate) fn poll_protocol_events(events: &mut [InputEvent]) -> usize {
-    let mut client = protocol_client::client();
     let mut count = 0usize;
+
+    // Phase 1: drain deferred events that were buffered during paste.
+    with_deferred(|q| {
+        while count < events.len() {
+            match q.pop() {
+                Some(evt) => {
+                    events[count] = evt;
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+    });
+
+    // Phase 2: poll the compositor socket for fresh events.
+    let mut client = protocol_client::client();
     while count < events.len() {
         match client.poll_event() {
             Ok(Some(evt)) => {
@@ -794,35 +865,31 @@ fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
 
 /// Request clipboard paste from the compositor and wait for the result.
 ///
-/// Non-paste events received while waiting are buffered and replayed
-/// into `deferred_out` so they are not lost.
-fn protocol_clipboard_paste(buf: &mut [u8], deferred_out: &mut [InputEvent]) -> (usize, usize) {
+/// Non-paste events received while waiting are pushed into the module-level
+/// `DeferredQueue` so they are replayed on the next `poll_protocol_events`
+/// call -- no events are lost regardless of type.
+fn protocol_clipboard_paste(buf: &mut [u8]) -> usize {
     let mut client = protocol_client::client();
     if client.clipboard_paste().is_err() {
-        return (0, 0);
+        return 0;
     }
-    let mut deferred_count = 0usize;
     for _ in 0..100 {
         match client.poll_event() {
             Ok(Some(ProtocolEvent::PasteResult(cb))) => {
                 let copy = (cb.len as usize).min(buf.len());
                 buf[..copy].copy_from_slice(&cb.data[..copy]);
-                return (copy, deferred_count);
+                return copy;
             }
             Ok(Some(other)) => {
-                // Buffer non-paste events so they are not lost.
-                if deferred_count < deferred_out.len() {
-                    if let Some(evt) = protocol_event_to_input_event(&other) {
-                        deferred_out[deferred_count] = evt;
-                        deferred_count += 1;
-                    }
+                if let Some(evt) = protocol_event_to_input_event(&other) {
+                    with_deferred(|q| q.push(evt));
                 }
             }
             Ok(None) => {
                 sys_core::yield_now();
             }
-            Err(_) => return (0, deferred_count),
+            Err(_) => return 0,
         }
     }
-    (0, deferred_count)
+    0
 }

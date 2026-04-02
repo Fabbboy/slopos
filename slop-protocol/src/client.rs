@@ -299,11 +299,18 @@ impl Client {
             return Ok(());
         }
 
-        // Fast path: data may already be in the socket buffer — try a
-        // non-blocking recv before resorting to poll().  This avoids the
-        // kernel poll path entirely in the common case where the compositor
-        // has already accepted and pushed OutputInfo.
-        if let Some(event) = self.conn.recv::<Event>()? {
+        // Loop until we receive OutputInfo, discarding any stale events
+        // (e.g. FrameDone, Error) that arrived before it.
+        //
+        // Fast path first: data may already be in the socket buffer.
+        for _ in 0..64 {
+            let event = match self.conn.recv::<Event>()? {
+                Some(e) => e,
+                None => {
+                    // Slow path: block via poll().
+                    self.conn.wait_recv::<Event>(10_000)?
+                }
+            };
             if let Event::OutputInfo {
                 width,
                 height,
@@ -319,28 +326,9 @@ impl Client {
                 };
                 return Ok(());
             }
-            return Err(ProtocolError::MalformedMessage);
+            // Not OutputInfo — discard and try again.
         }
-
-        // Slow path: data not yet buffered.  Block via poll().
-        let event = self.conn.wait_recv::<Event>(10_000)?;
-        if let Event::OutputInfo {
-            width,
-            height,
-            format,
-            pitch,
-        } = event
-        {
-            self.output = OutputInfo {
-                width,
-                height,
-                format,
-                pitch,
-            };
-            Ok(())
-        } else {
-            Err(ProtocolError::MalformedMessage)
-        }
+        Err(ProtocolError::Timeout)
     }
 
     // ── Convenience accessors ─────────────────────────────────────────────

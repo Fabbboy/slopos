@@ -31,17 +31,39 @@ impl FileOps for UnixSocketFileOps {
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
         let idx = raw_idx(handle);
-        let mut tmp = [0u8; IO_STAGING_SIZE];
-        let read_len = buf.len().min(tmp.len());
-        let n = unix_socket::unix_recv(idx, &mut tmp[..read_len]);
-        if n <= 0 {
-            return n as isize;
+        let mut staging = [0u8; IO_STAGING_SIZE];
+        let buf_len = buf.len();
+        let mut total = 0usize;
+
+        while total < buf_len {
+            let chunk = (buf_len - total).min(staging.len());
+            let n = unix_socket::unix_recv(idx, &mut staging[..chunk]);
+            if n < 0 {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    n as isize
+                };
+            }
+            if n == 0 {
+                break; // EOF
+            }
+            let n = n as usize;
+            match buf.copy_in(total, &staging[..n]) {
+                Ok(written) => total += written,
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        e.as_isize()
+                    };
+                }
+            }
+            if n < chunk {
+                break; // Short read — don't loop to avoid blocking
+            }
         }
-        let n = (n as usize).min(read_len);
-        match buf.copy_in(0, &tmp[..n]) {
-            Ok(written) => written as isize,
-            Err(e) => e.as_isize(),
-        }
+        total as isize
     }
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
@@ -88,6 +110,7 @@ impl FileOps for UnixSocketFileOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
+            open_file_idx: 0,
         }
     }
 

@@ -103,7 +103,12 @@ impl Connection {
         }
 
         let start = crate::timestamp_ms();
-        let deadline = start.saturating_add(timeout_ms as u64);
+        // Treat negative timeout as "no timeout" by saturating to u64::MAX.
+        let deadline = if timeout_ms < 0 {
+            u64::MAX
+        } else {
+            start.saturating_add(timeout_ms as u64)
+        };
         loop {
             let now = crate::timestamp_ms();
             if now >= deadline {
@@ -123,7 +128,11 @@ impl Connection {
     /// using a real-time deadline to avoid unbounded waits.
     fn poll_readable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
         const EINTR: i32 = -4;
-        let deadline = crate::timestamp_ms().saturating_add(timeout_ms as u64);
+        let deadline = if timeout_ms < 0 {
+            u64::MAX
+        } else {
+            crate::timestamp_ms().saturating_add(timeout_ms as u64)
+        };
         loop {
             let now = crate::timestamp_ms();
             if now >= deadline {
@@ -135,7 +144,7 @@ impl Connection {
                 events: POLLIN,
                 revents: 0,
             };
-            let result = crate::raw_poll(&mut pfd, 1, remaining as i64);
+            let result = crate::raw_poll(&mut pfd, remaining as i64);
             if result == EINTR {
                 continue;
             }
@@ -160,7 +169,11 @@ impl Connection {
     /// using a real-time deadline to avoid unbounded waits.
     fn poll_writable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
         const EINTR: i32 = -4;
-        let deadline = crate::timestamp_ms().saturating_add(timeout_ms as u64);
+        let deadline = if timeout_ms < 0 {
+            u64::MAX
+        } else {
+            crate::timestamp_ms().saturating_add(timeout_ms as u64)
+        };
         loop {
             let now = crate::timestamp_ms();
             if now >= deadline {
@@ -172,7 +185,7 @@ impl Connection {
                 events: POLLOUT,
                 revents: 0,
             };
-            let result = crate::raw_poll(&mut pfd, 1, remaining as i64);
+            let result = crate::raw_poll(&mut pfd, remaining as i64);
             if result == EINTR {
                 continue;
             }
@@ -259,9 +272,14 @@ impl Connection {
     /// Consume the connection and return the raw FD without closing it.
     ///
     /// The caller takes ownership of the FD and is responsible for closing it.
-    pub fn into_raw_fd(self) -> i32 {
+    /// The heap-allocated read buffer is properly freed.
+    pub fn into_raw_fd(mut self) -> i32 {
         let fd = self.fd;
-        core::mem::forget(self);
+        // Prevent Drop from closing the FD by setting it to an invalid value.
+        self.fd = -1;
+        // `self` drops here normally, which:
+        // - Frees `read_buf` (Box drop)
+        // - Calls Drop::drop which calls close(-1) — harmless no-op
         fd
     }
 

@@ -22,11 +22,7 @@ fn transition_to_c_int(success: bool) -> c_int {
     if success { 0 } else { -1 }
 }
 
-fn apply_state_transition(
-    task_ref: &mut Task,
-    new_status: TaskStatus,
-    reason: BlockReason,
-) -> c_int {
+fn apply_state_transition(task_ref: &Task, new_status: TaskStatus, reason: BlockReason) -> c_int {
     match new_status {
         TaskStatus::Ready => transition_to_c_int(task_ref.mark_ready()),
         TaskStatus::Running => transition_to_c_int(task_ref.mark_running()),
@@ -49,7 +45,7 @@ pub fn task_set_state_with_reason(
         return -1;
     }
 
-    let task_ref = unsafe { &mut *task };
+    let task_ref = unsafe { &*task };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }
@@ -84,7 +80,7 @@ pub fn task_set_state_from_with_reason(
     if task.is_null() {
         return -1;
     }
-    let task_ref = unsafe { &mut *task };
+    let task_ref = unsafe { &*task };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }

@@ -136,8 +136,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
 
         // Set block reason before releasing the bucket lock.
         unsafe {
-            let task = &mut *current;
-            task.block_reason = BlockReason::FutexWait;
+            (*current).store_block_reason(BlockReason::FutexWait);
             prepare_to_wait();
         }
     }

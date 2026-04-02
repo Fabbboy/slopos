@@ -267,20 +267,8 @@ impl InputHandler {
     /// This ensures the correct window already has focus by the time a PS/2
     /// button IRQ fires, so button events are routed to the right client.
     ///
-    /// With the protocol migration, pointer focus is tracked locally by the
-    /// compositor; enter/leave events are sent via the ProtocolBridge in the
-    /// main loop.  No kernel syscall needed.
-    pub fn update_pointer_focus(
-        &mut self,
-        windows: &[UserWindowInfo; MAX_WINDOWS],
-        window_count: u32,
-    ) {
-        // Pointer focus is now purely local — the compositor routes events
-        // to protocol clients via send_pointer_enter/leave in the main loop.
-        // This method still runs the hit-test so other code can query focus,
-        // but no kernel syscall is issued.
-        let _ = (windows, window_count);
-    }
+    // update_pointer_focus removed — pointer focus is tracked locally by the
+    // compositor; enter/leave events are sent via ProtocolBridge in the main loop.
 
     pub fn sync_keyboard_focus(
         &mut self,

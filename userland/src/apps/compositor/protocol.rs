@@ -124,6 +124,11 @@ pub struct ProtocolBridge {
     display_height: u32,
     display_format: u32,
     display_pitch: u32,
+    /// Bitmask of clients that have requested pointer capability.
+    /// Bit `i` set means client at index `i` has pointer.
+    client_has_pointer: u32,
+    /// Bitmask of clients that have requested keyboard capability.
+    client_has_keyboard: u32,
 }
 
 impl ProtocolBridge {
@@ -150,6 +155,8 @@ impl ProtocolBridge {
             display_height: 0,
             display_format: 0,
             display_pitch: 0,
+            client_has_pointer: 0,
+            client_has_keyboard: 0,
         })
     }
 
@@ -322,6 +329,11 @@ impl ProtocolBridge {
         self.surfaces[slot].surface_id = new_id;
         self.surfaces[slot].z_order = self.next_z_order;
         self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
+        // Apply per-client input capabilities to new surfaces.
+        if client_idx < 32 {
+            self.surfaces[slot].has_pointer = (self.client_has_pointer >> client_idx) & 1 != 0;
+            self.surfaces[slot].has_keyboard = (self.client_has_keyboard >> client_idx) & 1 != 0;
+        }
     }
 
     fn handle_surface_attach(
@@ -403,6 +415,11 @@ impl ProtocolBridge {
             None => return,
         };
 
+        // A surface can only have one role (Wayland protocol requirement).
+        if self.surfaces[idx].role != SurfaceRole::None {
+            return;
+        }
+
         self.surfaces[idx].role = SurfaceRole::Toplevel;
         self.surfaces[idx].toplevel_id = new_id;
     }
@@ -455,10 +472,21 @@ impl ProtocolBridge {
         parent_id: u32,
         _new_id: u32,
     ) {
+        // Reject self-parenting — creates a cycle in the surface tree.
+        if surface_id == parent_id {
+            return;
+        }
+
         let idx = match self.find_surface(client_idx, surface_id) {
             Some(i) => i,
             None => return,
         };
+
+        // A surface can only have one role.
+        if self.surfaces[idx].role != SurfaceRole::None {
+            return;
+        }
+
         let parent_idx = match self.find_surface(client_idx, parent_id) {
             Some(i) => i,
             None => return,
@@ -521,6 +549,12 @@ impl ProtocolBridge {
             Some(i) => i,
             None => return,
         };
+
+        // A surface can only have one role.
+        if self.surfaces[idx].role != SurfaceRole::None {
+            return;
+        }
+
         let parent_idx = self.find_surface(client_idx, parent_id);
 
         self.surfaces[idx].role = SurfaceRole::Popup;
@@ -539,7 +573,10 @@ impl ProtocolBridge {
     // ── Seat / Input ───────────────────────────────────────────────────────
 
     fn handle_get_pointer(&mut self, client_idx: usize, _new_id: u32) {
-        // Mark all surfaces owned by this client as having a pointer
+        // Record capability per-client so future surfaces inherit it.
+        if client_idx < 32 {
+            self.client_has_pointer |= 1 << client_idx;
+        }
         for s in &mut self.surfaces {
             if s.active && s.client_idx == client_idx {
                 s.has_pointer = true;
@@ -548,7 +585,9 @@ impl ProtocolBridge {
     }
 
     fn handle_get_keyboard(&mut self, client_idx: usize, _new_id: u32) {
-        // Mark all surfaces owned by this client as having a keyboard
+        if client_idx < 32 {
+            self.client_has_keyboard |= 1 << client_idx;
+        }
         for s in &mut self.surfaces {
             if s.active && s.client_idx == client_idx {
                 s.has_keyboard = true;
@@ -1018,6 +1057,11 @@ impl ProtocolBridge {
             if self.surfaces[i].active && self.surfaces[i].client_idx == client_idx {
                 self.destroy_surface(i);
             }
+        }
+        // Clear per-client capability bits.
+        if client_idx < 32 {
+            self.client_has_pointer &= !(1 << client_idx);
+            self.client_has_keyboard &= !(1 << client_idx);
         }
         self.server.disconnect(client_idx);
     }

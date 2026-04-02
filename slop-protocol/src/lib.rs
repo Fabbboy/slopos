@@ -19,17 +19,17 @@ pub use connection::Connection;
 pub use server::Server;
 pub use types::*;
 
-/// Thin wrapper around the poll syscall for use by Connection.
-pub(crate) fn raw_poll(
-    pfd: &mut slopos_abi::syscall::types::UserPollFd,
-    nfds: u32,
-    timeout_ms: i64,
-) -> i32 {
+/// Poll a single FD via the poll syscall.
+///
+/// Hardcodes `nfds=1` because the function takes a reference to a single
+/// `UserPollFd`, not a slice.  Passing `nfds > 1` with a single-struct
+/// pointer would read out of bounds.
+pub(crate) fn raw_poll(pfd: &mut slopos_abi::syscall::types::UserPollFd, timeout_ms: i64) -> i32 {
     unsafe {
         slopos_slibc::pal::raw::syscall3(
             slopos_abi::syscall::numbers::SYSCALL_POLL,
             pfd as *mut _ as u64,
-            nfds as u64,
+            1u64,
             timeout_ms as u64,
         ) as i32
     }

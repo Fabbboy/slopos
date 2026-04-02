@@ -49,6 +49,10 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let mut last_tick_ms: u64 = crate::syscall::core::get_time_ms();
 
     loop {
+        // Flush any deferred Surface::drop destroy requests before
+        // borrowing the client for anything else this iteration.
+        protocol_client::flush_pending_destroys();
+
         // --- Poll input events ---
         let count = win.poll_protocol_events(&mut proto_events);
         let mut unhandled_key: Option<(super::event::Key, super::event::Modifiers)> = None;

@@ -74,7 +74,9 @@ impl Surface {
 
         let shm = ShmBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
 
-        let _ = client.surface_attach(protocol_surface_id, shm.token(), width, height);
+        client
+            .surface_attach(protocol_surface_id, shm.token(), width, height)
+            .map_err(|_| SurfaceError::AttachFailed)?;
 
         Ok(Self {
             shm,
@@ -147,12 +149,14 @@ impl Surface {
         let new_shm = ShmBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
 
         let mut client = protocol_client::client();
-        let _ = client.surface_attach(
-            self.protocol_surface_id,
-            new_shm.token(),
-            new_width,
-            new_height,
-        );
+        client
+            .surface_attach(
+                self.protocol_surface_id,
+                new_shm.token(),
+                new_width,
+                new_height,
+            )
+            .map_err(|_| SurfaceError::AttachFailed)?;
 
         // Old ShmBuffer dropped here. shm_destroy defers the page free
         // if the compositor still holds a read-only mapping -- safe by design.
@@ -200,5 +204,27 @@ impl Surface {
     #[inline]
     pub fn protocol_toplevel_id(&self) -> u32 {
         self.protocol_toplevel_id
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        // Destroy compositor-side objects so we don't leak the limited
+        // per-client surface slots (MAX_SURFACES = 32).
+        // Use try_client to avoid panicking if the client isn't initialized
+        // or if the RefCell is already borrowed.
+        if let Some(mut client) = protocol_client::try_client() {
+            if self.protocol_toplevel_id != 0 {
+                let _ = client.toplevel_destroy(self.protocol_toplevel_id);
+            }
+            if self.protocol_surface_id != 0 {
+                let _ = client.surface_destroy(self.protocol_surface_id);
+            }
+        } else {
+            // Client RefCell already borrowed (or not initialized) — defer
+            // the destroy so the event loop flushes it at a safe point.
+            protocol_client::queue_destroy(self.protocol_toplevel_id, self.protocol_surface_id);
+        }
+        // ShmBuffer dropped automatically after this.
     }
 }

@@ -10,7 +10,9 @@ use slopos_abi::syscall::{
     UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
-use slopos_fs::fileio::{file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused};
+use slopos_fs::fileio::{
+    file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused_by_idx,
+};
 
 use slopos_kernel_services::driver_runtime::{
     current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, run_bottom_halves,
@@ -82,7 +84,10 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
 
         // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready_count = 0u64;
-        let mut registered_fds = [0i32; SELECT_MAX_FDS];
+        // Store open_file_idx for cleanup instead of FD numbers to avoid
+        // the TOCTOU where an FD is closed and reassigned between
+        // registration and cleanup.
+        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
         let mut reg_count = 0usize;
 
         for idx in 0..nfds {
@@ -98,8 +103,8 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
                 if result.revents != 0 {
                     ready_count += 1;
                 }
-                if result.registered && reg_count < registered_fds.len() {
-                    registered_fds[reg_count] = pfd.fd as i32;
+                if result.registered && reg_count < registered_ofis.len() {
+                    registered_ofis[reg_count] = result.open_file_idx;
                     reg_count += 1;
                 }
             }
@@ -109,8 +114,8 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         macro_rules! cleanup {
             () => {
                 slopos_kernel_services::driver_runtime::finish_wait();
-                for &fd in &registered_fds[..reg_count] {
-                    file_poll_unfused(pid, fd);
+                for &ofi in &registered_ofis[..reg_count] {
+                    file_poll_unfused_by_idx(ofi);
                 }
             };
         }
@@ -256,7 +261,10 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
 
         // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready = 0u64;
-        let mut registered_fds = [0i32; SELECT_MAX_FDS];
+        // Store open_file_idx for cleanup instead of FD numbers to avoid
+        // the TOCTOU where an FD is closed and reassigned between
+        // registration and cleanup.
+        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
         let mut reg_count = 0usize;
 
         for fd in 0..nfds {
@@ -293,8 +301,8 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
                 fdset_set(&mut except_out[..bytes_len], fd);
                 ready += 1;
             }
-            if result.registered && reg_count < registered_fds.len() {
-                registered_fds[reg_count] = fd as i32;
+            if result.registered && reg_count < registered_ofis.len() {
+                registered_ofis[reg_count] = result.open_file_idx;
                 reg_count += 1;
             }
         }
@@ -302,8 +310,8 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         macro_rules! cleanup {
             () => {
                 slopos_kernel_services::driver_runtime::finish_wait();
-                for &fd in &registered_fds[..reg_count] {
-                    file_poll_unfused(pid, fd);
+                for &ofi in &registered_ofis[..reg_count] {
+                    file_poll_unfused_by_idx(ofi);
                 }
             };
         }

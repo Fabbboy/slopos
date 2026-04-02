@@ -351,7 +351,7 @@ pub struct Task {
     state_atomic: AtomicU8,
     pub priority: u8,
     pub flags: u16,
-    pub block_reason: BlockReason,
+    block_reason: AtomicU8,
     _pad0: [u8; 3],
     pub process_id: u32,
     pub stack_base: u64,
@@ -427,7 +427,7 @@ impl Task {
             state_atomic: AtomicU8::new(TaskStatus::Invalid.as_u8()),
             priority: TASK_PRIORITY_NORMAL,
             flags: 0,
-            block_reason: BlockReason::None,
+            block_reason: AtomicU8::new(BlockReason::None.as_u8()),
             _pad0: [0; 3],
             process_id: INVALID_PROCESS_ID,
             stack_base: 0,
@@ -537,15 +537,16 @@ impl Task {
 
     /// Block from a specific expected state, setting the block reason.
     ///
+    /// Stores `reason` *before* the CAS so the Release ordering on
+    /// `state_atomic` publishes it to any CPU that Acquire-loads the
+    /// Blocked state.  If the CAS fails the stale reason is harmless
+    /// because no reader inspects `block_reason` unless `state == Blocked`.
+    ///
     /// Returns `true` only if the CAS `expected → Blocked` succeeded.
     #[inline]
-    pub fn block_from(&mut self, expected: TaskStatus, reason: BlockReason) -> bool {
-        if self.try_transition_from(expected, TaskStatus::Blocked) {
-            self.block_reason = reason;
-            true
-        } else {
-            false
-        }
+    pub fn block_from(&self, expected: TaskStatus, reason: BlockReason) -> bool {
+        self.block_reason.store(reason.as_u8(), Ordering::Relaxed);
+        self.try_transition_from(expected, TaskStatus::Blocked)
     }
 
     #[inline]
@@ -559,13 +560,25 @@ impl Task {
     }
 
     #[inline]
-    pub fn block(&mut self, reason: BlockReason) -> bool {
-        if self.try_transition_to(TaskStatus::Blocked) {
-            self.block_reason = reason;
-            true
-        } else {
-            false
-        }
+    pub fn block(&self, reason: BlockReason) -> bool {
+        self.block_reason.store(reason.as_u8(), Ordering::Relaxed);
+        self.try_transition_to(TaskStatus::Blocked)
+    }
+
+    /// Load the block reason.  Only meaningful when `status() == Blocked`.
+    ///
+    /// Callers must first Acquire-load `state_atomic` (via `status()`,
+    /// `is_blocked()`, etc.) to synchronise with the writer's Release CAS.
+    #[inline]
+    pub fn load_block_reason(&self) -> BlockReason {
+        BlockReason::from_u8(self.block_reason.load(Ordering::Relaxed))
+    }
+
+    /// Store the block reason directly (e.g. for futex, which sets the
+    /// reason before the generic block path runs).
+    #[inline]
+    pub fn store_block_reason(&self, reason: BlockReason) {
+        self.block_reason.store(reason.as_u8(), Ordering::Relaxed);
     }
 
     #[inline]

@@ -39,12 +39,16 @@ const UNIX_PATH_MAX: usize = 108;
 const MAX_BACKLOG: usize = 32;
 
 // ---------------------------------------------------------------------------
-// Wait queues — one set per socket slot, separate from UNIX_STATE.
+// Wait queues — one per socket slot, separate from UNIX_STATE.
+//
+// Unified design (Linux `sk->sk_wq` pattern): all blocking paths (recv,
+// send, accept) and poll share a single queue per socket.  Spurious wakeups
+// are harmless — every waiter re-checks its condition in a loop.  This
+// eliminates the TOCTOU where poll registers on the wrong queue because
+// the socket type changed between the state check and registration.
 // ---------------------------------------------------------------------------
 
-static RECV_WQS: [WaitQueue; MAX_UNIX_SOCKETS] = [const { WaitQueue::new() }; MAX_UNIX_SOCKETS];
-static SEND_WQS: [WaitQueue; MAX_UNIX_SOCKETS] = [const { WaitQueue::new() }; MAX_UNIX_SOCKETS];
-static ACCEPT_WQS: [WaitQueue; MAX_UNIX_SOCKETS] = [const { WaitQueue::new() }; MAX_UNIX_SOCKETS];
+static SOCKET_WQS: [WaitQueue; MAX_UNIX_SOCKETS] = [const { WaitQueue::new() }; MAX_UNIX_SOCKETS];
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -383,7 +387,7 @@ pub fn unix_accept(idx: u32) -> i32 {
         }
 
         // Block until a connection arrives.
-        ACCEPT_WQS[i].wait_event(|| {
+        SOCKET_WQS[i].wait_event(|| {
             let state = UNIX_STATE.lock();
             let slot = &state.slots[i];
             !slot.valid || slot.backlog_len > 0
@@ -492,7 +496,7 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
     drop(state);
 
     // Wake the listener's accept() call.
-    ACCEPT_WQS[listener_idx].wake_all();
+    SOCKET_WQS[listener_idx].wake_all();
 
     0
 }
@@ -512,11 +516,17 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
 
     let input = data;
 
+    // Capture generation at entry so condition closures can detect slot reuse.
+    let slot_gen = {
+        let state = UNIX_STATE.lock();
+        state.slots[i].generation
+    };
+
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
             let slot = &state.slots[i];
-            if !slot.valid || slot.state != UnixState::Connected {
+            if !slot.valid || slot.state != UnixState::Connected || slot.generation != slot_gen {
                 return -107; // ENOTCONN
             }
             if slot.peer_closed {
@@ -539,6 +549,9 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
                 return -32; // EPIPE
             }
 
+            // Also validate peer slot generation hasn't changed.
+            let peer_gen = state.slots[a_idx].generation;
+
             let a_slot = &mut state.slots[a_idx];
             let buf = match side {
                 PairSide::A => &mut a_slot.buf_a_to_b,
@@ -547,7 +560,7 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
 
             if buf.has_space() {
                 let n = buf.write_from(input);
-                Ok(n)
+                Ok((n, peer, peer_gen))
             } else {
                 // Check non-blocking before deciding to block.
                 let nb = state.slots[i].nonblocking;
@@ -556,14 +569,11 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
         };
 
         match result {
-            Ok(n) => {
+            Ok((n, peer, _peer_gen)) => {
                 // Wake the peer's recv wait queue.
-                let peer = {
-                    let state = UNIX_STATE.lock();
-                    state.slots[i].peer_idx as usize
-                };
+                // peer was captured under the lock above — no re-acquire needed.
                 if peer < MAX_UNIX_SOCKETS {
-                    RECV_WQS[peer].wake_all();
+                    SOCKET_WQS[peer].wake_all();
                 }
                 return n as i32;
             }
@@ -573,11 +583,14 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
             }
             Err(false) => {
                 // Block until space is available or peer closes.
-                SEND_WQS[i].wait_event(|| {
+                SOCKET_WQS[i].wait_event(|| {
                     let state = UNIX_STATE.lock();
                     let slot = &state.slots[i];
-                    if !slot.valid || slot.state != UnixState::Connected {
-                        return true;
+                    if !slot.valid
+                        || slot.state != UnixState::Connected
+                        || slot.generation != slot_gen
+                    {
+                        return true; // Slot reused — bail out.
                     }
                     if slot.peer_closed {
                         return true;
@@ -616,11 +629,17 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
 
     let out = buf;
 
+    // Capture generation at entry so condition closures can detect slot reuse.
+    let slot_gen = {
+        let state = UNIX_STATE.lock();
+        state.slots[i].generation
+    };
+
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
             let slot = &state.slots[i];
-            if !slot.valid || slot.state != UnixState::Connected {
+            if !slot.valid || slot.state != UnixState::Connected || slot.generation != slot_gen {
                 return -107; // ENOTCONN
             }
 
@@ -647,10 +666,10 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
 
             if !rbuf.is_empty() {
                 let n = rbuf.read_into(out);
-                Ok(n)
+                Ok((n, peer))
             } else if peer_closed {
                 // EOF — peer has closed.
-                Ok(0)
+                Ok((0, peer))
             } else {
                 let nb = state.slots[i].nonblocking;
                 Err(nb)
@@ -658,15 +677,12 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
         };
 
         match result {
-            Ok(n) => {
+            Ok((n, peer)) => {
                 if n > 0 {
                     // Wake the peer's send wait queue (we freed buffer space).
-                    let peer = {
-                        let state = UNIX_STATE.lock();
-                        state.slots[i].peer_idx as usize
-                    };
+                    // peer was captured under the lock above — no re-acquire needed.
                     if peer < MAX_UNIX_SOCKETS {
-                        SEND_WQS[peer].wake_all();
+                        SOCKET_WQS[peer].wake_all();
                     }
                 }
                 return n as i32;
@@ -676,11 +692,14 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
             }
             Err(false) => {
                 // Block until data arrives or peer closes.
-                RECV_WQS[i].wait_event(|| {
+                SOCKET_WQS[i].wait_event(|| {
                     let state = UNIX_STATE.lock();
                     let slot = &state.slots[i];
-                    if !slot.valid || slot.state != UnixState::Connected {
-                        return true;
+                    if !slot.valid
+                        || slot.state != UnixState::Connected
+                        || slot.generation != slot_gen
+                    {
+                        return true; // Slot reused — bail out.
                     }
                     if slot.peer_closed {
                         return true;
@@ -793,8 +812,7 @@ pub fn unix_close(idx: u32) -> i32 {
     // Wake peer waiters outside the lock.
     if let Some(peer) = wake_peer {
         if peer < MAX_UNIX_SOCKETS {
-            RECV_WQS[peer].wake_all();
-            SEND_WQS[peer].wake_all();
+            SOCKET_WQS[peer].wake_all();
         }
     }
 
@@ -802,14 +820,13 @@ pub fn unix_close(idx: u32) -> i32 {
     for k in 0..backlog_wake_count {
         let a_idx = backlog_a_peers[k];
         if a_idx < MAX_UNIX_SOCKETS {
-            RECV_WQS[a_idx].wake_all();
-            SEND_WQS[a_idx].wake_all();
+            SOCKET_WQS[a_idx].wake_all();
         }
     }
 
     // Wake blocked accept() callers on the closing listener.
     if was_listener {
-        ACCEPT_WQS[i].wake_all();
+        SOCKET_WQS[i].wake_all();
     }
 
     0
@@ -901,40 +918,12 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
         return (0, false);
     }
 
-    // ── Phase 1: Peek socket type for WQ selection ─────────────────
-    let is_listener = {
-        let state = UNIX_STATE.lock();
-        let slot = &state.slots[i];
-        if !slot.valid {
-            return (0, false);
-        }
-        slot.state == UnixState::Listening
-    };
-
-    // ── Phase 2: Register FIRST (Linux sock_poll_wait pattern) ─────
-    // By the time the readiness check below runs, the task is already
-    // visible to wake_all().  This eliminates the lost-wakeup race
-    // where data arrived between a check and a late registration.
+    // ── Phase 1: Register on the unified socket wait queue ─────────
     //
-    // Connected sockets register on RECV_WQS for POLLIN (woken by peer
-    // send) and on SEND_WQS for POLLOUT (woken by peer recv freeing
-    // buffer space).  Both are registered if both events are requested.
-    let registered = if is_listener {
-        ACCEPT_WQS[i].enqueue_current()
-    } else {
-        let mut reg = false;
-        if (requested & POLLIN) != 0 || requested == 0 {
-            reg |= RECV_WQS[i].enqueue_current();
-        }
-        if (requested & POLLOUT) != 0 {
-            reg |= SEND_WQS[i].enqueue_current();
-        }
-        // Default: at least register on RECV if no specific event requested.
-        if !reg {
-            reg = RECV_WQS[i].enqueue_current();
-        }
-        reg
-    };
+    // Single queue per socket (Linux `sk->sk_wq` pattern).  All blocking
+    // I/O and poll share it.  Spurious wakeups are harmless — every
+    // waiter re-checks its condition.
+    let registered = SOCKET_WQS[i].enqueue_current();
 
     // ── Phase 3: Check readiness AFTER registration ────────────────
     let revents = {
@@ -995,37 +984,24 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
 
 /// Enqueue the current task on the appropriate wait queue(s) for poll().
 ///
-/// Listener sockets register on `ACCEPT_WQS` (woken by `unix_connect`),
-/// connected sockets register on both `RECV_WQS` and `SEND_WQS`.
+/// Registers on all three queues unconditionally to avoid the TOCTOU
+/// race where the socket transitions between Listening and Connected
+/// after peeking state.  See `unix_poll_fused` for full rationale.
 pub fn unix_poll_register(idx: u32) -> bool {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return false;
     }
-    let is_listener = {
-        let state = UNIX_STATE.lock();
-        state.slots[i].valid && state.slots[i].state == UnixState::Listening
-    };
-    if is_listener {
-        ACCEPT_WQS[i].enqueue_current()
-    } else {
-        let r = RECV_WQS[i].enqueue_current();
-        let s = SEND_WQS[i].enqueue_current();
-        r || s
-    }
+    SOCKET_WQS[i].enqueue_current()
 }
 
-/// Remove the current task from all poll wait queues for this socket.
+/// Remove the current task from the socket's poll wait queue.
 pub fn unix_poll_unregister(idx: u32) {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return;
     }
-    // Remove from all three — the task is on at most two (RECV + SEND for
-    // connected sockets), and remove is a no-op if the task isn't present.
-    RECV_WQS[i].remove_current();
-    SEND_WQS[i].remove_current();
-    ACCEPT_WQS[i].remove_current();
+    SOCKET_WQS[i].remove_current();
 }
 
 /// Set or clear non-blocking mode on a Unix socket.

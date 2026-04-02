@@ -193,6 +193,7 @@ impl FileOps for PipeReadOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
+            open_file_idx: 0,
         }
     }
 
@@ -368,6 +369,7 @@ impl FileOps for PipeWriteOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
+            open_file_idx: 0,
         }
     }
 

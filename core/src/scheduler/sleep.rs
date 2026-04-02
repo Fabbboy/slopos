@@ -124,7 +124,7 @@ fn wake_sleeping_task(task_id: u32) {
     }
 
     let is_sleep_blocked =
-        task_is_blocked(task) && unsafe { (*task).block_reason == BlockReason::Sleep };
+        task_is_blocked(task) && unsafe { (*task).load_block_reason() == BlockReason::Sleep };
     if !is_sleep_blocked {
         return;
     }

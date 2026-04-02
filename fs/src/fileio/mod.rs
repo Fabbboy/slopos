@@ -507,6 +507,7 @@ impl FileOps for LocalTtyOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
+            open_file_idx: 0,
         }
     }
 

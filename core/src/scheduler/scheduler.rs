@@ -905,11 +905,15 @@ pub fn unblock_task(task: *mut Task) -> c_int {
 
     // Try WillBlock -> Running (task declared intent to block but hasn't yet).
     if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
+        // Cancel any pending sleep-queue entry so it doesn't fire later
+        // and spuriously transition the (now-Running) task.
+        super::sleep::cancel_sleep(task_id);
         return 0;
     }
 
     // Try Blocked -> Ready (task is fully blocked, wake it).
     if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+        super::sleep::cancel_sleep(task_id);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         return schedule_task(task);
     }

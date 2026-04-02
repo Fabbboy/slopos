@@ -79,6 +79,7 @@ impl FileOps for SocketFileOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
+            open_file_idx: 0,
         }
     }
 
@@ -88,18 +89,17 @@ impl FileOps for SocketFileOps {
         let writable = socket::socket_poll_writable(socket_idx) as u16;
         let mut revents = 0u16;
 
-        if (events & POLLIN) != 0 {
-            if (readable & 1) != 0 {
-                revents |= POLLIN;
-            }
-            revents |= readable & (POLLIN | POLLERR | POLLHUP);
+        if (events & POLLIN) != 0 && (readable & 1) != 0 {
+            revents |= POLLIN;
         }
-        if (events & POLLOUT) != 0 {
-            if (writable & 1) != 0 {
-                revents |= POLLOUT;
-            }
-            revents |= writable & (POLLOUT | POLLERR | POLLHUP);
+        if (events & POLLOUT) != 0 && (writable & 1) != 0 {
+            revents |= POLLOUT;
         }
+
+        // Per POSIX, POLLERR and POLLHUP are returned regardless of
+        // whether they were requested in `events`.
+        revents |= readable & (POLLERR | POLLHUP);
+        revents |= writable & (POLLERR | POLLHUP);
 
         revents
     }

@@ -255,7 +255,7 @@ define_syscall!(syscall_process_list(ctx, args) {
         entry.parent_task_id = task.parent_task_id;
         entry.process_id = task.process_id;
         entry.state = task.status().as_u8();
-        entry.block_reason = task.block_reason.as_u8();
+        entry.block_reason = task.load_block_reason().as_u8();
         entry.priority = task.priority;
         entry.last_cpu = task.last_cpu;
         entry.cpu_affinity = task.cpu_affinity;
