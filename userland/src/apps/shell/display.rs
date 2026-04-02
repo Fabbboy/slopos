@@ -6,7 +6,7 @@ use slopos_abi::draw::Color32;
 
 use crate::gfx::font;
 use crate::gfx::{self, DrawBuffer};
-use crate::syscall::{DisplayInfo, fs, window};
+use crate::syscall::fs;
 
 use super::SyncUnsafeCell;
 use super::surface;
@@ -777,12 +777,9 @@ pub fn shell_console_init() {
         return;
     }
 
-    let mut info = DisplayInfo::default();
-    let _ = window::fb_info(&mut info);
-
     DISPLAY.width.set(width);
     DISPLAY.height.set(height);
-    let bytes_pp = info.bytes_per_pixel();
+    let bytes_pp = surface::bytes_pp();
     DISPLAY.bytes_pp.set(bytes_pp);
     DISPLAY.pitch.set((width as usize) * (bytes_pp as usize));
 

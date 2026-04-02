@@ -72,24 +72,34 @@ impl FileOps for SocketFileOps {
         let _ = socket::socket_close(handle as u32);
     }
 
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        // Register FIRST, then check readiness (Linux pattern).
+        let registered = self.poll_wait(handle);
+        let revents = self.poll_events(handle, events);
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+            open_file_idx: 0,
+        }
+    }
+
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let socket_idx = handle as u32;
         let readable = socket::socket_poll_readable(socket_idx) as u16;
         let writable = socket::socket_poll_writable(socket_idx) as u16;
         let mut revents = 0u16;
 
-        if (events & POLLIN) != 0 {
-            if (readable & 1) != 0 {
-                revents |= POLLIN;
-            }
-            revents |= readable & (POLLIN | POLLERR | POLLHUP);
+        if (events & POLLIN) != 0 && (readable & 1) != 0 {
+            revents |= POLLIN;
         }
-        if (events & POLLOUT) != 0 {
-            if (writable & 1) != 0 {
-                revents |= POLLOUT;
-            }
-            revents |= writable & (POLLOUT | POLLERR | POLLHUP);
+        if (events & POLLOUT) != 0 && (writable & 1) != 0 {
+            revents |= POLLOUT;
         }
+
+        // Per POSIX, POLLERR and POLLHUP are returned regardless of
+        // whether they were requested in `events`.
+        revents |= readable & (POLLERR | POLLHUP);
+        revents |= writable & (POLLERR | POLLHUP);
 
         revents
     }

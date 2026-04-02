@@ -32,7 +32,7 @@ impl<'a> TaskHandle<'a> {
 
     #[inline]
     pub fn block_reason(&self) -> BlockReason {
-        self.task.block_reason
+        self.task.load_block_reason()
     }
 
     #[inline]

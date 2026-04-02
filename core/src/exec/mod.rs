@@ -132,6 +132,12 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::Fault);
         }
 
+        // task_create (via reserve_task_slot) returns the task in Blocked
+        // state.  It stays Blocked while we write entry_point, rip, rsp,
+        // fd table, pgid, etc.  We publish as Ready only at the end.
+        // This is the Linux TASK_NEW pattern: the task is invisible to
+        // the scheduler until fully initialized.
+
         let process_id = unsafe { (*task_info).process_id };
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
@@ -195,6 +201,15 @@ pub fn spawn_program_with_attrs(
                 child.parent_task_id = parent_task_id;
             }
         }
+
+        // Publish the task as Ready only after ALL field writes are done.
+        // The Release ordering on this atomic store ensures that every
+        // prior write (process_id, entry_point, rip, rsp, fd table,
+        // pgid, sid, controlling_tty) is visible to the CPU that
+        // eventually runs this task.  This is the Linux TASK_NEW →
+        // TASK_RUNNING pattern: task_create leaves the task Blocked,
+        // and we make it schedulable only here.
+        unsafe { (*task_info).set_status(slopos_abi::task::TaskStatus::Ready) };
 
         if schedule_new_task(task_info) != 0 {
             task_terminate(task_id);

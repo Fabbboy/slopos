@@ -29,7 +29,7 @@ use super::task::{
     TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskStatus, task_get_info, task_is_blocked,
     task_is_invalid, task_is_ready, task_is_running, task_is_terminated, task_is_will_block,
     task_pointer_is_valid, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_set_state, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -73,18 +73,9 @@ pub(crate) fn is_scheduling_active() -> bool {
 use slopos_mm::paging::paging_get_kernel_directory;
 use slopos_mm::process_vm::{process_vm_get_cr3_phys, process_vm_sync_kernel_mappings};
 use slopos_mm::tlb;
-use slopos_mm::user_copy;
 
 use super::ffi_boundary::kernel_stack_top;
 use super::switch_asm::{fpu_restore, fpu_save, switch_registers};
-
-fn current_task_process_id() -> u32 {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return crate::task::INVALID_PROCESS_ID;
-    }
-    unsafe { (*task).process_id }
-}
 
 fn get_default_time_slice() -> u64 {
     SCHED_DEFAULT_TIME_SLICE as u64
@@ -863,14 +854,12 @@ pub fn block_current_task() {
         return;
     }
 
-    // Only block if still in WillBlock (set by prepare_to_wait).
-    // If Running, the wakeup already arrived — do not re-block.
-    if !task_is_will_block(current) {
-        return;
-    }
-
     let task_id = unsafe { (*current).task_id };
-    if task_set_state(task_id, TaskStatus::Blocked) != 0 {
+
+    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
+    // If a concurrent unblock_task already set Running, the CAS fails and
+    // we return immediately — the wakeup is preserved.
+    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked) != 0 {
         return;
     }
     unschedule_task(current);
@@ -912,23 +901,27 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    if task_is_will_block(task) {
-        let task_id = unsafe { (*task).task_id };
-        let _ = task_set_state(task_id, TaskStatus::Running);
+    let task_id = unsafe { (*task).task_id };
+
+    // Try WillBlock -> Running (task declared intent to block but hasn't yet).
+    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
+        // Cancel any pending sleep-queue entry so it doesn't fire later
+        // and spuriously transition the (now-Running) task.
+        super::sleep::cancel_sleep(task_id);
         return 0;
     }
 
-    if task_is_blocked(task) {
-        if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
-            if task_is_terminated(task) || task_is_invalid(task) {
-                return -1;
-            }
-            return 0;
-        }
+    // Try Blocked -> Ready (task is fully blocked, wake it).
+    if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+        super::sleep::cancel_sleep(task_id);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         return schedule_task(task);
     }
 
+    // Task is in some other state (Running, Ready, Terminated) — nothing to do.
+    if task_is_terminated(task) || task_is_invalid(task) {
+        return -1;
+    }
     0
 }
 
@@ -956,29 +949,28 @@ pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
 
     match result {
         Ok(_) => {
-            // We won the race! Now transition state and enqueue
-            // CAS: BLOCKED -> READY (single-winner state transition)
-            if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
-                // State changed unexpectedly - task may be terminated or already ready
-                // Check if it's a real failure
-                if task_is_terminated(task) || task_is_invalid(task) {
-                    klog_info!(
-                        "try_wake_from_task_wait: task {} state transition failed (terminated/invalid)",
-                        unsafe { (*task).task_id }
-                    );
-                    return false;
-                }
-                // Task is already ready/running - that's fine, we still "won" the CAS
+            // We won the CAS race. Now wake the task using the same safe
+            // transitions as unblock_task() to avoid the WillBlock race.
+            let task_id = unsafe { (*task).task_id };
+
+            // WillBlock -> Running: task declared intent but hasn't blocked yet.
+            // Cancel any pending sleep; no schedule_task (task is still running).
+            if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
+                super::sleep::cancel_sleep(task_id);
+                return true;
             }
 
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            // Blocked -> Ready: task is fully blocked, wake it.
+            if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                super::sleep::cancel_sleep(task_id);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                schedule_task(task);
+                return true;
+            }
 
-            // Enqueue the task
-            if schedule_task(task) != 0 {
-                klog_info!(
-                    "try_wake_from_task_wait: failed to schedule task {}",
-                    unsafe { (*task).task_id }
-                );
+            // Task is in some other state (Running, Ready, Terminated).
+            if task_is_terminated(task) || task_is_invalid(task) {
+                return false;
             }
             true
         }
@@ -1045,8 +1037,6 @@ fn deferred_reschedule_callback() {
 pub fn init_scheduler() -> c_int {
     SCHEDULER_ENABLED.store(0, Ordering::Release);
     PREEMPTION_ENABLED.store(SCHEDULER_PREEMPTION_DEFAULT, Ordering::Release);
-
-    user_copy::register_current_task_provider(current_task_process_id);
 
     per_cpu::init_all_percpu_schedulers();
     reset_sleep_queue();

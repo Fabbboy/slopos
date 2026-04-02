@@ -674,7 +674,18 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     if ist_stacks::ist_guard_fault(fault_addr, core::ptr::null_mut()) != 0 {
         return false;
     }
+
+    // Kernel-mode fault inside the usercopy assembly region: recover
+    // gracefully by redirecting RIP to the fault return label, which
+    // returns a nonzero "remaining bytes" value to the Rust caller.
+    // This makes copy_from_user / copy_to_user safe against concurrent
+    // munmap on SMP (Redox OS pattern).
     if !in_user(frame_ref) {
+        if slopos_mm::user_copy::is_usercopy_ip(frame_ref.rip) {
+            let frame_mut = unsafe { &mut *frame };
+            frame_mut.rip = slopos_mm::user_copy::usercopy_fault_ip();
+            return true;
+        }
         return false;
     }
     let task_ptr = resolve_user_fault_task();

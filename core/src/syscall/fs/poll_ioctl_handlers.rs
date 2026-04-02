@@ -11,8 +11,7 @@ use slopos_abi::syscall::{
 };
 
 use slopos_fs::fileio::{
-    PollRegInfo, file_get_tty_index, file_open_tty_fd, file_poll_fd, file_poll_register_fd,
-    file_poll_register_pipes, file_poll_unregister_fd, file_poll_unregister_pipes,
+    file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused_by_idx,
 };
 
 use slopos_kernel_services::driver_runtime::{
@@ -73,95 +72,117 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let base_ptr = args.arg0;
     let start_ms = slopos_kernel_services::platform::get_time_ms();
 
+    // Kernel-side revents cache.  Written back to userspace only on
+    // return (ready FDs found, timeout, or signal) to avoid per-
+    // iteration page-table walks and observable intermediate writes.
+    let mut cached_revents = [0u16; SELECT_MAX_FDS];
+
     loop {
         run_bottom_halves();
 
+        // Pre-copy all poll FDs from userspace before registering waiters
+        // so a user-copy failure cannot leak prepare_to_wait / fused refs.
+        let mut poll_fds = [UserPollFd::default(); SELECT_MAX_FDS];
+        for idx in 0..nfds {
+            let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
+                base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
+            ));
+            poll_fds[idx] = try_or_err!(ctx, copy_from_user(user_ptr));
+        }
+
+        slopos_kernel_services::driver_runtime::prepare_to_wait();
+
+        // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready_count = 0u64;
-        let mut regs = [PollRegInfo::NONE; SELECT_MAX_FDS];
+        // Store open_file_idx for cleanup instead of FD numbers to avoid
+        // the TOCTOU where an FD is closed and reassigned between
+        // registration and cleanup.
+        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
         let mut reg_count = 0usize;
-        let mut pipe_fds = [(0i32, 0u16); SELECT_MAX_FDS];
-        let mut pipe_fd_count = 0usize;
 
         for idx in 0..nfds {
-            let user_ptr = try_or_err!(
-                ctx,
-                UserPtr::<UserPollFd>::try_new(
-                    base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64
-                )
-            );
-            let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
+            let pfd = &poll_fds[idx];
             if pfd.fd < 0 {
-                pfd.revents = 0;
+                cached_revents[idx] = 0;
             } else {
-                pfd.revents = file_poll_fd(pid, pfd.fd as c_int, pfd.events);
-                if pfd.revents != 0 {
+                let result = file_poll_fused(pid, pfd.fd as c_int, pfd.events);
+                cached_revents[idx] = result.revents;
+                if result.revents != 0 {
                     ready_count += 1;
                 }
+                if result.registered && reg_count < registered_ofis.len() {
+                    registered_ofis[reg_count] = result.open_file_idx;
+                    reg_count += 1;
+                }
             }
-            try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
+        }
+
+        // ── Cleanup + writeback helpers ────────────────────────────
+        macro_rules! cleanup {
+            () => {
+                slopos_kernel_services::driver_runtime::finish_wait();
+                for &ofi in &registered_ofis[..reg_count] {
+                    file_poll_unfused_by_idx(ofi);
+                }
+            };
+        }
+        macro_rules! writeback_revents {
+            () => {
+                // Write only the 2-byte revents field at its offset within
+                // each UserPollFd (offset 6: after i32 fd + u16 events).
+                // Avoids re-reading the entire struct from userspace.
+                const REVENTS_OFFSET: u64 = 6;
+                for idx in 0..nfds {
+                    let revents_addr = base_ptr
+                        + (idx * core::mem::size_of::<UserPollFd>()) as u64
+                        + REVENTS_OFFSET;
+                    let revents_ptr = try_or_err!(ctx,
+                        slopos_mm::user_ptr::UserBytes::try_new(revents_addr, 2)
+                    );
+                    try_or_err!(ctx,
+                        slopos_mm::user_copy::copy_bytes_to_user(revents_ptr, &cached_revents[idx].to_ne_bytes())
+                    );
+                }
+            };
         }
 
         if ready_count > 0 {
+            cleanup!();
+            writeback_revents!();
             return ctx.ok(ready_count);
         }
 
         if timeout_ms == 0 {
+            cleanup!();
+            writeback_revents!();
             return ctx.ok(0);
         }
         if timeout_ms > 0 {
             let now = slopos_kernel_services::platform::get_time_ms();
             if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
+                cleanup!();
+                writeback_revents!();
                 return ctx.ok(0);
             }
         }
 
-        for idx in 0..nfds {
-            let user_ptr = try_or_err!(
-                ctx,
-                UserPtr::<UserPollFd>::try_new(
-                    base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64
-                )
-            );
-            let pfd = try_or_err!(ctx, copy_from_user(user_ptr));
-            if pfd.fd >= 0 && pfd.events != 0 {
-                let reg = file_poll_register_fd(pid, pfd.fd as c_int, pfd.events);
-                if reg.registered {
-                    regs[reg_count] = reg;
-                    reg_count += 1;
-                } else if pipe_fd_count < pipe_fds.len() {
-                    pipe_fds[pipe_fd_count] = (pfd.fd as i32, pfd.events);
-                    pipe_fd_count += 1;
-                }
-            }
-        }
-
-        let pipe_registered = if pipe_fd_count > 0 {
-            file_poll_register_pipes(pid, &pipe_fds[..pipe_fd_count])
-        } else {
-            0
-        };
-
+        // ── Sleep ──────────────────────────────────────────────────
         let sleep_ms = if timeout_ms < 0 {
-            100u32
+            500u32
         } else {
-            let remaining =
-                timeout_ms - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
-            (remaining.max(0) as u32).min(100)
+            let remaining = timeout_ms
+                - (slopos_kernel_services::platform::get_time_ms()
+                    .wrapping_sub(start_ms) as i64);
+            (remaining.max(0) as u32).min(500)
         };
 
-        if reg_count > 0 || pipe_registered > 0 {
-            slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
+        if reg_count > 0 {
+            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
-        for reg in &regs[..reg_count] {
-            file_poll_unregister_fd(reg);
-        }
-
-        if pipe_registered > 0 {
-            file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
-        }
+        cleanup!();
 
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return ctx.err_with(ERRNO_EINTR as u64);
@@ -219,16 +240,39 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
     };
 
     let start_ms = slopos_kernel_services::platform::get_time_ms();
+
+    // Helper: copy out the result fd sets.
+    macro_rules! copy_out_sets {
+        () => {
+            if args.arg1 != 0 {
+                let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
+                try_or_err!(ctx, copy_bytes_to_user(out, &read_out[..bytes_len]));
+            }
+            if args.arg2 != 0 {
+                let out = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
+                try_or_err!(ctx, copy_bytes_to_user(out, &write_out[..bytes_len]));
+            }
+            if args.arg3 != 0 {
+                let out = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
+                try_or_err!(ctx, copy_bytes_to_user(out, &except_out[..bytes_len]));
+            }
+        };
+    }
+
     loop {
         read_out[..bytes_len].fill(0);
         write_out[..bytes_len].fill(0);
         except_out[..bytes_len].fill(0);
 
+        slopos_kernel_services::driver_runtime::prepare_to_wait();
+
+        // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready = 0u64;
-        let mut regs = [PollRegInfo::NONE; SELECT_MAX_FDS];
+        // Store open_file_idx for cleanup instead of FD numbers to avoid
+        // the TOCTOU where an FD is closed and reassigned between
+        // registration and cleanup.
+        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
         let mut reg_count = 0usize;
-        let mut pipe_fds = [(0i32, 0u16); SELECT_MAX_FDS];
-        let mut pipe_fd_count = 0usize;
 
         for fd in 0..nfds {
             let want_r = args.arg1 != 0 && fdset_test(&read_in[..bytes_len], fd);
@@ -249,8 +293,9 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
                 mask |= slopos_abi::syscall::POLLPRI;
             }
 
-            let revents = file_poll_fd(pid, fd as c_int, mask);
-            let (rdy_r, rdy_w, rdy_e) = poll_to_select_mask(revents, want_r, want_w, want_e);
+            let result = file_poll_fused(pid, fd as c_int, mask);
+            let (rdy_r, rdy_w, rdy_e) =
+                poll_to_select_mask(result.revents, want_r, want_w, want_e);
             if rdy_r {
                 fdset_set(&mut read_out[..bytes_len], fd);
                 ready += 1;
@@ -263,113 +308,57 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
                 fdset_set(&mut except_out[..bytes_len], fd);
                 ready += 1;
             }
+            if result.registered && reg_count < registered_ofis.len() {
+                registered_ofis[reg_count] = result.open_file_idx;
+                reg_count += 1;
+            }
+        }
+
+        macro_rules! cleanup {
+            () => {
+                slopos_kernel_services::driver_runtime::finish_wait();
+                for &ofi in &registered_ofis[..reg_count] {
+                    file_poll_unfused_by_idx(ofi);
+                }
+            };
         }
 
         if ready > 0 {
-            if args.arg1 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &read_out[..bytes_len]));
-            }
-            if args.arg2 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &write_out[..bytes_len]));
-            }
-            if args.arg3 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &except_out[..bytes_len]));
-            }
+            cleanup!();
+            copy_out_sets!();
             return ctx.ok(ready);
         }
 
         if timeout_ms == 0 {
-            if args.arg1 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &read_out[..bytes_len]));
-            }
-            if args.arg2 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &write_out[..bytes_len]));
-            }
-            if args.arg3 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &except_out[..bytes_len]));
-            }
+            cleanup!();
+            copy_out_sets!();
             return ctx.ok(0);
         }
         if timeout_ms > 0 {
             let now = slopos_kernel_services::platform::get_time_ms();
             if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
-                if args.arg1 != 0 {
-                    let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
-                    try_or_err!(ctx, copy_bytes_to_user(out, &read_out[..bytes_len]));
-                }
-                if args.arg2 != 0 {
-                    let out = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
-                    try_or_err!(ctx, copy_bytes_to_user(out, &write_out[..bytes_len]));
-                }
-                if args.arg3 != 0 {
-                    let out = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
-                    try_or_err!(ctx, copy_bytes_to_user(out, &except_out[..bytes_len]));
-                }
+                cleanup!();
+                copy_out_sets!();
                 return ctx.ok(0);
             }
         }
 
-        for fd in 0..nfds {
-            let want_r = args.arg1 != 0 && fdset_test(&read_in[..bytes_len], fd);
-            let want_w = args.arg2 != 0 && fdset_test(&write_in[..bytes_len], fd);
-            let want_e = args.arg3 != 0 && fdset_test(&except_in[..bytes_len], fd);
-            if !(want_r || want_w || want_e) {
-                continue;
-            }
-
-            let mut mask = 0u16;
-            if want_r {
-                mask |= POLLIN;
-            }
-            if want_w {
-                mask |= POLLOUT;
-            }
-            if want_e {
-                mask |= slopos_abi::syscall::POLLPRI;
-            }
-
-            let reg = file_poll_register_fd(pid, fd as c_int, mask);
-            if reg.registered {
-                regs[reg_count] = reg;
-                reg_count += 1;
-            } else if pipe_fd_count < pipe_fds.len() {
-                pipe_fds[pipe_fd_count] = (fd as i32, mask);
-                pipe_fd_count += 1;
-            }
-        }
-
-        let pipe_registered = if pipe_fd_count > 0 {
-            file_poll_register_pipes(pid, &pipe_fds[..pipe_fd_count])
-        } else {
-            0
-        };
-
         let sleep_ms = if timeout_ms < 0 {
-            100u32
+            500u32
         } else {
-            let remaining =
-                timeout_ms - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
-            (remaining.max(0) as u32).min(100)
+            let remaining = timeout_ms
+                - (slopos_kernel_services::platform::get_time_ms()
+                    .wrapping_sub(start_ms) as i64);
+            (remaining.max(0) as u32).min(500)
         };
 
-        if reg_count > 0 || pipe_registered > 0 {
-            slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
+        if reg_count > 0 {
+            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
-        for reg in &regs[..reg_count] {
-            file_poll_unregister_fd(reg);
-        }
-        if pipe_registered > 0 {
-            file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
-        }
+        cleanup!();
 
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return ctx.err_with(ERRNO_EINTR as u64);

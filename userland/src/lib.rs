@@ -4,6 +4,7 @@ pub mod appkit;
 pub mod apps;
 pub mod gfx;
 pub mod program_registry;
+pub mod readiness;
 pub mod runtime;
 pub mod syscall;
 pub mod theme;

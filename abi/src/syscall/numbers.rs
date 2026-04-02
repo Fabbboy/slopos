@@ -83,41 +83,14 @@ pub const SYSCALL_CLOCK_GETTIME: u64 = 125;
 // =============================================================================
 
 pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
-pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
-pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
-pub const SYSCALL_RAISE_WINDOW: u64 = 33;
-pub const SYSCALL_SET_CURSOR_SHAPE: u64 = 118;
 
 // =============================================================================
 // Input events
 // =============================================================================
 
 pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
-pub const SYSCALL_INPUT_POLL: u64 = 60;
-pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
-pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
-pub const SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET: u64 = 65;
-pub const SYSCALL_INPUT_GET_POINTER_POS: u64 = 66;
-pub const SYSCALL_INPUT_GET_BUTTON_STATE: u64 = 67;
-pub const SYSCALL_INPUT_REQUEST_CLOSE: u64 = 84;
 pub const SYSCALL_CLIPBOARD_COPY: u64 = 116;
 pub const SYSCALL_CLIPBOARD_PASTE: u64 = 117;
-
-// =============================================================================
-// Surface / Compositor
-// =============================================================================
-
-pub const SYSCALL_SURFACE_COMMIT: u64 = 38;
-pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
-pub const SYSCALL_SURFACE_FRAME: u64 = 50;
-pub const SYSCALL_POLL_FRAME_DONE: u64 = 51;
-pub const SYSCALL_MARK_FRAMES_DONE: u64 = 52;
-pub const SYSCALL_SURFACE_DAMAGE: u64 = 55;
-pub const SYSCALL_BUFFER_AGE: u64 = 56;
-pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
-pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
-pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
-pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
 
 // =============================================================================
 // Shared memory
@@ -128,7 +101,6 @@ pub const SYSCALL_SHM_MAP: u64 = 41;
 pub const SYSCALL_SHM_UNMAP: u64 = 42;
 pub const SYSCALL_SHM_DESTROY: u64 = 43;
 pub const SYSCALL_FB_FLIP: u64 = 45;
-pub const SYSCALL_DRAIN_QUEUE: u64 = 46;
 pub const SYSCALL_SHM_ACQUIRE: u64 = 47;
 pub const SYSCALL_SHM_RELEASE: u64 = 48;
 pub const SYSCALL_SHM_POLL_RELEASED: u64 = 49;
@@ -650,11 +622,6 @@ pub const FONT_FORMAT_BITMAP: u64 = 0;
 /// Pre-rasterized coverage format: 8-bit-per-pixel alpha, 95 glyphs + replacement.
 pub const FONT_FORMAT_COVERAGE: u64 = 1;
 
-// Syscall numbers 145-148 are in active use (OPENPTY, TTY_READ, TTY_WRITE, OPEN_TTY_FD).
-pub const SYSCALL_SURFACE_SET_APP_ID: u64 = 149;
-pub const SYSCALL_SET_WINDOW_SIZE: u64 = 150;
-pub const SYSCALL_SEND_CONFIGURE: u64 = 151;
-pub const SYSCALL_INPUT_GET_MODIFIER_STATE: u64 = 152;
 pub const SYSCALL_TABLE_SIZE: usize = 153;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).

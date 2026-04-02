@@ -156,8 +156,8 @@ impl FileOps for PipeReadOps {
             }
 
             if need_block {
-                pipe::reader_wq(pipe_id).enqueue_current();
                 prepare_to_wait();
+                pipe::reader_wq(pipe_id).enqueue_current();
                 block_current_task();
                 finish_wait();
                 pipe::reader_wq(pipe_id).remove_current();
@@ -177,6 +177,24 @@ impl FileOps for PipeReadOps {
 
     fn dup(&self, handle: usize) -> Option<usize> {
         pipe_dup_reader(handle as u32)
+    }
+
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let pipe_id = handle as u32;
+        // Register FIRST, then check readiness (Linux pattern).
+        let registered = pipe::reader_wq(pipe_id).enqueue_current();
+        let revents = {
+            let mut pipe_state = pipe::PIPE_STATE.lock();
+            match pipe::slot_mut(&mut pipe_state, pipe_id) {
+                Some(slot) => slot.revents(true, false, events),
+                None => POLLERR,
+            }
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+            open_file_idx: 0,
+        }
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
@@ -251,8 +269,8 @@ impl FileOps for PipeWriteOps {
                     return Errno::EAGAIN.as_isize();
                 }
                 if scheduler_is_enabled() != 0 {
-                    pipe::writer_wq(pipe_id).enqueue_current();
                     prepare_to_wait();
+                    pipe::writer_wq(pipe_id).enqueue_current();
                     block_current_task();
                     finish_wait();
                     pipe::writer_wq(pipe_id).remove_current();
@@ -318,8 +336,8 @@ impl FileOps for PipeWriteOps {
             }
 
             if need_block {
-                pipe::writer_wq(pipe_id).enqueue_current();
                 prepare_to_wait();
+                pipe::writer_wq(pipe_id).enqueue_current();
                 block_current_task();
                 finish_wait();
                 pipe::writer_wq(pipe_id).remove_current();
@@ -335,6 +353,24 @@ impl FileOps for PipeWriteOps {
 
     fn dup(&self, handle: usize) -> Option<usize> {
         pipe_dup_writer(handle as u32)
+    }
+
+    fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let pipe_id = handle as u32;
+        // Register FIRST, then check readiness (Linux pattern).
+        let registered = pipe::writer_wq(pipe_id).enqueue_current();
+        let revents = {
+            let mut pipe_state = pipe::PIPE_STATE.lock();
+            match pipe::slot_mut(&mut pipe_state, pipe_id) {
+                Some(slot) => slot.revents(false, true, events),
+                None => POLLERR | POLLHUP,
+            }
+        };
+        slopos_abi::file_ops::FusedPollResult {
+            revents,
+            registered,
+            open_file_idx: 0,
+        }
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {

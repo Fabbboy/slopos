@@ -942,6 +942,20 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
     )
 }
 
+/// Open an FD using caller-supplied FileOps and handle.
+///
+/// Used by AF_UNIX sockets (and potentially other subsystems) that have
+/// their own FileOps implementation distinct from the registered socket ops.
+pub fn fileio_open_fd_with_ops(process_id: u32, ops: &'static dyn FileOps, handle: usize) -> i32 {
+    install_fd_entry(
+        process_id,
+        ops,
+        handle,
+        OpenMode::READ | OpenMode::WRITE,
+        None,
+    )
+}
+
 pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind, usize)> {
     with_tables(|kernel, processes, open_files, _| {
         let table = table_for_pid(kernel, processes, process_id)?;

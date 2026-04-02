@@ -2,10 +2,12 @@ use core::cmp;
 use core::ffi::c_void;
 use core::ptr;
 
+use crate::appkit::protocol_client;
 use crate::runtime;
 use crate::syscall::core as sys_core;
-use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs, input};
+use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs};
 use slopos_abi::syscall::{LocalFlags, POLLIN};
+use slopos_protocol::types::Event as ProtocolEvent;
 use std::time::{Duration, Instant};
 
 use super::buffers;
@@ -51,6 +53,61 @@ static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
     super::SyncUnsafeCell::new([0; super::PROMPT_BUF_MAX]);
 static PROMPT_COLORS_LEN: super::SyncUnsafeCell<usize> = super::SyncUnsafeCell::new(0);
 static SCROLL_ACCUM: super::SyncUnsafeCell<i32> = super::SyncUnsafeCell::new(0);
+
+// ---------------------------------------------------------------------------
+// Deferred event queue: events received during clipboard paste are buffered
+// here and drained on the next call to `poll_protocol_events`.
+// ---------------------------------------------------------------------------
+
+const DEFERRED_CAPACITY: usize = 16;
+
+struct DeferredQueue {
+    buf: [InputEvent; DEFERRED_CAPACITY],
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl DeferredQueue {
+    const fn new() -> Self {
+        // SAFETY: InputEvent is #[repr(C)] with all-zero-bit-pattern valid
+        // (Default sets event_type to KeyPress which is 0, and all other
+        // fields to zero).  We need `zeroed()` here because `InputEvent`
+        // does not implement `Copy` in a const context for array init.
+        Self {
+            buf: unsafe { core::mem::zeroed() },
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, evt: InputEvent) {
+        if self.count >= DEFERRED_CAPACITY {
+            return; // full -- drop oldest-style would complicate things; just drop newest
+        }
+        self.buf[self.tail] = evt;
+        self.tail = (self.tail + 1) % DEFERRED_CAPACITY;
+        self.count += 1;
+    }
+
+    fn pop(&mut self) -> Option<InputEvent> {
+        if self.count == 0 {
+            return None;
+        }
+        let evt = self.buf[self.head];
+        self.head = (self.head + 1) % DEFERRED_CAPACITY;
+        self.count -= 1;
+        Some(evt)
+    }
+}
+
+static DEFERRED: super::SyncUnsafeCell<DeferredQueue> =
+    super::SyncUnsafeCell::new(DeferredQueue::new());
+
+fn with_deferred<R>(f: impl FnOnce(&mut DeferredQueue) -> R) -> R {
+    f(unsafe { &mut *DEFERRED.get() })
+}
 
 pub fn read_command_line(
     tokens: &mut [*const u8; SHELL_MAX_TOKENS],
@@ -129,7 +186,7 @@ fn input_loop(
         line_row = super::display::shell_console_get_cursor().1;
 
         let mut events = [InputEvent::default(); MOUSE_EVENT_BUF_SIZE];
-        let count = input::poll_batch(&mut events) as usize;
+        let count = poll_protocol_events(&mut events);
         let mut key_event: Option<u8> = None;
         for i in 0..count.min(MOUSE_EVENT_BUF_SIZE) {
             match events[i].event_type {
@@ -165,11 +222,12 @@ fn input_loop(
                         let lines = *accum / 120;
                         *accum %= 120;
                         if lines != 0 {
-                            // Negative value = scroll up (show history),
-                            // positive = scroll down (show newer).
                             shell_console_scroll_lines(lines);
                         }
                     }
+                }
+                InputEventType::CloseRequest => {
+                    std::process::exit(0);
                 }
                 _ => {}
             }
@@ -484,7 +542,7 @@ fn input_loop(
                     let hi = hi.min(len);
                     if lo < hi {
                         buffers::with_line_buf(|buf| {
-                            input::clipboard_copy(&buf[lo..hi]);
+                            let _ = protocol_client::client().clipboard_copy(&buf[lo..hi]);
                         });
                     }
                     sel = InputSelection::NONE;
@@ -501,7 +559,7 @@ fn input_loop(
                     delete_selection(&mut sel, &mut len, &mut cursor_pos);
                 }
                 let mut paste_buf = [0u8; 256];
-                let pasted = input::clipboard_paste(&mut paste_buf);
+                let pasted = protocol_clipboard_paste(&mut paste_buf);
                 if pasted > 0 {
                     let mut filtered = [0u8; 256];
                     let mut flen = 0;
@@ -722,4 +780,116 @@ fn redraw(
             selection,
         );
     });
+}
+
+/// Poll protocol events from the compositor and convert them to InputEvents.
+///
+/// Drains the deferred queue first (events stashed during clipboard paste),
+/// then polls fresh events from the compositor socket.
+pub(crate) fn poll_protocol_events(events: &mut [InputEvent]) -> usize {
+    let mut count = 0usize;
+
+    // Phase 1: drain deferred events that were buffered during paste.
+    with_deferred(|q| {
+        while count < events.len() {
+            match q.pop() {
+                Some(evt) => {
+                    events[count] = evt;
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+    });
+
+    // Phase 2: poll the compositor socket for fresh events.
+    let mut client = protocol_client::client();
+    while count < events.len() {
+        match client.poll_event() {
+            Ok(Some(evt)) => {
+                if let Some(input_evt) = protocol_event_to_input_event(&evt) {
+                    events[count] = input_evt;
+                    count += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    count
+}
+
+/// Convert a compositor protocol event into a kernel InputEvent.
+fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
+    match evt {
+        ProtocolEvent::Key {
+            time,
+            scancode,
+            ascii,
+            pressed,
+        } => Some(InputEvent::key(
+            if *pressed {
+                InputEventType::KeyPress
+            } else {
+                InputEventType::KeyRelease
+            },
+            *scancode as u8,
+            *ascii as u8,
+            *time as u64,
+        )),
+        ProtocolEvent::PointerMotion { time, x, y } => {
+            Some(InputEvent::pointer_motion(*x, *y, *time as u64))
+        }
+        ProtocolEvent::PointerButton {
+            time,
+            button,
+            pressed,
+        } => Some(InputEvent::pointer_button(
+            *pressed,
+            *button as u8,
+            *time as u64,
+        )),
+        ProtocolEvent::PointerEnter { x, y, .. } => {
+            Some(InputEvent::pointer_enter_leave(true, *x, *y, 0))
+        }
+        ProtocolEvent::PointerLeave { .. } => Some(InputEvent::pointer_enter_leave(false, 0, 0, 0)),
+        ProtocolEvent::PointerAxis { axis, value, time } => {
+            Some(InputEvent::pointer_axis(*axis, *value, *time as u64))
+        }
+        ProtocolEvent::Configure { width, height, .. } => {
+            Some(InputEvent::configure(*width, *height, 0))
+        }
+        ProtocolEvent::Close { .. } => Some(InputEvent::close_request(0)),
+        _ => None,
+    }
+}
+
+/// Request clipboard paste from the compositor and wait for the result.
+///
+/// Non-paste events received while waiting are pushed into the module-level
+/// `DeferredQueue` so they are replayed on the next `poll_protocol_events`
+/// call -- no events are lost regardless of type.
+fn protocol_clipboard_paste(buf: &mut [u8]) -> usize {
+    let mut client = protocol_client::client();
+    if client.clipboard_paste().is_err() {
+        return 0;
+    }
+    for _ in 0..100 {
+        match client.poll_event() {
+            Ok(Some(ProtocolEvent::PasteResult(cb))) => {
+                let copy = (cb.len as usize).min(buf.len());
+                buf[..copy].copy_from_slice(&cb.data[..copy]);
+                return copy;
+            }
+            Ok(Some(other)) => {
+                if let Some(evt) = protocol_event_to_input_event(&other) {
+                    with_deferred(|q| q.push(evt));
+                }
+            }
+            Ok(None) => {
+                sys_core::yield_now();
+            }
+            Err(_) => return 0,
+        }
+    }
+    0
 }

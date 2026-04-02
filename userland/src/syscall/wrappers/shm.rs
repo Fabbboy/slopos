@@ -54,15 +54,6 @@ impl ShmBuffer {
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
     }
-
-    pub fn attach_surface(&self, width: u32, height: u32) -> Result<(), ShmError> {
-        let result = crate::syscall::window::surface_attach(self.token.get(), width, height);
-        if result < 0 {
-            Err(ShmError::PermissionDenied)
-        } else {
-            Ok(())
-        }
-    }
 }
 
 impl Drop for ShmBuffer {

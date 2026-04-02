@@ -2,6 +2,7 @@ use slopos_abi::syscall::BOOT_FLAG_ROULETTE_SKIP;
 use slopos_font::atlas::GlyphAtlas;
 
 use crate::program_registry;
+use crate::readiness::ReadinessGate;
 use crate::syscall::{UserSysInfo, core as sys_core, process, tty};
 
 fn upgrade_console_font() {
@@ -51,16 +52,18 @@ pub fn init_user_main() {
         }
     }
 
+    let gate = ReadinessGate::create();
     let compositor_tid = spawn_service("compositor");
+    if let Some(gate) = gate {
+        gate.wait();
+    }
+
     spawn_service("shell");
 
-    // Block on compositor — it runs forever so init stays dormant (zero CPU).
-    // Like real PID 1: wait for children, don't busy-loop.
     if compositor_tid > 0 {
         process::waitpid(compositor_tid as u32);
     }
 
-    // Compositor died — keep init alive as a fallback reaper.
     loop {
         sys_core::yield_now();
     }

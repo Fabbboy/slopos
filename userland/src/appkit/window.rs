@@ -1,11 +1,12 @@
 //! High-level window abstraction combining surface, input, and redraw state.
 
-use crate::syscall::{InputEvent, input, window};
+use slopos_protocol::types::Event as ProtocolEvent;
 
 use super::event::Event;
+use super::protocol_client;
 use super::surface::{Surface, SurfaceError};
 
-pub(super) const EVENT_BUF_LEN: usize = 16;
+pub const EVENT_BUF_LEN: usize = 16;
 
 /// A compositor-managed window with input handling and redraw tracking.
 ///
@@ -35,13 +36,15 @@ impl Window {
 
     /// Set the window title shown in the compositor title bar.
     pub fn set_title(&self, title: &str) {
-        let _ = window::surface_set_title(title);
+        let mut client = protocol_client::client();
+        let _ = client.toplevel_set_title(self.surface.protocol_toplevel_id(), title.as_bytes());
     }
 
     /// Set the application identifier (e.g. "org.slopos.files").
     /// The compositor uses this for window-to-dock matching instead of the title.
     pub fn set_app_id(&self, app_id: &str) {
-        let _ = window::surface_set_app_id(app_id);
+        let mut client = protocol_client::client();
+        let _ = client.toplevel_set_app_id(self.surface.protocol_toplevel_id(), app_id.as_bytes());
     }
 
     /// Resize the window's backing surface to a new size.
@@ -98,11 +101,22 @@ impl Window {
         self.surface.height()
     }
 
-    /// Poll raw input events into `buf` without any processing.
+    /// Poll protocol events from the compositor socket.
     ///
-    /// Returns the number of events written (always ≤ `buf.len()`).
-    pub fn poll_events_raw(&mut self, buf: &mut [InputEvent]) -> usize {
-        (input::poll_batch(buf) as usize).min(buf.len())
+    /// Returns the number of events written (always <= `buf.len()`).
+    pub fn poll_protocol_events(&mut self, buf: &mut [ProtocolEvent]) -> usize {
+        let mut client = protocol_client::client();
+        let mut count = 0;
+        while count < buf.len() {
+            match client.poll_event() {
+                Ok(Some(evt)) => {
+                    buf[count] = evt;
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+        count
     }
 
     /// Update internal pointer state from a converted event.
@@ -119,14 +133,20 @@ impl Window {
 
     /// Poll input events, convert them, and call `handler` for each.
     ///
+    /// Reads from the compositor protocol socket.
     /// Pointer state is updated per-event before the handler is called.
     pub fn poll_events<F: FnMut(Event)>(&mut self, mut handler: F) {
-        let mut raw_events = [InputEvent::default(); EVENT_BUF_LEN];
-        let count = self.poll_events_raw(&mut raw_events);
-        for raw in &raw_events[..count] {
-            let event = Event::from_raw(raw);
-            self.track_pointer(&event);
-            handler(event);
+        let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
+            core::array::from_fn(|_| ProtocolEvent::FrameDone {
+                surface: 0,
+                timestamp_ms: 0,
+            });
+        let count = self.poll_protocol_events(&mut proto_events);
+        for pe in &proto_events[..count] {
+            if let Some(event) = Event::from_protocol(pe) {
+                self.track_pointer(&event);
+                handler(event);
+            }
         }
     }
 }

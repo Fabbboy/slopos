@@ -80,4 +80,5 @@ testbins = []
 slopos-abi = { workspace = true }
 slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
+slopos-protocol = { workspace = true }
 slopos-slibc = { workspace = true }

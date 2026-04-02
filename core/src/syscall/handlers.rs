@@ -35,20 +35,12 @@ use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
 pub use crate::syscall::ui_handlers::{
-    syscall_buffer_age, syscall_clipboard_copy, syscall_clipboard_paste, syscall_drain_queue,
-    syscall_enumerate_windows, syscall_fb_flip, syscall_fb_info, syscall_input_get_button_state,
-    syscall_input_get_modifier_state, syscall_input_get_pointer_pos, syscall_input_has_events,
-    syscall_input_poll, syscall_input_poll_batch, syscall_input_request_close,
-    syscall_input_set_focus, syscall_input_set_focus_with_offset, syscall_mark_frames_done,
-    syscall_open_tty_fd, syscall_openpty, syscall_poll_frame_done, syscall_raise_window,
+    syscall_clipboard_copy, syscall_clipboard_paste, syscall_enumerate_windows, syscall_fb_flip,
+    syscall_fb_info, syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty,
     syscall_random_next, syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
-    syscall_send_configure, syscall_set_cursor_shape, syscall_set_window_position,
-    syscall_set_window_size, syscall_set_window_state, syscall_shm_acquire, syscall_shm_create,
-    syscall_shm_create_with_format, syscall_shm_destroy, syscall_shm_get_formats, syscall_shm_map,
-    syscall_shm_poll_released, syscall_shm_release, syscall_shm_unmap, syscall_surface_attach,
-    syscall_surface_commit, syscall_surface_damage, syscall_surface_frame,
-    syscall_surface_set_app_id, syscall_surface_set_parent, syscall_surface_set_rel_pos,
-    syscall_surface_set_role, syscall_surface_set_title, syscall_tty_read, syscall_tty_write,
+    syscall_shm_acquire, syscall_shm_create, syscall_shm_create_with_format, syscall_shm_destroy,
+    syscall_shm_get_formats, syscall_shm_map, syscall_shm_poll_released, syscall_shm_release,
+    syscall_shm_unmap, syscall_tty_read, syscall_tty_write,
 };
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -132,28 +124,9 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
 
     // Window management
     [SYSCALL_ENUMERATE_WINDOWS]   => syscall_enumerate_windows,   "enumerate_windows";
-    [SYSCALL_SET_WINDOW_POSITION] => syscall_set_window_position, "set_window_position";
-    [SYSCALL_SET_WINDOW_SIZE]     => syscall_set_window_size,     "set_window_size";
-    [SYSCALL_SET_WINDOW_STATE]    => syscall_set_window_state,    "set_window_state";
-    [SYSCALL_SET_CURSOR_SHAPE]    => syscall_set_cursor_shape,    "set_cursor_shape";
-    [SYSCALL_RAISE_WINDOW]        => syscall_raise_window,        "raise_window";
 
-    // Surface / Compositor
-    [SYSCALL_SURFACE_COMMIT]      => syscall_surface_commit,      "surface_commit";
-    [SYSCALL_SURFACE_ATTACH]      => syscall_surface_attach,      "surface_attach";
-    [SYSCALL_SURFACE_FRAME]       => syscall_surface_frame,       "surface_frame";
-    [SYSCALL_POLL_FRAME_DONE]     => syscall_poll_frame_done,     "poll_frame_done";
-    [SYSCALL_MARK_FRAMES_DONE]    => syscall_mark_frames_done,    "mark_frames_done";
-    [SYSCALL_SURFACE_DAMAGE]      => syscall_surface_damage,      "surface_damage";
-    [SYSCALL_BUFFER_AGE]          => syscall_buffer_age,          "buffer_age";
-    [SYSCALL_SURFACE_SET_ROLE]    => syscall_surface_set_role,    "surface_set_role";
-    [SYSCALL_SURFACE_SET_PARENT]  => syscall_surface_set_parent,  "surface_set_parent";
-    [SYSCALL_SURFACE_SET_REL_POS] => syscall_surface_set_rel_pos, "surface_set_rel_pos";
-    [SYSCALL_SURFACE_SET_TITLE]    => syscall_surface_set_title,    "surface_set_title";
-    [SYSCALL_SURFACE_SET_APP_ID]  => syscall_surface_set_app_id,  "surface_set_app_id";
-    [SYSCALL_SEND_CONFIGURE]      => syscall_send_configure,      "send_configure";
+    // Compositor framebuffer
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
-    [SYSCALL_DRAIN_QUEUE]         => syscall_drain_queue,         "drain_queue";
 
     // Shared memory
     [SYSCALL_SHM_CREATE]             => syscall_shm_create,             "shm_create";
@@ -167,15 +140,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SHM_CREATE_WITH_FORMAT] => syscall_shm_create_with_format, "shm_create_with_format";
 
     // Input
-    [SYSCALL_INPUT_POLL]                 => syscall_input_poll,                 "input_poll";
     [SYSCALL_INPUT_POLL_BATCH]           => syscall_input_poll_batch,           "input_poll_batch";
-    [SYSCALL_INPUT_HAS_EVENTS]           => syscall_input_has_events,           "input_has_events";
-    [SYSCALL_INPUT_SET_FOCUS]            => syscall_input_set_focus,            "input_set_focus";
-    [SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET] => syscall_input_set_focus_with_offset, "input_set_focus_with_offset";
-    [SYSCALL_INPUT_GET_POINTER_POS]      => syscall_input_get_pointer_pos,      "input_get_pointer_pos";
-    [SYSCALL_INPUT_GET_BUTTON_STATE]     => syscall_input_get_button_state,     "input_get_button_state";
-    [SYSCALL_INPUT_GET_MODIFIER_STATE]   => syscall_input_get_modifier_state,   "input_get_modifier_state";
-    [SYSCALL_INPUT_REQUEST_CLOSE]        => syscall_input_request_close,        "input_request_close";
     [SYSCALL_CLIPBOARD_COPY]             => syscall_clipboard_copy,             "clipboard_copy";
     [SYSCALL_CLIPBOARD_PASTE]            => syscall_clipboard_paste,            "clipboard_paste";
 

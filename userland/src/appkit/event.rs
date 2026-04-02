@@ -1,9 +1,9 @@
 //! High-level event types for windowed applications.
 //!
-//! Converts raw `InputEvent` values from the kernel into a clean enum
-//! that applications can match on without knowing ABI details.
+//! Converts `slopos_protocol::Event` values from the compositor socket into a
+//! clean enum that applications can match on without knowing protocol details.
 
-use crate::syscall::{InputEvent, InputEventType};
+use slopos_protocol::types::Event as ProtocolEvent;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
@@ -41,36 +41,59 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn from_raw(raw: &InputEvent) -> Self {
-        match raw.event_type {
-            InputEventType::PointerMotion | InputEventType::PointerEnter => Event::PointerMotion {
-                x: raw.pointer_x(),
-                y: raw.pointer_y(),
-            },
-            InputEventType::PointerButtonPress => Event::PointerPress {
-                button: raw.pointer_button_code(),
-            },
-            InputEventType::PointerButtonRelease => Event::PointerRelease {
-                button: raw.pointer_button_code(),
-            },
-            InputEventType::KeyPress => Event::KeyPress {
-                scancode: raw.key_scancode(),
-                ascii: raw.key_ascii(),
-            },
-            InputEventType::KeyRelease => Event::KeyRelease {
-                scancode: raw.key_scancode(),
-                ascii: raw.key_ascii(),
-            },
-            InputEventType::CloseRequest => Event::CloseRequest,
-            InputEventType::Configure => Event::Configure {
-                width: raw.configure_width(),
-                height: raw.configure_height(),
-            },
-            InputEventType::PointerAxis => Event::PointerAxis {
-                axis: raw.axis_id(),
-                value_v120: raw.axis_value_v120(),
-            },
-            _ => Event::Other,
+    /// Convert a protocol event into an appkit Event.
+    ///
+    /// Returns `None` for protocol events that have no appkit equivalent
+    /// (e.g. `FrameDone`, `OutputInfo`).
+    pub fn from_protocol(evt: &ProtocolEvent) -> Option<Self> {
+        match evt {
+            ProtocolEvent::PointerEnter { x, y, .. }
+            | ProtocolEvent::PointerMotion { x, y, .. } => {
+                Some(Event::PointerMotion { x: *x, y: *y })
+            }
+            ProtocolEvent::PointerButton {
+                button, pressed, ..
+            } => {
+                if *pressed {
+                    Some(Event::PointerPress {
+                        button: *button as u8,
+                    })
+                } else {
+                    Some(Event::PointerRelease {
+                        button: *button as u8,
+                    })
+                }
+            }
+            ProtocolEvent::PointerAxis { axis, value, .. } => Some(Event::PointerAxis {
+                axis: *axis,
+                value_v120: *value,
+            }),
+            ProtocolEvent::Key {
+                scancode,
+                ascii,
+                pressed,
+                ..
+            } => {
+                let sc = u8::try_from(*scancode).ok()?;
+                let a = u8::try_from(*ascii).ok()?;
+                if *pressed {
+                    Some(Event::KeyPress {
+                        scancode: sc,
+                        ascii: a,
+                    })
+                } else {
+                    Some(Event::KeyRelease {
+                        scancode: sc,
+                        ascii: a,
+                    })
+                }
+            }
+            ProtocolEvent::Close { .. } => Some(Event::CloseRequest),
+            ProtocolEvent::Configure { width, height, .. } => Some(Event::Configure {
+                width: *width,
+                height: *height,
+            }),
+            _ => None,
         }
     }
 }

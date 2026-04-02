@@ -1,5 +1,5 @@
 #![no_std]
-#![allow(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 //! Network subsystem.
 //!
@@ -35,6 +35,8 @@ pub mod tcp;
 pub mod tcp_socket;
 pub mod timer;
 pub mod udp;
+pub mod unix_socket;
+pub mod unix_socket_file_ops;
 
 // Re-export key type-safe primitives for convenient access.
 pub use netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};

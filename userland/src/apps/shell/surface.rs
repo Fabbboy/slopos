@@ -1,6 +1,7 @@
 //! Compositor surface wrapper for shell drawing.
 
 use crate::appkit::Surface;
+use crate::appkit::protocol_client;
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
 
@@ -26,6 +27,35 @@ pub fn init(width: i32, height: i32) -> bool {
             false
         }
     }
+}
+
+pub fn set_title(title: &str) {
+    let slot = unsafe { &*SURFACE.get() };
+    if let Some(surface) = slot.as_ref() {
+        let mut client = protocol_client::client();
+        let _ = client.toplevel_set_title(surface.protocol_toplevel_id(), title.as_bytes());
+    }
+}
+
+pub fn set_app_id(app_id: &str) {
+    let slot = unsafe { &*SURFACE.get() };
+    if let Some(surface) = slot.as_ref() {
+        let mut client = protocol_client::client();
+        let _ = client.toplevel_set_app_id(surface.protocol_toplevel_id(), app_id.as_bytes());
+    }
+}
+
+pub fn set_cursor_shape(shape: u8) {
+    let slot = unsafe { &*SURFACE.get() };
+    if let Some(surface) = slot.as_ref() {
+        let mut client = protocol_client::client();
+        let _ = client.set_cursor_shape(surface.protocol_surface_id(), shape);
+    }
+}
+
+pub fn bytes_pp() -> u8 {
+    let slot = unsafe { &*SURFACE.get() };
+    slot.as_ref().map_or(4, |s| s.bytes_pp())
 }
 
 pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {

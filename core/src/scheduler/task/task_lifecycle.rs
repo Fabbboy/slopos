@@ -540,6 +540,10 @@ pub fn task_create(
     // Transition to Ready only after context + CR3 are fully initialised.
     // reserve_task_slot() marked the slot Blocked to prevent TOCTOU races;
     // we atomically publish it as dispatchable only now.
+    //
+    // NOTE: callers that modify the task further (spawn_program_with_attrs)
+    // must reset to Blocked and re-publish Ready after their writes to
+    // ensure SMP visibility (Linux TASK_NEW pattern).
     task_ref.set_status(TaskStatus::Ready);
 
     record_task_created();

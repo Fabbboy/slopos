@@ -1,0 +1,202 @@
+//! Server-side multi-client protocol manager.
+//!
+//! The compositor creates a `Server`, which listens on a Unix domain socket,
+//! accepts client connections, and dispatches typed requests.
+
+use crate::connection::Connection;
+use crate::types::{Event, ProtocolError, Request};
+use slopos_abi::net::AF_UNIX;
+use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
+use slopos_slibc::pal::{Pal, Sys};
+
+const MAX_CLIENTS: usize = 32;
+
+pub struct ClientConn {
+    pub conn: Connection,
+    pub active: bool,
+}
+
+pub struct Server {
+    listen_fd: i32,
+    pub clients: alloc::boxed::Box<[Option<ClientConn>; MAX_CLIENTS]>,
+    pub client_count: usize,
+}
+
+impl Server {
+    /// Create a Server from an inherited (socket-activated) listen FD.
+    ///
+    /// The FD must already be bound and listening. This is the systemd-style
+    /// activation path: init pre-creates the socket, the compositor inherits
+    /// it, and calls this constructor instead of `bind()`.
+    pub fn from_fd(listen_fd: i32) -> Result<Self, ProtocolError> {
+        // Ensure non-blocking for accept().
+        crate::connection::set_nonblock(listen_fd);
+
+        const NONE: Option<ClientConn> = None;
+        Ok(Self {
+            listen_fd,
+            clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
+            client_count: 0,
+        })
+    }
+
+    /// Create a listening Unix domain socket at the given path.
+    pub fn bind(path: &[u8]) -> Result<Self, ProtocolError> {
+        let fd = Sys::socket(AF_UNIX as i32, slopos_abi::net::SOCK_STREAM as i32, 0)
+            .map_err(|_| ProtocolError::Io)?;
+
+        let mut addr = SockAddrUn::default();
+        addr.family = AF_UNIX;
+        let copy_len = path.len().min(UNIX_PATH_MAX - 1);
+        addr.path[..copy_len].copy_from_slice(&path[..copy_len]);
+
+        let addr_ptr = &addr as *const SockAddrUn as *const u8;
+        let addr_len = core::mem::size_of::<SockAddrUn>() as u32;
+        Sys::bind(fd, addr_ptr, addr_len).map_err(|_| ProtocolError::Io)?;
+        Sys::listen(fd, 32).map_err(|_| ProtocolError::Io)?;
+        // Non-blocking so accept() returns EAGAIN instead of blocking
+        crate::connection::set_nonblock(fd);
+
+        const NONE: Option<ClientConn> = None;
+        Ok(Self {
+            listen_fd: fd,
+            clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
+            client_count: 0,
+        })
+    }
+
+    /// Non-blocking accept. Returns client index if a new connection was accepted.
+    ///
+    /// Returns `Ok(None)` when no pending connections (EAGAIN/EWOULDBLOCK).
+    /// Propagates real errors (EMFILE, ENOMEM, etc.) as `Err`.
+    pub fn accept(&mut self) -> Result<Option<usize>, ProtocolError> {
+        let client_fd =
+            match Sys::accept(self.listen_fd, core::ptr::null_mut(), core::ptr::null_mut()) {
+                Ok(fd) => fd,
+                Err(e)
+                    if e == slopos_slibc::errno::EAGAIN
+                        || e == slopos_slibc::errno::EWOULDBLOCK =>
+                {
+                    return Ok(None);
+                }
+                Err(_) => return Err(ProtocolError::Io),
+            };
+
+        let idx = match self.clients.iter().position(|c| c.is_none()) {
+            Some(i) => i,
+            None => {
+                let _ = Sys::close(client_fd);
+                return Err(ProtocolError::BufferFull);
+            }
+        };
+
+        // Connection::new sets O_NONBLOCK automatically.
+        let conn = Connection::new(client_fd);
+        self.clients[idx] = Some(ClientConn { conn, active: true });
+        self.client_count += 1;
+        Ok(Some(idx))
+    }
+
+    /// Read one request from a client (non-blocking).
+    pub fn recv_request(&mut self, client: usize) -> Result<Option<Request>, ProtocolError> {
+        match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => c.conn.recv::<Request>(),
+            _ => Ok(None),
+        }
+    }
+
+    /// Send an event to a client (immediate flush, no write buffer).
+    pub fn send_event(&mut self, client: usize, event: &Event) -> Result<(), ProtocolError> {
+        match self.clients.get(client) {
+            Some(Some(c)) if c.active => c.conn.send(event),
+            _ => Err(ProtocolError::Disconnected),
+        }
+    }
+
+    /// Check if a client is still connected.
+    pub fn is_connected(&self, client: usize) -> bool {
+        matches!(self.clients.get(client), Some(Some(c)) if c.active)
+    }
+
+    /// Probe a client for disconnection without consuming any messages.
+    ///
+    /// Performs a non-blocking `recv()` into the connection's read buffer.
+    /// If EOF is detected, marks the client as disconnected and returns
+    /// `true`.  Any data received is buffered for the next `recv_request`.
+    pub fn probe_disconnected(&mut self, client: usize) -> bool {
+        match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => {
+                if c.conn.probe_disconnected() {
+                    c.active = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Disconnect and clean up a client slot.
+    pub fn disconnect(&mut self, client: usize) {
+        if let Some(slot) = self.clients.get_mut(client) {
+            if slot.take().is_some() {
+                self.client_count = self.client_count.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Get the server's listening socket FD.
+    pub fn listen_fd(&self) -> i32 {
+        self.listen_fd
+    }
+
+    /// Get the number of connected clients.
+    pub fn client_count(&self) -> usize {
+        self.client_count
+    }
+
+    /// Build an array of poll FDs for the listen socket + all connected clients.
+    /// Returns the number of valid entries.
+    pub fn build_poll_fds(&self, out: &mut [slopos_abi::syscall::types::UserPollFd]) -> usize {
+        use slopos_abi::syscall::posix::POLLIN;
+        use slopos_abi::syscall::types::UserPollFd;
+
+        let max = out.len();
+        if max == 0 {
+            return 0;
+        }
+
+        // Listen socket first
+        out[0] = UserPollFd {
+            fd: self.listen_fd,
+            events: POLLIN,
+            revents: 0,
+        };
+        let mut count = 1;
+
+        for client in self.clients.iter() {
+            if let Some(c) = client {
+                if c.active && count < max {
+                    out[count] = UserPollFd {
+                        fd: c.conn.fd(),
+                        events: POLLIN,
+                        revents: 0,
+                    };
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // Client connections are dropped via Box<[Option<ClientConn>]>,
+        // each Connection::drop closes its FD. But the listen FD is
+        // owned directly and must be closed explicitly.
+        let _ = Sys::close(self.listen_fd);
+    }
+}

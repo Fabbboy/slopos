@@ -227,9 +227,11 @@ pub fn handle_scancode(scancode: u8) {
 
     state.scancode_buffer.push_overwrite(scancode);
 
-    // Modifier keys: update state and return (no character to deliver).
+    // Modifier keys: update state and route the event (no character to deliver).
     if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
         handle_modifier(&mut state.modifiers, make_code, is_press);
+        drop(state);
+        input_route_key_event(scancode, 0, is_press, slopos_utils::clock::uptime_ms());
         return;
     }
 

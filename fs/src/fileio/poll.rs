@@ -1,4 +1,4 @@
-use super::open_file_table::get_open_file_mut;
+use super::open_file_table::{get_open_file_mut, incref_open_file, release_open_file};
 use super::*;
 
 pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize {
@@ -124,6 +124,124 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
         if let Some(ops) = open_file.ops {
             ops.poll_unwait(open_file.handle);
         }
+    });
+}
+
+/// Fused poll: register waiter + check readiness in one call.
+///
+/// Replaces the separate `file_poll_register_fd` + `file_poll_fd` pattern.
+/// Delegates to `FileOps::poll_fused()` which implementations can override
+/// to perform registration and readiness check under a single subsystem lock.
+pub fn file_poll_fused(
+    process_id: u32,
+    fd: c_int,
+    events: u16,
+) -> slopos_abi::file_ops::FusedPollResult {
+    use slopos_abi::file_ops::FusedPollResult;
+    with_tables(|kernel, processes, open_files, _| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return FusedPollResult {
+                revents: POLLNVAL,
+                registered: false,
+                open_file_idx: 0,
+            };
+        };
+        if !table.in_use {
+            return FusedPollResult {
+                revents: POLLNVAL,
+                registered: false,
+                open_file_idx: 0,
+            };
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+        let ofi = match unsafe { get_fd_entry(&mut *table_ptr, fd) } {
+            Some(fd_entry) => fd_entry.open_file_idx,
+            None => {
+                drop(guard);
+                return FusedPollResult {
+                    revents: POLLNVAL,
+                    registered: false,
+                    open_file_idx: 0,
+                };
+            }
+        };
+
+        let result = match get_open_file_mut(open_files, ofi) {
+            Some(open_file) => match open_file.ops {
+                Some(ops) => {
+                    let mut r = ops.poll_fused(open_file.handle, events);
+                    r.open_file_idx = ofi as u32;
+                    r
+                }
+                None => FusedPollResult {
+                    revents: POLLNVAL,
+                    registered: false,
+                    open_file_idx: 0,
+                },
+            },
+            None => FusedPollResult {
+                revents: POLLNVAL,
+                registered: false,
+                open_file_idx: 0,
+            },
+        };
+
+        // Hold an extra reference while the caller is registered on
+        // a wait queue, preventing the open file from being freed if
+        // a concurrent close drops the last FD-level reference.
+        if result.registered {
+            incref_open_file(open_files, ofi);
+        }
+
+        drop(guard);
+        result
+    })
+}
+
+/// Unregister from a wait queue after fused poll.
+///
+/// Calls `poll_unwait()` for the given FD. Safe to call even if
+/// `poll_fused` did not register (no-op in that case).
+pub fn file_poll_unfused(process_id: u32, fd: c_int) {
+    with_tables(|kernel, processes, open_files, _| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return;
+        };
+        if !table.in_use {
+            return;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        if let Some(open_file) = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
+            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
+        {
+            if let Some(ops) = open_file.ops {
+                ops.poll_unwait(open_file.handle);
+            }
+        }
+        drop(guard);
+    });
+}
+
+/// Unregister from a wait queue using the open-file-table index directly.
+///
+/// Unlike `file_poll_unfused`, this does NOT re-look up the FD number —
+/// it targets the exact open file that was registered on.  This prevents
+/// unwaiting from the wrong file if the FD was closed and reassigned
+/// between registration and cleanup.
+pub fn file_poll_unfused_by_idx(open_file_idx: u32) {
+    with_tables(|_, _, open_files, _| {
+        let Some(open_file) = get_open_file_mut(open_files, open_file_idx as u16) else {
+            return;
+        };
+        if let Some(ops) = open_file.ops {
+            ops.poll_unwait(open_file.handle);
+        }
+        // Drop the extra reference that file_poll_fused() took to keep the
+        // open file alive while we were registered on its wait queue.
+        release_open_file(open_files, open_file_idx as u16);
     });
 }
 

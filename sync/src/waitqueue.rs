@@ -178,9 +178,15 @@ impl WaitQueue {
                 let mut inner = self.inner.lock();
                 // Re-check condition under lock to close the race window.
                 if condition() {
+                    inner.remove_task(task);
                     finish_wait();
                     return true;
                 }
+                // Remove any stale entry from a prior iteration before
+                // re-enqueuing.  A timeout wakeup does not dequeue us,
+                // so without this we'd leak duplicate entries and
+                // eventually exhaust the 32-slot capacity.
+                inner.remove_task(task);
                 if !inner.enqueue(task) {
                     // Queue full — cannot wait.
                     finish_wait();
@@ -290,47 +296,50 @@ impl WaitQueue {
             return false;
         }
 
+        let task = current_task();
+        if task.is_null() {
+            return false;
+        }
+
         let deadline_ms = platform::get_time_ms().saturating_add(timeout_ms);
 
         loop {
-            if condition() {
-                return true;
-            }
-
             let now = platform::get_time_ms();
             if now >= deadline_ms {
-                // Timeout — remove ourselves from the queue if still there.
-                let task = current_task();
-                if !task.is_null() {
-                    let mut inner = self.inner.lock();
-                    inner.remove_task(task);
-                }
+                let mut inner = self.inner.lock();
+                inner.remove_task(task);
                 return false;
             }
 
-            let task = current_task();
-            if task.is_null() {
-                return false;
-            }
+            prepare_to_wait();
 
             {
                 let mut inner = self.inner.lock();
                 if condition() {
+                    inner.remove_task(task);
+                    finish_wait();
                     return true;
                 }
+                // Remove any stale entry from a prior iteration before
+                // re-enqueuing.  A timeout wakeup does not dequeue us,
+                // so without this we'd leak duplicate entries.
+                inner.remove_task(task);
                 if !inner.enqueue(task) {
+                    finish_wait();
                     return false;
                 }
             }
 
             let remaining = deadline_ms.saturating_sub(platform::get_time_ms());
             if remaining == 0 {
+                finish_wait();
                 let mut inner = self.inner.lock();
                 inner.remove_task(task);
                 return false;
             }
             let sleep_ms = remaining.min(500) as u32;
-            driver_runtime::sleep_current_task_ms(sleep_ms);
+            driver_runtime::block_current_task_with_timeout(sleep_ms);
+            finish_wait();
         }
     }
 

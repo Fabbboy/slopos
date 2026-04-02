@@ -179,6 +179,9 @@ pub fn poll_sleep_on(slots: &[u8]) {
         return;
     }
 
+    // Set WillBlock before enqueuing so wakeups are not lost.
+    slopos_kernel_services::driver_runtime::prepare_to_wait();
+
     // Enqueue the current task on each slot's poll waiter.
     let mut registered = 0usize;
     for &slot in slots {
@@ -190,11 +193,13 @@ pub fn poll_sleep_on(slots: &[u8]) {
 
     if registered == 0 {
         // Could not enqueue on any queue — fall back to brief delay.
+        slopos_kernel_services::driver_runtime::finish_wait();
         slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
 
-    slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
+    slopos_kernel_services::driver_runtime::block_current_task_with_timeout(100);
+    slopos_kernel_services::driver_runtime::finish_wait();
 
     // Clean up: remove ourselves from all registered queues.
     for &slot in slots {

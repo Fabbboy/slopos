@@ -20,6 +20,7 @@ static INPUT_SERVICES: InputServices = InputServices {
     get_modifier_state: input_event::input_get_modifier_state,
     clipboard_copy: input_event::clipboard_copy,
     clipboard_paste: input_event::clipboard_paste,
+    register_compositor: input_event::input_register_compositor,
 };
 
 fn tty_read_adapter(

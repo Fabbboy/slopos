@@ -1,9 +1,10 @@
+use core::arch::global_asm;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr;
-use slopos_sync::{InitFlag, IrqMutex};
+use slopos_sync::InitFlag;
 
 use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
 use crate::paging::paging_is_user_accessible;
@@ -11,60 +12,84 @@ use crate::process_vm::process_vm_get_page_dir;
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
 
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
-static CURRENT_TASK_PROVIDER: IrqMutex<Option<fn() -> u32>> = IrqMutex::new(None);
 
-/// Reads the syscall PID from per-CPU storage (SMP-safe).
-fn syscall_process_id_provider() -> u32 {
-    // SAFETY: Accessing atomic field on current CPU's PCR.
+// =============================================================================
+// Assembly usercopy — Redox-style fault-recoverable byte copy
+//
+// The `raw_usercopy` function uses `rep movsb` between two labeled symbols.
+// If a page fault occurs while RIP is within `__usercopy_start..__usercopy_end`,
+// the page fault handler in `boot/src/idt.rs` redirects execution to
+// `__usercopy_fault` which returns the remaining byte count (nonzero = error).
+//
+// This makes copy_from_user / copy_to_user safe against concurrent munmap
+// on SMP — the kernel never panics on a user-space address fault.
+// =============================================================================
+
+global_asm!(
+    // fn raw_usercopy(dst: *mut u8 [rdi], src: *const u8 [rsi], len: usize [rdx]) -> usize
+    // Returns 0 on success, >0 (remaining bytes) on fault.
+    ".global raw_usercopy",
+    ".global __usercopy_start",
+    ".global __usercopy_end",
+    ".global __usercopy_fault",
+    "raw_usercopy:",
+    "   mov rcx, rdx", // len → rcx for rep prefix
+    "__usercopy_start:",
+    "   rep movsb", // copy [rsi] → [rdi], rcx bytes
+    "__usercopy_end:",
+    "   xor eax, eax", // return 0 = success
+    "   ret",
+    "__usercopy_fault:",
+    "   mov rax, rcx", // return remaining byte count
+    "   ret",
+);
+
+unsafe extern "C" {
+    /// Byte-copy with fault recovery.  Returns 0 on success, or the
+    /// number of remaining (un-copied) bytes if a page fault occurred.
+    fn raw_usercopy(dst: *mut u8, src: *const u8, len: usize) -> usize;
+
+    /// Start of the faultable instruction region.
+    fn __usercopy_start();
+    /// End of the faultable instruction region.
+    fn __usercopy_end();
+    /// Fault recovery entry point — jumped to by the page fault handler.
+    fn __usercopy_fault();
+}
+
+/// Returns `true` if `rip` falls within the faultable usercopy region.
+///
+/// Called by the page fault handler (`boot/src/idt.rs`) for kernel-mode
+/// faults.  If this returns `true`, the handler should redirect RIP to
+/// `usercopy_fault_ip()` instead of panicking.
+#[inline]
+pub fn is_usercopy_ip(rip: u64) -> bool {
+    let start = __usercopy_start as *const () as u64;
+    let end = __usercopy_end as *const () as u64;
+    rip >= start && rip < end
+}
+
+/// The RIP value the page fault handler should set to recover from a
+/// fault during usercopy.
+#[inline]
+pub fn usercopy_fault_ip() -> u64 {
+    __usercopy_fault as *const () as u64
+}
+
+// =============================================================================
+// Rust wrappers
+// =============================================================================
+
+#[inline]
+fn current_process_id() -> u32 {
     unsafe { pcr::current_pcr() }
         .syscall_pid
         .load(Ordering::Acquire)
 }
 
-pub fn register_current_task_provider(provider: fn() -> u32) {
-    *CURRENT_TASK_PROVIDER.lock() = Some(provider);
-}
-
-/// RAII guard that restores the previous task provider on drop.
-/// Ensures the provider cannot leak across syscall boundaries, even if
-/// the handler panics or takes an early-return path.
-pub struct SyscallProviderGuard {
-    original: Option<fn() -> u32>,
-}
-
-impl Drop for SyscallProviderGuard {
-    fn drop(&mut self) {
-        let mut guard = CURRENT_TASK_PROVIDER.lock();
-        *guard = self.original;
-    }
-}
-
-/// Sets the syscall PID in per-CPU storage (SMP-safe).
-/// Returns an RAII guard that restores the previous provider on drop.
-pub fn set_syscall_process_id(pid: u32) -> SyscallProviderGuard {
-    // SAFETY: Accessing atomic field on current CPU's PCR.
-    unsafe { pcr::current_pcr() }
-        .syscall_pid
-        .store(pid, Ordering::Release);
-    let mut guard = CURRENT_TASK_PROVIDER.lock();
-    let original = *guard;
-    *guard = Some(syscall_process_id_provider);
-    SyscallProviderGuard { original }
-}
-
-/// Restore the task provider explicitly. Prefer using the RAII guard from
-/// `set_syscall_process_id` instead; this exists for backward compatibility.
-pub fn restore_task_provider(provider: Option<fn() -> u32>) {
-    let mut guard = CURRENT_TASK_PROVIDER.lock();
-    *guard = provider;
-}
-
-fn current_process_id() -> u32 {
-    let guard = CURRENT_TASK_PROVIDER.lock();
-    if let Some(cb) = *guard {
-        cb()
-    } else {
-        slopos_abi::task::INVALID_PROCESS_ID
+pub fn set_test_process_id(pid: u32) {
+    unsafe {
+        pcr::current_pcr().syscall_pid.store(pid, Ordering::Release);
     }
 }
 
@@ -98,12 +123,10 @@ fn validate_user_pages(
 
     let start = user_addr.as_u64();
 
-    // Overflow-checked end computation: reject ranges that wrap around u64.
     let end = start
         .checked_add(len as u64)
         .ok_or(UserPtrError::Overflow)?;
 
-    // Reject ranges that extend into or past the kernel/user boundary.
     if end > crate::memory_layout_defs::USER_SPACE_END_VA {
         return Err(UserPtrError::OutOfUserRange);
     }
@@ -115,7 +138,6 @@ fn validate_user_pages(
         if paging_is_user_accessible(dir, VirtAddr(page)) == 0 {
             return Err(UserPtrError::NotMapped);
         }
-        // Saturating add prevents infinite loop on page near u64::MAX.
         page = match page.checked_add(page_size) {
             Some(next) => next,
             None => break,
@@ -125,37 +147,54 @@ fn validate_user_pages(
     Ok(())
 }
 
+/// Perform a fault-recoverable copy via the assembly usercopy function.
+///
+/// Returns `Ok(())` on success, `Err(Fault)` if the copy faulted.
+/// The page-validation step is an optimistic fast path — the assembly
+/// function handles the actual fault if validation is stale.
+#[inline]
+unsafe fn do_usercopy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), UserPtrError> {
+    let remaining = unsafe { raw_usercopy(dst, src, len) };
+    if remaining == 0 {
+        Ok(())
+    } else {
+        Err(UserPtrError::CopyFailed)
+    }
+}
+
+/// Copy a `T` from user space into kernel space.
+///
+/// Safe against concurrent munmap: if the pages are unmapped between
+/// validation and the copy, the assembly usercopy function faults and
+/// the page fault handler returns an error instead of panicking.
 pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
     let dir = current_process_dir();
     validate_user_pages(src.addr(), core::mem::size_of::<T>(), dir)?;
-    // SAFETY: Byte-wise copy avoids alignment requirements on the user pointer.
-    // This mirrors Linux's copy_from_user which treats userspace as unaligned.
     unsafe {
         let mut val = core::mem::MaybeUninit::<T>::uninit();
-        ptr::copy_nonoverlapping(
-            src.as_ptr() as *const u8,
+        do_usercopy(
             val.as_mut_ptr() as *mut u8,
+            src.as_ptr() as *const u8,
             core::mem::size_of::<T>(),
-        );
+        )?;
         Ok(val.assume_init())
     }
 }
 
+/// Copy a `T` from kernel space into user space.
 pub fn copy_to_user<T: Copy>(dst: UserPtr<T>, value: &T) -> Result<(), UserPtrError> {
     let dir = current_process_dir();
     validate_user_pages(dst.addr(), core::mem::size_of::<T>(), dir)?;
-    // SAFETY: Byte-wise copy avoids alignment requirements on the user pointer.
-    // This mirrors Linux's copy_to_user which treats userspace as unaligned.
     unsafe {
-        ptr::copy_nonoverlapping(
-            value as *const T as *const u8,
+        do_usercopy(
             dst.as_mut_ptr() as *mut u8,
+            value as *const T as *const u8,
             core::mem::size_of::<T>(),
-        );
+        )
     }
-    Ok(())
 }
 
+/// Copy raw bytes from user space.
 pub fn copy_bytes_from_user(src: UserBytes, dst: &mut [u8]) -> Result<usize, UserPtrError> {
     let copy_len = src.len().min(dst.len());
     if copy_len == 0 {
@@ -166,11 +205,12 @@ pub fn copy_bytes_from_user(src: UserBytes, dst: &mut [u8]) -> Result<usize, Use
     validate_user_pages(src.base(), copy_len, dir)?;
 
     unsafe {
-        ptr::copy_nonoverlapping(src.base().as_ptr(), dst.as_mut_ptr(), copy_len);
+        do_usercopy(dst.as_mut_ptr(), src.base().as_ptr(), copy_len)?;
     }
     Ok(copy_len)
 }
 
+/// Copy raw bytes to user space.
 pub fn copy_bytes_to_user(dst: UserBytes, src: &[u8]) -> Result<usize, UserPtrError> {
     let copy_len = src.len().min(dst.len());
     if copy_len == 0 {
@@ -181,7 +221,7 @@ pub fn copy_bytes_to_user(dst: UserBytes, src: &[u8]) -> Result<usize, UserPtrEr
     validate_user_pages(dst.base(), copy_len, dir)?;
 
     unsafe {
-        ptr::copy_nonoverlapping(src.as_ptr(), dst.base().as_mut_ptr(), copy_len);
+        do_usercopy(dst.base().as_mut_ptr(), src.as_ptr(), copy_len)?;
     }
     Ok(copy_len)
 }
