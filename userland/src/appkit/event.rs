@@ -74,15 +74,17 @@ impl Event {
                 pressed,
                 ..
             } => {
+                let sc = u8::try_from(*scancode).ok()?;
+                let a = u8::try_from(*ascii).ok()?;
                 if *pressed {
                     Some(Event::KeyPress {
-                        scancode: *scancode as u8,
-                        ascii: *ascii as u8,
+                        scancode: sc,
+                        ascii: a,
                     })
                 } else {
                     Some(Event::KeyRelease {
-                        scancode: *scancode as u8,
-                        ascii: *ascii as u8,
+                        scancode: sc,
+                        ascii: a,
                     })
                 }
             }

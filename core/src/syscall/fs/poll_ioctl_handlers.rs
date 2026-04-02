@@ -80,6 +80,16 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     loop {
         run_bottom_halves();
 
+        // Pre-copy all poll FDs from userspace before registering waiters
+        // so a user-copy failure cannot leak prepare_to_wait / fused refs.
+        let mut poll_fds = [UserPollFd::default(); SELECT_MAX_FDS];
+        for idx in 0..nfds {
+            let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
+                base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
+            ));
+            poll_fds[idx] = try_or_err!(ctx, copy_from_user(user_ptr));
+        }
+
         slopos_kernel_services::driver_runtime::prepare_to_wait();
 
         // ── SINGLE PASS: fused register + readiness check ──────────
@@ -91,10 +101,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         let mut reg_count = 0usize;
 
         for idx in 0..nfds {
-            let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
-                base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
-            ));
-            let pfd = try_or_err!(ctx, copy_from_user(user_ptr));
+            let pfd = &poll_fds[idx];
             if pfd.fd < 0 {
                 cached_revents[idx] = 0;
             } else {

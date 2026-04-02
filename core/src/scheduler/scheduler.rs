@@ -949,29 +949,28 @@ pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
 
     match result {
         Ok(_) => {
-            // We won the race! Now transition state and enqueue
-            // CAS: BLOCKED -> READY (single-winner state transition)
-            if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
-                // State changed unexpectedly - task may be terminated or already ready
-                // Check if it's a real failure
-                if task_is_terminated(task) || task_is_invalid(task) {
-                    klog_info!(
-                        "try_wake_from_task_wait: task {} state transition failed (terminated/invalid)",
-                        unsafe { (*task).task_id }
-                    );
-                    return false;
-                }
-                // Task is already ready/running - that's fine, we still "won" the CAS
+            // We won the CAS race. Now wake the task using the same safe
+            // transitions as unblock_task() to avoid the WillBlock race.
+            let task_id = unsafe { (*task).task_id };
+
+            // WillBlock -> Running: task declared intent but hasn't blocked yet.
+            // Cancel any pending sleep; no schedule_task (task is still running).
+            if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
+                super::sleep::cancel_sleep(task_id);
+                return true;
             }
 
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            // Blocked -> Ready: task is fully blocked, wake it.
+            if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                super::sleep::cancel_sleep(task_id);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                schedule_task(task);
+                return true;
+            }
 
-            // Enqueue the task
-            if schedule_task(task) != 0 {
-                klog_info!(
-                    "try_wake_from_task_wait: failed to schedule task {}",
-                    unsafe { (*task).task_id }
-                );
+            // Task is in some other state (Running, Ready, Terminated).
+            if task_is_terminated(task) || task_is_invalid(task) {
+                return false;
             }
             true
         }
