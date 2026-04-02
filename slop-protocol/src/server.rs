@@ -20,7 +20,6 @@ pub struct Server {
     listen_fd: i32,
     pub clients: alloc::boxed::Box<[Option<ClientConn>; MAX_CLIENTS]>,
     pub client_count: usize,
-    next_id: u32,
 }
 
 impl Server {
@@ -38,7 +37,6 @@ impl Server {
             listen_fd,
             clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
             client_count: 0,
-            next_id: 1,
         })
     }
 
@@ -64,16 +62,24 @@ impl Server {
             listen_fd: fd,
             clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
             client_count: 0,
-            next_id: 1,
         })
     }
 
     /// Non-blocking accept. Returns client index if a new connection was accepted.
+    ///
+    /// Returns `Ok(None)` when no pending connections (EAGAIN/EWOULDBLOCK).
+    /// Propagates real errors (EMFILE, ENOMEM, etc.) as `Err`.
     pub fn accept(&mut self) -> Result<Option<usize>, ProtocolError> {
         let client_fd =
             match Sys::accept(self.listen_fd, core::ptr::null_mut(), core::ptr::null_mut()) {
                 Ok(fd) => fd,
-                Err(_) => return Ok(None), // EAGAIN
+                Err(e)
+                    if e == slopos_slibc::errno::EAGAIN
+                        || e == slopos_slibc::errno::EWOULDBLOCK =>
+                {
+                    return Ok(None);
+                }
+                Err(_) => return Err(ProtocolError::Io),
             };
 
         let idx = match self.clients.iter().position(|c| c.is_none()) {
@@ -112,19 +118,31 @@ impl Server {
         matches!(&self.clients[client], Some(c) if c.active)
     }
 
+    /// Probe a client for disconnection without consuming any messages.
+    ///
+    /// Performs a non-blocking `recv()` into the connection's read buffer.
+    /// If EOF is detected, marks the client as disconnected and returns
+    /// `true`.  Any data received is buffered for the next `recv_request`.
+    pub fn probe_disconnected(&mut self, client: usize) -> bool {
+        match &mut self.clients[client] {
+            Some(c) if c.active => {
+                if c.conn.probe_disconnected() {
+                    c.active = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Disconnect and clean up a client slot.
     pub fn disconnect(&mut self, client: usize) {
         if self.clients[client].take().is_some() {
             // Connection::drop closes the FD automatically.
             self.client_count = self.client_count.saturating_sub(1);
         }
-    }
-
-    /// Allocate a monotonically increasing ID for surfaces/toplevels/etc.
-    pub fn allocate_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        id
     }
 
     /// Get the server's listening socket FD.

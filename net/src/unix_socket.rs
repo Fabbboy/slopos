@@ -476,7 +476,6 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
     }
 
     // Set up accepted side (side B) — shares ring buffers on side A.
-    let a_gen = state.slots[i].generation;
     let accepted = &mut state.slots[b_idx];
     accepted.state = UnixState::Connected;
     accepted.side = PairSide::B;
@@ -492,8 +491,6 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
     // Drop lock before waking.
     drop(state);
 
-    let _ = a_gen; // generation stored for future use in wait_event guards
-
     // Wake the listener's accept() call.
     ACCEPT_WQS[listener_idx].wake_all();
 
@@ -503,9 +500,9 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
 /// Send data on a connected AF_UNIX socket.
 ///
 /// Returns the number of bytes written, or a negative errno.
-pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
-    if data.is_null() || len == 0 {
-        return if len == 0 { 0 } else { -14 }; // EFAULT for null+nonzero
+pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
+    if data.is_empty() {
+        return 0;
     }
 
     let i = idx as usize;
@@ -513,9 +510,7 @@ pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
         return -9;
     }
 
-    // SAFETY: data is non-null (checked above) and caller guarantees len
-    // bytes are readable (kernel scratch buffer from net_handlers).
-    let input = unsafe { core::slice::from_raw_parts(data, len) };
+    let input = data;
 
     loop {
         let result = {
@@ -609,9 +604,9 @@ pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
 /// Receive data from a connected AF_UNIX socket.
 ///
 /// Returns the number of bytes read, 0 on EOF, or a negative errno.
-pub fn unix_recv(idx: u32, buf: *mut u8, len: usize) -> i32 {
-    if buf.is_null() || len == 0 {
-        return if len == 0 { 0 } else { -14 }; // EFAULT for null+nonzero
+pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
+    if buf.is_empty() {
+        return 0;
     }
 
     let i = idx as usize;
@@ -619,9 +614,7 @@ pub fn unix_recv(idx: u32, buf: *mut u8, len: usize) -> i32 {
         return -9;
     }
 
-    // SAFETY: buf is non-null (checked above) and caller guarantees len
-    // bytes are writable (kernel scratch buffer from net_handlers).
-    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    let out = buf;
 
     loop {
         let result = {

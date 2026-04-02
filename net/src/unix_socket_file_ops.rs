@@ -33,7 +33,7 @@ impl FileOps for UnixSocketFileOps {
         let idx = raw_idx(handle);
         let mut tmp = [0u8; IO_STAGING_SIZE];
         let read_len = buf.len().min(tmp.len());
-        let n = unix_socket::unix_recv(idx, tmp.as_mut_ptr(), read_len);
+        let n = unix_socket::unix_recv(idx, &mut tmp[..read_len]);
         if n <= 0 {
             return n as isize;
         }
@@ -63,7 +63,7 @@ impl FileOps for UnixSocketFileOps {
                     };
                 }
             };
-            let sent = unix_socket::unix_send(idx, staging.as_ptr(), n);
+            let sent = unix_socket::unix_send(idx, &staging[..n]);
             if sent <= 0 {
                 return if total > 0 {
                     total as isize

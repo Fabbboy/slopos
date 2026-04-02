@@ -117,7 +117,6 @@ struct Clipboard {
 pub struct ProtocolBridge {
     server: Server,
     surfaces: [ProtocolSurface; MAX_SURFACES],
-    surface_count: usize,
     next_z_order: u32,
     clipboard: Clipboard,
     /// Display dimensions passed to new clients on accept.
@@ -142,7 +141,6 @@ impl ProtocolBridge {
         Some(Self {
             server,
             surfaces: [const { ProtocolSurface::empty() }; MAX_SURFACES],
-            surface_count: 0,
             next_z_order: 1,
             clipboard: Clipboard {
                 data: [0u8; 4096],
@@ -300,13 +298,20 @@ impl ProtocolBridge {
     // ── Surface lifecycle ──────────────────────────────────────────────────
 
     fn handle_create_surface(&mut self, client_idx: usize, new_id: u32) {
+        // Reject zero IDs (used as sentinel) and duplicates within this client.
+        if new_id == 0 || self.find_surface(client_idx, new_id).is_some() {
+            let _ = self
+                .server
+                .send_event(client_idx, &Event::Error { code: 2 });
+            return;
+        }
+
         let slot = match self.surfaces.iter().position(|s| !s.active) {
             Some(idx) => idx,
             None => {
-                let _ = self.server.send_event(
-                    client_idx,
-                    &slopos_protocol::types::Event::Error { code: 1 },
-                );
+                let _ = self
+                    .server
+                    .send_event(client_idx, &Event::Error { code: 1 });
                 return;
             }
         };
@@ -317,7 +322,6 @@ impl ProtocolBridge {
         self.surfaces[slot].surface_id = new_id;
         self.surfaces[slot].z_order = self.next_z_order;
         self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
-        self.surface_count += 1;
     }
 
     fn handle_surface_attach(
@@ -985,27 +989,18 @@ impl ProtocolBridge {
     /// Disconnections are primarily detected by `process_requests()`
     /// when `recv` returns `Disconnected`.  This method handles the
     /// edge case where a client disconnects between `process_requests`
-    /// calls without sending any data — we do a non-blocking recv
-    /// purely to check for EOF, but do NOT process any data (it would
-    /// skip the damage/commit flow).  Any pending data is left in the
-    /// buffer for the next `process_requests` pass.
+    /// calls without sending any data.
+    ///
+    /// Uses `probe_disconnected()` which does a non-blocking recv into
+    /// the read buffer — any data that arrives is preserved for the
+    /// next `process_requests()` call.  No framed messages are consumed.
     pub fn cleanup_disconnected(&mut self) {
         for idx in 0..32 {
             if !self.server.is_connected(idx) {
                 continue;
             }
-            // Only probe for disconnection — actual requests are
-            // handled exclusively by process_requests().
-            match self.server.recv_request(idx) {
-                Err(ProtocolError::Disconnected) => self.cleanup_client(idx),
-                Ok(Some(req)) => {
-                    // Data arrived — don't process it here (it would
-                    // skip the damage/commit flow). Put it back by
-                    // re-handling in the normal path.  Since we can't
-                    // un-recv, handle it directly.
-                    self.handle_request(idx, req);
-                }
-                _ => {}
+            if self.server.probe_disconnected(idx) {
+                self.cleanup_client(idx);
             }
         }
     }
@@ -1086,6 +1081,5 @@ impl ProtocolBridge {
         }
 
         self.surfaces[idx] = ProtocolSurface::empty();
-        self.surface_count = self.surface_count.saturating_sub(1);
     }
 }

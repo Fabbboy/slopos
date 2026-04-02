@@ -47,22 +47,6 @@ impl Connection {
         }
     }
 
-    /// Create a connection that stays in blocking mode (for the initial
-    /// connect + handshake phase before the caller converts it).
-    pub fn new_blocking(fd: i32) -> Self {
-        Self {
-            fd,
-            read_buf: alloc::boxed::Box::new([0u8; READ_BUF_SIZE]),
-            read_len: 0,
-            read_pos: 0,
-        }
-    }
-
-    /// Switch this connection to non-blocking mode.
-    pub fn set_nonblocking(&self) {
-        set_nonblock(self.fd);
-    }
-
     pub fn fd(&self) -> i32 {
         self.fd
     }
@@ -238,6 +222,16 @@ impl Connection {
         }
 
         Ok(Some(msg))
+    }
+
+    /// Probe whether the peer has disconnected without consuming any
+    /// framed messages.
+    ///
+    /// Does a non-blocking `recv()` into the read buffer.  If the peer
+    /// has closed, returns `true`.  Any data received is buffered for
+    /// the next `recv()` / `try_decode()` call — nothing is lost.
+    pub fn probe_disconnected(&mut self) -> bool {
+        matches!(self.try_fill_buf(), Err(ProtocolError::Disconnected))
     }
 
     /// Non-blocking read from socket into buffer.

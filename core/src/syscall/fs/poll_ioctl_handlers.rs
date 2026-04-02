@@ -116,13 +116,20 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         }
         macro_rules! writeback_revents {
             () => {
+                // Write only the 2-byte revents field at its offset within
+                // each UserPollFd (offset 6: after i32 fd + u16 events).
+                // Avoids re-reading the entire struct from userspace.
+                const REVENTS_OFFSET: u64 = 6;
                 for idx in 0..nfds {
-                    let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
-                        base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
-                    ));
-                    let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
-                    pfd.revents = cached_revents[idx];
-                    try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
+                    let revents_addr = base_ptr
+                        + (idx * core::mem::size_of::<UserPollFd>()) as u64
+                        + REVENTS_OFFSET;
+                    let revents_ptr = try_or_err!(ctx,
+                        slopos_mm::user_ptr::UserBytes::try_new(revents_addr, 2)
+                    );
+                    try_or_err!(ctx,
+                        slopos_mm::user_copy::copy_bytes_to_user(revents_ptr, &cached_revents[idx].to_ne_bytes())
+                    );
                 }
             };
         }

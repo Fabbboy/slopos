@@ -279,7 +279,7 @@ define_syscall!(syscall_send(ctx, args) requires(let process_id) {
         if len > 0 {
             let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
             let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]));
-            return rc_i32(&ctx, unix_socket::unix_send(unix_handle_idx(sock_idx), scratch.as_ptr(), copied));
+            return rc_i32(&ctx, unix_socket::unix_send(unix_handle_idx(sock_idx), &scratch[..copied]));
         }
         return ctx.ok(0);
     }
@@ -308,7 +308,7 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
     let mut scratch = [0u8; 4096];
 
     if is_unix_handle(sock_idx) {
-        let rc = unix_socket::unix_recv(unix_handle_idx(sock_idx), scratch.as_mut_ptr(), len);
+        let rc = unix_socket::unix_recv(unix_handle_idx(sock_idx), &mut scratch[..len]);
         if rc < 0 {
             return ctx.err_with(errno_i32(rc));
         }
