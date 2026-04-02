@@ -46,25 +46,27 @@ impl Event {
     /// Returns `None` for protocol events that have no appkit equivalent
     /// (e.g. `FrameDone`, `OutputInfo`).
     pub fn from_protocol(evt: &ProtocolEvent) -> Option<Self> {
-        match *evt {
+        match evt {
             ProtocolEvent::PointerEnter { x, y, .. }
-            | ProtocolEvent::PointerMotion { x, y, .. } => Some(Event::PointerMotion { x, y }),
+            | ProtocolEvent::PointerMotion { x, y, .. } => {
+                Some(Event::PointerMotion { x: *x, y: *y })
+            }
             ProtocolEvent::PointerButton {
                 button, pressed, ..
             } => {
-                if pressed {
+                if *pressed {
                     Some(Event::PointerPress {
-                        button: button as u8,
+                        button: *button as u8,
                     })
                 } else {
                     Some(Event::PointerRelease {
-                        button: button as u8,
+                        button: *button as u8,
                     })
                 }
             }
             ProtocolEvent::PointerAxis { axis, value, .. } => Some(Event::PointerAxis {
-                axis,
-                value_v120: value,
+                axis: *axis,
+                value_v120: *value,
             }),
             ProtocolEvent::Key {
                 scancode,
@@ -72,22 +74,23 @@ impl Event {
                 pressed,
                 ..
             } => {
-                if pressed {
+                if *pressed {
                     Some(Event::KeyPress {
-                        scancode: scancode as u8,
-                        ascii: ascii as u8,
+                        scancode: *scancode as u8,
+                        ascii: *ascii as u8,
                     })
                 } else {
                     Some(Event::KeyRelease {
-                        scancode: scancode as u8,
-                        ascii: ascii as u8,
+                        scancode: *scancode as u8,
+                        ascii: *ascii as u8,
                     })
                 }
             }
             ProtocolEvent::Close { .. } => Some(Event::CloseRequest),
-            ProtocolEvent::Configure { width, height, .. } => {
-                Some(Event::Configure { width, height })
-            }
+            ProtocolEvent::Configure { width, height, .. } => Some(Event::Configure {
+                width: *width,
+                height: *height,
+            }),
             _ => None,
         }
     }

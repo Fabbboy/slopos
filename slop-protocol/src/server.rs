@@ -6,7 +6,6 @@
 use crate::connection::Connection;
 use crate::types::{Event, ProtocolError, Request};
 use slopos_abi::net::AF_UNIX;
-use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK};
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -32,7 +31,7 @@ impl Server {
     /// it, and calls this constructor instead of `bind()`.
     pub fn from_fd(listen_fd: i32) -> Result<Self, ProtocolError> {
         // Ensure non-blocking for accept().
-        let _ = Sys::fcntl(listen_fd, F_SETFL as i32, O_NONBLOCK);
+        crate::connection::set_nonblock(listen_fd);
 
         const NONE: Option<ClientConn> = None;
         Ok(Self {
@@ -58,7 +57,7 @@ impl Server {
         Sys::bind(fd, addr_ptr, addr_len).map_err(|_| ProtocolError::Io)?;
         Sys::listen(fd, 32).map_err(|_| ProtocolError::Io)?;
         // Non-blocking so accept() returns EAGAIN instead of blocking
-        let _ = Sys::fcntl(fd, F_SETFL as i32, O_NONBLOCK);
+        crate::connection::set_nonblock(fd);
 
         const NONE: Option<ClientConn> = None;
         Ok(Self {
@@ -117,20 +116,25 @@ impl Server {
     pub fn disconnect(&mut self, client: usize) {
         if self.clients[client].take().is_some() {
             // Connection::drop closes the FD automatically.
-            self.client_count -= 1;
+            self.client_count = self.client_count.saturating_sub(1);
         }
     }
 
     /// Allocate a monotonically increasing ID for surfaces/toplevels/etc.
     pub fn allocate_id(&mut self) -> u32 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
         id
     }
 
     /// Get the server's listening socket FD.
     pub fn listen_fd(&self) -> i32 {
         self.listen_fd
+    }
+
+    /// Get the number of connected clients.
+    pub fn client_count(&self) -> usize {
+        self.client_count
     }
 
     /// Build an array of poll FDs for the listen socket + all connected clients.
@@ -166,5 +170,14 @@ impl Server {
         }
 
         count
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // Client connections are dropped via Box<[Option<ClientConn>]>,
+        // each Connection::drop closes its FD. But the listen FD is
+        // owned directly and must be closed explicitly.
+        let _ = Sys::close(self.listen_fd);
     }
 }

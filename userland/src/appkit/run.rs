@@ -91,10 +91,11 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     let mut last_refresh = sys_core::get_time_ms();
 
     loop {
-        let mut proto_buf = [ProtocolEvent::FrameDone {
-            surface: 0,
-            timestamp_ms: 0,
-        }; EVENT_BUF_LEN];
+        let mut proto_buf: [ProtocolEvent; EVENT_BUF_LEN] =
+            core::array::from_fn(|_| ProtocolEvent::FrameDone {
+                surface: 0,
+                timestamp_ms: 0,
+            });
         let count = win.poll_protocol_events(&mut proto_buf);
 
         for pe in &proto_buf[..count] {

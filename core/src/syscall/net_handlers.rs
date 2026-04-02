@@ -25,7 +25,7 @@ fn rc_i32(ctx: &SyscallContext, rc: i32) -> SyscallDisposition {
 
 fn rc_i64(ctx: &SyscallContext, rc: i64) -> SyscallDisposition {
     if rc < 0 {
-        ctx.err_with((rc as u64) as u64)
+        ctx.err_with(rc as u64)
     } else {
         ctx.ok(rc as u64)
     }
@@ -310,7 +310,7 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
     if is_unix_handle(sock_idx) {
         let rc = unix_socket::unix_recv(unix_handle_idx(sock_idx), scratch.as_mut_ptr(), len);
         if rc < 0 {
-            return ctx.err_with(rc as u64);
+            return ctx.err_with(errno_i32(rc));
         }
         let copied = rc as usize;
         if copied > 0 {
@@ -322,7 +322,7 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
 
     let rc = socket::socket_recv(sock_idx, scratch.as_mut_ptr(), len);
     if rc < 0 {
-        return ctx.err_with(rc as u64);
+        return ctx.err_with(rc as u64); // i64→u64 sign-extends correctly
     }
 
     let copied = rc as usize;

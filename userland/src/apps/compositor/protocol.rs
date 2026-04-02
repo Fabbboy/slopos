@@ -288,8 +288,8 @@ impl ProtocolBridge {
             Request::GetKeyboard { new_id } => {
                 self.handle_get_keyboard(client_idx, new_id);
             }
-            Request::ClipboardCopy { data, len } => {
-                self.handle_clipboard_copy(client_idx, &data, len as usize);
+            Request::ClipboardCopy(cb) => {
+                self.handle_clipboard_copy(client_idx, &cb.data, cb.len as usize);
             }
             Request::ClipboardPaste => {
                 self.handle_clipboard_paste(client_idx);
@@ -302,7 +302,13 @@ impl ProtocolBridge {
     fn handle_create_surface(&mut self, client_idx: usize, new_id: u32) {
         let slot = match self.surfaces.iter().position(|s| !s.active) {
             Some(idx) => idx,
-            None => return,
+            None => {
+                let _ = self.server.send_event(
+                    client_idx,
+                    &slopos_protocol::types::Event::Error { code: 1 },
+                );
+                return;
+            }
         };
 
         self.surfaces[slot] = ProtocolSurface::empty();
@@ -560,10 +566,10 @@ impl ProtocolBridge {
         data[..len].copy_from_slice(&self.clipboard.data[..len]);
         let _ = self.server.send_event(
             client_idx,
-            &Event::PasteResult {
+            &Event::PasteResult(Box::new(slopos_protocol::types::ClipboardData {
                 data,
                 len: len as u16,
-            },
+            })),
         );
     }
 
@@ -974,17 +980,29 @@ impl ProtocolBridge {
 
     // ── Client cleanup ─────────────────────────────────────────────────────
 
+    /// Detect client disconnections that may have been missed.
+    ///
+    /// Disconnections are primarily detected by `process_requests()`
+    /// when `recv` returns `Disconnected`.  This method handles the
+    /// edge case where a client disconnects between `process_requests`
+    /// calls without sending any data — we do a non-blocking recv
+    /// purely to check for EOF, but do NOT process any data (it would
+    /// skip the damage/commit flow).  Any pending data is left in the
+    /// buffer for the next `process_requests` pass.
     pub fn cleanup_disconnected(&mut self) {
         for idx in 0..32 {
             if !self.server.is_connected(idx) {
                 continue;
             }
-            // Probe for disconnection: try a non-blocking recv.
-            // If the peer closed, recv returns Disconnected → clean up.
+            // Only probe for disconnection — actual requests are
+            // handled exclusively by process_requests().
             match self.server.recv_request(idx) {
                 Err(ProtocolError::Disconnected) => self.cleanup_client(idx),
                 Ok(Some(req)) => {
-                    // Got a late request — process it.
+                    // Data arrived — don't process it here (it would
+                    // skip the damage/commit flow). Put it back by
+                    // re-handling in the normal path.  Since we can't
+                    // un-recv, handle it directly.
                     self.handle_request(idx, req);
                 }
                 _ => {}

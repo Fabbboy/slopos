@@ -41,10 +41,11 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
     let mut needs_rebuild = false;
     let mut needs_repaint = true;
-    let mut proto_events = [ProtocolEvent::FrameDone {
-        surface: 0,
-        timestamp_ms: 0,
-    }; EVENT_BUF_LEN];
+    let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
+        core::array::from_fn(|_| ProtocolEvent::FrameDone {
+            surface: 0,
+            timestamp_ms: 0,
+        });
     let mut last_tick_ms: u64 = crate::syscall::core::get_time_ms();
 
     loop {

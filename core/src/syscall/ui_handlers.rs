@@ -67,10 +67,9 @@ define_syscall!(syscall_shm_create_with_format(ctx, args) requires(let task_id) 
 });
 
 define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
-    let buffer_ptr = args.arg0_ptr::<InputEvent>();
     let max_count = args.arg1_usize();
 
-    if buffer_ptr.is_null() || max_count == 0 {
+    if args.arg0 == 0 || max_count == 0 {
         return ctx.ok(0);
     }
 
@@ -82,7 +81,29 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
         }
     }
 
-    ctx.ok(input::drain_batch(task_id, buffer_ptr, max_count) as u64)
+    // Drain into a kernel scratch buffer, then copy to userspace.
+    const MAX_BATCH: usize = 64;
+    let batch = max_count.min(MAX_BATCH);
+    let mut scratch: [InputEvent; MAX_BATCH] = [const {
+        InputEvent {
+            event_type: slopos_abi::input::InputEventType::KeyPress,
+            _padding: [0; 3],
+            timestamp_ms: 0,
+            data: slopos_abi::input::InputEventData { data0: 0, data1: 0 },
+        }
+    }; MAX_BATCH];
+
+    let count = input::drain_batch(task_id, scratch.as_mut_ptr(), batch);
+    if count > 0 {
+        let byte_len = count * core::mem::size_of::<InputEvent>();
+        let user_out = try_or_err!(ctx, UserBytes::try_new(args.arg0, byte_len));
+        let src_bytes = unsafe {
+            core::slice::from_raw_parts(scratch.as_ptr() as *const u8, byte_len)
+        };
+        try_or_err!(ctx, copy_bytes_to_user(user_out, src_bytes));
+    }
+
+    ctx.ok(count as u64)
 });
 
 define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {

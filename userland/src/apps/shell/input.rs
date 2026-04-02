@@ -804,9 +804,9 @@ fn protocol_clipboard_paste(buf: &mut [u8], deferred_out: &mut [InputEvent]) -> 
     let mut deferred_count = 0usize;
     for _ in 0..100 {
         match client.poll_event() {
-            Ok(Some(ProtocolEvent::PasteResult { data, len })) => {
-                let copy = (len as usize).min(buf.len());
-                buf[..copy].copy_from_slice(&data[..copy]);
+            Ok(Some(ProtocolEvent::PasteResult(cb))) => {
+                let copy = (cb.len as usize).min(buf.len());
+                buf[..copy].copy_from_slice(&cb.data[..copy]);
                 return (copy, deferred_count);
             }
             Ok(Some(other)) => {

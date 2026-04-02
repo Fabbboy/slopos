@@ -234,10 +234,13 @@ impl Client {
         let mut data = [0u8; 4096];
         let copy_len = src.len().min(4096);
         data[..copy_len].copy_from_slice(&src[..copy_len]);
-        self.conn.send(&Request::ClipboardCopy {
-            data,
-            len: copy_len as u16,
-        })
+        self.conn
+            .send(&Request::ClipboardCopy(alloc::boxed::Box::new(
+                crate::types::ClipboardData {
+                    data,
+                    len: copy_len as u16,
+                },
+            )))
     }
 
     pub fn clipboard_paste(&mut self) -> Result<(), ProtocolError> {

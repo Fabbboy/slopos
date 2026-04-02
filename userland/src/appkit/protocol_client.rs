@@ -10,23 +10,24 @@
 //!   the first time it is needed (surface creation).  By that point the
 //!   compositor has had time to accept the connection and push the event.
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::RefCell;
 
 use slopos_protocol::client::Client;
 
-/// Interior-mutable cell that is `Sync`.
+/// Per-process global protocol client.
 ///
-/// SAFETY invariant: SlopOS user processes are single-threaded —
-/// there is no concurrent access to the inner value.
-struct ClientCell(UnsafeCell<Option<Client>>);
-unsafe impl Sync for ClientCell {}
+/// Uses `RefCell` for interior mutability with runtime borrow checking,
+/// which is safe because SlopOS user processes are single-threaded.
+/// `RefCell` dynamically enforces the single-mutable-borrow invariant
+/// that raw `UnsafeCell` + `*mut` cannot.
+static PROTOCOL_CLIENT: CellWrapper = CellWrapper(RefCell::new(None));
 
-static PROTOCOL_CLIENT: ClientCell = ClientCell(UnsafeCell::new(None));
-
-/// Guard flag with Acquire/Release ordering so the `Client` written
-/// inside `init()` is visible to any later `client()` call.
-static INIT_DONE: AtomicBool = AtomicBool::new(false);
+/// Wrapper to make `RefCell` usable in a `static`.
+///
+/// SAFETY: SlopOS user processes are single-threaded — `RefCell` is
+/// never accessed from multiple threads.
+struct CellWrapper(RefCell<Option<Client>>);
+unsafe impl Sync for CellWrapper {}
 
 /// Connect to the compositor protocol socket (non-blocking).
 ///
@@ -37,17 +38,13 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 ///
 /// Safe to call multiple times; only the first call actually connects.
 pub fn init() {
-    if INIT_DONE.load(Ordering::Acquire) {
+    if PROTOCOL_CLIENT.0.borrow().is_some() {
         return;
     }
 
     for _ in 0..10 {
         if let Ok(client) = Client::connect(b"/run/compositor") {
-            // SAFETY: single-threaded process; no concurrent access.
-            unsafe {
-                *PROTOCOL_CLIENT.0.get() = Some(client);
-            }
-            INIT_DONE.store(true, Ordering::Release);
+            *PROTOCOL_CLIENT.0.borrow_mut() = Some(client);
             return;
         }
         crate::syscall::core::sleep_ms(200);
@@ -55,44 +52,14 @@ pub fn init() {
     // Compositor not running — client stays None, surface creation will fail.
 }
 
-/// Thin handle to the global `Client`.
+/// Get an exclusive borrow of the global protocol client.
 ///
-/// Uses `Deref`/`DerefMut` so callers can write `client().method()` while
-/// the underlying `&mut Client` only lives for the duration of each method
-/// call — no overlapping mutable references (which was the UB with the old
-/// `&'static mut Client` return).
-pub struct ClientRef(*mut Client);
-
-impl core::ops::Deref for ClientRef {
-    type Target = Client;
-    #[inline]
-    fn deref(&self) -> &Client {
-        // SAFETY: single-threaded process; pointer is valid after init().
-        unsafe { &*self.0 }
-    }
-}
-
-impl core::ops::DerefMut for ClientRef {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Client {
-        // SAFETY: single-threaded process; only one ClientRef is
-        // dereferenced at a time in sequential code.
-        unsafe { &mut *self.0 }
-    }
-}
-
-/// Get a handle to the global protocol client.
-///
-/// # Panics
-///
-/// Panics if called before a successful `init()`.
+/// Returns a `RefMut` guard that dynamically enforces single-borrow.
+/// Panics if called reentrantly (which would be a logic bug in
+/// single-threaded code) or before a successful `init()`.
 #[inline]
-pub fn client() -> ClientRef {
-    // SAFETY: single-threaded process; init() completes before any client() call.
-    // The Acquire load on INIT_DONE ensures the Client write is visible.
-    let ptr = unsafe { (*PROTOCOL_CLIENT.0.get()).as_mut() };
-    match ptr {
-        Some(c) => ClientRef(c as *mut Client),
-        None => panic!("protocol not initialized"),
-    }
+pub fn client() -> core::cell::RefMut<'static, Client> {
+    core::cell::RefMut::map(PROTOCOL_CLIENT.0.borrow_mut(), |opt| {
+        opt.as_mut().expect("protocol not initialized")
+    })
 }

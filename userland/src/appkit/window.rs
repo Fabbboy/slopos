@@ -136,10 +136,11 @@ impl Window {
     /// Reads from the compositor protocol socket.
     /// Pointer state is updated per-event before the handler is called.
     pub fn poll_events<F: FnMut(Event)>(&mut self, mut handler: F) {
-        let mut proto_events = [ProtocolEvent::FrameDone {
-            surface: 0,
-            timestamp_ms: 0,
-        }; EVENT_BUF_LEN];
+        let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
+            core::array::from_fn(|_| ProtocolEvent::FrameDone {
+                surface: 0,
+                timestamp_ms: 0,
+            });
         let count = self.poll_protocol_events(&mut proto_events);
         for pe in &proto_events[..count] {
             if let Some(event) = Event::from_protocol(pe) {

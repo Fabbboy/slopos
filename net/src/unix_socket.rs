@@ -87,13 +87,12 @@ impl RingBuf {
         }
     }
 
-    /// Allocate the backing buffer.  Returns `true` on success.
-    fn alloc(&mut self) -> bool {
-        if self.buf.is_some() {
-            return true;
-        }
-        self.buf = Some(Box::new([0u8; UNIX_BUF_SIZE]));
-        true
+    /// Install a pre-allocated buffer and reset cursors.
+    fn install(&mut self, buf: Box<[u8; UNIX_BUF_SIZE]>) {
+        self.buf = Some(buf);
+        self.read_pos = 0;
+        self.write_pos = 0;
+        self.len = 0;
     }
 
     /// Release the backing buffer and reset cursors.
@@ -141,12 +140,6 @@ impl RingBuf {
     fn has_space(&self) -> bool {
         self.buf.is_some() && self.len < UNIX_BUF_SIZE
     }
-
-    fn reset(&mut self) {
-        self.read_pos = 0;
-        self.write_pos = 0;
-        self.len = 0;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +184,10 @@ struct UnixSlot {
     /// only when the count reaches 0, preventing use-after-free when one
     /// side closes while the other still references the data.
     buf_refcount: u8,
+    /// Monotonically increasing generation counter.  Incremented on each
+    /// slot reuse so that stale `peer_idx` references from wait-queue
+    /// condition closures can detect that the slot was repurposed.
+    generation: u32,
 }
 
 impl UnixSlot {
@@ -209,25 +206,36 @@ impl UnixSlot {
             peer_closed: false,
             nonblocking: false,
             buf_refcount: 0,
+            generation: 0,
         }
     }
 
+    /// Reset slot metadata for reuse.
+    ///
+    /// Ring buffers are managed exclusively by the refcount path in
+    /// `unix_close()`.  This method must only be called when
+    /// `buf_refcount == 0` (enforced by `unix_create()`), at which
+    /// point the buffers have already been freed.
     fn reset(&mut self) {
+        debug_assert!(
+            self.buf_refcount == 0,
+            "reset() called with live buffer references (refcount={})",
+            self.buf_refcount
+        );
         self.valid = false;
         self.state = UnixState::Unbound;
         self.path = [0u8; UNIX_PATH_MAX];
         self.path_len = 0;
         self.backlog = [0u32; MAX_BACKLOG];
         self.backlog_len = 0;
-        // Ring buffers are NOT released here — they are refcounted and
-        // freed only when both sides of a connection have closed.
+        // Buffers are already released (refcount == 0), safe to reinit.
         self.buf_a_to_b = RingBuf::new();
         self.buf_b_to_a = RingBuf::new();
         self.side = PairSide::A;
         self.peer_idx = u32::MAX;
         self.peer_closed = false;
         self.nonblocking = false;
-        self.buf_refcount = 0;
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -257,10 +265,14 @@ static UNIX_STATE: IrqMutex<UnixSocketState> = IrqMutex::new(UnixSocketState::ne
 // ---------------------------------------------------------------------------
 
 /// Allocate a new AF_UNIX socket slot. Returns slot index or negative errno.
+///
+/// Slots with `buf_refcount > 0` are skipped even if `valid == false`:
+/// the peer side still holds a live reference to the ring buffers on
+/// that slot, so reusing it would corrupt the peer's data.
 pub fn unix_create() -> i32 {
     let mut state = UNIX_STATE.lock();
     for (idx, slot) in state.slots.iter_mut().enumerate() {
-        if !slot.valid {
+        if !slot.valid && slot.buf_refcount == 0 {
             slot.reset();
             slot.valid = true;
             slot.state = UnixState::Unbound;
@@ -389,6 +401,12 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
         return -22; // EINVAL
     }
 
+    // Pre-allocate ring buffers BEFORE acquiring the global lock.
+    // This avoids blocking all socket operations during the heap allocation
+    // (each buffer is UNIX_BUF_SIZE = 16 KB).
+    let pre_buf_a = Box::new([0u8; UNIX_BUF_SIZE]);
+    let pre_buf_b = Box::new([0u8; UNIX_BUF_SIZE]);
+
     let mut state = UNIX_STATE.lock();
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
@@ -432,7 +450,7 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
     // Allocate a new slot for the accepted side (side B).
     let mut b_idx = None;
     for (j, slot) in state.slots.iter_mut().enumerate() {
-        if !slot.valid {
+        if !slot.valid && slot.buf_refcount == 0 {
             slot.reset();
             slot.valid = true;
             b_idx = Some(j);
@@ -444,36 +462,26 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
         None => return -23, // ENFILE — no free slots
     };
 
-    // Set up caller (side A) — allocate ring buffers on the A-side slot.
+    // Set up caller (side A) — install pre-allocated ring buffers.
     {
         let slot = &mut state.slots[i];
-        if !slot.buf_a_to_b.alloc() || !slot.buf_b_to_a.alloc() {
-            // Allocation failed — release partial allocs and the B slot.
-            slot.buf_a_to_b.release();
-            slot.buf_b_to_a.release();
-            state.slots[b_idx].valid = false;
-            return -12; // ENOMEM
-        }
+        slot.buf_a_to_b.install(pre_buf_a);
+        slot.buf_b_to_a.install(pre_buf_b);
         slot.state = UnixState::Connected;
         slot.side = PairSide::A;
         slot.peer_idx = b_idx as u32;
         slot.peer_closed = false;
-        slot.buf_a_to_b.reset();
-        slot.buf_b_to_a.reset();
         // Two references: one for side A, one for side B.
         slot.buf_refcount = 2;
     }
 
-    // Set up accepted side (side B) — shares ring buffers conceptually,
-    // but since B is a separate slot we point it at the caller.
+    // Set up accepted side (side B) — shares ring buffers on side A.
+    let a_gen = state.slots[i].generation;
     let accepted = &mut state.slots[b_idx];
     accepted.state = UnixState::Connected;
     accepted.side = PairSide::B;
     accepted.peer_idx = i as u32;
     accepted.peer_closed = false;
-    // B reads from A's buf_a_to_b and writes to A's buf_b_to_a.
-    // Since we store buffers on side A's slot, side B must reference A.
-    // We store the peer_idx so send/recv can find the right slot.
 
     // Enqueue B in the listener's backlog.
     let listener = &mut state.slots[listener_idx];
@@ -483,6 +491,8 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
 
     // Drop lock before waking.
     drop(state);
+
+    let _ = a_gen; // generation stored for future use in wait_event guards
 
     // Wake the listener's accept() call.
     ACCEPT_WQS[listener_idx].wake_all();
@@ -701,36 +711,39 @@ pub fn unix_recv(idx: u32, buf: *mut u8, len: usize) -> i32 {
 }
 
 /// Close an AF_UNIX socket. Wakes all waiters on the peer if connected.
+///
+/// For listeners, all pending backlog entries (side-B slots that were
+/// created by `unix_connect()` but never `accept()`-ed) are closed
+/// and their side-A peers are notified.  This prevents permanent slot
+/// leaks and ghost connections.
 pub fn unix_close(idx: u32) -> i32 {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return -9;
     }
 
-    let (peer_idx, was_listener) = {
+    // Collect wakeup targets under the lock, wake outside.
+    let mut wake_peer: Option<usize> = None;
+    // Side-A peers of backlog entries that need waking after lock drop.
+    let mut backlog_a_peers: [usize; MAX_BACKLOG] = [usize::MAX; MAX_BACKLOG];
+    let mut backlog_wake_count = 0usize;
+    let was_listener;
+
+    {
         let mut state = UNIX_STATE.lock();
         if !state.slots[i].valid {
             return -9;
         }
 
-        let peer = if state.slots[i].state == UnixState::Connected {
+        if state.slots[i].state == UnixState::Connected {
             let p = state.slots[i].peer_idx as usize;
-            // Mark peer as peer_closed.
             if p < MAX_UNIX_SOCKETS && p != i && state.slots[p].valid {
                 state.slots[p].peer_closed = true;
             }
-            Some(p)
-        } else {
-            None
-        };
+            wake_peer = Some(p);
 
-        let was_listener = state.slots[i].state == UnixState::Listening;
-
-        // Decrement the buffer refcount on the side-A slot.  Buffers are
-        // only freed when both sides have closed (refcount reaches 0).
-        // This prevents use-after-free when one side closes while the
-        // peer still holds a reference to the shared ring buffers.
-        if state.slots[i].state == UnixState::Connected {
+            // Decrement refcount on the side-A slot.  Buffers freed
+            // only when both sides have closed (refcount reaches 0).
             let a_idx = match state.slots[i].side {
                 PairSide::A => i,
                 PairSide::B => state.slots[i].peer_idx as usize,
@@ -745,21 +758,63 @@ pub fn unix_close(idx: u32) -> i32 {
             }
         }
 
+        was_listener = state.slots[i].state == UnixState::Listening;
+
+        // Clean up pending backlog entries for listeners.  Each entry
+        // is a side-B slot created by unix_connect() but never handed
+        // to userspace via accept().  Close B, notify A, decrement
+        // A's buffer refcount.
+        if was_listener {
+            let bl = state.slots[i].backlog_len as usize;
+            for k in 0..bl {
+                let b_idx = state.slots[i].backlog[k] as usize;
+                if b_idx >= MAX_UNIX_SOCKETS || !state.slots[b_idx].valid {
+                    continue;
+                }
+                let a_idx = state.slots[b_idx].peer_idx as usize;
+
+                // Close the orphaned B-slot.
+                state.slots[b_idx].valid = false;
+                state.slots[b_idx].state = UnixState::Closed;
+
+                // Notify the A-side peer and release B's buffer ref.
+                if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].valid {
+                    state.slots[a_idx].peer_closed = true;
+                    let rc = state.slots[a_idx].buf_refcount.saturating_sub(1);
+                    state.slots[a_idx].buf_refcount = rc;
+                    if rc == 0 {
+                        state.slots[a_idx].buf_a_to_b.release();
+                        state.slots[a_idx].buf_b_to_a.release();
+                    }
+                    backlog_a_peers[backlog_wake_count] = a_idx;
+                    backlog_wake_count += 1;
+                }
+            }
+            state.slots[i].backlog_len = 0;
+        }
+
         state.slots[i].valid = false;
         state.slots[i].state = UnixState::Closed;
+    }
 
-        (peer, was_listener)
-    };
-
-    // Wake peer waiters so they see the close / EOF.
-    if let Some(peer) = peer_idx {
+    // Wake peer waiters outside the lock.
+    if let Some(peer) = wake_peer {
         if peer < MAX_UNIX_SOCKETS {
             RECV_WQS[peer].wake_all();
             SEND_WQS[peer].wake_all();
         }
     }
 
-    // If we were a listener, wake any blocked accept() calls.
+    // Wake A-side peers of cleaned-up backlog entries so they see EPIPE.
+    for k in 0..backlog_wake_count {
+        let a_idx = backlog_a_peers[k];
+        if a_idx < MAX_UNIX_SOCKETS {
+            RECV_WQS[a_idx].wake_all();
+            SEND_WQS[a_idx].wake_all();
+        }
+    }
+
+    // Wake blocked accept() callers on the closing listener.
     if was_listener {
         ACCEPT_WQS[i].wake_all();
     }

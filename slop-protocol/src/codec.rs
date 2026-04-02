@@ -5,7 +5,7 @@
 //!
 //! All fields are little-endian. No padding, no alignment.
 
-use crate::types::{Event, ProtocolError, Request};
+use crate::types::{ClipboardData, Event, ProtocolError, Request};
 
 /// Serialize into a byte buffer. Returns number of bytes written.
 pub trait Encode {
@@ -90,15 +90,6 @@ fn get_i32(buf: &[u8], pos: usize) -> Result<(i32, usize), ProtocolError> {
 fn get_bool(buf: &[u8], pos: usize) -> Result<(bool, usize), ProtocolError> {
     let (v, p) = get_u8(buf, pos)?;
     Ok((v != 0, p))
-}
-
-fn get_bytes<const N: usize>(buf: &[u8], pos: usize) -> Result<([u8; N], usize), ProtocolError> {
-    if pos + N > buf.len() {
-        return Err(ProtocolError::MalformedMessage);
-    }
-    let mut arr = [0u8; N];
-    arr.copy_from_slice(&buf[pos..pos + N]);
-    Ok((arr, pos + N))
 }
 
 // ── Request tag constants ─────────────────────────────────────────────────
@@ -207,10 +198,11 @@ impl Encode for Request {
                 title,
                 len,
             } => {
+                let actual = (*len as usize).min(title.len());
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_TITLE)?;
                 let p = put_u32(buf, p, *toplevel)?;
-                let p = put_bytes(buf, p, title)?;
-                let p = put_u8(buf, p, *len)?;
+                let p = put_u8(buf, p, actual as u8)?;
+                let p = put_bytes(buf, p, &title[..actual])?;
                 Ok(p)
             }
             Request::ToplevelSetAppId {
@@ -218,10 +210,11 @@ impl Encode for Request {
                 app_id,
                 len,
             } => {
+                let actual = (*len as usize).min(app_id.len());
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_APP_ID)?;
                 let p = put_u32(buf, p, *toplevel)?;
-                let p = put_bytes(buf, p, app_id)?;
-                let p = put_u8(buf, p, *len)?;
+                let p = put_u8(buf, p, actual as u8)?;
+                let p = put_bytes(buf, p, &app_id[..actual])?;
                 Ok(p)
             }
             Request::ToplevelDestroy { toplevel } => {
@@ -284,10 +277,11 @@ impl Encode for Request {
                 let p = put_u32(buf, p, *new_id)?;
                 Ok(p)
             }
-            Request::ClipboardCopy { data, len } => {
+            Request::ClipboardCopy(cb) => {
+                let actual = (cb.len as usize).min(cb.data.len());
                 let p = put_u8(buf, 0, REQ_CLIPBOARD_COPY)?;
-                let p = put_bytes(buf, p, data)?;
-                let p = put_u16(buf, p, *len)?;
+                let p = put_u16(buf, p, actual as u16)?;
+                let p = put_bytes(buf, p, &cb.data[..actual])?;
                 Ok(p)
             }
             Request::ClipboardPaste => {
@@ -359,32 +353,38 @@ impl Decode for Request {
             }
             REQ_TOPLEVEL_SET_TITLE => {
                 let (toplevel, p) = get_u32(buf, p)?;
-                let (title, p) = get_bytes::<32>(buf, p)?;
                 let (raw_len, p) = get_u8(buf, p)?;
-                // Clamp to buffer size at decode time so consumers can
-                // trust `len` without their own bounds check.
-                let len = if raw_len > 32 { 32 } else { raw_len };
+                let len = (raw_len as usize).min(32);
+                let mut title = [0u8; 32];
+                if p + len > buf.len() {
+                    return Err(ProtocolError::MalformedMessage);
+                }
+                title[..len].copy_from_slice(&buf[p..p + len]);
                 Ok((
                     Request::ToplevelSetTitle {
                         toplevel,
                         title,
-                        len,
+                        len: len as u8,
                     },
-                    p,
+                    p + len,
                 ))
             }
             REQ_TOPLEVEL_SET_APP_ID => {
                 let (toplevel, p) = get_u32(buf, p)?;
-                let (app_id, p) = get_bytes::<32>(buf, p)?;
                 let (raw_len, p) = get_u8(buf, p)?;
-                let len = if raw_len > 32 { 32 } else { raw_len };
+                let len = (raw_len as usize).min(32);
+                let mut app_id = [0u8; 32];
+                if p + len > buf.len() {
+                    return Err(ProtocolError::MalformedMessage);
+                }
+                app_id[..len].copy_from_slice(&buf[p..p + len]);
                 Ok((
                     Request::ToplevelSetAppId {
                         toplevel,
                         app_id,
-                        len,
+                        len: len as u8,
                     },
-                    p,
+                    p + len,
                 ))
             }
             REQ_TOPLEVEL_DESTROY => {
@@ -445,9 +445,20 @@ impl Decode for Request {
                 Ok((Request::GetKeyboard { new_id }, p))
             }
             REQ_CLIPBOARD_COPY => {
-                let (data, p) = get_bytes::<4096>(buf, p)?;
-                let (len, p) = get_u16(buf, p)?;
-                Ok((Request::ClipboardCopy { data, len }, p))
+                let (raw_len, p) = get_u16(buf, p)?;
+                let len = (raw_len as usize).min(4096);
+                let mut data = [0u8; 4096];
+                if p + len > buf.len() {
+                    return Err(ProtocolError::MalformedMessage);
+                }
+                data[..len].copy_from_slice(&buf[p..p + len]);
+                Ok((
+                    Request::ClipboardCopy(alloc::boxed::Box::new(ClipboardData {
+                        data,
+                        len: len as u16,
+                    })),
+                    p + len,
+                ))
             }
             REQ_CLIPBOARD_PASTE => Ok((Request::ClipboardPaste, p)),
             _ => Err(ProtocolError::MalformedMessage),
@@ -563,10 +574,11 @@ impl Encode for Event {
                 let p = put_u32(buf, p, *pitch)?;
                 Ok(p)
             }
-            Event::PasteResult { data, len } => {
+            Event::PasteResult(cb) => {
+                let actual = (cb.len as usize).min(cb.data.len());
                 let p = put_u8(buf, 0, EVT_PASTE_RESULT)?;
-                let p = put_bytes(buf, p, data)?;
-                let p = put_u16(buf, p, *len)?;
+                let p = put_u16(buf, p, actual as u16)?;
+                let p = put_bytes(buf, p, &cb.data[..actual])?;
                 Ok(p)
             }
             Event::Error { code } => {
@@ -690,9 +702,20 @@ impl Decode for Event {
                 ))
             }
             EVT_PASTE_RESULT => {
-                let (data, p) = get_bytes::<4096>(buf, p)?;
-                let (len, p) = get_u16(buf, p)?;
-                Ok((Event::PasteResult { data, len }, p))
+                let (raw_len, p) = get_u16(buf, p)?;
+                let len = (raw_len as usize).min(4096);
+                let mut data = [0u8; 4096];
+                if p + len > buf.len() {
+                    return Err(ProtocolError::MalformedMessage);
+                }
+                data[..len].copy_from_slice(&buf[p..p + len]);
+                Ok((
+                    Event::PasteResult(alloc::boxed::Box::new(ClipboardData {
+                        data,
+                        len: len as u16,
+                    })),
+                    p + len,
+                ))
             }
             EVT_ERROR => {
                 let (code, p) = get_u32(buf, p)?;

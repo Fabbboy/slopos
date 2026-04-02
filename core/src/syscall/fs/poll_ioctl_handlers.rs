@@ -70,17 +70,17 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let base_ptr = args.arg0;
     let start_ms = slopos_kernel_services::platform::get_time_ms();
 
+    // Kernel-side revents cache.  Written back to userspace only on
+    // return (ready FDs found, timeout, or signal) to avoid per-
+    // iteration page-table walks and observable intermediate writes.
+    let mut cached_revents = [0u16; SELECT_MAX_FDS];
+
     loop {
         run_bottom_halves();
 
-        // Set WillBlock BEFORE any registration.  Works from both Running
-        // and Ready (after Phase 1 state-machine fix).
         slopos_kernel_services::driver_runtime::prepare_to_wait();
 
         // ── SINGLE PASS: fused register + readiness check ──────────
-        // Each file_poll_fused() call atomically registers the current
-        // task on the subsystem's wait queue AND checks readiness under
-        // the same subsystem lock.  This is the Linux ->poll() pattern.
         let mut ready_count = 0u64;
         let mut registered_fds = [0i32; SELECT_MAX_FDS];
         let mut reg_count = 0usize;
@@ -89,12 +89,12 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
                 base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
             ));
-            let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
+            let pfd = try_or_err!(ctx, copy_from_user(user_ptr));
             if pfd.fd < 0 {
-                pfd.revents = 0;
+                cached_revents[idx] = 0;
             } else {
                 let result = file_poll_fused(pid, pfd.fd as c_int, pfd.events);
-                pfd.revents = result.revents;
+                cached_revents[idx] = result.revents;
                 if result.revents != 0 {
                     ready_count += 1;
                 }
@@ -103,10 +103,9 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
                     reg_count += 1;
                 }
             }
-            try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
         }
 
-        // ── Cleanup helper ─────────────────────────────────────────
+        // ── Cleanup + writeback helpers ────────────────────────────
         macro_rules! cleanup {
             () => {
                 slopos_kernel_services::driver_runtime::finish_wait();
@@ -115,35 +114,47 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
                 }
             };
         }
+        macro_rules! writeback_revents {
+            () => {
+                for idx in 0..nfds {
+                    let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
+                        base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
+                    ));
+                    let mut pfd = try_or_err!(ctx, copy_from_user(user_ptr));
+                    pfd.revents = cached_revents[idx];
+                    try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
+                }
+            };
+        }
 
         if ready_count > 0 {
             cleanup!();
+            writeback_revents!();
             return ctx.ok(ready_count);
         }
 
         if timeout_ms == 0 {
             cleanup!();
+            writeback_revents!();
             return ctx.ok(0);
         }
         if timeout_ms > 0 {
             let now = slopos_kernel_services::platform::get_time_ms();
             if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
                 cleanup!();
+                writeback_revents!();
                 return ctx.ok(0);
             }
         }
 
         // ── Sleep ──────────────────────────────────────────────────
-        // If data arrived between registration and here, unblock_task
-        // already flipped us to Running via the WillBlock guard, so
-        // block_current_task_with_timeout returns immediately.
         let sleep_ms = if timeout_ms < 0 {
-            100u32
+            500u32
         } else {
             let remaining = timeout_ms
                 - (slopos_kernel_services::platform::get_time_ms()
                     .wrapping_sub(start_ms) as i64);
-            (remaining.max(0) as u32).min(100)
+            (remaining.max(0) as u32).min(500)
         };
 
         if reg_count > 0 {
@@ -311,12 +322,12 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         }
 
         let sleep_ms = if timeout_ms < 0 {
-            100u32
+            500u32
         } else {
             let remaining = timeout_ms
                 - (slopos_kernel_services::platform::get_time_ms()
                     .wrapping_sub(start_ms) as i64);
-            (remaining.max(0) as u32).min(100)
+            (remaining.max(0) as u32).min(500)
         };
 
         if reg_count > 0 {

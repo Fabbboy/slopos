@@ -26,6 +26,14 @@ pub struct OutputInfo {
     pub pitch: u32,
 }
 
+/// Heap-allocated clipboard payload to avoid bloating the Request/Event
+/// enums to 4 KiB+ per value.
+#[derive(Clone)]
+pub struct ClipboardData {
+    pub data: [u8; 4096],
+    pub len: u16,
+}
+
 /// Client-to-server request.
 #[derive(Clone)]
 pub enum Request {
@@ -102,15 +110,12 @@ pub enum Request {
     GetKeyboard {
         new_id: u32,
     },
-    ClipboardCopy {
-        data: [u8; 4096],
-        len: u16,
-    },
+    ClipboardCopy(alloc::boxed::Box<ClipboardData>),
     ClipboardPaste,
 }
 
 /// Server-to-client event.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Event {
     FrameDone {
         surface: u32,
@@ -168,10 +173,7 @@ pub enum Event {
         format: u32,
         pitch: u32,
     },
-    PasteResult {
-        data: [u8; 4096],
-        len: u16,
-    },
+    PasteResult(alloc::boxed::Box<ClipboardData>),
     Error {
         code: u32,
     },

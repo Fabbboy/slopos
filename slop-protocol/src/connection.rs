@@ -11,16 +11,24 @@
 
 use crate::codec::{Decode, Encode};
 use crate::types::ProtocolError;
-use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK, POLLIN, POLLOUT};
+use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_abi::syscall::types::UserPollFd;
+use slopos_slibc::errno;
 use slopos_slibc::pal::{Pal, Sys};
 
 const READ_BUF_SIZE: usize = 16384;
 const MAX_MSG_SIZE: usize = 8192;
 
+/// Set O_NONBLOCK on a socket FD, preserving any existing flags.
+pub fn set_nonblock(fd: i32) {
+    use slopos_abi::syscall::posix::F_GETFL;
+    let flags = Sys::fcntl(fd, F_GETFL as i32, 0).unwrap_or(0) as u64;
+    let _ = Sys::fcntl(fd, F_SETFL as i32, flags | O_NONBLOCK);
+}
+
 pub struct Connection {
     fd: i32,
-    read_buf: [u8; READ_BUF_SIZE],
+    read_buf: alloc::boxed::Box<[u8; READ_BUF_SIZE]>,
     read_len: usize,
     read_pos: usize,
 }
@@ -30,10 +38,10 @@ impl Connection {
     /// Sets the socket to non-blocking mode immediately.
     pub fn new(fd: i32) -> Self {
         // Set non-blocking ONCE. Never changed again.
-        let _ = Sys::fcntl(fd, F_SETFL as i32, O_NONBLOCK);
+        set_nonblock(fd);
         Self {
             fd,
-            read_buf: [0u8; READ_BUF_SIZE],
+            read_buf: alloc::boxed::Box::new([0u8; READ_BUF_SIZE]),
             read_len: 0,
             read_pos: 0,
         }
@@ -44,7 +52,7 @@ impl Connection {
     pub fn new_blocking(fd: i32) -> Self {
         Self {
             fd,
-            read_buf: [0u8; READ_BUF_SIZE],
+            read_buf: alloc::boxed::Box::new([0u8; READ_BUF_SIZE]),
             read_len: 0,
             read_pos: 0,
         }
@@ -52,7 +60,7 @@ impl Connection {
 
     /// Switch this connection to non-blocking mode.
     pub fn set_nonblocking(&self) {
-        let _ = Sys::fcntl(self.fd, F_SETFL as i32, O_NONBLOCK);
+        set_nonblock(self.fd);
     }
 
     pub fn fd(&self) -> i32 {
@@ -78,11 +86,11 @@ impl Connection {
             match Sys::send(self.fd, ptr, remaining, 0) {
                 Ok(n) if n > 0 => sent += n,
                 Ok(0) => return Err(ProtocolError::Disconnected),
-                _ => {
-                    // EAGAIN — socket buffer full. Wait via poll(POLLOUT)
-                    // then retry. This is the standard non-blocking send pattern.
+                Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
                     self.poll_writable(2000)?;
                 }
+                Err(_) => return Err(ProtocolError::Io),
+                Ok(_) => unreachable!(),
             }
         }
         Ok(())
@@ -150,10 +158,16 @@ impl Connection {
             if result <= 0 {
                 return Err(ProtocolError::Timeout);
             }
-            if pfd.revents & POLLIN == 0 {
-                return Err(ProtocolError::Timeout);
+            if pfd.revents & POLLERR != 0 {
+                return Err(ProtocolError::Io);
             }
-            return Ok(());
+            if pfd.revents & POLLHUP != 0 {
+                return Err(ProtocolError::Disconnected);
+            }
+            if pfd.revents & POLLIN != 0 {
+                return Ok(());
+            }
+            // Spurious wakeup — retry.
         }
     }
 
@@ -181,10 +195,15 @@ impl Connection {
             if result <= 0 {
                 return Err(ProtocolError::Timeout);
             }
-            if pfd.revents & POLLOUT == 0 {
-                return Err(ProtocolError::Timeout);
+            if pfd.revents & POLLERR != 0 {
+                return Err(ProtocolError::Io);
             }
-            return Ok(());
+            if pfd.revents & POLLHUP != 0 {
+                return Err(ProtocolError::Disconnected);
+            }
+            if pfd.revents & POLLOUT != 0 {
+                return Ok(());
+            }
         }
     }
 
@@ -237,7 +256,9 @@ impl Connection {
                 Ok(())
             }
             Ok(0) => Err(ProtocolError::Disconnected),
-            _ => Ok(()), // EAGAIN — no data available, that's fine
+            Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => Ok(()),
+            Err(_) => Err(ProtocolError::Io),
+            Ok(_) => unreachable!(),
         }
     }
 
