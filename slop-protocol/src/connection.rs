@@ -103,35 +103,41 @@ impl Connection {
 
     /// Block via poll() until a complete message arrives or timeout expires.
     /// Loops to handle partial reads (poll wakes but only part of the
-    /// frame arrived). The timeout is a total deadline, not per-iteration.
+    /// frame arrived). Uses a real-time deadline to avoid unbounded waits.
     pub fn wait_recv<T: Decode>(&mut self, timeout_ms: i32) -> Result<T, ProtocolError> {
         // Check buffer first — message might already be there.
         if let Some(msg) = self.recv::<T>()? {
             return Ok(msg);
         }
 
-        let mut remaining = timeout_ms;
+        let start = crate::timestamp_ms();
+        let deadline = start.saturating_add(timeout_ms as u64);
         loop {
+            let now = crate::timestamp_ms();
+            if now >= deadline {
+                return Err(ProtocolError::Timeout);
+            }
+            let remaining = (deadline - now) as i32;
             self.poll_readable(remaining)?;
             self.try_fill_buf()?;
             if let Some(msg) = self.try_decode::<T>()? {
                 return Ok(msg);
             }
-            // Partial read — reduce remaining time and retry.
-            let step = 50i32.min(remaining);
-            remaining -= step;
-            if remaining <= 0 {
-                return Err(ProtocolError::Timeout);
-            }
         }
     }
 
     /// Block via poll() until the socket has data to read.
-    /// Retries automatically if interrupted by a signal (EINTR).
+    /// Retries automatically if interrupted by a signal (EINTR),
+    /// using a real-time deadline to avoid unbounded waits.
     fn poll_readable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
         const EINTR: i32 = -4;
-        let mut remaining = timeout_ms;
+        let deadline = crate::timestamp_ms().saturating_add(timeout_ms as u64);
         loop {
+            let now = crate::timestamp_ms();
+            if now >= deadline {
+                return Err(ProtocolError::Timeout);
+            }
+            let remaining = (deadline - now) as i32;
             let mut pfd = UserPollFd {
                 fd: self.fd,
                 events: POLLIN,
@@ -139,12 +145,6 @@ impl Connection {
             };
             let result = crate::raw_poll(&mut pfd, 1, remaining as i64);
             if result == EINTR {
-                // Interrupted by signal — retry with reduced timeout.
-                let step = 10i32.min(remaining);
-                remaining -= step;
-                if remaining <= 0 {
-                    return Err(ProtocolError::Timeout);
-                }
                 continue;
             }
             if result <= 0 {
@@ -158,11 +158,17 @@ impl Connection {
     }
 
     /// Block via poll() until the socket is ready for writing.
-    /// Retries automatically if interrupted by a signal (EINTR).
+    /// Retries automatically if interrupted by a signal (EINTR),
+    /// using a real-time deadline to avoid unbounded waits.
     fn poll_writable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
         const EINTR: i32 = -4;
-        let mut remaining = timeout_ms;
+        let deadline = crate::timestamp_ms().saturating_add(timeout_ms as u64);
         loop {
+            let now = crate::timestamp_ms();
+            if now >= deadline {
+                return Err(ProtocolError::Timeout);
+            }
+            let remaining = (deadline - now) as i32;
             let mut pfd = UserPollFd {
                 fd: self.fd,
                 events: POLLOUT,
@@ -170,11 +176,6 @@ impl Connection {
             };
             let result = crate::raw_poll(&mut pfd, 1, remaining as i64);
             if result == EINTR {
-                let step = 10i32.min(remaining);
-                remaining -= step;
-                if remaining <= 0 {
-                    return Err(ProtocolError::Timeout);
-                }
                 continue;
             }
             if result <= 0 {

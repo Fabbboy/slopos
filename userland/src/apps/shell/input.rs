@@ -504,7 +504,9 @@ fn input_loop(
                     delete_selection(&mut sel, &mut len, &mut cursor_pos);
                 }
                 let mut paste_buf = [0u8; 256];
-                let pasted = protocol_clipboard_paste(&mut paste_buf);
+                let mut deferred_events = [InputEvent::default(); 8];
+                let (pasted, _deferred_n) =
+                    protocol_clipboard_paste(&mut paste_buf, &mut deferred_events);
                 if pasted > 0 {
                     let mut filtered = [0u8; 256];
                     let mut flen = 0;
@@ -729,7 +731,7 @@ fn redraw(
 
 /// Poll protocol events from the compositor and convert them to InputEvents.
 pub(crate) fn poll_protocol_events(events: &mut [InputEvent]) -> usize {
-    let client = protocol_client::client();
+    let mut client = protocol_client::client();
     let mut count = 0usize;
     while count < events.len() {
         match client.poll_event() {
@@ -791,25 +793,36 @@ fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
 }
 
 /// Request clipboard paste from the compositor and wait for the result.
-fn protocol_clipboard_paste(buf: &mut [u8]) -> usize {
-    let client = protocol_client::client();
+///
+/// Non-paste events received while waiting are buffered and replayed
+/// into `deferred_out` so they are not lost.
+fn protocol_clipboard_paste(buf: &mut [u8], deferred_out: &mut [InputEvent]) -> (usize, usize) {
+    let mut client = protocol_client::client();
     if client.clipboard_paste().is_err() {
-        return 0;
+        return (0, 0);
     }
-    // Poll for PasteResult event (with a short timeout via limited iterations).
+    let mut deferred_count = 0usize;
     for _ in 0..100 {
         match client.poll_event() {
             Ok(Some(ProtocolEvent::PasteResult { data, len })) => {
                 let copy = (len as usize).min(buf.len());
                 buf[..copy].copy_from_slice(&data[..copy]);
-                return copy;
+                return (copy, deferred_count);
             }
-            Ok(Some(_)) => continue, // Skip non-paste events
+            Ok(Some(other)) => {
+                // Buffer non-paste events so they are not lost.
+                if deferred_count < deferred_out.len() {
+                    if let Some(evt) = protocol_event_to_input_event(&other) {
+                        deferred_out[deferred_count] = evt;
+                        deferred_count += 1;
+                    }
+                }
+            }
             Ok(None) => {
                 sys_core::yield_now();
             }
-            Err(_) => return 0,
+            Err(_) => return (0, deferred_count),
         }
     }
-    0
+    (0, deferred_count)
 }

@@ -310,7 +310,7 @@ impl ProtocolBridge {
         self.surfaces[slot].client_idx = client_idx;
         self.surfaces[slot].surface_id = new_id;
         self.surfaces[slot].z_order = self.next_z_order;
-        self.next_z_order += 1;
+        self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
         self.surface_count += 1;
     }
 
@@ -465,41 +465,37 @@ impl ProtocolBridge {
         }
     }
 
-    fn handle_subsurface_set_position(&mut self, client_idx: usize, _sub_id: u32, x: i32, y: i32) {
-        // Find subsurface owned by this client
-        for i in 0..MAX_SURFACES {
-            let s = &self.surfaces[i];
-            if s.active && s.client_idx == client_idx && s.role == SurfaceRole::Subsurface {
-                self.surfaces[i].relative_x = x;
-                self.surfaces[i].relative_y = y;
-                return;
+    fn handle_subsurface_set_position(&mut self, client_idx: usize, sub_id: u32, x: i32, y: i32) {
+        if let Some(idx) = self.find_surface(client_idx, sub_id) {
+            if self.surfaces[idx].role == SurfaceRole::Subsurface {
+                self.surfaces[idx].relative_x = x;
+                self.surfaces[idx].relative_y = y;
             }
         }
     }
 
-    fn handle_subsurface_destroy(&mut self, client_idx: usize, _sub_id: u32) {
-        for i in 0..MAX_SURFACES {
-            let s = &self.surfaces[i];
-            if s.active && s.client_idx == client_idx && s.role == SurfaceRole::Subsurface {
-                // Remove from parent's children list
-                if let Some(parent_idx) = self.surfaces[i].parent_surface_idx {
-                    let parent = &mut self.surfaces[parent_idx];
-                    for j in 0..parent.child_count as usize {
-                        if parent.children[j] == Some(i) {
-                            for k in j..parent.child_count as usize - 1 {
-                                parent.children[k] = parent.children[k + 1];
-                            }
-                            parent.children[parent.child_count as usize - 1] = None;
-                            parent.child_count -= 1;
-                            break;
+    fn handle_subsurface_destroy(&mut self, client_idx: usize, sub_id: u32) {
+        let i = match self.find_surface(client_idx, sub_id) {
+            Some(idx) if self.surfaces[idx].role == SurfaceRole::Subsurface => idx,
+            _ => return,
+        };
+        if let Some(parent_idx) = self.surfaces[i].parent_surface_idx {
+            if parent_idx < MAX_SURFACES && self.surfaces[parent_idx].active {
+                let parent = &mut self.surfaces[parent_idx];
+                for j in 0..parent.child_count as usize {
+                    if parent.children[j] == Some(i) {
+                        for k in j..parent.child_count as usize - 1 {
+                            parent.children[k] = parent.children[k + 1];
                         }
+                        parent.children[parent.child_count as usize - 1] = None;
+                        parent.child_count -= 1;
+                        break;
                     }
                 }
-                self.surfaces[i].role = SurfaceRole::None;
-                self.surfaces[i].parent_surface_idx = None;
-                return;
             }
         }
+        self.surfaces[i].role = SurfaceRole::None;
+        self.surfaces[i].parent_surface_idx = None;
     }
 
     // ── Popup ──────────────────────────────────────────────────────────────
@@ -521,13 +517,11 @@ impl ProtocolBridge {
         self.surfaces[idx].parent_surface_idx = parent_idx;
     }
 
-    fn handle_popup_destroy(&mut self, client_idx: usize, _popup_id: u32) {
-        for i in 0..MAX_SURFACES {
-            let s = &self.surfaces[i];
-            if s.active && s.client_idx == client_idx && s.role == SurfaceRole::Popup {
-                self.surfaces[i].role = SurfaceRole::None;
-                self.surfaces[i].parent_surface_idx = None;
-                return;
+    fn handle_popup_destroy(&mut self, client_idx: usize, popup_id: u32) {
+        if let Some(idx) = self.find_surface(client_idx, popup_id) {
+            if self.surfaces[idx].role == SurfaceRole::Popup {
+                self.surfaces[idx].role = SurfaceRole::None;
+                self.surfaces[idx].parent_surface_idx = None;
             }
         }
     }
@@ -959,7 +953,7 @@ impl ProtocolBridge {
     pub fn raise_window(&mut self, task_id: u32) {
         if let Some(idx) = self.task_id_to_surface_idx(task_id) {
             self.surfaces[idx].z_order = self.next_z_order;
-            self.next_z_order += 1;
+            self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
         }
     }
 
@@ -1059,9 +1053,16 @@ impl ProtocolBridge {
             }
         }
 
+        // Snapshot the children array before recursing, since recursive
+        // destroy_surface calls can modify parent children lists.
+        let children_snapshot = self.surfaces[idx].children;
         let child_count = self.surfaces[idx].child_count as usize;
+        // Clear children from this surface BEFORE recursing to prevent
+        // the recursive parent-removal logic from modifying us mid-iteration.
+        self.surfaces[idx].children = [None; MAX_CHILDREN];
+        self.surfaces[idx].child_count = 0;
         for j in 0..child_count {
-            if let Some(child_idx) = self.surfaces[idx].children[j] {
+            if let Some(child_idx) = children_snapshot[j] {
                 self.destroy_surface(child_idx);
             }
         }

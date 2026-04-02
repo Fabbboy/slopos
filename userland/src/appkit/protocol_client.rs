@@ -55,18 +55,44 @@ pub fn init() {
     // Compositor not running — client stays None, surface creation will fail.
 }
 
-/// Borrow the global protocol client.
+/// Thin handle to the global `Client`.
+///
+/// Uses `Deref`/`DerefMut` so callers can write `client().method()` while
+/// the underlying `&mut Client` only lives for the duration of each method
+/// call — no overlapping mutable references (which was the UB with the old
+/// `&'static mut Client` return).
+pub struct ClientRef(*mut Client);
+
+impl core::ops::Deref for ClientRef {
+    type Target = Client;
+    #[inline]
+    fn deref(&self) -> &Client {
+        // SAFETY: single-threaded process; pointer is valid after init().
+        unsafe { &*self.0 }
+    }
+}
+
+impl core::ops::DerefMut for ClientRef {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Client {
+        // SAFETY: single-threaded process; only one ClientRef is
+        // dereferenced at a time in sequential code.
+        unsafe { &mut *self.0 }
+    }
+}
+
+/// Get a handle to the global protocol client.
 ///
 /// # Panics
 ///
 /// Panics if called before a successful `init()`.
 #[inline]
-pub fn client() -> &'static mut Client {
+pub fn client() -> ClientRef {
     // SAFETY: single-threaded process; init() completes before any client() call.
     // The Acquire load on INIT_DONE ensures the Client write is visible.
-    unsafe {
-        (*PROTOCOL_CLIENT.0.get())
-            .as_mut()
-            .expect("protocol not initialized")
+    let ptr = unsafe { (*PROTOCOL_CLIENT.0.get()).as_mut() };
+    match ptr {
+        Some(c) => ClientRef(c as *mut Client),
+        None => panic!("protocol not initialized"),
     }
 }

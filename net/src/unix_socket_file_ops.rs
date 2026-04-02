@@ -11,8 +11,9 @@ use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 
 use crate::unix_socket;
 
-/// Tag bit set on AF_UNIX socket handles.
-const UNIX_HANDLE_TAG: u32 = 0x8000_0000;
+/// Tag bit set on AF_UNIX socket handles to distinguish them from IP sockets.
+/// Shared with `core::syscall::net_handlers` via this public constant.
+pub const UNIX_HANDLE_TAG: u32 = 0x8000_0000;
 
 /// Strip the tag and return the raw unix socket slot index.
 fn raw_idx(handle: usize) -> u32 {

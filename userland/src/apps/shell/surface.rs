@@ -32,7 +32,7 @@ pub fn init(width: i32, height: i32) -> bool {
 pub fn set_title(title: &str) {
     let slot = unsafe { &*SURFACE.get() };
     if let Some(surface) = slot.as_ref() {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.toplevel_set_title(surface.protocol_toplevel_id(), title.as_bytes());
     }
 }
@@ -40,7 +40,7 @@ pub fn set_title(title: &str) {
 pub fn set_app_id(app_id: &str) {
     let slot = unsafe { &*SURFACE.get() };
     if let Some(surface) = slot.as_ref() {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.toplevel_set_app_id(surface.protocol_toplevel_id(), app_id.as_bytes());
     }
 }
@@ -48,7 +48,7 @@ pub fn set_app_id(app_id: &str) {
 pub fn set_cursor_shape(shape: u8) {
     let slot = unsafe { &*SURFACE.get() };
     if let Some(surface) = slot.as_ref() {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.set_cursor_shape(surface.protocol_surface_id(), shape);
     }
 }

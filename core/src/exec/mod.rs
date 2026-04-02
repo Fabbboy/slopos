@@ -132,16 +132,11 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::Fault);
         }
 
-        // Reset to Blocked so the scheduler cannot pick this task up
-        // while we continue writing fields (entry_point, rip, rsp, fd
-        // table, pgid, etc.).  We will re-publish as Ready right before
-        // schedule_new_task.  This is the Linux TASK_NEW pattern:
-        // task_create sets Ready for simple callers, but we need a
-        // longer initialization window that must not be visible to other
-        // CPUs.
-        unsafe {
-            (*task_info).set_status(slopos_abi::task::TaskStatus::Blocked);
-        }
+        // task_create (via reserve_task_slot) returns the task in Blocked
+        // state.  It stays Blocked while we write entry_point, rip, rsp,
+        // fd table, pgid, etc.  We publish as Ready only at the end.
+        // This is the Linux TASK_NEW pattern: the task is invisible to
+        // the scheduler until fully initialized.
 
         let process_id = unsafe { (*task_info).process_id };
         let mut entry = 0u64;

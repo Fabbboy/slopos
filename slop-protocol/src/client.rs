@@ -62,7 +62,8 @@ impl Client {
 
     fn allocate_id(&mut self) -> u32 {
         let id = self.next_id;
-        self.next_id += 1;
+        // Wrapping add, but skip 0 to avoid collisions with sentinel values.
+        self.next_id = self.next_id.wrapping_add(1).max(1);
         id
     }
 
@@ -246,6 +247,11 @@ impl Client {
     // ── Event polling ─────────────────────────────────────────────────────
 
     /// Poll for one event (non-blocking). Returns `Ok(None)` if nothing pending.
+    ///
+    /// The first `OutputInfo` event is consumed silently to populate the
+    /// cached display geometry.  Subsequent `OutputInfo` events (e.g.,
+    /// display mode changes) are returned to the caller so applications
+    /// can react to resolution changes.
     pub fn poll_event(&mut self) -> Result<Option<Event>, ProtocolError> {
         match self.conn.recv::<Event>()? {
             Some(Event::OutputInfo {
@@ -254,13 +260,23 @@ impl Client {
                 format,
                 pitch,
             }) => {
+                let first = self.output.width == 0;
                 self.output = OutputInfo {
                     width,
                     height,
                     format,
                     pitch,
                 };
-                Ok(None)
+                if first {
+                    Ok(None)
+                } else {
+                    Ok(Some(Event::OutputInfo {
+                        width,
+                        height,
+                        format,
+                        pitch,
+                    }))
+                }
             }
             other => Ok(other),
         }

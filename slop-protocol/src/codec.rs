@@ -360,7 +360,10 @@ impl Decode for Request {
             REQ_TOPLEVEL_SET_TITLE => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (title, p) = get_bytes::<32>(buf, p)?;
-                let (len, p) = get_u8(buf, p)?;
+                let (raw_len, p) = get_u8(buf, p)?;
+                // Clamp to buffer size at decode time so consumers can
+                // trust `len` without their own bounds check.
+                let len = if raw_len > 32 { 32 } else { raw_len };
                 Ok((
                     Request::ToplevelSetTitle {
                         toplevel,
@@ -373,7 +376,8 @@ impl Decode for Request {
             REQ_TOPLEVEL_SET_APP_ID => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (app_id, p) = get_bytes::<32>(buf, p)?;
-                let (len, p) = get_u8(buf, p)?;
+                let (raw_len, p) = get_u8(buf, p)?;
+                let len = if raw_len > 32 { 32 } else { raw_len };
                 Ok((
                     Request::ToplevelSetAppId {
                         toplevel,

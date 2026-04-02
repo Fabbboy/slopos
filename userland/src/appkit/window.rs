@@ -36,14 +36,14 @@ impl Window {
 
     /// Set the window title shown in the compositor title bar.
     pub fn set_title(&self, title: &str) {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.toplevel_set_title(self.surface.protocol_toplevel_id(), title.as_bytes());
     }
 
     /// Set the application identifier (e.g. "org.slopos.files").
     /// The compositor uses this for window-to-dock matching instead of the title.
     pub fn set_app_id(&self, app_id: &str) {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.toplevel_set_app_id(self.surface.protocol_toplevel_id(), app_id.as_bytes());
     }
 
@@ -105,7 +105,7 @@ impl Window {
     ///
     /// Returns the number of events written (always <= `buf.len()`).
     pub fn poll_protocol_events(&mut self, buf: &mut [ProtocolEvent]) -> usize {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let mut count = 0;
         while count < buf.len() {
             match client.poll_event() {

@@ -48,7 +48,7 @@ impl Surface {
             return Err(SurfaceError::BadSize);
         }
 
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         // Lazy sync point: receive OutputInfo if we haven't yet.
         // By this point the compositor has had time to accept + push it.
         client
@@ -107,7 +107,7 @@ impl Surface {
 
     /// Mark the full surface as damaged and commit to the compositor.
     pub fn present_full(&self) {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.surface_damage(
             self.protocol_surface_id,
             0,
@@ -120,7 +120,7 @@ impl Surface {
 
     /// Mark a sub-region as damaged and commit to the compositor.
     pub fn present_region(&self, x: i32, y: i32, w: i32, h: i32) {
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.surface_damage(self.protocol_surface_id, x, y, w, h);
         let _ = client.surface_commit(self.protocol_surface_id);
     }
@@ -146,7 +146,7 @@ impl Surface {
 
         let new_shm = ShmBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
 
-        let client = protocol_client::client();
+        let mut client = protocol_client::client();
         let _ = client.surface_attach(
             self.protocol_surface_id,
             new_shm.token(),

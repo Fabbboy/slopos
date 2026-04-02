@@ -185,6 +185,12 @@ struct UnixSlot {
     peer_closed: bool,
     /// Non-blocking mode.
     nonblocking: bool,
+    /// Reference count for the ring buffers.  Both buffers live on the
+    /// side-A slot.  Starts at 2 when a connection is established (one
+    /// for each side).  Each close decrements by 1.  Buffers are freed
+    /// only when the count reaches 0, preventing use-after-free when one
+    /// side closes while the other still references the data.
+    buf_refcount: u8,
 }
 
 impl UnixSlot {
@@ -202,6 +208,7 @@ impl UnixSlot {
             peer_idx: u32::MAX,
             peer_closed: false,
             nonblocking: false,
+            buf_refcount: 0,
         }
     }
 
@@ -212,13 +219,15 @@ impl UnixSlot {
         self.path_len = 0;
         self.backlog = [0u32; MAX_BACKLOG];
         self.backlog_len = 0;
-        // Release heap-allocated ring buffers.
-        self.buf_a_to_b.release();
-        self.buf_b_to_a.release();
+        // Ring buffers are NOT released here — they are refcounted and
+        // freed only when both sides of a connection have closed.
+        self.buf_a_to_b = RingBuf::new();
+        self.buf_b_to_a = RingBuf::new();
         self.side = PairSide::A;
         self.peer_idx = u32::MAX;
         self.peer_closed = false;
         self.nonblocking = false;
+        self.buf_refcount = 0;
     }
 }
 
@@ -393,6 +402,9 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
         if slot.state == UnixState::Connected {
             return -106; // EISCONN
         }
+        if slot.state == UnixState::Listening {
+            return -95; // EOPNOTSUPP
+        }
     }
 
     // Find the listener.
@@ -448,6 +460,8 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
         slot.peer_closed = false;
         slot.buf_a_to_b.reset();
         slot.buf_b_to_a.reset();
+        // Two references: one for side A, one for side B.
+        slot.buf_refcount = 2;
     }
 
     // Set up accepted side (side B) — shares ring buffers conceptually,
@@ -480,11 +494,8 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
 ///
 /// Returns the number of bytes written, or a negative errno.
 pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
-    if data.is_null() && len != 0 {
-        return -14; // EFAULT
-    }
-    if len == 0 {
-        return 0;
+    if data.is_null() || len == 0 {
+        return if len == 0 { 0 } else { -14 }; // EFAULT for null+nonzero
     }
 
     let i = idx as usize;
@@ -492,6 +503,8 @@ pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
         return -9;
     }
 
+    // SAFETY: data is non-null (checked above) and caller guarantees len
+    // bytes are readable (kernel scratch buffer from net_handlers).
     let input = unsafe { core::slice::from_raw_parts(data, len) };
 
     loop {
@@ -513,6 +526,13 @@ pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
                 PairSide::A => (i, peer),
                 PairSide::B => (peer, i),
             };
+
+            // Validate the side-A slot still belongs to this connection.
+            // After a peer close + slot reallocation, the A slot may have
+            // been repurposed for a different connection.
+            if a_idx >= MAX_UNIX_SOCKETS || state.slots[a_idx].buf_refcount == 0 {
+                return -32; // EPIPE
+            }
 
             let a_slot = &mut state.slots[a_idx];
             let buf = match side {
@@ -580,11 +600,8 @@ pub fn unix_send(idx: u32, data: *const u8, len: usize) -> i32 {
 ///
 /// Returns the number of bytes read, 0 on EOF, or a negative errno.
 pub fn unix_recv(idx: u32, buf: *mut u8, len: usize) -> i32 {
-    if buf.is_null() && len != 0 {
-        return -14; // EFAULT
-    }
-    if len == 0 {
-        return 0;
+    if buf.is_null() || len == 0 {
+        return if len == 0 { 0 } else { -14 }; // EFAULT for null+nonzero
     }
 
     let i = idx as usize;
@@ -592,6 +609,8 @@ pub fn unix_recv(idx: u32, buf: *mut u8, len: usize) -> i32 {
         return -9;
     }
 
+    // SAFETY: buf is non-null (checked above) and caller guarantees len
+    // bytes are writable (kernel scratch buffer from net_handlers).
     let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
 
     loop {
@@ -611,6 +630,11 @@ pub fn unix_recv(idx: u32, buf: *mut u8, len: usize) -> i32 {
                 PairSide::A => (i, peer),
                 PairSide::B => (peer, i),
             };
+
+            // Validate the side-A slot's buffers are still live.
+            if a_idx >= MAX_UNIX_SOCKETS || state.slots[a_idx].buf_refcount == 0 {
+                return if peer_closed { 0 } else { -107 }; // EOF or ENOTCONN
+            }
 
             let a_slot = &mut state.slots[a_idx];
             let rbuf = match side {
@@ -702,10 +726,23 @@ pub fn unix_close(idx: u32) -> i32 {
 
         let was_listener = state.slots[i].state == UnixState::Listening;
 
-        // If this is side A, free the ring buffers now.
-        if state.slots[i].side == PairSide::A {
-            state.slots[i].buf_a_to_b.release();
-            state.slots[i].buf_b_to_a.release();
+        // Decrement the buffer refcount on the side-A slot.  Buffers are
+        // only freed when both sides have closed (refcount reaches 0).
+        // This prevents use-after-free when one side closes while the
+        // peer still holds a reference to the shared ring buffers.
+        if state.slots[i].state == UnixState::Connected {
+            let a_idx = match state.slots[i].side {
+                PairSide::A => i,
+                PairSide::B => state.slots[i].peer_idx as usize,
+            };
+            if a_idx < MAX_UNIX_SOCKETS {
+                let rc = state.slots[a_idx].buf_refcount.saturating_sub(1);
+                state.slots[a_idx].buf_refcount = rc;
+                if rc == 0 {
+                    state.slots[a_idx].buf_a_to_b.release();
+                    state.slots[a_idx].buf_b_to_a.release();
+                }
+            }
         }
 
         state.slots[i].valid = false;
@@ -763,7 +800,7 @@ pub fn unix_poll_events(idx: u32, requested: u16) -> u16 {
                 PairSide::B => (peer, i),
             };
 
-            if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].valid {
+            if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].buf_refcount > 0 {
                 let a_slot = &state.slots[a_idx];
                 let rbuf = match side {
                     PairSide::A => &a_slot.buf_b_to_a,
@@ -792,6 +829,7 @@ pub fn unix_poll_events(idx: u32, requested: u16) -> u16 {
 
             revents
         }
+        UnixState::Closed => POLLHUP,
         _ => 0,
     }
 }
@@ -829,10 +867,25 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
     // By the time the readiness check below runs, the task is already
     // visible to wake_all().  This eliminates the lost-wakeup race
     // where data arrived between a check and a late registration.
+    //
+    // Connected sockets register on RECV_WQS for POLLIN (woken by peer
+    // send) and on SEND_WQS for POLLOUT (woken by peer recv freeing
+    // buffer space).  Both are registered if both events are requested.
     let registered = if is_listener {
         ACCEPT_WQS[i].enqueue_current()
     } else {
-        RECV_WQS[i].enqueue_current()
+        let mut reg = false;
+        if (requested & POLLIN) != 0 || requested == 0 {
+            reg |= RECV_WQS[i].enqueue_current();
+        }
+        if (requested & POLLOUT) != 0 {
+            reg |= SEND_WQS[i].enqueue_current();
+        }
+        // Default: at least register on RECV if no specific event requested.
+        if !reg {
+            reg = RECV_WQS[i].enqueue_current();
+        }
+        reg
     };
 
     // ── Phase 3: Check readiness AFTER registration ────────────────
@@ -859,7 +912,7 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
                     PairSide::A => (i, peer),
                     PairSide::B => (peer, i),
                 };
-                if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].valid {
+                if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].buf_refcount > 0 {
                     let a_slot = &state.slots[a_idx];
                     let rbuf = match side {
                         PairSide::A => &a_slot.buf_b_to_a,
@@ -884,6 +937,7 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
                 }
                 rev
             }
+            UnixState::Closed => POLLHUP,
             _ => 0,
         }
     };
@@ -891,10 +945,10 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
     (revents, registered)
 }
 
-/// Enqueue the current task on the appropriate wait queue for poll().
+/// Enqueue the current task on the appropriate wait queue(s) for poll().
 ///
 /// Listener sockets register on `ACCEPT_WQS` (woken by `unix_connect`),
-/// connected sockets register on `RECV_WQS` (woken by peer `unix_send`).
+/// connected sockets register on both `RECV_WQS` and `SEND_WQS`.
 pub fn unix_poll_register(idx: u32) -> bool {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
@@ -907,20 +961,22 @@ pub fn unix_poll_register(idx: u32) -> bool {
     if is_listener {
         ACCEPT_WQS[i].enqueue_current()
     } else {
-        RECV_WQS[i].enqueue_current()
+        let r = RECV_WQS[i].enqueue_current();
+        let s = SEND_WQS[i].enqueue_current();
+        r || s
     }
 }
 
-/// Remove the current task from the appropriate poll wait queue.
+/// Remove the current task from all poll wait queues for this socket.
 pub fn unix_poll_unregister(idx: u32) {
     let i = idx as usize;
     if i >= MAX_UNIX_SOCKETS {
         return;
     }
-    // Remove from both — the task is on at most one, and remove is a no-op
-    // if the task isn't present.  This avoids needing to re-check socket
-    // state (which may have changed between register and unregister).
+    // Remove from all three — the task is on at most two (RECV + SEND for
+    // connected sockets), and remove is a no-op if the task isn't present.
     RECV_WQS[i].remove_current();
+    SEND_WQS[i].remove_current();
     ACCEPT_WQS[i].remove_current();
 }
 

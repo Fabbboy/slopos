@@ -83,41 +83,14 @@ pub const SYSCALL_CLOCK_GETTIME: u64 = 125;
 // =============================================================================
 
 pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
-// 31: SYSCALL_SET_WINDOW_POSITION — removed (protocol-only)
-// 32: SYSCALL_SET_WINDOW_STATE — removed (protocol-only)
-// 33: SYSCALL_RAISE_WINDOW — removed (protocol-only)
-// 118: SYSCALL_SET_CURSOR_SHAPE — removed (protocol-only)
 
 // =============================================================================
 // Input events
 // =============================================================================
 
 pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
-// 60: SYSCALL_INPUT_POLL — removed (protocol-only)
-// 61: SYSCALL_INPUT_HAS_EVENTS — removed (protocol-only)
-// 62: SYSCALL_INPUT_SET_FOCUS — removed (protocol-only)
-// 65: SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET — removed (protocol-only)
-// 66: SYSCALL_INPUT_GET_POINTER_POS — removed (protocol-only)
-// 67: SYSCALL_INPUT_GET_BUTTON_STATE — removed (protocol-only)
-// 84: SYSCALL_INPUT_REQUEST_CLOSE — removed (protocol-only)
 pub const SYSCALL_CLIPBOARD_COPY: u64 = 116;
 pub const SYSCALL_CLIPBOARD_PASTE: u64 = 117;
-
-// =============================================================================
-// Surface / Compositor
-// =============================================================================
-
-// 38: SYSCALL_SURFACE_COMMIT — removed (protocol-only)
-// 44: SYSCALL_SURFACE_ATTACH — removed (protocol-only)
-// 50: SYSCALL_SURFACE_FRAME — removed (protocol-only)
-// 51: SYSCALL_POLL_FRAME_DONE — removed (protocol-only)
-// 52: SYSCALL_MARK_FRAMES_DONE — removed (protocol-only)
-// 55: SYSCALL_SURFACE_DAMAGE — removed (protocol-only)
-// 56: SYSCALL_BUFFER_AGE — removed (protocol-only)
-// 57: SYSCALL_SURFACE_SET_ROLE — removed (protocol-only)
-// 58: SYSCALL_SURFACE_SET_PARENT — removed (protocol-only)
-// 59: SYSCALL_SURFACE_SET_REL_POS — removed (protocol-only)
-// 63: SYSCALL_SURFACE_SET_TITLE — removed (protocol-only)
 
 // =============================================================================
 // Shared memory
@@ -128,7 +101,6 @@ pub const SYSCALL_SHM_MAP: u64 = 41;
 pub const SYSCALL_SHM_UNMAP: u64 = 42;
 pub const SYSCALL_SHM_DESTROY: u64 = 43;
 pub const SYSCALL_FB_FLIP: u64 = 45;
-// 46: SYSCALL_DRAIN_QUEUE — removed (protocol-only)
 pub const SYSCALL_SHM_ACQUIRE: u64 = 47;
 pub const SYSCALL_SHM_RELEASE: u64 = 48;
 pub const SYSCALL_SHM_POLL_RELEASED: u64 = 49;
@@ -650,11 +622,6 @@ pub const FONT_FORMAT_BITMAP: u64 = 0;
 /// Pre-rasterized coverage format: 8-bit-per-pixel alpha, 95 glyphs + replacement.
 pub const FONT_FORMAT_COVERAGE: u64 = 1;
 
-// Syscall numbers 145-148 are in active use (OPENPTY, TTY_READ, TTY_WRITE, OPEN_TTY_FD).
-// 149: SYSCALL_SURFACE_SET_APP_ID — removed (protocol-only)
-// 150: SYSCALL_SET_WINDOW_SIZE — removed (protocol-only)
-// 151: SYSCALL_SEND_CONFIGURE — removed (protocol-only)
-// 152: SYSCALL_INPUT_GET_MODIFIER_STATE — removed (protocol-only)
 pub const SYSCALL_TABLE_SIZE: usize = 153;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).

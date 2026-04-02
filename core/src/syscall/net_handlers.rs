@@ -8,6 +8,7 @@ use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_net::unix_socket_file_ops::UNIX_HANDLE_TAG;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 
 fn errno_i32(errno: i32) -> u64 {
@@ -29,9 +30,6 @@ fn rc_i64(ctx: &SyscallContext, rc: i64) -> SyscallDisposition {
         ctx.ok(rc as u64)
     }
 }
-
-/// Tag bit set on AF_UNIX socket handles to distinguish them from IP sockets.
-const UNIX_HANDLE_TAG: u32 = 0x8000_0000;
 
 fn is_unix_handle(handle: u32) -> bool {
     (handle & UNIX_HANDLE_TAG) != 0

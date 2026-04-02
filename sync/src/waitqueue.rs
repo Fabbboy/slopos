@@ -317,6 +317,10 @@ impl WaitQueue {
             {
                 let mut inner = self.inner.lock();
                 if condition() {
+                    // Condition became true.  Remove ourselves from the
+                    // queue in case we were enqueued in a prior iteration
+                    // but not dequeued by wake_all (prevents leaked entries).
+                    inner.remove_task(task);
                     finish_wait();
                     return true;
                 }
