@@ -1,9 +1,9 @@
 use slopos_abi::Canvas;
 use slopos_protocol::types::Event as ProtocolEvent;
 
-use super::platform::event::Event;
-use super::platform::protocol_client;
-use super::platform::window::{EVENT_BUF_LEN, Window};
+use slopos_windowing::Event;
+use slopos_windowing::connection;
+use slopos_windowing::{EVENT_BUF_LEN, Window};
 
 use super::event::{self, HitTestResult, MessageSink, WidgetEvent};
 use super::focus::FocusManager;
@@ -17,7 +17,7 @@ use super::tree;
 
 /// Run a widget-framework-driven application.
 pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
-    let handle = protocol_client::connect().expect("compositor not running");
+    let handle = connection::connect().expect("compositor not running");
     let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
     win.set_title(app.title());
     let id = app.app_id();
@@ -46,7 +46,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             surface: 0,
             timestamp_ms: 0,
         });
-    let mut last_tick_ms: u64 = crate::platform::sys::get_time_ms();
+    let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
 
     loop {
         // Flush any deferred Surface::drop destroy requests and execute
@@ -162,7 +162,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
         // --- Timer tick ---
         if let Some(interval) = app.tick_interval_ms() {
-            let now_ms = crate::platform::sys::get_time_ms();
+            let now_ms = slopos_windowing::get_time_ms();
             if now_ms.wrapping_sub(last_tick_ms) >= interval {
                 last_tick_ms = now_ms;
                 let action = app.tick();
@@ -200,7 +200,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
             0
         } else if let Some(interval) = app.tick_interval_ms() {
-            let now = crate::platform::sys::get_time_ms();
+            let now = slopos_windowing::get_time_ms();
             let elapsed = now.wrapping_sub(last_tick_ms);
             if elapsed >= interval {
                 0

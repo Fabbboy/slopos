@@ -12,9 +12,9 @@
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::DrawBuffer;
 
-use super::shm::ShmBuffer;
+use crate::shm::ShmBuffer;
 
-use super::protocol_client::ProtocolHandle;
+use crate::connection::ProtocolHandle;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SurfaceError {

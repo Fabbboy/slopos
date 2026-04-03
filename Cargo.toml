@@ -21,6 +21,7 @@ members = [
   "slibc",
   "userland",
   "video",
+  "windowing",
   "tests",
   "slop-protocol"
 ]
@@ -66,5 +67,6 @@ slopos-tests = { path = "tests" }
 slopos-userland = { path = "userland" }
 slopos-protocol = { path = "slop-protocol" }
 slopos-video = { path = "video" }
+slopos-windowing = { path = "windowing" }
 paste = { version = "1.0", default-features = false }
 x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }

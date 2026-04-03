@@ -1,5 +1,5 @@
 use super::event::{Key, Modifiers, NamedKey, WidgetEvent};
-use super::platform::event::Event;
+use slopos_windowing::Event;
 
 /// US-QWERTY keymap: maps scancodes to Keys.
 pub struct Keymap {

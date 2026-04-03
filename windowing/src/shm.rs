@@ -5,7 +5,7 @@ use core::ptr::NonNull;
 
 use slopos_abi::{SHM_ACCESS_RO, SHM_ACCESS_RW, ShmError};
 
-use super::sys;
+use crate::sys;
 
 pub struct ShmBuffer {
     token: NonZeroU32,

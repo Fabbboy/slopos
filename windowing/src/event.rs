@@ -41,9 +41,9 @@ pub enum Event {
 }
 
 impl Event {
-    /// Convert a protocol event into an appkit Event.
+    /// Convert a protocol event into a windowing Event.
     ///
-    /// Returns `None` for protocol events that have no appkit equivalent
+    /// Returns `None` for protocol events that have no windowing equivalent
     /// (e.g. `FrameDone`, `OutputInfo`).
     pub fn from_protocol(evt: &ProtocolEvent) -> Option<Self> {
         match evt {

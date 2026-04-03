@@ -6,12 +6,13 @@
 
 use slopos_gfx::DrawBuffer;
 
-use crate::platform::sys;
+use crate::sys;
 use slopos_protocol::types::Event as ProtocolEvent;
 
-use super::platform::event::Event;
-use super::platform::protocol_client;
-use super::platform::window::{EVENT_BUF_LEN, Window};
+use crate::connection;
+use crate::event::Event;
+use crate::surface::SurfaceError;
+use crate::window::{EVENT_BUF_LEN, Window};
 
 /// Instructs the event loop what to do after processing an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +26,7 @@ pub enum ControlFlow {
 /// Trait implemented by windowed applications.
 ///
 /// The framework calls these methods from the main event loop in
-/// `appkit::run()`. All methods have sensible defaults so apps only
+/// `run()`. All methods have sensible defaults so apps only
 /// need to override what they use.
 pub trait WindowedApp {
     /// Called once after the window has been created and before the
@@ -70,18 +71,16 @@ pub trait WindowedApp {
 pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     // Connect to the compositor protocol socket. Retries internally
     // since the compositor may still be starting.
-    let handle = protocol_client::connect().expect("compositor not running");
+    let handle = connection::connect().expect("compositor not running");
 
     let mut win = match Window::new(handle.clone(), width, height) {
         Ok(w) => w,
         Err(e) => {
             let msg: &[u8] = match e {
-                super::platform::surface::SurfaceError::NoDisplay => b"appkit: no display\n",
-                super::platform::surface::SurfaceError::BadSize => b"appkit: bad surface size\n",
-                super::platform::surface::SurfaceError::ShmFailed => b"appkit: shm alloc failed\n",
-                super::platform::surface::SurfaceError::AttachFailed => {
-                    b"appkit: surface attach failed\n"
-                }
+                SurfaceError::NoDisplay => b"windowing: no display\n",
+                SurfaceError::BadSize => b"windowing: bad surface size\n",
+                SurfaceError::ShmFailed => b"windowing: shm alloc failed\n",
+                SurfaceError::AttachFailed => b"windowing: surface attach failed\n",
             };
             sys::tty_write(msg);
             std::process::exit(1);

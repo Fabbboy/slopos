@@ -1,4 +1,4 @@
-//! Thin syscall wrappers for the appkit platform layer.
+//! Thin syscall wrappers for the windowing platform layer.
 //!
 //! Uses `slopos_slibc::pal::raw::syscall*()` directly — the same pattern
 //! that `slopos-protocol` uses for its internal `raw_poll()` and `timestamp_ms()`.

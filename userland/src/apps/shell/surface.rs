@@ -2,8 +2,8 @@
 
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
-use slopos_appkit::platform::protocol_client::ProtocolHandle;
-use slopos_appkit::platform::surface::Surface;
+use slopos_windowing::ProtocolHandle;
+use slopos_windowing::Surface;
 
 use super::SyncUnsafeCell;
 

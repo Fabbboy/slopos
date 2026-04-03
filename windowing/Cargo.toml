@@ -1,9 +1,9 @@
 [package]
-name = "slopos-appkit"
+name = "slopos-windowing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SlopOS application toolkit"
+description = "SlopOS windowing: compositor connection, surfaces, and event loop"
 
 [lib]
 path = "src/lib.rs"
@@ -17,8 +17,6 @@ workspace = true
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-protocol = { workspace = true }
 slopos-slibc = { workspace = true }
-slopos-windowing = { workspace = true }

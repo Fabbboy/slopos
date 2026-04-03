@@ -1,13 +1,13 @@
 //! AppKit — SlopOS application toolkit.
 //!
-//! Provides everything needed to build GUI applications:
+//! Provides everything needed to build widget-based GUI applications:
 //!
 //! - **Widget apps** (primary): Implement [`App`], return a [`Node`] tree from
 //!   `view()`, handle messages in `update()`. Call [`run_app()`] to launch.
 //!
-//! - **Raw-drawing apps** (escape hatch): Implement [`raw::WindowedApp`],
-//!   draw into a [`DrawBuffer`](slopos_gfx::DrawBuffer) directly.
-//!   Call [`raw::run()`] to launch.
+//! - **Raw-drawing apps**: Use `slopos-windowing` directly — implement
+//!   [`WindowedApp`], draw into a [`DrawBuffer`](slopos_gfx::DrawBuffer),
+//!   and call [`slopos_windowing::run()`].
 //!
 //! # Quick Start
 //!
@@ -29,14 +29,11 @@
 // layer (run_app, tree reconciliation) rather than within widget impls.
 #![allow(dead_code)]
 
-// === Platform layer (public for shell and low-level apps) ===
+// === Platform layer (backward-compat re-exports from slopos-windowing) ===
 pub mod platform;
 
 // === Text rendering ===
 pub mod text;
-
-// === Raw drawing escape hatch ===
-pub mod raw;
 
 // === Widget toolkit modules ===
 pub mod constraints;
@@ -80,8 +77,6 @@ pub use paint::PaintContext;
 pub use style::StyleSheet;
 pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 
-// === Public re-exports: raw drawing escape hatch ===
-pub use raw::{ControlFlow, WindowedApp};
-
-// === Public re-exports: protocol types for threading ===
-pub use platform::protocol_client::{ProtocolHandle, UiSender};
+// === Public re-exports: windowing types ===
+pub use slopos_windowing::{ControlFlow, WindowedApp};
+pub use slopos_windowing::{ProtocolHandle, UiSender};

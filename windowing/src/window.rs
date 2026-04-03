@@ -2,16 +2,16 @@
 
 use slopos_protocol::types::Event as ProtocolEvent;
 
-use super::event::Event;
-use super::protocol_client::ProtocolHandle;
-use super::surface::{Surface, SurfaceError};
+use crate::connection::ProtocolHandle;
+use crate::event::Event;
+use crate::surface::{Surface, SurfaceError};
 
 pub const EVENT_BUF_LEN: usize = 16;
 
 /// A compositor-managed window with input handling and redraw tracking.
 ///
 /// `Window` owns a [`Surface`] and adds pointer tracking, a redraw flag,
-/// and batch event polling. Applications that use `appkit::run()` receive
+/// and batch event polling. Applications that use `run()` receive
 /// a `Window` automatically; applications with custom event loops can
 /// create one directly.
 pub struct Window {
