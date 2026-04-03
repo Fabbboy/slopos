@@ -15,6 +15,9 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+alloc = ["slopos-gfx/alloc", "slopos-windowing/alloc"]
+
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-font = { workspace = true }

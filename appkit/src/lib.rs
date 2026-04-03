@@ -80,3 +80,6 @@ pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 // === Public re-exports: windowing types ===
 pub use slopos_windowing::{ControlFlow, WindowedApp};
 pub use slopos_windowing::{ProtocolHandle, UiSender};
+
+// === Public re-exports: render surface abstraction ===
+pub use slopos_gfx::{RenderError, RenderSurface};

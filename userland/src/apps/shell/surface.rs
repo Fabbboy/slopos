@@ -2,6 +2,7 @@
 
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
+use slopos_gfx::RenderSurface;
 use slopos_windowing::ProtocolHandle;
 use slopos_windowing::Surface;
 
@@ -95,9 +96,9 @@ pub fn resize(new_width: u32, new_height: u32) -> bool {
     }
 }
 
-pub fn present_full() {
+pub fn present() {
     let slot = unsafe { &*SURFACE.get() };
     if let Some(surface) = slot.as_ref() {
-        surface.present_full();
+        surface.present();
     }
 }

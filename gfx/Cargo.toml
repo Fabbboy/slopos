@@ -13,5 +13,8 @@ crate-type = ["rlib"]
 
 doctest = false
 
+[features]
+alloc = []
+
 [dependencies]
 slopos-abi = { workspace = true }

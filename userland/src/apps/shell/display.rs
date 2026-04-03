@@ -976,7 +976,7 @@ pub fn shell_console_scroll_lines(lines: i32) {
 
 pub fn shell_console_commit() {
     if DISPLAY.enabled.get() {
-        surface::present_full();
+        surface::present();
     }
 }
 

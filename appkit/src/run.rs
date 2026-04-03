@@ -1,4 +1,5 @@
 use slopos_abi::Canvas;
+use slopos_gfx::RenderSurface;
 use slopos_protocol::types::Event as ProtocolEvent;
 
 use slopos_windowing::Event;
@@ -190,7 +191,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 tree::paint_tree(root.as_ref(), &mut ctx);
                 overlays.paint(&mut ctx);
             }
-            win.surface().present_full();
+            win.surface().present();
             needs_repaint = false;
         }
 

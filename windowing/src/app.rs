@@ -4,7 +4,7 @@
 //! poll -> dispatch -> redraw -> present -> yield loop. All hot-path calls
 //! are monomorphized (no trait objects).
 
-use slopos_gfx::DrawBuffer;
+use slopos_gfx::{DrawBuffer, RenderSurface};
 
 use crate::sys;
 use slopos_protocol::types::Event as ProtocolEvent;
@@ -132,7 +132,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
         if win.take_redraw() {
             if let Some(mut fb) = win.surface_mut().frame() {
                 app.draw(&mut fb);
-                win.surface().present_full();
+                win.surface().present();
             } else {
                 win.request_redraw();
             }

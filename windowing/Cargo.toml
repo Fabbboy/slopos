@@ -12,6 +12,9 @@ crate-type = ["rlib"]
 test = false
 doctest = false
 
+[features]
+alloc = ["slopos-gfx/alloc"]
+
 [lints]
 workspace = true
 

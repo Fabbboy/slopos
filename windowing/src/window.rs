@@ -1,5 +1,6 @@
 //! High-level window abstraction combining surface, input, and redraw state.
 
+use slopos_gfx::{RenderError, RenderSurface};
 use slopos_protocol::types::Event as ProtocolEvent;
 
 use crate::connection::ProtocolHandle;
@@ -54,7 +55,7 @@ impl Window {
     ///
     /// Allocates a new SHM buffer, re-attaches to the compositor, and
     /// requests a redraw. Called automatically on `Event::Configure`.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), SurfaceError> {
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         self.surface.resize(width, height)?;
         self.redraw_needed = true;
         Ok(())
@@ -97,6 +98,15 @@ impl Window {
     /// Mutably borrow the underlying surface (needed for `frame()`).
     #[inline]
     pub fn surface_mut(&mut self) -> &mut Surface {
+        &mut self.surface
+    }
+
+    /// Access the surface as a [`RenderSurface`] trait object.
+    ///
+    /// Use this when code should be generic over the rendering backend.
+    /// For protocol-specific access (e.g. surface IDs), use [`surface()`](Self::surface).
+    #[inline]
+    pub fn render_surface(&mut self) -> &mut dyn RenderSurface {
         &mut self.surface
     }
 
