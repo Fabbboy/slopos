@@ -1,7 +1,11 @@
-//! SlopOS display protocol — typed enum wire format.
+//! SlopOS display protocol v2 — typed enum wire format.
 //!
-//! All messages are `Request` (client-to-server) or `Event` (server-to-client)
-//! enum variants with automatic binary codec. No object map, no manual opcodes.
+//! Protocol features:
+//! - Version handshake with capability discovery
+//! - Configure/ack semantics for resize synchronization
+//! - Explicit frame callbacks for render pacing
+//! - Input serials for interactive move/resize authorization
+//! - Length-prefixed binary codec, all little-endian
 
 #![no_std]
 

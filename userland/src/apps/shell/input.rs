@@ -845,6 +845,7 @@ fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
             scancode,
             ascii,
             pressed,
+            ..
         } => Some(InputEvent::key(
             if *pressed {
                 InputEventType::KeyPress
@@ -862,6 +863,7 @@ fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
             time,
             button,
             pressed,
+            ..
         } => Some(InputEvent::pointer_button(
             *pressed,
             *button as u8,

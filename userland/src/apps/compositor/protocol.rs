@@ -8,7 +8,9 @@ use core::num::NonZeroU32;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
 use slopos_protocol::server::Server;
-use slopos_protocol::types::{Event, ProtocolError, Request};
+use slopos_protocol::types::{
+    Event, MAX_STRING_LEN, PROTOCOL_VERSION, ProtocolError, Request, caps,
+};
 
 use crate::syscall::tty;
 
@@ -16,9 +18,10 @@ const MAX_SURFACES: usize = 32;
 const MAX_PENDING_DAMAGE: usize = 8;
 const MAX_CHILDREN: usize = 8;
 
-/// Surface role assigned via get_toplevel / get_popup / get_subsurface.
+/// Surface role assigned via get_toplevel.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 enum SurfaceRole {
     None = 0,
     Toplevel = 1,
@@ -27,6 +30,7 @@ enum SurfaceRole {
 }
 
 /// Per-surface state managed by the protocol bridge.
+#[allow(dead_code)]
 struct ProtocolSurface {
     active: bool,
     client_idx: usize,
@@ -59,13 +63,12 @@ struct ProtocolSurface {
     child_count: u8,
     relative_x: i32,
     relative_y: i32,
+    // Configure ack tracking
+    acked_serial: u32,
     // Metadata
-    title: [u8; 32],
-    app_id: [u8; 32],
+    title: [u8; MAX_STRING_LEN],
+    app_id: [u8; MAX_STRING_LEN],
     cursor_shape: u8,
-    // Whether this client has pointer/keyboard objects
-    has_pointer: bool,
-    has_keyboard: bool,
 }
 
 impl ProtocolSurface {
@@ -98,11 +101,10 @@ impl ProtocolSurface {
             child_count: 0,
             relative_x: 0,
             relative_y: 0,
-            title: [0u8; 32],
-            app_id: [0u8; 32],
+            acked_serial: 0,
+            title: [0u8; MAX_STRING_LEN],
+            app_id: [0u8; MAX_STRING_LEN],
             cursor_shape: 0,
-            has_pointer: false,
-            has_keyboard: false,
         }
     }
 }
@@ -124,11 +126,8 @@ pub struct ProtocolBridge {
     display_height: u32,
     display_format: u32,
     display_pitch: u32,
-    /// Bitmask of clients that have requested pointer capability.
-    /// Bit `i` set means client at index `i` has pointer.
-    client_has_pointer: u32,
-    /// Bitmask of clients that have requested keyboard capability.
-    client_has_keyboard: u32,
+    /// Monotonic serial counter for configure events.
+    configure_serial: u32,
 }
 
 impl ProtocolBridge {
@@ -155,8 +154,7 @@ impl ProtocolBridge {
             display_height: 0,
             display_format: 0,
             display_pitch: 0,
-            client_has_pointer: 0,
-            client_has_keyboard: 0,
+            configure_serial: 0,
         })
     }
 
@@ -176,11 +174,21 @@ impl ProtocolBridge {
                 Ok(Some(idx)) => {
                     let _ = self.server.queue_event(
                         idx,
+                        &Event::Hello {
+                            version: PROTOCOL_VERSION,
+                            capabilities: caps::TOPLEVEL
+                                | caps::CLIPBOARD
+                                | caps::INTERACTIVE_MOVE_RESIZE,
+                        },
+                    );
+                    let _ = self.server.queue_event(
+                        idx,
                         &Event::OutputInfo {
                             width: self.display_width,
                             height: self.display_height,
                             format: self.display_format,
                             pitch: self.display_pitch,
+                            scale: 1,
                         },
                     );
                 }
@@ -212,6 +220,9 @@ impl ProtocolBridge {
 
     fn handle_request(&mut self, client_idx: usize, req: Request) {
         match req {
+            Request::Hello { .. } => {
+                // Client echoing our Hello -- already accepted, ignore.
+            }
             Request::CreateSurface { new_id } => {
                 self.handle_create_surface(client_idx, new_id);
             }
@@ -261,37 +272,21 @@ impl ProtocolBridge {
             Request::ToplevelDestroy { toplevel } => {
                 self.handle_toplevel_destroy(client_idx, toplevel);
             }
+            Request::AckConfigure { serial } => {
+                self.handle_ack_configure(client_idx, serial);
+            }
             Request::SetCursorShape { surface, shape } => {
                 self.handle_set_cursor_shape(client_idx, surface, shape as u32);
             }
-            Request::GetSubsurface {
-                surface,
-                parent,
-                new_id,
+            Request::InteractiveMove { toplevel, serial } => {
+                self.handle_interactive_move(client_idx, toplevel, serial);
+            }
+            Request::InteractiveResize {
+                toplevel,
+                serial,
+                edges,
             } => {
-                self.handle_get_subsurface(client_idx, surface, parent, new_id);
-            }
-            Request::SubsurfaceSetPosition { subsurface, x, y } => {
-                self.handle_subsurface_set_position(client_idx, subsurface, x, y);
-            }
-            Request::SubsurfaceDestroy { subsurface } => {
-                self.handle_subsurface_destroy(client_idx, subsurface);
-            }
-            Request::GetPopup {
-                surface,
-                parent,
-                new_id,
-            } => {
-                self.handle_get_popup(client_idx, surface, parent, new_id);
-            }
-            Request::PopupDestroy { popup } => {
-                self.handle_popup_destroy(client_idx, popup);
-            }
-            Request::GetPointer { new_id } => {
-                self.handle_get_pointer(client_idx, new_id);
-            }
-            Request::GetKeyboard { new_id } => {
-                self.handle_get_keyboard(client_idx, new_id);
+                self.handle_interactive_resize(client_idx, toplevel, serial, edges);
             }
             Request::ClipboardCopy(cb) => {
                 self.handle_clipboard_copy(client_idx, &cb.data, cb.len as usize);
@@ -307,18 +302,26 @@ impl ProtocolBridge {
     fn handle_create_surface(&mut self, client_idx: usize, new_id: u32) {
         // Reject zero IDs (used as sentinel) and duplicates within this client.
         if new_id == 0 || self.find_surface(client_idx, new_id).is_some() {
-            let _ = self
-                .server
-                .queue_event(client_idx, &Event::Error { code: 2 });
+            let _ = self.server.queue_event(
+                client_idx,
+                &Event::Error {
+                    object_id: 0,
+                    code: 2,
+                },
+            );
             return;
         }
 
         let slot = match self.surfaces.iter().position(|s| !s.active) {
             Some(idx) => idx,
             None => {
-                let _ = self
-                    .server
-                    .queue_event(client_idx, &Event::Error { code: 1 });
+                let _ = self.server.queue_event(
+                    client_idx,
+                    &Event::Error {
+                        object_id: 0,
+                        code: 1,
+                    },
+                );
                 return;
             }
         };
@@ -329,11 +332,6 @@ impl ProtocolBridge {
         self.surfaces[slot].surface_id = new_id;
         self.surfaces[slot].z_order = self.next_z_order;
         self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
-        // Apply per-client input capabilities to new surfaces.
-        if client_idx < 32 {
-            self.surfaces[slot].has_pointer = (self.client_has_pointer >> client_idx) & 1 != 0;
-            self.surfaces[slot].has_keyboard = (self.client_has_keyboard >> client_idx) & 1 != 0;
-        }
     }
 
     fn handle_surface_attach(
@@ -439,13 +437,13 @@ impl ProtocolBridge {
         &mut self,
         client_idx: usize,
         toplevel_id: u32,
-        title: &[u8; 32],
+        title: &[u8; MAX_STRING_LEN],
         title_len: usize,
     ) {
         if let Some(idx) = self.find_surface_by_toplevel(client_idx, toplevel_id) {
-            let copy_len = title_len.min(32);
+            let copy_len = title_len.min(MAX_STRING_LEN);
             self.surfaces[idx].title[..copy_len].copy_from_slice(&title[..copy_len]);
-            if copy_len < 32 {
+            if copy_len < MAX_STRING_LEN {
                 self.surfaces[idx].title[copy_len..].fill(0);
             }
         }
@@ -455,13 +453,13 @@ impl ProtocolBridge {
         &mut self,
         client_idx: usize,
         toplevel_id: u32,
-        app_id: &[u8; 32],
+        app_id: &[u8; MAX_STRING_LEN],
         app_id_len: usize,
     ) {
         if let Some(idx) = self.find_surface_by_toplevel(client_idx, toplevel_id) {
-            let copy_len = app_id_len.min(32);
+            let copy_len = app_id_len.min(MAX_STRING_LEN);
             self.surfaces[idx].app_id[..copy_len].copy_from_slice(&app_id[..copy_len]);
-            if copy_len < 32 {
+            if copy_len < MAX_STRING_LEN {
                 self.surfaces[idx].app_id[copy_len..].fill(0);
             }
         }
@@ -474,136 +472,34 @@ impl ProtocolBridge {
         }
     }
 
-    // ── Subsurface ─────────────────────────────────────────────────────────
+    // ── Configure ack ──────────────────────────────────────────────────────
 
-    fn handle_get_subsurface(
+    fn handle_ack_configure(&mut self, client_idx: usize, serial: u32) {
+        // Record the acked serial on any surface belonging to this client.
+        for s in &mut self.surfaces {
+            if s.active && s.client_idx == client_idx && s.role == SurfaceRole::Toplevel {
+                s.acked_serial = serial;
+            }
+        }
+    }
+
+    // ── Interactive move/resize ───────────────────────────────────────────
+
+    fn handle_interactive_move(&mut self, client_idx: usize, toplevel_id: u32, _serial: u32) {
+        // Client-initiated interactive move -- currently a no-op.
+        // The compositor drives moves via title-bar drag; log for future use.
+        let _ = (client_idx, toplevel_id);
+    }
+
+    fn handle_interactive_resize(
         &mut self,
         client_idx: usize,
-        surface_id: u32,
-        parent_id: u32,
-        _new_id: u32,
+        toplevel_id: u32,
+        _serial: u32,
+        _edges: u32,
     ) {
-        // Reject self-parenting — creates a cycle in the surface tree.
-        if surface_id == parent_id {
-            return;
-        }
-
-        let idx = match self.find_surface(client_idx, surface_id) {
-            Some(i) => i,
-            None => return,
-        };
-
-        // A surface can only have one role.
-        if self.surfaces[idx].role != SurfaceRole::None {
-            return;
-        }
-
-        let parent_idx = match self.find_surface(client_idx, parent_id) {
-            Some(i) => i,
-            None => return,
-        };
-
-        self.surfaces[idx].role = SurfaceRole::Subsurface;
-        self.surfaces[idx].parent_surface_idx = Some(parent_idx);
-
-        // Add as child of parent
-        let parent = &mut self.surfaces[parent_idx];
-        if (parent.child_count as usize) < MAX_CHILDREN {
-            parent.children[parent.child_count as usize] = Some(idx);
-            parent.child_count += 1;
-        }
-    }
-
-    fn handle_subsurface_set_position(&mut self, client_idx: usize, sub_id: u32, x: i32, y: i32) {
-        if let Some(idx) = self.find_surface(client_idx, sub_id) {
-            if self.surfaces[idx].role == SurfaceRole::Subsurface {
-                self.surfaces[idx].relative_x = x;
-                self.surfaces[idx].relative_y = y;
-            }
-        }
-    }
-
-    fn handle_subsurface_destroy(&mut self, client_idx: usize, sub_id: u32) {
-        let i = match self.find_surface(client_idx, sub_id) {
-            Some(idx) if self.surfaces[idx].role == SurfaceRole::Subsurface => idx,
-            _ => return,
-        };
-        if let Some(parent_idx) = self.surfaces[i].parent_surface_idx {
-            if parent_idx < MAX_SURFACES && self.surfaces[parent_idx].active {
-                let parent = &mut self.surfaces[parent_idx];
-                for j in 0..parent.child_count as usize {
-                    if parent.children[j] == Some(i) {
-                        for k in j..parent.child_count as usize - 1 {
-                            parent.children[k] = parent.children[k + 1];
-                        }
-                        parent.children[parent.child_count as usize - 1] = None;
-                        parent.child_count -= 1;
-                        break;
-                    }
-                }
-            }
-        }
-        self.surfaces[i].role = SurfaceRole::None;
-        self.surfaces[i].parent_surface_idx = None;
-    }
-
-    // ── Popup ──────────────────────────────────────────────────────────────
-
-    fn handle_get_popup(
-        &mut self,
-        client_idx: usize,
-        surface_id: u32,
-        parent_id: u32,
-        _new_id: u32,
-    ) {
-        let idx = match self.find_surface(client_idx, surface_id) {
-            Some(i) => i,
-            None => return,
-        };
-
-        // A surface can only have one role.
-        if self.surfaces[idx].role != SurfaceRole::None {
-            return;
-        }
-
-        let parent_idx = self.find_surface(client_idx, parent_id);
-
-        self.surfaces[idx].role = SurfaceRole::Popup;
-        self.surfaces[idx].parent_surface_idx = parent_idx;
-    }
-
-    fn handle_popup_destroy(&mut self, client_idx: usize, popup_id: u32) {
-        if let Some(idx) = self.find_surface(client_idx, popup_id) {
-            if self.surfaces[idx].role == SurfaceRole::Popup {
-                self.surfaces[idx].role = SurfaceRole::None;
-                self.surfaces[idx].parent_surface_idx = None;
-            }
-        }
-    }
-
-    // ── Seat / Input ───────────────────────────────────────────────────────
-
-    fn handle_get_pointer(&mut self, client_idx: usize, _new_id: u32) {
-        // Record capability per-client so future surfaces inherit it.
-        if client_idx < 32 {
-            self.client_has_pointer |= 1 << client_idx;
-        }
-        for s in &mut self.surfaces {
-            if s.active && s.client_idx == client_idx {
-                s.has_pointer = true;
-            }
-        }
-    }
-
-    fn handle_get_keyboard(&mut self, client_idx: usize, _new_id: u32) {
-        if client_idx < 32 {
-            self.client_has_keyboard |= 1 << client_idx;
-        }
-        for s in &mut self.surfaces {
-            if s.active && s.client_idx == client_idx {
-                s.has_keyboard = true;
-            }
-        }
+        // Client-initiated interactive resize -- currently a no-op.
+        let _ = (client_idx, toplevel_id);
     }
 
     // ── Clipboard ──────────────────────────────────────────────────────────
@@ -651,20 +547,24 @@ impl ProtocolBridge {
     // ── Outgoing events (called by compositor input/WM code) ───────────────
 
     /// Send toplevel configure event to a protocol surface.
-    pub fn send_configure(&mut self, surface_idx: usize, width: u32, height: u32) {
+    pub fn send_configure(&mut self, surface_idx: usize, width: u32, height: u32, states: u32) {
         let surface = match self.surfaces.get(surface_idx) {
             Some(s) if s.active && s.toplevel_id != 0 => s,
             _ => return,
         };
 
+        self.configure_serial = self.configure_serial.wrapping_add(1);
+        let serial = self.configure_serial;
         let client_idx = surface.client_idx;
         let toplevel = surface.toplevel_id;
         let _ = self.server.queue_event(
             client_idx,
             &Event::Configure {
                 toplevel,
+                serial,
                 width,
                 height,
+                states,
             },
         );
     }
@@ -736,7 +636,7 @@ impl ProtocolBridge {
     pub fn send_pointer_button(
         &mut self,
         surface_idx: usize,
-        _serial: u32,
+        serial: u32,
         time: u32,
         button: u32,
         state: u32,
@@ -750,6 +650,7 @@ impl ProtocolBridge {
         let _ = self.server.queue_event(
             client_idx,
             &Event::PointerButton {
+                serial,
                 time,
                 button,
                 pressed: state != 0,
@@ -774,7 +675,7 @@ impl ProtocolBridge {
     pub fn send_key(
         &mut self,
         surface_idx: usize,
-        _serial: u32,
+        serial: u32,
         time: u32,
         scancode: u32,
         ascii: u32,
@@ -789,6 +690,7 @@ impl ProtocolBridge {
         let _ = self.server.queue_event(
             client_idx,
             &Event::Key {
+                serial,
                 time,
                 scancode,
                 ascii,
@@ -957,8 +859,10 @@ impl ProtocolBridge {
             info.cursor_shape = s.cursor_shape;
             info.frame_width = s.frame_width;
             info.frame_height = s.frame_height;
-            info.title = s.title;
-            info.app_id = AppId(s.app_id);
+            info.title.copy_from_slice(&s.title[..32]);
+            let mut aid = [0u8; 32];
+            aid.copy_from_slice(&s.app_id[..32]);
+            info.app_id = AppId(aid);
 
             if s.dirty {
                 if s.committed_damage_count == 0 {
@@ -1017,9 +921,9 @@ impl ProtocolBridge {
         }
     }
 
-    pub fn send_configure_for_task(&mut self, task_id: u32, width: u32, height: u32) {
+    pub fn send_configure_for_task(&mut self, task_id: u32, width: u32, height: u32, states: u32) {
         if let Some(idx) = self.task_id_to_surface_idx(task_id) {
-            self.send_configure(idx, width, height);
+            self.send_configure(idx, width, height, states);
         }
     }
 
@@ -1073,11 +977,6 @@ impl ProtocolBridge {
             if self.surfaces[i].active && self.surfaces[i].client_idx == client_idx {
                 self.destroy_surface(i);
             }
-        }
-        // Clear per-client capability bits.
-        if client_idx < 32 {
-            self.client_has_pointer &= !(1 << client_idx);
-            self.client_has_keyboard &= !(1 << client_idx);
         }
         self.server.disconnect(client_idx);
     }

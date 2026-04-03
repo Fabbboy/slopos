@@ -1,16 +1,11 @@
 //! High-level client-side protocol API.
 //!
 //! `Client::connect()` opens a Unix domain socket to the compositor,
-//! waits for `OutputInfo`, and provides typed methods for every protocol
-//! request plus event polling.
-//!
-//! Design: The socket is ALWAYS non-blocking (`O_NONBLOCK` set in
-//! `Connection::new`). Synchronous request-response pairs use
-//! `conn.wait_recv()` which blocks via `poll(fd, POLLIN, timeout)`
-//! — never via sleep-spin or mode switching.
+//! performs the version handshake, and provides typed methods for every
+//! protocol request plus event polling.
 
 use crate::connection::Connection;
-use crate::types::{Event, OutputInfo, ProtocolError, Request};
+use crate::types::{Event, MAX_STRING_LEN, OutputInfo, PROTOCOL_VERSION, ProtocolError, Request};
 use slopos_abi::net::AF_UNIX;
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 use slopos_slibc::pal::{Pal, Sys};
@@ -19,22 +14,21 @@ pub struct Client {
     conn: Connection,
     /// Cached display geometry from the initial OutputInfo event.
     pub output: OutputInfo,
+    /// Compositor capability flags from the Hello handshake.
+    pub capabilities: u64,
     /// Monotonically increasing ID counter for client-assigned object IDs.
     next_id: u32,
 }
 
 impl Client {
-    /// Connect to the compositor (non-blocking, Wayland-style).
+    /// Connect to the compositor and perform the version handshake.
     ///
-    /// Like `wl_display_connect()`, this only opens the socket — it does
-    /// NOT wait for any server response.  The `connect()` succeeds via
-    /// the kernel's listen backlog even if the compositor hasn't called
-    /// `accept()` yet.
+    /// 1. Opens the AF_UNIX socket at `path`.
+    /// 2. Receives `Event::Hello { version, capabilities }`.
+    /// 3. Sends `Request::Hello { version }` back.
     ///
-    /// Display geometry (`OutputInfo`) is received lazily: call
-    /// [`ensure_output_info()`] before the first operation that needs it
-    /// (typically surface creation).  By that point the compositor has
-    /// had time to accept the connection and push the event.
+    /// Display geometry (`OutputInfo`) is received lazily via
+    /// [`ensure_output_info()`] before the first surface operation.
     pub fn connect(path: &[u8]) -> Result<Self, ProtocolError> {
         let fd = Sys::socket(AF_UNIX as i32, slopos_abi::net::SOCK_STREAM as i32, 0)
             .map_err(|_| ProtocolError::Io)?;
@@ -51,11 +45,32 @@ impl Client {
             return Err(ProtocolError::Io);
         }
 
-        let conn = Connection::new(fd);
+        let mut conn = Connection::new(fd);
+
+        // Receive server Hello (blocking, 5 second timeout).
+        let hello: Event = conn.wait_recv(5000)?;
+        let capabilities = match hello {
+            Event::Hello {
+                version,
+                capabilities,
+            } => {
+                if version != PROTOCOL_VERSION {
+                    return Err(ProtocolError::VersionMismatch);
+                }
+                capabilities
+            }
+            _ => return Err(ProtocolError::MalformedMessage),
+        };
+
+        // Send client Hello response.
+        conn.send(&Request::Hello {
+            version: PROTOCOL_VERSION,
+        })?;
 
         Ok(Self {
             conn,
             output: OutputInfo::default(),
+            capabilities,
             next_id: 1,
         })
     }
@@ -63,18 +78,14 @@ impl Client {
     fn allocate_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        // Skip 0: many protocol paths use 0 as "no object" sentinel.
-        // Wrapping from u32::MAX reuses ID 1, which is safe because
-        // 4 billion allocations will never happen in a single session.
         if self.next_id == 0 {
             self.next_id = 1;
         }
         id
     }
 
-    // ── Surface operations ────────────────────────────────────────────────
+    // -- Surface operations -----------------------------------------------
 
-    /// Create a new surface. Client assigns the ID; returns immediately.
     pub fn create_surface(&mut self) -> Result<u32, ProtocolError> {
         let id = self.allocate_id();
         self.conn.send(&Request::CreateSurface { new_id: id })?;
@@ -117,6 +128,7 @@ impl Client {
         self.conn.send(&Request::SurfaceCommit { surface })
     }
 
+    /// Request a FrameDone callback for this surface.
     pub fn surface_frame(&mut self, surface: u32) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceFrame { surface })
     }
@@ -125,9 +137,8 @@ impl Client {
         self.conn.send(&Request::SurfaceDestroy { surface })
     }
 
-    // ── Toplevel operations ───────────────────────────────────────────────
+    // -- Toplevel operations ----------------------------------------------
 
-    /// Get a toplevel role. Client assigns the ID; returns immediately.
     pub fn get_toplevel(&mut self, surface: u32) -> Result<u32, ProtocolError> {
         let id = self.allocate_id();
         self.conn.send(&Request::GetToplevel {
@@ -142,8 +153,8 @@ impl Client {
         toplevel: u32,
         title_data: &[u8],
     ) -> Result<(), ProtocolError> {
-        let mut title = [0u8; 32];
-        let copy_len = title_data.len().min(32);
+        let mut title = [0u8; MAX_STRING_LEN];
+        let copy_len = title_data.len().min(MAX_STRING_LEN);
         title[..copy_len].copy_from_slice(&title_data[..copy_len]);
         self.conn.send(&Request::ToplevelSetTitle {
             toplevel,
@@ -157,8 +168,8 @@ impl Client {
         toplevel: u32,
         app_id_data: &[u8],
     ) -> Result<(), ProtocolError> {
-        let mut app_id = [0u8; 32];
-        let copy_len = app_id_data.len().min(32);
+        let mut app_id = [0u8; MAX_STRING_LEN];
+        let copy_len = app_id_data.len().min(MAX_STRING_LEN);
         app_id[..copy_len].copy_from_slice(&app_id_data[..copy_len]);
         self.conn.send(&Request::ToplevelSetAppId {
             toplevel,
@@ -171,69 +182,18 @@ impl Client {
         self.conn.send(&Request::ToplevelDestroy { toplevel })
     }
 
-    // ── Cursor ────────────────────────────────────────────────────────────
+    /// Acknowledge a Configure event's serial before committing a resized buffer.
+    pub fn ack_configure(&mut self, serial: u32) -> Result<(), ProtocolError> {
+        self.conn.send(&Request::AckConfigure { serial })
+    }
+
+    // -- Cursor -----------------------------------------------------------
 
     pub fn set_cursor_shape(&mut self, surface: u32, shape: u8) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SetCursorShape { surface, shape })
     }
 
-    // ── Subsurface ────────────────────────────────────────────────────────
-
-    pub fn get_subsurface(&mut self, surface: u32, parent: u32) -> Result<u32, ProtocolError> {
-        let id = self.allocate_id();
-        self.conn.send(&Request::GetSubsurface {
-            surface,
-            parent,
-            new_id: id,
-        })?;
-        Ok(id)
-    }
-
-    pub fn subsurface_set_position(
-        &mut self,
-        subsurface: u32,
-        x: i32,
-        y: i32,
-    ) -> Result<(), ProtocolError> {
-        self.conn
-            .send(&Request::SubsurfaceSetPosition { subsurface, x, y })
-    }
-
-    pub fn subsurface_destroy(&mut self, subsurface: u32) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::SubsurfaceDestroy { subsurface })
-    }
-
-    // ── Popup ─────────────────────────────────────────────────────────────
-
-    pub fn get_popup(&mut self, surface: u32, parent: u32) -> Result<u32, ProtocolError> {
-        let id = self.allocate_id();
-        self.conn.send(&Request::GetPopup {
-            surface,
-            parent,
-            new_id: id,
-        })?;
-        Ok(id)
-    }
-
-    pub fn popup_destroy(&mut self, popup: u32) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::PopupDestroy { popup })
-    }
-
-    // ── Input ─────────────────────────────────────────────────────────────
-
-    pub fn get_pointer(&mut self) -> Result<u32, ProtocolError> {
-        let id = self.allocate_id();
-        self.conn.send(&Request::GetPointer { new_id: id })?;
-        Ok(id)
-    }
-
-    pub fn get_keyboard(&mut self) -> Result<u32, ProtocolError> {
-        let id = self.allocate_id();
-        self.conn.send(&Request::GetKeyboard { new_id: id })?;
-        Ok(id)
-    }
-
-    // ── Clipboard ─────────────────────────────────────────────────────────
+    // -- Clipboard --------------------------------------------------------
 
     pub fn clipboard_copy(&mut self, src: &[u8]) -> Result<(), ProtocolError> {
         let mut data = [0u8; 4096];
@@ -252,14 +212,34 @@ impl Client {
         self.conn.send(&Request::ClipboardPaste)
     }
 
-    // ── Event polling ─────────────────────────────────────────────────────
+    // -- Interactive (compositor-driven) -----------------------------------
+
+    /// Start an interactive move. Serial must come from a recent pointer event.
+    pub fn interactive_move(&mut self, toplevel: u32, serial: u32) -> Result<(), ProtocolError> {
+        self.conn
+            .send(&Request::InteractiveMove { toplevel, serial })
+    }
+
+    /// Start an interactive resize. Serial must come from a recent pointer event.
+    pub fn interactive_resize(
+        &mut self,
+        toplevel: u32,
+        serial: u32,
+        edges: u32,
+    ) -> Result<(), ProtocolError> {
+        self.conn.send(&Request::InteractiveResize {
+            toplevel,
+            serial,
+            edges,
+        })
+    }
+
+    // -- Event polling ----------------------------------------------------
 
     /// Poll for one event (non-blocking). Returns `Ok(None)` if nothing pending.
     ///
     /// The first `OutputInfo` event is consumed silently to populate the
-    /// cached display geometry.  Subsequent `OutputInfo` events (e.g.,
-    /// display mode changes) are returned to the caller so applications
-    /// can react to resolution changes.
+    /// cached display geometry. Subsequent ones are returned to the caller.
     pub fn poll_event(&mut self) -> Result<Option<Event>, ProtocolError> {
         match self.conn.recv::<Event>()? {
             Some(Event::OutputInfo {
@@ -267,6 +247,7 @@ impl Client {
                 height,
                 format,
                 pitch,
+                scale,
             }) => {
                 let first = self.output.width == 0;
                 self.output = OutputInfo {
@@ -274,6 +255,7 @@ impl Client {
                     height,
                     format,
                     pitch,
+                    scale,
                 };
                 if first {
                     Ok(None)
@@ -283,6 +265,7 @@ impl Client {
                         height,
                         format,
                         pitch,
+                        scale,
                     }))
                 }
             }
@@ -290,23 +273,12 @@ impl Client {
         }
     }
 
-    /// Block until OutputInfo has been received (like `wl_display_roundtrip`).
-    ///
-    /// The compositor pushes `OutputInfo` immediately upon accepting the
-    /// connection.  This method uses a non-blocking `recv()` first (data
-    /// is usually already buffered by the time any app needs geometry),
-    /// falling back to a blocking `wait_recv()` only if it hasn't arrived.
-    ///
-    /// Total wait is capped at 10 seconds.  Call this before the first
-    /// operation that needs display geometry (typically surface creation).
+    /// Block until OutputInfo has been received.
     pub fn ensure_output_info(&mut self) -> Result<(), ProtocolError> {
         if self.output.width > 0 {
             return Ok(());
         }
 
-        // Total deadline: 10 seconds from now.  Each blocking wait uses
-        // the remaining time, so we never exceed the deadline regardless
-        // of how many non-OutputInfo events arrive.
         const TOTAL_TIMEOUT_MS: u64 = 10_000;
         let start = crate::timestamp_ms();
         let deadline = start.saturating_add(TOTAL_TIMEOUT_MS);
@@ -328,6 +300,7 @@ impl Client {
                 height,
                 format,
                 pitch,
+                scale,
             } = event
             {
                 self.output = OutputInfo {
@@ -335,19 +308,15 @@ impl Client {
                     height,
                     format,
                     pitch,
+                    scale,
                 };
                 return Ok(());
             }
-            // Not OutputInfo — discard and try again within the deadline.
         }
     }
 
-    // ── Convenience accessors ─────────────────────────────────────────────
+    // -- Convenience accessors --------------------------------------------
 
-    /// The raw socket fd for this connection.
-    ///
-    /// Useful for registering with `poll()` so callers can sleep until the
-    /// compositor sends an event rather than busy-spinning.
     pub fn fd(&self) -> i32 {
         self.conn.fd()
     }
@@ -366,5 +335,9 @@ impl Client {
 
     pub fn display_pitch(&self) -> u32 {
         self.output.pitch
+    }
+
+    pub fn display_scale(&self) -> u32 {
+        self.output.scale
     }
 }

@@ -424,7 +424,12 @@ impl InputHandler {
                                 if let Some(ref mut p) = proto {
                                     p.set_window_position(window.task_id, geo.1, geo.2);
                                     p.set_window_size(window.task_id, geo.3, geo.4);
-                                    p.send_configure_for_task(window.task_id, geo.3, geo.4);
+                                    p.send_configure_for_task(
+                                        window.task_id,
+                                        geo.3,
+                                        geo.4,
+                                        slopos_protocol::toplevel_state::ACTIVATED,
+                                    );
                                 }
                             }
                             if let Some(ref mut p) = proto {
@@ -455,7 +460,13 @@ impl InputHandler {
                                 p.set_window_position(window.task_id, 0, max_y);
                                 p.set_window_size(window.task_id, max_w, max_h);
                                 p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
-                                p.send_configure_for_task(window.task_id, max_w, max_h);
+                                p.send_configure_for_task(
+                                    window.task_id,
+                                    max_w,
+                                    max_h,
+                                    slopos_protocol::toplevel_state::ACTIVATED
+                                        | slopos_protocol::toplevel_state::MAXIMIZED,
+                                );
                             }
                         }
                         self.needs_full_redraw = true;
@@ -638,7 +649,13 @@ impl InputHandler {
             let now = self.now_ms();
             if now.saturating_sub(self.resize_last_configure_ms) >= 100 {
                 self.resize_last_configure_ms = now;
-                p.send_configure_for_task(self.resize_task, new_w as u32, new_h as u32);
+                p.send_configure_for_task(
+                    self.resize_task,
+                    new_w as u32,
+                    new_h as u32,
+                    slopos_protocol::toplevel_state::ACTIVATED
+                        | slopos_protocol::toplevel_state::RESIZING,
+                );
             }
         }
     }
@@ -669,7 +686,12 @@ impl InputHandler {
                 final_h = MIN_WINDOW_HEIGHT;
             }
             if let Some(p) = proto {
-                p.send_configure_for_task(self.resize_task, final_w as u32, final_h as u32);
+                p.send_configure_for_task(
+                    self.resize_task,
+                    final_w as u32,
+                    final_h as u32,
+                    slopos_protocol::toplevel_state::ACTIVATED,
+                );
             }
         }
         self.resizing = false;
