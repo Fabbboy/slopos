@@ -22,6 +22,7 @@ pub mod error;
 pub mod fate;
 pub mod file_ops;
 pub mod fs;
+pub mod handle;
 pub mod input;
 pub mod io;
 pub mod net;
@@ -50,6 +51,10 @@ pub use error::*;
 pub use fate::FateResult;
 pub use file_ops::{FileKind, FileOps};
 pub use fs::*;
+pub use handle::{
+    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle,
+};
 pub use input::*;
 pub use io::{IoBufRead, IoBufWrite, KernelIoBuf, KernelIoBufRef};
 pub use net::*;

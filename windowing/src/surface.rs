@@ -9,12 +9,14 @@
 //! All surface operations go through the compositor protocol socket.
 //! SHM allocation uses kernel syscalls (memory management).
 
+use slopos_abi::handle::{
+    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WindowHandle,
+};
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
 
-use crate::shm::ShmBuffer;
-
 use crate::connection::ProtocolHandle;
+use crate::shm::ShmBuffer;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SurfaceError {
@@ -121,22 +123,26 @@ impl Surface {
         self.pitch
     }
 
-    /// Protocol surface ID.
-    #[inline]
-    pub fn protocol_surface_id(&self) -> u32 {
-        self.protocol_surface_id
-    }
-
-    /// Protocol toplevel ID.
-    #[inline]
-    pub fn protocol_toplevel_id(&self) -> u32 {
-        self.protocol_toplevel_id
-    }
-
     /// Protocol handle (for callers that need direct client access).
     #[inline]
     pub fn protocol_handle(&self) -> &ProtocolHandle {
         &self.handle
+    }
+}
+
+impl HasWindowHandle for Surface {
+    fn window_handle(&self) -> WindowHandle<'_> {
+        WindowHandle::new(RawWindowHandle {
+            surface_id: self.protocol_surface_id,
+            toplevel_id: self.protocol_toplevel_id,
+            shm_token: self.shm.token(),
+        })
+    }
+}
+
+impl HasDisplayHandle for Surface {
+    fn display_handle(&self) -> DisplayHandle<'_> {
+        self.handle.display_handle()
     }
 }
 

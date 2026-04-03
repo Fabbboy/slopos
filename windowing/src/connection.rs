@@ -17,6 +17,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::vec::Vec;
 
+use slopos_abi::handle::{DisplayHandle, HasDisplayHandle, RawDisplayHandle};
+use slopos_abi::pixel::PixelFormat;
 use slopos_abi::syscall::posix::POLLIN;
 use slopos_abi::syscall::types::UserPollFd;
 use slopos_protocol::client::Client;
@@ -40,6 +42,12 @@ pub struct Protocol {
     wakeup_read_fd: i32,
     /// Write end — closed on drop (the UiQueue also holds a copy via `wakeup_fd`).
     wakeup_write_fd: i32,
+    /// Cached display pixel format (set during `connect()`).
+    display_format: PixelFormat,
+    /// Cached display width in pixels (set during `connect()`).
+    display_width: u32,
+    /// Cached display height in pixels (set during `connect()`).
+    display_height: u32,
 }
 
 /// Handle to the protocol connection.
@@ -57,8 +65,20 @@ pub type ProtocolHandle = Rc<Protocol>;
 /// woken by [`UiSender::post`] from background threads.
 pub fn connect() -> Result<ProtocolHandle, ()> {
     for _ in 0..10 {
-        if let Ok(client) = Client::connect(b"/run/compositor") {
+        if let Ok(mut client) = Client::connect(b"/run/compositor") {
             let compositor_fd = client.fd();
+
+            // Eagerly sync display info before wrapping in RefCell.
+            // If the compositor hasn't sent OutputInfo yet, ensure_output_info
+            // retries internally for up to 10 seconds.
+            if client.ensure_output_info().is_err() {
+                crate::sys::sleep_ms(200);
+                continue;
+            }
+            let display_format =
+                PixelFormat::from_u32(client.display_format()).unwrap_or(PixelFormat::Argb8888);
+            let display_width = client.display_width();
+            let display_height = client.display_height();
 
             // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
             let (wakeup_read_fd, wakeup_write_fd) =
@@ -71,6 +91,9 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
                 compositor_fd,
                 wakeup_read_fd,
                 wakeup_write_fd,
+                display_format,
+                display_width,
+                display_height,
             }));
         }
         crate::sys::sleep_ms(200);
@@ -78,7 +101,26 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
     Err(())
 }
 
+impl HasDisplayHandle for Protocol {
+    fn display_handle(&self) -> DisplayHandle<'_> {
+        DisplayHandle::new(RawDisplayHandle {
+            fd: self.compositor_fd,
+            format: self.display_format,
+            width: self.display_width,
+            height: self.display_height,
+        })
+    }
+}
+
 impl Protocol {
+    /// The compositor socket file descriptor.
+    ///
+    /// Stable for the lifetime of this connection.
+    #[inline]
+    pub fn compositor_fd(&self) -> i32 {
+        self.compositor_fd
+    }
+
     /// Get exclusive access to the protocol client.
     ///
     /// Panics on reentrant borrow (a logic bug in single-threaded code).

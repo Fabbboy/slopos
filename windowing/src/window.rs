@@ -1,5 +1,6 @@
 //! High-level window abstraction combining surface, input, and redraw state.
 
+use slopos_abi::handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 use slopos_gfx::{RenderError, RenderSurface};
 use slopos_protocol::types::Event as ProtocolEvent;
 
@@ -40,15 +41,17 @@ impl Window {
 
     /// Set the window title shown in the compositor title bar.
     pub fn set_title(&self, title: &str) {
+        let toplevel_id = self.surface.window_handle().toplevel_id();
         let mut client = self.handle.borrow_client();
-        let _ = client.toplevel_set_title(self.surface.protocol_toplevel_id(), title.as_bytes());
+        let _ = client.toplevel_set_title(toplevel_id, title.as_bytes());
     }
 
     /// Set the application identifier (e.g. "org.slopos.files").
     /// The compositor uses this for window-to-dock matching instead of the title.
     pub fn set_app_id(&self, app_id: &str) {
+        let toplevel_id = self.surface.window_handle().toplevel_id();
         let mut client = self.handle.borrow_client();
-        let _ = client.toplevel_set_app_id(self.surface.protocol_toplevel_id(), app_id.as_bytes());
+        let _ = client.toplevel_set_app_id(toplevel_id, app_id.as_bytes());
     }
 
     /// Resize the window's backing surface to a new size.
@@ -167,5 +170,17 @@ impl Window {
                 handler(event);
             }
         }
+    }
+}
+
+impl HasWindowHandle for Window {
+    fn window_handle(&self) -> WindowHandle<'_> {
+        self.surface.window_handle()
+    }
+}
+
+impl HasDisplayHandle for Window {
+    fn display_handle(&self) -> DisplayHandle<'_> {
+        self.surface.display_handle()
     }
 }

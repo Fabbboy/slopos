@@ -19,7 +19,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 /// These values match the Wayland wl_shm format constants.
 /// This is the canonical definition used by both kernel and userland.
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PixelFormat {
     /// 32-bit ARGB (alpha in high byte, red in bits 16-23)
     /// Memory layout: [B, G, R, A] (little-endian)

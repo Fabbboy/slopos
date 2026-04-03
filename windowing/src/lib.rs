@@ -33,6 +33,10 @@ pub mod window;
 pub use app::{ControlFlow, WindowedApp, run};
 pub use connection::{Protocol, ProtocolHandle, UiSender, connect};
 pub use event::Event;
+pub use slopos_abi::handle::{
+    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle,
+};
 pub use slopos_gfx::{RenderError, RenderSurface};
 pub use surface::{Surface, SurfaceError};
 pub use window::{EVENT_BUF_LEN, Window};

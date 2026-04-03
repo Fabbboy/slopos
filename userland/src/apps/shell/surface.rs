@@ -3,8 +3,7 @@
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
 use slopos_gfx::RenderSurface;
-use slopos_windowing::ProtocolHandle;
-use slopos_windowing::Surface;
+use slopos_windowing::{HasWindowHandle, ProtocolHandle, Surface};
 
 use super::SyncUnsafeCell;
 
@@ -52,8 +51,9 @@ pub fn set_title(title: &str) {
     let slot = unsafe { &*SURFACE.get() };
     let handle = unsafe { &*HANDLE.get() };
     if let (Some(surface), Some(handle)) = (slot.as_ref(), handle.as_ref()) {
+        let toplevel_id = surface.window_handle().toplevel_id();
         let mut client = handle.borrow_client();
-        let _ = client.toplevel_set_title(surface.protocol_toplevel_id(), title.as_bytes());
+        let _ = client.toplevel_set_title(toplevel_id, title.as_bytes());
     }
 }
 
@@ -61,8 +61,9 @@ pub fn set_app_id(app_id: &str) {
     let slot = unsafe { &*SURFACE.get() };
     let handle = unsafe { &*HANDLE.get() };
     if let (Some(surface), Some(handle)) = (slot.as_ref(), handle.as_ref()) {
+        let toplevel_id = surface.window_handle().toplevel_id();
         let mut client = handle.borrow_client();
-        let _ = client.toplevel_set_app_id(surface.protocol_toplevel_id(), app_id.as_bytes());
+        let _ = client.toplevel_set_app_id(toplevel_id, app_id.as_bytes());
     }
 }
 
@@ -70,8 +71,9 @@ pub fn set_cursor_shape(shape: u8) {
     let slot = unsafe { &*SURFACE.get() };
     let handle = unsafe { &*HANDLE.get() };
     if let (Some(surface), Some(handle)) = (slot.as_ref(), handle.as_ref()) {
+        let surface_id = surface.window_handle().surface_id();
         let mut client = handle.borrow_client();
-        let _ = client.set_cursor_shape(surface.protocol_surface_id(), shape);
+        let _ = client.set_cursor_shape(surface_id, shape);
     }
 }
 
