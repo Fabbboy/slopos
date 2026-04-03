@@ -183,7 +183,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
         // --- Paint if needed ---
         if needs_repaint {
-            if let Some(mut fb) = win.surface_mut().frame() {
+            if let Some(mut fb) = win.renderer_mut().frame() {
                 let fmt = fb.pixel_format();
                 fb.clear_canvas(fmt.encode(style.bg_primary));
                 let mut ctx = PaintContext::new(&mut fb, &style);
@@ -191,7 +191,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 tree::paint_tree(root.as_ref(), &mut ctx);
                 overlays.paint(&mut ctx);
             }
-            win.surface().present();
+            win.renderer().present();
             needs_repaint = false;
         }
 

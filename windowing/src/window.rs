@@ -1,4 +1,4 @@
-//! High-level window abstraction combining surface, input, and redraw state.
+//! High-level window abstraction combining surface, rendering, input, and redraw state.
 
 use slopos_abi::handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 use slopos_gfx::{RenderError, RenderSurface};
@@ -6,19 +6,20 @@ use slopos_protocol::types::Event as ProtocolEvent;
 
 use crate::connection::ProtocolHandle;
 use crate::event::Event;
+use crate::soft_surface::SoftSurface;
 use crate::surface::{Surface, SurfaceError};
 
 pub const EVENT_BUF_LEN: usize = 16;
 
 /// A compositor-managed window with input handling and redraw tracking.
 ///
-/// `Window` owns a [`Surface`] and adds pointer tracking, a redraw flag,
-/// and batch event polling. Applications that use `run()` receive
-/// a `Window` automatically; applications with custom event loops can
-/// create one directly.
+/// `Window` owns a [`Surface`] (windowing lifecycle) and a [`SoftSurface`]
+/// (rendering backend).  Applications that use `run()` receive a `Window`
+/// automatically; applications with custom event loops can create one directly.
 pub struct Window {
     handle: ProtocolHandle,
     surface: Surface,
+    renderer: SoftSurface,
     redraw_needed: bool,
     pointer_x: i32,
     pointer_y: i32,
@@ -27,12 +28,21 @@ pub struct Window {
 impl Window {
     /// Create a new window of the given size.
     ///
-    /// Internally creates and attaches a `Surface`.
+    /// Internally creates a [`Surface`] (compositor objects) and a
+    /// [`SoftSurface`] (SHM pixel buffer).
     pub fn new(handle: ProtocolHandle, width: u32, height: u32) -> Result<Self, SurfaceError> {
         let surface = Surface::new(handle.clone(), width, height)?;
+        let renderer = SoftSurface::new(
+            handle.clone(),
+            surface.surface_id(),
+            surface.pixel_format(),
+            width,
+            height,
+        )?;
         Ok(Self {
             handle,
             surface,
+            renderer,
             redraw_needed: true,
             pointer_x: 0,
             pointer_y: 0,
@@ -41,7 +51,7 @@ impl Window {
 
     /// Set the window title shown in the compositor title bar.
     pub fn set_title(&self, title: &str) {
-        let toplevel_id = self.surface.window_handle().toplevel_id();
+        let toplevel_id = self.surface.toplevel_id();
         let mut client = self.handle.borrow_client();
         let _ = client.toplevel_set_title(toplevel_id, title.as_bytes());
     }
@@ -49,7 +59,7 @@ impl Window {
     /// Set the application identifier (e.g. "org.slopos.files").
     /// The compositor uses this for window-to-dock matching instead of the title.
     pub fn set_app_id(&self, app_id: &str) {
-        let toplevel_id = self.surface.window_handle().toplevel_id();
+        let toplevel_id = self.surface.toplevel_id();
         let mut client = self.handle.borrow_client();
         let _ = client.toplevel_set_app_id(toplevel_id, app_id.as_bytes());
     }
@@ -59,7 +69,8 @@ impl Window {
     /// Allocates a new SHM buffer, re-attaches to the compositor, and
     /// requests a redraw. Called automatically on `Event::Configure`.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
-        self.surface.resize(width, height)?;
+        self.renderer.resize(width, height)?;
+        self.surface.set_size(width, height);
         self.redraw_needed = true;
         Ok(())
     }
@@ -92,35 +103,46 @@ impl Window {
         (self.pointer_x, self.pointer_y)
     }
 
-    /// Borrow the underlying surface.
+    /// Borrow the underlying windowing surface.
     #[inline]
     pub fn surface(&self) -> &Surface {
         &self.surface
     }
 
-    /// Mutably borrow the underlying surface (needed for `frame()`).
+    /// Mutably borrow the underlying windowing surface.
     #[inline]
     pub fn surface_mut(&mut self) -> &mut Surface {
         &mut self.surface
     }
 
-    /// Access the surface as a [`RenderSurface`] trait object.
+    /// Borrow the software rendering backend.
+    #[inline]
+    pub fn renderer(&self) -> &SoftSurface {
+        &self.renderer
+    }
+
+    /// Mutably borrow the software rendering backend (needed for `frame()`).
+    #[inline]
+    pub fn renderer_mut(&mut self) -> &mut SoftSurface {
+        &mut self.renderer
+    }
+
+    /// Access the renderer as a [`RenderSurface`] trait object.
     ///
     /// Use this when code should be generic over the rendering backend.
-    /// For protocol-specific access (e.g. surface IDs), use [`surface()`](Self::surface).
     #[inline]
     pub fn render_surface(&mut self) -> &mut dyn RenderSurface {
-        &mut self.surface
+        &mut self.renderer
     }
 
     #[inline]
     pub fn width(&self) -> u32 {
-        self.surface.width()
+        self.renderer.width()
     }
 
     #[inline]
     pub fn height(&self) -> u32 {
-        self.surface.height()
+        self.renderer.height()
     }
 
     /// Poll protocol events from the compositor socket.

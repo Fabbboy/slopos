@@ -3,11 +3,12 @@
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
 use slopos_gfx::RenderSurface;
-use slopos_windowing::{HasWindowHandle, ProtocolHandle, Surface};
+use slopos_windowing::{HasWindowHandle, ProtocolHandle, SoftSurface, Surface};
 
 use super::SyncUnsafeCell;
 
 static SURFACE: SyncUnsafeCell<Option<Surface>> = SyncUnsafeCell::new(None);
+static RENDERER: SyncUnsafeCell<Option<SoftSurface>> = SyncUnsafeCell::new(None);
 
 /// Store a protocol handle for shell surface operations (title, app_id, cursor).
 ///
@@ -15,8 +16,8 @@ static SURFACE: SyncUnsafeCell<Option<Surface>> = SyncUnsafeCell::new(None);
 /// main shell thread, same as all other SyncUnsafeCell statics in the shell.
 static HANDLE: SyncUnsafeCell<Option<ProtocolHandle>> = SyncUnsafeCell::new(None);
 
-fn with_surface<R, F: FnOnce(&mut Surface) -> R>(f: F) -> Option<R> {
-    let slot = unsafe { &mut *SURFACE.get() };
+fn with_renderer<R, F: FnOnce(&mut SoftSurface) -> R>(f: F) -> Option<R> {
+    let slot = unsafe { &mut *RENDERER.get() };
     slot.as_mut().map(f)
 }
 
@@ -33,18 +34,31 @@ pub fn init(width: i32, height: i32) -> bool {
         let _ = tty::write(b"shell: no protocol handle\n");
         return false;
     };
-    match Surface::new(handle.clone(), width as u32, height as u32) {
-        Ok(s) => {
-            unsafe {
-                *SURFACE.get() = Some(s);
-            }
-            true
-        }
+    let surface = match Surface::new(handle.clone(), width as u32, height as u32) {
+        Ok(s) => s,
         Err(_) => {
             let _ = tty::write(b"shell: surface init failed\n");
-            false
+            return false;
         }
+    };
+    let renderer = match SoftSurface::new(
+        handle.clone(),
+        surface.surface_id(),
+        surface.pixel_format(),
+        width as u32,
+        height as u32,
+    ) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = tty::write(b"shell: renderer init failed\n");
+            return false;
+        }
+    };
+    unsafe {
+        *SURFACE.get() = Some(surface);
+        *RENDERER.get() = Some(renderer);
     }
+    true
 }
 
 pub fn set_title(title: &str) {
@@ -78,29 +92,24 @@ pub fn set_cursor_shape(shape: u8) {
 }
 
 pub fn bytes_pp() -> u8 {
-    let slot = unsafe { &*SURFACE.get() };
-    slot.as_ref().map_or(4, |s| s.bytes_pp())
+    let slot = unsafe { &*RENDERER.get() };
+    slot.as_ref().map_or(4, |r| r.bytes_pp())
 }
 
 pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
-    with_surface(|surface| {
-        let mut buf = surface.frame()?;
+    with_renderer(|renderer| {
+        let mut buf = renderer.frame()?;
         Some(f(&mut buf))
     })?
 }
 
 pub fn resize(new_width: u32, new_height: u32) -> bool {
-    let slot = unsafe { &mut *SURFACE.get() };
-    if let Some(surface) = slot.as_mut() {
-        surface.resize(new_width, new_height).is_ok()
-    } else {
-        false
-    }
+    with_renderer(|renderer| renderer.resize(new_width, new_height).is_ok()).unwrap_or(false)
 }
 
 pub fn present() {
-    let slot = unsafe { &*SURFACE.get() };
-    if let Some(surface) = slot.as_ref() {
-        surface.present();
+    let slot = unsafe { &*RENDERER.get() };
+    if let Some(renderer) = slot.as_ref() {
+        renderer.present();
     }
 }

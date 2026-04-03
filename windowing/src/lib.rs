@@ -25,6 +25,7 @@ pub mod app;
 pub mod connection;
 pub mod event;
 pub(crate) mod shm;
+pub mod soft_surface;
 pub mod surface;
 pub(crate) mod sys;
 pub mod window;
@@ -38,6 +39,7 @@ pub use slopos_abi::handle::{
     WindowHandle,
 };
 pub use slopos_gfx::{RenderError, RenderSurface};
+pub use soft_surface::SoftSurface;
 pub use surface::{Surface, SurfaceError};
 pub use window::{EVENT_BUF_LEN, Window};
 

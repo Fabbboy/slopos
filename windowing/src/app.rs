@@ -130,9 +130,9 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
         }
 
         if win.take_redraw() {
-            if let Some(mut fb) = win.surface_mut().frame() {
+            if let Some(mut fb) = win.renderer_mut().frame() {
                 app.draw(&mut fb);
-                win.surface().present();
+                win.renderer().present();
             } else {
                 win.request_redraw();
             }

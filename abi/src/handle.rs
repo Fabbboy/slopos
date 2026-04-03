@@ -35,8 +35,8 @@ use crate::pixel::PixelFormat;
 
 /// Raw identifiers for a compositor surface.
 ///
-/// A rendering backend uses these to create its own shared-memory buffer and
-/// attach it, or to issue damage/commit on an existing buffer.
+/// A rendering backend uses these to locate the target surface and create its
+/// own rendering resources (shared-memory buffers, GPU swapchains, etc.).
 ///
 /// All fields are plain integers — no pointers. The struct is `Send + Sync`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,8 +46,6 @@ pub struct RawWindowHandle {
     pub surface_id: u32,
     /// Compositor-assigned toplevel identifier (0 if no toplevel role).
     pub toplevel_id: u32,
-    /// Kernel-assigned shared-memory token for the backing buffer.
-    pub shm_token: u32,
 }
 
 /// Raw identifiers for a compositor connection.
@@ -111,12 +109,6 @@ impl<'a> WindowHandle<'a> {
     #[inline]
     pub fn toplevel_id(&self) -> u32 {
         self.raw.toplevel_id
-    }
-
-    /// Kernel-assigned shared-memory token for the backing buffer.
-    #[inline]
-    pub fn shm_token(&self) -> u32 {
-        self.raw.shm_token
     }
 }
 
