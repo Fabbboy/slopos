@@ -53,6 +53,9 @@ impl Connection {
 
     /// Send a message immediately to the socket. No write buffer.
     /// Handles EAGAIN on non-blocking sockets by waiting with poll(POLLOUT).
+    ///
+    /// Used by the client side.  The server side uses [`Server::queue_event`]
+    /// which writes to a per-client buffer flushed once per frame.
     pub fn send<T: Encode>(&self, msg: &T) -> Result<(), ProtocolError> {
         let mut buf = [0u8; MAX_MSG_SIZE];
         let payload_len = msg.encode(&mut buf[4..])?;

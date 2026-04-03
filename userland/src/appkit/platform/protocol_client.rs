@@ -17,6 +17,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::vec::Vec;
 
+use slopos_abi::syscall::posix::POLLIN;
+use slopos_abi::syscall::types::UserPollFd;
 use slopos_protocol::client::Client;
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,12 @@ pub struct Protocol {
     client: RefCell<Client>,
     pending_destroys: RefCell<PendingDestroys>,
     ui_queue: Arc<UiQueue>,
+    /// Cached compositor socket fd (stable for the lifetime of the connection).
+    compositor_fd: i32,
+    /// Read end of the self-pipe used by [`wait_events`] to wake from `poll()`.
+    wakeup_read_fd: i32,
+    /// Write end — closed on drop (the UiQueue also holds a copy via `wakeup_fd`).
+    wakeup_write_fd: i32,
 }
 
 /// Handle to the protocol connection.
@@ -44,13 +52,28 @@ pub type ProtocolHandle = Rc<Protocol>;
 ///
 /// Returns an `Rc<Protocol>` confined to the calling thread. Retries up to 10
 /// times with 200ms delays to allow for compositor startup.
+///
+/// Internally creates a self-pipe so that [`Protocol::wait_events`] can be
+/// woken by [`UiSender::post`] from background threads.
 pub fn connect() -> Result<ProtocolHandle, ()> {
     for _ in 0..10 {
         if let Ok(client) = Client::connect(b"/run/compositor") {
+            let compositor_fd = client.fd();
+
+            // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
+            let (read_fd, write_fd) =
+                crate::syscall::fs::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as u32)
+                    .map_err(|_| ())?;
+            let wakeup_read_fd = read_fd.into_raw();
+            let wakeup_write_fd = write_fd.into_raw();
+
             return Ok(Rc::new(Protocol {
                 client: RefCell::new(client),
                 pending_destroys: RefCell::new(PendingDestroys::new()),
-                ui_queue: Arc::new(UiQueue::new()),
+                ui_queue: Arc::new(UiQueue::with_wakeup(wakeup_write_fd)),
+                compositor_fd,
+                wakeup_read_fd,
+                wakeup_write_fd,
             }));
         }
         crate::syscall::core::sleep_ms(200);
@@ -143,6 +166,44 @@ impl Protocol {
         };
         self.ui_queue.drain(&mut client);
     }
+
+    /// Sleep until the compositor sends data or `timeout_ms` elapses.
+    ///
+    /// Polls both the compositor socket and the internal wakeup pipe, so
+    /// [`UiSender::post`] from a background thread also wakes this call.
+    ///
+    /// * `timeout_ms > 0` — sleep up to that many milliseconds.
+    /// * `timeout_ms == 0` — non-blocking check (returns immediately).
+    /// * `timeout_ms < 0` — sleep indefinitely until an event arrives.
+    pub fn wait_events(&self, timeout_ms: i64) {
+        let mut fds = [
+            UserPollFd {
+                fd: self.compositor_fd,
+                events: POLLIN,
+                revents: 0,
+            },
+            UserPollFd {
+                fd: self.wakeup_read_fd,
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
+        let _ = crate::syscall::fs::poll(&mut fds, timeout_ms);
+
+        // Drain the wakeup pipe so it doesn't fire again next iteration.
+        if fds[1].revents & POLLIN != 0 {
+            let mut drain = [0u8; 64];
+            while crate::syscall::fs::read_slice(self.wakeup_read_fd, &mut drain).unwrap_or(0) > 0 {
+            }
+        }
+    }
+}
+
+impl Drop for Protocol {
+    fn drop(&mut self) {
+        let _ = crate::syscall::fs::close_fd_raw(self.wakeup_read_fd);
+        let _ = crate::syscall::fs::close_fd_raw(self.wakeup_write_fd);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,8 +254,13 @@ struct CallbackNode {
 /// Thread-safe callback queue (lock-free Treiber stack).
 ///
 /// Push from any thread (wait-free CAS), drain from UI thread only.
+/// Holds the write end of a self-pipe so that [`UiSender::post`] can wake
+/// a UI thread sleeping in [`Protocol::wait_events`].
 struct UiQueue {
     head: AtomicPtr<CallbackNode>,
+    /// Write end of the wakeup pipe. -1 means no pipe (should not happen in
+    /// practice but keeps the default constructor safe).
+    wakeup_fd: i32,
 }
 
 // SAFETY: The AtomicPtr itself is Send+Sync. CallbackNode contains a
@@ -204,13 +270,18 @@ unsafe impl Send for UiQueue {}
 unsafe impl Sync for UiQueue {}
 
 impl UiQueue {
-    const fn new() -> Self {
+    /// Create a queue with a wakeup pipe write end.
+    fn with_wakeup(wakeup_fd: i32) -> Self {
         Self {
             head: AtomicPtr::new(core::ptr::null_mut()),
+            wakeup_fd,
         }
     }
 
     /// Push a callback (any thread, wait-free).
+    ///
+    /// After the callback is enqueued, writes one byte to the wakeup pipe
+    /// so that a UI thread sleeping in [`Protocol::wait_events`] wakes up.
     fn push(&self, callback: UiCallback) {
         let node = Box::into_raw(Box::new(CallbackNode {
             callback,
@@ -227,6 +298,12 @@ impl UiQueue {
             {
                 break;
             }
+        }
+
+        // Wake the UI thread. EAGAIN (pipe full) is fine — the wakeup is
+        // already pending. Any other error is harmless (best-effort).
+        if self.wakeup_fd >= 0 {
+            let _ = crate::syscall::fs::write_slice(self.wakeup_fd, &[1u8]);
         }
     }
 

@@ -194,7 +194,25 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             needs_repaint = false;
         }
 
-        crate::syscall::core::yield_now();
+        // Sleep until the compositor sends an event, a UiSender posts work,
+        // or the next tick/refresh is due.  Replaces the old yield_now()
+        // busy-spin with a proper poll()-based sleep.
+        let timeout_ms: i64 = if needs_repaint || needs_rebuild {
+            0
+        } else if let Some(interval) = app.tick_interval_ms() {
+            let now = crate::syscall::core::get_time_ms();
+            let elapsed = now.wrapping_sub(last_tick_ms);
+            if elapsed >= interval {
+                0
+            } else {
+                (interval - elapsed) as i64
+            }
+        } else {
+            -1
+        };
+        if timeout_ms != 0 {
+            handle.wait_events(timeout_ms);
+        }
     }
 }
 

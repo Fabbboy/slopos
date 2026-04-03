@@ -174,7 +174,7 @@ impl ProtocolBridge {
         for _ in 0..4 {
             match self.server.accept() {
                 Ok(Some(idx)) => {
-                    let _ = self.server.send_event(
+                    let _ = self.server.queue_event(
                         idx,
                         &Event::OutputInfo {
                             width: self.display_width,
@@ -309,7 +309,7 @@ impl ProtocolBridge {
         if new_id == 0 || self.find_surface(client_idx, new_id).is_some() {
             let _ = self
                 .server
-                .send_event(client_idx, &Event::Error { code: 2 });
+                .queue_event(client_idx, &Event::Error { code: 2 });
             return;
         }
 
@@ -318,7 +318,7 @@ impl ProtocolBridge {
             None => {
                 let _ = self
                     .server
-                    .send_event(client_idx, &Event::Error { code: 1 });
+                    .queue_event(client_idx, &Event::Error { code: 1 });
                 return;
             }
         };
@@ -618,7 +618,7 @@ impl ProtocolBridge {
         let mut data = [0u8; 4096];
         let len = self.clipboard.data_len;
         data[..len].copy_from_slice(&self.clipboard.data[..len]);
-        let _ = self.server.send_event(
+        let _ = self.server.queue_event(
             client_idx,
             &Event::PasteResult(Box::new(slopos_protocol::types::ClipboardData {
                 data,
@@ -637,7 +637,7 @@ impl ProtocolBridge {
                 surface.frame_callback_pending = false;
                 surface.last_present_time_ms = timestamp_ms;
 
-                let _ = self.server.send_event(
+                let _ = self.server.queue_event(
                     surface.client_idx,
                     &Event::FrameDone {
                         surface: surface.surface_id,
@@ -659,7 +659,7 @@ impl ProtocolBridge {
 
         let client_idx = surface.client_idx;
         let toplevel = surface.toplevel_id;
-        let _ = self.server.send_event(
+        let _ = self.server.queue_event(
             client_idx,
             &Event::Configure {
                 toplevel,
@@ -680,7 +680,7 @@ impl ProtocolBridge {
         let toplevel = surface.toplevel_id;
         let _ = self
             .server
-            .send_event(client_idx, &Event::Close { toplevel });
+            .queue_event(client_idx, &Event::Close { toplevel });
     }
 
     /// Send pointer enter event.
@@ -692,7 +692,7 @@ impl ProtocolBridge {
 
         let client_idx = surface.client_idx;
         let surface_id = surface.surface_id;
-        let _ = self.server.send_event(
+        let _ = self.server.queue_event(
             client_idx,
             &Event::PointerEnter {
                 surface: surface_id,
@@ -711,7 +711,7 @@ impl ProtocolBridge {
 
         let client_idx = surface.client_idx;
         let surface_id = surface.surface_id;
-        let _ = self.server.send_event(
+        let _ = self.server.queue_event(
             client_idx,
             &Event::PointerLeave {
                 surface: surface_id,
@@ -729,7 +729,7 @@ impl ProtocolBridge {
         let client_idx = surface.client_idx;
         let _ = self
             .server
-            .send_event(client_idx, &Event::PointerMotion { time, x, y });
+            .queue_event(client_idx, &Event::PointerMotion { time, x, y });
     }
 
     /// Send pointer button event.
@@ -747,7 +747,7 @@ impl ProtocolBridge {
         };
 
         let client_idx = surface.client_idx;
-        let _ = self.server.send_event(
+        let _ = self.server.queue_event(
             client_idx,
             &Event::PointerButton {
                 time,
@@ -767,7 +767,7 @@ impl ProtocolBridge {
         let client_idx = surface.client_idx;
         let _ = self
             .server
-            .send_event(client_idx, &Event::PointerAxis { time, axis, value });
+            .queue_event(client_idx, &Event::PointerAxis { time, axis, value });
     }
 
     /// Send keyboard key event.
@@ -786,7 +786,7 @@ impl ProtocolBridge {
         };
 
         let client_idx = surface.client_idx;
-        let _ = self.server.send_event(
+        let _ = self.server.queue_event(
             client_idx,
             &Event::Key {
                 time,
@@ -807,7 +807,7 @@ impl ProtocolBridge {
         let client_idx = surface.client_idx;
         let _ = self
             .server
-            .send_event(client_idx, &Event::Modifiers { mods });
+            .queue_event(client_idx, &Event::Modifiers { mods });
     }
 
     // ── Input forwarding ───────────────────────────────────────────────────
@@ -1060,8 +1060,13 @@ impl ProtocolBridge {
         self.server.build_poll_fds(out)
     }
 
-    /// No-op: send_event flushes immediately, no write buffer to drain.
-    pub fn flush_all(&mut self) {}
+    /// Flush all per-client write buffers to their sockets (non-blocking).
+    ///
+    /// Call once per frame.  EAGAIN is absorbed — data stays buffered for
+    /// the next frame.  Hard errors disconnect the client.
+    pub fn flush_all(&mut self) {
+        self.server.flush_clients();
+    }
 
     fn cleanup_client(&mut self, client_idx: usize) {
         for i in 0..MAX_SURFACES {

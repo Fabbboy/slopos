@@ -138,6 +138,24 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
             }
         }
 
-        sys_core::yield_now();
+        // Sleep until the compositor sends an event, a UiSender posts work,
+        // or the next refresh is due.  Replaces the old yield_now()
+        // busy-spin with a proper poll()-based sleep.
+        let timeout_ms: i64 = if win.needs_redraw() {
+            0
+        } else if let Some(interval) = refresh_interval {
+            let now = sys_core::get_time_ms();
+            let elapsed = now.saturating_sub(last_refresh);
+            if elapsed >= interval {
+                0
+            } else {
+                (interval - elapsed) as i64
+            }
+        } else {
+            -1
+        };
+        if timeout_ms != 0 {
+            handle.wait_events(timeout_ms);
+        }
     }
 }

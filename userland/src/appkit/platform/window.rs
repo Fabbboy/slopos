@@ -74,6 +74,12 @@ impl Window {
         redraw
     }
 
+    /// Check whether a redraw is pending without consuming the flag.
+    #[inline]
+    pub fn needs_redraw(&self) -> bool {
+        self.redraw_needed
+    }
+
     /// Last known pointer position in window-local coordinates.
     ///
     /// Returns `(0, 0)` until the first `PointerMotion` event is received.

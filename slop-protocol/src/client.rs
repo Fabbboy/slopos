@@ -344,6 +344,14 @@ impl Client {
 
     // ── Convenience accessors ─────────────────────────────────────────────
 
+    /// The raw socket fd for this connection.
+    ///
+    /// Useful for registering with `poll()` so callers can sleep until the
+    /// compositor sends an event rather than busy-spinning.
+    pub fn fd(&self) -> i32 {
+        self.conn.fd()
+    }
+
     pub fn display_width(&self) -> u32 {
         self.output.width
     }

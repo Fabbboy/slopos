@@ -2,7 +2,20 @@
 //!
 //! The compositor creates a `Server`, which listens on a Unix domain socket,
 //! accepts client connections, and dispatches typed requests.
+//!
+//! # Non-blocking event delivery
+//!
+//! Events are written into a per-client [`WriteBuf`] (4 KB, matching
+//! libwayland-server's design).  The compositor calls [`Server::flush_clients`]
+//! once per frame to drain the buffers with non-blocking `send()`.
+//!
+//! If a flush gets `EAGAIN` the data stays in the buffer and is retried next
+//! frame.  Only when the buffer itself overflows (client truly unresponsive)
+//! is the client disconnected.  This gives healthy clients a grace period for
+//! transient slowness (long paint, GC pause, scheduling delay) while still
+//! protecting the compositor from blocking.
 
+use crate::codec::Encode;
 use crate::connection::Connection;
 use crate::types::{Event, ProtocolError, Request};
 use slopos_abi::net::AF_UNIX;
@@ -11,9 +24,85 @@ use slopos_slibc::pal::{Pal, Sys};
 
 const MAX_CLIENTS: usize = 32;
 
+// ---------------------------------------------------------------------------
+// Per-client write buffer (matches libwayland-server's 4 KB design)
+// ---------------------------------------------------------------------------
+
+/// Outgoing event buffer size per client.  4 KB holds ~200+ typical events
+/// (PointerMotion ~17 B, Key ~18 B, FrameDone ~13 B), giving a client
+/// roughly 3 seconds of backlog at 60 fps before disconnection.
+const WRITE_BUF_SIZE: usize = 4096;
+
+/// Per-client outgoing buffer.
+///
+/// Events are serialized into this buffer by [`Server::queue_event`].
+/// The compositor calls [`Server::flush_clients`] once per frame to
+/// drain all buffers with non-blocking `send()`.
+struct WriteBuf {
+    data: [u8; WRITE_BUF_SIZE],
+    len: usize,
+}
+
+impl WriteBuf {
+    const fn new() -> Self {
+        Self {
+            data: [0; WRITE_BUF_SIZE],
+            len: 0,
+        }
+    }
+
+    /// Append a length-prefixed message.  Returns `false` if there is not
+    /// enough room (caller should flush or disconnect).
+    fn put(&mut self, payload: &[u8]) -> bool {
+        let framed_len = 4 + payload.len();
+        if self.len + framed_len > WRITE_BUF_SIZE {
+            return false;
+        }
+        let header = (payload.len() as u32).to_le_bytes();
+        self.data[self.len..self.len + 4].copy_from_slice(&header);
+        self.data[self.len + 4..self.len + framed_len].copy_from_slice(payload);
+        self.len += framed_len;
+        true
+    }
+
+    /// Non-blocking flush to socket.  Returns:
+    /// - `Ok(true)`  — buffer fully drained.
+    /// - `Ok(false)` — partial send or EAGAIN, data remains for retry.
+    /// - `Err(…)`    — hard error (disconnected / IO).
+    fn flush(&mut self, fd: i32) -> Result<bool, ProtocolError> {
+        while self.len > 0 {
+            match Sys::send(fd, self.data.as_ptr(), self.len, 0) {
+                Ok(n) if n > 0 => {
+                    // Compact: shift remaining bytes to front.
+                    let remaining = self.len - n;
+                    if remaining > 0 {
+                        self.data.copy_within(n..self.len, 0);
+                    }
+                    self.len = remaining;
+                }
+                Ok(0) => return Err(ProtocolError::Disconnected),
+                Err(e)
+                    if e == slopos_slibc::errno::EAGAIN
+                        || e == slopos_slibc::errno::EWOULDBLOCK =>
+                {
+                    return Ok(false); // retry next frame
+                }
+                Err(_) => return Err(ProtocolError::Io),
+                Ok(_) => unreachable!(),
+            }
+        }
+        Ok(true)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 pub struct ClientConn {
     pub conn: Connection,
     pub active: bool,
+    write_buf: WriteBuf,
 }
 
 pub struct Server {
@@ -92,7 +181,11 @@ impl Server {
 
         // Connection::new sets O_NONBLOCK automatically.
         let conn = Connection::new(client_fd);
-        self.clients[idx] = Some(ClientConn { conn, active: true });
+        self.clients[idx] = Some(ClientConn {
+            conn,
+            active: true,
+            write_buf: WriteBuf::new(),
+        });
         self.client_count += 1;
         Ok(Some(idx))
     }
@@ -105,11 +198,80 @@ impl Server {
         }
     }
 
-    /// Send an event to a client (immediate flush, no write buffer).
-    pub fn send_event(&mut self, client: usize, event: &Event) -> Result<(), ProtocolError> {
-        match self.clients.get(client) {
-            Some(Some(c)) if c.active => c.conn.send(event),
-            _ => Err(ProtocolError::Disconnected),
+    /// Queue an event into the client's write buffer (never blocks).
+    ///
+    /// The event is serialized and appended to the per-client [`WriteBuf`].
+    /// Actual socket I/O happens in [`flush_clients`], called once per frame.
+    ///
+    /// If the write buffer is full, an emergency non-blocking flush is
+    /// attempted.  The client is disconnected only if both the buffer and
+    /// the kernel socket buffer are saturated — matching libwayland-server's
+    /// overflow policy.
+    pub fn queue_event(&mut self, client: usize, event: &Event) -> Result<(), ProtocolError> {
+        // Encode the payload into a scratch buffer (no length header — WriteBuf
+        // adds its own framing, identical to Connection's wire format).
+        let mut scratch = [0u8; 8192];
+        let payload_len = event.encode(&mut scratch)?;
+        let payload = &scratch[..payload_len];
+
+        let c = match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => c,
+            _ => return Err(ProtocolError::Disconnected),
+        };
+
+        // Fast path: room in the buffer.
+        if c.write_buf.put(payload) {
+            return Ok(());
+        }
+
+        // Buffer full — emergency flush to make room.
+        match c.write_buf.flush(c.conn.fd()) {
+            Ok(_) => {}
+            Err(ProtocolError::Disconnected) => {
+                let idx = client;
+                self.disconnect(idx);
+                return Err(ProtocolError::Disconnected);
+            }
+            Err(_) => {
+                let idx = client;
+                self.disconnect(idx);
+                return Err(ProtocolError::Disconnected);
+            }
+        }
+
+        // Retry the put after flush.
+        let c = match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => c,
+            _ => return Err(ProtocolError::Disconnected),
+        };
+        if c.write_buf.put(payload) {
+            return Ok(());
+        }
+
+        // Buffer AND kernel socket both full — client is genuinely stuck.
+        self.disconnect(client);
+        Err(ProtocolError::Disconnected)
+    }
+
+    /// Non-blocking flush of all clients' write buffers.
+    ///
+    /// Call once per frame.  Clients whose flush hits a hard error
+    /// (broken pipe, EOF) are disconnected.  `EAGAIN` is benign — data
+    /// stays buffered for the next frame.
+    pub fn flush_clients(&mut self) {
+        for i in 0..MAX_CLIENTS {
+            let should_disconnect = match self.clients.get_mut(i) {
+                Some(Some(c)) if c.active && !c.write_buf.is_empty() => {
+                    match c.write_buf.flush(c.conn.fd()) {
+                        Ok(_) => false,
+                        Err(_) => true,
+                    }
+                }
+                _ => false,
+            };
+            if should_disconnect {
+                self.disconnect(i);
+            }
         }
     }
 
