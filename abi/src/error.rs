@@ -53,52 +53,6 @@ macro_rules! impl_kernel_error {
     };
 }
 
-/// Compositor operation result type
-pub type CompositorResult<T> = Result<T, CompositorError>;
-
-/// Errors returned by compositor operations
-#[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CompositorError {
-    /// Operation succeeded
-    #[default]
-    Success = 0,
-    /// Surface not found for given task ID
-    SurfaceNotFound = -1,
-    /// Invalid role value
-    InvalidRole = -2,
-    /// Role already set (can only be set once per surface)
-    RoleAlreadySet = -3,
-    /// Parent surface not found
-    ParentNotFound = -4,
-    /// Maximum number of children reached
-    ChildLimitReached = -5,
-    /// Invalid argument
-    InvalidArgument = -6,
-    /// Memory allocation failed
-    OutOfMemory = -7,
-    /// Operation not permitted
-    PermissionDenied = -8,
-    /// Buffer not found
-    BufferNotFound = -9,
-    /// Invalid buffer token
-    InvalidToken = -10,
-}
-
-impl_kernel_error!(CompositorError, fallback: InvalidArgument, variants: {
-    0 => Success,
-    -1 => SurfaceNotFound,
-    -2 => InvalidRole,
-    -3 => RoleAlreadySet,
-    -4 => ParentNotFound,
-    -5 => ChildLimitReached,
-    -6 => InvalidArgument,
-    -7 => OutOfMemory,
-    -8 => PermissionDenied,
-    -9 => BufferNotFound,
-    -10 => InvalidToken,
-});
-
 /// Shared memory operation errors
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

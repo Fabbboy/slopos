@@ -2,7 +2,7 @@ use slopos_abi::KernelErrno;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::{ERRNO_ERESTARTSYS, TtyIndex};
-use slopos_abi::{DisplayInfo, InputEvent, WindowInfo};
+use slopos_abi::{DisplayInfo, InputEvent};
 
 use crate::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 use slopos_fs::fileio::file_open_tty_fd;
@@ -241,14 +241,6 @@ define_syscall!(syscall_open_tty_fd(ctx, args) requires(let pid: process_id) {
     }
 });
 
-define_syscall!(syscall_enumerate_windows(ctx, args) requires(compositor) {
-    let out_buffer = args.arg0_ptr::<WindowInfo>();
-    let max_count = args.arg1_u32();
-    require_nonnull!(ctx, out_buffer);
-    require_nonzero!(ctx, max_count);
-    ctx.ok(video::surface_enumerate_windows(out_buffer, max_count) as u64)
-});
-
 define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
     let token = args.arg0_u32();
     let damage_ptr = args.arg1;
@@ -290,6 +282,7 @@ define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
         damage_ptr,
         damage_region_count,
     ));
+    video::set_compositor_task_id(ctx.task_id().unwrap_or(0));
     ctx.ok(0)
 });
 

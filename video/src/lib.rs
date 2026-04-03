@@ -11,10 +11,11 @@ use slopos_abi::video_traits::VideoResult;
 use slopos_core::task::register_task_resource_cleanup_hook;
 #[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
-use slopos_kernel_services::syscall_services::video::{VideoServices, register_video_services};
+use slopos_kernel_services::syscall_services::video::{
+    VideoServices, compositor_task_id, register_video_services, set_compositor_task_id,
+};
 use slopos_utils::{klog_info, klog_warn};
 
-pub mod compositor_context;
 pub mod framebuffer;
 pub mod graphics;
 pub mod kernel_font;
@@ -44,17 +45,14 @@ fn video_roulette_draw(fate: u32) -> VideoResult {
 
 static VIDEO_SERVICES: VideoServices = VideoServices {
     get_display_info: framebuffer::get_display_info,
-    surface_enumerate_windows: compositor_context::surface_enumerate_windows,
     fb_flip: video_fb_flip,
     roulette_draw: video_roulette_draw,
 };
 
 fn task_cleanup_callback(task_id: u32) {
-    compositor_context::unregister_surface_for_task(task_id);
-
-    // If all surfaces are gone (compositor died), return framebuffer
-    // ownership to the vconsole so the kernel console is visible again.
-    if compositor_context::surface_count() == 0 {
+    let cid = compositor_task_id();
+    if cid != 0 && task_id == cid {
+        set_compositor_task_id(0);
         framebuffer::release_compositor_fb();
     }
 }

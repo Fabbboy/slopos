@@ -1,7 +1,7 @@
 use slopos_abi::signal::{SIGCONT, SIGINT, SIGKILL};
 
 use crate::runtime;
-use crate::syscall::{UserSysInfo, WindowInfo, core as sys_core, process, window};
+use crate::syscall::{UserSysInfo, core as sys_core, process};
 
 use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
 use super::super::exec;
@@ -182,40 +182,6 @@ pub fn cmd_ps(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(b"\nready: ");
     jobs::write_u64(info.ready_tasks as u64);
     shell_write(b"\n");
-
-    let mut windows = [WindowInfo::default(); 32];
-    let raw_window_count = window::enumerate_windows(&mut windows);
-    if raw_window_count <= 0 {
-        return 0;
-    }
-    let window_count = (raw_window_count as usize).min(windows.len());
-    if window_count == 0 {
-        return 0;
-    }
-
-    shell_write(b"pid state name\n");
-    for win in windows.iter().take(window_count.min(windows.len())) {
-        jobs::write_u64(win.task_id as u64);
-        shell_write(b" ");
-        match win.state {
-            0 => shell_write(b"normal"),
-            1 => shell_write(b"min"),
-            2 => shell_write(b"max"),
-            _ => shell_write(b"?"),
-        };
-        shell_write(b" ");
-        let name_len = win
-            .title
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(win.title.len());
-        if name_len == 0 {
-            shell_write(b"<untitled>");
-        } else {
-            shell_write(&win.title[..name_len]);
-        }
-        shell_write(b"\n");
-    }
     0
 }
 

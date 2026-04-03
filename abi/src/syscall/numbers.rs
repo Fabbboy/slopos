@@ -82,6 +82,7 @@ pub const SYSCALL_CLOCK_GETTIME: u64 = 125;
 // Window management
 // =============================================================================
 
+// Slot 30 reserved (enumerate_windows removed — compositor state is userland-only)
 pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
 
 // =============================================================================

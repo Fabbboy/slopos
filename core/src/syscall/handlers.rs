@@ -35,10 +35,10 @@ use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
 pub use crate::syscall::ui_handlers::{
-    syscall_clipboard_copy, syscall_clipboard_paste, syscall_enumerate_windows, syscall_fb_flip,
-    syscall_fb_info, syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty,
-    syscall_random_next, syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
-    syscall_shm_acquire, syscall_shm_create, syscall_shm_create_with_format, syscall_shm_destroy,
+    syscall_clipboard_copy, syscall_clipboard_paste, syscall_fb_flip, syscall_fb_info,
+    syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty, syscall_random_next,
+    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin, syscall_shm_acquire,
+    syscall_shm_create, syscall_shm_create_with_format, syscall_shm_destroy,
     syscall_shm_get_formats, syscall_shm_map, syscall_shm_poll_released, syscall_shm_release,
     syscall_shm_unmap, syscall_tty_read, syscall_tty_write,
 };
@@ -121,9 +121,6 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_TTY_READ]      => syscall_tty_read,      "tty_read";
     [SYSCALL_TTY_WRITE]     => syscall_tty_write,     "tty_write";
     [SYSCALL_OPEN_TTY_FD]   => syscall_open_tty_fd,   "open_tty_fd";
-
-    // Window management
-    [SYSCALL_ENUMERATE_WINDOWS]   => syscall_enumerate_windows,   "enumerate_windows";
 
     // Compositor framebuffer
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
