@@ -4,8 +4,9 @@
 //! poll -> dispatch -> redraw -> present -> yield loop. All hot-path calls
 //! are monomorphized (no trait objects).
 
-use crate::gfx::DrawBuffer;
-use crate::syscall::{core as sys_core, tty};
+use slopos_gfx::DrawBuffer;
+
+use crate::platform::sys;
 use slopos_protocol::types::Event as ProtocolEvent;
 
 use super::platform::event::Event;
@@ -82,7 +83,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
                     b"appkit: surface attach failed\n"
                 }
             };
-            let _ = tty::write(msg);
+            sys::tty_write(msg);
             std::process::exit(1);
         }
     };
@@ -90,7 +91,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     app.init(&mut win);
 
     let refresh_interval = app.refresh_interval_ms();
-    let mut last_refresh = sys_core::get_time_ms();
+    let mut last_refresh = sys::get_time_ms();
 
     loop {
         // Flush any deferred Surface::drop destroy requests and execute
@@ -122,7 +123,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
 
         // Auto-request redraws for apps with a periodic refresh interval.
         if let Some(interval) = refresh_interval {
-            let now = sys_core::get_time_ms();
+            let now = sys::get_time_ms();
             if now.saturating_sub(last_refresh) >= interval {
                 last_refresh = now;
                 win.request_redraw();
@@ -144,7 +145,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
         let timeout_ms: i64 = if win.needs_redraw() {
             0
         } else if let Some(interval) = refresh_interval {
-            let now = sys_core::get_time_ms();
+            let now = sys::get_time_ms();
             let elapsed = now.saturating_sub(last_refresh);
             if elapsed >= interval {
                 0

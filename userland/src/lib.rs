@@ -1,6 +1,5 @@
 #![feature(restricted_std)]
 
-pub mod appkit;
 pub mod apps;
 pub mod gfx;
 pub mod program_registry;

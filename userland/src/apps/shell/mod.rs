@@ -298,8 +298,8 @@ pub fn shell_user_main() {
 fn shell_interactive_main() {
     use slopos_abi::signal::SIGINT;
 
-    use crate::appkit::platform::protocol_client;
     use crate::syscall::{fs, process};
+    use slopos_appkit::platform::protocol_client;
 
     let handle = protocol_client::connect().expect("compositor not running");
     surface::init_handle(handle.clone());

@@ -9,8 +9,10 @@
 //! All surface operations go through the compositor protocol socket.
 //! SHM allocation uses kernel syscalls (memory management).
 
-use crate::gfx::{DrawBuffer, PixelFormat};
-use crate::syscall::ShmBuffer;
+use slopos_abi::pixel::PixelFormat;
+use slopos_gfx::DrawBuffer;
+
+use super::shm::ShmBuffer;
 
 use super::protocol_client::ProtocolHandle;
 

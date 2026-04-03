@@ -1,8 +1,8 @@
-use crate::appkit::constraints::{BoxConstraints, Rect, Size};
-use crate::appkit::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::appkit::node::{MenuItem, MenuItemKind, MessageId};
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::node::{MenuItem, MenuItemKind, MessageId};
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Popup menu rendered as a regular widget.
 ///
@@ -78,10 +78,10 @@ impl Widget for MenuWidget {
         for item in &self.items {
             match &item.kind {
                 MenuItemKind::Action | MenuItemKind::Submenu(_) => {
-                    let lw = crate::gfx::font::string_width(item.label);
+                    let lw = crate::text::string_width(item.label);
                     max_label_w = max_label_w.max(lw);
                     if let Some(sc) = item.shortcut {
-                        let sw = crate::gfx::font::string_width(sc);
+                        let sw = crate::text::string_width(sc);
                         max_shortcut_w = max_shortcut_w.max(sw);
                     }
                 }

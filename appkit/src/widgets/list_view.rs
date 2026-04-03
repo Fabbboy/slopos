@@ -1,8 +1,8 @@
-use crate::appkit::constraints::{BoxConstraints, Rect, Size};
-use crate::appkit::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::appkit::node::MessageId;
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::node::MessageId;
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Virtualized list with fixed item height.
 ///
@@ -101,8 +101,8 @@ impl Widget for ListViewWidget {
             min_height: self.item_height,
             max_height: self.item_height,
         };
-        let style = crate::appkit::style::StyleSheet::dark();
-        let mut mctx = crate::appkit::traits::MeasureCtx { style: &style };
+        let style = crate::style::StyleSheet::dark();
+        let mut mctx = crate::traits::MeasureCtx { style: &style };
         for (i, item) in self.items.iter_mut().enumerate() {
             let _ = item.measure(item_constraints, &mut mctx);
             let y = rect.y + i as i32 * self.item_height - self.scroll_offset;

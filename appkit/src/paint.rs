@@ -95,23 +95,23 @@ impl<'a> PaintContext<'a> {
     /// Draw text at position, clipped to the current clip rect.
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
         let dr = self.clip.to_damage_rect();
-        crate::gfx::font::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
+        crate::text::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
     }
 
     /// Draw text with a transparent background (alpha-blended onto existing content).
     pub fn draw_text_transparent(&mut self, x: i32, y: i32, text: &str, fg: Color32) {
         let dr = self.clip.to_damage_rect();
-        crate::gfx::font::draw_str_clipped(self.buffer, x, y, text, fg, Color32::TRANSPARENT, &dr);
+        crate::text::draw_str_clipped(self.buffer, x, y, text, fg, Color32::TRANSPARENT, &dr);
     }
 
     /// Measure text width in pixels.
     pub fn text_width(&self, text: &str) -> i32 {
-        crate::gfx::font::string_width(text)
+        crate::text::string_width(text)
     }
 
     /// Cell height for the current font.
     pub fn text_height(&self) -> i32 {
-        crate::gfx::font::cell_height()
+        crate::text::cell_height()
     }
 
     /// Draw a standard focus ring around the given rect.

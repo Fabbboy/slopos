@@ -1,10 +1,10 @@
-use crate::appkit::constraints::{BoxConstraints, Rect, Size};
-use crate::appkit::event::{
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::appkit::node::MessageId;
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::node::MessageId;
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 pub struct TextFieldWidget {
     id: WidgetId,
@@ -88,7 +88,7 @@ impl TextFieldWidget {
     /// Pixel x-offset of the cursor at char index `idx` relative to text start.
     fn char_x_offset(&self, idx: usize) -> i32 {
         let prefix: String = self.text.chars().take(idx).collect();
-        crate::gfx::font::string_width(&prefix)
+        crate::text::string_width(&prefix)
     }
 
     /// Adjust scroll_offset so the cursor is within the visible content area.
@@ -202,7 +202,7 @@ impl TextFieldWidget {
 
     // --- Content area rect (for clipping) ---
 
-    fn content_rect(&self, style: &crate::appkit::style::StyleSheet) -> Rect {
+    fn content_rect(&self, style: &crate::style::StyleSheet) -> Rect {
         let ph = style.field_padding_h;
         let pv = style.field_padding_v;
         Rect::new(
@@ -216,7 +216,7 @@ impl TextFieldWidget {
 
 impl Widget for TextFieldWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_h = crate::gfx::font::cell_height();
+        let text_h = crate::text::cell_height();
         let width = constraints.max_width.max(ctx.style.field_min_width);
         let height = text_h + ctx.style.field_padding_v * 2;
         constraints.constrain(Size::new(width, height))

@@ -1,9 +1,9 @@
 use slopos_abi::draw::Color32;
 
-use crate::appkit::constraints::{BoxConstraints, Rect, Size, TextAlignment};
-use crate::appkit::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::constraints::{BoxConstraints, Rect, Size, TextAlignment};
+use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Label with an explicit foreground color that overrides the theme.
 pub struct StyledLabelWidget {
@@ -28,7 +28,7 @@ impl StyledLabelWidget {
 
 impl Widget for StyledLabelWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_w = crate::gfx::font::string_width(&self.text);
+        let text_w = crate::text::string_width(&self.text);
         let line_height = ctx.style.line_height;
         constraints.constrain(Size::new(text_w, line_height))
     }

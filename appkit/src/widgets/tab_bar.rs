@@ -1,8 +1,8 @@
-use crate::appkit::constraints::{BoxConstraints, Rect, Size};
-use crate::appkit::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::appkit::node::MessageId;
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::node::MessageId;
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Tab header bar with panel switching.
 ///

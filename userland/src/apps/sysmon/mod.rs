@@ -5,12 +5,12 @@ use slopos_abi::PAGE_SIZE;
 use slopos_abi::draw::Color32;
 use slopos_slibc::mem::malloc::heap_stats;
 
-use crate::appkit::{
+use crate::syscall::process as sys_proc;
+use slopos_appkit::{
     Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, MessageId, Node,
     ScrollDirection, ScrollbarVisibility, SortIndicator, TableColumn, TableColumnWidth,
     TextAlignment,
 };
-use crate::syscall::process as sys_proc;
 
 mod format;
 mod state;
@@ -561,5 +561,5 @@ fn kv_row(key: &str, value: &str) -> Node {
 
 pub fn sysmon_main() -> ! {
     let app = SysmonApp::new();
-    crate::appkit::run_app(app, 640, 480)
+    slopos_appkit::run_app(app, 640, 480)
 }

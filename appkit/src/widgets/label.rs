@@ -1,7 +1,7 @@
-use crate::appkit::constraints::{BoxConstraints, Rect, Size, TextAlignment};
-use crate::appkit::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::constraints::{BoxConstraints, Rect, Size, TextAlignment};
+use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 pub struct LabelWidget {
     id: WidgetId,
@@ -71,7 +71,7 @@ impl Widget for LabelWidget {
         if !self.wrap {
             // Single-line: measure natural text width.
             // Use PaintContext::text_width indirectly via the font module.
-            let text_w = crate::gfx::font::string_width(&self.text);
+            let text_w = crate::text::string_width(&self.text);
             let mut lines = 1i32;
             if self.text.contains('\n') {
                 lines = self.text.split('\n').count() as i32;
@@ -94,12 +94,12 @@ impl Widget for LabelWidget {
                 let mut current_w = 0i32;
                 let mut on_line = false;
                 for word in raw_line.split_whitespace() {
-                    let word_w = crate::gfx::font::string_width(word);
+                    let word_w = crate::text::string_width(word);
                     if !on_line {
                         current_w = word_w;
                         on_line = true;
                     } else {
-                        let space_w = crate::gfx::font::string_width(" ");
+                        let space_w = crate::text::string_width(" ");
                         if current_w + space_w + word_w <= avail_w {
                             current_w += space_w + word_w;
                         } else {

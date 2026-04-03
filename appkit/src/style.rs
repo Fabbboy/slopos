@@ -1,7 +1,5 @@
 use slopos_abi::draw::Color32;
 
-use crate::theme;
-
 /// Central style sheet holding all visual parameters.
 /// Widgets reference this instead of hardcoding colors/sizes.
 pub struct StyleSheet {
@@ -70,8 +68,8 @@ impl StyleSheet {
             bg_accent: Color32::rgb(0, 122, 255),
             bg_destructive: Color32::rgb(255, 59, 48),
 
-            text_primary: theme::TEXT_PRIMARY,
-            text_secondary: theme::TEXT_SECONDARY,
+            text_primary: Color32::rgb(0xE0, 0xE0, 0xE0),
+            text_secondary: Color32::rgb(0x90, 0x90, 0x90),
             text_on_accent: Color32::WHITE,
             text_disabled: Color32::rgb(100, 100, 100),
 

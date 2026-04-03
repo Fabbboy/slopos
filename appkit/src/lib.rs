@@ -6,13 +6,13 @@
 //!   `view()`, handle messages in `update()`. Call [`run_app()`] to launch.
 //!
 //! - **Raw-drawing apps** (escape hatch): Implement [`raw::WindowedApp`],
-//!   draw into a [`DrawBuffer`](crate::gfx::DrawBuffer) directly.
+//!   draw into a [`DrawBuffer`](slopos_gfx::DrawBuffer) directly.
 //!   Call [`raw::run()`] to launch.
 //!
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use crate::appkit::{App, Action, Node, MessageId, run_app};
+//! use slopos_appkit::{App, Action, Node, MessageId, run_app};
 //!
 //! struct MyApp;
 //! impl App for MyApp {
@@ -24,12 +24,16 @@
 //! pub fn main() -> ! { run_app(MyApp, 640, 480) }
 //! ```
 
+#![feature(restricted_std)]
 // Widget toolkit — many fields are read by the framework integration
 // layer (run_app, tree reconciliation) rather than within widget impls.
 #![allow(dead_code)]
 
-// === Platform internals (not part of public API) ===
-pub(crate) mod platform;
+// === Platform layer (public for shell and low-level apps) ===
+pub mod platform;
+
+// === Text rendering ===
+pub mod text;
 
 // === Raw drawing escape hatch ===
 pub mod raw;

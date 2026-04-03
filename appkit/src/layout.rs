@@ -1,11 +1,9 @@
 use slopos_abi::draw::Color32;
 
-use crate::appkit::constraints::{
-    BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, Rect, Size,
-};
-use crate::appkit::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{MeasureCtx, Widget, WidgetId, next_widget_id};
+use crate::constraints::{BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, Rect, Size};
+use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::paint::PaintContext;
+use crate::traits::{MeasureCtx, Widget, WidgetId, next_widget_id};
 
 // ---------------------------------------------------------------------------
 // Axis helpers

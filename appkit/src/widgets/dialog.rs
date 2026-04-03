@@ -1,12 +1,12 @@
 use slopos_abi::draw::Color32;
 
-use crate::appkit::constraints::{BoxConstraints, Rect, Size};
-use crate::appkit::event::{
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::appkit::node::MessageId;
-use crate::appkit::paint::PaintContext;
-use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::node::MessageId;
+use crate::paint::PaintContext;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Modal dialog rendered as a centered card with semi-transparent backdrop.
 ///
@@ -53,7 +53,7 @@ impl Widget for DialogWidget {
         let inner_w = (card_w - CARD_PADDING * 2).max(0);
 
         // Title row height.
-        let title_h = crate::gfx::font::cell_height() + CARD_PADDING;
+        let title_h = crate::text::cell_height() + CARD_PADDING;
 
         // Measure content widget.
         let content_constraints = BoxConstraints {
@@ -90,7 +90,7 @@ impl Widget for DialogWidget {
         let inner_w = (card_w - CARD_PADDING * 2).max(0);
 
         // Recompute heights for layout (matching measure).
-        let title_h = crate::gfx::font::cell_height() + CARD_PADDING;
+        let title_h = crate::text::cell_height() + CARD_PADDING;
 
         let content_rect_y_offset = title_h;
         let content_layout_rect = Rect::new(0, 0, inner_w, i32::MAX);
@@ -176,8 +176,7 @@ impl Widget for DialogWidget {
         // 4. Title text.
         let text_h = ctx.text_height();
         let title_x = self.card_rect.x + CARD_PADDING;
-        let title_y =
-            self.card_rect.y + (CARD_PADDING + crate::gfx::font::cell_height() - text_h) / 2;
+        let title_y = self.card_rect.y + (CARD_PADDING + crate::text::cell_height() - text_h) / 2;
         ctx.draw_text_transparent(title_x, title_y, &self.title, style.text_primary);
 
         // 5. Content widget.

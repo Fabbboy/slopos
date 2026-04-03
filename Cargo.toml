@@ -2,6 +2,7 @@
 members = [
   "abi",
   "acpi",
+  "appkit",
   "karch",
   "boot",
   "core",
@@ -47,6 +48,7 @@ limine = { version = "0.6.3", default-features = false }
 slopos-arch = { path = "karch" }
 slopos-abi = { path = "abi" }
 slopos-acpi = { path = "acpi" }
+slopos-appkit = { path = "appkit" }
 slopos-boot = { path = "boot" }
 slopos-core = { path = "core" }
 slopos-drivers = { path = "drivers" }

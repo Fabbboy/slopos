@@ -61,11 +61,8 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
             let compositor_fd = client.fd();
 
             // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
-            let (read_fd, write_fd) =
-                crate::syscall::fs::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as u32)
-                    .map_err(|_| ())?;
-            let wakeup_read_fd = read_fd.into_raw();
-            let wakeup_write_fd = write_fd.into_raw();
+            let (wakeup_read_fd, wakeup_write_fd) =
+                super::sys::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as u32)?;
 
             return Ok(Rc::new(Protocol {
                 client: RefCell::new(client),
@@ -76,7 +73,7 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
                 wakeup_write_fd,
             }));
         }
-        crate::syscall::core::sleep_ms(200);
+        super::sys::sleep_ms(200);
     }
     Err(())
 }
@@ -188,21 +185,20 @@ impl Protocol {
                 revents: 0,
             },
         ];
-        let _ = crate::syscall::fs::poll(&mut fds, timeout_ms);
+        let _ = super::sys::poll(&mut fds, timeout_ms);
 
         // Drain the wakeup pipe so it doesn't fire again next iteration.
         if fds[1].revents & POLLIN != 0 {
             let mut drain = [0u8; 64];
-            while crate::syscall::fs::read_slice(self.wakeup_read_fd, &mut drain).unwrap_or(0) > 0 {
-            }
+            while super::sys::read(self.wakeup_read_fd, &mut drain) > 0 {}
         }
     }
 }
 
 impl Drop for Protocol {
     fn drop(&mut self) {
-        let _ = crate::syscall::fs::close_fd_raw(self.wakeup_read_fd);
-        let _ = crate::syscall::fs::close_fd_raw(self.wakeup_write_fd);
+        super::sys::close(self.wakeup_read_fd);
+        super::sys::close(self.wakeup_write_fd);
     }
 }
 
@@ -227,7 +223,7 @@ impl PendingDestroys {
         if self.entries.len() < PENDING_DESTROY_CAP {
             self.entries.push((toplevel_id, surface_id));
         } else {
-            crate::syscall::tty::write(b"warn: destroy queue full, surface leak\n");
+            super::sys::tty_write(b"warn: destroy queue full, surface leak\n");
         }
     }
 
@@ -303,7 +299,7 @@ impl UiQueue {
         // Wake the UI thread. EAGAIN (pipe full) is fine — the wakeup is
         // already pending. Any other error is harmless (best-effort).
         if self.wakeup_fd >= 0 {
-            let _ = crate::syscall::fs::write_slice(self.wakeup_fd, &[1u8]);
+            let _ = super::sys::write(self.wakeup_fd, &[1u8]);
         }
     }
 

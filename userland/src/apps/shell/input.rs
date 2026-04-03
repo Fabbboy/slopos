@@ -2,11 +2,11 @@ use core::cmp;
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::appkit::platform::protocol_client::ProtocolHandle;
 use crate::runtime;
 use crate::syscall::core as sys_core;
 use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs};
 use slopos_abi::syscall::{LocalFlags, POLLIN};
+use slopos_appkit::platform::protocol_client::ProtocolHandle;
 use slopos_protocol::types::Event as ProtocolEvent;
 use std::time::{Duration, Instant};
 

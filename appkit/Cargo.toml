@@ -1,0 +1,23 @@
+[package]
+name = "slopos-appkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SlopOS application toolkit"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-font = { workspace = true }
+slopos-gfx = { workspace = true }
+slopos-protocol = { workspace = true }
+slopos-slibc = { workspace = true }
