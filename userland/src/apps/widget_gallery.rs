@@ -1,4 +1,4 @@
-use crate::ui::{
+use crate::appkit::{
     Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, MessageId, Node,
     ScrollDirection, ScrollbarVisibility, TextAlignment,
 };
@@ -221,5 +221,5 @@ impl App for WidgetGalleryApp {
 
 pub fn main() {
     let app = WidgetGalleryApp::new();
-    crate::ui::run_app(app, 640, 480);
+    crate::appkit::run_app(app, 640, 480);
 }

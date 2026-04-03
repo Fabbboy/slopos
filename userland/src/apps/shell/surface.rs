@@ -1,7 +1,7 @@
 //! Compositor surface wrapper for shell drawing.
 
-use crate::appkit::Surface;
-use crate::appkit::protocol_client;
+use crate::appkit::platform::protocol_client;
+use crate::appkit::platform::surface::Surface;
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
 

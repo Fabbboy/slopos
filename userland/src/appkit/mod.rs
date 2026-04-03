@@ -1,40 +1,80 @@
-//! Application framework for SlopOS windowed applications.
+//! AppKit — SlopOS application toolkit.
 //!
-//! Provides `Surface`, `Window`, `Event`, and a generic `run()` loop that
-//! eliminate the boilerplate of surface creation, pixel format negotiation,
-//! event polling, and frame presentation.
+//! Provides everything needed to build GUI applications:
 //!
-//! # Example
+//! - **Widget apps** (primary): Implement [`App`], return a [`Node`] tree from
+//!   `view()`, handle messages in `update()`. Call [`run_app()`] to launch.
+//!
+//! - **Raw-drawing apps** (escape hatch): Implement [`raw::WindowedApp`],
+//!   draw into a [`DrawBuffer`](crate::gfx::DrawBuffer) directly.
+//!   Call [`raw::run()`] to launch.
+//!
+//! # Quick Start
 //!
 //! ```rust,ignore
-//! use crate::appkit::{self, ControlFlow, Event, Window, WindowedApp};
-//! use crate::gfx::DrawBuffer;
+//! use crate::appkit::{App, Action, Node, MessageId, run_app};
 //!
 //! struct MyApp;
-//!
-//! impl WindowedApp for MyApp {
-//!     fn init(&mut self, win: &mut Window) {
-//!         win.set_title("My App");
-//!         win.request_redraw();
-//!     }
-//!
-//!     fn draw(&mut self, fb: &mut DrawBuffer<'_>) {
-//!         // render here
-//!     }
+//! impl App for MyApp {
+//!     type Message = MyMsg;
+//!     fn view(&self) -> Node { Node::Label { text: "Hello".into(), .. } }
+//!     fn update(&mut self, msg: MyMsg) -> Action { Action::None }
 //! }
 //!
-//! pub fn main() -> ! {
-//!     appkit::run(MyApp, 640, 480)
-//! }
+//! pub fn main() -> ! { run_app(MyApp, 640, 480) }
 //! ```
 
-pub mod event;
-pub mod protocol_client;
-pub mod run;
-pub mod surface;
-pub mod window;
+// Widget toolkit — many fields are read by the framework integration
+// layer (run_app, tree reconciliation) rather than within widget impls.
+#![allow(dead_code)]
 
-pub use event::Event;
-pub use run::{ControlFlow, WindowedApp, run};
-pub use surface::{Surface, SurfaceError};
-pub use window::Window;
+// === Platform internals (not part of public API) ===
+pub(crate) mod platform;
+
+// === Raw drawing escape hatch ===
+pub mod raw;
+
+// === Widget toolkit modules ===
+pub mod constraints;
+pub mod dirty;
+pub mod event;
+pub mod focus;
+pub mod input;
+pub mod layout;
+pub mod node;
+pub mod overlay;
+pub mod paint;
+pub mod run;
+pub mod style;
+pub mod tests;
+pub mod traits;
+pub mod tree;
+pub mod widgets;
+
+// === Public re-exports: primary app API ===
+pub use node::{
+    Action, App, ButtonStyle, MenuItem, MenuItemKind, MessageId, Node, SortIndicator, TableColumn,
+    TableColumnWidth,
+};
+pub use run::run_app;
+
+// === Public re-exports: layout & constraint types ===
+pub use constraints::{
+    BoxConstraints, CrossAxisAlignment, EdgeInsets, ImageScale, Length, Orientation, Rect,
+    ScrollDirection, ScrollbarVisibility, Size, SizePolicy, TextAlignment,
+};
+
+// === Public re-exports: event & input types ===
+pub use event::{
+    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
+};
+
+// === Public re-exports: framework types ===
+pub use dirty::DirtyFlags;
+pub use focus::FocusManager;
+pub use paint::PaintContext;
+pub use style::StyleSheet;
+pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
+
+// === Public re-exports: raw drawing escape hatch ===
+pub use raw::{ControlFlow, WindowedApp};

@@ -1,7 +1,9 @@
-use crate::ui::constraints::{BoxConstraints, Rect, ScrollDirection, ScrollbarVisibility, Size};
-use crate::ui::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::ui::paint::PaintContext;
-use crate::ui::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::appkit::constraints::{
+    BoxConstraints, Rect, ScrollDirection, ScrollbarVisibility, Size,
+};
+use crate::appkit::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::appkit::paint::PaintContext;
+use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Scrollable container with a single child widget.
 pub struct ScrollViewWidget {
@@ -19,7 +21,7 @@ pub struct ScrollViewWidget {
     drag_start_y: i32,
     drag_start_offset: i32,
     focused: bool,
-    on_scroll: Option<crate::ui::node::MessageId>,
+    on_scroll: Option<crate::appkit::node::MessageId>,
 }
 
 impl ScrollViewWidget {
@@ -52,7 +54,7 @@ impl ScrollViewWidget {
         direction: ScrollDirection,
         show_scrollbar: ScrollbarVisibility,
         scroll_y: i32,
-        on_scroll: Option<crate::ui::node::MessageId>,
+        on_scroll: Option<crate::appkit::node::MessageId>,
     ) -> Self {
         let mut sv = Self::new(child, direction, show_scrollbar);
         sv.offset_y = scroll_y;
@@ -301,7 +303,7 @@ impl Widget for ScrollViewWidget {
                         self.content_size.height,
                     ));
                     if let Some(msg) = self.on_scroll {
-                        sink.emit(crate::ui::node::MessageId::with_payload(
+                        sink.emit(crate::appkit::node::MessageId::with_payload(
                             msg.id,
                             self.offset_y as u32,
                         ));

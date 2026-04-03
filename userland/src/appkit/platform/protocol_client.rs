@@ -80,6 +80,7 @@ pub fn try_client() -> Option<core::cell::RefMut<'static, Client>> {
 
 /// Returns `true` if the protocol client is connected.
 #[inline]
+#[allow(dead_code)]
 pub fn is_initialized() -> bool {
     PROTOCOL_CLIENT
         .0

@@ -1,14 +1,14 @@
 use slopos_abi::draw::Color32;
 
-use crate::gfx::font;
-use crate::ui::constraints::{BoxConstraints, Rect, Size};
-use crate::ui::event::{
+use crate::appkit::constraints::{BoxConstraints, Rect, Size};
+use crate::appkit::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::ui::node::{ButtonStyle, MessageId};
-use crate::ui::paint::PaintContext;
-use crate::ui::style::StyleSheet;
-use crate::ui::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::appkit::node::{ButtonStyle, MessageId};
+use crate::appkit::paint::PaintContext;
+use crate::appkit::style::StyleSheet;
+use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::gfx::font;
 
 /// Visual interaction state of the button.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

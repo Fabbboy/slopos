@@ -1,8 +1,8 @@
-use crate::ui::constraints::{BoxConstraints, Rect, Size};
-use crate::ui::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::ui::node::{MenuItem, MenuItemKind, MessageId};
-use crate::ui::paint::PaintContext;
-use crate::ui::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::appkit::constraints::{BoxConstraints, Rect, Size};
+use crate::appkit::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::appkit::node::{MenuItem, MenuItemKind, MessageId};
+use crate::appkit::paint::PaintContext;
+use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 /// Popup menu rendered as a regular widget.
 ///

@@ -298,7 +298,7 @@ pub fn shell_user_main() {
 fn shell_interactive_main() {
     use slopos_abi::signal::SIGINT;
 
-    use crate::appkit::protocol_client;
+    use crate::appkit::platform::protocol_client;
     use crate::syscall::{fs, process};
 
     protocol_client::init();

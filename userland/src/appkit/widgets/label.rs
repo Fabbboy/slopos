@@ -1,7 +1,7 @@
-use crate::ui::constraints::{BoxConstraints, Rect, Size, TextAlignment};
-use crate::ui::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
-use crate::ui::paint::PaintContext;
-use crate::ui::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::appkit::constraints::{BoxConstraints, Rect, Size, TextAlignment};
+use crate::appkit::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::appkit::paint::PaintContext;
+use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 pub struct LabelWidget {
     id: WidgetId,

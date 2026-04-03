@@ -1,5 +1,5 @@
 use super::event::{Key, Modifiers, NamedKey, WidgetEvent};
-use crate::appkit::event::Event;
+use super::platform::event::Event;
 
 /// US-QWERTY keymap: maps scancodes to Keys.
 pub struct Keymap {

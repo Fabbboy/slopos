@@ -2,7 +2,7 @@ use core::cmp;
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::appkit::protocol_client;
+use crate::appkit::platform::protocol_client;
 use crate::runtime;
 use crate::syscall::core as sys_core;
 use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs};

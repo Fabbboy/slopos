@@ -1,8 +1,8 @@
-use crate::ui::constraints::{BoxConstraints, Rect, Size};
-use crate::ui::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::ui::node::{MessageId, SortIndicator, TableColumn, TableColumnWidth};
-use crate::ui::paint::PaintContext;
-use crate::ui::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::appkit::constraints::{BoxConstraints, Rect, Size};
+use crate::appkit::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::appkit::node::{MessageId, SortIndicator, TableColumn, TableColumnWidth};
+use crate::appkit::paint::PaintContext;
+use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 use slopos_abi::draw::Color32;
 
@@ -178,8 +178,8 @@ impl Widget for TableWidget {
 
         // Measure then layout each cell widget at its absolute position.
         let cell_padding = 4;
-        let style = crate::ui::style::StyleSheet::dark();
-        let mut mctx = crate::ui::traits::MeasureCtx { style: &style };
+        let style = crate::appkit::style::StyleSheet::dark();
+        let mut mctx = crate::appkit::traits::MeasureCtx { style: &style };
         for (row_idx, row) in self.rows.iter_mut().enumerate() {
             let y =
                 rect.y + self.header_height + row_idx as i32 * self.row_height - self.scroll_offset;

@@ -1,12 +1,12 @@
 use slopos_abi::draw::Color32;
 
-use crate::ui::constraints::{BoxConstraints, Rect, Size};
-use crate::ui::event::{
+use crate::appkit::constraints::{BoxConstraints, Rect, Size};
+use crate::appkit::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::ui::node::MessageId;
-use crate::ui::paint::PaintContext;
-use crate::ui::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::appkit::node::MessageId;
+use crate::appkit::paint::PaintContext;
+use crate::appkit::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
 pub struct CheckboxWidget {
     id: WidgetId,

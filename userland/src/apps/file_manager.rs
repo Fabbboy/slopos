@@ -6,11 +6,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::string::String;
 
-use crate::theme;
-use crate::ui::{
+use crate::appkit::{
     Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, MessageId, Modifiers,
     NamedKey, Node, TableColumn, TableColumnWidth, TextAlignment,
 };
+use crate::theme;
 
 // ---------------------------------------------------------------------------
 // Message IDs
@@ -628,5 +628,5 @@ impl App for FileManagerApp {
 
 pub fn file_manager_main() -> ! {
     let app = FileManagerApp::new();
-    crate::ui::run_app(app, 640, 392)
+    crate::appkit::run_app(app, 640, 392)
 }
