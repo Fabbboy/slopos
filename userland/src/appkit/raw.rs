@@ -69,9 +69,9 @@ pub trait WindowedApp {
 pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     // Connect to the compositor protocol socket. Retries internally
     // since the compositor may still be starting.
-    protocol_client::init();
+    let handle = protocol_client::connect().expect("compositor not running");
 
-    let mut win = match Window::new(width, height) {
+    let mut win = match Window::new(handle.clone(), width, height) {
         Ok(w) => w,
         Err(e) => {
             let msg: &[u8] = match e {
@@ -93,9 +93,10 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     let mut last_refresh = sys_core::get_time_ms();
 
     loop {
-        // Flush any deferred Surface::drop destroy requests before
-        // borrowing the client for anything else this iteration.
-        protocol_client::flush_pending_destroys();
+        // Flush any deferred Surface::drop destroy requests and execute
+        // any closures posted by background threads via UiSender.
+        handle.flush_pending_destroys();
+        handle.drain_ui_queue();
 
         let mut proto_buf: [ProtocolEvent; EVENT_BUF_LEN] =
             core::array::from_fn(|_| ProtocolEvent::FrameDone {

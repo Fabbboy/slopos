@@ -12,7 +12,7 @@
 use crate::gfx::{DrawBuffer, PixelFormat};
 use crate::syscall::ShmBuffer;
 
-use super::protocol_client;
+use super::protocol_client::ProtocolHandle;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SurfaceError {
@@ -27,6 +27,7 @@ pub enum SurfaceError {
 /// Owns the `ShmBuffer` and all associated metadata (dimensions, pitch,
 /// pixel format). Created once per window via `Surface::new()`.
 pub struct Surface {
+    handle: ProtocolHandle,
     shm: ShmBuffer,
     width: u32,
     height: u32,
@@ -43,12 +44,12 @@ impl Surface {
     /// Queries the display for pixel format information, allocates a
     /// shared memory buffer of the appropriate size, and registers it
     /// via the compositor protocol.
-    pub fn new(width: u32, height: u32) -> Result<Self, SurfaceError> {
+    pub fn new(handle: ProtocolHandle, width: u32, height: u32) -> Result<Self, SurfaceError> {
         if width == 0 || height == 0 {
             return Err(SurfaceError::BadSize);
         }
 
-        let mut client = protocol_client::client();
+        let mut client = handle.borrow_client();
         // Lazy sync point: receive OutputInfo if we haven't yet.
         // By this point the compositor has had time to accept + push it.
         client
@@ -78,7 +79,10 @@ impl Surface {
             .surface_attach(protocol_surface_id, shm.token(), width, height)
             .map_err(|_| SurfaceError::AttachFailed)?;
 
+        drop(client);
+
         Ok(Self {
+            handle,
             shm,
             width,
             height,
@@ -109,7 +113,7 @@ impl Surface {
 
     /// Mark the full surface as damaged and commit to the compositor.
     pub fn present_full(&self) {
-        let mut client = protocol_client::client();
+        let mut client = self.handle.borrow_client();
         let _ = client.surface_damage(
             self.protocol_surface_id,
             0,
@@ -122,7 +126,7 @@ impl Surface {
 
     /// Mark a sub-region as damaged and commit to the compositor.
     pub fn present_region(&self, x: i32, y: i32, w: i32, h: i32) {
-        let mut client = protocol_client::client();
+        let mut client = self.handle.borrow_client();
         let _ = client.surface_damage(self.protocol_surface_id, x, y, w, h);
         let _ = client.surface_commit(self.protocol_surface_id);
     }
@@ -148,7 +152,7 @@ impl Surface {
 
         let new_shm = ShmBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
 
-        let mut client = protocol_client::client();
+        let mut client = self.handle.borrow_client();
         client
             .surface_attach(
                 self.protocol_surface_id,
@@ -205,15 +209,20 @@ impl Surface {
     pub fn protocol_toplevel_id(&self) -> u32 {
         self.protocol_toplevel_id
     }
+
+    /// Protocol handle (for callers that need direct client access).
+    #[inline]
+    pub fn protocol_handle(&self) -> &ProtocolHandle {
+        &self.handle
+    }
 }
 
 impl Drop for Surface {
     fn drop(&mut self) {
         // Destroy compositor-side objects so we don't leak the limited
         // per-client surface slots (MAX_SURFACES = 32).
-        // Use try_client to avoid panicking if the client isn't initialized
-        // or if the RefCell is already borrowed.
-        if let Some(mut client) = protocol_client::try_client() {
+        // Use try_borrow_client to avoid panicking if the RefCell is already borrowed.
+        if let Some(mut client) = self.handle.try_borrow_client() {
             if self.protocol_toplevel_id != 0 {
                 let _ = client.toplevel_destroy(self.protocol_toplevel_id);
             }
@@ -221,9 +230,10 @@ impl Drop for Surface {
                 let _ = client.surface_destroy(self.protocol_surface_id);
             }
         } else {
-            // Client RefCell already borrowed (or not initialized) — defer
-            // the destroy so the event loop flushes it at a safe point.
-            protocol_client::queue_destroy(self.protocol_toplevel_id, self.protocol_surface_id);
+            // Client RefCell already borrowed — defer the destroy so the event
+            // loop flushes it at a safe point.
+            self.handle
+                .queue_destroy(self.protocol_toplevel_id, self.protocol_surface_id);
         }
         // ShmBuffer dropped automatically after this.
     }

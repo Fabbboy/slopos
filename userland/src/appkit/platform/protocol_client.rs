@@ -1,185 +1,299 @@
-//! Global protocol connection for compositor communication.
+//! Thread-safe protocol connection for compositor communication.
 //!
-//! Manages a single `Client` connection per process.  The compositor
-//! always starts before GUI apps, so `init()` retries a few times
-//! to allow for startup delays.
+//! The protocol client is confined to the UI thread via `Rc` (`!Send + !Sync`).
+//! Background threads that need to post work to the UI thread use [`UiSender`],
+//! which is `Send + Sync + Clone`.
 //!
-//! Architecture (Wayland-style):
-//! - `init()` only opens the socket — no blocking handshake.
-//! - Display geometry is received lazily via `Client::ensure_output_info()`
-//!   the first time it is needed (surface creation).  By that point the
-//!   compositor has had time to accept the connection and push the event.
+//! Architecture:
+//! - [`connect()`] opens the socket and returns an `Rc<Protocol>` handle.
+//! - The handle stays on the UI thread — the compiler prevents sending it.
+//! - [`Protocol::ui_sender()`] creates a cross-thread posting handle.
+//! - The event loop calls [`Protocol::drain_ui_queue()`] each iteration.
 
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicPtr, Ordering};
+use std::boxed::Box;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::vec::Vec;
 
 use slopos_protocol::client::Client;
 
-/// Per-process global protocol client.
-///
-/// Uses `RefCell` for interior mutability with runtime borrow checking,
-/// which is safe because SlopOS user processes are single-threaded.
-/// `RefCell` dynamically enforces the single-mutable-borrow invariant
-/// that raw `UnsafeCell` + `*mut` cannot.
-static PROTOCOL_CLIENT: CellWrapper = CellWrapper(RefCell::new(None));
+// ---------------------------------------------------------------------------
+// Protocol handle (UI-thread-confined via Rc)
+// ---------------------------------------------------------------------------
 
-/// Wrapper to make `RefCell` usable in a `static`.
+/// Protocol connection state.
 ///
-/// SAFETY: SlopOS user processes are single-threaded — `RefCell` is
-/// never accessed from multiple threads.
-struct CellWrapper(RefCell<Option<Client>>);
-unsafe impl Sync for CellWrapper {}
+/// Confined to the UI thread by `Rc` (`!Send`, `!Sync`). Two separate `RefCell`s
+/// ensure that `Surface::drop` can always queue a deferred destroy even while the
+/// client `RefCell` is borrowed elsewhere.
+pub struct Protocol {
+    client: RefCell<Client>,
+    pending_destroys: RefCell<PendingDestroys>,
+    ui_queue: Arc<UiQueue>,
+}
 
-/// Connect to the compositor protocol socket (non-blocking).
+/// Handle to the protocol connection.
 ///
-/// With socket activation, the listen socket exists before any app starts,
-/// so connect() succeeds on the first try via the kernel backlog.
-/// No OutputInfo handshake happens here — that is deferred to the first
-/// `Surface::new()` call via `Client::ensure_output_info()`.
-///
-/// Safe to call multiple times; only the first call actually connects.
-pub fn init() {
-    if PROTOCOL_CLIENT.0.borrow().is_some() {
-        return;
-    }
+/// Clone freely on the UI thread. Cannot cross thread boundaries — `Rc` is
+/// `!Send` and `!Sync`, so the compiler rejects any attempt to share it.
+pub type ProtocolHandle = Rc<Protocol>;
 
+/// Connect to the compositor protocol socket.
+///
+/// Returns an `Rc<Protocol>` confined to the calling thread. Retries up to 10
+/// times with 200ms delays to allow for compositor startup.
+pub fn connect() -> Result<ProtocolHandle, ()> {
     for _ in 0..10 {
         if let Ok(client) = Client::connect(b"/run/compositor") {
-            *PROTOCOL_CLIENT.0.borrow_mut() = Some(client);
-            return;
+            return Ok(Rc::new(Protocol {
+                client: RefCell::new(client),
+                pending_destroys: RefCell::new(PendingDestroys::new()),
+                ui_queue: Arc::new(UiQueue::new()),
+            }));
         }
         crate::syscall::core::sleep_ms(200);
     }
-    // Compositor not running — client stays None, surface creation will fail.
+    Err(())
 }
 
-/// Get an exclusive borrow of the global protocol client.
-///
-/// Returns a `RefMut` guard that dynamically enforces single-borrow.
-/// Panics if called reentrantly (which would be a logic bug in
-/// single-threaded code) or before a successful `init()`.
-#[inline]
-pub fn client() -> core::cell::RefMut<'static, Client> {
-    core::cell::RefMut::map(PROTOCOL_CLIENT.0.borrow_mut(), |opt| {
-        opt.as_mut().expect("protocol not initialized")
-    })
-}
-
-/// Non-panicking variant of [`client()`].
-///
-/// Returns `None` if the protocol client was never initialized or if
-/// the `RefCell` is already borrowed (e.g. during Drop from within
-/// a client call).
-#[inline]
-pub fn try_client() -> Option<core::cell::RefMut<'static, Client>> {
-    let borrow = PROTOCOL_CLIENT.0.try_borrow_mut().ok()?;
-    if borrow.is_none() {
-        return None;
+impl Protocol {
+    /// Get exclusive access to the protocol client.
+    ///
+    /// Panics on reentrant borrow (a logic bug in single-threaded code).
+    #[inline]
+    pub fn borrow_client(&self) -> core::cell::RefMut<'_, Client> {
+        self.client.borrow_mut()
     }
-    Some(core::cell::RefMut::map(borrow, |opt| opt.as_mut().unwrap()))
-}
 
-/// Returns `true` if the protocol client is connected.
-#[inline]
-#[allow(dead_code)]
-pub fn is_initialized() -> bool {
-    PROTOCOL_CLIENT
-        .0
-        .try_borrow()
-        .map(|b| b.is_some())
-        .unwrap_or(false)
+    /// Non-panicking variant of [`borrow_client()`].
+    ///
+    /// Returns `None` if the client `RefCell` is already borrowed (e.g. during
+    /// `Surface::drop` from within a client call).
+    #[inline]
+    pub fn try_borrow_client(&self) -> Option<core::cell::RefMut<'_, Client>> {
+        self.client.try_borrow_mut().ok()
+    }
+
+    /// Queue a deferred destroy for compositor-side objects.
+    ///
+    /// Uses a separate `RefCell` from the client, so this never conflicts with
+    /// an active client borrow. Called from `Surface::drop` when the client
+    /// `RefCell` is already borrowed.
+    pub fn queue_destroy(&self, toplevel_id: u32, surface_id: u32) {
+        if let Ok(mut q) = self.pending_destroys.try_borrow_mut() {
+            q.push(toplevel_id, surface_id);
+        }
+    }
+
+    /// Send any deferred destroy requests queued by `Surface::drop`.
+    ///
+    /// Call at the top of the event loop before any other client operations.
+    pub fn flush_pending_destroys(&self) {
+        let snapshot = {
+            let Ok(mut q) = self.pending_destroys.try_borrow_mut() else {
+                return;
+            };
+            q.take()
+        };
+
+        if snapshot.is_empty() {
+            return;
+        }
+
+        let Some(mut client) = self.try_borrow_client() else {
+            // Re-queue so we retry next iteration.
+            if let Ok(mut q) = self.pending_destroys.try_borrow_mut() {
+                for &(toplevel_id, surface_id) in &snapshot {
+                    q.push(toplevel_id, surface_id);
+                }
+            }
+            return;
+        };
+
+        for (toplevel_id, surface_id) in snapshot {
+            if toplevel_id != 0 {
+                let _ = client.toplevel_destroy(toplevel_id);
+            }
+            if surface_id != 0 {
+                let _ = client.surface_destroy(surface_id);
+            }
+        }
+    }
+
+    /// Create a sender handle for posting work from background threads.
+    ///
+    /// The returned `UiSender` is `Send + Sync + Clone` — pass it to any thread.
+    /// Posted closures execute on the next [`drain_ui_queue()`] call.
+    pub fn ui_sender(&self) -> UiSender {
+        UiSender {
+            queue: Arc::clone(&self.ui_queue),
+        }
+    }
+
+    /// Execute all closures posted by background threads via [`UiSender`].
+    ///
+    /// Zero cost when the queue is empty (single atomic load).
+    /// Call at the top of the event loop, after `flush_pending_destroys`.
+    pub fn drain_ui_queue(&self) {
+        let mut client = match self.try_borrow_client() {
+            Some(c) => c,
+            None => return,
+        };
+        self.ui_queue.drain(&mut client);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Deferred destroy queue
 // ---------------------------------------------------------------------------
 
-/// Maximum number of deferred destroy requests that can be queued.
-///
-/// Sized to handle the worst case: all MAX_SURFACES (32) destroyed in one
-/// frame plus re-queued entries from a failed prior flush (another 32).
 const PENDING_DESTROY_CAP: usize = 64;
 
-struct PendingDestroy {
-    entries: [(u32, u32); PENDING_DESTROY_CAP], // (toplevel_id, surface_id)
-    count: usize,
+struct PendingDestroys {
+    entries: Vec<(u32, u32)>,
 }
 
-static PENDING_DESTROYS: PendingDestroyCellWrapper =
-    PendingDestroyCellWrapper(RefCell::new(PendingDestroy {
-        entries: [(0, 0); PENDING_DESTROY_CAP],
-        count: 0,
-    }));
+impl PendingDestroys {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
 
-/// Wrapper to make `RefCell<PendingDestroy>` usable in a `static`.
-///
-/// SAFETY: same single-threaded guarantee as `CellWrapper` above.
-struct PendingDestroyCellWrapper(RefCell<PendingDestroy>);
-unsafe impl Sync for PendingDestroyCellWrapper {}
-
-/// Queue a deferred destroy for compositor-side toplevel + surface objects.
-///
-/// Called from `Surface::drop` when the protocol client RefCell is already
-/// borrowed. The request will be flushed at the top of the next event loop
-/// iteration via [`flush_pending_destroys`].
-pub fn queue_destroy(toplevel_id: u32, surface_id: u32) {
-    if let Ok(mut q) = PENDING_DESTROYS.0.try_borrow_mut() {
-        let idx = q.count;
-        if idx < PENDING_DESTROY_CAP {
-            q.entries[idx] = (toplevel_id, surface_id);
-            q.count = idx + 1;
+    fn push(&mut self, toplevel_id: u32, surface_id: u32) {
+        if self.entries.len() < PENDING_DESTROY_CAP {
+            self.entries.push((toplevel_id, surface_id));
         } else {
-            // Queue full — destroy is lost.  This indicates a bug:
-            // flush_pending_destroys() is not being called frequently enough
-            // or a pathological number of surfaces are being dropped at once.
             crate::syscall::tty::write(b"warn: destroy queue full, surface leak\n");
+        }
+    }
+
+    fn take(&mut self) -> Vec<(u32, u32)> {
+        core::mem::take(&mut self.entries)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UiSender — cross-thread posting (Send + Sync + Clone)
+// ---------------------------------------------------------------------------
+
+type UiCallback = Box<dyn FnOnce(&mut Client) + Send>;
+
+struct CallbackNode {
+    callback: UiCallback,
+    next: *mut CallbackNode,
+}
+
+/// Thread-safe callback queue (lock-free Treiber stack).
+///
+/// Push from any thread (wait-free CAS), drain from UI thread only.
+struct UiQueue {
+    head: AtomicPtr<CallbackNode>,
+}
+
+// SAFETY: The AtomicPtr itself is Send+Sync. CallbackNode contains a
+// Box<dyn FnOnce + Send> which is Send. Push uses CAS (thread-safe),
+// drain swaps head to null (exclusive to UI thread).
+unsafe impl Send for UiQueue {}
+unsafe impl Sync for UiQueue {}
+
+impl UiQueue {
+    const fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    /// Push a callback (any thread, wait-free).
+    fn push(&self, callback: UiCallback) {
+        let node = Box::into_raw(Box::new(CallbackNode {
+            callback,
+            next: core::ptr::null_mut(),
+        }));
+        loop {
+            let old_head = self.head.load(Ordering::Acquire);
+            // SAFETY: `node` is a valid, exclusively owned allocation.
+            unsafe { (*node).next = old_head };
+            if self
+                .head
+                .compare_exchange_weak(old_head, node, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    /// Drain all callbacks, executing each with `&mut Client` (UI thread only).
+    fn drain(&self, client: &mut Client) {
+        let head = self.head.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        if head.is_null() {
+            return;
+        }
+
+        // Treiber stack is LIFO — reverse to get FIFO order.
+        let mut reversed: *mut CallbackNode = core::ptr::null_mut();
+        let mut current = head;
+        while !current.is_null() {
+            // SAFETY: Each node was allocated via Box::into_raw and is uniquely
+            // owned after the atomic swap above.
+            let next = unsafe { (*current).next };
+            unsafe { (*current).next = reversed };
+            reversed = current;
+            current = next;
+        }
+
+        // Execute in submission order.
+        current = reversed;
+        while !current.is_null() {
+            // SAFETY: Reclaim the Box allocation. The node is exclusively ours.
+            let node = unsafe { Box::from_raw(current) };
+            current = node.next;
+            (node.callback)(client);
         }
     }
 }
 
-/// Send any deferred destroy requests that were queued by `Surface::drop`.
+impl Drop for UiQueue {
+    fn drop(&mut self) {
+        // Drop any un-drained callbacks.
+        let mut current = *self.head.get_mut();
+        while !current.is_null() {
+            let node = unsafe { Box::from_raw(current) };
+            current = node.next;
+            // callback dropped without executing
+        }
+    }
+}
+
+/// Handle for posting work to the UI thread from any thread.
 ///
-/// Must be called from a context where the protocol client RefCell is NOT
-/// already borrowed (i.e. at the top of the event loop, before any other
-/// client operations).
-pub fn flush_pending_destroys() {
-    // Take the pending list with a short borrow.
-    let snapshot = {
-        let Ok(mut q) = PENDING_DESTROYS.0.try_borrow_mut() else {
-            return;
-        };
-        let n = q.count;
-        if n == 0 {
-            return;
-        }
-        let snap = (q.entries, n);
-        q.count = 0;
-        snap
-    };
+/// `Send + Sync + Clone` — safe to move to background threads.
+/// Posted closures receive `&mut Client` and execute on the next event loop
+/// iteration when the UI thread calls `Protocol::drain_ui_queue()`.
+pub struct UiSender {
+    queue: Arc<UiQueue>,
+}
 
-    // Separate scope: borrow the client and send destroy messages.
-    let Some(mut client) = try_client() else {
-        // Client unavailable — re-queue so we retry next iteration.
-        if let Ok(mut q) = PENDING_DESTROYS.0.try_borrow_mut() {
-            let (entries, n) = snapshot;
-            for i in 0..n {
-                let idx = q.count;
-                if idx < PENDING_DESTROY_CAP {
-                    q.entries[idx] = entries[i];
-                    q.count = idx + 1;
-                }
-            }
-        }
-        return;
-    };
+impl UiSender {
+    /// Post a closure to execute on the UI thread.
+    ///
+    /// Returns immediately. The closure runs on the next event loop iteration.
+    pub fn post(&self, f: impl FnOnce(&mut Client) + Send + 'static) {
+        self.queue.push(Box::new(f));
+    }
+}
 
-    let (entries, n) = snapshot;
-    for i in 0..n {
-        let (toplevel_id, surface_id) = entries[i];
-        if toplevel_id != 0 {
-            let _ = client.toplevel_destroy(toplevel_id);
-        }
-        if surface_id != 0 {
-            let _ = client.surface_destroy(surface_id);
+impl Clone for UiSender {
+    fn clone(&self) -> Self {
+        Self {
+            queue: Arc::clone(&self.queue),
         }
     }
 }

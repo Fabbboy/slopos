@@ -78,3 +78,6 @@ pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 
 // === Public re-exports: raw drawing escape hatch ===
 pub use raw::{ControlFlow, WindowedApp};
+
+// === Public re-exports: protocol types for threading ===
+pub use platform::protocol_client::{ProtocolHandle, UiSender};

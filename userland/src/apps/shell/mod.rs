@@ -301,7 +301,10 @@ fn shell_interactive_main() {
     use crate::appkit::platform::protocol_client;
     use crate::syscall::{fs, process};
 
-    protocol_client::init();
+    let handle = protocol_client::connect().expect("compositor not running");
+    surface::init_handle(handle.clone());
+    input::init_handle(handle);
+
     display::shell_console_init();
     display::shell_console_clear();
 

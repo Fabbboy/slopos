@@ -2,7 +2,7 @@ use core::cmp;
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::appkit::platform::protocol_client;
+use crate::appkit::platform::protocol_client::ProtocolHandle;
 use crate::runtime;
 use crate::syscall::core as sys_core;
 use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs};
@@ -48,6 +48,25 @@ const CTRL_W: u8 = 0x17;
 
 const MOUSE_LEFT: u8 = 0x01;
 const MOUSE_EVENT_BUF_SIZE: usize = 8;
+
+/// Protocol handle for compositor communication (stored via init_handle).
+static PROTO_HANDLE: super::SyncUnsafeCell<Option<ProtocolHandle>> =
+    super::SyncUnsafeCell::new(None);
+
+/// Store the protocol handle for later use by input operations.
+pub fn init_handle(handle: ProtocolHandle) {
+    unsafe {
+        *PROTO_HANDLE.get() = Some(handle);
+    }
+}
+
+fn handle() -> &'static ProtocolHandle {
+    unsafe {
+        (*PROTO_HANDLE.get())
+            .as_ref()
+            .expect("input: no protocol handle")
+    }
+}
 
 static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
     super::SyncUnsafeCell::new([0; super::PROMPT_BUF_MAX]);
@@ -542,7 +561,7 @@ fn input_loop(
                     let hi = hi.min(len);
                     if lo < hi {
                         buffers::with_line_buf(|buf| {
-                            let _ = protocol_client::client().clipboard_copy(&buf[lo..hi]);
+                            let _ = handle().borrow_client().clipboard_copy(&buf[lo..hi]);
                         });
                     }
                     sel = InputSelection::NONE;
@@ -803,7 +822,7 @@ pub(crate) fn poll_protocol_events(events: &mut [InputEvent]) -> usize {
     });
 
     // Phase 2: poll the compositor socket for fresh events.
-    let mut client = protocol_client::client();
+    let mut client = handle().borrow_client();
     while count < events.len() {
         match client.poll_event() {
             Ok(Some(evt)) => {
@@ -869,7 +888,7 @@ fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
 /// `DeferredQueue` so they are replayed on the next `poll_protocol_events`
 /// call -- no events are lost regardless of type.
 fn protocol_clipboard_paste(buf: &mut [u8]) -> usize {
-    let mut client = protocol_client::client();
+    let mut client = handle().borrow_client();
     if client.clipboard_paste().is_err() {
         return 0;
     }

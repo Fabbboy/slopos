@@ -17,8 +17,8 @@ use super::tree;
 
 /// Run a widget-framework-driven application.
 pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
-    protocol_client::init();
-    let mut win = Window::new(width, height).expect("failed to create window");
+    let handle = protocol_client::connect().expect("compositor not running");
+    let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
     win.set_title(app.title());
     let id = app.app_id();
     if !id.is_empty() {
@@ -49,9 +49,10 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let mut last_tick_ms: u64 = crate::syscall::core::get_time_ms();
 
     loop {
-        // Flush any deferred Surface::drop destroy requests before
-        // borrowing the client for anything else this iteration.
-        protocol_client::flush_pending_destroys();
+        // Flush any deferred Surface::drop destroy requests and execute
+        // any closures posted by background threads via UiSender.
+        handle.flush_pending_destroys();
+        handle.drain_ui_queue();
 
         // --- Poll input events ---
         let count = win.poll_protocol_events(&mut proto_events);

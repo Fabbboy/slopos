@@ -3,7 +3,7 @@
 use slopos_protocol::types::Event as ProtocolEvent;
 
 use super::event::Event;
-use super::protocol_client;
+use super::protocol_client::ProtocolHandle;
 use super::surface::{Surface, SurfaceError};
 
 pub const EVENT_BUF_LEN: usize = 16;
@@ -15,6 +15,7 @@ pub const EVENT_BUF_LEN: usize = 16;
 /// a `Window` automatically; applications with custom event loops can
 /// create one directly.
 pub struct Window {
+    handle: ProtocolHandle,
     surface: Surface,
     redraw_needed: bool,
     pointer_x: i32,
@@ -25,9 +26,11 @@ impl Window {
     /// Create a new window of the given size.
     ///
     /// Internally creates and attaches a `Surface`.
-    pub fn new(width: u32, height: u32) -> Result<Self, SurfaceError> {
+    pub fn new(handle: ProtocolHandle, width: u32, height: u32) -> Result<Self, SurfaceError> {
+        let surface = Surface::new(handle.clone(), width, height)?;
         Ok(Self {
-            surface: Surface::new(width, height)?,
+            handle,
+            surface,
             redraw_needed: true,
             pointer_x: 0,
             pointer_y: 0,
@@ -36,14 +39,14 @@ impl Window {
 
     /// Set the window title shown in the compositor title bar.
     pub fn set_title(&self, title: &str) {
-        let mut client = protocol_client::client();
+        let mut client = self.handle.borrow_client();
         let _ = client.toplevel_set_title(self.surface.protocol_toplevel_id(), title.as_bytes());
     }
 
     /// Set the application identifier (e.g. "org.slopos.files").
     /// The compositor uses this for window-to-dock matching instead of the title.
     pub fn set_app_id(&self, app_id: &str) {
-        let mut client = protocol_client::client();
+        let mut client = self.handle.borrow_client();
         let _ = client.toplevel_set_app_id(self.surface.protocol_toplevel_id(), app_id.as_bytes());
     }
 
@@ -105,7 +108,7 @@ impl Window {
     ///
     /// Returns the number of events written (always <= `buf.len()`).
     pub fn poll_protocol_events(&mut self, buf: &mut [ProtocolEvent]) -> usize {
-        let mut client = protocol_client::client();
+        let mut client = self.handle.borrow_client();
         let mut count = 0;
         while count < buf.len() {
             match client.poll_event() {
