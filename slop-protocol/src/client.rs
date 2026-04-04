@@ -107,6 +107,26 @@ impl Client {
         })
     }
 
+    /// Attach a memfd-backed buffer to a surface, passing the fd via SCM_RIGHTS.
+    /// The shm_token field is set to 0 (ignored by the compositor — fd is authoritative).
+    pub fn surface_attach_fd(
+        &mut self,
+        surface: u32,
+        memfd_fd: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ProtocolError> {
+        self.conn.send_with_fd(
+            &Request::SurfaceAttach {
+                surface,
+                shm_token: 0, // Placeholder — compositor uses the received fd
+                width,
+                height,
+            },
+            memfd_fd,
+        )
+    }
+
     pub fn surface_damage(
         &mut self,
         surface: u32,

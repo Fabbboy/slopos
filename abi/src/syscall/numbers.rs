@@ -94,19 +94,10 @@ pub const SYSCALL_CLIPBOARD_COPY: u64 = 116;
 pub const SYSCALL_CLIPBOARD_PASTE: u64 = 117;
 
 // =============================================================================
-// Shared memory
+// Compositor framebuffer
 // =============================================================================
 
-pub const SYSCALL_SHM_CREATE: u64 = 40;
-pub const SYSCALL_SHM_MAP: u64 = 41;
-pub const SYSCALL_SHM_UNMAP: u64 = 42;
-pub const SYSCALL_SHM_DESTROY: u64 = 43;
 pub const SYSCALL_FB_FLIP: u64 = 45;
-pub const SYSCALL_SHM_ACQUIRE: u64 = 47;
-pub const SYSCALL_SHM_RELEASE: u64 = 48;
-pub const SYSCALL_SHM_POLL_RELEASED: u64 = 49;
-pub const SYSCALL_SHM_GET_FORMATS: u64 = 53;
-pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 
 // =============================================================================
 // Task management
@@ -623,7 +614,60 @@ pub const FONT_FORMAT_BITMAP: u64 = 0;
 /// Pre-rasterized coverage format: 8-bit-per-pixel alpha, 95 glyphs + replacement.
 pub const FONT_FORMAT_COVERAGE: u64 = 1;
 
-pub const SYSCALL_TABLE_SIZE: usize = 153;
+// =============================================================================
+// Memfd / ftruncate
+// =============================================================================
+
+/// Create an anonymous memory-backed file descriptor.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): flags (reserved, must be 0)
+///
+/// # Returns
+/// * File descriptor on success
+/// * Negative errno on failure
+pub const SYSCALL_MEMFD_CREATE: u64 = 149;
+
+/// Set the size of a memfd.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): file descriptor (must refer to a memfd)
+/// * rsi (arg1): new size in bytes (must be > 0, page-aligned internally)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_FTRUNCATE: u64 = 150;
+
+// =============================================================================
+// sendmsg / recvmsg (fd passing)
+// =============================================================================
+
+/// Send a message on a socket, optionally with ancillary data (SCM_RIGHTS).
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to MsgHdr struct
+/// * rdx (arg2): flags (reserved, must be 0)
+///
+/// # Returns
+/// * Bytes sent on success
+/// * Negative errno on failure
+pub const SYSCALL_SENDMSG: u64 = 151;
+
+/// Receive a message from a socket, optionally with ancillary data (SCM_RIGHTS).
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to MsgHdr struct (output)
+/// * rdx (arg2): flags (reserved, must be 0)
+///
+/// # Returns
+/// * Bytes received on success
+/// * Negative errno on failure
+pub const SYSCALL_RECVMSG: u64 = 152;
+
+pub const SYSCALL_TABLE_SIZE: usize = 156;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

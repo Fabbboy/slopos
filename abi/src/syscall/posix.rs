@@ -56,6 +56,7 @@ pub const PROT_WRITE: u64 = 2;
 pub const PROT_EXEC: u64 = 4;
 
 /// Mapping flags for mmap
+pub const MAP_SHARED: u64 = 0x01;
 pub const MAP_PRIVATE: u64 = 0x02;
 pub const MAP_ANONYMOUS: u64 = 0x20;
 pub const MAP_FIXED: u64 = 0x10;
@@ -74,6 +75,43 @@ pub const FD_CLOEXEC: u64 = 1;
 pub const O_NONBLOCK: u64 = 0x800;
 pub const O_NOCTTY: u64 = 0x100;
 pub const O_CLOEXEC: u64 = 0x80_000;
+
+// =============================================================================
+// SCM_RIGHTS — fd passing over Unix sockets
+// =============================================================================
+
+/// Ancillary data type: pass file descriptors.
+pub const SCM_RIGHTS: u32 = 1;
+
+/// Maximum number of file descriptors in a single sendmsg ancillary payload.
+pub const SCM_MAX_FDS: usize = 4;
+
+/// User-space message header for sendmsg/recvmsg.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MsgHdr {
+    /// Pointer to data buffer.
+    pub iov_base: u64,
+    /// Data buffer length.
+    pub iov_len: u64,
+    /// Pointer to ancillary (control) data buffer.
+    pub control: u64,
+    /// Ancillary data buffer length (input: capacity, output: actual).
+    pub control_len: u64,
+}
+
+/// Ancillary data header (simplified POSIX cmsghdr).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CmsgHdr {
+    /// Total length including this header and data.
+    pub cmsg_len: u32,
+    /// Originating protocol (SOL_SOCKET).
+    pub cmsg_level: u32,
+    /// Protocol-specific type (SCM_RIGHTS).
+    pub cmsg_type: u32,
+    // Followed by i32[] of fd numbers (up to SCM_MAX_FDS).
+}
 
 // =============================================================================
 // lseek whence constants

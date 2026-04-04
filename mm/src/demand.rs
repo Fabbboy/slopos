@@ -1,8 +1,7 @@
 //! Demand Paging - Lazy page allocation on first access
 //!
-//! This module implements on-demand page allocation for anonymous memory regions.
-//! When a process accesses a page marked as LAZY in its VMA, the page fault handler
-//! calls into this module to allocate a physical page and map it.
+//! When a process accesses a page in a lazy-anonymous VMA, the page fault
+//! handler calls into this module to allocate a physical page and map it.
 
 use slopos_abi::addr::VirtAddr;
 
@@ -12,7 +11,7 @@ use crate::paging::{ProcessPageDir, map_page_4kb_in_dir, virt_to_phys_in_dir};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
-use crate::vma_flags::VmaFlags;
+use crate::vma_region::VmaRegion;
 
 pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> bool {
     let is_present = (error_code & 0x01) != 0;
@@ -20,29 +19,27 @@ pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> boo
         return false;
     }
 
-    let vma_flags = process_vm::process_vm_get_vma_flags(process_id, fault_addr);
-    if vma_flags.is_none() {
+    let Some(region) = process_vm::process_vm_get_region(process_id, fault_addr) else {
         return false;
-    }
+    };
 
-    let flags = vma_flags.unwrap();
-    flags.is_demand_paged() && flags.is_anonymous()
+    region.is_demand_paged() && region.is_anonymous()
 }
 
-pub fn can_satisfy_fault(error_code: u64, vma_flags: VmaFlags) -> bool {
+pub fn can_satisfy_fault(error_code: u64, region: &VmaRegion) -> bool {
     let is_write = (error_code & 0x02) != 0;
     let is_user = (error_code & 0x04) != 0;
     let is_ifetch = (error_code & 0x10) != 0;
 
-    if is_user && !vma_flags.is_user() {
+    if is_user && !region.user {
         return false;
     }
 
-    if is_write && !vma_flags.is_writable() {
+    if is_write && !region.protection.write {
         return false;
     }
 
-    if is_ifetch && !vma_flags.contains(VmaFlags::EXEC) {
+    if is_ifetch && !region.protection.exec {
         return false;
     }
 
@@ -61,14 +58,14 @@ pub fn handle_demand_fault(
 
     let aligned_addr = fault_addr & !(PAGE_SIZE_4KB - 1);
 
-    let vma_flags =
-        process_vm::process_vm_get_vma_flags(process_id, aligned_addr).ok_or(MmError::NoVma)?;
+    let region =
+        process_vm::process_vm_get_region(process_id, aligned_addr).ok_or(MmError::NoVma)?;
 
-    if !vma_flags.is_demand_paged() || !vma_flags.is_anonymous() {
+    if !region.is_demand_paged() || !region.is_anonymous() {
         return Err(MmError::NotDemandPaged);
     }
 
-    if !can_satisfy_fault(error_code, vma_flags) {
+    if !can_satisfy_fault(error_code, &region) {
         return Err(MmError::PermissionDenied);
     }
 
@@ -82,7 +79,7 @@ pub fn handle_demand_fault(
         return Err(MmError::NoMemory);
     }
 
-    let pte_flags = vma_flags.to_page_flags().bits();
+    let pte_flags = region.to_page_flags().bits();
     if map_page_4kb_in_dir(page_dir, VirtAddr::new(aligned_addr), phys, pte_flags) != 0 {
         free_page_frame(phys);
         return Err(MmError::MappingFailed);

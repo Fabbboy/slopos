@@ -18,7 +18,7 @@ use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
 
 use crate::connection::ProtocolHandle;
-use crate::shm::ShmBuffer;
+use crate::memfd_buf::MemfdBuffer;
 use crate::surface::SurfaceError;
 
 /// A CPU/SHM rendering backend for compositor-managed surfaces.
@@ -28,7 +28,7 @@ use crate::surface::SurfaceError;
 /// and manages its own shared-memory pixel buffer independently.
 pub struct SoftSurface {
     handle: ProtocolHandle,
-    shm: ShmBuffer,
+    shm: MemfdBuffer,
     surface_id: u32,
     width: u32,
     height: u32,
@@ -62,11 +62,11 @@ impl SoftSurface {
             .checked_mul(height as usize)
             .ok_or(SurfaceError::BadSize)?;
 
-        let shm = ShmBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
+        let shm = MemfdBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?;
 
         let mut client = handle.borrow_client();
         client
-            .surface_attach(surface_id, shm.token(), width, height)
+            .surface_attach_fd(surface_id, shm.fd(), width, height)
             .map_err(|_| SurfaceError::AttachFailed)?;
         drop(client);
 
@@ -123,11 +123,12 @@ impl RenderSurface for SoftSurface {
             .checked_mul(new_height as usize)
             .ok_or(RenderError::BadSize)?;
 
-        let new_shm = ShmBuffer::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?;
+        let new_shm =
+            MemfdBuffer::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?;
 
         let mut client = self.handle.borrow_client();
         client
-            .surface_attach(self.surface_id, new_shm.token(), new_width, new_height)
+            .surface_attach_fd(self.surface_id, new_shm.fd(), new_width, new_height)
             .map_err(|_| RenderError::BufferUnavailable)?;
 
         self.shm = new_shm;

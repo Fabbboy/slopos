@@ -33,7 +33,6 @@ use slopos_mm::process_vm::{
     create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_page_dir,
     process_vm_get_stack_top,
 };
-use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
 
@@ -253,7 +252,6 @@ fn cleanup_task_process_resources(
 ) {
     unsafe {
         run_task_resource_cleanup_hooks(resolved_id);
-        shm_cleanup_task(resolved_id);
 
         if (*task_ptr).process_id == INVALID_PROCESS_ID {
             return;

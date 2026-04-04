@@ -20,52 +20,6 @@ define_syscall!(syscall_random_next(ctx, args) {
     ctx.ok(value)
 });
 
-define_syscall!(syscall_shm_get_formats(ctx, args) {
-    let _ = args;
-    let formats = slopos_mm::shared_memory::shm_get_formats();
-    ctx.ok(formats as u64)
-});
-
-define_syscall!(syscall_shm_poll_released(ctx, args) {
-    let token = args.arg0_u32();
-    let result = slopos_mm::shared_memory::shm_poll_released(token);
-    ctx.ok(result as u64)
-});
-
-define_syscall!(syscall_shm_create(ctx, args) requires(let process_id) {
-    let size = args.arg0;
-    let flags = args.arg1_u32();
-    ctx.from_token(slopos_mm::shared_memory::shm_create(process_id, size, flags))
-});
-
-define_syscall!(syscall_shm_map(ctx, args) requires(let process_id) {
-    let token = args.arg0_u32();
-    let access_val = args.arg1_u32();
-    let access = some_or_err!(ctx, slopos_mm::shared_memory::ShmAccess::from_u32(access_val));
-    ctx.from_nonzero(slopos_mm::shared_memory::shm_map(process_id, token, access))
-});
-
-define_syscall!(syscall_shm_unmap(ctx, args) requires(let process_id) {
-    let vaddr = args.arg0;
-    let result = slopos_mm::shared_memory::shm_unmap(process_id, vaddr);
-    check_result!(ctx, result);
-    ctx.ok(0)
-});
-
-define_syscall!(syscall_shm_destroy(ctx, args) requires(let process_id) {
-    let token = args.arg0_u32();
-    let result = slopos_mm::shared_memory::shm_destroy(process_id, token);
-    check_result!(ctx, result);
-    ctx.ok(0)
-});
-
-define_syscall!(syscall_shm_create_with_format(ctx, args) requires(let task_id) {
-    let size = args.arg0;
-    let format_val = args.arg1_u32();
-    let format = some_or_err!(ctx, slopos_mm::shared_memory::PixelFormat::from_u32(format_val));
-    ctx.from_token(slopos_mm::shared_memory::shm_create_with_format(task_id, size, format))
-});
-
 define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
     let max_count = args.arg1_usize();
 
@@ -242,11 +196,18 @@ define_syscall!(syscall_open_tty_fd(ctx, args) requires(let pid: process_id) {
 });
 
 define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
-    let token = args.arg0_u32();
+    let fd = args.arg0 as i32;
     let damage_ptr = args.arg1;
     let damage_count = args.arg2_usize();
-    let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
-    let size = slopos_mm::shared_memory::shm_get_size(token);
+
+    // Resolve memfd fd to physical address (lock-free hot path).
+    let process_id = some_or_err!(ctx, ctx.process_id());
+    let (kind, handle) = some_or_err!(ctx,
+        slopos_fs::fileio::fileio_get_open_file_handle(process_id, fd));
+    if kind != slopos_abi::file_ops::FileKind::Memfd {
+        return ctx.err();
+    }
+    let (phys_addr, size) = slopos_mm::memfd::memfd_get_phys(handle);
     if phys_addr.is_null() || size == 0 {
         return ctx.err();
     }
@@ -284,18 +245,6 @@ define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
     ));
     video::set_compositor_task_id(ctx.task_id().unwrap_or(0));
     ctx.ok(0)
-});
-
-define_syscall!(syscall_shm_acquire(ctx, args) requires(compositor) {
-    let token = args.arg0_u32();
-    let result = slopos_mm::shared_memory::shm_acquire(token);
-    ctx.ok(result as u64)
-});
-
-define_syscall!(syscall_shm_release(ctx, args) requires(compositor) {
-    let token = args.arg0_u32();
-    let result = slopos_mm::shared_memory::shm_release(token);
-    ctx.ok(result as u64)
 });
 
 define_syscall!(syscall_roulette_draw(ctx, args) requires(display_exclusive) {

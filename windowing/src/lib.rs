@@ -24,7 +24,7 @@
 pub mod app;
 pub mod connection;
 pub mod event;
-pub(crate) mod shm;
+pub(crate) mod memfd_buf;
 pub mod soft_surface;
 pub mod surface;
 pub(crate) mod sys;

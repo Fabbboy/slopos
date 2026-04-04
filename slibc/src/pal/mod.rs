@@ -134,4 +134,13 @@ pub trait Pal {
     fn yield_now();
     fn halt() -> !;
     fn reboot() -> !;
+
+    fn sendmsg(
+        fd: i32,
+        msg: *const slopos_abi::syscall::MsgHdr,
+        flags: i32,
+    ) -> Result<usize, Errno>;
+    fn recvmsg(fd: i32, msg: *mut slopos_abi::syscall::MsgHdr, flags: i32) -> Result<usize, Errno>;
+    fn memfd_create(flags: u32) -> Result<i32, Errno>;
+    fn ftruncate(fd: i32, size: u64) -> Result<(), Errno>;
 }

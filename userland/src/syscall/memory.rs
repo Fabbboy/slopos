@@ -4,7 +4,6 @@ use core::ffi::c_void;
 
 use super::numbers::*;
 use super::raw::{syscall1, syscall2};
-use slopos_abi::PixelFormat;
 
 #[inline(always)]
 pub fn brk(addr: *mut c_void) -> *mut c_void {
@@ -32,49 +31,33 @@ pub fn sbrk(increment: isize) -> *mut c_void {
     }
 }
 
+use super::raw::syscall6;
+
+// ---------------------------------------------------------------------------
+// memfd + mmap wrappers (fd-based shared memory)
+// ---------------------------------------------------------------------------
+
 #[inline(always)]
-pub fn shm_create(size: u64, flags: u32) -> u32 {
-    unsafe { syscall2(SYSCALL_SHM_CREATE, size, flags as u64) as u32 }
+pub fn memfd_create(flags: u32) -> i32 {
+    unsafe { syscall1(SYSCALL_MEMFD_CREATE, flags as u64) as i32 }
 }
 
 #[inline(always)]
-pub fn shm_create_with_format(size: u64, format: PixelFormat) -> u32 {
-    unsafe { syscall2(SYSCALL_SHM_CREATE_WITH_FORMAT, size, format as u64) as u32 }
+pub fn ftruncate(fd: i32, size: u64) -> i32 {
+    unsafe { syscall2(SYSCALL_FTRUNCATE, fd as u64, size) as i32 }
 }
 
 #[inline(always)]
-pub fn shm_map(token: u32, access: u32) -> u64 {
-    unsafe { syscall2(SYSCALL_SHM_MAP, token as u64, access as u64) }
+pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> u64 {
+    unsafe { syscall6(SYSCALL_MMAP, addr, length, prot, flags, fd as u64, offset) }
 }
 
 #[inline(always)]
-pub unsafe fn shm_unmap(virt_addr: u64) -> i64 {
-    unsafe { syscall1(SYSCALL_SHM_UNMAP, virt_addr) as i64 }
+pub fn munmap(addr: u64, length: u64) -> i32 {
+    unsafe { syscall2(SYSCALL_MUNMAP, addr, length) as i32 }
 }
 
 #[inline(always)]
-pub fn shm_destroy(token: u32) -> i64 {
-    unsafe { syscall1(SYSCALL_SHM_DESTROY, token as u64) as i64 }
+pub fn close(fd: i32) -> i32 {
+    unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) as i32 }
 }
-
-#[inline(always)]
-pub fn shm_acquire(token: u32) -> i64 {
-    unsafe { syscall1(SYSCALL_SHM_ACQUIRE, token as u64) as i64 }
-}
-
-#[inline(always)]
-pub fn shm_release(token: u32) -> i64 {
-    unsafe { syscall1(SYSCALL_SHM_RELEASE, token as u64) as i64 }
-}
-
-#[inline(always)]
-pub fn shm_poll_released(token: u32) -> i64 {
-    unsafe { syscall1(SYSCALL_SHM_POLL_RELEASED, token as u64) as i64 }
-}
-
-#[inline(always)]
-pub fn shm_get_formats() -> u32 {
-    unsafe { syscall0(SYSCALL_SHM_GET_FORMATS) as u32 }
-}
-
-use super::raw::syscall0;

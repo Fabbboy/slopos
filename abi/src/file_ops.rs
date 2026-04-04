@@ -29,6 +29,7 @@ pub enum FileKind {
     PipeRead = 2,
     PipeWrite = 3,
     Tty = 4,
+    Memfd = 5,
 }
 
 /// Per-resource-type operations for open file descriptions.

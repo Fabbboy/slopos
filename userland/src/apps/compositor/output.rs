@@ -52,7 +52,7 @@ impl CompositorOutput {
     /// Present the output buffer to the framebuffer.
     /// When `damage` is empty this falls back to full-buffer present.
     pub fn present(&self, damage: &[DamageRect]) -> bool {
-        window::fb_flip_damage(self.buffer.token(), damage) == 0
+        window::fb_flip_damage(self.buffer.fd() as u32, damage) == 0
     }
 }
 

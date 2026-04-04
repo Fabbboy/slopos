@@ -1,8 +1,6 @@
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_info;
 
-use slopos_mm::shared_memory::shm_cleanup_task;
-
 // =============================================================================
 // Task Resource Cleanup Hooks
 // =============================================================================
@@ -73,5 +71,5 @@ pub(super) fn run_task_resource_cleanup_hooks(task_id: u32) {
 /// Called from `syscall_exec` after `do_exec` succeeds (point of no return).
 pub fn task_cleanup_for_exec(task_id: u32) {
     run_task_resource_cleanup_hooks(task_id);
-    shm_cleanup_task(task_id);
+    // memfd cleanup happens automatically via fd close on process exit
 }

@@ -553,3 +553,215 @@ define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
 
     ctx.ok(0)
 });
+
+// ---------------------------------------------------------------------------
+// sendmsg / recvmsg — fd passing via SCM_RIGHTS
+// ---------------------------------------------------------------------------
+
+define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
+    use slopos_abi::syscall::{MsgHdr, CmsgHdr, SCM_RIGHTS, SCM_MAX_FDS};
+
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+    if !is_unix_handle(sock_idx) {
+        return ctx.err_with(ERRNO_ENOTSOCK);
+    }
+    let unix_idx = unix_handle_idx(sock_idx);
+
+    // Copy MsgHdr from userspace.
+    let msg_ptr = try_or_err!(ctx, UserPtr::<MsgHdr>::try_new(args.arg1));
+    let msg: MsgHdr = try_or_err!(ctx, copy_from_user(msg_ptr));
+
+    // Copy data bytes.
+    let data_len = (msg.iov_len as usize).min(4096);
+    let mut scratch = [0u8; 4096];
+    if data_len > 0 && msg.iov_base != 0 {
+        let user_data = try_or_err!(ctx, UserBytes::try_new(msg.iov_base, data_len));
+        try_or_err!(ctx, copy_bytes_from_user(user_data, &mut scratch[..data_len]));
+    }
+
+    // Parse ancillary data for SCM_RIGHTS fds.
+    let mut inflight: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =
+        [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+    let mut fd_count = 0usize;
+
+    if msg.control_len >= core::mem::size_of::<CmsgHdr>() as u64 && msg.control != 0 {
+        // Read CmsgHdr
+        let cmsg_ptr = try_or_err!(ctx, UserPtr::<CmsgHdr>::try_new(msg.control));
+        let cmsg: CmsgHdr = try_or_err!(ctx, copy_from_user(cmsg_ptr));
+
+        if cmsg.cmsg_type == SCM_RIGHTS {
+            let hdr_size = core::mem::size_of::<CmsgHdr>();
+            let fd_data_len = cmsg.cmsg_len as usize - hdr_size;
+            let n_fds = (fd_data_len / 4).min(SCM_MAX_FDS);
+
+            if n_fds > 0 {
+                let fd_array_addr = msg.control + hdr_size as u64;
+                let mut fd_buf = [0i32; SCM_MAX_FDS];
+                let fd_bytes = n_fds * 4;
+                let user_fds = try_or_err!(ctx, UserBytes::try_new(fd_array_addr, fd_bytes));
+                // Read raw bytes then reinterpret as i32 array
+                let fd_buf_bytes = unsafe {
+                    core::slice::from_raw_parts_mut(fd_buf.as_mut_ptr() as *mut u8, fd_bytes)
+                };
+                try_or_err!(ctx, copy_bytes_from_user(user_fds, fd_buf_bytes));
+
+                // Resolve and dup each fd
+                for j in 0..n_fds {
+                    let send_fd = fd_buf[j];
+                    let Some((handle, ops)) =
+                        slopos_fs::fileio::fileio_get_handle_and_ops(process_id, send_fd)
+                    else {
+                        // Release already-dup'd fds on error
+                        for k in 0..fd_count {
+                            inflight[k].1.release(inflight[k].0);
+                        }
+                        return ctx.err_with(ERRNO_ENOTSOCK); // closest available errno
+                    };
+                    // Dup to create a new reference
+                    let Some(new_handle) = ops.dup(handle) else {
+                        for k in 0..fd_count {
+                            inflight[k].1.release(inflight[k].0);
+                        }
+                        return ctx.err_with(ERRNO_ENOMEM);
+                    };
+                    inflight[fd_count] = (new_handle, ops);
+                    fd_count += 1;
+                }
+            }
+        }
+    }
+
+    let rc = unix_socket::unix_sendmsg(
+        unix_idx,
+        &scratch[..data_len],
+        &mut inflight[..fd_count],
+        fd_count,
+    );
+    if rc < 0 {
+        // On error, release any fds that weren't consumed
+        for j in 0..fd_count {
+            if inflight[j].0 != 0 {
+                inflight[j].1.release(inflight[j].0);
+            }
+        }
+        return ctx.err_with(errno_i32(rc));
+    }
+    ctx.ok(rc as u64)
+});
+
+define_syscall!(syscall_recvmsg(ctx, args) requires(let process_id) {
+    use slopos_abi::syscall::{MsgHdr, CmsgHdr, SCM_RIGHTS, SCM_MAX_FDS};
+
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+    if !is_unix_handle(sock_idx) {
+        return ctx.err_with(ERRNO_ENOTSOCK);
+    }
+    let unix_idx = unix_handle_idx(sock_idx);
+
+    // Copy MsgHdr from userspace.
+    let msg_ptr = try_or_err!(ctx, UserPtr::<MsgHdr>::try_new(args.arg1));
+    let msg: MsgHdr = try_or_err!(ctx, copy_from_user(msg_ptr));
+
+    let data_len = (msg.iov_len as usize).min(4096);
+    let mut scratch = [0u8; 4096];
+
+    // Receive data + fds
+    let mut received_fds: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =
+        [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+    let (bytes_read, n_fds) = unix_socket::unix_recvmsg(
+        unix_idx,
+        &mut scratch[..data_len],
+        &mut received_fds,
+        SCM_MAX_FDS,
+    );
+
+    if bytes_read < 0 {
+        // Release any fds we received despite the error
+        for j in 0..n_fds {
+            received_fds[j].1.release(received_fds[j].0);
+        }
+        return ctx.err_with(errno_i32(bytes_read));
+    }
+
+    // Copy data to user.
+    let copied = bytes_read as usize;
+    if copied > 0 && msg.iov_base != 0 {
+        let user_out = try_or_err!(ctx, UserBytes::try_new(msg.iov_base, copied));
+        try_or_err!(ctx, copy_bytes_to_user(user_out, &scratch[..copied]));
+    }
+
+    // Install received fds into the calling process's fd table and build cmsg.
+    if n_fds > 0 && msg.control != 0 {
+        let hdr_size = core::mem::size_of::<CmsgHdr>();
+        let needed = hdr_size + n_fds * 4;
+        if msg.control_len as usize >= needed {
+            let mut fd_nums = [0i32; SCM_MAX_FDS];
+            for j in 0..n_fds {
+                let (handle, ops) = received_fds[j];
+                let new_fd = slopos_fs::fileio::fileio_open_fd_with_ops(process_id, ops, handle);
+                if new_fd < 0 {
+                    // Failed to install — release this and remaining
+                    ops.release(handle);
+                    for k in (j + 1)..n_fds {
+                        received_fds[k].1.release(received_fds[k].0);
+                    }
+                    return ctx.err_with(ERRNO_ENOMEM);
+                }
+                fd_nums[j] = new_fd;
+            }
+
+            // Write CmsgHdr to user
+            let cmsg = CmsgHdr {
+                cmsg_len: needed as u32,
+                cmsg_level: SOL_SOCKET as u32,
+                cmsg_type: SCM_RIGHTS,
+            };
+            let cmsg_ptr = try_or_err!(ctx, UserPtr::<CmsgHdr>::try_new(msg.control));
+            try_or_err!(ctx, copy_to_user(cmsg_ptr, &cmsg));
+
+            // Write fd array after header
+            let fd_bytes = unsafe {
+                core::slice::from_raw_parts(fd_nums.as_ptr() as *const u8, n_fds * 4)
+            };
+            let fd_out = try_or_err!(ctx, UserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4));
+            try_or_err!(ctx, copy_bytes_to_user(fd_out, fd_bytes));
+
+            // Update control_len in the user's MsgHdr
+            let updated_msg = MsgHdr {
+                iov_base: msg.iov_base,
+                iov_len: msg.iov_len,
+                control: msg.control,
+                control_len: needed as u64,
+            };
+            try_or_err!(ctx, copy_to_user(msg_ptr, &updated_msg));
+        } else {
+            // Not enough space — release fds
+            for j in 0..n_fds {
+                received_fds[j].1.release(received_fds[j].0);
+            }
+            // Zero out control_len to indicate no ancillary data
+            let updated_msg = MsgHdr {
+                iov_base: msg.iov_base,
+                iov_len: msg.iov_len,
+                control: msg.control,
+                control_len: 0,
+            };
+            try_or_err!(ctx, copy_to_user(msg_ptr, &updated_msg));
+        }
+    } else if n_fds > 0 {
+        // No control buffer provided — release received fds
+        for j in 0..n_fds {
+            received_fds[j].1.release(received_fds[j].0);
+        }
+    }
+
+    ctx.ok(copied as u64)
+});

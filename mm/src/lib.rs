@@ -9,6 +9,7 @@ pub mod elf;
 pub mod error;
 pub mod hhdm;
 pub mod kernel_heap;
+pub mod memfd;
 pub mod memory_init;
 pub mod memory_layout;
 pub mod memory_layout_defs;
@@ -20,7 +21,6 @@ pub mod paging;
 pub mod paging_defs;
 pub mod pat;
 pub mod process_vm;
-pub mod shared_memory;
 pub mod symbols;
 #[cfg(feature = "itests")]
 pub mod tests;
@@ -28,8 +28,7 @@ pub mod tlb;
 pub mod user_copy;
 pub mod user_io_buf;
 pub mod user_ptr;
-pub mod vma_flags;
-pub mod vma_tree;
+pub mod vma_region;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::SyncUnsafeCell;

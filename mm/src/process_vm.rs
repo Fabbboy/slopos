@@ -1,7 +1,10 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::ptr;
 
-use slopos_abi::addr::VirtAddr;
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 use slopos_utils::{align_down, align_up, klog_debug, klog_info};
 
@@ -19,16 +22,14 @@ use crate::paging::{
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
-use crate::vma_flags::VmaFlags;
-use crate::vma_tree::{VmaNode, VmaTree};
+use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// Per-process VM state, protected by the per-slot lock in `PROCESS_VMS`.
-#[derive(Clone, Copy)]
 struct ProcessVmInner {
     process_id: u32,
     page_dir: *mut ProcessPageDir,
-    vma_tree: VmaTree,
+    vma_map: VmaMap,
     code_start: u64,
     data_start: u64,
     heap_start: u64,
@@ -46,7 +47,7 @@ impl ProcessVmInner {
         Self {
             process_id: INVALID_PROCESS_ID,
             page_dir: ptr::null_mut(),
-            vma_tree: VmaTree::new(),
+            vma_map: VmaMap::new(),
             code_start: 0,
             data_start: 0,
             heap_start: 0,
@@ -61,6 +62,7 @@ impl ProcessVmInner {
     fn reset(&mut self) {
         self.process_id = INVALID_PROCESS_ID;
         self.page_dir = ptr::null_mut();
+        self.vma_map.clear();
         self.code_start = 0;
         self.data_start = 0;
         self.heap_start = 0;
@@ -278,70 +280,37 @@ pub fn process_vm_sync_kernel_mappings(process_id: u32) {
     }
 }
 
-fn add_vma_to_inner(inner: &mut ProcessVmInner, start: u64, end: u64, flags: VmaFlags) -> c_int {
+/// Insert a VMA into the process address space.
+///
+/// The caller must guarantee the range does not overlap with existing VMAs
+/// (enforced by the gap finder for non-MAP_FIXED mmaps). This matches Linux's
+/// design where the gap finder provides the non-overlap guarantee by construction.
+///
+/// After insertion, adjacent VMAs with compatible metadata are merged
+/// automatically inside `VmaMap::insert`.
+fn add_vma_to_inner(inner: &mut ProcessVmInner, start: u64, end: u64, region: VmaRegion) -> c_int {
     if !vma_range_valid(start, end) {
         return -1;
     }
-    let tree = &mut inner.vma_tree;
-
-    let overlap = tree.find_overlapping(start, end);
-    if !overlap.is_null() && unsafe { (*overlap).flags != flags } {
-        klog_info!("add_vma_to_inner: Overlap with incompatible VMA");
-        return -1;
-    }
-
-    let node = tree.insert(start, end, flags);
-    if node.is_null() {
-        klog_info!("add_vma_to_inner: Failed to allocate VMA");
-        return -1;
-    }
-
-    unsafe {
-        try_merge_adjacent(tree, node);
-    }
+    inner.vma_map.insert(start, end, region);
     0
 }
 
-unsafe fn try_merge_adjacent(tree: &mut VmaTree, node: *mut VmaNode) {
-    if node.is_null() {
-        return;
+/// Convert POSIX mmap prot flags to a `VmaRegion` (anonymous, lazy, user-mode).
+fn prot_to_region(prot: u64) -> VmaRegion {
+    use slopos_abi::syscall::{PROT_EXEC, PROT_READ, PROT_WRITE};
+    VmaRegion {
+        protection: Protection {
+            read: prot & PROT_READ != 0,
+            write: prot & PROT_WRITE != 0,
+            exec: prot & PROT_EXEC != 0,
+        },
+        backing: RegionBacking::Anonymous,
+        lazy: true,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::General,
     }
-
-    let start = (*node).start;
-    let end = (*node).end;
-    let flags = (*node).flags;
-
-    let prev = tree.find_overlapping(start.saturating_sub(1), start);
-    if !prev.is_null() && prev != node && (*prev).end == start && (*prev).flags == flags {
-        let new_start = (*prev).start;
-        tree.remove((*prev).start, (*prev).end);
-        tree.set_start(node, new_start);
-    }
-
-    let next = tree.find_overlapping(end, end.saturating_add(1));
-    if !next.is_null() && next != node && (*next).start == (*node).end && (*next).flags == flags {
-        let new_end = (*next).end;
-        tree.remove((*next).start, (*next).end);
-        tree.set_end(node, new_end);
-    }
-}
-
-fn remove_vma_from_inner(inner: &mut ProcessVmInner, start: u64, end: u64) -> c_int {
-    if !vma_range_valid(start, end) {
-        return -1;
-    }
-    if inner.vma_tree.remove(start, end) {
-        0
-    } else {
-        -1
-    }
-}
-
-fn find_vma_covering_inner(inner: &ProcessVmInner, start: u64, end: u64) -> *mut VmaNode {
-    if !vma_range_valid(start, end) {
-        return ptr::null_mut();
-    }
-    inner.vma_tree.find_covering(start, end)
 }
 
 fn unmap_and_free_range_inner(inner: &ProcessVmInner, start: u64, end: u64) -> u32 {
@@ -365,21 +334,20 @@ fn teardown_inner_mappings(inner: &mut ProcessVmInner) {
     if inner.page_dir.is_null() {
         return;
     }
-    let tree = &mut inner.vma_tree;
-    let mut cursor = tree.first();
-    while !cursor.is_null() {
-        let next = tree.next(cursor);
-        let start = unsafe { (*cursor).start };
-        let end = unsafe { (*cursor).end };
-        let freed = unmap_and_free_range_dir(inner.page_dir, start, end);
-        if inner.total_pages >= freed {
-            inner.total_pages -= freed;
+    let page_dir = inner.page_dir;
+    let mut total = inner.total_pages;
+    inner.vma_map.drain(|start, end, region| {
+        let freed = if region.is_shared() {
+            unmap_range_nofree_dir(page_dir, start, end)
         } else {
-            inner.total_pages = 0;
+            unmap_and_free_range_dir(page_dir, start, end)
+        };
+        total = total.saturating_sub(freed);
+        if region.is_shared() && !region.memfd_handle().is_none() {
+            crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
         }
-        cursor = next;
-    }
-    tree.clear();
+    });
+    inner.total_pages = total;
     inner.heap_end = inner.heap_start;
 }
 
@@ -399,6 +367,26 @@ fn unmap_and_free_range_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64)
         addr += PAGE_SIZE_4KB;
     }
     freed
+}
+
+/// Unmap pages from a page directory WITHOUT freeing the physical frames.
+/// Used for shared memfd mappings where pages belong to the MemfdObject.
+/// Returns the number of pages unmapped (for total_pages accounting).
+fn unmap_range_nofree_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64) -> u32 {
+    if page_dir.is_null() || !vma_range_valid(start, end) {
+        return 0;
+    }
+    let mut unmapped = 0u32;
+    let mut addr = start;
+    while addr < end {
+        let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
+        if !phys.is_null() {
+            // Do NOT free the physical page — it belongs to the memfd.
+            unmapped += 1;
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    unmapped
 }
 
 // ELF structures for relocation parsing
@@ -1173,7 +1161,7 @@ pub fn create_process_vm() -> u32 {
         let mut proc = PROCESS_VMS[slot].lock();
         proc.process_id = process_id;
         proc.page_dir = page_dir_ptr;
-        proc.vma_tree.clear();
+        proc.vma_map.clear();
         proc.code_start = layout.code_start;
         proc.data_start = layout.data_start;
         proc.heap_start = layout.heap_start;
@@ -1188,14 +1176,35 @@ pub fn create_process_vm() -> u32 {
         let heap_s = proc.heap_start;
         let stack_s = proc.stack_start;
         let stack_e = proc.stack_end;
-        if add_vma_to_inner(&mut proc, code_s, data_s, VmaFlags::USER_CODE) != 0
-            || add_vma_to_inner(&mut proc, data_s, heap_s, VmaFlags::USER_DATA) != 0
-            || add_vma_to_inner(
-                &mut proc,
-                stack_s,
-                stack_e,
-                VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK,
-            ) != 0
+
+        let code_region = VmaRegion {
+            protection: Protection::RX,
+            backing: RegionBacking::Anonymous,
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::Code,
+        };
+        let data_region = VmaRegion {
+            protection: Protection::RW,
+            backing: RegionBacking::Anonymous,
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::Data,
+        };
+        let stack_region = VmaRegion {
+            protection: Protection::RW,
+            backing: RegionBacking::Anonymous,
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::Stack,
+        };
+
+        if add_vma_to_inner(&mut proc, code_s, data_s, code_region) != 0
+            || add_vma_to_inner(&mut proc, data_s, heap_s, data_region) != 0
+            || add_vma_to_inner(&mut proc, stack_s, stack_e, stack_region) != 0
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_inner_mappings(&mut proc);
@@ -1209,14 +1218,21 @@ pub fn create_process_vm() -> u32 {
             return INVALID_PROCESS_ID;
         }
 
-        let stack_vma_flags = VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK;
-        let stack_map_flags = stack_vma_flags.to_page_flags().bits();
+        let stack_page_flags = VmaRegion {
+            protection: Protection::RW,
+            backing: RegionBacking::Anonymous,
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::Stack,
+        }
+        .to_page_flags();
         let mut stack_pages: u32 = 0;
         if map_user_range(
             proc.page_dir,
             proc.stack_start,
             proc.stack_end,
-            stack_map_flags,
+            stack_page_flags.bits(),
             &mut stack_pages,
         ) != 0
         {
@@ -1243,12 +1259,15 @@ pub fn create_process_vm() -> u32 {
             &mut null_pages,
         ) == 0
         {
-            let _ = add_vma_to_inner(
-                &mut proc,
-                0,
-                PAGE_SIZE_4KB,
-                VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER,
-            );
+            let null_region = VmaRegion {
+                protection: Protection::RW,
+                backing: RegionBacking::Anonymous,
+                lazy: false,
+                cow: false,
+                user: true,
+                purpose: RegionPurpose::General,
+            };
+            let _ = add_vma_to_inner(&mut proc, 0, PAGE_SIZE_4KB, null_region);
             proc.total_pages += null_pages;
         } else {
             klog_info!("create_process_vm: Failed to map null page for user task");
@@ -1341,13 +1360,20 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
         return 0;
     }
 
-    let mut vma_flags =
-        VmaFlags::READ | VmaFlags::USER | VmaFlags::HEAP | VmaFlags::LAZY | VmaFlags::ANON;
-    if flags & PageFlags::WRITABLE.bits() as u32 != 0 {
-        vma_flags |= VmaFlags::WRITE;
-    }
+    let heap_region = VmaRegion {
+        protection: Protection {
+            read: true,
+            write: flags & PageFlags::WRITABLE.bits() as u32 != 0,
+            exec: false,
+        },
+        backing: RegionBacking::Anonymous,
+        lazy: true,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Heap,
+    };
 
-    if add_vma_to_inner(&mut proc, start_addr, end_addr, vma_flags) != 0 {
+    if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
         klog_info!("process_vm_alloc: Failed to record VMA");
         return 0;
     }
@@ -1376,41 +1402,23 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
         return -1;
     }
 
-    let vma = find_vma_covering_inner(&proc, start, end);
-    if vma.is_null() {
+    if proc.vma_map.find_covering(start, end).is_none() {
         klog_info!("process_vm_free: Range not covered by a VMA");
         return -1;
     }
 
     let freed = unmap_and_free_range_inner(&proc, start, end);
 
-    unsafe {
-        let tree = &mut proc.vma_tree;
-        if start == (*vma).start && end == (*vma).end {
-            tree.remove((*vma).start, (*vma).end);
-        } else if start == (*vma).start {
-            tree.set_start(vma, end);
-        } else if end == (*vma).end {
-            tree.set_end(vma, start);
-        } else {
-            let right_start = end;
-            let right_end = (*vma).end;
-            let flags = (*vma).flags;
-            tree.set_end(vma, start);
-            if tree.insert(right_start, right_end, flags).is_null() {
-                klog_info!("process_vm_free: Failed to create right split VMA");
-                return -1;
-            }
-        }
-        if proc.total_pages >= freed {
-            proc.total_pages -= freed;
-        } else {
-            proc.total_pages = 0;
-        }
-        if proc.heap_end == end && end > proc.heap_start {
-            proc.heap_end = start;
-        }
+    proc.vma_map
+        .remove_range(start, end, |_overlap_start, _overlap_end, _region| {
+            // Physical pages already freed above by unmap_and_free_range_inner.
+        });
+
+    proc.total_pages = proc.total_pages.saturating_sub(freed);
+    if proc.heap_end == end && end > proc.heap_start {
+        proc.heap_end = start;
     }
+
     0
 }
 
@@ -1466,7 +1474,8 @@ pub fn get_current_process_id() -> u32 {
     0
 }
 
-pub fn process_vm_get_vma_flags(process_id: u32, addr: u64) -> Option<VmaFlags> {
+/// Look up the VMA region at a given address. Returns a cloned region.
+pub fn process_vm_get_region(process_id: u32, addr: u64) -> Option<VmaRegion> {
     let slot = find_slot_for_pid(process_id)?;
     let guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process_id {
@@ -1474,12 +1483,8 @@ pub fn process_vm_get_vma_flags(process_id: u32, addr: u64) -> Option<VmaFlags> 
     }
 
     let aligned_addr = addr & !(PAGE_SIZE_4KB - 1);
-    let vma = guard.vma_tree.find_containing(aligned_addr);
-    if vma.is_null() {
-        return None;
-    }
-
-    Some(unsafe { (*vma).flags })
+    let (_start, _end, region) = guard.vma_map.find_containing(aligned_addr)?;
+    Some(region.clone())
 }
 
 pub fn process_vm_increment_pages(process_id: u32, count: u32) {
@@ -1526,14 +1531,21 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
 
     unmap_user_range(page_dir, stack_start, stack_end);
 
-    let stack_flags =
-        (VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK).to_page_flags();
+    let stack_page_flags = VmaRegion {
+        protection: Protection::RW,
+        backing: RegionBacking::Anonymous,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Stack,
+    }
+    .to_page_flags();
     let mut pages: u32 = 0;
     if map_user_range(
         page_dir,
         stack_start,
         stack_end,
-        stack_flags.bits(),
+        stack_page_flags.bits(),
         &mut pages,
     ) != 0
     {
@@ -1569,14 +1581,21 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     if aligned_brk > proc.heap_end {
         let start_addr = proc.heap_end;
         let end_addr = aligned_brk;
-        let heap_vma_flags =
-            VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::HEAP | VmaFlags::ANON;
+        let heap_region = VmaRegion {
+            protection: Protection::RW,
+            backing: RegionBacking::Anonymous,
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::Heap,
+        };
 
-        if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_vma_flags) != 0 {
+        let heap_map_flags = heap_region.to_page_flags().bits();
+
+        if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
             return 0;
         }
 
-        let heap_map_flags = heap_vma_flags.to_page_flags().bits();
         let mut pages_mapped: u32 = 0;
         if map_user_range(
             proc.page_dir,
@@ -1586,7 +1605,8 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
             &mut pages_mapped,
         ) != 0
         {
-            remove_vma_from_inner(&mut proc, start_addr, end_addr);
+            proc.vma_map
+                .remove_range(start_addr, end_addr, |_, _, _| {});
             return 0;
         }
         proc.total_pages += pages_mapped;
@@ -1596,13 +1616,10 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         let end_addr = proc.heap_end;
 
         let freed = unmap_and_free_range_inner(&proc, start_addr, end_addr);
-        remove_vma_from_inner(&mut proc, start_addr, end_addr);
+        proc.vma_map
+            .remove_range(start_addr, end_addr, |_, _, _| {});
 
-        if proc.total_pages >= freed {
-            proc.total_pages -= freed;
-        } else {
-            proc.total_pages = 0;
-        }
+        proc.total_pages = proc.total_pages.saturating_sub(freed);
         proc.heap_end = aligned_brk;
     }
 
@@ -1613,23 +1630,6 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
 // mmap / munmap / mprotect
 // =============================================================================
 
-/// Convert POSIX mmap prot flags to VmaFlags.
-fn prot_to_vma_flags(prot: u64) -> VmaFlags {
-    use slopos_abi::syscall::{PROT_EXEC, PROT_READ, PROT_WRITE};
-
-    let mut flags = VmaFlags::USER | VmaFlags::ANON | VmaFlags::LAZY;
-    if prot & PROT_READ != 0 {
-        flags |= VmaFlags::READ;
-    }
-    if prot & PROT_WRITE != 0 {
-        flags |= VmaFlags::WRITE;
-    }
-    if prot & PROT_EXEC != 0 {
-        flags |= VmaFlags::EXEC;
-    }
-    flags
-}
-
 /// Find a free gap in the process address space within the mmap region.
 fn find_mmap_gap_inner(inner: &ProcessVmInner, size: u64) -> u64 {
     use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
@@ -1638,34 +1638,17 @@ fn find_mmap_gap_inner(inner: &ProcessVmInner, size: u64) -> u64 {
         return 0;
     }
 
-    let tree = &inner.vma_tree;
-    let mut candidate = PROCESS_MMAP_START_VA;
-
-    let mut cursor = tree.find_first_at_or_after(PROCESS_MMAP_START_VA);
-
-    while !cursor.is_null() {
-        let vma_start = unsafe { (*cursor).start };
-        let vma_end = unsafe { (*cursor).end };
-
-        if candidate + size <= vma_start {
-            return candidate;
-        }
-
-        if vma_end > candidate {
-            candidate = vma_end;
-        }
-
-        cursor = tree.next(cursor);
-    }
-
-    if candidate + size <= PROCESS_MMAP_END_VA {
-        return candidate;
-    }
-
-    0
+    inner
+        .vma_map
+        .find_gap(PROCESS_MMAP_START_VA, PROCESS_MMAP_END_VA, size)
+        .unwrap_or(0)
 }
 
-/// Map anonymous memory into the process address space (mmap).
+/// Map memory into the process address space (mmap).
+///
+/// Supports anonymous private mappings (existing) and shared memfd mappings (new).
+/// For shared mappings, `memfd_handle` must be a valid memfd handle obtained from
+/// the syscall handler (which resolves the fd before calling this function).
 pub fn process_vm_mmap(
     process_id: u32,
     addr_hint: u64,
@@ -1675,21 +1658,79 @@ pub fn process_vm_mmap(
     fd: i64,
     offset: u64,
 ) -> u64 {
-    use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
-    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE};
+    process_vm_mmap_inner(
+        process_id,
+        addr_hint,
+        length,
+        prot,
+        flags_val,
+        fd,
+        offset,
+        crate::memfd::MemfdHandle::NONE,
+    )
+}
 
-    if flags_val & MAP_ANONYMOUS == 0 {
-        klog_info!("process_vm_mmap: Only MAP_ANONYMOUS supported");
-        return 0;
+/// Extended mmap with optional memfd handle for shared mappings.
+pub fn process_vm_mmap_shared(
+    process_id: u32,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags_val: u64,
+    offset: u64,
+    memfd_handle: crate::memfd::MemfdHandle,
+) -> u64 {
+    process_vm_mmap_inner(
+        process_id,
+        addr_hint,
+        length,
+        prot,
+        flags_val,
+        -1,
+        offset,
+        memfd_handle,
+    )
+}
+
+fn process_vm_mmap_inner(
+    process_id: u32,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags_val: u64,
+    fd: i64,
+    offset: u64,
+    memfd_handle: crate::memfd::MemfdHandle,
+) -> u64 {
+    use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
+    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED};
+
+    let is_shared = flags_val & MAP_SHARED != 0;
+    let is_anonymous = flags_val & MAP_ANONYMOUS != 0;
+    let is_private = flags_val & MAP_PRIVATE != 0;
+
+    // Validate flag combinations
+    if is_shared && is_private {
+        return 0; // Cannot be both
     }
-    if flags_val & MAP_PRIVATE == 0 {
-        klog_info!("process_vm_mmap: Only MAP_PRIVATE supported");
-        return 0;
+    if is_shared {
+        // Shared mapping requires a memfd handle (resolved by syscall handler)
+        if memfd_handle.is_none() || offset != 0 {
+            klog_info!("process_vm_mmap: MAP_SHARED requires memfd_handle and offset=0");
+            return 0;
+        }
+    } else {
+        // Anonymous private (existing path)
+        if !is_anonymous || !is_private {
+            klog_info!("process_vm_mmap: requires MAP_ANONYMOUS|MAP_PRIVATE or MAP_SHARED");
+            return 0;
+        }
+        if fd != -1 || offset != 0 {
+            klog_info!("process_vm_mmap: fd must be -1 and offset 0 for anonymous");
+            return 0;
+        }
     }
-    if fd != -1 || offset != 0 {
-        klog_info!("process_vm_mmap: fd must be -1 and offset 0 for anonymous");
-        return 0;
-    }
+
     if length == 0 {
         return 0;
     }
@@ -1697,6 +1738,26 @@ pub fn process_vm_mmap(
     let size = match length.checked_add(PAGE_SIZE_4KB - 1) {
         Some(v) => v & !(PAGE_SIZE_4KB - 1),
         None => return 0,
+    };
+
+    // For shared mappings, validate the memfd and get physical pages
+    let shared_info = if is_shared {
+        let Some((phys, memfd_size, pages)) = crate::memfd::memfd_get_info(memfd_handle.as_usize())
+        else {
+            klog_info!("process_vm_mmap: invalid or unsized memfd_handle");
+            return 0;
+        };
+        if size > memfd_size as u64 {
+            klog_info!(
+                "process_vm_mmap: requested size {} > memfd size {}",
+                size,
+                memfd_size
+            );
+            return 0;
+        }
+        Some((phys, pages))
+    } else {
+        None
     };
 
     let slot = match find_slot_for_pid(process_id) {
@@ -1726,37 +1787,19 @@ pub fn process_vm_mmap(
         let end_addr = addr_hint + size;
         let inner = &mut *proc;
         let page_dir = inner.page_dir;
-        let tree = &mut inner.vma_tree;
-        unsafe {
-            let mut cursor = tree.find_first_at_or_after(addr_hint);
-            while !cursor.is_null() && (*cursor).start < end_addr {
-                let next = tree.next(cursor);
-                let overlap_start = (*cursor).start.max(addr_hint);
-                let overlap_end = (*cursor).end.min(end_addr);
-                if overlap_start < overlap_end {
-                    let freed = unmap_and_free_range_dir(page_dir, overlap_start, overlap_end);
-                    if inner.total_pages >= freed {
-                        inner.total_pages -= freed;
-                    } else {
-                        inner.total_pages = 0;
-                    }
-                    if (*cursor).start >= addr_hint && (*cursor).end <= end_addr {
-                        tree.remove((*cursor).start, (*cursor).end);
-                    } else if (*cursor).start < addr_hint && (*cursor).end > end_addr {
-                        let right_start = end_addr;
-                        let right_end = (*cursor).end;
-                        let flags = (*cursor).flags;
-                        tree.set_end(cursor, addr_hint);
-                        tree.insert(right_start, right_end, flags);
-                    } else if (*cursor).start < addr_hint {
-                        tree.set_end(cursor, addr_hint);
-                    } else {
-                        tree.set_start(cursor, end_addr);
-                    }
-                }
-                cursor = next;
-            }
-        }
+
+        // Remove all overlapping VMAs in the fixed range.
+        inner
+            .vma_map
+            .remove_range(addr_hint, end_addr, |overlap_start, overlap_end, region| {
+                let freed = if region.is_shared() {
+                    unmap_range_nofree_dir(page_dir, overlap_start, overlap_end)
+                } else {
+                    unmap_and_free_range_dir(page_dir, overlap_start, overlap_end)
+                };
+                inner.total_pages = inner.total_pages.saturating_sub(freed);
+            });
+
         addr_hint
     } else {
         let chosen = find_mmap_gap_inner(&proc, size);
@@ -1768,14 +1811,70 @@ pub fn process_vm_mmap(
     };
 
     let end_addr = start_addr + size;
-    let vma_flags = prot_to_vma_flags(prot);
 
-    if add_vma_to_inner(&mut proc, start_addr, end_addr, vma_flags) != 0 {
-        klog_info!("process_vm_mmap: Failed to insert VMA");
-        return 0;
+    if let Some((phys, _pages)) = shared_info {
+        // -- Shared memfd path: eagerly map the memfd's physical pages --
+        use slopos_abi::syscall::PROT_WRITE;
+
+        let shared_region = VmaRegion {
+            protection: Protection {
+                read: prot_to_region(prot).protection.read,
+                write: prot_to_region(prot).protection.write,
+                exec: prot_to_region(prot).protection.exec,
+            },
+            backing: RegionBacking::SharedMemfd {
+                handle: memfd_handle,
+            },
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::General,
+        };
+
+        let inner = &mut *proc;
+        let page_dir = inner.page_dir;
+        let page_count = (size / PAGE_SIZE_4KB) as u32;
+
+        // Determine PTE flags from protection
+        let pte_flags = if prot & PROT_WRITE != 0 {
+            PageFlags::USER_RW.bits()
+        } else {
+            PageFlags::USER_RO.bits()
+        };
+
+        for i in 0..page_count {
+            let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
+            let paddr = PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB);
+            if map_page_4kb_in_dir(page_dir, VirtAddr::new(vaddr), paddr, pte_flags) != 0 {
+                // Rollback on failure
+                for j in 0..i {
+                    let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
+                    unmap_page_in_dir(page_dir, VirtAddr::new(rv));
+                }
+                return 0;
+            }
+        }
+
+        // Insert the shared VMA
+        inner.vma_map.insert(start_addr, end_addr, shared_region);
+
+        inner.total_pages += page_count;
+
+        // Tell the memfd about this mapping
+        crate::memfd::memfd_inc_mapcount(memfd_handle.as_usize());
+
+        start_addr
+    } else {
+        // -- Anonymous private path (existing behavior) --
+        let region = prot_to_region(prot);
+
+        if add_vma_to_inner(&mut proc, start_addr, end_addr, region) != 0 {
+            klog_info!("process_vm_mmap: Failed to insert VMA");
+            return 0;
+        }
+
+        start_addr
     }
-
-    start_addr
 }
 
 /// Unmap a previously mmap'd memory region.
@@ -1811,61 +1910,32 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
 
     let inner = &mut *proc;
     let page_dir = inner.page_dir;
-    let tree = &mut inner.vma_tree;
 
-    unsafe {
-        {
-            let mut scan = tree.find_first_at_or_after(addr);
-            while !scan.is_null() && (*scan).start < end {
-                if (*scan).flags.contains(VmaFlags::EXEC) {
-                    return -1;
-                }
-                scan = tree.next(scan);
-            }
-        }
-
-        let mut cursor = tree.find_first_at_or_after(addr);
-        let mut found_any = false;
-
-        while !cursor.is_null() && (*cursor).start < end {
-            let next = tree.next(cursor);
-            let vma_start = (*cursor).start;
-            let vma_end = (*cursor).end;
-
-            let overlap_start = vma_start.max(addr);
-            let overlap_end = vma_end.min(end);
-
-            if overlap_start < overlap_end {
-                found_any = true;
-                let freed = unmap_and_free_range_dir(page_dir, overlap_start, overlap_end);
-                if inner.total_pages >= freed {
-                    inner.total_pages -= freed;
-                } else {
-                    inner.total_pages = 0;
-                }
-
-                if vma_start >= addr && vma_end <= end {
-                    tree.remove(vma_start, vma_end);
-                } else if vma_start < addr && vma_end > end {
-                    let right_start = end;
-                    let right_end = vma_end;
-                    let flags = (*cursor).flags;
-                    tree.set_end(cursor, addr);
-                    tree.insert(right_start, right_end, flags);
-                } else if vma_start < addr {
-                    tree.set_end(cursor, addr);
-                } else {
-                    tree.set_start(cursor, end);
-                }
-            }
-
-            cursor = next;
-        }
-
-        if !found_any {
-            return 0;
+    // Pre-scan for EXEC regions -- munmap of executable mappings is forbidden.
+    for (s, e, r) in inner.vma_map.iter() {
+        if s < end && e > addr && r.protection.exec {
+            return -1;
         }
     }
+
+    // Remove range, unmapping pages and handling shared memfd bookkeeping.
+    let mut total_freed = 0u32;
+    inner
+        .vma_map
+        .remove_range(addr, end, |overlap_start, overlap_end, region| {
+            let freed = if region.is_shared() {
+                // Shared: unmap PTEs but do NOT free physical pages
+                unmap_range_nofree_dir(page_dir, overlap_start, overlap_end)
+            } else {
+                // Anonymous: unmap and free as before
+                unmap_and_free_range_dir(page_dir, overlap_start, overlap_end)
+            };
+            total_freed += freed;
+            if region.is_shared() && !region.memfd_handle().is_none() {
+                crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
+            }
+        });
+    inner.total_pages = inner.total_pages.saturating_sub(total_freed);
 
     0
 }
@@ -1903,35 +1973,33 @@ pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -
         return -1;
     }
 
-    let new_prot = prot_to_vma_flags(prot).protection_only();
-    let new_page_flags = (new_prot | VmaFlags::USER).to_page_flags();
+    let new_prot = prot_to_region(prot);
 
     let page_dir = proc.page_dir;
     if page_dir.is_null() {
         return -1;
     }
 
-    let vma = find_vma_covering_inner(&proc, addr, end);
-    if vma.is_null() {
-        klog_info!("process_vm_mprotect: Range not covered by VMA");
-        return -1;
-    }
+    let (_vma_start, _vma_end, region) = match proc.vma_map.find_covering_mut(addr, end) {
+        Some(v) => v,
+        None => {
+            klog_info!("process_vm_mprotect: Range not covered by VMA");
+            return -1;
+        }
+    };
 
-    unsafe {
-        let state = (*vma).flags.state_only();
-        (*vma).flags = new_prot | VmaFlags::USER | state;
+    // Update the region's protection bits, preserving other fields.
+    region.protection = new_prot.protection;
 
-        paging_update_range_protection(
-            page_dir,
-            VirtAddr::new(addr),
-            VirtAddr::new(end),
-            new_page_flags,
-        );
-    }
+    // Convert updated region to page flags for the PTE update.
+    let new_page_flags = region.to_page_flags();
 
-    // Suppress unused-mut warning -- proc may not be mutated on all paths
-    // but we need the mutable guard to borrow vma_tree for find_vma_covering_inner.
-    let _ = &mut proc;
+    paging_update_range_protection(
+        page_dir,
+        VirtAddr::new(addr),
+        VirtAddr::new(end),
+        new_page_flags,
+    );
 
     0
 }
@@ -1949,14 +2017,41 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         }
     };
 
-    // Snapshot parent state under the parent's per-process lock.
-    let parent_snapshot: ProcessVmInner = {
+    // Snapshot parent scalar fields + VMA list under the parent's per-process lock.
+    // ProcessVmInner is no longer Copy (BTreeMap), so we collect what we need
+    // into plain scalars and a Vec.
+    let (
+        parent_page_dir,
+        parent_code_start,
+        parent_data_start,
+        parent_heap_start,
+        parent_heap_end,
+        parent_stack_start,
+        parent_stack_end,
+        parent_flags,
+        parent_vmas,
+    ) = {
         let guard = PROCESS_VMS[parent_slot].lock();
         if guard.process_id != parent_id || guard.page_dir.is_null() {
             klog_info!("process_vm_clone_cow: Parent has no page directory");
             return INVALID_PROCESS_ID;
         }
-        *guard
+        let vmas: Vec<(u64, u64, VmaRegion)> = guard
+            .vma_map
+            .iter()
+            .map(|(s, e, r)| (s, e, r.clone()))
+            .collect();
+        (
+            guard.page_dir,
+            guard.code_start,
+            guard.data_start,
+            guard.heap_start,
+            guard.heap_end,
+            guard.stack_start,
+            guard.stack_end,
+            guard.flags,
+            vmas,
+        )
     };
 
     // Phase 1: allocate child slot under global lock.
@@ -2023,10 +2118,9 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     }
 
     // Phase 3: initialize child slot and perform COW page walk.
-    // We hold the child slot lock while building VMA tree + page tables.
+    // We hold the child slot lock while building VMA map + page tables.
     // The parent's page_dir pointer is stable (read from snapshot; parent
     // cannot be destroyed while fork is in progress -- scheduler guarantees).
-    let parent_page_dir = parent_snapshot.page_dir;
     let mut cow_pages: u32 = 0;
     let mut clone_failed = false;
 
@@ -2034,36 +2128,60 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         let mut child = PROCESS_VMS[child_slot].lock();
         child.process_id = child_id;
         child.page_dir = child_page_dir;
-        child.vma_tree.clear();
-        child.code_start = parent_snapshot.code_start;
-        child.data_start = parent_snapshot.data_start;
-        child.heap_start = parent_snapshot.heap_start;
-        child.heap_end = parent_snapshot.heap_end;
-        child.stack_start = parent_snapshot.stack_start;
-        child.stack_end = parent_snapshot.stack_end;
+        child.vma_map.clear();
+        child.code_start = parent_code_start;
+        child.data_start = parent_data_start;
+        child.heap_start = parent_heap_start;
+        child.heap_end = parent_heap_end;
+        child.stack_start = parent_stack_start;
+        child.stack_end = parent_stack_end;
         child.total_pages = 0;
-        child.flags = parent_snapshot.flags;
+        child.flags = parent_flags;
 
-        // Walk parent's VMA tree (from snapshot).
-        let parent_tree = &parent_snapshot.vma_tree;
-        let child_tree = &mut child.vma_tree;
+        // Walk parent's VMA list (from snapshot Vec).
+        for (vma_start, vma_end, parent_region) in parent_vmas.iter() {
+            let vma_start = *vma_start;
+            let vma_end = *vma_end;
+            let is_shared_vma = parent_region.is_shared();
 
-        let mut cursor = parent_tree.first();
-        while !cursor.is_null() {
-            let vma = unsafe { &*cursor };
-            let vma_start = vma.start;
-            let vma_end = vma.end;
-            let child_vma_flags = vma.flags | VmaFlags::COW;
+            let child_region = if is_shared_vma {
+                // Shared memfd: inherit directly, no COW
+                parent_region.clone()
+            } else {
+                // Anonymous: mark as COW
+                let mut r = parent_region.clone();
+                r.cow = true;
+                r
+            };
 
-            let child_vma = child_tree.insert(vma_start, vma_end, child_vma_flags);
-            if child_vma.is_null() {
-                klog_info!(
-                    "process_vm_clone_cow: Failed to insert VMA [{:#x}, {:#x})",
-                    vma_start,
-                    vma_end
-                );
-                clone_failed = true;
-                break;
+            child.vma_map.insert(vma_start, vma_end, child_region);
+
+            if is_shared_vma {
+                // Shared memfd: map same physical pages directly, no COW
+                let mut addr = vma_start;
+                while addr < vma_end {
+                    let vaddr = VirtAddr::new(addr);
+                    let phys = virt_to_phys_in_dir(parent_page_dir, vaddr);
+                    if !phys.is_null() {
+                        let flags_opt = paging_get_pte_flags(parent_page_dir, vaddr);
+                        if let Some(flags) = flags_opt {
+                            // Map with same permissions -- no COW, no ref_count
+                            // (pages belong to the memfd, not to processes)
+                            if map_page_4kb_in_dir(child_page_dir, vaddr, phys, flags.bits()) != 0 {
+                                clone_failed = true;
+                                break;
+                            }
+                            cow_pages += 1;
+                        }
+                    }
+                    addr += PAGE_SIZE_4KB;
+                }
+                // Increment memfd map_count for the child's mapping
+                let memfd_handle = parent_region.memfd_handle();
+                if !memfd_handle.is_none() {
+                    crate::memfd::memfd_inc_mapcount(memfd_handle.as_usize());
+                }
+                continue;
             }
 
             let mut addr = vma_start;
@@ -2107,8 +2225,6 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             if clone_failed {
                 break;
             }
-
-            cursor = parent_tree.next(cursor);
         }
 
         if !clone_failed {

@@ -56,7 +56,7 @@ macro_rules! impl_kernel_error {
 /// Shared memory operation errors
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ShmError {
+pub enum MemfdError {
     /// Operation succeeded
     #[default]
     Success = 0,
@@ -76,7 +76,7 @@ pub enum ShmError {
     InvalidSize = -7,
 }
 
-impl_kernel_error!(ShmError, fallback: InvalidToken, variants: {
+impl_kernel_error!(MemfdError, fallback: InvalidToken, variants: {
     0 => Success,
     -1 => AllocationFailed,
     -2 => MappingFailed,

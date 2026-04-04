@@ -78,22 +78,28 @@ pub fn tty_write(buf: &[u8]) {
     }
 }
 
-/// Create a shared memory region. Returns a token (0 on failure).
-pub fn shm_create(size: u64, flags: u32) -> u32 {
-    unsafe { slopos_slibc::pal::raw::syscall2(SYSCALL_SHM_CREATE, size, flags as u64) as u32 }
+// ---------------------------------------------------------------------------
+// memfd + mmap wrappers (fd-based shared memory)
+// ---------------------------------------------------------------------------
+
+/// Create an anonymous memory-backed file descriptor.
+pub fn memfd_create(flags: u32) -> i32 {
+    unsafe { slopos_slibc::pal::raw::syscall1(SYSCALL_MEMFD_CREATE, flags as u64) as i32 }
 }
 
-/// Map a shared memory region. Returns virtual address (0 or negative on failure).
-pub fn shm_map(token: u32, access: u32) -> u64 {
-    unsafe { slopos_slibc::pal::raw::syscall2(SYSCALL_SHM_MAP, token as u64, access as u64) }
+/// Set the size of a memfd.
+pub fn ftruncate(fd: i32, size: u64) -> i32 {
+    unsafe { slopos_slibc::pal::raw::syscall2(SYSCALL_FTRUNCATE, fd as u64, size) as i32 }
 }
 
-/// Unmap a shared memory region.
-pub unsafe fn shm_unmap(virt_addr: u64) -> i64 {
-    unsafe { slopos_slibc::pal::raw::syscall1(SYSCALL_SHM_UNMAP, virt_addr) as i64 }
+/// Map memory. Returns the virtual address, or 0/negative on failure.
+pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> u64 {
+    unsafe {
+        slopos_slibc::pal::raw::syscall6(SYSCALL_MMAP, addr, length, prot, flags, fd as u64, offset)
+    }
 }
 
-/// Destroy a shared memory region.
-pub fn shm_destroy(token: u32) -> i64 {
-    unsafe { slopos_slibc::pal::raw::syscall1(SYSCALL_SHM_DESTROY, token as u64) as i64 }
+/// Unmap a previously mmap'd region.
+pub fn munmap(addr: u64, length: u64) -> i32 {
+    unsafe { slopos_slibc::pal::raw::syscall2(SYSCALL_MUNMAP, addr, length) as i32 }
 }

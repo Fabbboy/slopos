@@ -837,189 +837,116 @@ pub fn test_irqmutex_try_lock() -> TestResult {
 }
 
 // ============================================================================
-// SHARED MEMORY TESTS - 8 tests
+// MEMFD TESTS - replaces old shared memory tests
 // ============================================================================
 
-use crate::shared_memory::{
-    shm_create, shm_destroy, shm_get_buffer_info, shm_get_ref_count, surface_attach,
-};
+use crate::memfd;
 
-/// Test 1: Create and destroy shared memory buffer
-pub fn test_shm_create_destroy() -> TestResult {
-    let owner = 1u32;
-    let size = 4096u64;
-
-    let token = shm_create(owner, size, 0);
-    assert_test!(token != 0, "shm_create failed");
-
-    let (phys, buf_size, buf_owner) = shm_get_buffer_info(token);
-    if phys.is_null() {
-        shm_destroy(owner, token);
-        return fail!("buffer info phys is null");
-    }
-    if buf_size < size as usize {
-        shm_destroy(owner, token);
-        return fail!("buffer size {} < requested {}", buf_size, size);
-    }
-    if buf_owner != owner {
-        shm_destroy(owner, token);
-        return fail!("owner mismatch {} != {}", buf_owner, owner);
-    }
-
-    assert_test!(shm_destroy(owner, token) == 0, "shm_destroy failed");
-    pass!()
-}
-
-/// Test 2: Create with zero size should fail
-pub fn test_shm_create_zero_size() -> TestResult {
-    let token = shm_create(1, 0, 0);
-    if token != 0 {
-        shm_destroy(1, token);
-        return fail!("shm_create with zero size should fail");
+pub fn test_memfd_create_and_release() -> TestResult {
+    let result = memfd::memfd_create(0);
+    assert_test!(result.is_some(), "memfd_create should succeed");
+    if let Some((handle, _ops)) = result {
+        memfd::memfd_release(handle);
     }
     pass!()
 }
 
-/// Test 3: Create with excessive size should fail
-pub fn test_shm_create_excessive_size() -> TestResult {
-    let token = shm_create(1, 128 * 1024 * 1024, 0);
-    if token != 0 {
-        shm_destroy(1, token);
-        return fail!("shm_create with excessive size should fail");
-    }
+pub fn test_memfd_ftruncate_valid() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let rc = memfd::memfd_ftruncate(handle, 4096);
+    assert_test!(rc == 0, "ftruncate(4096) should succeed");
+    let (phys, size) = memfd::memfd_get_phys(handle);
+    assert_test!(!phys.is_null(), "phys should be non-null after ftruncate");
+    assert_test!(size >= 4096, "size should be >= 4096");
+    memfd::memfd_release(handle);
     pass!()
 }
 
-/// Test 4: Destroy by non-owner should fail
-pub fn test_shm_destroy_non_owner() -> TestResult {
-    let owner = 1u32;
-    let non_owner = 2u32;
-
-    let token = shm_create(owner, 4096, 0);
-    assert_test!(token != 0, "shm_create failed");
-
-    if shm_destroy(non_owner, token) == 0 {
-        shm_destroy(owner, token);
-        return fail!("non-owner destroy should fail");
-    }
-
-    shm_destroy(owner, token);
+pub fn test_memfd_ftruncate_zero() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let rc = memfd::memfd_ftruncate(handle, 0);
+    assert_test!(rc < 0, "ftruncate(0) should fail");
+    memfd::memfd_release(handle);
     pass!()
 }
 
-/// Test 5: Reference counting
-pub fn test_shm_refcount() -> TestResult {
-    let owner = 1u32;
-
-    let token = shm_create(owner, 4096, 0);
-    assert_test!(token != 0, "shm_create failed");
-
-    let ref_count = shm_get_ref_count(token);
-    if ref_count != 1 {
-        shm_destroy(owner, token);
-        return fail!("initial refcount should be 1, got {}", ref_count);
-    }
-
-    shm_destroy(owner, token);
+pub fn test_memfd_ftruncate_excessive() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let rc = memfd::memfd_ftruncate(handle, 128 * 1024 * 1024);
+    assert_test!(rc < 0, "ftruncate(128MB) should fail");
+    memfd::memfd_release(handle);
     pass!()
 }
 
-/// Test 6: Get info for invalid token
-pub fn test_shm_invalid_token() -> TestResult {
-    let invalid_token = 99999u32;
+pub fn test_memfd_ftruncate_twice() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let rc1 = memfd::memfd_ftruncate(handle, 4096);
+    assert_test!(rc1 == 0, "first ftruncate should succeed");
+    let rc2 = memfd::memfd_ftruncate(handle, 8192);
+    assert_test!(rc2 < 0, "second ftruncate should fail (one-shot)");
+    memfd::memfd_release(handle);
+    pass!()
+}
 
-    let (phys, size, owner) = shm_get_buffer_info(invalid_token);
+pub fn test_memfd_refcount() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    // Initial refcount is 1. Dup increments to 2.
+    memfd::memfd_inc_ref(handle);
+    // First release: refcount 2 -> 1 (no cleanup)
+    memfd::memfd_release(handle);
+    // Second release: refcount 1 -> 0 (cleanup)
+    memfd::memfd_release(handle);
+    pass!()
+}
+
+pub fn test_memfd_invalid_handle() -> TestResult {
+    let (phys, size) = memfd::memfd_get_phys(0xDEAD_BEEF);
     assert_test!(
-        phys.is_null() && size == 0 && owner == 0,
-        "invalid token should return null info"
+        phys.is_null() && size == 0,
+        "invalid handle should return null"
     );
     pass!()
 }
 
-/// Test 7: Surface attach
-pub fn test_shm_surface_attach() -> TestResult {
-    let owner = 1u32;
-    let width = 640u32;
-    let height = 480u32;
-    let size = (width as u64) * (height as u64) * 4;
-
-    let token = shm_create(owner, size, 0);
-    assert_test!(token != 0, "shm_create failed");
-
-    if surface_attach(owner, token, width, height) != 0 {
-        shm_destroy(owner, token);
-        return fail!("surface_attach failed");
-    }
-
-    shm_destroy(owner, token);
+pub fn test_memfd_mapcount() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    memfd::memfd_ftruncate(handle, 4096);
+    memfd::memfd_inc_mapcount(handle);
+    memfd::memfd_inc_mapcount(handle);
+    // Release fd ref — should NOT free pages because map_count > 0
+    memfd::memfd_release(handle);
+    // Dec mapcounts
+    memfd::memfd_dec_mapcount(handle);
+    memfd::memfd_dec_mapcount(handle);
+    // Now both refcount=0 and map_count=0, pages should be freed
     pass!()
 }
 
-/// Test 8: Surface attach with insufficient buffer
-pub fn test_shm_surface_attach_too_small() -> TestResult {
-    let owner = 1u32;
-
-    let token = shm_create(owner, 4096, 0);
-    assert_test!(token != 0, "shm_create failed");
-
-    // 1920x1080x4 = 8,294,400 bytes - should fail
-    if surface_attach(owner, token, 1920, 1080) == 0 {
-        shm_destroy(owner, token);
-        return fail!("surface_attach with too small buffer should fail");
+pub fn test_memfd_get_info() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    // Before ftruncate, get_info should return None
+    assert_test!(
+        memfd::memfd_get_info(handle).is_none(),
+        "unsized memfd should return None"
+    );
+    memfd::memfd_ftruncate(handle, 8192);
+    let info = memfd::memfd_get_info(handle);
+    assert_test!(info.is_some(), "sized memfd should return Some");
+    if let Some((phys, size, pages)) = info {
+        assert_test!(!phys.is_null(), "phys non-null");
+        assert_test!(size >= 8192, "size >= 8192");
+        assert_test!(pages >= 2, "pages >= 2");
     }
-
-    shm_destroy(owner, token);
+    memfd::memfd_release(handle);
     pass!()
 }
 
-/// Test 9: Map shared buffer more than MAX_MAPPINGS_PER_BUFFER times
-/// BUG FINDER: shm_map uses unwrap() on mapping slot search - will panic!
-pub fn test_shm_mapping_overflow() -> TestResult {
-    use crate::shared_memory::{ShmAccess, shm_map};
-
-    let owner = 1u32;
-    let size = 4096u64;
-
-    let token = shm_create(owner, size, 0);
-    assert_test!(token != 0, "shm_create failed");
-
-    // MAX_MAPPINGS_PER_BUFFER is 8 - try to map 10 times using different process IDs
-    let mut mapped_count = 0u32;
-    for process_id in 1..=10u32 {
-        let vaddr = shm_map(process_id, token, ShmAccess::ReadOnly);
-        if vaddr != 0 {
-            mapped_count += 1;
-        }
-    }
-
-    shm_destroy(owner, token);
-
-    if mapped_count > 8 {
-        return fail!("BUG - mapped {} times, max should be 8", mapped_count);
-    }
-    pass!()
-}
-
-pub fn test_shm_surface_attach_overflow() -> TestResult {
-    let owner = 1u32;
-    let token = shm_create(owner, 64 * 1024 * 1024, 0);
-    if token == 0 {
-        return fail!("create large buffer for overflow test");
-    }
-
-    let result = surface_attach(owner, token, 0xFFFF, 0xFFFF);
-    if result == 0 {
-        shm_destroy(owner, token);
-        return fail!("BUG - surface_attach accepted 0xFFFF x 0xFFFF (potential overflow)");
-    }
-
-    let result2 = surface_attach(owner, token, 0x8000_0000, 2);
-    if result2 == 0 {
-        shm_destroy(owner, token);
-        return fail!("BUG - surface_attach accepted 0x80000000 x 2 (32-bit overflow)");
-    }
-
-    shm_destroy(owner, token);
+pub fn test_memfd_size_query() -> TestResult {
+    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    assert_test!(memfd::memfd_size(handle) == 0, "size before ftruncate");
+    memfd::memfd_ftruncate(handle, 16384);
+    assert_test!(memfd::memfd_size(handle) >= 16384, "size after ftruncate");
+    memfd::memfd_release(handle);
     pass!()
 }
 
@@ -1564,28 +1491,31 @@ pub fn test_multiple_process_vms() -> TestResult {
     pass!()
 }
 
-pub fn test_vma_flags_retrieval() -> TestResult {
+pub fn test_vma_region_retrieval() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
 
-    use crate::process_vm::{process_vm_alloc, process_vm_get_vma_flags};
-    use crate::vma_flags::VmaFlags;
+    use crate::process_vm::{process_vm_alloc, process_vm_get_region};
+    use crate::vma_region::RegionPurpose;
 
     let user_addr = process_vm_alloc(vm.pid, 8192, PageFlags::WRITABLE.bits() as u32);
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
-    let flags = process_vm_get_vma_flags(vm.pid, user_addr);
-    assert_test!(flags.is_some(), "VMA flags not found for allocated region");
-
-    let flags = flags.unwrap();
+    let region = process_vm_get_region(vm.pid, user_addr);
     assert_test!(
-        flags.contains(VmaFlags::HEAP),
-        "allocated region not marked as HEAP"
+        region.is_some(),
+        "VMA region not found for allocated address"
+    );
+
+    let region = region.unwrap();
+    assert_test!(
+        region.purpose == RegionPurpose::Heap,
+        "allocated region not marked as Heap"
     );
     assert_test!(
-        flags.contains(VmaFlags::WRITE),
-        "allocated region not marked as WRITE"
+        region.protection.write,
+        "allocated region not marked as writable"
     );
 
     pass!()
@@ -1699,16 +1629,16 @@ define_test_suite!(
 define_test_suite!(
     shm,
     [
-        test_shm_create_destroy,
-        test_shm_create_zero_size,
-        test_shm_create_excessive_size,
-        test_shm_destroy_non_owner,
-        test_shm_refcount,
-        test_shm_invalid_token,
-        test_shm_surface_attach,
-        test_shm_surface_attach_too_small,
-        test_shm_surface_attach_overflow,
-        test_shm_mapping_overflow,
+        test_memfd_create_and_release,
+        test_memfd_ftruncate_valid,
+        test_memfd_ftruncate_zero,
+        test_memfd_ftruncate_excessive,
+        test_memfd_ftruncate_twice,
+        test_memfd_refcount,
+        test_memfd_invalid_handle,
+        test_memfd_mapcount,
+        test_memfd_get_info,
+        test_memfd_size_query,
     ]
 );
 
@@ -1736,6 +1666,6 @@ define_test_suite!(
         test_cow_page_isolation,
         test_cow_fault_handling,
         test_multiple_process_vms,
-        test_vma_flags_retrieval,
+        test_vma_region_retrieval,
     ]
 );

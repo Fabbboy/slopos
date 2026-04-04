@@ -228,11 +228,16 @@ impl ProtocolBridge {
             }
             Request::SurfaceAttach {
                 surface,
-                shm_token,
+                shm_token: _,
                 width,
                 height,
             } => {
-                self.handle_surface_attach(client_idx, surface, shm_token, width, height);
+                // SurfaceAttach carries a memfd fd via SCM_RIGHTS.
+                // Pop it from the connection's fd FIFO (libwayland pattern).
+                let memfd_fd = self.server.take_client_fd(client_idx);
+                if memfd_fd >= 0 {
+                    self.handle_surface_attach(client_idx, surface, memfd_fd as u32, width, height);
+                }
             }
             Request::SurfaceDamage {
                 surface,

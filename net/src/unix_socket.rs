@@ -38,6 +38,9 @@ const UNIX_PATH_MAX: usize = 108;
 /// Matches Wayland's libwayland-server default of 128.
 const MAX_BACKLOG: usize = 32;
 
+/// Maximum number of in-flight file descriptors per direction (SCM_RIGHTS).
+const MAX_INFLIGHT_FDS: usize = 8;
+
 // ---------------------------------------------------------------------------
 // Wait queues — one per socket slot, separate from UNIX_STATE.
 //
@@ -147,6 +150,66 @@ impl RingBuf {
 }
 
 // ---------------------------------------------------------------------------
+// In-flight fd queue for SCM_RIGHTS (sendmsg/recvmsg)
+// ---------------------------------------------------------------------------
+
+/// A file descriptor reference in transit through a Unix socket.
+struct InFlightFd {
+    handle: usize,
+    ops: &'static dyn slopos_abi::file_ops::FileOps,
+}
+
+/// Per-direction queue of in-flight fds (SCM_RIGHTS side-channel).
+///
+/// Fds are pushed by sendmsg and popped by recvmsg.  On socket close,
+/// any unclaimed fds are released (ops.release) to avoid leaks.
+struct AncillaryQueue {
+    entries: [Option<InFlightFd>; MAX_INFLIGHT_FDS],
+    /// Number of valid entries (at indices 0..count).
+    count: u8,
+}
+
+impl AncillaryQueue {
+    const fn new() -> Self {
+        Self {
+            entries: [const { None }; MAX_INFLIGHT_FDS],
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, fd: InFlightFd) -> bool {
+        if (self.count as usize) < MAX_INFLIGHT_FDS {
+            self.entries[self.count as usize] = Some(fd);
+            self.count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drain all entries, returning them in a fixed-size array.
+    fn drain(&mut self) -> ([Option<InFlightFd>; MAX_INFLIGHT_FDS], u8) {
+        let mut out: [Option<InFlightFd>; MAX_INFLIGHT_FDS] = [const { None }; MAX_INFLIGHT_FDS];
+        let n = self.count;
+        for i in 0..n as usize {
+            out[i] = self.entries[i].take();
+        }
+        self.count = 0;
+        (out, n)
+    }
+
+    /// Release all unclaimed fds (called on socket close).
+    fn release_all(&mut self) {
+        for i in 0..self.count as usize {
+            if let Some(fd) = self.entries[i].take() {
+                fd.ops.release(fd.handle);
+            }
+        }
+        self.count = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-slot state
 // ---------------------------------------------------------------------------
 
@@ -174,6 +237,10 @@ struct UnixSlot {
     buf_a_to_b: RingBuf,
     /// Ring buffer for data flowing B→A (side B writes, side A reads).
     buf_b_to_a: RingBuf,
+    /// In-flight fds flowing A→B (sendmsg on A, recvmsg on B).
+    anc_a_to_b: AncillaryQueue,
+    /// In-flight fds flowing B→A (sendmsg on B, recvmsg on A).
+    anc_b_to_a: AncillaryQueue,
     /// Which side of the pair this slot is.
     side: PairSide,
     /// Index of the peer slot (the other half of the connected pair).
@@ -205,6 +272,8 @@ impl UnixSlot {
             backlog_len: 0,
             buf_a_to_b: RingBuf::new(),
             buf_b_to_a: RingBuf::new(),
+            anc_a_to_b: AncillaryQueue::new(),
+            anc_b_to_a: AncillaryQueue::new(),
             side: PairSide::A,
             peer_idx: u32::MAX,
             peer_closed: false,
@@ -235,6 +304,8 @@ impl UnixSlot {
         // Buffers are already released (refcount == 0), safe to reinit.
         self.buf_a_to_b = RingBuf::new();
         self.buf_b_to_a = RingBuf::new();
+        self.anc_a_to_b = AncillaryQueue::new();
+        self.anc_b_to_a = AncillaryQueue::new();
         self.side = PairSide::A;
         self.peer_idx = u32::MAX;
         self.peer_closed = false;
@@ -723,6 +794,138 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
     }
 }
 
+/// Send data on a connected AF_UNIX socket, with optional in-flight fds (SCM_RIGHTS).
+///
+/// `inflight_fds` contains already-dup'd (handle, ops) pairs.  On success,
+/// ownership transfers to the ancillary queue.  On failure, the caller must
+/// release them.
+///
+/// Returns bytes written or negative errno.
+pub fn unix_sendmsg(
+    idx: u32,
+    data: &[u8],
+    inflight_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    fd_count: usize,
+) -> i32 {
+    let i = idx as usize;
+    if i >= MAX_UNIX_SOCKETS {
+        return -9;
+    }
+
+    // Send the data bytes first (reuses existing unix_send logic inline).
+    let bytes_sent = if !data.is_empty() {
+        let rc = unix_send(idx, data);
+        if rc < 0 {
+            return rc;
+        }
+        rc
+    } else {
+        0
+    };
+
+    // Push in-flight fds into the ancillary queue.
+    if fd_count > 0 {
+        let mut state = UNIX_STATE.lock();
+        let slot = &state.slots[i];
+        if !slot.valid || slot.state != UnixState::Connected {
+            return -107; // ENOTCONN
+        }
+        let side = slot.side;
+        let peer = slot.peer_idx as usize;
+        let a_idx = match side {
+            PairSide::A => i,
+            PairSide::B => peer,
+        };
+        if a_idx >= MAX_UNIX_SOCKETS || state.slots[a_idx].buf_refcount == 0 {
+            return -32; // EPIPE
+        }
+
+        let anc = match side {
+            PairSide::A => &mut state.slots[a_idx].anc_a_to_b,
+            PairSide::B => &mut state.slots[a_idx].anc_b_to_a,
+        };
+
+        for j in 0..fd_count {
+            let (handle, ops) = inflight_fds[j];
+            if !anc.push(InFlightFd { handle, ops }) {
+                // Queue full — release remaining fds and return error
+                for k in j..fd_count {
+                    inflight_fds[k].1.release(inflight_fds[k].0);
+                }
+                return -12; // ENOMEM (queue full)
+            }
+            // Mark as consumed so caller doesn't double-release
+            inflight_fds[j] = (0, inflight_fds[j].1);
+        }
+
+        // Wake peer so recvmsg can pick up the fds
+        drop(state);
+        if peer < MAX_UNIX_SOCKETS {
+            SOCKET_WQS[peer].wake_all();
+        }
+    }
+
+    bytes_sent
+}
+
+/// Receive data from a connected AF_UNIX socket, with optional in-flight fds.
+///
+/// `out_fds` receives (handle, ops) pairs.  Returns (bytes_read, fd_count).
+/// Negative bytes_read indicates an error.
+pub fn unix_recvmsg(
+    idx: u32,
+    buf: &mut [u8],
+    out_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    max_fds: usize,
+) -> (i32, usize) {
+    let i = idx as usize;
+    if i >= MAX_UNIX_SOCKETS {
+        return (-9, 0);
+    }
+
+    // Receive data bytes first (reuses existing unix_recv logic).
+    let bytes_read = unix_recv(idx, buf);
+
+    // Drain in-flight fds from the ancillary queue.
+    let mut received_fds = 0usize;
+    {
+        let mut state = UNIX_STATE.lock();
+        let slot = &state.slots[i];
+        if slot.valid && slot.state == UnixState::Connected {
+            let side = slot.side;
+            let peer = slot.peer_idx as usize;
+            let a_idx = match side {
+                PairSide::A => i,
+                PairSide::B => peer,
+            };
+            if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].buf_refcount > 0 {
+                // Read from the queue that the PEER wrote to (opposite direction).
+                let anc = match side {
+                    // If we are side A, peer is side B, peer writes to anc_b_to_a
+                    PairSide::A => &mut state.slots[a_idx].anc_b_to_a,
+                    // If we are side B, peer is side A, peer writes to anc_a_to_b
+                    PairSide::B => &mut state.slots[a_idx].anc_a_to_b,
+                };
+
+                let (mut entries, count) = anc.drain();
+                for j in 0..count as usize {
+                    if let Some(fd) = entries[j].take() {
+                        if received_fds < max_fds {
+                            out_fds[received_fds] = (fd.handle, fd.ops);
+                            received_fds += 1;
+                        } else {
+                            // Doesn't fit — release
+                            fd.ops.release(fd.handle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (bytes_read, received_fds)
+}
+
 /// Close an AF_UNIX socket. Wakes all waiters on the peer if connected.
 ///
 /// For listeners, all pending backlog entries (side-B slots that were
@@ -767,6 +970,9 @@ pub fn unix_close(idx: u32) -> i32 {
                 if rc == 0 {
                     state.slots[a_idx].buf_a_to_b.release();
                     state.slots[a_idx].buf_b_to_a.release();
+                    // Release any unclaimed in-flight fds
+                    state.slots[a_idx].anc_a_to_b.release_all();
+                    state.slots[a_idx].anc_b_to_a.release_all();
                 }
             }
         }
@@ -798,6 +1004,8 @@ pub fn unix_close(idx: u32) -> i32 {
                     if rc == 0 {
                         state.slots[a_idx].buf_a_to_b.release();
                         state.slots[a_idx].buf_b_to_a.release();
+                        state.slots[a_idx].anc_a_to_b.release_all();
+                        state.slots[a_idx].anc_b_to_a.release_all();
                     }
                     backlog_a_peers[backlog_wake_count] = a_idx;
                     backlog_wake_count += 1;

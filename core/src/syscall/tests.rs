@@ -1039,22 +1039,26 @@ pub fn test_brk_extreme_values() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_shm_create_boundaries() -> TestResult {
-    let token_zero = slopos_mm::shared_memory::shm_create(1, 0, 0);
-    assert_eq_test!(token_zero, 0, "shm_create accepted size 0");
+pub fn test_memfd_create_boundaries() -> TestResult {
+    // Test memfd_create + ftruncate basics
+    let result = slopos_mm::memfd::memfd_create(0);
+    assert_test!(result.is_some(), "memfd_create should succeed");
+    if let Some((handle, _ops)) = result {
+        // ftruncate with zero size should fail
+        let rc = slopos_mm::memfd::memfd_ftruncate(handle, 0);
+        assert_test!(rc < 0, "ftruncate(0) should fail");
 
-    let token_one = slopos_mm::shared_memory::shm_create(1, 1, 0);
-    if token_one != 0 {
-        slopos_mm::shared_memory::shm_destroy(1, token_one);
+        // ftruncate with valid size should succeed
+        let rc = slopos_mm::memfd::memfd_ftruncate(handle, 4096);
+        assert_eq_test!(rc, 0, "ftruncate(4096) should succeed");
+
+        // ftruncate again should fail (one-shot)
+        let rc = slopos_mm::memfd::memfd_ftruncate(handle, 8192);
+        assert_test!(rc < 0, "ftruncate twice should fail");
+
+        // Cleanup
+        slopos_mm::memfd::memfd_release(handle);
     }
-
-    let token_max = slopos_mm::shared_memory::shm_create(1, u64::MAX, 0);
-    assert_eq_test!(token_max, 0, "shm_create accepted u64::MAX");
-
-    let over_limit = (64 * 1024 * 1024) + 1;
-    let token_over = slopos_mm::shared_memory::shm_create(1, over_limit, 0);
-    assert_eq_test!(token_over, 0, "shm_create accepted size over limit");
-
     TestResult::Pass
 }
 
@@ -2428,7 +2432,7 @@ slopos_testing::define_test_suite!(
         test_user_ptr_misaligned,
         test_user_ptr_overflow_boundary,
         test_brk_extreme_values,
-        test_shm_create_boundaries,
+        test_memfd_create_boundaries,
         test_terminate_already_terminated,
         test_operations_on_terminated_task,
         test_fork_memory_pressure,

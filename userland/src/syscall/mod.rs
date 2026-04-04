@@ -49,11 +49,11 @@ pub use numbers::*;
 pub use slopos_abi::syscall::{Timespec, UserCpuInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry};
 pub use slopos_abi::{
     DamageRect, DisplayInfo, InputEvent, InputEventData, InputEventType, MAX_WINDOW_DAMAGE_REGIONS,
-    PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW, ShmError, SockAddrIn, USER_NET_MAX_MEMBERS,
-    UserFsEntry, UserFsList, UserFsStat, UserNetInfo, UserNetMember, WindowInfo,
+    MemfdError, PixelFormat, SockAddrIn, USER_NET_MAX_MEMBERS, UserFsEntry, UserFsList, UserFsStat,
+    UserNetInfo, UserNetMember, WindowInfo,
 };
 
-pub use wrappers::shm::{CachedShmMapping, ShmBuffer, ShmBufferRef};
+pub use wrappers::memfd_buf::{CachedShmMapping, ShmBuffer};
 
 pub type UserWindowInfo = WindowInfo;
 pub type RawFd = i32;

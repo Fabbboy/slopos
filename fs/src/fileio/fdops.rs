@@ -875,3 +875,17 @@ pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind
     };
     Some((snap.ops?.kind(), snap.handle))
 }
+
+/// Get the handle AND FileOps for an open fd (needed for SCM_RIGHTS fd passing).
+pub fn fileio_get_handle_and_ops(
+    process_id: u32,
+    fd: i32,
+) -> Option<(usize, &'static dyn FileOps)> {
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
+            return None;
+        };
+        snapshot_fd(table, fd)?
+    };
+    Some((snap.handle, snap.ops?))
+}

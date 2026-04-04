@@ -17,12 +17,13 @@ use crate::syscall::fs::{
     syscall_poll, syscall_rename, syscall_select,
 };
 pub use crate::syscall::memory_handlers::{
-    syscall_brk, syscall_mmap, syscall_mprotect, syscall_munmap,
+    syscall_brk, syscall_ftruncate, syscall_memfd_create, syscall_mmap, syscall_mprotect,
+    syscall_munmap,
 };
 use crate::syscall::net_handlers::{
     syscall_accept, syscall_bind, syscall_connect, syscall_getsockopt, syscall_listen,
-    syscall_recv, syscall_recvfrom, syscall_resolve, syscall_send, syscall_sendto,
-    syscall_setsockopt, syscall_shutdown, syscall_socket,
+    syscall_recv, syscall_recvfrom, syscall_recvmsg, syscall_resolve, syscall_send,
+    syscall_sendmsg, syscall_sendto, syscall_setsockopt, syscall_shutdown, syscall_socket,
 };
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
@@ -37,10 +38,8 @@ use crate::syscall::signal::{
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_fb_flip, syscall_fb_info,
     syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty, syscall_random_next,
-    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin, syscall_shm_acquire,
-    syscall_shm_create, syscall_shm_create_with_format, syscall_shm_destroy,
-    syscall_shm_get_formats, syscall_shm_map, syscall_shm_poll_released, syscall_shm_release,
-    syscall_shm_unmap, syscall_tty_read, syscall_tty_write,
+    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin, syscall_tty_read,
+    syscall_tty_write,
 };
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -115,6 +114,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SETSOCKOPT] => syscall_setsockopt, "setsockopt";
     [SYSCALL_GETSOCKOPT] => syscall_getsockopt, "getsockopt";
     [SYSCALL_SHUTDOWN]   => syscall_shutdown,   "shutdown";
+    [SYSCALL_SENDMSG]    => syscall_sendmsg,    "sendmsg";
+    [SYSCALL_RECVMSG]    => syscall_recvmsg,    "recvmsg";
 
     // TTY
     [SYSCALL_OPENPTY]       => syscall_openpty,       "openpty";
@@ -124,17 +125,6 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
 
     // Compositor framebuffer
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
-
-    // Shared memory
-    [SYSCALL_SHM_CREATE]             => syscall_shm_create,             "shm_create";
-    [SYSCALL_SHM_MAP]                => syscall_shm_map,                "shm_map";
-    [SYSCALL_SHM_UNMAP]              => syscall_shm_unmap,              "shm_unmap";
-    [SYSCALL_SHM_DESTROY]            => syscall_shm_destroy,            "shm_destroy";
-    [SYSCALL_SHM_ACQUIRE]            => syscall_shm_acquire,            "shm_acquire";
-    [SYSCALL_SHM_RELEASE]            => syscall_shm_release,            "shm_release";
-    [SYSCALL_SHM_POLL_RELEASED]      => syscall_shm_poll_released,      "shm_poll_released";
-    [SYSCALL_SHM_GET_FORMATS]        => syscall_shm_get_formats,        "shm_get_formats";
-    [SYSCALL_SHM_CREATE_WITH_FORMAT] => syscall_shm_create_with_format, "shm_create_with_format";
 
     // Input
     [SYSCALL_INPUT_POLL_BATCH]           => syscall_input_poll_batch,           "input_poll_batch";
@@ -152,10 +142,12 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_ARCH_PRCTL]     => syscall_arch_prctl,      "arch_prctl";
 
     // Memory
-    [SYSCALL_BRK]      => syscall_brk,      "brk";
-    [SYSCALL_MMAP]     => syscall_mmap,     "mmap";
-    [SYSCALL_MUNMAP]   => syscall_munmap,   "munmap";
-    [SYSCALL_MPROTECT] => syscall_mprotect, "mprotect";
+    [SYSCALL_BRK]          => syscall_brk,          "brk";
+    [SYSCALL_MMAP]         => syscall_mmap,         "mmap";
+    [SYSCALL_MUNMAP]       => syscall_munmap,       "munmap";
+    [SYSCALL_MPROTECT]     => syscall_mprotect,     "mprotect";
+    [SYSCALL_MEMFD_CREATE] => syscall_memfd_create, "memfd_create";
+    [SYSCALL_FTRUNCATE]    => syscall_ftruncate,    "ftruncate";
 
     // SMP / CPU affinity
     [SYSCALL_GET_CPU_COUNT]    => syscall_get_cpu_count,    "get_cpu_count";

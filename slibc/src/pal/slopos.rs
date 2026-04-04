@@ -627,4 +627,28 @@ impl Pal for Sys {
             core::hint::spin_loop();
         }
     }
+
+    fn sendmsg(fd: i32, msg: *const MsgHdr, flags: i32) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_SENDMSG, fd as u64, msg as u64, flags as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn recvmsg(fd: i32, msg: *mut MsgHdr, flags: i32) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_RECVMSG, fd as u64, msg as u64, flags as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn memfd_create(flags: u32) -> Result<i32, Errno> {
+        let ret = unsafe { syscall1(SYSCALL_MEMFD_CREATE, flags as u64) };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
+    fn ftruncate(fd: i32, size: u64) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_FTRUNCATE, fd as u64, size) };
+        to_result(ret)?;
+        Ok(())
+    }
 }

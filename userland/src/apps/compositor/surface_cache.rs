@@ -3,7 +3,7 @@
 //! Manages read-only mappings of client surface buffers so the compositor can
 //! composite window contents without re-mapping every frame.
 
-use crate::syscall::{CachedShmMapping, UserWindowInfo, memory};
+use crate::syscall::{CachedShmMapping, UserWindowInfo};
 
 use super::MAX_WINDOWS;
 
@@ -64,7 +64,7 @@ impl ClientSurfaceCache {
 
         let slot = self.entries.iter().position(|e| e.is_empty())?;
 
-        let mapping = CachedShmMapping::map_readonly(token, buffer_size)?;
+        let mapping = CachedShmMapping::map_readonly_fd(token as i32, buffer_size)?;
         self.entries[slot] = ClientSurfaceEntry {
             task_id,
             token,
@@ -100,11 +100,7 @@ impl ClientSurfaceCache {
             }
 
             if stale {
-                if let Some(ref mapping) = entry.mapping {
-                    unsafe {
-                        memory::shm_unmap(mapping.vaddr());
-                    }
-                }
+                // CachedShmMapping::drop handles munmap+close automatically.
                 *entry = ClientSurfaceEntry::empty();
             }
         }
