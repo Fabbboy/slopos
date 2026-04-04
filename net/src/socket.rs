@@ -383,9 +383,12 @@ impl SlabSocketTable {
     }
 
     /// Lazily initialize with default capacities if currently empty.
+    ///
+    /// Also syncs the allocation bitmap with the initial capacity.
     pub fn init_if_needed(&mut self) {
         if self.max_capacity == 0 {
             *self = Self::new(Self::INITIAL_CAPACITY, Self::MAX_CAPACITY);
+            SOCKET_ALLOC.lock().set_capacity(Self::INITIAL_CAPACITY);
         }
     }
 
@@ -412,6 +415,7 @@ impl SlabSocketTable {
     ///
     /// Returns the socket index on success. If no free slots are available,
     /// attempts to grow capacity (doubling, capped at `max_capacity`).
+    /// Also marks the index in the allocation bitmap.
     pub fn alloc(&mut self, inner: SocketInner) -> Option<usize> {
         self.init_if_needed();
         if self.freelist.is_empty() {
@@ -419,6 +423,11 @@ impl SlabSocketTable {
         }
         let idx = self.freelist.pop()?;
         self.slots[idx] = Some(Socket::new(inner));
+        {
+            let mut alloc = SOCKET_ALLOC.lock();
+            alloc.bitmap.set(idx);
+            alloc.allocated_count += 1;
+        }
         Some(idx)
     }
 
@@ -433,10 +442,12 @@ impl SlabSocketTable {
     }
 
     /// Free an active slot and return it to the freelist.
+    /// Also clears the index in the allocation bitmap.
     pub fn free(&mut self, idx: usize) {
         if let Some(slot) = self.slots.get_mut(idx) {
             if slot.take().is_some() {
                 self.freelist.push(idx);
+                SOCKET_ALLOC.lock().free(idx);
             }
         }
     }
@@ -483,6 +494,7 @@ impl SlabSocketTable {
         for idx in (current..new_cap).rev() {
             self.freelist.push(idx);
         }
+        SOCKET_ALLOC.lock().set_capacity(new_cap);
     }
 }
 
@@ -571,6 +583,77 @@ impl Default for EphemeralPortAllocator {
         Self::new()
     }
 }
+
+// =============================================================================
+// Socket allocation bitmap — separate lock from per-socket state
+// =============================================================================
+
+/// Socket allocation bitmap, keyed separately from per-socket data.
+///
+/// The bitmap tracks which socket indices are occupied. This allows
+/// allocation decisions to be made without locking the full socket table,
+/// reducing contention on the hot data-access path.
+pub struct SocketAllocBitmap {
+    bitmap: Bitmap<{ words_for(SlabSocketTable::MAX_CAPACITY) }>,
+    allocated_count: usize,
+    initialized_capacity: usize,
+}
+
+impl SocketAllocBitmap {
+    pub const fn new() -> Self {
+        Self {
+            bitmap: Bitmap::new(),
+            allocated_count: 0,
+            initialized_capacity: 0,
+        }
+    }
+
+    /// Mark capacity as initialized (called when the socket table grows).
+    pub fn set_capacity(&mut self, cap: usize) {
+        self.initialized_capacity = cap;
+    }
+
+    /// Allocate a free index. Returns `None` if all slots are occupied.
+    pub fn alloc(&mut self) -> Option<usize> {
+        if self.allocated_count >= self.initialized_capacity {
+            return None;
+        }
+        let idx = self.bitmap.find_next_zero(0, self.initialized_capacity)?;
+        self.bitmap.set(idx);
+        self.allocated_count += 1;
+        Some(idx)
+    }
+
+    /// Release a previously allocated index.
+    pub fn free(&mut self, idx: usize) {
+        if idx < self.initialized_capacity && self.bitmap.test(idx) {
+            self.bitmap.clear(idx);
+            self.allocated_count = self.allocated_count.saturating_sub(1);
+        }
+    }
+
+    /// Check if an index is currently allocated.
+    pub fn is_allocated(&self, idx: usize) -> bool {
+        idx < self.initialized_capacity && self.bitmap.test(idx)
+    }
+
+    /// Number of active sockets.
+    pub fn count_active(&self) -> usize {
+        self.allocated_count
+    }
+
+    /// Clear all allocations.
+    pub fn clear(&mut self) {
+        for i in 0..self.initialized_capacity {
+            self.bitmap.clear(i);
+        }
+        self.allocated_count = 0;
+    }
+}
+
+/// Socket allocation bitmap — separate lock from per-socket data.
+pub static SOCKET_ALLOC: slopos_sync::IrqMutex<SocketAllocBitmap> =
+    slopos_sync::IrqMutex::new(SocketAllocBitmap::new());
 
 /// Global slab-based socket table.
 pub static NEW_SOCKET_TABLE: slopos_sync::IrqMutex<SlabSocketTable> =
@@ -2383,6 +2466,14 @@ pub fn socket_reset_all() {
         SEND_WQS[idx].wake_all();
     }
 
+    // Reset the allocation bitmap to match the cleared table.
+    {
+        let table = NEW_SOCKET_TABLE.lock();
+        let mut alloc = SOCKET_ALLOC.lock();
+        alloc.clear();
+        alloc.set_capacity(table.capacity());
+    }
+
     *EPHEMERAL_PORTS.lock() = EphemeralPortAllocator::new();
     crate::icmp::ICMP_DEMUX.lock().clear();
     crate::udp::UDP_DEMUX.lock().clear();
@@ -2426,7 +2517,8 @@ pub fn socket_lookup_tcp_idx(sock_idx: u32) -> Option<usize> {
 }
 
 pub fn socket_count_active() -> usize {
-    NEW_SOCKET_TABLE.lock().count_active()
+    // Fast path: use the allocation bitmap instead of scanning the full table.
+    SOCKET_ALLOC.lock().count_active()
 }
 
 pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) -> i32 {

@@ -238,6 +238,124 @@ unsafe impl Send for FileioState {}
 pub(super) static FILEIO_STATE: IrqMutex<FileioState> = IrqMutex::new(FileioState::uninitialized());
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
+// ---------------------------------------------------------------------------
+// Per-process file table access bypass.
+//
+// The global FILEIO_STATE lock serializes ALL file operations. But each
+// FileTableSlot already has its own per-process `lock: IrqMutex<()>`.
+// For hot-path operations (read, write, close, dup), we bypass the global
+// lock and use only the per-process lock via `unsafe { FILEIO_STATE.as_ptr() }`.
+//
+// This is safe because:
+// 1. Each FileTableSlot.lock is an independent IrqMutex with its own ticket.
+// 2. The FileTableSlot data (descriptors[]) is only modified under that lock.
+// 3. The global lock is still used for rare operations (table create/destroy,
+//    initialization, registration) where structural changes happen.
+// ---------------------------------------------------------------------------
+
+use slopos_sync::IrqMutexGuard;
+
+#[allow(dead_code)]
+/// Snapshot of an FD entry's open file for use outside the lock.
+#[derive(Clone, Copy)]
+pub(super) struct FdSnapshot {
+    pub(super) ops: Option<&'static dyn FileOps>,
+    pub(super) handle: usize,
+    pub(super) position: u64,
+    pub(super) status_flags: OpenMode,
+    pub(super) open_file_idx: u16,
+}
+
+/// Find a process's file table slot by PID and lock it WITHOUT the global lock.
+///
+/// Returns a guard on the per-process lock + a pointer to the FileTableSlot.
+/// The caller can access `descriptors[]` through the slot pointer while holding
+/// the guard.
+///
+/// # Safety
+/// Uses `FILEIO_STATE.as_ptr()` for lock-free data access. Safe because:
+/// - `FileTableSlot.in_use` and `.process_id` are written only under the global
+///   lock (during table create/destroy), and reads of these fields are naturally
+///   aligned — no torn reads on x86_64.
+/// - `FileTableSlot.lock` is an independent IrqMutex that provides its own
+///   synchronization for the `descriptors[]` array.
+#[allow(dead_code)]
+pub(super) fn lock_process_table(
+    pid: u32,
+) -> Option<(IrqMutexGuard<'static, ()>, *mut FileTableSlot)> {
+    if !FILEIO_INIT.is_set() {
+        return None;
+    }
+
+    // SAFETY: as_ptr() gives us a raw pointer to FileioState. The fields we
+    // read (in_use, process_id) are naturally aligned and written atomically
+    // on x86_64. The per-process lock is an independent IrqMutex.
+    let state = unsafe { &*FILEIO_STATE.as_ptr() };
+
+    if pid == INVALID_PROCESS_ID {
+        let table = &state.kernel as *const FileTableSlot as *mut FileTableSlot;
+        // SAFETY: table is a valid static pointer; lock() is always safe.
+        let guard = unsafe { &(*table).lock }.lock();
+        return Some((guard, table));
+    }
+
+    for slot in state.processes.iter() {
+        if slot.in_use && slot.process_id == pid {
+            let table = slot as *const FileTableSlot as *mut FileTableSlot;
+            let guard = unsafe { &(*table).lock }.lock();
+            return Some((guard, table));
+        }
+    }
+
+    None
+}
+
+/// Get a reference to the open files array without the global lock.
+///
+/// # Safety
+/// The caller must ensure no structural changes to the open files array are
+/// happening concurrently (no file open/close on the same entry). For read-only
+/// snapshots of immutable fields (ops, handle, kind), this is safe.
+#[allow(dead_code)]
+pub(super) unsafe fn open_files_ptr() -> &'static [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES] {
+    unsafe { &(*FILEIO_STATE.as_ptr()).open_files }
+}
+
+#[allow(dead_code)]
+pub(super) unsafe fn open_files_mut_ptr()
+-> &'static mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES] {
+    unsafe { &mut (*(FILEIO_STATE.as_ptr() as *mut FileioState)).open_files }
+}
+
+#[allow(dead_code)]
+pub(super) fn snapshot_fd(table: *mut FileTableSlot, fd: c_int) -> Option<FdSnapshot> {
+    if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+        return None;
+    }
+    let table_ref = unsafe { &*table };
+    let entry = &table_ref.descriptors[fd as usize];
+    if !entry.valid {
+        return None;
+    }
+    let open_files = unsafe { open_files_ptr() };
+    let ofe = &open_files[entry.open_file_idx as usize];
+    if !ofe.valid {
+        return None;
+    }
+    Some(FdSnapshot {
+        ops: ofe.ops,
+        handle: ofe.handle,
+        position: ofe.position,
+        status_flags: ofe.status_flags,
+        open_file_idx: entry.open_file_idx,
+    })
+}
+
+#[allow(dead_code)]
+pub(super) fn external_ops_fast() -> ExternalOpsState {
+    unsafe { (*FILEIO_STATE.as_ptr()).external_ops }
+}
+
 pub fn fileio_register_tty_ops(ops: &'static dyn FileOps) {
     let mut guard = FILEIO_STATE.lock();
     guard.external_ops.tty_ops = Some(ops);

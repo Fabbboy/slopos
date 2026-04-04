@@ -3,6 +3,7 @@ use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
+use crate::lock_tracking;
 use crate::preempt::PreemptGuard;
 use slopos_arch::cpu;
 
@@ -127,6 +128,17 @@ impl<T> IrqMutex<T> {
         next != serving
     }
 
+    /// Get a raw pointer to the protected data without taking the lock.
+    ///
+    /// # Safety
+    /// The caller must ensure that accessing the data through this pointer
+    /// is safe. Typical use: reading naturally-aligned fields that are
+    /// written atomically (e.g., u32 task_id fields for lock-free lookup).
+    #[inline]
+    pub unsafe fn as_ptr(&self) -> *const T {
+        self.data.get() as *const T
+    }
+
     #[inline]
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
         let preempt = PreemptGuard::new();
@@ -155,6 +167,16 @@ impl<T> IrqMutex<T> {
             }
         }
 
+        // Track this lock for panic recovery.
+        // SAFETY: Preemption is disabled, self is a static lock.
+        unsafe {
+            lock_tracking::push_lock(
+                self as *const _ as *const (),
+                irq_mutex_poison_fn::<T>,
+                lock_tracking::LOCK_LEVEL_UNORDERED,
+            );
+        }
+
         IrqMutexGuard {
             mutex: self,
             saved_flags,
@@ -181,6 +203,13 @@ impl<T> IrqMutex<T> {
             )
             .is_ok()
         {
+            unsafe {
+                lock_tracking::push_lock(
+                    self as *const _ as *const (),
+                    irq_mutex_poison_fn::<T>,
+                    lock_tracking::LOCK_LEVEL_UNORDERED,
+                );
+            }
             Some(IrqMutexGuard {
                 mutex: self,
                 saved_flags,
@@ -213,12 +242,27 @@ impl<'a, T> DerefMut for IrqMutexGuard<'a, T> {
 impl<'a, T> Drop for IrqMutexGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
+        // Untrack this lock before releasing.
+        unsafe {
+            lock_tracking::pop_lock(self.mutex as *const _ as *const ());
+        }
         // Advance now_serving to hand the lock to the next waiter in FIFO order.
         // Release ordering ensures our writes are visible to the next acquirer.
         self.mutex.now_serving.fetch_add(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
         // _preempt drops after this, potentially triggering deferred reschedule
     }
+}
+
+/// Poison-unlock callback for lock tracking. Called during panic recovery
+/// to force-release an IrqMutex that the panicking CPU held.
+///
+/// # Safety
+/// `addr` must point to a live `IrqMutex<T>`. Only called from
+/// `poison_unlock_all_held` during panic recovery.
+unsafe fn irq_mutex_poison_fn<T>(addr: *const ()) {
+    let mutex = &*(addr as *const IrqMutex<T>);
+    mutex.poison_unlock();
 }
 
 impl<T> PreemptMutex<T> {

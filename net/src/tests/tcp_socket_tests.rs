@@ -223,6 +223,7 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
 
 pub fn test_demux_register_established_lookup() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let local_ip = Ipv4Addr([10, 0, 0, 1]);
     let local_port = Port(80);
@@ -266,6 +267,7 @@ pub fn test_demux_register_established_lookup() -> TestResult {
 
 pub fn test_demux_established_duplicate_rejected() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let local_ip = Ipv4Addr([10, 0, 0, 1]);
     let local_port = Port(80);
@@ -287,6 +289,7 @@ pub fn test_demux_established_duplicate_rejected() -> TestResult {
 
 pub fn test_demux_unregister_established() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let local_ip = Ipv4Addr([10, 0, 0, 1]);
     let local_port = Port(80);
@@ -323,6 +326,7 @@ pub fn test_demux_unregister_established() -> TestResult {
 
 pub fn test_demux_register_listener_lookup() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let local_ip = Ipv4Addr([10, 0, 0, 1]);
     let local_port = Port(8080);
@@ -352,6 +356,7 @@ pub fn test_demux_register_listener_lookup() -> TestResult {
 
 pub fn test_demux_listener_wildcard_fallback() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let wildcard = Ipv4Addr::UNSPECIFIED;
     let local_port = Port(80);
@@ -397,6 +402,7 @@ pub fn test_demux_listener_wildcard_fallback() -> TestResult {
 
 pub fn test_demux_unregister_listener() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let local_ip = Ipv4Addr([10, 0, 0, 1]);
     let local_port = Port(8080);
@@ -425,6 +431,7 @@ pub fn test_demux_unregister_listener() -> TestResult {
 
 pub fn test_demux_clear() -> TestResult {
     let mut demux = TcpDemuxTable::new();
+    demux.clear();
 
     let _ = demux.register_established(
         Ipv4Addr([10, 0, 0, 1]),

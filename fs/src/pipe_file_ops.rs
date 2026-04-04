@@ -18,8 +18,7 @@ fn pipe_dup_reader(pipe_id: u32) -> Option<usize> {
     if pipe_id == pipe::INVALID_PIPE_ID {
         return None;
     }
-    let mut pipe_state = pipe::PIPE_STATE.lock();
-    let slot = pipe::slot_mut(&mut pipe_state, pipe_id)?;
+    let mut slot = pipe::lock_slot(pipe_id)?;
     slot.readers = slot.readers.saturating_add(1);
     Some(pipe_id as usize)
 }
@@ -28,8 +27,7 @@ fn pipe_dup_writer(pipe_id: u32) -> Option<usize> {
     if pipe_id == pipe::INVALID_PIPE_ID {
         return None;
     }
-    let mut pipe_state = pipe::PIPE_STATE.lock();
-    let slot = pipe::slot_mut(&mut pipe_state, pipe_id)?;
+    let mut slot = pipe::lock_slot(pipe_id)?;
     slot.writers = slot.writers.saturating_add(1);
     Some(pipe_id as usize)
 }
@@ -39,19 +37,21 @@ fn pipe_release_reader(pipe_id: u32) {
         return;
     }
     let mut wake_writers = false;
-    {
-        let mut pipe_state = pipe::PIPE_STATE.lock();
-        if let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) {
+    let should_free = {
+        if let Some(mut slot) = pipe::lock_slot(pipe_id) {
             if slot.readers > 0 {
                 slot.readers -= 1;
                 if slot.readers == 0 {
                     wake_writers = true;
                 }
             }
-            if slot.readers == 0 && slot.writers == 0 {
-                *slot = pipe::PipeSlot::new();
-            }
+            slot.readers == 0 && slot.writers == 0
+        } else {
+            false
         }
+    };
+    if should_free {
+        pipe::free_slot(pipe_id);
     }
     if wake_writers {
         pipe::writer_wq(pipe_id).wake_all();
@@ -63,19 +63,21 @@ fn pipe_release_writer(pipe_id: u32) {
         return;
     }
     let mut wake_readers = false;
-    {
-        let mut pipe_state = pipe::PIPE_STATE.lock();
-        if let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) {
+    let should_free = {
+        if let Some(mut slot) = pipe::lock_slot(pipe_id) {
             if slot.writers > 0 {
                 slot.writers -= 1;
                 if slot.writers == 0 {
                     wake_readers = true;
                 }
             }
-            if slot.readers == 0 && slot.writers == 0 {
-                *slot = pipe::PipeSlot::new();
-            }
+            slot.readers == 0 && slot.writers == 0
+        } else {
+            false
         }
+    };
+    if should_free {
+        pipe::free_slot(pipe_id);
     }
     if wake_readers {
         pipe::reader_wq(pipe_id).wake_all();
@@ -102,8 +104,7 @@ impl FileOps for PipeReadOps {
             let mut consumed = 0usize;
             let no_writers;
             {
-                let mut pipe_state = pipe::PIPE_STATE.lock();
-                let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
+                let Some(mut slot) = pipe::lock_slot(pipe_id) else {
                     return if total > 0 {
                         total as isize
                     } else {
@@ -183,12 +184,9 @@ impl FileOps for PipeReadOps {
         let pipe_id = handle as u32;
         // Register FIRST, then check readiness (Linux pattern).
         let registered = pipe::reader_wq(pipe_id).enqueue_current();
-        let revents = {
-            let mut pipe_state = pipe::PIPE_STATE.lock();
-            match pipe::slot_mut(&mut pipe_state, pipe_id) {
-                Some(slot) => slot.revents(true, false, events),
-                None => POLLERR,
-            }
+        let revents = match pipe::lock_slot(pipe_id) {
+            Some(slot) => slot.revents(true, false, events),
+            None => POLLERR,
         };
         slopos_abi::file_ops::FusedPollResult {
             revents,
@@ -199,8 +197,7 @@ impl FileOps for PipeReadOps {
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let pipe_id = handle as u32;
-        let mut pipe_state = pipe::PIPE_STATE.lock();
-        match pipe::slot_mut(&mut pipe_state, pipe_id) {
+        match pipe::lock_slot(pipe_id) {
             Some(slot) => slot.revents(true, false, events),
             None => POLLERR,
         }
@@ -238,8 +235,7 @@ impl FileOps for PipeWriteOps {
             let mut need_block = false;
             let can_write;
             {
-                let mut pipe_state = pipe::PIPE_STATE.lock();
-                let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
+                let Some(slot) = pipe::lock_slot(pipe_id) else {
                     return if total > 0 {
                         total as isize
                     } else {
@@ -298,8 +294,7 @@ impl FileOps for PipeWriteOps {
             }
 
             {
-                let mut pipe_state = pipe::PIPE_STATE.lock();
-                let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
+                let Some(mut slot) = pipe::lock_slot(pipe_id) else {
                     return if total > 0 {
                         total as isize
                     } else {
@@ -359,12 +354,9 @@ impl FileOps for PipeWriteOps {
         let pipe_id = handle as u32;
         // Register FIRST, then check readiness (Linux pattern).
         let registered = pipe::writer_wq(pipe_id).enqueue_current();
-        let revents = {
-            let mut pipe_state = pipe::PIPE_STATE.lock();
-            match pipe::slot_mut(&mut pipe_state, pipe_id) {
-                Some(slot) => slot.revents(false, true, events),
-                None => POLLERR | POLLHUP,
-            }
+        let revents = match pipe::lock_slot(pipe_id) {
+            Some(slot) => slot.revents(false, true, events),
+            None => POLLERR | POLLHUP,
         };
         slopos_abi::file_ops::FusedPollResult {
             revents,
@@ -375,8 +367,7 @@ impl FileOps for PipeWriteOps {
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let pipe_id = handle as u32;
-        let mut pipe_state = pipe::PIPE_STATE.lock();
-        match pipe::slot_mut(&mut pipe_state, pipe_id) {
+        match pipe::lock_slot(pipe_id) {
             Some(slot) => slot.revents(false, true, events),
             None => POLLERR | POLLHUP,
         }

@@ -207,61 +207,71 @@ pub fn init_task_manager() -> c_int {
     0
 }
 
+/// Find a task by its unique ID.
+///
+/// **Lock-free fast path**: scans the tasks array directly without taking
+/// the `TASK_MANAGER` lock. The `task_id` field is written during task
+/// creation (under the lock) and cleared during invalidation (under the
+/// lock), but READS of it are safe without the lock — the field is a plain
+/// u32 aligned to 4 bytes, so reads are atomic on x86_64. A stale read
+/// (seeing the old ID after invalidation) is benign: the caller will
+/// find a terminated task and handle it appropriately.
 pub fn task_find_by_id(task_id: u32) -> *mut Task {
-    // INVALID_TASK_ID is used for uninitialized/invalid task slots - never return those
     if task_id == INVALID_TASK_ID {
         return ptr::null_mut();
     }
 
-    with_task_manager(|mgr| {
-        for task in mgr.tasks.iter_mut() {
-            if task.task_id == task_id {
-                return task as *mut Task;
-            }
+    // Lock-free scan: read task_id fields directly from the tasks array.
+    // SAFETY: We're reading a u32 field (naturally aligned) from a fixed
+    // static array. The TASK_MANAGER lock is NOT held — this is intentional.
+    // The tasks array is inside TASK_MANAGER's IrqMutex<TaskManagerInner>,
+    // so we access it via the raw pointer.
+    let mgr_ptr = unsafe { &*TASK_MANAGER.as_ptr() };
+    for task in mgr_ptr.tasks.iter() {
+        if task.task_id == task_id {
+            return task as *const Task as *mut Task;
         }
-        ptr::null_mut()
-    })
+    }
+    ptr::null_mut()
 }
 
 /// Find a live task whose active address space matches `cr3`.
 ///
 /// This is primarily used by exception paths that need to recover the faulting
 /// task even if per-CPU scheduler current-task metadata is temporarily stale.
+/// Find a task by its CR3 value. **Lock-free** — see `task_find_by_id`.
 pub fn task_find_by_cr3(cr3: u64) -> *mut Task {
     if cr3 == 0 {
         return ptr::null_mut();
     }
 
     let target = cr3 & !0xFFF;
+    let mgr_ptr = unsafe { &*TASK_MANAGER.as_ptr() };
+    let mut fallback: *mut Task = ptr::null_mut();
 
-    with_task_manager(|mgr| {
-        let mut fallback: *mut Task = ptr::null_mut();
-
-        for task in mgr.tasks.iter_mut() {
-            let status = task.status();
-            if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
-                continue;
-            }
-
-            let task_cr3 =
-                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(task.context.cr3)) }
-                    & !0xFFF;
-            if task_cr3 != target {
-                continue;
-            }
-
-            let task_ptr = task as *mut Task;
-            if status == TaskStatus::Running {
-                return task_ptr;
-            }
-
-            if fallback.is_null() {
-                fallback = task_ptr;
-            }
+    for task in mgr_ptr.tasks.iter() {
+        let status = task.status();
+        if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
+            continue;
         }
 
-        fallback
-    })
+        let task_cr3 =
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(task.context.cr3)) } & !0xFFF;
+        if task_cr3 != target {
+            continue;
+        }
+
+        let task_ptr = task as *const Task as *mut Task;
+        if status == TaskStatus::Running {
+            return task_ptr;
+        }
+
+        if fallback.is_null() {
+            fallback = task_ptr;
+        }
+    }
+
+    fallback
 }
 
 pub(super) fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<usize> {

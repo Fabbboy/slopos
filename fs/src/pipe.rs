@@ -1,14 +1,17 @@
-//! Kernel pipe implementation.
+//! Kernel pipe implementation with per-pipe locking.
 //!
 //! # Locking
 //!
-//! Pipe data (ring buffer, reader/writer counts) is protected by [`PIPE_STATE`].
-//! Wait queues live in separate statics ([`READER_WQS`], [`WRITER_WQS`]) indexed
-//! by pipe slot, so wakers and sleepers never hold `PIPE_STATE` and a wait-queue
-//! lock simultaneously.
+//! Each pipe slot has its own [`IrqMutex`], so operations on independent
+//! pipes never contend. A separate [`PIPE_ALLOC`] lock protects only the
+//! allocation bitmap (touched on pipe create/destroy only).
+//!
+//! Wait queues live in separate statics ([`READER_WQS`], [`WRITER_WQS`])
+//! indexed by pipe slot, so wakers and sleepers never hold a pipe lock
+//! and a wait-queue lock simultaneously.
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
-use slopos_sync::{IrqMutex, WaitQueue};
+use slopos_sync::{IrqMutex, IrqMutexGuard, WaitQueue};
 
 pub(crate) const MAX_PIPES: usize = 64;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
@@ -52,16 +55,10 @@ impl PipeSlot {
 
     /// Atomically read and consume bytes from the pipe buffer.
     ///
-    /// Modelled after Linux's `pipe_read()` in `fs/pipe.c`: data is
-    /// consumed from the ring buffer in a single operation while the
-    /// caller holds `PIPE_STATE`.  The consumed bytes are copied into
-    /// the kernel staging buffer `out`; the caller is responsible for
+    /// Data is consumed from the ring buffer in a single operation while
+    /// the caller holds the per-pipe lock. The consumed bytes are copied
+    /// into the kernel staging buffer `out`; the caller is responsible for
     /// transferring them to userspace *after* releasing the lock.
-    ///
-    /// This is critical for correctness: if consumption and copying
-    /// were split (peek → unlock → copy → re-lock → consume), a
-    /// concurrent reader could peek the same bytes before they are
-    /// consumed, causing double delivery.
     pub(crate) fn read_into(&mut self, out: &mut [u8]) -> usize {
         let mut copied = 0usize;
         while copied < out.len() && self.len > 0 {
@@ -111,27 +108,40 @@ impl PipeSlot {
     }
 }
 
-pub(crate) struct PipeState {
-    pub(crate) slots: [PipeSlot; MAX_PIPES],
+// ---------------------------------------------------------------------------
+// Per-pipe locks — each pipe has its own IrqMutex.
+// ---------------------------------------------------------------------------
+
+/// Per-pipe locks. Each slot is independently locked.
+pub(crate) static PIPE_SLOTS: [IrqMutex<PipeSlot>; MAX_PIPES] =
+    [const { IrqMutex::new(PipeSlot::new()) }; MAX_PIPES];
+
+/// Allocation bitmap — only locked during pipe create/destroy.
+struct PipeAllocBitmap {
+    used: [bool; MAX_PIPES],
 }
 
-// SAFETY: PipeState is only accessed through the PIPE_STATE IrqMutex.
-unsafe impl Send for PipeState {}
-
-impl PipeState {
+impl PipeAllocBitmap {
     const fn new() -> Self {
         Self {
-            slots: [const { PipeSlot::new() }; MAX_PIPES],
+            used: [false; MAX_PIPES],
         }
     }
 }
 
-pub(crate) static PIPE_STATE: IrqMutex<PipeState> = IrqMutex::new(PipeState::new());
+static PIPE_ALLOC: IrqMutex<PipeAllocBitmap> = IrqMutex::new(PipeAllocBitmap::new());
 
+/// Allocate a new pipe slot. Returns the pipe ID.
+///
+/// Takes the allocation bitmap lock briefly to find a free slot, then
+/// locks the individual pipe slot to initialize it.
 pub(crate) fn alloc_slot() -> Option<u32> {
-    let mut state = PIPE_STATE.lock();
-    for (idx, slot) in state.slots.iter_mut().enumerate() {
-        if !slot.valid {
+    let mut alloc = PIPE_ALLOC.lock();
+    for (idx, used) in alloc.used.iter_mut().enumerate() {
+        if !*used {
+            *used = true;
+            drop(alloc); // Release alloc lock before taking pipe lock.
+            let mut slot = PIPE_SLOTS[idx].lock();
             *slot = PipeSlot::new();
             slot.valid = true;
             return Some(idx as u32);
@@ -140,14 +150,34 @@ pub(crate) fn alloc_slot() -> Option<u32> {
     None
 }
 
-pub(crate) fn slot_mut(state: &mut PipeState, pipe_id: u32) -> Option<&mut PipeSlot> {
+/// Lock a pipe slot by ID, returning a guard if the slot is valid.
+///
+/// This is the primary accessor for pipe operations. Replaces the old
+/// `PIPE_STATE.lock()` + `slot_mut()` pattern with per-pipe locking.
+#[inline]
+pub(crate) fn lock_slot(pipe_id: u32) -> Option<IrqMutexGuard<'static, PipeSlot>> {
     let idx = pipe_id as usize;
     if idx >= MAX_PIPES {
         return None;
     }
-    let slot = &mut state.slots[idx];
-    if !slot.valid {
+    let guard = PIPE_SLOTS[idx].lock();
+    if !guard.valid {
         return None;
     }
-    Some(slot)
+    Some(guard)
+}
+
+/// Free a pipe slot. Marks it as unused in the allocation bitmap.
+pub(crate) fn free_slot(pipe_id: u32) {
+    let idx = pipe_id as usize;
+    if idx >= MAX_PIPES {
+        return;
+    }
+    // Invalidate the slot first, then release the alloc bitmap.
+    {
+        let mut slot = PIPE_SLOTS[idx].lock();
+        slot.valid = false;
+    }
+    let mut alloc = PIPE_ALLOC.lock();
+    alloc.used[idx] = false;
 }

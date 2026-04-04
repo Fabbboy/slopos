@@ -23,8 +23,9 @@ use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
+/// Per-process VM state, protected by the per-slot lock in `PROCESS_VMS`.
 #[derive(Clone, Copy)]
-struct ProcessVm {
+struct ProcessVmInner {
     process_id: u32,
     page_dir: *mut ProcessPageDir,
     vma_tree: VmaTree,
@@ -36,12 +37,11 @@ struct ProcessVm {
     stack_end: u64,
     total_pages: u32,
     flags: u32,
-    next: *mut ProcessVm,
 }
 
-unsafe impl Send for ProcessVm {}
+unsafe impl Send for ProcessVmInner {}
 
-impl ProcessVm {
+impl ProcessVmInner {
     const fn new() -> Self {
         Self {
             process_id: INVALID_PROCESS_ID,
@@ -55,7 +55,6 @@ impl ProcessVm {
             stack_end: 0,
             total_pages: 0,
             flags: 0,
-            next: ptr::null_mut(),
         }
     }
 
@@ -70,33 +69,35 @@ impl ProcessVm {
         self.stack_end = 0;
         self.total_pages = 0;
         self.flags = 0;
-        self.next = ptr::null_mut();
     }
 }
 
-struct VmManager {
-    processes: [ProcessVm; MAX_PROCESSES],
+/// Global slot-allocation state: only held during create/destroy/init to
+/// manage which slots are in use and the next PID counter.
+struct VmSlotAlloc {
     num_processes: u32,
     next_process_id: u32,
-    active_process: *mut ProcessVm,
-    process_list: *mut ProcessVm,
 }
 
-unsafe impl Send for VmManager {}
-
-impl VmManager {
+impl VmSlotAlloc {
     const fn new() -> Self {
         Self {
-            processes: [ProcessVm::new(); MAX_PROCESSES],
             num_processes: 0,
             next_process_id: 1,
-            active_process: ptr::null_mut(),
-            process_list: ptr::null_mut(),
         }
     }
 }
 
-static VM_MANAGER: IrqMutex<VmManager> = IrqMutex::new(VmManager::new());
+/// Per-process VM locks.  Each slot is independently lockable so that
+/// independent processes never contend on each other's VM operations.
+static PROCESS_VMS: [IrqMutex<ProcessVmInner>; MAX_PROCESSES] = {
+    const INIT: IrqMutex<ProcessVmInner> = IrqMutex::new(ProcessVmInner::new());
+    [INIT; MAX_PROCESSES]
+};
+
+/// Global slot allocator -- only taken for fork/exit/init to find free slots
+/// and update the process count.
+static VM_SLOT_ALLOC: IrqMutex<VmSlotAlloc> = IrqMutex::new(VmSlotAlloc::new());
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0
@@ -184,38 +185,56 @@ fn unmap_user_range(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u6
     }
 }
 
-fn find_process_vm(process_id: u32) -> *mut ProcessVm {
-    let manager = VM_MANAGER.lock();
-    for process in manager.processes.iter() {
-        if process.process_id == process_id {
-            return process as *const _ as *mut ProcessVm;
+/// Find the slot index for a given process ID using a lock-free scan.
+///
+/// SAFETY: reads `process_id` through `IrqMutex::as_ptr()`.  The field is a
+/// naturally-aligned `u32` that is only written under the per-slot lock, so
+/// the read is tear-free on x86-64.  The caller must lock `PROCESS_VMS[slot]`
+/// before accessing any other field.
+fn find_slot_for_pid(process_id: u32) -> Option<usize> {
+    if process_id == INVALID_PROCESS_ID {
+        return None;
+    }
+    for i in 0..MAX_PROCESSES {
+        // SAFETY: reading a naturally-aligned u32 from a static; see doc above.
+        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+        if pid == process_id {
+            return Some(i);
         }
     }
-    ptr::null_mut()
-}
-pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe { (*process_ptr).page_dir }
+    None
 }
 
-/// Read the PML4 physical address for a process, entirely under the
-/// VM_MANAGER lock.  Returns 0 if the process or page directory is not found.
-/// SMP-safe: the returned u64 cannot become dangling.
+/// Lock-free page-directory lookup.  The page_dir pointer is only cleared
+/// under the per-slot lock during `destroy_process_vm`, which is called after
+/// the process has been fully descheduled, so concurrent readers see either
+/// the valid pointer or null.
+pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return ptr::null_mut(),
+    };
+    // SAFETY: reading a naturally-aligned pointer from a static.
+    unsafe { (*PROCESS_VMS[slot].as_ptr()).page_dir }
+}
+
+/// Read the PML4 physical address for a process.  Lock-free for the slot
+/// lookup; takes the per-process lock briefly to read pml4_phys so the
+/// returned u64 cannot become dangling.
 pub fn process_vm_get_cr3_phys(process_id: u32) -> u64 {
-    let manager = VM_MANAGER.lock();
-    for process in manager.processes.iter() {
-        if process.process_id == process_id {
-            let page_dir = process.page_dir;
-            if page_dir.is_null() {
-                return 0;
-            }
-            return unsafe { (*page_dir).pml4_phys.as_u64() };
-        }
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return 0;
     }
-    0
+    let page_dir = guard.page_dir;
+    if page_dir.is_null() {
+        return 0;
+    }
+    unsafe { (*page_dir).pml4_phys.as_u64() }
 }
 
 pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
@@ -224,14 +243,18 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
         return INVALID_PROCESS_ID;
     }
 
-    let manager = VM_MANAGER.lock();
-    for process in manager.processes.iter() {
-        if process.process_id == INVALID_PROCESS_ID || process.page_dir.is_null() {
+    for i in 0..MAX_PROCESSES {
+        // SAFETY: lock-free read of naturally-aligned fields.
+        let (pid, page_dir) = unsafe {
+            let p = &*PROCESS_VMS[i].as_ptr();
+            (p.process_id, p.page_dir)
+        };
+        if pid == INVALID_PROCESS_ID || page_dir.is_null() {
             continue;
         }
-        let matches = unsafe { (*process.page_dir).pml4_phys.as_u64() == cr3_phys };
+        let matches = unsafe { (*page_dir).pml4_phys.as_u64() == cr3_phys };
         if matches {
-            return process.process_id;
+            return pid;
         }
     }
 
@@ -239,37 +262,39 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
 }
 
 pub fn process_vm_sync_kernel_mappings(process_id: u32) {
-    let manager = VM_MANAGER.lock();
-    for process in manager.processes.iter() {
-        if process.process_id == process_id {
-            let page_dir = process.page_dir;
-            if !page_dir.is_null() {
-                paging_sync_kernel_mappings(page_dir);
-            }
-            return;
-        }
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return,
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return;
+    }
+    let page_dir = guard.page_dir;
+    if !page_dir.is_null() {
+        paging_sync_kernel_mappings(page_dir);
     }
 }
 
-fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: VmaFlags) -> c_int {
-    if process.is_null() || !vma_range_valid(start, end) {
+fn add_vma_to_inner(inner: &mut ProcessVmInner, start: u64, end: u64, flags: VmaFlags) -> c_int {
+    if !vma_range_valid(start, end) {
         return -1;
     }
+    let tree = &mut inner.vma_tree;
+
+    let overlap = tree.find_overlapping(start, end);
+    if !overlap.is_null() && unsafe { (*overlap).flags != flags } {
+        klog_info!("add_vma_to_inner: Overlap with incompatible VMA");
+        return -1;
+    }
+
+    let node = tree.insert(start, end, flags);
+    if node.is_null() {
+        klog_info!("add_vma_to_inner: Failed to allocate VMA");
+        return -1;
+    }
+
     unsafe {
-        let tree = &mut (*process).vma_tree;
-
-        let overlap = tree.find_overlapping(start, end);
-        if !overlap.is_null() && (*overlap).flags != flags {
-            klog_info!("add_vma_to_process: Overlap with incompatible VMA");
-            return -1;
-        }
-
-        let node = tree.insert(start, end, flags);
-        if node.is_null() {
-            klog_info!("add_vma_to_process: Failed to allocate VMA");
-            return -1;
-        }
-
         try_merge_adjacent(tree, node);
     }
     0
@@ -299,66 +324,79 @@ unsafe fn try_merge_adjacent(tree: &mut VmaTree, node: *mut VmaNode) {
     }
 }
 
-fn remove_vma_from_process(process: *mut ProcessVm, start: u64, end: u64) -> c_int {
-    if process.is_null() || !vma_range_valid(start, end) {
+fn remove_vma_from_inner(inner: &mut ProcessVmInner, start: u64, end: u64) -> c_int {
+    if !vma_range_valid(start, end) {
         return -1;
     }
-    unsafe {
-        if (*process).vma_tree.remove(start, end) {
-            0
-        } else {
-            -1
-        }
+    if inner.vma_tree.remove(start, end) {
+        0
+    } else {
+        -1
     }
 }
 
-fn find_vma_covering(process: *mut ProcessVm, start: u64, end: u64) -> *mut VmaNode {
-    if process.is_null() || !vma_range_valid(start, end) {
+fn find_vma_covering_inner(inner: &ProcessVmInner, start: u64, end: u64) -> *mut VmaNode {
+    if !vma_range_valid(start, end) {
         return ptr::null_mut();
     }
-    unsafe { (*process).vma_tree.find_covering(start, end) }
+    inner.vma_tree.find_covering(start, end)
 }
 
-fn unmap_and_free_range(process: *mut ProcessVm, start: u64, end: u64) -> u32 {
-    if process.is_null() || unsafe { (*process).page_dir.is_null() } || !vma_range_valid(start, end)
-    {
+fn unmap_and_free_range_inner(inner: &ProcessVmInner, start: u64, end: u64) -> u32 {
+    if inner.page_dir.is_null() || !vma_range_valid(start, end) {
         return 0;
     }
     let mut freed = 0u32;
     let mut addr = start;
-    unsafe {
-        while addr < end {
-            let phys = unmap_page_in_dir((*process).page_dir, VirtAddr::new(addr));
-            if !phys.is_null() {
-                free_page_frame(phys);
-                freed += 1;
-            }
-            addr += PAGE_SIZE_4KB;
+    while addr < end {
+        let phys = unmap_page_in_dir(inner.page_dir, VirtAddr::new(addr));
+        if !phys.is_null() {
+            free_page_frame(phys);
+            freed += 1;
         }
+        addr += PAGE_SIZE_4KB;
     }
     freed
 }
 
-fn teardown_process_mappings(process: *mut ProcessVm) {
-    if process.is_null() || unsafe { (*process).page_dir.is_null() } {
+fn teardown_inner_mappings(inner: &mut ProcessVmInner) {
+    if inner.page_dir.is_null() {
         return;
     }
-    unsafe {
-        let tree = &mut (*process).vma_tree;
-        let mut cursor = tree.first();
-        while !cursor.is_null() {
-            let next = tree.next(cursor);
-            let freed = unmap_and_free_range(process, (*cursor).start, (*cursor).end);
-            if (*process).total_pages >= freed {
-                (*process).total_pages -= freed;
-            } else {
-                (*process).total_pages = 0;
-            }
-            cursor = next;
+    let tree = &mut inner.vma_tree;
+    let mut cursor = tree.first();
+    while !cursor.is_null() {
+        let next = tree.next(cursor);
+        let start = unsafe { (*cursor).start };
+        let end = unsafe { (*cursor).end };
+        let freed = unmap_and_free_range_dir(inner.page_dir, start, end);
+        if inner.total_pages >= freed {
+            inner.total_pages -= freed;
+        } else {
+            inner.total_pages = 0;
         }
-        tree.clear();
-        (*process).heap_end = (*process).heap_start;
+        cursor = next;
     }
+    tree.clear();
+    inner.heap_end = inner.heap_start;
+}
+
+/// Unmap and free pages in a range using a raw page_dir pointer.
+fn unmap_and_free_range_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64) -> u32 {
+    if page_dir.is_null() || !vma_range_valid(start, end) {
+        return 0;
+    }
+    let mut freed = 0u32;
+    let mut addr = start;
+    while addr < end {
+        let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
+        if !phys.is_null() {
+            free_page_frame(phys);
+            freed += 1;
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    freed
 }
 
 // ELF structures for relocation parsing
@@ -683,14 +721,18 @@ pub fn process_vm_load_elf_data(
         None => (0, 0, 0, 0, None),
     };
 
-    let process = find_process_vm(process_id);
-    if process.is_null() {
-        return Err(ElfError::NullPointer);
-    }
-    let page_dir = unsafe { (*process).page_dir };
-    if page_dir.is_null() {
-        return Err(ElfError::NullPointer);
-    }
+    let slot = find_slot_for_pid(process_id).ok_or(ElfError::NullPointer)?;
+    let page_dir = {
+        let guard = PROCESS_VMS[slot].lock();
+        if guard.process_id != process_id {
+            return Err(ElfError::NullPointer);
+        }
+        let pd = guard.page_dir;
+        if pd.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+        pd
+    };
 
     let (min_vaddr, needs_reloc) = calculate_load_offset(segments, code_base);
 
@@ -758,10 +800,11 @@ pub fn process_vm_load_elf_data(
         addr
     };
 
-    unsafe {
-        (*process).total_pages = (*process).total_pages.saturating_add(mapped_pages);
-        *entry_out = user_entry;
+    {
+        let mut guard = PROCESS_VMS[slot].lock();
+        guard.total_pages = guard.total_pages.saturating_add(mapped_pages);
     }
+    *entry_out = user_entry;
 
     Ok(crate::elf::ElfExecInfo {
         entry: user_entry,
@@ -1058,45 +1101,59 @@ fn copy_segment_page_data(
 }
 pub fn create_process_vm() -> u32 {
     let layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
-    let mut manager = VM_MANAGER.lock();
-    if manager.num_processes >= MAX_PROCESSES as u32 {
-        klog_info!("create_process_vm: Maximum processes reached");
-        return INVALID_PROCESS_ID;
-    }
-    let mut process_ptr: *mut ProcessVm = ptr::null_mut();
-    for i in 0..MAX_PROCESSES {
-        if manager.processes[i].process_id == INVALID_PROCESS_ID {
-            process_ptr = &manager.processes[i] as *const _ as *mut ProcessVm;
-            break;
-        }
-    }
-    if process_ptr.is_null() {
-        klog_info!("create_process_vm: No free process slots available");
-        return INVALID_PROCESS_ID;
-    }
 
+    // Phase 1: allocate a slot under the global lock.
+    let (slot, process_id) = {
+        let mut alloc = VM_SLOT_ALLOC.lock();
+        if alloc.num_processes >= MAX_PROCESSES as u32 {
+            klog_info!("create_process_vm: Maximum processes reached");
+            return INVALID_PROCESS_ID;
+        }
+        let mut found_slot = None;
+        for i in 0..MAX_PROCESSES {
+            // SAFETY: lock-free read of naturally-aligned u32 to find free slot.
+            let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+            if pid == INVALID_PROCESS_ID {
+                found_slot = Some(i);
+                break;
+            }
+        }
+        let slot = match found_slot {
+            Some(s) => s,
+            None => {
+                klog_info!("create_process_vm: No free process slots available");
+                return INVALID_PROCESS_ID;
+            }
+        };
+        let process_id = alloc.next_process_id;
+        alloc.next_process_id += 1;
+        alloc.num_processes += 1;
+        (slot, process_id)
+    };
+
+    // Phase 2: allocate physical resources (no locks held).
     let pml4_phys = alloc_page_frame(0);
     if pml4_phys.is_null() {
         klog_info!("create_process_vm: Failed to allocate PML4");
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
     let pml4 = pml4_phys.to_virt().as_mut_ptr::<PageTable>();
     if pml4.is_null() {
         klog_info!("create_process_vm: No HHDM/identity map available for PML4");
         free_page_frame(pml4_phys);
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
     unsafe {
         (*pml4).zero();
     }
 
-    let process_id = manager.next_process_id;
-    manager.next_process_id += 1;
-
     let page_dir_ptr = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
     if page_dir_ptr.is_null() {
         klog_info!("create_process_vm: Failed to allocate page directory");
         free_page_frame(pml4_phys);
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
     unsafe {
@@ -1106,14 +1163,12 @@ pub fn create_process_vm() -> u32 {
         (*page_dir_ptr).process_id = process_id;
         (*page_dir_ptr).next = ptr::null_mut();
         (*page_dir_ptr).kernel_mapping_gen = 0;
-    }
-
-    unsafe {
         paging_copy_kernel_mappings((*page_dir_ptr).pml4);
     }
 
-    unsafe {
-        let proc = &mut *process_ptr;
+    // Phase 3: initialize the per-process slot under its own lock.
+    {
+        let mut proc = PROCESS_VMS[slot].lock();
         proc.process_id = process_id;
         proc.page_dir = page_dir_ptr;
         proc.vma_tree.clear();
@@ -1125,32 +1180,30 @@ pub fn create_process_vm() -> u32 {
         proc.stack_end = layout.stack_top;
         proc.total_pages = 1;
         proc.flags = 0;
-        proc.next = manager.process_list;
-        if add_vma_to_process(
-            process_ptr,
-            proc.code_start,
-            proc.data_start,
-            VmaFlags::USER_CODE,
-        ) != 0
-            || add_vma_to_process(
-                process_ptr,
-                proc.data_start,
-                proc.heap_start,
-                VmaFlags::USER_DATA,
-            ) != 0
-            || add_vma_to_process(
-                process_ptr,
-                proc.stack_start,
-                proc.stack_end,
+
+        let code_s = proc.code_start;
+        let data_s = proc.data_start;
+        let heap_s = proc.heap_start;
+        let stack_s = proc.stack_start;
+        let stack_e = proc.stack_end;
+        if add_vma_to_inner(&mut proc, code_s, data_s, VmaFlags::USER_CODE) != 0
+            || add_vma_to_inner(&mut proc, data_s, heap_s, VmaFlags::USER_DATA) != 0
+            || add_vma_to_inner(
+                &mut proc,
+                stack_s,
+                stack_e,
                 VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK,
             ) != 0
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
-            teardown_process_mappings(process_ptr);
-            free_page_frame((*page_dir_ptr).pml4_phys);
-            kfree(page_dir_ptr as *mut _);
+            teardown_inner_mappings(&mut proc);
+            unsafe {
+                free_page_frame((*page_dir_ptr).pml4_phys);
+                kfree(page_dir_ptr as *mut _);
+            }
             proc.page_dir = ptr::null_mut();
             proc.process_id = INVALID_PROCESS_ID;
+            VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
         }
 
@@ -1166,18 +1219,19 @@ pub fn create_process_vm() -> u32 {
         ) != 0
         {
             klog_info!("create_process_vm: Failed to map process stack");
-            teardown_process_mappings(process_ptr);
-            free_page_frame((*page_dir_ptr).pml4_phys);
-            kfree(page_dir_ptr as *mut _);
+            teardown_inner_mappings(&mut proc);
+            unsafe {
+                free_page_frame((*page_dir_ptr).pml4_phys);
+                kfree(page_dir_ptr as *mut _);
+            }
             proc.page_dir = ptr::null_mut();
             proc.process_id = INVALID_PROCESS_ID;
+            VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
         }
         proc.total_pages += stack_pages;
 
         // Map a single zero page to tolerate benign null accesses in early userland.
-        // This keeps user tasks from immediately faulting on startup before they
-        // can report richer diagnostics.
         let mut null_pages: u32 = 0;
         if map_user_range(
             proc.page_dir,
@@ -1187,8 +1241,8 @@ pub fn create_process_vm() -> u32 {
             &mut null_pages,
         ) == 0
         {
-            let _ = add_vma_to_process(
-                process_ptr,
+            let _ = add_vma_to_inner(
+                &mut proc,
                 0,
                 PAGE_SIZE_4KB,
                 VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER,
@@ -1198,85 +1252,87 @@ pub fn create_process_vm() -> u32 {
             klog_info!("create_process_vm: Failed to map null page for user task");
         }
 
-        manager.process_list = process_ptr;
-        manager.num_processes += 1;
         klog_info!("Created process VM space for PID {}", process_id);
     }
     tlb::register_process_tlb(process_id);
     process_id
 }
+
 pub fn destroy_process_vm(process_id: u32) -> c_int {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
-        return 0;
-    }
-    unsafe {
-        if (*process_ptr).process_id == INVALID_PROCESS_ID {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    // Read current state under the per-process lock.
+    {
+        let guard = PROCESS_VMS[slot].lock();
+        if guard.process_id == INVALID_PROCESS_ID {
             return 0;
         }
-        klog_info!("Destroying process VM space for PID {}", process_id);
     }
+    klog_info!("Destroying process VM space for PID {}", process_id);
 
     tlb::flush_all_for_process(process_id);
     tlb::unregister_process_tlb(process_id);
 
-    unsafe {
+    // Teardown under the per-process lock.
+    {
+        let mut proc = PROCESS_VMS[slot].lock();
+        // Re-check after re-acquiring lock.
+        if proc.process_id != process_id {
+            return 0;
+        }
+
         klog_debug!(
             "destroy_process_vm({}): teardown_process_mappings",
             process_id
         );
-        teardown_process_mappings(process_ptr);
+        teardown_inner_mappings(&mut proc);
         klog_debug!("destroy_process_vm({}): paging_free_user_space", process_id);
-        paging_free_user_space((*process_ptr).page_dir);
-        if !(*process_ptr).page_dir.is_null() {
-            if !(*(*process_ptr).page_dir).pml4_phys.is_null() {
-                free_page_frame((*(*process_ptr).page_dir).pml4_phys);
+        paging_free_user_space(proc.page_dir);
+        if !proc.page_dir.is_null() {
+            unsafe {
+                if !(*proc.page_dir).pml4_phys.is_null() {
+                    free_page_frame((*proc.page_dir).pml4_phys);
+                }
+                klog_debug!("destroy_process_vm({}): kfree(page_dir)", process_id);
+                kfree(proc.page_dir as *mut _);
             }
-            klog_debug!("destroy_process_vm({}): kfree(page_dir)", process_id);
-            kfree((*process_ptr).page_dir as *mut _);
-            (*process_ptr).page_dir = ptr::null_mut();
+            proc.page_dir = ptr::null_mut();
         }
         klog_debug!(
             "destroy_process_vm({}): page table cleanup done",
             process_id
         );
+
+        proc.process_id = INVALID_PROCESS_ID;
+        proc.total_pages = 0;
+        proc.flags = 0;
     }
 
-    let mut manager = VM_MANAGER.lock();
-    unsafe {
-        if manager.process_list == process_ptr {
-            manager.process_list = (*process_ptr).next;
-        } else {
-            let mut current = manager.process_list;
-            while !current.is_null() && (*current).next != process_ptr {
-                current = (*current).next;
-            }
-            if !current.is_null() {
-                (*current).next = (*process_ptr).next;
-            }
-        }
-        if manager.active_process == process_ptr {
-            manager.active_process = ptr::null_mut();
-        }
-        (*process_ptr).process_id = INVALID_PROCESS_ID;
-        (*process_ptr).next = ptr::null_mut();
-        (*process_ptr).total_pages = 0;
-        (*process_ptr).flags = 0;
-        manager.num_processes = manager.num_processes.saturating_sub(1);
+    // Decrement global count.
+    {
+        let mut alloc = VM_SLOT_ALLOC.lock();
+        alloc.num_processes = alloc.num_processes.saturating_sub(1);
     }
     0
 }
+
 pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
         return 0;
     }
-    let process = unsafe { &mut *process_ptr };
     let size_aligned = (size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
     if size_aligned == 0 {
         return 0;
     }
-    let start_addr = process.heap_end;
+    let start_addr = proc.heap_end;
     let end_addr = start_addr + size_aligned;
     if end_addr > DEFAULT_PROCESS_LAYOUT.heap_max {
         klog_info!("process_vm_alloc: Heap overflow");
@@ -1289,20 +1345,27 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
         vma_flags |= VmaFlags::WRITE;
     }
 
-    if add_vma_to_process(process_ptr, start_addr, end_addr, vma_flags) != 0 {
+    if add_vma_to_inner(&mut proc, start_addr, end_addr, vma_flags) != 0 {
         klog_info!("process_vm_alloc: Failed to record VMA");
         return 0;
     }
 
-    process.heap_end = end_addr;
+    proc.heap_end = end_addr;
     start_addr
 }
+
 pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() || size == 0 {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    if size == 0 {
         return -1;
     }
-    let process = unsafe { &mut *process_ptr };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
+        return -1;
+    }
 
     let start = vaddr & !(PAGE_SIZE_4KB - 1);
     let end = (vaddr + size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
@@ -1311,16 +1374,16 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
         return -1;
     }
 
-    let vma = find_vma_covering(process_ptr, start, end);
+    let vma = find_vma_covering_inner(&proc, start, end);
     if vma.is_null() {
         klog_info!("process_vm_free: Range not covered by a VMA");
         return -1;
     }
 
-    let freed = unmap_and_free_range(process_ptr, start, end);
+    let freed = unmap_and_free_range_inner(&proc, start, end);
 
     unsafe {
-        let tree = &mut (*process_ptr).vma_tree;
+        let tree = &mut proc.vma_tree;
         if start == (*vma).start && end == (*vma).end {
             tree.remove((*vma).start, (*vma).end);
         } else if start == (*vma).start {
@@ -1337,23 +1400,25 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
                 return -1;
             }
         }
-        if process.total_pages >= freed {
-            process.total_pages -= freed;
+        if proc.total_pages >= freed {
+            proc.total_pages -= freed;
         } else {
-            process.total_pages = 0;
+            proc.total_pages = 0;
         }
-        if process.heap_end == end && end > process.heap_start {
-            process.heap_end = start;
+        if proc.heap_end == end && end > proc.heap_start {
+            proc.heap_end = start;
         }
     }
     0
 }
+
 fn collect_active_pids() -> [u32; MAX_PROCESSES] {
-    let manager = VM_MANAGER.lock();
     let mut pids = [INVALID_PROCESS_ID; MAX_PROCESSES];
-    for (i, proc) in manager.processes.iter().enumerate() {
-        if proc.process_id != INVALID_PROCESS_ID {
-            pids[i] = proc.process_id;
+    for i in 0..MAX_PROCESSES {
+        // SAFETY: lock-free read of naturally-aligned u32.
+        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+        if pid != INVALID_PROCESS_ID {
+            pids[i] = pid;
         }
     }
     pids
@@ -1366,46 +1431,48 @@ pub fn init_process_vm() -> c_int {
         }
     }
 
-    let mut manager = VM_MANAGER.lock();
-    manager.num_processes = 0;
-    manager.next_process_id = 1;
-    manager.active_process = ptr::null_mut();
-    manager.process_list = ptr::null_mut();
+    {
+        let mut alloc = VM_SLOT_ALLOC.lock();
+        alloc.num_processes = 0;
+        alloc.next_process_id = 1;
+    }
     for i in 0..MAX_PROCESSES {
-        manager.processes[i].reset();
+        PROCESS_VMS[i].lock().reset();
     }
     klog_info!("Process VM manager initialized");
 
     0
 }
+
 pub fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
-    let manager = VM_MANAGER.lock();
+    let alloc = VM_SLOT_ALLOC.lock();
     unsafe {
         if !total_processes.is_null() {
             *total_processes = MAX_PROCESSES as u32;
         }
         if !active_processes.is_null() {
-            *active_processes = manager.num_processes;
+            *active_processes = alloc.num_processes;
         }
     }
 }
+
 pub fn get_current_process_id() -> u32 {
-    let manager = VM_MANAGER.lock();
-    if manager.active_process.is_null() {
-        0
-    } else {
-        unsafe { (*manager.active_process).process_id }
-    }
+    // This function was always racy under SMP with the old global lock (it
+    // returned active_process which could change immediately after).
+    // With per-process locks there is no meaningful "current" concept at the
+    // VM layer -- the scheduler owns that. Return 0 for backwards compat.
+    0
 }
 
 pub fn process_vm_get_vma_flags(process_id: u32, addr: u64) -> Option<VmaFlags> {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = find_slot_for_pid(process_id)?;
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
         return None;
     }
 
     let aligned_addr = addr & !(PAGE_SIZE_4KB - 1);
-    let vma = unsafe { (*process_ptr).vma_tree.find_containing(aligned_addr) };
+    let vma = guard.vma_tree.find_containing(aligned_addr);
     if vma.is_null() {
         return None;
     }
@@ -1414,33 +1481,43 @@ pub fn process_vm_get_vma_flags(process_id: u32, addr: u64) -> Option<VmaFlags> 
 }
 
 pub fn process_vm_increment_pages(process_id: u32, count: u32) {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return,
+    };
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
         return;
     }
-
-    unsafe {
-        (*process_ptr).total_pages = (*process_ptr).total_pages.saturating_add(count);
-    }
+    guard.total_pages = guard.total_pages.saturating_add(count);
 }
 
 pub fn process_vm_get_stack_top(process_id: u32) -> u64 {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
         return 0;
     }
-    unsafe { (*process_ptr).stack_end }
+    guard.stack_end
 }
 
 pub fn process_vm_reset_stack(process_id: u32) -> c_int {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
         return -1;
     }
-    let (page_dir, stack_start, stack_end) = unsafe {
-        let p = &*process_ptr;
-        (p.page_dir, p.stack_start, p.stack_end)
-    };
+    let page_dir = guard.page_dir;
+    let stack_start = guard.stack_start;
+    let stack_end = guard.stack_end;
+    drop(guard);
+
     if page_dir.is_null() || stack_end <= stack_start {
         return -1;
     }
@@ -1465,71 +1542,69 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
 }
 
 pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
-    let pp = find_process_vm(process_id);
-    if pp.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
         return 0;
     }
 
-    macro_rules! pvm {
-        () => {
-            unsafe { &mut *pp }
-        };
-    }
-
     if new_brk == 0 {
-        return pvm!().heap_end;
+        return proc.heap_end;
     }
 
     let aligned_brk = match new_brk.checked_add(PAGE_SIZE_4KB - 1) {
         Some(v) => v & !(PAGE_SIZE_4KB - 1),
-        None => return pvm!().heap_end,
+        None => return proc.heap_end,
     };
 
-    if aligned_brk < pvm!().heap_start || aligned_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
-        return pvm!().heap_end;
+    if aligned_brk < proc.heap_start || aligned_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
+        return proc.heap_end;
     }
 
-    if aligned_brk > pvm!().heap_end {
-        let start_addr = pvm!().heap_end;
+    if aligned_brk > proc.heap_end {
+        let start_addr = proc.heap_end;
         let end_addr = aligned_brk;
         let heap_vma_flags =
             VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::HEAP | VmaFlags::ANON;
 
-        if add_vma_to_process(pp, start_addr, end_addr, heap_vma_flags) != 0 {
+        if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_vma_flags) != 0 {
             return 0;
         }
 
         let heap_map_flags = heap_vma_flags.to_page_flags().bits();
         let mut pages_mapped: u32 = 0;
         if map_user_range(
-            pvm!().page_dir,
+            proc.page_dir,
             start_addr,
             end_addr,
             heap_map_flags,
             &mut pages_mapped,
         ) != 0
         {
-            remove_vma_from_process(pp, start_addr, end_addr);
+            remove_vma_from_inner(&mut proc, start_addr, end_addr);
             return 0;
         }
-        pvm!().total_pages += pages_mapped;
-        pvm!().heap_end = aligned_brk;
-    } else if aligned_brk < pvm!().heap_end {
+        proc.total_pages += pages_mapped;
+        proc.heap_end = aligned_brk;
+    } else if aligned_brk < proc.heap_end {
         let start_addr = aligned_brk;
-        let end_addr = pvm!().heap_end;
+        let end_addr = proc.heap_end;
 
-        let freed = unmap_and_free_range(pp, start_addr, end_addr);
-        remove_vma_from_process(pp, start_addr, end_addr);
+        let freed = unmap_and_free_range_inner(&proc, start_addr, end_addr);
+        remove_vma_from_inner(&mut proc, start_addr, end_addr);
 
-        if pvm!().total_pages >= freed {
-            pvm!().total_pages -= freed;
+        if proc.total_pages >= freed {
+            proc.total_pages -= freed;
         } else {
-            pvm!().total_pages = 0;
+            proc.total_pages = 0;
         }
-        pvm!().heap_end = aligned_brk;
+        proc.heap_end = aligned_brk;
     }
 
-    pvm!().heap_end
+    proc.heap_end
 }
 
 // =============================================================================
@@ -1554,59 +1629,41 @@ fn prot_to_vma_flags(prot: u64) -> VmaFlags {
 }
 
 /// Find a free gap in the process address space within the mmap region.
-///
-/// Walks the VMA tree starting at `PROCESS_MMAP_START_VA` looking for a gap
-/// of at least `size` bytes. Returns the start address of the gap, or 0 on
-/// failure.
-fn find_mmap_gap(process: *const ProcessVm, size: u64) -> u64 {
+fn find_mmap_gap_inner(inner: &ProcessVmInner, size: u64) -> u64 {
     use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
 
-    if process.is_null() || size == 0 {
+    if size == 0 {
         return 0;
     }
 
-    unsafe {
-        let tree = &(*process).vma_tree;
-        let mut candidate = PROCESS_MMAP_START_VA;
+    let tree = &inner.vma_tree;
+    let mut candidate = PROCESS_MMAP_START_VA;
 
-        let mut cursor = tree.find_first_at_or_after(PROCESS_MMAP_START_VA);
+    let mut cursor = tree.find_first_at_or_after(PROCESS_MMAP_START_VA);
 
-        while !cursor.is_null() {
-            let vma_start = (*cursor).start;
-            let vma_end = (*cursor).end;
+    while !cursor.is_null() {
+        let vma_start = unsafe { (*cursor).start };
+        let vma_end = unsafe { (*cursor).end };
 
-            // If there's enough space before this VMA, use it
-            if candidate + size <= vma_start {
-                return candidate;
-            }
-
-            // Skip past this VMA
-            if vma_end > candidate {
-                candidate = vma_end;
-            }
-
-            cursor = tree.next(cursor);
-        }
-
-        // Check space after the last VMA
-        if candidate + size <= PROCESS_MMAP_END_VA {
+        if candidate + size <= vma_start {
             return candidate;
         }
+
+        if vma_end > candidate {
+            candidate = vma_end;
+        }
+
+        cursor = tree.next(cursor);
+    }
+
+    if candidate + size <= PROCESS_MMAP_END_VA {
+        return candidate;
     }
 
     0
 }
 
 /// Map anonymous memory into the process address space (mmap).
-///
-/// `addr_hint`: requested address (0 = kernel chooses).
-/// `length`: mapping size in bytes (rounded up to page boundary).
-/// `prot`: PROT_READ | PROT_WRITE | PROT_EXEC.
-/// `flags_val`: MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED.
-/// `fd`: must be -1 for MAP_ANONYMOUS (file-backed not yet supported).
-/// `offset`: must be 0 for MAP_ANONYMOUS.
-///
-/// Returns the virtual address of the mapping on success, or 0 on failure.
 pub fn process_vm_mmap(
     process_id: u32,
     addr_hint: u64,
@@ -1619,7 +1676,6 @@ pub fn process_vm_mmap(
     use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
     use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE};
 
-    // Only anonymous private mappings for now
     if flags_val & MAP_ANONYMOUS == 0 {
         klog_info!("process_vm_mmap: Only MAP_ANONYMOUS supported");
         return 0;
@@ -1641,15 +1697,18 @@ pub fn process_vm_mmap(
         None => return 0,
     };
 
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
         return 0;
     }
 
     let is_fixed = flags_val & MAP_FIXED != 0;
 
     let start_addr = if is_fixed {
-        // MAP_FIXED: use exact address, must be page-aligned
         if (addr_hint & (PAGE_SIZE_4KB - 1)) != 0 {
             klog_info!("process_vm_mmap: MAP_FIXED address not page-aligned");
             return 0;
@@ -1662,27 +1721,26 @@ pub fn process_vm_mmap(
             klog_info!("process_vm_mmap: MAP_FIXED address out of mmap region");
             return 0;
         }
-        // Unmap any existing pages in the range first
         let end_addr = addr_hint + size;
+        let inner = &mut *proc;
+        let page_dir = inner.page_dir;
+        let tree = &mut inner.vma_tree;
         unsafe {
-            let tree = &mut (*process_ptr).vma_tree;
             let mut cursor = tree.find_first_at_or_after(addr_hint);
             while !cursor.is_null() && (*cursor).start < end_addr {
                 let next = tree.next(cursor);
                 let overlap_start = (*cursor).start.max(addr_hint);
                 let overlap_end = (*cursor).end.min(end_addr);
                 if overlap_start < overlap_end {
-                    let freed = unmap_and_free_range(process_ptr, overlap_start, overlap_end);
-                    if (*process_ptr).total_pages >= freed {
-                        (*process_ptr).total_pages -= freed;
+                    let freed = unmap_and_free_range_dir(page_dir, overlap_start, overlap_end);
+                    if inner.total_pages >= freed {
+                        inner.total_pages -= freed;
                     } else {
-                        (*process_ptr).total_pages = 0;
+                        inner.total_pages = 0;
                     }
-                    // Remove or trim the overlapping VMA
                     if (*cursor).start >= addr_hint && (*cursor).end <= end_addr {
                         tree.remove((*cursor).start, (*cursor).end);
                     } else if (*cursor).start < addr_hint && (*cursor).end > end_addr {
-                        // Split: trim left, create right
                         let right_start = end_addr;
                         let right_end = (*cursor).end;
                         let flags = (*cursor).flags;
@@ -1699,8 +1757,7 @@ pub fn process_vm_mmap(
         }
         addr_hint
     } else {
-        // Kernel chooses address
-        let chosen = find_mmap_gap(process_ptr, size);
+        let chosen = find_mmap_gap_inner(&proc, size);
         if chosen == 0 {
             klog_info!("process_vm_mmap: No free region found for {} bytes", size);
             return 0;
@@ -1711,24 +1768,15 @@ pub fn process_vm_mmap(
     let end_addr = start_addr + size;
     let vma_flags = prot_to_vma_flags(prot);
 
-    if add_vma_to_process(process_ptr, start_addr, end_addr, vma_flags) != 0 {
+    if add_vma_to_inner(&mut proc, start_addr, end_addr, vma_flags) != 0 {
         klog_info!("process_vm_mmap: Failed to insert VMA");
         return 0;
     }
-
-    // For the baseline: mappings are lazy (demand-paged), so no physical
-    // pages are allocated here. The page fault handler will allocate them
-    // when accessed.
 
     start_addr
 }
 
 /// Unmap a previously mmap'd memory region.
-///
-/// `addr`: start address (must be page-aligned).
-/// `length`: length in bytes (rounded up to page size).
-///
-/// Returns 0 on success, -1 on failure.
 pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
     if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
         return -1;
@@ -1744,25 +1792,26 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
         None => return -1,
     };
 
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
         return -1;
     }
 
-    // Validate the range falls within user space
     if addr >= crate::memory_layout_defs::USER_SPACE_END_VA
         || end > crate::memory_layout_defs::USER_SPACE_END_VA
     {
         return -1;
     }
 
-    unsafe {
-        let tree = &mut (*process_ptr).vma_tree;
+    let inner = &mut *proc;
+    let page_dir = inner.page_dir;
+    let tree = &mut inner.vma_tree;
 
-        // Reject unmapping of executable code regions.  POSIX leaves this
-        // as undefined behaviour but we enforce it to prevent a buggy or
-        // malicious process from pulling its own code pages out from under
-        // itself (or from beneath another thread on another CPU).
+    unsafe {
         {
             let mut scan = tree.find_first_at_or_after(addr);
             while !scan.is_null() && (*scan).start < end {
@@ -1786,28 +1835,24 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
 
             if overlap_start < overlap_end {
                 found_any = true;
-                let freed = unmap_and_free_range(process_ptr, overlap_start, overlap_end);
-                if (*process_ptr).total_pages >= freed {
-                    (*process_ptr).total_pages -= freed;
+                let freed = unmap_and_free_range_dir(page_dir, overlap_start, overlap_end);
+                if inner.total_pages >= freed {
+                    inner.total_pages -= freed;
                 } else {
-                    (*process_ptr).total_pages = 0;
+                    inner.total_pages = 0;
                 }
 
                 if vma_start >= addr && vma_end <= end {
-                    // Entire VMA is within range: remove
                     tree.remove(vma_start, vma_end);
                 } else if vma_start < addr && vma_end > end {
-                    // Range punches a hole: split VMA
                     let right_start = end;
                     let right_end = vma_end;
                     let flags = (*cursor).flags;
                     tree.set_end(cursor, addr);
                     tree.insert(right_start, right_end, flags);
                 } else if vma_start < addr {
-                    // Trim end
                     tree.set_end(cursor, addr);
                 } else {
-                    // Trim start
                     tree.set_start(cursor, end);
                 }
             }
@@ -1816,7 +1861,6 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
         }
 
         if !found_any {
-            // POSIX says munmap on unmapped region is a no-op, return success
             return 0;
         }
     }
@@ -1825,12 +1869,6 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
 }
 
 /// Change protection on a memory region.
-///
-/// `addr`: start address (must be page-aligned).
-/// `length`: length in bytes (rounded up to page size).
-/// `prot`: new protection flags (PROT_READ | PROT_WRITE | PROT_EXEC).
-///
-/// Returns 0 on success, -1 on failure.
 pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -> i32 {
     use crate::paging::paging_update_range_protection;
 
@@ -1848,42 +1886,39 @@ pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -
         None => return -1,
     };
 
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
         return -1;
     }
 
-    // Validate the range falls within user space
     if addr >= crate::memory_layout_defs::USER_SPACE_END_VA
         || end > crate::memory_layout_defs::USER_SPACE_END_VA
     {
         return -1;
     }
 
-    // Build new VMA flags from prot
     let new_prot = prot_to_vma_flags(prot).protection_only();
     let new_page_flags = (new_prot | VmaFlags::USER).to_page_flags();
 
+    let page_dir = proc.page_dir;
+    if page_dir.is_null() {
+        return -1;
+    }
+
+    let vma = find_vma_covering_inner(&proc, addr, end);
+    if vma.is_null() {
+        klog_info!("process_vm_mprotect: Range not covered by VMA");
+        return -1;
+    }
+
     unsafe {
-        let page_dir = (*process_ptr).page_dir;
-        if page_dir.is_null() {
-            return -1;
-        }
-
-        // Verify the entire range is covered by VMAs
-        let vma = find_vma_covering(process_ptr, addr, end);
-        if vma.is_null() {
-            // Range not fully covered -- check if there's partial coverage
-            // For baseline: require full coverage by a single VMA
-            klog_info!("process_vm_mprotect: Range not covered by VMA");
-            return -1;
-        }
-
-        // Update VMA protection flags (preserve state flags)
         let state = (*vma).flags.state_only();
         (*vma).flags = new_prot | VmaFlags::USER | state;
 
-        // Update page table entries for already-mapped pages
         paging_update_range_protection(
             page_dir,
             VirtAddr::new(addr),
@@ -1892,66 +1927,87 @@ pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -
         );
     }
 
+    // Suppress unused-mut warning -- proc may not be mutated on all paths
+    // but we need the mutable guard to borrow vma_tree for find_vma_covering_inner.
+    let _ = &mut proc;
+
     0
 }
 
 /// Clone address space with COW for fork(). Returns child PID or INVALID_PROCESS_ID.
 pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
-    let parent_ptr = find_process_vm(parent_id);
-    if parent_ptr.is_null() {
-        klog_info!(
-            "process_vm_clone_cow: Parent process {} not found",
-            parent_id
-        );
-        return INVALID_PROCESS_ID;
-    }
-
-    let parent = unsafe { &*parent_ptr };
-    if parent.page_dir.is_null() {
-        klog_info!("process_vm_clone_cow: Parent has no page directory");
-        return INVALID_PROCESS_ID;
-    }
-
-    let mut manager = VM_MANAGER.lock();
-    if manager.num_processes >= MAX_PROCESSES as u32 {
-        klog_info!("process_vm_clone_cow: Maximum processes reached");
-        return INVALID_PROCESS_ID;
-    }
-
-    let mut child_ptr: *mut ProcessVm = ptr::null_mut();
-    for i in 0..MAX_PROCESSES {
-        if manager.processes[i].process_id == INVALID_PROCESS_ID {
-            child_ptr = &manager.processes[i] as *const _ as *mut ProcessVm;
-            break;
+    let parent_slot = match find_slot_for_pid(parent_id) {
+        Some(s) => s,
+        None => {
+            klog_info!(
+                "process_vm_clone_cow: Parent process {} not found",
+                parent_id
+            );
+            return INVALID_PROCESS_ID;
         }
-    }
-    if child_ptr.is_null() {
-        klog_info!("process_vm_clone_cow: No free process slots");
-        return INVALID_PROCESS_ID;
-    }
+    };
 
+    // Snapshot parent state under the parent's per-process lock.
+    let parent_snapshot: ProcessVmInner = {
+        let guard = PROCESS_VMS[parent_slot].lock();
+        if guard.process_id != parent_id || guard.page_dir.is_null() {
+            klog_info!("process_vm_clone_cow: Parent has no page directory");
+            return INVALID_PROCESS_ID;
+        }
+        *guard
+    };
+
+    // Phase 1: allocate child slot under global lock.
+    let (child_slot, child_id) = {
+        let mut alloc = VM_SLOT_ALLOC.lock();
+        if alloc.num_processes >= MAX_PROCESSES as u32 {
+            klog_info!("process_vm_clone_cow: Maximum processes reached");
+            return INVALID_PROCESS_ID;
+        }
+        let mut found_slot = None;
+        for i in 0..MAX_PROCESSES {
+            let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+            if pid == INVALID_PROCESS_ID {
+                found_slot = Some(i);
+                break;
+            }
+        }
+        let child_slot = match found_slot {
+            Some(s) => s,
+            None => {
+                klog_info!("process_vm_clone_cow: No free process slots");
+                return INVALID_PROCESS_ID;
+            }
+        };
+        let child_id = alloc.next_process_id;
+        alloc.next_process_id += 1;
+        alloc.num_processes += 1;
+        (child_slot, child_id)
+    };
+
+    // Phase 2: allocate physical resources (no locks held).
     let pml4_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     if pml4_phys.is_null() {
         klog_info!("process_vm_clone_cow: Failed to allocate PML4");
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
     let pml4 = pml4_phys.to_virt().as_mut_ptr::<PageTable>();
     if pml4.is_null() {
         klog_info!("process_vm_clone_cow: No HHDM mapping for PML4");
         free_page_frame(pml4_phys);
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
     unsafe {
         (*pml4).zero();
     }
 
-    let child_id = manager.next_process_id;
-    manager.next_process_id += 1;
-
     let child_page_dir = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
     if child_page_dir.is_null() {
         klog_info!("process_vm_clone_cow: Failed to allocate page directory struct");
         free_page_frame(pml4_phys);
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
     unsafe {
@@ -1961,38 +2017,38 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         (*child_page_dir).process_id = child_id;
         (*child_page_dir).next = ptr::null_mut();
         (*child_page_dir).kernel_mapping_gen = 0;
-    }
-
-    unsafe {
         paging_copy_kernel_mappings((*child_page_dir).pml4);
     }
 
-    let child = unsafe { &mut *child_ptr };
-    child.process_id = child_id;
-    child.page_dir = child_page_dir;
-    child.vma_tree.clear();
-    child.code_start = parent.code_start;
-    child.data_start = parent.data_start;
-    child.heap_start = parent.heap_start;
-    child.heap_end = parent.heap_end;
-    child.stack_start = parent.stack_start;
-    child.stack_end = parent.stack_end;
-    child.total_pages = 0;
-    child.flags = parent.flags;
-    child.next = manager.process_list;
-
-    drop(manager);
-
+    // Phase 3: initialize child slot and perform COW page walk.
+    // We hold the child slot lock while building VMA tree + page tables.
+    // The parent's page_dir pointer is stable (read from snapshot; parent
+    // cannot be destroyed while fork is in progress -- scheduler guarantees).
+    let parent_page_dir = parent_snapshot.page_dir;
     let mut cow_pages: u32 = 0;
     let mut clone_failed = false;
 
-    unsafe {
-        let parent_tree = &(*parent_ptr).vma_tree;
-        let child_tree = &mut (*child_ptr).vma_tree;
+    {
+        let mut child = PROCESS_VMS[child_slot].lock();
+        child.process_id = child_id;
+        child.page_dir = child_page_dir;
+        child.vma_tree.clear();
+        child.code_start = parent_snapshot.code_start;
+        child.data_start = parent_snapshot.data_start;
+        child.heap_start = parent_snapshot.heap_start;
+        child.heap_end = parent_snapshot.heap_end;
+        child.stack_start = parent_snapshot.stack_start;
+        child.stack_end = parent_snapshot.stack_end;
+        child.total_pages = 0;
+        child.flags = parent_snapshot.flags;
+
+        // Walk parent's VMA tree (from snapshot).
+        let parent_tree = &parent_snapshot.vma_tree;
+        let child_tree = &mut child.vma_tree;
 
         let mut cursor = parent_tree.first();
         while !cursor.is_null() {
-            let vma = &*cursor;
+            let vma = unsafe { &*cursor };
             let vma_start = vma.start;
             let vma_end = vma.end;
             let child_vma_flags = vma.flags | VmaFlags::COW;
@@ -2011,10 +2067,10 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             let mut addr = vma_start;
             while addr < vma_end {
                 let vaddr = VirtAddr::new(addr);
-                let phys = virt_to_phys_in_dir(parent.page_dir, vaddr);
+                let phys = virt_to_phys_in_dir(parent_page_dir, vaddr);
 
                 if !phys.is_null() {
-                    let flags_opt = paging_get_pte_flags(parent.page_dir, vaddr);
+                    let flags_opt = paging_get_pte_flags(parent_page_dir, vaddr);
                     if let Some(flags) = flags_opt {
                         if !flags.contains(PageFlags::USER) {
                             addr += PAGE_SIZE_4KB;
@@ -2022,7 +2078,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
                         }
 
                         if flags.contains(PageFlags::WRITABLE) {
-                            paging_mark_cow(parent.page_dir, vaddr);
+                            paging_mark_cow(parent_page_dir, vaddr);
                         }
 
                         page_frame_inc_ref(phys);
@@ -2052,32 +2108,33 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
             cursor = parent_tree.next(cursor);
         }
+
+        if !clone_failed {
+            child.total_pages = cow_pages;
+        }
     }
 
-    // paging_mark_cow defers TLB invalidation — flush once for all COW pages.
+    // paging_mark_cow defers TLB invalidation -- flush once for all COW pages.
     if cow_pages > 0 {
         tlb::flush_all();
     }
 
     if clone_failed {
         klog_info!("process_vm_clone_cow: Clone failed, cleaning up");
+        {
+            let mut child = PROCESS_VMS[child_slot].lock();
+            teardown_inner_mappings(&mut child);
+        }
         unsafe {
-            teardown_process_mappings(child_ptr);
             paging_free_user_space(child_page_dir);
             if !(*child_page_dir).pml4_phys.is_null() {
                 free_page_frame((*child_page_dir).pml4_phys);
             }
             kfree(child_page_dir as *mut _);
-            (*child_ptr).reset();
         }
+        PROCESS_VMS[child_slot].lock().reset();
+        VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
-    }
-
-    let mut manager = VM_MANAGER.lock();
-    unsafe {
-        (*child_ptr).total_pages = cow_pages;
-        manager.process_list = child_ptr;
-        manager.num_processes += 1;
     }
 
     klog_info!(
@@ -2093,22 +2150,28 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 }
 
 pub unsafe fn process_vm_force_unlock() {
-    VM_MANAGER.force_unlock();
+    VM_SLOT_ALLOC.force_unlock();
+    for i in 0..MAX_PROCESSES {
+        PROCESS_VMS[i].force_unlock();
+    }
 }
 
-/// Force-unlock the VM manager AND mark it as poisoned.
+/// Force-unlock all VM locks AND mark the slot allocator as poisoned.
 /// Called from panic recovery to signal that VM state may be
 /// inconsistent. Check `process_vm_is_poisoned()` before trusting state.
 pub unsafe fn process_vm_poison_unlock() {
-    VM_MANAGER.poison_unlock();
+    VM_SLOT_ALLOC.poison_unlock();
+    for i in 0..MAX_PROCESSES {
+        PROCESS_VMS[i].force_unlock();
+    }
 }
 
-/// Returns true if the VM manager was force-unlocked during panic recovery.
+/// Returns true if the slot allocator was force-unlocked during panic recovery.
 pub fn process_vm_is_poisoned() -> bool {
-    VM_MANAGER.is_poisoned()
+    VM_SLOT_ALLOC.is_poisoned()
 }
 
-/// Clear the VM manager's poisoned state after reinitialization.
+/// Clear the VM slot allocator's poisoned state after reinitialization.
 pub fn process_vm_clear_poison() {
-    VM_MANAGER.clear_poison();
+    VM_SLOT_ALLOC.clear_poison();
 }

@@ -144,6 +144,176 @@ impl KernelHeap {
 
 static KERNEL_HEAP: IrqMutex<KernelHeap> = IrqMutex::new(KernelHeap::new());
 
+// ---------------------------------------------------------------------------
+// Per-CPU object magazine caches — lock-free fast path for kmalloc/kfree.
+//
+// Each CPU has a magazine (small stack) per size class. The fast path pops/
+// pushes from the magazine with only a PreemptGuard. The global KERNEL_HEAP
+// lock is only taken for batch refill/drain (amortized over MAGAZINE_CAPACITY
+// allocations).
+// ---------------------------------------------------------------------------
+
+use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
+use slopos_sync::{IrqPreemptGuard, PreemptGuard};
+
+const MAGAZINE_CAPACITY: usize = 32;
+
+/// Per-size-class magazine: a small stack of pre-allocated object pointers.
+struct Magazine {
+    objects: [*mut c_void; MAGAZINE_CAPACITY],
+    count: u32,
+}
+
+impl Magazine {
+    const fn new() -> Self {
+        Self {
+            objects: [ptr::null_mut(); MAGAZINE_CAPACITY],
+            count: 0,
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) -> *mut c_void {
+        if self.count == 0 {
+            return ptr::null_mut();
+        }
+        self.count -= 1;
+        let ptr = self.objects[self.count as usize];
+        self.objects[self.count as usize] = ptr::null_mut();
+        ptr
+    }
+
+    #[inline]
+    fn push(&mut self, ptr: *mut c_void) -> bool {
+        if (self.count as usize) >= MAGAZINE_CAPACITY {
+            return false;
+        }
+        self.objects[self.count as usize] = ptr;
+        self.count += 1;
+        true
+    }
+}
+
+/// Per-CPU heap cache: one magazine per size class.
+struct PerCpuHeapCache {
+    magazines: [Magazine; NUM_SIZE_CLASSES],
+}
+
+impl PerCpuHeapCache {
+    const fn new() -> Self {
+        Self {
+            magazines: [const { Magazine::new() }; NUM_SIZE_CLASSES],
+        }
+    }
+}
+
+struct HeapCacheArray(core::cell::UnsafeCell<[PerCpuHeapCache; MAX_CPUS]>);
+unsafe impl Sync for HeapCacheArray {}
+
+static HEAP_CACHES: HeapCacheArray = {
+    const INIT: PerCpuHeapCache = PerCpuHeapCache::new();
+    HeapCacheArray(core::cell::UnsafeCell::new([INIT; MAX_CPUS]))
+};
+
+static HEAP_CACHES_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Heap bounds for lock-free range checks in the kfree fast path.
+static HEAP_START: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static HEAP_END: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Magazine-level stats (objects currently cached, not visible to slab stats).
+/// These represent objects that the slab considers "allocated" (they were
+/// slab_alloc'd during refill) but are idle in a magazine.
+static MAG_CACHED_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Cumulative magazine-served allocations (for allocation_count adjustment).
+static MAG_ALLOC_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Cumulative magazine-absorbed frees (for free_count adjustment).
+static MAG_FREE_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Drain all per-CPU magazines, discarding cached objects.
+///
+/// Must be called before heap reinitialization to prevent stale pointers
+/// from being handed out after the slab caches are reset.
+pub fn drain_all_heap_caches() {
+    if !HEAP_CACHES_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    for cpu in 0..MAX_CPUS {
+        let cache = unsafe { &mut (*HEAP_CACHES.0.get())[cpu] };
+        for mag in cache.magazines.iter_mut() {
+            mag.count = 0;
+            mag.objects = [ptr::null_mut(); MAGAZINE_CAPACITY];
+        }
+    }
+    MAG_CACHED_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+    MAG_ALLOC_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+    MAG_FREE_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Enable per-CPU heap caches. Called after heap and SMP are initialized.
+pub fn enable_heap_caches() {
+    // Publish heap bounds for lock-free range checks.
+    let heap = KERNEL_HEAP.lock();
+    HEAP_START.store(heap.start_addr, core::sync::atomic::Ordering::Relaxed);
+    HEAP_END.store(heap.end_addr, core::sync::atomic::Ordering::Relaxed);
+    drop(heap);
+    HEAP_CACHES_ENABLED.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Get the current CPU's heap cache.
+#[inline]
+unsafe fn heap_cache(cpu: usize) -> &'static mut PerCpuHeapCache {
+    debug_assert!(PreemptGuard::is_active());
+    debug_assert!(cpu < MAX_CPUS);
+    unsafe { &mut (*HEAP_CACHES.0.get())[cpu] }
+}
+
+/// Refill a magazine from the global slab. Takes KERNEL_HEAP lock once.
+fn magazine_refill(mag: &mut Magazine, class_idx: usize) {
+    let mut heap = KERNEL_HEAP.lock();
+    if !heap.initialized {
+        return;
+    }
+    let batch = MAGAZINE_CAPACITY / 2; // Refill half
+    for _ in 0..batch {
+        if (mag.count as usize) >= MAGAZINE_CAPACITY {
+            break;
+        }
+        let ptr = slab_alloc_from_cache(&mut heap, class_idx);
+        if ptr.is_null() {
+            break;
+        }
+        mag.objects[mag.count as usize] = ptr;
+        mag.count += 1;
+        MAG_CACHED_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Drain half a magazine back to the global slab. Takes KERNEL_HEAP lock once.
+fn magazine_drain(mag: &mut Magazine, _class_idx: usize) {
+    let drain_count = mag.count as usize / 2;
+    if drain_count == 0 {
+        return;
+    }
+    let mut heap = KERNEL_HEAP.lock();
+    if !heap.initialized {
+        return;
+    }
+    for _ in 0..drain_count {
+        if mag.count == 0 {
+            break;
+        }
+        mag.count -= 1;
+        let ptr = mag.objects[mag.count as usize];
+        mag.objects[mag.count as usize] = ptr::null_mut();
+        if !ptr.is_null() {
+            let _ = slab_free(&mut heap, ptr);
+            MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 fn slab_object_start() -> usize {
     align_up_usize(mem::size_of::<SlabHeader>(), 16)
 }
@@ -568,25 +738,54 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
 }
 
 pub fn kmalloc(size: usize) -> *mut c_void {
-    let mut heap = KERNEL_HEAP.lock();
-
-    if !heap.initialized {
-        klog_info!("kmalloc: Heap not initialized");
-        return ptr::null_mut();
-    }
-
     if size == 0 || size > MAX_ALLOC_SIZE {
         return ptr::null_mut();
     }
 
     let rounded_size = align_up_usize(size, 16);
-    let result = if let Some(idx) = size_class_index(rounded_size) {
+
+    // Per-CPU magazine fast path for slab-sized allocations.
+    // The magazine avoids the global KERNEL_HEAP lock for common sizes.
+    if let Some(class_idx) = size_class_index(rounded_size) {
+        if HEAP_CACHES_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && !KERNEL_HEAP.is_locked()
+        {
+            let _pin = IrqPreemptGuard::new();
+            let cpu = get_current_cpu();
+            // SAFETY: PreemptGuard held → CPU pinned.
+            let cache = unsafe { heap_cache(cpu) };
+            let mag = &mut cache.magazines[class_idx];
+
+            // Fast path: pop from magazine. No lock, no atomic.
+            let ptr = mag.pop();
+            if !ptr.is_null() {
+                MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                MAG_ALLOC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return ptr;
+            }
+
+            // Slow path: refill magazine from global slab, then pop.
+            magazine_refill(mag, class_idx);
+            let ptr = mag.pop();
+            if !ptr.is_null() {
+                MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                MAG_ALLOC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return ptr;
+            }
+        }
+    }
+
+    // Fallback: global lock (large allocs, or heap caches not yet enabled).
+    let mut heap = KERNEL_HEAP.lock();
+    if !heap.initialized {
+        return ptr::null_mut();
+    }
+
+    if let Some(idx) = size_class_index(rounded_size) {
         slab_alloc_from_cache(&mut heap, idx)
     } else {
         alloc_large(&mut heap, rounded_size)
-    };
-
-    result
+    }
 }
 
 pub fn kzalloc(size: usize) -> *mut c_void {
@@ -605,6 +804,41 @@ pub fn kfree(ptr_in: *mut c_void) {
         return;
     }
 
+    // Per-CPU magazine fast path: if this is a slab object and caches are
+    // enabled, push it to the per-CPU magazine without the global lock.
+    if HEAP_CACHES_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        let base = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB);
+        let heap_start = HEAP_START.load(core::sync::atomic::Ordering::Relaxed);
+        let heap_end = HEAP_END.load(core::sync::atomic::Ordering::Relaxed);
+
+        // Only access the slab header if the pointer is within the heap range
+        // and the heap lock isn't already held (avoids recursive locking in drain).
+        if base >= heap_start && base < heap_end && !KERNEL_HEAP.is_locked() {
+            let magic = unsafe { *(base as *const u32) };
+            if magic == SLAB_MAGIC {
+                let object_size = unsafe { *((base as *const u32).add(1)) } as usize;
+                if let Some(class_idx) = size_class_index(object_size) {
+                    let _pin = IrqPreemptGuard::new();
+                    let cpu = get_current_cpu();
+                    let cache = unsafe { heap_cache(cpu) };
+                    let mag = &mut cache.magazines[class_idx];
+                    if mag.push(ptr_in) {
+                        MAG_CACHED_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        MAG_FREE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    magazine_drain(mag, class_idx);
+                    if mag.push(ptr_in) {
+                        MAG_CACHED_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        MAG_FREE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: global lock path (large allocs, or magazine full).
     let mut heap = KERNEL_HEAP.lock();
     if !heap.initialized {
         return;
@@ -646,6 +880,10 @@ pub fn kfree(ptr_in: *mut c_void) {
 pub const HEAP_WARMUP_PAGES: u32 = 4;
 
 pub fn init_kernel_heap() -> c_int {
+    // Drain per-CPU magazines before reinitializing — prevents stale
+    // pointers from old slabs being handed out after the reset.
+    drain_all_heap_caches();
+
     let mut heap = KERNEL_HEAP.lock();
     heap.start_addr = KERNEL_HEAP_VBASE;
     heap.end_addr = KERNEL_HEAP_VEND;
@@ -704,7 +942,14 @@ pub fn get_heap_stats(stats: *mut HeapStats) {
     let heap = KERNEL_HEAP.lock();
     if !stats.is_null() {
         unsafe {
-            *stats = heap.stats;
+            let mut s = heap.stats;
+            // Magazine-served allocs/frees don't touch slab stats. Add them
+            // so callers see accurate totals.
+            let mag_allocs = MAG_ALLOC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            let mag_frees = MAG_FREE_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            s.allocation_count = s.allocation_count.saturating_add(mag_allocs);
+            s.free_count = s.free_count.saturating_add(mag_frees);
+            *stats = s;
         }
     }
 }

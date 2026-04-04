@@ -99,7 +99,11 @@ impl ShmMapping {
     }
 }
 
-/// A shared memory buffer with Wayland-style reference counting
+/// A shared memory buffer with Wayland-style reference counting.
+/// Hot-path fields (ref_count, released, format) are mirrored in per-buffer
+/// statics for lock-free access — the copies here are kept for cold-path
+/// use (cleanup, debug dumps).
+#[allow(dead_code)]
 struct SharedBuffer {
     /// Physical address of the buffer (page-aligned)
     phys_addr: PhysAddr,
@@ -252,6 +256,98 @@ impl SharedBufferRegistry {
 
 static REGISTRY: IrqRwLock<SharedBufferRegistry> = IrqRwLock::new(SharedBufferRegistry::new());
 
+// ---------------------------------------------------------------------------
+// Per-buffer hot-path state — lock-free reads, per-buffer locks for writes.
+//
+// The compositor's inner loop calls acquire/release/poll/get_phys_addr
+// per surface per frame. These must not contend on the global REGISTRY lock.
+//
+// BUFFER_TOKENS[i]: token for slot i (0 = unused). Lock-free lookup.
+// BUFFER_PHYS[i]:   physical address. Set once on create, read lock-free.
+// BUFFER_SIZE[i]:   buffer size. Set once on create, read lock-free.
+// BUFFER_FORMAT[i]: pixel format. Set once on create, read lock-free.
+// BUFFER_HOT[i]:    ref_count + released. Per-buffer IrqMutex.
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::AtomicU64;
+
+static BUFFER_TOKENS: [AtomicU32; MAX_SHARED_BUFFERS] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; MAX_SHARED_BUFFERS]
+};
+static BUFFER_PHYS: [AtomicU64; MAX_SHARED_BUFFERS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_SHARED_BUFFERS]
+};
+static BUFFER_SIZE: [AtomicU32; MAX_SHARED_BUFFERS] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; MAX_SHARED_BUFFERS]
+};
+static BUFFER_FORMAT: [AtomicU32; MAX_SHARED_BUFFERS] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; MAX_SHARED_BUFFERS]
+};
+
+struct BufferHotState {
+    ref_count: u32,
+    released: bool,
+}
+
+impl BufferHotState {
+    const fn new() -> Self {
+        Self {
+            ref_count: 0,
+            released: false,
+        }
+    }
+}
+
+use slopos_sync::IrqMutex;
+
+static BUFFER_HOT: [IrqMutex<BufferHotState>; MAX_SHARED_BUFFERS] =
+    [const { IrqMutex::new(BufferHotState::new()) }; MAX_SHARED_BUFFERS];
+
+/// Lock-free token → slot lookup. Returns None if token not found.
+fn find_slot_fast(token: u32) -> Option<usize> {
+    if token == 0 {
+        return None;
+    }
+    for i in 0..MAX_SHARED_BUFFERS {
+        if BUFFER_TOKENS[i].load(Ordering::Relaxed) == token {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Publish hot-path state for a newly created buffer.
+fn publish_buffer_hot(slot: usize, token: u32, phys: PhysAddr, size: usize, format: PixelFormat) {
+    BUFFER_PHYS[slot].store(phys.as_u64(), Ordering::Relaxed);
+    BUFFER_SIZE[slot].store(size as u32, Ordering::Relaxed);
+    BUFFER_FORMAT[slot].store(format as u32, Ordering::Relaxed);
+    {
+        let mut hot = BUFFER_HOT[slot].lock();
+        hot.ref_count = 1;
+        hot.released = false;
+    }
+    // Token must be published LAST — it's the signal that the slot is live.
+    BUFFER_TOKENS[slot].store(token, Ordering::Release);
+}
+
+/// Unpublish hot-path state for a destroyed buffer.
+fn unpublish_buffer_hot(slot: usize) {
+    // Clear token FIRST — prevents new lookups from finding this slot.
+    BUFFER_TOKENS[slot].store(0, Ordering::Release);
+    BUFFER_PHYS[slot].store(0, Ordering::Relaxed);
+    BUFFER_SIZE[slot].store(0, Ordering::Relaxed);
+    BUFFER_FORMAT[slot].store(0, Ordering::Relaxed);
+    {
+        let mut hot = BUFFER_HOT[slot].lock();
+        hot.ref_count = 0;
+        hot.released = false;
+    }
+}
+
 /// Create a new shared memory buffer.
 ///
 /// # Arguments
@@ -308,6 +404,9 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
         released: false,
         format: DEFAULT_PIXEL_FORMAT,
     };
+
+    // Publish to per-buffer hot state for lock-free access.
+    publish_buffer_hot(slot, token, phys_addr, aligned_size, DEFAULT_PIXEL_FORMAT);
 
     token
 }
@@ -489,6 +588,7 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
         for i in 0..pages {
             free_page_frame(phys_addr.offset((i as u64) * PAGE_SIZE_4KB));
         }
+        unpublish_buffer_hot(buf_idx);
         registry.buffers[buf_idx] = SharedBuffer::empty();
         klog_debug!("shm_unmap: finalized deferred destroy token={}", token);
     }
@@ -585,6 +685,7 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
             token,
             process_id
         );
+        unpublish_buffer_hot(slot);
         registry.buffers[slot] = SharedBuffer::empty();
     } else {
         registry.buffers[slot].owner_task = 0;
@@ -683,19 +784,22 @@ pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, PhysAddr) {
 
 /// Get the physical address of a shared buffer by token.
 /// Used by FB_FLIP syscall.
+/// Get the physical address of a buffer.
+///
+/// **Completely lock-free** — reads from atomics published during create.
 pub fn shm_get_phys_addr(token: u32) -> PhysAddr {
-    let registry = REGISTRY.read();
-    match registry.find_by_token(token) {
-        Some(slot) => registry.buffers[slot].phys_addr,
+    match find_slot_fast(token) {
+        Some(slot) => PhysAddr::new(BUFFER_PHYS[slot].load(Ordering::Relaxed)),
         None => PhysAddr::NULL,
     }
 }
 
 /// Get the size of a shared buffer by token.
+///
+/// **Completely lock-free** — reads from atomics published during create.
 pub fn shm_get_size(token: u32) -> usize {
-    let registry = REGISTRY.read();
-    match registry.find_by_token(token) {
-        Some(slot) => registry.buffers[slot].size,
+    match find_slot_fast(token) {
+        Some(slot) => BUFFER_SIZE[slot].load(Ordering::Relaxed) as usize,
         None => 0,
     }
 }
@@ -747,6 +851,7 @@ pub fn shm_cleanup_task(task_id: u32) {
                 free_page_frame(phys_addr.offset((j as u64) * PAGE_SIZE_4KB));
             }
             klog_debug!("shm_cleanup_task: destroyed buffer token={}", buffer.token);
+            unpublish_buffer_hot(i);
             *buffer = SharedBuffer::empty();
         } else {
             buffer.owner_task = 0;
@@ -780,80 +885,56 @@ pub fn shm_cleanup_task(task_id: u32) {
 ///
 /// # Returns
 /// 0 on success, -1 on failure
+/// Acquire a buffer reference (compositor use only).
+///
+/// **Per-buffer lock only — no global REGISTRY lock.**
 pub fn shm_acquire(token: u32) -> c_int {
-    let mut registry = REGISTRY.write();
-
-    let slot = match registry.find_by_token(token) {
+    let slot = match find_slot_fast(token) {
         Some(s) => s,
         None => return -1,
     };
 
-    let buffer = &mut registry.buffers[slot];
-    buffer.ref_count = buffer.ref_count.saturating_add(1);
-    buffer.released = false;
+    let mut hot = BUFFER_HOT[slot].lock();
+    hot.ref_count = hot.ref_count.saturating_add(1);
+    hot.released = false;
 
-    klog_debug!(
-        "shm_acquire: token={} ref_count={}",
-        token,
-        buffer.ref_count
-    );
-
+    klog_debug!("shm_acquire: token={} ref_count={}", token, hot.ref_count);
     0
 }
 
 /// Release a buffer reference (compositor use only).
 ///
-/// Called by the compositor when it finishes using a client's buffer.
-/// Decrements the reference count and signals the client that the buffer
-/// can be reused by setting the released flag.
-///
-/// # Arguments
-/// * `token` - Buffer token
-///
-/// # Returns
-/// 0 on success, -1 on failure
+/// **Per-buffer lock only — no global REGISTRY lock.**
 pub fn shm_release(token: u32) -> c_int {
-    let mut registry = REGISTRY.write();
-
-    let slot = match registry.find_by_token(token) {
+    let slot = match find_slot_fast(token) {
         Some(s) => s,
         None => return -1,
     };
 
-    let buffer = &mut registry.buffers[slot];
-    buffer.ref_count = buffer.ref_count.saturating_sub(1);
-    buffer.released = true;
+    let mut hot = BUFFER_HOT[slot].lock();
+    hot.ref_count = hot.ref_count.saturating_sub(1);
+    hot.released = true;
 
     klog_debug!(
         "shm_release: token={} ref_count={} released=true",
         token,
-        buffer.ref_count
+        hot.ref_count
     );
-
     0
 }
 
 /// Poll whether a buffer has been released by the compositor.
 ///
-/// Called by clients to check if they can safely reuse a buffer.
-/// After polling returns true, the released flag is cleared.
-///
-/// # Arguments
-/// * `token` - Buffer token
-///
-/// # Returns
-/// 1 if released (client can reuse), 0 if not released, -1 on error
+/// **Per-buffer lock only — no global REGISTRY lock.**
 pub fn shm_poll_released(token: u32) -> c_int {
-    let mut registry = REGISTRY.write();
-
-    let slot = match registry.find_by_token(token) {
+    let slot = match find_slot_fast(token) {
         Some(s) => s,
         None => return -1,
     };
 
-    let buffer = &mut registry.buffers[slot];
-    if buffer.released {
-        buffer.released = false; // Clear after polling
+    let mut hot = BUFFER_HOT[slot].lock();
+    if hot.released {
+        hot.released = false;
         1
     } else {
         0
@@ -862,18 +943,15 @@ pub fn shm_poll_released(token: u32) -> c_int {
 
 /// Get the current reference count for a buffer.
 ///
-/// # Arguments
-/// * `token` - Buffer token
-///
-/// # Returns
-/// Reference count, or 0 if token is invalid
+/// **Per-buffer lock only — no global REGISTRY lock.**
 pub fn shm_get_ref_count(token: u32) -> u32 {
-    let registry = REGISTRY.read();
+    let slot = match find_slot_fast(token) {
+        Some(s) => s,
+        None => return 0,
+    };
 
-    match registry.find_by_token(token) {
-        Some(slot) => registry.buffers[slot].ref_count,
-        None => 0,
-    }
+    let hot = BUFFER_HOT[slot].lock();
+    hot.ref_count
 }
 
 // =============================================================================
@@ -952,6 +1030,8 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
         format,
     };
 
+    publish_buffer_hot(slot, token, phys_addr, aligned_size, format);
+
     klog_debug!(
         "shm_create_with_format: created buffer token={} size={} format={:?} for task={}",
         token,
@@ -970,11 +1050,12 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
 ///
 /// # Returns
 /// Pixel format as u32 (PixelFormat enum value), or u32::MAX on error
+/// Get the pixel format of a buffer.
+///
+/// **Completely lock-free** — reads from atomics published during create.
 pub fn shm_get_format(token: u32) -> u32 {
-    let registry = REGISTRY.read();
-
-    match registry.find_by_token(token) {
-        Some(slot) => registry.buffers[slot].format as u32,
+    match find_slot_fast(token) {
+        Some(slot) => BUFFER_FORMAT[slot].load(Ordering::Relaxed),
         None => u32::MAX,
     }
 }

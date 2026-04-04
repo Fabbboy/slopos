@@ -1,4 +1,3 @@
-use slopos_abi::net::MAX_SOCKETS;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -142,20 +141,23 @@ pub fn test_udp_demux_clear() -> TestResult {
 pub fn test_udp_demux_overflow() -> TestResult {
     reset();
 
+    // Fill a single hash bucket by registering entries on the same port
+    // with different IP addresses (all hash to the same bucket).
+    // Each bucket holds 8 entries; the 9th should overflow.
     let mut demux = UDP_DEMUX.lock();
-    for idx in 0..MAX_SOCKETS {
-        let port = 10_000u16 + idx as u16;
-        let rc = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(port), idx as u32, false);
+    for idx in 0..8u32 {
+        let ip = Ipv4Addr([10, 0, idx as u8, 1]);
+        let rc = demux.register(ip, Port(5555), idx, false);
         if rc.is_err() {
-            return fail!("register failed before table became full");
+            return fail!("register failed before bucket became full");
         }
     }
 
-    let overflow = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(20_000), 999, false);
+    let overflow = demux.register(Ipv4Addr([10, 0, 8, 1]), Port(5555), 999, false);
     assert_eq_test!(
         overflow,
         Err(NetError::NoBufferSpace),
-        "register fails when table is full"
+        "register fails when bucket is full"
     );
 
     pass!()

@@ -1,5 +1,5 @@
 use super::open_file_table::{
-    alloc_open_file_entry, get_open_file_mut, incref_open_file, open_file_kind, release_open_file,
+    alloc_open_file_entry, get_open_file_mut, incref_open_file, release_open_file,
 };
 use super::*;
 
@@ -191,55 +191,33 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
 }
 
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
-    let (open_file_idx, ops, handle, flags, offset, seekable) =
-        with_tables(|kernel, processes, open_files, _| {
-            let table = table_for_pid(kernel, processes, process_id)?;
-            if !table.in_use {
-                return None;
-            }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let fd_entry = unsafe { get_fd_entry(&mut *table_ptr, fd) }?;
-            let open_file_idx = fd_entry.open_file_idx;
-            let open_file = get_open_file_mut(open_files, open_file_idx)?;
-            if !open_file.status_flags.contains(OpenMode::READ) {
-                drop(guard);
-                return None;
-            }
-            let ops = open_file.ops?;
-            let snapshot = (
-                open_file_idx,
-                ops,
-                open_file.handle,
-                open_file.status_flags,
-                open_file.position,
-                ops.seekable(),
-            );
-            drop(guard);
-            Some(snapshot)
-        })
-        .unwrap_or((
-            u16::MAX,
-            &VFS_FILE_OPS as &dyn FileOps,
-            0,
-            OpenMode::EMPTY,
-            0,
-            false,
-        ));
+    // Per-process lock fast path — no global FILEIO_STATE lock.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
+            return Errno::EBADF.raw() as _;
+        };
+        match snapshot_fd(table, fd) {
+            Some(s) if s.status_flags.contains(OpenMode::READ) => s,
+            _ => return Errno::EBADF.raw() as _,
+        }
+    };
 
-    if open_file_idx == u16::MAX {
+    let Some(ops) = snap.ops else {
         return Errno::EBADF.raw() as _;
-    }
+    };
+
     if buf.len() == 0 {
         return 0;
     }
 
-    let used_offset = if seekable { offset } else { 0 };
-    let rc = ops.read(handle, buf, used_offset, flags.bits());
+    let seekable = ops.seekable();
+    let used_offset = if seekable { snap.position } else { 0 };
+    let rc = ops.read(snap.handle, buf, used_offset, snap.status_flags.bits());
     if rc > 0 && seekable {
+        // Update position — take global lock briefly for open_files mutation.
         with_tables(|_, _, open_files, _| {
-            if let Some(open_file) = get_open_file_mut(open_files, open_file_idx)
-                && open_file.seekable_position_matches(ops, handle)
+            if let Some(open_file) = get_open_file_mut(open_files, snap.open_file_idx)
+                && open_file.seekable_position_matches(ops, snap.handle)
             {
                 open_file.position = open_file.position.saturating_add(rc as u64);
             }
@@ -249,55 +227,32 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
-    let (open_file_idx, ops, handle, flags, offset, seekable) =
-        with_tables(|kernel, processes, open_files, _| {
-            let table = table_for_pid(kernel, processes, process_id)?;
-            if !table.in_use {
-                return None;
-            }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let fd_entry = unsafe { get_fd_entry(&mut *table_ptr, fd) }?;
-            let open_file_idx = fd_entry.open_file_idx;
-            let open_file = get_open_file_mut(open_files, open_file_idx)?;
-            if !open_file.status_flags.contains(OpenMode::WRITE) {
-                drop(guard);
-                return None;
-            }
-            let ops = open_file.ops?;
-            let snapshot = (
-                open_file_idx,
-                ops,
-                open_file.handle,
-                open_file.status_flags,
-                open_file.position,
-                ops.seekable(),
-            );
-            drop(guard);
-            Some(snapshot)
-        })
-        .unwrap_or((
-            u16::MAX,
-            &VFS_FILE_OPS as &dyn FileOps,
-            0,
-            OpenMode::EMPTY,
-            0,
-            false,
-        ));
+    // Per-process lock fast path — no global FILEIO_STATE lock.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
+            return Errno::EBADF.raw() as _;
+        };
+        match snapshot_fd(table, fd) {
+            Some(s) if s.status_flags.contains(OpenMode::WRITE) => s,
+            _ => return Errno::EBADF.raw() as _,
+        }
+    };
 
-    if open_file_idx == u16::MAX {
+    let Some(ops) = snap.ops else {
         return Errno::EBADF.raw() as _;
-    }
+    };
+
     if buf.len() == 0 {
         return 0;
     }
 
-    let used_offset = if seekable { offset } else { 0 };
-    let rc = ops.write(handle, buf, used_offset, flags.bits());
+    let seekable = ops.seekable();
+    let used_offset = if seekable { snap.position } else { 0 };
+    let rc = ops.write(snap.handle, buf, used_offset, snap.status_flags.bits());
     if rc > 0 && seekable {
         with_tables(|_, _, open_files, _| {
-            if let Some(open_file) = get_open_file_mut(open_files, open_file_idx)
-                && open_file.seekable_position_matches(ops, handle)
+            if let Some(open_file) = get_open_file_mut(open_files, snap.open_file_idx)
+                && open_file.seekable_position_matches(ops, snap.handle)
             {
                 open_file.position = open_file.position.saturating_add(rc as u64);
             }
@@ -340,78 +295,65 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
 }
 
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+    // Per-process lock fast path — snapshot the FD without the global lock.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
             return Errno::ESRCH.raw() as i64;
         };
-        if !table.in_use {
-            return Errno::EBADF.raw() as i64;
+        match snapshot_fd(table, fd) {
+            Some(s) => s,
+            None => return Errno::EBADF.raw() as i64,
         }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
-            drop(guard);
-            return Errno::EBADF.raw() as i64;
-        };
-        let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
-            drop(guard);
-            return Errno::EBADF.raw() as i64;
-        };
-        let Some(ops) = open_file.ops else {
-            drop(guard);
-            return Errno::EBADF.raw() as i64;
-        };
-        if !ops.seekable() {
-            drop(guard);
-            return Errno::ESPIPE.raw() as i64;
+    };
+
+    let Some(ops) = snap.ops else {
+        return Errno::EBADF.raw() as i64;
+    };
+    if !ops.seekable() {
+        return Errno::ESPIPE.raw() as i64;
+    }
+
+    let size = match ops.size(snap.handle) {
+        Some(v) => v as i64,
+        None => return Errno::EBADF.raw() as i64,
+    };
+
+    let new_pos = match whence as u64 {
+        SEEK_SET => offset,
+        SEEK_CUR => (snap.position as i64).saturating_add(offset),
+        SEEK_END => size.saturating_add(offset),
+        _ => return Errno::EINVAL.raw() as i64,
+    };
+    if new_pos < 0 {
+        return Errno::EINVAL.raw() as i64;
+    }
+
+    // Write back the new position — brief global lock for open_files mutation.
+    with_tables(|_, _, open_files, _| {
+        if let Some(open_file) = get_open_file_mut(open_files, snap.open_file_idx)
+            && open_file.seekable_position_matches(ops, snap.handle)
+        {
+            open_file.position = new_pos as u64;
         }
-
-        let size = match ops.size(open_file.handle) {
-            Some(v) => v as i64,
-            None => {
-                drop(guard);
-                return Errno::EBADF.raw() as i64;
-            }
-        };
-
-        let new_pos = match whence as u64 {
-            SEEK_SET => offset,
-            SEEK_CUR => (open_file.position as i64).saturating_add(offset),
-            SEEK_END => size.saturating_add(offset),
-            _ => {
-                drop(guard);
-                return Errno::EINVAL.raw() as i64;
-            }
-        };
-        if new_pos < 0 {
-            drop(guard);
-            return Errno::EINVAL.raw() as i64;
-        }
-
-        open_file.position = new_pos as u64;
-        drop(guard);
-        new_pos
-    })
+    });
+    new_pos
 }
 
 pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+    // Per-process lock fast path — pure read, no global lock needed.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
             return usize::MAX;
         };
-        if !table.in_use {
-            return usize::MAX;
+        match snapshot_fd(table, fd) {
+            Some(s) => s,
+            None => return usize::MAX,
         }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let size = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
-            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
-            .and_then(|open_file| open_file.ops.and_then(|ops| ops.size(open_file.handle)))
-            .map(|v| v as usize)
-            .unwrap_or(usize::MAX);
-        drop(guard);
-        size
-    })
+    };
+    snap.ops
+        .and_then(|ops| ops.size(snap.handle))
+        .map(|v| v as usize)
+        .unwrap_or(usize::MAX)
 }
 
 pub fn file_exists_path(path: *const c_char) -> c_int {
@@ -505,44 +447,33 @@ pub fn file_list_path(
 }
 
 pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+    // Per-process lock fast path — pure read, no global lock needed.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
             return false;
         };
-        if !table.in_use {
-            return false;
+        match snapshot_fd(table, fd) {
+            Some(s) => s,
+            None => return false,
         }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let is_console = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
-            .and_then(|fd_entry| open_file_kind(open_files, fd_entry.open_file_idx))
-            .map(kind_is_tty)
-            .unwrap_or(false);
-        drop(guard);
-        is_console
-    })
+    };
+    snap.ops.map(|ops| kind_is_tty(ops.kind())).unwrap_or(false)
 }
 
 pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
-    with_tables(|kernel, processes, open_files, _| {
-        let table = table_for_pid(kernel, processes, process_id)?;
-        if !table.in_use {
+    // Per-process lock fast path — pure read, no global lock needed.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
             return None;
-        }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let out = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
-            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
-            .and_then(|open_file| {
-                if open_file.ops?.kind() == FileKind::Tty {
-                    Some(TtyIndex(open_file.handle as u8))
-                } else {
-                    None
-                }
-            });
-        drop(guard);
-        out
-    })
+        };
+        snapshot_fd(table, fd)?
+    };
+    let ops = snap.ops?;
+    if ops.kind() == FileKind::Tty {
+        Some(TtyIndex(snap.handle as u8))
+    } else {
+        None
+    }
 }
 
 /// Open a file descriptor for a TTY device.
@@ -633,8 +564,7 @@ pub fn file_pipe_create(
         };
 
         {
-            let mut pipe_state = pipe::PIPE_STATE.lock();
-            let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
+            let Some(mut slot) = pipe::lock_slot(pipe_id) else {
                 release_open_file(open_files, read_open_idx);
                 release_open_file(open_files, write_open_idx);
                 reset_fd_entry(&mut table.descriptors[read_idx]);
@@ -663,10 +593,7 @@ pub fn file_pipe_create(
     });
 
     if rc != 0 {
-        let mut pipe_state = pipe::PIPE_STATE.lock();
-        if let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) {
-            *slot = pipe::PipeSlot::new();
-        }
+        pipe::free_slot(pipe_id);
     }
 
     rc
@@ -718,23 +645,16 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
         return Errno::EBADF.raw() as _;
     }
     if old_fd == new_fd {
-        return with_tables(|kernel, processes, _, _| {
-            let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return Errno::ESRCH.raw() as _;
-            };
-            if !table.in_use {
-                return Errno::EBADF.raw() as _;
-            }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let valid = unsafe { get_fd_entry(&mut *table_ptr, old_fd) }.is_some();
-            drop(guard);
-            if valid {
-                new_fd
-            } else {
-                Errno::EBADF.raw() as _
-            }
-        });
+        // Per-process lock fast path — pure validity check, no global lock.
+        let Some((_guard, table)) = lock_process_table(process_id) else {
+            return Errno::ESRCH.raw() as _;
+        };
+        let valid = snapshot_fd(table, old_fd).is_some();
+        return if valid {
+            new_fd
+        } else {
+            Errno::EBADF.raw() as _
+        };
     }
 
     with_tables(|kernel, processes, open_files, _| {
@@ -814,56 +734,50 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
 pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
     match cmd {
         F_DUPFD => file_dup_fd_min(process_id, fd, arg as usize) as i64,
-        F_GETFD => with_tables(|kernel, processes, _, _| {
-            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+        F_GETFD => {
+            // Per-process lock fast path — read cloexec directly from FD entry.
+            let Some((_guard, table)) = lock_process_table(process_id) else {
                 return Errno::ESRCH.raw() as i64;
             };
-            if !table.in_use {
+            let table_ref = unsafe { &*table };
+            if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
                 return Errno::EBADF.raw() as i64;
             }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let Some(desc) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
-                drop(guard);
+            let entry = &table_ref.descriptors[fd as usize];
+            if !entry.valid {
                 return Errno::EBADF.raw() as i64;
-            };
-            let val = if desc.cloexec { FD_CLOEXEC as i64 } else { 0 };
-            drop(guard);
-            val
-        }),
-        F_SETFD => with_tables(|kernel, processes, _, _| {
-            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            }
+            if entry.cloexec { FD_CLOEXEC as i64 } else { 0 }
+        }
+        F_SETFD => {
+            // Per-process lock fast path — mutates only the FD entry (no open_files).
+            let Some((_guard, table)) = lock_process_table(process_id) else {
                 return Errno::ESRCH.raw() as i64;
             };
-            if !table.in_use {
+            let table_ref = unsafe { &mut *table };
+            if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
                 return Errno::EBADF.raw() as i64;
             }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let Some(desc) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
-                drop(guard);
+            let entry = &mut table_ref.descriptors[fd as usize];
+            if !entry.valid {
                 return Errno::EBADF.raw() as i64;
-            };
-            desc.cloexec = (arg & FD_CLOEXEC) != 0;
-            drop(guard);
+            }
+            entry.cloexec = (arg & FD_CLOEXEC) != 0;
             0
-        }),
-        F_GETFL => with_tables(|kernel, processes, open_files, _| {
-            let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return Errno::ESRCH.raw() as i64;
+        }
+        F_GETFL => {
+            // Per-process lock fast path — read status flags from snapshot.
+            let snap = {
+                let Some((_guard, table)) = lock_process_table(process_id) else {
+                    return Errno::ESRCH.raw() as i64;
+                };
+                match snapshot_fd(table, fd) {
+                    Some(s) => s,
+                    None => return Errno::EBADF.raw() as i64,
+                }
             };
-            if !table.in_use {
-                return Errno::EBADF.raw() as i64;
-            }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let val = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
-                .and_then(|f| get_open_file_mut(open_files, f.open_file_idx))
-                .map(|o| openmode_to_posix_bits(o.status_flags) as i64)
-                .unwrap_or(Errno::EBADF.raw() as i64);
-            drop(guard);
-            val
-        }),
+            openmode_to_posix_bits(snap.status_flags) as i64
+        }
         F_SETFL => with_tables(|kernel, processes, open_files, _| {
             let Some(table) = table_for_pid(kernel, processes, process_id) else {
                 return Errno::ESRCH.raw() as i64;
@@ -908,25 +822,20 @@ pub fn file_fstat_fd(
     fd: c_int,
     out_stat: &mut slopos_abi::fs::UserFsStat,
 ) -> c_int {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+    // Per-process lock fast path — pure read, no global lock needed.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
             return Errno::ESRCH.raw() as _;
         };
-        if !table.in_use {
-            return Errno::EBADF.raw() as _;
+        match snapshot_fd(table, fd) {
+            Some(s) => s,
+            None => return Errno::EBADF.raw() as _,
         }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let rc = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
-            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
-            .and_then(|open_file| {
-                let ops = open_file.ops?;
-                Some(ops.stat(open_file.handle, out_stat))
-            })
-            .unwrap_or(Errno::EBADF.raw() as _);
-        drop(guard);
-        rc
-    })
+    };
+    match snap.ops {
+        Some(ops) => ops.stat(snap.handle, out_stat),
+        None => Errno::EBADF.raw() as _,
+    }
 }
 
 pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
@@ -957,17 +866,12 @@ pub fn fileio_open_fd_with_ops(process_id: u32, ops: &'static dyn FileOps, handl
 }
 
 pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind, usize)> {
-    with_tables(|kernel, processes, open_files, _| {
-        let table = table_for_pid(kernel, processes, process_id)?;
-        if !table.in_use {
+    // Per-process lock fast path — pure read, no global lock needed.
+    let snap = {
+        let Some((_guard, table)) = lock_process_table(process_id) else {
             return None;
-        }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let out = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
-            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
-            .and_then(|open_file| Some((open_file.ops?.kind(), open_file.handle)));
-        drop(guard);
-        out
-    })
+        };
+        snapshot_fd(table, fd)?
+    };
+    Some((snap.ops?.kind(), snap.handle))
 }

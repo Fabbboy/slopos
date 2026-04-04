@@ -1,9 +1,25 @@
-use slopos_abi::net::MAX_SOCKETS;
 use slopos_sync::IrqMutex;
 use slopos_utils::klog_debug;
 
 use super::packetbuf::PacketBuf;
 use super::types::{Ipv4Addr, NetError, Port};
+
+// =============================================================================
+// Hash-bucket UDP demux table
+// =============================================================================
+
+/// Number of hash buckets. Must be a power of two.
+const UDP_DEMUX_BUCKETS: usize = 16;
+
+/// Maximum entries per bucket.
+const UDP_ENTRIES_PER_BUCKET: usize = 8;
+
+/// Hash a local port to a bucket index.
+#[inline]
+fn udp_demux_hash(port: Port) -> usize {
+    let h = (port.0 as u64).wrapping_mul(0x9E3779B97F4A7C15u64);
+    (h as usize >> 48) & (UDP_DEMUX_BUCKETS - 1)
+}
 
 #[derive(Clone, Copy)]
 struct UdpDemuxEntry {
@@ -12,18 +28,19 @@ struct UdpDemuxEntry {
     sock_idx: u32,
 }
 
-pub struct UdpDemuxTable {
-    entries: [Option<UdpDemuxEntry>; MAX_SOCKETS],
+/// A single hash bucket in the UDP demux table.
+pub struct UdpDemuxBucket {
+    entries: [Option<UdpDemuxEntry>; UDP_ENTRIES_PER_BUCKET],
 }
 
-impl UdpDemuxTable {
-    pub const fn new() -> Self {
+impl UdpDemuxBucket {
+    const fn new() -> Self {
         Self {
-            entries: [None; MAX_SOCKETS],
+            entries: [None; UDP_ENTRIES_PER_BUCKET],
         }
     }
 
-    pub fn register(
+    fn register(
         &mut self,
         local_ip: Ipv4Addr,
         local_port: Port,
@@ -57,7 +74,7 @@ impl UdpDemuxTable {
         Err(NetError::NoBufferSpace)
     }
 
-    pub fn unregister(&mut self, local_ip: Ipv4Addr, local_port: Port, sock_idx: u32) {
+    fn unregister(&mut self, local_ip: Ipv4Addr, local_port: Port, sock_idx: u32) {
         for slot in &mut self.entries {
             if let Some(entry) = slot
                 && entry.local_ip == local_ip
@@ -69,27 +86,84 @@ impl UdpDemuxTable {
         }
     }
 
-    pub fn lookup(&self, dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
+    fn lookup_exact(&self, dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
         for entry in self.entries.iter().flatten() {
             if entry.local_ip == dst_ip && entry.local_port == dst_port {
                 return Some(entry.sock_idx);
             }
         }
+        None
+    }
 
+    fn lookup_wildcard(&self, dst_port: Port) -> Option<u32> {
         for entry in self.entries.iter().flatten() {
             if entry.local_ip == Ipv4Addr::UNSPECIFIED && entry.local_port == dst_port {
                 return Some(entry.sock_idx);
             }
         }
-
         None
     }
 
-    pub fn clear(&mut self) {
-        self.entries = [None; MAX_SOCKETS];
+    fn clear(&mut self) {
+        self.entries = [None; UDP_ENTRIES_PER_BUCKET];
     }
 }
 
+/// Shim that provides the same public API as the old monolithic `UdpDemuxTable`
+/// but delegates to the per-bucket statics. This lets existing test code that
+/// calls `UDP_DEMUX.lock().register(...)` keep compiling.
+pub struct UdpDemuxTable;
+
+impl UdpDemuxTable {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn register(
+        &mut self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        sock_idx: u32,
+        reuse_addr: bool,
+    ) -> Result<(), NetError> {
+        let idx = udp_demux_hash(local_port);
+        UDP_DEMUX_BUCKETS_TABLE[idx]
+            .lock()
+            .register(local_ip, local_port, sock_idx, reuse_addr)
+    }
+
+    pub fn unregister(&mut self, local_ip: Ipv4Addr, local_port: Port, sock_idx: u32) {
+        let idx = udp_demux_hash(local_port);
+        UDP_DEMUX_BUCKETS_TABLE[idx]
+            .lock()
+            .unregister(local_ip, local_port, sock_idx);
+    }
+
+    pub fn lookup(&self, dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
+        let idx = udp_demux_hash(dst_port);
+        let bucket = UDP_DEMUX_BUCKETS_TABLE[idx].lock();
+        // Exact match first, then wildcard fallback.
+        if let Some(sock) = bucket.lookup_exact(dst_ip, dst_port) {
+            return Some(sock);
+        }
+        bucket.lookup_wildcard(dst_port)
+    }
+
+    pub fn clear(&mut self) {
+        for bucket_mutex in UDP_DEMUX_BUCKETS_TABLE.iter() {
+            bucket_mutex.lock().clear();
+        }
+    }
+}
+
+/// Per-bucket locks for the UDP demux table.
+static UDP_DEMUX_BUCKETS_TABLE: [IrqMutex<UdpDemuxBucket>; UDP_DEMUX_BUCKETS] = {
+    const BUCKET: IrqMutex<UdpDemuxBucket> = IrqMutex::new(UdpDemuxBucket::new());
+    [BUCKET; UDP_DEMUX_BUCKETS]
+};
+
+/// Compatibility shim: existing code locks this to call register/unregister/lookup.
+/// The actual per-bucket locking happens inside the method implementations.
 pub static UDP_DEMUX: IrqMutex<UdpDemuxTable> = IrqMutex::new(UdpDemuxTable::new());
 
 pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {

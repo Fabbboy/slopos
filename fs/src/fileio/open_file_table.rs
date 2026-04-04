@@ -77,6 +77,7 @@ pub(super) fn release_open_file(
     slot.valid = false;
 }
 
+#[allow(dead_code)]
 pub(super) fn open_file_kind(
     open_files: &mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
     open_file_idx: u16,

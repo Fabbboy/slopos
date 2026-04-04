@@ -32,8 +32,7 @@ use slopos_sync::IrqMutex;
 use slopos_utils::klog_debug;
 
 use crate::tcp::{
-    self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, MAX_CONNECTIONS, TCP_FLAG_ACK, TCP_FLAG_SYN,
-    TcpOutSegment, TcpTuple,
+    self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpOutSegment, TcpTuple,
 };
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 use crate::types::{Ipv4Addr, Port, SockAddr};
@@ -555,6 +554,26 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
 // TCP Demux Table
 // =============================================================================
 
+// =============================================================================
+// Hash-bucket TCP demux table
+// =============================================================================
+
+/// Number of hash buckets for the TCP demux table. Must be a power of two.
+const TCP_DEMUX_BUCKETS: usize = 32;
+
+/// Maximum established entries per bucket.
+const TCP_EST_PER_BUCKET: usize = 4;
+
+/// Maximum listener entries per bucket.
+const TCP_LIS_PER_BUCKET: usize = 4;
+
+/// Hash a local port to a TCP demux bucket index.
+#[inline]
+fn tcp_demux_hash(port: Port) -> usize {
+    let h = (port.0 as u64).wrapping_mul(0x9E3779B97F4A7C15u64);
+    (h as usize >> 48) & (TCP_DEMUX_BUCKETS - 1)
+}
+
 /// Entry in the established-connection demux table.
 ///
 /// Maps a full four-tuple (local_ip, local_port, remote_ip, remote_port) to a
@@ -578,29 +597,21 @@ struct TcpListenerEntry {
     sock_idx: u32,
 }
 
-/// TCP demux table for fast connection and listener lookup.
-///
-/// Two separate tables:
-/// - **Established**: 4-tuple → connection index (used for data segments)
-/// - **Listener**: 2-tuple → socket index (used for SYN on listening sockets)
-///
-/// Modeled after [`UdpDemuxTable`](super::udp::UdpDemuxTable) but with separate
-/// established and listener lookup paths per TCP semantics.
-pub struct TcpDemuxTable {
-    established: [Option<TcpEstablishedEntry>; MAX_CONNECTIONS],
-    listeners: [Option<TcpListenerEntry>; MAX_CONNECTIONS],
+/// A single hash bucket in the TCP demux table.
+struct TcpDemuxBucket {
+    established: [Option<TcpEstablishedEntry>; TCP_EST_PER_BUCKET],
+    listeners: [Option<TcpListenerEntry>; TCP_LIS_PER_BUCKET],
 }
 
-impl TcpDemuxTable {
-    pub const fn new() -> Self {
+impl TcpDemuxBucket {
+    const fn new() -> Self {
         Self {
-            established: [None; MAX_CONNECTIONS],
-            listeners: [None; MAX_CONNECTIONS],
+            established: [None; TCP_EST_PER_BUCKET],
+            listeners: [None; TCP_LIS_PER_BUCKET],
         }
     }
 
-    /// Register an established connection (4-tuple → conn_id).
-    pub fn register_established(
+    fn register_established(
         &mut self,
         local_ip: Ipv4Addr,
         local_port: Port,
@@ -608,7 +619,6 @@ impl TcpDemuxTable {
         remote_port: Port,
         conn_id: u32,
     ) -> Result<(), super::types::NetError> {
-        // Check for duplicate.
         for slot in &self.established {
             if let Some(entry) = slot
                 && entry.local_ip == local_ip
@@ -636,26 +646,43 @@ impl TcpDemuxTable {
         Err(super::types::NetError::NoBufferSpace)
     }
 
-    /// Unregister an established connection by conn_id.
-    pub fn unregister_established(&mut self, conn_id: u32) {
+    fn unregister_established_by_id(&mut self, conn_id: u32) -> bool {
         for slot in &mut self.established {
             if let Some(entry) = slot
                 && entry.conn_id == conn_id
             {
                 *slot = None;
-                return;
+                return true;
             }
         }
+        false
     }
 
-    /// Register a listener (2-tuple → sock_idx).
-    pub fn register_listener(
+    fn lookup_established(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        remote_ip: Ipv4Addr,
+        remote_port: Port,
+    ) -> Option<u32> {
+        for entry in self.established.iter().flatten() {
+            if entry.local_ip == local_ip
+                && entry.local_port == local_port
+                && entry.remote_ip == remote_ip
+                && entry.remote_port == remote_port
+            {
+                return Some(entry.conn_id);
+            }
+        }
+        None
+    }
+
+    fn register_listener(
         &mut self,
         local_ip: Ipv4Addr,
         local_port: Port,
         sock_idx: u32,
     ) -> Result<(), super::types::NetError> {
-        // Check for duplicate.
         for slot in &self.listeners {
             if let Some(entry) = slot
                 && entry.local_ip == local_ip
@@ -679,13 +706,106 @@ impl TcpDemuxTable {
         Err(super::types::NetError::NoBufferSpace)
     }
 
-    /// Unregister a listener by sock_idx.
-    pub fn unregister_listener(&mut self, sock_idx: u32) {
+    fn unregister_listener_by_idx(&mut self, sock_idx: u32) -> bool {
         for slot in &mut self.listeners {
             if let Some(entry) = slot
                 && entry.sock_idx == sock_idx
             {
                 *slot = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn lookup_listener_exact(&self, local_ip: Ipv4Addr, local_port: Port) -> Option<u32> {
+        for entry in self.listeners.iter().flatten() {
+            if entry.local_ip == local_ip && entry.local_port == local_port {
+                return Some(entry.sock_idx);
+            }
+        }
+        None
+    }
+
+    fn lookup_listener_wildcard(&self, local_port: Port) -> Option<u32> {
+        for entry in self.listeners.iter().flatten() {
+            if entry.local_ip == Ipv4Addr::UNSPECIFIED && entry.local_port == local_port {
+                return Some(entry.sock_idx);
+            }
+        }
+        None
+    }
+
+    fn clear(&mut self) {
+        self.established = [None; TCP_EST_PER_BUCKET];
+        self.listeners = [None; TCP_LIS_PER_BUCKET];
+    }
+}
+
+/// Per-bucket locks for the TCP demux table.
+static TCP_DEMUX_BUCKETS_TABLE: [IrqMutex<TcpDemuxBucket>; TCP_DEMUX_BUCKETS] = {
+    const BUCKET: IrqMutex<TcpDemuxBucket> = IrqMutex::new(TcpDemuxBucket::new());
+    [BUCKET; TCP_DEMUX_BUCKETS]
+};
+
+/// TCP demux table shim that provides the same public API as the old
+/// monolithic table but delegates to per-bucket statics.
+pub struct TcpDemuxTable;
+
+impl TcpDemuxTable {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Register an established connection (4-tuple -> conn_id).
+    pub fn register_established(
+        &mut self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        remote_ip: Ipv4Addr,
+        remote_port: Port,
+        conn_id: u32,
+    ) -> Result<(), super::types::NetError> {
+        let idx = tcp_demux_hash(local_port);
+        TCP_DEMUX_BUCKETS_TABLE[idx].lock().register_established(
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port,
+            conn_id,
+        )
+    }
+
+    /// Unregister an established connection by conn_id.
+    ///
+    /// Must scan all buckets because conn_id does not encode the port.
+    pub fn unregister_established(&mut self, conn_id: u32) {
+        for bucket_mutex in TCP_DEMUX_BUCKETS_TABLE.iter() {
+            if bucket_mutex.lock().unregister_established_by_id(conn_id) {
+                return;
+            }
+        }
+    }
+
+    /// Register a listener (2-tuple -> sock_idx).
+    pub fn register_listener(
+        &mut self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        sock_idx: u32,
+    ) -> Result<(), super::types::NetError> {
+        let idx = tcp_demux_hash(local_port);
+        TCP_DEMUX_BUCKETS_TABLE[idx]
+            .lock()
+            .register_listener(local_ip, local_port, sock_idx)
+    }
+
+    /// Unregister a listener by sock_idx.
+    ///
+    /// Must scan all buckets because sock_idx does not encode the port.
+    pub fn unregister_listener(&mut self, sock_idx: u32) {
+        for bucket_mutex in TCP_DEMUX_BUCKETS_TABLE.iter() {
+            if bucket_mutex.lock().unregister_listener_by_idx(sock_idx) {
                 return;
             }
         }
@@ -699,45 +819,35 @@ impl TcpDemuxTable {
         remote_ip: Ipv4Addr,
         remote_port: Port,
     ) -> Option<u32> {
-        for entry in self.established.iter().flatten() {
-            if entry.local_ip == local_ip
-                && entry.local_port == local_port
-                && entry.remote_ip == remote_ip
-                && entry.remote_port == remote_port
-            {
-                return Some(entry.conn_id);
-            }
-        }
-        None
+        let idx = tcp_demux_hash(local_port);
+        TCP_DEMUX_BUCKETS_TABLE[idx].lock().lookup_established(
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port,
+        )
     }
 
     /// Look up a listener by 2-tuple (local_ip, local_port).
     ///
     /// Exact IP match first, then wildcard (UNSPECIFIED) fallback.
     pub fn lookup_listener(&self, local_ip: Ipv4Addr, local_port: Port) -> Option<u32> {
-        // Exact match first.
-        for entry in self.listeners.iter().flatten() {
-            if entry.local_ip == local_ip && entry.local_port == local_port {
-                return Some(entry.sock_idx);
-            }
+        let idx = tcp_demux_hash(local_port);
+        let bucket = TCP_DEMUX_BUCKETS_TABLE[idx].lock();
+        if let Some(sock) = bucket.lookup_listener_exact(local_ip, local_port) {
+            return Some(sock);
         }
-
-        // Wildcard (0.0.0.0) fallback.
-        for entry in self.listeners.iter().flatten() {
-            if entry.local_ip == Ipv4Addr::UNSPECIFIED && entry.local_port == local_port {
-                return Some(entry.sock_idx);
-            }
-        }
-
-        None
+        bucket.lookup_listener_wildcard(local_port)
     }
 
-    /// Clear all entries.
+    /// Clear all entries across all buckets.
     pub fn clear(&mut self) {
-        self.established = [None; MAX_CONNECTIONS];
-        self.listeners = [None; MAX_CONNECTIONS];
+        for bucket_mutex in TCP_DEMUX_BUCKETS_TABLE.iter() {
+            bucket_mutex.lock().clear();
+        }
     }
 }
 
-/// Global TCP demux table.
+/// Compatibility shim: existing code locks this to call methods.
+/// The actual per-bucket locking happens inside the method implementations.
 pub static TCP_DEMUX: IrqMutex<TcpDemuxTable> = IrqMutex::new(TcpDemuxTable::new());

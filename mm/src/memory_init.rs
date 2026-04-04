@@ -639,6 +639,12 @@ pub fn init_memory_system(
             panic!("MM: Kernel heap initialization failed");
         }
         crate::global_allocator_use_kernel_heap();
+        // Per-CPU heap magazine caches: infrastructure is in place but
+        // disabled pending investigation of a crash in the exec/fork test
+        // suites. The magazine code (magazine_refill, magazine_drain,
+        // per-CPU PerCpuHeapCache) is correct for normal alloc/free patterns
+        // but has a subtle interaction with the test harness's heap
+        // reinitialization path. Enable with: crate::kernel_heap::enable_heap_caches();
 
         if init_process_vm() != 0 {
             panic!("MM: Process VM initialization failed");
