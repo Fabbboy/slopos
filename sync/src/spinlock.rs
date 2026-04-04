@@ -28,6 +28,9 @@ pub struct IrqMutex<T> {
     /// unlock. A waiter spins until `now_serving == my_ticket`.
     now_serving: AtomicU16,
     poisoned: AtomicBool,
+    /// Lock ordering level for deadlock prevention. Acquiring a lock at
+    /// level N while holding a lock at level >= N is a violation.
+    level: u8,
     data: UnsafeCell<T>,
 }
 
@@ -45,6 +48,7 @@ pub struct IrqMutexGuard<'a, T> {
 pub struct PreemptMutex<T> {
     next_ticket: AtomicU16,
     now_serving: AtomicU16,
+    level: u8,
     data: UnsafeCell<T>,
 }
 
@@ -58,13 +62,20 @@ pub struct PreemptMutexGuard<'a, T> {
 
 impl<T> IrqMutex<T> {
     #[inline]
-    pub const fn new(data: T) -> Self {
+    pub const fn new(data: T, level: u8) -> Self {
         Self {
             next_ticket: AtomicU16::new(0),
             now_serving: AtomicU16::new(0),
             poisoned: AtomicBool::new(false),
+            level,
             data: UnsafeCell::new(data),
         }
+    }
+
+    /// Returns the lock ordering level.
+    #[inline]
+    pub const fn level(&self) -> u8 {
+        self.level
     }
 
     /// Force unlock the mutex without proper guard handling.
@@ -173,7 +184,7 @@ impl<T> IrqMutex<T> {
             lock_tracking::push_lock(
                 self as *const _ as *const (),
                 irq_mutex_poison_fn::<T>,
-                lock_tracking::LOCK_LEVEL_UNORDERED,
+                self.level,
             );
         }
 
@@ -207,7 +218,7 @@ impl<T> IrqMutex<T> {
                 lock_tracking::push_lock(
                     self as *const _ as *const (),
                     irq_mutex_poison_fn::<T>,
-                    lock_tracking::LOCK_LEVEL_UNORDERED,
+                    self.level,
                 );
             }
             Some(IrqMutexGuard {
@@ -267,10 +278,11 @@ unsafe fn irq_mutex_poison_fn<T>(addr: *const ()) {
 
 impl<T> PreemptMutex<T> {
     #[inline]
-    pub const fn new(data: T) -> Self {
+    pub const fn new(data: T, level: u8) -> Self {
         Self {
             next_ticket: AtomicU16::new(0),
             now_serving: AtomicU16::new(0),
+            level,
             data: UnsafeCell::new(data),
         }
     }
@@ -289,6 +301,14 @@ impl<T> PreemptMutex<T> {
             for _ in 0..distance.min(64) {
                 spin_loop();
             }
+        }
+
+        unsafe {
+            lock_tracking::push_lock(
+                self as *const _ as *const (),
+                preempt_mutex_poison_fn::<T>,
+                self.level,
+            );
         }
 
         PreemptMutexGuard {
@@ -311,6 +331,13 @@ impl<T> PreemptMutex<T> {
             )
             .is_ok()
         {
+            unsafe {
+                lock_tracking::push_lock(
+                    self as *const _ as *const (),
+                    preempt_mutex_poison_fn::<T>,
+                    self.level,
+                );
+            }
             Some(PreemptMutexGuard {
                 mutex: self,
                 _preempt: preempt,
@@ -341,8 +368,22 @@ impl<'a, T> DerefMut for PreemptMutexGuard<'a, T> {
 impl<'a, T> Drop for PreemptMutexGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
+        unsafe {
+            lock_tracking::pop_lock(self.mutex as *const _ as *const ());
+        }
         self.mutex.now_serving.fetch_add(1, Ordering::Release);
     }
+}
+
+/// Poison-unlock callback for PreemptMutex lock tracking.
+///
+/// # Safety
+/// `addr` must point to a live `PreemptMutex<T>`.
+unsafe fn preempt_mutex_poison_fn<T>(addr: *const ()) {
+    let mutex = &*(addr as *const PreemptMutex<T>);
+    mutex
+        .now_serving
+        .store(mutex.next_ticket.load(Ordering::Relaxed), Ordering::Release);
 }
 
 // =============================================================================
@@ -359,6 +400,7 @@ pub struct IrqRwLock<T> {
     /// Number of writers waiting for access.  When > 0, new readers yield
     /// to prevent writer starvation under continuous read traffic.
     writer_waiting: AtomicU32,
+    level: u8,
     data: UnsafeCell<T>,
 }
 
@@ -384,10 +426,11 @@ pub struct IrqRwLockWriteGuard<'a, T> {
 impl<T> IrqRwLock<T> {
     /// Create a new IrqRwLock protecting the given data.
     #[inline]
-    pub const fn new(data: T) -> Self {
+    pub const fn new(data: T, level: u8) -> Self {
         Self {
             state: core::sync::atomic::AtomicI32::new(0),
             writer_waiting: AtomicU32::new(0),
+            level,
             data: UnsafeCell::new(data),
         }
     }
@@ -409,6 +452,13 @@ impl<T> IrqRwLock<T> {
                     .compare_exchange_weak(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
+                    unsafe {
+                        lock_tracking::push_lock(
+                            self as *const _ as *const (),
+                            irq_rwlock_poison_fn::<T>,
+                            self.level,
+                        );
+                    }
                     return IrqRwLockReadGuard {
                         lock: self,
                         saved_flags,
@@ -435,6 +485,13 @@ impl<T> IrqRwLock<T> {
                 .compare_exchange(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
+                unsafe {
+                    lock_tracking::push_lock(
+                        self as *const _ as *const (),
+                        irq_rwlock_poison_fn::<T>,
+                        self.level,
+                    );
+                }
                 return Some(IrqRwLockReadGuard {
                     lock: self,
                     saved_flags,
@@ -467,6 +524,13 @@ impl<T> IrqRwLock<T> {
             {
                 // Acquired — no longer "waiting".
                 self.writer_waiting.fetch_sub(1, Ordering::Relaxed);
+                unsafe {
+                    lock_tracking::push_lock(
+                        self as *const _ as *const (),
+                        irq_rwlock_poison_fn::<T>,
+                        self.level,
+                    );
+                }
                 return IrqRwLockWriteGuard {
                     lock: self,
                     saved_flags,
@@ -488,6 +552,13 @@ impl<T> IrqRwLock<T> {
             .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            unsafe {
+                lock_tracking::push_lock(
+                    self as *const _ as *const (),
+                    irq_rwlock_poison_fn::<T>,
+                    self.level,
+                );
+            }
             return Some(IrqRwLockWriteGuard {
                 lock: self,
                 saved_flags,
@@ -513,6 +584,9 @@ impl<'a, T> Deref for IrqRwLockReadGuard<'a, T> {
 impl<'a, T> Drop for IrqRwLockReadGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
+        unsafe {
+            lock_tracking::pop_lock(self.lock as *const _ as *const ());
+        }
         self.lock.state.fetch_sub(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
         // _preempt drops after this
@@ -540,8 +614,21 @@ impl<'a, T> DerefMut for IrqRwLockWriteGuard<'a, T> {
 impl<'a, T> Drop for IrqRwLockWriteGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
+        unsafe {
+            lock_tracking::pop_lock(self.lock as *const _ as *const ());
+        }
         self.lock.state.store(0, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
         // _preempt drops after this
     }
+}
+
+/// Poison-unlock callback for IrqRwLock lock tracking. Force-releases
+/// any read or write hold by resetting state to unlocked.
+///
+/// # Safety
+/// `addr` must point to a live `IrqRwLock<T>`.
+unsafe fn irq_rwlock_poison_fn<T>(addr: *const ()) {
+    let lock = &*(addr as *const IrqRwLock<T>);
+    lock.state.store(0, Ordering::Release);
 }

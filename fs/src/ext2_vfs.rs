@@ -1,7 +1,7 @@
 use crate::blockdev::{CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_sync::{InitFlag, PreemptMutex};
+use slopos_sync::{InitFlag, LOCK_LEVEL_RESOURCE, PreemptMutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
 
@@ -20,7 +20,8 @@ impl GlobalExt2Vfs {
     }
 }
 
-static GLOBAL_EXT2_VFS: PreemptMutex<GlobalExt2Vfs> = PreemptMutex::new(GlobalExt2Vfs::new());
+static GLOBAL_EXT2_VFS: PreemptMutex<GlobalExt2Vfs> =
+    PreemptMutex::new(GlobalExt2Vfs::new(), LOCK_LEVEL_RESOURCE);
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
 /// Static wrapper that implements FileSystem by delegating to the global ext2 state.

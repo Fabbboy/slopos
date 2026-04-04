@@ -653,15 +653,18 @@ impl SocketAllocBitmap {
 
 /// Socket allocation bitmap — separate lock from per-socket data.
 pub static SOCKET_ALLOC: slopos_sync::IrqMutex<SocketAllocBitmap> =
-    slopos_sync::IrqMutex::new(SocketAllocBitmap::new());
+    slopos_sync::IrqMutex::new(SocketAllocBitmap::new(), slopos_sync::LOCK_LEVEL_REGISTRY);
 
 /// Global slab-based socket table.
 pub static NEW_SOCKET_TABLE: slopos_sync::IrqMutex<SlabSocketTable> =
-    slopos_sync::IrqMutex::new(SlabSocketTable::empty());
+    slopos_sync::IrqMutex::new(SlabSocketTable::empty(), slopos_sync::LOCK_LEVEL_REGISTRY);
 
 /// Ephemeral port allocator.
 pub static EPHEMERAL_PORTS: slopos_sync::IrqMutex<EphemeralPortAllocator> =
-    slopos_sync::IrqMutex::new(EphemeralPortAllocator::new());
+    slopos_sync::IrqMutex::new(
+        EphemeralPortAllocator::new(),
+        slopos_sync::LOCK_LEVEL_REGISTRY,
+    );
 
 // =============================================================================
 // Socket operations

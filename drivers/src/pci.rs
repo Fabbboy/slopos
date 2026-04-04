@@ -8,7 +8,7 @@ use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_sync::{InitFlag, IrqMutex};
+use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_info;
 use slopos_utils::string::cstr_to_str;
 
@@ -84,8 +84,9 @@ impl PciDriverRegistry {
 unsafe impl Send for PciDriverRegistry {}
 
 static PCI_INIT: InitFlag = InitFlag::new();
-static ENUM_STATE: IrqMutex<PciEnumState> = IrqMutex::new(PciEnumState::new());
-static DRIVER_REGISTRY: IrqMutex<PciDriverRegistry> = IrqMutex::new(PciDriverRegistry::new());
+static ENUM_STATE: IrqMutex<PciEnumState> = IrqMutex::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
+static DRIVER_REGISTRY: IrqMutex<PciDriverRegistry> =
+    IrqMutex::new(PciDriverRegistry::new(), LOCK_LEVEL_REGISTRY);
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
 // =============================================================================
@@ -125,7 +126,7 @@ impl EcamState {
     }
 }
 
-static ECAM_STATE: IrqMutex<EcamState> = IrqMutex::new(EcamState::new());
+static ECAM_STATE: IrqMutex<EcamState> = IrqMutex::new(EcamState::new(), LOCK_LEVEL_REGISTRY);
 
 /// Cached ECAM base address for segment 0 — fast lock-free read path.
 /// Set to 0 if MCFG is absent or segment 0 is not covered.

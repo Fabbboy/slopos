@@ -93,6 +93,7 @@ pub fn init() -> i32 {
 
     slopos_arch::pcr::register_lapic_id_fn(get_id);
     slopos_arch::pcr::register_send_ipi_to_cpu_fn(send_ipi_to_cpu);
+    slopos_arch::pcr::register_send_nmi_fn(send_nmi_to);
 
     let mut apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
     if apic_base_msr & ApicBaseMsr::GLOBAL_ENABLE == 0 {
@@ -365,4 +366,19 @@ pub fn send_ipi_all_excluding_self(vector: u8) {
 
 pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
     send_ipi_raw(target_apic_id << 24, fixed_ipi_flags(vector as u32));
+}
+
+/// Send a Non-Maskable Interrupt to a specific CPU via the LAPIC ICR.
+///
+/// Used by the NMI watchdog to interrupt a CPU that appears stuck with
+/// interrupts disabled (e.g. deadlocked spinlock).
+pub fn send_nmi_to(target_apic_id: u32) {
+    // ICR format: delivery mode NMI (0b100 << 8), level assert, edge trigger,
+    // physical destination.  No vector is needed for NMI delivery.
+    const ICR_DELIVERY_NMI: u32 = 0b100 << 8;
+    let icr_low = ICR_DELIVERY_NMI
+        | LAPIC_ICR_DEST_PHYSICAL
+        | LAPIC_ICR_LEVEL_ASSERT
+        | LAPIC_ICR_TRIGGER_EDGE;
+    send_ipi_raw(target_apic_id << 24, icr_low);
 }

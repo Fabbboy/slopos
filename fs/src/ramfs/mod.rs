@@ -1,5 +1,5 @@
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 const MAX_INODES: usize = 64;
 const RAMFS_MAX_FILE_SIZE: usize = 4096;
@@ -185,13 +185,13 @@ pub struct RamFs {
 impl RamFs {
     pub fn new() -> Self {
         Self {
-            inner: IrqMutex::new(RamFsInner::new()),
+            inner: IrqMutex::new(RamFsInner::new(), LOCK_LEVEL_RESOURCE),
         }
     }
 
     pub const fn new_const() -> Self {
         Self {
-            inner: IrqMutex::new(RamFsInner::new_const()),
+            inner: IrqMutex::new(RamFsInner::new_const(), LOCK_LEVEL_RESOURCE),
         }
     }
 

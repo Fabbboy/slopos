@@ -11,7 +11,7 @@
 //! and a wait-queue lock simultaneously.
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
-use slopos_sync::{IrqMutex, IrqMutexGuard, WaitQueue};
+use slopos_sync::{IrqMutex, IrqMutexGuard, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, WaitQueue};
 
 pub(crate) const MAX_PIPES: usize = 64;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
@@ -114,7 +114,7 @@ impl PipeSlot {
 
 /// Per-pipe locks. Each slot is independently locked.
 pub(crate) static PIPE_SLOTS: [IrqMutex<PipeSlot>; MAX_PIPES] =
-    [const { IrqMutex::new(PipeSlot::new()) }; MAX_PIPES];
+    [const { IrqMutex::new(PipeSlot::new(), LOCK_LEVEL_RESOURCE) }; MAX_PIPES];
 
 /// Allocation bitmap — only locked during pipe create/destroy.
 struct PipeAllocBitmap {
@@ -129,7 +129,8 @@ impl PipeAllocBitmap {
     }
 }
 
-static PIPE_ALLOC: IrqMutex<PipeAllocBitmap> = IrqMutex::new(PipeAllocBitmap::new());
+static PIPE_ALLOC: IrqMutex<PipeAllocBitmap> =
+    IrqMutex::new(PipeAllocBitmap::new(), LOCK_LEVEL_REGISTRY);
 
 /// Allocate a new pipe slot. Returns the pipe ID.
 ///

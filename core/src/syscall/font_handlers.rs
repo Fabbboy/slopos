@@ -6,7 +6,8 @@ use slopos_utils::klog_info;
 
 use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
 
-static FONT_WRITER_LOCK: slopos_sync::IrqMutex<()> = slopos_sync::IrqMutex::new(());
+static FONT_WRITER_LOCK: slopos_sync::IrqMutex<()> =
+    slopos_sync::IrqMutex::new((), slopos_sync::LOCK_LEVEL_RESOURCE);
 
 unsafe fn free_atlas_box(ptr: *mut u8) {
     unsafe {

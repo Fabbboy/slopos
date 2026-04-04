@@ -1,4 +1,4 @@
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_info;
 
 use slopos_mm::shared_memory::shm_cleanup_task;
@@ -33,7 +33,7 @@ impl TaskResourceCleanupHooks {
 }
 
 static TASK_RESOURCE_HOOKS: IrqMutex<TaskResourceCleanupHooks> =
-    IrqMutex::new(TaskResourceCleanupHooks::new());
+    IrqMutex::new(TaskResourceCleanupHooks::new(), LOCK_LEVEL_REGISTRY);
 
 /// Register a cleanup hook called whenever task-bound resources must be released.
 ///

@@ -635,3 +635,27 @@ pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
 pub fn register_lapic_id_fn(f: fn() -> u32) {
     LAPIC_ID_FN.store(f as *mut (), Ordering::Release);
 }
+
+// ==================== NMI IPI ====================
+
+pub type SendNmiToCpuFn = fn(u32);
+
+static SEND_NMI_TO_CPU_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Register the NMI send function from the APIC driver.
+pub fn register_send_nmi_fn(f: SendNmiToCpuFn) {
+    SEND_NMI_TO_CPU_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Send an NMI to the specified CPU (by APIC ID).
+///
+/// Used by the NMI watchdog to interrupt a CPU that appears stuck with
+/// interrupts disabled.  No-op if the NMI send function has not been
+/// registered yet.
+pub fn send_nmi_to_cpu(target_apic_id: u32) {
+    let fn_ptr = SEND_NMI_TO_CPU_FN.load(Ordering::Acquire);
+    if !fn_ptr.is_null() {
+        let f: SendNmiToCpuFn = unsafe { core::mem::transmute(fn_ptr) };
+        f(target_apic_id);
+    }
+}

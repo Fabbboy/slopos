@@ -30,7 +30,7 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 
 use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
@@ -103,7 +103,7 @@ pub fn validate_peer(handle: &PtyPeerHandle) -> bool {
 /// pair destruction, and validated slave opens.
 ///
 /// **Not** held during data-path operations (read, write, push_input).
-static PTY_ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
+static PTY_ALLOC_LOCK: IrqMutex<()> = IrqMutex::new((), LOCK_LEVEL_REGISTRY);
 
 // ---------------------------------------------------------------------------
 // Pair allocation

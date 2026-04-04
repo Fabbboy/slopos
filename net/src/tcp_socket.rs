@@ -28,7 +28,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 use crate::tcp::{
@@ -744,7 +744,8 @@ impl TcpDemuxBucket {
 
 /// Per-bucket locks for the TCP demux table.
 static TCP_DEMUX_BUCKETS_TABLE: [IrqMutex<TcpDemuxBucket>; TCP_DEMUX_BUCKETS] = {
-    const BUCKET: IrqMutex<TcpDemuxBucket> = IrqMutex::new(TcpDemuxBucket::new());
+    const BUCKET: IrqMutex<TcpDemuxBucket> =
+        IrqMutex::new(TcpDemuxBucket::new(), LOCK_LEVEL_REGISTRY);
     [BUCKET; TCP_DEMUX_BUCKETS]
 };
 
@@ -850,4 +851,5 @@ impl TcpDemuxTable {
 
 /// Compatibility shim: existing code locks this to call methods.
 /// The actual per-bucket locking happens inside the method implementations.
-pub static TCP_DEMUX: IrqMutex<TcpDemuxTable> = IrqMutex::new(TcpDemuxTable::new());
+pub static TCP_DEMUX: IrqMutex<TcpDemuxTable> =
+    IrqMutex::new(TcpDemuxTable::new(), LOCK_LEVEL_REGISTRY);

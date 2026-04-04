@@ -40,7 +40,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 /// Number of slots in the timer wheel.
@@ -205,10 +205,13 @@ impl NetTimerWheel {
     /// Create a new, empty timer wheel with `current_tick = 0`.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(TimerWheelInner {
-                slots: [const { Vec::new() }; NUM_SLOTS],
-                current_tick: 0,
-            }),
+            inner: IrqMutex::new(
+                TimerWheelInner {
+                    slots: [const { Vec::new() }; NUM_SLOTS],
+                    current_tick: 0,
+                },
+                LOCK_LEVEL_REGISTRY,
+            ),
             next_token: AtomicU64::new(1),
         }
     }

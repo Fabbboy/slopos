@@ -1,6 +1,6 @@
 use core::ffi::c_int;
 use core::ptr;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_arch::cpu;
 use slopos_sync::preempt::PreemptGuard;
@@ -9,6 +9,24 @@ use slopos_utils::kdiag_timestamp;
 use slopos_utils::klog_info;
 
 use slopos_kernel_services::platform;
+
+// ---------------------------------------------------------------------------
+// NMI watchdog: per-CPU alive timestamp (updated every timer tick)
+// ---------------------------------------------------------------------------
+static WATCHDOG_TICKS: [AtomicU64; slopos_arch::MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; slopos_arch::MAX_CPUS]
+};
+
+/// Returns the last timer-tick timestamp recorded by `cpu_id`.
+/// Used by the cross-CPU watchdog monitor in the scheduler idle loop.
+pub fn watchdog_last_tick(cpu_id: usize) -> u64 {
+    if cpu_id < WATCHDOG_TICKS.len() {
+        WATCHDOG_TICKS[cpu_id].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
 
 pub use super::lifecycle::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
@@ -1136,12 +1154,15 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    // NMI watchdog: record that this CPU is alive before touching any lock.
+    WATCHDOG_TICKS[cpu_id].store(crate::irq::get_timer_ticks(), Ordering::Relaxed);
+
     // Unconditional QS: the timer ISR firing proves this CPU is not
     // inside an RCU read-side critical section (those disable preemption
     // but not interrupts).  Matches Linux rcu_sched_clock_irq().
     slopos_sync::rcu_note_qs();
-
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Raise the deferred-callback softirq flag on CPU 0 only.
     // rcu_process_callbacks() runs later from the idle loop, not here.

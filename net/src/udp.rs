@@ -1,4 +1,4 @@
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 use super::packetbuf::PacketBuf;
@@ -158,13 +158,15 @@ impl UdpDemuxTable {
 
 /// Per-bucket locks for the UDP demux table.
 static UDP_DEMUX_BUCKETS_TABLE: [IrqMutex<UdpDemuxBucket>; UDP_DEMUX_BUCKETS] = {
-    const BUCKET: IrqMutex<UdpDemuxBucket> = IrqMutex::new(UdpDemuxBucket::new());
+    const BUCKET: IrqMutex<UdpDemuxBucket> =
+        IrqMutex::new(UdpDemuxBucket::new(), LOCK_LEVEL_REGISTRY);
     [BUCKET; UDP_DEMUX_BUCKETS]
 };
 
 /// Compatibility shim: existing code locks this to call register/unregister/lookup.
 /// The actual per-bucket locking happens inside the method implementations.
-pub static UDP_DEMUX: IrqMutex<UdpDemuxTable> = IrqMutex::new(UdpDemuxTable::new());
+pub static UDP_DEMUX: IrqMutex<UdpDemuxTable> =
+    IrqMutex::new(UdpDemuxTable::new(), LOCK_LEVEL_REGISTRY);
 
 pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     if payload.len() < 8 {

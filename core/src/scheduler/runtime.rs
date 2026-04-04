@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_sync::{IrqMutex, OnceLock};
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, OnceLock};
 use slopos_utils::klog_info;
 
 use super::per_cpu;
@@ -49,7 +49,7 @@ static IDLE_CBS: OnceLock<IrqMutex<IdleCallbacks>> = OnceLock::new();
 static BOTTOM_HALVES: OnceLock<IrqMutex<BottomHalves>> = OnceLock::new();
 
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
-    IDLE_CBS.call_once(|| IrqMutex::new(IdleCallbacks::new()));
+    IDLE_CBS.call_once(|| IrqMutex::new(IdleCallbacks::new(), LOCK_LEVEL_REGISTRY));
     let Some(cb) = callback else { return };
     if let Some(mutex) = IDLE_CBS.get() {
         let mut cbs = mutex.lock();
@@ -62,7 +62,7 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
 }
 
 pub fn scheduler_register_bottom_half(callback: fn()) {
-    BOTTOM_HALVES.call_once(|| IrqMutex::new(BottomHalves::new()));
+    BOTTOM_HALVES.call_once(|| IrqMutex::new(BottomHalves::new(), LOCK_LEVEL_REGISTRY));
     if let Some(mutex) = BOTTOM_HALVES.get() {
         let mut halves = mutex.lock();
         let idx = halves.count;
@@ -315,11 +315,73 @@ fn deferred_start_ap_timer(cpu_id: usize) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NMI watchdog: cross-CPU deadlock detection
+// ---------------------------------------------------------------------------
+
+/// Per-CPU watchdog threshold in timer ticks. 50 ticks at 100Hz = 500ms.
+/// The global timer counter is incremented by ALL CPUs, so the actual
+/// threshold used is `WATCHDOG_PER_CPU_THRESHOLD * num_online_cpus`.
+const WATCHDOG_PER_CPU_THRESHOLD: u64 = 50;
+
+/// Grace period after boot before the watchdog activates.  The global
+/// counter must reach this value before any checks run, giving all CPUs
+/// time to start their LAPIC timers and begin ticking.
+const WATCHDOG_WARMUP_TICKS: u64 = 200;
+
+/// Each CPU monitors the next CPU in round-robin order.  If the target has
+/// not recorded a timer tick within the scaled threshold, it is presumed
+/// stuck with interrupts disabled (deadlocked spinlock) and receives an NMI.
+fn check_watchdog_for_neighbor(my_cpu: usize) {
+    let num_cpus = slopos_arch::pcr::get_online_cpu_count();
+    if num_cpus < 2 {
+        return;
+    }
+
+    let current_tick = crate::irq::get_timer_ticks();
+
+    // Don't arm the watchdog during early boot while CPUs are still
+    // starting their LAPIC timers.
+    if current_tick < WATCHDOG_WARMUP_TICKS {
+        return;
+    }
+
+    // Find the next online CPU to monitor.
+    let target = (my_cpu + 1) % num_cpus;
+    if target == my_cpu {
+        return;
+    }
+    if !slopos_arch::pcr::is_cpu_online(target) {
+        return;
+    }
+
+    let target_tick = super::scheduler::watchdog_last_tick(target);
+
+    // Don't trigger if the target hasn't started ticking yet.
+    if target_tick == 0 {
+        return;
+    }
+
+    // Scale threshold by number of online CPUs since the global tick
+    // counter is incremented by every CPU's LAPIC timer.
+    let threshold = WATCHDOG_PER_CPU_THRESHOLD * num_cpus as u64;
+
+    if current_tick.saturating_sub(target_tick) > threshold {
+        // Target CPU hasn't had a timer tick in >500 ms -- likely stuck.
+        if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(target) {
+            slopos_arch::pcr::send_nmi_to_cpu(apic_id);
+        }
+    }
+}
+
 fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
     loop {
         // Start the LAPIC timer on this AP once the boot layer registers
         // the callback (after calibration).  No-op after the first success.
         deferred_start_ap_timer(cpu_id);
+
+        // NMI watchdog: each CPU monitors the next one in round-robin.
+        check_watchdog_for_neighbor(cpu_id);
 
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.drain_remote_inbox();

@@ -6,7 +6,7 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_sync::IrqRwLock;
+use slopos_sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 pub use slopos_abi::pixel::PixelFormat;
@@ -254,7 +254,8 @@ impl SharedBufferRegistry {
     }
 }
 
-static REGISTRY: IrqRwLock<SharedBufferRegistry> = IrqRwLock::new(SharedBufferRegistry::new());
+static REGISTRY: IrqRwLock<SharedBufferRegistry> =
+    IrqRwLock::new(SharedBufferRegistry::new(), LOCK_LEVEL_REGISTRY);
 
 // ---------------------------------------------------------------------------
 // Per-buffer hot-path state — lock-free reads, per-buffer locks for writes.
@@ -302,10 +303,10 @@ impl BufferHotState {
     }
 }
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 static BUFFER_HOT: [IrqMutex<BufferHotState>; MAX_SHARED_BUFFERS] =
-    [const { IrqMutex::new(BufferHotState::new()) }; MAX_SHARED_BUFFERS];
+    [const { IrqMutex::new(BufferHotState::new(), LOCK_LEVEL_RESOURCE) }; MAX_SHARED_BUFFERS];
 
 /// Lock-free token → slot lookup. Returns None if token not found.
 fn find_slot_fast(token: u32) -> Option<usize> {

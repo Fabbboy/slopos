@@ -33,8 +33,21 @@ use crate::cpu_local::CacheAligned;
 const MAX_HELD_LOCKS: usize = 8;
 
 /// Default lock level when none is specified. Disables ordering checks for
-/// that lock instance.
+/// that lock instance. Deprecated: all locks should use a real level.
 pub const LOCK_LEVEL_UNORDERED: u8 = 0;
+
+/// Lock ordering hierarchy — acquire in ascending order only.
+///
+/// ```text
+/// Level 1: Per-resource     (individual device, pipe, queue, VM, framebuffer)
+/// Level 2: Registry/alloc   (allocation bitmaps, lookup tables, registries)
+/// Level 3: Global allocator (PAGE_ALLOCATOR, KERNEL_HEAP)
+/// Level 4: Scheduler        (per-CPU queue_lock)
+/// ```
+pub const LOCK_LEVEL_RESOURCE: u8 = 1;
+pub const LOCK_LEVEL_REGISTRY: u8 = 2;
+pub const LOCK_LEVEL_ALLOCATOR: u8 = 3;
+pub const LOCK_LEVEL_SCHEDULER: u8 = 4;
 
 /// A function pointer that can poison-unlock a specific lock instance.
 ///
@@ -115,19 +128,14 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
     let cpu = get_current_cpu();
     let stack = &mut *(HELD_STACKS[cpu].0).0.get();
 
-    // Debug: check lock ordering.
-    #[cfg(debug_assertions)]
+    // Lock ordering check: acquiring a lock at level <= any currently held
+    // lock's level indicates a potential deadlock.  Always-on (not debug-only)
+    // because the cost is a single u8 comparison per lock acquisition.
     if level != LOCK_LEVEL_UNORDERED && stack.depth > 0 {
         let top = &stack.entries[stack.depth as usize - 1];
         if top.level != LOCK_LEVEL_UNORDERED && level <= top.level {
-            // Lock ordering violation. Can't panic here (recursive), so
-            // just log via a debug break / write to serial if available.
-            // In production this is compiled out.
-            debug_assert!(
-                false,
-                "lock ordering violation: acquiring level {} while holding level {}",
-                level, top.level
-            );
+            // Write directly to serial to avoid lock recursion in the panic path.
+            lock_ordering_violation(level, top.level, lock_addr, top.lock_addr);
         }
     }
 
@@ -228,3 +236,24 @@ pub fn held_lock_count() -> u32 {
 
 /// No-op poison function for the empty sentinel entry.
 unsafe fn noop_poison(_addr: *const ()) {}
+
+/// Report a lock ordering violation. Panics with diagnostic info.
+///
+/// Separated from the check site to keep the hot path small (no format
+/// machinery inlined into every lock acquisition).
+#[cold]
+#[inline(never)]
+fn lock_ordering_violation(
+    acquiring_level: u8,
+    held_level: u8,
+    acquiring_addr: *const (),
+    held_addr: *const (),
+) {
+    panic!(
+        "LOCK ORDERING VIOLATION: acquiring level {} (lock @ {:#x}) while holding level {} (lock @ {:#x})",
+        acquiring_level,
+        acquiring_addr as usize,
+        held_level,
+        held_addr as usize,
+    );
+}

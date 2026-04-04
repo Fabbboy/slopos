@@ -27,7 +27,7 @@ static FORK_RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
-use slopos_sync::{InitFlag, IrqMutex};
+use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_SCHEDULER};
 use slopos_utils::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -223,7 +223,7 @@ impl PerCpuScheduler {
         Self {
             cpu_id: 0,
             ready_queues: UnsafeCell::new([EMPTY_QUEUE; NUM_PRIORITY_LEVELS]),
-            queue_lock: IrqMutex::new(()),
+            queue_lock: IrqMutex::new((), LOCK_LEVEL_SCHEDULER),
             current_task_atomic: AtomicPtr::new(ptr::null_mut()),
             idle_task_atomic: AtomicPtr::new(ptr::null_mut()),
             enabled: AtomicBool::new(false),

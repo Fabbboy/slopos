@@ -3,7 +3,7 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLIN, POLLOUT};
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 
 use crate::vfs::{FileSystem, InodeId};
 
@@ -40,7 +40,8 @@ impl OpenVnodeTable {
     }
 }
 
-static OPEN_VNODES: IrqMutex<OpenVnodeTable> = IrqMutex::new(OpenVnodeTable::new());
+static OPEN_VNODES: IrqMutex<OpenVnodeTable> =
+    IrqMutex::new(OpenVnodeTable::new(), LOCK_LEVEL_REGISTRY);
 
 pub struct VfsFileOps;
 

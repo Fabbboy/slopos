@@ -1,7 +1,7 @@
 use core::ffi::c_int;
 
 use slopos_abi::task::{BlockReason, MAX_TASKS};
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 
 use super::scheduler::{
     is_scheduling_active, schedule, schedule_task, scheduler_get_current_task, unschedule_task,
@@ -96,7 +96,7 @@ impl SleepQueue {
     }
 }
 
-static SLEEP_QUEUE: IrqMutex<SleepQueue> = IrqMutex::new(SleepQueue::new());
+static SLEEP_QUEUE: IrqMutex<SleepQueue> = IrqMutex::new(SleepQueue::new(), LOCK_LEVEL_REGISTRY);
 
 #[inline]
 fn tick_reached(now_tick: u64, deadline_tick: u64) -> bool {

@@ -27,7 +27,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::IrqMutex;
+use crate::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_kernel_services::driver_runtime::{
     self, block_current_task, current_task, finish_wait, prepare_to_wait, unblock_task,
     DriverTaskHandle,
@@ -142,7 +142,7 @@ impl WaitQueue {
     /// Create a new empty wait queue.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(WaitQueueInner::new()),
+            inner: IrqMutex::new(WaitQueueInner::new(), LOCK_LEVEL_RESOURCE),
             generation: AtomicU32::new(0),
         }
     }

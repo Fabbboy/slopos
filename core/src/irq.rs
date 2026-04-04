@@ -17,7 +17,7 @@ use slopos_arch::arch::idt::{
 use slopos_arch::{InterruptFrame, tsc};
 pub use slopos_kernel_services::driver_runtime::IRQ_LINES;
 use slopos_sync::InitFlag;
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::string::cstr_to_str;
 use slopos_utils::{AtomicBitmap, kdiag_dump_interrupt_frame, klog_debug, klog_info, words_for};
 
@@ -103,7 +103,7 @@ static TIMER_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Global keyboard event counter. Incremented atomically by the keyboard IRQ handler.
 /// Uses Relaxed ordering since we only need eventual consistency for statistics.
 static KEYBOARD_EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
-static IRQ_TABLE_LOCK: IrqMutex<()> = IrqMutex::new(());
+static IRQ_TABLE_LOCK: IrqMutex<()> = IrqMutex::new((), LOCK_LEVEL_REGISTRY);
 
 /// Access IRQ tables under lock.
 #[inline]
@@ -473,7 +473,7 @@ impl MsiTables {
 }
 
 static MSI_TABLE: MsiTables = MsiTables::new();
-static MSI_TABLE_LOCK: IrqMutex<()> = IrqMutex::new(());
+static MSI_TABLE_LOCK: IrqMutex<()> = IrqMutex::new((), LOCK_LEVEL_REGISTRY);
 static MSI_INIT: InitFlag = InitFlag::new();
 
 /// Initialize MSI subsystem (pre-reserve SYSCALL_VECTOR).

@@ -368,6 +368,34 @@ impl Drop for IstPreemptHold {
     }
 }
 
+/// NMI watchdog handler -- invoked when a neighbouring CPU sends an NMI
+/// because this CPU has not recorded a timer tick for >500 ms.
+///
+/// Dumps the faulting context, reports held-lock state, force-unlocks all
+/// tracked locks (so other CPUs are not permanently blocked), and panics.
+fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    // Use serial logging directly to avoid lock recursion.
+    klog_info!(
+        "NMI WATCHDOG: CPU {} locked up! RIP={:#x} RSP={:#x} CS={:#x}",
+        cpu_id,
+        frame.rip,
+        frame.rsp,
+        frame.cs
+    );
+
+    let held = slopos_sync::held_lock_count();
+    klog_info!("NMI WATCHDOG: CPU {} holds {} lock(s)", cpu_id, held);
+
+    // Force-release all tracked locks so other CPUs can make progress.
+    unsafe {
+        slopos_sync::poison_unlock_all_held();
+    }
+
+    panic!("NMI WATCHDOG: CPU {} not responding for >500ms", cpu_id);
+}
+
 /// Implementation of common_exception_handler - called from FFI boundary
 pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     let frame_ref = unsafe { &mut *frame };
@@ -389,6 +417,13 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     let _ist_hold = IstPreemptHold::new(vector < 32);
 
     ist_stacks::ist_record_usage(vector, frame as u64);
+
+    // NMI watchdog: vector 2 is used by the cross-CPU deadlock detector.
+    // Handle it before any other dispatch to keep the path minimal.
+    if vector == EXCEPTION_NMI {
+        nmi_watchdog_handler(frame_ref);
+        return;
+    }
 
     if vector == SYSCALL_VECTOR {
         syscall_handle(frame);
@@ -432,8 +467,12 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         let pre_ss = frame_ref.ss;
 
         slopos_core::irq::increment_timer_ticks();
-        slopos_core::sched::scheduler_handle_timer_interrupt(frame);
+        // EOI before handler: prevents timer starvation if the handler is
+        // slow (e.g. blocked on a lock). Safe because the interrupt gate
+        // clears IF, so the next timer interrupt won't nest — it stays
+        // pending until IRET re-enables interrupts.
         send_eoi();
+        slopos_core::sched::scheduler_handle_timer_interrupt(frame);
         scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
 
         // Re-read the frame from the stack pointer — if context_switch saved
@@ -531,7 +570,8 @@ fn initialize_handler_tables() {
 
         // Fatal: log name, dump frame, panic.
         (*PANIC_HANDLERS.get())[EXCEPTION_DIVIDE_ERROR as usize] = exception_fatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_NMI as usize] = exception_fatal;
+        // NMI (vector 2) is handled directly in common_exception_handler_impl
+        // by the watchdog handler -- no table entry needed.
         (*PANIC_HANDLERS.get())[EXCEPTION_DOUBLE_FAULT as usize] = exception_fatal;
         (*PANIC_HANDLERS.get())[EXCEPTION_INVALID_TSS as usize] = exception_fatal;
         (*PANIC_HANDLERS.get())[EXCEPTION_SEGMENT_NOT_PRES as usize] = exception_fatal;

@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 use slopos_utils::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
@@ -91,13 +91,15 @@ impl VmSlotAlloc {
 /// Per-process VM locks.  Each slot is independently lockable so that
 /// independent processes never contend on each other's VM operations.
 static PROCESS_VMS: [IrqMutex<ProcessVmInner>; MAX_PROCESSES] = {
-    const INIT: IrqMutex<ProcessVmInner> = IrqMutex::new(ProcessVmInner::new());
+    const INIT: IrqMutex<ProcessVmInner> =
+        IrqMutex::new(ProcessVmInner::new(), LOCK_LEVEL_RESOURCE);
     [INIT; MAX_PROCESSES]
 };
 
 /// Global slot allocator -- only taken for fork/exit/init to find free slots
 /// and update the process count.
-static VM_SLOT_ALLOC: IrqMutex<VmSlotAlloc> = IrqMutex::new(VmSlotAlloc::new());
+static VM_SLOT_ALLOC: IrqMutex<VmSlotAlloc> =
+    IrqMutex::new(VmSlotAlloc::new(), LOCK_LEVEL_REGISTRY);
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0

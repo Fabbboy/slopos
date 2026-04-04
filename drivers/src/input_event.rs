@@ -11,8 +11,8 @@
 //! Queue slot allocation uses a small global [`IrqMutex`] touched only
 //! on task creation/destruction.
 
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
-use slopos_sync::{IrqMutex, SeqLock};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock};
 use slopos_utils::RingBuffer;
 
 /// Monotonic millisecond timestamp for input events.
@@ -51,7 +51,7 @@ impl TaskEventQueue {
 
 /// Per-task event queues — each independently locked.
 static TASK_QUEUES: [IrqMutex<TaskEventQueue>; MAX_INPUT_TASKS] =
-    [const { IrqMutex::new(TaskEventQueue::new()) }; MAX_INPUT_TASKS];
+    [const { IrqMutex::new(TaskEventQueue::new(), LOCK_LEVEL_RESOURCE) }; MAX_INPUT_TASKS];
 
 // =============================================================================
 // Focus State (SeqLock — lock-free reads from ISR, rare writes by compositor)
@@ -115,41 +115,91 @@ impl QueueAllocState {
     }
 }
 
-static QUEUE_ALLOC: IrqMutex<QueueAllocState> = IrqMutex::new(QueueAllocState::new());
+static QUEUE_ALLOC: IrqMutex<QueueAllocState> =
+    IrqMutex::new(QueueAllocState::new(), LOCK_LEVEL_REGISTRY);
+
+/// Lock-free slot allocation bitmap. Bit i = 1 means slot i is occupied.
+/// Avoids holding QUEUE_ALLOC (L2) while locking TASK_QUEUES (L1).
+static SLOT_BITMAP: AtomicU64 = AtomicU64::new(0);
+
+/// Atomically claim a free slot from the bitmap. Returns slot index.
+fn atomic_alloc_slot() -> Option<usize> {
+    loop {
+        let bits = SLOT_BITMAP.load(Ordering::Relaxed);
+        let free = !bits;
+        if free == 0 {
+            return None; // All slots occupied
+        }
+        let slot = free.trailing_zeros() as usize;
+        if slot >= MAX_INPUT_TASKS {
+            return None;
+        }
+        let mask = 1u64 << slot;
+        if SLOT_BITMAP
+            .compare_exchange_weak(bits, bits | mask, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(slot);
+        }
+    }
+}
+
+/// Release a slot in the bitmap.
+fn atomic_free_slot(slot: usize) {
+    if slot < MAX_INPUT_TASKS {
+        SLOT_BITMAP.fetch_and(!(1u64 << slot), Ordering::Release);
+    }
+}
 
 /// Find or create a queue slot for a task. Returns slot index.
 ///
-/// Checks the fast lookup table first. If unmapped, scans for a free slot
-/// under the global alloc lock and registers the mapping.
+/// Uses a lock-free bitmap for slot allocation to avoid nesting
+/// QUEUE_ALLOC (L2) inside TASK_QUEUES (L1). Locks are acquired
+/// in ascending order only: L1 (TASK_QUEUES) then L2 (QUEUE_ALLOC).
 fn resolve_queue(task_id: u32) -> Option<usize> {
     if task_id == 0 || task_id as usize >= TASK_MAP_SIZE {
         return None;
     }
 
-    let mut alloc = QUEUE_ALLOC.lock();
-    let mapped = alloc.task_to_slot[task_id as usize];
-    if mapped != 0 {
-        return Some((mapped - 1) as usize);
-    }
-
-    // Slow path: find a free slot and register.
-    for i in 0..MAX_INPUT_TASKS {
-        let queue = TASK_QUEUES[i].lock();
-        if !queue.active {
-            drop(queue);
-            let mut queue = TASK_QUEUES[i].lock();
-            if queue.active {
-                continue;
-            }
-            queue.task_id = task_id;
-            queue.active = true;
-            queue.events.reset();
-            alloc.task_to_slot[task_id as usize] = (i + 1) as u32;
-            return Some(i);
+    // Fast path: check lookup table under QUEUE_ALLOC (L2 only).
+    {
+        let alloc = QUEUE_ALLOC.lock();
+        let mapped = alloc.task_to_slot[task_id as usize];
+        if mapped != 0 {
+            return Some((mapped - 1) as usize);
         }
     }
 
-    None
+    // Slow path: claim a free slot via atomic bitmap (no locks held).
+    let slot = atomic_alloc_slot()?;
+
+    // Initialize the slot (L1 only).
+    {
+        let mut queue = TASK_QUEUES[slot].lock();
+        queue.task_id = task_id;
+        queue.active = true;
+        queue.events.reset();
+    }
+
+    // Register in lookup table (L2 only — L1 already released = ascending order).
+    {
+        let mut alloc = QUEUE_ALLOC.lock();
+        // Double-check: another CPU may have raced and registered this task.
+        let mapped = alloc.task_to_slot[task_id as usize];
+        if mapped != 0 {
+            // Lost the race — undo our slot claim.
+            {
+                let mut queue = TASK_QUEUES[slot].lock();
+                queue.active = false;
+                queue.task_id = 0;
+            }
+            atomic_free_slot(slot);
+            return Some((mapped - 1) as usize);
+        }
+        alloc.task_to_slot[task_id as usize] = (slot + 1) as u32;
+    }
+
+    Some(slot)
 }
 
 /// Find an existing queue slot for a task. Returns slot index.
@@ -499,7 +549,8 @@ impl ClipboardState {
     }
 }
 
-static CLIPBOARD: IrqMutex<ClipboardState> = IrqMutex::new(ClipboardState::new());
+static CLIPBOARD: IrqMutex<ClipboardState> =
+    IrqMutex::new(ClipboardState::new(), LOCK_LEVEL_RESOURCE);
 
 pub fn clipboard_copy(src: &[u8]) -> usize {
     let mut clip = CLIPBOARD.lock();
@@ -553,5 +604,9 @@ pub fn input_cleanup_task(task_id: u32) {
         if (task_id as usize) < TASK_MAP_SIZE {
             alloc.task_to_slot[task_id as usize] = 0;
         }
+        drop(alloc);
+
+        // Release the bitmap slot (lock-free).
+        atomic_free_slot(slot);
     }
 }

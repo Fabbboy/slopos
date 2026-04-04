@@ -779,9 +779,9 @@ pub fn test_ring_buffer_capacity() -> TestResult {
 
 /// Test 1: IrqMutex basic lock/unlock with guard
 pub fn test_irqmutex_basic() -> TestResult {
-    use slopos_sync::IrqMutex;
+    use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
-    let mutex: IrqMutex<u32> = IrqMutex::new(42);
+    let mutex: IrqMutex<u32> = IrqMutex::new(42, LOCK_LEVEL_RESOURCE);
 
     {
         let guard = mutex.lock();
@@ -798,9 +798,9 @@ pub fn test_irqmutex_basic() -> TestResult {
 
 /// Test 2: IrqMutex mutation through guard
 pub fn test_irqmutex_mutation() -> TestResult {
-    use slopos_sync::IrqMutex;
+    use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
-    let mutex: IrqMutex<u32> = IrqMutex::new(0);
+    let mutex: IrqMutex<u32> = IrqMutex::new(0, LOCK_LEVEL_RESOURCE);
 
     {
         let mut guard = mutex.lock();
@@ -819,9 +819,9 @@ pub fn test_irqmutex_mutation() -> TestResult {
 
 /// Test 3: IrqMutex try_lock
 pub fn test_irqmutex_try_lock() -> TestResult {
-    use slopos_sync::IrqMutex;
+    use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
-    let mutex: IrqMutex<u32> = IrqMutex::new(55);
+    let mutex: IrqMutex<u32> = IrqMutex::new(55, LOCK_LEVEL_RESOURCE);
 
     {
         let maybe_guard = mutex.try_lock();

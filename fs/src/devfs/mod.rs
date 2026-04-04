@@ -1,5 +1,5 @@
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 const ROOT_INODE: InodeId = 1;
 const NULL_INODE: InodeId = 2;
@@ -76,7 +76,7 @@ pub struct DevFs {
 impl DevFs {
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(DevFsInner::new()),
+            inner: IrqMutex::new(DevFsInner::new(), LOCK_LEVEL_RESOURCE),
         }
     }
 }

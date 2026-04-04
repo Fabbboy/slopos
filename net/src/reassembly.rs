@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::{klog_debug, klog_warn};
 
 use super::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
@@ -56,7 +56,8 @@ pub struct ReassemblyTable {
     groups: [ReassemblyGroup; MAX_REASSEMBLY_GROUPS],
 }
 
-pub static REASSEMBLY_TABLE: IrqMutex<ReassemblyTable> = IrqMutex::new(ReassemblyTable::new());
+pub static REASSEMBLY_TABLE: IrqMutex<ReassemblyTable> =
+    IrqMutex::new(ReassemblyTable::new(), LOCK_LEVEL_REGISTRY);
 
 impl ReassemblyGroup {
     const fn empty() -> Self {

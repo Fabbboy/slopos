@@ -26,7 +26,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 use super::types::{DevIndex, Ipv4Addr};
@@ -152,7 +152,7 @@ impl NetStack {
     /// Create an empty network stack.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(NetStackInner { ifaces: Vec::new() }),
+            inner: IrqMutex::new(NetStackInner { ifaces: Vec::new() }, LOCK_LEVEL_REGISTRY),
         }
     }
 

@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 // =============================================================================
@@ -583,7 +583,7 @@ fn fnv1a_hash(data: &[u8]) -> u32 {
     hash
 }
 
-static DNS_CACHE: IrqMutex<DnsCache> = IrqMutex::new(DnsCache::new());
+static DNS_CACHE: IrqMutex<DnsCache> = IrqMutex::new(DnsCache::new(), LOCK_LEVEL_REGISTRY);
 
 /// Look up a hostname in the DNS cache.
 pub fn dns_cache_lookup(hostname: &[u8]) -> Option<[u8; 4]> {

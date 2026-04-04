@@ -21,7 +21,7 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
 use super::packetbuf::PacketBuf;
@@ -55,10 +55,13 @@ impl LoopbackDev {
     /// Create a new loopback device with an empty queue.
     pub fn new() -> Self {
         Self {
-            inner: IrqMutex::new(LoopbackInner {
-                queue: VecDeque::with_capacity(64),
-                stats: NetDeviceStats::new(),
-            }),
+            inner: IrqMutex::new(
+                LoopbackInner {
+                    queue: VecDeque::with_capacity(64),
+                    stats: NetDeviceStats::new(),
+                },
+                LOCK_LEVEL_RESOURCE,
+            ),
         }
     }
 }

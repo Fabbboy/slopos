@@ -30,7 +30,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 use super::types::{DevIndex, Ipv4Addr};
@@ -155,7 +155,7 @@ impl RouteTable {
     /// Create an empty routing table.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(RouteTableInner::new()),
+            inner: IrqMutex::new(RouteTableInner::new(), LOCK_LEVEL_REGISTRY),
         }
     }
 

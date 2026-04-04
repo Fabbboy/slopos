@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_utils::{RingBuffer, klog_debug};
 
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
@@ -994,7 +994,8 @@ pub fn alloc_ephemeral_port() -> u16 {
 // =============================================================================
 
 /// Global TCP connection table.
-static TCP_TABLE: IrqMutex<TcpConnectionTable> = IrqMutex::new(TcpConnectionTable::new());
+static TCP_TABLE: IrqMutex<TcpConnectionTable> =
+    IrqMutex::new(TcpConnectionTable::new(), LOCK_LEVEL_RESOURCE);
 
 pub struct TcpConnectionTable {
     connections: [TcpConnection; MAX_CONNECTIONS],

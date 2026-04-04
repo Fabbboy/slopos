@@ -1,7 +1,7 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_arch::cpu;
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_utils::io::Port;
 use slopos_utils::ports::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
@@ -33,12 +33,13 @@ pub struct UartCapabilities {
     pub fifo_size: usize,
 }
 
-static SERIAL: IrqMutex<SerialPort> = IrqMutex::new(SerialPort::new(COM1));
+static SERIAL: IrqMutex<SerialPort> = IrqMutex::new(SerialPort::new(COM1), LOCK_LEVEL_RESOURCE);
 const BUF_SIZE: usize = 256;
 
 type SerialBuffer = RingBuffer<u8, BUF_SIZE>;
 
-static INPUT_BUFFER: IrqMutex<SerialBuffer> = IrqMutex::new(SerialBuffer::new_with(0));
+static INPUT_BUFFER: IrqMutex<SerialBuffer> =
+    IrqMutex::new(SerialBuffer::new_with(0), LOCK_LEVEL_RESOURCE);
 
 pub fn init() {
     let mut port = SERIAL.lock();

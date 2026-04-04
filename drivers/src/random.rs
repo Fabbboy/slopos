@@ -1,5 +1,5 @@
 use slopos_arch::tsc;
-use slopos_sync::{IrqMutex, OnceLock};
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, OnceLock};
 
 const DEFAULT_LFSR_SEED: u64 = 0xACE1u64;
 
@@ -32,7 +32,7 @@ impl Lfsr64 {
 static RNG: OnceLock<IrqMutex<Lfsr64>> = OnceLock::new();
 
 pub fn random_next() -> u64 {
-    RNG.call_once(|| IrqMutex::new(Lfsr64::from_tsc()));
+    RNG.call_once(|| IrqMutex::new(Lfsr64::from_tsc(), LOCK_LEVEL_REGISTRY));
     let rng = RNG.get().expect("RNG missing");
     rng.lock().next()
 }

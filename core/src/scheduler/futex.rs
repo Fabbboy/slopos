@@ -11,7 +11,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::task::BlockReason;
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 use super::scheduler::{
     block_current_task, finish_wait, prepare_to_wait, scheduler_get_current_task, unblock_task,
@@ -67,7 +67,7 @@ impl FutexBucket {
 // Wrap each bucket in an IrqMutex for interrupt-safe locking.
 static FUTEX_TABLE: [IrqMutex<FutexBucket>; FUTEX_HASH_BUCKETS] = {
     // const-init all buckets
-    const BUCKET: IrqMutex<FutexBucket> = IrqMutex::new(FutexBucket::new());
+    const BUCKET: IrqMutex<FutexBucket> = IrqMutex::new(FutexBucket::new(), LOCK_LEVEL_RESOURCE);
     [BUCKET; FUTEX_HASH_BUCKETS]
 };
 

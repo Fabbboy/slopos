@@ -9,7 +9,7 @@ use slopos_abi::fs::{
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
-use slopos_sync::{InitFlag, IrqMutex};
+use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::driver_runtime::{
@@ -190,7 +190,7 @@ impl FileTableSlot {
         Self {
             process_id: INVALID_PROCESS_ID,
             in_use,
-            lock: IrqMutex::new(()),
+            lock: IrqMutex::new((), LOCK_LEVEL_RESOURCE),
             descriptors: [FdEntry::new(); FILEIO_MAX_OPEN_FILES],
         }
     }
@@ -235,7 +235,8 @@ impl FileioState {
 
 unsafe impl Send for FileioState {}
 
-pub(super) static FILEIO_STATE: IrqMutex<FileioState> = IrqMutex::new(FileioState::uninitialized());
+pub(super) static FILEIO_STATE: IrqMutex<FileioState> =
+    IrqMutex::new(FileioState::uninitialized(), LOCK_LEVEL_REGISTRY);
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
 // ---------------------------------------------------------------------------

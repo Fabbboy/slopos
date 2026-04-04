@@ -2,7 +2,7 @@ use core::ffi::{c_int, c_void};
 use core::mem;
 use core::ptr;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
@@ -19,7 +19,7 @@ use slopos_mm::kernel_heap::kfree;
 /// List of terminated tasks waiting to be freed when refcount hits zero.
 /// Protected by IrqMutex for interrupt safety.
 static ZOMBIE_LIST: slopos_sync::IrqMutex<ZombieList> =
-    slopos_sync::IrqMutex::new(ZombieList::new());
+    slopos_sync::IrqMutex::new(ZombieList::new(), LOCK_LEVEL_REGISTRY);
 
 struct ZombieList {
     tasks: [Option<*mut Task>; MAX_TASKS],
@@ -152,7 +152,8 @@ impl TaskManagerInner {
     }
 }
 
-static TASK_MANAGER: IrqMutex<TaskManagerInner> = IrqMutex::new(TaskManagerInner::new());
+static TASK_MANAGER: IrqMutex<TaskManagerInner> =
+    IrqMutex::new(TaskManagerInner::new(), LOCK_LEVEL_REGISTRY);
 
 #[inline]
 pub(super) fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> R {

@@ -35,7 +35,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
 use super::packetbuf::PacketBuf;
@@ -182,10 +182,13 @@ impl NeighborCache {
     /// Create an empty neighbor cache.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(NeighborCacheInner {
-                entries: Vec::new(),
-                next_entry_id: 1,
-            }),
+            inner: IrqMutex::new(
+                NeighborCacheInner {
+                    entries: Vec::new(),
+                    next_entry_id: 1,
+                },
+                LOCK_LEVEL_REGISTRY,
+            ),
         }
     }
 

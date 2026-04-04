@@ -532,7 +532,7 @@ mod global_atlas {
     static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
     static FONT_CHANGE_CALLBACK: slopos_sync::IrqMutex<Option<fn()>> =
-        slopos_sync::IrqMutex::new(None);
+        slopos_sync::IrqMutex::new(None, slopos_sync::LOCK_LEVEL_RESOURCE);
 
     pub fn register_font_change_callback(cb: fn()) {
         *FONT_CHANGE_CALLBACK.lock() = Some(cb);

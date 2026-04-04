@@ -23,7 +23,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
-use slopos_sync::{IrqMutex, WaitQueue};
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, WaitQueue};
 
 /// Maximum number of concurrent AF_UNIX sockets.
 pub const MAX_UNIX_SOCKETS: usize = 32;
@@ -262,7 +262,8 @@ impl UnixSocketState {
     }
 }
 
-static UNIX_STATE: IrqMutex<UnixSocketState> = IrqMutex::new(UnixSocketState::new());
+static UNIX_STATE: IrqMutex<UnixSocketState> =
+    IrqMutex::new(UnixSocketState::new(), LOCK_LEVEL_REGISTRY);
 
 // ---------------------------------------------------------------------------
 // Public API

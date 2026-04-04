@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::pass;
 
@@ -41,9 +41,9 @@ impl MockNetDevice {
             mac_addr: mac,
             dev_mtu: mtu,
             feats: NetDeviceFeatures::empty(),
-            stats: IrqMutex::new(NetDeviceStats::new()),
-            tx_count: IrqMutex::new(0),
-            is_up: IrqMutex::new(false),
+            stats: IrqMutex::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
+            tx_count: IrqMutex::new(0, LOCK_LEVEL_RESOURCE),
+            is_up: IrqMutex::new(false, LOCK_LEVEL_RESOURCE),
         }
     }
 }

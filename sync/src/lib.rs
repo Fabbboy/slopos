@@ -12,7 +12,10 @@ pub mod waitqueue;
 
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
-pub use lock_tracking::{enable_lock_tracking, held_lock_count, poison_unlock_all_held};
+pub use lock_tracking::{
+    enable_lock_tracking, held_lock_count, poison_unlock_all_held, LOCK_LEVEL_ALLOCATOR,
+    LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LOCK_LEVEL_SCHEDULER,
+};
 pub use once_lock::OnceLock;
 pub use preempt::{is_preemption_disabled, preempt_count, IrqPreemptGuard, PreemptGuard};
 pub use rcu::{

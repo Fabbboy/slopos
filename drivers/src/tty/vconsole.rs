@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 use crate::serial::serial_putc_com1;
 
@@ -1589,8 +1589,10 @@ impl VConsoleState {
     }
 }
 
-static VCONSOLE_STATE: IrqMutex<VConsoleState> = IrqMutex::new(VConsoleState::new());
-static SCROLLBACK: IrqMutex<Option<alloc::boxed::Box<ScrollbackBuf>>> = IrqMutex::new(None);
+static VCONSOLE_STATE: IrqMutex<VConsoleState> =
+    IrqMutex::new(VConsoleState::new(), LOCK_LEVEL_RESOURCE);
+static SCROLLBACK: IrqMutex<Option<alloc::boxed::Box<ScrollbackBuf>>> =
+    IrqMutex::new(None, LOCK_LEVEL_RESOURCE);
 
 pub fn register_framebuffer(
     base: *mut u8,

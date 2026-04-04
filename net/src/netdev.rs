@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use bitflags::bitflags;
-use slopos_sync::IrqMutex;
+use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;
@@ -377,10 +377,13 @@ impl NetDeviceRegistry {
     /// No heap allocation occurs until the first [`register`](Self::register) call.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(RegistryInner {
-                slots: [const { None }; MAX_DEVICES],
-                count: 0,
-            }),
+            inner: IrqMutex::new(
+                RegistryInner {
+                    slots: [const { None }; MAX_DEVICES],
+                    count: 0,
+                },
+                LOCK_LEVEL_REGISTRY,
+            ),
         }
     }
 
@@ -404,7 +407,7 @@ impl NetDeviceRegistry {
                 return Some(DeviceHandle {
                     dev: dev_ptr,
                     index: DevIndex(i),
-                    tx_lock: IrqMutex::new(()),
+                    tx_lock: IrqMutex::new((), LOCK_LEVEL_RESOURCE),
                 });
             }
         }
