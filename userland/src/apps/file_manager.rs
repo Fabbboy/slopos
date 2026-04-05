@@ -8,19 +8,13 @@ use std::string::String;
 
 use crate::theme;
 use slopos_appkit::{
-    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, MessageId, Modifiers,
-    NamedKey, Node, TableColumn, TableColumnWidth, TextAlignment,
+    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, Modifiers, NamedKey,
+    Node, TableColumn, TableColumnWidth, TextAlignment,
 };
 
 // ---------------------------------------------------------------------------
-// Message IDs
+// Messages
 // ---------------------------------------------------------------------------
-
-const MSG_NAV_BACK: MessageId = MessageId::new(1);
-const MSG_NAV_FWD: MessageId = MessageId::new(2);
-const MSG_NAV_UP: MessageId = MessageId::new(3);
-const MSG_FILE_SELECT: MessageId = MessageId::new(10);
-const MSG_BOOKMARK_BASE: u32 = 20;
 
 #[derive(Clone, Debug)]
 pub enum FileMsg {
@@ -29,20 +23,6 @@ pub enum FileMsg {
     NavUp,
     FileSelect(usize),
     Bookmark(usize),
-    Unknown(#[allow(dead_code)] MessageId),
-}
-
-impl From<MessageId> for FileMsg {
-    fn from(m: MessageId) -> Self {
-        match m.id {
-            1 => FileMsg::NavBack,
-            2 => FileMsg::NavForward,
-            3 => FileMsg::NavUp,
-            10 => FileMsg::FileSelect(m.payload as usize),
-            20 => FileMsg::Bookmark(m.payload as usize),
-            _ => FileMsg::Unknown(m),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +232,7 @@ impl FileManagerApp {
         BOOKMARKS.iter().position(|bm| path_str == bm.path)
     }
 
-    fn build_sidebar(&self) -> Node {
+    fn build_sidebar(&self) -> Node<FileMsg> {
         let active_idx = self.active_bookmark_index();
 
         // "Places" heading
@@ -266,7 +246,7 @@ impl FileManagerApp {
         };
 
         // Bookmark entries as a ListView with styled content
-        let items: Vec<Node> = BOOKMARKS
+        let items: Vec<Node<FileMsg>> = BOOKMARKS
             .iter()
             .enumerate()
             .map(|(i, bm)| {
@@ -303,7 +283,7 @@ impl FileManagerApp {
         let bookmark_list = Node::ListView {
             item_height: theme::FM_SIDEBAR_ITEM_HEIGHT,
             selected: active_idx,
-            on_select: MessageId::new(MSG_BOOKMARK_BASE),
+            on_select: Some(FileMsg::Bookmark),
             items,
         };
 
@@ -326,7 +306,7 @@ impl FileManagerApp {
     // View helpers -- navigation bar
     // -----------------------------------------------------------------------
 
-    fn build_navbar(&self) -> Node {
+    fn build_navbar(&self) -> Node<FileMsg> {
         // Path breadcrumb with truncation from left
         let path_str = self.current_path.display().to_string();
         let display_path = if path_str.len() > 50 {
@@ -346,19 +326,19 @@ impl FileManagerApp {
                     children: vec![
                         Node::Button {
                             label: String::from(" < "),
-                            on_press: Some(MSG_NAV_BACK),
+                            on_press: Some(FileMsg::NavBack),
                             style: ButtonStyle::Secondary,
                             enabled: !self.history_back.is_empty(),
                         },
                         Node::Button {
                             label: String::from(" > "),
-                            on_press: Some(MSG_NAV_FWD),
+                            on_press: Some(FileMsg::NavForward),
                             style: ButtonStyle::Secondary,
                             enabled: !self.history_forward.is_empty(),
                         },
                         Node::Button {
                             label: String::from(" ^ "),
-                            on_press: Some(MSG_NAV_UP),
+                            on_press: Some(FileMsg::NavUp),
                             style: ButtonStyle::Secondary,
                             enabled: true,
                         },
@@ -380,7 +360,7 @@ impl FileManagerApp {
     // View helpers -- file list rows
     // -----------------------------------------------------------------------
 
-    fn build_file_row(&self, entry: &FileEntry) -> Vec<Node> {
+    fn build_file_row(&self, entry: &FileEntry) -> Vec<Node<FileMsg>> {
         let (name_text, name_color) = if entry.is_directory {
             (format!("[D] {}", entry.name), theme::FM_DIR_COLOR)
         } else {
@@ -411,7 +391,7 @@ impl FileManagerApp {
     // View helpers -- main content area
     // -----------------------------------------------------------------------
 
-    fn build_content(&self) -> Node {
+    fn build_content(&self) -> Node<FileMsg> {
         let content_node = match self.load_state {
             LoadState::Error => Node::Background {
                 color: theme::FM_COLOR_BG,
@@ -436,7 +416,7 @@ impl FileManagerApp {
                 }),
             },
             LoadState::Ok => {
-                let rows: Vec<Vec<Node>> = self
+                let rows: Vec<Vec<Node<FileMsg>>> = self
                     .entries
                     .iter()
                     .map(|e| self.build_file_row(e))
@@ -457,7 +437,7 @@ impl FileManagerApp {
                     rows,
                     row_height: theme::FM_ITEM_HEIGHT,
                     selected: self.selected,
-                    on_select: MSG_FILE_SELECT,
+                    on_select: Some(FileMsg::FileSelect),
                     on_header_click: None,
                 }
             }
@@ -473,7 +453,7 @@ impl FileManagerApp {
     // View helpers -- status bar
     // -----------------------------------------------------------------------
 
-    fn build_status_bar(&self) -> Node {
+    fn build_status_bar(&self) -> Node<FileMsg> {
         let text = match self.load_state {
             LoadState::Error => String::from("Error"),
             LoadState::Empty => String::from("0 items"),
@@ -539,7 +519,7 @@ fn format_size(size: u32) -> String {
 impl App for FileManagerApp {
     type Message = FileMsg;
 
-    fn view(&self) -> Node {
+    fn view(&self) -> Node<FileMsg> {
         Node::HStack {
             spacing: 0,
             align: CrossAxisAlignment::Stretch,
@@ -581,7 +561,7 @@ impl App for FileManagerApp {
                 Action::Rebuild
             }
             FileMsg::FileSelect(idx) => {
-                // Click on already-selected row = double-click → open directory
+                // Click on already-selected row = double-click -> open directory
                 if self.selected == Some(idx) {
                     self.open_selected();
                 } else {
@@ -595,7 +575,6 @@ impl App for FileManagerApp {
                 }
                 Action::Rebuild
             }
-            FileMsg::Unknown(_) => Action::None,
         }
     }
 

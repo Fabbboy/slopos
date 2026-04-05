@@ -5,7 +5,10 @@
 //! protocol request plus event polling.
 
 use crate::connection::Connection;
-use crate::types::{Event, MAX_STRING_LEN, OutputInfo, PROTOCOL_VERSION, ProtocolError, Request};
+use crate::types::{
+    Event, MAX_STRING_LEN, OutputInfo, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId,
+    ToplevelId,
+};
 use slopos_abi::net::AF_UNIX;
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 use slopos_slibc::pal::{Pal, Sys};
@@ -86,15 +89,17 @@ impl Client {
 
     // -- Surface operations -----------------------------------------------
 
-    pub fn create_surface(&mut self) -> Result<u32, ProtocolError> {
+    pub fn create_surface(&mut self) -> Result<SurfaceId, ProtocolError> {
         let id = self.allocate_id();
-        self.conn.send(&Request::CreateSurface { new_id: id })?;
-        Ok(id)
+        self.conn.send(&Request::CreateSurface {
+            new_id: SurfaceId::from_raw(id),
+        })?;
+        Ok(SurfaceId::from_raw(id))
     }
 
     pub fn surface_attach(
         &mut self,
-        surface: u32,
+        surface: SurfaceId,
         shm_token: u32,
         width: u32,
         height: u32,
@@ -104,6 +109,7 @@ impl Client {
             shm_token,
             width,
             height,
+            buffer_fd: None,
         })
     }
 
@@ -111,7 +117,7 @@ impl Client {
     /// The shm_token field is set to 0 (ignored by the compositor — fd is authoritative).
     pub fn surface_attach_fd(
         &mut self,
-        surface: u32,
+        surface: SurfaceId,
         memfd_fd: i32,
         width: u32,
         height: u32,
@@ -122,6 +128,7 @@ impl Client {
                 shm_token: 0, // Placeholder — compositor uses the received fd
                 width,
                 height,
+                buffer_fd: None, // fd travels via SCM_RIGHTS ancillary data, not in struct
             },
             memfd_fd,
         )
@@ -129,7 +136,7 @@ impl Client {
 
     pub fn surface_damage(
         &mut self,
-        surface: u32,
+        surface: SurfaceId,
         x: i32,
         y: i32,
         w: i32,
@@ -144,33 +151,33 @@ impl Client {
         })
     }
 
-    pub fn surface_commit(&mut self, surface: u32) -> Result<(), ProtocolError> {
+    pub fn surface_commit(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceCommit { surface })
     }
 
     /// Request a FrameDone callback for this surface.
-    pub fn surface_frame(&mut self, surface: u32) -> Result<(), ProtocolError> {
+    pub fn surface_frame(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceFrame { surface })
     }
 
-    pub fn surface_destroy(&mut self, surface: u32) -> Result<(), ProtocolError> {
+    pub fn surface_destroy(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceDestroy { surface })
     }
 
     // -- Toplevel operations ----------------------------------------------
 
-    pub fn get_toplevel(&mut self, surface: u32) -> Result<u32, ProtocolError> {
+    pub fn get_toplevel(&mut self, surface: SurfaceId) -> Result<ToplevelId, ProtocolError> {
         let id = self.allocate_id();
         self.conn.send(&Request::GetToplevel {
             surface,
-            new_id: id,
+            new_id: ToplevelId::from_raw(id),
         })?;
-        Ok(id)
+        Ok(ToplevelId::from_raw(id))
     }
 
     pub fn toplevel_set_title(
         &mut self,
-        toplevel: u32,
+        toplevel: ToplevelId,
         title_data: &[u8],
     ) -> Result<(), ProtocolError> {
         let mut title = [0u8; MAX_STRING_LEN];
@@ -185,7 +192,7 @@ impl Client {
 
     pub fn toplevel_set_app_id(
         &mut self,
-        toplevel: u32,
+        toplevel: ToplevelId,
         app_id_data: &[u8],
     ) -> Result<(), ProtocolError> {
         let mut app_id = [0u8; MAX_STRING_LEN];
@@ -198,7 +205,7 @@ impl Client {
         })
     }
 
-    pub fn toplevel_destroy(&mut self, toplevel: u32) -> Result<(), ProtocolError> {
+    pub fn toplevel_destroy(&mut self, toplevel: ToplevelId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::ToplevelDestroy { toplevel })
     }
 
@@ -209,7 +216,7 @@ impl Client {
 
     // -- Cursor -----------------------------------------------------------
 
-    pub fn set_cursor_shape(&mut self, surface: u32, shape: u8) -> Result<(), ProtocolError> {
+    pub fn set_cursor_shape(&mut self, surface: SurfaceId, shape: u8) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SetCursorShape { surface, shape })
     }
 
@@ -235,7 +242,11 @@ impl Client {
     // -- Interactive (compositor-driven) -----------------------------------
 
     /// Start an interactive move. Serial must come from a recent pointer event.
-    pub fn interactive_move(&mut self, toplevel: u32, serial: u32) -> Result<(), ProtocolError> {
+    pub fn interactive_move(
+        &mut self,
+        toplevel: ToplevelId,
+        serial: u32,
+    ) -> Result<(), ProtocolError> {
         self.conn
             .send(&Request::InteractiveMove { toplevel, serial })
     }
@@ -243,7 +254,7 @@ impl Client {
     /// Start an interactive resize. Serial must come from a recent pointer event.
     pub fn interactive_resize(
         &mut self,
-        toplevel: u32,
+        toplevel: ToplevelId,
         serial: u32,
         edges: u32,
     ) -> Result<(), ProtocolError> {

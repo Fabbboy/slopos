@@ -7,6 +7,42 @@
 /// Current wire protocol version.
 pub const PROTOCOL_VERSION: u32 = 2;
 
+/// Compile-time-safe surface identifier.
+///
+/// `repr(transparent)` over `u32` -- zero runtime cost.
+/// Prevents accidental interchange with toplevel IDs or raw integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[repr(transparent)]
+pub struct SurfaceId(u32);
+
+/// Compile-time-safe toplevel identifier.
+///
+/// `repr(transparent)` over `u32` -- zero runtime cost.
+/// Prevents accidental interchange with surface IDs or raw integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[repr(transparent)]
+pub struct ToplevelId(u32);
+
+impl SurfaceId {
+    pub const NONE: Self = Self(0);
+    pub fn from_raw(v: u32) -> Self {
+        Self(v)
+    }
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl ToplevelId {
+    pub const NONE: Self = Self(0);
+    pub fn from_raw(v: u32) -> Self {
+        Self(v)
+    }
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// Capability flags advertised by the compositor in [`Event::Hello`].
 pub mod caps {
     /// Compositor supports toplevel windows.
@@ -32,6 +68,36 @@ pub mod resize_edge {
     pub const BOTTOM: u32 = 2;
     pub const LEFT: u32 = 4;
     pub const RIGHT: u32 = 8;
+}
+
+/// Move-only file descriptor wrapper. Closes on drop.
+///
+/// Provides RAII lifecycle for file descriptors received via SCM_RIGHTS.
+/// The fd is closed automatically when the `OwnedFd` is dropped, unless
+/// consumed via [`into_raw`](OwnedFd::into_raw).
+pub struct OwnedFd(i32);
+
+impl OwnedFd {
+    pub fn from_raw(fd: i32) -> Self {
+        Self(fd)
+    }
+    pub fn raw(&self) -> i32 {
+        self.0
+    }
+    pub fn into_raw(self) -> i32 {
+        let fd = self.0;
+        core::mem::forget(self);
+        fd
+    }
+}
+
+impl Drop for OwnedFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            use slopos_slibc::pal::{Pal, Sys};
+            let _ = Sys::close(self.0);
+        }
+    }
 }
 
 /// Error type for all protocol operations.
@@ -75,7 +141,6 @@ pub struct ClipboardData {
 pub const MAX_STRING_LEN: usize = 128;
 
 /// Client-to-server request.
-#[derive(Clone)]
 pub enum Request {
     /// Protocol version handshake (client response to server Hello).
     Hello {
@@ -84,49 +149,53 @@ pub enum Request {
 
     // -- Surface lifecycle ------------------------------------------------
     CreateSurface {
-        new_id: u32,
+        new_id: SurfaceId,
     },
     SurfaceAttach {
-        surface: u32,
+        surface: SurfaceId,
         shm_token: u32,
         width: u32,
         height: u32,
+        /// File descriptor received via SCM_RIGHTS (memfd-backed buffer).
+        /// `None` when the attach was decoded from a message without an
+        /// accompanying fd, or on the send side before transmission.
+        buffer_fd: Option<OwnedFd>,
     },
     SurfaceDamage {
-        surface: u32,
+        surface: SurfaceId,
         x: i32,
         y: i32,
         w: i32,
         h: i32,
     },
     SurfaceCommit {
-        surface: u32,
+        surface: SurfaceId,
     },
     /// Request a [`Event::FrameDone`] callback after the next present.
     SurfaceFrame {
-        surface: u32,
+        surface: SurfaceId,
     },
     SurfaceDestroy {
-        surface: u32,
+        surface: SurfaceId,
     },
 
     // -- Toplevel lifecycle ------------------------------------------------
     GetToplevel {
-        surface: u32,
-        new_id: u32,
+        surface: SurfaceId,
+        new_id: ToplevelId,
     },
     ToplevelSetTitle {
-        toplevel: u32,
+        toplevel: ToplevelId,
         title: [u8; MAX_STRING_LEN],
         len: u8,
     },
     ToplevelSetAppId {
-        toplevel: u32,
+        toplevel: ToplevelId,
         app_id: [u8; MAX_STRING_LEN],
         len: u8,
     },
     ToplevelDestroy {
-        toplevel: u32,
+        toplevel: ToplevelId,
     },
     /// Acknowledge a [`Event::Configure`] serial before committing.
     AckConfigure {
@@ -135,7 +204,7 @@ pub enum Request {
 
     // -- Cursor -----------------------------------------------------------
     SetCursorShape {
-        surface: u32,
+        surface: SurfaceId,
         shape: u8,
     },
 
@@ -146,12 +215,12 @@ pub enum Request {
     // -- Interactive (compositor-driven) -----------------------------------
     /// Start an interactive window move. Serial must match a recent pointer event.
     InteractiveMove {
-        toplevel: u32,
+        toplevel: ToplevelId,
         serial: u32,
     },
     /// Start an interactive window resize. Serial must match a recent pointer event.
     InteractiveResize {
-        toplevel: u32,
+        toplevel: ToplevelId,
         serial: u32,
         edges: u32,
     },
@@ -183,7 +252,7 @@ pub enum Event {
     // -- Frame synchronization --------------------------------------------
     /// Sent only to surfaces that requested it via [`Request::SurfaceFrame`].
     FrameDone {
-        surface: u32,
+        surface: SurfaceId,
         timestamp_ms: u32,
     },
 
@@ -191,24 +260,24 @@ pub enum Event {
     /// Window state/size change. Client must [`Request::AckConfigure`] the
     /// serial before committing a buffer at the new size.
     Configure {
-        toplevel: u32,
+        toplevel: ToplevelId,
         serial: u32,
         width: u32,
         height: u32,
         states: u32,
     },
     Close {
-        toplevel: u32,
+        toplevel: ToplevelId,
     },
 
     // -- Pointer ----------------------------------------------------------
     PointerEnter {
-        surface: u32,
+        surface: SurfaceId,
         x: i32,
         y: i32,
     },
     PointerLeave {
-        surface: u32,
+        surface: SurfaceId,
     },
     PointerMotion {
         time: u32,
@@ -229,10 +298,10 @@ pub enum Event {
 
     // -- Keyboard ---------------------------------------------------------
     KeyboardEnter {
-        surface: u32,
+        surface: SurfaceId,
     },
     KeyboardLeave {
-        surface: u32,
+        surface: SurfaceId,
     },
     Key {
         serial: u32,

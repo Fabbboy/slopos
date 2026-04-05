@@ -4,7 +4,6 @@ use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::node::MessageId;
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -13,13 +12,18 @@ pub struct CheckboxWidget {
     rect: Rect,
     checked: bool,
     label: String,
-    on_toggle: MessageId,
+    on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     enabled: bool,
     hovered: bool,
 }
 
 impl CheckboxWidget {
-    pub fn new(checked: bool, label: String, on_toggle: MessageId, enabled: bool) -> Self {
+    pub fn new(
+        checked: bool,
+        label: String,
+        on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
+        enabled: bool,
+    ) -> Self {
         Self {
             id: next_widget_id(),
             rect: Rect::ZERO,
@@ -130,7 +134,9 @@ impl Widget for CheckboxWidget {
                 ..
             } => {
                 self.toggle();
-                sink.emit(self.on_toggle);
+                if let Some(f) = &self.on_toggle {
+                    sink.emit_raw(f());
+                }
                 EventResponse::Consumed
             }
             WidgetEvent::PointerEnter => {
@@ -146,7 +152,9 @@ impl Widget for CheckboxWidget {
                 ..
             } => {
                 self.toggle();
-                sink.emit(self.on_toggle);
+                if let Some(f) = &self.on_toggle {
+                    sink.emit_raw(f());
+                }
                 EventResponse::Consumed
             }
             _ => EventResponse::Ignored,

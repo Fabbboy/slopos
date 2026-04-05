@@ -1,6 +1,7 @@
+use std::any::Any;
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::node::MessageId;
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -14,7 +15,7 @@ pub struct ListViewWidget {
 
     item_height: i32,
     selected: Option<usize>,
-    on_select: MessageId,
+    on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     items: Vec<Box<dyn Widget>>,
     scroll_offset: i32,
     focused: bool,
@@ -24,7 +25,7 @@ impl ListViewWidget {
     pub fn new(
         item_height: i32,
         selected: Option<usize>,
-        on_select: MessageId,
+        on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
         items: Vec<Box<dyn Widget>>,
     ) -> Self {
         Self {
@@ -187,7 +188,9 @@ impl Widget for ListViewWidget {
                 let index = (relative_y / self.item_height) as usize;
                 if index < self.items.len() {
                     self.selected = Some(index);
-                    sink.emit(MessageId::with_payload(self.on_select.id, index as u32));
+                    if let Some(cb) = &self.on_select {
+                        sink.emit_raw(cb(index));
+                    }
                     EventResponse::Consumed
                 } else {
                     EventResponse::Ignored
@@ -200,13 +203,17 @@ impl Widget for ListViewWidget {
                         if sel > 0 {
                             self.selected = Some(sel - 1);
                             self.scroll_to_selected();
-                            sink.emit(MessageId::with_payload(self.on_select.id, (sel - 1) as u32));
+                            if let Some(cb) = &self.on_select {
+                                sink.emit_raw(cb(sel - 1));
+                            }
                             return EventResponse::Consumed;
                         }
-                    } else if self.items.len() > 0 {
+                    } else if !self.items.is_empty() {
                         self.selected = Some(0);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, 0));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(0));
+                        }
                         return EventResponse::Consumed;
                     }
                     EventResponse::Ignored
@@ -216,35 +223,41 @@ impl Widget for ListViewWidget {
                         if sel + 1 < self.items.len() {
                             self.selected = Some(sel + 1);
                             self.scroll_to_selected();
-                            sink.emit(MessageId::with_payload(self.on_select.id, (sel + 1) as u32));
+                            if let Some(cb) = &self.on_select {
+                                sink.emit_raw(cb(sel + 1));
+                            }
                             return EventResponse::Consumed;
                         }
-                    } else if self.items.len() > 0 {
+                    } else if !self.items.is_empty() {
                         self.selected = Some(0);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, 0));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(0));
+                        }
                         return EventResponse::Consumed;
                     }
                     EventResponse::Ignored
                 }
                 Key::Named(NamedKey::Home) => {
-                    if self.items.len() > 0 {
+                    if !self.items.is_empty() {
                         self.selected = Some(0);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, 0));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(0));
+                        }
                         EventResponse::Consumed
                     } else {
                         EventResponse::Ignored
                     }
                 }
                 Key::Named(NamedKey::End) => {
-                    if self.items.len() > 0 {
-                        self.selected = Some(self.items.len() - 1);
+                    if !self.items.is_empty() {
+                        let last = self.items.len() - 1;
+                        self.selected = Some(last);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(
-                            self.on_select.id,
-                            (self.items.len() - 1) as u32,
-                        ));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(last));
+                        }
                         EventResponse::Consumed
                     } else {
                         EventResponse::Ignored

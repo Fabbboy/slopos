@@ -4,7 +4,6 @@ use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::node::MessageId;
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -18,7 +17,7 @@ pub struct DialogWidget {
     title: String,
     content: Box<dyn Widget>,
     actions: Vec<Box<dyn Widget>>,
-    on_dismiss: MessageId,
+    on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     /// Cached card rect from the last layout pass.
     card_rect: Rect,
 }
@@ -28,7 +27,7 @@ impl DialogWidget {
         title: String,
         content: Box<dyn Widget>,
         actions: Vec<Box<dyn Widget>>,
-        on_dismiss: MessageId,
+        on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     ) -> Self {
         Self {
             id: next_widget_id(),
@@ -204,7 +203,9 @@ impl Widget for DialogWidget {
                 key: Key::Named(NamedKey::Escape),
                 ..
             } => {
-                sink.emit(self.on_dismiss);
+                if let Some(f) = &self.on_dismiss {
+                    sink.emit_raw(f());
+                }
                 EventResponse::Consumed
             }
 
@@ -215,7 +216,9 @@ impl Widget for DialogWidget {
                 button: PointerButton::Left,
             } => {
                 if !self.card_rect.contains(*x, *y) {
-                    sink.emit(self.on_dismiss);
+                    if let Some(f) = &self.on_dismiss {
+                        sink.emit_raw(f());
+                    }
                     return EventResponse::Consumed;
                 }
                 // Forward to action widgets.

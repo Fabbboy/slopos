@@ -10,24 +10,72 @@
 //! indexed by pipe slot, so wakers and sleepers never hold a pipe lock
 //! and a wait-queue lock simultaneously.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
 use slopos_sync::{IrqMutex, IrqMutexGuard, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, WaitQueue};
 
 pub(crate) const MAX_PIPES: usize = 64;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
-pub(crate) const INVALID_PIPE_ID: u32 = u32::MAX;
+
+/// Bits used for the slot index in the handle encoding.
+const SLOT_BITS: u32 = 8;
+const SLOT_MASK: usize = (1 << SLOT_BITS) - 1; // 0xFF — supports up to 256 slots
+
+// ---------------------------------------------------------------------------
+// PipeHandle — type-safe handle for pipe kernel objects
+// ---------------------------------------------------------------------------
+
+/// Opaque handle identifying a kernel pipe slot.
+///
+/// Encodes a slot index and a generation counter so that stale handles
+/// (from a closed pipe whose slot was recycled) are reliably rejected.
+/// The encoding is `(generation << SLOT_BITS) | slot_index`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(transparent)]
+pub struct PipeHandle(u32);
+
+impl PipeHandle {
+    /// Sentinel value representing no pipe.
+    pub const INVALID: Self = Self(u32::MAX);
+
+    pub(crate) fn new(slot: usize, generation: u32) -> Self {
+        Self(((generation as usize) << SLOT_BITS | (slot & SLOT_MASK)) as u32)
+    }
+
+    pub(crate) fn slot(self) -> usize {
+        (self.0 as usize) & SLOT_MASK
+    }
+
+    pub(crate) fn generation(self) -> u32 {
+        ((self.0 as usize) >> SLOT_BITS) as u32
+    }
+
+    /// Convert to usize for storage in OpenFileEntry.handle.
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Reconstruct from usize stored in OpenFileEntry.handle.
+    pub fn from_usize(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+/// Global generation counter for pipe slot allocation.
+static PIPE_GENERATION: AtomicU32 = AtomicU32::new(1);
 
 pub(crate) static READER_WQS: [WaitQueue; MAX_PIPES] = [const { WaitQueue::new() }; MAX_PIPES];
 pub(crate) static WRITER_WQS: [WaitQueue; MAX_PIPES] = [const { WaitQueue::new() }; MAX_PIPES];
 
 #[inline]
-pub(crate) fn reader_wq(pipe_id: u32) -> &'static WaitQueue {
-    &READER_WQS[pipe_id as usize]
+pub(crate) fn reader_wq(handle: PipeHandle) -> &'static WaitQueue {
+    &READER_WQS[handle.slot()]
 }
 
 #[inline]
-pub(crate) fn writer_wq(pipe_id: u32) -> &'static WaitQueue {
-    &WRITER_WQS[pipe_id as usize]
+pub(crate) fn writer_wq(handle: PipeHandle) -> &'static WaitQueue {
+    &WRITER_WQS[handle.slot()]
 }
 
 pub(crate) struct PipeSlot {
@@ -37,6 +85,7 @@ pub(crate) struct PipeSlot {
     pub(crate) len: usize,
     pub(crate) readers: u16,
     pub(crate) writers: u16,
+    pub(crate) generation: u32,
     buffer: [u8; PIPE_BUFFER_SIZE],
 }
 
@@ -49,6 +98,7 @@ impl PipeSlot {
             len: 0,
             readers: 0,
             writers: 0,
+            generation: 0,
             buffer: [0; PIPE_BUFFER_SIZE],
         }
     }
@@ -132,45 +182,48 @@ impl PipeAllocBitmap {
 static PIPE_ALLOC: IrqMutex<PipeAllocBitmap> =
     IrqMutex::new(PipeAllocBitmap::new(), LOCK_LEVEL_REGISTRY);
 
-/// Allocate a new pipe slot. Returns the pipe ID.
+/// Allocate a new pipe slot. Returns a [`PipeHandle`] encoding the slot
+/// index and a monotonic generation counter for stale-handle detection.
 ///
 /// Takes the allocation bitmap lock briefly to find a free slot, then
 /// locks the individual pipe slot to initialize it.
-pub(crate) fn alloc_slot() -> Option<u32> {
+pub(crate) fn alloc_slot() -> Option<PipeHandle> {
     let mut alloc = PIPE_ALLOC.lock();
     for (idx, used) in alloc.used.iter_mut().enumerate() {
         if !*used {
             *used = true;
             drop(alloc); // Release alloc lock before taking pipe lock.
+            let gn = PIPE_GENERATION.fetch_add(1, Ordering::Relaxed);
             let mut slot = PIPE_SLOTS[idx].lock();
             *slot = PipeSlot::new();
             slot.valid = true;
-            return Some(idx as u32);
+            slot.generation = gn;
+            return Some(PipeHandle::new(idx, gn));
         }
     }
     None
 }
 
-/// Lock a pipe slot by ID, returning a guard if the slot is valid.
+/// Lock a pipe slot by handle, returning a guard if the slot is valid
+/// and the generation matches (stale-handle detection).
 ///
-/// This is the primary accessor for pipe operations. Replaces the old
-/// `PIPE_STATE.lock()` + `slot_mut()` pattern with per-pipe locking.
+/// This is the primary accessor for pipe operations.
 #[inline]
-pub(crate) fn lock_slot(pipe_id: u32) -> Option<IrqMutexGuard<'static, PipeSlot>> {
-    let idx = pipe_id as usize;
+pub(crate) fn lock_slot(handle: PipeHandle) -> Option<IrqMutexGuard<'static, PipeSlot>> {
+    let idx = handle.slot();
     if idx >= MAX_PIPES {
         return None;
     }
     let guard = PIPE_SLOTS[idx].lock();
-    if !guard.valid {
+    if !guard.valid || guard.generation != handle.generation() {
         return None;
     }
     Some(guard)
 }
 
 /// Free a pipe slot. Marks it as unused in the allocation bitmap.
-pub(crate) fn free_slot(pipe_id: u32) {
-    let idx = pipe_id as usize;
+pub(crate) fn free_slot(handle: PipeHandle) {
+    let idx = handle.slot();
     if idx >= MAX_PIPES {
         return;
     }

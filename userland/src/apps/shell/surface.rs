@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use crate::gfx::DrawBuffer;
 use crate::syscall::tty;
 use slopos_gfx::RenderSurface;
+use slopos_protocol::types::{SurfaceId, ToplevelId};
 use slopos_windowing::{HasWindowHandle, ProtocolHandle, SoftSurface, Surface};
 
 thread_local! {
@@ -61,7 +62,7 @@ pub fn set_title(title: &str) {
             let s = s.borrow();
             let h = h.borrow();
             if let (Some(surface), Some(handle)) = (s.as_ref(), h.as_ref()) {
-                let toplevel_id = surface.window_handle().toplevel_id();
+                let toplevel_id = ToplevelId::from_raw(surface.window_handle().toplevel_id());
                 let mut client = handle.borrow_client();
                 let _ = client.toplevel_set_title(toplevel_id, title.as_bytes());
             }
@@ -75,7 +76,7 @@ pub fn set_app_id(app_id: &str) {
             let s = s.borrow();
             let h = h.borrow();
             if let (Some(surface), Some(handle)) = (s.as_ref(), h.as_ref()) {
-                let toplevel_id = surface.window_handle().toplevel_id();
+                let toplevel_id = ToplevelId::from_raw(surface.window_handle().toplevel_id());
                 let mut client = handle.borrow_client();
                 let _ = client.toplevel_set_app_id(toplevel_id, app_id.as_bytes());
             }
@@ -89,7 +90,7 @@ pub fn set_cursor_shape(shape: u8) {
             let s = s.borrow();
             let h = h.borrow();
             if let (Some(surface), Some(handle)) = (s.as_ref(), h.as_ref()) {
-                let surface_id = surface.window_handle().surface_id();
+                let surface_id = SurfaceId::from_raw(surface.window_handle().surface_id());
                 let mut client = handle.borrow_client();
                 let _ = client.set_cursor_shape(surface_id, shape);
             }

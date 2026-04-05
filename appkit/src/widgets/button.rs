@@ -1,10 +1,12 @@
+use std::any::Any;
+
 use slopos_abi::draw::Color32;
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::node::{ButtonStyle, MessageId};
+use crate::node::ButtonStyle;
 use crate::paint::PaintContext;
 use crate::style::StyleSheet;
 use crate::text as font;
@@ -24,7 +26,7 @@ pub struct ButtonWidget {
     id: WidgetId,
     rect: Rect,
     label: String,
-    on_press: Option<MessageId>,
+    on_press: Option<Box<dyn Fn() -> Box<dyn Any>>>,
     style: ButtonStyle,
     enabled: bool,
     state: ButtonState,
@@ -34,7 +36,7 @@ pub struct ButtonWidget {
 impl ButtonWidget {
     pub fn new(
         label: String,
-        on_press: Option<MessageId>,
+        on_press: Option<Box<dyn Fn() -> Box<dyn Any>>>,
         style: ButtonStyle,
         enabled: bool,
     ) -> Self {
@@ -190,9 +192,9 @@ impl Widget for ButtonWidget {
             } => {
                 if self.state == ButtonState::Pressed {
                     self.state = ButtonState::Hovered;
-                    if let Some(msg) = self.on_press {
-                        sink.emit(msg)
-                    };
+                    if let Some(f) = &self.on_press {
+                        sink.emit_raw(f());
+                    }
                     return EventResponse::Consumed;
                 }
                 EventResponse::Ignored
@@ -214,9 +216,9 @@ impl Widget for ButtonWidget {
                     key,
                     Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space)
                 ) {
-                    if let Some(msg) = self.on_press {
-                        sink.emit(msg)
-                    };
+                    if let Some(f) = &self.on_press {
+                        sink.emit_raw(f());
+                    }
                     return EventResponse::Consumed;
                 }
                 EventResponse::Ignored

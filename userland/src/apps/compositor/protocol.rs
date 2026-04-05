@@ -9,7 +9,7 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
 use slopos_protocol::server::Server;
 use slopos_protocol::types::{
-    Event, MAX_STRING_LEN, PROTOCOL_VERSION, ProtocolError, Request, caps,
+    Event, MAX_STRING_LEN, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId, ToplevelId, caps,
 };
 
 use crate::syscall::tty;
@@ -34,8 +34,8 @@ enum SurfaceRole {
 struct ProtocolSurface {
     active: bool,
     client_idx: usize,
-    surface_id: u32,
-    toplevel_id: u32,
+    surface_id: SurfaceId,
+    toplevel_id: ToplevelId,
     shm_token: u32,
     width: u32,
     height: u32,
@@ -76,8 +76,8 @@ impl ProtocolSurface {
         Self {
             active: false,
             client_idx: 0,
-            surface_id: 0,
-            toplevel_id: 0,
+            surface_id: SurfaceId::NONE,
+            toplevel_id: ToplevelId::NONE,
             shm_token: 0,
             width: 0,
             height: 0,
@@ -231,12 +231,17 @@ impl ProtocolBridge {
                 shm_token: _,
                 width,
                 height,
+                buffer_fd,
             } => {
-                // SurfaceAttach carries a memfd fd via SCM_RIGHTS.
-                // Pop it from the connection's fd FIFO (libwayland pattern).
-                let memfd_fd = self.server.take_client_fd(client_idx);
-                if memfd_fd >= 0 {
-                    self.handle_surface_attach(client_idx, surface, memfd_fd as u32, width, height);
+                // The memfd fd is now decoded inline as part of the Request.
+                if let Some(fd) = buffer_fd {
+                    self.handle_surface_attach(
+                        client_idx,
+                        surface,
+                        fd.into_raw() as u32,
+                        width,
+                        height,
+                    );
                 }
             }
             Request::SurfaceDamage {
@@ -304,9 +309,9 @@ impl ProtocolBridge {
 
     // ── Surface lifecycle ──────────────────────────────────────────────────
 
-    fn handle_create_surface(&mut self, client_idx: usize, new_id: u32) {
+    fn handle_create_surface(&mut self, client_idx: usize, new_id: SurfaceId) {
         // Reject zero IDs (used as sentinel) and duplicates within this client.
-        if new_id == 0 || self.find_surface(client_idx, new_id).is_some() {
+        if new_id == SurfaceId::NONE || self.find_surface(client_idx, new_id).is_some() {
             let _ = self.server.queue_event(
                 client_idx,
                 &Event::Error {
@@ -342,7 +347,7 @@ impl ProtocolBridge {
     fn handle_surface_attach(
         &mut self,
         client_idx: usize,
-        surface_id: u32,
+        surface_id: SurfaceId,
         shm_token: u32,
         width: u32,
         height: u32,
@@ -357,7 +362,7 @@ impl ProtocolBridge {
     fn handle_surface_damage(
         &mut self,
         client_idx: usize,
-        surface_id: u32,
+        surface_id: SurfaceId,
         x: i32,
         y: i32,
         w: i32,
@@ -389,7 +394,7 @@ impl ProtocolBridge {
         }
     }
 
-    fn handle_surface_commit(&mut self, client_idx: usize, surface_id: u32) {
+    fn handle_surface_commit(&mut self, client_idx: usize, surface_id: SurfaceId) {
         if let Some(idx) = self.find_surface(client_idx, surface_id) {
             let surface = &mut self.surfaces[idx];
             surface.committed_damage = surface.pending_damage;
@@ -403,19 +408,19 @@ impl ProtocolBridge {
         }
     }
 
-    fn handle_surface_frame(&mut self, client_idx: usize, surface_id: u32) {
+    fn handle_surface_frame(&mut self, client_idx: usize, surface_id: SurfaceId) {
         if let Some(idx) = self.find_surface(client_idx, surface_id) {
             self.surfaces[idx].frame_callback_pending = true;
         }
     }
 
-    fn handle_surface_destroy(&mut self, client_idx: usize, surface_id: u32) {
+    fn handle_surface_destroy(&mut self, client_idx: usize, surface_id: SurfaceId) {
         if let Some(idx) = self.find_surface(client_idx, surface_id) {
             self.destroy_surface(idx);
         }
     }
 
-    fn handle_set_cursor_shape(&mut self, client_idx: usize, surface_id: u32, shape: u32) {
+    fn handle_set_cursor_shape(&mut self, client_idx: usize, surface_id: SurfaceId, shape: u32) {
         if let Some(idx) = self.find_surface(client_idx, surface_id) {
             self.surfaces[idx].cursor_shape = shape as u8;
         }
@@ -423,7 +428,12 @@ impl ProtocolBridge {
 
     // ── Toplevel ───────────────────────────────────────────────────────────
 
-    fn handle_get_toplevel(&mut self, client_idx: usize, surface_id: u32, new_id: u32) {
+    fn handle_get_toplevel(
+        &mut self,
+        client_idx: usize,
+        surface_id: SurfaceId,
+        new_id: ToplevelId,
+    ) {
         let idx = match self.find_surface(client_idx, surface_id) {
             Some(i) => i,
             None => return,
@@ -441,7 +451,7 @@ impl ProtocolBridge {
     fn handle_toplevel_set_title(
         &mut self,
         client_idx: usize,
-        toplevel_id: u32,
+        toplevel_id: ToplevelId,
         title: &[u8; MAX_STRING_LEN],
         title_len: usize,
     ) {
@@ -457,7 +467,7 @@ impl ProtocolBridge {
     fn handle_toplevel_set_app_id(
         &mut self,
         client_idx: usize,
-        toplevel_id: u32,
+        toplevel_id: ToplevelId,
         app_id: &[u8; MAX_STRING_LEN],
         app_id_len: usize,
     ) {
@@ -470,10 +480,10 @@ impl ProtocolBridge {
         }
     }
 
-    fn handle_toplevel_destroy(&mut self, client_idx: usize, toplevel_id: u32) {
+    fn handle_toplevel_destroy(&mut self, client_idx: usize, toplevel_id: ToplevelId) {
         if let Some(idx) = self.find_surface_by_toplevel(client_idx, toplevel_id) {
             self.surfaces[idx].role = SurfaceRole::None;
-            self.surfaces[idx].toplevel_id = 0;
+            self.surfaces[idx].toplevel_id = ToplevelId::NONE;
         }
     }
 
@@ -490,7 +500,12 @@ impl ProtocolBridge {
 
     // ── Interactive move/resize ───────────────────────────────────────────
 
-    fn handle_interactive_move(&mut self, client_idx: usize, toplevel_id: u32, _serial: u32) {
+    fn handle_interactive_move(
+        &mut self,
+        client_idx: usize,
+        toplevel_id: ToplevelId,
+        _serial: u32,
+    ) {
         // Client-initiated interactive move -- currently a no-op.
         // The compositor drives moves via title-bar drag; log for future use.
         let _ = (client_idx, toplevel_id);
@@ -499,7 +514,7 @@ impl ProtocolBridge {
     fn handle_interactive_resize(
         &mut self,
         client_idx: usize,
-        toplevel_id: u32,
+        toplevel_id: ToplevelId,
         _serial: u32,
         _edges: u32,
     ) {
@@ -554,7 +569,7 @@ impl ProtocolBridge {
     /// Send toplevel configure event to a protocol surface.
     pub fn send_configure(&mut self, surface_idx: usize, width: u32, height: u32, states: u32) {
         let surface = match self.surfaces.get(surface_idx) {
-            Some(s) if s.active && s.toplevel_id != 0 => s,
+            Some(s) if s.active && s.toplevel_id != ToplevelId::NONE => s,
             _ => return,
         };
 
@@ -577,7 +592,7 @@ impl ProtocolBridge {
     /// Send toplevel close event to a protocol surface.
     pub fn send_close(&mut self, surface_idx: usize) {
         let surface = match self.surfaces.get(surface_idx) {
-            Some(s) if s.active && s.toplevel_id != 0 => s,
+            Some(s) if s.active && s.toplevel_id != ToplevelId::NONE => s,
             _ => return,
         };
 
@@ -988,13 +1003,17 @@ impl ProtocolBridge {
 
     // ── Internal helpers ───────────────────────────────────────────────────
 
-    fn find_surface(&self, client_idx: usize, surface_id: u32) -> Option<usize> {
+    fn find_surface(&self, client_idx: usize, surface_id: SurfaceId) -> Option<usize> {
         self.surfaces
             .iter()
             .position(|s| s.active && s.client_idx == client_idx && s.surface_id == surface_id)
     }
 
-    fn find_surface_by_toplevel(&self, client_idx: usize, toplevel_id: u32) -> Option<usize> {
+    fn find_surface_by_toplevel(
+        &self,
+        client_idx: usize,
+        toplevel_id: ToplevelId,
+    ) -> Option<usize> {
         self.surfaces
             .iter()
             .position(|s| s.active && s.client_idx == client_idx && s.toplevel_id == toplevel_id)

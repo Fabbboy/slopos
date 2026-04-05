@@ -546,13 +546,25 @@ struct LocalTtyOps;
 
 static LOCAL_TTY_OPS: LocalTtyOps = LocalTtyOps;
 
+/// Convert a `handle: usize` to a [`TtyIndex`], returning `EBADF` if out of range.
+fn local_tty_index(handle: usize) -> Result<TtyIndex, slopos_abi::Errno> {
+    if handle > u8::MAX as usize {
+        Err(slopos_abi::Errno::EBADF)
+    } else {
+        Ok(TtyIndex(handle as u8))
+    }
+}
+
 impl FileOps for LocalTtyOps {
     fn kind(&self) -> FileKind {
         FileKind::Tty
     }
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, flags: u32) -> isize {
-        let tty_idx = TtyIndex(handle as u8);
+        let tty_idx = match local_tty_index(handle) {
+            Ok(idx) => idx,
+            Err(e) => return e.as_isize(),
+        };
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         // TTY service API uses raw pointers; use a kernel-side staging buffer.
         let buf_len = buf.len();
@@ -568,7 +580,10 @@ impl FileOps for LocalTtyOps {
     }
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, flags: u32) -> isize {
-        let tty_idx = TtyIndex(handle as u8);
+        let tty_idx = match local_tty_index(handle) {
+            Ok(idx) => idx,
+            Err(e) => return e.as_isize(),
+        };
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         let mut staging = [0u8; IO_STAGING_SIZE];
         let buf_len = buf.len();
@@ -607,11 +622,13 @@ impl FileOps for LocalTtyOps {
     }
 
     fn release(&self, handle: usize) {
-        let _ = tty::close_ref(TtyIndex(handle as u8));
+        if let Ok(idx) = local_tty_index(handle) {
+            let _ = tty::close_ref(idx);
+        }
     }
 
     fn dup(&self, handle: usize) -> Option<usize> {
-        let tty_idx = TtyIndex(handle as u8);
+        let tty_idx = local_tty_index(handle).ok()?;
         if tty::open_ref(tty_idx).is_ok() {
             Some(handle)
         } else {
@@ -620,9 +637,19 @@ impl FileOps for LocalTtyOps {
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+        let tty_idx = match local_tty_index(handle) {
+            Ok(idx) => idx,
+            Err(_) => {
+                return slopos_abi::file_ops::FusedPollResult {
+                    revents: 0,
+                    registered: false,
+                    open_file_idx: 0,
+                };
+            }
+        };
         // Register FIRST, then check readiness (Linux pattern).
-        let registered = tty::poll_enqueue(TtyIndex(handle as u8));
-        let revents = tty::poll_events(TtyIndex(handle as u8), events);
+        let registered = tty::poll_enqueue(tty_idx);
+        let revents = tty::poll_events(tty_idx, events);
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
@@ -631,15 +658,23 @@ impl FileOps for LocalTtyOps {
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
-        tty::poll_events(TtyIndex(handle as u8), events)
+        match local_tty_index(handle) {
+            Ok(idx) => tty::poll_events(idx, events),
+            Err(_) => 0,
+        }
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        tty::poll_enqueue(TtyIndex(handle as u8))
+        match local_tty_index(handle) {
+            Ok(idx) => tty::poll_enqueue(idx),
+            Err(_) => false,
+        }
     }
 
     fn poll_unwait(&self, handle: usize) {
-        tty::poll_dequeue(TtyIndex(handle as u8));
+        if let Ok(idx) = local_tty_index(handle) {
+            tty::poll_dequeue(idx);
+        }
     }
 
     fn stat(&self, _handle: usize, out: &mut UserFsStat) -> i32 {

@@ -1,6 +1,8 @@
+use std::any::Any;
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::node::{MenuItem, MenuItemKind, MessageId};
+use crate::node::{MenuItem, MenuItemKind};
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -12,13 +14,16 @@ pub struct MenuWidget {
     id: WidgetId,
     rect: Rect,
     items: Vec<MenuItem>,
-    on_action: MessageId,
+    on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     hovered_index: Option<usize>,
     focused: bool,
 }
 
 impl MenuWidget {
-    pub fn new(items: Vec<MenuItem>, on_action: MessageId) -> Self {
+    pub fn new(
+        items: Vec<MenuItem>,
+        on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
+    ) -> Self {
         Self {
             id: next_widget_id(),
             rect: Rect::ZERO,
@@ -228,7 +233,9 @@ impl Widget for MenuWidget {
                         if matches!(self.items[idx].kind, MenuItemKind::Action)
                             && self.items[idx].enabled
                         {
-                            sink.emit(MessageId::with_payload(self.on_action.id, idx as u32));
+                            if let Some(cb) = &self.on_action {
+                                sink.emit_raw(cb(idx));
+                            }
                             return EventResponse::Consumed;
                         }
                     }
@@ -251,7 +258,9 @@ impl Widget for MenuWidget {
                             && matches!(self.items[idx].kind, MenuItemKind::Action)
                             && self.items[idx].enabled
                         {
-                            sink.emit(MessageId::with_payload(self.on_action.id, idx as u32));
+                            if let Some(cb) = &self.on_action {
+                                sink.emit_raw(cb(idx));
+                            }
                             return EventResponse::Consumed;
                         }
                     }

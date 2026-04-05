@@ -1,6 +1,8 @@
+use std::any::Any;
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::node::{MessageId, SortIndicator, TableColumn, TableColumnWidth};
+use crate::node::{SortIndicator, TableColumn, TableColumnWidth};
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -15,8 +17,8 @@ pub struct TableWidget {
     row_height: i32,
     selected: Option<usize>,
     hovered_row: Option<usize>,
-    on_select: MessageId,
-    on_header_click: Option<MessageId>,
+    on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
+    on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     scroll_offset: i32,
     header_height: i32,
     col_widths: Vec<i32>,
@@ -29,8 +31,8 @@ impl TableWidget {
         rows: Vec<Vec<Box<dyn Widget>>>,
         row_height: i32,
         selected: Option<usize>,
-        on_select: MessageId,
-        on_header_click: Option<MessageId>,
+        on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
+        on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     ) -> Self {
         let col_count = columns.len();
         #[cfg(debug_assertions)]
@@ -363,9 +365,9 @@ impl Widget for TableWidget {
             WidgetEvent::PointerDown { x, y, .. } => {
                 // Header click?
                 if *y >= self.rect.y && *y < self.rect.y + self.header_height {
-                    if let Some(msg) = self.on_header_click {
+                    if let Some(cb) = &self.on_header_click {
                         if let Some(col) = self.column_at_x(*x) {
-                            sink.emit(MessageId::with_payload(msg.id, col as u32));
+                            sink.emit_raw(cb(col));
                         }
                     }
                     return EventResponse::Consumed;
@@ -381,7 +383,9 @@ impl Widget for TableWidget {
                     let index = (relative_y / self.row_height) as usize;
                     if index < self.row_count() {
                         self.selected = Some(index);
-                        sink.emit(MessageId::with_payload(self.on_select.id, index as u32));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(index));
+                        }
                         return EventResponse::Consumed;
                     }
                 }
@@ -446,16 +450,17 @@ impl Widget for TableWidget {
                             if sel > 0 {
                                 self.selected = Some(sel - 1);
                                 self.scroll_to_selected();
-                                sink.emit(MessageId::with_payload(
-                                    self.on_select.id,
-                                    (sel - 1) as u32,
-                                ));
+                                if let Some(cb) = &self.on_select {
+                                    sink.emit_raw(cb(sel - 1));
+                                }
                                 return EventResponse::Consumed;
                             }
                         } else {
                             self.selected = Some(0);
                             self.scroll_to_selected();
-                            sink.emit(MessageId::with_payload(self.on_select.id, 0));
+                            if let Some(cb) = &self.on_select {
+                                sink.emit_raw(cb(0));
+                            }
                             return EventResponse::Consumed;
                         }
                         EventResponse::Ignored
@@ -465,16 +470,17 @@ impl Widget for TableWidget {
                             if sel + 1 < rc {
                                 self.selected = Some(sel + 1);
                                 self.scroll_to_selected();
-                                sink.emit(MessageId::with_payload(
-                                    self.on_select.id,
-                                    (sel + 1) as u32,
-                                ));
+                                if let Some(cb) = &self.on_select {
+                                    sink.emit_raw(cb(sel + 1));
+                                }
                                 return EventResponse::Consumed;
                             }
                         } else {
                             self.selected = Some(0);
                             self.scroll_to_selected();
-                            sink.emit(MessageId::with_payload(self.on_select.id, 0));
+                            if let Some(cb) = &self.on_select {
+                                sink.emit_raw(cb(0));
+                            }
                             return EventResponse::Consumed;
                         }
                         EventResponse::Ignored
@@ -482,13 +488,17 @@ impl Widget for TableWidget {
                     Key::Named(NamedKey::Home) => {
                         self.selected = Some(0);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, 0));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(0));
+                        }
                         EventResponse::Consumed
                     }
                     Key::Named(NamedKey::End) => {
                         self.selected = Some(rc - 1);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, (rc - 1) as u32));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(rc - 1));
+                        }
                         EventResponse::Consumed
                     }
                     Key::Named(NamedKey::PageUp) => {
@@ -497,7 +507,9 @@ impl Widget for TableWidget {
                         let new_sel = sel.saturating_sub(page);
                         self.selected = Some(new_sel);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, new_sel as u32));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(new_sel));
+                        }
                         EventResponse::Consumed
                     }
                     Key::Named(NamedKey::PageDown) => {
@@ -506,7 +518,9 @@ impl Widget for TableWidget {
                         let new_sel = (sel + page).min(rc - 1);
                         self.selected = Some(new_sel);
                         self.scroll_to_selected();
-                        sink.emit(MessageId::with_payload(self.on_select.id, new_sel as u32));
+                        if let Some(cb) = &self.on_select {
+                            sink.emit_raw(cb(new_sel));
+                        }
                         EventResponse::Consumed
                     }
                     _ => EventResponse::Ignored,

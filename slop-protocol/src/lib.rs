@@ -18,7 +18,7 @@ pub mod server;
 pub mod types;
 
 pub use client::Client;
-pub use codec::{Decode, Encode};
+pub use codec::{Decode, Encode, FdFifo};
 pub use connection::Connection;
 pub use server::Server;
 pub use types::*;

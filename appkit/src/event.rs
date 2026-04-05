@@ -202,9 +202,11 @@ fn hit_test_recursive(
 }
 
 /// Message queue that widgets push to during event handling.
-/// Drained by run_app() to deliver messages to App::update().
+/// Uses type erasure (`Box<dyn Any>`) so that the object-safe `Widget` trait
+/// can emit messages without knowing the concrete message type.
+/// `run_app()` drains messages with `drain_typed::<M>()`.
 pub struct MessageSink {
-    messages: Vec<super::node::MessageId>,
+    messages: Vec<Box<dyn std::any::Any>>,
 }
 
 impl MessageSink {
@@ -214,14 +216,23 @@ impl MessageSink {
         }
     }
 
-    /// Emit a message from a widget (e.g. button click, tab change, list select).
-    pub fn emit(&mut self, msg: super::node::MessageId) {
+    /// Emit a type-erased message from a widget.
+    pub fn emit_raw(&mut self, msg: Box<dyn std::any::Any>) {
         self.messages.push(msg);
     }
 
-    /// Drain all pending messages.
-    pub fn drain(&mut self) -> Vec<super::node::MessageId> {
-        std::mem::take(&mut self.messages)
+    /// Drain all pending messages that match type `M`, leaving others in place.
+    pub fn drain_typed<M: 'static>(&mut self) -> Vec<M> {
+        let mut typed = Vec::new();
+        let mut remaining = Vec::new();
+        for msg in self.messages.drain(..) {
+            match msg.downcast::<M>() {
+                Ok(m) => typed.push(*m),
+                Err(other) => remaining.push(other),
+            }
+        }
+        self.messages = remaining;
+        typed
     }
 
     /// Whether any messages are pending.

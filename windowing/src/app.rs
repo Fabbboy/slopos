@@ -100,7 +100,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
 
         let mut proto_buf: [ProtocolEvent; EVENT_BUF_LEN] =
             core::array::from_fn(|_| ProtocolEvent::FrameDone {
-                surface: 0,
+                surface: slopos_protocol::types::SurfaceId::NONE,
                 timestamp_ms: 0,
             });
         let count = win.poll_protocol_events(&mut proto_buf);

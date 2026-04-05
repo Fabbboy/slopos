@@ -44,7 +44,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let mut needs_repaint = true;
     let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
         core::array::from_fn(|_| ProtocolEvent::FrameDone {
-            surface: 0,
+            surface: slopos_protocol::types::SurfaceId::NONE,
             timestamp_ms: 0,
         });
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
@@ -150,8 +150,8 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         }
 
         // --- Deliver widget messages to app ---
-        for msg in sink.drain() {
-            let action = app.update(msg.into());
+        for msg in sink.drain_typed::<A::Message>() {
+            let action = app.update(msg);
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
 

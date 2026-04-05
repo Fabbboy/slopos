@@ -16,6 +16,7 @@
 
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
+use slopos_protocol::types::SurfaceId;
 
 use crate::connection::ProtocolHandle;
 use crate::memfd_buf::MemfdBuffer;
@@ -29,7 +30,7 @@ use crate::surface::SurfaceError;
 pub struct SoftSurface {
     handle: ProtocolHandle,
     shm: MemfdBuffer,
-    surface_id: u32,
+    surface_id: SurfaceId,
     width: u32,
     height: u32,
     pitch: usize,
@@ -45,7 +46,7 @@ impl SoftSurface {
     /// [`Surface`](crate::surface::Surface).
     pub fn new(
         handle: ProtocolHandle,
-        surface_id: u32,
+        surface_id: SurfaceId,
         pixel_format: PixelFormat,
         width: u32,
         height: u32,

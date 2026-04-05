@@ -925,7 +925,7 @@ fn execute_request(
     config: &CurlConfig,
     parsed: &ParsedUrl,
 ) -> Result<(ParsedResponseHeaders, Vec<u8>), CurlError> {
-    let fd = net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0)
+    let sock = net::Socket::new(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0)
         .map_err(|_| CurlError::SocketFailed)?;
 
     let addr = SockAddrIn {
@@ -935,10 +935,7 @@ fn execute_request(
         _pad: [0; 8],
     };
 
-    if net::connect(fd.raw(), &addr).is_err() {
-        let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
-        return Err(CurlError::ConnectFailed);
-    }
+    let conn = sock.connect(&addr).map_err(|_| CurlError::ConnectFailed)?;
 
     let req = build_request(config, parsed)?;
     if config.verbose {
@@ -947,14 +944,14 @@ fn execute_request(
         }
     }
 
-    if send_all(fd.raw(), &req).is_err() {
-        let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
+    if send_all(conn.raw_fd(), &req).is_err() {
+        let _ = conn.shutdown(slopos_abi::syscall::SHUT_RDWR);
         return Err(CurlError::SendFailed);
     }
 
-    let _ = net::set_nonblocking(fd.raw());
-    let result = receive_http_response(fd.raw(), config.verbose);
-    let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
+    let _ = conn.set_nonblocking();
+    let result = receive_http_response(conn.raw_fd(), config.verbose);
+    let _ = conn.shutdown(slopos_abi::syscall::SHUT_RDWR);
     result
 }
 

@@ -1,6 +1,7 @@
+use std::any::Any;
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::node::MessageId;
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -12,7 +13,7 @@ pub struct TabBarWidget {
     rect: Rect,
     tabs: Vec<String>,
     active: usize,
-    on_change: MessageId,
+    on_change: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     content: Vec<Box<dyn Widget>>,
     focused: bool,
 }
@@ -21,7 +22,7 @@ impl TabBarWidget {
     pub fn new(
         tabs: Vec<String>,
         active: usize,
-        on_change: MessageId,
+        on_change: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
         content: Vec<Box<dyn Widget>>,
     ) -> Self {
         Self {
@@ -201,7 +202,9 @@ impl Widget for TabBarWidget {
                     if rel_x >= *tab_x && rel_x < *tab_x + *tab_w {
                         if i != self.active {
                             self.active = i;
-                            sink.emit(MessageId::with_payload(self.on_change.id, i as u32));
+                            if let Some(cb) = &self.on_change {
+                                sink.emit_raw(cb(i));
+                            }
                         }
                         return EventResponse::Consumed;
                     }
@@ -213,10 +216,9 @@ impl Widget for TabBarWidget {
                 Key::Named(NamedKey::Left) => {
                     if !self.tabs.is_empty() && self.active > 0 {
                         self.active -= 1;
-                        sink.emit(MessageId::with_payload(
-                            self.on_change.id,
-                            self.active as u32,
-                        ));
+                        if let Some(cb) = &self.on_change {
+                            sink.emit_raw(cb(self.active));
+                        }
                         EventResponse::Consumed
                     } else {
                         EventResponse::Ignored
@@ -225,10 +227,9 @@ impl Widget for TabBarWidget {
                 Key::Named(NamedKey::Right) => {
                     if !self.tabs.is_empty() && self.active + 1 < self.tabs.len() {
                         self.active += 1;
-                        sink.emit(MessageId::with_payload(
-                            self.on_change.id,
-                            self.active as u32,
-                        ));
+                        if let Some(cb) = &self.on_change {
+                            sink.emit_raw(cb(self.active));
+                        }
                         EventResponse::Consumed
                     } else {
                         EventResponse::Ignored

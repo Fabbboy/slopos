@@ -182,7 +182,7 @@ impl Window {
     pub fn poll_events<F: FnMut(Event)>(&mut self, mut handler: F) {
         let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
             core::array::from_fn(|_| ProtocolEvent::FrameDone {
-                surface: 0,
+                surface: slopos_protocol::types::SurfaceId::NONE,
                 timestamp_ms: 0,
             });
         let count = self.poll_protocol_events(&mut proto_events);

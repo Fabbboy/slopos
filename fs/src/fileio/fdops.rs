@@ -505,8 +505,8 @@ pub fn file_pipe_create(
         return Errno::EINVAL.raw() as _;
     }
 
-    let pipe_id = match pipe::alloc_slot() {
-        Some(id) => id,
+    let pipe_handle = match pipe::alloc_slot() {
+        Some(h) => h,
         None => return Errno::ENOMEM.raw() as _,
     };
 
@@ -543,9 +543,13 @@ pub fn file_pipe_create(
             OpenMode::WRITE
         };
 
-        let Some(read_open_idx) =
-            alloc_open_file_entry(open_files, &PIPE_READ_OPS, pipe_id as usize, read_flags, 0)
-        else {
+        let Some(read_open_idx) = alloc_open_file_entry(
+            open_files,
+            &PIPE_READ_OPS,
+            pipe_handle.as_usize(),
+            read_flags,
+            0,
+        ) else {
             reset_fd_entry(&mut table.descriptors[read_idx]);
             drop(guard);
             return Errno::ENFILE.raw() as _;
@@ -553,7 +557,7 @@ pub fn file_pipe_create(
         let Some(write_open_idx) = alloc_open_file_entry(
             open_files,
             &PIPE_WRITE_OPS,
-            pipe_id as usize,
+            pipe_handle.as_usize(),
             write_flags,
             0,
         ) else {
@@ -564,7 +568,7 @@ pub fn file_pipe_create(
         };
 
         {
-            let Some(mut slot) = pipe::lock_slot(pipe_id) else {
+            let Some(mut slot) = pipe::lock_slot(pipe_handle) else {
                 release_open_file(open_files, read_open_idx);
                 release_open_file(open_files, write_open_idx);
                 reset_fd_entry(&mut table.descriptors[read_idx]);
@@ -593,7 +597,7 @@ pub fn file_pipe_create(
     });
 
     if rc != 0 {
-        pipe::free_slot(pipe_id);
+        pipe::free_slot(pipe_handle);
     }
 
     rc

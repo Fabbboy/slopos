@@ -10,12 +10,13 @@
 //! - `wait_recv()` uses `poll()` for efficient blocking with timeout.
 //!
 //! fd passing (SCM_RIGHTS) uses recvmsg for ALL socket reads. Received
-//! fds are queued in a FIFO and consumed by `take_fd()` when the codec
-//! decodes a message type that carries an fd. This matches libwayland's
-//! design and avoids the message-framing race where multiple protocol
-//! messages arrive in a single socket read.
+//! fds are queued in a pending FIFO and consumed inline by the Decode
+//! trait implementation for message types that carry fds (e.g.
+//! SurfaceAttach). This matches libwayland's design and avoids the
+//! message-framing race where multiple protocol messages arrive in a
+//! single socket read.
 
-use crate::codec::{Decode, Encode};
+use crate::codec::{Decode, Encode, FdFifo};
 use crate::types::ProtocolError;
 use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_abi::syscall::types::UserPollFd;
@@ -27,7 +28,7 @@ const READ_BUF_SIZE: usize = 16384;
 const MAX_MSG_SIZE: usize = 8192;
 
 /// Maximum queued fds from recvmsg ancillary data.
-const MAX_PENDING_FDS: usize = 8;
+pub(crate) const MAX_PENDING_FDS: usize = 8;
 
 /// Set O_NONBLOCK on a socket FD, preserving any existing flags.
 pub fn set_nonblock(fd: i32) {
@@ -64,6 +65,18 @@ impl Connection {
 
     pub fn fd(&self) -> i32 {
         self.fd
+    }
+
+    /// Enqueue a raw fd into the pending FIFO. If the FIFO is full, the fd
+    /// is closed immediately to prevent leaking. This is the ONLY place
+    /// that adds fds to the FIFO — all receive paths go through here.
+    fn enqueue_fd(&mut self, fd: i32) {
+        if (self.pending_fd_count as usize) < MAX_PENDING_FDS {
+            self.pending_fds[self.pending_fd_count as usize] = fd;
+            self.pending_fd_count += 1;
+        } else if fd >= 0 {
+            let _ = Sys::close(fd);
+        }
     }
 
     // ── Send ────────────────────────────────────────────────────────────
@@ -143,8 +156,8 @@ impl Connection {
 
     /// Try to receive one complete message (non-blocking).
     /// Returns `Ok(None)` if no complete message is available.
-    /// Any fds received via SCM_RIGHTS are queued internally — call
-    /// `take_fd()` to consume them after decoding.
+    /// File descriptors received via SCM_RIGHTS are consumed inline by the
+    /// decoder for message types that carry fds (e.g. `SurfaceAttach`).
     pub fn recv<T: Decode>(&mut self) -> Result<Option<T>, ProtocolError> {
         // First check if we already have a complete frame in the buffer.
         if let Some(msg) = self.try_decode::<T>()? {
@@ -181,25 +194,6 @@ impl Connection {
                 return Ok(msg);
             }
         }
-    }
-
-    /// Pop one fd from the pending fd FIFO. Returns -1 if empty.
-    ///
-    /// Call this after decoding a message type that is known to carry an fd
-    /// (e.g., SurfaceAttach). This matches libwayland's design: the codec
-    /// knows which message types carry fds, and consumes them in order.
-    pub fn take_fd(&mut self) -> i32 {
-        if self.pending_fd_count == 0 {
-            return -1;
-        }
-        let fd = self.pending_fds[0];
-        // Shift remaining fds down
-        for i in 1..self.pending_fd_count as usize {
-            self.pending_fds[i - 1] = self.pending_fds[i];
-        }
-        self.pending_fd_count -= 1;
-        self.pending_fds[self.pending_fd_count as usize] = -1;
-        fd
     }
 
     // ── Internal ────────────────────────────────────────────────────────
@@ -251,6 +245,10 @@ impl Connection {
     }
 
     /// Decode one length-prefixed frame from the read buffer.
+    ///
+    /// Constructs an [`FdFifo`] from the pending fd state and passes it to
+    /// `T::decode`, so message types that carry fds (e.g. `SurfaceAttach`)
+    /// can pop them inline during decoding.
     fn try_decode<T: Decode>(&mut self) -> Result<Option<T>, ProtocolError> {
         let available = self.read_len - self.read_pos;
         if available < 4 {
@@ -270,7 +268,8 @@ impl Connection {
 
         let payload_start = self.read_pos + 4;
         let payload = &self.read_buf[payload_start..payload_start + payload_len];
-        let (msg, _consumed) = T::decode(payload)?;
+        let mut fifo = FdFifo::new(&mut self.pending_fds, &mut self.pending_fd_count);
+        let (msg, _consumed) = T::decode(payload, &mut fifo)?;
         self.read_pos += 4 + payload_len;
         Ok(Some(msg))
     }
@@ -315,14 +314,11 @@ impl Connection {
                 let fd_data_len = cmsg.cmsg_len as usize - hdr_size;
                 let n_fds = fd_data_len / 4;
                 for i in 0..n_fds {
-                    if (self.pending_fd_count as usize) < MAX_PENDING_FDS {
-                        let off = hdr_size + i * 4;
-                        let mut fb = [0u8; 4];
-                        fb.copy_from_slice(&cmsg_buf[off..off + 4]);
-                        let fd = i32::from_le_bytes(fb);
-                        self.pending_fds[self.pending_fd_count as usize] = fd;
-                        self.pending_fd_count += 1;
-                    }
+                    let off = hdr_size + i * 4;
+                    let mut fb = [0u8; 4];
+                    fb.copy_from_slice(&cmsg_buf[off..off + 4]);
+                    let fd = i32::from_le_bytes(fb);
+                    self.enqueue_fd(fd);
                 }
             }
         }

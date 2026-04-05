@@ -1,8 +1,9 @@
+use std::any::Any;
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
-use crate::node::MessageId;
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -11,7 +12,7 @@ pub struct TextFieldWidget {
     rect: Rect,
     text: String,
     placeholder: String,
-    on_change: MessageId,
+    on_change: Option<Box<dyn Fn(String) -> Box<dyn Any>>>,
     max_length: Option<usize>,
     read_only: bool,
     cursor: usize,
@@ -25,7 +26,7 @@ impl TextFieldWidget {
     pub fn new(
         text: String,
         placeholder: String,
-        on_change: MessageId,
+        on_change: Option<Box<dyn Fn(String) -> Box<dyn Any>>>,
         max_length: Option<usize>,
         read_only: bool,
     ) -> Self {
@@ -57,10 +58,6 @@ impl TextFieldWidget {
         }
         self.selection_anchor = None;
         self.ensure_cursor_visible();
-    }
-
-    pub fn on_change(&self) -> MessageId {
-        self.on_change
     }
 
     // --- Character helpers ---
@@ -325,14 +322,18 @@ impl Widget for TextFieldWidget {
                     return EventResponse::Ignored;
                 }
                 self.insert_text(&character.to_string());
-                sink.emit(self.on_change);
+                if let Some(cb) = &self.on_change {
+                    sink.emit_raw(cb(self.text.clone()));
+                }
                 EventResponse::Consumed
             }
 
             WidgetEvent::KeyDown { key, modifiers, .. } => {
                 let resp = self.handle_key_down(key, modifiers);
                 if resp.is_consumed() && self.is_text_modifying_key(key, modifiers) {
-                    sink.emit(self.on_change);
+                    if let Some(cb) = &self.on_change {
+                        sink.emit_raw(cb(self.text.clone()));
+                    }
                 }
                 resp
             }

@@ -28,6 +28,63 @@ use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, WaitQueue};
 /// Maximum number of concurrent AF_UNIX sockets.
 pub const MAX_UNIX_SOCKETS: usize = 32;
 
+/// Bits used for the slot index in the handle encoding.
+const SLOT_BITS: u32 = 8;
+const SLOT_MASK: usize = (1 << SLOT_BITS) - 1; // 0xFF — supports up to 256 slots
+
+// ---------------------------------------------------------------------------
+// SocketHandle — type-safe handle for AF_UNIX socket kernel objects
+// ---------------------------------------------------------------------------
+
+/// Opaque handle identifying an AF_UNIX socket slot.
+///
+/// Encodes a slot index and the slot's generation counter so that stale
+/// handles (from a closed socket whose slot was recycled) are reliably
+/// rejected. Replaces the old `UNIX_HANDLE_TAG` bit-hack.
+///
+/// The encoding is `(generation << SLOT_BITS) | slot_index`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(transparent)]
+pub struct SocketHandle(u32);
+
+impl SocketHandle {
+    pub(crate) fn new(slot: usize, generation: u32) -> Self {
+        Self(((generation as usize) << SLOT_BITS | (slot & SLOT_MASK)) as u32)
+    }
+
+    /// Extract the raw slot index.  Private — only `validate_socket_handle`
+    /// should use this (it IS the generation check).
+    fn raw_slot(self) -> usize {
+        (self.0 as usize) & SLOT_MASK
+    }
+
+    /// Slot index for wait-queue indexing (static `SOCKET_WQS` arrays).
+    ///
+    /// This performs a **bounds check** against `MAX_UNIX_SOCKETS` but does
+    /// **not** validate the generation counter.  Safe for `SOCKET_WQS[i]`
+    /// because the wait-queue array is a fixed-size static — indexing a
+    /// recycled slot's queue is harmless (spurious wakeups are tolerated).
+    /// All slot *data* access must go through `validate_socket_handle`.
+    pub(crate) fn slot_for_wq(self) -> Option<usize> {
+        let i = (self.0 as usize) & SLOT_MASK;
+        if i < MAX_UNIX_SOCKETS { Some(i) } else { None }
+    }
+
+    pub(crate) fn generation(self) -> u32 {
+        (self.0 as usize >> SLOT_BITS) as u32
+    }
+
+    /// Convert to usize for storage in OpenFileEntry.handle.
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Reconstruct from usize stored in OpenFileEntry.handle.
+    pub fn from_usize(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
 /// Per-direction ring buffer size (16 KB).
 pub const UNIX_BUF_SIZE: usize = 16384;
 
@@ -336,44 +393,54 @@ impl UnixSocketState {
 static UNIX_STATE: IrqMutex<UnixSocketState> =
     IrqMutex::new(UnixSocketState::new(), LOCK_LEVEL_REGISTRY);
 
+/// Validate a socket handle against the current state, returning the slot
+/// index if the handle is valid and the generation matches.
+fn validate_socket_handle(state: &UnixSocketState, handle: SocketHandle) -> Option<usize> {
+    let i = handle.raw_slot();
+    if i >= MAX_UNIX_SOCKETS {
+        return None;
+    }
+    let slot = &state.slots[i];
+    if !slot.valid || slot.generation != handle.generation() {
+        return None;
+    }
+    Some(i)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Allocate a new AF_UNIX socket slot. Returns slot index or negative errno.
+/// Allocate a new AF_UNIX socket slot. Returns a [`SocketHandle`] or `None`.
 ///
 /// Slots with `buf_refcount > 0` are skipped even if `valid == false`:
 /// the peer side still holds a live reference to the ring buffers on
 /// that slot, so reusing it would corrupt the peer's data.
-pub fn unix_create() -> i32 {
+pub fn unix_create() -> Option<SocketHandle> {
     let mut state = UNIX_STATE.lock();
     for (idx, slot) in state.slots.iter_mut().enumerate() {
         if !slot.valid && slot.buf_refcount == 0 {
             slot.reset();
             slot.valid = true;
             slot.state = UnixState::Unbound;
-            return idx as i32;
+            let handle = SocketHandle::new(idx, slot.generation);
+            return Some(handle);
         }
     }
-    -1 // ENOMEM
+    None
 }
 
 /// Bind a socket to an abstract namespace path.
-pub fn unix_bind(idx: u32, path: &[u8]) -> i32 {
+pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return -22; // EINVAL
     }
 
     let mut state = UNIX_STATE.lock();
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+    let Some(i) = validate_socket_handle(&state, handle) else {
         return -9; // EBADF
-    }
-    let slot = &mut state.slots[i];
-    if !slot.valid {
-        return -9; // EBADF
-    }
-    if slot.state != UnixState::Unbound {
+    };
+    if state.slots[i].state != UnixState::Unbound {
         return -22; // EINVAL
     }
 
@@ -398,45 +465,43 @@ pub fn unix_bind(idx: u32, path: &[u8]) -> i32 {
 }
 
 /// Mark a bound socket as listening.
-pub fn unix_listen(idx: u32, _backlog: u32) -> i32 {
+pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
     let mut state = UNIX_STATE.lock();
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+    let Some(i) = validate_socket_handle(&state, handle) else {
         return -9;
-    }
-    let slot = &mut state.slots[i];
-    if !slot.valid {
-        return -9;
-    }
-    if slot.state != UnixState::Bound {
+    };
+    if state.slots[i].state != UnixState::Bound {
         return -22; // EINVAL — must be bound first
     }
-    slot.state = UnixState::Listening;
-    slot.backlog_len = 0;
+    state.slots[i].state = UnixState::Listening;
+    state.slots[i].backlog_len = 0;
     0
 }
 
 /// Accept a pending connection from a listening socket.
 ///
 /// Blocks the caller until a connection arrives (unless non-blocking).
-/// Returns the index of a new connected socket slot.
-pub fn unix_accept(idx: u32) -> i32 {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
-        return -9;
-    }
+/// Returns a [`SocketHandle`] for the new connected socket, or a
+/// negative errno.
+pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
+    let Some(wq_idx) = handle.slot_for_wq() else {
+        return Err(-9);
+    };
 
     loop {
         // Try to dequeue a pending connection.
         let (nonblocking, got) = {
             let mut state = UNIX_STATE.lock();
+            let Some(i) = validate_socket_handle(&state, handle) else {
+                return Err(-9);
+            };
             let slot = &mut state.slots[i];
-            if !slot.valid || slot.state != UnixState::Listening {
-                return -22; // EINVAL
+            if slot.state != UnixState::Listening {
+                return Err(-22); // EINVAL
             }
             let nb = slot.nonblocking;
             if slot.backlog_len > 0 {
-                let connected_idx = slot.backlog[0];
+                let connected_idx = slot.backlog[0] as usize;
                 // Shift backlog entries down.
                 let bl = slot.backlog_len as usize;
                 for k in 1..bl {
@@ -444,24 +509,27 @@ pub fn unix_accept(idx: u32) -> i32 {
                 }
                 slot.backlog[bl - 1] = 0;
                 slot.backlog_len -= 1;
-                (nb, Some(connected_idx))
+                // Build a SocketHandle for the accepted slot using its generation.
+                let accepted_gen = state.slots[connected_idx].generation;
+                let accepted_handle = SocketHandle::new(connected_idx, accepted_gen);
+                (nb, Some(accepted_handle))
             } else {
                 (nb, None)
             }
         };
 
-        if let Some(connected_idx) = got {
-            return connected_idx as i32;
+        if let Some(accepted_handle) = got {
+            return Ok(accepted_handle);
         }
 
         if nonblocking {
-            return -11; // EAGAIN
+            return Err(-11); // EAGAIN
         }
 
         // Block until a connection arrives.
-        SOCKET_WQS[i].wait_event(|| {
+        SOCKET_WQS[wq_idx].wait_event(|| {
             let state = UNIX_STATE.lock();
-            let slot = &state.slots[i];
+            let slot = &state.slots[wq_idx];
             !slot.valid || slot.backlog_len > 0
         });
     }
@@ -472,7 +540,7 @@ pub fn unix_accept(idx: u32) -> i32 {
 /// Creates a connected pair: the caller's slot becomes side A, a new slot
 /// is allocated for side B (which is enqueued in the listener's backlog
 /// for `accept()` to return).
-pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
+pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return -22; // EINVAL
     }
@@ -484,15 +552,11 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
     let pre_buf_b = Box::new([0u8; UNIX_BUF_SIZE]);
 
     let mut state = UNIX_STATE.lock();
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+    let Some(i) = validate_socket_handle(&state, handle) else {
         return -9;
-    }
+    };
     {
         let slot = &state.slots[i];
-        if !slot.valid {
-            return -9;
-        }
         if slot.state == UnixState::Connected {
             return -106; // EISCONN
         }
@@ -576,34 +640,36 @@ pub fn unix_connect(idx: u32, path: &[u8]) -> i32 {
 /// Send data on a connected AF_UNIX socket.
 ///
 /// Returns the number of bytes written, or a negative errno.
-pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
+pub fn unix_send(handle: SocketHandle, data: &[u8]) -> i32 {
     if data.is_empty() {
         return 0;
     }
 
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+    let Some(wq_idx) = handle.slot_for_wq() else {
         return -9;
-    }
+    };
 
     let input = data;
 
-    // Capture generation at entry so condition closures can detect slot reuse.
-    let slot_gen = {
-        let state = UNIX_STATE.lock();
-        state.slots[i].generation
-    };
+    // Use the generation from the handle for stale-detection in condition closures.
+    let slot_gen = handle.generation();
 
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
+            let Some(i) = validate_socket_handle(&state, handle) else {
+                return -107; // ENOTCONN (stale handle)
+            };
             let slot = &state.slots[i];
-            if !slot.valid || slot.state != UnixState::Connected || slot.generation != slot_gen {
+            if slot.state != UnixState::Connected {
                 return -107; // ENOTCONN
             }
             if slot.peer_closed {
                 return -32; // EPIPE
             }
+
+            // Capture nonblocking INSIDE the validated section (fixes TOCTOU).
+            let nonblocking = slot.nonblocking;
 
             let peer = slot.peer_idx as usize;
             let side = slot.side;
@@ -634,9 +700,7 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
                 let n = buf.write_from(input);
                 Ok((n, peer, peer_gen))
             } else {
-                // Check non-blocking before deciding to block.
-                let nb = state.slots[i].nonblocking;
-                Err(nb)
+                Err(nonblocking)
             }
         };
 
@@ -655,9 +719,9 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
             }
             Err(false) => {
                 // Block until space is available or peer closes.
-                SOCKET_WQS[i].wait_event(|| {
+                SOCKET_WQS[wq_idx].wait_event(|| {
                     let state = UNIX_STATE.lock();
-                    let slot = &state.slots[i];
+                    let slot = &state.slots[wq_idx];
                     if !slot.valid
                         || slot.state != UnixState::Connected
                         || slot.generation != slot_gen
@@ -670,8 +734,8 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
                     let peer = slot.peer_idx as usize;
                     let side = slot.side;
                     let (a_idx, _) = match side {
-                        PairSide::A => (i, peer),
-                        PairSide::B => (peer, i),
+                        PairSide::A => (wq_idx, peer),
+                        PairSide::B => (peer, wq_idx),
                     };
                     let a_slot = &state.slots[a_idx];
                     let buf = match side {
@@ -689,31 +753,33 @@ pub fn unix_send(idx: u32, data: &[u8]) -> i32 {
 /// Receive data from a connected AF_UNIX socket.
 ///
 /// Returns the number of bytes read, 0 on EOF, or a negative errno.
-pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
+pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
     if buf.is_empty() {
         return 0;
     }
 
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+    let Some(wq_idx) = handle.slot_for_wq() else {
         return -9;
-    }
+    };
 
     let out = buf;
 
-    // Capture generation at entry so condition closures can detect slot reuse.
-    let slot_gen = {
-        let state = UNIX_STATE.lock();
-        state.slots[i].generation
-    };
+    // Use the generation from the handle for stale-detection in condition closures.
+    let slot_gen = handle.generation();
 
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
+            let Some(i) = validate_socket_handle(&state, handle) else {
+                return -107; // ENOTCONN (stale handle)
+            };
             let slot = &state.slots[i];
-            if !slot.valid || slot.state != UnixState::Connected || slot.generation != slot_gen {
+            if slot.state != UnixState::Connected {
                 return -107; // ENOTCONN
             }
+
+            // Capture nonblocking INSIDE the validated section (fixes TOCTOU).
+            let nonblocking = slot.nonblocking;
 
             let peer = slot.peer_idx as usize;
             let side = slot.side;
@@ -743,8 +809,7 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
                 // EOF — peer has closed.
                 Ok((0, peer))
             } else {
-                let nb = state.slots[i].nonblocking;
-                Err(nb)
+                Err(nonblocking)
             }
         };
 
@@ -764,9 +829,9 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
             }
             Err(false) => {
                 // Block until data arrives or peer closes.
-                SOCKET_WQS[i].wait_event(|| {
+                SOCKET_WQS[wq_idx].wait_event(|| {
                     let state = UNIX_STATE.lock();
-                    let slot = &state.slots[i];
+                    let slot = &state.slots[wq_idx];
                     if !slot.valid
                         || slot.state != UnixState::Connected
                         || slot.generation != slot_gen
@@ -779,8 +844,8 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
                     let peer = slot.peer_idx as usize;
                     let side = slot.side;
                     let (a_idx, _) = match side {
-                        PairSide::A => (i, peer),
-                        PairSide::B => (peer, i),
+                        PairSide::A => (wq_idx, peer),
+                        PairSide::B => (peer, wq_idx),
                     };
                     let a_slot = &state.slots[a_idx];
                     let rbuf = match side {
@@ -802,19 +867,14 @@ pub fn unix_recv(idx: u32, buf: &mut [u8]) -> i32 {
 ///
 /// Returns bytes written or negative errno.
 pub fn unix_sendmsg(
-    idx: u32,
+    handle: SocketHandle,
     data: &[u8],
     inflight_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
     fd_count: usize,
 ) -> i32 {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
-        return -9;
-    }
-
     // Send the data bytes first (reuses existing unix_send logic inline).
     let bytes_sent = if !data.is_empty() {
-        let rc = unix_send(idx, data);
+        let rc = unix_send(handle, data);
         if rc < 0 {
             return rc;
         }
@@ -826,8 +886,11 @@ pub fn unix_sendmsg(
     // Push in-flight fds into the ancillary queue.
     if fd_count > 0 {
         let mut state = UNIX_STATE.lock();
+        let Some(i) = validate_socket_handle(&state, handle) else {
+            return -107; // ENOTCONN
+        };
         let slot = &state.slots[i];
-        if !slot.valid || slot.state != UnixState::Connected {
+        if slot.state != UnixState::Connected {
             return -107; // ENOTCONN
         }
         let side = slot.side;
@@ -873,49 +936,46 @@ pub fn unix_sendmsg(
 /// `out_fds` receives (handle, ops) pairs.  Returns (bytes_read, fd_count).
 /// Negative bytes_read indicates an error.
 pub fn unix_recvmsg(
-    idx: u32,
+    handle: SocketHandle,
     buf: &mut [u8],
     out_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
     max_fds: usize,
 ) -> (i32, usize) {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
-        return (-9, 0);
-    }
-
     // Receive data bytes first (reuses existing unix_recv logic).
-    let bytes_read = unix_recv(idx, buf);
+    let bytes_read = unix_recv(handle, buf);
 
     // Drain in-flight fds from the ancillary queue.
     let mut received_fds = 0usize;
     {
         let mut state = UNIX_STATE.lock();
-        let slot = &state.slots[i];
-        if slot.valid && slot.state == UnixState::Connected {
-            let side = slot.side;
-            let peer = slot.peer_idx as usize;
-            let a_idx = match side {
-                PairSide::A => i,
-                PairSide::B => peer,
-            };
-            if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].buf_refcount > 0 {
-                // Read from the queue that the PEER wrote to (opposite direction).
-                let anc = match side {
-                    // If we are side A, peer is side B, peer writes to anc_b_to_a
-                    PairSide::A => &mut state.slots[a_idx].anc_b_to_a,
-                    // If we are side B, peer is side A, peer writes to anc_a_to_b
-                    PairSide::B => &mut state.slots[a_idx].anc_a_to_b,
+        if let Some(i) = validate_socket_handle(&state, handle) {
+            let slot = &state.slots[i];
+            if slot.state == UnixState::Connected {
+                let side = slot.side;
+                let peer = slot.peer_idx as usize;
+                let a_idx = match side {
+                    PairSide::A => i,
+                    PairSide::B => peer,
                 };
+                if a_idx < MAX_UNIX_SOCKETS && state.slots[a_idx].buf_refcount > 0 {
+                    // Read from the queue that the PEER wrote to (opposite direction).
+                    let anc = match side {
+                        // If we are side A, peer is side B, peer writes to anc_b_to_a
+                        PairSide::A => &mut state.slots[a_idx].anc_b_to_a,
+                        // If we are side B, peer is side A, peer writes to anc_a_to_b
+                        PairSide::B => &mut state.slots[a_idx].anc_a_to_b,
+                    };
 
-                let (mut entries, count) = anc.drain();
-                for j in 0..count as usize {
-                    if let Some(fd) = entries[j].take() {
-                        if received_fds < max_fds {
-                            out_fds[received_fds] = (fd.handle, fd.ops);
-                            received_fds += 1;
-                        } else {
-                            // Doesn't fit — release
-                            fd.ops.release(fd.handle);
+                    let (mut entries, count) = anc.drain();
+                    for j in 0..count as usize {
+                        if let Some(fd) = entries[j].take() {
+                            if received_fds < max_fds {
+                                out_fds[received_fds] = (fd.handle, fd.ops);
+                                received_fds += 1;
+                            } else {
+                                // Doesn't fit — release
+                                fd.ops.release(fd.handle);
+                            }
                         }
                     }
                 }
@@ -932,11 +992,10 @@ pub fn unix_recvmsg(
 /// created by `unix_connect()` but never `accept()`-ed) are closed
 /// and their side-A peers are notified.  This prevents permanent slot
 /// leaks and ghost connections.
-pub fn unix_close(idx: u32) -> i32 {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+pub fn unix_close(handle: SocketHandle) -> i32 {
+    let Some(wq_idx) = handle.slot_for_wq() else {
         return -9;
-    }
+    };
 
     // Collect wakeup targets under the lock, wake outside.
     let mut wake_peer: Option<usize> = None;
@@ -947,9 +1006,9 @@ pub fn unix_close(idx: u32) -> i32 {
 
     {
         let mut state = UNIX_STATE.lock();
-        if !state.slots[i].valid {
+        let Some(i) = validate_socket_handle(&state, handle) else {
             return -9;
-        }
+        };
 
         if state.slots[i].state == UnixState::Connected {
             let p = state.slots[i].peer_idx as usize;
@@ -1035,24 +1094,19 @@ pub fn unix_close(idx: u32) -> i32 {
 
     // Wake blocked accept() callers on the closing listener.
     if was_listener {
-        SOCKET_WQS[i].wake_all();
+        SOCKET_WQS[wq_idx].wake_all();
     }
 
     0
 }
 
 /// Return POLL* bitmask of currently ready events for a Unix socket.
-pub fn unix_poll_events(idx: u32, requested: u16) -> u16 {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
-        return 0;
-    }
-
+pub fn unix_poll_events(handle: SocketHandle, requested: u16) -> u16 {
     let state = UNIX_STATE.lock();
-    let slot = &state.slots[i];
-    if !slot.valid {
+    let Some(i) = validate_socket_handle(&state, handle) else {
         return 0;
-    }
+    };
+    let slot = &state.slots[i];
 
     match slot.state {
         UnixState::Listening => {
@@ -1121,26 +1175,25 @@ pub fn unix_poll_events(idx: u32, requested: u16) -> u16 {
 /// before calling this function.  If `wake_all` → `unblock_task` fires
 /// between registration and `block_current_task_with_timeout`, the CAS
 /// `WillBlock → Blocked` fails and the task stays Running.
-pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+pub fn unix_poll_fused(handle: SocketHandle, requested: u16) -> (u16, bool) {
+    let Some(wq_idx) = handle.slot_for_wq() else {
         return (0, false);
-    }
+    };
 
     // ── Phase 1: Register on the unified socket wait queue ─────────
     //
     // Single queue per socket (Linux `sk->sk_wq` pattern).  All blocking
     // I/O and poll share it.  Spurious wakeups are harmless — every
     // waiter re-checks its condition.
-    let registered = SOCKET_WQS[i].enqueue_current();
+    let registered = SOCKET_WQS[wq_idx].enqueue_current();
 
     // ── Phase 3: Check readiness AFTER registration ────────────────
     let revents = {
         let state = UNIX_STATE.lock();
-        let slot = &state.slots[i];
-        if !slot.valid {
+        let Some(i) = validate_socket_handle(&state, handle) else {
             return (0, false);
-        }
+        };
+        let slot = &state.slots[i];
 
         match slot.state {
             UnixState::Listening => {
@@ -1196,34 +1249,27 @@ pub fn unix_poll_fused(idx: u32, requested: u16) -> (u16, bool) {
 /// Registers on all three queues unconditionally to avoid the TOCTOU
 /// race where the socket transitions between Listening and Connected
 /// after peeking state.  See `unix_poll_fused` for full rationale.
-pub fn unix_poll_register(idx: u32) -> bool {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+pub fn unix_poll_register(handle: SocketHandle) -> bool {
+    let Some(wq_idx) = handle.slot_for_wq() else {
         return false;
-    }
-    SOCKET_WQS[i].enqueue_current()
+    };
+    SOCKET_WQS[wq_idx].enqueue_current()
 }
 
 /// Remove the current task from the socket's poll wait queue.
-pub fn unix_poll_unregister(idx: u32) {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
+pub fn unix_poll_unregister(handle: SocketHandle) {
+    let Some(wq_idx) = handle.slot_for_wq() else {
         return;
-    }
-    SOCKET_WQS[i].remove_current();
+    };
+    SOCKET_WQS[wq_idx].remove_current();
 }
 
 /// Set or clear non-blocking mode on a Unix socket.
-pub fn unix_set_nonblocking(idx: u32, nonblocking: bool) -> i32 {
-    let i = idx as usize;
-    if i >= MAX_UNIX_SOCKETS {
-        return -9;
-    }
+pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
     let mut state = UNIX_STATE.lock();
-    let slot = &mut state.slots[i];
-    if !slot.valid {
+    let Some(i) = validate_socket_handle(&state, handle) else {
         return -9;
-    }
-    slot.nonblocking = nonblocking;
+    };
+    state.slots[i].nonblocking = nonblocking;
     0
 }

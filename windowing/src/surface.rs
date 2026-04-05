@@ -11,6 +11,7 @@ use slopos_abi::handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WindowHandle,
 };
 use slopos_abi::pixel::PixelFormat;
+use slopos_protocol::types::{SurfaceId, ToplevelId};
 
 use crate::connection::ProtocolHandle;
 
@@ -34,8 +35,8 @@ pub struct Surface {
     height: u32,
     bytes_pp: u8,
     pixel_format: PixelFormat,
-    protocol_surface_id: u32,
-    protocol_toplevel_id: u32,
+    protocol_surface_id: SurfaceId,
+    protocol_toplevel_id: ToplevelId,
 }
 
 impl Surface {
@@ -81,13 +82,13 @@ impl Surface {
 
     /// Compositor-assigned surface identifier.
     #[inline]
-    pub fn surface_id(&self) -> u32 {
+    pub fn surface_id(&self) -> SurfaceId {
         self.protocol_surface_id
     }
 
     /// Compositor-assigned toplevel identifier.
     #[inline]
-    pub fn toplevel_id(&self) -> u32 {
+    pub fn toplevel_id(&self) -> ToplevelId {
         self.protocol_toplevel_id
     }
 
@@ -128,8 +129,8 @@ impl Surface {
 impl HasWindowHandle for Surface {
     fn window_handle(&self) -> WindowHandle<'_> {
         WindowHandle::new(RawWindowHandle {
-            surface_id: self.protocol_surface_id,
-            toplevel_id: self.protocol_toplevel_id,
+            surface_id: self.protocol_surface_id.raw(),
+            toplevel_id: self.protocol_toplevel_id.raw(),
         })
     }
 }
@@ -143,10 +144,10 @@ impl HasDisplayHandle for Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         if let Some(mut client) = self.handle.try_borrow_client() {
-            if self.protocol_toplevel_id != 0 {
+            if self.protocol_toplevel_id != ToplevelId::NONE {
                 let _ = client.toplevel_destroy(self.protocol_toplevel_id);
             }
-            if self.protocol_surface_id != 0 {
+            if self.protocol_surface_id != SurfaceId::NONE {
                 let _ = client.surface_destroy(self.protocol_surface_id);
             }
         } else {

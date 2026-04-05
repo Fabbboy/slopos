@@ -2527,51 +2527,45 @@ fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
 
     let path = b"/test/sock";
 
-    let srv_idx = unix_socket::unix_create();
-    if srv_idx < 0 {
+    let srv_handle = unix_socket::unix_create()?;
+    if unix_socket::unix_bind(srv_handle, path) != 0 {
+        unix_socket::unix_close(srv_handle);
         return None;
     }
-    if unix_socket::unix_bind(srv_idx as u32, path) != 0 {
-        unix_socket::unix_close(srv_idx as u32);
+    if unix_socket::unix_listen(srv_handle, 4) != 0 {
+        unix_socket::unix_close(srv_handle);
         return None;
     }
-    if unix_socket::unix_listen(srv_idx as u32, 4) != 0 {
-        unix_socket::unix_close(srv_idx as u32);
-        return None;
-    }
-    unix_socket::unix_set_nonblocking(srv_idx as u32, true);
+    unix_socket::unix_set_nonblocking(srv_handle, true);
 
-    let cli_idx = unix_socket::unix_create();
-    if cli_idx < 0 {
-        unix_socket::unix_close(srv_idx as u32);
-        return None;
-    }
-    if unix_socket::unix_connect(cli_idx as u32, path) != 0 {
-        unix_socket::unix_close(cli_idx as u32);
-        unix_socket::unix_close(srv_idx as u32);
+    let cli_handle = unix_socket::unix_create()?;
+    if unix_socket::unix_connect(cli_handle, path) != 0 {
+        unix_socket::unix_close(cli_handle);
+        unix_socket::unix_close(srv_handle);
         return None;
     }
 
-    let accepted_idx = unix_socket::unix_accept(srv_idx as u32);
-    if accepted_idx < 0 {
-        unix_socket::unix_close(cli_idx as u32);
-        unix_socket::unix_close(srv_idx as u32);
-        return None;
-    }
+    let accepted_handle = match unix_socket::unix_accept(srv_handle) {
+        Ok(h) => h,
+        Err(_) => {
+            unix_socket::unix_close(cli_handle);
+            unix_socket::unix_close(srv_handle);
+            return None;
+        }
+    };
 
-    let tag: u32 = 0x8000_0000;
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
-        (accepted_idx as u32 | tag) as usize,
+        accepted_handle.as_usize(),
     );
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
-        (cli_idx as u32 | tag) as usize,
+        cli_handle.as_usize(),
     );
 
-    unix_socket::unix_close(srv_idx as u32);
+    unix_socket::unix_close(srv_handle);
 
     if srv_fd < 0 || cli_fd < 0 {
         return None;
@@ -3045,26 +3039,23 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     let pid = unsafe { (*task_find_by_id(task_id)).process_id };
 
     let path = b"/test/compositor-handshake";
-    let tag: u32 = 0x8000_0000;
 
     // ── Server: bind + listen (like compositor socket activation) ──
-    let listen_idx = unix_socket::unix_create();
-    assert_test!(listen_idx >= 0, "listen socket create");
-    assert_eq_test!(unix_socket::unix_bind(listen_idx as u32, path), 0, "bind");
-    assert_eq_test!(unix_socket::unix_listen(listen_idx as u32, 4), 0, "listen");
-    unix_socket::unix_set_nonblocking(listen_idx as u32, true);
+    let listen_handle = unix_socket::unix_create().expect("listen socket create");
+    assert_eq_test!(unix_socket::unix_bind(listen_handle, path), 0, "bind");
+    assert_eq_test!(unix_socket::unix_listen(listen_handle, 4), 0, "listen");
+    unix_socket::unix_set_nonblocking(listen_handle, true);
 
     // ── Client: connect (goes to backlog, no accept yet) ──
-    let cli_idx = unix_socket::unix_create();
-    assert_test!(cli_idx >= 0, "client socket create");
-    let rc = unix_socket::unix_connect(cli_idx as u32, path);
+    let cli_handle = unix_socket::unix_create().expect("client socket create");
+    let rc = unix_socket::unix_connect(cli_handle, path);
     assert_eq_test!(rc, 0, "connect");
 
     // Open FD for client side (like kernel does after connect syscall)
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
-        (cli_idx as u32 | tag) as usize,
+        cli_handle.as_usize(),
     );
     assert_test!(cli_fd >= 0, "cli fd open");
 
@@ -3076,13 +3067,12 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     );
 
     // ── Server: accept (gets side-B) ──
-    let accepted_idx = unix_socket::unix_accept(listen_idx as u32);
-    assert_test!(accepted_idx >= 0, "accept");
+    let accepted_handle = unix_socket::unix_accept(listen_handle).expect("accept");
 
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
-        (accepted_idx as u32 | tag) as usize,
+        accepted_handle.as_usize(),
     );
     assert_test!(srv_fd >= 0, "srv fd open");
 
@@ -3112,7 +3102,7 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     // Cleanup
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
-    unix_socket::unix_close(listen_idx as u32);
+    unix_socket::unix_close(listen_handle);
     task_terminate(task_id);
     TestResult::Pass
 }

@@ -7,6 +7,7 @@ use slopos_kernel_services::driver_runtime::{
 };
 
 use crate::pipe;
+use crate::pipe::PipeHandle;
 
 pub struct PipeReadOps;
 pub struct PipeWriteOps;
@@ -14,31 +15,31 @@ pub struct PipeWriteOps;
 pub static PIPE_READ_OPS: PipeReadOps = PipeReadOps;
 pub static PIPE_WRITE_OPS: PipeWriteOps = PipeWriteOps;
 
-fn pipe_dup_reader(pipe_id: u32) -> Option<usize> {
-    if pipe_id == pipe::INVALID_PIPE_ID {
+fn pipe_dup_reader(h: PipeHandle) -> Option<usize> {
+    if h == PipeHandle::INVALID {
         return None;
     }
-    let mut slot = pipe::lock_slot(pipe_id)?;
+    let mut slot = pipe::lock_slot(h)?;
     slot.readers = slot.readers.saturating_add(1);
-    Some(pipe_id as usize)
+    Some(h.as_usize())
 }
 
-fn pipe_dup_writer(pipe_id: u32) -> Option<usize> {
-    if pipe_id == pipe::INVALID_PIPE_ID {
+fn pipe_dup_writer(h: PipeHandle) -> Option<usize> {
+    if h == PipeHandle::INVALID {
         return None;
     }
-    let mut slot = pipe::lock_slot(pipe_id)?;
+    let mut slot = pipe::lock_slot(h)?;
     slot.writers = slot.writers.saturating_add(1);
-    Some(pipe_id as usize)
+    Some(h.as_usize())
 }
 
-fn pipe_release_reader(pipe_id: u32) {
-    if pipe_id == pipe::INVALID_PIPE_ID {
+fn pipe_release_reader(h: PipeHandle) {
+    if h == PipeHandle::INVALID {
         return;
     }
     let mut wake_writers = false;
     let should_free = {
-        if let Some(mut slot) = pipe::lock_slot(pipe_id) {
+        if let Some(mut slot) = pipe::lock_slot(h) {
             if slot.readers > 0 {
                 slot.readers -= 1;
                 if slot.readers == 0 {
@@ -51,20 +52,20 @@ fn pipe_release_reader(pipe_id: u32) {
         }
     };
     if should_free {
-        pipe::free_slot(pipe_id);
+        pipe::free_slot(h);
     }
     if wake_writers {
-        pipe::writer_wq(pipe_id).wake_all();
+        pipe::writer_wq(h).wake_all();
     }
 }
 
-fn pipe_release_writer(pipe_id: u32) {
-    if pipe_id == pipe::INVALID_PIPE_ID {
+fn pipe_release_writer(h: PipeHandle) {
+    if h == PipeHandle::INVALID {
         return;
     }
     let mut wake_readers = false;
     let should_free = {
-        if let Some(mut slot) = pipe::lock_slot(pipe_id) {
+        if let Some(mut slot) = pipe::lock_slot(h) {
             if slot.writers > 0 {
                 slot.writers -= 1;
                 if slot.writers == 0 {
@@ -77,10 +78,10 @@ fn pipe_release_writer(pipe_id: u32) {
         }
     };
     if should_free {
-        pipe::free_slot(pipe_id);
+        pipe::free_slot(h);
     }
     if wake_readers {
-        pipe::reader_wq(pipe_id).wake_all();
+        pipe::reader_wq(h).wake_all();
     }
 }
 
@@ -93,7 +94,7 @@ impl FileOps for PipeReadOps {
         if buf.is_empty() {
             return 0;
         }
-        let pipe_id = handle as u32;
+        let h = PipeHandle::from_usize(handle);
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         let mut local = [0u8; IO_STAGING_SIZE];
         let mut total = 0usize;
@@ -104,7 +105,7 @@ impl FileOps for PipeReadOps {
             let mut consumed = 0usize;
             let no_writers;
             {
-                let Some(mut slot) = pipe::lock_slot(pipe_id) else {
+                let Some(mut slot) = pipe::lock_slot(h) else {
                     return if total > 0 {
                         total as isize
                     } else {
@@ -142,7 +143,7 @@ impl FileOps for PipeReadOps {
                         };
                     }
                 }
-                pipe::writer_wq(pipe_id).wake_one();
+                pipe::writer_wq(h).wake_one();
                 continue;
             }
 
@@ -158,10 +159,10 @@ impl FileOps for PipeReadOps {
 
             if need_block {
                 prepare_to_wait();
-                pipe::reader_wq(pipe_id).enqueue_current();
+                pipe::reader_wq(h).enqueue_current();
                 block_current_task();
                 finish_wait();
-                pipe::reader_wq(pipe_id).remove_current();
+                pipe::reader_wq(h).remove_current();
                 continue;
             }
             return Errno::EAGAIN.as_isize();
@@ -173,18 +174,18 @@ impl FileOps for PipeReadOps {
     }
 
     fn release(&self, handle: usize) {
-        pipe_release_reader(handle as u32);
+        pipe_release_reader(PipeHandle::from_usize(handle));
     }
 
     fn dup(&self, handle: usize) -> Option<usize> {
-        pipe_dup_reader(handle as u32)
+        pipe_dup_reader(PipeHandle::from_usize(handle))
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
-        let pipe_id = handle as u32;
+        let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness (Linux pattern).
-        let registered = pipe::reader_wq(pipe_id).enqueue_current();
-        let revents = match pipe::lock_slot(pipe_id) {
+        let registered = pipe::reader_wq(h).enqueue_current();
+        let revents = match pipe::lock_slot(h) {
             Some(slot) => slot.revents(true, false, events),
             None => POLLERR,
         };
@@ -196,19 +197,19 @@ impl FileOps for PipeReadOps {
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
-        let pipe_id = handle as u32;
-        match pipe::lock_slot(pipe_id) {
+        let h = PipeHandle::from_usize(handle);
+        match pipe::lock_slot(h) {
             Some(slot) => slot.revents(true, false, events),
             None => POLLERR,
         }
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        pipe::reader_wq(handle as u32).enqueue_current()
+        pipe::reader_wq(PipeHandle::from_usize(handle)).enqueue_current()
     }
 
     fn poll_unwait(&self, handle: usize) {
-        pipe::reader_wq(handle as u32).remove_current();
+        pipe::reader_wq(PipeHandle::from_usize(handle)).remove_current();
     }
 }
 
@@ -225,7 +226,7 @@ impl FileOps for PipeWriteOps {
         if buf.is_empty() {
             return 0;
         }
-        let pipe_id = handle as u32;
+        let h = PipeHandle::from_usize(handle);
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         let buf_len = buf.len();
         let mut total = 0usize;
@@ -235,7 +236,7 @@ impl FileOps for PipeWriteOps {
             let mut need_block = false;
             let can_write;
             {
-                let Some(slot) = pipe::lock_slot(pipe_id) else {
+                let Some(slot) = pipe::lock_slot(h) else {
                     return if total > 0 {
                         total as isize
                     } else {
@@ -266,10 +267,10 @@ impl FileOps for PipeWriteOps {
                 }
                 if scheduler_is_enabled() != 0 {
                     prepare_to_wait();
-                    pipe::writer_wq(pipe_id).enqueue_current();
+                    pipe::writer_wq(h).enqueue_current();
                     block_current_task();
                     finish_wait();
-                    pipe::writer_wq(pipe_id).remove_current();
+                    pipe::writer_wq(h).remove_current();
                     continue;
                 }
                 return Errno::EAGAIN.as_isize();
@@ -294,7 +295,7 @@ impl FileOps for PipeWriteOps {
             }
 
             {
-                let Some(mut slot) = pipe::lock_slot(pipe_id) else {
+                let Some(mut slot) = pipe::lock_slot(h) else {
                     return if total > 0 {
                         total as isize
                     } else {
@@ -313,7 +314,7 @@ impl FileOps for PipeWriteOps {
                 let written = slot.write_from(&local[..staged]);
                 total += written;
                 if written > 0 {
-                    pipe::reader_wq(pipe_id).wake_one();
+                    pipe::reader_wq(h).wake_one();
                 }
             }
 
@@ -332,10 +333,10 @@ impl FileOps for PipeWriteOps {
 
             if need_block {
                 prepare_to_wait();
-                pipe::writer_wq(pipe_id).enqueue_current();
+                pipe::writer_wq(h).enqueue_current();
                 block_current_task();
                 finish_wait();
-                pipe::writer_wq(pipe_id).remove_current();
+                pipe::writer_wq(h).remove_current();
                 continue;
             }
             return Errno::EAGAIN.as_isize();
@@ -343,18 +344,18 @@ impl FileOps for PipeWriteOps {
     }
 
     fn release(&self, handle: usize) {
-        pipe_release_writer(handle as u32);
+        pipe_release_writer(PipeHandle::from_usize(handle));
     }
 
     fn dup(&self, handle: usize) -> Option<usize> {
-        pipe_dup_writer(handle as u32)
+        pipe_dup_writer(PipeHandle::from_usize(handle))
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
-        let pipe_id = handle as u32;
+        let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness (Linux pattern).
-        let registered = pipe::writer_wq(pipe_id).enqueue_current();
-        let revents = match pipe::lock_slot(pipe_id) {
+        let registered = pipe::writer_wq(h).enqueue_current();
+        let revents = match pipe::lock_slot(h) {
             Some(slot) => slot.revents(false, true, events),
             None => POLLERR | POLLHUP,
         };
@@ -366,18 +367,18 @@ impl FileOps for PipeWriteOps {
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
-        let pipe_id = handle as u32;
-        match pipe::lock_slot(pipe_id) {
+        let h = PipeHandle::from_usize(handle);
+        match pipe::lock_slot(h) {
             Some(slot) => slot.revents(false, true, events),
             None => POLLERR | POLLHUP,
         }
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        pipe::writer_wq(handle as u32).enqueue_current()
+        pipe::writer_wq(PipeHandle::from_usize(handle)).enqueue_current()
     }
 
     fn poll_unwait(&self, handle: usize) {
-        pipe::writer_wq(handle as u32).remove_current();
+        pipe::writer_wq(PipeHandle::from_usize(handle)).remove_current();
     }
 }

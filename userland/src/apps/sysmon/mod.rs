@@ -7,9 +7,8 @@ use slopos_slibc::mem::malloc::heap_stats;
 
 use crate::syscall::process as sys_proc;
 use slopos_appkit::{
-    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, MessageId, Node,
-    ScrollDirection, ScrollbarVisibility, SortIndicator, TableColumn, TableColumnWidth,
-    TextAlignment,
+    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, Node, ScrollDirection,
+    ScrollbarVisibility, SortIndicator, TableColumn, TableColumnWidth, TextAlignment,
 };
 
 mod format;
@@ -27,13 +26,6 @@ pub(crate) const COLOR_STATE_READY: Color32 = Color32::rgb(0xCC, 0xCC, 0xCC);
 pub(crate) const MAX_CPUS: usize = 16;
 pub(crate) const REFRESH_INTERVAL_MS: u64 = 1000;
 
-const MSG_TAB: MessageId = MessageId::new(1);
-const MSG_SORT: MessageId = MessageId::new(2);
-const MSG_SELECT: MessageId = MessageId::new(3);
-const MSG_KILL: MessageId = MessageId::new(4);
-const MSG_CANCEL: MessageId = MessageId::new(5);
-const MSG_HW_SCROLL: MessageId = MessageId::new(6);
-
 #[derive(Clone, Debug)]
 pub enum SysmonMsg {
     TabChanged(usize),
@@ -42,27 +34,12 @@ pub enum SysmonMsg {
     Kill,
     Cancel,
     HwScroll(i32),
-    Unknown(#[allow(dead_code)] MessageId),
-}
-
-impl From<MessageId> for SysmonMsg {
-    fn from(m: MessageId) -> Self {
-        match m.id {
-            1 => SysmonMsg::TabChanged(m.payload as usize),
-            2 => SysmonMsg::SortColumn(m.payload as usize),
-            3 => SysmonMsg::SelectRow(m.payload as usize),
-            4 => SysmonMsg::Kill,
-            5 => SysmonMsg::Cancel,
-            6 => SysmonMsg::HwScroll(m.payload as i32),
-            _ => SysmonMsg::Unknown(m),
-        }
-    }
 }
 
 impl App for SysmonApp {
     type Message = SysmonMsg;
 
-    fn view(&self) -> Node {
+    fn view(&self) -> Node<SysmonMsg> {
         Node::TabBar {
             tabs: vec![
                 String::from("Overview"),
@@ -74,7 +51,7 @@ impl App for SysmonApp {
                 Tab::Processes => 1,
                 Tab::Hardware => 2,
             },
-            on_change: MSG_TAB,
+            on_change: Some(SysmonMsg::TabChanged),
             content: vec![
                 self.view_overview(),
                 self.view_processes(),
@@ -127,7 +104,6 @@ impl App for SysmonApp {
                 self.hardware_scroll_y = y;
                 Action::None
             }
-            SysmonMsg::Unknown(_) => Action::None,
         }
     }
 
@@ -150,8 +126,8 @@ impl App for SysmonApp {
 }
 
 impl SysmonApp {
-    fn view_overview(&self) -> Node {
-        let mut children: Vec<Node> = Vec::new();
+    fn view_overview(&self) -> Node<SysmonMsg> {
+        let mut children: Vec<Node<SysmonMsg>> = Vec::new();
 
         // SYSTEM
         children.push(label("SYSTEM"));
@@ -232,7 +208,7 @@ impl SysmonApp {
         }
     }
 
-    fn view_processes(&self) -> Node {
+    fn view_processes(&self) -> Node<SysmonMsg> {
         let sort_ind = |col: SortColumn| -> Option<SortIndicator> {
             if self.sort_column == col {
                 Some(if self.sort_ascending {
@@ -283,7 +259,7 @@ impl SysmonApp {
             },
         ];
 
-        let mut rows: Vec<Vec<Node>> = Vec::new();
+        let mut rows: Vec<Vec<Node<SysmonMsg>>> = Vec::new();
         for row_idx in 0..self.task_count {
             let Some(idx) = self.sorted_task_index(row_idx) else {
                 continue;
@@ -312,11 +288,11 @@ impl SysmonApp {
             rows,
             row_height: 20,
             selected,
-            on_select: MSG_SELECT,
-            on_header_click: Some(MSG_SORT),
+            on_select: Some(SysmonMsg::SelectRow),
+            on_header_click: Some(SysmonMsg::SortColumn),
         };
 
-        let mut children: Vec<Node> = vec![Node::Expand {
+        let mut children: Vec<Node<SysmonMsg>> = vec![Node::Expand {
             weight: 1,
             child: Box::new(table),
         }];
@@ -339,18 +315,18 @@ impl SysmonApp {
                 actions: vec![
                     Node::Button {
                         label: String::from("Kill"),
-                        on_press: Some(MSG_KILL),
+                        on_press: Some(SysmonMsg::Kill),
                         style: ButtonStyle::Destructive,
                         enabled: true,
                     },
                     Node::Button {
                         label: String::from("Cancel"),
-                        on_press: Some(MSG_CANCEL),
+                        on_press: Some(SysmonMsg::Cancel),
                         style: ButtonStyle::Secondary,
                         enabled: true,
                     },
                 ],
-                on_dismiss: MSG_CANCEL,
+                on_dismiss: Some(SysmonMsg::Cancel),
             });
         }
 
@@ -361,8 +337,8 @@ impl SysmonApp {
         }
     }
 
-    fn view_hardware(&self) -> Node {
-        let mut children: Vec<Node> = Vec::new();
+    fn view_hardware(&self) -> Node<SysmonMsg> {
+        let mut children: Vec<Node<SysmonMsg>> = Vec::new();
 
         // PROCESSOR
         children.push(label("PROCESSOR"));
@@ -504,7 +480,7 @@ impl SysmonApp {
             direction: ScrollDirection::Vertical,
             show_scrollbar: ScrollbarVisibility::WhenNeeded,
             scroll_y: self.hardware_scroll_y,
-            on_scroll: Some(MSG_HW_SCROLL),
+            on_scroll: Some(SysmonMsg::HwScroll),
             child: Box::new(Node::Padding {
                 padding: EdgeInsets::all(10),
                 child: Box::new(Node::VStack {
@@ -517,7 +493,7 @@ impl SysmonApp {
     }
 }
 
-fn label(text: &str) -> Node {
+fn label(text: &str) -> Node<SysmonMsg> {
     Node::Label {
         text: String::from(text),
         alignment: TextAlignment::Start,
@@ -526,7 +502,7 @@ fn label(text: &str) -> Node {
     }
 }
 
-fn cell(text: &str) -> Node {
+fn cell(text: &str) -> Node<SysmonMsg> {
     Node::Label {
         text: String::from(text),
         alignment: TextAlignment::Start,
@@ -535,7 +511,7 @@ fn cell(text: &str) -> Node {
     }
 }
 
-fn kv_row(key: &str, value: &str) -> Node {
+fn kv_row(key: &str, value: &str) -> Node<SysmonMsg> {
     Node::HStack {
         spacing: 0,
         align: CrossAxisAlignment::Center,

@@ -191,20 +191,12 @@ impl Server {
     }
 
     /// Read one request from a client (non-blocking).
-    /// Fds received via SCM_RIGHTS are queued — call `take_client_fd()`
-    /// after decoding a message type that carries an fd.
+    /// File descriptors received via SCM_RIGHTS are consumed inline by
+    /// the decoder and embedded in the returned `Request` variant.
     pub fn recv_request(&mut self, client: usize) -> Result<Option<Request>, ProtocolError> {
         match self.clients.get_mut(client) {
             Some(Some(c)) if c.active => c.conn.recv::<Request>(),
             _ => Ok(None),
-        }
-    }
-
-    /// Pop one pending fd from a client's SCM_RIGHTS FIFO (-1 if empty).
-    pub fn take_client_fd(&mut self, client: usize) -> i32 {
-        match self.clients.get_mut(client) {
-            Some(Some(c)) if c.active => c.conn.take_fd(),
-            _ => -1,
         }
     }
 

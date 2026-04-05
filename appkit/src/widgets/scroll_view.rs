@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::constraints::{BoxConstraints, Rect, ScrollDirection, ScrollbarVisibility, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
@@ -19,7 +21,7 @@ pub struct ScrollViewWidget {
     drag_start_y: i32,
     drag_start_offset: i32,
     focused: bool,
-    on_scroll: Option<crate::node::MessageId>,
+    on_scroll: Option<Box<dyn Fn(i32) -> Box<dyn Any>>>,
 }
 
 impl ScrollViewWidget {
@@ -52,7 +54,7 @@ impl ScrollViewWidget {
         direction: ScrollDirection,
         show_scrollbar: ScrollbarVisibility,
         scroll_y: i32,
-        on_scroll: Option<crate::node::MessageId>,
+        on_scroll: Option<Box<dyn Fn(i32) -> Box<dyn Any>>>,
     ) -> Self {
         let mut sv = Self::new(child, direction, show_scrollbar);
         sv.offset_y = scroll_y;
@@ -300,11 +302,8 @@ impl Widget for ScrollViewWidget {
                         self.content_size.width,
                         self.content_size.height,
                     ));
-                    if let Some(msg) = self.on_scroll {
-                        sink.emit(crate::node::MessageId::with_payload(
-                            msg.id,
-                            self.offset_y as u32,
-                        ));
+                    if let Some(cb) = &self.on_scroll {
+                        sink.emit_raw(cb(self.offset_y));
                     }
                     EventResponse::Consumed
                 } else {

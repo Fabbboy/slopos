@@ -12,12 +12,12 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use slopos_appkit::{App, Action, Node, MessageId, run_app};
+//! use slopos_appkit::{App, Action, Node, run_app};
 //!
 //! struct MyApp;
 //! impl App for MyApp {
 //!     type Message = MyMsg;
-//!     fn view(&self) -> Node { Node::Label { text: "Hello".into(), .. } }
+//!     fn view(&self) -> Node<MyMsg> { Node::Label { text: "Hello".into(), .. } }
 //!     fn update(&mut self, msg: MyMsg) -> Action { Action::None }
 //! }
 //!
@@ -54,7 +54,7 @@ pub mod widgets;
 
 // === Public re-exports: primary app API ===
 pub use node::{
-    Action, App, ButtonStyle, MenuItem, MenuItemKind, MessageId, Node, SortIndicator, TableColumn,
+    Action, App, ButtonStyle, MenuItem, MenuItemKind, Node, SortIndicator, TableColumn,
     TableColumnWidth,
 };
 pub use run::run_app;

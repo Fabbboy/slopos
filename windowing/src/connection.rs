@@ -22,6 +22,7 @@ use slopos_abi::pixel::PixelFormat;
 use slopos_abi::syscall::posix::POLLIN;
 use slopos_abi::syscall::types::UserPollFd;
 use slopos_protocol::client::Client;
+use slopos_protocol::types::{SurfaceId, ToplevelId};
 
 // ---------------------------------------------------------------------------
 // Protocol handle (UI-thread-confined via Rc)
@@ -143,7 +144,7 @@ impl Protocol {
     /// Uses a separate `RefCell` from the client, so this never conflicts with
     /// an active client borrow. Called from `Surface::drop` when the client
     /// `RefCell` is already borrowed.
-    pub fn queue_destroy(&self, toplevel_id: u32, surface_id: u32) {
+    pub fn queue_destroy(&self, toplevel_id: ToplevelId, surface_id: SurfaceId) {
         if let Ok(mut q) = self.pending_destroys.try_borrow_mut() {
             q.push(toplevel_id, surface_id);
         }
@@ -175,10 +176,10 @@ impl Protocol {
         };
 
         for (toplevel_id, surface_id) in snapshot {
-            if toplevel_id != 0 {
+            if toplevel_id != ToplevelId::NONE {
                 let _ = client.toplevel_destroy(toplevel_id);
             }
-            if surface_id != 0 {
+            if surface_id != SurfaceId::NONE {
                 let _ = client.surface_destroy(surface_id);
             }
         }
@@ -251,7 +252,7 @@ impl Drop for Protocol {
 const PENDING_DESTROY_CAP: usize = 64;
 
 struct PendingDestroys {
-    entries: Vec<(u32, u32)>,
+    entries: Vec<(ToplevelId, SurfaceId)>,
 }
 
 impl PendingDestroys {
@@ -261,7 +262,7 @@ impl PendingDestroys {
         }
     }
 
-    fn push(&mut self, toplevel_id: u32, surface_id: u32) {
+    fn push(&mut self, toplevel_id: ToplevelId, surface_id: SurfaceId) {
         if self.entries.len() < PENDING_DESTROY_CAP {
             self.entries.push((toplevel_id, surface_id));
         } else {
@@ -269,7 +270,7 @@ impl PendingDestroys {
         }
     }
 
-    fn take(&mut self) -> Vec<(u32, u32)> {
+    fn take(&mut self) -> Vec<(ToplevelId, SurfaceId)> {
         core::mem::take(&mut self.entries)
     }
 

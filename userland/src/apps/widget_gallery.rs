@@ -1,35 +1,15 @@
 use slopos_appkit::{
-    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, MessageId, Node,
-    ScrollDirection, ScrollbarVisibility, TextAlignment,
+    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, Node, ScrollDirection,
+    ScrollbarVisibility, TextAlignment,
 };
-
-const CLICK_BTN: MessageId = MessageId::new(1);
-const TOGGLE_CHECK: MessageId = MessageId::new(2);
-const TEXT_CHANGED: MessageId = MessageId::new(3);
-const TAB_CHANGED: MessageId = MessageId::new(4);
-const _LIST_SELECT: MessageId = MessageId::new(5);
 
 #[derive(Clone, Debug)]
 pub enum GalleryMsg {
     ButtonClicked,
     ToggleCheck,
-    TextChanged,
+    TextChanged(String),
     TabChanged(usize),
     ListSelect(usize),
-    Unknown(#[allow(dead_code)] MessageId),
-}
-
-impl From<MessageId> for GalleryMsg {
-    fn from(m: MessageId) -> Self {
-        match m.id {
-            1 => GalleryMsg::ButtonClicked,
-            2 => GalleryMsg::ToggleCheck,
-            3 => GalleryMsg::TextChanged,
-            4 => GalleryMsg::TabChanged(m.payload as usize),
-            5 => GalleryMsg::ListSelect(m.payload as usize),
-            _ => GalleryMsg::Unknown(m),
-        }
-    }
 }
 
 pub struct WidgetGalleryApp {
@@ -51,7 +31,7 @@ impl WidgetGalleryApp {
         }
     }
 
-    fn basics_tab(&self) -> Node {
+    fn basics_tab(&self) -> Node<GalleryMsg> {
         Node::Padding {
             padding: EdgeInsets::all(16),
             child: Box::new(Node::VStack {
@@ -71,19 +51,19 @@ impl WidgetGalleryApp {
                         children: vec![
                             Node::Button {
                                 label: format!("Click me ({})", self.counter),
-                                on_press: Some(CLICK_BTN),
+                                on_press: Some(GalleryMsg::ButtonClicked),
                                 style: ButtonStyle::Primary,
                                 enabled: true,
                             },
                             Node::Button {
                                 label: String::from("Disabled"),
-                                on_press: Some(CLICK_BTN),
+                                on_press: Some(GalleryMsg::ButtonClicked),
                                 style: ButtonStyle::Secondary,
                                 enabled: false,
                             },
                             Node::Button {
                                 label: String::from("Delete"),
-                                on_press: Some(CLICK_BTN),
+                                on_press: Some(GalleryMsg::ButtonClicked),
                                 style: ButtonStyle::Destructive,
                                 enabled: true,
                             },
@@ -92,7 +72,7 @@ impl WidgetGalleryApp {
                     Node::Checkbox {
                         checked: self.checked,
                         label: String::from("Enable feature"),
-                        on_toggle: TOGGLE_CHECK,
+                        on_toggle: Some(GalleryMsg::ToggleCheck),
                         enabled: true,
                     },
                     Node::Spacer {
@@ -109,7 +89,7 @@ impl WidgetGalleryApp {
         }
     }
 
-    fn input_tab(&self) -> Node {
+    fn input_tab(&self) -> Node<GalleryMsg> {
         Node::Padding {
             padding: EdgeInsets::all(16),
             child: Box::new(Node::VStack {
@@ -125,7 +105,7 @@ impl WidgetGalleryApp {
                     Node::TextField {
                         text: self.text.clone(),
                         placeholder: String::from("Type here..."),
-                        on_change: TEXT_CHANGED,
+                        on_change: Some(GalleryMsg::TextChanged),
                         max_length: None,
                         read_only: false,
                     },
@@ -140,8 +120,8 @@ impl WidgetGalleryApp {
         }
     }
 
-    fn lists_tab(&self) -> Node {
-        let items: Vec<Node> = (0..50)
+    fn lists_tab(&self) -> Node<GalleryMsg> {
+        let items: Vec<Node<GalleryMsg>> = (0..50)
             .map(|i| Node::Label {
                 text: format!("Item {}", i),
                 alignment: TextAlignment::Start,
@@ -182,7 +162,7 @@ impl WidgetGalleryApp {
 impl App for WidgetGalleryApp {
     type Message = GalleryMsg;
 
-    fn view(&self) -> Node {
+    fn view(&self) -> Node<GalleryMsg> {
         Node::TabBar {
             tabs: vec![
                 String::from("Basics"),
@@ -190,7 +170,7 @@ impl App for WidgetGalleryApp {
                 String::from("Lists"),
             ],
             active: self.active_tab,
-            on_change: TAB_CHANGED,
+            on_change: Some(GalleryMsg::TabChanged),
             content: vec![self.basics_tab(), self.input_tab(), self.lists_tab()],
         }
     }
@@ -205,7 +185,7 @@ impl App for WidgetGalleryApp {
                 self.checked = !self.checked;
                 Action::Rebuild
             }
-            GalleryMsg::TextChanged => Action::None,
+            GalleryMsg::TextChanged(_text) => Action::None,
             GalleryMsg::TabChanged(tab) => {
                 self.active_tab = tab;
                 Action::Rebuild
@@ -214,7 +194,6 @@ impl App for WidgetGalleryApp {
                 self.selected_item = Some(idx);
                 Action::Rebuild
             }
-            GalleryMsg::Unknown(_) => Action::None,
         }
     }
 }

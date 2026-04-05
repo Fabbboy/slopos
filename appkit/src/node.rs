@@ -6,24 +6,6 @@ use super::constraints::{
 };
 use super::event::{Key, Modifiers};
 
-/// Message identifier with payload for routing widget actions to the App.
-/// `id` identifies the action type, `payload` carries context (e.g. which tab, row, column).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct MessageId {
-    pub id: u32,
-    pub payload: u32,
-}
-
-impl MessageId {
-    pub const fn new(id: u32) -> Self {
-        Self { id, payload: 0 }
-    }
-
-    pub const fn with_payload(id: u32, payload: u32) -> Self {
-        Self { id, payload }
-    }
-}
-
 /// Button visual style.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ButtonStyle {
@@ -74,10 +56,11 @@ pub struct TableColumn {
     pub sort_indicator: Option<SortIndicator>,
 }
 
-/// Declarative tree description. Apps build a tree of Nodes in `view()`.
+/// Declarative tree description. Apps build a tree of `Node<M>` in `view()`.
 /// The framework diffs against the previous tree to update retained widgets.
-#[derive(Clone, Debug)]
-pub enum Node {
+/// `M` is the application's message type — widgets emit concrete `M` values
+/// instead of opaque integer IDs.
+pub enum Node<M> {
     // --- Leaf widgets ---
     Label {
         text: String,
@@ -90,21 +73,21 @@ pub enum Node {
         /// None = no action (button is non-interactive). Some = emits this message on click.
         /// This makes silent no-ops impossible — if you want a clickable button, you MUST
         /// provide a message. If you don't want an action, use None explicitly.
-        on_press: Option<MessageId>,
+        on_press: Option<M>,
         style: ButtonStyle,
         enabled: bool,
     },
     TextField {
         text: String,
         placeholder: String,
-        on_change: MessageId,
+        on_change: Option<fn(String) -> M>,
         max_length: Option<usize>,
         read_only: bool,
     },
     Checkbox {
         checked: bool,
         label: String,
-        on_toggle: MessageId,
+        on_toggle: Option<M>,
         enabled: bool,
     },
     /// Divider line. Automatically detects orientation from parent layout context:
@@ -129,82 +112,82 @@ pub enum Node {
 
     // --- Container widgets ---
     ScrollView {
-        child: Box<Node>,
+        child: Box<Node<M>>,
         direction: ScrollDirection,
         show_scrollbar: ScrollbarVisibility,
         /// Initial scroll offset (preserved across rebuilds).
         scroll_y: i32,
-        /// Emitted when scroll offset changes (payload = new offset_y).
-        on_scroll: Option<MessageId>,
+        /// Emitted when scroll offset changes (argument = new offset_y).
+        on_scroll: Option<fn(i32) -> M>,
     },
     ListView {
         item_height: i32,
         selected: Option<usize>,
-        on_select: MessageId,
-        items: Vec<Node>,
+        on_select: Option<fn(usize) -> M>,
+        items: Vec<Node<M>>,
     },
     TabBar {
         tabs: Vec<String>,
         active: usize,
-        on_change: MessageId,
-        content: Vec<Node>,
+        on_change: Option<fn(usize) -> M>,
+        content: Vec<Node<M>>,
     },
     Menu {
         items: Vec<MenuItem>,
-        on_action: MessageId,
+        on_action: Option<fn(usize) -> M>,
     },
     Table {
         columns: Vec<TableColumn>,
-        rows: Vec<Vec<Node>>,
+        rows: Vec<Vec<Node<M>>>,
         row_height: i32,
         selected: Option<usize>,
-        on_select: MessageId,
-        /// None = headers not clickable. Some = emits with column index as payload.
-        on_header_click: Option<MessageId>,
+        on_select: Option<fn(usize) -> M>,
+        /// None = headers not clickable. Some = emits with column index as argument.
+        on_header_click: Option<fn(usize) -> M>,
     },
     Dialog {
         title: String,
-        content: Box<Node>,
-        actions: Vec<Node>,
-        on_dismiss: MessageId,
+        content: Box<Node<M>>,
+        actions: Vec<Node<M>>,
+        on_dismiss: Option<M>,
     },
 
     // --- Layout containers ---
     VStack {
-        children: Vec<Node>,
+        children: Vec<Node<M>>,
         spacing: i32,
         align: CrossAxisAlignment,
     },
     HStack {
-        children: Vec<Node>,
+        children: Vec<Node<M>>,
         spacing: i32,
         align: CrossAxisAlignment,
     },
     ZStack {
-        children: Vec<Node>,
+        children: Vec<Node<M>>,
     },
     Padding {
         padding: EdgeInsets,
-        child: Box<Node>,
+        child: Box<Node<M>>,
     },
     Spacer {
         size: Length,
     },
     Expand {
         weight: u16,
-        child: Box<Node>,
+        child: Box<Node<M>>,
     },
 
     /// Container that paints a solid background color behind its child.
     Background {
         color: Color32,
-        child: Box<Node>,
+        child: Box<Node<M>>,
     },
     /// Container with explicit width and/or height constraints.
     SizedBox {
         width: Option<Length>,
         height: Option<Length>,
-        child: Box<Node>,
+        child: Box<Node<M>>,
     },
 
     /// Escape hatch: raw drawing callback.
@@ -220,10 +203,10 @@ pub enum Node {
 /// Application trait driven by the widget framework.
 pub trait App {
     /// The message type for this application's events.
-    type Message: From<MessageId>;
+    type Message: Clone + 'static;
 
     /// Build the widget tree. Called when the tree needs to be (re)constructed.
-    fn view(&self) -> Node;
+    fn view(&self) -> Node<Self::Message>;
 
     /// Handle a widget event. Return an Action indicating what happened.
     fn update(&mut self, msg: Self::Message) -> Action;

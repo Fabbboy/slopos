@@ -7,16 +7,42 @@ use slopos_abi::syscall::TtyIndex;
 
 use crate::tty;
 
+// ---------------------------------------------------------------------------
+// TtyHandle — type-safe handle for TTY kernel objects
+// ---------------------------------------------------------------------------
+
+/// Lightweight newtype wrapping a TTY index for type-safe passage through
+/// the `FileOps` `handle: usize` boundary.  No generation counter needed
+/// since TTY slots are fixed (never recycled).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct TtyHandle(u8);
+
+impl TtyHandle {
+    /// Convert to usize for storage in OpenFileEntry.handle.
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Reconstruct from usize stored in OpenFileEntry.handle.
+    /// Returns `None` if the value exceeds `u8::MAX`.
+    pub fn from_usize(v: usize) -> Option<Self> {
+        if v > u8::MAX as usize {
+            None
+        } else {
+            Some(Self(v as u8))
+        }
+    }
+
+    /// Return the underlying [`TtyIndex`].
+    pub fn index(self) -> TtyIndex {
+        TtyIndex(self.0)
+    }
+}
+
 pub struct TtyFileOps;
 
 pub static TTY_FILE_OPS: TtyFileOps = TtyFileOps;
-
-fn validated_tty_index(handle: usize) -> Result<TtyIndex, Errno> {
-    if handle > u8::MAX as usize {
-        return Err(Errno::EBADF);
-    }
-    Ok(TtyIndex(handle as u8))
-}
 
 impl FileOps for TtyFileOps {
     fn kind(&self) -> FileKind {
@@ -24,14 +50,13 @@ impl FileOps for TtyFileOps {
     }
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, flags: u32) -> isize {
-        let tty_idx = match validated_tty_index(handle) {
-            Ok(idx) => idx,
-            Err(e) => return e.as_isize(),
+        let Some(th) = TtyHandle::from_usize(handle) else {
+            return Errno::EBADF.as_isize();
         };
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         let mut tmp = [0u8; IO_STAGING_SIZE];
         let read_len = buf.len().min(tmp.len());
-        match tty::read(tty_idx, &mut tmp[..read_len], nonblock) {
+        match tty::read(th.index(), &mut tmp[..read_len], nonblock) {
             Ok(n) => {
                 // Clamp defensively — tty::read structurally cannot exceed
                 // read_len, but a kernel panic is never acceptable.
@@ -50,9 +75,8 @@ impl FileOps for TtyFileOps {
     }
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, flags: u32) -> isize {
-        let tty_idx = match validated_tty_index(handle) {
-            Ok(idx) => idx,
-            Err(e) => return e.as_isize(),
+        let Some(th) = TtyHandle::from_usize(handle) else {
+            return Errno::EBADF.as_isize();
         };
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         let mut staging = [0u8; IO_STAGING_SIZE];
@@ -72,7 +96,7 @@ impl FileOps for TtyFileOps {
                     };
                 }
             };
-            match tty::write(tty_idx, &staging[..n], nonblock) {
+            match tty::write(th.index(), &staging[..n], nonblock) {
                 Ok(written) => {
                     total += written;
                     if written < n {
@@ -92,14 +116,14 @@ impl FileOps for TtyFileOps {
     }
 
     fn release(&self, handle: usize) {
-        if let Ok(idx) = validated_tty_index(handle) {
-            let _ = tty::close_ref(idx);
+        if let Some(th) = TtyHandle::from_usize(handle) {
+            let _ = tty::close_ref(th.index());
         }
     }
 
     fn dup(&self, handle: usize) -> Option<usize> {
-        let tty_idx = validated_tty_index(handle).ok()?;
-        if tty::open_ref(tty_idx).is_ok() {
+        let th = TtyHandle::from_usize(handle)?;
+        if tty::open_ref(th.index()).is_ok() {
             Some(handle)
         } else {
             None
@@ -118,22 +142,22 @@ impl FileOps for TtyFileOps {
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
-        match validated_tty_index(handle) {
-            Ok(idx) => tty::poll_events(idx, events),
-            Err(_) => 0,
+        match TtyHandle::from_usize(handle) {
+            Some(th) => tty::poll_events(th.index(), events),
+            None => 0,
         }
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        match validated_tty_index(handle) {
-            Ok(idx) => tty::poll_enqueue(idx),
-            Err(_) => false,
+        match TtyHandle::from_usize(handle) {
+            Some(th) => tty::poll_enqueue(th.index()),
+            None => false,
         }
     }
 
     fn poll_unwait(&self, handle: usize) {
-        if let Ok(idx) = validated_tty_index(handle) {
-            tty::poll_dequeue(idx);
+        if let Some(th) = TtyHandle::from_usize(handle) {
+            tty::poll_dequeue(th.index());
         }
     }
 

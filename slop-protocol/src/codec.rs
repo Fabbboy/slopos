@@ -7,16 +7,60 @@
 //! Strings: `[u8 len][utf8 bytes]` (max 128 bytes).
 //! Clipboard: `[u16 len][bytes]` (max 4096 bytes).
 
-use crate::types::{ClipboardData, Event, MAX_STRING_LEN, ProtocolError, Request};
+use crate::types::{
+    ClipboardData, Event, MAX_STRING_LEN, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId,
+};
 
 /// Serialize into a byte buffer. Returns number of bytes written.
 pub trait Encode {
     fn encode(&self, buf: &mut [u8]) -> Result<usize, ProtocolError>;
 }
 
+/// FIFO view over pending file descriptors received via SCM_RIGHTS.
+///
+/// The decoder pops fds from the front for message types that carry
+/// ancillary fds (e.g. `SurfaceAttach`). All other messages ignore it.
+pub struct FdFifo<'a> {
+    fds: &'a mut [i32; super::connection::MAX_PENDING_FDS],
+    count: &'a mut u8,
+}
+
+impl FdFifo<'_> {
+    /// Pop the first fd from the FIFO, wrapping it in an `OwnedFd`.
+    /// Returns `None` if the FIFO is empty or the fd is negative.
+    pub fn take(&mut self) -> Option<OwnedFd> {
+        if *self.count == 0 {
+            return None;
+        }
+        let fd = self.fds[0];
+        for i in 1..*self.count as usize {
+            self.fds[i - 1] = self.fds[i];
+        }
+        *self.count -= 1;
+        self.fds[*self.count as usize] = -1;
+        if fd >= 0 {
+            Some(OwnedFd::from_raw(fd))
+        } else {
+            None
+        }
+    }
+
+    /// Construct an `FdFifo` from a pending fd array and count.
+    pub(crate) fn new<'a>(
+        fds: &'a mut [i32; super::connection::MAX_PENDING_FDS],
+        count: &'a mut u8,
+    ) -> FdFifo<'a> {
+        FdFifo { fds, count }
+    }
+}
+
 /// Deserialize from a byte buffer. Returns (value, bytes_consumed).
+///
+/// The `fds` parameter provides access to file descriptors received via
+/// SCM_RIGHTS ancillary data. Message types that carry fds (like
+/// `SurfaceAttach`) pop them from the FIFO during decode.
 pub trait Decode: Sized {
-    fn decode(buf: &[u8]) -> Result<(Self, usize), ProtocolError>;
+    fn decode(buf: &[u8], fds: &mut FdFifo<'_>) -> Result<(Self, usize), ProtocolError>;
 }
 
 // -- Primitive helpers ----------------------------------------------------
@@ -170,16 +214,17 @@ impl Encode for Request {
             }
             Request::CreateSurface { new_id } => {
                 let p = put_u8(buf, 0, REQ_CREATE_SURFACE)?;
-                put_u32(buf, p, *new_id)
+                put_u32(buf, p, new_id.raw())
             }
             Request::SurfaceAttach {
                 surface,
                 shm_token,
                 width,
                 height,
+                buffer_fd: _,
             } => {
                 let p = put_u8(buf, 0, REQ_SURFACE_ATTACH)?;
-                let p = put_u32(buf, p, *surface)?;
+                let p = put_u32(buf, p, surface.raw())?;
                 let p = put_u32(buf, p, *shm_token)?;
                 let p = put_u32(buf, p, *width)?;
                 put_u32(buf, p, *height)
@@ -192,7 +237,7 @@ impl Encode for Request {
                 h,
             } => {
                 let p = put_u8(buf, 0, REQ_SURFACE_DAMAGE)?;
-                let p = put_u32(buf, p, *surface)?;
+                let p = put_u32(buf, p, surface.raw())?;
                 let p = put_i32(buf, p, *x)?;
                 let p = put_i32(buf, p, *y)?;
                 let p = put_i32(buf, p, *w)?;
@@ -200,20 +245,20 @@ impl Encode for Request {
             }
             Request::SurfaceCommit { surface } => {
                 let p = put_u8(buf, 0, REQ_SURFACE_COMMIT)?;
-                put_u32(buf, p, *surface)
+                put_u32(buf, p, surface.raw())
             }
             Request::SurfaceFrame { surface } => {
                 let p = put_u8(buf, 0, REQ_SURFACE_FRAME)?;
-                put_u32(buf, p, *surface)
+                put_u32(buf, p, surface.raw())
             }
             Request::SurfaceDestroy { surface } => {
                 let p = put_u8(buf, 0, REQ_SURFACE_DESTROY)?;
-                put_u32(buf, p, *surface)
+                put_u32(buf, p, surface.raw())
             }
             Request::GetToplevel { surface, new_id } => {
                 let p = put_u8(buf, 0, REQ_GET_TOPLEVEL)?;
-                let p = put_u32(buf, p, *surface)?;
-                put_u32(buf, p, *new_id)
+                let p = put_u32(buf, p, surface.raw())?;
+                put_u32(buf, p, new_id.raw())
             }
             Request::ToplevelSetTitle {
                 toplevel,
@@ -222,7 +267,7 @@ impl Encode for Request {
             } => {
                 let actual = (*len as usize).min(MAX_STRING_LEN);
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_TITLE)?;
-                let p = put_u32(buf, p, *toplevel)?;
+                let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u8(buf, p, actual as u8)?;
                 put_bytes(buf, p, &title[..actual])
             }
@@ -233,13 +278,13 @@ impl Encode for Request {
             } => {
                 let actual = (*len as usize).min(MAX_STRING_LEN);
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_APP_ID)?;
-                let p = put_u32(buf, p, *toplevel)?;
+                let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u8(buf, p, actual as u8)?;
                 put_bytes(buf, p, &app_id[..actual])
             }
             Request::ToplevelDestroy { toplevel } => {
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_DESTROY)?;
-                put_u32(buf, p, *toplevel)
+                put_u32(buf, p, toplevel.raw())
             }
             Request::AckConfigure { serial } => {
                 let p = put_u8(buf, 0, REQ_ACK_CONFIGURE)?;
@@ -247,7 +292,7 @@ impl Encode for Request {
             }
             Request::SetCursorShape { surface, shape } => {
                 let p = put_u8(buf, 0, REQ_SET_CURSOR_SHAPE)?;
-                let p = put_u32(buf, p, *surface)?;
+                let p = put_u32(buf, p, surface.raw())?;
                 put_u8(buf, p, *shape)
             }
             Request::ClipboardCopy(cb) => {
@@ -259,7 +304,7 @@ impl Encode for Request {
             Request::ClipboardPaste => put_u8(buf, 0, REQ_CLIPBOARD_PASTE),
             Request::InteractiveMove { toplevel, serial } => {
                 let p = put_u8(buf, 0, REQ_INTERACTIVE_MOVE)?;
-                let p = put_u32(buf, p, *toplevel)?;
+                let p = put_u32(buf, p, toplevel.raw())?;
                 put_u32(buf, p, *serial)
             }
             Request::InteractiveResize {
@@ -268,7 +313,7 @@ impl Encode for Request {
                 edges,
             } => {
                 let p = put_u8(buf, 0, REQ_INTERACTIVE_RESIZE)?;
-                let p = put_u32(buf, p, *toplevel)?;
+                let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u32(buf, p, *serial)?;
                 put_u32(buf, p, *edges)
             }
@@ -279,7 +324,7 @@ impl Encode for Request {
 // -- Decode for Request ---------------------------------------------------
 
 impl Decode for Request {
-    fn decode(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+    fn decode(buf: &[u8], fds: &mut FdFifo<'_>) -> Result<(Self, usize), ProtocolError> {
         let (tag, p) = get_u8(buf, 0)?;
         match tag {
             REQ_HELLO => {
@@ -288,19 +333,26 @@ impl Decode for Request {
             }
             REQ_CREATE_SURFACE => {
                 let (new_id, p) = get_u32(buf, p)?;
-                Ok((Request::CreateSurface { new_id }, p))
+                Ok((
+                    Request::CreateSurface {
+                        new_id: SurfaceId::from_raw(new_id),
+                    },
+                    p,
+                ))
             }
             REQ_SURFACE_ATTACH => {
                 let (surface, p) = get_u32(buf, p)?;
                 let (shm_token, p) = get_u32(buf, p)?;
                 let (width, p) = get_u32(buf, p)?;
                 let (height, p) = get_u32(buf, p)?;
+                let buffer_fd = fds.take();
                 Ok((
                     Request::SurfaceAttach {
-                        surface,
+                        surface: SurfaceId::from_raw(surface),
                         shm_token,
                         width,
                         height,
+                        buffer_fd,
                     },
                     p,
                 ))
@@ -313,7 +365,7 @@ impl Decode for Request {
                 let (h, p) = get_i32(buf, p)?;
                 Ok((
                     Request::SurfaceDamage {
-                        surface,
+                        surface: SurfaceId::from_raw(surface),
                         x,
                         y,
                         w,
@@ -324,20 +376,41 @@ impl Decode for Request {
             }
             REQ_SURFACE_COMMIT => {
                 let (surface, p) = get_u32(buf, p)?;
-                Ok((Request::SurfaceCommit { surface }, p))
+                Ok((
+                    Request::SurfaceCommit {
+                        surface: SurfaceId::from_raw(surface),
+                    },
+                    p,
+                ))
             }
             REQ_SURFACE_FRAME => {
                 let (surface, p) = get_u32(buf, p)?;
-                Ok((Request::SurfaceFrame { surface }, p))
+                Ok((
+                    Request::SurfaceFrame {
+                        surface: SurfaceId::from_raw(surface),
+                    },
+                    p,
+                ))
             }
             REQ_SURFACE_DESTROY => {
                 let (surface, p) = get_u32(buf, p)?;
-                Ok((Request::SurfaceDestroy { surface }, p))
+                Ok((
+                    Request::SurfaceDestroy {
+                        surface: SurfaceId::from_raw(surface),
+                    },
+                    p,
+                ))
             }
             REQ_GET_TOPLEVEL => {
                 let (surface, p) = get_u32(buf, p)?;
                 let (new_id, p) = get_u32(buf, p)?;
-                Ok((Request::GetToplevel { surface, new_id }, p))
+                Ok((
+                    Request::GetToplevel {
+                        surface: SurfaceId::from_raw(surface),
+                        new_id: ToplevelId::from_raw(new_id),
+                    },
+                    p,
+                ))
             }
             REQ_TOPLEVEL_SET_TITLE => {
                 let (toplevel, p) = get_u32(buf, p)?;
@@ -350,7 +423,7 @@ impl Decode for Request {
                 title[..len].copy_from_slice(&buf[p..p + len]);
                 Ok((
                     Request::ToplevelSetTitle {
-                        toplevel,
+                        toplevel: ToplevelId::from_raw(toplevel),
                         title,
                         len: len as u8,
                     },
@@ -368,7 +441,7 @@ impl Decode for Request {
                 app_id[..len].copy_from_slice(&buf[p..p + len]);
                 Ok((
                     Request::ToplevelSetAppId {
-                        toplevel,
+                        toplevel: ToplevelId::from_raw(toplevel),
                         app_id,
                         len: len as u8,
                     },
@@ -377,7 +450,12 @@ impl Decode for Request {
             }
             REQ_TOPLEVEL_DESTROY => {
                 let (toplevel, p) = get_u32(buf, p)?;
-                Ok((Request::ToplevelDestroy { toplevel }, p))
+                Ok((
+                    Request::ToplevelDestroy {
+                        toplevel: ToplevelId::from_raw(toplevel),
+                    },
+                    p,
+                ))
             }
             REQ_ACK_CONFIGURE => {
                 let (serial, p) = get_u32(buf, p)?;
@@ -386,7 +464,13 @@ impl Decode for Request {
             REQ_SET_CURSOR_SHAPE => {
                 let (surface, p) = get_u32(buf, p)?;
                 let (shape, p) = get_u8(buf, p)?;
-                Ok((Request::SetCursorShape { surface, shape }, p))
+                Ok((
+                    Request::SetCursorShape {
+                        surface: SurfaceId::from_raw(surface),
+                        shape,
+                    },
+                    p,
+                ))
             }
             REQ_CLIPBOARD_COPY => {
                 let (raw_len, p) = get_u16(buf, p)?;
@@ -408,7 +492,13 @@ impl Decode for Request {
             REQ_INTERACTIVE_MOVE => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (serial, p) = get_u32(buf, p)?;
-                Ok((Request::InteractiveMove { toplevel, serial }, p))
+                Ok((
+                    Request::InteractiveMove {
+                        toplevel: ToplevelId::from_raw(toplevel),
+                        serial,
+                    },
+                    p,
+                ))
             }
             REQ_INTERACTIVE_RESIZE => {
                 let (toplevel, p) = get_u32(buf, p)?;
@@ -416,7 +506,7 @@ impl Decode for Request {
                 let (edges, p) = get_u32(buf, p)?;
                 Ok((
                     Request::InteractiveResize {
-                        toplevel,
+                        toplevel: ToplevelId::from_raw(toplevel),
                         serial,
                         edges,
                     },
@@ -464,7 +554,7 @@ impl Encode for Event {
                 timestamp_ms,
             } => {
                 let p = put_u8(buf, 0, EVT_FRAME_DONE)?;
-                let p = put_u32(buf, p, *surface)?;
+                let p = put_u32(buf, p, surface.raw())?;
                 put_u32(buf, p, *timestamp_ms)
             }
             Event::Configure {
@@ -475,7 +565,7 @@ impl Encode for Event {
                 states,
             } => {
                 let p = put_u8(buf, 0, EVT_CONFIGURE)?;
-                let p = put_u32(buf, p, *toplevel)?;
+                let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u32(buf, p, *serial)?;
                 let p = put_u32(buf, p, *width)?;
                 let p = put_u32(buf, p, *height)?;
@@ -483,17 +573,17 @@ impl Encode for Event {
             }
             Event::Close { toplevel } => {
                 let p = put_u8(buf, 0, EVT_CLOSE)?;
-                put_u32(buf, p, *toplevel)
+                put_u32(buf, p, toplevel.raw())
             }
             Event::PointerEnter { surface, x, y } => {
                 let p = put_u8(buf, 0, EVT_POINTER_ENTER)?;
-                let p = put_u32(buf, p, *surface)?;
+                let p = put_u32(buf, p, surface.raw())?;
                 let p = put_i32(buf, p, *x)?;
                 put_i32(buf, p, *y)
             }
             Event::PointerLeave { surface } => {
                 let p = put_u8(buf, 0, EVT_POINTER_LEAVE)?;
-                put_u32(buf, p, *surface)
+                put_u32(buf, p, surface.raw())
             }
             Event::PointerMotion { time, x, y } => {
                 let p = put_u8(buf, 0, EVT_POINTER_MOTION)?;
@@ -521,11 +611,11 @@ impl Encode for Event {
             }
             Event::KeyboardEnter { surface } => {
                 let p = put_u8(buf, 0, EVT_KEYBOARD_ENTER)?;
-                put_u32(buf, p, *surface)
+                put_u32(buf, p, surface.raw())
             }
             Event::KeyboardLeave { surface } => {
                 let p = put_u8(buf, 0, EVT_KEYBOARD_LEAVE)?;
-                put_u32(buf, p, *surface)
+                put_u32(buf, p, surface.raw())
             }
             Event::Key {
                 serial,
@@ -563,7 +653,7 @@ impl Encode for Event {
 // -- Decode for Event -----------------------------------------------------
 
 impl Decode for Event {
-    fn decode(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+    fn decode(buf: &[u8], _fds: &mut FdFifo<'_>) -> Result<(Self, usize), ProtocolError> {
         let (tag, p) = get_u8(buf, 0)?;
         match tag {
             EVT_HELLO => {
@@ -603,7 +693,7 @@ impl Decode for Event {
                 let (timestamp_ms, p) = get_u32(buf, p)?;
                 Ok((
                     Event::FrameDone {
-                        surface,
+                        surface: SurfaceId::from_raw(surface),
                         timestamp_ms,
                     },
                     p,
@@ -617,7 +707,7 @@ impl Decode for Event {
                 let (states, p) = get_u32(buf, p)?;
                 Ok((
                     Event::Configure {
-                        toplevel,
+                        toplevel: ToplevelId::from_raw(toplevel),
                         serial,
                         width,
                         height,
@@ -628,17 +718,34 @@ impl Decode for Event {
             }
             EVT_CLOSE => {
                 let (toplevel, p) = get_u32(buf, p)?;
-                Ok((Event::Close { toplevel }, p))
+                Ok((
+                    Event::Close {
+                        toplevel: ToplevelId::from_raw(toplevel),
+                    },
+                    p,
+                ))
             }
             EVT_POINTER_ENTER => {
                 let (surface, p) = get_u32(buf, p)?;
                 let (x, p) = get_i32(buf, p)?;
                 let (y, p) = get_i32(buf, p)?;
-                Ok((Event::PointerEnter { surface, x, y }, p))
+                Ok((
+                    Event::PointerEnter {
+                        surface: SurfaceId::from_raw(surface),
+                        x,
+                        y,
+                    },
+                    p,
+                ))
             }
             EVT_POINTER_LEAVE => {
                 let (surface, p) = get_u32(buf, p)?;
-                Ok((Event::PointerLeave { surface }, p))
+                Ok((
+                    Event::PointerLeave {
+                        surface: SurfaceId::from_raw(surface),
+                    },
+                    p,
+                ))
             }
             EVT_POINTER_MOTION => {
                 let (time, p) = get_u32(buf, p)?;
@@ -669,11 +776,21 @@ impl Decode for Event {
             }
             EVT_KEYBOARD_ENTER => {
                 let (surface, p) = get_u32(buf, p)?;
-                Ok((Event::KeyboardEnter { surface }, p))
+                Ok((
+                    Event::KeyboardEnter {
+                        surface: SurfaceId::from_raw(surface),
+                    },
+                    p,
+                ))
             }
             EVT_KEYBOARD_LEAVE => {
                 let (surface, p) = get_u32(buf, p)?;
-                Ok((Event::KeyboardLeave { surface }, p))
+                Ok((
+                    Event::KeyboardLeave {
+                        surface: SurfaceId::from_raw(surface),
+                    },
+                    p,
+                ))
             }
             EVT_KEY => {
                 let (serial, p) = get_u32(buf, p)?;
