@@ -20,6 +20,12 @@ pub enum Ext2Error {
     NotDirectory,
     NotFile,
     PathNotFound,
+    NoSpace,
+    NameTooLong,
+    AlreadyExists,
+    NotEmpty,
+    IsDirectory,
+    TooManyLinks,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -82,7 +88,7 @@ pub struct Ext2DirEntry<'a> {
 }
 
 pub struct Ext2Fs<'a> {
-    device: &'a mut dyn BlockDevice,
+    device: &'a dyn BlockDevice,
     superblock: Ext2Superblock,
     block_size: u32,
     inode_size: u16,
@@ -91,7 +97,7 @@ pub struct Ext2Fs<'a> {
 }
 
 impl<'a> Ext2Fs<'a> {
-    pub fn init(device: &'a mut dyn BlockDevice) -> Result<Self, Ext2Error> {
+    pub fn init(device: &'a dyn BlockDevice) -> Result<Self, Ext2Error> {
         Self::init_internal(device)
     }
 
@@ -152,7 +158,24 @@ impl<'a> Ext2Fs<'a> {
         self.unlink_entry_internal(parent_inode, name)
     }
 
-    pub(crate) fn init_internal(device: &'a mut dyn BlockDevice) -> Result<Self, Ext2Error> {
+    /// Create an Ext2Fs from pre-validated parts (skip superblock read).
+    pub(crate) fn from_parts(
+        device: &'a dyn BlockDevice,
+        superblock: Ext2Superblock,
+        block_size: u32,
+        inode_size: u16,
+    ) -> Self {
+        Self {
+            device,
+            superblock,
+            block_size,
+            inode_size,
+            blocks_per_group: superblock.blocks_per_group,
+            inodes_per_group: superblock.inodes_per_group,
+        }
+    }
+
+    pub(crate) fn init_internal(device: &'a dyn BlockDevice) -> Result<Self, Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         device
             .read_at(1024, &mut sb_buf)

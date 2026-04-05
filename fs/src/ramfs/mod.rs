@@ -1,8 +1,12 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 const MAX_INODES: usize = 64;
-const RAMFS_MAX_FILE_SIZE: usize = 4096;
+const RAMFS_MAX_FILE_SIZE: usize = 16 * 1024 * 1024; // 16 MB per file
 use crate::MAX_NAME_LEN;
 const MAX_DIR_ENTRIES: usize = 32;
 
@@ -28,8 +32,7 @@ impl DirEntry {
 struct RamInode {
     in_use: bool,
     file_type: FileType,
-    data: [u8; RAMFS_MAX_FILE_SIZE],
-    data_len: usize,
+    data: Vec<u8>,
     dir_entries: [DirEntry; MAX_DIR_ENTRIES],
     dir_entry_count: usize,
     parent: InodeId,
@@ -38,18 +41,33 @@ struct RamInode {
 }
 
 impl RamInode {
-    const fn empty() -> Self {
+    fn new() -> Self {
         Self {
             in_use: false,
             file_type: FileType::Regular,
-            data: [0; RAMFS_MAX_FILE_SIZE],
-            data_len: 0,
-            dir_entries: [const { DirEntry::empty() }; MAX_DIR_ENTRIES],
+            data: Vec::new(),
+            dir_entries: [DirEntry::empty(); MAX_DIR_ENTRIES],
             dir_entry_count: 0,
             parent: 0,
             mode: 0o644,
             nlink: 1,
         }
+    }
+
+    fn reset(&mut self) {
+        self.in_use = false;
+        self.file_type = FileType::Regular;
+        self.data.clear();
+        self.data.shrink_to(0);
+        self.dir_entries = [DirEntry::empty(); MAX_DIR_ENTRIES];
+        self.dir_entry_count = 0;
+        self.parent = 0;
+        self.mode = 0o644;
+        self.nlink = 1;
+    }
+
+    fn data_len(&self) -> usize {
+        self.data.len()
     }
 
     fn add_dir_entry(&mut self, name: &[u8], inode: InodeId) -> VfsResult<()> {
@@ -102,22 +120,22 @@ impl RamInode {
 }
 
 struct RamFsInner {
-    inodes: [RamInode; MAX_INODES],
+    inodes: Vec<RamInode>,
     next_inode: InodeId,
     initialized: bool,
 }
 
 impl RamFsInner {
-    const fn new_const() -> Self {
-        Self {
-            inodes: [const { RamInode::empty() }; MAX_INODES],
+    fn new() -> Self {
+        let mut inodes = Vec::with_capacity(MAX_INODES);
+        for _ in 0..MAX_INODES {
+            inodes.push(RamInode::new());
+        }
+        let mut inner = Self {
+            inodes,
             next_inode: ROOT_INODE + 1,
             initialized: false,
-        }
-    }
-
-    fn new() -> Self {
-        let mut inner = Self::new_const();
+        };
         inner.ensure_initialized();
         inner
     }
@@ -125,6 +143,12 @@ impl RamFsInner {
     fn ensure_initialized(&mut self) {
         if self.initialized {
             return;
+        }
+        if self.inodes.is_empty() {
+            // Deferred allocation for const-constructed instances
+            for _ in 0..MAX_INODES {
+                self.inodes.push(RamInode::new());
+            }
         }
         self.initialized = true;
 
@@ -189,9 +213,18 @@ impl RamFs {
         }
     }
 
+    /// Const-constructible version for statics. Inode storage is allocated
+    /// lazily on first access via `ensure_initialized`.
     pub const fn new_const() -> Self {
         Self {
-            inner: IrqMutex::new(RamFsInner::new_const(), LOCK_LEVEL_RESOURCE),
+            inner: IrqMutex::new(
+                RamFsInner {
+                    inodes: Vec::new(),
+                    next_inode: ROOT_INODE + 1,
+                    initialized: false,
+                },
+                LOCK_LEVEL_RESOURCE,
+            ),
         }
     }
 
@@ -242,7 +275,7 @@ impl FileSystem for RamFs {
             Ok(FileStat {
                 inode,
                 file_type: ram_inode.file_type,
-                size: ram_inode.data_len as u64,
+                size: ram_inode.data_len() as u64,
                 mode: ram_inode.mode,
                 nlink: ram_inode.nlink,
                 uid: 0,
@@ -265,11 +298,11 @@ impl FileSystem for RamFs {
             }
 
             let offset = offset as usize;
-            if offset >= ram_inode.data_len {
+            if offset >= ram_inode.data_len() {
                 return Ok(0);
             }
 
-            let available = ram_inode.data_len - offset;
+            let available = ram_inode.data_len() - offset;
             let to_read = buf.len().min(available);
             buf[..to_read].copy_from_slice(&ram_inode.data[offset..offset + to_read]);
             Ok(to_read)
@@ -291,10 +324,12 @@ impl FileSystem for RamFs {
                 return Err(VfsError::NoSpace);
             }
 
-            ram_inode.data[offset..end].copy_from_slice(buf);
-            if end > ram_inode.data_len {
-                ram_inode.data_len = end;
+            // Grow the data vector if needed
+            if end > ram_inode.data.len() {
+                ram_inode.data.resize(end, 0);
             }
+
+            ram_inode.data[offset..end].copy_from_slice(buf);
 
             Ok(buf.len())
         })
@@ -318,7 +353,7 @@ impl FileSystem for RamFs {
                 let new_inode = &mut inner.inodes[new_id as usize];
                 new_inode.in_use = true;
                 new_inode.file_type = file_type;
-                new_inode.data_len = 0;
+                new_inode.data.clear();
                 new_inode.dir_entry_count = 0;
                 new_inode.parent = parent;
 
@@ -370,7 +405,7 @@ impl FileSystem for RamFs {
                 inner.get_inode_mut(parent)?.nlink -= 1;
             }
 
-            inner.inodes[target_id as usize] = RamInode::empty();
+            inner.inodes[target_id as usize].reset();
 
             Ok(())
         })
@@ -416,10 +451,7 @@ impl FileSystem for RamFs {
             }
 
             let new_size = (size as usize).min(RAMFS_MAX_FILE_SIZE);
-            if new_size < ram_inode.data_len {
-                ram_inode.data[new_size..ram_inode.data_len].fill(0);
-            }
-            ram_inode.data_len = new_size;
+            ram_inode.data.resize(new_size, 0);
 
             Ok(())
         })

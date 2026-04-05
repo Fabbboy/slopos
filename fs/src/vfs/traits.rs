@@ -308,6 +308,18 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
+    /// Read the target of a symbolic link.
+    fn readlink(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {
+        let _ = (inode, buf);
+        Err(VfsError::NotSupported)
+    }
+
+    /// Create a symbolic link.
+    fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
+        let _ = (parent, name, target);
+        Err(VfsError::NotSupported)
+    }
+
     /// Sync filesystem metadata and data to backing store.
     fn sync(&self) -> VfsResult<()> {
         // Default: no-op for in-memory filesystems

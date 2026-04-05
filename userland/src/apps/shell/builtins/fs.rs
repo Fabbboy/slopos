@@ -492,11 +492,16 @@ pub fn cmd_cp(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    if stdfs::copy(src_str, dst_str).is_err() {
-        shell_write_idx(b"copy failed\n", COLOR_ERROR_RED);
-        return 1;
+    match stdfs::copy(src_str, dst_str) {
+        Ok(_) => 0,
+        Err(e) => {
+            shell_write_idx(
+                format!("cp: {src_str} -> {dst_str}: {e}\n").as_bytes(),
+                COLOR_ERROR_RED,
+            );
+            1
+        }
     }
-    0
 }
 
 pub fn cmd_mv(argc: i32, argv: &[&[u8]]) -> i32 {
@@ -548,8 +553,11 @@ pub fn cmd_mv(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    if stdfs::copy(src_str, dst_str).is_err() {
-        shell_write_idx(b"copy failed\n", COLOR_ERROR_RED);
+    if let Err(e) = stdfs::copy(src_str, dst_str) {
+        shell_write_idx(
+            format!("mv: copy failed: {e}\n").as_bytes(),
+            COLOR_ERROR_RED,
+        );
         return 1;
     }
 

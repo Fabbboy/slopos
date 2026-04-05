@@ -1,31 +1,24 @@
 use crate::blockdev::{CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
-use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode};
+use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_sync::{InitFlag, LOCK_LEVEL_RESOURCE, PreemptMutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
 
 // ============================================================================
-// Global ext2 VFS adapter using virtio-blk callbacks
+// Cached ext2 state — superblock is read once at mount, not on every VFS call
 // ============================================================================
 
-/// Storage for the global ext2 VFS adapter
-struct GlobalExt2Vfs {
-    device: Option<CallbackBlockDevice>,
+struct CachedExt2 {
+    device: CallbackBlockDevice,
+    superblock: Ext2Superblock,
+    block_size: u32,
+    inode_size: u16,
 }
 
-impl GlobalExt2Vfs {
-    const fn new() -> Self {
-        Self { device: None }
-    }
-}
-
-static GLOBAL_EXT2_VFS: PreemptMutex<GlobalExt2Vfs> =
-    PreemptMutex::new(GlobalExt2Vfs::new(), LOCK_LEVEL_RESOURCE);
+static CACHED_EXT2: PreemptMutex<Option<CachedExt2>> = PreemptMutex::new(None, LOCK_LEVEL_RESOURCE);
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
-/// Static wrapper that implements FileSystem by delegating to the global ext2 state.
-/// This enables mounting ext2 at "/" through the VFS layer.
 pub struct StaticExt2Vfs;
 
 impl StaticExt2Vfs {
@@ -33,10 +26,18 @@ impl StaticExt2Vfs {
         if !EXT2_VFS_INIT.is_set() {
             return Err(VfsError::IoError);
         }
-        let mut guard = GLOBAL_EXT2_VFS.lock();
-        let device = guard.device.as_mut().ok_or(VfsError::IoError)?;
-        let mut fs = Ext2Fs::init_internal(device).map_err(ext2_error_to_vfs)?;
-        f(&mut fs).map_err(ext2_error_to_vfs)
+        let mut guard = CACHED_EXT2.lock();
+        let cached = guard.as_mut().ok_or(VfsError::IoError)?;
+        let mut fs = Ext2Fs::from_parts(
+            &cached.device,
+            cached.superblock,
+            cached.block_size,
+            cached.inode_size,
+        );
+        let result = f(&mut fs).map_err(ext2_error_to_vfs);
+        // Persist any superblock mutations (free counts change on alloc/dealloc)
+        cached.superblock = fs.superblock();
+        result
     }
 }
 
@@ -65,7 +66,6 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
             if !parent_inode.is_directory() {
                 return Err(Ext2Error::NotDirectory);
             }
-
             let mut found: Option<u32> = None;
             fs.for_each_dir_entry(parent as u32, |entry| {
                 if entry.name == name {
@@ -75,7 +75,6 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
                     true
                 }
             })?;
-
             found.map(|i| i as InodeId).ok_or(Ext2Error::PathNotFound)
         })
     }
@@ -134,23 +133,19 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
             if !ext2_inode.is_directory() {
                 return Err(Ext2Error::NotDirectory);
             }
-
             let mut count = 0usize;
             let mut current = 0usize;
-
             fs.for_each_dir_entry(inode as u32, |entry| {
                 if current < offset {
                     current += 1;
                     return true;
                 }
-
                 let ft = ext2_file_type_to_vfs(entry.file_type);
                 let cont = callback(entry.name, entry.inode as InodeId, ft);
                 count += 1;
                 current += 1;
                 cont
             })?;
-
             Ok(count)
         })
     }
@@ -167,10 +162,8 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 unsafe impl Send for StaticExt2Vfs {}
 unsafe impl Sync for StaticExt2Vfs {}
 
-/// Global static instance for mounting
 pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
 
-/// Initialize the global ext2 VFS adapter with virtio-blk callbacks.
 pub fn ext2_vfs_init_with_callbacks(
     read_fn: ReadFn,
     write_fn: WriteFn,
@@ -180,16 +173,20 @@ pub fn ext2_vfs_init_with_callbacks(
         return Ok(());
     }
 
+    // Validate the filesystem by doing a full init
     let device = CallbackBlockDevice::new(read_fn, write_fn, capacity_fn);
+    let fs = Ext2Fs::init_internal(&device).map_err(ext2_error_to_vfs)?;
+    let superblock = fs.superblock();
+    let block_size = fs.block_size();
+    let inode_size = superblock.inode_size;
 
-    // Verify ext2 superblock is valid
-    {
-        let mut test_device = CallbackBlockDevice::new(read_fn, write_fn, capacity_fn);
-        Ext2Fs::init_internal(&mut test_device).map_err(ext2_error_to_vfs)?;
-    }
-
-    let mut guard = GLOBAL_EXT2_VFS.lock();
-    guard.device = Some(device);
+    let mut guard = CACHED_EXT2.lock();
+    *guard = Some(CachedExt2 {
+        device,
+        superblock,
+        block_size,
+        inode_size: if inode_size == 0 { 128 } else { inode_size },
+    });
 
     Ok(())
 }
@@ -199,7 +196,7 @@ pub fn ext2_vfs_is_initialized() -> bool {
 }
 
 // ============================================================================
-// Helper functions
+// Helpers
 // ============================================================================
 
 fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
@@ -214,16 +211,26 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
         Ext2Error::NotDirectory => VfsError::NotDirectory,
         Ext2Error::NotFile => VfsError::NotFile,
         Ext2Error::PathNotFound => VfsError::NotFound,
+        Ext2Error::NoSpace => VfsError::NoSpace,
+        Ext2Error::NameTooLong => VfsError::NameTooLong,
+        Ext2Error::AlreadyExists => VfsError::AlreadyExists,
+        Ext2Error::NotEmpty => VfsError::NotEmpty,
+        Ext2Error::IsDirectory => VfsError::IsDirectory,
+        Ext2Error::TooManyLinks => VfsError::TooManyLinks,
     }
 }
 
 fn inode_to_file_type(inode: &Ext2Inode) -> FileType {
-    if inode.is_directory() {
-        FileType::Directory
-    } else if inode.is_regular_file() {
-        FileType::Regular
-    } else {
-        FileType::Regular
+    let mode = inode.mode & 0xF000;
+    match mode {
+        0x4000 => FileType::Directory,
+        0x8000 => FileType::Regular,
+        0xA000 => FileType::Symlink,
+        0x2000 => FileType::CharDevice,
+        0x6000 => FileType::BlockDevice,
+        0x1000 => FileType::Pipe,
+        0xC000 => FileType::Socket,
+        _ => FileType::Regular,
     }
 }
 

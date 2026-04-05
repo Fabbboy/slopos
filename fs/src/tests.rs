@@ -180,7 +180,7 @@ impl BlockDevice for FailingBlockDevice {
         }
     }
 
-    fn write_at(&mut self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
         if self.fail_writes {
             Err(BlockDeviceError::InvalidBuffer)
         } else {
@@ -208,7 +208,7 @@ impl BlockDevice for WriteFailingDevice {
         self.inner.read_at(offset, buffer)
     }
 
-    fn write_at(&mut self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
         Err(BlockDeviceError::InvalidBuffer)
     }
 
@@ -357,7 +357,7 @@ fn build_minimal_ext2_image(blocks: u32, inodes: u32) -> Option<MemoryBlockDevic
 }
 
 pub fn test_ext2_invalid_superblock_magic() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
     let sb_offset = 1024usize;
@@ -367,7 +367,7 @@ pub fn test_ext2_invalid_superblock_magic() -> TestResult {
         sb[57] = 0;
     }
 
-    let result = Ext2Fs::init_internal(&mut device);
+    let result = Ext2Fs::init_internal(&device);
     match result {
         Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -375,7 +375,7 @@ pub fn test_ext2_invalid_superblock_magic() -> TestResult {
 }
 
 pub fn test_ext2_unsupported_block_size() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
     let sb_offset = 1024usize;
@@ -384,7 +384,7 @@ pub fn test_ext2_unsupported_block_size() -> TestResult {
         sb[24..28].copy_from_slice(&8u32.to_le_bytes());
     }
 
-    let result = Ext2Fs::init_internal(&mut device);
+    let result = Ext2Fs::init_internal(&device);
     match result {
         Err(Ext2Error::UnsupportedBlockSize) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -392,7 +392,7 @@ pub fn test_ext2_unsupported_block_size() -> TestResult {
 }
 
 pub fn test_ext2_directory_format_error() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
     let dir_offset = 6 * 1024usize;
@@ -402,7 +402,7 @@ pub fn test_ext2_directory_format_error() -> TestResult {
         dir_block[5] = 0;
     }
 
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };
@@ -415,10 +415,10 @@ pub fn test_ext2_directory_format_error() -> TestResult {
 }
 
 pub fn test_ext2_invalid_inode() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };
@@ -431,10 +431,10 @@ pub fn test_ext2_invalid_inode() -> TestResult {
 }
 
 pub fn test_ext2_read_file_not_regular() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };
@@ -448,8 +448,8 @@ pub fn test_ext2_read_file_not_regular() -> TestResult {
 }
 
 pub fn test_ext2_device_read_error() -> TestResult {
-    let mut device = FailingBlockDevice::new(4096).with_read_fail();
-    let result = Ext2Fs::init_internal(&mut device);
+    let device = FailingBlockDevice::new(4096).with_read_fail();
+    let result = Ext2Fs::init_internal(&device);
     match result {
         Err(Ext2Error::DeviceError) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -460,8 +460,8 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut failing = WriteFailingDevice::new(device);
-    let mut fs = match Ext2Fs::init_internal(&mut failing) {
+    let failing = WriteFailingDevice::new(device);
+    let mut fs = match Ext2Fs::init_internal(&failing) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Pass,
     };
@@ -481,10 +481,10 @@ pub fn test_ext2_read_block_out_of_bounds() -> TestResult {
         file_data: Some(b"slopos-test"),
         file_block: 80,
     };
-    let Some(mut device) = build_ext2_image(spec) else {
+    let Some(device) = build_ext2_image(spec) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };
@@ -510,10 +510,10 @@ pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
         file_data: Some(b"slopos-test"),
         file_block: 7,
     };
-    let Some(mut device) = build_ext2_image(spec) else {
+    let Some(device) = build_ext2_image(spec) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };
@@ -536,10 +536,10 @@ pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
 }
 
 pub fn test_ext2_path_resolution_not_found() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };
@@ -552,10 +552,10 @@ pub fn test_ext2_path_resolution_not_found() -> TestResult {
 }
 
 pub fn test_ext2_remove_path_not_file() -> TestResult {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
+    let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,
         Err(_) => return TestResult::Fail,
     };

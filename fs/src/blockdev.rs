@@ -10,7 +10,7 @@ pub enum BlockDeviceError {
 
 pub trait BlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
-    fn write_at(&mut self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
     fn capacity(&self) -> u64;
 }
 
@@ -85,7 +85,7 @@ impl BlockDevice for MemoryBlockDevice {
         Ok(())
     }
 
-    fn write_at(&mut self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         if buffer.is_empty() {
             return Ok(());
         }
@@ -98,6 +98,9 @@ impl BlockDevice for MemoryBlockDevice {
         if self.base.is_null() {
             return Err(BlockDeviceError::InvalidBuffer);
         }
+        // Safety: MemoryBlockDevice owns the allocation and callers serialise access
+        // via the ext2 global mutex. The raw pointer write is equivalent to the read
+        // path but in the opposite direction.
         unsafe {
             ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
@@ -142,7 +145,7 @@ impl BlockDevice for CallbackBlockDevice {
         }
     }
 
-    fn write_at(&mut self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         if (self.write_fn)(offset, buffer) {
             Ok(())
         } else {
