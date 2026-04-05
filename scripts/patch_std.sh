@@ -335,35 +335,32 @@ patch_os_fd() {
     # Widen the hermit|motor arm to include slopos
     sed -i 's/any(target_os = "hermit", target_os = "motor")/any(target_os = "hermit", target_os = "motor", target_os = "slopos")/' "$RAW"
     # Exclude slopos from the raw::c_int arm and the os::raw import
-    sed -i '/not(target_os = "hermit"), not(target_os = "motor"))/{s/)/, not(target_os = "slopos"))/}' "$RAW"
-    # Add slopos to the motor OwnedFd import from super::owned
-    sed -i 's/cfg(target_os = "motor")/cfg(any(target_os = "motor", target_os = "slopos"))/' "$RAW"
+    sed -i 's/all(not(target_os = "hermit"), not(target_os = "motor"))/all(not(target_os = "hermit"), not(target_os = "motor"), not(target_os = "slopos"))/' "$RAW"
+    # Add slopos to the motor OwnedFd import (NOT the moto_rt::libc import)
+    sed -i '/#\[cfg(target_os = "motor")\]/{N;/OwnedFd/s/cfg(target_os = "motor")/cfg(any(target_os = "motor", target_os = "slopos"))/}' "$RAW"
+    # Replace libc stdio constants with slopos-safe cfg-gated versions
+    sed -i 's/libc::STDIN_FILENO/#[cfg(target_os = "slopos")] { 0 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDIN_FILENO }/' "$RAW"
+    sed -i 's/libc::STDOUT_FILENO/#[cfg(target_os = "slopos")] { 1 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDOUT_FILENO }/' "$RAW"
+    sed -i 's/libc::STDERR_FILENO/#[cfg(target_os = "slopos")] { 2 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDERR_FILENO }/' "$RAW"
 
     # -- owned.rs: try_clone_to_owned + Drop for slopos --
-    # 1) Exclude slopos from the main try_clone_to_owned (which uses libc::fcntl)
-    sed -i '/target_os = "motor"/{/try_clone_to_owned/!{N;/try_clone_to_owned/!b;};s/target_os = "motor"/target_os = "motor",\n        target_os = "slopos"/}' "$OWNED"
-    # Actually, the exclusion list is in the not(any(...)) block above
-    # try_clone_to_owned. Let me just add to that list.
-    # The cfg is: #[cfg(not(any(target_arch = "wasm32", target_os = "hermit", target_os = "trusty", target_os = "motor")))]
+    # 1) Exclude slopos from the libc-based try_clone_to_owned and cvt import
+    #    (both cfg blocks contain "target_os = "trusty"," so this adds slopos to both)
     sed -i 's/target_os = "trusty",/target_os = "trusty",\n        target_os = "slopos",/' "$OWNED"
 
-    # 2) Add slopos try_clone_to_owned block
-    #    Insert after the motor try_clone_to_owned closing brace
-    local SLOPOS_CLONE='    #[cfg(target_os = "slopos")]\
+    # 2) Add slopos try_clone_to_owned block after motor's
+    #    Anchor on map_motor_error (unique to motor impl), find its closing }, append after
+    sed -i '/map_motor_error/,/^    }/{
+        /^    }/a\
+\
+    #[cfg(target_os = "slopos")]\
     #[stable(feature = "io_safety", since = "1.63.0")]\
-    pub fn try_clone_to_owned(\&self) -> io::Result<OwnedFd> {\
+    pub fn try_clone_to_owned(&self) -> io::Result<OwnedFd> {\
         unsafe extern "C" { fn dup(fd: i32) -> i32; }\
-        let fd = crate::sys::pal::cvt(unsafe { dup(self.as_raw_fd()) })?;\
+        let fd = crate::sys::cvt(unsafe { dup(self.as_raw_fd()) })?;\
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })\
-    }'
-    # Find the motor try_clone_to_owned and append after its closing }
-    sed -i "/target_os = \"motor\"/{
-        /try_clone_to_owned/,/^    \}/{
-            /^    \}/a\\
-\\
-${SLOPOS_CLONE}
-        }
-    }" "$OWNED"
+    }
+    }' "$OWNED"
 
     # 3) Patch Drop: exclude slopos from the #[cfg(not(target_os = "hermit"))] close block
     #    and add a slopos close block
