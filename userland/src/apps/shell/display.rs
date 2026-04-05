@@ -1,6 +1,7 @@
 //! Display state, scrollback buffer, and rendering functions.
 
-use core::cell::Cell;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use slopos_abi::draw::Color32;
 
@@ -8,7 +9,6 @@ use crate::gfx::font;
 use crate::gfx::{self, DrawBuffer};
 use crate::syscall::fs;
 
-use super::SyncUnsafeCell;
 use super::surface;
 
 pub const SHELL_BG_COLOR: Color32 = Color32::rgb(0x1E, 0x1E, 0x1E);
@@ -57,80 +57,86 @@ pub const SHELL_SCROLLBACK_COLS: usize = 160;
 // =============================================================================
 
 pub struct DisplayState {
-    pub enabled: Cell<bool>,
-    pub width: Cell<i32>,
-    pub height: Cell<i32>,
-    pub pitch: Cell<usize>,
-    pub bytes_pp: Cell<u8>,
-    pub cols: Cell<i32>,
-    pub rows: Cell<i32>,
-    pub cursor_col: Cell<i32>,
-    pub cursor_line: Cell<i32>,
-    pub origin: Cell<i32>,
-    pub total_lines: Cell<i32>,
-    pub view_top: Cell<i32>,
-    pub follow: Cell<bool>,
-    pub fg: Cell<Color32>,
-    pub bg: Cell<Color32>,
+    pub width: AtomicI32,
+    pub height: AtomicI32,
+    pub pitch: AtomicUsize,
+    pub bytes_pp: AtomicU8,
+    pub cols: AtomicI32,
+    pub rows: AtomicI32,
+    pub cursor_col: AtomicI32,
+    pub cursor_line: AtomicI32,
+    pub origin: AtomicI32,
+    pub total_lines: AtomicI32,
+    pub view_top: AtomicI32,
+    pub follow: AtomicBool,
+    pub fg: AtomicU32,
+    pub bg: AtomicU32,
+}
+
+#[inline]
+fn load_color(a: &AtomicU32) -> Color32 {
+    Color32(a.load(Ordering::Relaxed))
+}
+
+#[inline]
+fn store_color(a: &AtomicU32, c: Color32) {
+    a.store(c.to_u32(), Ordering::Relaxed);
 }
 
 impl DisplayState {
     pub const fn new() -> Self {
         Self {
-            enabled: Cell::new(false),
-            width: Cell::new(0),
-            height: Cell::new(0),
-            pitch: Cell::new(0),
-            bytes_pp: Cell::new(4),
-            cols: Cell::new(0),
-            rows: Cell::new(0),
-            cursor_col: Cell::new(0),
-            cursor_line: Cell::new(0),
-            origin: Cell::new(0),
-            total_lines: Cell::new(1),
-            view_top: Cell::new(0),
-            follow: Cell::new(true),
-            fg: Cell::new(SHELL_FG_COLOR),
-            bg: Cell::new(SHELL_BG_COLOR),
+            width: AtomicI32::new(0),
+            height: AtomicI32::new(0),
+            pitch: AtomicUsize::new(0),
+            bytes_pp: AtomicU8::new(4),
+            cols: AtomicI32::new(0),
+            rows: AtomicI32::new(0),
+            cursor_col: AtomicI32::new(0),
+            cursor_line: AtomicI32::new(0),
+            origin: AtomicI32::new(0),
+            total_lines: AtomicI32::new(1),
+            view_top: AtomicI32::new(0),
+            follow: AtomicBool::new(true),
+            fg: AtomicU32::new(SHELL_FG_COLOR.to_u32()),
+            bg: AtomicU32::new(SHELL_BG_COLOR.to_u32()),
         }
     }
 
     pub fn line_slot(&self, logical: i32) -> usize {
         let max_lines = SHELL_SCROLLBACK_LINES as i32;
-        ((self.origin.get() + logical).rem_euclid(max_lines)) as usize
+        ((self.origin.load(Ordering::Relaxed) + logical).rem_euclid(max_lines)) as usize
     }
 
     pub fn cursor(&self) -> (i32, i32) {
-        let row = (self.cursor_line.get() - self.view_top.get())
-            .clamp(0, self.rows.get().saturating_sub(1));
-        (self.cursor_col.get(), row)
+        let row = (self.cursor_line.load(Ordering::Relaxed)
+            - self.view_top.load(Ordering::Relaxed))
+        .clamp(0, self.rows.load(Ordering::Relaxed).saturating_sub(1));
+        (self.cursor_col.load(Ordering::Relaxed), row)
     }
 
     pub fn reset(&self) {
-        self.cursor_col.set(0);
-        self.cursor_line.set(0);
-        self.origin.set(0);
-        self.total_lines.set(1);
-        self.view_top.set(0);
-        self.follow.set(true);
+        self.cursor_col.store(0, Ordering::Relaxed);
+        self.cursor_line.store(0, Ordering::Relaxed);
+        self.origin.store(0, Ordering::Relaxed);
+        self.total_lines.store(1, Ordering::Relaxed);
+        self.view_top.store(0, Ordering::Relaxed);
+        self.follow.store(true, Ordering::Relaxed);
     }
 }
 
-// Safety: Userland is single-threaded with no preemption during shell code
-unsafe impl Sync for DisplayState {}
-
 pub static DISPLAY: DisplayState = DisplayState::new();
-static OUTPUT_FD: SyncUnsafeCell<i32> = SyncUnsafeCell::new(-1);
-static CURRENT_COLOR_IDX: SyncUnsafeCell<u8> = SyncUnsafeCell::new(0);
+static OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
+static CURRENT_COLOR_IDX: AtomicU8 = AtomicU8::new(0);
 
 #[inline]
 fn current_color_idx() -> u8 {
-    unsafe { *CURRENT_COLOR_IDX.get() }
+    CURRENT_COLOR_IDX.load(Ordering::Relaxed)
 }
 
 #[inline]
 fn set_current_color_idx(idx: u8) {
-    unsafe { *CURRENT_COLOR_IDX.get() = idx }
+    CURRENT_COLOR_IDX.store(idx, Ordering::Relaxed);
 }
 
 fn palette_index_for(color: Color32) -> u8 {
@@ -150,145 +156,134 @@ fn palette_index_for(color: Color32) -> u8 {
 pub mod scrollback {
     use super::*;
 
-    static DATA: SyncUnsafeCell<[u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]> =
-        SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]);
-
-    static COLORS: SyncUnsafeCell<[u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]> =
-        SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]);
-
-    static LENS: SyncUnsafeCell<[u16; SHELL_SCROLLBACK_LINES]> =
-        SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES]);
-
-    #[inline]
-    pub fn with_line<R, F: FnOnce(&[u8]) -> R>(slot: usize, f: F) -> R {
-        let slot = slot % SHELL_SCROLLBACK_LINES;
-        unsafe {
-            let data = &*DATA.get();
-            let start = slot * SHELL_SCROLLBACK_COLS;
-            f(&data[start..start + SHELL_SCROLLBACK_COLS])
-        }
+    struct Scrollback {
+        data: [u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS],
+        colors: [u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS],
+        lens: [u16; SHELL_SCROLLBACK_LINES],
     }
+
+    static SCROLLBACK: Mutex<Scrollback> = Mutex::new(Scrollback {
+        data: [0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS],
+        colors: [0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS],
+        lens: [0; SHELL_SCROLLBACK_LINES],
+    });
 
     #[inline]
     pub fn get_line_len(slot: usize) -> u16 {
         let slot = slot % SHELL_SCROLLBACK_LINES;
-        unsafe { (*LENS.get())[slot] }
+        SCROLLBACK.lock().unwrap().lens[slot]
     }
 
     #[inline]
     pub fn set_line_len(slot: usize, len: u16) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
-        unsafe { (*LENS.get())[slot] = len }
+        SCROLLBACK.lock().unwrap().lens[slot] = len;
     }
 
     #[inline]
     pub fn set_char(slot: usize, col: usize, ch: u8) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let col = col % SHELL_SCROLLBACK_COLS;
-        unsafe {
-            let data = &mut *DATA.get();
-            data[slot * SHELL_SCROLLBACK_COLS + col] = ch;
-        }
+        SCROLLBACK.lock().unwrap().data[slot * SHELL_SCROLLBACK_COLS + col] = ch;
     }
 
     #[inline]
     pub fn get_char(slot: usize, col: usize) -> u8 {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let col = col % SHELL_SCROLLBACK_COLS;
-        unsafe {
-            let data = &*DATA.get();
-            data[slot * SHELL_SCROLLBACK_COLS + col]
-        }
+        SCROLLBACK.lock().unwrap().data[slot * SHELL_SCROLLBACK_COLS + col]
     }
 
     #[inline]
     pub fn set_color(slot: usize, col: usize, color_idx: u8) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let col = col % SHELL_SCROLLBACK_COLS;
-        unsafe {
-            let colors = &mut *COLORS.get();
-            colors[slot * SHELL_SCROLLBACK_COLS + col] = color_idx;
-        }
+        SCROLLBACK.lock().unwrap().colors[slot * SHELL_SCROLLBACK_COLS + col] = color_idx;
     }
 
     #[inline]
     pub fn get_color(slot: usize, col: usize) -> u8 {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let col = col % SHELL_SCROLLBACK_COLS;
-        unsafe {
-            let colors = &*COLORS.get();
-            colors[slot * SHELL_SCROLLBACK_COLS + col]
-        }
+        SCROLLBACK.lock().unwrap().colors[slot * SHELL_SCROLLBACK_COLS + col]
     }
 
     pub fn clear_line(slot: usize) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
-        unsafe {
-            let data = &mut *DATA.get();
-            let colors = &mut *COLORS.get();
-            let start = slot * SHELL_SCROLLBACK_COLS;
-            for i in start..start + SHELL_SCROLLBACK_COLS {
-                data[i] = 0;
-                colors[i] = 0;
-            }
-            (*LENS.get())[slot] = 0;
+        let mut sb = SCROLLBACK.lock().unwrap();
+        let start = slot * SHELL_SCROLLBACK_COLS;
+        for i in start..start + SHELL_SCROLLBACK_COLS {
+            sb.data[i] = 0;
+            sb.colors[i] = 0;
         }
+        sb.lens[slot] = 0;
     }
 
     pub fn clear_all() {
-        unsafe {
-            let data = &mut *DATA.get();
-            for byte in data.iter_mut() {
-                *byte = 0;
-            }
-            let colors = &mut *COLORS.get();
-            for c in colors.iter_mut() {
-                *c = 0;
-            }
-            let lens = &mut *LENS.get();
-            for len in lens.iter_mut() {
-                *len = 0;
-            }
+        let mut sb = SCROLLBACK.lock().unwrap();
+        for byte in sb.data.iter_mut() {
+            *byte = 0;
+        }
+        for c in sb.colors.iter_mut() {
+            *c = 0;
+        }
+        for len in sb.lens.iter_mut() {
+            *len = 0;
         }
     }
 
     pub fn write_line(slot: usize, content: &[u8]) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let len = content.len().min(SHELL_SCROLLBACK_COLS);
-        unsafe {
-            let data = &mut *DATA.get();
-            let colors = &mut *COLORS.get();
-            let start = slot * SHELL_SCROLLBACK_COLS;
-            for i in start..start + SHELL_SCROLLBACK_COLS {
-                data[i] = 0;
-                colors[i] = 0;
-            }
-            for (i, &b) in content.iter().take(len).enumerate() {
-                data[start + i] = b;
-            }
-            (*LENS.get())[slot] = len as u16;
+        let mut sb = SCROLLBACK.lock().unwrap();
+        let start = slot * SHELL_SCROLLBACK_COLS;
+        for i in start..start + SHELL_SCROLLBACK_COLS {
+            sb.data[i] = 0;
+            sb.colors[i] = 0;
         }
+        for (i, &b) in content.iter().take(len).enumerate() {
+            sb.data[start + i] = b;
+        }
+        sb.lens[slot] = len as u16;
     }
 
     pub fn write_line_colored(slot: usize, content: &[u8], color_indices: &[u8]) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let len = content.len().min(SHELL_SCROLLBACK_COLS);
-        unsafe {
-            let data = &mut *DATA.get();
-            let colors = &mut *COLORS.get();
-            let start = slot * SHELL_SCROLLBACK_COLS;
-            for i in start..start + SHELL_SCROLLBACK_COLS {
-                data[i] = 0;
-                colors[i] = 0;
-            }
-            for (i, &b) in content.iter().take(len).enumerate() {
-                data[start + i] = b;
-                if i < color_indices.len() {
-                    colors[start + i] = color_indices[i];
-                }
-            }
-            (*LENS.get())[slot] = len as u16;
+        let mut sb = SCROLLBACK.lock().unwrap();
+        let start = slot * SHELL_SCROLLBACK_COLS;
+        for i in start..start + SHELL_SCROLLBACK_COLS {
+            sb.data[i] = 0;
+            sb.colors[i] = 0;
         }
+        for (i, &b) in content.iter().take(len).enumerate() {
+            sb.data[start + i] = b;
+            if i < color_indices.len() {
+                sb.colors[start + i] = color_indices[i];
+            }
+        }
+        sb.lens[slot] = len as u16;
+    }
+
+    /// Snapshot a row's character data, color data, and length in a single lock.
+    ///
+    /// Used by `draw_row_from_scrollback` to avoid re-entrant locking (Mutex is
+    /// not re-entrant, so calling `get_color` inside `with_line` would deadlock).
+    pub fn row_snapshot(
+        slot: usize,
+    ) -> (
+        u16,
+        [u8; SHELL_SCROLLBACK_COLS],
+        [u8; SHELL_SCROLLBACK_COLS],
+    ) {
+        let slot = slot % SHELL_SCROLLBACK_LINES;
+        let sb = SCROLLBACK.lock().unwrap();
+        let start = slot * SHELL_SCROLLBACK_COLS;
+        let mut chars = [0u8; SHELL_SCROLLBACK_COLS];
+        let mut colors = [0u8; SHELL_SCROLLBACK_COLS];
+        chars.copy_from_slice(&sb.data[start..start + SHELL_SCROLLBACK_COLS]);
+        colors.copy_from_slice(&sb.colors[start..start + SHELL_SCROLLBACK_COLS]);
+        (sb.lens[slot], chars, colors)
     }
 }
 
@@ -314,10 +309,10 @@ fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: Color32) {
 }
 
 fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logical: i32, row: i32) {
-    let bg = display.bg.get();
-    let width = display.width.get();
-    let cols = display.cols.get();
-    let total_lines = display.total_lines.get();
+    let bg = load_color(&display.bg);
+    let width = display.width.load(Ordering::Relaxed);
+    let cols = display.cols.load(Ordering::Relaxed);
+    let total_lines = display.total_lines.load(Ordering::Relaxed);
 
     clear_row(buf, row, width, bg);
 
@@ -326,30 +321,29 @@ fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logica
     }
 
     let slot = display.line_slot(logical);
-    let len = scrollback::get_line_len(slot) as usize;
-    let draw_len = len.min(cols as usize);
+    // Snapshot the entire row in one lock to avoid re-entrant Mutex deadlock.
+    let (len, chars, colors) = scrollback::row_snapshot(slot);
+    let draw_len = (len as usize).min(cols as usize);
 
     if draw_len == 0 {
         return;
     }
 
-    scrollback::with_line(slot, |line| {
-        for (col, &ch) in line.iter().take(draw_len).enumerate() {
-            if ch != 0 {
-                let color_idx = scrollback::get_color(slot, col);
-                let fg = PALETTE[color_idx as usize % PALETTE_SIZE];
-                draw_char_at(buf, col as i32, row, ch, fg, bg);
-            }
+    for col in 0..draw_len {
+        let ch = chars[col];
+        if ch != 0 {
+            let fg = PALETTE[colors[col] as usize % PALETTE_SIZE];
+            draw_char_at(buf, col as i32, row, ch, fg, bg);
         }
-    });
+    }
 }
 
 fn redraw_view(buf: &mut DrawBuffer, display: &DisplayState) {
-    let bg = display.bg.get();
-    let width = display.width.get();
-    let height = display.height.get();
-    let rows = display.rows.get();
-    let view_top = display.view_top.get();
+    let bg = load_color(&display.bg);
+    let width = display.width.load(Ordering::Relaxed);
+    let height = display.height.load(Ordering::Relaxed);
+    let rows = display.rows.load(Ordering::Relaxed);
+    let view_top = display.view_top.load(Ordering::Relaxed);
 
     // Clear entire view
     gfx::fill_rect(buf, 0, 0, width, height, bg);
@@ -361,9 +355,9 @@ fn redraw_view(buf: &mut DrawBuffer, display: &DisplayState) {
 }
 
 fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
-    let width = display.width.get();
-    let height = display.height.get();
-    let bg = display.bg.get();
+    let width = display.width.load(Ordering::Relaxed);
+    let height = display.height.load(Ordering::Relaxed);
+    let bg = load_color(&display.bg);
 
     if height <= font::cell_height() {
         return false;
@@ -395,32 +389,37 @@ fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
 // =============================================================================
 
 fn update_new_line(display: &DisplayState) {
-    display.cursor_col.set(0);
-    let cursor_line = display.cursor_line.get() + 1;
-    display.cursor_line.set(cursor_line);
+    display.cursor_col.store(0, Ordering::Relaxed);
+    let cursor_line = display.cursor_line.load(Ordering::Relaxed) + 1;
+    display.cursor_line.store(cursor_line, Ordering::Relaxed);
 
-    let total_lines = display.total_lines.get();
+    let total_lines = display.total_lines.load(Ordering::Relaxed);
     if cursor_line >= total_lines {
         if total_lines < SHELL_SCROLLBACK_LINES as i32 {
-            display.total_lines.set(total_lines + 1);
+            display
+                .total_lines
+                .store(total_lines + 1, Ordering::Relaxed);
         } else {
-            let origin = (display.origin.get() + 1) % SHELL_SCROLLBACK_LINES as i32;
-            display.origin.set(origin);
-            display.cursor_line.set(total_lines - 1);
-            let view_top = display.view_top.get();
+            let origin =
+                (display.origin.load(Ordering::Relaxed) + 1) % SHELL_SCROLLBACK_LINES as i32;
+            display.origin.store(origin, Ordering::Relaxed);
+            display
+                .cursor_line
+                .store(total_lines - 1, Ordering::Relaxed);
+            let view_top = display.view_top.load(Ordering::Relaxed);
             if view_top > 0 {
-                display.view_top.set(view_top - 1);
+                display.view_top.store(view_top - 1, Ordering::Relaxed);
             }
         }
-        let slot = display.line_slot(display.cursor_line.get());
+        let slot = display.line_slot(display.cursor_line.load(Ordering::Relaxed));
         scrollback::clear_line(slot);
     }
 }
 
 fn update_char_state(display: &DisplayState, c: u8) {
-    let cursor_col = display.cursor_col.get();
-    let cursor_line = display.cursor_line.get();
-    let cols = display.cols.get();
+    let cursor_col = display.cursor_col.load(Ordering::Relaxed);
+    let cursor_line = display.cursor_line.load(Ordering::Relaxed);
+    let cols = display.cols.load(Ordering::Relaxed);
     let slot = display.line_slot(cursor_line);
 
     if (cursor_col as usize) < SHELL_SCROLLBACK_COLS {
@@ -432,15 +431,15 @@ fn update_char_state(display: &DisplayState, c: u8) {
         }
     }
 
-    display.cursor_col.set(cursor_col + 1);
-    if display.cursor_col.get() >= cols {
+    display.cursor_col.store(cursor_col + 1, Ordering::Relaxed);
+    if display.cursor_col.load(Ordering::Relaxed) >= cols {
         update_new_line(display);
     }
 }
 
 fn update_backspace_state(display: &DisplayState) {
-    let mut cursor_col = display.cursor_col.get();
-    let mut cursor_line = display.cursor_line.get();
+    let mut cursor_col = display.cursor_col.load(Ordering::Relaxed);
+    let mut cursor_line = display.cursor_line.load(Ordering::Relaxed);
 
     if cursor_col > 0 {
         cursor_col -= 1;
@@ -449,7 +448,7 @@ fn update_backspace_state(display: &DisplayState) {
         let slot = display.line_slot(cursor_line);
         let len = scrollback::get_line_len(slot) as i32;
         cursor_col = if len > 0 {
-            (len - 1).clamp(0, display.cols.get().saturating_sub(1))
+            (len - 1).clamp(0, display.cols.load(Ordering::Relaxed).saturating_sub(1))
         } else {
             0
         };
@@ -457,8 +456,8 @@ fn update_backspace_state(display: &DisplayState) {
         return;
     }
 
-    display.cursor_col.set(cursor_col);
-    display.cursor_line.set(cursor_line);
+    display.cursor_col.store(cursor_col, Ordering::Relaxed);
+    display.cursor_line.store(cursor_line, Ordering::Relaxed);
 
     let slot = display.line_slot(cursor_line);
     if (cursor_col as usize) < SHELL_SCROLLBACK_COLS {
@@ -480,36 +479,34 @@ fn update_backspace_state(display: &DisplayState) {
 // =============================================================================
 
 fn console_write(display: &DisplayState, text: &[u8]) {
-    if !display.enabled.get() {
-        return;
-    }
-
-    let follow = display.follow.get();
+    let follow = display.follow.load(Ordering::Relaxed);
     let mut needs_scroll = false;
-    let old_view_top = display.view_top.get();
-    let start_line = display.cursor_line.get(); // Track first line modified
+    let old_view_top = display.view_top.load(Ordering::Relaxed);
+    let start_line = display.cursor_line.load(Ordering::Relaxed); // Track first line modified
 
     // Phase 1: Update state
     for &b in text {
         match b {
             b'\n' => {
-                let old_total = display.total_lines.get();
+                let old_total = display.total_lines.load(Ordering::Relaxed);
                 update_new_line(display);
 
                 // Check if we need to scroll view
                 if follow {
-                    let rows = display.rows.get();
-                    let total = display.total_lines.get();
+                    let rows = display.rows.load(Ordering::Relaxed);
+                    let total = display.total_lines.load(Ordering::Relaxed);
                     let max_top = (total - rows).max(0);
-                    if display.view_top.get() != max_top {
-                        display.view_top.set(max_top);
-                        if total > old_total || display.view_top.get() != old_view_top {
+                    if display.view_top.load(Ordering::Relaxed) != max_top {
+                        display.view_top.store(max_top, Ordering::Relaxed);
+                        if total > old_total
+                            || display.view_top.load(Ordering::Relaxed) != old_view_top
+                        {
                             needs_scroll = true;
                         }
                     }
                 }
             }
-            b'\r' => display.cursor_col.set(0),
+            b'\r' => display.cursor_col.store(0, Ordering::Relaxed),
             b'\t' => {
                 for _ in 0..SHELL_TAB_WIDTH {
                     update_char_state(display, b' ');
@@ -524,12 +521,12 @@ fn console_write(display: &DisplayState, text: &[u8]) {
     // Phase 2: Render if following
     if follow {
         surface::draw(|buf| {
-            let view_top = display.view_top.get();
-            let rows = display.rows.get();
-            let cursor_line = display.cursor_line.get();
+            let view_top = display.view_top.load(Ordering::Relaxed);
+            let rows = display.rows.load(Ordering::Relaxed);
+            let cursor_line = display.cursor_line.load(Ordering::Relaxed);
 
             if needs_scroll {
-                let view_diff = display.view_top.get() - old_view_top;
+                let view_diff = display.view_top.load(Ordering::Relaxed) - old_view_top;
                 if view_diff == 1 && scroll_up_fast(buf, display) {
                     for line in start_line..=cursor_line {
                         let row = line - view_top;
@@ -553,31 +550,27 @@ fn console_write(display: &DisplayState, text: &[u8]) {
 }
 
 fn console_clear(display: &DisplayState) {
-    if !display.enabled.get() {
-        return;
-    }
-
     display.reset();
     scrollback::clear_all();
 
     surface::draw(|buf| {
-        let bg = display.bg.get();
-        let width = display.width.get();
-        let height = display.height.get();
+        let bg = load_color(&display.bg);
+        let width = display.width.load(Ordering::Relaxed);
+        let height = display.height.load(Ordering::Relaxed);
         gfx::fill_rect(buf, 0, 0, width, height, bg);
     });
 }
 
 fn scroll_view(display: &DisplayState, delta: i32) {
-    let rows = display.rows.get();
-    let total_lines = display.total_lines.get();
+    let rows = display.rows.load(Ordering::Relaxed);
+    let total_lines = display.total_lines.load(Ordering::Relaxed);
 
     if total_lines <= rows {
         return;
     }
 
     let max_top = (total_lines - rows).max(0);
-    let current = display.view_top.get();
+    let current = display.view_top.load(Ordering::Relaxed);
     let new_top = (current + delta).clamp(0, max_top);
     let actual_delta = new_top - current;
 
@@ -585,28 +578,28 @@ fn scroll_view(display: &DisplayState, delta: i32) {
         return;
     }
 
-    display.view_top.set(new_top);
-    display.follow.set(new_top == max_top);
+    display.view_top.store(new_top, Ordering::Relaxed);
+    display.follow.store(new_top == max_top, Ordering::Relaxed);
 
     let abs_delta = actual_delta.unsigned_abs() as i32;
 
     surface::draw(|buf| {
         if abs_delta < rows {
             let shift = abs_delta * font::cell_height();
-            let width = display.width.get();
-            let height = display.height.get();
+            let width = display.width.load(Ordering::Relaxed);
+            let height = display.height.load(Ordering::Relaxed);
             let content_height = rows * font::cell_height();
 
             if actual_delta < 0 {
                 buf.blit(0, 0, 0, shift, width, height - shift);
-                let view_top = display.view_top.get();
+                let view_top = display.view_top.load(Ordering::Relaxed);
                 for row in 0..abs_delta {
                     draw_row_from_scrollback(buf, display, view_top + row, row);
                 }
             } else {
                 buf.blit(0, shift, 0, 0, width, height - shift);
                 let start = rows - abs_delta;
-                let view_top = display.view_top.get();
+                let view_top = display.view_top.load(Ordering::Relaxed);
                 for row in start..rows {
                     draw_row_from_scrollback(buf, display, view_top + row, row);
                 }
@@ -622,7 +615,7 @@ fn scroll_view(display: &DisplayState, delta: i32) {
                     content_height,
                     width,
                     height - content_height,
-                    display.bg.get(),
+                    load_color(&display.bg),
                 );
             }
         } else {
@@ -632,7 +625,7 @@ fn scroll_view(display: &DisplayState, delta: i32) {
 }
 
 fn half_page_step(display: &DisplayState) -> i32 {
-    (display.rows.get() / 2).max(1)
+    (display.rows.load(Ordering::Relaxed) / 2).max(1)
 }
 
 fn console_page_up(display: &DisplayState) {
@@ -644,9 +637,10 @@ fn console_page_down(display: &DisplayState) {
 }
 
 fn console_ensure_follow(display: &DisplayState) {
-    let max_top = (display.total_lines.get() - display.rows.get()).max(0);
-    display.view_top.set(max_top);
-    display.follow.set(true);
+    let max_top =
+        (display.total_lines.load(Ordering::Relaxed) - display.rows.load(Ordering::Relaxed)).max(0);
+    display.view_top.store(max_top, Ordering::Relaxed);
+    display.follow.store(true, Ordering::Relaxed);
 
     surface::draw(|buf| {
         redraw_view(buf, display);
@@ -687,13 +681,9 @@ fn console_rewrite_input(
     cursor_visible: bool,
     selection: &InputSelection,
 ) {
-    if !display.enabled.get() {
-        return;
-    }
-
-    let cursor_line = display.cursor_line.get();
+    let cursor_line = display.cursor_line.load(Ordering::Relaxed);
     let slot = display.line_slot(cursor_line);
-    let cols = display.cols.get() as usize;
+    let cols = display.cols.load(Ordering::Relaxed) as usize;
 
     let total_len = prompt.len() + input.len();
     let write_len = total_len.min(cols);
@@ -716,12 +706,12 @@ fn console_rewrite_input(
         idx += 1;
     }
     scrollback::write_line_colored(slot, &combined[..idx], &colors[..idx]);
-    display.cursor_col.set(idx as i32);
+    display.cursor_col.store(idx as i32, Ordering::Relaxed);
 
-    if display.follow.get() {
-        let view_top = display.view_top.get();
+    if display.follow.load(Ordering::Relaxed) {
+        let view_top = display.view_top.load(Ordering::Relaxed);
         let row = cursor_line - view_top;
-        if row >= 0 && row < display.rows.get() {
+        if row >= 0 && row < display.rows.load(Ordering::Relaxed) {
             surface::draw(|buf| {
                 draw_row_from_scrollback(buf, display, cursor_line, row);
 
@@ -731,7 +721,8 @@ fn console_rewrite_input(
                     let sel_col_start = (prompt_len + sel_lo) as i32;
                     let sel_col_end = (prompt_len + sel_hi) as i32;
 
-                    for col in sel_col_start..sel_col_end.min(display.cols.get()) {
+                    for col in sel_col_start..sel_col_end.min(display.cols.load(Ordering::Relaxed))
+                    {
                         let ch = if (col as usize) < idx {
                             combined[col as usize]
                         } else {
@@ -748,14 +739,14 @@ fn console_rewrite_input(
 
                 if cursor_visible {
                     let cursor_col = (prompt.len() + cursor_pos) as i32;
-                    if cursor_col < display.cols.get() {
+                    if cursor_col < display.cols.load(Ordering::Relaxed) {
                         draw_char_at(
                             buf,
                             cursor_col,
                             row,
                             b' ',
-                            display.bg.get(),
-                            display.fg.get(),
+                            load_color(&display.bg),
+                            load_color(&display.fg),
                         );
                     }
                 }
@@ -773,40 +764,41 @@ pub fn shell_console_init() {
     let height = SHELL_WINDOW_HEIGHT;
 
     if !surface::init(width, height) {
-        DISPLAY.enabled.set(false);
-        return;
+        panic!("shell: surface init failed");
     }
 
-    DISPLAY.width.set(width);
-    DISPLAY.height.set(height);
+    DISPLAY.width.store(width, Ordering::Relaxed);
+    DISPLAY.height.store(height, Ordering::Relaxed);
     let bytes_pp = surface::bytes_pp();
-    DISPLAY.bytes_pp.set(bytes_pp);
-    DISPLAY.pitch.set((width as usize) * (bytes_pp as usize));
+    DISPLAY.bytes_pp.store(bytes_pp, Ordering::Relaxed);
+    DISPLAY
+        .pitch
+        .store((width as usize) * (bytes_pp as usize), Ordering::Relaxed);
 
     let cols = width / font::cell_width();
     let rows = height / font::cell_height();
-    DISPLAY
-        .cols
-        .set(cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
-    DISPLAY
-        .rows
-        .set(rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
+    DISPLAY.cols.store(
+        cols.clamp(1, SHELL_SCROLLBACK_COLS as i32),
+        Ordering::Relaxed,
+    );
+    DISPLAY.rows.store(
+        rows.clamp(1, SHELL_SCROLLBACK_LINES as i32),
+        Ordering::Relaxed,
+    );
 
-    if DISPLAY.cols.get() <= 0 || DISPLAY.rows.get() <= 0 {
-        DISPLAY.enabled.set(false);
-        return;
+    if DISPLAY.cols.load(Ordering::Relaxed) <= 0 || DISPLAY.rows.load(Ordering::Relaxed) <= 0 {
+        panic!("shell: invalid display dimensions");
     }
 
-    DISPLAY.enabled.set(true);
     DISPLAY.reset();
-    DISPLAY.fg.set(SHELL_FG_COLOR);
-    DISPLAY.bg.set(SHELL_BG_COLOR);
+    store_color(&DISPLAY.fg, SHELL_FG_COLOR);
+    store_color(&DISPLAY.bg, SHELL_BG_COLOR);
 }
 
 /// Resize the shell display to new pixel dimensions.
 /// Called when a Configure event arrives from the compositor.
 pub fn shell_console_resize(new_width: i32, new_height: i32) {
-    if !DISPLAY.enabled.get() || new_width <= 0 || new_height <= 0 {
+    if new_width <= 0 || new_height <= 0 {
         return;
     }
 
@@ -815,36 +807,42 @@ pub fn shell_console_resize(new_width: i32, new_height: i32) {
         return;
     }
 
-    DISPLAY.width.set(new_width);
-    DISPLAY.height.set(new_height);
-    DISPLAY
-        .pitch
-        .set((new_width as usize) * (DISPLAY.bytes_pp.get() as usize));
+    DISPLAY.width.store(new_width, Ordering::Relaxed);
+    DISPLAY.height.store(new_height, Ordering::Relaxed);
+    DISPLAY.pitch.store(
+        (new_width as usize) * (DISPLAY.bytes_pp.load(Ordering::Relaxed) as usize),
+        Ordering::Relaxed,
+    );
 
     let new_cols = new_width / font::cell_width();
     let new_rows = new_height / font::cell_height();
-    DISPLAY
-        .cols
-        .set(new_cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
-    DISPLAY
-        .rows
-        .set(new_rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
+    DISPLAY.cols.store(
+        new_cols.clamp(1, SHELL_SCROLLBACK_COLS as i32),
+        Ordering::Relaxed,
+    );
+    DISPLAY.rows.store(
+        new_rows.clamp(1, SHELL_SCROLLBACK_LINES as i32),
+        Ordering::Relaxed,
+    );
 
-    if DISPLAY.cols.get() <= 0 || DISPLAY.rows.get() <= 0 {
-        DISPLAY.enabled.set(false);
+    if DISPLAY.cols.load(Ordering::Relaxed) <= 0 || DISPLAY.rows.load(Ordering::Relaxed) <= 0 {
         return;
     }
 
     // Clamp cursor to new bounds
-    if DISPLAY.cursor_col.get() >= DISPLAY.cols.get() {
-        DISPLAY.cursor_col.set(DISPLAY.cols.get() - 1);
+    if DISPLAY.cursor_col.load(Ordering::Relaxed) >= DISPLAY.cols.load(Ordering::Relaxed) {
+        DISPLAY
+            .cursor_col
+            .store(DISPLAY.cols.load(Ordering::Relaxed) - 1, Ordering::Relaxed);
     }
 
     // Adjust view_top so the cursor/input line stays visible after
-    // the row count changes — same as kitty/alacritty on terminal resize.
-    let max_top = (DISPLAY.total_lines.get() - DISPLAY.rows.get()).max(0);
-    if DISPLAY.follow.get() || DISPLAY.view_top.get() > max_top {
-        DISPLAY.view_top.set(max_top);
+    // the row count changes -- same as kitty/alacritty on terminal resize.
+    let max_top =
+        (DISPLAY.total_lines.load(Ordering::Relaxed) - DISPLAY.rows.load(Ordering::Relaxed)).max(0);
+    if DISPLAY.follow.load(Ordering::Relaxed) || DISPLAY.view_top.load(Ordering::Relaxed) > max_top
+    {
+        DISPLAY.view_top.store(max_top, Ordering::Relaxed);
     }
 
     // Always redraw: surface::resize() allocated a new blank buffer.
@@ -857,25 +855,19 @@ pub fn shell_console_resize(new_width: i32, new_height: i32) {
 }
 
 pub fn shell_console_clear() {
-    if DISPLAY.enabled.get() {
-        console_clear(&DISPLAY);
-        shell_console_commit();
-    }
+    console_clear(&DISPLAY);
+    shell_console_commit();
 }
 
 pub fn shell_console_write(buf: &[u8]) {
-    if DISPLAY.enabled.get() {
-        console_write(&DISPLAY, buf);
-    }
+    console_write(&DISPLAY, buf);
 }
 
 pub fn shell_console_write_colored(buf: &[u8], color_idx: u8) {
-    if DISPLAY.enabled.get() {
-        let old = current_color_idx();
-        set_current_color_idx(color_idx);
-        console_write(&DISPLAY, buf);
-        set_current_color_idx(old);
-    }
+    let old = current_color_idx();
+    set_current_color_idx(color_idx);
+    console_write(&DISPLAY, buf);
+    set_current_color_idx(old);
 }
 
 /// Write output to the current destination (pipe/redirect fd or TTY).
@@ -884,7 +876,7 @@ pub fn shell_console_write_colored(buf: &[u8], color_idx: u8) {
 /// Callers in tight loops (like `yes`, `seq`) should check the return value and
 /// exit early on `false` to avoid spinning on a dead pipe.
 pub fn shell_write(buf: &[u8]) -> bool {
-    let redirected_fd = unsafe { *OUTPUT_FD.get() };
+    let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
         return fs::write_slice(redirected_fd, buf).is_ok();
     }
@@ -900,7 +892,7 @@ pub fn shell_write(buf: &[u8]) -> bool {
 /// text is written.  Otherwise the text goes to the serial TTY (uncolored) and
 /// the compositor surface (colored via the palette index matching `fg`).
 pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
-    let redirected_fd = unsafe { *OUTPUT_FD.get() };
+    let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
         return fs::write_slice(redirected_fd, buf).is_ok();
     }
@@ -916,7 +908,7 @@ pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
 /// Convenience wrapper that avoids a palette lookup when the caller already
 /// has an index.
 pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
-    let redirected_fd = unsafe { *OUTPUT_FD.get() };
+    let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
         return fs::write_slice(redirected_fd, buf).is_ok();
     }
@@ -927,15 +919,11 @@ pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
 }
 
 pub fn shell_set_output_fd(fd: i32) {
-    unsafe {
-        *OUTPUT_FD.get() = fd;
-    }
+    OUTPUT_FD.store(fd, Ordering::Relaxed);
 }
 
 pub fn shell_clear_output_fd() {
-    unsafe {
-        *OUTPUT_FD.get() = -1;
-    }
+    OUTPUT_FD.store(-1, Ordering::Relaxed);
 }
 
 pub fn shell_echo_char(c: u8) {
@@ -946,45 +934,33 @@ pub fn shell_echo_char(c: u8) {
 }
 
 pub fn shell_console_get_cursor() -> (i32, i32) {
-    if DISPLAY.enabled.get() {
-        DISPLAY.cursor()
-    } else {
-        (0, 0)
-    }
+    DISPLAY.cursor()
 }
 
 pub fn shell_console_page_up() {
-    if DISPLAY.enabled.get() {
-        console_page_up(&DISPLAY);
-        shell_console_commit();
-    }
+    console_page_up(&DISPLAY);
+    shell_console_commit();
 }
 
 pub fn shell_console_page_down() {
-    if DISPLAY.enabled.get() {
-        console_page_down(&DISPLAY);
-        shell_console_commit();
-    }
+    console_page_down(&DISPLAY);
+    shell_console_commit();
 }
 
 pub fn shell_console_scroll_lines(lines: i32) {
-    if DISPLAY.enabled.get() && lines != 0 {
+    if lines != 0 {
         scroll_view(&DISPLAY, lines);
         shell_console_commit();
     }
 }
 
 pub fn shell_console_commit() {
-    if DISPLAY.enabled.get() {
-        surface::present();
-    }
+    surface::present();
 }
 
 pub fn shell_console_follow_bottom() {
-    if DISPLAY.enabled.get() {
-        console_ensure_follow(&DISPLAY);
-        shell_console_commit();
-    }
+    console_ensure_follow(&DISPLAY);
+    shell_console_commit();
 }
 
 pub fn shell_redraw_input(
@@ -996,16 +972,14 @@ pub fn shell_redraw_input(
     cursor_visible: bool,
     selection: &InputSelection,
 ) {
-    if DISPLAY.enabled.get() {
-        console_rewrite_input(
-            &DISPLAY,
-            prompt,
-            prompt_colors,
-            input,
-            cursor_pos,
-            cursor_visible,
-            selection,
-        );
-        shell_console_commit();
-    }
+    console_rewrite_input(
+        &DISPLAY,
+        prompt,
+        prompt_colors,
+        input,
+        cursor_pos,
+        cursor_visible,
+        selection,
+    );
+    shell_console_commit();
 }

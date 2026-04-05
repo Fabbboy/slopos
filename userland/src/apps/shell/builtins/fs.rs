@@ -4,14 +4,12 @@
 use core::cmp;
 use core::option::Option;
 use core::option::Option::{None, Some};
-use core::ptr;
 use core::result::Result::{Err, Ok};
 
 use std::env;
 use std::fs::{self as stdfs, File, OpenOptions};
 use std::io::{Read, Write};
 
-use crate::runtime;
 use crate::syscall::fs as sys_fs;
 
 use super::super::buffers;
@@ -29,22 +27,22 @@ struct LsEntry {
     size: u64,
 }
 
-pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_ls(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc > 2 {
         shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
-    let path_ptr = if argc == 2 { argv[1] } else { ptr::null() };
+    let has_path = argc == 2 && !argv[1].is_empty();
 
     buffers::with_path_buf(|path_buf| {
-        if path_ptr.is_null() {
+        if !has_path {
             let cwd = super::super::cwd_bytes();
             let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(1);
             let len = cwd_len.min(path_buf.len() - 1);
             path_buf[..len].copy_from_slice(&cwd[..len]);
             path_buf[len] = 0;
-        } else if normalize_path(path_ptr, path_buf) != 0 {
+        } else if normalize_path(argv[1], path_buf) != 0 {
             shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
@@ -130,7 +128,7 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_cat(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc == 1 {
         let mut buf = [0u8; SHELL_IO_MAX];
         loop {
@@ -150,7 +148,7 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
 
     let mut rc = 0;
     for i in 1..argc as usize {
-        if i >= argv.len() || argv[i].is_null() {
+        if i >= argv.len() || argv[i].is_empty() {
             continue;
         }
         let result = buffers::with_path_buf(|path_buf| {
@@ -198,7 +196,7 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     rc
 }
 
-pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_write(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(ERR_MISSING_FILE.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -219,19 +217,14 @@ pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
         }
 
         let text = argv[2];
-        if text.is_null() {
+        if text.is_empty() {
             shell_write_idx(ERR_MISSING_TEXT.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
-        let mut len = runtime::u_strlen(text);
-        if len > SHELL_IO_MAX {
-            len = SHELL_IO_MAX;
-        }
-
-        let text_slice = unsafe { core::slice::from_raw_parts(text, len) };
+        let len = text.len().min(SHELL_IO_MAX);
         let path_str = path_buf_to_str(path_buf);
-        if stdfs::write(path_str, text_slice).is_err() {
+        if stdfs::write(path_str, &text[..len]).is_err() {
             shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
             return 1;
         }
@@ -240,7 +233,7 @@ pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-pub fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_mkdir(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -263,7 +256,7 @@ pub fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-pub fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_rm(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -286,7 +279,7 @@ pub fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_cd(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc > 2 {
         shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -299,38 +292,33 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
         resolved[1] = 0;
     } else {
         let arg = argv[1];
-        if arg.is_null() {
+        if arg.is_empty() {
             resolved[0] = b'/';
             resolved[1] = 0;
-        } else {
-            let arg_len = runtime::u_strlen(arg);
-            let arg_bytes = unsafe { core::slice::from_raw_parts(arg, arg_len) };
-
-            if arg_len == 2 && arg_bytes[0] == b'.' && arg_bytes[1] == b'.' {
-                let cwd = super::super::cwd_bytes();
-                let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(1);
-                if cwd_len <= 1 {
+        } else if arg == b".." {
+            let cwd = super::super::cwd_bytes();
+            let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(1);
+            if cwd_len <= 1 {
+                resolved[0] = b'/';
+                resolved[1] = 0;
+            } else {
+                let mut last_slash = 0;
+                for i in 0..cwd_len {
+                    if cwd[i] == b'/' && i > 0 {
+                        last_slash = i;
+                    }
+                }
+                if last_slash == 0 {
                     resolved[0] = b'/';
                     resolved[1] = 0;
                 } else {
-                    let mut last_slash = 0;
-                    for i in 0..cwd_len {
-                        if cwd[i] == b'/' && i > 0 {
-                            last_slash = i;
-                        }
-                    }
-                    if last_slash == 0 {
-                        resolved[0] = b'/';
-                        resolved[1] = 0;
-                    } else {
-                        resolved[..last_slash].copy_from_slice(&cwd[..last_slash]);
-                        resolved[last_slash] = 0;
-                    }
+                    resolved[..last_slash].copy_from_slice(&cwd[..last_slash]);
+                    resolved[last_slash] = 0;
                 }
-            } else if normalize_path(arg, &mut resolved) != 0 {
-                shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
-                return 1;
             }
+        } else if normalize_path(arg, &mut resolved) != 0 {
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
+            return 1;
         }
     }
 
@@ -361,7 +349,7 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_pwd(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_pwd(_argc: i32, _argv: &[&[u8]]) -> i32 {
     if let Ok(path) = env::current_dir() {
         if let Some(path_str) = path.to_str() {
             shell_write(path_str.as_bytes());
@@ -377,7 +365,7 @@ pub fn cmd_pwd(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_stat(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -424,7 +412,7 @@ pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_touch(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -432,7 +420,7 @@ pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
 
     let mut rc = 0;
     for i in 1..argc as usize {
-        if i >= argv.len() || argv[i].is_null() {
+        if i >= argv.len() || argv[i].is_empty() {
             continue;
         }
         let result = buffers::with_path_buf(|path_buf| {
@@ -459,7 +447,7 @@ pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
     rc
 }
 
-pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_cp(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 3 {
         shell_write_idx(b"cp: missing operand\n", COLOR_ERROR_RED);
         return 1;
@@ -511,7 +499,7 @@ pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_mv(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 3 {
         shell_write_idx(b"mv: missing operand\n", COLOR_ERROR_RED);
         return 1;
@@ -572,7 +560,7 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_head(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc > 3 {
         shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -678,7 +666,7 @@ fn head_from_reader<R: Read>(reader: &mut R, n_lines: usize) -> i32 {
     0
 }
 
-pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_tail(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc > 3 {
         shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -802,7 +790,7 @@ fn write_tail_output(data: &[u8], n_lines: usize) -> i32 {
     0
 }
 
-pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_wc(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         let mut lines = 0usize;
         let mut words = 0usize;
@@ -846,7 +834,7 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
     let mut rc = 0;
 
     for i in 1..argc as usize {
-        if i >= argv.len() || argv[i].is_null() {
+        if i >= argv.len() || argv[i].is_empty() {
             continue;
         }
         let result = buffers::with_path_buf(|path_buf| {
@@ -916,7 +904,7 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
     rc
 }
 
-pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_hexdump(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(ERR_MISSING_FILE.as_bytes(), COLOR_ERROR_RED);
         return 1;
@@ -1005,7 +993,7 @@ pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_diff(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 3 {
         shell_write_idx(b"diff: missing operand\n", COLOR_ERROR_RED);
         return 1;
@@ -1095,20 +1083,18 @@ pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
     if differ { 1 } else { 0 }
 }
 
-pub fn cmd_tee(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_tee(argc: i32, argv: &[&[u8]]) -> i32 {
     let mut append = false;
     let mut file_arg: Option<usize> = None;
 
     let mut i = 1usize;
     while i < argc as usize {
-        if i >= argv.len() || argv[i].is_null() {
+        if i >= argv.len() || argv[i].is_empty() {
             i += 1;
             continue;
         }
         let arg = argv[i];
-        let len = runtime::u_strlen(arg);
-        let bytes = unsafe { core::slice::from_raw_parts(arg, len) };
-        if len == 2 && bytes[0] == b'-' && bytes[1] == b'a' {
+        if arg == b"-a" {
             append = true;
         } else {
             file_arg = Some(i);

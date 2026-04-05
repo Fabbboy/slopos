@@ -1,4 +1,4 @@
-use super::SyncUnsafeCell;
+use std::sync::Mutex;
 
 const MAX_HISTORY: usize = 64;
 const MAX_LINE_LEN: usize = 256;
@@ -29,10 +29,10 @@ impl HistoryInner {
     }
 }
 
-static HISTORY: SyncUnsafeCell<HistoryInner> = SyncUnsafeCell::new(HistoryInner::new());
+static HISTORY: Mutex<HistoryInner> = Mutex::new(HistoryInner::new());
 
 fn with_history<R, F: FnOnce(&mut HistoryInner) -> R>(f: F) -> R {
-    f(unsafe { &mut *HISTORY.get() })
+    f(&mut HISTORY.lock().unwrap())
 }
 
 pub fn push(line: &[u8], len: usize) {

@@ -1,9 +1,5 @@
 //! Command line parsing and path normalization.
 
-use core::ptr;
-
-use crate::runtime;
-
 use super::buffers;
 
 pub const SHELL_MAX_TOKENS: usize = 16;
@@ -14,25 +10,7 @@ pub fn is_space(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
-pub fn u_streq_slice(a: *const u8, b: &[u8]) -> bool {
-    if a.is_null() {
-        return b.is_empty();
-    }
-    let len = runtime::u_strlen(a);
-    if len != b.len() {
-        return false;
-    }
-    for i in 0..len {
-        unsafe {
-            if *a.add(i) != b[i] {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-pub fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
+pub fn normalize_path(input: &[u8], buffer: &mut [u8]) -> i32 {
     let cwd = super::cwd_bytes();
     normalize_path_with_cwd(input, buffer, &cwd)
 }
@@ -92,11 +70,11 @@ fn collapse_absolute_path(buffer: &mut [u8], len: usize) -> usize {
     if write == 0 { 1 } else { write }
 }
 
-pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) -> i32 {
+pub fn normalize_path_with_cwd(input: &[u8], buffer: &mut [u8], cwd: &[u8]) -> i32 {
     if buffer.is_empty() {
         return -1;
     }
-    if input.is_null() || unsafe { *input } == 0 {
+    if input.is_empty() {
         buffer[0] = b'/';
         if buffer.len() > 1 {
             buffer[1] = 0;
@@ -104,21 +82,19 @@ pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) 
         return 0;
     }
 
-    unsafe {
-        if *input == b'/' {
-            let len = runtime::u_strnlen(input, buffer.len().saturating_sub(1));
-            if len >= buffer.len() {
-                return -1;
-            }
-            ptr::copy_nonoverlapping(input, buffer.as_mut_ptr(), len);
-            let collapsed_len = collapse_absolute_path(buffer, len);
-            buffer[collapsed_len] = 0;
-            return 0;
+    if input[0] == b'/' {
+        let len = input.len().min(buffer.len().saturating_sub(1));
+        if len >= buffer.len() {
+            return -1;
         }
+        buffer[..len].copy_from_slice(&input[..len]);
+        let collapsed_len = collapse_absolute_path(buffer, len);
+        buffer[collapsed_len] = 0;
+        return 0;
     }
 
     let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(cwd.len());
-    let input_len = runtime::u_strnlen(input, buffer.len());
+    let input_len = input.len().min(buffer.len());
 
     let needs_sep = cwd_len > 0 && cwd[cwd_len - 1] != b'/';
     let sep_len = if needs_sep { 1 } else { 0 };
@@ -132,9 +108,7 @@ pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) 
     if needs_sep {
         buffer[cwd_len] = b'/';
     }
-    unsafe {
-        ptr::copy_nonoverlapping(input, buffer.as_mut_ptr().add(cwd_len + sep_len), input_len);
-    }
+    buffer[cwd_len + sep_len..cwd_len + sep_len + input_len].copy_from_slice(&input[..input_len]);
     let collapsed_len = collapse_absolute_path(buffer, total);
     buffer[collapsed_len] = 0;
     0
@@ -301,14 +275,15 @@ fn is_operator(b: u8) -> bool {
     b == b'|' || b == b'<' || b == b'>' || b == b'&'
 }
 
-pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
-    if line.is_empty() || tokens.is_empty() {
+pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 {
+    if line.is_empty() {
         return 0;
     }
+    let max_tokens = SHELL_MAX_TOKENS;
     let mut count = 0usize;
     let mut cursor = 0usize;
 
-    while cursor < line.len() && count < tokens.len() {
+    while cursor < line.len() && count < max_tokens {
         while cursor < line.len() && is_space(line[cursor]) {
             cursor += 1;
         }
@@ -317,14 +292,12 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
         }
 
         if line[cursor] == b'|' || line[cursor] == b'<' || line[cursor] == b'&' {
-            let mut tok = [0u8; SHELL_MAX_TOKEN_LENGTH];
-            tok[0] = line[cursor];
+            let ch = line[cursor];
             cursor += 1;
-            buffers::with_token_storage(|storage| {
-                storage[count][0] = tok[0];
-                storage[count][1] = 0;
-            });
-            tokens[count] = buffers::token_ptr(count);
+            let slot = tokens.slot_mut(count);
+            slot[0] = ch;
+            slot[1] = 0;
+            tokens.advance();
             count += 1;
             continue;
         }
@@ -334,16 +307,15 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
             if is_append {
                 cursor += 1;
             }
-            buffers::with_token_storage(|storage| {
-                storage[count][0] = b'>';
-                if is_append {
-                    storage[count][1] = b'>';
-                    storage[count][2] = 0;
-                } else {
-                    storage[count][1] = 0;
-                }
-            });
-            tokens[count] = buffers::token_ptr(count);
+            let slot = tokens.slot_mut(count);
+            slot[0] = b'>';
+            if is_append {
+                slot[1] = b'>';
+                slot[2] = 0;
+            } else {
+                slot[1] = 0;
+            }
+            tokens.advance();
             count += 1;
             continue;
         }
@@ -398,17 +370,13 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
         }
 
         if tok_len > 0 {
-            buffers::with_token_storage(|storage| {
-                storage[count][..tok_len].copy_from_slice(&tok[..tok_len]);
-                storage[count][tok_len] = 0;
-            });
-            tokens[count] = buffers::token_ptr(count);
+            let slot = tokens.slot_mut(count);
+            slot[..tok_len].copy_from_slice(&tok[..tok_len]);
+            slot[tok_len] = 0;
+            tokens.advance();
             count += 1;
         }
     }
 
-    if count < tokens.len() {
-        tokens[count] = ptr::null();
-    }
     count as i32
 }

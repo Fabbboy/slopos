@@ -1,12 +1,10 @@
 use crate::program_registry;
-use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
 use super::super::display::{
     COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT,
     shell_console_clear, shell_write, shell_write_idx,
 };
-use super::super::parser::u_streq_slice;
 use super::super::{HALTED, NL, REBOOTING};
 use super::{BUILTINS, BuiltinCategory};
 
@@ -21,8 +19,8 @@ fn write_padded_colored(name: &str, color: u8) {
     }
 }
 
-pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
-    if argc >= 2 && !argv[1].is_null() {
+pub fn cmd_help(argc: i32, argv: &[&[u8]]) -> i32 {
+    if argc >= 2 && !argv[1].is_empty() {
         return cmd_help_single(argv[1]);
     }
 
@@ -57,9 +55,9 @@ pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-fn cmd_help_single(name: *const u8) -> i32 {
+fn cmd_help_single(name: &[u8]) -> i32 {
     for entry in BUILTINS {
-        if !u_streq_slice(name, entry.name.as_bytes()) {
+        if name != entry.name.as_bytes() {
             continue;
         }
         shell_write_idx(entry.name.as_bytes(), COLOR_EXEC_GREEN);
@@ -77,7 +75,7 @@ fn cmd_help_single(name: *const u8) -> i32 {
     }
 
     for spec in program_registry::user_programs() {
-        if !u_streq_slice(name, spec.name.as_bytes()) {
+        if name != spec.name.as_bytes() {
             continue;
         }
         shell_write_idx(spec.name.as_bytes(), COLOR_EXEC_GREEN);
@@ -88,16 +86,12 @@ fn cmd_help_single(name: *const u8) -> i32 {
     }
 
     shell_write_idx(b"help: unknown command '", COLOR_ERROR_RED);
-    let len = runtime::u_strlen(name);
-    shell_write_idx(
-        unsafe { core::slice::from_raw_parts(name, len) },
-        COLOR_ERROR_RED,
-    );
+    shell_write_idx(name, COLOR_ERROR_RED);
     shell_write_idx(b"'\n", COLOR_ERROR_RED);
     1
 }
 
-pub fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_echo(argc: i32, argv: &[&[u8]]) -> i32 {
     let mut first = true;
     for i in 1..argc {
         let idx = i as usize;
@@ -105,32 +99,31 @@ pub fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
             break;
         }
         let arg = argv[idx];
-        if arg.is_null() {
+        if arg.is_empty() {
             continue;
         }
         if !first {
             shell_write(b" ");
         }
-        let len = runtime::u_strlen(arg);
-        shell_write(unsafe { core::slice::from_raw_parts(arg, len) });
+        shell_write(arg);
         first = false;
     }
     shell_write(NL.as_bytes());
     0
 }
 
-pub fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_clear(_argc: i32, _argv: &[&[u8]]) -> i32 {
     shell_write(b"\x1B[2J\x1B[H");
     shell_console_clear();
     0
 }
 
-pub fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_shutdown(_argc: i32, _argv: &[&[u8]]) -> i32 {
     shell_write(HALTED.as_bytes());
     process::halt();
 }
 
-pub fn cmd_reboot(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_reboot(_argc: i32, _argv: &[&[u8]]) -> i32 {
     shell_write(REBOOTING.as_bytes());
     process::reboot();
 }
@@ -140,7 +133,7 @@ fn info_kv(label: &[u8], value: impl core::fmt::Display) {
     shell_write(format!("{value}\n").as_bytes());
 }
 
-pub fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_info(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
         shell_write_idx(b"info: failed\n", COLOR_ERROR_RED);
@@ -165,7 +158,7 @@ pub fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_uptime(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_uptime(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let ns = sys_core::clock_gettime_ns();
     let total_secs = ns / 1_000_000_000;
     let sub_ms = (ns % 1_000_000_000) / 1_000_000;
@@ -182,7 +175,7 @@ pub fn cmd_uptime(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_cpuinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_cpuinfo(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let cpu_count = sys_core::get_cpu_count();
     let current = sys_core::get_current_cpu();
 
@@ -195,7 +188,7 @@ pub fn cmd_cpuinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_free(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_free(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
         shell_write_idx(b"free: failed to query system info\n", COLOR_ERROR_RED);
@@ -238,14 +231,21 @@ pub fn cmd_free(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_time(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_time(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(b"time: missing command\n", COLOR_ERROR_RED);
         return 1;
     }
 
     let start_ns = sys_core::clock_gettime_ns();
-    let rc = super::super::exec::execute_tokens(argc - 1, &argv[1..]);
+
+    // Build a sub-ParsedTokens from argv[1..] and execute it.
+    let mut sub = super::super::buffers::ParsedTokens::new();
+    for arg in &argv[1..argc as usize] {
+        sub.push_token(arg);
+    }
+    let rc = super::super::exec::execute_tokens(&sub);
+
     let end_ns = sys_core::clock_gettime_ns();
     let elapsed_ns = end_ns.saturating_sub(start_ns);
 
@@ -257,7 +257,7 @@ pub fn cmd_time(argc: i32, argv: &[*const u8]) -> i32 {
     rc
 }
 
-pub fn cmd_date(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_date(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let ms = sys_core::get_time_ms();
     let total_secs = ms / 1000;
     let days = total_secs / 86400;
@@ -272,7 +272,7 @@ pub fn cmd_date(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_uname(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_uname(argc: i32, argv: &[&[u8]]) -> i32 {
     let mut show_all = argc < 2;
     let mut show_sysname = false;
     let mut show_release = false;
@@ -280,16 +280,16 @@ pub fn cmd_uname(argc: i32, argv: &[*const u8]) -> i32 {
 
     for i in 1..argc {
         let idx = i as usize;
-        if idx >= argv.len() || argv[idx].is_null() {
+        if idx >= argv.len() || argv[idx].is_empty() {
             continue;
         }
-        if u_streq_slice(argv[idx], b"-a") {
+        if argv[idx] == b"-a" {
             show_all = true;
-        } else if u_streq_slice(argv[idx], b"-s") {
+        } else if argv[idx] == b"-s" {
             show_sysname = true;
-        } else if u_streq_slice(argv[idx], b"-r") {
+        } else if argv[idx] == b"-r" {
             show_release = true;
-        } else if u_streq_slice(argv[idx], b"-m") {
+        } else if argv[idx] == b"-m" {
             show_machine = true;
         }
     }
@@ -322,7 +322,7 @@ pub fn cmd_uname(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_whoami(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_whoami(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let uid = process::getuid();
     if uid == 0 {
         shell_write(b"root\n");
@@ -332,24 +332,13 @@ pub fn cmd_whoami(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_resolve(argc: i32, argv: &[*const u8]) -> i32 {
-    if argc < 2 || argv[1].is_null() {
+pub fn cmd_resolve(argc: i32, argv: &[&[u8]]) -> i32 {
+    if argc < 2 || argv[1].is_empty() {
         shell_write(b"usage: resolve <hostname>\n");
         return 1;
     }
 
-    // Convert argv[1] to a byte slice
-    let hostname_ptr = argv[1];
-    let mut len = 0usize;
-    unsafe {
-        while *hostname_ptr.add(len) != 0 {
-            len += 1;
-            if len > 253 {
-                break;
-            }
-        }
-    }
-    let hostname = unsafe { core::slice::from_raw_parts(hostname_ptr, len) };
+    let hostname = argv[1];
 
     match crate::syscall::net::resolve(hostname) {
         Some(addr) => {

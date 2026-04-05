@@ -20,20 +20,14 @@ fn main() {
 
     let _ = fs::remove_file("/tmp/tee.txt");
 
-    static TOK_ECHO: &[u8] = b"echo\0";
-    static TOK_TEXT: &[u8] = b"piped text\0";
-    static TOK_PIPE: &[u8] = b"|\0";
-    static TOK_TEE: &[u8] = b"tee\0";
-    static TOK_PATH: &[u8] = b"/tmp/tee.txt\0";
+    let mut tokens = shell::buffers::ParsedTokens::new();
+    tokens.push_token(b"echo");
+    tokens.push_token(b"piped text");
+    tokens.push_token(b"|");
+    tokens.push_token(b"tee");
+    tokens.push_token(b"/tmp/tee.txt");
 
-    let argv = [
-        TOK_ECHO.as_ptr(),
-        TOK_TEXT.as_ptr(),
-        TOK_PIPE.as_ptr(),
-        TOK_TEE.as_ptr(),
-        TOK_PATH.as_ptr(),
-    ];
-    let rc = shell::exec::execute_tokens(argv.len() as i32, &argv);
+    let rc = shell::exec::execute_tokens(&tokens);
     if rc != 0 {
         fail("fork_test: execute_tokens failed", 20);
     }

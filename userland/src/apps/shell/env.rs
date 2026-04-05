@@ -1,6 +1,6 @@
 //! Environment variable storage for the shell.
 
-use super::SyncUnsafeCell;
+use std::sync::Mutex;
 
 pub const MAX_ENV_ENTRIES: usize = 64;
 pub const ENV_KEY_MAX: usize = 64;
@@ -39,10 +39,10 @@ impl Environment {
     }
 }
 
-static ENV: SyncUnsafeCell<Environment> = SyncUnsafeCell::new(Environment::new());
+static ENV: Mutex<Environment> = Mutex::new(Environment::new());
 
 fn with_env<R, F: FnOnce(&mut Environment) -> R>(f: F) -> R {
-    f(unsafe { &mut *ENV.get() })
+    f(&mut ENV.lock().unwrap())
 }
 
 fn key_matches(entry: &EnvEntry, key: &[u8]) -> bool {

@@ -1,6 +1,5 @@
 //! Utility builtins: sleep, true, false, seq, yes, random, roulette, wl.
 
-use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, roulette};
 use std::thread;
 use std::time::Duration;
@@ -9,13 +8,13 @@ use super::super::NL;
 use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
 use super::super::jobs::{arg_as_str, parse_u32_arg, write_u64};
 
-fn parse_u64_arg(ptr: *const u8) -> Option<u64> {
-    arg_as_str(ptr)?.parse().ok()
+fn parse_u64_arg(arg: &[u8]) -> Option<u64> {
+    arg_as_str(arg)?.parse().ok()
 }
 
-// ─── Commands ───────────────────────────────────────────────────────────────
+// --- Commands ---
 
-pub fn cmd_sleep(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_sleep(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(b"sleep: missing operand (milliseconds)\n", COLOR_ERROR_RED);
         return 1;
@@ -31,15 +30,15 @@ pub fn cmd_sleep(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_true(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_true(_argc: i32, _argv: &[&[u8]]) -> i32 {
     0
 }
 
-pub fn cmd_false(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_false(_argc: i32, _argv: &[&[u8]]) -> i32 {
     1
 }
 
-pub fn cmd_seq(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_seq(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(b"seq: missing operand\n", COLOR_ERROR_RED);
         return 1;
@@ -81,16 +80,11 @@ pub fn cmd_seq(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_yes(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_yes(argc: i32, argv: &[&[u8]]) -> i32 {
     const MAX_ITERATIONS: u32 = 100_000;
 
-    let text: &[u8] = if argc >= 2 && !argv[1].is_null() {
-        let len = runtime::u_strlen(argv[1]);
-        if len > 0 {
-            unsafe { core::slice::from_raw_parts(argv[1], len) }
-        } else {
-            b"y"
-        }
+    let text: &[u8] = if argc >= 2 && !argv[1].is_empty() {
+        argv[1]
     } else {
         b"y"
     };
@@ -104,7 +98,7 @@ pub fn cmd_yes(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_random(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn cmd_random(argc: i32, argv: &[&[u8]]) -> i32 {
     let raw = sys_core::random_next();
     let value = if argc >= 2 {
         let Some(max) = parse_u32_arg(argv[1]) else {
@@ -124,7 +118,7 @@ pub fn cmd_random(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-pub fn cmd_roulette(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_roulette(_argc: i32, _argv: &[&[u8]]) -> i32 {
     shell_write(b"=== WHEEL OF FATE ===\n");
     shell_write(b"Spinning...\n");
 
@@ -145,13 +139,13 @@ pub fn cmd_roulette(_argc: i32, _argv: &[*const u8]) -> i32 {
         shell_write(b"The Wheel demands its toll. Rebooting...\n");
     }
 
-    // On loss the kernel reboots — this call may not return.
+    // On loss the kernel reboots -- this call may not return.
     roulette::result(spin);
 
     0
 }
 
-pub fn cmd_wl(_argc: i32, _argv: &[*const u8]) -> i32 {
+pub fn cmd_wl(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
         shell_write_idx(b"wl: failed to query balance\n", COLOR_ERROR_RED);

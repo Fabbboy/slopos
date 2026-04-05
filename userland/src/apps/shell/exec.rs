@@ -2,15 +2,15 @@ use core::ffi::c_char;
 use core::ptr;
 
 use crate::program_registry;
-use crate::runtime;
 use crate::syscall::{POLLIN, UserFsStat, UserPollFd, core as sys_core, fs, process};
 use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_WRONLY};
 
-use super::SyncUnsafeCell;
+use super::buffers::ParsedTokens;
 use super::builtins;
 use super::display::{shell_clear_output_fd, shell_set_output_fd, shell_write};
 use super::jobs;
-use super::parser::{SHELL_MAX_TOKENS, normalize_path, u_streq_slice};
+use super::parser::{SHELL_MAX_TOKENS, normalize_path};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 const MAX_PIPE_CMDS: usize = 8;
 const MAX_REDIRECTS: usize = 4;
@@ -25,21 +25,21 @@ enum RedirectKind {
 #[derive(Clone, Copy)]
 struct Redirect {
     kind: RedirectKind,
-    target: *const u8,
+    target: usize, // index into ParsedTokens
 }
 
 impl Redirect {
     const fn empty() -> Self {
         Self {
             kind: RedirectKind::Input,
-            target: ptr::null(),
+            target: 0,
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct ParsedCommand {
-    argv: [*const u8; SHELL_MAX_TOKENS],
+    argv: [usize; SHELL_MAX_TOKENS], // indices into ParsedTokens
     argc: usize,
     redirects: [Redirect; MAX_REDIRECTS],
     redirect_count: usize,
@@ -48,7 +48,7 @@ struct ParsedCommand {
 impl ParsedCommand {
     const fn empty() -> Self {
         Self {
-            argv: [ptr::null(); SHELL_MAX_TOKENS],
+            argv: [0; SHELL_MAX_TOKENS],
             argc: 0,
             redirects: [Redirect::empty(); MAX_REDIRECTS],
             redirect_count: 0,
@@ -85,23 +85,19 @@ impl SavedFd {
     }
 }
 
-static FOREGROUND_PGID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
-static SHELL_PGID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static FOREGROUND_PGID: AtomicU32 = AtomicU32::new(0);
+static SHELL_PGID: AtomicU32 = AtomicU32::new(0);
 
 pub fn foreground_pgid() -> u32 {
-    unsafe { *FOREGROUND_PGID.get() }
+    FOREGROUND_PGID.load(Ordering::Relaxed)
 }
 
 pub fn set_foreground_pgid(pgid: u32) {
-    unsafe {
-        *FOREGROUND_PGID.get() = pgid;
-    }
+    FOREGROUND_PGID.store(pgid, Ordering::Relaxed);
 }
 
 pub fn clear_foreground_pgid() {
-    unsafe {
-        *FOREGROUND_PGID.get() = 0;
-    }
+    FOREGROUND_PGID.store(0, Ordering::Relaxed);
 }
 
 pub fn initialize_job_control() {
@@ -115,15 +111,13 @@ pub fn initialize_job_control() {
     let _ = process::setpgid(0, 0);
     let shell_pgid = process::getpgid(0);
     if shell_pgid > 0 {
-        unsafe {
-            *SHELL_PGID.get() = shell_pgid as u32;
-        }
+        SHELL_PGID.store(shell_pgid as u32, Ordering::Relaxed);
         let _ = fs::tcsetpgrp(0, shell_pgid as u32);
     }
 }
 
 fn shell_pgid() -> u32 {
-    unsafe { *SHELL_PGID.get() }
+    SHELL_PGID.load(Ordering::Relaxed)
 }
 
 pub fn enter_foreground(pgid: u32) {
@@ -142,27 +136,21 @@ pub fn leave_foreground() {
     clear_foreground_pgid();
 }
 
-fn token_is(token: *const u8, text: &[u8]) -> bool {
-    u_streq_slice(token, text)
-}
-
-fn parse_pipeline(argc: i32, argv: &[*const u8], out: &mut ParsedPipeline) -> Result<(), ()> {
+fn parse_pipeline(tokens: &ParsedTokens, out: &mut ParsedPipeline) -> Result<(), ()> {
     *out = ParsedPipeline::empty();
-    if argc <= 0 {
+    let argc = tokens.count();
+    if argc == 0 {
         return Err(());
     }
 
     let mut cmd_idx = 0usize;
     let mut token_idx = 0usize;
 
-    while token_idx < argc as usize && token_idx < argv.len() {
-        let token = argv[token_idx];
-        if token.is_null() {
-            break;
-        }
+    while token_idx < argc {
+        let tok = tokens.token(token_idx);
 
-        if token_is(token, b"&") {
-            if token_idx + 1 != argc as usize {
+        if tok == b"&" {
+            if token_idx + 1 != argc {
                 return Err(());
             }
             out.background = true;
@@ -170,7 +158,7 @@ fn parse_pipeline(argc: i32, argv: &[*const u8], out: &mut ParsedPipeline) -> Re
             continue;
         }
 
-        if token_is(token, b"|") {
+        if tok == b"|" {
             if out.commands[cmd_idx].argc == 0 {
                 return Err(());
             }
@@ -183,27 +171,27 @@ fn parse_pipeline(argc: i32, argv: &[*const u8], out: &mut ParsedPipeline) -> Re
         }
 
         let mut redirect_kind = None;
-        if token_is(token, b">") {
+        if tok == b">" {
             redirect_kind = Some(RedirectKind::OutputTruncate);
-        } else if token_is(token, b">>") {
+        } else if tok == b">>" {
             redirect_kind = Some(RedirectKind::OutputAppend);
-        } else if token_is(token, b"<") {
+        } else if tok == b"<" {
             redirect_kind = Some(RedirectKind::Input);
         }
 
         if let Some(kind) = redirect_kind {
-            if token_idx + 1 >= argc as usize || token_idx + 1 >= argv.len() {
+            if token_idx + 1 >= argc {
                 return Err(());
             }
             if out.commands[cmd_idx].redirect_count >= MAX_REDIRECTS {
                 return Err(());
             }
-            let target = argv[token_idx + 1];
-            if target.is_null() {
-                return Err(());
-            }
+            let target_idx = token_idx + 1;
             let redir_idx = out.commands[cmd_idx].redirect_count;
-            out.commands[cmd_idx].redirects[redir_idx] = Redirect { kind, target };
+            out.commands[cmd_idx].redirects[redir_idx] = Redirect {
+                kind,
+                target: target_idx,
+            };
             out.commands[cmd_idx].redirect_count += 1;
             token_idx += 2;
             continue;
@@ -213,7 +201,7 @@ fn parse_pipeline(argc: i32, argv: &[*const u8], out: &mut ParsedPipeline) -> Re
         if cmd.argc >= SHELL_MAX_TOKENS - 1 {
             return Err(());
         }
-        cmd.argv[cmd.argc] = token;
+        cmd.argv[cmd.argc] = token_idx;
         cmd.argc += 1;
         token_idx += 1;
     }
@@ -226,12 +214,14 @@ fn parse_pipeline(argc: i32, argv: &[*const u8], out: &mut ParsedPipeline) -> Re
     Ok(())
 }
 
-fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> Option<*const u8> {
+fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
     use super::env;
 
-    let (path_val, path_len) = env::get(b"PATH")?;
+    let Some((path_val, path_len)) = env::get(b"PATH") else {
+        return false;
+    };
     if path_len == 0 {
-        return None;
+        return false;
     }
 
     let mut seg_start = 0usize;
@@ -258,35 +248,29 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> Option<*const u8> {
 
                 let mut stat = UserFsStat::default();
                 if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() {
-                    return Some(tmp.as_ptr());
+                    return true;
                 }
             }
         }
         seg_start = seg_end + 1;
     }
-    None
+    false
 }
 
-fn resolve_exec_path(command: *const u8, tmp: &mut [u8; 256]) -> Option<*const u8> {
-    if command.is_null() {
-        return None;
+fn resolve_exec_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
+    if name.is_empty() {
+        return false;
     }
-
-    let len = runtime::u_strlen(command);
-    if len == 0 {
-        return None;
-    }
-    let name = unsafe { core::slice::from_raw_parts(command, len) };
 
     if name.contains(&b'/') {
-        if normalize_path(command, tmp) != 0 {
-            return None;
+        if normalize_path(name, tmp) != 0 {
+            return false;
         }
         let mut stat = UserFsStat::default();
         if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_err() {
-            return None;
+            return false;
         }
-        return Some(tmp.as_ptr());
+        return true;
     }
 
     if let Ok(name_str) = core::str::from_utf8(name)
@@ -296,27 +280,24 @@ fn resolve_exec_path(command: *const u8, tmp: &mut [u8; 256]) -> Option<*const u
         let path_len = path_bytes.len().min(tmp.len() - 1);
         tmp[..path_len].copy_from_slice(&path_bytes[..path_len]);
         tmp[path_len] = 0;
-        return Some(tmp.as_ptr());
+        return true;
     }
 
     resolve_via_path(name, tmp)
 }
 
-fn is_builtin_command(cmd: &ParsedCommand) -> bool {
+fn is_builtin_command(cmd: &ParsedCommand, tokens: &ParsedTokens) -> bool {
     if cmd.argc == 0 {
         return false;
     }
-    builtins::find_builtin(cmd.argv[0]).is_some()
+    builtins::find_builtin(tokens.token(cmd.argv[0])).is_some()
 }
 
-fn is_passthrough_cat(cmd: &ParsedCommand) -> bool {
-    cmd.redirect_count == 0
-        && cmd.argc == 1
-        && !cmd.argv[0].is_null()
-        && u_streq_slice(cmd.argv[0], b"cat")
+fn is_passthrough_cat(cmd: &ParsedCommand, tokens: &ParsedTokens) -> bool {
+    cmd.redirect_count == 0 && cmd.argc == 1 && tokens.token(cmd.argv[0]) == b"cat"
 }
 
-fn simplify_pipeline(pipeline: &mut ParsedPipeline) {
+fn simplify_pipeline(pipeline: &mut ParsedPipeline, tokens: &ParsedTokens) {
     if pipeline.command_count <= 1 {
         return;
     }
@@ -325,7 +306,7 @@ fn simplify_pipeline(pipeline: &mut ParsedPipeline) {
     let mut out = 0usize;
     for i in 0..pipeline.command_count {
         let cmd = pipeline.commands[i];
-        if i > 0 && is_passthrough_cat(&cmd) {
+        if i > 0 && is_passthrough_cat(&cmd, tokens) {
             continue;
         }
         compacted[out] = cmd;
@@ -338,24 +319,25 @@ fn simplify_pipeline(pipeline: &mut ParsedPipeline) {
     }
 }
 
-fn command_name_bytes<'a>(cmd: &ParsedCommand) -> Option<&'a [u8]> {
-    if cmd.argc == 0 || cmd.argv[0].is_null() {
+fn command_name_bytes<'a>(cmd: &ParsedCommand, tokens: &'a ParsedTokens) -> Option<&'a [u8]> {
+    if cmd.argc == 0 {
         return None;
     }
-    let len = runtime::u_strlen(cmd.argv[0]);
-    if len == 0 {
+    let name = tokens.token(cmd.argv[0]);
+    if name.is_empty() {
         return None;
     }
-    Some(unsafe { core::slice::from_raw_parts(cmd.argv[0], len) })
+    Some(name)
 }
 
 fn registry_spec_for_command(
     cmd: &ParsedCommand,
+    tokens: &ParsedTokens,
 ) -> Option<&'static program_registry::ProgramSpec> {
-    let name = command_name_bytes(cmd)?;
+    let name = command_name_bytes(cmd, tokens)?;
     if name.contains(&b'/') {
         let mut tmp = [0u8; 256];
-        if normalize_path(cmd.argv[0], &mut tmp) != 0 {
+        if normalize_path(name, &mut tmp) != 0 {
             return None;
         }
         let path_len = tmp.iter().position(|&b| b == 0).unwrap_or(tmp.len());
@@ -366,18 +348,19 @@ fn registry_spec_for_command(
     program_registry::resolve_program(name_str)
 }
 
-fn command_resolves(cmd: &ParsedCommand) -> bool {
+fn command_resolves(cmd: &ParsedCommand, tokens: &ParsedTokens) -> bool {
     if cmd.argc == 0 {
         return false;
     }
-    if is_builtin_command(cmd) {
+    if is_builtin_command(cmd, tokens) {
         return true;
     }
-    if registry_spec_for_command(cmd).is_some() {
+    if registry_spec_for_command(cmd, tokens).is_some() {
         return true;
     }
+    let name = tokens.token(cmd.argv[0]);
     let mut tmp = [0u8; 256];
-    resolve_exec_path(cmd.argv[0], &mut tmp).is_some()
+    resolve_exec_path(name, &mut tmp)
 }
 
 fn print_background_job_started(job_id: u16, pid: u32) {
@@ -399,9 +382,6 @@ fn print_background_job_started(job_id: u16, pid: u32) {
 fn forward_compositor_keyboard() {
     use crate::syscall::{InputEvent, InputEventType};
 
-    if !super::display::DISPLAY.enabled.get() {
-        return;
-    }
     let master = super::shell_pty_master();
     if master < 0 {
         return;
@@ -450,11 +430,15 @@ fn forward_compositor_keyboard() {
     }
 }
 
-fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> {
+fn execute_registry_spawn(
+    cmd: &ParsedCommand,
+    tokens: &ParsedTokens,
+    background: bool,
+) -> Option<i32> {
     if cmd.redirect_count != 0 {
         return None;
     }
-    let spec = registry_spec_for_command(cmd)?;
+    let spec = registry_spec_for_command(cmd, tokens)?;
     let capture = !spec.gui && !background;
     let mut pipe_fds = [-1i32; 2];
     let mut backup_fd = -1i32;
@@ -495,9 +479,23 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP
     };
 
+    // Build null-terminated argv copies for the syscall ABI boundary.
+    // Each token is copied into its own stack buffer so the kernel's
+    // copy_bytes_from_user (which reads up to EXEC_MAX_ARG_STRLEN bytes
+    // from the pointer) stays within mapped memory.
+    let mut arg_bufs = [[0u8; super::parser::SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
+    let mut argv_ptrs = [ptr::null::<u8>(); SHELL_MAX_TOKENS + 1];
+    for i in 0..cmd.argc {
+        let tok = tokens.token(cmd.argv[i]);
+        let len = tok.len().min(super::parser::SHELL_MAX_TOKEN_LENGTH - 1);
+        arg_bufs[i][..len].copy_from_slice(&tok[..len]);
+        arg_bufs[i][len] = 0;
+        argv_ptrs[i] = arg_bufs[i].as_ptr();
+    }
+
     let tid = process::spawn_path_with_argv(
         spec.path.as_bytes(),
-        &cmd.argv[..cmd.argc],
+        &argv_ptrs[..cmd.argc],
         spec.priority,
         spawn_flags,
     );
@@ -517,7 +515,7 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
     if background {
         let mut cmd_buf = [0u8; 128];
         let mut len = 0usize;
-        if let Some(name) = command_name_bytes(cmd) {
+        if let Some(name) = command_name_bytes(cmd, tokens) {
             let n = name.len().min(cmd_buf.len());
             cmd_buf[..n].copy_from_slice(&name[..n]);
             len = n;
@@ -578,7 +576,7 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         }
         let _ = fs::close_fd_raw(pipe_fds[0]);
         exit_status
-    } else if super::display::DISPLAY.enabled.get() {
+    } else {
         loop {
             if let Some(st) = process::waitpid_nohang(pid) {
                 break st;
@@ -586,15 +584,17 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
             forward_compositor_keyboard();
             sys_core::sleep_ms(5);
         }
-    } else {
-        process::waitpid(pid)
     };
     leave_foreground();
     Some(status)
 }
 
-fn open_redirect_target(redir: Redirect, path_buf: &mut [u8; 256]) -> Result<(i32, i32), ()> {
-    if normalize_path(redir.target, path_buf) != 0 {
+fn open_redirect_target(
+    redir: Redirect,
+    tokens: &ParsedTokens,
+    path_buf: &mut [u8; 256],
+) -> Result<(i32, i32), ()> {
+    if normalize_path(tokens.token(redir.target), path_buf) != 0 {
         return Err(());
     }
 
@@ -622,6 +622,7 @@ fn open_redirect_target(redir: Redirect, path_buf: &mut [u8; 256]) -> Result<(i3
 
 fn apply_redirects_for_builtin(
     cmd: &ParsedCommand,
+    tokens: &ParsedTokens,
     saved: &mut [SavedFd; MAX_REDIRECTS],
     output_fd: &mut i32,
 ) -> bool {
@@ -629,7 +630,7 @@ fn apply_redirects_for_builtin(
     let mut save_count = 0usize;
 
     for redir in &cmd.redirects[..cmd.redirect_count] {
-        let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, &mut path_buf) else {
+        let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
             shell_write(b"redirection failed\n");
             return false;
         };
@@ -682,17 +683,12 @@ fn restore_redirects(saved: &mut [SavedFd; MAX_REDIRECTS]) {
     }
 }
 
-fn command_text(pipeline: &ParsedPipeline, out: &mut [u8; 128]) -> usize {
+fn command_text(pipeline: &ParsedPipeline, tokens: &ParsedTokens, out: &mut [u8; 128]) -> usize {
     let mut pos = 0usize;
     for ci in 0..pipeline.command_count {
         let cmd = &pipeline.commands[ci];
         for ai in 0..cmd.argc {
-            let arg = cmd.argv[ai];
-            if arg.is_null() {
-                continue;
-            }
-            let len = runtime::u_strlen(arg);
-            let bytes = unsafe { core::slice::from_raw_parts(arg, len) };
+            let bytes = tokens.token(cmd.argv[ai]);
             for &b in bytes {
                 if pos >= out.len() {
                     return pos;
@@ -723,6 +719,7 @@ fn command_text(pipeline: &ParsedPipeline, out: &mut [u8; 128]) -> usize {
 
 fn run_in_child(
     cmd: &ParsedCommand,
+    tokens: &ParsedTokens,
     stdin_fd: i32,
     stdout_fd: i32,
     pipes: &[[i32; 2]; MAX_PIPE_CMDS],
@@ -753,11 +750,13 @@ fn run_in_child(
         let _ = fs::close_fd_raw(pipe[1]);
     }
 
-    if let Some(entry) = builtins::find_builtin(cmd.argv[0]) {
+    let cmd_name = tokens.token(cmd.argv[0]);
+    if let Some(entry) = builtins::find_builtin(cmd_name) {
         let mut builtin_output_fd = 1;
         let mut path_buf = [0u8; 256];
         for redir in &cmd.redirects[..cmd.redirect_count] {
-            let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, &mut path_buf) else {
+            let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf)
+            else {
                 let _ = crate::syscall::tty::write(b"redirection failed\n");
                 sys_core::exit_with_code(1);
             };
@@ -777,11 +776,11 @@ fn run_in_child(
         }
 
         shell_set_output_fd(builtin_output_fd);
-        let mut args = [ptr::null(); SHELL_MAX_TOKENS];
-        for (i, slot) in args.iter_mut().enumerate().take(cmd.argc) {
-            *slot = cmd.argv[i];
+        let mut argv_slices: [&[u8]; SHELL_MAX_TOKENS] = [&[]; SHELL_MAX_TOKENS];
+        for i in 0..cmd.argc {
+            argv_slices[i] = tokens.token(cmd.argv[i]);
         }
-        let code = (entry.func)(cmd.argc as i32, &args);
+        let code = (entry.func)(cmd.argc as i32, &argv_slices[..cmd.argc]);
         shell_clear_output_fd();
         if builtin_output_fd != 1 {
             let _ = fs::close_fd_raw(builtin_output_fd);
@@ -791,7 +790,7 @@ fn run_in_child(
 
     let mut path_buf = [0u8; 256];
     for redir in &cmd.redirects[..cmd.redirect_count] {
-        let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, &mut path_buf) else {
+        let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
             let _ = crate::syscall::tty::write(b"redirection failed\n");
             sys_core::exit_with_code(1);
         };
@@ -803,27 +802,36 @@ fn run_in_child(
         let _ = fs::close_fd_raw(opened_fd);
     }
 
-    let Some(path_ptr) = resolve_exec_path(cmd.argv[0], &mut path_buf) else {
+    let name = tokens.token(cmd.argv[0]);
+    if !resolve_exec_path(name, &mut path_buf) {
         sys_core::exit_with_code(127);
-    };
-
-    let mut argv = [ptr::null(); SHELL_MAX_TOKENS + 1];
-    for (idx, arg) in cmd.argv.iter().take(cmd.argc).enumerate() {
-        argv[idx] = *arg;
     }
-    argv[cmd.argc] = ptr::null();
 
-    let rc = process::execve(path_ptr, argv.as_ptr(), ptr::null());
+    // Build raw-pointer argv for the execve syscall ABI boundary.
+    // We write each token into null-terminated stack buffers so the pointers
+    // remain valid through the syscall.
+    let mut arg_bufs = [[0u8; super::parser::SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
+    let mut argv_ptrs = [ptr::null::<u8>(); SHELL_MAX_TOKENS + 1];
+    for i in 0..cmd.argc {
+        let tok = tokens.token(cmd.argv[i]);
+        let len = tok.len().min(super::parser::SHELL_MAX_TOKEN_LENGTH - 1);
+        arg_bufs[i][..len].copy_from_slice(&tok[..len]);
+        arg_bufs[i][len] = 0;
+        argv_ptrs[i] = arg_bufs[i].as_ptr();
+    }
+    argv_ptrs[cmd.argc] = ptr::null();
+
+    let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), ptr::null());
     if rc < 0 {
         let _ = crate::syscall::tty::write(b"exec failed\n");
     }
     sys_core::exit_with_code(127);
 }
 
-fn execute_single_builtin(cmd: &ParsedCommand) -> i32 {
+fn execute_single_builtin(cmd: &ParsedCommand, tokens: &ParsedTokens) -> i32 {
     let mut saved = [SavedFd::empty(); MAX_REDIRECTS];
     let mut output_fd = -1;
-    if !apply_redirects_for_builtin(cmd, &mut saved, &mut output_fd) {
+    if !apply_redirects_for_builtin(cmd, tokens, &mut saved, &mut output_fd) {
         restore_redirects(&mut saved);
         if output_fd >= 0 {
             let _ = fs::close_fd_raw(output_fd);
@@ -831,15 +839,15 @@ fn execute_single_builtin(cmd: &ParsedCommand) -> i32 {
         return 1;
     }
 
-    let code = if let Some(entry) = builtins::find_builtin(cmd.argv[0]) {
+    let code = if let Some(entry) = builtins::find_builtin(tokens.token(cmd.argv[0])) {
         if output_fd >= 0 {
             shell_set_output_fd(output_fd);
         }
-        let mut args = [ptr::null(); SHELL_MAX_TOKENS];
-        for (i, slot) in args.iter_mut().enumerate().take(cmd.argc) {
-            *slot = cmd.argv[i];
+        let mut argv_slices: [&[u8]; SHELL_MAX_TOKENS] = [&[]; SHELL_MAX_TOKENS];
+        for i in 0..cmd.argc {
+            argv_slices[i] = tokens.token(cmd.argv[i]);
         }
-        let rc = (entry.func)(cmd.argc as i32, &args);
+        let rc = (entry.func)(cmd.argc as i32, &argv_slices[..cmd.argc]);
         if output_fd >= 0 {
             shell_clear_output_fd();
         }
@@ -855,7 +863,7 @@ fn execute_single_builtin(cmd: &ParsedCommand) -> i32 {
     code
 }
 
-fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
+fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
     let inter_pipes = pipeline.command_count.saturating_sub(1);
     let capture_output = !pipeline.background;
 
@@ -907,6 +915,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
         if pid == 0 {
             run_in_child(
                 &pipeline.commands[i],
+                tokens,
                 stdin_fd,
                 stdout_fd,
                 &pipes,
@@ -938,7 +947,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
 
     if pipeline.background {
         let mut cmd_buf = [0u8; 128];
-        let cmd_len = command_text(pipeline, &mut cmd_buf);
+        let cmd_len = command_text(pipeline, tokens, &mut cmd_buf);
         if let Some(job_id) = jobs::add(pgid, pgid, &cmd_buf[..cmd_len]) {
             print_background_job_started(job_id, pgid);
         } else {
@@ -950,8 +959,8 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
     enter_foreground(pgid);
 
     let capture_fd = pipes[inter_pipes][0];
-    if capture_fd >= 0 && super::display::DISPLAY.enabled.get() {
-        // Display mode: non-blocking read + poll so we keep forwarding
+    if capture_fd >= 0 {
+        // Non-blocking read + poll so we keep forwarding
         // compositor keyboard events to the PTY (avoids deadlocking
         // children that read from the TTY slave).
         let _ = crate::syscall::net::set_nonblocking(capture_fd);
@@ -999,7 +1008,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
                     all_exited = true;
                 }
             } else {
-                // Children exited — drain remaining data then stop.
+                // Children exited -- drain remaining data then stop.
                 break;
             }
         }
@@ -1018,71 +1027,52 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
         return status;
     }
 
-    if capture_fd >= 0 {
-        let mut buf = [0u8; 512];
-        loop {
-            let n = match fs::read_slice(capture_fd, &mut buf) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            if n == 0 {
-                break;
-            }
-            shell_write(&buf[..n]);
-        }
-        let _ = fs::close_fd_raw(capture_fd);
-    }
-
     let mut status = 0;
     for pid in pids.iter().take(pipeline.command_count) {
-        if super::display::DISPLAY.enabled.get() {
-            loop {
-                if let Some(st) = process::waitpid_nohang(*pid) {
-                    status = st;
-                    break;
-                }
-                forward_compositor_keyboard();
-                sys_core::sleep_ms(5);
+        loop {
+            if let Some(st) = process::waitpid_nohang(*pid) {
+                status = st;
+                break;
             }
-        } else {
-            status = process::waitpid(*pid);
+            forward_compositor_keyboard();
+            sys_core::sleep_ms(5);
         }
     }
     leave_foreground();
     status
 }
 
-pub fn execute_tokens(argc: i32, argv: &[*const u8]) -> i32 {
+pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
     let mut pipeline = ParsedPipeline::empty();
-    if parse_pipeline(argc, argv, &mut pipeline).is_err() {
+    if parse_pipeline(tokens, &mut pipeline).is_err() {
         shell_write(b"syntax error\n");
         return 1;
     }
 
-    simplify_pipeline(&mut pipeline);
+    simplify_pipeline(&mut pipeline, tokens);
 
     if pipeline.command_count == 1 && !pipeline.background {
         let cmd = &pipeline.commands[0];
-        if is_builtin_command(cmd) {
-            return execute_single_builtin(cmd);
+        if is_builtin_command(cmd, tokens) {
+            return execute_single_builtin(cmd, tokens);
         }
-        if let Some(status) = execute_registry_spawn(cmd, false) {
+        if let Some(status) = execute_registry_spawn(cmd, tokens, false) {
             return status;
         }
     }
 
     if pipeline.command_count == 1
         && pipeline.background
-        && let Some(status) = execute_registry_spawn(&pipeline.commands[0], true)
+        && let Some(status) = execute_registry_spawn(&pipeline.commands[0], tokens, true)
     {
         return status;
     }
 
     for cmd in pipeline.commands.iter().take(pipeline.command_count) {
-        if !command_resolves(cmd) {
+        if !command_resolves(cmd, tokens) {
             return 127;
         }
     }
 
-    execute_pipeline(&pipeline)
+    execute_pipeline(&pipeline, tokens)
 }

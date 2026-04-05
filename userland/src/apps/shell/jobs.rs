@@ -1,8 +1,7 @@
-use crate::runtime;
 use crate::syscall::process;
 
-use super::SyncUnsafeCell;
 use super::display::shell_write;
+use std::sync::Mutex;
 
 const MAX_JOBS: usize = 16;
 const MAX_CMD: usize = 128;
@@ -52,10 +51,10 @@ impl JobTable {
     }
 }
 
-static JOBS: SyncUnsafeCell<JobTable> = SyncUnsafeCell::new(JobTable::new());
+static JOBS: Mutex<JobTable> = Mutex::new(JobTable::new());
 
 fn with_jobs<R, F: FnOnce(&mut JobTable) -> R>(f: F) -> R {
-    f(unsafe { &mut *JOBS.get() })
+    f(&mut JOBS.lock().unwrap())
 }
 
 fn next_job_id(table: &mut JobTable) -> u16 {
@@ -204,18 +203,13 @@ pub fn write_u64(value: u64) {
     shell_write(format!("{value}").as_bytes());
 }
 
-pub fn arg_as_str(ptr: *const u8) -> Option<&'static str> {
-    if ptr.is_null() {
+pub fn arg_as_str(arg: &[u8]) -> Option<&str> {
+    if arg.is_empty() {
         return None;
     }
-    let len = runtime::u_strlen(ptr);
-    if len == 0 {
-        return None;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-    core::str::from_utf8(bytes).ok()
+    core::str::from_utf8(arg).ok()
 }
 
-pub fn parse_u32_arg(ptr: *const u8) -> Option<u32> {
-    arg_as_str(ptr)?.parse().ok()
+pub fn parse_u32_arg(arg: &[u8]) -> Option<u32> {
+    arg_as_str(arg)?.parse().ok()
 }

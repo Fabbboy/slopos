@@ -1,16 +1,14 @@
 use core::cmp;
-use core::ffi::c_void;
-use core::ptr;
 
-use crate::runtime;
 use crate::syscall::core as sys_core;
-use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs};
-use slopos_abi::syscall::{LocalFlags, POLLIN};
+use crate::syscall::{InputEvent, InputEventData, InputEventType, fs};
+use slopos_abi::syscall::LocalFlags;
 use slopos_protocol::types::Event as ProtocolEvent;
 use slopos_windowing::ProtocolHandle;
 use std::time::{Duration, Instant};
 
 use super::buffers;
+use super::buffers::ParsedTokens;
 use super::completion;
 use slopos_abi::input::POINTER_AXIS_VERTICAL;
 
@@ -19,7 +17,7 @@ use super::display::{
     shell_console_page_up, shell_console_scroll_lines, shell_redraw_input, shell_write,
 };
 use super::history;
-use super::parser::{SHELL_MAX_TOKENS, shell_parse_line};
+use super::parser::shell_parse_line;
 
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;
@@ -49,29 +47,29 @@ const CTRL_W: u8 = 0x17;
 const MOUSE_LEFT: u8 = 0x01;
 const MOUSE_EVENT_BUF_SIZE: usize = 8;
 
-/// Protocol handle for compositor communication (stored via init_handle).
-static PROTO_HANDLE: super::SyncUnsafeCell<Option<ProtocolHandle>> =
-    super::SyncUnsafeCell::new(None);
+use std::cell::RefCell;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
+thread_local! {
+    static PROTO_HANDLE: RefCell<Option<ProtocolHandle>> = RefCell::new(None);
+}
 
 /// Store the protocol handle for later use by input operations.
 pub fn init_handle(handle: ProtocolHandle) {
-    unsafe {
-        *PROTO_HANDLE.get() = Some(handle);
-    }
+    PROTO_HANDLE.with(|h| *h.borrow_mut() = Some(handle));
 }
 
-fn handle() -> &'static ProtocolHandle {
-    unsafe {
-        (*PROTO_HANDLE.get())
-            .as_ref()
-            .expect("input: no protocol handle")
-    }
+fn with_handle<R>(f: impl FnOnce(&ProtocolHandle) -> R) -> R {
+    PROTO_HANDLE.with(|h| {
+        let h = h.borrow();
+        f(h.as_ref().expect("input: no protocol handle"))
+    })
 }
 
-static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
-    super::SyncUnsafeCell::new([0; super::PROMPT_BUF_MAX]);
-static PROMPT_COLORS_LEN: super::SyncUnsafeCell<usize> = super::SyncUnsafeCell::new(0);
-static SCROLL_ACCUM: super::SyncUnsafeCell<i32> = super::SyncUnsafeCell::new(0);
+static PROMPT_COLORS: Mutex<[u8; super::PROMPT_BUF_MAX]> = Mutex::new([0; super::PROMPT_BUF_MAX]);
+static PROMPT_COLORS_LEN: AtomicUsize = AtomicUsize::new(0);
+static SCROLL_ACCUM: AtomicI32 = AtomicI32::new(0);
 
 // ---------------------------------------------------------------------------
 // Deferred event queue: events received during clipboard paste are buffered
@@ -87,14 +85,17 @@ struct DeferredQueue {
     count: usize,
 }
 
+const EMPTY_EVENT: InputEvent = InputEvent {
+    event_type: InputEventType::KeyPress,
+    _padding: [0; 3],
+    timestamp_ms: 0,
+    data: InputEventData { data0: 0, data1: 0 },
+};
+
 impl DeferredQueue {
     const fn new() -> Self {
-        // SAFETY: InputEvent is #[repr(C)] with all-zero-bit-pattern valid
-        // (Default sets event_type to KeyPress which is 0, and all other
-        // fields to zero).  We need `zeroed()` here because `InputEvent`
-        // does not implement `Copy` in a const context for array init.
         Self {
-            buf: unsafe { core::mem::zeroed() },
+            buf: [EMPTY_EVENT; DEFERRED_CAPACITY],
             head: 0,
             tail: 0,
             count: 0,
@@ -121,26 +122,21 @@ impl DeferredQueue {
     }
 }
 
-static DEFERRED: super::SyncUnsafeCell<DeferredQueue> =
-    super::SyncUnsafeCell::new(DeferredQueue::new());
+static DEFERRED: Mutex<DeferredQueue> = Mutex::new(DeferredQueue::new());
 
 fn with_deferred<R>(f: impl FnOnce(&mut DeferredQueue) -> R) -> R {
-    f(unsafe { &mut *DEFERRED.get() })
+    f(&mut DEFERRED.lock().unwrap())
 }
 
-pub fn read_command_line(
-    tokens: &mut [*const u8; SHELL_MAX_TOKENS],
-    prompt: &[u8],
-    prompt_colors: &[u8],
-) -> i32 {
-    unsafe {
-        let colors = &mut *PROMPT_COLORS.get();
+pub fn read_command_line(tokens: &mut ParsedTokens, prompt: &[u8], prompt_colors: &[u8]) -> i32 {
+    {
+        let mut colors = PROMPT_COLORS.lock().unwrap();
         let copy_len = prompt_colors.len().min(super::PROMPT_BUF_MAX);
         colors[..copy_len].copy_from_slice(&prompt_colors[..copy_len]);
-        *PROMPT_COLORS_LEN.get() = copy_len;
+        PROMPT_COLORS_LEN.store(copy_len, Ordering::Relaxed);
     }
     buffers::with_line_buf(|buf| {
-        runtime::u_memset(buf.as_mut_ptr() as *mut c_void, 0, buf.len());
+        buf.fill(0);
     });
 
     // Set TTY to raw mode: shell handles its own rendering / line editing.
@@ -163,16 +159,14 @@ pub fn read_command_line(
     result
 }
 
-fn prompt_colors_slice() -> &'static [u8] {
-    unsafe {
-        let len = *PROMPT_COLORS_LEN.get();
-        let colors: &[u8; super::PROMPT_BUF_MAX] = &*PROMPT_COLORS.get();
-        &colors[..len]
-    }
+fn prompt_colors_snapshot() -> ([u8; super::PROMPT_BUF_MAX], usize) {
+    let colors = *PROMPT_COLORS.lock().unwrap();
+    let len = PROMPT_COLORS_LEN.load(Ordering::Relaxed);
+    (colors, len)
 }
 
 fn input_loop(
-    tokens: &mut [*const u8; SHELL_MAX_TOKENS],
+    tokens: &mut ParsedTokens,
     prompt: &[u8],
     mut len: usize,
     mut cursor_pos: usize,
@@ -236,10 +230,11 @@ fn input_loop(
                 }
                 InputEventType::PointerAxis => {
                     if events[i].axis_id() == POINTER_AXIS_VERTICAL {
-                        let accum = unsafe { &mut *SCROLL_ACCUM.get() };
-                        *accum += events[i].axis_value_v120();
-                        let lines = *accum / 120;
-                        *accum %= 120;
+                        let delta = events[i].axis_value_v120();
+                        let prev = SCROLL_ACCUM.fetch_add(delta, Ordering::Relaxed);
+                        let new_accum = prev + delta;
+                        let lines = new_accum / 120;
+                        SCROLL_ACCUM.store(new_accum % 120, Ordering::Relaxed);
                         if lines != 0 {
                             shell_console_scroll_lines(lines);
                         }
@@ -299,27 +294,9 @@ fn input_loop(
             rd!();
         }
 
-        let rc = if DISPLAY.enabled.get() {
-            match key_event {
-                Some(c) => c as i64,
-                None => -1,
-            }
-        } else {
-            let mut pfds = [UserPollFd {
-                fd: 0,
-                events: POLLIN,
-                revents: 0,
-            }];
-            let _ = fs::poll(&mut pfds, 0);
-            if (pfds[0].revents & POLLIN) != 0 {
-                let mut ch = [0u8; 1];
-                match fs::read_slice(0, &mut ch) {
-                    Ok(1) => ch[0] as i64,
-                    _ => -1,
-                }
-            } else {
-                -1i64
-            }
+        let rc = match key_event {
+            Some(c) => c as i64,
+            None => -1,
         };
         if rc < 0 {
             let now = Instant::now();
@@ -347,7 +324,7 @@ fn input_loop(
             continue;
         }
 
-        if DISPLAY.enabled.get() && !DISPLAY.follow.get() {
+        if !DISPLAY.follow.load(std::sync::atomic::Ordering::Relaxed) {
             shell_console_follow_bottom();
         }
 
@@ -561,7 +538,9 @@ fn input_loop(
                     let hi = hi.min(len);
                     if lo < hi {
                         buffers::with_line_buf(|buf| {
-                            let _ = handle().borrow_client().clipboard_copy(&buf[lo..hi]);
+                            with_handle(|h| {
+                                let _ = h.borrow_client().clipboard_copy(&buf[lo..hi]);
+                            });
                         });
                     }
                     sel = InputSelection::NONE;
@@ -677,8 +656,9 @@ fn input_loop(
         })
     });
 
-    *tokens = [ptr::null(); SHELL_MAX_TOKENS];
-    buffers::with_expand_buf(|expand_buf| shell_parse_line(&expand_buf[..expanded_len], tokens))
+    tokens.clear();
+    buffers::with_expand_buf(|expand_buf| shell_parse_line(&expand_buf[..expanded_len], tokens));
+    tokens.count() as i32
 }
 
 /// Convert a pixel x-coordinate to a character offset within the input buffer.
@@ -788,11 +768,12 @@ fn redraw(
     cursor_visible: bool,
     selection: &super::display::InputSelection,
 ) {
+    let (pc_buf, pc_len) = prompt_colors_snapshot();
     buffers::with_line_buf(|buf| {
         shell_redraw_input(
             line_row,
             prompt,
-            prompt_colors_slice(),
+            &pc_buf[..pc_len],
             &buf[..len],
             cursor_pos,
             cursor_visible,
@@ -822,18 +803,20 @@ pub(crate) fn poll_protocol_events(events: &mut [InputEvent]) -> usize {
     });
 
     // Phase 2: poll the compositor socket for fresh events.
-    let mut client = handle().borrow_client();
-    while count < events.len() {
-        match client.poll_event() {
-            Ok(Some(evt)) => {
-                if let Some(input_evt) = protocol_event_to_input_event(&evt) {
-                    events[count] = input_evt;
-                    count += 1;
+    with_handle(|h| {
+        let mut client = h.borrow_client();
+        while count < events.len() {
+            match client.poll_event() {
+                Ok(Some(evt)) => {
+                    if let Some(input_evt) = protocol_event_to_input_event(&evt) {
+                        events[count] = input_evt;
+                        count += 1;
+                    }
                 }
+                _ => break,
             }
-            _ => break,
         }
-    }
+    });
     count
 }
 
@@ -890,27 +873,29 @@ fn protocol_event_to_input_event(evt: &ProtocolEvent) -> Option<InputEvent> {
 /// `DeferredQueue` so they are replayed on the next `poll_protocol_events`
 /// call -- no events are lost regardless of type.
 fn protocol_clipboard_paste(buf: &mut [u8]) -> usize {
-    let mut client = handle().borrow_client();
-    if client.clipboard_paste().is_err() {
-        return 0;
-    }
-    for _ in 0..100 {
-        match client.poll_event() {
-            Ok(Some(ProtocolEvent::PasteResult(cb))) => {
-                let copy = (cb.len as usize).min(buf.len());
-                buf[..copy].copy_from_slice(&cb.data[..copy]);
-                return copy;
-            }
-            Ok(Some(other)) => {
-                if let Some(evt) = protocol_event_to_input_event(&other) {
-                    with_deferred(|q| q.push(evt));
-                }
-            }
-            Ok(None) => {
-                sys_core::yield_now();
-            }
-            Err(_) => return 0,
+    with_handle(|h| {
+        let mut client = h.borrow_client();
+        if client.clipboard_paste().is_err() {
+            return 0;
         }
-    }
-    0
+        for _ in 0..100 {
+            match client.poll_event() {
+                Ok(Some(ProtocolEvent::PasteResult(cb))) => {
+                    let copy = (cb.len as usize).min(buf.len());
+                    buf[..copy].copy_from_slice(&cb.data[..copy]);
+                    return copy;
+                }
+                Ok(Some(other)) => {
+                    if let Some(evt) = protocol_event_to_input_event(&other) {
+                        with_deferred(|q| q.push(evt));
+                    }
+                }
+                Ok(None) => {
+                    sys_core::yield_now();
+                }
+                Err(_) => return 0,
+            }
+        }
+        0
+    })
 }

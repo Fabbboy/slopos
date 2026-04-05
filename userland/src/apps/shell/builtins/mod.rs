@@ -6,9 +6,7 @@ pub mod process;
 pub mod system;
 pub mod utils;
 
-use super::parser::u_streq_slice;
-
-pub type BuiltinFn = fn(argc: i32, argv: &[*const u8]) -> i32;
+pub type BuiltinFn = fn(argc: i32, argv: &[&[u8]]) -> i32;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinCategory {
@@ -462,9 +460,9 @@ pub static BUILTINS: &[BuiltinEntry] = &[
     },
 ];
 
-pub fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {
+pub fn find_builtin(name: &[u8]) -> Option<&'static BuiltinEntry> {
     for entry in BUILTINS {
-        if u_streq_slice(name, entry.name.as_bytes()) {
+        if name == entry.name.as_bytes() {
             return Some(entry);
         }
     }
