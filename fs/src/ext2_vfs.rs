@@ -69,7 +69,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
             let mut found: Option<u32> = None;
             fs.for_each_dir_entry(parent as u32, |entry| {
                 if entry.name == name {
-                    found = Some(entry.inode);
+                    found = Some(entry.inode.raw());
                     false
                 } else {
                     true
@@ -141,7 +141,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
                     return true;
                 }
                 let ft = ext2_file_type_to_vfs(entry.file_type);
-                let cont = callback(entry.name, entry.inode as InodeId, ft);
+                let cont = callback(entry.name, entry.inode.raw() as InodeId, ft);
                 count += 1;
                 current += 1;
                 cont

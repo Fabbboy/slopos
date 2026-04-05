@@ -1,8 +1,10 @@
 use super::Ext2Error;
 use super::blockmap;
 use super::cache::BlockCache;
-use super::ondisk::{DIR_ENTRY_HEADER_SIZE, DirEntry, Inode, dir_entry_size, write_dir_entry};
-use super::types::{BlockNum, FileBlock, InodeNum};
+use super::ondisk::{
+    DIR_ENTRY_HEADER_SIZE, DirEntry, Inode, Superblock, dir_entry_size, write_dir_entry,
+};
+use super::types::{FileBlock, InodeNum};
 use crate::blockdev::BlockDevice;
 use core::cmp;
 
@@ -202,7 +204,7 @@ pub fn append_dir_entry(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
-    alloc_fn: &mut dyn FnMut() -> Result<BlockNum, Ext2Error>,
+    superblock: &mut Superblock,
 ) -> Result<(), Ext2Error> {
     let needed = dir_entry_size(name.len());
     let bs = block_size as usize;
@@ -270,19 +272,19 @@ pub fn append_dir_entry(
         offset += block_size;
     }
 
-    // No space found: allocate a new block
-    let new_block = alloc_fn()?;
+    // No space found: allocate a new block and add to parent's block map
     let file_block = FileBlock(parent_inode.size / block_size);
-
-    // Store the new block pointer in the inode's block map
     blockmap::ensure_data_block(
         parent_inode,
         file_block,
         ptrs_per_block,
         cache,
         device,
-        &mut || Ok(new_block),
+        superblock,
+        block_size,
     )?;
+    // Re-map to get the newly allocated block number
+    let new_block = blockmap::map_block(parent_inode, file_block, ptrs_per_block, cache, device)?;
 
     // Write the new entry into the fresh block
     let mut block = cache.get_zero(new_block, device)?;

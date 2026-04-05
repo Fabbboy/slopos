@@ -1,6 +1,7 @@
 use super::Ext2Error;
 use super::cache::BlockCache;
-use super::ondisk::Inode;
+use super::ext2_alloc;
+use super::ondisk::{Inode, Superblock};
 use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
 
@@ -17,12 +18,6 @@ pub struct BlockPath {
 }
 
 /// Convert a logical file block to a chain of offsets into the indirect tree.
-///
-/// For 4KB blocks (ptrs_per_block=1024):
-///   direct: [0..12)          -> depth=1
-///   single: [12..1036)       -> depth=2
-///   double: [1036..1049612)  -> depth=3
-///   triple: [1049612..~1B)   -> depth=4
 pub fn block_to_path(file_block: FileBlock, ptrs_per_block: u32) -> Result<BlockPath, Ext2Error> {
     let fb = file_block.raw();
     let n = ptrs_per_block;
@@ -63,7 +58,6 @@ pub fn block_to_path(file_block: FileBlock, ptrs_per_block: u32) -> Result<Block
     Err(Ext2Error::InvalidBlock)
 }
 
-/// Read a u32 block pointer from an indirect block at the given index.
 fn read_ptr(data: &[u8], idx: u32) -> BlockNum {
     let off = idx as usize * 4;
     BlockNum(u32::from_le_bytes([
@@ -74,7 +68,6 @@ fn read_ptr(data: &[u8], idx: u32) -> BlockNum {
     ]))
 }
 
-/// Write a u32 block pointer into an indirect block at the given index.
 fn write_ptr(data: &mut [u8], idx: u32, block: BlockNum) {
     let off = idx as usize * 4;
     data[off..off + 4].copy_from_slice(&block.raw().to_le_bytes());
@@ -91,13 +84,11 @@ pub fn map_block(
 ) -> Result<BlockNum, Ext2Error> {
     let path = block_to_path(file_block, ptrs_per_block)?;
 
-    // First offset is always an index into inode.block[]
     let mut current = inode.block[path.offsets[0] as usize];
     if !current.is_valid() {
         return Ok(BlockNum::ZERO);
     }
 
-    // Walk through indirect blocks
     for level in 1..path.depth as usize {
         let block = cache.get(current, device)?;
         current = read_ptr(block.data(), path.offsets[level]);
@@ -110,41 +101,36 @@ pub fn map_block(
 }
 
 /// Ensure a data block exists at the given file block offset.
-/// Allocates new blocks (including intermediate indirect blocks) as needed.
-/// Returns (physical_block, was_newly_allocated).
+/// Allocates blocks internally via the alloc module — no closure needed.
 pub fn ensure_data_block(
     inode: &mut Inode,
     file_block: FileBlock,
     ptrs_per_block: u32,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    alloc_fn: &mut dyn FnMut() -> Result<BlockNum, Ext2Error>,
+    superblock: &mut Superblock,
+    block_size: u32,
 ) -> Result<(BlockNum, bool), Ext2Error> {
     let path = block_to_path(file_block, ptrs_per_block)?;
 
     if path.depth == 1 {
-        // Direct block
         let idx = path.offsets[0] as usize;
         if inode.block[idx].is_valid() {
             return Ok((inode.block[idx], false));
         }
-        let new_block = alloc_fn()?;
-        let _zero = cache.get_zero(new_block, device)?;
+        let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
+        drop(cache.get_zero(new_block, device)?);
         inode.block[idx] = new_block;
         return Ok((new_block, true));
     }
 
-    // For indirect paths (depth 2, 3, or 4):
-    // Ensure the top-level indirect block exists in inode.block[]
     let top_idx = path.offsets[0] as usize;
     if !inode.block[top_idx].is_valid() {
-        let new_block = alloc_fn()?;
-        // Zero-fill and immediately release the guard
+        let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
         drop(cache.get_zero(new_block, device)?);
         inode.block[top_idx] = new_block;
     }
 
-    // Walk and allocate intermediate indirect blocks
     let mut current_indirect = inode.block[top_idx];
     for level in 1..path.depth as usize - 1 {
         let child = {
@@ -154,7 +140,7 @@ pub fn ensure_data_block(
         if child.is_valid() {
             current_indirect = child;
         } else {
-            let new_block = alloc_fn()?;
+            let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
             drop(cache.get_zero(new_block, device)?);
             let mut parent = cache.get(current_indirect, device)?;
             write_ptr(parent.data_mut(), path.offsets[level], new_block);
@@ -162,7 +148,6 @@ pub fn ensure_data_block(
         }
     }
 
-    // Final level: the data block pointer
     let data_idx = path.offsets[path.depth as usize - 1];
     let existing = {
         let block = cache.get(current_indirect, device)?;
@@ -173,7 +158,7 @@ pub fn ensure_data_block(
         return Ok((existing, false));
     }
 
-    let new_data = alloc_fn()?;
+    let new_data = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
     drop(cache.get_zero(new_data, device)?);
     let mut parent = cache.get(current_indirect, device)?;
     write_ptr(parent.data_mut(), data_idx, new_data);
