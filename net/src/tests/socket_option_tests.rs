@@ -46,8 +46,8 @@ pub fn test_socket_option_roundtrips() -> TestResult {
     let rcvbuf: u32 = 8192;
     let sndbuf: u32 = 12288;
     let keepalive: i32 = 1;
-    let rcvtimeo: u64 = 5000;
-    let sndtimeo: u64 = 7000;
+    let rcvtimeo = slopos_abi::syscall::Timeval::from_millis(5000);
+    let sndtimeo = slopos_abi::syscall::Timeval::from_millis(7000);
     let nodelay: i32 = 1;
 
     assert_eq_test!(
@@ -62,12 +62,15 @@ pub fn test_socket_option_roundtrips() -> TestResult {
         socket_setsockopt(sock_idx, SOL_SOCKET, SO_KEEPALIVE, &keepalive.to_ne_bytes()),
         0
     );
+    let mut tv_bytes = [0u8; 16];
+    rcvtimeo.to_bytes(&mut tv_bytes);
     assert_eq_test!(
-        socket_setsockopt(sock_idx, SOL_SOCKET, SO_RCVTIMEO, &rcvtimeo.to_ne_bytes()),
+        socket_setsockopt(sock_idx, SOL_SOCKET, SO_RCVTIMEO, &tv_bytes),
         0
     );
+    sndtimeo.to_bytes(&mut tv_bytes);
     assert_eq_test!(
-        socket_setsockopt(sock_idx, SOL_SOCKET, SO_SNDTIMEO, &sndtimeo.to_ne_bytes()),
+        socket_setsockopt(sock_idx, SOL_SOCKET, SO_SNDTIMEO, &tv_bytes),
         0
     );
     assert_eq_test!(
@@ -76,7 +79,6 @@ pub fn test_socket_option_roundtrips() -> TestResult {
     );
 
     let mut i32buf = [0u8; 4];
-    let mut u64buf = [0u8; 8];
 
     assert_eq_test!(
         socket_getsockopt(sock_idx, SOL_SOCKET, SO_RCVBUF, &mut i32buf),
@@ -96,17 +98,22 @@ pub fn test_socket_option_roundtrips() -> TestResult {
     );
     assert_eq_test!(i32::from_ne_bytes(i32buf), 1);
 
+    // SO_RCVTIMEO/SO_SNDTIMEO use Timeval (16 bytes, type-safe)
+    let mut tvbuf = [0u8; 16];
     assert_eq_test!(
-        socket_getsockopt(sock_idx, SOL_SOCKET, SO_RCVTIMEO, &mut u64buf),
-        8
+        socket_getsockopt(sock_idx, SOL_SOCKET, SO_RCVTIMEO, &mut tvbuf),
+        16
     );
-    assert_eq_test!(u64::from_ne_bytes(u64buf), rcvtimeo);
+    let got = slopos_abi::syscall::Timeval::from_bytes(&tvbuf).unwrap();
+    assert_eq_test!(got, rcvtimeo, "SO_RCVTIMEO roundtrip");
 
+    tvbuf = [0u8; 16];
     assert_eq_test!(
-        socket_getsockopt(sock_idx, SOL_SOCKET, SO_SNDTIMEO, &mut u64buf),
-        8
+        socket_getsockopt(sock_idx, SOL_SOCKET, SO_SNDTIMEO, &mut tvbuf),
+        16
     );
-    assert_eq_test!(u64::from_ne_bytes(u64buf), sndtimeo);
+    let got = slopos_abi::syscall::Timeval::from_bytes(&tvbuf).unwrap();
+    assert_eq_test!(got, sndtimeo, "SO_SNDTIMEO roundtrip");
 
     assert_eq_test!(
         socket_getsockopt(sock_idx, IPPROTO_TCP, TCP_NODELAY, &mut i32buf),

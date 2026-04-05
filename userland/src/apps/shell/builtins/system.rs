@@ -340,15 +340,33 @@ pub fn cmd_resolve(argc: i32, argv: &[&[u8]]) -> i32 {
 
     let hostname = argv[1];
 
-    match crate::syscall::net::resolve(hostname) {
-        Some(addr) => {
+    let host_str = match core::str::from_utf8(hostname) {
+        Ok(s) => s,
+        Err(_) => {
+            shell_write(b"resolve: invalid hostname\n");
+            return 1;
+        }
+    };
+
+    use std::net::ToSocketAddrs;
+    match (host_str, 0u16)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.find(|a| a.is_ipv4()))
+    {
+        Some(std::net::SocketAddr::V4(v4)) => {
+            let octets = v4.ip().octets();
             shell_write(hostname);
             shell_write(
-                format!(" -> {}.{}.{}.{}\n", addr[0], addr[1], addr[2], addr[3]).as_bytes(),
+                format!(
+                    " -> {}.{}.{}.{}\n",
+                    octets[0], octets[1], octets[2], octets[3]
+                )
+                .as_bytes(),
             );
             0
         }
-        None => {
+        _ => {
             shell_write(b"resolve: failed to resolve ");
             shell_write(hostname);
             shell_write(b"\n");

@@ -537,7 +537,7 @@ fn execute_registry_spawn(
     // returns EAGAIN when all available data is consumed instead of
     // blocking forever (which would hang for long-running children like nc).
     let status = if capture {
-        let _ = crate::syscall::net::set_nonblocking(pipe_fds[0]);
+        let _ = crate::syscall::fs::set_fd_nonblocking(pipe_fds[0]);
         let mut buf = [0u8; 512];
         let exit_status;
         loop {
@@ -963,7 +963,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
         // Non-blocking read + poll so we keep forwarding
         // compositor keyboard events to the PTY (avoids deadlocking
         // children that read from the TTY slave).
-        let _ = crate::syscall::net::set_nonblocking(capture_fd);
+        let _ = crate::syscall::fs::set_fd_nonblocking(capture_fd);
         let mut buf = [0u8; 512];
         let mut all_exited = false;
         let mut status = 0;

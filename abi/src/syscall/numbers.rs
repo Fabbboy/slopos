@@ -667,6 +667,34 @@ pub const SYSCALL_SENDMSG: u64 = 151;
 /// * Negative errno on failure
 pub const SYSCALL_RECVMSG: u64 = 152;
 
+// =============================================================================
+// Socket address query
+// =============================================================================
+
+/// Get the address of the peer connected to a socket.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to address buffer (output)
+/// * rdx (arg2): pointer to address length (in/out)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_GETPEERNAME: u64 = 153;
+
+/// Get the local address bound to a socket.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to address buffer (output)
+/// * rdx (arg2): pointer to address length (in/out)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_GETSOCKNAME: u64 = 154;
+
 pub const SYSCALL_TABLE_SIZE: usize = 156;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).

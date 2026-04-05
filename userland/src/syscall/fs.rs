@@ -323,3 +323,16 @@ pub fn tcsetattr(fd: RawFd, t: &UserTermios) -> SyscallResult<()> {
     };
     demux(result).map(|_| ())
 }
+
+/// Set a file descriptor to non-blocking mode via fcntl.
+///
+/// Works on any FD type (pipes, sockets, files).
+#[inline(always)]
+pub fn set_fd_nonblocking(fd: RawFd) -> SyscallResult<()> {
+    use super::error::SyscallError;
+    use slopos_abi::syscall::{F_GETFL, F_SETFL, O_NONBLOCK};
+    let current = Sys::fcntl(fd, F_GETFL as i32, 0).map_err(SyscallError::from)?;
+    let _ = Sys::fcntl(fd, F_SETFL as i32, (current as u64) | O_NONBLOCK)
+        .map_err(SyscallError::from)?;
+    Ok(())
+}

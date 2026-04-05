@@ -1,8 +1,9 @@
 use core::fmt::Write;
-use std::net::Ipv4Addr;
+use std::io::{self, Read};
+use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
-use crate::syscall::{SockAddrIn, UserPollFd, fs, net, process};
-use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN};
+use crate::syscall::{fs, process};
 
 const MAX_HEADERS: usize = 8;
 const MAX_REDIRECTS: usize = 10;
@@ -55,6 +56,7 @@ struct ChunkDecoder {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum CurlError {
     Usage,
     InvalidFlag,
@@ -372,9 +374,19 @@ fn resolve_host(parsed: &mut ParsedUrl) -> Result<(), CurlError> {
         return Ok(());
     }
 
-    let resolved = net::resolve(host).ok_or(CurlError::ResolveFailed)?;
-    parsed.ip = resolved;
-    Ok(())
+    let host_str = core::str::from_utf8(host).map_err(|_| CurlError::ResolveFailed)?;
+    let addr = (host_str, 0u16)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.find(|a| a.is_ipv4()))
+        .ok_or(CurlError::ResolveFailed)?;
+    match addr {
+        std::net::SocketAddr::V4(v4) => {
+            parsed.ip = v4.ip().octets();
+            Ok(())
+        }
+        _ => Err(CurlError::ResolveFailed),
+    }
 }
 
 fn choose_method(config: &CurlConfig) -> &str {
@@ -570,16 +582,9 @@ fn is_redirect_status(status: u16) -> bool {
     }
 }
 
-fn send_all(fd: i32, data: &[u8]) -> Result<(), CurlError> {
-    let mut sent = 0usize;
-    while sent < data.len() {
-        match net::send(fd, &data[sent..], 0) {
-            Ok(0) => return Err(CurlError::SendFailed),
-            Ok(n) => sent += n,
-            Err(_) => return Err(CurlError::SendFailed),
-        }
-    }
-    Ok(())
+fn send_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), CurlError> {
+    use std::io::Write;
+    stream.write_all(data).map_err(|_| CurlError::SendFailed)
 }
 
 fn verbose_emit_prefixed(prefix: u8, block: &[u8]) {
@@ -694,9 +699,13 @@ impl ChunkDecoder {
 }
 
 fn receive_http_response(
-    fd: i32,
+    stream: &mut TcpStream,
     verbose: bool,
 ) -> Result<(ParsedResponseHeaders, Vec<u8>), CurlError> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
+        .map_err(|_| CurlError::RecvFailed)?;
+
     let mut recv_buf = [0u8; 4096];
     let mut raw: Vec<u8> = Vec::new();
     let mut decoded_body = Vec::new();
@@ -706,173 +715,135 @@ fn receive_http_response(
     let mut chunk_decoder = ChunkDecoder::new();
 
     loop {
-        let mut pfd = [UserPollFd {
-            fd,
-            events: slopos_abi::syscall::POLLIN,
-            revents: 0,
-        }];
-
-        let poll_res = fs::poll(&mut pfd, IO_TIMEOUT_MS);
-        match poll_res {
-            Ok(0) => return Err(CurlError::Timeout),
-            Ok(_) => {}
-            Err(_) => return Err(CurlError::RecvFailed),
-        }
-
-        if (pfd[0].revents & POLLIN) != 0 {
-            match net::recv(fd, &mut recv_buf, 0) {
-                Ok(0) => {
-                    if headers.is_none() {
-                        return Err(CurlError::InvalidResponse);
+        match stream.read(&mut recv_buf) {
+            Ok(0) => {
+                if headers.is_none() {
+                    return Err(CurlError::InvalidResponse);
+                }
+                match body_kind {
+                    BodyKind::UntilClose => {
+                        let parsed = headers.ok_or(CurlError::InvalidResponse)?;
+                        return Ok((parsed, decoded_body));
                     }
-                    match body_kind {
-                        BodyKind::UntilClose => {
+                    BodyKind::ContentLength(expected) => {
+                        if decoded_body.len() == expected {
                             let parsed = headers.ok_or(CurlError::InvalidResponse)?;
                             return Ok((parsed, decoded_body));
                         }
-                        BodyKind::ContentLength(expected) => {
-                            if decoded_body.len() == expected {
-                                let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                                return Ok((parsed, decoded_body));
-                            }
-                            return Err(CurlError::InvalidResponse);
+                        return Err(CurlError::InvalidResponse);
+                    }
+                    BodyKind::Chunked => {
+                        if chunk_decoder.done {
+                            let parsed = headers.ok_or(CurlError::InvalidResponse)?;
+                            return Ok((parsed, decoded_body));
                         }
-                        BodyKind::Chunked => {
-                            if chunk_decoder.done {
-                                let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                                return Ok((parsed, decoded_body));
-                            }
-                            return Err(CurlError::InvalidChunkedEncoding);
-                        }
+                        return Err(CurlError::InvalidChunkedEncoding);
                     }
                 }
-                Ok(n) => {
-                    append_limited(&mut raw, &recv_buf[..n])?;
+            }
+            Ok(n) => {
+                append_limited(&mut raw, &recv_buf[..n])?;
 
-                    if headers.is_none() {
-                        if let Some(end) = find_header_terminator(&raw) {
-                            header_end = end;
-                            let parsed = parse_response_headers(&raw[..header_end])?;
-                            if verbose {
-                                verbose_emit_prefixed(b'<', &raw[..header_end]);
-                            }
-
-                            body_kind = if parsed.chunked {
-                                BodyKind::Chunked
-                            } else if let Some(len) = parsed.content_length {
-                                BodyKind::ContentLength(len)
-                            } else {
-                                BodyKind::UntilClose
-                            };
-
-                            headers = Some(parsed);
-
-                            let body_part =
-                                raw.get(header_end..).ok_or(CurlError::InvalidResponse)?;
-                            match body_kind {
-                                BodyKind::Chunked => {
-                                    chunk_decoder.decode_from(body_part, &mut decoded_body)?;
-                                    if chunk_decoder.done {
-                                        let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                                        return Ok((parsed, decoded_body));
-                                    }
-                                }
-                                BodyKind::ContentLength(expected) => {
-                                    let take = body_part.len().min(expected);
-                                    append_limited(&mut decoded_body, &body_part[..take])?;
-                                    if decoded_body.len() == expected {
-                                        let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                                        return Ok((parsed, decoded_body));
-                                    }
-                                }
-                                BodyKind::UntilClose => {
-                                    append_limited(&mut decoded_body, body_part)?;
-                                }
-                            }
+                if headers.is_none() {
+                    if let Some(end) = find_header_terminator(&raw) {
+                        header_end = end;
+                        let parsed = parse_response_headers(&raw[..header_end])?;
+                        if verbose {
+                            verbose_emit_prefixed(b'<', &raw[..header_end]);
                         }
-                    } else {
-                        let parsed = headers.as_ref().ok_or(CurlError::InvalidResponse)?;
+
+                        body_kind = if parsed.chunked {
+                            BodyKind::Chunked
+                        } else if let Some(len) = parsed.content_length {
+                            BodyKind::ContentLength(len)
+                        } else {
+                            BodyKind::UntilClose
+                        };
+
+                        headers = Some(parsed);
+
                         let body_part = raw.get(header_end..).ok_or(CurlError::InvalidResponse)?;
                         match body_kind {
                             BodyKind::Chunked => {
                                 chunk_decoder.decode_from(body_part, &mut decoded_body)?;
                                 if chunk_decoder.done {
-                                    return Ok((
-                                        ParsedResponseHeaders {
-                                            status_code: parsed.status_code,
-                                            content_length: parsed.content_length,
-                                            chunked: parsed.chunked,
-                                            location: parsed.location.clone(),
-                                        },
-                                        decoded_body,
-                                    ));
+                                    let parsed = headers.ok_or(CurlError::InvalidResponse)?;
+                                    return Ok((parsed, decoded_body));
                                 }
                             }
                             BodyKind::ContentLength(expected) => {
-                                if decoded_body.len() < expected {
-                                    let needed = expected - decoded_body.len();
-                                    let available =
-                                        body_part.len().saturating_sub(decoded_body.len());
-                                    if available > 0 {
-                                        let start = body_part.len() - available;
-                                        let take = needed.min(available);
-                                        append_limited(
-                                            &mut decoded_body,
-                                            &body_part[start..start + take],
-                                        )?;
-                                    }
-                                }
+                                let take = body_part.len().min(expected);
+                                append_limited(&mut decoded_body, &body_part[..take])?;
                                 if decoded_body.len() == expected {
-                                    return Ok((
-                                        ParsedResponseHeaders {
-                                            status_code: parsed.status_code,
-                                            content_length: parsed.content_length,
-                                            chunked: parsed.chunked,
-                                            location: parsed.location.clone(),
-                                        },
-                                        decoded_body,
-                                    ));
+                                    let parsed = headers.ok_or(CurlError::InvalidResponse)?;
+                                    return Ok((parsed, decoded_body));
                                 }
                             }
                             BodyKind::UntilClose => {
-                                let already = decoded_body.len();
-                                let total = body_part.len();
-                                if total > already {
-                                    append_limited(&mut decoded_body, &body_part[already..])?;
+                                append_limited(&mut decoded_body, body_part)?;
+                            }
+                        }
+                    }
+                } else {
+                    let parsed = headers.as_ref().ok_or(CurlError::InvalidResponse)?;
+                    let body_part = raw.get(header_end..).ok_or(CurlError::InvalidResponse)?;
+                    match body_kind {
+                        BodyKind::Chunked => {
+                            chunk_decoder.decode_from(body_part, &mut decoded_body)?;
+                            if chunk_decoder.done {
+                                return Ok((
+                                    ParsedResponseHeaders {
+                                        status_code: parsed.status_code,
+                                        content_length: parsed.content_length,
+                                        chunked: parsed.chunked,
+                                        location: parsed.location.clone(),
+                                    },
+                                    decoded_body,
+                                ));
+                            }
+                        }
+                        BodyKind::ContentLength(expected) => {
+                            if decoded_body.len() < expected {
+                                let needed = expected - decoded_body.len();
+                                let available = body_part.len().saturating_sub(decoded_body.len());
+                                if available > 0 {
+                                    let start = body_part.len() - available;
+                                    let take = needed.min(available);
+                                    append_limited(
+                                        &mut decoded_body,
+                                        &body_part[start..start + take],
+                                    )?;
                                 }
+                            }
+                            if decoded_body.len() == expected {
+                                return Ok((
+                                    ParsedResponseHeaders {
+                                        status_code: parsed.status_code,
+                                        content_length: parsed.content_length,
+                                        chunked: parsed.chunked,
+                                        location: parsed.location.clone(),
+                                    },
+                                    decoded_body,
+                                ));
+                            }
+                        }
+                        BodyKind::UntilClose => {
+                            let already = decoded_body.len();
+                            let total = body_part.len();
+                            if total > already {
+                                append_limited(&mut decoded_body, &body_part[already..])?;
                             }
                         }
                     }
                 }
-                Err(_) => return Err(CurlError::RecvFailed),
             }
-        }
-
-        if (pfd[0].revents & (POLLHUP | POLLERR)) != 0 {
-            if headers.is_none() {
-                return Err(CurlError::RecvFailed);
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                return Err(CurlError::Timeout);
             }
-
-            match body_kind {
-                BodyKind::UntilClose => {
-                    let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                    return Ok((parsed, decoded_body));
-                }
-                BodyKind::ContentLength(expected) => {
-                    if decoded_body.len() == expected {
-                        let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                        return Ok((parsed, decoded_body));
-                    }
-                    return Err(CurlError::InvalidResponse);
-                }
-                BodyKind::Chunked => {
-                    if chunk_decoder.done {
-                        let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                        return Ok((parsed, decoded_body));
-                    }
-                    return Err(CurlError::InvalidChunkedEncoding);
-                }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                return Err(CurlError::Timeout);
             }
+            Err(_) => return Err(CurlError::RecvFailed),
         }
     }
 }
@@ -925,17 +896,9 @@ fn execute_request(
     config: &CurlConfig,
     parsed: &ParsedUrl,
 ) -> Result<(ParsedResponseHeaders, Vec<u8>), CurlError> {
-    let sock = net::Socket::new(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0)
-        .map_err(|_| CurlError::SocketFailed)?;
+    let addr = SocketAddrV4::new(Ipv4Addr::from(parsed.ip), parsed.port);
 
-    let addr = SockAddrIn {
-        family: slopos_abi::net::AF_INET,
-        port: parsed.port.to_be(),
-        addr: parsed.ip,
-        _pad: [0; 8],
-    };
-
-    let conn = sock.connect(&addr).map_err(|_| CurlError::ConnectFailed)?;
+    let mut stream = TcpStream::connect(addr).map_err(|_| CurlError::ConnectFailed)?;
 
     let req = build_request(config, parsed)?;
     if config.verbose {
@@ -944,14 +907,13 @@ fn execute_request(
         }
     }
 
-    if send_all(conn.raw_fd(), &req).is_err() {
-        let _ = conn.shutdown(slopos_abi::syscall::SHUT_RDWR);
+    if send_all(&mut stream, &req).is_err() {
+        let _ = stream.shutdown(Shutdown::Both);
         return Err(CurlError::SendFailed);
     }
 
-    let _ = conn.set_nonblocking();
-    let result = receive_http_response(conn.raw_fd(), config.verbose);
-    let _ = conn.shutdown(slopos_abi::syscall::SHUT_RDWR);
+    let result = receive_http_response(&mut stream, config.verbose);
+    let _ = stream.shutdown(Shutdown::Both);
     result
 }
 

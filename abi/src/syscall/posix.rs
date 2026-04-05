@@ -27,10 +27,63 @@ pub const SO_SNDBUF: i32 = 7;
 pub const SO_RCVBUF: i32 = 8;
 /// Enable keepalive probes.
 pub const SO_KEEPALIVE: i32 = 9;
-/// Receive timeout in milliseconds (as u64).
+/// Receive timeout (value: [`Timeval`]).
 pub const SO_RCVTIMEO: i32 = 20;
-/// Send timeout in milliseconds (as u64).
+/// Send timeout (value: [`Timeval`]).
 pub const SO_SNDTIMEO: i32 = 21;
+
+/// POSIX `struct timeval` — the canonical wire format for socket timeouts.
+///
+/// Used by `SO_RCVTIMEO` and `SO_SNDTIMEO` in both `setsockopt` and
+/// `getsockopt`.  All layers (kernel, slibc, std) must use this layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+impl Timeval {
+    /// Construct from milliseconds.
+    pub const fn from_millis(ms: u64) -> Self {
+        Self {
+            tv_sec: (ms / 1000) as i64,
+            tv_usec: ((ms % 1000) * 1000) as i64,
+        }
+    }
+
+    /// Convert to milliseconds (saturating).
+    pub const fn as_millis(&self) -> u64 {
+        (self.tv_sec as u64) * 1000 + (self.tv_usec as u64) / 1000
+    }
+
+    /// Zero value — represents "no timeout".
+    pub const ZERO: Self = Self {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+
+    /// Interpret a byte slice as a `Timeval`.  Returns `None` if too short.
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < core::mem::size_of::<Self>() {
+            return None;
+        }
+        Some(Self {
+            tv_sec: i64::from_ne_bytes(b[..8].try_into().ok()?),
+            tv_usec: i64::from_ne_bytes(b[8..16].try_into().ok()?),
+        })
+    }
+
+    /// Write self into a byte slice.  Returns `false` if too short.
+    pub fn to_bytes(&self, b: &mut [u8]) -> bool {
+        if b.len() < core::mem::size_of::<Self>() {
+            return false;
+        }
+        b[..8].copy_from_slice(&self.tv_sec.to_ne_bytes());
+        b[8..16].copy_from_slice(&self.tv_usec.to_ne_bytes());
+        true
+    }
+}
 
 /// Disable Nagle's algorithm (TCP only).
 pub const TCP_NODELAY: i32 = 1;

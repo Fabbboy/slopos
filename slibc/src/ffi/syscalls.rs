@@ -217,3 +217,169 @@ pub unsafe extern "C" fn slopos_munmap(addr: *mut u8, len: usize) -> i32 {
         Err(e) => -(e.raw()),
     }
 }
+
+// =============================================================================
+// Networking FFI exports for std::net platform layer
+// =============================================================================
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
+    match Sys::socket(domain, sock_type, protocol) {
+        Ok(fd) => fd,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_bind(fd: i32, addr: *const u8, addrlen: u32) -> i32 {
+    match Sys::bind(fd, addr, addrlen) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_listen(fd: i32, backlog: i32) -> i32 {
+    match Sys::listen(fd, backlog) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_accept(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i32 {
+    match Sys::accept(fd, addr, addrlen) {
+        Ok(new_fd) => new_fd,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_connect(fd: i32, addr: *const u8, addrlen: u32) -> i32 {
+    match Sys::connect(fd, addr, addrlen) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize {
+    match Sys::send(fd, buf, len, flags) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize {
+    match Sys::recv(fd, buf, len, flags) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_sendto(
+    fd: i32,
+    buf: *const u8,
+    len: usize,
+    flags: i32,
+    addr: *const u8,
+    addrlen: u32,
+) -> isize {
+    match Sys::sendto(fd, buf, len, flags, addr, addrlen) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_recvfrom(
+    fd: i32,
+    buf: *mut u8,
+    len: usize,
+    flags: i32,
+    addr: *mut u8,
+    addrlen: *mut u32,
+) -> isize {
+    match Sys::recvfrom(fd, buf, len, flags, addr, addrlen) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_setsockopt(
+    fd: i32,
+    level: i32,
+    optname: i32,
+    optval: *const u8,
+    optlen: u32,
+) -> i32 {
+    match Sys::setsockopt(fd, level, optname, optval, optlen) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_getsockopt(
+    fd: i32,
+    level: i32,
+    optname: i32,
+    optval: *mut u8,
+    optlen: *mut u32,
+) -> i32 {
+    match Sys::getsockopt(fd, level, optname, optval, optlen) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_shutdown(fd: i32, how: i32) -> i32 {
+    match Sys::shutdown(fd, how) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_getpeername(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i32 {
+    match Sys::getpeername(fd, addr, addrlen) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_getsockname(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i32 {
+    match Sys::getsockname(fd, addr, addrlen) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_poll(fds: *mut u8, nfds: u32, timeout: i32) -> i32 {
+    match Sys::poll(fds, nfds, timeout) {
+        Ok(n) => n,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_ioctl(fd: i32, request: u64, arg: u64) -> i32 {
+    match Sys::ioctl(fd, request, arg) {
+        Ok(n) => n,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_fcntl(fd: i32, cmd: i32, arg: u64) -> i32 {
+    match Sys::fcntl(fd, cmd, arg) {
+        Ok(n) => n,
+        Err(e) => -(e.raw()),
+    }
+}

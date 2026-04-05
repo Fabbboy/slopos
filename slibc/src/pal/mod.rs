@@ -125,6 +125,8 @@ pub trait Pal {
         optlen: *mut u32,
     ) -> Result<(), Errno>;
     fn shutdown(fd: i32, how: i32) -> Result<(), Errno>;
+    fn getpeername(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<(), Errno>;
+    fn getsockname(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<(), Errno>;
     fn resolve(hostname: *const u8, hostname_len: usize, result: *mut u8) -> Result<(), Errno>;
 
     fn clock_gettime(clk_id: u64, tp: *mut u8) -> Result<(), Errno>;

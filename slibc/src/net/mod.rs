@@ -5,7 +5,7 @@ pub mod addr;
 pub mod dns;
 pub mod tests;
 
-use crate::errno::{ENOSYS, errno_set};
+use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};
 
 pub use addr::*;
@@ -193,19 +193,29 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 }
 
 // =============================================================================
-// Peer / local address (stubs — kernel lacks these syscalls)
+// Peer / local address
 // =============================================================================
 
-/// Get name of connected peer socket. Stub: returns -1 with ENOSYS.
+/// Get name of connected peer socket.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getpeername(_fd: i32, _addr: *mut SockAddr, _addrlen: *mut u32) -> i32 {
-    errno_set(ENOSYS.raw());
-    -1
+pub unsafe extern "C" fn getpeername(fd: i32, addr: *mut SockAddr, addrlen: *mut u32) -> i32 {
+    match Sys::getpeername(fd, addr as *mut u8, addrlen) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
 }
 
-/// Get socket name. Stub: returns -1 with ENOSYS.
+/// Get socket name.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getsockname(_fd: i32, _addr: *mut SockAddr, _addrlen: *mut u32) -> i32 {
-    errno_set(ENOSYS.raw());
-    -1
+pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut SockAddr, addrlen: *mut u32) -> i32 {
+    match Sys::getsockname(fd, addr as *mut u8, addrlen) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
 }

@@ -1273,3 +1273,55 @@ pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
     state.slots[i].nonblocking = nonblocking;
     0
 }
+
+/// Return the bound path for a Unix socket, if any.
+///
+/// Returns `Some(slice)` containing the abstract namespace path bytes
+/// when the socket is bound/listening/connected and has a non-empty path.
+/// Returns `None` for unbound sockets or invalid handles.
+pub fn unix_get_local_path(handle: SocketHandle) -> Option<[u8; UNIX_PATH_MAX]> {
+    let state = UNIX_STATE.lock();
+    let i = validate_socket_handle(&state, handle)?;
+    let slot = &state.slots[i];
+    if slot.path_len == 0 {
+        return None;
+    }
+    let mut out = [0u8; UNIX_PATH_MAX];
+    out[..slot.path_len as usize].copy_from_slice(&slot.path[..slot.path_len as usize]);
+    Some(out)
+}
+
+/// Return the path length of the bound address for a Unix socket.
+///
+/// Returns 0 if the socket is not bound or the handle is invalid.
+pub fn unix_get_local_path_len(handle: SocketHandle) -> usize {
+    let state = UNIX_STATE.lock();
+    let Some(i) = validate_socket_handle(&state, handle) else {
+        return 0;
+    };
+    state.slots[i].path_len as usize
+}
+
+/// Return the bound path of the peer for a connected Unix socket.
+///
+/// For connected sockets, looks up the peer slot and returns its path.
+/// Returns `None` if the socket is not connected or the peer has no path.
+pub fn unix_get_peer_path(handle: SocketHandle) -> Option<([u8; UNIX_PATH_MAX], usize)> {
+    let state = UNIX_STATE.lock();
+    let i = validate_socket_handle(&state, handle)?;
+    let slot = &state.slots[i];
+    if slot.state != UnixState::Connected {
+        return None;
+    }
+    let peer = slot.peer_idx as usize;
+    if peer >= MAX_UNIX_SOCKETS || !state.slots[peer].valid {
+        return None;
+    }
+    let peer_slot = &state.slots[peer];
+    let len = peer_slot.path_len as usize;
+    let mut out = [0u8; UNIX_PATH_MAX];
+    if len > 0 {
+        out[..len].copy_from_slice(&peer_slot.path[..len]);
+    }
+    Some((out, len))
+}

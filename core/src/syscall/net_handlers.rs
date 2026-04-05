@@ -788,3 +788,194 @@ define_syscall!(syscall_recvmsg(ctx, args) requires(let process_id) {
 
     ctx.ok(copied as u64)
 });
+
+// ---------------------------------------------------------------------------
+// getpeername / getsockname
+// ---------------------------------------------------------------------------
+
+define_syscall!(syscall_getpeername(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let addr_buf = args.arg1;
+    let addrlen_ptr = args.arg2;
+
+    if addr_buf == 0 || addrlen_ptr == 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let sock_fd = match socket_fd_for(process_id, fd) {
+        Ok(v) => v,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    match sock_fd {
+        SocketFd::Unix(sh) => {
+            // For AF_UNIX, return the peer's bound path as SockAddrUn.
+            let Some((path, path_len)) = unix_socket::unix_get_peer_path(sh) else {
+                return ctx.err_with(ERRNO_ENOTCONN);
+            };
+            let mut addr_un = SockAddrUn::default();
+            addr_un.family = AF_UNIX;
+            if path_len > 0 {
+                addr_un.path[..path_len].copy_from_slice(&path[..path_len]);
+            }
+            let struct_len = 2 + path_len; // family + path bytes
+
+            // Read caller's buffer length.
+            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
+            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
+            let copy_len = caller_len.min(struct_len);
+
+            if copy_len > 0 {
+                // SAFETY: SockAddrUn is repr(C) and we copy at most its size.
+                let addr_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &addr_un as *const SockAddrUn as *const u8,
+                        core::mem::size_of::<SockAddrUn>(),
+                    )
+                };
+                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
+                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
+            }
+
+            // Write back actual length.
+            let actual = struct_len as u32;
+            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
+            ctx.ok(0)
+        }
+        SocketFd::Inet(sock_idx) => {
+            let Some(peer) = socket::socket_get_peer_addr(sock_idx) else {
+                return ctx.err_with(ERRNO_ENOTCONN);
+            };
+            let sock_addr_in = peer.to_user();
+            let struct_len = core::mem::size_of::<SockAddrIn>();
+
+            // Read caller's buffer length.
+            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
+            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
+            let copy_len = caller_len.min(struct_len);
+
+            if copy_len > 0 {
+                // SAFETY: SockAddrIn is repr(C), 16 bytes, and we copy at most that.
+                let addr_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &sock_addr_in as *const SockAddrIn as *const u8,
+                        struct_len,
+                    )
+                };
+                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
+                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
+            }
+
+            // Write back actual length.
+            let actual = struct_len as u32;
+            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
+            ctx.ok(0)
+        }
+    }
+});
+
+define_syscall!(syscall_getsockname(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let addr_buf = args.arg1;
+    let addrlen_ptr = args.arg2;
+
+    if addr_buf == 0 || addrlen_ptr == 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let sock_fd = match socket_fd_for(process_id, fd) {
+        Ok(v) => v,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    match sock_fd {
+        SocketFd::Unix(sh) => {
+            // For AF_UNIX, return the socket's own bound path as SockAddrUn.
+            let path_len = unix_socket::unix_get_local_path_len(sh);
+            let mut addr_un = SockAddrUn::default();
+            addr_un.family = AF_UNIX;
+            if path_len > 0 {
+                if let Some(path) = unix_socket::unix_get_local_path(sh) {
+                    addr_un.path[..path_len].copy_from_slice(&path[..path_len]);
+                }
+            }
+            let struct_len = 2 + path_len; // family + path bytes
+
+            // Read caller's buffer length.
+            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
+            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
+            let copy_len = caller_len.min(struct_len);
+
+            if copy_len > 0 {
+                // SAFETY: SockAddrUn is repr(C) and we copy at most its size.
+                let addr_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &addr_un as *const SockAddrUn as *const u8,
+                        core::mem::size_of::<SockAddrUn>(),
+                    )
+                };
+                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
+                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
+            }
+
+            // Write back actual length.
+            let actual = struct_len as u32;
+            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
+            ctx.ok(0)
+        }
+        SocketFd::Inet(sock_idx) => {
+            let Some(local) = socket::socket_get_local_addr(sock_idx) else {
+                // Per POSIX, getsockname on an unbound socket returns
+                // AF_INET + zeroed addr/port rather than EINVAL.
+                let zeroed = SockAddrIn {
+                    family: AF_INET,
+                    port: 0,
+                    addr: [0; 4],
+                    _pad: [0; 8],
+                };
+                let struct_len = core::mem::size_of::<SockAddrIn>();
+                let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
+                let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
+                let copy_len = caller_len.min(struct_len);
+                if copy_len > 0 {
+                    // SAFETY: SockAddrIn is repr(C), 16 bytes.
+                    let addr_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &zeroed as *const SockAddrIn as *const u8,
+                            struct_len,
+                        )
+                    };
+                    let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
+                    try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
+                }
+                let actual = struct_len as u32;
+                try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
+                return ctx.ok(0);
+            };
+            let sock_addr_in = local.to_user();
+            let struct_len = core::mem::size_of::<SockAddrIn>();
+
+            // Read caller's buffer length.
+            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
+            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
+            let copy_len = caller_len.min(struct_len);
+
+            if copy_len > 0 {
+                // SAFETY: SockAddrIn is repr(C), 16 bytes, and we copy at most that.
+                let addr_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &sock_addr_in as *const SockAddrIn as *const u8,
+                        struct_len,
+                    )
+                };
+                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
+                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
+            }
+
+            // Write back actual length.
+            let actual = struct_len as u32;
+            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
+            ctx.ok(0)
+        }
+    }
+});

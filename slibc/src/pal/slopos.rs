@@ -575,6 +575,18 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn getpeername(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_GETPEERNAME, fd as u64, addr as u64, addrlen as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn getsockname(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_GETSOCKNAME, fd as u64, addr as u64, addrlen as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn resolve(hostname: *const u8, hostname_len: usize, result: *mut u8) -> Result<(), Errno> {
         let ret = unsafe {
             syscall3(

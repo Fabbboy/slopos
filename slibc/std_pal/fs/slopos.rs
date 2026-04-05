@@ -5,10 +5,11 @@ use crate::fmt;
 use crate::fs::TryLockError;
 use crate::hash::{Hash, Hasher};
 use crate::io::{self, BorrowedCursor, Error, ErrorKind, IoSlice, IoSliceMut, SeekFrom};
+use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::path::{Path, PathBuf};
 pub use crate::sys::fs::common::Dir;
 use crate::sys::time::SystemTime;
-use crate::sys::{unsupported, unsupported_err};
+use crate::sys::{unsupported, unsupported_err, AsInner, FromInner, IntoInner};
 use crate::vec::Vec;
 
 const O_RDONLY: i32 = 0;
@@ -55,13 +56,15 @@ unsafe extern "C" {
     fn slopos_list(path: *const u8, buf: *mut u8, buf_len: usize) -> isize;
 }
 
-pub struct File {
-    fd: i32,
-}
+pub struct File(crate::sys::fd::FileDesc);
 
 impl File {
     pub fn as_raw_fd(&self) -> i32 {
-        self.fd
+        self.0.as_raw_fd()
+    }
+
+    fn fd(&self) -> i32 {
+        self.0.as_raw_fd()
     }
 }
 
@@ -418,12 +421,12 @@ impl File {
         let flags = open_flags(opts)?;
         let fd = unsafe { open(cpath.as_ptr(), flags) };
         let fd = cvt_i32(fd)?;
-        Ok(File { fd })
+        Ok(File(unsafe { crate::sys::fd::FileDesc::from_raw_fd(fd) }))
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         let mut st = SloposStat::default();
-        let rc = unsafe { slopos_fstat(self.fd, &mut st as *mut SloposStat) };
+        let rc = unsafe { slopos_fstat(self.fd(), &mut st as *mut SloposStat) };
         cvt_i32(rc)?;
         Ok(FileAttr { stat: st })
     }
@@ -464,7 +467,7 @@ impl File {
         if buf.is_empty() {
             return Ok(0);
         }
-        let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe { read(self.fd(), buf.as_mut_ptr(), buf.len()) };
         Ok(cvt_isize(n)? as usize)
     }
 
@@ -489,7 +492,7 @@ impl File {
         if buf.is_empty() {
             return Ok(0);
         }
-        let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
+        let n = unsafe { write(self.fd(), buf.as_ptr(), buf.len()) };
         Ok(cvt_isize(n)? as usize)
     }
 
@@ -524,7 +527,7 @@ impl File {
             SeekFrom::End(off) => (off, SEEK_END),
             SeekFrom::Current(off) => (off, SEEK_CUR),
         };
-        let out = unsafe { slopos_lseek(self.fd, offset, whence) };
+        let out = unsafe { slopos_lseek(self.fd(), offset, whence) };
         Ok(cvt_i64(out)? as u64)
     }
 
@@ -533,13 +536,14 @@ impl File {
     }
 
     pub fn tell(&self) -> io::Result<u64> {
-        let out = unsafe { slopos_lseek(self.fd, 0, SEEK_CUR) };
+        let out = unsafe { slopos_lseek(self.fd(), 0, SEEK_CUR) };
         Ok(cvt_i64(out)? as u64)
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
-        let fd = unsafe { slopos_dup(self.fd) };
-        Ok(File { fd: cvt_i32(fd)? })
+        let fd = unsafe { slopos_dup(self.fd()) };
+        let fd = cvt_i32(fd)?;
+        Ok(File(unsafe { crate::sys::fd::FileDesc::from_raw_fd(fd) }))
     }
 
     pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
@@ -551,11 +555,7 @@ impl File {
     }
 }
 
-impl Drop for File {
-    fn drop(&mut self) {
-        let _ = unsafe { close(self.fd) };
-    }
-}
+// FileDesc (via OwnedFd) handles close on drop — no explicit Drop needed.
 
 impl DirBuilder {
     pub fn new() -> DirBuilder {
@@ -571,7 +571,49 @@ impl DirBuilder {
 
 impl fmt::Debug for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("File").field("fd", &self.fd).finish()
+        f.debug_struct("File").field("fd", &self.fd()).finish()
+    }
+}
+
+impl AsInner<crate::sys::fd::FileDesc> for File {
+    fn as_inner(&self) -> &crate::sys::fd::FileDesc {
+        &self.0
+    }
+}
+
+impl IntoInner<crate::sys::fd::FileDesc> for File {
+    fn into_inner(self) -> crate::sys::fd::FileDesc {
+        self.0
+    }
+}
+
+impl FromInner<crate::sys::fd::FileDesc> for File {
+    fn from_inner(fd: crate::sys::fd::FileDesc) -> Self {
+        File(fd)
+    }
+}
+
+impl AsFd for File {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl AsRawFd for File {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl IntoRawFd for File {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_raw_fd()
+    }
+}
+
+impl FromRawFd for File {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        File(unsafe { crate::sys::fd::FileDesc::from_raw_fd(fd) })
     }
 }
 

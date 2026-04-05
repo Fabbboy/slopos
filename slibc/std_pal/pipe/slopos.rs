@@ -2,25 +2,24 @@
 
 use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
+use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use crate::sys::{AsInner, FromInner, IntoInner};
 
 unsafe extern "C" {
     fn slopos_pipe(fds: *mut i32) -> i32;
     fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-    fn close(fd: i32) -> i32;
 }
 
-pub struct Pipe {
-    fd: i32,
-}
+pub struct Pipe(OwnedFd);
 
 impl Pipe {
     pub fn from_raw_fd(fd: i32) -> Pipe {
-        Pipe { fd }
+        Pipe(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
     pub fn as_raw_fd(&self) -> i32 {
-        self.fd
+        self.0.as_raw_fd()
     }
 }
 
@@ -30,7 +29,10 @@ pub fn pipe() -> io::Result<(Pipe, Pipe)> {
     if ret < 0 {
         Err(io::Error::from_raw_os_error(-ret))
     } else {
-        Ok((Pipe { fd: fds[0] }, Pipe { fd: fds[1] }))
+        Ok((
+            Pipe(unsafe { OwnedFd::from_raw_fd(fds[0]) }),
+            Pipe(unsafe { OwnedFd::from_raw_fd(fds[1]) }),
+        ))
     }
 }
 
@@ -43,7 +45,7 @@ impl Pipe {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let ret = unsafe { read(self.fd, buf.as_mut_ptr(), buf.len()) };
+        let ret = unsafe { read(self.0.as_raw_fd(), buf.as_mut_ptr(), buf.len()) };
         if ret < 0 {
             Err(io::Error::from_raw_os_error(-ret as i32))
         } else {
@@ -53,7 +55,7 @@ impl Pipe {
 
     pub fn read_buf(&self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
         let buf = unsafe { cursor.as_mut() };
-        let ret = unsafe { read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+        let ret = unsafe { read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
         if ret < 0 {
             Err(io::Error::from_raw_os_error(-ret as i32))
         } else {
@@ -97,7 +99,7 @@ impl Pipe {
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        let ret = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
+        let ret = unsafe { write(self.0.as_raw_fd(), buf.as_ptr(), buf.len()) };
         if ret < 0 {
             Err(io::Error::from_raw_os_error(-ret as i32))
         } else {
@@ -127,14 +129,54 @@ impl Pipe {
     }
 }
 
-impl Drop for Pipe {
-    fn drop(&mut self) {
-        unsafe { close(self.fd) };
-    }
-}
+// OwnedFd handles close on drop — no explicit Drop needed.
 
 impl fmt::Debug for Pipe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pipe").field("fd", &self.fd).finish()
+        f.debug_struct("Pipe")
+            .field("fd", &self.0.as_raw_fd())
+            .finish()
+    }
+}
+
+impl AsInner<OwnedFd> for Pipe {
+    fn as_inner(&self) -> &OwnedFd {
+        &self.0
+    }
+}
+
+impl IntoInner<OwnedFd> for Pipe {
+    fn into_inner(self) -> OwnedFd {
+        self.0
+    }
+}
+
+impl FromInner<OwnedFd> for Pipe {
+    fn from_inner(fd: OwnedFd) -> Self {
+        Self(fd)
+    }
+}
+
+impl AsFd for Pipe {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl crate::os::fd::AsRawFd for Pipe {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl crate::os::fd::IntoRawFd for Pipe {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_raw_fd()
+    }
+}
+
+impl crate::os::fd::FromRawFd for Pipe {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 }

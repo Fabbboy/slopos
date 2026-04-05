@@ -258,6 +258,135 @@ if [ -f "$EXIT_RS" ] && ! grep -q 'target_os = "slopos"' "$EXIT_RS" 2>/dev/null;
     echo "  Patched exit.rs"
 fi
 
+# 3i. Net routing — wire std::net through SlopOS socket layer
+if [ -f "$STD_PAL_SRC/net/slopos.rs" ]; then
+    cp "$STD_PAL_SRC/net/slopos.rs" "$STD_SYS/net/connection/socket/slopos.rs"
+    echo "  Copied net/connection/socket/slopos.rs"
+fi
+
+# Patch connection/socket/mod.rs — add slopos arm before `_ => {}`
+SOCK_MOD="$STD_SYS/net/connection/socket/mod.rs"
+if [ -f "$SOCK_MOD" ] && ! grep -q 'target_os = "slopos"' "$SOCK_MOD" 2>/dev/null; then
+    sed -i '/^[[:space:]]*_ => {}$/{
+i\    target_os = "slopos" => {\
+        mod slopos;\
+        pub use slopos::*;\
+    }
+}' "$SOCK_MOD"
+    echo "  Patched net/connection/socket/mod.rs"
+fi
+
+# Patch connection/mod.rs — add slopos to the socket-based arm
+CONN_MOD="$STD_SYS/net/connection/mod.rs"
+if [ -f "$CONN_MOD" ] && ! grep -q 'target_os = "slopos"' "$CONN_MOD" 2>/dev/null; then
+    sed -i '/^[[:space:]]*_ => {/{
+i\    target_os = "slopos" => {\
+        mod socket;\
+        pub use socket::*;\
+    }
+}' "$CONN_MOD"
+    echo "  Patched net/connection/mod.rs"
+fi
+
+# Patch hostname/mod.rs — use unsupported (returns error, acceptable)
+HOST_MOD="$STD_SYS/net/hostname/mod.rs"
+if [ -f "$HOST_MOD" ] && ! grep -q 'target_os = "slopos"' "$HOST_MOD" 2>/dev/null; then
+    sed -i '/^[[:space:]]*_ => {/{
+i\    target_os = "slopos" => {\
+        mod unsupported;\
+        pub use unsupported::hostname;\
+    }
+}' "$HOST_MOD"
+    echo "  Patched net/hostname/mod.rs"
+fi
+
+# 3j. File descriptor abstraction — sys::fd::FileDesc
+if [ -f "$STD_PAL_SRC/fd/slopos.rs" ]; then
+    cp "$STD_PAL_SRC/fd/slopos.rs" "$STD_SYS/fd/slopos.rs"
+    echo "  Copied fd/slopos.rs"
+fi
+
+FD_MOD="$STD_SYS/fd/mod.rs"
+if [ -f "$FD_MOD" ] && ! grep -q 'target_os = "slopos"' "$FD_MOD" 2>/dev/null; then
+    sed -i '/^[[:space:]]*_ => {}$/{
+i\    target_os = "slopos" => {\
+        mod slopos;\
+        pub use slopos::*;\
+    }
+}' "$FD_MOD"
+    echo "  Patched fd/mod.rs"
+fi
+
+# 3k. Enable os::fd + patch raw.rs/owned.rs for SlopOS
+#
+# These files have complex multi-line cfg blocks that sed can't reliably
+# handle. We use targeted string replacements instead.
+STD_OS="$SYSROOT/lib/rustlib/src/rust/library/std/src/os"
+
+patch_os_fd() {
+    local OS_MOD="$STD_OS/mod.rs"
+    local RAW="$STD_OS/fd/raw.rs"
+    local OWNED="$STD_OS/fd/owned.rs"
+
+    # -- os/mod.rs: add slopos to os::fd gate --
+    sed -i 's/target_os = "motor",/target_os = "motor",\n    target_os = "slopos",/' "$OS_MOD"
+
+    # -- raw.rs: RawFd = i32 for slopos --
+    # Widen the hermit|motor arm to include slopos
+    sed -i 's/any(target_os = "hermit", target_os = "motor")/any(target_os = "hermit", target_os = "motor", target_os = "slopos")/' "$RAW"
+    # Exclude slopos from the raw::c_int arm and the os::raw import
+    sed -i '/not(target_os = "hermit"), not(target_os = "motor"))/{s/)/, not(target_os = "slopos"))/}' "$RAW"
+    # Add slopos to the motor OwnedFd import from super::owned
+    sed -i 's/cfg(target_os = "motor")/cfg(any(target_os = "motor", target_os = "slopos"))/' "$RAW"
+
+    # -- owned.rs: try_clone_to_owned + Drop for slopos --
+    # 1) Exclude slopos from the main try_clone_to_owned (which uses libc::fcntl)
+    sed -i '/target_os = "motor"/{/try_clone_to_owned/!{N;/try_clone_to_owned/!b;};s/target_os = "motor"/target_os = "motor",\n        target_os = "slopos"/}' "$OWNED"
+    # Actually, the exclusion list is in the not(any(...)) block above
+    # try_clone_to_owned. Let me just add to that list.
+    # The cfg is: #[cfg(not(any(target_arch = "wasm32", target_os = "hermit", target_os = "trusty", target_os = "motor")))]
+    sed -i 's/target_os = "trusty",/target_os = "trusty",\n        target_os = "slopos",/' "$OWNED"
+
+    # 2) Add slopos try_clone_to_owned block
+    #    Insert after the motor try_clone_to_owned closing brace
+    local SLOPOS_CLONE='    #[cfg(target_os = "slopos")]\
+    #[stable(feature = "io_safety", since = "1.63.0")]\
+    pub fn try_clone_to_owned(\&self) -> io::Result<OwnedFd> {\
+        unsafe extern "C" { fn dup(fd: i32) -> i32; }\
+        let fd = crate::sys::pal::cvt(unsafe { dup(self.as_raw_fd()) })?;\
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })\
+    }'
+    # Find the motor try_clone_to_owned and append after its closing }
+    sed -i "/target_os = \"motor\"/{
+        /try_clone_to_owned/,/^    \}/{
+            /^    \}/a\\
+\\
+${SLOPOS_CLONE}
+        }
+    }" "$OWNED"
+
+    # 3) Patch Drop: exclude slopos from the #[cfg(not(target_os = "hermit"))] close block
+    #    and add a slopos close block
+    sed -i 's/#\[cfg(not(target_os = "hermit"))\]/#[cfg(not(any(target_os = "hermit", target_os = "slopos")))]/' "$OWNED"
+    # Add slopos close block after the hermit close
+    sed -i '/hermit_abi::close(self.fd.as_inner());/a\
+            #[cfg(target_os = "slopos")]\
+            {\
+                unsafe extern "C" { fn close(fd: i32) -> i32; }\
+                let _ = unsafe { close(self.fd.as_inner()) };\
+            }' "$OWNED"
+
+    # 4) Exclude slopos from the cvt import (we have our own cvt signature)
+    # The gate is: #[cfg(not(any(target_arch = "wasm32", target_env = "sgx", target_os = "hermit", target_os = "trusty", target_os = "motor")))]
+    # We already added slopos to this list via step 1 (same cfg block)
+
+    echo "  Patched os/mod.rs, os/fd/raw.rs, os/fd/owned.rs"
+}
+
+if ! grep -q 'target_os = "slopos"' "$STD_OS/mod.rs" 2>/dev/null; then
+    patch_os_fd
+fi
+
 # 4. Create marker file
 echo "SlopOS std patches applied on $(date)" > "$MARKER"
 echo ""

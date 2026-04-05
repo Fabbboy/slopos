@@ -55,9 +55,6 @@ pub use slopos_abi::{
 
 pub use wrappers::memfd_buf::{CachedShmMapping, ShmBuffer};
 
-// Re-export typestate socket types
-pub use net::{Bound, Connected, Listening, Socket, SocketState, Unbound};
-
 pub type UserWindowInfo = WindowInfo;
 pub type RawFd = i32;
 

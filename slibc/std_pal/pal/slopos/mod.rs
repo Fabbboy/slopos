@@ -36,25 +36,66 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
 // NOTE: this is not guaranteed to run, for example when the program aborts.
 pub unsafe fn cleanup() {}
 
+// ---------------------------------------------------------------------------
+// errno
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    fn __errno_location() -> *mut i32;
+    fn abort() -> !;
+}
+
+/// Read the thread-local errno set by C library functions.
+pub fn errno() -> i32 {
+    unsafe { __errno_location().read() }
+}
+
+// ---------------------------------------------------------------------------
 // Error conversion helpers
-pub fn cvt(ret: isize) -> io::Result<isize> {
+// ---------------------------------------------------------------------------
+
+/// Trait for C return values where -1 signals an error.
+pub trait IsMinusOne {
+    fn is_minus_one(&self) -> bool;
+}
+
+macro_rules! impl_is_minus_one {
+    ($($t:ty),+) => { $(impl IsMinusOne for $t {
+        fn is_minus_one(&self) -> bool { *self == -1 }
+    })+ }
+}
+impl_is_minus_one!(i32, i64, isize);
+
+/// Convert a C-ABI return value to `io::Result`.
+///
+/// Returns `Err` with errno when the value is -1.  Used by code that calls
+/// slibc C functions (read, write, socket, …) which set errno on failure.
+pub fn cvt<T: IsMinusOne>(t: T) -> io::Result<T> {
+    if t.is_minus_one() {
+        Err(io::Error::from_raw_os_error(errno()))
+    } else {
+        Ok(t)
+    }
+}
+
+/// Like [`cvt`] but retries on `EINTR`.
+pub fn cvt_r<T: IsMinusOne, F: FnMut() -> T>(mut f: F) -> io::Result<T> {
+    loop {
+        match cvt(f()) {
+            Err(ref e) if e.raw_os_error() == Some(4 /* EINTR */) => {}
+            other => return other,
+        }
+    }
+}
+
+/// Convert a raw-syscall return value (negated-errno convention) to
+/// `io::Result`.  Kept for existing callers that bypass the C library.
+pub fn cvt_syscall(ret: isize) -> io::Result<isize> {
     if ret < 0 {
         Err(io::Error::from_raw_os_error(-ret as i32))
     } else {
         Ok(ret)
     }
-}
-
-pub fn cvt_i32(ret: i32) -> io::Result<i32> {
-    if ret < 0 {
-        Err(io::Error::from_raw_os_error(-ret))
-    } else {
-        Ok(ret)
-    }
-}
-
-unsafe extern "C" {
-    fn abort() -> !;
 }
 
 unsafe fn slopos_abort() -> ! {

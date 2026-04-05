@@ -2566,22 +2566,20 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 0
             }
             SO_RCVTIMEO => {
-                if val.len() < 8 {
-                    return errno_i32(ERRNO_EINVAL);
-                }
-                let ms = u64::from_ne_bytes([
-                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
-                ]);
+                let tv = match slopos_abi::syscall::Timeval::from_bytes(val) {
+                    Some(tv) => tv,
+                    None => return errno_i32(ERRNO_EINVAL),
+                };
+                let ms = tv.as_millis();
                 sock.options.recv_timeout = if ms == 0 { None } else { Some(ms) };
                 0
             }
             SO_SNDTIMEO => {
-                if val.len() < 8 {
-                    return errno_i32(ERRNO_EINVAL);
-                }
-                let ms = u64::from_ne_bytes([
-                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
-                ]);
+                let tv = match slopos_abi::syscall::Timeval::from_bytes(val) {
+                    Some(tv) => tv,
+                    None => return errno_i32(ERRNO_EINVAL),
+                };
+                let ms = tv.as_millis();
                 sock.options.send_timeout = if ms == 0 { None } else { Some(ms) };
                 0
             }
@@ -2653,20 +2651,22 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 4
             }
             SO_RCVTIMEO => {
-                if out.len() < 8 {
+                let tv = slopos_abi::syscall::Timeval::from_millis(
+                    sock.options.recv_timeout.unwrap_or(0),
+                );
+                if !tv.to_bytes(out) {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v = sock.options.recv_timeout.unwrap_or(0);
-                out[..8].copy_from_slice(&v.to_ne_bytes());
-                8
+                core::mem::size_of::<slopos_abi::syscall::Timeval>() as i32
             }
             SO_SNDTIMEO => {
-                if out.len() < 8 {
+                let tv = slopos_abi::syscall::Timeval::from_millis(
+                    sock.options.send_timeout.unwrap_or(0),
+                );
+                if !tv.to_bytes(out) {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v = sock.options.send_timeout.unwrap_or(0);
-                out[..8].copy_from_slice(&v.to_ne_bytes());
-                8
+                core::mem::size_of::<slopos_abi::syscall::Timeval>() as i32
             }
             SO_KEEPALIVE => {
                 if out.len() < 4 {
@@ -2859,4 +2859,18 @@ pub fn socket_max_send_probe(sock_idx: u32, max_len: usize) -> i32 {
     };
     let space = tcp::tcp_send_buffer_space(tcp_idx);
     cmp::min(space, max_len) as i32
+}
+
+/// Return the peer (remote) address for socket `sock_idx`, if connected.
+pub fn socket_get_peer_addr(sock_idx: u32) -> Option<SockAddr> {
+    let table = NEW_SOCKET_TABLE.lock();
+    let sock = table.get(sock_idx as usize)?;
+    sock.remote_addr
+}
+
+/// Return the local (bound) address for socket `sock_idx`, if bound.
+pub fn socket_get_local_addr(sock_idx: u32) -> Option<SockAddr> {
+    let table = NEW_SOCKET_TABLE.lock();
+    let sock = table.get(sock_idx as usize)?;
+    sock.local_addr
 }
