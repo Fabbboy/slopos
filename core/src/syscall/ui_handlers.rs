@@ -14,10 +14,33 @@ use slopos_mm::process_vm::process_vm_get_page_dir;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
-define_syscall!(syscall_random_next(ctx, args) {
-    let _ = args;
-    let value = platform::rng_next();
-    ctx.ok(value)
+define_syscall!(syscall_getrandom(ctx, args) {
+    let buf_ptr = args.arg0;
+    let buf_len = args.arg1_usize();
+    let _flags = args.arg2 as u32;
+
+    if buf_ptr == 0 || buf_len == 0 {
+        return ctx.ok(0);
+    }
+
+    // Cap at 256 bytes per call to limit IRQ-mutex hold time.
+    let len = buf_len.min(256);
+    let mut scratch = [0u8; 256];
+
+    // Fill via platform service (routes to ChaCha20 CSPRNG in drivers).
+    let mut pos = 0;
+    while pos < len {
+        let val = platform::rng_next();
+        let bytes = val.to_le_bytes();
+        let chunk = (len - pos).min(8);
+        scratch[pos..pos + chunk].copy_from_slice(&bytes[..chunk]);
+        pos += chunk;
+    }
+
+    let user_out = try_or_err!(ctx, UserBytes::try_new(buf_ptr, len));
+    try_or_err!(ctx, copy_bytes_to_user(user_out, &scratch[..len]));
+
+    ctx.ok(len as u64)
 });
 
 define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {

@@ -32,7 +32,21 @@ pub const SYSCALL_FB_INFO: u64 = 6;
 // Random / Roulette
 // =============================================================================
 
-pub const SYSCALL_RANDOM_NEXT: u64 = 12;
+/// Fill a buffer with cryptographically secure random bytes.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to output buffer
+/// * rsi (arg1): buffer length in bytes (capped at 256 per call)
+/// * rdx (arg2): flags (GRND_NONBLOCK = 0x0001, currently no-op)
+///
+/// # Returns
+/// * Number of bytes written on success
+/// * -EFAULT: invalid pointer
+/// * -EINVAL: invalid flags
+pub const SYSCALL_GETRANDOM: u64 = 12;
+
+/// Flags for SYSCALL_GETRANDOM.
+pub const GRND_NONBLOCK: u32 = 0x0001;
 pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
 pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
 

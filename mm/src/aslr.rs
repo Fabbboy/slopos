@@ -57,11 +57,14 @@ pub fn is_enabled() -> bool {
 }
 
 fn get_random() -> u64 {
-    let mut x = tsc::rdtsc() | 1;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
+    // Use hardware RDRAND directly — no lock contention, per-core, no init dependency.
+    if let Some(val) = slopos_arch::cpu::rdrand::rdrand64() {
+        return val;
+    }
+    // TSC fallback with mixing
+    let a = tsc::rdtsc();
+    let b = tsc::rdtsc();
+    a.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b)
 }
 
 pub fn randomize_layout(base: &ProcessMemoryLayout) -> ProcessMemoryLayout {

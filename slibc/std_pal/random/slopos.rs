@@ -1,42 +1,34 @@
-use crate::io;
-
-unsafe extern "C" {
-    fn slopos_get_time_ms() -> u64;
-    fn getpid() -> i32;
-}
-
-static mut PRNG_STATE: u64 = 0;
-static mut PRNG_INITIALIZED: bool = false;
-
-fn prng_seed() -> u64 {
-    let time = unsafe { slopos_get_time_ms() };
-    let pid = unsafe { getpid() } as u64;
-    time.wrapping_mul(6364136223846793005)
-        .wrapping_add(pid ^ 0xdeadbeef_cafebabe)
-}
-
-fn prng_next() -> u64 {
-    unsafe {
-        if !PRNG_INITIALIZED {
-            PRNG_STATE = prng_seed();
-            PRNG_INITIALIZED = true;
-        }
-        // xorshift64
-        PRNG_STATE ^= PRNG_STATE << 13;
-        PRNG_STATE ^= PRNG_STATE >> 7;
-        PRNG_STATE ^= PRNG_STATE << 17;
-        PRNG_STATE
-    }
-}
-
+/// Fill `bytes` with cryptographically secure random data from the kernel.
+///
+/// Issues the `SYSCALL_GETRANDOM` syscall (number 12) directly via inline
+/// assembly. This replaces the old userland xorshift64 PRNG with a proper
+/// kernel-backed CSPRNG (ChaCha20).
 pub fn fill_bytes(bytes: &mut [u8]) {
-    let mut i = 0;
-    while i < bytes.len() {
-        let val = prng_next();
-        let chunk = val.to_ne_bytes();
-        let remaining = bytes.len() - i;
-        let to_copy = remaining.min(8);
-        bytes[i..i + to_copy].copy_from_slice(&chunk[..to_copy]);
-        i += to_copy;
+    const SYS_GETRANDOM: u64 = 12;
+
+    let mut filled = 0usize;
+    while filled < bytes.len() {
+        let ret: u64;
+        let remaining = bytes.len() - filled;
+        let ptr = unsafe { bytes.as_mut_ptr().add(filled) };
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_GETRANDOM,
+                in("rdi") ptr as u64,
+                in("rsi") remaining as u64,
+                in("rdx") 0u64, // flags
+                lateout("rax") ret,
+                out("rcx") _,
+                out("r11") _,
+                options(nostack),
+            );
+        }
+        let n = ret as i64;
+        if n <= 0 {
+            // Should never happen with a seeded CSPRNG, but don't loop forever.
+            break;
+        }
+        filled += n as usize;
     }
 }

@@ -394,6 +394,58 @@ crate::boot_init!(
     boot_step_hpet_setup_fn,
     flags = boot_init_priority(55)
 );
+fn boot_step_csprng_seed_fn() -> i32 {
+    use slopos_arch::cpu::rdrand;
+    use slopos_arch::tsc;
+
+    let mut seed = [0u8; 32];
+    let mut source = "tsc";
+
+    // Primary: RDRAND (available on all modern x86-64, emulated by QEMU)
+    if rdrand::has_rdrand() {
+        source = "rdrand";
+        for chunk in seed.chunks_exact_mut(8) {
+            if let Some(val) = rdrand::rdrand64() {
+                chunk.copy_from_slice(&val.to_le_bytes());
+            }
+        }
+        // Bonus: XOR in RDSEED if available
+        if rdrand::has_rdseed() {
+            source = "rdrand+rdseed";
+            for chunk in seed.chunks_exact_mut(8) {
+                if let Some(val) = rdrand::rdseed64() {
+                    let existing = u64::from_le_bytes(chunk.try_into().unwrap());
+                    let mixed = existing ^ val;
+                    chunk.copy_from_slice(&mixed.to_le_bytes());
+                }
+            }
+        }
+    } else {
+        // Fallback: TSC with mixing constants
+        let mixing: [u64; 4] = [
+            0x9E37_79B9_7F4A_7C15,
+            0x6C62_272E_07BB_0142,
+            0xBF58_476D_1CE4_E5B9,
+            0x94D0_49BB_1331_11EB,
+        ];
+        for (i, chunk) in seed.chunks_exact_mut(8).enumerate() {
+            let val = tsc::rdtsc().wrapping_mul(mixing[i]).wrapping_add(mixing[i]);
+            chunk.copy_from_slice(&val.to_le_bytes());
+        }
+    }
+
+    slopos_drivers::random::init_csprng(&seed);
+    klog_info!("CSPRNG seeded from {source}");
+    0
+}
+
+crate::boot_init!(
+    BOOT_STEP_CSPRNG_SEED,
+    drivers,
+    b"csprng seed\0",
+    boot_step_csprng_seed_fn,
+    flags = boot_init_priority(56)
+);
 crate::boot_init!(
     BOOT_STEP_LAPIC_CALIBRATION,
     drivers,

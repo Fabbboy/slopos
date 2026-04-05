@@ -4,6 +4,7 @@ pub mod core;
 pub mod cpuid;
 pub mod interrupts;
 pub mod msr;
+pub mod rdrand;
 pub mod sse;
 pub mod stack;
 pub mod tlb;

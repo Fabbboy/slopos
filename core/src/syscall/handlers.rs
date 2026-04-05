@@ -38,7 +38,7 @@ use crate::syscall::signal::{
 };
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_fb_flip, syscall_fb_info,
-    syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty, syscall_random_next,
+    syscall_getrandom, syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty,
     syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin, syscall_tty_read,
     syscall_tty_write,
 };
@@ -86,7 +86,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_PERCPU_STATS]  => syscall_percpu_stats,  "percpu_stats";
 
     // Random / Roulette
-    [SYSCALL_RANDOM_NEXT]     => syscall_random_next,     "random_next";
+    [SYSCALL_GETRANDOM]       => syscall_getrandom,       "getrandom";
     [SYSCALL_ROULETTE]        => syscall_roulette_spin,   "roulette";
     [SYSCALL_ROULETTE_RESULT] => syscall_roulette_result, "roulette_result";
     [SYSCALL_ROULETTE_DRAW]   => syscall_roulette_draw,   "roulette_draw";

@@ -1,7 +1,7 @@
 //! Core syscalls: yield, exit, sleep, time, CPU info.
 
 use super::numbers::*;
-use super::raw::{syscall0, syscall1, syscall2};
+use super::raw::{syscall0, syscall1, syscall2, syscall3};
 use slopos_slibc::pal::{Pal, Sys};
 
 #[inline(always)]
@@ -64,9 +64,26 @@ pub fn get_current_cpu() -> u32 {
     unsafe { syscall0(SYSCALL_GET_CURRENT_CPU) as u32 }
 }
 
+/// Fill a buffer with cryptographically secure random bytes.
+/// Returns the number of bytes written.
+#[inline(always)]
+pub fn getrandom(buf: &mut [u8]) -> isize {
+    unsafe {
+        syscall3(
+            SYSCALL_GETRANDOM,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+        ) as isize
+    }
+}
+
+/// Convenience: get a random u32 value.
 #[inline(always)]
 pub fn random_next() -> u32 {
-    unsafe { syscall0(SYSCALL_RANDOM_NEXT) as u32 }
+    let mut buf = [0u8; 4];
+    let _ = getrandom(&mut buf);
+    u32::from_le_bytes(buf)
 }
 
 #[inline(always)]

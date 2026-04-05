@@ -1,5 +1,4 @@
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 const ROOT_INODE: InodeId = 1;
 const NULL_INODE: InodeId = 2;
@@ -48,36 +47,11 @@ static DEVICES: [DeviceEntry; 4] = [
     DeviceEntry::new(b"console", CONSOLE_INODE, 5, 1),
 ];
 
-struct DevFsInner {
-    rng_state: u64,
-}
-
-impl DevFsInner {
-    const fn new() -> Self {
-        Self {
-            rng_state: 0x853c49e6748fea9b,
-        }
-    }
-
-    fn next_random(&mut self) -> u64 {
-        let mut x = self.rng_state;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.rng_state = x;
-        x.wrapping_mul(0x2545F4914F6CDD1D)
-    }
-}
-
-pub struct DevFs {
-    inner: IrqMutex<DevFsInner>,
-}
+pub struct DevFs;
 
 impl DevFs {
     pub const fn new() -> Self {
-        Self {
-            inner: IrqMutex::new(DevFsInner::new(), LOCK_LEVEL_RESOURCE),
-        }
+        Self
     }
 }
 
@@ -138,10 +112,10 @@ impl FileSystem for DevFs {
             }
 
             RANDOM_INODE => {
-                let mut inner = self.inner.lock();
+                // Reads from the kernel CSPRNG via the platform service.
                 let mut pos = 0;
                 while pos < buf.len() {
-                    let val = inner.next_random();
+                    let val = slopos_kernel_services::platform::rng_next();
                     let bytes = val.to_le_bytes();
                     let chunk = (buf.len() - pos).min(8);
                     buf[pos..pos + chunk].copy_from_slice(&bytes[..chunk]);
@@ -162,18 +136,9 @@ impl FileSystem for DevFs {
         match inode {
             NULL_INODE | ZERO_INODE => Ok(buf.len()),
 
-            RANDOM_INODE => {
-                let mut inner = self.inner.lock();
-                let mut pos = 0;
-                while pos < buf.len() {
-                    let mut bytes = [0u8; 8];
-                    let chunk = (buf.len() - pos).min(8);
-                    bytes[..chunk].copy_from_slice(&buf[pos..pos + chunk]);
-                    inner.rng_state ^= u64::from_le_bytes(bytes);
-                    pos += chunk;
-                }
-                Ok(pos)
-            }
+            // Accept and discard writes to /dev/random (entropy injection is
+            // not meaningful with a properly-seeded CSPRNG).
+            RANDOM_INODE => Ok(buf.len()),
 
             CONSOLE_INODE => Ok(buf.len()),
 

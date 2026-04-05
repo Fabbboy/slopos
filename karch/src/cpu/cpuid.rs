@@ -78,6 +78,9 @@ pub const CPUID_FEAT_ECX_X2APIC: u32 = 1 << 21;
 /// XSAVE/XRSTOR/XGETBV/XSETBV instruction support.
 pub const CPUID_FEAT_ECX_XSAVE: u32 = 1 << 26;
 
+/// RDRAND instruction support (hardware random number generator).
+pub const CPUID_FEAT_ECX_RDRAND: u32 = 1 << 30;
+
 /// OS has enabled XSAVE via CR4.OSXSAVE.
 /// When set, userland can execute XGETBV and the kernel has set CR4.OSXSAVE.
 pub const CPUID_FEAT_ECX_OSXSAVE: u32 = 1 << 27;
@@ -87,6 +90,9 @@ pub const CPUID_FEAT_ECX_OSXSAVE: u32 = 1 << 27;
 
 /// INVPCID instruction support.
 pub const CPUID_SEXT_EBX_INVPCID: u32 = 1 << 10;
+
+/// RDSEED instruction support (hardware entropy seed).
+pub const CPUID_SEXT_EBX_RDSEED: u32 = 1 << 18;
 
 // =============================================================================
 // CPUID Extended Leaf 0x80000001 - EDX Flags
