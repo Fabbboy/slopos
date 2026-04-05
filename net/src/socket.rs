@@ -2481,6 +2481,7 @@ pub fn socket_reset_all() {
     crate::icmp::ICMP_DEMUX.lock().clear();
     crate::udp::UDP_DEMUX.lock().clear();
     tcp::tcp_reset_all();
+    crate::neighbor::NEIGHBOR_CACHE.reset();
 }
 
 #[derive(Clone, Copy)]

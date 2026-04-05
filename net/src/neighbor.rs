@@ -192,6 +192,22 @@ impl NeighborCache {
         }
     }
 
+    /// Clear all entries and reset the ID generator.
+    ///
+    /// Used by test harnesses to ensure no stale neighbor state (e.g. `Failed`
+    /// entries from earlier ARP retransmit exhaustion) leaks between tests.
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock();
+        // Cancel all outstanding ARP timers before dropping entries.
+        for entry in inner.entries.iter_mut() {
+            if let Some(token) = entry.timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
+        }
+        inner.entries.clear();
+        inner.next_entry_id = 1;
+    }
+
     // =========================================================================
     // 2B.2 — lookup
     // =========================================================================
