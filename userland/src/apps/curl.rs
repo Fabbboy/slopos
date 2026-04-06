@@ -1,9 +1,8 @@
-use core::fmt::Write;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use crate::syscall::{fs, process};
+use crate::syscall::process;
 
 const MAX_HEADERS: usize = 8;
 const MAX_REDIRECTS: usize = 10;
@@ -24,6 +23,7 @@ struct CurlConfig {
     verbose: bool,
     follow_redirects: bool,
     method: Option<String>,
+    #[allow(dead_code)] // parsed but not yet implemented
     output_file: Option<String>,
     headers: Vec<String>,
     data: Option<Vec<u8>>,
@@ -81,67 +81,8 @@ enum CurlError {
     RedirectLimit,
 }
 
-struct WriteBuf {
-    buf: [u8; 256],
-    pos: usize,
-}
-
-impl WriteBuf {
-    fn new() -> Self {
-        Self {
-            buf: [0u8; 256],
-            pos: 0,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.pos]
-    }
-}
-
-impl core::fmt::Write for WriteBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = self.buf.len().saturating_sub(self.pos);
-        let n = bytes.len().min(avail);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-        self.pos += n;
-        Ok(())
-    }
-}
-
-fn write_fd(fd: i32, mut bytes: &[u8]) {
-    while !bytes.is_empty() {
-        match fs::write_slice(fd, bytes) {
-            Ok(0) => break,
-            Ok(n) => bytes = &bytes[n..],
-            Err(_) => break,
-        }
-    }
-}
-
-fn write_stdout(bytes: &[u8]) {
-    write_fd(1, bytes);
-}
-
-fn write_stderr(bytes: &[u8]) {
-    write_fd(2, bytes);
-}
-
-fn writeln_stdout(args: core::fmt::Arguments<'_>) {
-    let mut buf = WriteBuf::new();
-    let _ = write!(buf, "{}\n", args);
-    write_stdout(buf.as_bytes());
-}
-
-fn writeln_stderr(args: core::fmt::Arguments<'_>) {
-    let mut buf = WriteBuf::new();
-    let _ = write!(buf, "{}\n", args);
-    write_stderr(buf.as_bytes());
-}
-
 fn print_usage() {
-    write_stdout(b"usage: curl [-v] [-L] [-o output] [-X method] [-H header] [-d data] <url>\n");
+    println!("usage: curl [-v] [-L] [-o output] [-X method] [-H header] [-d data] <url>");
 }
 
 fn print_error(err: CurlError) {
@@ -168,7 +109,7 @@ fn print_error(err: CurlError) {
         CurlError::RedirectWithoutLocation => "curl: redirect without Location header",
         CurlError::RedirectLimit => "curl: too many redirects",
     };
-    writeln_stdout(format_args!("{}", msg));
+    eprintln!("{msg}");
 }
 
 fn parse_args(args: Vec<String>) -> Result<CurlConfig, CurlError> {
@@ -421,10 +362,8 @@ fn build_request(config: &CurlConfig, parsed: &ParsedUrl) -> Result<Vec<u8>, Cur
     req.extend_from_slice(b"Connection: close\r\n");
 
     if !body.is_empty() {
-        let mut len_buf = WriteBuf::new();
-        let _ = write!(len_buf, "{}", body.len());
         req.extend_from_slice(b"Content-Length: ");
-        req.extend_from_slice(len_buf.as_bytes());
+        req.extend_from_slice(format!("{}", body.len()).as_bytes());
         req.extend_from_slice(b"\r\n");
     }
 
@@ -583,11 +522,11 @@ fn is_redirect_status(status: u16) -> bool {
 }
 
 fn send_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), CurlError> {
-    use std::io::Write;
     stream.write_all(data).map_err(|_| CurlError::SendFailed)
 }
 
 fn verbose_emit_prefixed(prefix: u8, block: &[u8]) {
+    let mut err = io::stderr().lock();
     let mut start = 0usize;
     while start < block.len() {
         let mut end = start;
@@ -607,12 +546,13 @@ fn verbose_emit_prefixed(prefix: u8, block: &[u8]) {
             break;
         }
 
-        write_stderr(&[prefix, b' ']);
-        write_stderr(line);
-        write_stderr(b"\n");
+        let _ = err.write_all(&[prefix, b' ']);
+        let _ = err.write_all(line);
+        let _ = err.write_all(b"\n");
 
         start = end + 2;
     }
+    let _ = err.flush();
 }
 
 fn append_limited(dst: &mut Vec<u8>, src: &[u8]) -> Result<(), CurlError> {
@@ -938,10 +878,10 @@ fn run_curl(config: &CurlConfig) -> Result<(), CurlError> {
             continue;
         }
 
-        if config.output_file.is_some() {
-            write_stdout(&body);
-        } else {
-            write_stdout(&body);
+        {
+            let mut out = io::stdout().lock();
+            let _ = out.write_all(&body);
+            let _ = out.flush();
         }
         return Ok(());
     }
@@ -960,9 +900,7 @@ pub fn curl_main(args: Vec<String>) -> ! {
     };
 
     if config.verbose {
-        let host = config.url.as_bytes();
-        let _ = host;
-        writeln_stderr(format_args!("* SlopOS curl HTTP/1.1"));
+        eprintln!("* SlopOS curl HTTP/1.1");
     }
 
     match run_curl(&config) {

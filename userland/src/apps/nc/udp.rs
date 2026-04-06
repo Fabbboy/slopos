@@ -1,12 +1,11 @@
-use crate::syscall::{UserPollFd, fs};
-use slopos_abi::syscall::POLLIN;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Instant;
 
-use super::{
-    NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv, write_stdout,
-    writeln_stdout,
-};
+use crate::syscall::{UserPollFd, fs};
+use slopos_abi::syscall::POLLIN;
+
+use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv};
 
 /// Extract the raw fd number from a `UdpSocket`.
 ///
@@ -41,13 +40,13 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
     let socket = match UdpSocket::bind(&bind_addr) {
         Ok(s) => s,
         Err(_) => {
-            write_stdout(b"nc: socket creation failed\n");
+            eprintln!("nc: socket creation failed");
             return 1;
         }
     };
 
     if let Err(_) = socket.set_nonblocking(true) {
-        write_stdout(b"nc: failed to set non-blocking\n");
+        eprintln!("nc: failed to set non-blocking");
         return 1;
     }
 
@@ -106,7 +105,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
                                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
                                     }
                                     Err(_) => {
-                                        write_stdout(b"nc: send failed\n");
+                                        eprintln!("nc: send failed");
                                     }
                                 }
                                 line_pos = 0;
@@ -126,9 +125,13 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
             match socket.recv_from(&mut recv_buf) {
                 Ok((0, _)) => {}
                 Ok((received, src_addr)) => {
-                    write_stdout(&recv_buf[..received]);
-                    if recv_buf[received - 1] != b'\n' {
-                        write_stdout(b"\n");
+                    {
+                        let mut out = std::io::stdout().lock();
+                        let _ = out.write_all(&recv_buf[..received]);
+                        if recv_buf[received - 1] != b'\n' {
+                            let _ = out.write_all(b"\n");
+                        }
+                        let _ = out.flush();
                     }
                     let (ip, port) = addr_parts(&src_addr);
                     verbose_recv(config, received, ip, port);
@@ -141,7 +144,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                write_stdout(b"nc: timeout\n");
+                eprintln!("nc: timeout");
                 return 1;
             }
         }
@@ -154,21 +157,18 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     let socket = match UdpSocket::bind(&bind_addr) {
         Ok(s) => s,
         Err(_) => {
-            write_stdout(b"nc: bind failed (port in use?)\n");
+            eprintln!("nc: bind failed (port in use?)");
             return 1;
         }
     };
 
     if let Err(_) = socket.set_nonblocking(true) {
-        write_stdout(b"nc: failed to set non-blocking\n");
+        eprintln!("nc: failed to set non-blocking");
         return 1;
     }
 
     if config.verbose {
-        writeln_stdout(format_args!(
-            "nc: listening on 0.0.0.0:{} (udp)",
-            config.local_port
-        ));
+        println!("nc: listening on 0.0.0.0:{} (udp)", config.local_port);
     }
 
     let sock_fd = socket_raw_fd(&socket);
@@ -220,7 +220,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
                                                 clock_start.elapsed().as_millis() as u64;
                                         }
                                         Err(_) => {
-                                            write_stdout(b"nc: send failed\n");
+                                            eprintln!("nc: send failed");
                                         }
                                     }
                                 }
@@ -241,9 +241,13 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
             match socket.recv_from(&mut recv_buf) {
                 Ok((0, _)) => {}
                 Ok((received, src_addr)) => {
-                    write_stdout(&recv_buf[..received]);
-                    if recv_buf[received - 1] != b'\n' {
-                        write_stdout(b"\n");
+                    {
+                        let mut out = std::io::stdout().lock();
+                        let _ = out.write_all(&recv_buf[..received]);
+                        if recv_buf[received - 1] != b'\n' {
+                            let _ = out.write_all(b"\n");
+                        }
+                        let _ = out.flush();
                     }
                     let (ip, port) = addr_parts(&src_addr);
                     verbose_recv(config, received, ip, port);
@@ -257,7 +261,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                write_stdout(b"nc: timeout\n");
+                eprintln!("nc: timeout");
                 return 1;
             }
         }

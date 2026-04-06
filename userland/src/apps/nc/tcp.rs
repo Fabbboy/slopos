@@ -1,13 +1,13 @@
-use crate::syscall::{UserPollFd, fs, net};
-use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
-use slopos_abi::syscall::POLLIN;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{
-    NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, write_stdout, writeln_stdout,
-};
+use crate::syscall::{UserPollFd, fs, net};
+use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
+use slopos_abi::syscall::POLLIN;
+
+use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg};
 
 /// Build a kernel `SockAddrIn` from a high-level `SocketAddrV4`.
 fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
@@ -73,7 +73,7 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     let fd = match net::socket(AF_INET, SOCK_STREAM, 0) {
         Ok(f) => f,
         Err(_) => {
-            write_stdout(b"nc: socket creation failed\n");
+            eprintln!("nc: socket creation failed");
             return 1;
         }
     };
@@ -81,15 +81,13 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     // Optional local-port bind before connect.
     if config.local_port != 0 {
         if net::bind_any(fd.raw(), config.local_port).is_err() {
-            write_stdout(b"nc: bind failed (port in use?)\n");
+            eprintln!("nc: bind failed (port in use?)");
             return 1;
         }
     }
 
     if let Err(e) = net::connect(fd.raw(), &dest) {
-        write_stdout(b"nc: connect failed: ");
-        write_stdout(e.as_str().as_bytes());
-        write_stdout(b"\n");
+        eprintln!("nc: connect failed: {}", e.as_str());
         return 1;
     }
 
@@ -104,7 +102,7 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     verbose_msg(config, "protocol: tcp");
 
     if conn.set_nonblocking().is_err() {
-        write_stdout(b"nc: failed to set non-blocking\n");
+        eprintln!("nc: failed to set non-blocking");
         return 1;
     }
 
@@ -159,7 +157,7 @@ fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
                                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
                                     }
                                     Err(_) => {
-                                        write_stdout(b"nc: send failed (broken pipe)\n");
+                                        eprintln!("nc: send failed (broken pipe)");
                                         conn.shutdown_both();
                                         return 1;
                                     }
@@ -186,9 +184,13 @@ fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
                     return 0;
                 }
                 Ok(received) => {
-                    write_stdout(&recv_buf[..received]);
-                    if recv_buf[received - 1] != b'\n' {
-                        write_stdout(b"\n");
+                    {
+                        let mut out = std::io::stdout().lock();
+                        let _ = out.write_all(&recv_buf[..received]);
+                        if recv_buf[received - 1] != b'\n' {
+                            let _ = out.write_all(b"\n");
+                        }
+                        let _ = out.flush();
                     }
                     verbose_bytes(config, "received ", received);
                     last_activity_ms = clock_start.elapsed().as_millis() as u64;
@@ -206,7 +208,7 @@ fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                write_stdout(b"nc: timeout\n");
+                eprintln!("nc: timeout");
                 conn.shutdown_both();
                 return 1;
             }
@@ -220,7 +222,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     let fd = match net::socket(AF_INET, SOCK_STREAM, 0) {
         Ok(f) => f,
         Err(_) => {
-            write_stdout(b"nc: socket creation failed\n");
+            eprintln!("nc: socket creation failed");
             return 1;
         }
     };
@@ -228,22 +230,22 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     let _ = net::set_reuse_addr(fd.raw());
 
     if net::bind_any(fd.raw(), listen_addr.port()).is_err() {
-        write_stdout(b"nc: bind failed (port in use?)\n");
+        eprintln!("nc: bind failed (port in use?)");
         return 1;
     }
 
     if net::listen(fd.raw(), 1).is_err() {
-        write_stdout(b"nc: listen failed\n");
+        eprintln!("nc: listen failed");
         return 1;
     }
 
     if net::set_nonblocking(fd.raw()).is_err() {
-        write_stdout(b"nc: failed to set non-blocking\n");
+        eprintln!("nc: failed to set non-blocking");
         return 1;
     }
 
     if config.verbose {
-        writeln_stdout(format_args!("nc: listening on {} (tcp)", listen_addr));
+        println!("nc: listening on {listen_addr} (tcp)");
     }
 
     let accept_start = Instant::now();
@@ -254,7 +256,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
             if config.timeout_ms > 0 {
                 let elapsed = accept_start.elapsed().as_millis() as u64;
                 if elapsed >= config.timeout_ms as u64 {
-                    write_stdout(b"nc: timeout waiting for connection\n");
+                    eprintln!("nc: timeout waiting for connection");
                     return 1;
                 }
             }
@@ -271,7 +273,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
         let client = TcpConn { fd: client_fd };
 
         if client.set_nonblocking().is_err() {
-            write_stdout(b"nc: failed to set non-blocking on client socket\n");
+            eprintln!("nc: failed to set non-blocking on client socket");
             client.shutdown_both();
             if !config.keep_listen {
                 return 1;
@@ -344,7 +346,7 @@ fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
                                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
                                     }
                                     Err(_) => {
-                                        write_stdout(b"nc: send failed (broken pipe)\n");
+                                        eprintln!("nc: send failed (broken pipe)");
                                         client.shutdown_both();
                                         return Some(1);
                                     }
@@ -371,9 +373,13 @@ fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
                     return None;
                 }
                 Ok(received) => {
-                    write_stdout(&recv_buf[..received]);
-                    if recv_buf[received - 1] != b'\n' {
-                        write_stdout(b"\n");
+                    {
+                        let mut out = std::io::stdout().lock();
+                        let _ = out.write_all(&recv_buf[..received]);
+                        if recv_buf[received - 1] != b'\n' {
+                            let _ = out.write_all(b"\n");
+                        }
+                        let _ = out.flush();
                     }
                     verbose_bytes(config, "received ", received);
                     last_activity_ms = clock_start.elapsed().as_millis() as u64;
@@ -391,7 +397,7 @@ fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                write_stdout(b"nc: timeout\n");
+                eprintln!("nc: timeout");
                 client.shutdown_both();
                 return None;
             }

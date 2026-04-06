@@ -1,4 +1,3 @@
-use core::fmt::Write;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -33,54 +32,8 @@ impl PingStats {
     }
 }
 
-struct WriteBuf {
-    buf: [u8; 512],
-    pos: usize,
-}
-
-impl WriteBuf {
-    fn new() -> Self {
-        Self {
-            buf: [0; 512],
-            pos: 0,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.pos]
-    }
-}
-
-impl core::fmt::Write for WriteBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = self.buf.len().saturating_sub(self.pos);
-        let n = bytes.len().min(avail);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-        self.pos += n;
-        Ok(())
-    }
-}
-
-fn write_stdout(buf: &[u8]) {
-    let mut remaining = buf;
-    while !remaining.is_empty() {
-        match fs::write_slice(1, remaining) {
-            Ok(0) => break,
-            Ok(n) => remaining = &remaining[n..],
-            Err(_) => break,
-        }
-    }
-}
-
-fn writeln_stdout(args: core::fmt::Arguments<'_>) {
-    let mut buf = WriteBuf::new();
-    let _ = write!(buf, "{}\n", args);
-    write_stdout(buf.as_bytes());
-}
-
 fn print_usage() {
-    write_stdout(b"usage: ping [-c count] [-i interval] [-s size] [-W timeout] [-v] <host>\n");
+    println!("usage: ping [-c count] [-i interval] [-s size] [-W timeout] [-v] <host>");
 }
 
 fn parse_ipv4(host: &str) -> Option<[u8; 4]> {
@@ -257,7 +210,7 @@ fn send_ping(
             true
         }
         Err(_) => {
-            write_stdout(b"ping: sendto failed\n");
+            eprintln!("ping: sendto failed");
             false
         }
     }
@@ -281,19 +234,19 @@ fn try_receive(fd: i32, clock_start: &Instant, stats: &mut PingStats, verbose: b
                 };
                 stats.record_rtt(rtt_ms);
 
-                writeln_stdout(format_args!(
+                println!(
                     "{} bytes from {}: icmp_seq={} time={:.3} ms",
                     received,
                     Ipv4Addr::from(src.addr),
                     reply_seq,
                     rtt_ms
-                ));
+                );
             }
         }
         Ok(_) => {}
         Err(_) => {
             if verbose {
-                writeln_stdout(format_args!("ping: recvfrom failed"));
+                eprintln!("ping: recvfrom failed");
             }
         }
     }
@@ -321,7 +274,7 @@ pub fn ping_main(args: Vec<String>) -> ! {
     let target_ip = if let Some(ip) = resolve_host(&config.host) {
         ip
     } else {
-        writeln_stdout(format_args!("ping: cannot resolve {}", config.host));
+        eprintln!("ping: cannot resolve {}", config.host);
         std::process::exit(2);
     };
 
@@ -332,19 +285,19 @@ pub fn ping_main(args: Vec<String>) -> ! {
     ) {
         Ok(fd) => fd,
         Err(_) => {
-            write_stdout(b"ping: socket creation failed\n");
+            eprintln!("ping: socket creation failed");
             std::process::exit(2);
         }
     };
 
     let ident = (process::getpid() & 0xFFFF) as u16;
     if let Err(_) = net::bind_addr(fd.raw(), [0, 0, 0, 0], ident) {
-        write_stdout(b"ping: bind failed\n");
+        eprintln!("ping: bind failed");
         std::process::exit(2);
     }
 
     if let Err(_) = net::set_nonblocking(fd.raw()) {
-        write_stdout(b"ping: failed to set non-blocking\n");
+        eprintln!("ping: failed to set non-blocking");
         std::process::exit(2);
     }
 
@@ -355,12 +308,12 @@ pub fn ping_main(args: Vec<String>) -> ! {
         let _ = fs::tcsetattr(0, &raw);
     }
 
-    writeln_stdout(format_args!(
+    println!(
         "PING {} ({}): {} data bytes",
         config.host,
         Ipv4Addr::from(target_ip),
         config.payload_size
-    ));
+    );
 
     let target = SockAddrIn {
         family: slopos_abi::net::AF_INET,
@@ -448,7 +401,7 @@ pub fn ping_main(args: Vec<String>) -> ! {
         }
 
         if !stop_requested && stdin_ready && stdin_has_ctrl_c() {
-            write_stdout(b"^C\n");
+            print!("^C\n");
             stop_requested = true;
             continue;
         }
@@ -472,11 +425,11 @@ pub fn ping_main(args: Vec<String>) -> ! {
         ((stats.sent - stats.received) * 100) / stats.sent
     };
 
-    writeln_stdout(format_args!("--- {} ping statistics ---", config.host));
-    writeln_stdout(format_args!(
+    println!("--- {} ping statistics ---", config.host);
+    println!(
         "{} packets transmitted, {} received, {}% packet loss",
         stats.sent, stats.received, loss
-    ));
+    );
 
     let (min_rtt, avg_rtt, max_rtt) = if stats.received > 0 {
         (
@@ -487,10 +440,10 @@ pub fn ping_main(args: Vec<String>) -> ! {
     } else {
         (0.0, 0.0, 0.0)
     };
-    writeln_stdout(format_args!(
+    println!(
         "rtt min/avg/max = {:.3}/{:.3}/{:.3} ms",
         min_rtt, avg_rtt, max_rtt
-    ));
+    );
 
     let code = if stats.received > 0 { 0 } else { 1 };
     std::process::exit(code);

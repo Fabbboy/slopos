@@ -118,38 +118,12 @@ fn is_var_char(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric()
 }
 
-fn write_u32_to_buf(value: u32, dst: &mut [u8]) -> usize {
-    if value == 0 {
-        if !dst.is_empty() {
-            dst[0] = b'0';
-        }
-        return 1;
-    }
-    let mut rev = [0u8; 12];
-    let mut r = 0usize;
-    let mut n = value;
-    while n != 0 && r < rev.len() {
-        rev[r] = b'0' + (n % 10) as u8;
-        n /= 10;
-        r += 1;
-    }
-    let len = r.min(dst.len());
-    for i in 0..len {
-        dst[i] = rev[r - 1 - i];
-    }
-    len
-}
-
-fn write_i32_to_buf(value: i32, dst: &mut [u8]) -> usize {
-    if value < 0 {
-        if dst.is_empty() {
-            return 0;
-        }
-        dst[0] = b'-';
-        1 + write_u32_to_buf(value.unsigned_abs(), &mut dst[1..])
-    } else {
-        write_u32_to_buf(value as u32, dst)
-    }
+fn format_int_into(dst: &mut [u8], val: impl core::fmt::Display) -> usize {
+    use std::io::Write;
+    let len = dst.len();
+    let mut cursor: &mut [u8] = dst;
+    let _ = write!(cursor, "{val}");
+    len - cursor.len()
 }
 
 fn emit(dst: &mut [u8], pos: &mut usize, b: u8) {
@@ -213,22 +187,19 @@ pub fn expand_variables(input: &[u8], input_len: usize, output: &mut [u8]) -> us
 
             if next == b'?' {
                 let val = super::last_exit_code();
-                let n = write_i32_to_buf(val, &mut output[out..]);
-                out += n;
+                out += format_int_into(&mut output[out..], val);
                 i += 2;
                 continue;
             }
             if next == b'$' {
                 let val = super::shell_pid();
-                let n = write_u32_to_buf(val, &mut output[out..]);
-                out += n;
+                out += format_int_into(&mut output[out..], val);
                 i += 2;
                 continue;
             }
             if next == b'!' {
                 let val = super::last_bg_pid();
-                let n = write_u32_to_buf(val, &mut output[out..]);
-                out += n;
+                out += format_int_into(&mut output[out..], val);
                 i += 2;
                 continue;
             }

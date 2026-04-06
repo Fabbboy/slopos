@@ -1209,14 +1209,11 @@ fn write_wc_line(lines: usize, words: usize, chars: usize, name: &[u8]) {
 }
 
 fn write_hex_byte(b: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let out = [HEX[(b >> 4) as usize], HEX[(b & 0x0F) as usize]];
-    shell_write(&out);
+    shell_write(format!("{b:02x}").as_bytes());
 }
 
 fn write_hex_u16(val: u16) {
-    write_hex_byte((val >> 8) as u8);
-    write_hex_byte(val as u8);
+    shell_write(format!("{val:04x}").as_bytes());
 }
 
 fn paths_equal(a: &[u8], b: &[u8]) -> bool {

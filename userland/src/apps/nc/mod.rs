@@ -7,6 +7,7 @@
 pub mod tcp;
 pub mod udp;
 
+use std::io::Write;
 use std::net::Ipv4Addr;
 
 use crate::syscall::{fs, process};
@@ -50,59 +51,6 @@ enum NcError {
 }
 
 // ---------------------------------------------------------------------------
-// Output helpers
-// ---------------------------------------------------------------------------
-
-pub(super) fn write_stdout(buf: &[u8]) {
-    let mut remaining = buf;
-    while !remaining.is_empty() {
-        match fs::write_slice(1, remaining) {
-            Ok(0) => break,
-            Ok(n) => remaining = &remaining[n..],
-            Err(_) => break,
-        }
-    }
-}
-
-/// Formatted write to stdout with newline, via raw fd 1 syscall.
-/// Avoids std::io::Stdout buffering which doesn't flush through pipes.
-pub(super) fn writeln_stdout(args: core::fmt::Arguments<'_>) {
-    use core::fmt::Write;
-    let mut buf = WriteBuf::new();
-    let _ = write!(buf, "{}\n", args);
-    write_stdout(buf.as_bytes());
-}
-
-struct WriteBuf {
-    buf: [u8; 256],
-    pos: usize,
-}
-
-impl WriteBuf {
-    fn new() -> Self {
-        Self {
-            buf: [0u8; 256],
-            pos: 0,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.pos]
-    }
-}
-
-impl core::fmt::Write for WriteBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = self.buf.len() - self.pos;
-        let n = bytes.len().min(avail);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-        self.pos += n;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Stdin processing (raw mode)
 // ---------------------------------------------------------------------------
 
@@ -124,10 +72,12 @@ pub(super) fn process_raw_stdin_char(
     line_buf: &mut [u8; 1024],
     line_pos: &mut usize,
 ) -> StdinResult {
+    let mut out = std::io::stdout().lock();
     match c {
         // Ctrl+C / Ctrl+D -> quit
         0x03 => {
-            write_stdout(b"^C\n");
+            let _ = out.write_all(b"^C\n");
+            let _ = out.flush();
             StdinResult::Quit
         }
         0x04 => StdinResult::Quit,
@@ -135,13 +85,15 @@ pub(super) fn process_raw_stdin_char(
         0x08 | 0x7F => {
             if *line_pos > 0 {
                 *line_pos -= 1;
-                write_stdout(b"\x08 \x08");
+                let _ = out.write_all(b"\x08 \x08");
+                let _ = out.flush();
             }
             StdinResult::Continue
         }
         // Enter
         b'\n' | b'\r' => {
-            write_stdout(b"\n");
+            let _ = out.write_all(b"\n");
+            let _ = out.flush();
             if *line_pos > 0 {
                 let send_len = if *line_pos < line_buf.len() {
                     line_buf[*line_pos] = b'\n';
@@ -159,7 +111,8 @@ pub(super) fn process_raw_stdin_char(
             if *line_pos < line_buf.len() - 1 {
                 line_buf[*line_pos] = c;
                 *line_pos += 1;
-                write_stdout(&[c]);
+                let _ = out.write_all(&[c]);
+                let _ = out.flush();
             }
             StdinResult::Continue
         }
@@ -176,38 +129,33 @@ fn verbose_msg(config: &NcConfig, msg: &str) {
     if !config.verbose {
         return;
     }
-    writeln_stdout(format_args!("nc: {}", msg));
+    println!("nc: {msg}");
 }
 
 fn verbose_addr(config: &NcConfig, prefix: &str, ip: [u8; 4], port: u16) {
     if !config.verbose {
         return;
     }
-    writeln_stdout(format_args!(
-        "nc: {}{}:{}",
-        prefix,
-        Ipv4Addr::from(ip),
-        port
-    ));
+    println!("nc: {}{}:{}", prefix, Ipv4Addr::from(ip), port);
 }
 
 fn verbose_bytes(config: &NcConfig, prefix: &str, count: usize) {
     if !config.verbose {
         return;
     }
-    writeln_stdout(format_args!("nc: {}{} bytes", prefix, count));
+    println!("nc: {prefix}{count} bytes");
 }
 
 fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
     if !config.verbose {
         return;
     }
-    writeln_stdout(format_args!(
+    println!(
         "nc: received {} bytes from {}:{}",
         count,
         Ipv4Addr::from(ip),
         port
-    ));
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -215,16 +163,18 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    write_stdout(b"usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n");
-    write_stdout(b"\n");
-    write_stdout(b"  -u        UDP mode (default is TCP)\n");
-    write_stdout(b"  -l        Listen mode (bind and accept/receive)\n");
-    write_stdout(b"  -v        Verbose output\n");
-    write_stdout(b"  -k        Keep listening after client disconnects (TCP -l only)\n");
-    write_stdout(b"  -p port   Source port (client mode)\n");
-    write_stdout(b"  -w secs   Timeout in seconds\n");
-    write_stdout(b"  host      Remote hostname or IP (client mode)\n");
-    write_stdout(b"  port      Remote port (client) or listen port (listen mode)\n");
+    print!(
+        "usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n\
+         \n\
+         \x20 -u        UDP mode (default is TCP)\n\
+         \x20 -l        Listen mode (bind and accept/receive)\n\
+         \x20 -v        Verbose output\n\
+         \x20 -k        Keep listening after client disconnects (TCP -l only)\n\
+         \x20 -p port   Source port (client mode)\n\
+         \x20 -w secs   Timeout in seconds\n\
+         \x20 host      Remote hostname or IP (client mode)\n\
+         \x20 port      Remote port (client) or listen port (listen mode)\n"
+    );
 }
 
 fn print_error(err: NcError) {
@@ -235,7 +185,7 @@ fn print_error(err: NcError) {
         NcError::ResolveFailed => "nc: cannot resolve hostname",
         NcError::UnknownFlag => "nc: unknown flag",
     };
-    writeln_stdout(format_args!("{}", msg));
+    eprintln!("{msg}");
 }
 
 fn parse_port(s: &str) -> Option<u16> {
