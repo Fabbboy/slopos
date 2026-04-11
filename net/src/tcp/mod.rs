@@ -8,6 +8,7 @@
 //! directly.  Higher layers wire it into the VirtIO net driver
 //! for actual packet I/O.
 
+pub mod actions;
 pub mod buffer;
 pub mod checksum;
 pub mod clock;
@@ -15,10 +16,17 @@ pub mod cong;
 pub mod header;
 pub mod isn;
 pub mod listener;
+pub mod pcb;
 pub mod reasm;
+pub mod retx;
 pub mod rtt;
 pub mod segment;
 pub mod seq;
+pub mod table;
+pub mod tuple;
+
+pub use actions::{Actions, MAX_SEGMENTS, MAX_TIMER_OPS, SocketNotify, TimerOp};
+pub use tuple::{TcpError, TcpTuple};
 
 pub use buffer::{
     DELAYED_ACK_MS, DELAYED_ACK_SEGMENTS, TCP_BUFFER_SIZE, TcpBuffer, TcpBufferPair, TcpRecvState,
@@ -131,54 +139,7 @@ impl TcpState {
 // =============================================================================
 // TCP Connection
 // =============================================================================
-
-/// Four-tuple identifying a TCP connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TcpTuple {
-    pub local_ip: [u8; 4],
-    pub local_port: u16,
-    pub remote_ip: [u8; 4],
-    pub remote_port: u16,
-}
-
-impl TcpTuple {
-    pub const ZERO: Self = Self {
-        local_ip: [0; 4],
-        local_port: 0,
-        remote_ip: [0; 4],
-        remote_port: 0,
-    };
-
-    /// Check if this tuple matches a specific remote endpoint (for listen sockets,
-    /// `remote_ip`/`remote_port` may be zero = wildcard).
-    pub fn matches(&self, other: &TcpTuple) -> bool {
-        self.local_ip == other.local_ip
-            && self.local_port == other.local_port
-            && (self.remote_ip == [0; 4] || self.remote_ip == other.remote_ip)
-            && (self.remote_port == 0 || self.remote_port == other.remote_port)
-    }
-}
-
-/// Error type for TCP operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TcpError {
-    /// Connection table is full.
-    TableFull,
-    /// No connection found for the given tuple.
-    NotFound,
-    /// Connection is in wrong state for the requested operation.
-    InvalidState,
-    /// Port already in use.
-    AddrInUse,
-    /// Connection was reset by peer.
-    ConnectionReset,
-    /// Connection timed out.
-    TimedOut,
-    /// Connection refused by peer (RST received in SYN_SENT).
-    ConnectionRefused,
-    /// Invalid segment or parameter.
-    InvalidSegment,
-}
+// `TcpTuple` and `TcpError` moved to `tcp/tuple.rs` (re-exported above).
 
 /// Per-connection state.
 #[derive(Clone, Copy, Debug)]
