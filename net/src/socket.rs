@@ -753,65 +753,6 @@ fn be_port(port: u16) -> [u8; 2] {
     port.to_be_bytes()
 }
 
-fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) -> Option<usize> {
-    let has_mss = seg.mss != 0;
-    let has_wscale = seg.wscale != 255;
-    let mut opt_len = 0usize;
-    if has_mss {
-        opt_len += 4;
-    }
-    if has_wscale {
-        // NOP + Window Scale (3 bytes) = 4 bytes for alignment
-        opt_len += 4;
-    }
-    // Pad to 4-byte boundary
-    let padded_opt_len = (opt_len + 3) & !3;
-    let data_offset_words = ((TCP_HEADER_LEN + padded_opt_len) / 4) as u8;
-    let tcp_len = TCP_HEADER_LEN + padded_opt_len + payload.len();
-    if out.len() < tcp_len {
-        return None;
-    }
-
-    let hdr = tcp::build_header(
-        seg.tuple.local_port,
-        seg.tuple.remote_port,
-        seg.seq_num,
-        seg.ack_num,
-        seg.flags,
-        seg.window_size,
-        data_offset_words,
-    );
-    let hdr_len = tcp::write_header(&hdr, out)?;
-
-    let mut opt_cursor = TCP_HEADER_LEN;
-    if has_mss {
-        out[opt_cursor] = tcp::TCP_OPT_MSS;
-        out[opt_cursor + 1] = tcp::TCP_OPT_MSS_LEN;
-        out[opt_cursor + 2..opt_cursor + 4].copy_from_slice(&seg.mss.to_be_bytes());
-        opt_cursor += 4;
-    }
-    if has_wscale {
-        out[opt_cursor] = tcp::TCP_OPT_NOP;
-        out[opt_cursor + 1] = tcp::TCP_OPT_WINDOW_SCALE;
-        out[opt_cursor + 2] = tcp::TCP_OPT_WINDOW_SCALE_LEN;
-        out[opt_cursor + 3] = seg.wscale;
-        opt_cursor += 4;
-    }
-    // Zero any padding
-    while opt_cursor < TCP_HEADER_LEN + padded_opt_len {
-        out[opt_cursor] = tcp::TCP_OPT_END;
-        opt_cursor += 1;
-    }
-
-    let _ = hdr_len;
-    let data_start = TCP_HEADER_LEN + padded_opt_len;
-    out[data_start..data_start + payload.len()].copy_from_slice(payload);
-
-    let checksum = tcp::tcp_checksum(seg.tuple.local_ip, seg.tuple.remote_ip, &out[..tcp_len]);
-    out[16..18].copy_from_slice(&checksum.to_be_bytes());
-    Some(tcp_len)
-}
-
 pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     let mut opt_len = 0usize;
     if seg.mss != 0 {
@@ -825,7 +766,7 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
 
     let mut tcp_segment = Vec::with_capacity(tcp_len);
     tcp_segment.resize(tcp_len, 0u8);
-    let tcp_len = match write_tcp_segment(seg, payload, tcp_segment.as_mut_slice()) {
+    let tcp_len = match tcp::write_tcp_segment(seg, payload, tcp_segment.as_mut_slice()) {
         Some(n) => n,
         None => return errno_i32(ERRNO_EINVAL),
     };

@@ -21,9 +21,7 @@ use crate::tcp::{
 // Helper: reset global state before each test
 // =============================================================================
 
-fn reset() {
-    tcp::tcp_reset_all();
-}
+use crate::tests::tcp_common::reset_all as reset;
 
 // =============================================================================
 // 1. Header parsing

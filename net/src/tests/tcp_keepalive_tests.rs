@@ -5,15 +5,11 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::socket;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader, TcpOutSegment, TcpState};
+use crate::tests::tcp_common::reset_all as reset;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind};
 
 const MAX_IDLE_WAIT_TICKS: u64 = 900_000;
 const MAX_INTERVAL_WAIT_TICKS: u64 = 20_000;
-
-fn reset() {
-    socket::socket_reset_all();
-    tcp::tcp_reset_all();
-}
 
 fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, usize), &'static str> {
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0);

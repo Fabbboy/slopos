@@ -703,42 +703,17 @@ pub fn test_listen_state_clear() -> TestResult {
 // TCP Send/Recv/Shutdown — FIN handling and shutdown semantics
 // =============================================================================
 
-use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_SYN, TcpHeader, TcpState};
+use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_FIN, TcpHeader, TcpState};
+use crate::tests::tcp_common;
 
-/// Helper: create an established TCP connection via active open.
+/// Legacy tuple form of [`tcp_common::establish_connection`], kept so the
+/// test bodies below don't need destructuring rewrites during the P1.2 move.
 ///
-/// Calls `tcp_connect` then feeds a synthetic SYN+ACK to transition to ESTABLISHED.
-/// Returns `(conn_idx, local_port, iss)` for further testing.
+/// The canonical helper in `tcp_common` targets `REMOTE_IP = 10.0.0.2` with
+/// `REMOTE_PORT = 80`, which matches the addresses this suite used before.
 fn establish_connection() -> (usize, u16, u32) {
-    let local_ip = [10, 0, 0, 1];
-    let remote_ip = [192, 168, 1, 1];
-    let remote_port: u16 = 80;
-
-    let (idx, syn_seg) =
-        tcp::tcp_connect(local_ip, remote_ip, remote_port).expect("tcp_connect should succeed");
-
-    let local_port = syn_seg.tuple.local_port;
-    let iss = syn_seg.seq_num; // our ISS
-
-    // Simulate receiving SYN+ACK from peer.
-    let syn_ack_hdr = TcpHeader {
-        src_port: remote_port,
-        dst_port: local_port,
-        seq_num: 5000,                // peer's ISS
-        ack_num: iss.wrapping_add(1), // acks our SYN
-        data_offset: 5,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: 65535,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let result = tcp::tcp_input(remote_ip, local_ip, &syn_ack_hdr, &[], &[], 0);
-    assert!(
-        matches!(result.new_state, Some(TcpState::Established)),
-        "should transition to ESTABLISHED"
-    );
-
-    (idx, local_port, iss)
+    let c = tcp_common::establish_connection();
+    (c.idx, c.local_port, c.our_iss)
 }
 
 /// Helper: deliver a FIN from the remote peer to a connection.

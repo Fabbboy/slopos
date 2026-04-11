@@ -1,6 +1,8 @@
 // Test modules for net.
 // The parent lib.rs gates this entire module behind #[cfg(feature = "itests")].
 
+pub mod tcp_common;
+
 pub mod dns_tests;
 pub mod icmp_tests;
 pub mod ingress_tests;

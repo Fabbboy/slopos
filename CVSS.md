@@ -62,6 +62,17 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 - CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H`
 - Base score: `6.1` (Medium)
 
+### SLOPOS-2026-0007
+- Title: Predictable TCP Initial Sequence Number enables off-path injection
+- Status: open
+- Confidence: 90 (evidence 40, exploitability 25, reproducibility 25)
+- Evidence: `net/src/tcp.rs:966-972` — `static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x4F50_534C); pub(crate) fn generate_isn() -> u32 { ISN_COUNTER.fetch_add(64000, Ordering::Relaxed) }`.
+- Impact: Every new TCP connection's ISN is the previous ISN plus exactly `64000`. An off-path attacker who observes or can cause one connection sees all future ISNs for every 4-tuple on the host. This enables TCP injection attacks against established connections (RST, data injection on cleartext streams), contrary to RFC 6528's requirement that ISNs include a keyed hash of the 4-tuple.
+- Repro: `assert_eq!(tcp::generate_isn().wrapping_sub(tcp::generate_isn()) as i32, -64000i32)`.
+- CVSS vector: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L`
+- Base score: `7.3` (High)
+- Remediation: P2.5 of the TCP overhaul plan replaces this with a ChaCha20-based keyed-hash PRF over `(src_ip, src_port, dst_ip, dst_port, secret)` per RFC 6528. Tracks to `fixed` with commit hash at P2.5 merge.
+
 ## Relevant NVD CVE Analogs (fetched)
 
 Retrieved using NVD API pattern:

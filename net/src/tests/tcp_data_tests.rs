@@ -9,34 +9,15 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::{
     self, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
-    TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_SYN, TcpError, TcpHeader, TcpState,
+    TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpState,
 };
+use crate::tests::tcp_common::{self, reset_all as reset};
 
-fn reset() {
-    tcp::tcp_reset_all();
-}
-
+/// Legacy tuple form of [`tcp_common::establish_connection`], kept so the
+/// ~38 call sites below don't need destructuring rewrites.
 fn establish_connection() -> (usize, u32, u16) {
-    let local_ip = [10, 0, 0, 1];
-    let remote_ip = [10, 0, 0, 2];
-    let (idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, 80).unwrap();
-    let client_iss = syn_seg.seq_num;
-    let client_port = syn_seg.tuple.local_port;
-
-    let server_iss = 7000u32;
-    let syn_ack = TcpHeader {
-        src_port: 80,
-        dst_port: client_port,
-        seq_num: server_iss,
-        ack_num: client_iss.wrapping_add(1),
-        data_offset: 5,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let _ = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
-    (idx, server_iss, client_port)
+    let c = tcp_common::establish_connection();
+    (c.idx, c.peer_iss, c.local_port)
 }
 
 fn inject_data_segment(
