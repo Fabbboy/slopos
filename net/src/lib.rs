@@ -32,7 +32,15 @@ pub mod route;
 pub mod socket;
 pub mod socket_file_ops;
 pub mod tcp;
-pub mod tcp_socket;
+/// Compatibility shim for the former top-level `net::tcp_socket` module.
+///
+/// The real implementation moved to `tcp::listener` under P2.4 of the TCP
+/// overhaul.  Existing call sites (socket.rs, tests) keep working through
+/// this glob re-export; future work will update them to import from
+/// `tcp::listener` directly.
+pub mod tcp_socket {
+    pub use crate::tcp::listener::*;
+}
 pub mod timer;
 pub mod udp;
 pub mod unix_socket;

@@ -12,6 +12,8 @@ pub mod buffer;
 pub mod checksum;
 pub mod clock;
 pub mod header;
+pub mod isn;
+pub mod listener;
 pub mod reasm;
 pub mod segment;
 pub mod seq;
@@ -25,18 +27,19 @@ pub use header::{
     DEFAULT_MSS, DEFAULT_WINDOW_SIZE, ParsedTcpOptions, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH,
     TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TCP_HEADER_LEN, TCP_HEADER_MAX_LEN, TCP_OPT_END,
     TCP_OPT_MSS, TCP_OPT_MSS_LEN, TCP_OPT_NOP, TCP_OPT_WINDOW_SCALE, TCP_OPT_WINDOW_SCALE_LEN,
-    TcpHeader, build_header, our_window_scale, parse_header, parse_mss_option, parse_tcp_options,
-    write_header, write_mss_option, write_window_scale_option,
+    TcpHeader, build_header, our_window_scale, parse_header, parse_tcp_options, write_header,
+    write_mss_option, write_window_scale_option,
 };
 pub use reasm::TcpOooQueue;
 pub use segment::{TcpOutSegment, write_tcp_segment};
 pub use seq::{seq_ge, seq_gt, seq_le, seq_lt};
 
-use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_utils::klog_debug;
 
+use self::segment::SegmentBuilder;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
 // =============================================================================
@@ -270,14 +273,11 @@ impl TcpConnection {
 // =============================================================================
 // ISN (Initial Sequence Number) generator
 // =============================================================================
-
-/// Simple monotonic ISN counter — incremented by 64000 per connection (RFC 6528
-/// recommends a clock-based or hash-based ISN; this is a minimal starting point).
-static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x4F50_534C); // "OPSL"
-
-pub(crate) fn generate_isn() -> u32 {
-    ISN_COUNTER.fetch_add(64000, Ordering::Relaxed)
-}
+//
+// Delegates to [`isn::generate_isn`] which mixes the 4-tuple with a per-boot
+// secret and a 4µs clock drift (RFC 6528).  The historical
+// `ISN_COUNTER.fetch_add(64000)` scheme tracked as SLOPOS-2026-0007 is gone.
+pub(crate) use isn::generate_isn;
 
 // =============================================================================
 // Ephemeral port allocator
@@ -463,18 +463,17 @@ pub fn tcp_connect(
     remote_port: u16,
 ) -> Result<(usize, TcpOutSegment), TcpError> {
     let local_port = alloc_ephemeral_port();
-    let iss = generate_isn();
-
-    let mut table = TCP_TABLE.lock();
-
-    let idx = table.alloc_slot().ok_or(TcpError::TableFull)?;
-
     let tuple = TcpTuple {
         local_ip,
         local_port,
         remote_ip,
         remote_port,
     };
+    let iss = generate_isn(&tuple);
+
+    let mut table = TCP_TABLE.lock();
+
+    let idx = table.alloc_slot().ok_or(TcpError::TableFull)?;
 
     let conn = &mut table.connections[idx];
     conn.tuple = tuple;
@@ -502,15 +501,7 @@ pub fn tcp_connect(
     let wscale = our_window_scale();
     conn.rcv_wscale = wscale;
 
-    let seg = TcpOutSegment {
-        tuple,
-        seq_num: iss,
-        ack_num: 0,
-        flags: TCP_FLAG_SYN,
-        window_size: DEFAULT_WINDOW_SIZE,
-        mss: DEFAULT_MSS,
-        wscale: if wscale > 0 { wscale } else { 255 },
-    };
+    let seg = SegmentBuilder::active_syn(tuple, iss, wscale);
 
     Ok((idx, seg))
 }
@@ -566,15 +557,7 @@ pub fn tcp_close(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
             conn.state = TcpState::FinWait1;
             tcp_cancel_keepalive(conn);
 
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: seq,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
-                window_size: conn.rcv_wnd,
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::fin_ack(conn, seq);
 
             klog_debug!(
                 "tcp: CLOSE idx={} {} -> FIN_WAIT_1, FIN seq={}",
@@ -591,15 +574,7 @@ pub fn tcp_close(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
             conn.state = TcpState::LastAck;
             tcp_cancel_keepalive(conn);
 
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: seq,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
-                window_size: conn.rcv_wnd,
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::fin_ack(conn, seq);
 
             klog_debug!(
                 "tcp: CLOSE idx={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
@@ -630,15 +605,7 @@ pub fn tcp_abort(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
     let conn = table.get_mut(idx).ok_or(TcpError::NotFound)?;
 
     let seg = if conn.state != TcpState::Listen && conn.state != TcpState::Closed {
-        Some(TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_nxt,
-            ack_num: 0,
-            flags: TCP_FLAG_RST,
-            window_size: 0,
-            mss: 0,
-            wscale: 255,
-        })
+        Some(SegmentBuilder::rst_of(conn))
     } else {
         None
     };
@@ -664,15 +631,7 @@ pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError>
             conn.state = TcpState::FinWait1;
             tcp_cancel_keepalive(conn);
 
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: seq,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
-                window_size: conn.rcv_wnd,
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::fin_ack(conn, seq);
 
             klog_debug!(
                 "tcp: SHUTDOWN_WR idx={} {} -> FIN_WAIT_1, FIN seq={}",
@@ -688,15 +647,7 @@ pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError>
             conn.state = TcpState::LastAck;
             tcp_cancel_keepalive(conn);
 
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: seq,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
-                window_size: conn.rcv_wnd,
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::fin_ack(conn, seq);
 
             klog_debug!(
                 "tcp: SHUTDOWN_WR idx={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
@@ -789,34 +740,12 @@ impl TcpInputResult {
 }
 
 /// Build a RST segment in response to an unexpected incoming segment.
+///
+/// Thin adapter around [`SegmentBuilder::rst_for`] so the `tcp_input`
+/// dispatcher can call it by its historical name until P3 renames the whole
+/// input path.
 fn build_rst_for(hdr: &TcpHeader, local_ip: [u8; 4], remote_ip: [u8; 4]) -> TcpOutSegment {
-    let (seq, ack, flags) = if hdr.is_ack() {
-        // RST with seq = incoming ACK number.
-        (hdr.ack_num, 0u32, TCP_FLAG_RST)
-    } else {
-        // RST+ACK with ack = incoming SEQ + segment length.
-        let seg_len = if hdr.is_syn() { 1u32 } else { 0u32 };
-        (
-            0u32,
-            hdr.seq_num.wrapping_add(seg_len),
-            TCP_FLAG_RST | TCP_FLAG_ACK,
-        )
-    };
-
-    TcpOutSegment {
-        tuple: TcpTuple {
-            local_ip,
-            local_port: hdr.dst_port,
-            remote_ip,
-            remote_port: hdr.src_port,
-        },
-        seq_num: seq,
-        ack_num: ack,
-        flags,
-        window_size: 0,
-        mss: 0,
-        wscale: 255,
-    }
+    SegmentBuilder::rst_for(hdr, local_ip, remote_ip)
 }
 
 /// Process an incoming TCP segment.
@@ -905,20 +834,7 @@ fn process_listen(
     // ACK to a LISTEN — send RST.
     if hdr.is_ack() {
         return TcpInputResult {
-            response: Some(TcpOutSegment {
-                tuple: TcpTuple {
-                    local_ip: incoming_tuple.local_ip,
-                    local_port: incoming_tuple.local_port,
-                    remote_ip: incoming_tuple.remote_ip,
-                    remote_port: incoming_tuple.remote_port,
-                },
-                seq_num: hdr.ack_num,
-                ack_num: 0,
-                flags: TCP_FLAG_RST,
-                window_size: 0,
-                mss: 0,
-                wscale: 255,
-            }),
+            response: Some(SegmentBuilder::bare_rst(*incoming_tuple, hdr.ack_num)),
             conn_idx: Some(listen_idx),
             ..TcpInputResult::empty()
         };
@@ -934,8 +850,8 @@ fn process_listen(
         None => return TcpInputResult::empty(), // Table full, drop silently.
     };
 
-    let iss = generate_isn();
-    let peer_mss = parse_mss_option(options).unwrap_or(DEFAULT_MSS);
+    let iss = generate_isn(incoming_tuple);
+    let peer_mss = parse_tcp_options(options).mss.unwrap_or(DEFAULT_MSS);
     let listener_socket_idx = table.connections[listen_idx].socket_idx;
 
     let child = &mut table.connections[new_idx];
@@ -961,15 +877,7 @@ fn process_listen(
         hdr.seq_num
     );
 
-    let seg = TcpOutSegment {
-        tuple: child.tuple,
-        seq_num: iss,
-        ack_num: child.rcv_nxt,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: DEFAULT_WINDOW_SIZE,
-        mss: DEFAULT_MSS,
-        wscale: 255,
-    };
+    let seg = SegmentBuilder::passive_syn_ack(child);
 
     TcpInputResult {
         response: Some(seg),
@@ -999,15 +907,7 @@ fn process_syn_sent(
                 return TcpInputResult::empty();
             }
             return TcpInputResult {
-                response: Some(TcpOutSegment {
-                    tuple: conn.tuple,
-                    seq_num: hdr.ack_num,
-                    ack_num: 0,
-                    flags: TCP_FLAG_RST,
-                    window_size: 0,
-                    mss: 0,
-                    wscale: 255,
-                }),
+                response: Some(SegmentBuilder::bare_rst(conn.tuple, hdr.ack_num)),
                 conn_idx: Some(idx),
                 ..TcpInputResult::empty()
             };
@@ -1076,15 +976,7 @@ fn process_syn_sent(
             table.connections[idx].irs
         );
 
-        let seg = TcpOutSegment {
-            tuple: table.connections[idx].tuple,
-            seq_num: table.connections[idx].snd_nxt,
-            ack_num: table.connections[idx].rcv_nxt,
-            flags: TCP_FLAG_ACK,
-            window_size: table.connections[idx].rcv_wnd,
-            mss: 0,
-            wscale: 255,
-        };
+        let seg = SegmentBuilder::ack_of(&table.connections[idx]);
 
         TcpInputResult {
             response: Some(seg),
@@ -1102,14 +994,11 @@ fn process_syn_sent(
             idx
         );
 
+        // Simultaneous-open SYN+ACK: emit with the conn's own rcv_wnd
+        // instead of DEFAULT_WINDOW_SIZE, preserving pre-refactor bytes.
         let seg = TcpOutSegment {
-            tuple: table.connections[idx].tuple,
-            seq_num: table.connections[idx].iss,
-            ack_num: table.connections[idx].rcv_nxt,
-            flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
             window_size: table.connections[idx].rcv_wnd,
-            mss: DEFAULT_MSS,
-            wscale: 255,
+            ..SegmentBuilder::passive_syn_ack(&table.connections[idx])
         };
 
         TcpInputResult {
@@ -1151,15 +1040,7 @@ fn process_syn_received(
     if seq_lt(hdr.ack_num, conn.snd_una) || seq_gt(hdr.ack_num, conn.snd_nxt) {
         // Bad ACK — send RST.
         return TcpInputResult {
-            response: Some(TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: hdr.ack_num,
-                ack_num: 0,
-                flags: TCP_FLAG_RST,
-                window_size: 0,
-                mss: 0,
-                wscale: 255,
-            }),
+            response: Some(SegmentBuilder::bare_rst(conn.tuple, hdr.ack_num)),
             conn_idx: Some(idx),
             ..TcpInputResult::empty()
         };
@@ -1233,15 +1114,7 @@ fn process_established_and_closing(
         );
         table.release(idx);
         return TcpInputResult {
-            response: Some(TcpOutSegment {
-                tuple,
-                seq_num: snd_nxt,
-                ack_num: 0,
-                flags: TCP_FLAG_RST,
-                window_size: 0,
-                mss: 0,
-                wscale: 255,
-            }),
+            response: Some(SegmentBuilder::bare_rst(tuple, snd_nxt)),
             conn_idx: Some(idx),
             new_state: Some(TcpState::Closed),
             accepted_idx: None,
@@ -1314,15 +1187,7 @@ fn process_established_and_closing(
                 table.buffers[idx].ooo.insert(hdr.seq_num, payload);
             }
             let conn = &table.connections[idx];
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: conn.snd_nxt,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_ACK,
-                window_size: table.buffers[idx].recv.window(),
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::ack_with_window(conn, table.buffers[idx].recv.window());
             return TcpInputResult {
                 response: Some(seg),
                 conn_idx: Some(idx),
@@ -1364,15 +1229,7 @@ fn process_established_and_closing(
 
         if table.buffers[idx].recv.should_ack_now(now_ms) {
             let conn = &table.connections[idx];
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: conn.snd_nxt,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_ACK,
-                window_size: conn.rcv_wnd,
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::ack_of(conn);
             table.buffers[idx].recv.ack_sent();
             return TcpInputResult {
                 response: Some(seg),
@@ -1424,15 +1281,7 @@ fn process_established_and_closing(
                         idx
                     );
 
-                    let seg = TcpOutSegment {
-                        tuple: conn.tuple,
-                        seq_num: conn.snd_nxt,
-                        ack_num: conn.rcv_nxt,
-                        flags: TCP_FLAG_ACK,
-                        window_size: conn.rcv_wnd,
-                        mss: 0,
-                        wscale: 255,
-                    };
+                    let seg = SegmentBuilder::ack_of(conn);
                     return TcpInputResult {
                         response: Some(seg),
                         conn_idx: Some(idx),
@@ -1492,15 +1341,7 @@ fn process_established_and_closing(
         let conn = &mut table.connections[idx];
         let fin_seq = hdr.seq_num.wrapping_add(accepted_payload_len as u32);
         if fin_seq != conn.rcv_nxt {
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: conn.snd_nxt,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_ACK,
-                window_size: conn.rcv_wnd,
-                mss: 0,
-                wscale: 255,
-            };
+            let seg = SegmentBuilder::ack_of(conn);
             return TcpInputResult {
                 response: Some(seg),
                 conn_idx: Some(idx),
@@ -1543,15 +1384,7 @@ fn process_established_and_closing(
             other => other, // FIN in other states — just ACK.
         };
 
-        let seg = TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_nxt,
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
-            mss: 0,
-            wscale: 255,
-        };
+        let seg = SegmentBuilder::ack_of(conn);
 
         return TcpInputResult {
             response: Some(seg),
@@ -1592,15 +1425,7 @@ fn process_time_wait(
 
     // Retransmitted FIN — re-ACK and restart timer.
     if hdr.is_fin() {
-        let seg = TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_nxt,
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
-            mss: 0,
-            wscale: 255,
-        };
+        let seg = SegmentBuilder::ack_of(conn);
         let conn = &mut table.connections[idx];
         conn.time_wait_start_ms = now_ms;
         if let Some(token) = conn.time_wait_timer_token.take() {
@@ -1662,15 +1487,6 @@ pub fn tcp_on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
     table.connections[idx].keepalive_timer_token = None;
 
     if table.connections[idx].keepalive_probes_sent >= TCP_KEEPALIVE_PROBES_MAX {
-        let _rst_seg = TcpOutSegment {
-            tuple: table.connections[idx].tuple,
-            seq_num: table.connections[idx].snd_nxt,
-            ack_num: table.connections[idx].rcv_nxt,
-            flags: TCP_FLAG_RST,
-            window_size: 0,
-            mss: 0,
-            wscale: 255,
-        };
         klog_debug!(
             "tcp: keepalive max probes reached idx={} conn_id={} -> closing",
             idx,
@@ -1680,15 +1496,7 @@ pub fn tcp_on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
         return None;
     }
 
-    let probe_seg = TcpOutSegment {
-        tuple: table.connections[idx].tuple,
-        seq_num: table.connections[idx].snd_una.wrapping_sub(1),
-        ack_num: table.connections[idx].rcv_nxt,
-        flags: TCP_FLAG_ACK,
-        window_size: table.connections[idx].rcv_wnd,
-        mss: 0,
-        wscale: 255,
-    };
+    let probe_seg = SegmentBuilder::keepalive_probe(&table.connections[idx]);
 
     table.connections[idx].keepalive_probes_sent = table.connections[idx]
         .keepalive_probes_sent
@@ -1868,13 +1676,11 @@ pub fn tcp_poll_transmit(
     now_ms: u64,
 ) -> Option<(TcpOutSegment, usize)> {
     let mut table = TCP_TABLE.lock();
-    let (state, tuple, seq, ack_num, rto_ms, peer_mss, snd_wnd) = {
+    let (state, seq, rto_ms, peer_mss, snd_wnd) = {
         let conn = table.get(idx)?;
         (
             conn.state,
-            conn.tuple,
             conn.snd_nxt,
-            conn.rcv_nxt,
             conn.rto_ms as u64,
             conn.peer_mss as usize,
             conn.snd_wnd as usize,
@@ -1919,22 +1725,23 @@ pub fn tcp_poll_transmit(
         }
     }
 
-    let seg = TcpOutSegment {
-        tuple,
-        seq_num: seq,
-        ack_num,
-        flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
-        window_size: table.buffers[idx].recv.window(),
-        mss: 0,
-        wscale: 255,
-    };
+    let window = table.buffers[idx].recv.window();
+    let seg = SegmentBuilder::data_push(&table.connections[idx], seq, window);
+    // `ack_num` on the builder comes from `conn.rcv_nxt`, which we never
+    // mutated in this function — parity with the old inline construction.
 
     Some((seg, payload_len))
 }
 
-/// Check all connections for retransmission timeouts.
-/// Returns connection index for first expired connection, or None.
-/// After this returns Some, caller should call tcp_poll_transmit to get retransmit segments.
+/// Deterministic retransmit probe — test-only.
+///
+/// Walks the connection table and triggers retransmit for the first
+/// connection whose RTO deadline has expired at `now_ms`.  Production code
+/// no longer polls this function (retransmits fire via
+/// [`NET_TIMER_WHEEL`] → [`tcp_on_retransmit`]); it is retained here so
+/// mock-clock tests in `tcp_data_tests` can drive retransmit behavior
+/// without waiting for the wall-clock timer wheel.
+#[cfg(feature = "itests")]
 pub fn tcp_retransmit_check(now_ms: u64) -> Option<usize> {
     let mut table = TCP_TABLE.lock();
 
@@ -1986,16 +1793,8 @@ pub fn tcp_delayed_ack_check(now_ms: u64) -> Option<(usize, TcpOutSegment)> {
         }
 
         if table.buffers[i].recv.should_ack_now(now_ms) {
-            let conn = &table.connections[i];
-            let seg = TcpOutSegment {
-                tuple: conn.tuple,
-                seq_num: conn.snd_nxt,
-                ack_num: conn.rcv_nxt,
-                flags: TCP_FLAG_ACK,
-                window_size: table.buffers[i].recv.window(),
-                mss: 0,
-                wscale: 255,
-            };
+            let window = table.buffers[i].recv.window();
+            let seg = SegmentBuilder::ack_with_window(&table.connections[i], window);
             table.buffers[i].recv.ack_sent();
             return Some((i, seg));
         }
@@ -2021,15 +1820,8 @@ pub fn tcp_zero_window_probe(idx: usize, _now_ms: u64) -> Option<TcpOutSegment> 
         return None;
     }
 
-    Some(TcpOutSegment {
-        tuple: conn.tuple,
-        seq_num: conn.snd_nxt,
-        ack_num: conn.rcv_nxt,
-        flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
-        window_size: table.buffers[idx].recv.window(),
-        mss: 0,
-        wscale: 255,
-    })
+    let window = table.buffers[idx].recv.window();
+    Some(SegmentBuilder::data_push(conn, conn.snd_nxt, window))
 }
 
 /// Available send buffer space for a connection.
@@ -2081,7 +1873,7 @@ pub fn tcp_reset_all() {
         table.connections[i] = TcpConnection::empty();
         table.buffers[i].clear();
     }
-    // Reset ISN counter and ephemeral port for deterministic tests.
-    ISN_COUNTER.store(0x4F50_534C, Ordering::Relaxed);
+    // Reset ISN secret and ephemeral port for deterministic tests.
+    isn::reset_for_tests();
     EPHEMERAL_PORT.store(49152, Ordering::Relaxed);
 }

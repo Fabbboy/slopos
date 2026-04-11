@@ -221,9 +221,9 @@ pub fn test_tcp_parse_mss_option() -> TestResult {
         0x05,
         0xB4, // 1460 big-endian
     ];
-    let mss = match tcp::parse_mss_option(&opts) {
+    let mss = match tcp::parse_tcp_options(&opts).mss {
         Some(m) => m,
-        None => return fail!("parse_mss_option returned None"),
+        None => return fail!("parse_tcp_options returned None for MSS"),
     };
     assert_eq_test!(mss, 1460, "MSS should be 1460");
     pass!()
@@ -238,7 +238,7 @@ pub fn test_tcp_parse_mss_option_with_nop_padding() -> TestResult {
         0x02,
         0x18, // 536 big-endian
     ];
-    let mss = match tcp::parse_mss_option(&opts) {
+    let mss = match tcp::parse_tcp_options(&opts).mss {
         Some(m) => m,
         None => return fail!("MSS with NOP padding returned None"),
     };
@@ -249,11 +249,11 @@ pub fn test_tcp_parse_mss_option_with_nop_padding() -> TestResult {
 pub fn test_tcp_parse_mss_option_not_present() -> TestResult {
     let opts = [tcp::TCP_OPT_NOP, tcp::TCP_OPT_END];
     assert_test!(
-        tcp::parse_mss_option(&opts).is_none(),
+        tcp::parse_tcp_options(&opts).mss.is_none(),
         "no MSS should return None"
     );
     assert_test!(
-        tcp::parse_mss_option(&[]).is_none(),
+        tcp::parse_tcp_options(&[]).mss.is_none(),
         "empty options should return None"
     );
     pass!()
@@ -1595,6 +1595,92 @@ pub fn test_tcp_connection_empty_defaults() -> TestResult {
 }
 
 // =============================================================================
+// ISN generator (fixes SLOPOS-2026-0007 — predictable monotonic ISN)
+// =============================================================================
+
+/// Two calls with the same 4-tuple within the same 4-µs drift bucket yield
+/// the same ISN; across buckets the delta is strictly the drift increment.
+///
+/// We can't freeze `monotonic_ns()` in-kernel without adding a clock trait
+/// to the ISN path just for tests, so this test verifies the weaker but
+/// still-useful property: the 32-bit delta between two same-tuple calls
+/// equals the drift difference (which is bounded by elapsed time and
+/// therefore tiny for back-to-back calls).
+pub fn test_tcp_isn_same_tuple_delta_is_drift_only() -> TestResult {
+    reset();
+    let tuple = TcpTuple {
+        local_ip: [10, 0, 0, 1],
+        local_port: 49152,
+        remote_ip: [10, 0, 0, 2],
+        remote_port: 80,
+    };
+    let a = tcp::isn::generate_isn(&tuple);
+    let b = tcp::isn::generate_isn(&tuple);
+    // Forward drift must be small for back-to-back calls, and negative
+    // drift is impossible because monotonic_ns is monotonic.
+    let delta = b.wrapping_sub(a);
+    assert_test!(
+        delta <= 1_000_000,
+        "back-to-back same-tuple ISN delta should be small drift, not a hash change"
+    );
+    pass!()
+}
+
+/// Different 4-tuples must not produce the same ISN.
+pub fn test_tcp_isn_varies_by_tuple() -> TestResult {
+    reset();
+    let t1 = TcpTuple {
+        local_ip: [10, 0, 0, 1],
+        local_port: 49152,
+        remote_ip: [10, 0, 0, 2],
+        remote_port: 80,
+    };
+    let t2 = TcpTuple {
+        local_ip: [10, 0, 0, 1],
+        local_port: 49153,
+        remote_ip: [10, 0, 0, 2],
+        remote_port: 80,
+    };
+    let t3 = TcpTuple {
+        local_ip: [10, 0, 0, 1],
+        local_port: 49152,
+        remote_ip: [10, 0, 0, 2],
+        remote_port: 443,
+    };
+    let isn_1 = tcp::isn::generate_isn(&t1);
+    let isn_2 = tcp::isn::generate_isn(&t2);
+    let isn_3 = tcp::isn::generate_isn(&t3);
+    assert_test!(isn_1 != isn_2, "differing local port → differing ISN");
+    assert_test!(isn_1 != isn_3, "differing remote port → differing ISN");
+    assert_test!(isn_2 != isn_3, "independent tuples → independent ISNs");
+    pass!()
+}
+
+/// The ISN must NOT equal the previous ISN + 64000.  The old
+/// `ISN_COUNTER.fetch_add(64000)` scheme is gone; any caller that relied
+/// on that delta needs to update.
+pub fn test_tcp_isn_not_monotonic_counter() -> TestResult {
+    reset();
+    let tuple = TcpTuple {
+        local_ip: [10, 0, 0, 1],
+        local_port: 49152,
+        remote_ip: [10, 0, 0, 2],
+        remote_port: 80,
+    };
+    let t2 = TcpTuple {
+        local_ip: [10, 0, 0, 1],
+        local_port: 49153,
+        remote_ip: [10, 0, 0, 2],
+        remote_port: 80,
+    };
+    let isn_a = tcp::isn::generate_isn(&tuple);
+    let isn_b = tcp::isn::generate_isn(&t2);
+    let delta = isn_b.wrapping_sub(isn_a);
+    assert_test!(delta != 64_000, "ISN delta must not be the legacy 64000");
+    pass!()
+}
+
+// =============================================================================
 // Register the test suite
 // =============================================================================
 
@@ -1683,5 +1769,9 @@ slopos_testing::define_test_suite!(
         test_tcp_multiple_connections,
         // Default state (1)
         test_tcp_connection_empty_defaults,
+        // ISN generator, RFC 6528-ish (3 — fixes SLOPOS-2026-0007)
+        test_tcp_isn_same_tuple_delta_is_drift_only,
+        test_tcp_isn_varies_by_tuple,
+        test_tcp_isn_not_monotonic_counter,
     ]
 );

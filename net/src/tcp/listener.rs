@@ -279,7 +279,8 @@ impl TcpListenState {
             return None;
         }
 
-        let iss = tcp::generate_isn();
+        let child_tuple = four_tuple.to_tcp_tuple();
+        let iss = tcp::isn::generate_isn(&child_tuple);
         let key = alloc_syn_entry_key();
 
         // Schedule initial SYN-ACK retransmit timer.
@@ -618,7 +619,7 @@ impl TcpDemuxBucket {
         remote_ip: Ipv4Addr,
         remote_port: Port,
         conn_id: u32,
-    ) -> Result<(), super::types::NetError> {
+    ) -> Result<(), crate::types::NetError> {
         for slot in &self.established {
             if let Some(entry) = slot
                 && entry.local_ip == local_ip
@@ -626,7 +627,7 @@ impl TcpDemuxBucket {
                 && entry.remote_ip == remote_ip
                 && entry.remote_port == remote_port
             {
-                return Err(super::types::NetError::AddressInUse);
+                return Err(crate::types::NetError::AddressInUse);
             }
         }
 
@@ -643,7 +644,7 @@ impl TcpDemuxBucket {
             }
         }
 
-        Err(super::types::NetError::NoBufferSpace)
+        Err(crate::types::NetError::NoBufferSpace)
     }
 
     fn unregister_established_by_id(&mut self, conn_id: u32) -> bool {
@@ -682,13 +683,13 @@ impl TcpDemuxBucket {
         local_ip: Ipv4Addr,
         local_port: Port,
         sock_idx: u32,
-    ) -> Result<(), super::types::NetError> {
+    ) -> Result<(), crate::types::NetError> {
         for slot in &self.listeners {
             if let Some(entry) = slot
                 && entry.local_ip == local_ip
                 && entry.local_port == local_port
             {
-                return Err(super::types::NetError::AddressInUse);
+                return Err(crate::types::NetError::AddressInUse);
             }
         }
 
@@ -703,7 +704,7 @@ impl TcpDemuxBucket {
             }
         }
 
-        Err(super::types::NetError::NoBufferSpace)
+        Err(crate::types::NetError::NoBufferSpace)
     }
 
     fn unregister_listener_by_idx(&mut self, sock_idx: u32) -> bool {
@@ -766,7 +767,7 @@ impl TcpDemuxTable {
         remote_ip: Ipv4Addr,
         remote_port: Port,
         conn_id: u32,
-    ) -> Result<(), super::types::NetError> {
+    ) -> Result<(), crate::types::NetError> {
         let idx = tcp_demux_hash(local_port);
         TCP_DEMUX_BUCKETS_TABLE[idx].lock().register_established(
             local_ip,
@@ -794,7 +795,7 @@ impl TcpDemuxTable {
         local_ip: Ipv4Addr,
         local_port: Port,
         sock_idx: u32,
-    ) -> Result<(), super::types::NetError> {
+    ) -> Result<(), crate::types::NetError> {
         let idx = tcp_demux_hash(local_port);
         TCP_DEMUX_BUCKETS_TABLE[idx]
             .lock()

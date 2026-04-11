@@ -2712,13 +2712,9 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_process_timers() {
+    // Retransmit timers now fire exclusively via NET_TIMER_WHEEL → tcp::tcp_on_retransmit;
+    // the polling path used to shadow this and was a known race hazard.
     let now_ms = slopos_utils::clock::uptime_ms();
-    if let Some(idx) = tcp::tcp_retransmit_check(now_ms)
-        && let Some(sock_idx) = socket_from_tcp_idx(idx)
-    {
-        let _ = socket_send_queued(sock_idx);
-    }
-
     if let Some((_idx, seg)) = tcp::tcp_delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);
     }

@@ -167,39 +167,6 @@ pub fn parse_header(data: &[u8]) -> Option<TcpHeader> {
     })
 }
 
-/// Parse MSS option from TCP header options region.
-///
-/// Returns the MSS value if found, otherwise `None`.
-pub fn parse_mss_option(options: &[u8]) -> Option<u16> {
-    let mut i = 0;
-    while i < options.len() {
-        match options[i] {
-            TCP_OPT_END => break,
-            TCP_OPT_NOP => {
-                i += 1;
-            }
-            TCP_OPT_MSS => {
-                if i + 3 < options.len() && options[i + 1] == TCP_OPT_MSS_LEN {
-                    return Some(u16::from_be_bytes([options[i + 2], options[i + 3]]));
-                }
-                break;
-            }
-            _ => {
-                // Unknown option: skip using length byte.
-                if i + 1 >= options.len() {
-                    break;
-                }
-                let opt_len = options[i + 1] as usize;
-                if opt_len < 2 || i + opt_len > options.len() {
-                    break;
-                }
-                i += opt_len;
-            }
-        }
-    }
-    None
-}
-
 pub struct ParsedTcpOptions {
     pub mss: Option<u16>,
     pub window_scale: Option<u8>,

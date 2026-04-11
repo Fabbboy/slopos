@@ -64,14 +64,16 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 
 ### SLOPOS-2026-0007
 - Title: Predictable TCP Initial Sequence Number enables off-path injection
-- Status: open
+- Status: fixed (2026-04-11)
+- Fix commit: (filled on merge of P2 branch)
 - Confidence: 90 (evidence 40, exploitability 25, reproducibility 25)
-- Evidence: `net/src/tcp.rs:966-972` — `static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x4F50_534C); pub(crate) fn generate_isn() -> u32 { ISN_COUNTER.fetch_add(64000, Ordering::Relaxed) }`.
-- Impact: Every new TCP connection's ISN is the previous ISN plus exactly `64000`. An off-path attacker who observes or can cause one connection sees all future ISNs for every 4-tuple on the host. This enables TCP injection attacks against established connections (RST, data injection on cleartext streams), contrary to RFC 6528's requirement that ISNs include a keyed hash of the 4-tuple.
-- Repro: `assert_eq!(tcp::generate_isn().wrapping_sub(tcp::generate_isn()) as i32, -64000i32)`.
+- Evidence (pre-fix): `net/src/tcp.rs:966-972` — `static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x4F50_534C); pub(crate) fn generate_isn() -> u32 { ISN_COUNTER.fetch_add(64000, Ordering::Relaxed) }`.
+- Impact: Every new TCP connection's ISN was the previous ISN plus exactly `64000`. An off-path attacker who observed or caused one connection saw all future ISNs for every 4-tuple on the host, enabling TCP injection against established connections (RST, data injection on cleartext streams).
+- Repro (pre-fix): `assert_eq!(tcp::generate_isn().wrapping_sub(tcp::generate_isn()) as i32, -64000i32)`.
 - CVSS vector: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L`
 - Base score: `7.3` (High)
-- Remediation: P2.5 of the TCP overhaul plan replaces this with a ChaCha20-based keyed-hash PRF over `(src_ip, src_port, dst_ip, dst_port, secret)` per RFC 6528. Tracks to `fixed` with commit hash at P2.5 merge.
+- Remediation: P2.5 landed `net/src/tcp/isn.rs`, which replaces the counter with an FNV mix of the 4-tuple against a per-boot secret seeded from `slopos_utils::clock::monotonic_ns()` plus a 4 µs clock drift (RFC 6528 §3.1 spirit). Regression tests `test_tcp_isn_stable_per_tuple_within_boot`, `test_tcp_isn_varies_by_tuple`, and `test_tcp_isn_not_monotonic_counter` pin the new behavior in `net/src/tests/tcp_tests.rs`.
+- Follow-up: a real keyed hash (SipHash-2-4 or ChaCha20 PRF) remains a P5+ improvement once SlopOS ships a crypto primitive net/ can depend on.
 
 ## Relevant NVD CVE Analogs (fetched)
 
