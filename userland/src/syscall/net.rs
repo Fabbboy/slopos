@@ -149,10 +149,7 @@ pub fn set_reuse_addr(fd: RawFd) -> SyscallResult<()> {
     )
 }
 
-/// Resolve a hostname to an IPv4 address via the in-kernel DNS client.
-///
-/// Returns `Some([a, b, c, d])` on success, or `None` if resolution fails.
-pub fn resolve(hostname: &[u8]) -> Option<[u8; 4]> {
+pub(crate) fn resolve(hostname: &[u8]) -> SyscallResult<[u8; 4]> {
     let mut result = [0u8; 4];
     let rc = unsafe {
         syscall3(
@@ -162,7 +159,12 @@ pub fn resolve(hostname: &[u8]) -> Option<[u8; 4]> {
             &mut result as *mut [u8; 4] as u64,
         )
     };
-    if (rc as i64) < 0 { None } else { Some(result) }
+    let signed = rc as i64;
+    if signed < 0 {
+        Err(SyscallError::from_errno((-signed) as i32))
+    } else {
+        Ok(result)
+    }
 }
 
 pub fn bind_any(fd: RawFd, port: u16) -> SyscallResult<()> {

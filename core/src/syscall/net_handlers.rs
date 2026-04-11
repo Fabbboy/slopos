@@ -557,7 +557,6 @@ define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
         return ctx.err_with(ERRNO_EINVAL);
     }
 
-    // Copy hostname from user memory
     let mut hostname_buf = [0u8; 253];
     let user_hostname = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg0, hostname_len));
     let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_hostname, &mut hostname_buf[..hostname_len]));
@@ -567,10 +566,14 @@ define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
 
     let result_addr = match dns::dns_resolve(&hostname_buf[..hostname_len]) {
         Ok(addr) => addr,
-        Err(_) => return ctx.err_with(ERRNO_EHOSTUNREACH),
+        Err(dns::DnsResolveError::InvalidHostname) => return ctx.err_with(ERRNO_EINVAL),
+        Err(dns::DnsResolveError::NoDnsServer) => return ctx.err_with(ERRNO_ENETUNREACH),
+        Err(dns::DnsResolveError::Timeout | dns::DnsResolveError::TransmitFailed) => {
+            return ctx.err_with(ERRNO_EAGAIN);
+        }
+        Err(dns::DnsResolveError::ParseFailed) => return ctx.err_with(ERRNO_EHOSTUNREACH),
     };
 
-    // Copy result to user memory
     let user_result = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg2, 4));
     try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_result, &result_addr));
 

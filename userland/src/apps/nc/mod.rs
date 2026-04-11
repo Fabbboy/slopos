@@ -46,7 +46,7 @@ enum NcError {
     MissingHost,
     MissingPort,
     InvalidPort,
-    ResolveFailed,
+    Resolve(crate::net::ResolveError),
     UnknownFlag,
 }
 
@@ -178,11 +178,15 @@ fn print_usage() {
 }
 
 fn print_error(err: NcError) {
+    if let NcError::Resolve(reason) = err {
+        eprintln!("nc: {}", reason);
+        return;
+    }
     let msg = match err {
         NcError::MissingHost => "nc: missing host",
         NcError::MissingPort => "nc: missing port",
         NcError::InvalidPort => "nc: invalid port number",
-        NcError::ResolveFailed => "nc: cannot resolve hostname",
+        NcError::Resolve(_) => unreachable!("handled above"),
         NcError::UnknownFlag => "nc: unknown flag",
     };
     eprintln!("{msg}");
@@ -196,23 +200,10 @@ fn parse_port(s: &str) -> Option<u16> {
     Some(parsed)
 }
 
-/// Parse a dotted-quad IPv4 address (e.g. "10.0.2.2").
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    Some(s.parse::<Ipv4Addr>().ok()?.octets())
-}
-
-/// Resolve a host argument: try dotted-quad first, then kernel DNS.
 fn resolve_host(host: &[u8]) -> Result<[u8; 4], NcError> {
-    if let Ok(host_str) = core::str::from_utf8(host)
-        && let Some(ip) = parse_ipv4(host_str)
-    {
-        return Ok(ip);
-    }
-    // Try kernel DNS resolution
-    match crate::syscall::net::resolve(host) {
-        Some(ip) => Ok(ip),
-        _ => Err(NcError::ResolveFailed),
-    }
+    let host_str = core::str::from_utf8(host)
+        .map_err(|_| NcError::Resolve(crate::net::ResolveError::InvalidHostname))?;
+    crate::net::resolve_host_raw(host_str).map_err(NcError::Resolve)
 }
 
 /// Core argument parsing logic operating on clean Rust slices.
@@ -435,27 +426,6 @@ mod tests {
         assert_eq!(parse_port("abc"), None);
         assert_eq!(parse_port("12a"), None);
         assert_eq!(parse_port("99999"), None);
-    }
-
-    #[test]
-    fn test_parse_ipv4_valid() {
-        assert_eq!(parse_ipv4("10.0.2.2"), Some([10, 0, 2, 2]));
-        assert_eq!(parse_ipv4("192.168.1.1"), Some([192, 168, 1, 1]));
-        assert_eq!(parse_ipv4("0.0.0.0"), Some([0, 0, 0, 0]));
-        assert_eq!(parse_ipv4("255.255.255.255"), Some([255, 255, 255, 255]));
-        assert_eq!(parse_ipv4("127.0.0.1"), Some([127, 0, 0, 1]));
-    }
-
-    #[test]
-    fn test_parse_ipv4_invalid() {
-        assert_eq!(parse_ipv4(""), None);
-        assert_eq!(parse_ipv4("10.0.2"), None);
-        assert_eq!(parse_ipv4("10.0.2.2.1"), None);
-        assert_eq!(parse_ipv4("256.0.0.1"), None);
-        assert_eq!(parse_ipv4("10.0.2.abc"), None);
-        assert_eq!(parse_ipv4("..."), None);
-        assert_eq!(parse_ipv4("1.2.3."), None);
-        assert_eq!(parse_ipv4(".1.2.3"), None);
     }
 
     // -----------------------------------------------------------------------

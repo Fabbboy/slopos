@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod gfx;
+pub mod net;
 pub mod program_registry;
 pub mod readiness;
 pub mod runtime;

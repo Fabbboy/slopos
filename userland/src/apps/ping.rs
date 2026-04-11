@@ -36,17 +36,6 @@ fn print_usage() {
     println!("usage: ping [-c count] [-i interval] [-s size] [-W timeout] [-v] <host>");
 }
 
-fn parse_ipv4(host: &str) -> Option<[u8; 4]> {
-    Some(host.parse::<Ipv4Addr>().ok()?.octets())
-}
-
-fn resolve_host(host: &str) -> Option<[u8; 4]> {
-    if let Some(ip) = parse_ipv4(host) {
-        return Some(ip);
-    }
-    net::resolve(host.as_bytes())
-}
-
 fn parse_u32_arg(value: &str) -> Option<u32> {
     value.parse::<u32>().ok()
 }
@@ -271,11 +260,12 @@ pub fn ping_main(args: Vec<String>) -> ! {
         }
     };
 
-    let target_ip = if let Some(ip) = resolve_host(&config.host) {
-        ip
-    } else {
-        eprintln!("ping: cannot resolve {}", config.host);
-        std::process::exit(2);
+    let target_ip = match crate::net::resolve_host_raw(&config.host) {
+        Ok(ip) => ip,
+        Err(err) => {
+            eprintln!("ping: {}: {}", config.host, err);
+            std::process::exit(2);
+        }
     };
 
     let fd = match net::socket(

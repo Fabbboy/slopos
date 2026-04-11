@@ -18,21 +18,11 @@ if [ ! -d "$STD_SYS" ]; then
     exit 1
 fi
 
-# Note: no outer idempotency marker.
-#
-# An earlier version of this script used a `.slopos_patched` marker file
-# to short-circuit re-runs.  That was unsafe by design — when new patch
-# sections were added to the script, the outer gate prevented them from
-# ever running against sysroots that had been marked by an older script
-# version, leaving the std library silently half-patched (the `net`
-# section's 2026-04-05 addition is an example that went unnoticed for
-# weeks because nothing exercises `std::net::ToSocketAddrs` at build
-# time).
-#
-# Every patch section below is individually idempotent via its own
-# `grep -q 'target_os = "slopos"'` guard, so re-running the script on
-# an already-patched sysroot is a no-op (~50 fast sed passes).  We
-# remove the stale marker if we see one so old installations recover.
+# Don't add an outer idempotency marker — a stale marker would prevent
+# new patch sections from applying to already-patched sysroots.  Every
+# section below is individually idempotent via its own `grep -q` guard,
+# and the post-patch verification at the bottom catches drift.  Strip
+# any legacy marker so old installations recover.
 MARKER="$STD_SYS/.slopos_patched"
 if [ -f "$MARKER" ]; then
     rm -f "$MARKER"
@@ -397,14 +387,9 @@ if ! grep -q 'target_os = "slopos"' "$STD_OS/mod.rs" 2>/dev/null; then
     patch_os_fd
 fi
 
-# 4. Post-patch verification
-#
-# Catches the "script updated, sysroot stale" drift that used to produce
-# a silently half-patched std library (see comment at the top of this
-# file).  Each entry below is a (label, file, anchor) triple: after all
-# patches run, every anchor MUST be present in its file or we bail out.
-# Adding a new patch section means adding a matching verification row.
-
+# Post-patch verification.  Each new patch section above needs a
+# matching check_patched row so drift fails the build loudly instead
+# of leaving the sysroot half-patched.
 failed=0
 check_patched() {
     local label="$1"
@@ -440,7 +425,6 @@ check_patched "sync/rwlock/mod.rs"             "$STD_SYS/sync/rwlock/mod.rs"    
 check_patched "sync/once/mod.rs"               "$STD_SYS/sync/once/mod.rs"                  'target_os = "slopos"'
 check_patched "sync/thread_parking/mod.rs"     "$STD_SYS/sync/thread_parking/mod.rs"        'target_os = "slopos"'
 
-# Net routing — this is the one that silently broke for weeks.
 check_patched "net/connection/mod.rs"          "$STD_SYS/net/connection/mod.rs"             'target_os = "slopos"'
 check_patched "net/connection/socket/mod.rs"   "$STD_SYS/net/connection/socket/mod.rs"      'target_os = "slopos"'
 check_patched "net/connection/socket/slopos.rs" "$STD_SYS/net/connection/socket/slopos.rs"  'SlopOS platform implementation for `std::net`'

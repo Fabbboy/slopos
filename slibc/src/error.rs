@@ -34,8 +34,10 @@ impl SyscallError {
     pub const EROFS: Self = Self(30);
     pub const EPIPE: Self = Self(32);
     pub const ENOSYS: Self = Self(38);
+    pub const ENETUNREACH: Self = Self(101);
     pub const ETIMEDOUT: Self = Self(110);
     pub const ECONNREFUSED: Self = Self(111);
+    pub const EHOSTUNREACH: Self = Self(113);
 
     #[inline]
     pub const fn from_errno(errno: i32) -> Self {
@@ -77,8 +79,10 @@ impl SyscallError {
             30 => "Read-only file system",
             32 => "Broken pipe",
             38 => "Function not implemented",
+            101 => "Network is unreachable",
             110 => "Connection timed out",
             111 => "Connection refused",
+            113 => "No route to host",
             _ => "Unknown error",
         }
     }

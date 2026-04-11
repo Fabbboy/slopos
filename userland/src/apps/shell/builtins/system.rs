@@ -338,9 +338,7 @@ pub fn cmd_resolve(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    let hostname = argv[1];
-
-    let host_str = match core::str::from_utf8(hostname) {
+    let host_str = match core::str::from_utf8(argv[1]) {
         Ok(s) => s,
         Err(_) => {
             shell_write(b"resolve: invalid hostname\n");
@@ -348,38 +346,13 @@ pub fn cmd_resolve(argc: i32, argv: &[&[u8]]) -> i32 {
         }
     };
 
-    // Surface the real `io::Error` from `to_socket_addrs` — the
-    // previous implementation discarded it with `.ok()`, which
-    // meant a "operation not supported" PAL error from a
-    // half-patched std sysroot looked identical to a real "name not
-    // found" DNS failure, and the user had no way to tell from
-    // the shell alone.
-    use std::net::ToSocketAddrs;
-    let iter = match (host_str, 0u16).to_socket_addrs() {
-        Ok(it) => it,
-        Err(err) => {
-            shell_write(format!("resolve: {}: {}\n", host_str, err).as_bytes());
-            return 1;
-        }
-    };
-
-    let v4 = iter
-        .filter_map(|a| match a {
-            std::net::SocketAddr::V4(v4) => Some(v4),
-            _ => None,
-        })
-        .next();
-
-    match v4 {
-        Some(v4) => {
-            let o = v4.ip().octets();
-            shell_write(
-                format!("{}: -> {}.{}.{}.{}\n", host_str, o[0], o[1], o[2], o[3]).as_bytes(),
-            );
+    match crate::net::resolve_host(host_str) {
+        Ok(addr) => {
+            shell_write(format!("{}: -> {}\n", host_str, addr).as_bytes());
             0
         }
-        None => {
-            shell_write(format!("resolve: {}: no IPv4 address returned\n", host_str).as_bytes());
+        Err(err) => {
+            shell_write(format!("resolve: {}: {}\n", host_str, err).as_bytes());
             1
         }
     }

@@ -297,7 +297,8 @@ fn shell_interactive_main() {
             if let Ok(slave_fd) = fs::ioctl_tiocgptpeer(master_fd.raw()) {
                 set_shell_pty_master_fd(master_fd.into_raw());
                 let _ = fs::dup2(slave_fd.raw(), 0);
-                // slave_fd dropped here, auto-closed
+                let _ = fs::dup2(slave_fd.raw(), 1);
+                let _ = fs::dup2(slave_fd.raw(), 2);
             }
         }
     }

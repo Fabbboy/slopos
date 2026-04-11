@@ -1,7 +1,8 @@
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream};
 use std::time::Duration;
 
+use crate::net::ResolveError;
 use crate::syscall::process;
 
 const MAX_HEADERS: usize = 8;
@@ -68,7 +69,7 @@ enum CurlError {
     InvalidHost,
     InvalidPort,
     InvalidPath,
-    ResolveFailed,
+    Resolve(ResolveError),
     SocketFailed,
     ConnectFailed,
     SendFailed,
@@ -86,6 +87,10 @@ fn print_usage() {
 }
 
 fn print_error(err: CurlError) {
+    if let CurlError::Resolve(reason) = err {
+        eprintln!("curl: {}", reason);
+        return;
+    }
     let msg = match err {
         CurlError::Usage => "curl: invalid usage",
         CurlError::InvalidFlag => "curl: invalid flag",
@@ -97,7 +102,7 @@ fn print_error(err: CurlError) {
         CurlError::InvalidHost => "curl: invalid host",
         CurlError::InvalidPort => "curl: invalid port",
         CurlError::InvalidPath => "curl: invalid path",
-        CurlError::ResolveFailed => "curl: hostname resolution failed",
+        CurlError::Resolve(_) => unreachable!("handled above"),
         CurlError::SocketFailed => "curl: socket creation failed",
         CurlError::ConnectFailed => "curl: connect failed",
         CurlError::SendFailed => "curl: send failed",
@@ -303,31 +308,13 @@ fn parse_url(url: &[u8]) -> Result<ParsedUrl, CurlError> {
     })
 }
 
-fn parse_ipv4(host: &[u8]) -> Option<[u8; 4]> {
-    let host_str = core::str::from_utf8(host).ok()?;
-    Some(host_str.parse::<Ipv4Addr>().ok()?.octets())
-}
-
 fn resolve_host(parsed: &mut ParsedUrl) -> Result<(), CurlError> {
     let host = &parsed.host[..parsed.host_len];
-    if let Some(ip) = parse_ipv4(host) {
-        parsed.ip = ip;
-        return Ok(());
-    }
-
-    let host_str = core::str::from_utf8(host).map_err(|_| CurlError::ResolveFailed)?;
-    let addr = (host_str, 0u16)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.find(|a| a.is_ipv4()))
-        .ok_or(CurlError::ResolveFailed)?;
-    match addr {
-        std::net::SocketAddr::V4(v4) => {
-            parsed.ip = v4.ip().octets();
-            Ok(())
-        }
-        _ => Err(CurlError::ResolveFailed),
-    }
+    let host_str = core::str::from_utf8(host)
+        .map_err(|_| CurlError::Resolve(ResolveError::InvalidHostname))?;
+    let addr = crate::net::resolve_host(host_str).map_err(CurlError::Resolve)?;
+    parsed.ip = addr.octets();
+    Ok(())
 }
 
 fn choose_method(config: &CurlConfig) -> &str {

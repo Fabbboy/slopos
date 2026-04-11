@@ -570,6 +570,7 @@ fn execute_registry_spawn(
                         Err(_) => break,
                     }
                 }
+                forward_compositor_keyboard();
                 exit_status = st;
                 break;
             }
@@ -1012,7 +1013,6 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 break;
             }
         }
-        // Final drain after children have exited.
         loop {
             match fs::read_slice(capture_fd, &mut buf) {
                 Ok(0) => break,
@@ -1022,6 +1022,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 Err(_) => break,
             }
         }
+        forward_compositor_keyboard();
         let _ = fs::close_fd_raw(capture_fd);
         leave_foreground();
         return status;
