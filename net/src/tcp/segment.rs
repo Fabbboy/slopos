@@ -280,4 +280,86 @@ impl SegmentBuilder {
             wscale: 255,
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Explicit-field constructors for the Pcb state machine
+    // -------------------------------------------------------------------------
+    //
+    // The `_of` variants above all take `&TcpConnection`, which is the
+    // legacy god-struct.  The new `Pcb` / `PcbState` world doesn't have
+    // that type any more — each state variant carries only its own
+    // fields.  These `_raw` helpers take the sequence and tuple values
+    // directly so every `Pcb::on_segment` handler can construct output
+    // segments without touching `TcpConnection`.  Post-C.1 the legacy
+    // helpers are deleted and these become the canonical builders.
+
+    /// Plain ACK with explicit (tuple, seq, ack, window).
+    #[inline]
+    pub fn ack_raw(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
+        TcpOutSegment {
+            tuple,
+            seq_num: seq,
+            ack_num: ack,
+            flags: TCP_FLAG_ACK,
+            window_size: window,
+            mss: 0,
+            wscale: 255,
+        }
+    }
+
+    /// `FIN|ACK` with explicit fields.
+    #[inline]
+    pub fn fin_ack_raw(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
+        TcpOutSegment {
+            tuple,
+            seq_num: seq,
+            ack_num: ack,
+            flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+            window_size: window,
+            mss: 0,
+            wscale: 255,
+        }
+    }
+
+    /// `SYN|ACK` with explicit fields, typically emitted by a
+    /// simultaneous-open transition.
+    #[inline]
+    pub fn syn_ack_raw(
+        tuple: TcpTuple,
+        seq: u32,
+        ack: u32,
+        window: u16,
+        mss: u16,
+    ) -> TcpOutSegment {
+        TcpOutSegment {
+            tuple,
+            seq_num: seq,
+            ack_num: ack,
+            flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+            window_size: window,
+            mss,
+            wscale: 255,
+        }
+    }
+
+    /// Bare RST with explicit fields.  The `rst_of` legacy helper
+    /// already took `&TcpConnection`; this is the `_raw` form.
+    #[inline]
+    pub fn rst_raw(tuple: TcpTuple, seq: u32) -> TcpOutSegment {
+        Self::bare_rst(tuple, seq)
+    }
+
+    /// Data-carrying PSH+ACK with explicit fields.
+    #[inline]
+    pub fn data_push_raw(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
+        TcpOutSegment {
+            tuple,
+            seq_num: seq,
+            ack_num: ack,
+            flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
+            window_size: window,
+            mss: 0,
+            wscale: 255,
+        }
+    }
 }

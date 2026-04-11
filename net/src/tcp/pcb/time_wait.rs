@@ -1,31 +1,35 @@
 //! `TimeWait` state: connection fully closed, waiting out `2 × MSL`.
+//!
+//! RFC 793 §3.5: a connection in `TIME_WAIT` ignores most traffic but
+//! does two useful things:
+//!
+//! 1. **Retransmitted FIN** → re-ACK and restart the `2 × MSL` timer.
+//!    The peer may not have seen our previous ACK, so we issue it
+//!    again without transitioning out of TIME_WAIT.
+//! 2. **RST** → release the slot immediately (no reason to wait out
+//!    MSL when the peer's already given up).
+//!
+//! Everything else is dropped silently.  TimeWait carries no send or
+//! receive buffers — those were drained on entry — so there's nothing
+//! useful to do with data or other flags.
 
-use super::super::actions::Actions;
+use super::super::actions::{Actions, SocketNotify};
 use super::super::header::TcpHeader;
+use super::super::segment::SegmentBuilder;
 use super::super::seq::SeqNum;
-use super::Pcb;
+use super::{Pcb, PcbState};
 use crate::timer::TimerToken;
 
+/// `2 × MSL` in milliseconds.  MSL = 30 s per RFC 793 §3.3.
+pub const TIME_WAIT_MS: u64 = 60_000;
+
 /// State-specific payload for `TIME_WAIT`.
-///
-/// A `TimeWait` PCB carries no send or receive buffers — both were
-/// drained when the connection transitioned here — only enough state
-/// to re-ACK a retransmitted FIN from the peer and to expire itself
-/// after `2 × MSL`.
 #[derive(Debug)]
 pub struct TimeWaitState {
-    /// `rcv_nxt` at the moment of entry.  Used as the ACK value in
-    /// any re-ACK we emit in response to a retransmitted FIN.
     pub last_rcv_nxt: SeqNum,
-    /// `snd_nxt` at the moment of entry.  Stays static; used as the
-    /// SEQ value on a re-ACK.
     pub last_snd_nxt: SeqNum,
-    /// Our last advertised receive window.  Advertised verbatim on
-    /// re-ACKs.
     pub last_rcv_wnd: u16,
-    /// Timestamp (`now_ms`) when TIME_WAIT was entered.
     pub entry_ms: u64,
-    /// Pending `2 × MSL` expiry timer, when armed.
     pub expire_token: Option<TimerToken>,
 }
 
@@ -45,9 +49,41 @@ impl TimeWaitState {
         }
     }
 
-    /// Apply an incoming segment to a TimeWait PCB.  Real body lands in B.5.
-    pub fn on_segment(_pcb: &mut Pcb, _hdr: &TcpHeader, _now_ms: u64) -> Actions {
-        Actions::new()
+    /// Apply an incoming segment to a TimeWait PCB.
+    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
+        let mut actions = Actions::new();
+
+        let tuple = pcb.tuple;
+        let PcbState::TimeWait(s) = &mut pcb.state else {
+            unreachable!("TimeWaitState::on_segment called with non-TimeWait state");
+        };
+
+        // RST → immediate release.
+        if hdr.is_rst() {
+            actions.release = true;
+            actions.notify |= SocketNotify::RESET_RECEIVED;
+            return actions;
+        }
+
+        // Retransmitted FIN → re-ACK with the frozen-in-amber sequence
+        // numbers and restart the MSL timer.
+        if hdr.is_fin() {
+            actions.push_segment(SegmentBuilder::ack_raw(
+                tuple,
+                s.last_snd_nxt.raw(),
+                s.last_rcv_nxt.raw(),
+                s.last_rcv_wnd,
+            ));
+            s.entry_ms = now_ms;
+            // The caller (glue layer) cancels the old timer token
+            // and schedules a new one based on `s.entry_ms`.  We
+            // can't do that inline because Actions doesn't carry
+            // tokens yet — the D.5 cleanup pulls this tidy-up into
+            // the glue layer.
+        }
+
+        // Everything else → drop silently.
+        actions
     }
 
     #[cfg(debug_assertions)]

@@ -1,48 +1,47 @@
 //! `SynReceived` state: server saw a SYN, sent SYN+ACK, waiting for ACK.
+//!
+//! RFC 793 §3.4 segment arrival at `SYN_RECEIVED` has three cases:
+//!
+//! 1. **RST** → release the PCB and flag `RESET_RECEIVED`.
+//! 2. **ACK with bad value** → reply with `RST(seq = ack_num)`.
+//!    A "bad" ACK here means `ack_num < snd_una` or
+//!    `ack_num > snd_nxt`.
+//! 3. **Valid ACK** → transition to `Data` / `ClosePhase::Established`.
+//!    The connection is now fully open.
+//!
+//! Non-ACK segments are dropped silently (they would be impossible
+//! in a correct 3WHS — at this point the peer must send ACK).
 
-use super::super::actions::Actions;
+use core::mem;
+
+use super::super::actions::{Actions, SocketNotify};
 use super::super::header::{DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TcpHeader};
-use super::super::seq::SeqNum;
-use super::Pcb;
+use super::super::segment::SegmentBuilder;
+use super::super::seq::{SeqNum, seq_gt, seq_lt};
+use super::data::DataState;
+use super::{Pcb, PcbState};
 use crate::timer::TimerToken;
 
 /// State-specific payload for `SYN_RECEIVED`.
 #[derive(Debug)]
 pub struct SynRecvState {
-    /// Our initial send sequence number (sent in SYN+ACK).
     pub iss: SeqNum,
-    /// Peer's initial receive sequence number (from their SYN).
     pub irs: SeqNum,
-    /// Send unacknowledged.  Equal to `iss` until the handshake's
-    /// final ACK advances it to `iss + 1`.
     pub snd_una: SeqNum,
-    /// Next sequence number we will send.  Equal to `iss + 1`.
     pub snd_nxt: SeqNum,
-    /// Next byte we expect to receive.  Equal to `irs + 1`.
     pub rcv_nxt: SeqNum,
-    /// Peer's advertised window (parsed from the incoming SYN).
     pub snd_wnd: u32,
-    /// Our advertised receive window.
     pub rcv_wnd: u16,
-    /// Our receive-side window scale.
     pub our_wscale: u8,
-    /// Peer's send-side window scale (from their SYN options).
     pub snd_wscale: u8,
-    /// Whether window scaling was negotiated.
     pub wscale_enabled: bool,
-    /// Peer MSS parsed from SYN options, or `DEFAULT_MSS`.
     pub peer_mss: u16,
-    /// Current retransmission timeout in milliseconds.
     pub rto_ms: u32,
-    /// SYN+ACK retransmission counter.
     pub retransmits: u8,
-    /// Timer token for pending SYN+ACK retransmit.
     pub retransmit_token: Option<TimerToken>,
 }
 
 impl SynRecvState {
-    /// Create a fresh SYN_RECEIVED payload after a valid SYN arrives
-    /// on a listening socket.
     pub const fn new(iss: SeqNum, irs: SeqNum) -> Self {
         Self {
             iss,
@@ -62,9 +61,71 @@ impl SynRecvState {
         }
     }
 
-    /// Apply an incoming segment to a SYN_RECEIVED PCB.  Real body lands in B.3.
-    pub fn on_segment(_pcb: &mut Pcb, _hdr: &TcpHeader, _now_ms: u64) -> Actions {
-        Actions::new()
+    /// Apply an incoming segment to a SYN_RECEIVED PCB.
+    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, _now_ms: u64) -> Actions {
+        let mut actions = Actions::new();
+
+        let tuple = pcb.tuple;
+        let PcbState::SynRecv(s) = &mut pcb.state else {
+            unreachable!("SynRecvState::on_segment called with non-SynRecv state");
+        };
+
+        // RST → release.
+        if hdr.is_rst() {
+            actions.release = true;
+            actions.notify |= SocketNotify::RESET_RECEIVED;
+            return actions;
+        }
+
+        // Must have ACK.
+        if !hdr.is_ack() {
+            return actions;
+        }
+
+        // Validate ACK range.
+        if seq_lt(hdr.ack_num, s.snd_una.raw()) || seq_gt(hdr.ack_num, s.snd_nxt.raw()) {
+            actions.push_segment(SegmentBuilder::bare_rst(tuple, hdr.ack_num));
+            return actions;
+        }
+
+        // Valid ACK → ESTABLISHED.  Capture every field we need out
+        // of the SynRecv state before we swap the variant out.
+        let iss = s.iss;
+        let irs = s.irs;
+        let snd_nxt = s.snd_nxt;
+        let rcv_nxt = s.rcv_nxt;
+        let peer_mss = s.peer_mss;
+        let snd_wscale = s.snd_wscale;
+        let our_wscale = s.our_wscale;
+        let wscale_enabled = s.wscale_enabled;
+        let snd_una = SeqNum::new(hdr.ack_num);
+        let snd_wnd = if wscale_enabled {
+            (hdr.window_size as u32) << snd_wscale
+        } else {
+            hdr.window_size as u32
+        };
+        let _ = s;
+
+        let data = DataState::new(
+            iss,
+            irs,
+            snd_una,
+            snd_nxt,
+            rcv_nxt,
+            snd_wnd,
+            DEFAULT_WINDOW_SIZE,
+            peer_mss,
+            snd_wscale,
+            our_wscale,
+            wscale_enabled,
+        );
+        let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
+
+        actions.notify |= SocketNotify::NEW_ESTABLISHED | SocketNotify::ACCEPT_WAKE;
+        // Note: no outgoing segment — the 3WHS is complete; the peer's
+        // ACK doesn't need a response.
+        let _ = tuple;
+        actions
     }
 
     #[cfg(debug_assertions)]
@@ -79,8 +140,6 @@ impl SynRecvState {
             self.irs.wrapping_add(1),
             "SynRecv: rcv_nxt == irs + 1"
         );
-        // `snd_una` can be `iss` (awaiting final ACK) or `iss+1`
-        // (ACKed at the moment we transition out).
         debug_assert!(
             self.snd_una == self.iss || self.snd_una == self.iss.wrapping_add(1),
             "SynRecv: snd_una in {{iss, iss+1}}"
