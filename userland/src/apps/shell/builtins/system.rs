@@ -348,28 +348,38 @@ pub fn cmd_resolve(argc: i32, argv: &[&[u8]]) -> i32 {
         }
     };
 
+    // Surface the real `io::Error` from `to_socket_addrs` — the
+    // previous implementation discarded it with `.ok()`, which
+    // meant a "operation not supported" PAL error from a
+    // half-patched std sysroot looked identical to a real "name not
+    // found" DNS failure, and the user had no way to tell from
+    // the shell alone.
     use std::net::ToSocketAddrs;
-    match (host_str, 0u16)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.find(|a| a.is_ipv4()))
-    {
-        Some(std::net::SocketAddr::V4(v4)) => {
-            let octets = v4.ip().octets();
-            shell_write(hostname);
+    let iter = match (host_str, 0u16).to_socket_addrs() {
+        Ok(it) => it,
+        Err(err) => {
+            shell_write(format!("resolve: {}: {}\n", host_str, err).as_bytes());
+            return 1;
+        }
+    };
+
+    let v4 = iter
+        .filter_map(|a| match a {
+            std::net::SocketAddr::V4(v4) => Some(v4),
+            _ => None,
+        })
+        .next();
+
+    match v4 {
+        Some(v4) => {
+            let o = v4.ip().octets();
             shell_write(
-                format!(
-                    " -> {}.{}.{}.{}\n",
-                    octets[0], octets[1], octets[2], octets[3]
-                )
-                .as_bytes(),
+                format!("{}: -> {}.{}.{}.{}\n", host_str, o[0], o[1], o[2], o[3]).as_bytes(),
             );
             0
         }
-        _ => {
-            shell_write(b"resolve: failed to resolve ");
-            shell_write(hostname);
-            shell_write(b"\n");
+        None => {
+            shell_write(format!("resolve: {}: no IPv4 address returned\n", host_str).as_bytes());
             1
         }
     }

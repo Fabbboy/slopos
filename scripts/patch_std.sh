@@ -18,11 +18,24 @@ if [ ! -d "$STD_SYS" ]; then
     exit 1
 fi
 
+# Note: no outer idempotency marker.
+#
+# An earlier version of this script used a `.slopos_patched` marker file
+# to short-circuit re-runs.  That was unsafe by design — when new patch
+# sections were added to the script, the outer gate prevented them from
+# ever running against sysroots that had been marked by an older script
+# version, leaving the std library silently half-patched (the `net`
+# section's 2026-04-05 addition is an example that went unnoticed for
+# weeks because nothing exercises `std::net::ToSocketAddrs` at build
+# time).
+#
+# Every patch section below is individually idempotent via its own
+# `grep -q 'target_os = "slopos"'` guard, so re-running the script on
+# an already-patched sysroot is a no-op (~50 fast sed passes).  We
+# remove the stale marker if we see one so old installations recover.
 MARKER="$STD_SYS/.slopos_patched"
 if [ -f "$MARKER" ]; then
-    echo "SlopOS std patches already applied (marker: $MARKER)"
-    echo "To re-apply, run: rm $MARKER && $0"
-    exit 0
+    rm -f "$MARKER"
 fi
 
 echo "Patching Rust std source for SlopOS target..."
@@ -384,8 +397,68 @@ if ! grep -q 'target_os = "slopos"' "$STD_OS/mod.rs" 2>/dev/null; then
     patch_os_fd
 fi
 
-# 4. Create marker file
-echo "SlopOS std patches applied on $(date)" > "$MARKER"
+# 4. Post-patch verification
+#
+# Catches the "script updated, sysroot stale" drift that used to produce
+# a silently half-patched std library (see comment at the top of this
+# file).  Each entry below is a (label, file, anchor) triple: after all
+# patches run, every anchor MUST be present in its file or we bail out.
+# Adding a new patch section means adding a matching verification row.
+
+failed=0
+check_patched() {
+    local label="$1"
+    local file="$2"
+    local needle="$3"
+    if ! grep -q "$needle" "$file" 2>/dev/null; then
+        echo "  MISSING PATCH: $label"
+        echo "    file  : $file"
+        echo "    needle: $needle"
+        failed=1
+    fi
+}
+
+# Core PAL + routing surfaces
+check_patched "pal/mod.rs"                     "$STD_SYS/pal/mod.rs"                        'target_os = "slopos"'
+check_patched "alloc/mod.rs"                   "$STD_SYS/alloc/mod.rs"                      'target_os = "slopos"'
+check_patched "args/mod.rs"                    "$STD_SYS/args/mod.rs"                       'target_os = "slopos"'
+check_patched "env/mod.rs"                     "$STD_SYS/env/mod.rs"                        'target_os = "slopos"'
+check_patched "stdio/mod.rs"                   "$STD_SYS/stdio/mod.rs"                      'target_os = "slopos"'
+check_patched "time/mod.rs"                    "$STD_SYS/time/mod.rs"                       'target_os = "slopos"'
+check_patched "thread/mod.rs"                  "$STD_SYS/thread/mod.rs"                     'target_os = "slopos"'
+check_patched "pipe/mod.rs"                    "$STD_SYS/pipe/mod.rs"                       'target_os = "slopos"'
+check_patched "random/mod.rs"                  "$STD_SYS/random/mod.rs"                     'target_os = "slopos"'
+check_patched "fs/mod.rs"                      "$STD_SYS/fs/mod.rs"                         'target_os = "slopos"'
+check_patched "process/mod.rs"                 "$STD_SYS/process/mod.rs"                    'target_os = "slopos"'
+check_patched "thread_local/mod.rs"            "$STD_SYS/thread_local/mod.rs"               'target_os = "slopos"'
+check_patched "io/error/mod.rs"                "$STD_SYS/io/error/mod.rs"                   'target_os = "slopos"'
+check_patched "exit.rs"                        "$STD_SYS/exit.rs"                           'target_os = "slopos"'
+check_patched "env_consts.rs"                  "$STD_SYS/env_consts.rs"                     'target_os = "slopos"'
+check_patched "sync/mutex/mod.rs"              "$STD_SYS/sync/mutex/mod.rs"                 'target_os = "slopos"'
+check_patched "sync/condvar/mod.rs"            "$STD_SYS/sync/condvar/mod.rs"               'target_os = "slopos"'
+check_patched "sync/rwlock/mod.rs"             "$STD_SYS/sync/rwlock/mod.rs"                'target_os = "slopos"'
+check_patched "sync/once/mod.rs"               "$STD_SYS/sync/once/mod.rs"                  'target_os = "slopos"'
+check_patched "sync/thread_parking/mod.rs"     "$STD_SYS/sync/thread_parking/mod.rs"        'target_os = "slopos"'
+
+# Net routing — this is the one that silently broke for weeks.
+check_patched "net/connection/mod.rs"          "$STD_SYS/net/connection/mod.rs"             'target_os = "slopos"'
+check_patched "net/connection/socket/mod.rs"   "$STD_SYS/net/connection/socket/mod.rs"      'target_os = "slopos"'
+check_patched "net/connection/socket/slopos.rs" "$STD_SYS/net/connection/socket/slopos.rs"  'SlopOS platform implementation for `std::net`'
+check_patched "net/hostname/mod.rs"            "$STD_SYS/net/hostname/mod.rs"               'target_os = "slopos"'
+
+# File descriptor surfaces
+check_patched "fd/mod.rs"                      "$STD_SYS/fd/mod.rs"                         'target_os = "slopos"'
+check_patched "fd/slopos.rs"                   "$STD_SYS/fd/slopos.rs"                      '.'
+check_patched "os/mod.rs"                      "$STD_OS/mod.rs"                             'target_os = "slopos"'
+check_patched "os/fd/raw.rs"                   "$STD_OS/fd/raw.rs"                          'target_os = "slopos"'
+check_patched "os/fd/owned.rs"                 "$STD_OS/fd/owned.rs"                        'target_os = "slopos"'
+
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "ERROR: one or more std patches failed to apply."
+    echo "       The sysroot at $SYSROOT is in a half-patched state."
+    exit 1
+fi
+
 echo ""
-echo "SlopOS std patches applied successfully!"
-echo "Marker: $MARKER"
+echo "SlopOS std patches applied successfully (verified)."
