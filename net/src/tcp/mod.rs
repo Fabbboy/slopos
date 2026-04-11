@@ -32,7 +32,7 @@ pub use header::{
 };
 pub use reasm::TcpOooQueue;
 pub use segment::{TcpOutSegment, write_tcp_segment};
-pub use seq::{seq_ge, seq_gt, seq_le, seq_lt};
+pub use seq::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
 
 use core::sync::atomic::{AtomicU16, Ordering};
 

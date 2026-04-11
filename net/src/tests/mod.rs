@@ -21,6 +21,8 @@ pub mod socket_tests;
 pub mod tcp_data_tests;
 pub mod tcp_keepalive_tests;
 pub mod tcp_live_tests;
+pub mod tcp_reasm_tests;
+pub mod tcp_seq_tests;
 pub mod tcp_socket_tests;
 pub mod tcp_tests;
 pub mod timer_tests;
