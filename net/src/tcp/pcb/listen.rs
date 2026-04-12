@@ -13,7 +13,7 @@
 //!    peer's MSS / WScale options, and emits a SYN+ACK back.  It
 //!    **does not** allocate a child PCB itself — it fills
 //!    [`Actions::accepted`] with the [`AcceptedConn`] metadata and
-//!    lets the glue layer in `tcp::tcp_input` install the new PCB in
+//!    lets the glue layer in `tcp::input` install the new PCB in
 //!    [`crate::tcp::table::PcbTable`] while still holding the lock.
 //!    This keeps `Listen::on_segment` sans-IO and avoids the
 //!    awkwardness of nested table borrows inside a handler.
@@ -122,13 +122,13 @@ impl ListenState {
     /// Per-state debug invariants.  Listen has no send buffer, no
     /// retransmit timer, and no sequence-space state to validate.
     #[cfg(debug_assertions)]
-    pub(super) fn debug_assert_invariants(&self, pcb: &Pcb) {
+    pub(super) fn debug_assert_invariants(&self, bufs: &crate::tcp::buffer::TcpBufferPair) {
         debug_assert!(
-            pcb.buffers.send.buffered_len() == 0,
+            bufs.send.buffered_len() == 0,
             "Listen PCB has unexpected send data"
         );
         debug_assert!(
-            pcb.buffers.recv.available() == 0,
+            bufs.recv.available() == 0,
             "Listen PCB has unexpected recv data"
         );
     }

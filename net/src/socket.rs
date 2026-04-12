@@ -5,7 +5,8 @@ use core::fmt;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::packetbuf::PacketBuf;
-use crate::tcp_socket;
+use crate::tcp;
+use crate::tcp::listener as tcp_listener;
 use crate::types::{Ipv4Addr, NetError, Port, SockAddr};
 use slopos_utils::{Bitmap, words_for};
 
@@ -28,9 +29,9 @@ pub struct IcmpSocketInner {
 
 pub struct TcpSocketInner {
     /// Optional transport connection identifier.
-    pub conn_id: Option<u32>,
+    pub conn_id: Option<tcp::ConnId>,
     /// Two-queue listen state for TCP listening sockets.
-    pub listen: Option<tcp_socket::TcpListenState>,
+    pub listen: Option<tcp_listener::TcpListenState>,
 }
 
 pub struct RawSocketInner;
@@ -682,7 +683,7 @@ use slopos_abi::syscall::{
 use slopos_sync::WaitQueue;
 
 use crate as net;
-use crate::tcp::{self, TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
+use crate::tcp::{TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
 
 const TCP_TX_MAX: usize = 1460;
 pub const UDP_DGRAM_MAX_PAYLOAD: usize = 1472;
@@ -821,9 +822,9 @@ fn socket_wake_accept_hint(wq_hint: u8) {
     ACCEPT_WQS[wq_slot(wq_hint)].wake_all();
 }
 
-fn socket_tcp_conn_id(sock: &Socket) -> Option<usize> {
+fn socket_tcp_conn_id(sock: &Socket) -> Option<tcp::ConnId> {
     match &sock.inner {
-        SocketInner::Tcp(tcp) => tcp.conn_id.map(|id| id as usize),
+        SocketInner::Tcp(tcp) => tcp.conn_id,
         _ => None,
     }
 }
@@ -836,20 +837,20 @@ fn socket_is_icmp(sock: &Socket) -> bool {
     matches!(sock.inner, SocketInner::Icmp(_))
 }
 
-fn socket_notify_tcp_idx_waiters(tcp_idx: usize) {
+fn socket_notify_tcp_idx_waiters(tcp_idx: tcp::ConnId) {
     let table = NEW_SOCKET_TABLE.lock();
     for slot in table.slots.iter().flatten() {
         if socket_tcp_conn_id(slot) != Some(tcp_idx) {
             continue;
         }
-        if tcp::tcp_recv_available(tcp_idx) > 0 || tcp::tcp_is_peer_closed(tcp_idx) {
+        if tcp::recv_available(tcp_idx) > 0 || tcp::is_peer_closed(tcp_idx) {
             socket_wake_recv_hint(slot.recv_wq_idx);
         }
-        if tcp::tcp_send_buffer_space(tcp_idx) > 0 {
+        if tcp::send_buffer_space(tcp_idx) > 0 {
             socket_wake_send_hint(slot.send_wq_idx);
         }
         if !matches!(
-            tcp::tcp_get_state(tcp_idx),
+            tcp::get_state(tcp_idx),
             Some(TcpState::Established | TcpState::CloseWait)
         ) {
             socket_wake_recv_hint(slot.recv_wq_idx);
@@ -880,73 +881,69 @@ fn socket_notify_accept_waiters() {
     }
 }
 
-pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
-    if let Some(tcp_idx) = result.conn_idx {
-        socket_notify_tcp_idx_waiters(tcp_idx);
+pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
+    if let Some(conn_id) = actions.conn_id {
+        socket_notify_tcp_idx_waiters(conn_id);
 
         // When a connection transitions to Established, register it
         // in the TCP demux table for fast 4-tuple lookup.
-        if result.new_state == Some(TcpState::Established) {
-            if let Some(conn) = tcp::tcp_get_connection(tcp_idx) {
-                let _ = tcp_socket::TCP_DEMUX.lock().register_established(
-                    Ipv4Addr(conn.tuple.local_ip),
-                    Port(conn.tuple.local_port),
-                    Ipv4Addr(conn.tuple.remote_ip),
-                    Port(conn.tuple.remote_port),
-                    tcp_idx as u32,
+        if actions.notify.contains(tcp::SocketNotify::NEW_ESTABLISHED) {
+            if let Some(tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
+                let _ = tcp_listener::TCP_DEMUX.lock().register_established(
+                    Ipv4Addr(tuple.local_ip),
+                    Port(tuple.local_port),
+                    Ipv4Addr(tuple.remote_ip),
+                    Port(tuple.remote_port),
+                    conn_id.0,
                 );
 
                 // Wire completed 3WHS into the listener's accept queue.
-                // When a server-side child connection transitions SYN_RECEIVED -> Established,
-                // find the parent listener and push an AcceptedConn to its accept queue.
-                let listener_sock_idx = tcp_socket::TCP_DEMUX
+                // Read the PCB metadata to build the AcceptedConn — this
+                // is the ACK leg, not the SYN leg, so actions.accepted is
+                // not populated.
+                let listener_sock_idx = tcp_listener::TCP_DEMUX
                     .lock()
-                    .lookup_listener(Ipv4Addr(conn.tuple.local_ip), Port(conn.tuple.local_port));
+                    .lookup_listener(Ipv4Addr(tuple.local_ip), Port(tuple.local_port));
                 if let Some(listener_idx) = listener_sock_idx {
-                    let mut table = NEW_SOCKET_TABLE.lock();
-                    if let Some(listener_sock) = table.get_mut(listener_idx as usize)
-                        && listener_sock.state == SocketState::Listening
-                        && let SocketInner::Tcp(ref mut tcp_inner) = listener_sock.inner
-                        && let Some(ref mut listen_state) = tcp_inner.listen
-                    {
-                        let accepted = tcp_socket::AcceptedConn {
-                            tuple: conn.tuple,
-                            iss: conn.iss,
-                            irs: conn.irs,
-                            peer_mss: conn.peer_mss,
+                    let accepted_meta = tcp::with_pcb(conn_id, |pcb| {
+                        let tcp::PcbState::Data(d) = &pcb.state else {
+                            return None;
                         };
-                        listen_state.push_accepted(accepted);
+                        Some(tcp_listener::AcceptedConn {
+                            tuple: pcb.tuple,
+                            iss: d.iss.raw(),
+                            irs: d.irs.raw(),
+                            peer_mss: d.peer_mss,
+                        })
+                    })
+                    .flatten();
+                    if let Some(accepted) = accepted_meta {
+                        let mut table = NEW_SOCKET_TABLE.lock();
+                        if let Some(listener_sock) = table.get_mut(listener_idx as usize)
+                            && listener_sock.state == SocketState::Listening
+                            && let SocketInner::Tcp(ref mut tcp_inner) = listener_sock.inner
+                            && let Some(ref mut listen_state) = tcp_inner.listen
+                        {
+                            listen_state.push_accepted(accepted);
+                        }
                     }
                 }
             }
         }
     }
-    if result.accepted_idx.is_some() || result.new_state == Some(TcpState::Established) {
+    if actions.accepted.is_some() || actions.notify.contains(tcp::SocketNotify::NEW_ESTABLISHED) {
         socket_notify_accept_waiters();
     }
 }
 
 fn sync_socket_state(sock: &mut Socket) {
-    if let Some(tcp_idx) = socket_tcp_conn_id(sock) {
-        match tcp::tcp_get_state(tcp_idx) {
-            Some(
-                TcpState::Established
-                | TcpState::CloseWait
-                | TcpState::FinWait1
-                | TcpState::FinWait2,
-            ) => {
-                sock.state = SocketState::Connected;
-            }
-            Some(TcpState::SynSent | TcpState::SynReceived) => {
-                sock.state = SocketState::Connecting;
-            }
-            Some(TcpState::Closed | TcpState::TimeWait | TcpState::Closing | TcpState::LastAck) => {
-                sock.state = SocketState::Closed;
-            }
-            Some(TcpState::Listen) => {}
-            None => {
-                sock.state = SocketState::Closed;
-            }
+    if let Some(id) = socket_tcp_conn_id(sock) {
+        use tcp::ObservedSocketState;
+        match tcp::with_pcb(id, |pcb| pcb.state.observed_socket_state()) {
+            Some(ObservedSocketState::Listening) => {}
+            Some(ObservedSocketState::Connecting) => sock.state = SocketState::Connecting,
+            Some(ObservedSocketState::Connected) => sock.state = SocketState::Connected,
+            Some(ObservedSocketState::Closed) | None => sock.state = SocketState::Closed,
         }
     }
 }
@@ -1392,22 +1389,22 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
         return errno_i32(ERRNO_EINVAL);
     }
 
-    match tcp::tcp_listen(local.ip.0, local.port.0) {
+    match tcp::listen(local.ip.0, local.port.0) {
         Ok(tcp_idx) => {
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
-                tcp_inner.conn_id = Some(tcp_idx as u32);
+                tcp_inner.conn_id = Some(tcp_idx);
                 // Create TcpListenState with two-queue model.
-                tcp_inner.listen = Some(tcp_socket::TcpListenState::new(backlog as usize, local));
+                tcp_inner.listen = Some(tcp_listener::TcpListenState::new(backlog as usize, local));
             }
             sock.state = SocketState::Listening;
 
             // Register listener in TCP demux table.
-            let _ = tcp_socket::TCP_DEMUX
+            let _ = tcp_listener::TCP_DEMUX
                 .lock()
                 .register_listener(local.ip, local.port, sock_idx);
 
             // Set bidirectional link on the connection.
-            tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
+            tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
 
             0
         }
@@ -1457,14 +1454,14 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 
             if let Some(accepted_conn) = accepted {
                 // Find the TCP connection index for this accepted connection.
-                let tcp_idx = tcp::tcp_find(&accepted_conn.tuple);
+                let tcp_idx = tcp::find(&accepted_conn.tuple);
 
                 let Some(tcp_idx) = tcp_idx else {
                     continue;
                 };
 
                 if !matches!(
-                    tcp::tcp_get_state(tcp_idx),
+                    tcp::get_state(tcp_idx),
                     Some(
                         TcpState::Established
                             | TcpState::CloseWait
@@ -1476,7 +1473,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 }
 
                 let Some(new_idx) = table.alloc(SocketInner::Tcp(TcpSocketInner {
-                    conn_id: Some(tcp_idx as u32),
+                    conn_id: Some(tcp_idx),
                     listen: None,
                 })) else {
                     return errno_i32(ERRNO_ENOMEM);
@@ -1509,7 +1506,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 }
 
                 // Set bidirectional socket↔connection link.
-                tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
+                tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(new_idx as u32)));
 
                 return new_idx as i32;
             }
@@ -1583,17 +1580,17 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                         .unwrap_or([0; 4])
                 });
 
-                match tcp::tcp_connect(local_ip, addr, port) {
+                match tcp::connect(local_ip, addr, port) {
                     Ok((tcp_idx, syn)) => {
                         sock.local_addr = Some(SockAddr::new(
                             Ipv4Addr(syn.tuple.local_ip),
                             Port(syn.tuple.local_port),
                         ));
                         sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
-                        tcp_inner.conn_id = Some(tcp_idx as u32);
+                        tcp_inner.conn_id = Some(tcp_idx);
                         sock.state = SocketState::Connecting;
 
-                        tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
+                        tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
 
                         let nb = sock.is_nonblocking();
                         let hint = sock.send_wq_idx;
@@ -1619,7 +1616,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     // so the NAPI RX path can call socket_notify_tcp_activity without deadlocking.
     let send_rc = socket_send_tcp_segment(&syn_seg, &[]);
     if send_rc != 0 {
-        let _ = tcp::tcp_abort(tcp_idx);
+        let _ = tcp::abort(tcp_idx);
         return send_rc;
     }
 
@@ -1631,7 +1628,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 
     loop {
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
-            let _ = tcp::tcp_abort(tcp_idx);
+            let _ = tcp::abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
                 sock.state = SocketState::Closed;
@@ -1639,7 +1636,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             return errno_i32(ERRNO_EINTR);
         }
 
-        match tcp::tcp_get_state(tcp_idx) {
+        match tcp::get_state(tcp_idx) {
             Some(TcpState::Established) => {
                 let mut table = NEW_SOCKET_TABLE.lock();
                 if let Some(sock) = table.get_mut(sock_idx as usize) {
@@ -1648,7 +1645,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                 return 0;
             }
             Some(TcpState::SynSent) => {}
-            Some(TcpState::Closed) | None => {
+            None => {
                 let mut table = NEW_SOCKET_TABLE.lock();
                 if let Some(sock) = table.get_mut(sock_idx as usize) {
                     sock.state = SocketState::Closed;
@@ -1665,7 +1662,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
 
         if slopos_utils::clock::uptime_ms() >= deadline_ms {
-            let _ = tcp::tcp_abort(tcp_idx);
+            let _ = tcp::abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
                 sock.state = SocketState::Closed;
@@ -1848,7 +1845,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
 
     let mut total_wrote = 0usize;
     while total_wrote < payload.len() {
-        let space = tcp::tcp_send_buffer_space(tcp_idx);
+        let space = tcp::send_buffer_space(tcp_idx);
         if space == 0 {
             if total_wrote > 0 {
                 break;
@@ -1858,9 +1855,9 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             }
             let wait_ok = if timeout_ms > 0 {
                 SEND_WQS[wq_slot(send_hint)]
-                    .wait_event_timeout(|| tcp::tcp_send_buffer_space(tcp_idx) > 0, timeout_ms)
+                    .wait_event_timeout(|| tcp::send_buffer_space(tcp_idx) > 0, timeout_ms)
             } else {
-                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
+                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::send_buffer_space(tcp_idx) > 0)
             };
             if !wait_ok {
                 return errno_i32(ERRNO_EAGAIN) as i64;
@@ -1871,7 +1868,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         let remaining = payload.len() - total_wrote;
         let chunk_len = cmp::min(space, remaining);
         let chunk = &payload[total_wrote..total_wrote + chunk_len];
-        let wrote = match tcp::tcp_send(tcp_idx, chunk) {
+        let wrote = match tcp::send(tcp_idx, chunk) {
             Ok(n) => n,
             Err(e) => {
                 if total_wrote > 0 {
@@ -1890,9 +1887,9 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             }
             let wait_ok = if timeout_ms > 0 {
                 SEND_WQS[wq_slot(send_hint)]
-                    .wait_event_timeout(|| tcp::tcp_send_buffer_space(tcp_idx) > 0, timeout_ms)
+                    .wait_event_timeout(|| tcp::send_buffer_space(tcp_idx) > 0, timeout_ms)
             } else {
-                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
+                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::send_buffer_space(tcp_idx) > 0)
             };
             if !wait_ok {
                 return errno_i32(ERRNO_EAGAIN) as i64;
@@ -1905,7 +1902,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
     let mut tx_payload = [0u8; TCP_TX_MAX];
     let now_ms = slopos_utils::clock::uptime_ms();
     loop {
-        let Some((seg, n)) = tcp::tcp_poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
+        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
             break;
         };
         let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
@@ -2046,7 +2043,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     };
 
     loop {
-        match tcp::tcp_recv(tcp_idx, out) {
+        match tcp::recv(tcp_idx, out) {
             Ok(n) => {
                 if n > 0 {
                     return n as i64;
@@ -2057,14 +2054,14 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 // still receive — only return EOF when the peer also closed
                 // (Closing, TimeWait, Closed, LastAck) or tcp reports peer FIN.
                 if !matches!(
-                    tcp::tcp_get_state(tcp_idx),
+                    tcp::get_state(tcp_idx),
                     Some(
                         TcpState::Established
                             | TcpState::CloseWait
                             | TcpState::FinWait1
                             | TcpState::FinWait2
                     )
-                ) || tcp::tcp_is_peer_closed(tcp_idx)
+                ) || tcp::is_peer_closed(tcp_idx)
                 {
                     return 0;
                 }
@@ -2076,10 +2073,10 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 let wait_ok = if timeout_ms > 0 {
                     RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
                         || {
-                            tcp::tcp_recv_available(tcp_idx) > 0
-                                || tcp::tcp_is_peer_closed(tcp_idx)
+                            tcp::recv_available(tcp_idx) > 0
+                                || tcp::is_peer_closed(tcp_idx)
                                 || !matches!(
-                                    tcp::tcp_get_state(tcp_idx),
+                                    tcp::get_state(tcp_idx),
                                     Some(
                                         TcpState::Established
                                             | TcpState::CloseWait
@@ -2092,10 +2089,10 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     )
                 } else {
                     RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
-                        tcp::tcp_recv_available(tcp_idx) > 0
-                            || tcp::tcp_is_peer_closed(tcp_idx)
+                        tcp::recv_available(tcp_idx) > 0
+                            || tcp::is_peer_closed(tcp_idx)
                             || !matches!(
-                                tcp::tcp_get_state(tcp_idx),
+                                tcp::get_state(tcp_idx),
                                 Some(
                                     TcpState::Established
                                         | TcpState::CloseWait
@@ -2167,14 +2164,14 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 
     // Unregister from TCP demux table.
     if was_listener {
-        tcp_socket::TCP_DEMUX.lock().unregister_listener(sock_idx);
+        tcp_listener::TCP_DEMUX.lock().unregister_listener(sock_idx);
     }
     if let Some(tcp_idx) = tcp_idx {
-        tcp_socket::TCP_DEMUX
+        tcp_listener::TCP_DEMUX
             .lock()
-            .unregister_established(tcp_idx as u32);
+            .unregister_established(tcp_idx.0);
         // Clear the bidirectional link.
-        tcp::tcp_set_socket_idx(tcp_idx, None);
+        tcp::set_socket_idx(tcp_idx, None);
     }
 
     if let Some(local) = udp_unbind {
@@ -2192,7 +2189,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
     socket_wake_accept_hint(accept_hint);
 
     if let Some(tcp_idx) = tcp_idx {
-        match tcp::tcp_close(tcp_idx) {
+        match tcp::close(tcp_idx) {
             Ok(Some(seg)) => {
                 let _ = socket_send_tcp_segment(&seg, &[]);
                 socket_notify_tcp_idx_waiters(tcp_idx);
@@ -2253,18 +2250,18 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     };
 
     let mut flags = 0u32;
-    let recv_available = tcp::tcp_recv_available(tcp_idx);
+    let recv_available = tcp::recv_available(tcp_idx);
     if recv_available > 0 {
         flags |= POLLIN as u32;
     }
 
-    if tcp::tcp_is_reset(tcp_idx) && recv_available == 0 {
+    if tcp::is_reset(tcp_idx) && recv_available == 0 {
         return (POLLERR | POLLHUP) as u32;
     }
 
-    match tcp::tcp_get_state(tcp_idx) {
+    match tcp::get_state(tcp_idx) {
         Some(TcpState::Established | TcpState::CloseWait) => {
-            if tcp::tcp_is_peer_closed(tcp_idx) && recv_available == 0 {
+            if tcp::is_peer_closed(tcp_idx) && recv_available == 0 {
                 flags |= (POLLIN | POLLHUP) as u32;
             }
         }
@@ -2277,7 +2274,7 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
         ) => {
             flags |= POLLHUP as u32;
         }
-        Some(TcpState::Closed) | None => {
+        None => {
             flags |= (POLLERR | POLLHUP) as u32;
         }
         _ => {}
@@ -2331,13 +2328,13 @@ pub fn socket_poll_writable(sock_idx: u32) -> u32 {
     };
 
     let mut flags = 0u32;
-    if matches!(state, SocketState::Connected) && tcp::tcp_send_buffer_space(tcp_idx) > 0 {
+    if matches!(state, SocketState::Connected) && tcp::send_buffer_space(tcp_idx) > 0 {
         flags |= POLLOUT as u32;
     }
 
-    match tcp::tcp_get_state(tcp_idx) {
+    match tcp::get_state(tcp_idx) {
         Some(TcpState::Established | TcpState::CloseWait) => {}
-        Some(TcpState::Closed) | None => {
+        None => {
             flags |= (POLLERR | POLLHUP) as u32;
         }
         Some(
@@ -2421,7 +2418,7 @@ pub fn socket_reset_all() {
     *EPHEMERAL_PORTS.lock() = EphemeralPortAllocator::new();
     crate::icmp::ICMP_DEMUX.lock().clear();
     crate::udp::UDP_DEMUX.lock().clear();
-    tcp::tcp_reset_all();
+    tcp::reset_all();
     crate::neighbor::NEIGHBOR_CACHE.reset();
 }
 
@@ -2454,7 +2451,7 @@ pub fn socket_snapshot(sock_idx: u32) -> Option<SocketSnapshot> {
     })
 }
 
-pub fn socket_lookup_tcp_idx(sock_idx: u32) -> Option<usize> {
+pub fn socket_lookup_tcp_idx(sock_idx: u32) -> Option<tcp::ConnId> {
     NEW_SOCKET_TABLE
         .lock()
         .get(sock_idx as usize)
@@ -2676,13 +2673,13 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
         let shut_rd = how == SHUT_RD || how == SHUT_RDWR;
 
         if shut_wr {
-            if let Ok(Some(seg)) = tcp::tcp_shutdown_write(tcp_idx) {
+            if let Ok(Some(seg)) = tcp::shutdown_write(tcp_idx) {
                 let _ = socket_send_tcp_segment(&seg, &[]);
             }
         }
 
         if shut_rd {
-            tcp::tcp_recv_discard(tcp_idx);
+            tcp::recv_discard(tcp_idx);
             // Wake recv waiters so they see EOF.
             socket_wake_recv_hint(recv_hint);
         }
@@ -2700,7 +2697,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
     let mut tx_payload = [0u8; TCP_TX_MAX];
     let now_ms = slopos_utils::clock::uptime_ms();
     loop {
-        let Some((seg, n)) = tcp::tcp_poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
+        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
             break;
         };
         let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
@@ -2712,10 +2709,10 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_process_timers() {
-    // Retransmit timers now fire exclusively via NET_TIMER_WHEEL → tcp::tcp_on_retransmit;
+    // Retransmit timers now fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit;
     // the polling path used to shadow this and was a known race hazard.
     let now_ms = slopos_utils::clock::uptime_ms();
-    if let Some((_idx, seg)) = tcp::tcp_delayed_ack_check(now_ms) {
+    if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);
     }
 }
@@ -2740,7 +2737,7 @@ pub fn socket_dispatch_syn_ack_retransmit(key: u32) -> Option<tcp::TcpOutSegment
 }
 
 /// Public wrapper for socket_from_tcp_idx (used by timer dispatch).
-pub fn socket_from_tcp_idx_pub(tcp_idx: usize) -> Option<u32> {
+pub fn socket_from_tcp_idx_pub(tcp_idx: tcp::ConnId) -> Option<u32> {
     socket_from_tcp_idx(tcp_idx)
 }
 
@@ -2752,7 +2749,7 @@ pub fn socket_keepalive_enabled_by_index(sock_idx: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn socket_from_tcp_idx(tcp_idx: usize) -> Option<u32> {
+fn socket_from_tcp_idx(tcp_idx: tcp::ConnId) -> Option<u32> {
     let table = NEW_SOCKET_TABLE.lock();
     for (idx, sock) in table.slots.iter().enumerate() {
         if let Some(sock) = sock
@@ -2773,9 +2770,7 @@ pub fn socket_debug_set_connected(sock_idx: u32, remote_ip: [u8; 4], remote_port
         return errno_i32(ERRNO_ENOTCONN);
     };
 
-    if let Some(conn) = tcp::tcp_get_connection(tcp_idx)
-        && conn.state == TcpState::Established
-    {
+    if tcp::get_state(tcp_idx) == Some(TcpState::Established) {
         sock.state = SocketState::Connected;
         sock.remote_addr = Some(SockAddr::new(Ipv4Addr(remote_ip), Port(remote_port)));
         return 0;
@@ -2795,7 +2790,7 @@ pub fn socket_max_send_probe(sock_idx: u32, max_len: usize) -> i32 {
     let Some(tcp_idx) = socket_lookup_tcp_idx(sock_idx) else {
         return errno_i32(ERRNO_ENOTCONN);
     };
-    let space = tcp::tcp_send_buffer_space(tcp_idx);
+    let space = tcp::send_buffer_space(tcp_idx);
     cmp::min(space, max_len) as i32
 }
 

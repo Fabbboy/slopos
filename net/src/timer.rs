@@ -463,25 +463,25 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);
             let handled_by_listen = dispatch_tcp_syn_ack_retransmit(timer.key);
-            if !handled_by_listen && let Some(idx) = super::tcp::tcp_on_retransmit(timer.key) {
+            if !handled_by_listen && let Some(idx) = super::tcp::on_retransmit(timer.key) {
                 dispatch_tcp_retransmit_send(idx);
             }
         }
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);
             if let Some((_idx, seg)) =
-                super::tcp::tcp_delayed_ack_check(slopos_utils::clock::uptime_ms())
+                super::tcp::delayed_ack_check(slopos_utils::clock::uptime_ms())
             {
                 let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
             }
         }
         TimerKind::TcpTimeWait => {
             klog_debug!("net_timer: TCP TIME_WAIT expired, key={}", timer.key);
-            super::tcp::tcp_on_time_wait_expire(timer.key);
+            super::tcp::on_time_wait_expire(timer.key);
         }
         TimerKind::TcpKeepalive => {
             klog_debug!("net_timer: TCP keepalive fired, key={}", timer.key);
-            if let Some(probe_seg) = super::tcp::tcp_on_keepalive(timer.key) {
+            if let Some(probe_seg) = super::tcp::on_keepalive(timer.key) {
                 let _ = super::socket::socket_send_tcp_segment(&probe_seg, &[]);
             }
         }
@@ -505,10 +505,10 @@ fn dispatch_tcp_syn_ack_retransmit(key: u32) -> bool {
     false
 }
 
-fn dispatch_tcp_retransmit_send(idx: usize) {
+fn dispatch_tcp_retransmit_send(id: super::tcp::ConnId) {
     use super::socket;
 
-    if let Some(sock_idx) = socket::socket_from_tcp_idx_pub(idx) {
+    if let Some(sock_idx) = socket::socket_from_tcp_idx_pub(id) {
         let _ = socket::socket_send_queued(sock_idx);
     }
 }

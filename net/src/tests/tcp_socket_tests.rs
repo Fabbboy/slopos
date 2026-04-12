@@ -7,7 +7,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
-use crate::tcp_socket::{
+use crate::tcp::listener::{
     SYN_QUEUE_MAX, SYN_RETRIES_MAX, TcpDemuxTable, TcpListenState, reset_syn_entry_keys,
 };
 use crate::types::{Ipv4Addr, Port, SockAddr};
@@ -474,7 +474,7 @@ pub fn test_push_accepted_basic() -> TestResult {
     let mut listen = TcpListenState::new(4, local_addr());
 
     // Push an accepted connection directly.
-    let accepted = crate::tcp_socket::AcceptedConn {
+    let accepted = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
             local_ip: [10, 0, 0, 1],
             local_port: 8080,
@@ -526,7 +526,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
 
     // Fill to backlog.
     for i in 0..backlog as u16 {
-        let accepted = crate::tcp_socket::AcceptedConn {
+        let accepted = crate::tcp::listener::AcceptedConn {
             tuple: crate::tcp::TcpTuple {
                 local_ip: [10, 0, 0, 1],
                 local_port: 8080,
@@ -547,7 +547,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
     );
 
     // Next push should fail (queue full).
-    let overflow = crate::tcp_socket::AcceptedConn {
+    let overflow = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
             local_ip: [10, 0, 0, 1],
             local_port: 8080,
@@ -599,7 +599,7 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
     let listen_min = TcpListenState::new(0, local_addr());
     assert_eq_test!(
         listen_min.backlog(),
-        crate::tcp_socket::BACKLOG_MIN,
+        crate::tcp::listener::BACKLOG_MIN,
         "backlog=0 should clamp to BACKLOG_MIN"
     );
 
@@ -607,7 +607,7 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
     let listen_max = TcpListenState::new(999, local_addr());
     assert_eq_test!(
         listen_max.backlog(),
-        crate::tcp_socket::BACKLOG_MAX,
+        crate::tcp::listener::BACKLOG_MAX,
         "backlog=999 should clamp to BACKLOG_MAX"
     );
 
@@ -632,7 +632,7 @@ pub fn test_accept_fifo_order() -> TestResult {
 
     // Push 3 connections with distinct remote ports.
     for i in 0..3u16 {
-        let accepted = crate::tcp_socket::AcceptedConn {
+        let accepted = crate::tcp::listener::AcceptedConn {
             tuple: crate::tcp::TcpTuple {
                 local_ip: [10, 0, 0, 1],
                 local_port: 8080,
@@ -677,7 +677,7 @@ pub fn test_listen_state_clear() -> TestResult {
     assert_eq_test!(listen.syn_queue_len(), 1, "SYN queue has 1 entry");
 
     // Push to accept queue.
-    let accepted = crate::tcp_socket::AcceptedConn {
+    let accepted = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
             local_ip: [10, 0, 0, 1],
             local_port: 8080,
@@ -703,7 +703,7 @@ pub fn test_listen_state_clear() -> TestResult {
 // TCP Send/Recv/Shutdown — FIN handling and shutdown semantics
 // =============================================================================
 
-use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_FIN, TcpHeader, TcpState};
+use crate::tcp::{self, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TcpHeader, TcpState};
 use crate::tests::tcp_common;
 
 /// Legacy tuple form of [`tcp_common::establish_connection`], kept so the
@@ -711,57 +711,51 @@ use crate::tests::tcp_common;
 ///
 /// The canonical helper in `tcp_common` targets `REMOTE_IP = 10.0.0.2` with
 /// `REMOTE_PORT = 80`, which matches the addresses this suite used before.
-fn establish_connection() -> (usize, u16, u32) {
+fn establish_connection() -> (ConnId, u16, u32) {
     let c = tcp_common::establish_connection();
-    (c.idx, c.local_port, c.our_iss)
+    (c.id, c.local_port, c.our_iss)
 }
 
 /// Helper: deliver a FIN from the remote peer to a connection.
-fn deliver_peer_fin(idx: usize) {
-    let conn = tcp::tcp_get_connection(idx).expect("connection should exist");
+fn deliver_peer_fin(id: ConnId) {
+    let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let fin_hdr = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
-        seq_num: conn.rcv_nxt,
-        ack_num: conn.snd_nxt,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
+        seq_num: rcv_nxt,
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
         window_size: 65535,
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &fin_hdr,
-        &[],
-        &[],
-        0,
-    );
+    tcp::input(tuple.remote_ip, tuple.local_ip, &fin_hdr, &[], &[], 0);
 }
 
 /// Helper: deliver data from the remote peer.
-fn deliver_peer_data(idx: usize, data: &[u8]) {
-    let conn = tcp::tcp_get_connection(idx).expect("connection should exist");
+fn deliver_peer_data(id: ConnId, data: &[u8]) {
+    let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let hdr = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
-        seq_num: conn.rcv_nxt,
-        ack_num: conn.snd_nxt,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
+        seq_num: rcv_nxt,
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 65535,
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &hdr,
-        &[],
-        data,
-        0,
-    );
+    tcp::input(tuple.remote_ip, tuple.local_ip, &hdr, &[], data, 0);
 }
 
 // =============================================================================
@@ -770,33 +764,33 @@ fn deliver_peer_data(idx: usize, data: &[u8]) {
 // =============================================================================
 
 pub fn test_fin_handling_eof() -> TestResult {
-    tcp::tcp_reset_all();
+    tcp::reset_all();
 
-    let (idx, _lp, _iss) = establish_connection();
+    let (id, _lp, _iss) = establish_connection();
 
     // Peer sends some data, then FIN.
-    deliver_peer_data(idx, b"hello");
-    deliver_peer_fin(idx);
+    deliver_peer_data(id, b"hello");
+    deliver_peer_fin(id);
 
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::CloseWait),
         "should be CLOSE_WAIT after peer FIN"
     );
 
     // Drain the buffered data.
     let mut buf = [0u8; 64];
-    let n = tcp::tcp_recv(idx, &mut buf).expect("recv should succeed");
+    let n = tcp::recv(id, &mut buf).expect("recv should succeed");
     assert_eq_test!(n, 5, "should read 5 bytes of buffered data");
     assert_eq_test!(&buf[..5], b"hello", "buffered data should match");
 
     // Next recv should return 0 (EOF) — buffer empty + peer closed.
-    let n2 = tcp::tcp_recv(idx, &mut buf).expect("recv should succeed");
+    let n2 = tcp::recv(id, &mut buf).expect("recv should succeed");
     assert_eq_test!(n2, 0, "recv after drain + FIN should return 0 (EOF)");
 
     // is_peer_closed should be true.
     assert_test!(
-        tcp::tcp_is_peer_closed(idx),
+        tcp::is_peer_closed(id),
         "tcp_is_peer_closed should be true in CLOSE_WAIT"
     );
 
@@ -809,15 +803,15 @@ pub fn test_fin_handling_eof() -> TestResult {
 // =============================================================================
 
 pub fn test_shutdown_write_sends_fin() -> TestResult {
-    tcp::tcp_reset_all();
+    tcp::reset_all();
 
-    let (idx, _lp, _iss) = establish_connection();
+    let (id, _lp, _iss) = establish_connection();
 
     // Peer sends data before our shutdown.
-    deliver_peer_data(idx, b"world");
+    deliver_peer_data(id, b"world");
 
     // Shutdown write half — should send FIN.
-    let result = tcp::tcp_shutdown_write(idx);
+    let result = tcp::shutdown_write(id);
     assert_test!(result.is_ok(), "tcp_shutdown_write should succeed");
     let seg = result.unwrap();
     assert_test!(seg.is_some(), "should produce a FIN segment");
@@ -828,19 +822,19 @@ pub fn test_shutdown_write_sends_fin() -> TestResult {
     );
 
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::FinWait1),
         "should transition to FIN_WAIT_1"
     );
 
     // Recv should still work — we only shut down writing.
     let mut buf = [0u8; 64];
-    let n = tcp::tcp_recv(idx, &mut buf).expect("recv should still work");
+    let n = tcp::recv(id, &mut buf).expect("recv should still work");
     assert_eq_test!(n, 5, "should read 5 bytes");
     assert_eq_test!(&buf[..5], b"world", "data should match");
 
     // Sending should fail (InvalidState — no longer Established/CloseWait).
-    let send_result = tcp::tcp_send(idx, b"test");
+    let send_result = tcp::send(id, b"test");
     assert_test!(send_result.is_err(), "send after SHUT_WR should fail");
 
     pass!()
@@ -851,32 +845,32 @@ pub fn test_shutdown_write_sends_fin() -> TestResult {
 // =============================================================================
 
 pub fn test_shutdown_read_discards_buffer() -> TestResult {
-    tcp::tcp_reset_all();
+    tcp::reset_all();
 
-    let (idx, _lp, _iss) = establish_connection();
+    let (id, _lp, _iss) = establish_connection();
 
     // Peer sends data.
-    deliver_peer_data(idx, b"discard me");
+    deliver_peer_data(id, b"discard me");
 
     // Verify data is in the buffer.
     assert_test!(
-        tcp::tcp_recv_available(idx) > 0,
+        tcp::recv_available(id) > 0,
         "recv buffer should have data before discard"
     );
 
     // Discard recv buffer (simulates SHUT_RD at tcp layer).
-    tcp::tcp_recv_discard(idx);
+    tcp::recv_discard(id);
 
     // Buffer should be empty now.
     assert_eq_test!(
-        tcp::tcp_recv_available(idx),
+        tcp::recv_available(id),
         0,
         "recv buffer should be empty after discard"
     );
 
     // State should still be Established (shutdown read doesn't change state).
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::Established),
         "state unchanged after recv discard"
     );
@@ -889,28 +883,32 @@ pub fn test_shutdown_read_discards_buffer() -> TestResult {
 // =============================================================================
 
 pub fn test_tcp_data_roundtrip() -> TestResult {
-    tcp::tcp_reset_all();
+    tcp::reset_all();
 
-    let (idx, _lp, _iss) = establish_connection();
+    let (id, _lp, _iss) = establish_connection();
 
     // Write data into the send buffer.
-    let written = tcp::tcp_send(idx, b"ping").expect("tcp_send should succeed");
+    let written = tcp::send(id, b"ping").expect("tcp_send should succeed");
     assert_eq_test!(written, 4, "should write 4 bytes");
 
     // Poll transmit to get the outgoing segment.
     let mut tx_buf = [0u8; 1500];
-    let result = tcp::tcp_poll_transmit(idx, &mut tx_buf, 0);
+    let result = tcp::poll_transmit(id, &mut tx_buf, 0);
     assert_test!(result.is_some(), "should have data to transmit");
     let (seg, payload_len) = result.unwrap();
     assert_eq_test!(payload_len, 4, "transmitted payload should be 4 bytes");
     assert_eq_test!(&tx_buf[..4], b"ping", "payload should be 'ping'");
 
     // Simulate peer ACK + echo data back.
-    let conn = tcp::tcp_get_connection(idx).expect("connection should exist");
+    let (tuple, rcv_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let ack_hdr = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
-        seq_num: conn.rcv_nxt,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
+        seq_num: rcv_nxt,
         ack_num: seg.seq_num.wrapping_add(payload_len as u32),
         data_offset: 5,
         flags: TCP_FLAG_ACK,
@@ -918,18 +916,11 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &ack_hdr,
-        &[],
-        b"pong",
-        0,
-    );
+    tcp::input(tuple.remote_ip, tuple.local_ip, &ack_hdr, &[], b"pong", 0);
 
     // Read the echoed data.
     let mut buf = [0u8; 64];
-    let n = tcp::tcp_recv(idx, &mut buf).expect("recv should succeed");
+    let n = tcp::recv(id, &mut buf).expect("recv should succeed");
     assert_eq_test!(n, 4, "should read 4 bytes");
     assert_eq_test!(&buf[..4], b"pong", "data should be 'pong'");
 
@@ -941,19 +932,19 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
 // =============================================================================
 
 pub fn test_tcp_send_buffer_space() -> TestResult {
-    tcp::tcp_reset_all();
+    tcp::reset_all();
 
-    let (idx, _lp, _iss) = establish_connection();
+    let (id, _lp, _iss) = establish_connection();
 
-    let initial_space = tcp::tcp_send_buffer_space(idx);
+    let initial_space = tcp::send_buffer_space(id);
     assert_test!(initial_space > 0, "initial send buffer should have space");
 
     // Fill some of the buffer.
     let data = [0xABu8; 1024];
-    let written = tcp::tcp_send(idx, &data).expect("tcp_send should succeed");
+    let written = tcp::send(id, &data).expect("tcp_send should succeed");
     assert_eq_test!(written, 1024, "should write 1024 bytes");
 
-    let remaining = tcp::tcp_send_buffer_space(idx);
+    let remaining = tcp::send_buffer_space(id);
     assert_eq_test!(
         remaining,
         initial_space - 1024,
@@ -962,7 +953,7 @@ pub fn test_tcp_send_buffer_space() -> TestResult {
 
     // has_pending_data should be true.
     assert_test!(
-        tcp::tcp_has_pending_data(idx),
+        tcp::has_pending_data(id),
         "should have pending data after send"
     );
 
@@ -975,103 +966,104 @@ pub fn test_tcp_send_buffer_space() -> TestResult {
 // =============================================================================
 
 pub fn test_fin_full_teardown() -> TestResult {
-    tcp::tcp_reset_all();
+    tcp::reset_all();
 
     // --- Active close path: Established → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT ---
-    let (idx, _lp, _iss) = establish_connection();
+    let (id, _lp, _iss) = establish_connection();
 
     // Initiate close (sends FIN).
-    let close_result = tcp::tcp_close(idx);
+    let close_result = tcp::close(id);
     assert_test!(close_result.is_ok(), "tcp_close should succeed");
     let fin_seg = close_result.unwrap();
     assert_test!(fin_seg.is_some(), "should produce FIN segment");
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::FinWait1),
         "should be FIN_WAIT_1 after close"
     );
 
     // Peer ACKs our FIN → FIN_WAIT_2.
-    let conn = tcp::tcp_get_connection(idx).expect("connection should exist");
+    let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let fin_ack_hdr = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
-        seq_num: conn.rcv_nxt,
-        ack_num: conn.snd_nxt, // ACKs our FIN
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
+        seq_num: rcv_nxt,
+        ack_num: snd_nxt, // ACKs our FIN
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 65535,
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &fin_ack_hdr,
-        &[],
-        &[],
-        0,
-    );
+    tcp::input(tuple.remote_ip, tuple.local_ip, &fin_ack_hdr, &[], &[], 0);
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::FinWait2),
         "should be FIN_WAIT_2 after FIN ack"
     );
 
     // Peer sends FIN → TIME_WAIT.
-    deliver_peer_fin(idx);
+    deliver_peer_fin(id);
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::TimeWait),
         "should be TIME_WAIT after peer FIN"
     );
 
     // --- Passive close path: Established → CLOSE_WAIT → LAST_ACK → CLOSED ---
-    tcp::tcp_reset_all();
-    let (idx2, _lp2, _iss2) = establish_connection();
+    tcp::reset_all();
+    let (id2, _lp2, _iss2) = establish_connection();
 
     // Peer sends FIN → CLOSE_WAIT.
-    deliver_peer_fin(idx2);
+    deliver_peer_fin(id2);
     assert_eq_test!(
-        tcp::tcp_get_state(idx2),
+        tcp::get_state(id2),
         Some(TcpState::CloseWait),
         "should be CLOSE_WAIT after peer FIN"
     );
 
     // We close → sends our FIN → LAST_ACK.
-    let close_result2 = tcp::tcp_close(idx2);
+    let close_result2 = tcp::close(id2);
     assert_test!(close_result2.is_ok(), "tcp_close should succeed");
     assert_eq_test!(
-        tcp::tcp_get_state(idx2),
+        tcp::get_state(id2),
         Some(TcpState::LastAck),
         "should be LAST_ACK after close from CLOSE_WAIT"
     );
 
     // Peer ACKs our FIN → CLOSED (released).
-    let conn2 = tcp::tcp_get_connection(idx2).expect("connection should exist");
+    let (tuple2, rcv_nxt2, snd_nxt2) = tcp::with_pcb(id2, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let final_ack_hdr = TcpHeader {
-        src_port: conn2.tuple.remote_port,
-        dst_port: conn2.tuple.local_port,
-        seq_num: conn2.rcv_nxt,
-        ack_num: conn2.snd_nxt,
+        src_port: tuple2.remote_port,
+        dst_port: tuple2.local_port,
+        seq_num: rcv_nxt2,
+        ack_num: snd_nxt2,
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 65535,
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(
-        conn2.tuple.remote_ip,
-        conn2.tuple.local_ip,
+    tcp::input(
+        tuple2.remote_ip,
+        tuple2.local_ip,
         &final_ack_hdr,
         &[],
         &[],
         0,
     );
-    // Connection should be released (Closed / None).
+    // Connection should be released.
     assert_test!(
-        tcp::tcp_get_state(idx2).is_none() || tcp::tcp_get_state(idx2) == Some(TcpState::Closed),
-        "should be CLOSED or released after LAST_ACK acked"
+        tcp::get_state(id2).is_none(),
+        "should be released after LAST_ACK acked"
     );
 
     pass!()

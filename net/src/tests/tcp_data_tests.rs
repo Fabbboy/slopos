@@ -8,16 +8,17 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::{
-    self, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
+    self, ConnId, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
     TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpState,
 };
 use crate::tests::tcp_common::{self, reset_all as reset};
+use crate::with_data_state;
 
 /// Legacy tuple form of [`tcp_common::establish_connection`], kept so the
 /// ~38 call sites below don't need destructuring rewrites.
-fn establish_connection() -> (usize, u32, u16) {
+fn establish_connection() -> (ConnId, u32, u16) {
     let c = tcp_common::establish_connection();
-    (c.idx, c.peer_iss, c.local_port)
+    (c.id, c.peer_iss, c.local_port)
 }
 
 fn inject_data_segment(
@@ -29,7 +30,7 @@ fn inject_data_segment(
     ack: u32,
     data: &[u8],
     now_ms: u64,
-) -> tcp::TcpInputResult {
+) -> tcp::Actions {
     let hdr = TcpHeader {
         src_port,
         dst_port,
@@ -41,7 +42,7 @@ fn inject_data_segment(
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &hdr, &[], data, now_ms)
+    tcp::input(remote_ip, local_ip, &hdr, &[], data, now_ms)
 }
 
 // =============================================================================
@@ -50,22 +51,22 @@ fn inject_data_segment(
 
 pub fn test_ring_buffer_new_empty() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    assert_eq_test!(tcp::tcp_send_buffer_space(idx), TCP_BUFFER_SIZE, "capacity");
-    assert_eq_test!(tcp::tcp_recv_available(idx), 0, "new len");
-    assert_test!(!tcp::tcp_has_pending_data(idx), "new is empty");
+    let (id, _, _) = establish_connection();
+    assert_eq_test!(tcp::send_buffer_space(id), TCP_BUFFER_SIZE, "capacity");
+    assert_eq_test!(tcp::recv_available(id), 0, "new len");
+    assert_test!(!tcp::has_pending_data(id), "new is empty");
     pass!()
 }
 
 pub fn test_ring_buffer_write_read_basic() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let n = tcp::tcp_send(idx, b"hello").unwrap();
+    let (id, _, _) = establish_connection();
+    let n = tcp::send(id, b"hello").unwrap();
     assert_eq_test!(n, 5, "write hello");
-    assert_test!(tcp::tcp_has_pending_data(idx), "pending after write");
+    assert_test!(tcp::has_pending_data(id), "pending after write");
 
     let mut out = [0u8; 16];
-    let (_, r) = tcp::tcp_poll_transmit(idx, &mut out, 0).unwrap();
+    let (_, r) = tcp::poll_transmit(id, &mut out, 0).unwrap();
     assert_eq_test!(r, 5, "read hello");
     assert_test!(&out[..5] == b"hello", "content matches");
     pass!()
@@ -73,26 +74,26 @@ pub fn test_ring_buffer_write_read_basic() -> TestResult {
 
 pub fn test_ring_buffer_write_full() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
+    let (id, _, _) = establish_connection();
     let chunk = [0xABu8; 512];
     let mut remaining = TCP_BUFFER_SIZE;
     while remaining > 0 {
         let to_write = core::cmp::min(remaining, chunk.len());
-        let wrote = tcp::tcp_send(idx, &chunk[..to_write]).unwrap();
+        let wrote = tcp::send(id, &chunk[..to_write]).unwrap();
         assert_eq_test!(wrote, to_write, "write chunk into send buffer");
         remaining -= to_write;
     }
 
-    assert_eq_test!(tcp::tcp_send_buffer_space(idx), 0, "no free space");
-    let second = tcp::tcp_send(idx, &[1, 2, 3]).unwrap();
+    assert_eq_test!(tcp::send_buffer_space(id), 0, "no free space");
+    let second = tcp::send(id, &[1, 2, 3]).unwrap();
     assert_eq_test!(second, 0, "write when full");
     pass!()
 }
 
 pub fn test_ring_buffer_wrap_around() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let mut seq = server_iss.wrapping_add(1);
     let half = TCP_BUFFER_SIZE / 2;
     let first = [1u8; 256];
@@ -105,7 +106,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
             80,
             client_port,
             seq,
-            conn.snd_nxt,
+            snd_nxt,
             &first[..n],
             injected as u64,
         );
@@ -116,7 +117,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
     let mut tmp = [0u8; 256];
     let mut drained = 0usize;
     while drained < half {
-        let n = tcp::tcp_recv(idx, &mut tmp).unwrap();
+        let n = tcp::recv(id, &mut tmp).unwrap();
         if n == 0 {
             return fail!("expected data while draining first half");
         }
@@ -135,7 +136,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
             80,
             client_port,
             seq,
-            conn.snd_nxt,
+            snd_nxt,
             &second[..n],
             (half + injected) as u64,
         );
@@ -146,7 +147,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
     let mut out = [0u8; 256];
     drained = 0;
     while drained < half {
-        let n = tcp::tcp_recv(idx, &mut out).unwrap();
+        let n = tcp::recv(id, &mut out).unwrap();
         if n == 0 {
             return fail!("expected data while draining wrapped half");
         }
@@ -159,25 +160,25 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
 
 pub fn test_ring_buffer_peek_offset() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcdefgh").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcdefgh").unwrap();
 
     let mut first = [0u8; 2];
-    let (seg1, n1) = tcp::tcp_poll_transmit(idx, &mut first, 0).unwrap();
+    let (seg1, n1) = tcp::poll_transmit(id, &mut first, 0).unwrap();
     assert_eq_test!(n1, 2, "first chunk len");
     assert_test!(&first == b"ab", "first chunk content");
 
     let mut second = [0u8; 3];
-    let (_, n2) = tcp::tcp_poll_transmit(idx, &mut second, 1).unwrap();
+    let (_, n2) = tcp::poll_transmit(id, &mut second, 1).unwrap();
     assert_eq_test!(n2, 3, "peek len");
     assert_test!(&second == b"cde", "peek offset data");
 
     let mut third = [0u8; 8];
-    let (_, n3) = tcp::tcp_poll_transmit(idx, &mut third, 2).unwrap();
+    let (_, n3) = tcp::poll_transmit(id, &mut third, 2).unwrap();
     assert_eq_test!(n3, 3, "remaining chunk len");
     assert_test!(&third[..3] == b"fgh", "remaining chunk content");
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE - 8,
         "peek does not consume"
     );
@@ -193,9 +194,9 @@ pub fn test_ring_buffer_peek_offset() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 2);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 2);
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE,
         "full data preserved"
     );
@@ -204,10 +205,10 @@ pub fn test_ring_buffer_peek_offset() -> TestResult {
 
 pub fn test_ring_buffer_consume() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcdef").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcdef").unwrap();
     let mut tx = [0u8; 16];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut tx, 0).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut tx, 0).unwrap();
     assert_eq_test!(n, 6, "initial send");
 
     let ack = TcpHeader {
@@ -221,20 +222,16 @@ pub fn test_ring_buffer_consume() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE - 4,
         "len after consume"
     );
 
-    assert_eq_test!(
-        tcp::tcp_retransmit_check(1000),
-        Some(idx),
-        "trigger retransmit"
-    );
+    assert_eq_test!(tcp::retransmit_check(1000), Some(id), "trigger retransmit");
     let mut out = [0u8; 8];
-    let (_, r) = tcp::tcp_poll_transmit(idx, &mut out, 1001).unwrap();
+    let (_, r) = tcp::poll_transmit(id, &mut out, 1001).unwrap();
     assert_eq_test!(r, 4, "read remaining");
     assert_test!(&out[..4] == b"cdef", "remaining content");
     pass!()
@@ -242,19 +239,19 @@ pub fn test_ring_buffer_consume() -> TestResult {
 
 pub fn test_ring_buffer_clear() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"data").unwrap();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"data").unwrap();
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE - 4,
         "wrote data"
     );
 
     reset();
-    let (idx2, _, _) = establish_connection();
-    assert_eq_test!(tcp::tcp_recv_available(idx2), 0, "len after clear");
+    let (id2, _, _) = establish_connection();
+    assert_eq_test!(tcp::recv_available(id2), 0, "len after clear");
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx2),
+        tcp::send_buffer_space(id2),
         TCP_BUFFER_SIZE,
         "free after clear"
     );
@@ -263,20 +260,20 @@ pub fn test_ring_buffer_clear() -> TestResult {
 
 pub fn test_ring_buffer_partial_write() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
+    let (id, _, _) = establish_connection();
     let chunk = [7u8; 512];
     let mut remaining = TCP_BUFFER_SIZE - 4;
     while remaining > 0 {
         let to_write = core::cmp::min(remaining, chunk.len());
-        let wrote = tcp::tcp_send(idx, &chunk[..to_write]).unwrap();
+        let wrote = tcp::send(id, &chunk[..to_write]).unwrap();
         assert_eq_test!(wrote, to_write, "fill buffer");
         remaining -= to_write;
     }
 
-    let n = tcp::tcp_send(idx, &[9u8; 16]).unwrap();
+    let n = tcp::send(id, &[9u8; 16]).unwrap();
     assert_eq_test!(n, 4, "partial write limited by free space");
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         0,
         "buffer full after partial write"
     );
@@ -289,13 +286,13 @@ pub fn test_ring_buffer_partial_write() -> TestResult {
 
 pub fn test_send_enqueue_and_peek() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let n = tcp::tcp_send(idx, b"payload").unwrap();
+    let (id, _, _) = establish_connection();
+    let n = tcp::send(id, b"payload").unwrap();
     assert_eq_test!(n, 7, "enqueue len");
-    assert_test!(tcp::tcp_has_pending_data(idx), "unsent len");
+    assert_test!(tcp::has_pending_data(id), "unsent len");
 
     let mut out = [0u8; 7];
-    let (_, p) = tcp::tcp_poll_transmit(idx, &mut out, 0).unwrap();
+    let (_, p) = tcp::poll_transmit(id, &mut out, 0).unwrap();
     assert_eq_test!(p, 7, "peek unsent");
     assert_test!(&out == b"payload", "peek content");
     pass!()
@@ -303,10 +300,10 @@ pub fn test_send_enqueue_and_peek() -> TestResult {
 
 pub fn test_send_mark_sent_and_ack() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcdef").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcdef").unwrap();
     let mut payload = [0u8; 16];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 6, "inflight after mark_sent");
 
     let ack = TcpHeader {
@@ -320,9 +317,9 @@ pub fn test_send_mark_sent_and_ack() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE,
         "buffer empty after ack"
     );
@@ -331,13 +328,13 @@ pub fn test_send_mark_sent_and_ack() -> TestResult {
 
 pub fn test_send_retransmit_timeout() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcd").unwrap();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"abcd").unwrap();
     let mut payload = [0u8; 8];
-    let _ = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
-    assert_eq_test!(tcp::tcp_retransmit_check(1000), Some(idx), "inflight reset");
-    let (_, n) = tcp::tcp_poll_transmit(idx, &mut payload, 1001).unwrap();
+    assert_eq_test!(tcp::retransmit_check(1000), Some(id), "inflight reset");
+    let (_, n) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
     assert_eq_test!(n, 4, "retransmit flag set");
     assert_test!(&payload[..4] == b"abcd", "retransmit payload");
     pass!()
@@ -345,11 +342,11 @@ pub fn test_send_retransmit_timeout() -> TestResult {
 
 pub fn test_send_free_space() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let before = tcp::tcp_send_buffer_space(idx);
-    let _ = tcp::tcp_send(idx, &[1u8; 128]).unwrap();
+    let (id, _, _) = establish_connection();
+    let before = tcp::send_buffer_space(id);
+    let _ = tcp::send(id, &[1u8; 128]).unwrap();
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         before - 128,
         "free space decreases"
     );
@@ -358,10 +355,10 @@ pub fn test_send_free_space() -> TestResult {
 
 pub fn test_send_partial_ack() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, &[3u8; 1000]).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, &[3u8; 1000]).unwrap();
     let mut payload = [0u8; 1200];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 1000, "sent full test payload");
 
     let ack = TcpHeader {
@@ -375,29 +372,29 @@ pub fn test_send_partial_ack() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE - 500,
         "buffered after partial ack"
     );
 
     assert_eq_test!(
-        tcp::tcp_retransmit_check(1000),
-        Some(idx),
+        tcp::retransmit_check(1000),
+        Some(id),
         "inflight after partial ack"
     );
-    let (_, retransmit_len) = tcp::tcp_poll_transmit(idx, &mut payload, 1001).unwrap();
+    let (_, retransmit_len) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
     assert_eq_test!(retransmit_len, 500, "remaining bytes retransmit");
     pass!()
 }
 
 pub fn test_send_ack_stops_rto_timer() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcd").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcd").unwrap();
     let mut payload = [0u8; 16];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 4, "sent payload");
 
     let ack = TcpHeader {
@@ -411,11 +408,8 @@ pub fn test_send_ack_stops_rto_timer() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 10);
-    assert_test!(
-        tcp::tcp_retransmit_check(2000).is_none(),
-        "rto timer cleared"
-    );
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 10);
+    assert_test!(tcp::retransmit_check(2000).is_none(), "rto timer cleared");
     pass!()
 }
 
@@ -425,25 +419,25 @@ pub fn test_send_ack_stops_rto_timer() -> TestResult {
 
 pub fn test_recv_enqueue_dequeue() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let res = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"hello",
         10,
     );
-    assert_test!(res.response.is_none(), "first segment delayed ack");
+    assert_test!(res.segments().next().is_none(), "first segment delayed ack");
 
-    let n = tcp::tcp_recv_available(idx);
+    let n = tcp::recv_available(id);
     assert_eq_test!(n, 5, "enqueue len");
 
     let mut out = [0u8; 5];
-    let r = tcp::tcp_recv(idx, &mut out).unwrap();
+    let r = tcp::recv(id, &mut out).unwrap();
     assert_eq_test!(r, 5, "dequeue len");
     assert_test!(&out == b"hello", "dequeue content");
     pass!()
@@ -451,48 +445,48 @@ pub fn test_recv_enqueue_dequeue() -> TestResult {
 
 pub fn test_recv_window_decreases() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let before = tcp::tcp_get_connection(idx).unwrap().rcv_wnd;
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let before = with_data_state!(id, |d| d.rcv_wnd);
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let _ = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         &[1u8; 256],
         0,
     );
-    let after_enqueue = tcp::tcp_get_connection(idx).unwrap().rcv_wnd;
+    let after_enqueue = with_data_state!(id, |d| d.rcv_wnd);
     assert_test!(after_enqueue < before, "window shrinks after enqueue");
 
     let mut out = [0u8; 256];
-    let _ = tcp::tcp_recv(idx, &mut out).unwrap();
-    let after_dequeue = tcp::tcp_get_connection(idx).unwrap().rcv_wnd;
+    let _ = tcp::recv(id, &mut out).unwrap();
+    let after_dequeue = with_data_state!(id, |d| d.rcv_wnd);
     assert_test!(after_dequeue > after_enqueue, "window grows after dequeue");
     pass!()
 }
 
 pub fn test_recv_ack_tracking() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let res = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"x",
         100,
     );
-    assert_test!(res.response.is_none(), "ack pending set");
-    let delayed = tcp::tcp_delayed_ack_check(100 + DELAYED_ACK_MS);
+    assert_test!(res.segments().next().is_none(), "ack pending set");
+    let delayed = tcp::delayed_ack_check(100 + DELAYED_ACK_MS);
     assert_test!(delayed.is_some(), "ack pending cleared");
     assert_test!(
-        tcp::tcp_delayed_ack_check(100 + DELAYED_ACK_MS + 1).is_none(),
+        tcp::delayed_ack_check(100 + DELAYED_ACK_MS + 1).is_none(),
         "segment counter cleared"
     );
     pass!()
@@ -500,54 +494,57 @@ pub fn test_recv_ack_tracking() -> TestResult {
 
 pub fn test_recv_delayed_ack_segments() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let first = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"a",
         0,
     );
-    assert_test!(first.response.is_none(), "one segment not enough");
+    assert_test!(first.segments().next().is_none(), "one segment not enough");
     let second = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(2),
-        conn.snd_nxt,
+        snd_nxt,
         b"b",
         1,
     );
-    assert_test!(second.response.is_some(), "two segments trigger ack");
+    assert_test!(
+        second.segments().next().is_some(),
+        "two segments trigger ack"
+    );
     pass!()
 }
 
 pub fn test_recv_delayed_ack_timeout() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let res = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"x",
         1000,
     );
-    assert_test!(res.response.is_none(), "initial delayed ack");
+    assert_test!(res.segments().next().is_none(), "initial delayed ack");
     assert_test!(
-        tcp::tcp_delayed_ack_check(1000 + DELAYED_ACK_MS - 1).is_none(),
+        tcp::delayed_ack_check(1000 + DELAYED_ACK_MS - 1).is_none(),
         "before timeout"
     );
     assert_test!(
-        tcp::tcp_delayed_ack_check(1000 + DELAYED_ACK_MS).is_some(),
+        tcp::delayed_ack_check(1000 + DELAYED_ACK_MS).is_some(),
         "timeout triggers ack"
     );
     pass!()
@@ -559,36 +556,32 @@ pub fn test_recv_delayed_ack_timeout() -> TestResult {
 
 pub fn test_tcp_send_in_established() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let before = tcp::tcp_send_buffer_space(idx);
-    let wrote = tcp::tcp_send(idx, b"hello").unwrap();
+    let (id, _, _) = establish_connection();
+    let before = tcp::send_buffer_space(id);
+    let wrote = tcp::send(id, b"hello").unwrap();
     assert_eq_test!(wrote, 5, "tcp_send wrote bytes");
-    assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
-        before - 5,
-        "send space reduced"
-    );
+    assert_eq_test!(tcp::send_buffer_space(id), before - 5, "send space reduced");
     pass!()
 }
 
 pub fn test_tcp_recv_in_established() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let res = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"abc",
         0,
     );
-    assert_test!(res.response.is_none(), "first segment delayed ack");
+    assert_test!(res.segments().next().is_none(), "first segment delayed ack");
 
     let mut out = [0u8; 8];
-    let n = tcp::tcp_recv(idx, &mut out).unwrap();
+    let n = tcp::recv(id, &mut out).unwrap();
     assert_eq_test!(n, 3, "recv bytes");
     assert_test!(&out[..3] == b"abc", "recv content");
     pass!()
@@ -596,48 +589,48 @@ pub fn test_tcp_recv_in_established() -> TestResult {
 
 pub fn test_tcp_send_wrong_state() -> TestResult {
     reset();
-    let (idx, _) = tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
-    let err = tcp::tcp_send(idx, b"x").unwrap_err();
+    let (id, _) = tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
+    let err = tcp::send(id, b"x").unwrap_err();
     assert_eq_test!(err, TcpError::InvalidState, "send in SYN_SENT rejected");
     pass!()
 }
 
 pub fn test_tcp_poll_transmit_basic() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcd").unwrap();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"abcd").unwrap();
+    let (snd_nxt, rcv_nxt) = with_data_state!(id, |d| (d.snd_nxt.raw(), d.rcv_nxt.raw()));
     let mut payload = [0u8; 64];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut payload, 10).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut payload, 10).unwrap();
     assert_eq_test!(n, 4, "payload len");
     assert_test!(&payload[..4] == b"abcd", "payload bytes");
-    assert_eq_test!(seg.seq_num, conn.snd_nxt, "segment seq");
-    assert_eq_test!(seg.ack_num, conn.rcv_nxt, "segment ack");
+    assert_eq_test!(seg.seq_num, snd_nxt, "segment seq");
+    assert_eq_test!(seg.ack_num, rcv_nxt, "segment ack");
     assert_test!(seg.flags & TCP_FLAG_PSH != 0, "PSH set");
     pass!()
 }
 
 pub fn test_tcp_poll_transmit_mss_segmentation() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
+    let (id, _, _) = establish_connection();
     let data = [0x42u8; DEFAULT_MSS as usize + 100];
-    let wrote = tcp::tcp_send(idx, &data).unwrap();
+    let wrote = tcp::send(id, &data).unwrap();
     assert_eq_test!(wrote, data.len(), "enqueue full test payload");
 
     let mut payload = [0u8; 2048];
-    let (_, first_len) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (_, first_len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(first_len, DEFAULT_MSS as usize, "first chunk mss-sized");
-    let (_, second_len) = tcp::tcp_poll_transmit(idx, &mut payload, 1).unwrap();
+    let (_, second_len) = tcp::poll_transmit(id, &mut payload, 1).unwrap();
     assert_eq_test!(second_len, 100, "second chunk remainder");
     pass!()
 }
 
 pub fn test_tcp_poll_transmit_none_when_empty() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
+    let (id, _, _) = establish_connection();
     let mut payload = [0u8; 64];
     assert_test!(
-        tcp::tcp_poll_transmit(idx, &mut payload, 0).is_none(),
+        tcp::poll_transmit(id, &mut payload, 0).is_none(),
         "none when empty"
     );
     pass!()
@@ -645,10 +638,10 @@ pub fn test_tcp_poll_transmit_none_when_empty() -> TestResult {
 
 pub fn test_tcp_data_roundtrip() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"hello").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"hello").unwrap();
     let mut payload = [0u8; 64];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 5, "sent len");
 
     let ack = TcpHeader {
@@ -662,10 +655,10 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
-    assert_test!(!tcp::tcp_has_pending_data(idx), "no pending data after ack");
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 1);
+    assert_test!(!tcp::has_pending_data(id), "no pending data after ack");
     assert_eq_test!(
-        tcp::tcp_send_buffer_space(idx),
+        tcp::send_buffer_space(id),
         TCP_BUFFER_SIZE,
         "send buffer reclaimed"
     );
@@ -674,9 +667,9 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
 
 pub fn test_tcp_recv_updates_window() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let before = tcp::tcp_get_connection(idx).unwrap().rcv_wnd;
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let before = with_data_state!(id, |d| d.rcv_wnd);
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
 
     let first = inject_data_segment(
         [10, 0, 0, 2],
@@ -684,11 +677,11 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"a",
         0,
     );
-    assert_test!(first.response.is_none(), "first segment delayed");
+    assert_test!(first.segments().next().is_none(), "first segment delayed");
 
     let second = inject_data_segment(
         [10, 0, 0, 2],
@@ -696,15 +689,15 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
         80,
         client_port,
         server_iss.wrapping_add(2),
-        conn.snd_nxt,
+        snd_nxt,
         b"b",
         1,
     );
-    let ack = match second.response {
-        Some(s) => s,
+    let ack = match second.segments().next() {
+        Some(s) => s.clone(),
         None => return fail!("expected immediate ACK after second segment"),
     };
-    let after = tcp::tcp_get_connection(idx).unwrap().rcv_wnd;
+    let after = with_data_state!(id, |d| d.rcv_wnd);
     assert_test!(after < before, "receive window decreased");
     assert_eq_test!(ack.window_size, after, "ack advertises updated window");
     pass!()
@@ -716,14 +709,14 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
 
 pub fn test_tcp_retransmit_on_timeout() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abc").unwrap();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"abc").unwrap();
     let mut payload = [0u8; 16];
-    let _ = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
-    assert_test!(tcp::tcp_retransmit_check(999).is_none(), "before timeout");
+    let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    assert_test!(tcp::retransmit_check(999).is_none(), "before timeout");
     assert_eq_test!(
-        tcp::tcp_retransmit_check(1000),
-        Some(idx),
+        tcp::retransmit_check(1000),
+        Some(id),
         "timeout triggers retransmit"
     );
     pass!()
@@ -731,46 +724,42 @@ pub fn test_tcp_retransmit_on_timeout() -> TestResult {
 
 pub fn test_tcp_retransmit_exponential_backoff() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abc").unwrap();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"abc").unwrap();
     let mut payload = [0u8; 16];
-    let _ = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
-    let _ = tcp::tcp_retransmit_check(1000);
-    let conn1 = tcp::tcp_get_connection(idx).unwrap();
-    assert_eq_test!(conn1.rto_ms, 2000, "first timeout doubles rto");
-    let _ = tcp::tcp_poll_transmit(idx, &mut payload, 1001).unwrap();
+    let _ = tcp::retransmit_check(1000);
+    let rto1 = with_data_state!(id, |d| d.rtt.rto_ms());
+    assert_eq_test!(rto1, 2000, "first timeout doubles rto");
+    let _ = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
 
-    let _ = tcp::tcp_retransmit_check(3001);
-    let conn2 = tcp::tcp_get_connection(idx).unwrap();
-    assert_eq_test!(conn2.rto_ms, 4000, "second timeout doubles rto again");
+    let _ = tcp::retransmit_check(3001);
+    let rto2 = with_data_state!(id, |d| d.rtt.rto_ms());
+    assert_eq_test!(rto2, 4000, "second timeout doubles rto again");
     pass!()
 }
 
 pub fn test_tcp_retransmit_max_exceeded() -> TestResult {
     reset();
-    let (idx, _, _) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"x").unwrap();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"x").unwrap();
     let mut payload = [0u8; 8];
-    let _ = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let mut now = 0u64;
     for _ in 0..MAX_RETRANSMITS {
-        let rto = tcp::tcp_get_connection(idx).unwrap().rto_ms as u64;
+        let rto = with_data_state!(id, |d| d.rtt.rto_ms()) as u64;
         now = now.saturating_add(rto);
-        assert_eq_test!(
-            tcp::tcp_retransmit_check(now),
-            Some(idx),
-            "retransmit fires"
-        );
-        let _ = tcp::tcp_poll_transmit(idx, &mut payload, now + 1).unwrap();
+        assert_eq_test!(tcp::retransmit_check(now), Some(id), "retransmit fires");
+        let _ = tcp::poll_transmit(id, &mut payload, now + 1).unwrap();
     }
 
-    let rto = tcp::tcp_get_connection(idx).unwrap().rto_ms as u64;
+    let rto = with_data_state!(id, |d| d.rtt.rto_ms()) as u64;
     now = now.saturating_add(rto);
-    let _ = tcp::tcp_retransmit_check(now);
+    let _ = tcp::retransmit_check(now);
     assert_test!(
-        tcp::tcp_get_state(idx).is_none(),
+        tcp::get_state(id).is_none(),
         "connection released after max retransmits"
     );
     pass!()
@@ -778,10 +767,10 @@ pub fn test_tcp_retransmit_max_exceeded() -> TestResult {
 
 pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"hello").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"hello").unwrap();
     let mut payload = [0u8; 16];
-    let (seg, n) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let ack = TcpHeader {
         src_port: 80,
@@ -794,11 +783,8 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 500);
-    assert_test!(
-        tcp::tcp_retransmit_check(1000).is_none(),
-        "ack cancels timeout"
-    );
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 500);
+    assert_test!(tcp::retransmit_check(1000).is_none(), "ack cancels timeout");
     pass!()
 }
 
@@ -808,10 +794,10 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
 
 pub fn test_tcp_respects_peer_window() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcde").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 512];
-    let (first_seg, first_len) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (first_seg, first_len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let shrink = TcpHeader {
         src_port: 80,
@@ -824,20 +810,20 @@ pub fn test_tcp_respects_peer_window() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &shrink, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &shrink, &[], &[], 1);
 
-    let _ = tcp::tcp_send(idx, &[0x11u8; 200]).unwrap();
-    let (_, next_len) = tcp::tcp_poll_transmit(idx, &mut payload, 2).unwrap();
+    let _ = tcp::send(id, &[0x11u8; 200]).unwrap();
+    let (_, next_len) = tcp::poll_transmit(id, &mut payload, 2).unwrap();
     assert_eq_test!(next_len, 100, "limited by peer window");
     pass!()
 }
 
 pub fn test_tcp_zero_window_blocks_send() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcde").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 128];
-    let (seg, len) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let zero_wnd = TcpHeader {
         src_port: 80,
@@ -850,11 +836,11 @@ pub fn test_tcp_zero_window_blocks_send() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &zero_wnd, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &zero_wnd, &[], &[], 1);
 
-    let _ = tcp::tcp_send(idx, &[0x22u8; 64]).unwrap();
+    let _ = tcp::send(id, &[0x22u8; 64]).unwrap();
     assert_test!(
-        tcp::tcp_poll_transmit(idx, &mut payload, 2).is_none(),
+        tcp::poll_transmit(id, &mut payload, 2).is_none(),
         "blocked by zero window"
     );
     pass!()
@@ -862,10 +848,10 @@ pub fn test_tcp_zero_window_blocks_send() -> TestResult {
 
 pub fn test_tcp_zero_window_probe() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, b"abcde").unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 128];
-    let (seg, len) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let zero_wnd = TcpHeader {
         src_port: 80,
@@ -878,25 +864,25 @@ pub fn test_tcp_zero_window_probe() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &zero_wnd, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &zero_wnd, &[], &[], 1);
 
     // Enqueue new data after zero-window so there is unsent data for the probe
-    let _ = tcp::tcp_send(idx, b"more").unwrap();
+    let _ = tcp::send(id, b"more").unwrap();
 
-    let before = tcp::tcp_get_connection(idx).unwrap().snd_nxt;
-    let probe = tcp::tcp_zero_window_probe(idx, 2);
+    let before = with_data_state!(id, |d| d.snd_nxt.raw());
+    let probe = tcp::zero_window_probe(id, 2);
     assert_test!(probe.is_some(), "probe generated");
-    let after = tcp::tcp_get_connection(idx).unwrap().snd_nxt;
+    let after = with_data_state!(id, |d| d.snd_nxt.raw());
     assert_eq_test!(before, after, "probe does not advance snd_nxt");
     pass!()
 }
 
 pub fn test_tcp_window_update_resumes_send() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let _ = tcp::tcp_send(idx, &[0x33u8; 50]).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, &[0x33u8; 50]).unwrap();
     let mut payload = [0u8; 256];
-    let (seg, len) = tcp::tcp_poll_transmit(idx, &mut payload, 0).unwrap();
+    let (seg, len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let ack_half_zero = TcpHeader {
         src_port: 80,
@@ -909,9 +895,9 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack_half_zero, &[], &[], 1);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack_half_zero, &[], &[], 1);
     assert_test!(
-        tcp::tcp_poll_transmit(idx, &mut payload, 2).is_none(),
+        tcp::poll_transmit(id, &mut payload, 2).is_none(),
         "send blocked at wnd=0"
     );
 
@@ -926,10 +912,10 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack_rest_open, &[], &[], 3);
+    let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack_rest_open, &[], &[], 3);
 
-    let _ = tcp::tcp_send(idx, &[0x44u8; 80]).unwrap();
-    let resumed = tcp::tcp_poll_transmit(idx, &mut payload, 4);
+    let _ = tcp::send(id, &[0x44u8; 80]).unwrap();
+    let resumed = tcp::poll_transmit(id, &mut payload, 4);
     assert_test!(resumed.is_some(), "send resumes after window opens");
     pass!()
 }
@@ -940,8 +926,8 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
 
 pub fn test_tcp_delayed_ack_after_two_segments() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
 
     let r1 = inject_data_segment(
         [10, 0, 0, 2],
@@ -949,11 +935,11 @@ pub fn test_tcp_delayed_ack_after_two_segments() -> TestResult {
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"1",
         0,
     );
-    assert_test!(r1.response.is_none(), "first segment delayed");
+    assert_test!(r1.segments().next().is_none(), "first segment delayed");
 
     let r2 = inject_data_segment(
         [10, 0, 0, 2],
@@ -961,60 +947,63 @@ pub fn test_tcp_delayed_ack_after_two_segments() -> TestResult {
         80,
         client_port,
         server_iss.wrapping_add(2),
-        conn.snd_nxt,
+        snd_nxt,
         b"2",
         1,
     );
-    assert_test!(r2.response.is_some(), "second segment triggers ack");
+    assert_test!(
+        r2.segments().next().is_some(),
+        "second segment triggers ack"
+    );
     pass!()
 }
 
 pub fn test_tcp_delayed_ack_timeout() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let r = inject_data_segment(
         [10, 0, 0, 2],
         [10, 0, 0, 1],
         80,
         client_port,
         server_iss.wrapping_add(1),
-        conn.snd_nxt,
+        snd_nxt,
         b"x",
         0,
     );
-    assert_test!(r.response.is_none(), "initial delayed ack");
+    assert_test!(r.segments().next().is_none(), "initial delayed ack");
     assert_test!(
-        tcp::tcp_delayed_ack_check(DELAYED_ACK_MS - 1).is_none(),
+        tcp::delayed_ack_check(DELAYED_ACK_MS - 1).is_none(),
         "before delayed ack timeout"
     );
-    let delayed = tcp::tcp_delayed_ack_check(DELAYED_ACK_MS);
+    let delayed = tcp::delayed_ack_check(DELAYED_ACK_MS);
     assert_test!(delayed.is_some(), "delayed ack fires at timeout");
     pass!()
 }
 
 pub fn test_tcp_immediate_ack_for_fin() -> TestResult {
     reset();
-    let (idx, server_iss, client_port) = establish_connection();
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let (id, server_iss, client_port) = establish_connection();
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let fin = TcpHeader {
         src_port: 80,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
-        ack_num: conn.snd_nxt,
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &fin, &[], &[], 0);
+    let result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &fin, &[], &[], 0);
     assert_eq_test!(
-        result.new_state,
+        tcp::get_state(id),
         Some(TcpState::CloseWait),
         "fin moves to close_wait"
     );
-    assert_test!(result.response.is_some(), "fin gets immediate ack");
+    assert_test!(result.segments().next().is_some(), "fin gets immediate ack");
     pass!()
 }
 

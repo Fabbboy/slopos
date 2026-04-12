@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 
 use crate::socket;
 use crate::tcp::{
-    self, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TcpHeader,
-    TcpOutSegment, TcpTuple,
+    self, Actions, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN,
+    TcpHeader, TcpOutSegment, TcpTuple,
 };
 #[cfg(feature = "itests")]
 use crate::timer::NET_TIMER_WHEEL;
@@ -42,7 +42,7 @@ pub const PEER_ISS: u32 = 7000;
 /// otherwise.
 pub fn reset_all() {
     socket::socket_reset_all();
-    tcp::tcp_reset_all();
+    tcp::reset_all();
     #[cfg(feature = "itests")]
     tcp::clock::MockClock::clear();
 }
@@ -57,20 +57,20 @@ pub fn reset_all() {
 /// referring to either sequence space can do so without re-reading the
 /// connection.
 pub struct EstablishedConn {
-    pub idx: usize,
+    pub id: ConnId,
     pub local_port: u16,
     pub our_iss: u32,
     pub peer_iss: u32,
 }
 
 /// Drive a client-side 3-way handshake against the canonical addresses and
-/// [`REMOTE_PORT`].  Returns the connection index and both sides' ISS.
+/// [`REMOTE_PORT`].  Returns the connection id and both sides' ISS.
 ///
 /// Uses [`PEER_ISS`] for the synthetic peer ISS so tests can predict peer
 /// sequence numbers deterministically.
 pub fn establish_connection() -> EstablishedConn {
-    let (idx, syn_seg) =
-        tcp::tcp_connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).expect("tcp_connect should succeed");
+    let (id, syn_seg) =
+        tcp::connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).expect("tcp_connect should succeed");
     let our_iss = syn_seg.seq_num;
     let local_port = syn_seg.tuple.local_port;
 
@@ -85,10 +85,10 @@ pub fn establish_connection() -> EstablishedConn {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input(REMOTE_IP, LOCAL_IP, &syn_ack, &[], &[], 0);
+    let _ = tcp::input(REMOTE_IP, LOCAL_IP, &syn_ack, &[], &[], 0);
 
     EstablishedConn {
-        idx,
+        id,
         local_port,
         our_iss,
         peer_iss: PEER_ISS,
@@ -100,7 +100,7 @@ pub fn establish_connection() -> EstablishedConn {
 // -----------------------------------------------------------------------------
 
 /// Build a minimal TCP header in host-byte-order form suitable for passing to
-/// [`tcp::tcp_input`].  Tests rarely need window scaling or urgent pointers,
+/// [`tcp::input`].  Tests rarely need window scaling or urgent pointers,
 /// so they are defaulted.
 pub fn make_header(
     src_port: u16,
@@ -134,13 +134,13 @@ pub fn inject(
     ack: u32,
     flags: u8,
     payload: &[u8],
-) -> tcp::TcpInputResult {
+) -> Actions {
     let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
-    tcp::tcp_input(src_ip, dst_ip, &hdr, &[], payload, tcp::clock::now_ms())
+    tcp::input(src_ip, dst_ip, &hdr, &[], payload, tcp::clock::now_ms())
 }
 
 /// Inject a payload-carrying ACK from the peer of an established connection.
-pub fn inject_data(conn: &EstablishedConn, seq: u32, ack: u32, data: &[u8]) -> tcp::TcpInputResult {
+pub fn inject_data(conn: &EstablishedConn, seq: u32, ack: u32, data: &[u8]) -> Actions {
     inject(
         REMOTE_IP,
         LOCAL_IP,
@@ -154,7 +154,7 @@ pub fn inject_data(conn: &EstablishedConn, seq: u32, ack: u32, data: &[u8]) -> t
 }
 
 /// Inject a bare ACK from the peer.
-pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> tcp::TcpInputResult {
+pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
         LOCAL_IP,
@@ -168,7 +168,7 @@ pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> tcp::TcpInputRe
 }
 
 /// Inject a FIN from the peer.
-pub fn inject_fin(conn: &EstablishedConn, seq: u32, ack: u32) -> tcp::TcpInputResult {
+pub fn inject_fin(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
         LOCAL_IP,
@@ -182,7 +182,7 @@ pub fn inject_fin(conn: &EstablishedConn, seq: u32, ack: u32) -> tcp::TcpInputRe
 }
 
 /// Inject a RST from the peer.
-pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> tcp::TcpInputResult {
+pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
         LOCAL_IP,
@@ -201,20 +201,40 @@ pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> tcp::TcpInputRe
 
 /// Poll once for an outgoing segment.  Returns `None` if the connection has
 /// nothing to send under the current window.
-pub fn poll_once(idx: usize) -> Option<(TcpOutSegment, Vec<u8>)> {
+pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, Vec<u8>)> {
     let mut buf = [0u8; 1500];
-    tcp::tcp_poll_transmit(idx, &mut buf, tcp::clock::now_ms())
+    tcp::poll_transmit(id, &mut buf, tcp::clock::now_ms())
         .map(|(seg, len)| (seg, buf[..len].to_vec()))
 }
 
 /// Drain `tcp_poll_transmit` until it returns `None`.  Used by data-transfer
 /// tests that want to observe exactly what bytes were serialized.
-pub fn drain_transmit(idx: usize) -> Vec<(TcpOutSegment, Vec<u8>)> {
+pub fn drain_transmit(id: ConnId) -> Vec<(TcpOutSegment, Vec<u8>)> {
     let mut out = Vec::new();
-    while let Some(item) = poll_once(idx) {
+    while let Some(item) = poll_once(id) {
         out.push(item);
     }
     out
+}
+
+// -----------------------------------------------------------------------------
+// State-access macros
+// -----------------------------------------------------------------------------
+
+/// Access the `DataState` of a PCB inside a closure under the `PCB_TABLE`
+/// lock.  Panics if the PCB doesn't exist or isn't in the `Data` state.
+///
+/// Usage: `with_data_state!(conn.id, |d| assert_eq!(d.snd_nxt.raw(), ...));`
+#[macro_export]
+macro_rules! with_data_state {
+    ($id:expr, |$d:ident| $body:expr) => {{
+        let table = crate::tcp::table::PCB_TABLE.lock();
+        let pcb = table.get($id).expect("PCB should exist");
+        match &pcb.state {
+            crate::tcp::PcbState::Data($d) => $body,
+            other => panic!("expected Data state, got {}", other.name()),
+        }
+    }};
 }
 
 // -----------------------------------------------------------------------------
@@ -345,13 +365,13 @@ pub fn dispatch_fired_timers() -> usize {
     for timer in fired {
         match timer.kind {
             TimerKind::TcpRetransmit => {
-                let _ = tcp::tcp_on_retransmit(timer.key);
+                let _ = tcp::on_retransmit(timer.key);
             }
             TimerKind::TcpKeepalive => {
-                let _ = tcp::tcp_on_keepalive(timer.key);
+                let _ = tcp::on_keepalive(timer.key);
             }
             TimerKind::TcpTimeWait => {
-                tcp::tcp_on_time_wait_expire(timer.key);
+                tcp::on_time_wait_expire(timer.key);
             }
             _ => {}
         }

@@ -10,6 +10,7 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::tcp::actions::SocketNotify;
+use crate::tcp::buffer::TcpBufferPair;
 use crate::tcp::header::{
     TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TcpHeader,
 };
@@ -82,7 +83,8 @@ fn data_ref(pcb: &Pcb) -> &DataState {
 
 pub fn test_data_rst_releases_and_notifies() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let actions = DataState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, 0, 0), &[], 0);
+    let mut bufs = TcpBufferPair::new();
+    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_RST, 0, 0), &[], 0);
     assert_test!(actions.release, "release flag set");
     assert_test!(
         actions.notify.contains(SocketNotify::RESET_RECEIVED),
@@ -101,7 +103,8 @@ pub fn test_data_rst_releases_and_notifies() -> TestResult {
 
 pub fn test_data_unexpected_syn_triggers_rst_and_release() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let actions = DataState::on_segment(&mut pcb, &hdr(TCP_FLAG_SYN, 0, 0), &[], 0);
+    let mut bufs = TcpBufferPair::new();
+    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_SYN, 0, 0), &[], 0);
     assert_eq_test!(actions.segments_len, 1, "one RST emitted");
     let rst = actions.segments[0].as_ref().unwrap();
     assert_test!((rst.flags & TCP_FLAG_RST) != 0, "RST flag");
@@ -115,13 +118,15 @@ pub fn test_data_unexpected_syn_triggers_rst_and_release() -> TestResult {
 
 pub fn test_data_in_order_payload_accepted() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     let _ = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK | TCP_FLAG_PSH, PEER_IRS + 1, OUR_ISS + 1),
         b"hello",
         0,
     );
-    assert_eq_test!(pcb.buffers.recv.available(), 5, "5 bytes in recv buffer");
+    assert_eq_test!(bufs.recv.available(), 5, "5 bytes in recv buffer");
     let d = data_ref(&pcb);
     assert_eq_test!(d.rcv_nxt.raw(), PEER_IRS + 1 + 5, "rcv_nxt advanced by 5");
     pass!()
@@ -129,8 +134,10 @@ pub fn test_data_in_order_payload_accepted() -> TestResult {
 
 pub fn test_data_in_order_payload_sets_recv_wake() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK | TCP_FLAG_PSH, PEER_IRS + 1, OUR_ISS + 1),
         b"data",
         0,
@@ -148,14 +155,16 @@ pub fn test_data_in_order_payload_sets_recv_wake() -> TestResult {
 
 pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     // Gap at PEER_IRS+1..PEER_IRS+5; segment starts at PEER_IRS+5.
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 5, OUR_ISS + 1),
         b"worldX",
         0,
     );
-    assert_eq_test!(pcb.buffers.recv.available(), 0, "nothing delivered yet");
+    assert_eq_test!(bufs.recv.available(), 0, "nothing delivered yet");
     assert_eq_test!(actions.segments_len, 1, "duplicate ACK emitted");
     let d = data_ref(&pcb);
     assert_eq_test!(d.rcv_nxt.raw(), PEER_IRS + 1, "rcv_nxt unchanged");
@@ -168,8 +177,10 @@ pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
 
 pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
         0,
@@ -189,10 +200,12 @@ pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
 
 pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
+    let mut bufs = TcpBufferPair::new();
     // Peer's FIN arrives; our FIN not yet acked.  ack_num below
     // snd_nxt means peer hasn't acked our FIN.
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS),
         &[],
         0,
@@ -207,11 +220,13 @@ pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
 
 pub fn test_data_fin_ack_in_fin_wait_1_simultaneous_close() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
+    let mut bufs = TcpBufferPair::new();
     // Peer FIN+ACK acks our FIN AND carries theirs → transition to
     // TimeWait directly.  snd_nxt in this test harness is OUR_ISS+1
     // so our "FIN" sits at OUR_ISS+1.
     let _actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
         0,
@@ -225,8 +240,10 @@ pub fn test_data_fin_ack_in_fin_wait_1_simultaneous_close() -> TestResult {
 
 pub fn test_data_fin_in_fin_wait_2_goes_time_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait2);
+    let mut bufs = TcpBufferPair::new();
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
         0,
@@ -245,9 +262,11 @@ pub fn test_data_fin_in_fin_wait_2_goes_time_wait() -> TestResult {
 
 pub fn test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
+    let mut bufs = TcpBufferPair::new();
     // Pretend our FIN was sent at snd_nxt = OUR_ISS+1 (set by make_pcb).
     let _ = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
         0,
@@ -261,8 +280,10 @@ pub fn test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2() -> TestResult {
 
 pub fn test_data_ack_in_closing_transitions_to_time_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Closing);
+    let mut bufs = TcpBufferPair::new();
     let _ = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 2, OUR_ISS + 1),
         &[],
         0,
@@ -276,8 +297,10 @@ pub fn test_data_ack_in_closing_transitions_to_time_wait() -> TestResult {
 
 pub fn test_data_ack_in_last_ack_releases() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::LastAck);
+    let mut bufs = TcpBufferPair::new();
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 2, OUR_ISS + 1),
         &[],
         0,
@@ -292,6 +315,7 @@ pub fn test_data_ack_in_last_ack_releases() -> TestResult {
 
 pub fn test_data_ack_advances_snd_una() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     // Bump snd_nxt so there's room for the ACK to advance.
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
@@ -301,6 +325,7 @@ pub fn test_data_ack_advances_snd_una() -> TestResult {
     }
     let actions = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 50),
         &[],
         0,
@@ -320,8 +345,15 @@ pub fn test_data_ack_advances_snd_una() -> TestResult {
 
 pub fn test_data_stale_ack_ignored() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     // ACK below snd_una — stale, should not change state.
-    let _ = DataState::on_segment(&mut pcb, &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS), &[], 0);
+    let _ = DataState::on_segment(
+        &mut pcb,
+        &mut bufs,
+        &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS),
+        &[],
+        0,
+    );
     let d = data_ref(&pcb);
     assert_eq_test!(d.snd_una.raw(), OUR_ISS + 1, "snd_una unchanged");
     pass!()
@@ -329,6 +361,7 @@ pub fn test_data_stale_ack_ignored() -> TestResult {
 
 pub fn test_data_duplicate_ack_counter_increments() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
+    let mut bufs = TcpBufferPair::new();
     // Set up inflight data so dup-ack logic is reachable.
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
@@ -336,6 +369,7 @@ pub fn test_data_duplicate_ack_counter_increments() -> TestResult {
     }
     let _ = DataState::on_segment(
         &mut pcb,
+        &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
         0,

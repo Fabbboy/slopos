@@ -24,6 +24,7 @@ use crate::timer::{TimerKind, TimerToken};
 
 use super::TcpOutSegment;
 use super::listener::AcceptedConn;
+use super::table::ConnId;
 
 /// Maximum number of outbound segments a single state transition may emit.
 pub const MAX_SEGMENTS: usize = 3;
@@ -47,6 +48,11 @@ pub struct Actions {
     /// Bitfield of socket-layer wake-ups / side effects.
     pub notify: SocketNotify,
 
+    /// The PCB this action set originated from.  State handlers leave
+    /// this as `None`; the `tcp_input` glue layer fills it in so
+    /// consumers (socket layer, drivers) know which connection to act on.
+    pub conn_id: Option<ConnId>,
+
     /// When a LISTEN PCB accepts a new child via a completed 3-way
     /// handshake, the child's tuple + seq numbers land here so the socket
     /// layer can wire it into the accept queue.  Replaces the old
@@ -69,6 +75,7 @@ impl Actions {
             timer_ops: [None, None, None, None],
             timer_ops_len: 0,
             notify: SocketNotify::empty(),
+            conn_id: None,
             accepted: None,
             release: false,
         }

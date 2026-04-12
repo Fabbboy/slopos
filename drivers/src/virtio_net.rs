@@ -653,11 +653,11 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
             let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
             let payload = &ip_payload[hdr_len..];
             let now_ms = slopos_utils::clock::uptime_ms();
-            let result = tcp::tcp_input(src_ip, dst_ip, &hdr, options, payload, now_ms);
-            if let Some(seg) = result.response {
-                let _ = socket::socket_send_tcp_segment(&seg, &[]);
+            let actions = tcp::input(src_ip, dst_ip, &hdr, options, payload, now_ms);
+            for seg in actions.segments() {
+                let _ = socket::socket_send_tcp_segment(seg, &[]);
             }
-            socket::socket_notify_tcp_activity(&result);
+            socket::socket_notify_tcp_activity(&actions);
         }
         p if p == net::IpProtocol::Udp.as_u8() => {
             if let Some((src_port, dst_port, udp_payload)) = parse_udp_header(ip_payload) {

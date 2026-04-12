@@ -213,7 +213,7 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: 
     // 2-tuple (listener). The actual state machine processing still goes
     // through tcp_input() which uses TcpConnectionTable internally.
     {
-        use super::tcp_socket::TCP_DEMUX;
+        use super::tcp::listener::TCP_DEMUX;
         use super::types::{Ipv4Addr, Port};
 
         let demux = TCP_DEMUX.lock();
@@ -242,12 +242,12 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: 
         }
     }
 
-    let result = tcp::tcp_input(src_ip, dst_ip, &hdr, options, payload, now_ms);
+    let actions = tcp::input(src_ip, dst_ip, &hdr, options, payload, now_ms);
 
-    if let Some(seg) = result.response {
-        let _ = socket::socket_send_tcp_segment(&seg, &[]);
+    for seg in actions.segments() {
+        let _ = socket::socket_send_tcp_segment(seg, &[]);
     }
-    socket::socket_notify_tcp_activity(&result);
+    socket::socket_notify_tcp_activity(&actions);
 }
 
 /// Dispatch a UDP datagram to the socket layer, with DNS interception.

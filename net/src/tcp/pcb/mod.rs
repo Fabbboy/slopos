@@ -78,7 +78,7 @@ pub struct SocketId(pub u32);
 ///
 /// Stored inside `[Option<Pcb>; MAX_CONNECTIONS]` behind
 /// `IrqMutex<PcbTable>` (see [`crate::tcp::table`]).  State transitions
-/// mutate `self.state` in place; the glue layer in `tcp::tcp_input`
+/// mutate `self.state` in place; the glue layer in `tcp::input`
 /// drains the returned [`Actions`] after the table lock is released.
 #[derive(Debug)]
 pub struct Pcb {
@@ -91,22 +91,14 @@ pub struct Pcb {
 
     /// State-specific payload.  See [`PcbState`].
     pub state: PcbState,
-
-    /// Send + receive + OOO reassembly buffers.  Allocated for every
-    /// PCB (even `Listen`, where they stay empty) so transitions never
-    /// need to allocate.
-    pub buffers: TcpBufferPair,
 }
 
 impl Pcb {
-    /// Create a new PCB in the given state.  Buffers are freshly
-    /// zero-initialized.
     pub const fn new(tuple: TcpTuple, state: PcbState) -> Self {
         Self {
             tuple,
             socket_id: None,
             state,
-            buffers: TcpBufferPair::new(),
         }
     }
 
@@ -120,20 +112,21 @@ impl Pcb {
     /// compile the check away.
     pub fn on_segment(
         &mut self,
+        bufs: &mut TcpBufferPair,
         hdr: &TcpHeader,
         options: &[u8],
         payload: &[u8],
         now_ms: u64,
     ) -> Actions {
-        self.assert_invariants();
+        self.assert_invariants(bufs);
         let actions = match &mut self.state {
             PcbState::Listen(_) => listen::ListenState::on_segment(self, hdr, options, now_ms),
             PcbState::SynSent(_) => syn_sent::SynSentState::on_segment(self, hdr, options, now_ms),
             PcbState::SynRecv(_) => syn_recv::SynRecvState::on_segment(self, hdr, now_ms),
-            PcbState::Data(_) => data::DataState::on_segment(self, hdr, payload, now_ms),
+            PcbState::Data(_) => data::DataState::on_segment(self, bufs, hdr, payload, now_ms),
             PcbState::TimeWait(_) => time_wait::TimeWaitState::on_segment(self, hdr, now_ms),
         };
-        self.assert_invariants();
+        self.assert_invariants(bufs);
         actions
     }
 
@@ -146,14 +139,15 @@ impl Pcb {
     /// the assertion *at the transition site* rather than at some
     /// unrelated later read.
     #[inline]
-    pub fn assert_invariants(&self) {
+    pub fn assert_invariants(&self, bufs: &TcpBufferPair) {
+        let _ = bufs;
         #[cfg(debug_assertions)]
         match &self.state {
-            PcbState::Listen(s) => s.debug_assert_invariants(self),
+            PcbState::Listen(s) => s.debug_assert_invariants(bufs),
             PcbState::SynSent(s) => s.debug_assert_invariants(self),
             PcbState::SynRecv(s) => s.debug_assert_invariants(self),
             PcbState::Data(s) => s.debug_assert_invariants(self),
-            PcbState::TimeWait(s) => s.debug_assert_invariants(self),
+            PcbState::TimeWait(s) => s.debug_assert_invariants(bufs),
         }
     }
 }
@@ -232,4 +226,92 @@ pub enum ObservedSocketState {
     Connecting,
     Connected,
     Closed,
+}
+
+// -----------------------------------------------------------------------------
+// TcpState — RFC 793 names as a derived read-only view
+// -----------------------------------------------------------------------------
+
+/// RFC 793 state names, derived on demand from [`PcbState`].
+///
+/// This enum is **never stored** — `PcbState` is the sole source of
+/// truth.  `TcpState` exists so that the socket layer and tests can
+/// query "is this connection in ESTABLISHED?" without knowing the
+/// internal `DataState` / `ClosePhase` split.  It is produced by
+/// [`PcbState::tcp_state()`] and consumed by `tcp_get_state()`.
+///
+/// `Closed` is not representable: a released PCB slot is `None`, not
+/// a state.  Code that previously matched `TcpState::Closed` should
+/// match on the slot being missing (`tcp_get_state() == None`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcpState {
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+impl TcpState {
+    /// Human-readable name for logging.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Listen => "LISTEN",
+            Self::SynSent => "SYN_SENT",
+            Self::SynReceived => "SYN_RECEIVED",
+            Self::Established => "ESTABLISHED",
+            Self::FinWait1 => "FIN_WAIT_1",
+            Self::FinWait2 => "FIN_WAIT_2",
+            Self::CloseWait => "CLOSE_WAIT",
+            Self::Closing => "CLOSING",
+            Self::LastAck => "LAST_ACK",
+            Self::TimeWait => "TIME_WAIT",
+        }
+    }
+
+    /// Is this state "open" (capable of data transfer or about to be)?
+    pub const fn is_open(self) -> bool {
+        matches!(
+            self,
+            Self::Established | Self::FinWait1 | Self::FinWait2 | Self::CloseWait
+        )
+    }
+
+    /// Is this state a closing/teardown state?
+    pub const fn is_closing(self) -> bool {
+        matches!(
+            self,
+            Self::FinWait1
+                | Self::FinWait2
+                | Self::CloseWait
+                | Self::Closing
+                | Self::LastAck
+                | Self::TimeWait
+        )
+    }
+}
+
+impl PcbState {
+    /// Derive the RFC 793 state name from this PCB's current state.
+    pub fn tcp_state(&self) -> TcpState {
+        match self {
+            Self::Listen(_) => TcpState::Listen,
+            Self::SynSent(_) => TcpState::SynSent,
+            Self::SynRecv(_) => TcpState::SynReceived,
+            Self::Data(d) => match d.close_phase {
+                ClosePhase::Established => TcpState::Established,
+                ClosePhase::FinWait1 => TcpState::FinWait1,
+                ClosePhase::FinWait2 => TcpState::FinWait2,
+                ClosePhase::CloseWait => TcpState::CloseWait,
+                ClosePhase::Closing => TcpState::Closing,
+                ClosePhase::LastAck => TcpState::LastAck,
+            },
+            Self::TimeWait(_) => TcpState::TimeWait,
+        }
+    }
 }

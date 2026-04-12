@@ -75,6 +75,9 @@ pub struct RttEstimator {
     /// Current retransmission timeout.
     rto_ms: u32,
     has_sample: bool,
+    /// Number of consecutive retransmit timeouts without a fresh sample.
+    /// Reset to 0 on each successful RTT sample.
+    pub consecutive_timeouts: u8,
 }
 
 impl Default for RttEstimator {
@@ -93,6 +96,7 @@ impl RttEstimator {
             rttvar_ms: 0,
             rto_ms: INITIAL_RTO_MS,
             has_sample: false,
+            consecutive_timeouts: 0,
         }
     }
 
@@ -156,6 +160,7 @@ impl RttEstimator {
             self.srtt_ms = core::cmp::min(srtt_next, u32::MAX as u64) as u32;
         }
         self.recompute_rto();
+        self.consecutive_timeouts = 0;
     }
 
     /// RFC 6298 §5.5: on retransmit timeout, double the current RTO (but
@@ -163,6 +168,7 @@ impl RttEstimator {
     /// — those only update from fresh samples that pass Karn's filter.
     pub fn back_off(&mut self) {
         self.rto_ms = self.rto_ms.saturating_mul(2).min(MAX_RTO_MS);
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
     }
 
     /// Reset the estimator to its initial state.  Used on connection

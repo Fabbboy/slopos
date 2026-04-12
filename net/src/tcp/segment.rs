@@ -9,7 +9,6 @@
 //! The [`SegmentBuilder`] type lands in P2.1 and is currently a thin stub;
 //! state handlers still construct `TcpOutSegment { ... }` directly.
 
-use super::TcpConnection;
 use super::TcpTuple;
 use super::header::{
     DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST,
@@ -104,78 +103,18 @@ pub fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) ->
 // SegmentBuilder — single source of truth for TcpOutSegment construction
 // -----------------------------------------------------------------------------
 
-/// Factory methods that replace the 27+ inline `TcpOutSegment { ... }`
-/// constructions that used to litter the state handlers.
+/// Factory methods for [`TcpOutSegment`] construction.
 ///
 /// Every outgoing segment the TCP state machine emits comes from one of
-/// these.  The goal is **one place** where "what does an ACK look like for
-/// this connection?" is answered, so that adding a new field to
-/// `TcpOutSegment` (or changing how the receive window is computed) is a
-/// single-line change.
+/// these.  The goal is **one place** where "what does an ACK look like?"
+/// is answered, so that adding a new field to `TcpOutSegment` is a
+/// single-line change.  All methods take explicit field values — there
+/// are no methods that borrow a connection struct.
 pub struct SegmentBuilder;
 
 impl SegmentBuilder {
-    /// Plain ACK snapshot of the connection: `conn.snd_nxt` as seq, the
-    /// stored `rcv_nxt` as ack, `rcv_wnd` as window.
-    #[inline]
-    pub fn ack_of(conn: &TcpConnection) -> TcpOutSegment {
-        TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_nxt,
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
-            mss: 0,
-            wscale: 255,
-        }
-    }
-
-    /// ACK with an explicit window override — used on payload-accept paths
-    /// that want to advertise the *live* recv buffer window rather than
-    /// the connection's stored `rcv_wnd`.
-    #[inline]
-    pub fn ack_with_window(conn: &TcpConnection, window: u16) -> TcpOutSegment {
-        TcpOutSegment {
-            window_size: window,
-            ..Self::ack_of(conn)
-        }
-    }
-
-    /// `FIN|ACK` using a caller-specified seq.  Callers typically pass the
-    /// stored `snd_nxt` *before* they incremented it to account for FIN's
-    /// sequence consumption, so the exact seq cannot be derived from the
-    /// connection alone.
-    #[inline]
-    pub fn fin_ack(conn: &TcpConnection, seq: u32) -> TcpOutSegment {
-        TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: seq,
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
-            mss: 0,
-            wscale: 255,
-        }
-    }
-
-    /// Bare RST sourced from an established connection (seq = `snd_nxt`,
-    /// window = 0).  Used by `tcp_abort`.
-    #[inline]
-    pub fn rst_of(conn: &TcpConnection) -> TcpOutSegment {
-        TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_nxt,
-            ack_num: 0,
-            flags: TCP_FLAG_RST,
-            window_size: 0,
-            mss: 0,
-            wscale: 255,
-        }
-    }
-
-    /// RST with an explicit tuple and seq — used by the LISTEN ACK path and
-    /// the SYN_SENT bad-ACK path, which already know what tuple to use but
-    /// don't have a full [`TcpConnection`] to pull it from.
+    /// RST with an explicit tuple and seq — used by abort paths and LISTEN
+    /// ACK rejection.
     #[inline]
     pub fn bare_rst(tuple: TcpTuple, seq: u32) -> TcpOutSegment {
         TcpOutSegment {
@@ -235,67 +174,13 @@ impl SegmentBuilder {
         }
     }
 
-    /// Passive-open SYN+ACK (server side).  Emitted from `process_listen`
-    /// and from the simultaneous-open fallback in `process_syn_sent`.
-    #[inline]
-    pub fn passive_syn_ack(conn: &TcpConnection) -> TcpOutSegment {
-        TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.iss,
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-            window_size: DEFAULT_WINDOW_SIZE,
-            mss: DEFAULT_MSS,
-            wscale: 255,
-        }
-    }
-
-    /// Keepalive probe: `seq = snd_una - 1` so the peer is forced to
-    /// acknowledge its latest rcv_nxt without touching the data stream.
-    #[inline]
-    pub fn keepalive_probe(conn: &TcpConnection) -> TcpOutSegment {
-        TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_una.wrapping_sub(1),
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
-            mss: 0,
-            wscale: 255,
-        }
-    }
-
-    /// Data-carrying PSH+ACK segment used by `tcp_poll_transmit`.  Caller
-    /// passes the sequence number of the first payload byte and the live
-    /// recv-buffer window.
-    #[inline]
-    pub fn data_push(conn: &TcpConnection, seq: u32, window: u16) -> TcpOutSegment {
-        TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: seq,
-            ack_num: conn.rcv_nxt,
-            flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
-            window_size: window,
-            mss: 0,
-            wscale: 255,
-        }
-    }
-
     // -------------------------------------------------------------------------
-    // Explicit-field constructors for the Pcb state machine
+    // Canonical explicit-field constructors
     // -------------------------------------------------------------------------
-    //
-    // The `_of` variants above all take `&TcpConnection`, which is the
-    // legacy god-struct.  The new `Pcb` / `PcbState` world doesn't have
-    // that type any more — each state variant carries only its own
-    // fields.  These `_raw` helpers take the sequence and tuple values
-    // directly so every `Pcb::on_segment` handler can construct output
-    // segments without touching `TcpConnection`.  Post-C.1 the legacy
-    // helpers are deleted and these become the canonical builders.
 
     /// Plain ACK with explicit (tuple, seq, ack, window).
     #[inline]
-    pub fn ack_raw(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
+    pub fn ack(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
         TcpOutSegment {
             tuple,
             seq_num: seq,
@@ -309,7 +194,7 @@ impl SegmentBuilder {
 
     /// `FIN|ACK` with explicit fields.
     #[inline]
-    pub fn fin_ack_raw(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
+    pub fn fin_ack(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
         TcpOutSegment {
             tuple,
             seq_num: seq,
@@ -322,15 +207,9 @@ impl SegmentBuilder {
     }
 
     /// `SYN|ACK` with explicit fields, typically emitted by a
-    /// simultaneous-open transition.
+    /// simultaneous-open transition or passive-open path.
     #[inline]
-    pub fn syn_ack_raw(
-        tuple: TcpTuple,
-        seq: u32,
-        ack: u32,
-        window: u16,
-        mss: u16,
-    ) -> TcpOutSegment {
+    pub fn syn_ack(tuple: TcpTuple, seq: u32, ack: u32, window: u16, mss: u16) -> TcpOutSegment {
         TcpOutSegment {
             tuple,
             seq_num: seq,
@@ -342,22 +221,36 @@ impl SegmentBuilder {
         }
     }
 
-    /// Bare RST with explicit fields.  The `rst_of` legacy helper
-    /// already took `&TcpConnection`; this is the `_raw` form.
+    /// Data-carrying PSH+ACK segment.  Caller passes the sequence number of
+    /// the first payload byte and the live recv-buffer window.
     #[inline]
-    pub fn rst_raw(tuple: TcpTuple, seq: u32) -> TcpOutSegment {
-        Self::bare_rst(tuple, seq)
-    }
-
-    /// Data-carrying PSH+ACK with explicit fields.
-    #[inline]
-    pub fn data_push_raw(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
+    pub fn data_push(tuple: TcpTuple, seq: u32, ack: u32, window: u16) -> TcpOutSegment {
         TcpOutSegment {
             tuple,
             seq_num: seq,
             ack_num: ack,
             flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
             window_size: window,
+            mss: 0,
+            wscale: 255,
+        }
+    }
+
+    /// Keepalive probe: `seq = snd_una - 1` so the peer is forced to
+    /// acknowledge its latest `rcv_nxt` without touching the data stream.
+    #[inline]
+    pub fn keepalive_probe(
+        tuple: TcpTuple,
+        snd_una: u32,
+        rcv_nxt: u32,
+        rcv_wnd: u16,
+    ) -> TcpOutSegment {
+        TcpOutSegment {
+            tuple,
+            seq_num: snd_una.wrapping_sub(1),
+            ack_num: rcv_nxt,
+            flags: TCP_FLAG_ACK,
+            window_size: rcv_wnd,
             mss: 0,
             wscale: 255,
         }

@@ -17,7 +17,7 @@ fn reset() {
     socket::socket_reset_all();
 }
 
-fn connect_and_establish() -> Option<(u32, usize)> {
+fn connect_and_establish() -> Option<(u32, tcp::ConnId)> {
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0);
     if sock < 0 {
         return None;
@@ -27,29 +27,30 @@ fn connect_and_establish() -> Option<(u32, usize)> {
     if rc < 0 && rc != -115 {
         return None;
     }
-    let tcp_idx = socket::socket_lookup_tcp_idx(sock as u32)?;
-    let conn = tcp::tcp_get_connection(tcp_idx)?;
+    let tcp_id = socket::socket_lookup_tcp_idx(sock as u32)?;
+    let (tuple, iss) = tcp::with_pcb(tcp_id, |pcb| {
+        let iss = match &pcb.state {
+            tcp::PcbState::SynSent(s) => s.iss.raw(),
+            tcp::PcbState::Data(d) => d.iss.raw(),
+            _ => return None,
+        };
+        Some((pcb.tuple, iss))
+    })
+    .flatten()?;
     let syn_ack = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
         seq_num: 9000,
-        ack_num: conn.iss.wrapping_add(1),
+        ack_num: iss.wrapping_add(1),
         data_offset: 5,
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &syn_ack,
-        &[],
-        &[],
-        0,
-    );
+    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
     socket::socket_notify_tcp_activity(&result);
-    Some((sock as u32, tcp_idx))
+    Some((sock as u32, tcp_id))
 }
 
 pub fn test_napi_budget_limiting() -> TestResult {
@@ -99,7 +100,7 @@ pub fn test_waitqueue_basic() -> TestResult {
 
 pub fn test_blocking_recv() -> TestResult {
     reset();
-    let Some((sock, _tcp_idx)) = connect_and_establish() else {
+    let Some((sock, _tcp_id)) = connect_and_establish() else {
         return TestResult::Fail;
     };
     let _ = socket::socket_set_nonblocking(sock, false);

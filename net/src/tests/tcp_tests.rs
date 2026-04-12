@@ -11,11 +11,13 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use crate::tcp::table::MAX_CONNECTIONS;
 use crate::tcp::{
-    self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, MAX_CONNECTIONS, TCP_FLAG_ACK, TCP_FLAG_FIN,
-    TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TIME_WAIT_MS, TcpConnection, TcpError,
-    TcpHeader, TcpState, TcpTuple,
+    self, ConnId, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, SocketNotify, TCP_FLAG_ACK, TCP_FLAG_FIN,
+    TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TcpError, TcpHeader, TcpState,
+    TcpTuple,
 };
+use crate::with_data_state;
 
 // =============================================================================
 // Helper: reset global state before each test
@@ -436,19 +438,19 @@ pub fn test_tcp_seq_ge() -> TestResult {
 
 pub fn test_tcp_table_initially_empty() -> TestResult {
     reset();
-    assert_eq_test!(tcp::tcp_active_count(), 0, "table should start empty");
+    assert_eq_test!(tcp::active_count(), 0, "table should start empty");
     pass!()
 }
 
 pub fn test_tcp_connect_creates_syn_sent() -> TestResult {
     reset();
-    let (idx, seg) = match tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], 80) {
+    let (id, seg) = match tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80) {
         Ok(r) => r,
         Err(e) => return fail!("tcp_connect failed: {:?}", e),
     };
 
-    assert_eq_test!(tcp::tcp_active_count(), 1, "one active connection");
-    let state = tcp::tcp_get_state(idx);
+    assert_eq_test!(tcp::active_count(), 1, "one active connection");
+    let state = tcp::get_state(id);
     assert_eq_test!(state, Some(TcpState::SynSent), "state should be SYN_SENT");
 
     // Outgoing segment should be SYN.
@@ -469,15 +471,15 @@ pub fn test_tcp_table_full_returns_error() -> TestResult {
     reset();
     // Fill all slots.
     for i in 0..MAX_CONNECTIONS {
-        match tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], (80 + i) as u16) {
+        match tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], (80 + i) as u16) {
             Ok(_) => {}
             Err(e) => return fail!("connect {} failed: {:?}", i, e),
         }
     }
-    assert_eq_test!(tcp::tcp_active_count(), MAX_CONNECTIONS, "table full");
+    assert_eq_test!(tcp::active_count(), MAX_CONNECTIONS, "table full");
 
     // Next connect should fail.
-    match tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], 9999) {
+    match tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 9999) {
         Err(TcpError::TableFull) => {}
         other => return fail!("expected TableFull, got {:?}", other),
     }
@@ -486,25 +488,21 @@ pub fn test_tcp_table_full_returns_error() -> TestResult {
 
 pub fn test_tcp_listen_creates_listen_state() -> TestResult {
     reset();
-    let idx = match tcp::tcp_listen([0; 4], 8080) {
+    let id = match tcp::listen([0; 4], 8080) {
         Ok(i) => i,
         Err(e) => return fail!("tcp_listen failed: {:?}", e),
     };
 
-    assert_eq_test!(
-        tcp::tcp_get_state(idx),
-        Some(TcpState::Listen),
-        "LISTEN state"
-    );
-    assert_eq_test!(tcp::tcp_active_count(), 1, "one active");
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::Listen), "LISTEN state");
+    assert_eq_test!(tcp::active_count(), 1, "one active");
     pass!()
 }
 
 pub fn test_tcp_listen_duplicate_port_fails() -> TestResult {
     reset();
-    tcp::tcp_listen([0; 4], 8080).unwrap();
+    tcp::listen([0; 4], 8080).unwrap();
 
-    match tcp::tcp_listen([0; 4], 8080) {
+    match tcp::listen([0; 4], 8080) {
         Err(TcpError::AddrInUse) => {}
         other => return fail!("expected AddrInUse, got {:?}", other),
     }
@@ -513,50 +511,50 @@ pub fn test_tcp_listen_duplicate_port_fails() -> TestResult {
 
 pub fn test_tcp_close_listen_releases_slot() -> TestResult {
     reset();
-    let idx = tcp::tcp_listen([0; 4], 8080).unwrap();
-    assert_eq_test!(tcp::tcp_active_count(), 1, "one active");
+    let id = tcp::listen([0; 4], 8080).unwrap();
+    assert_eq_test!(tcp::active_count(), 1, "one active");
 
-    let result = tcp::tcp_close(idx);
+    let result = tcp::close(id);
     assert_test!(result.is_ok(), "close should succeed");
     assert_test!(result.unwrap().is_none(), "no FIN for listen socket");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "released");
+    assert_eq_test!(tcp::active_count(), 0, "released");
     pass!()
 }
 
 pub fn test_tcp_close_syn_sent_releases_slot() -> TestResult {
     reset();
-    let (idx, _) = tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
-    assert_eq_test!(tcp::tcp_active_count(), 1, "one active");
+    let (id, _) = tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
+    assert_eq_test!(tcp::active_count(), 1, "one active");
 
-    let result = tcp::tcp_close(idx).unwrap();
+    let result = tcp::close(id).unwrap();
     assert_test!(result.is_none(), "no FIN from SYN_SENT");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "released");
+    assert_eq_test!(tcp::active_count(), 0, "released");
     pass!()
 }
 
 pub fn test_tcp_abort_sends_rst() -> TestResult {
     reset();
-    let (idx, _) = tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
-    let result = tcp::tcp_abort(idx).unwrap();
+    let (id, _) = tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
+    let result = tcp::abort(id).unwrap();
     assert_test!(result.is_some(), "RST segment expected");
     let seg = result.unwrap();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "released after abort");
+    assert_eq_test!(tcp::active_count(), 0, "released after abort");
     pass!()
 }
 
 pub fn test_tcp_abort_listen_no_rst() -> TestResult {
     reset();
-    let idx = tcp::tcp_listen([0; 4], 80).unwrap();
-    let result = tcp::tcp_abort(idx).unwrap();
+    let id = tcp::listen([0; 4], 80).unwrap();
+    let result = tcp::abort(id).unwrap();
     assert_test!(result.is_none(), "no RST for LISTEN");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "released");
+    assert_eq_test!(tcp::active_count(), 0, "released");
     pass!()
 }
 
 pub fn test_tcp_close_not_found() -> TestResult {
     reset();
-    match tcp::tcp_close(999) {
+    match tcp::close(ConnId(999)) {
         Err(TcpError::NotFound) => {}
         other => return fail!("expected NotFound, got {:?}", other),
     }
@@ -573,8 +571,8 @@ pub fn test_tcp_active_handshake_complete() -> TestResult {
     let remote_ip = [10, 0, 0, 2];
 
     // Step 1: Client sends SYN.
-    let (idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, 80).unwrap();
-    assert_eq_test!(tcp::tcp_get_state(idx), Some(TcpState::SynSent), "SYN_SENT");
+    let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::SynSent), "SYN_SENT");
 
     let client_iss = syn_seg.seq_num;
     let client_port = syn_seg.tuple.local_port;
@@ -593,20 +591,39 @@ pub fn test_tcp_active_handshake_complete() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
-    assert_eq_test!(result.new_state, Some(TcpState::Established), "ESTABLISHED");
-    assert_test!(result.response.is_some(), "should send ACK");
-    let ack_seg = result.response.unwrap();
+    let result = tcp::input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::Established),
+        "ESTABLISHED"
+    );
+    assert_test!(result.segments().next().is_some(), "should send ACK");
+    let ack_seg = result.segments().next().unwrap().clone();
     assert_test!(ack_seg.flags & TCP_FLAG_ACK != 0, "ACK flag");
     assert_test!(ack_seg.flags & TCP_FLAG_SYN == 0, "no SYN in ACK");
     assert_eq_test!(ack_seg.ack_num, server_iss.wrapping_add(1), "ACK number");
 
     // Verify connection state.
-    let conn = tcp::tcp_get_connection(idx).unwrap();
-    assert_eq_test!(conn.state, TcpState::Established, "connection established");
-    assert_eq_test!(conn.irs, server_iss, "IRS stored");
-    assert_eq_test!(conn.rcv_nxt, server_iss.wrapping_add(1), "rcv_nxt");
-    assert_eq_test!(conn.snd_una, client_iss.wrapping_add(1), "snd_una advanced");
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::Established),
+        "connection established"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| d.irs.raw()),
+        server_iss,
+        "IRS stored"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| d.rcv_nxt.raw()),
+        server_iss.wrapping_add(1),
+        "rcv_nxt"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| d.snd_una.raw()),
+        client_iss.wrapping_add(1),
+        "snd_una advanced"
+    );
     pass!()
 }
 
@@ -615,7 +632,7 @@ pub fn test_tcp_active_rst_in_syn_sent() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (_idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, 80).unwrap();
+    let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     let client_iss = syn_seg.seq_num;
     let client_port = syn_seg.tuple.local_port;
 
@@ -632,14 +649,14 @@ pub fn test_tcp_active_rst_in_syn_sent() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(remote_ip, local_ip, &rst, &[], &[], 0);
-    assert_test!(result.reset, "reset flag should be set");
-    assert_eq_test!(
-        result.new_state,
-        Some(TcpState::Closed),
-        "connection closed"
+    let result = tcp::input(remote_ip, local_ip, &rst, &[], &[], 0);
+    assert_test!(
+        result.notify.contains(SocketNotify::RESET_RECEIVED),
+        "reset flag should be set"
     );
-    assert_eq_test!(tcp::tcp_active_count(), 0, "connection released");
+    // Released PCB = None state.
+    assert_eq_test!(tcp::get_state(id), None, "connection released");
+    assert_eq_test!(tcp::active_count(), 0, "connection released");
     pass!()
 }
 
@@ -648,7 +665,7 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, 80).unwrap();
+    let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
 
     // Peer sends SYN+ACK with wrong ack_num.
@@ -664,15 +681,18 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(remote_ip, local_ip, &bad_synack, &[], &[], 0);
+    let result = tcp::input(remote_ip, local_ip, &bad_synack, &[], &[], 0);
     // Should respond with RST.
-    assert_test!(result.response.is_some(), "should send RST for bad ACK");
-    let seg = result.response.unwrap();
+    assert_test!(
+        result.segments().next().is_some(),
+        "should send RST for bad ACK"
+    );
+    let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
 
     // Connection should still be in SYN_SENT (not destroyed by bad ACK).
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::SynSent),
         "still SYN_SENT"
     );
@@ -684,7 +704,7 @@ pub fn test_tcp_active_mss_negotiation() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, 80).unwrap();
+    let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
     let client_iss = syn_seg.seq_num;
 
@@ -702,11 +722,18 @@ pub fn test_tcp_active_mss_negotiation() -> TestResult {
     };
     let mss_opt = [tcp::TCP_OPT_MSS, tcp::TCP_OPT_MSS_LEN, 0x02, 0x18]; // 536
 
-    let _ = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &mss_opt, &[], 0);
+    let _ = tcp::input(remote_ip, local_ip, &syn_ack, &mss_opt, &[], 0);
 
-    let conn = tcp::tcp_get_connection(idx).unwrap();
-    assert_eq_test!(conn.peer_mss, 536, "peer MSS should be 536");
-    assert_eq_test!(conn.snd_wnd, 4096, "send window from SYN+ACK");
+    assert_eq_test!(
+        with_data_state!(id, |d| d.peer_mss),
+        536,
+        "peer MSS should be 536"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| d.snd_wnd),
+        4096,
+        "send window from SYN+ACK"
+    );
     pass!()
 }
 
@@ -720,7 +747,7 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
     let client_ip = [10, 0, 0, 2];
 
     // Step 1: Server listens.
-    let listen_idx = tcp::tcp_listen(server_ip, 80).unwrap();
+    let listen_id = tcp::listen(server_ip, 80).unwrap();
 
     // Step 2: Client sends SYN.
     let client_iss = 3000u32;
@@ -737,18 +764,26 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
     };
     let mss_opt = [tcp::TCP_OPT_MSS, tcp::TCP_OPT_MSS_LEN, 0x05, 0xB4]; // 1460
 
-    let result = tcp::tcp_input(client_ip, server_ip, &syn, &mss_opt, &[], 0);
-    assert_test!(result.accepted_idx.is_some(), "new connection accepted");
-    let child_idx = result.accepted_idx.unwrap();
+    let result = tcp::input(client_ip, server_ip, &syn, &mss_opt, &[], 0);
+    assert_test!(result.accepted.is_some(), "new connection accepted");
+
+    // Find the child's ConnId via its tuple.
+    let child_tuple = TcpTuple {
+        local_ip: server_ip,
+        local_port: 80,
+        remote_ip: client_ip,
+        remote_port: 50000,
+    };
+    let child_id = tcp::find(&child_tuple).expect("child should be in table");
     assert_eq_test!(
-        result.new_state,
+        tcp::get_state(child_id),
         Some(TcpState::SynReceived),
         "SYN_RECEIVED"
     );
 
     // Should respond with SYN+ACK.
-    assert_test!(result.response.is_some(), "SYN+ACK response");
-    let syn_ack = result.response.unwrap();
+    assert_test!(result.segments().next().is_some(), "SYN+ACK response");
+    let syn_ack = result.segments().next().unwrap().clone();
     assert_test!(syn_ack.flags & TCP_FLAG_SYN != 0, "SYN flag");
     assert_test!(syn_ack.flags & TCP_FLAG_ACK != 0, "ACK flag");
     assert_eq_test!(
@@ -760,7 +795,7 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
 
     // Listen socket should still be active.
     assert_eq_test!(
-        tcp::tcp_get_state(listen_idx),
+        tcp::get_state(listen_id),
         Some(TcpState::Listen),
         "listen still active"
     );
@@ -778,14 +813,28 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(client_ip, server_ip, &ack, &[], &[], 0);
-    assert_eq_test!(result.new_state, Some(TcpState::Established), "ESTABLISHED");
+    let _result = tcp::input(client_ip, server_ip, &ack, &[], &[], 0);
+    assert_eq_test!(
+        tcp::get_state(child_id),
+        Some(TcpState::Established),
+        "ESTABLISHED"
+    );
 
-    let conn = tcp::tcp_get_connection(child_idx).unwrap();
-    assert_eq_test!(conn.state, TcpState::Established, "child ESTABLISHED");
-    assert_eq_test!(conn.peer_mss, 1460, "peer MSS from options");
-    assert_eq_test!(conn.tuple.remote_port, 50000, "remote port");
-    assert_eq_test!(conn.tuple.remote_ip, client_ip, "remote IP");
+    assert_eq_test!(
+        with_data_state!(child_id, |d| d.peer_mss),
+        1460,
+        "peer MSS from options"
+    );
+    assert_eq_test!(
+        tcp::with_pcb(child_id, |pcb| pcb.tuple.remote_port).unwrap(),
+        50000,
+        "remote port"
+    );
+    assert_eq_test!(
+        tcp::with_pcb(child_id, |pcb| pcb.tuple.remote_ip).unwrap(),
+        client_ip,
+        "remote IP"
+    );
     pass!()
 }
 
@@ -794,7 +843,7 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
     let server_ip = [10, 0, 0, 1];
     let client_ip = [10, 0, 0, 2];
 
-    tcp::tcp_listen(server_ip, 80).unwrap();
+    tcp::listen(server_ip, 80).unwrap();
 
     // Client SYN.
     let syn = TcpHeader {
@@ -808,8 +857,14 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(client_ip, server_ip, &syn, &[], &[], 0);
-    let child_idx = result.accepted_idx.unwrap();
+    let _result = tcp::input(client_ip, server_ip, &syn, &[], &[], 0);
+    let child_tuple = TcpTuple {
+        local_ip: server_ip,
+        local_port: 80,
+        remote_ip: client_ip,
+        remote_port: 50000,
+    };
+    let child_id = tcp::find(&child_tuple).expect("child should be in table");
 
     // Client sends RST.
     let rst = TcpHeader {
@@ -823,18 +878,22 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(client_ip, server_ip, &rst, &[], &[], 0);
-    assert_test!(result.reset, "reset flag");
-    assert_eq_test!(result.new_state, Some(TcpState::Closed), "closed");
+    let result = tcp::input(client_ip, server_ip, &rst, &[], &[], 0);
+    assert_test!(
+        result.notify.contains(SocketNotify::RESET_RECEIVED),
+        "reset flag"
+    );
+    // Released PCB = None.
+    assert_eq_test!(tcp::get_state(child_id), None, "child released");
 
     // Child connection released, listen still active.
-    assert_test!(tcp::tcp_get_state(child_idx).is_none(), "child released");
+    assert_test!(tcp::get_state(child_id).is_none(), "child released");
     pass!()
 }
 
 pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
     reset();
-    tcp::tcp_listen([10, 0, 0, 1], 80).unwrap();
+    tcp::listen([10, 0, 0, 1], 80).unwrap();
 
     // Random ACK to a LISTEN socket → should get RST.
     let ack = TcpHeader {
@@ -848,9 +907,9 @@ pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 0);
-    assert_test!(result.response.is_some(), "should send RST");
-    let seg = result.response.unwrap();
+    let result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 0);
+    assert_test!(result.segments().next().is_some(), "should send RST");
+    let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
     pass!()
 }
@@ -859,13 +918,13 @@ pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
 // 9. Connection teardown
 // =============================================================================
 
-/// Helper: establish a connection (client side) and return (idx, server_iss).
+/// Helper: establish a connection (client side) and return (id, server_iss, client_port).
 fn establish_client_connection(
     local_ip: [u8; 4],
     remote_ip: [u8; 4],
     remote_port: u16,
-) -> (usize, u32, u16) {
-    let (idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, remote_port).unwrap();
+) -> (ConnId, u32, u16) {
+    let (id, syn_seg) = tcp::connect(local_ip, remote_ip, remote_port).unwrap();
     let client_iss = syn_seg.seq_num;
     let client_port = syn_seg.tuple.local_port;
 
@@ -881,8 +940,8 @@ fn establish_client_connection(
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
-    (idx, server_iss, client_port)
+    tcp::input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
+    (id, server_iss, client_port)
 }
 
 pub fn test_tcp_active_close() -> TestResult {
@@ -890,24 +949,20 @@ pub fn test_tcp_active_close() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::Established),
         "ESTABLISHED"
     );
 
     // Step 1: Client closes → sends FIN.
-    let close_result = tcp::tcp_close(idx).unwrap();
+    let close_result = tcp::close(id).unwrap();
     assert_test!(close_result.is_some(), "FIN segment");
     let fin_seg = close_result.unwrap();
     assert_test!(fin_seg.flags & TCP_FLAG_FIN != 0, "FIN flag");
     assert_test!(fin_seg.flags & TCP_FLAG_ACK != 0, "ACK with FIN");
-    assert_eq_test!(
-        tcp::tcp_get_state(idx),
-        Some(TcpState::FinWait1),
-        "FIN_WAIT_1"
-    );
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::FinWait1), "FIN_WAIT_1");
 
     // Step 2: Server ACKs the FIN.
     let ack = TcpHeader {
@@ -921,8 +976,8 @@ pub fn test_tcp_active_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
-    assert_eq_test!(result.new_state, Some(TcpState::FinWait2), "FIN_WAIT_2");
+    let _result = tcp::input(remote_ip, local_ip, &ack, &[], &[], 0);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::FinWait2), "FIN_WAIT_2");
 
     // Step 3: Server sends its FIN.
     let server_fin = TcpHeader {
@@ -936,10 +991,10 @@ pub fn test_tcp_active_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 100);
-    assert_eq_test!(result.new_state, Some(TcpState::TimeWait), "TIME_WAIT");
-    assert_test!(result.response.is_some(), "ACK the server's FIN");
-    let ack_seg = result.response.unwrap();
+    let result = tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 100);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
+    assert_test!(result.segments().next().is_some(), "ACK the server's FIN");
+    let ack_seg = result.segments().next().unwrap().clone();
     assert_test!(ack_seg.flags & TCP_FLAG_ACK != 0, "ACK flag");
     pass!()
 }
@@ -949,28 +1004,29 @@ pub fn test_tcp_passive_close() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
     // Server sends FIN first.
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let server_fin = TcpHeader {
         src_port: 80,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
-        ack_num: tcp::tcp_get_connection(idx).unwrap().snd_nxt,
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 0);
-    assert_eq_test!(result.new_state, Some(TcpState::CloseWait), "CLOSE_WAIT");
-    assert_test!(result.response.is_some(), "ACK the FIN");
+    let result = tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 0);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::CloseWait), "CLOSE_WAIT");
+    assert_test!(result.segments().next().is_some(), "ACK the FIN");
 
     // Client closes.
-    let close_result = tcp::tcp_close(idx).unwrap();
+    let close_result = tcp::close(id).unwrap();
     assert_test!(close_result.is_some(), "FIN segment");
-    assert_eq_test!(tcp::tcp_get_state(idx), Some(TcpState::LastAck), "LAST_ACK");
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::LastAck), "LAST_ACK");
 
     // Server ACKs our FIN.
     let fin_seg = close_result.unwrap();
@@ -985,9 +1041,10 @@ pub fn test_tcp_passive_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_ack, &[], &[], 0);
-    assert_eq_test!(result.new_state, Some(TcpState::Closed), "CLOSED");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "connection released");
+    let _result = tcp::input(remote_ip, local_ip, &server_ack, &[], &[], 0);
+    // Released PCB = None state.
+    assert_eq_test!(tcp::get_state(id), None, "released");
+    assert_eq_test!(tcp::active_count(), 0, "connection released");
     pass!()
 }
 
@@ -996,34 +1053,30 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
     // Both sides send FIN simultaneously.
     // Client sends FIN first.
-    let close_result = tcp::tcp_close(idx).unwrap();
-    assert_eq_test!(
-        tcp::tcp_get_state(idx),
-        Some(TcpState::FinWait1),
-        "FIN_WAIT_1"
-    );
+    let close_result = tcp::close(id).unwrap();
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::FinWait1), "FIN_WAIT_1");
     let fin_seg = close_result.unwrap();
 
     // Server's FIN arrives (not ACKing our FIN yet — it was sent simultaneously).
-    let conn = tcp::tcp_get_connection(idx).unwrap();
+    let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let server_fin = TcpHeader {
         src_port: 80,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
-        ack_num: conn.snd_una, // Doesn't ACK our FIN.
+        ack_num: snd_una, // Doesn't ACK our FIN.
         data_offset: 5,
         flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 0);
-    assert_eq_test!(result.new_state, Some(TcpState::Closing), "CLOSING");
-    assert_test!(result.response.is_some(), "ACK the peer FIN");
+    let result = tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 0);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::Closing), "CLOSING");
+    assert_test!(result.segments().next().is_some(), "ACK the peer FIN");
 
     // Server ACKs our FIN.
     let ack = TcpHeader {
@@ -1037,8 +1090,8 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 200);
-    assert_eq_test!(result.new_state, Some(TcpState::TimeWait), "TIME_WAIT");
+    let _result = tcp::input(remote_ip, local_ip, &ack, &[], &[], 200);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
     pass!()
 }
 
@@ -1051,10 +1104,10 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
     // Active close → FIN_WAIT_1.
-    let close_result = tcp::tcp_close(idx).unwrap().unwrap();
+    let close_result = tcp::close(id).unwrap().unwrap();
     let fin_seq = close_result.seq_num;
 
     // Server ACKs FIN → FIN_WAIT_2.
@@ -1069,7 +1122,7 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
+    tcp::input(remote_ip, local_ip, &ack, &[], &[], 0);
 
     // Server sends FIN → TIME_WAIT.
     let server_fin = TcpHeader {
@@ -1083,26 +1136,14 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
-    assert_eq_test!(
-        tcp::tcp_get_state(idx),
-        Some(TcpState::TimeWait),
-        "TIME_WAIT"
-    );
+    tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
 
-    // Timer tick before expiry — should not reap.
-    let reaped = tcp::tcp_timer_tick(1000 + TIME_WAIT_MS - 1);
-    assert_eq_test!(reaped, 0, "not expired yet");
-    assert_eq_test!(
-        tcp::tcp_get_state(idx),
-        Some(TcpState::TimeWait),
-        "still TIME_WAIT"
-    );
-
-    // Timer tick after expiry — should reap.
-    let reaped = tcp::tcp_timer_tick(1000 + TIME_WAIT_MS);
-    assert_eq_test!(reaped, 1, "expired");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "released");
+    // Fire the TIME_WAIT timer directly (the timer wheel approach replaced
+    // the old `tcp_timer_tick` sweep).
+    tcp::on_time_wait_expire(id.0);
+    assert_eq_test!(tcp::get_state(id), None, "released");
+    assert_eq_test!(tcp::active_count(), 0, "released");
     pass!()
 }
 
@@ -1111,10 +1152,10 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
     // Full close sequence to TIME_WAIT.
-    let close_result = tcp::tcp_close(idx).unwrap().unwrap();
+    let close_result = tcp::close(id).unwrap().unwrap();
     let fin_seq = close_result.seq_num;
 
     let ack = TcpHeader {
@@ -1128,7 +1169,7 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
+    tcp::input(remote_ip, local_ip, &ack, &[], &[], 0);
 
     let server_fin = TcpHeader {
         src_port: 80,
@@ -1141,20 +1182,19 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 500);
-    assert_eq_test!(
-        tcp::tcp_get_state(idx),
-        Some(TcpState::TimeWait),
-        "TIME_WAIT"
-    );
+    tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 500);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
 
     // Server retransmits FIN in TIME_WAIT → should re-ACK.
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
-    assert_test!(result.response.is_some(), "re-ACK the retransmitted FIN");
-    let seg = result.response.unwrap();
+    let result = tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
+    assert_test!(
+        result.segments().next().is_some(),
+        "re-ACK the retransmitted FIN"
+    );
+    let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_ACK != 0, "ACK flag");
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::TimeWait),
         "still TIME_WAIT"
     );
@@ -1167,34 +1207,31 @@ pub fn test_tcp_retransmit_timer() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, _server_iss, _client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, _server_iss, _client_port) = establish_client_connection(local_ip, remote_ip, 80);
     assert_eq_test!(
-        tcp::tcp_get_state(idx),
+        tcp::get_state(id),
         Some(TcpState::Established),
         "ESTABLISHED"
     );
 
-    let wrote = tcp::tcp_send(idx, b"hello").unwrap();
+    let wrote = tcp::send(id, b"hello").unwrap();
     assert_eq_test!(wrote, 5, "wrote 5 bytes to send buffer");
 
     let mut payload = [0u8; 1460];
     let now_ms = 0u64;
-    let seg = tcp::tcp_poll_transmit(idx, &mut payload, now_ms);
+    let seg = tcp::poll_transmit(id, &mut payload, now_ms);
     assert_test!(seg.is_some(), "segment produced for transmit");
 
-    let conn_before = tcp::tcp_get_connection(idx).unwrap();
-    assert_test!(
-        conn_before.retransmit_timer_token.is_some(),
-        "retransmit timer scheduled"
-    );
+    let has_retransmit_token = with_data_state!(id, |d| d.retransmit_token.is_some());
+    assert_test!(has_retransmit_token, "retransmit timer scheduled");
 
-    let result = tcp::tcp_on_retransmit(idx as u32);
-    assert_test!(result.is_some(), "retransmit handler returned conn idx");
-    assert_eq_test!(result.unwrap(), idx, "correct conn_id");
+    let rto_before = with_data_state!(id, |d| d.rtt.rto_ms());
+    let result = tcp::on_retransmit(id.0);
+    assert_test!(result.is_some(), "retransmit handler returned conn id");
+    assert_eq_test!(result.unwrap(), id, "correct conn_id");
 
-    let conn_after = tcp::tcp_get_connection(idx).unwrap();
-    assert_test!(conn_after.rto_ms > conn_before.rto_ms, "RTO doubled");
-    assert_eq_test!(conn_after.retransmits, 1, "retransmit count incremented");
+    let rto_after = with_data_state!(id, |d| d.rtt.rto_ms());
+    assert_test!(rto_after > rto_before, "RTO doubled");
 
     pass!()
 }
@@ -1205,9 +1242,9 @@ pub fn test_tcp_time_wait_timer() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
-    let close_result = tcp::tcp_close(idx).unwrap().unwrap();
+    let close_result = tcp::close(id).unwrap().unwrap();
     let fin_seq = close_result.seq_num;
 
     let ack = TcpHeader {
@@ -1221,7 +1258,7 @@ pub fn test_tcp_time_wait_timer() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
+    tcp::input(remote_ip, local_ip, &ack, &[], &[], 0);
 
     let server_fin = TcpHeader {
         src_port: 80,
@@ -1234,19 +1271,14 @@ pub fn test_tcp_time_wait_timer() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
+    tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
 
-    let conn = tcp::tcp_get_connection(idx).unwrap();
-    assert_eq_test!(conn.state, TcpState::TimeWait, "in TIME_WAIT");
-    assert_test!(
-        conn.time_wait_timer_token.is_some(),
-        "TIME_WAIT timer scheduled"
-    );
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "in TIME_WAIT");
 
-    tcp::tcp_on_time_wait_expire(idx as u32);
+    tcp::on_time_wait_expire(id.0);
 
-    assert_eq_test!(tcp::tcp_get_state(idx), None, "connection released");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "no active connections");
+    assert_eq_test!(tcp::get_state(id), None, "connection released");
+    assert_eq_test!(tcp::active_count(), 0, "no active connections");
 
     pass!()
 }
@@ -1260,7 +1292,7 @@ pub fn test_tcp_rst_in_established() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (_idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (_id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
     let rst = TcpHeader {
         src_port: 80,
@@ -1273,10 +1305,12 @@ pub fn test_tcp_rst_in_established() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &rst, &[], &[], 0);
-    assert_test!(result.reset, "reset flag");
-    assert_eq_test!(result.new_state, Some(TcpState::Closed), "closed");
-    assert_eq_test!(tcp::tcp_active_count(), 0, "released");
+    let result = tcp::input(remote_ip, local_ip, &rst, &[], &[], 0);
+    assert_test!(
+        result.notify.contains(SocketNotify::RESET_RECEIVED),
+        "reset flag"
+    );
+    assert_eq_test!(tcp::active_count(), 0, "released");
     pass!()
 }
 
@@ -1294,9 +1328,9 @@ pub fn test_tcp_rst_to_unknown_ignored() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &rst, &[], &[], 0);
+    let result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &rst, &[], &[], 0);
     assert_test!(
-        result.response.is_none(),
+        result.segments().next().is_none(),
         "no response to RST for unknown connection"
     );
     pass!()
@@ -1307,7 +1341,7 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (_idx, _server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    let (_id, _server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
     // Unexpected SYN in ESTABLISHED → should RST and close.
     let syn = TcpHeader {
@@ -1321,11 +1355,14 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &syn, &[], &[], 0);
-    assert_test!(result.response.is_some(), "RST response");
-    let seg = result.response.unwrap();
+    let result = tcp::input(remote_ip, local_ip, &syn, &[], &[], 0);
+    assert_test!(result.segments().next().is_some(), "RST response");
+    let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
-    assert_test!(result.reset, "reset");
+    assert_test!(
+        result.notify.contains(SocketNotify::RESET_RECEIVED),
+        "reset"
+    );
     pass!()
 }
 
@@ -1347,9 +1384,9 @@ pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &syn, &[], &[], 0);
-    assert_test!(result.response.is_some(), "RST response expected");
-    let seg = result.response.unwrap();
+    let result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &syn, &[], &[], 0);
+    assert_test!(result.segments().next().is_some(), "RST response expected");
+    let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
     pass!()
 }
@@ -1360,9 +1397,11 @@ pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
 
 pub fn test_tcp_ephemeral_ports_unique() -> TestResult {
     reset();
-    let p1 = tcp::alloc_ephemeral_port();
-    let p2 = tcp::alloc_ephemeral_port();
-    let p3 = tcp::alloc_ephemeral_port();
+    let table = tcp::table::PCB_TABLE.lock();
+    let p1 = table.alloc_ephemeral_port();
+    let p2 = table.alloc_ephemeral_port();
+    let p3 = table.alloc_ephemeral_port();
+    drop(table);
     assert_test!(p1 >= 49152, "p1 in range");
     assert_test!(p2 >= 49152, "p2 in range");
     assert_test!(p3 >= 49152, "p3 in range");
@@ -1377,7 +1416,6 @@ pub fn test_tcp_ephemeral_ports_unique() -> TestResult {
 // =============================================================================
 
 pub fn test_tcp_state_names() -> TestResult {
-    assert_eq_test!(TcpState::Closed.name(), "CLOSED");
     assert_eq_test!(TcpState::Listen.name(), "LISTEN");
     assert_eq_test!(TcpState::SynSent.name(), "SYN_SENT");
     assert_eq_test!(TcpState::SynReceived.name(), "SYN_RECEIVED");
@@ -1396,7 +1434,6 @@ pub fn test_tcp_state_is_open() -> TestResult {
     assert_test!(TcpState::FinWait1.is_open(), "FIN_WAIT_1 is open");
     assert_test!(TcpState::FinWait2.is_open(), "FIN_WAIT_2 is open");
     assert_test!(TcpState::CloseWait.is_open(), "CLOSE_WAIT is open");
-    assert_test!(!TcpState::Closed.is_open(), "CLOSED not open");
     assert_test!(!TcpState::Listen.is_open(), "LISTEN not open");
     assert_test!(!TcpState::SynSent.is_open(), "SYN_SENT not open");
     assert_test!(!TcpState::TimeWait.is_open(), "TIME_WAIT not open");
@@ -1414,7 +1451,6 @@ pub fn test_tcp_state_is_closing() -> TestResult {
         !TcpState::Established.is_closing(),
         "ESTABLISHED not closing"
     );
-    assert_test!(!TcpState::Closed.is_closing(), "CLOSED not closing");
     pass!()
 }
 
@@ -1424,21 +1460,21 @@ pub fn test_tcp_state_is_closing() -> TestResult {
 
 pub fn test_tcp_find_exact_match() -> TestResult {
     reset();
-    let (idx, syn_seg) = tcp::tcp_connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
+    let (id, syn_seg) = tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
     let tuple = TcpTuple {
         local_ip: [10, 0, 0, 1],
         local_port: syn_seg.tuple.local_port,
         remote_ip: [10, 0, 0, 2],
         remote_port: 80,
     };
-    let found = tcp::tcp_find(&tuple);
-    assert_eq_test!(found, Some(idx), "exact match found");
+    let found = tcp::find(&tuple);
+    assert_eq_test!(found, Some(id), "exact match found");
     pass!()
 }
 
 pub fn test_tcp_find_wildcard_listen() -> TestResult {
     reset();
-    let listen_idx = tcp::tcp_listen([0; 4], 80).unwrap();
+    let listen_id = tcp::listen([0; 4], 80).unwrap();
 
     // A connection from any IP to port 80 should match the wildcard listener.
     let tuple = TcpTuple {
@@ -1447,8 +1483,8 @@ pub fn test_tcp_find_wildcard_listen() -> TestResult {
         remote_ip: [10, 0, 0, 2],
         remote_port: 50000,
     };
-    let found = tcp::tcp_find(&tuple);
-    assert_eq_test!(found, Some(listen_idx), "wildcard listen match");
+    let found = tcp::find(&tuple);
+    assert_eq_test!(found, Some(listen_id), "wildcard listen match");
     pass!()
 }
 
@@ -1510,7 +1546,7 @@ pub fn test_tcp_simultaneous_open() -> TestResult {
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    let (_idx, syn_seg) = tcp::tcp_connect(local_ip, remote_ip, 80).unwrap();
+    let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
 
     // Peer also sends SYN (without ACK — simultaneous open).
@@ -1525,14 +1561,14 @@ pub fn test_tcp_simultaneous_open() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &peer_syn, &[], &[], 0);
+    let result = tcp::input(remote_ip, local_ip, &peer_syn, &[], &[], 0);
     assert_eq_test!(
-        result.new_state,
+        tcp::get_state(id),
         Some(TcpState::SynReceived),
         "SYN_RECEIVED (simultaneous)"
     );
-    assert_test!(result.response.is_some(), "SYN+ACK response");
-    let seg = result.response.unwrap();
+    assert_test!(result.segments().next().is_some(), "SYN+ACK response");
+    let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_SYN != 0, "SYN flag");
     assert_test!(seg.flags & TCP_FLAG_ACK != 0, "ACK flag");
     pass!()
@@ -1547,28 +1583,24 @@ pub fn test_tcp_multiple_connections() -> TestResult {
     let local_ip = [10, 0, 0, 1];
 
     // Create 10 connections to different servers.
-    let mut indices = [0usize; 10];
+    let mut ids = [ConnId(0); 10];
     for i in 0..10 {
         let remote = [10, 0, (i / 256) as u8, (i % 256 + 1) as u8];
-        let (idx, _) = tcp::tcp_connect(local_ip, remote, (80 + i) as u16).unwrap();
-        indices[i] = idx;
+        let (id, _) = tcp::connect(local_ip, remote, (80 + i) as u16).unwrap();
+        ids[i] = id;
     }
-    assert_eq_test!(tcp::tcp_active_count(), 10, "10 active connections");
+    assert_eq_test!(tcp::active_count(), 10, "10 active connections");
 
     // Close half of them.
     for i in (0..10).step_by(2) {
-        tcp::tcp_close(indices[i]).unwrap();
+        tcp::close(ids[i]).unwrap();
     }
-    assert_eq_test!(
-        tcp::tcp_active_count(),
-        5,
-        "5 remaining after closing evens"
-    );
+    assert_eq_test!(tcp::active_count(), 5, "5 remaining after closing evens");
 
     // The remaining odd-indexed connections should still be SYN_SENT.
     for i in (1..10).step_by(2) {
         assert_eq_test!(
-            tcp::tcp_get_state(indices[i]),
+            tcp::get_state(ids[i]),
             Some(TcpState::SynSent),
             "odd connection still SYN_SENT"
         );
@@ -1577,28 +1609,10 @@ pub fn test_tcp_multiple_connections() -> TestResult {
 }
 
 // =============================================================================
-// 19. Connection empty state
-// =============================================================================
-
-pub fn test_tcp_connection_empty_defaults() -> TestResult {
-    let conn = TcpConnection::empty();
-    assert_test!(!conn.active, "not active");
-    assert_eq_test!(conn.state, TcpState::Closed, "closed");
-    assert_eq_test!(conn.snd_una, 0, "snd_una");
-    assert_eq_test!(conn.snd_nxt, 0, "snd_nxt");
-    assert_eq_test!(conn.rcv_nxt, 0, "rcv_nxt");
-    assert_eq_test!(conn.rcv_wnd, DEFAULT_WINDOW_SIZE, "rcv_wnd");
-    assert_eq_test!(conn.peer_mss, DEFAULT_MSS, "peer_mss");
-    assert_eq_test!(conn.rto_ms, tcp::INITIAL_RTO_MS, "rto_ms");
-    assert_eq_test!(conn.retransmits, 0, "retransmits");
-    pass!()
-}
-
-// =============================================================================
 // ISN generator (fixes SLOPOS-2026-0007 — predictable monotonic ISN)
 // =============================================================================
 
-/// Two calls with the same 4-tuple within the same 4-µs drift bucket yield
+/// Two calls with the same 4-tuple within the same 4-us drift bucket yield
 /// the same ISN; across buckets the delta is strictly the drift increment.
 ///
 /// We can't freeze `monotonic_ns()` in-kernel without adding a clock trait
@@ -1650,9 +1664,9 @@ pub fn test_tcp_isn_varies_by_tuple() -> TestResult {
     let isn_1 = tcp::isn::generate_isn(&t1);
     let isn_2 = tcp::isn::generate_isn(&t2);
     let isn_3 = tcp::isn::generate_isn(&t3);
-    assert_test!(isn_1 != isn_2, "differing local port → differing ISN");
-    assert_test!(isn_1 != isn_3, "differing remote port → differing ISN");
-    assert_test!(isn_2 != isn_3, "independent tuples → independent ISNs");
+    assert_test!(isn_1 != isn_2, "differing local port -> differing ISN");
+    assert_test!(isn_1 != isn_3, "differing remote port -> differing ISN");
+    assert_test!(isn_2 != isn_3, "independent tuples -> independent ISNs");
     pass!()
 }
 
@@ -1767,8 +1781,6 @@ slopos_testing::define_test_suite!(
         test_tcp_simultaneous_open,
         // Multiple connections (1)
         test_tcp_multiple_connections,
-        // Default state (1)
-        test_tcp_connection_empty_defaults,
         // ISN generator, RFC 6528-ish (3 — fixes SLOPOS-2026-0007)
         test_tcp_isn_same_tuple_delta_is_drift_only,
         test_tcp_isn_varies_by_tuple,

@@ -117,14 +117,14 @@ fn test_tcp_syn_transmit() -> TestResult {
         None => return fail!("no local IP"),
     };
 
-    let (tcp_idx, syn) = match tcp::tcp_connect(our_ip, GATEWAY_IP, GATEWAY_PORT) {
+    let (tcp_id, syn) = match tcp::connect(our_ip, GATEWAY_IP, GATEWAY_PORT) {
         Ok(r) => r,
         Err(e) => return fail!("tcp_connect failed: {:?}", e),
     };
 
     klog_info!(
-        "tcp_live: SYN built idx={} seq={} local_port={}",
-        tcp_idx,
+        "tcp_live: SYN built id={} seq={} local_port={}",
+        tcp_id.0,
         syn.seq_num,
         syn.tuple.local_port,
     );
@@ -132,7 +132,7 @@ fn test_tcp_syn_transmit() -> TestResult {
     let send_rc = socket::socket_send_tcp_segment(&syn, &[]);
     klog_info!("tcp_live: send_tcp_segment returned {}", send_rc);
 
-    let _ = tcp::tcp_abort(tcp_idx);
+    let _ = tcp::abort(tcp_id);
 
     assert_test!(send_rc == 0, "send_tcp_segment failed with {}", send_rc);
     pass!()

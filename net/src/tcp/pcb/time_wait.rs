@@ -68,7 +68,7 @@ impl TimeWaitState {
         // Retransmitted FIN → re-ACK with the frozen-in-amber sequence
         // numbers and restart the MSL timer.
         if hdr.is_fin() {
-            actions.push_segment(SegmentBuilder::ack_raw(
+            actions.push_segment(SegmentBuilder::ack(
                 tuple,
                 s.last_snd_nxt.raw(),
                 s.last_rcv_nxt.raw(),
@@ -87,9 +87,9 @@ impl TimeWaitState {
     }
 
     #[cfg(debug_assertions)]
-    pub(super) fn debug_assert_invariants(&self, pcb: &Pcb) {
+    pub(super) fn debug_assert_invariants(&self, bufs: &crate::tcp::buffer::TcpBufferPair) {
         debug_assert!(
-            pcb.buffers.send.buffered_len() == 0,
+            bufs.send.buffered_len() == 0,
             "TimeWait must have no send data"
         );
     }

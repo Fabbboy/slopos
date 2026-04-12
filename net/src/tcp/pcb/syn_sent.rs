@@ -151,7 +151,7 @@ impl SynSentState {
             let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
             // Emit plain ACK that closes out the 3WHS from our side.
-            actions.push_segment(SegmentBuilder::ack_raw(
+            actions.push_segment(SegmentBuilder::ack(
                 tuple,
                 snd_nxt.raw(),
                 rcv_nxt.raw(),
@@ -172,7 +172,7 @@ impl SynSentState {
 
             // Emit SYN+ACK that reflects the simultaneous-open
             // crossover.
-            actions.push_segment(SegmentBuilder::syn_ack_raw(
+            actions.push_segment(SegmentBuilder::syn_ack(
                 tuple,
                 iss.raw(),
                 rcv_nxt.raw(),

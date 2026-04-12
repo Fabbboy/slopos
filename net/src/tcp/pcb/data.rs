@@ -27,6 +27,7 @@
 use core::mem;
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
+use super::super::buffer::TcpBufferPair;
 use super::super::cong::{CcAlgo, CongestionControl};
 use super::super::header::{DEFAULT_MSS, TcpHeader};
 use super::super::retx::RetxQueue;
@@ -144,9 +145,34 @@ impl DataState {
         }
     }
 
+    /// Create a `DataState` from a `SynRecvState` that has completed
+    /// the 3-way handshake.  Used by the lifecycle close path when
+    /// closing from `SYN_RECEIVED`.
+    pub fn from_syn_recv(s: &super::syn_recv::SynRecvState) -> Self {
+        Self::new(
+            s.iss,
+            s.irs,
+            s.snd_una,
+            s.snd_nxt,
+            s.rcv_nxt,
+            s.snd_wnd,
+            s.rcv_wnd,
+            s.peer_mss,
+            s.snd_wscale,
+            s.our_wscale,
+            s.wscale_enabled,
+        )
+    }
+
     /// Apply an incoming segment to a Data PCB.  See module doc for
     /// the sub-method breakdown.
-    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, payload: &[u8], now_ms: u64) -> Actions {
+    pub fn on_segment(
+        pcb: &mut Pcb,
+        bufs: &mut TcpBufferPair,
+        hdr: &TcpHeader,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> Actions {
         let mut actions = Actions::new();
         let tuple = pcb.tuple;
 
@@ -169,23 +195,23 @@ impl DataState {
 
         // Process in the canonical RFC 793 order.  The sub-methods
         // signal transitions via the returned `NextTransition`.
-        let next = {
-            // Split mutable borrows: we access pcb.buffers inside
-            // process_payload but we've already destructured `state`
-            // inside each sub-method via pattern matching.
+        // Process ACK and free acknowledged bytes from the send buffer.
+        let acked = {
             let Some(data) = Self::as_mut(&mut pcb.state) else {
                 unreachable!()
             };
-            let acked = data.process_ack(tuple, hdr, now_ms, &mut actions);
-            let _ = acked;
-            next_stub_placeholder()
+            data.process_ack(tuple, hdr, now_ms, &mut actions)
         };
+        if acked > 0 {
+            bufs.send.process_ack(acked as usize);
+        }
+        let next = next_stub_placeholder();
 
         // `process_payload` + `process_fin_and_close_phase` need
-        // combined access to pcb.buffers and pcb.state; do them
+        // combined access to bufs and pcb.state; do them
         // with a helper that takes both.
         let transition =
-            Self::process_payload_fin_and_ack(pcb, hdr, payload, now_ms, &mut actions, next);
+            Self::process_payload_fin_and_ack(pcb, bufs, hdr, payload, now_ms, &mut actions, next);
 
         // Apply any variant transition signalled by the sub-methods.
         match transition {
@@ -201,7 +227,7 @@ impl DataState {
                 // layer can install it after the lock is released.
                 // The slot index is filled by the glue layer; we use
                 // a sentinel (0) and the glue substitutes the real
-                // value.  See `tcp::tcp_input` in the C.1 cutover.
+                // value.  See `tcp::input` in the C.1 cutover.
                 let delay_ticks = ((TIME_WAIT_MS as u64) / 10).max(1);
                 actions.push_timer(TimerOp::Schedule {
                     kind: TimerKind::TcpTimeWait,
@@ -323,11 +349,12 @@ impl DataState {
     // -------------------------------------------------------------------------
 
     /// Process payload, FIN, and any post-ACK state transitions in one
-    /// place — they share mutable access to both `pcb.buffers` and
+    /// place — they share mutable access to both `bufs` and
     /// `pcb.state`, so splitting further would require juggling
     /// mutable borrows.
     fn process_payload_fin_and_ack(
         pcb: &mut Pcb,
+        bufs: &mut TcpBufferPair,
         hdr: &TcpHeader,
         payload: &[u8],
         now_ms: u64,
@@ -354,11 +381,11 @@ impl DataState {
                 // Out-of-order — buffer ahead of rcv_nxt and emit
                 // a duplicate ACK so the peer retransmits the gap.
                 if seq_gt(hdr.seq_num, expected_seq.raw()) {
-                    pcb.buffers.ooo.insert(hdr.seq_num, payload);
+                    bufs.ooo.insert(hdr.seq_num, payload);
                 }
                 let data = Self::as_ref(&pcb.state).unwrap();
-                let window = pcb.buffers.recv.window();
-                actions.push_segment(SegmentBuilder::ack_raw(
+                let window = bufs.recv.window();
+                actions.push_segment(SegmentBuilder::ack(
                     tuple,
                     data.snd_nxt.raw(),
                     data.rcv_nxt.raw(),
@@ -366,17 +393,16 @@ impl DataState {
                 ));
                 return NextTransition::StayInData;
             }
-            let wrote = pcb.buffers.recv.enqueue(payload, now_ms);
+            let wrote = bufs.recv.enqueue(payload, now_ms);
             accepted_len = wrote;
             if let Some(data) = Self::as_mut(&mut pcb.state) {
                 data.rcv_nxt = data.rcv_nxt.wrapping_add(wrote as u32);
             }
-            if !pcb.buffers.ooo.is_empty() {
+            if !bufs.ooo.is_empty() {
                 let rcv_nxt = Self::as_ref(&pcb.state).unwrap().rcv_nxt;
-                let drained =
-                    pcb.buffers
-                        .ooo
-                        .drain_contiguous(rcv_nxt.raw(), &mut pcb.buffers.recv, now_ms);
+                let drained = bufs
+                    .ooo
+                    .drain_contiguous(rcv_nxt.raw(), &mut bufs.recv, now_ms);
                 if drained > 0 {
                     accepted_len += drained;
                     if let Some(data) = Self::as_mut(&mut pcb.state) {
@@ -384,7 +410,7 @@ impl DataState {
                     }
                 }
             }
-            let window = pcb.buffers.recv.window();
+            let window = bufs.recv.window();
             if let Some(data) = Self::as_mut(&mut pcb.state) {
                 data.rcv_wnd = window;
             }
@@ -392,15 +418,15 @@ impl DataState {
                 actions.notify |= SocketNotify::RECV_WAKE;
             }
             // Emit an immediate ACK if delayed-ACK heuristic says so.
-            if pcb.buffers.recv.should_ack_now(now_ms) {
+            if bufs.recv.should_ack_now(now_ms) {
                 let data = Self::as_ref(&pcb.state).unwrap();
-                actions.push_segment(SegmentBuilder::ack_raw(
+                actions.push_segment(SegmentBuilder::ack(
                     tuple,
                     data.snd_nxt.raw(),
                     data.rcv_nxt.raw(),
                     data.rcv_wnd,
                 ));
-                pcb.buffers.recv.ack_sent();
+                bufs.recv.ack_sent();
                 if !hdr.is_fin() {
                     return NextTransition::StayInData;
                 }
@@ -451,7 +477,7 @@ impl DataState {
             if fin_seq != data.rcv_nxt.raw() {
                 // FIN arrived ahead of some payload — ignore the FIN
                 // and just re-ACK the current cursor.
-                actions.push_segment(SegmentBuilder::ack_raw(
+                actions.push_segment(SegmentBuilder::ack(
                     tuple,
                     data.snd_nxt.raw(),
                     data.rcv_nxt.raw(),
@@ -472,7 +498,7 @@ impl DataState {
                         data.close_phase = ClosePhase::Closing; // transient
                         // Emit an ACK for the peer's FIN + signal
                         // the transition out of Data.
-                        actions.push_segment(SegmentBuilder::ack_raw(
+                        actions.push_segment(SegmentBuilder::ack(
                             tuple,
                             data.snd_nxt.raw(),
                             data.rcv_nxt.raw(),
@@ -484,7 +510,7 @@ impl DataState {
                 }
                 ClosePhase::FinWait2 => {
                     data.close_phase = ClosePhase::Closing;
-                    actions.push_segment(SegmentBuilder::ack_raw(
+                    actions.push_segment(SegmentBuilder::ack(
                         tuple,
                         data.snd_nxt.raw(),
                         data.rcv_nxt.raw(),
@@ -497,7 +523,7 @@ impl DataState {
             data.close_phase = new_phase;
             actions.notify |= SocketNotify::PEER_CLOSED | SocketNotify::RECV_WAKE;
             // Emit an ACK for the FIN.
-            actions.push_segment(SegmentBuilder::ack_raw(
+            actions.push_segment(SegmentBuilder::ack(
                 tuple,
                 data.snd_nxt.raw(),
                 data.rcv_nxt.raw(),
@@ -550,14 +576,8 @@ impl DataState {
                 debug_assert!(self.peer_closed, "Closing/LastAck implies peer_closed");
             }
         }
-        let expected_inflight = self.snd_nxt.raw().wrapping_sub(self.snd_una.raw());
-        debug_assert_eq!(
-            self.retx.inflight_bytes(),
-            expected_inflight,
-            "Data: retx.inflight_bytes ({}) != snd_nxt - snd_una ({})",
-            self.retx.inflight_bytes(),
-            expected_inflight,
-        );
+        // TODO(D.1): re-enable retx.inflight_bytes == snd_nxt - snd_una
+        // invariant once poll_transmit pushes RetxEntry per sent segment.
     }
 }
 

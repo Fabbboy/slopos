@@ -10,7 +10,7 @@ fn reset() {
     socket_reset_all();
 }
 
-fn connect_and_establish() -> Result<(u32, usize), &'static str> {
+fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
     let sock = socket_create(AF_INET, SOCK_STREAM, 0);
     if sock < 0 {
         return Err("socket_create failed");
@@ -27,35 +27,34 @@ fn connect_and_establish() -> Result<(u32, usize), &'static str> {
         return Err("socket_connect failed");
     }
 
-    let Some(tcp_idx) = socket_lookup_tcp_idx(sock) else {
+    let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
         return Err("no tcp idx");
     };
-    let Some(conn) = tcp::tcp_get_connection(tcp_idx) else {
-        return Err("no tcp conn");
-    };
+    let (tuple, iss) = tcp::with_pcb(tcp_id, |pcb| {
+        let iss = match &pcb.state {
+            tcp::PcbState::SynSent(s) => s.iss.raw(),
+            tcp::PcbState::Data(d) => d.iss.raw(),
+            _ => return Err("unexpected PCB state"),
+        };
+        Ok((pcb.tuple, iss))
+    })
+    .ok_or("no tcp conn")??;
 
     let syn_ack = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
         seq_num: 9000,
-        ack_num: conn.iss.wrapping_add(1),
+        ack_num: iss.wrapping_add(1),
         data_offset: 5,
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &syn_ack,
-        &[],
-        &[],
-        0,
-    );
+    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
     socket_notify_tcp_activity(&result);
 
-    Ok((sock, tcp_idx))
+    Ok((sock, tcp_id))
 }
 
 pub fn test_socket_create_tcp() -> TestResult {
@@ -174,8 +173,8 @@ pub fn test_socket_connect_creates_tcp_connection() -> TestResult {
         rc == 0 || rc == -115,
         "non-blocking connect should succeed or EINPROGRESS"
     );
-    let tcp_idx = socket_lookup_tcp_idx(sock).unwrap();
-    assert_eq_test!(tcp::tcp_get_state(tcp_idx), Some(TcpState::SynSent));
+    let tcp_id = socket_lookup_tcp_idx(sock).unwrap();
+    assert_eq_test!(tcp::get_state(tcp_id), Some(TcpState::SynSent));
     pass!()
 }
 
@@ -225,14 +224,14 @@ pub fn test_socket_recv_returns_error_not_connected() -> TestResult {
 
 pub fn test_socket_send_buffer_space() -> TestResult {
     reset();
-    let (sock, tcp_idx) = match connect_and_establish() {
+    let (sock, tcp_id) = match connect_and_establish() {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
     let probe = socket_max_send_probe(sock, 1024);
     assert_test!(probe >= 0, "send probe succeeds");
     assert_test!(
-        probe as usize <= tcp::tcp_send_buffer_space(tcp_idx),
+        probe as usize <= tcp::send_buffer_space(tcp_id),
         "probe <= tcp space"
     );
     pass!()
@@ -314,7 +313,7 @@ pub fn test_socket_reset_all() -> TestResult {
     assert_test!(socket_count_active() >= 2, "active before reset");
     socket_reset_all();
     assert_eq_test!(socket_count_active(), 0);
-    assert_eq_test!(tcp::tcp_active_count(), 0);
+    assert_eq_test!(tcp::active_count(), 0);
     pass!()
 }
 
@@ -551,7 +550,7 @@ pub fn test_socket_new_defaults_and_helpers() -> TestResult {
 
 pub fn test_tcp_send_on_established_returns_bytes() -> TestResult {
     reset();
-    let (sock, _tcp_idx) = match connect_and_establish() {
+    let (sock, _tcp_id) = match connect_and_establish() {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -568,18 +567,22 @@ pub fn test_tcp_send_on_established_returns_bytes() -> TestResult {
 
 pub fn test_tcp_recv_after_peer_data() -> TestResult {
     reset();
-    let (sock, tcp_idx) = match connect_and_establish() {
+    let (sock, tcp_id) = match connect_and_establish() {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
     socket_set_nonblocking(sock, true);
 
-    let conn = tcp::tcp_get_connection(tcp_idx).unwrap();
+    let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(tcp_id, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let data_hdr = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
-        seq_num: conn.rcv_nxt,
-        ack_num: conn.snd_nxt,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
+        seq_num: rcv_nxt,
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 32768,
@@ -587,14 +590,7 @@ pub fn test_tcp_recv_after_peer_data() -> TestResult {
         urgent_ptr: 0,
     };
     let payload = b"hello";
-    let _ = tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &data_hdr,
-        &[],
-        payload,
-        0,
-    );
+    let _ = tcp::input(tuple.remote_ip, tuple.local_ip, &data_hdr, &[], payload, 0);
 
     let mut buf = [0u8; 32];
     let n = socket_recv(sock, buf.as_mut_ptr(), buf.len());
@@ -606,14 +602,14 @@ pub fn test_tcp_recv_after_peer_data() -> TestResult {
 
 pub fn test_tcp_shutdown_wr_transitions_to_fin_wait1() -> TestResult {
     reset();
-    let (sock, tcp_idx) = match connect_and_establish() {
+    let (sock, tcp_id) = match connect_and_establish() {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
     use slopos_abi::syscall::SHUT_WR;
     assert_eq_test!(socket_shutdown(sock, SHUT_WR), 0);
     assert_eq_test!(
-        tcp::tcp_get_state(tcp_idx),
+        tcp::get_state(tcp_id),
         Some(TcpState::FinWait1),
         "SHUT_WR should transition Established -> FinWait1"
     );
@@ -622,7 +618,7 @@ pub fn test_tcp_shutdown_wr_transitions_to_fin_wait1() -> TestResult {
 
 pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
     reset();
-    let (sock, tcp_idx) = match connect_and_establish() {
+    let (sock, tcp_id) = match connect_and_establish() {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -630,21 +626,25 @@ pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
     use slopos_abi::syscall::SHUT_WR;
     assert_eq_test!(socket_shutdown(sock, SHUT_WR), 0);
 
-    let conn = tcp::tcp_get_connection(tcp_idx).unwrap();
+    let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(tcp_id, |pcb| match &pcb.state {
+        tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
+        other => panic!("expected Data state, got {}", other.name()),
+    })
+    .expect("PCB should exist");
     let data_hdr = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
-        seq_num: conn.rcv_nxt,
-        ack_num: conn.snd_nxt,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
+        seq_num: rcv_nxt,
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
+    let _ = tcp::input(
+        tuple.remote_ip,
+        tuple.local_ip,
         &data_hdr,
         &[],
         b"post-fin",
@@ -660,7 +660,7 @@ pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
 
 pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
     reset();
-    let (sock, _tcp_idx) = match connect_and_establish() {
+    let (sock, _tcp_id) = match connect_and_establish() {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -691,37 +691,38 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
     let rc = socket_connect(sock, [10, 0, 0, 2], 80);
     assert_test!(rc == 0 || rc == -115, "non-blocking connect");
 
-    let Some(tcp_idx) = socket_lookup_tcp_idx(sock) else {
+    let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
         return fail!("no tcp connection after connect");
     };
-    let Some(conn) = tcp::tcp_get_connection(tcp_idx) else {
-        return fail!("cannot snapshot tcp connection");
+    assert_eq_test!(
+        tcp::get_state(tcp_id),
+        Some(TcpState::SynSent),
+        "should be in SynSent"
+    );
+    let Some((tuple, iss)) = tcp::with_pcb(tcp_id, |pcb| match &pcb.state {
+        tcp::PcbState::SynSent(s) => Some((pcb.tuple, s.iss.raw())),
+        _ => None,
+    })
+    .flatten() else {
+        return fail!("expected SynSent state");
     };
-    assert_eq_test!(conn.state, TcpState::SynSent, "should be in SynSent");
 
     let syn_ack = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
         seq_num: 5000,
-        ack_num: conn.iss.wrapping_add(1),
+        ack_num: iss.wrapping_add(1),
         data_offset: 5,
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &syn_ack,
-        &[],
-        &[],
-        0,
-    );
+    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
     socket_notify_tcp_activity(&result);
 
     assert_eq_test!(
-        tcp::tcp_get_state(tcp_idx),
+        tcp::get_state(tcp_id),
         Some(TcpState::Established),
         "TCP should be Established after SYN-ACK"
     );
@@ -757,11 +758,11 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     assert_test!(rc == 0 || rc == -115, "non-blocking connect");
 
     // Verify TCP is in SynSent (handshake NOT complete).
-    let Some(tcp_idx) = socket_lookup_tcp_idx(sock) else {
+    let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
         return fail!("no tcp idx after connect");
     };
     assert_eq_test!(
-        tcp::tcp_get_state(tcp_idx),
+        tcp::get_state(tcp_id),
         Some(TcpState::SynSent),
         "TCP should be SynSent"
     );
@@ -772,26 +773,25 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     assert_test!(n < 0, "send before 3WHS completion must fail (ENOTCONN)");
 
     // Now complete the handshake.
-    let conn = tcp::tcp_get_connection(tcp_idx).unwrap();
+    let Some((tuple, iss)) = tcp::with_pcb(tcp_id, |pcb| match &pcb.state {
+        tcp::PcbState::SynSent(s) => Some((pcb.tuple, s.iss.raw())),
+        _ => None,
+    })
+    .flatten() else {
+        return fail!("expected SynSent state");
+    };
     let syn_ack = TcpHeader {
-        src_port: conn.tuple.remote_port,
-        dst_port: conn.tuple.local_port,
+        src_port: tuple.remote_port,
+        dst_port: tuple.local_port,
         seq_num: 7000,
-        ack_num: conn.iss.wrapping_add(1),
+        ack_num: iss.wrapping_add(1),
         data_offset: 5,
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(
-        conn.tuple.remote_ip,
-        conn.tuple.local_ip,
-        &syn_ack,
-        &[],
-        &[],
-        0,
-    );
+    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
     socket_notify_tcp_activity(&result);
 
     // After 3WHS, send should now succeed.
@@ -820,29 +820,26 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let syn_result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &syn_hdr, &[], &[], 0);
+    let syn_result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &syn_hdr, &[], &[], 0);
 
-    let child_idx = match syn_result.accepted_idx {
-        Some(idx) => idx,
-        None => return fail!("no child connection after SYN"),
+    // The SYN-ACK was sent; get the ISS from the outbound segment.
+    let syn_ack_seg = match syn_result.segments().next() {
+        Some(seg) => seg.clone(),
+        None => return fail!("no SYN-ACK segment after SYN"),
     };
 
-    let child = match tcp::tcp_get_connection(child_idx) {
-        Some(c) => c,
-        None => return fail!("no child connection snapshot"),
-    };
     let ack_hdr = TcpHeader {
         src_port: 5000,
         dst_port: 80,
         seq_num: 1001,
-        ack_num: child.iss.wrapping_add(1),
+        ack_num: syn_ack_seg.seq_num.wrapping_add(1),
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 32768,
         checksum: 0,
         urgent_ptr: 0,
     };
-    let ack_result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack_hdr, &[], &[], 0);
+    let ack_result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack_hdr, &[], &[], 0);
     socket_notify_tcp_activity(&ack_result);
 
     let mut peer_addr = [0u8; 4];
