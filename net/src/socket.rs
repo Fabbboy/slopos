@@ -2498,6 +2498,11 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 };
                 sock.options.recv_buf_size = size;
                 sock.recv_queue.resize(size);
+                if let SocketInner::Tcp(tcp_inner) = &sock.inner {
+                    if let Some(conn_id) = tcp_inner.conn_id {
+                        tcp::set_rcvbuf(conn_id, size);
+                    }
+                }
                 0
             }
             SO_SNDBUF => {
@@ -2509,6 +2514,11 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 };
                 sock.options.send_buf_size = size;
+                if let SocketInner::Tcp(tcp_inner) = &sock.inner {
+                    if let Some(conn_id) = tcp_inner.conn_id {
+                        tcp::set_sndbuf(conn_id, size);
+                    }
+                }
                 0
             }
             SO_RCVTIMEO => {

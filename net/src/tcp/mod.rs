@@ -557,6 +557,26 @@ pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
 }
 
 // =============================================================================
+// Socket options
+// =============================================================================
+
+/// Set the effective send buffer capacity (SO_SNDBUF).
+/// Values above TCP_BUFFER_SIZE are silently capped.
+pub fn set_sndbuf(id: ConnId, bytes: usize) {
+    let mut table = PCB_TABLE.lock();
+    let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
+    table.bufs_mut(id).send.effective_capacity = capped;
+}
+
+/// Set the effective receive buffer capacity (SO_RCVBUF).
+/// Values above TCP_BUFFER_SIZE are silently capped.
+pub fn set_rcvbuf(id: ConnId, bytes: usize) {
+    let mut table = PCB_TABLE.lock();
+    let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
+    table.bufs_mut(id).recv.effective_capacity = capped;
+}
+
+// =============================================================================
 // Data path
 // =============================================================================
 

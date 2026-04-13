@@ -30,6 +30,9 @@ pub struct TcpSendState {
     pub inflight: usize,
     pub rto_deadline_ms: u64,
     pub needs_retransmit: bool,
+    /// Soft cap on usable buffer capacity (SO_SNDBUF).
+    /// Defaults to TCP_BUFFER_SIZE; values above that are silently capped.
+    pub effective_capacity: usize,
 }
 
 impl TcpSendState {
@@ -39,11 +42,17 @@ impl TcpSendState {
             inflight: 0,
             rto_deadline_ms: 0,
             needs_retransmit: false,
+            effective_capacity: TCP_BUFFER_SIZE,
         }
     }
 
     pub fn enqueue(&mut self, data: &[u8]) -> usize {
-        self.buf.write(data)
+        let avail = self.free_space();
+        let n = core::cmp::min(data.len(), avail);
+        if n == 0 {
+            return 0;
+        }
+        self.buf.write(&data[..n])
     }
 
     pub fn unsent_len(&self) -> usize {
@@ -55,7 +64,9 @@ impl TcpSendState {
     }
 
     pub fn free_space(&self) -> usize {
-        self.buf.free_space()
+        let raw = self.buf.free_space();
+        let cap_limit = self.effective_capacity.saturating_sub(self.buf.len());
+        core::cmp::min(raw, cap_limit)
     }
 
     pub fn peek_unsent(&self, out: &mut [u8]) -> usize {
@@ -107,6 +118,8 @@ pub struct TcpRecvState {
     pub segments_since_ack: u8,
     pub ack_pending: bool,
     pub delayed_ack_deadline_ms: u64,
+    /// Soft cap on usable buffer capacity (SO_RCVBUF).
+    pub effective_capacity: usize,
 }
 
 impl TcpRecvState {
@@ -116,6 +129,7 @@ impl TcpRecvState {
             segments_since_ack: 0,
             ack_pending: false,
             delayed_ack_deadline_ms: 0,
+            effective_capacity: TCP_BUFFER_SIZE,
         }
     }
 
@@ -144,7 +158,9 @@ impl TcpRecvState {
     }
 
     pub fn window(&self) -> u16 {
-        core::cmp::min(self.buf.free_space(), u16::MAX as usize) as u16
+        let raw_free = self.buf.free_space();
+        let cap_limit = self.effective_capacity.saturating_sub(self.buf.len());
+        core::cmp::min(core::cmp::min(raw_free, cap_limit), u16::MAX as usize) as u16
     }
 
     pub fn should_ack_now(&self, now_ms: u64) -> bool {

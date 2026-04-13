@@ -1175,6 +1175,42 @@ pub fn test_sack_blocks_from_ooo_queue() -> TestResult {
 }
 
 // =============================================================================
+// SO_SNDBUF / SO_RCVBUF (D.3)
+// =============================================================================
+
+pub fn test_so_sndbuf_caps_send_space() -> TestResult {
+    reset();
+    let (id, _, _) = establish_connection();
+    // Default: full 32KB free.
+    let before = tcp::send_buffer_space(id);
+    assert_test!(before > 1024, "default > 1024");
+
+    tcp::set_sndbuf(id, 1024);
+    let after = tcp::send_buffer_space(id);
+    assert_test!(after <= 1024, "capped to 1024 by SO_SNDBUF");
+
+    // Enqueue should also be limited.
+    let wrote = tcp::send(id, &[0xAA; 2000]).unwrap();
+    assert_test!(wrote <= 1024, "send limited by effective capacity");
+    pass!()
+}
+
+pub fn test_so_rcvbuf_affects_window() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+
+    tcp::set_rcvbuf(id, 4096);
+
+    let window = {
+        let table = tcp::table::PCB_TABLE.lock();
+        table.bufs(id).recv.window()
+    };
+    assert_test!(window <= 4096, "recv window capped by SO_RCVBUF");
+    pass!()
+}
+
+// =============================================================================
 // Flow Control
 // =============================================================================
 
@@ -1439,6 +1475,8 @@ slopos_testing::define_test_suite!(
         test_sack_blocks_parsed_from_peer_ack,
         test_sack_scoreboard_cleared_on_forward_ack,
         test_sack_blocks_from_ooo_queue,
+        test_so_sndbuf_caps_send_space,
+        test_so_rcvbuf_affects_window,
         test_tcp_respects_peer_window,
         test_tcp_zero_window_blocks_send,
         test_tcp_zero_window_probe,
