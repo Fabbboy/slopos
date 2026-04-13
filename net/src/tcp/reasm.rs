@@ -161,6 +161,28 @@ impl TcpOooQueue {
         total
     }
 
+    /// Return SACK blocks describing the buffered OOO ranges, sorted by
+    /// sequence number.  Returns up to 4 blocks (the maximum that fits
+    /// in a single TCP SACK option).
+    pub fn sack_blocks(&self) -> ([(u32, u32); 4], u8) {
+        let mut blocks = [(0u32, 0u32); 4];
+        let n = core::cmp::min(self.count, 4);
+        // Collect entries.
+        for i in 0..n {
+            let e = &self.entries[i];
+            blocks[i] = (e.seq, e.end_seq());
+        }
+        // Insertion-sort by left edge (sequence number). n ≤ 4, so O(n²) is fine.
+        for i in 1..n {
+            let mut j = i;
+            while j > 0 && seq_gt(blocks[j - 1].0, blocks[j].0) {
+                blocks.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        (blocks, n as u8)
+    }
+
     pub fn clear(&mut self) {
         self.count = 0;
     }

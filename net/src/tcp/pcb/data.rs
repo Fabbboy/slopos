@@ -97,6 +97,11 @@ pub struct DataState {
     pub keepalive_probes_sent: u8,
     pub last_activity_tick: u64,
 
+    // -------- SACK scoreboard (RFC 2018) --------
+    /// SACK blocks last received from the peer (left_edge, right_edge).
+    pub sack_scoreboard: [(u32, u32); 4],
+    pub sack_scoreboard_count: u8,
+
     // -------- Misc --------
     pub reset_received: bool,
     pub peer_closed: bool,
@@ -140,6 +145,8 @@ impl DataState {
             keepalive_token: None,
             keepalive_probes_sent: 0,
             last_activity_tick: 0,
+            sack_scoreboard: [(0, 0); 4],
+            sack_scoreboard_count: 0,
             reset_received: false,
             peer_closed: false,
         }
@@ -149,7 +156,7 @@ impl DataState {
     /// the 3-way handshake.  Used by the lifecycle close path when
     /// closing from `SYN_RECEIVED`.
     pub fn from_syn_recv(s: &super::syn_recv::SynRecvState) -> Self {
-        Self::new(
+        let mut ds = Self::new(
             s.iss,
             s.irs,
             s.snd_una,
@@ -161,7 +168,9 @@ impl DataState {
             s.snd_wscale,
             s.our_wscale,
             s.wscale_enabled,
-        )
+        );
+        ds.sack_permitted = s.sack_permitted;
+        ds
     }
 
     /// Apply an incoming segment to a Data PCB.  See module doc for
@@ -170,6 +179,7 @@ impl DataState {
         pcb: &mut Pcb,
         bufs: &mut TcpBufferPair,
         hdr: &TcpHeader,
+        options: &[u8],
         payload: &[u8],
         now_ms: u64,
     ) -> Actions {
@@ -200,7 +210,7 @@ impl DataState {
             let Some(data) = Self::as_mut(&mut pcb.state) else {
                 unreachable!()
             };
-            data.process_ack(tuple, hdr, now_ms, &mut actions)
+            data.process_ack(tuple, hdr, options, now_ms, &mut actions)
         };
         if acked > 0 {
             bufs.send.process_ack(acked as usize);
@@ -312,11 +322,21 @@ impl DataState {
         &mut self,
         _tuple: super::super::tuple::TcpTuple,
         hdr: &TcpHeader,
+        options: &[u8],
         now_ms: u64,
         actions: &mut Actions,
     ) -> u32 {
         let old_snd_una = self.snd_una;
         let ack = hdr.ack_num;
+
+        // Parse SACK blocks from the peer's ACK (RFC 2018).
+        if self.sack_permitted && !options.is_empty() {
+            let parsed = super::super::header::parse_tcp_options(options);
+            if parsed.sack_block_count > 0 {
+                self.sack_scoreboard = parsed.sack_blocks;
+                self.sack_scoreboard_count = parsed.sack_block_count;
+            }
+        }
 
         // Only advance if the ACK is strictly greater than snd_una
         // and no greater than snd_nxt (RFC 793 §3.4).
@@ -343,6 +363,8 @@ impl DataState {
                     .map(|origin| now_ms.saturating_sub(origin) as u32),
             );
             self.dup_ack_count = 0;
+            // Clear SACK scoreboard — forward ACK supersedes old blocks.
+            self.sack_scoreboard_count = 0;
             // Reschedule the retransmit timer.
             if let Some(token) = self.retransmit_token.take() {
                 actions.push_timer(TimerOp::Cancel { token });
@@ -359,8 +381,6 @@ impl DataState {
             acked
         } else if ack == old_snd_una.raw() && self.snd_nxt > old_snd_una {
             // Duplicate ACK (same ack_num, still have inflight data).
-            // D.1 will turn 3+ of these into a fast retransmit; for
-            // now just count them.
             self.cc.on_dup_ack();
             self.dup_ack_count = self.dup_ack_count.saturating_add(1);
             0
@@ -410,12 +430,16 @@ impl DataState {
                 }
                 let data = Self::as_ref(&pcb.state).unwrap();
                 let window = bufs.recv.window();
-                actions.push_segment(SegmentBuilder::ack(
-                    tuple,
-                    data.snd_nxt.raw(),
-                    data.rcv_nxt.raw(),
-                    window,
-                ));
+                let mut ack_seg =
+                    SegmentBuilder::ack(tuple, data.snd_nxt.raw(), data.rcv_nxt.raw(), window);
+                // Include SACK blocks so the peer knows which OOO
+                // ranges we hold (RFC 2018).
+                if data.sack_permitted {
+                    let (blocks, count) = bufs.ooo.sack_blocks();
+                    ack_seg.sack_blocks = blocks;
+                    ack_seg.sack_block_count = count;
+                }
+                actions.push_segment(ack_seg);
                 return NextTransition::StayInData;
             }
             let wrote = bufs.recv.enqueue(payload, now_ms);

@@ -135,7 +135,7 @@ impl SynSentState {
         if ack_valid_for_our_syn {
             // SYN+ACK acknowledging our SYN → ESTABLISHED.
             // Build the new DataState and replace pcb.state.
-            let data = DataState::new(
+            let mut data = DataState::new(
                 iss,
                 irs,
                 snd_una,
@@ -148,6 +148,7 @@ impl SynSentState {
                 our_wscale,
                 wscale_enabled,
             );
+            data.sack_permitted = opts.sack_permitted;
             let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
             // Emit plain ACK that closes out the 3WHS from our side.

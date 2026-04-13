@@ -31,6 +31,12 @@ pub struct TcpOutSegment {
     pub mss: u16,
     /// Window Scale option shift count (255 = don't include option).
     pub wscale: u8,
+    /// Include SACK-Permitted option (SYN/SYN-ACK only).
+    pub sack_permitted: bool,
+    /// SACK blocks to include (left_edge, right_edge) pairs.
+    pub sack_blocks: [(u32, u32); 4],
+    /// Number of valid SACK blocks (0–4).
+    pub sack_block_count: u8,
 }
 
 /// Serialize a [`TcpOutSegment`] plus its payload into `out`.
@@ -41,8 +47,11 @@ pub struct TcpOutSegment {
 ///
 /// Returns the number of bytes written or `None` if `out` is too short.
 pub fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) -> Option<usize> {
+    use super::header::{TCP_OPT_SACK, TCP_OPT_SACK_PERMITTED, TCP_OPT_SACK_PERMITTED_LEN};
+
     let has_mss = seg.mss != 0;
     let has_wscale = seg.wscale != 255;
+    let sack_n = seg.sack_block_count as usize;
     let mut opt_len = 0usize;
     if has_mss {
         opt_len += 4;
@@ -50,6 +59,13 @@ pub fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) ->
     if has_wscale {
         // NOP + Window Scale (3 bytes) = 4 bytes for alignment
         opt_len += 4;
+    }
+    if seg.sack_permitted {
+        opt_len += TCP_OPT_SACK_PERMITTED_LEN as usize;
+    }
+    if sack_n > 0 {
+        // NOP + NOP + kind(1) + len(1) + 8*N
+        opt_len += 2 + 2 + 8 * sack_n;
     }
     // Pad to 4-byte boundary
     let padded_opt_len = (opt_len + 3) & !3;
@@ -83,6 +99,26 @@ pub fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) ->
         out[opt_cursor + 2] = TCP_OPT_WINDOW_SCALE_LEN;
         out[opt_cursor + 3] = seg.wscale;
         opt_cursor += 4;
+    }
+    if seg.sack_permitted {
+        out[opt_cursor] = TCP_OPT_SACK_PERMITTED;
+        out[opt_cursor + 1] = TCP_OPT_SACK_PERMITTED_LEN;
+        opt_cursor += 2;
+    }
+    if sack_n > 0 {
+        // Two NOP bytes for 4-byte alignment of the SACK block data.
+        out[opt_cursor] = TCP_OPT_NOP;
+        out[opt_cursor + 1] = TCP_OPT_NOP;
+        opt_cursor += 2;
+        out[opt_cursor] = TCP_OPT_SACK;
+        out[opt_cursor + 1] = (2 + 8 * sack_n) as u8;
+        opt_cursor += 2;
+        for i in 0..sack_n {
+            let (left, right) = seg.sack_blocks[i];
+            out[opt_cursor..opt_cursor + 4].copy_from_slice(&left.to_be_bytes());
+            out[opt_cursor + 4..opt_cursor + 8].copy_from_slice(&right.to_be_bytes());
+            opt_cursor += 8;
+        }
     }
     // Zero any padding
     while opt_cursor < TCP_HEADER_LEN + padded_opt_len {
@@ -125,6 +161,9 @@ impl SegmentBuilder {
             window_size: 0,
             mss: 0,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -156,6 +195,9 @@ impl SegmentBuilder {
             window_size: 0,
             mss: 0,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -171,6 +213,9 @@ impl SegmentBuilder {
             window_size: DEFAULT_WINDOW_SIZE,
             mss: DEFAULT_MSS,
             wscale: if wscale > 0 { wscale } else { 255 },
+            sack_permitted: true,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -189,6 +234,9 @@ impl SegmentBuilder {
             window_size: window,
             mss: 0,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -203,6 +251,9 @@ impl SegmentBuilder {
             window_size: window,
             mss: 0,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -218,6 +269,9 @@ impl SegmentBuilder {
             window_size: window,
             mss,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -233,6 +287,9 @@ impl SegmentBuilder {
             window_size: window,
             mss: 0,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 
@@ -253,6 +310,9 @@ impl SegmentBuilder {
             window_size: rcv_wnd,
             mss: 0,
             wscale: 255,
+            sack_permitted: false,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         }
     }
 }

@@ -957,6 +957,224 @@ pub fn test_rto_resets_cwnd_and_clears_retx() -> TestResult {
 }
 
 // =============================================================================
+// SACK (D.2)
+// =============================================================================
+
+pub fn test_sack_permitted_negotiated_active_open() -> TestResult {
+    reset();
+    // establish_connection sends SYN with SACK-Permitted.  We inject
+    // a SYN-ACK that also carries SACK-Permitted via raw options.
+    let (id, syn_seg) = tcp::connect(
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_IP,
+        tcp_common::REMOTE_PORT,
+    )
+    .expect("connect");
+    let local_port = syn_seg.tuple.local_port;
+    let our_iss = syn_seg.seq_num;
+    assert_test!(syn_seg.sack_permitted, "SYN carries SACK-Permitted");
+
+    // Build SYN-ACK options: MSS(4B) + SACK-Permitted(2B)
+    let opts: [u8; 6] = [
+        2, 4, 0x05, 0xB4, // MSS = 1460
+        4, 2, // SACK-Permitted
+    ];
+    let syn_ack = TcpHeader {
+        src_port: tcp_common::REMOTE_PORT,
+        dst_port: local_port,
+        seq_num: tcp_common::PEER_ISS,
+        ack_num: our_iss.wrapping_add(1),
+        data_offset: 5,
+        flags: tcp::TCP_FLAG_SYN | TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let _ = tcp::input(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        &syn_ack,
+        &opts,
+        &[],
+        0,
+    );
+
+    let permitted = with_data_state!(id, |d| d.sack_permitted);
+    assert_test!(permitted, "SACK permitted after negotiation");
+    pass!()
+}
+
+pub fn test_sack_permitted_not_set_without_peer() -> TestResult {
+    reset();
+    // Standard establish_connection sends SYN-ACK without SACK-Permitted
+    // (the test helper builds a bare SYN-ACK with no options).
+    let c = tcp_common::establish_connection();
+    let permitted = with_data_state!(c.id, |d| d.sack_permitted);
+    assert_test!(!permitted, "SACK not permitted when peer omits option");
+    pass!()
+}
+
+pub fn test_sack_blocks_sent_on_ooo() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+    // Enable SACK on this connection for testing.
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.sack_permitted = true;
+            }
+        }
+    }
+
+    let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
+    let peer_seq = c.peer_iss.wrapping_add(1);
+
+    // Inject OOO segment: gap at peer_seq, data at peer_seq+100.
+    let actions = tcp_common::inject(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        peer_seq.wrapping_add(100),
+        snd_nxt,
+        TCP_FLAG_ACK,
+        b"ooo_data",
+    );
+    let seg = actions.segments().next().expect("dup ACK emitted");
+    assert_test!(seg.sack_block_count > 0, "SACK blocks present in dup ACK");
+    assert_eq_test!(
+        seg.sack_blocks[0].0,
+        peer_seq.wrapping_add(100),
+        "SACK left edge"
+    );
+    pass!()
+}
+
+pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+    // Enable SACK.
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.sack_permitted = true;
+            }
+        }
+    }
+
+    // Send data so we have inflight.
+    let _ = tcp::send(id, &[0xAA; 100]).unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+
+    let snd_una = with_data_state!(id, |d| d.snd_una.raw());
+
+    // Inject an ACK carrying SACK blocks in options.
+    // Options: NOP NOP SACK(kind=5, len=10, one block)
+    let sack_left = snd_una.wrapping_add(50);
+    let sack_right = snd_una.wrapping_add(100);
+    let mut opts = [0u8; 12];
+    opts[0] = 1; // NOP
+    opts[1] = 1; // NOP
+    opts[2] = 5; // SACK kind
+    opts[3] = 10; // SACK len (2 + 8)
+    opts[4..8].copy_from_slice(&sack_left.to_be_bytes());
+    opts[8..12].copy_from_slice(&sack_right.to_be_bytes());
+
+    let hdr = tcp_common::make_header(
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        c.peer_iss.wrapping_add(1),
+        snd_una, // dup ACK
+        TCP_FLAG_ACK,
+        32768,
+    );
+    let _ = tcp::input(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        &hdr,
+        &opts,
+        &[],
+        0,
+    );
+
+    let (count, left, right) = with_data_state!(id, |d| (
+        d.sack_scoreboard_count,
+        d.sack_scoreboard[0].0,
+        d.sack_scoreboard[0].1
+    ));
+    assert_eq_test!(count, 1, "one SACK block parsed");
+    assert_eq_test!(left, sack_left, "SACK left edge stored");
+    assert_eq_test!(right, sack_right, "SACK right edge stored");
+    pass!()
+}
+
+pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.sack_permitted = true;
+                // Fake a scoreboard entry.
+                d.sack_scoreboard[0] = (1000, 2000);
+                d.sack_scoreboard_count = 1;
+            }
+        }
+    }
+
+    // Send data and get it acked with a forward ACK.
+    let _ = tcp::send(id, &[0xBB; 50]).unwrap();
+    let mut buf = [0u8; 1500];
+    let (seg, _) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+
+    let ack = tcp_common::make_header(
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        c.peer_iss.wrapping_add(1),
+        seg.seq_num.wrapping_add(50), // forward ACK
+        TCP_FLAG_ACK,
+        32768,
+    );
+    let _ = tcp::input(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        &ack,
+        &[],
+        &[],
+        1,
+    );
+
+    let count = with_data_state!(id, |d| d.sack_scoreboard_count);
+    assert_eq_test!(count, 0, "scoreboard cleared on forward ACK");
+    pass!()
+}
+
+pub fn test_sack_blocks_from_ooo_queue() -> TestResult {
+    reset();
+    // Test the OOO queue sack_blocks() method directly.
+    let mut q = tcp::TcpOooQueue::new();
+    q.insert(200, &[1; 10]); // range [200, 210)
+    q.insert(100, &[2; 5]); // range [100, 105)
+    q.insert(300, &[3; 20]); // range [300, 320)
+
+    let (blocks, count) = q.sack_blocks();
+    assert_eq_test!(count, 3, "three SACK blocks");
+    // Should be sorted by left edge.
+    assert_eq_test!(blocks[0].0, 100, "first block left");
+    assert_eq_test!(blocks[0].1, 105, "first block right");
+    assert_eq_test!(blocks[1].0, 200, "second block left");
+    assert_eq_test!(blocks[2].0, 300, "third block left");
+    pass!()
+}
+
+// =============================================================================
 // Flow Control
 // =============================================================================
 
@@ -1215,6 +1433,12 @@ slopos_testing::define_test_suite!(
         test_fast_retransmit_cwnd_reduction,
         test_fast_retransmit_not_during_recovery,
         test_rto_resets_cwnd_and_clears_retx,
+        test_sack_permitted_negotiated_active_open,
+        test_sack_permitted_not_set_without_peer,
+        test_sack_blocks_sent_on_ooo,
+        test_sack_blocks_parsed_from_peer_ack,
+        test_sack_scoreboard_cleared_on_forward_ack,
+        test_sack_blocks_from_ooo_queue,
         test_tcp_respects_peer_window,
         test_tcp_zero_window_blocks_send,
         test_tcp_zero_window_probe,

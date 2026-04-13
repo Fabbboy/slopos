@@ -84,7 +84,7 @@ fn data_ref(pcb: &Pcb) -> &DataState {
 pub fn test_data_rst_releases_and_notifies() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new();
-    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_RST, 0, 0), &[], 0);
+    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_RST, 0, 0), &[], &[], 0);
     assert_test!(actions.release, "release flag set");
     assert_test!(
         actions.notify.contains(SocketNotify::RESET_RECEIVED),
@@ -104,7 +104,7 @@ pub fn test_data_rst_releases_and_notifies() -> TestResult {
 pub fn test_data_unexpected_syn_triggers_rst_and_release() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new();
-    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_SYN, 0, 0), &[], 0);
+    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_SYN, 0, 0), &[], &[], 0);
     assert_eq_test!(actions.segments_len, 1, "one RST emitted");
     let rst = actions.segments[0].as_ref().unwrap();
     assert_test!((rst.flags & TCP_FLAG_RST) != 0, "RST flag");
@@ -123,6 +123,7 @@ pub fn test_data_in_order_payload_accepted() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_ACK | TCP_FLAG_PSH, PEER_IRS + 1, OUR_ISS + 1),
+        &[],
         b"hello",
         0,
     );
@@ -139,6 +140,7 @@ pub fn test_data_in_order_payload_sets_recv_wake() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_ACK | TCP_FLAG_PSH, PEER_IRS + 1, OUR_ISS + 1),
+        &[],
         b"data",
         0,
     );
@@ -161,6 +163,7 @@ pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 5, OUR_ISS + 1),
+        &[],
         b"worldX",
         0,
     );
@@ -182,6 +185,7 @@ pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
+        &[],
         &[],
         0,
     );
@@ -208,6 +212,7 @@ pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
         &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS),
         &[],
+        &[],
         0,
     );
     assert_test!(
@@ -229,6 +234,7 @@ pub fn test_data_fin_ack_in_fin_wait_1_simultaneous_close() -> TestResult {
         &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
+        &[],
         0,
     );
     assert_test!(
@@ -245,6 +251,7 @@ pub fn test_data_fin_in_fin_wait_2_goes_time_wait() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
+        &[],
         &[],
         0,
     );
@@ -269,6 +276,7 @@ pub fn test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2() -> TestResult {
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
         &[],
+        &[],
         0,
     );
     assert_test!(
@@ -286,6 +294,7 @@ pub fn test_data_ack_in_closing_transitions_to_time_wait() -> TestResult {
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 2, OUR_ISS + 1),
         &[],
+        &[],
         0,
     );
     assert_test!(
@@ -302,6 +311,7 @@ pub fn test_data_ack_in_last_ack_releases() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 2, OUR_ISS + 1),
+        &[],
         &[],
         0,
     );
@@ -328,6 +338,7 @@ pub fn test_data_ack_advances_snd_una() -> TestResult {
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 50),
         &[],
+        &[],
         0,
     );
     let d = data_ref(&pcb);
@@ -352,6 +363,7 @@ pub fn test_data_stale_ack_ignored() -> TestResult {
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS),
         &[],
+        &[],
         0,
     );
     let d = data_ref(&pcb);
@@ -371,6 +383,7 @@ pub fn test_data_duplicate_ack_counter_increments() -> TestResult {
         &mut pcb,
         &mut bufs,
         &hdr(TCP_FLAG_ACK, PEER_IRS + 1, OUR_ISS + 1),
+        &[],
         &[],
         0,
     );

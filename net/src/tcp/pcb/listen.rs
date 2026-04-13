@@ -99,6 +99,7 @@ impl ListenState {
             iss,
             irs,
             peer_mss,
+            sack_permitted: parsed.sack_permitted,
         });
 
         // Emit the SYN+ACK that completes step 1 of the 3WHS.
@@ -110,6 +111,9 @@ impl ListenState {
             window_size: DEFAULT_WINDOW_SIZE,
             mss: DEFAULT_MSS,
             wscale: 255,
+            sack_permitted: parsed.sack_permitted,
+            sack_blocks: [(0, 0); 4],
+            sack_block_count: 0,
         };
         let _ = TCP_FLAG_RST; // silence dead-import lint if options parser changes
         let _ = TCP_FLAG_SYN;

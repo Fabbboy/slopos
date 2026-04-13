@@ -123,7 +123,9 @@ impl Pcb {
             PcbState::Listen(_) => listen::ListenState::on_segment(self, hdr, options, now_ms),
             PcbState::SynSent(_) => syn_sent::SynSentState::on_segment(self, hdr, options, now_ms),
             PcbState::SynRecv(_) => syn_recv::SynRecvState::on_segment(self, hdr, now_ms),
-            PcbState::Data(_) => data::DataState::on_segment(self, bufs, hdr, payload, now_ms),
+            PcbState::Data(_) => {
+                data::DataState::on_segment(self, bufs, hdr, options, payload, now_ms)
+            }
             PcbState::TimeWait(_) => time_wait::TimeWaitState::on_segment(self, hdr, now_ms),
         };
         self.assert_invariants(bufs);

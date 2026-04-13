@@ -186,6 +186,8 @@ pub struct AcceptedConn {
     pub irs: u32,
     /// Peer's advertised MSS.
     pub peer_mss: u16,
+    /// Peer offered SACK-Permitted in their SYN.
+    pub sack_permitted: bool,
 }
 
 // =============================================================================
@@ -366,6 +368,7 @@ impl TcpListenState {
             iss: entry.iss,
             irs: entry.irs,
             peer_mss: entry.peer_mss,
+            sack_permitted: false,
         };
 
         klog_debug!(
@@ -548,6 +551,9 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
         window_size: DEFAULT_WINDOW_SIZE,
         mss: DEFAULT_MSS,
         wscale: 255,
+        sack_permitted: false,
+        sack_blocks: [(0, 0); 4],
+        sack_block_count: 0,
     }
 }
 

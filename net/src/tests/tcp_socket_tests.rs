@@ -484,6 +484,7 @@ pub fn test_push_accepted_basic() -> TestResult {
         iss: 1000,
         irs: 2000,
         peer_mss: 1460,
+        sack_permitted: false,
     };
 
     let ok = listen.push_accepted(accepted);
@@ -536,6 +537,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
             iss: 1000 + i as u32,
             irs: 2000 + i as u32,
             peer_mss: 1460,
+            sack_permitted: false,
         };
         let ok = listen.push_accepted(accepted);
         assert_test!(ok, "push_accepted should succeed within backlog");
@@ -557,6 +559,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
         iss: 9999,
         irs: 8888,
         peer_mss: 1460,
+        sack_permitted: false,
     };
     let rejected = listen.push_accepted(overflow);
     assert_test!(
@@ -642,6 +645,7 @@ pub fn test_accept_fifo_order() -> TestResult {
             iss: 1000 + i as u32,
             irs: 2000 + i as u32,
             peer_mss: 1460,
+            sack_permitted: false,
         };
         listen.push_accepted(accepted);
     }
@@ -687,6 +691,7 @@ pub fn test_listen_state_clear() -> TestResult {
         iss: 3000,
         irs: 4000,
         peer_mss: 1460,
+        sack_permitted: false,
     };
     listen.push_accepted(accepted);
     assert_eq_test!(listen.accept_queue_len(), 1, "accept queue has 1 entry");

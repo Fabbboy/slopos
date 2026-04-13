@@ -129,6 +129,7 @@ pub fn input(
         let child_irs = SeqNum::new(accepted.irs);
         let mut child_state = pcb::SynRecvState::new(child_iss, child_irs);
         child_state.peer_mss = accepted.peer_mss;
+        child_state.sack_permitted = accepted.sack_permitted;
         child_state.snd_wnd = hdr.window_size as u32;
         let parent_sock = table.get(id).and_then(|p| p.socket_id);
 

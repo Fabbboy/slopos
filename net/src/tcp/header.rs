@@ -42,6 +42,9 @@ pub const TCP_OPT_MSS: u8 = 2;
 pub const TCP_OPT_MSS_LEN: u8 = 4;
 pub const TCP_OPT_WINDOW_SCALE: u8 = 3;
 pub const TCP_OPT_WINDOW_SCALE_LEN: u8 = 3;
+pub const TCP_OPT_SACK_PERMITTED: u8 = 4;
+pub const TCP_OPT_SACK_PERMITTED_LEN: u8 = 2;
+pub const TCP_OPT_SACK: u8 = 5;
 
 // =============================================================================
 // TCP Header
@@ -170,12 +173,18 @@ pub fn parse_header(data: &[u8]) -> Option<TcpHeader> {
 pub struct ParsedTcpOptions {
     pub mss: Option<u16>,
     pub window_scale: Option<u8>,
+    pub sack_permitted: bool,
+    pub sack_blocks: [(u32, u32); 4],
+    pub sack_block_count: u8,
 }
 
 pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
     let mut result = ParsedTcpOptions {
         mss: None,
         window_scale: None,
+        sack_permitted: false,
+        sack_blocks: [(0, 0); 4],
+        sack_block_count: 0,
     };
     let mut i = 0;
     while i < options.len() {
@@ -196,6 +205,38 @@ pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
                     result.window_scale = Some(options[i + 2].min(14));
                 }
                 i += TCP_OPT_WINDOW_SCALE_LEN as usize;
+            }
+            TCP_OPT_SACK_PERMITTED => {
+                if i + 1 < options.len() && options[i + 1] == TCP_OPT_SACK_PERMITTED_LEN {
+                    result.sack_permitted = true;
+                }
+                i += TCP_OPT_SACK_PERMITTED_LEN as usize;
+            }
+            TCP_OPT_SACK => {
+                if i + 1 >= options.len() {
+                    break;
+                }
+                let opt_len = options[i + 1] as usize;
+                if opt_len < 2 || i + opt_len > options.len() {
+                    break;
+                }
+                // Each SACK block is 8 bytes (4-byte left + 4-byte right).
+                let body = &options[i + 2..i + opt_len];
+                let mut bi = 0;
+                while bi + 8 <= body.len() && (result.sack_block_count as usize) < 4 {
+                    let left =
+                        u32::from_be_bytes([body[bi], body[bi + 1], body[bi + 2], body[bi + 3]]);
+                    let right = u32::from_be_bytes([
+                        body[bi + 4],
+                        body[bi + 5],
+                        body[bi + 6],
+                        body[bi + 7],
+                    ]);
+                    result.sack_blocks[result.sack_block_count as usize] = (left, right);
+                    result.sack_block_count += 1;
+                    bi += 8;
+                }
+                i += opt_len;
             }
             _ => {
                 if i + 1 >= options.len() {

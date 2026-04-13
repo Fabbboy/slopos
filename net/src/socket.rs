@@ -762,6 +762,12 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     if seg.wscale != 255 {
         opt_len += 4;
     }
+    if seg.sack_permitted {
+        opt_len += 2;
+    }
+    if seg.sack_block_count > 0 {
+        opt_len += 2 + 2 + 8 * seg.sack_block_count as usize; // NOP NOP + kind len + blocks
+    }
     let padded_opt_len = (opt_len + 3) & !3;
     let tcp_len = TCP_HEADER_LEN + padded_opt_len + payload.len();
 
@@ -914,6 +920,7 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                             iss: d.iss.raw(),
                             irs: d.irs.raw(),
                             peer_mss: d.peer_mss,
+                            sack_permitted: d.sack_permitted,
                         })
                     })
                     .flatten();
