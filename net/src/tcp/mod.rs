@@ -294,7 +294,7 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
 /// Returns the outgoing FIN segment if one should be sent.
 pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     let mut table = PCB_TABLE.lock();
-    let pcb = table.get_mut(id).ok_or(TcpError::NotFound)?;
+    let (pcb, bufs) = table.get_with_bufs(id).ok_or(TcpError::NotFound)?;
 
     match &mut pcb.state {
         PcbState::Listen(_) | PcbState::SynSent(_) => {
@@ -313,6 +313,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             ds.close_phase = ClosePhase::FinWait1;
             ds.snd_nxt = ds.snd_nxt.wrapping_add(1); // FIN consumes 1
             pcb.state = PcbState::Data(ds);
+            pcb.assert_invariants(bufs);
             let seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
             klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id.0);
             Ok(Some(seg))
@@ -326,6 +327,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.close_phase = ClosePhase::FinWait1;
                     cancel_keepalive(d);
                     let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    pcb.assert_invariants(bufs);
                     klog_debug!(
                         "tcp: CLOSE id={} ESTABLISHED -> FIN_WAIT_1, FIN seq={}",
                         id.0,
@@ -339,6 +341,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.close_phase = ClosePhase::LastAck;
                     cancel_keepalive(d);
                     let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    pcb.assert_invariants(bufs);
                     klog_debug!(
                         "tcp: CLOSE id={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
                         id.0,
@@ -384,7 +387,7 @@ pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
 /// Shutdown the write half of a connection (send FIN without releasing).
 pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     let mut table = PCB_TABLE.lock();
-    let pcb = table.get_mut(id).ok_or(TcpError::NotFound)?;
+    let (pcb, bufs) = table.get_with_bufs(id).ok_or(TcpError::NotFound)?;
 
     match &mut pcb.state {
         PcbState::Data(d) => {
@@ -396,6 +399,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.close_phase = ClosePhase::FinWait1;
                     cancel_keepalive(d);
                     let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    pcb.assert_invariants(bufs);
                     klog_debug!("tcp: SHUTDOWN_WR id={} ESTABLISHED -> FIN_WAIT_1", id.0);
                     Ok(Some(seg))
                 }
@@ -405,6 +409,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.close_phase = ClosePhase::LastAck;
                     cancel_keepalive(d);
                     let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    pcb.assert_invariants(bufs);
                     klog_debug!("tcp: SHUTDOWN_WR id={} CLOSE_WAIT -> LAST_ACK", id.0);
                     Ok(Some(seg))
                 }
@@ -429,6 +434,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                 ds.close_phase = ClosePhase::FinWait1;
                 ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
                 pcb.state = PcbState::Data(ds);
+                pcb.assert_invariants(bufs);
                 let seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
                 Ok(Some(seg))
             } else {
@@ -685,6 +691,7 @@ pub fn poll_transmit(
 
     let window = bufs.recv.window();
     let seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+    pcb.assert_invariants(bufs);
 
     Some((seg, payload_len))
 }
@@ -738,6 +745,7 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
     let now_ms = slopos_utils::clock::uptime_ms();
     bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
+    pcb.assert_invariants(bufs);
 
     klog_debug!("tcp: retransmit fired id={} rto_ms={}", conn_id, rto_ms);
 
@@ -835,6 +843,7 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
         d.snd_nxt = d.snd_una;
         d.rtt.back_off();
         bufs.send.rto_deadline_ms = now_ms.saturating_add(d.rtt.rto_ms() as u64);
+        pcb.assert_invariants(bufs);
 
         retransmitted = Some(id);
         break;
