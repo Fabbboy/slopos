@@ -50,7 +50,7 @@ impl ListenState {
     }
 
     /// Apply an incoming segment to a Listen PCB.
-    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, options: &[u8], _now_ms: u64) -> Actions {
+    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, options: &[u8], now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
         let incoming = TcpTuple {
@@ -94,27 +94,33 @@ impl ListenState {
         // in the PcbTable by populating `Actions::accepted`.  The glue
         // layer has the table lock already — doing the install here
         // would require a second mutable borrow.
+        let peer_tsval = parsed.timestamp.map(|(v, _)| v);
         actions.accepted = Some(AcceptedConn {
             tuple: incoming,
             iss,
             irs,
             peer_mss,
             sack_permitted: parsed.sack_permitted,
+            peer_tsval,
         });
 
         // Emit the SYN+ACK that completes step 1 of the 3WHS.
-        let syn_ack = TcpOutSegment {
+        let mut syn_ack = TcpOutSegment {
             tuple: incoming,
             seq_num: iss,
             ack_num: irs.wrapping_add(1),
             flags: TCP_FLAG_SYN | crate::tcp::header::TCP_FLAG_ACK,
             window_size: DEFAULT_WINDOW_SIZE,
-            mss: DEFAULT_MSS,
-            wscale: 255,
+            mss: Some(DEFAULT_MSS),
+            wscale: None,
             sack_permitted: parsed.sack_permitted,
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
+            timestamp: None,
         };
+        if let Some(tsval) = peer_tsval {
+            syn_ack.timestamp = Some((now_ms as u32, tsval));
+        }
         let _ = TCP_FLAG_RST; // silence dead-import lint if options parser changes
         let _ = TCP_FLAG_SYN;
         actions.push_segment(syn_ack);

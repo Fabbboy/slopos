@@ -45,6 +45,8 @@ pub const TCP_OPT_WINDOW_SCALE_LEN: u8 = 3;
 pub const TCP_OPT_SACK_PERMITTED: u8 = 4;
 pub const TCP_OPT_SACK_PERMITTED_LEN: u8 = 2;
 pub const TCP_OPT_SACK: u8 = 5;
+pub const TCP_OPT_TIMESTAMP: u8 = 8;
+pub const TCP_OPT_TIMESTAMP_LEN: u8 = 10;
 
 // =============================================================================
 // TCP Header
@@ -176,6 +178,8 @@ pub struct ParsedTcpOptions {
     pub sack_permitted: bool,
     pub sack_blocks: [(u32, u32); 4],
     pub sack_block_count: u8,
+    /// TCP Timestamp option (TSval, TSecr).  RFC 7323 §3.
+    pub timestamp: Option<(u32, u32)>,
 }
 
 pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
@@ -185,6 +189,7 @@ pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
         sack_permitted: false,
         sack_blocks: [(0, 0); 4],
         sack_block_count: 0,
+        timestamp: None,
     };
     let mut i = 0;
     while i < options.len() {
@@ -238,6 +243,24 @@ pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
                 }
                 i += opt_len;
             }
+            TCP_OPT_TIMESTAMP => {
+                if i + 9 < options.len() && options[i + 1] == TCP_OPT_TIMESTAMP_LEN {
+                    let tsval = u32::from_be_bytes([
+                        options[i + 2],
+                        options[i + 3],
+                        options[i + 4],
+                        options[i + 5],
+                    ]);
+                    let tsecr = u32::from_be_bytes([
+                        options[i + 6],
+                        options[i + 7],
+                        options[i + 8],
+                        options[i + 9],
+                    ]);
+                    result.timestamp = Some((tsval, tsecr));
+                }
+                i += TCP_OPT_TIMESTAMP_LEN as usize;
+            }
             _ => {
                 if i + 1 >= options.len() {
                     break;
@@ -251,6 +274,13 @@ pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
         }
     }
     result
+}
+
+/// RFC 7323 §5.2: signed 32-bit comparison for timestamps.
+/// Returns `true` when `a` is "less than" `b` in the circular u32 space.
+#[inline]
+pub fn ts_less_than(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) < 0
 }
 
 /// Compute our receive-side window scale shift count from `TCP_BUFFER_SIZE`.

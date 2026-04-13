@@ -456,7 +456,7 @@ pub fn test_tcp_connect_creates_syn_sent() -> TestResult {
     // Outgoing segment should be SYN.
     assert_test!(seg.flags & TCP_FLAG_SYN != 0, "SYN flag set");
     assert_test!(seg.flags & TCP_FLAG_ACK == 0, "ACK flag not set");
-    assert_eq_test!(seg.mss, DEFAULT_MSS, "MSS advertised");
+    assert_eq_test!(seg.mss, Some(DEFAULT_MSS), "MSS advertised");
     assert_eq_test!(seg.window_size, DEFAULT_WINDOW_SIZE, "window advertised");
 
     // Tuple should be correct.

@@ -62,7 +62,7 @@ impl SynSentState {
     }
 
     /// Apply an incoming segment to a SYN_SENT PCB.
-    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, options: &[u8], _now_ms: u64) -> Actions {
+    pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, options: &[u8], now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
         // Snapshot the bits we need — destructuring &mut pcb.state and
@@ -135,6 +135,7 @@ impl SynSentState {
         if ack_valid_for_our_syn {
             // SYN+ACK acknowledging our SYN → ESTABLISHED.
             // Build the new DataState and replace pcb.state.
+            let ts_enabled = opts.timestamp.is_some();
             let mut data = DataState::new(
                 iss,
                 irs,
@@ -147,20 +148,26 @@ impl SynSentState {
                 snd_wscale,
                 our_wscale,
                 wscale_enabled,
+                ts_enabled,
             );
             data.sack_permitted = opts.sack_permitted;
+            let peer_tsval = opts.timestamp.map(|(tsval, _)| tsval).unwrap_or(0);
+            if ts_enabled {
+                data.ts_recent = peer_tsval;
+            }
             let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
             // Emit plain ACK that closes out the 3WHS from our side.
-            actions.push_segment(SegmentBuilder::ack(
-                tuple,
-                snd_nxt.raw(),
-                rcv_nxt.raw(),
-                DEFAULT_WINDOW_SIZE,
-            ));
+            let mut ack_seg =
+                SegmentBuilder::ack(tuple, snd_nxt.raw(), rcv_nxt.raw(), DEFAULT_WINDOW_SIZE);
+            if ts_enabled {
+                ack_seg.timestamp = Some((now_ms as u32, peer_tsval));
+            }
+            actions.push_segment(ack_seg);
             actions.notify |= SocketNotify::NEW_ESTABLISHED | SocketNotify::SEND_WAKE;
         } else {
             // Simultaneous open: SYN without ACK → SYN_RECEIVED.
+            let ts_offered = opts.timestamp.is_some();
             let mut syn_recv = SynRecvState::new(iss, irs);
             syn_recv.snd_nxt = snd_nxt; // preserve our SYN's +1 advance
             syn_recv.snd_una = iss;
@@ -169,17 +176,26 @@ impl SynSentState {
             syn_recv.snd_wscale = snd_wscale;
             syn_recv.wscale_enabled = wscale_enabled;
             syn_recv.our_wscale = our_wscale;
+            syn_recv.ts_enabled = ts_offered;
+            if let Some((tsval, _)) = opts.timestamp {
+                syn_recv.peer_tsval = tsval;
+            }
             let _old = mem::replace(&mut pcb.state, PcbState::SynRecv(syn_recv));
 
             // Emit SYN+ACK that reflects the simultaneous-open
             // crossover.
-            actions.push_segment(SegmentBuilder::syn_ack(
+            let mut syn_ack_seg = SegmentBuilder::syn_ack(
                 tuple,
                 iss.raw(),
                 rcv_nxt.raw(),
                 DEFAULT_WINDOW_SIZE,
                 DEFAULT_MSS,
-            ));
+            );
+            if ts_offered {
+                let peer_ts = opts.timestamp.map(|(v, _)| v).unwrap_or(0);
+                syn_ack_seg.timestamp = Some((now_ms as u32, peer_ts));
+            }
+            actions.push_segment(syn_ack_seg);
         }
         // Silence an unused TCP_FLAG_ACK warning if the compiler can't
         // see it used via the builder.

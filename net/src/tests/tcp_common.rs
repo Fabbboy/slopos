@@ -199,6 +199,76 @@ pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     )
 }
 
+/// Inject a segment with explicit TCP options bytes.
+pub fn inject_with_options(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    options: &[u8],
+    payload: &[u8],
+) -> Actions {
+    let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
+    tcp::input(src_ip, dst_ip, &hdr, options, payload, tcp::clock::now_ms())
+}
+
+/// Build a 12-byte TCP Timestamp option (NOP+NOP+TSopt).
+pub fn build_tsopt(tsval: u32, tsecr: u32) -> [u8; 12] {
+    let mut buf = [0u8; 12];
+    buf[0] = 1; // NOP
+    buf[1] = 1; // NOP
+    buf[2] = 8; // Timestamp kind
+    buf[3] = 10; // Timestamp length
+    buf[4..8].copy_from_slice(&tsval.to_be_bytes());
+    buf[8..12].copy_from_slice(&tsecr.to_be_bytes());
+    buf
+}
+
+/// Drive a client-side 3WHS with timestamps negotiated.
+pub fn establish_connection_with_ts() -> EstablishedConn {
+    let (id, syn_seg) =
+        tcp::connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).expect("tcp_connect should succeed");
+    let our_iss = syn_seg.seq_num;
+    let local_port = syn_seg.tuple.local_port;
+    // Our SYN should carry a timestamp option.
+    assert!(syn_seg.timestamp.is_some(), "SYN should carry TSopt");
+    let our_tsval = syn_seg.timestamp.unwrap().0;
+
+    // Peer's SYN-ACK with timestamps.
+    let syn_ack = TcpHeader {
+        src_port: REMOTE_PORT,
+        dst_port: local_port,
+        seq_num: PEER_ISS,
+        ack_num: our_iss.wrapping_add(1),
+        data_offset: 8, // 20 + 12 options = 32 bytes → 8 words
+        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let tsopt = build_tsopt(1000, our_tsval);
+    let _ = tcp::input(
+        REMOTE_IP,
+        LOCAL_IP,
+        &syn_ack,
+        &tsopt,
+        &[],
+        tcp::clock::now_ms(),
+    );
+
+    tcp::set_nodelay(id, true);
+
+    EstablishedConn {
+        id,
+        local_port,
+        our_iss,
+        peer_iss: PEER_ISS,
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Transmit draining
 // -----------------------------------------------------------------------------
@@ -318,7 +388,7 @@ impl<'a> SegmentMatcher<'a> {
     }
 
     pub fn mss(mut self, mss: u16) -> Self {
-        if self.seg.mss != mss {
+        if self.seg.mss != Some(mss) {
             self.failures.push("mss mismatch");
         }
         self

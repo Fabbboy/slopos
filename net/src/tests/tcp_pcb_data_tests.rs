@@ -45,6 +45,7 @@ fn make_pcb_in_phase(phase: ClosePhase) -> Pcb {
         0,                         // snd_wscale
         0,                         // rcv_wscale
         false,                     // wscale_enabled
+        false,                     // ts_enabled
     );
     data.close_phase = phase;
     if matches!(

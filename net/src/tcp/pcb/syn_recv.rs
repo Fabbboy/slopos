@@ -41,6 +41,8 @@ pub struct SynRecvState {
     pub rto_ms: u32,
     pub retransmits: u8,
     pub retransmit_token: Option<TimerToken>,
+    pub ts_enabled: bool,
+    pub peer_tsval: u32,
 }
 
 impl SynRecvState {
@@ -61,6 +63,8 @@ impl SynRecvState {
             rto_ms: 1000,
             retransmits: 0,
             retransmit_token: None,
+            ts_enabled: false,
+            peer_tsval: 0,
         }
     }
 
@@ -117,8 +121,9 @@ impl SynRecvState {
         } else {
             hdr.window_size as u32
         };
+        let ts_enabled = s.ts_enabled;
+        let _peer_tsval = s.peer_tsval;
         let _ = s;
-
         let data = DataState::new(
             iss,
             irs,
@@ -131,6 +136,7 @@ impl SynRecvState {
             snd_wscale,
             our_wscale,
             wscale_enabled,
+            ts_enabled,
         );
         let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 

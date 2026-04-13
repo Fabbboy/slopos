@@ -106,6 +106,11 @@ pub struct DataState {
     pub sack_scoreboard: [(u32, u32); 4],
     pub sack_scoreboard_count: u8,
 
+    // -------- TCP Timestamps (RFC 7323) --------
+    pub ts_enabled: bool,
+    pub ts_recent: u32,
+    pub last_ack_sent: u32,
+
     // -------- Misc --------
     pub reset_received: bool,
     pub peer_closed: bool,
@@ -125,6 +130,7 @@ impl DataState {
         snd_wscale: u8,
         rcv_wscale: u8,
         wscale_enabled: bool,
+        ts_enabled: bool,
     ) -> Self {
         Self {
             iss,
@@ -152,6 +158,9 @@ impl DataState {
             fin_wait2_token: None,
             sack_scoreboard: [(0, 0); 4],
             sack_scoreboard_count: 0,
+            ts_enabled,
+            ts_recent: 0,
+            last_ack_sent: 0,
             reset_received: false,
             peer_closed: false,
         }
@@ -173,9 +182,24 @@ impl DataState {
             s.snd_wscale,
             s.our_wscale,
             s.wscale_enabled,
+            s.ts_enabled,
         );
         ds.sack_permitted = s.sack_permitted;
+        if s.ts_enabled {
+            ds.ts_recent = s.peer_tsval;
+        }
         ds
+    }
+
+    /// Build TSopt value for outgoing segments, or `None` if timestamps
+    /// are not negotiated on this connection.
+    #[inline]
+    pub fn ts_option(&self, now_ms: u64) -> Option<(u32, u32)> {
+        if self.ts_enabled {
+            Some((now_ms as u32, self.ts_recent))
+        } else {
+            None
+        }
     }
 
     /// Apply an incoming segment to a Data PCB.  See module doc for
@@ -204,13 +228,16 @@ impl DataState {
             let rcv_nxt = data.rcv_nxt.raw();
             let snd_nxt = data.snd_nxt.raw();
             let rcv_wnd = data.rcv_wnd;
+            let ts_opt = data.ts_option(now_ms);
             match challenge_ack::classify_rst(hdr.seq_num, rcv_nxt, effective_wnd) {
                 challenge_ack::RstAction::Accept => {
                     return Self::on_rst(pcb, actions);
                 }
                 challenge_ack::RstAction::ChallengeAck => {
                     if challenge_ack::try_challenge_ack(now_ms) {
-                        actions.push_segment(SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd));
+                        let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd);
+                        ack.timestamp = ts_opt;
+                        actions.push_segment(ack);
                     }
                     return actions;
                 }
@@ -222,9 +249,53 @@ impl DataState {
         if hdr.is_syn() {
             return Self::on_unexpected_syn(pcb, hdr, actions);
         }
+
+        // PAWS: Protection Against Wrapped Sequences (RFC 7323 §5.2).
+        // Drop segments with an old timestamp before any further processing.
+        // RSTs bypass PAWS (handled above).
+        {
+            let PcbState::Data(data) = &pcb.state else {
+                unreachable!()
+            };
+            if data.ts_enabled && data.ts_recent != 0 {
+                let parsed = super::super::header::parse_tcp_options(options);
+                if let Some((tsval, _)) = parsed.timestamp {
+                    if super::super::header::ts_less_than(tsval, data.ts_recent) {
+                        // Old duplicate — drop silently, send ACK.
+                        let mut ack = SegmentBuilder::ack(
+                            tuple,
+                            data.snd_nxt.raw(),
+                            data.rcv_nxt.raw(),
+                            data.rcv_wnd,
+                        );
+                        ack.timestamp = data.ts_option(now_ms);
+                        actions.push_segment(ack);
+                        return actions;
+                    }
+                }
+            }
+        }
+
         // Everything past this point requires an ACK flag.
         if !hdr.is_ack() {
             return actions;
+        }
+
+        // Update ts_recent from the incoming segment (RFC 7323 §4.3):
+        // only when SEG.SEQ <= Last.ACK.sent (segment is in the window
+        // we've already acknowledged).
+        {
+            let PcbState::Data(data) = &mut pcb.state else {
+                unreachable!()
+            };
+            if data.ts_enabled {
+                let parsed = super::super::header::parse_tcp_options(options);
+                if let Some((tsval, _)) = parsed.timestamp {
+                    if seq_le(hdr.seq_num, data.last_ack_sent) || data.last_ack_sent == 0 {
+                        data.ts_recent = tsval;
+                    }
+                }
+            }
         }
 
         // Process in the canonical RFC 793 order.  The sub-methods
@@ -345,12 +416,16 @@ impl DataState {
         let old_snd_una = self.snd_una;
         let ack = hdr.ack_num;
 
-        // Parse SACK blocks from the peer's ACK (RFC 2018).
-        if self.sack_permitted && !options.is_empty() {
-            let parsed = super::super::header::parse_tcp_options(options);
-            if parsed.sack_block_count > 0 {
-                self.sack_scoreboard = parsed.sack_blocks;
-                self.sack_scoreboard_count = parsed.sack_block_count;
+        // Parse options once — used for both SACK blocks and TSecr.
+        let parsed = if (!options.is_empty() && self.sack_permitted) || self.ts_enabled {
+            Some(super::super::header::parse_tcp_options(options))
+        } else {
+            None
+        };
+        if let Some(ref p) = parsed {
+            if self.sack_permitted && p.sack_block_count > 0 {
+                self.sack_scoreboard = p.sack_blocks;
+                self.sack_scoreboard_count = p.sack_block_count;
             }
         }
 
@@ -364,20 +439,30 @@ impl DataState {
                 hdr.window_size as u32
             };
             let acked = ack.wrapping_sub(old_snd_una.raw());
-            // Pop retx entries; the oldest freed non-retransmitted
-            // entry gives us an RTT sample (Karn).
             let outcome = self.retx.on_ack(self.snd_una);
-            if let Some(origin_ms) = outcome.rtt_sample_origin_ms {
-                let rtt_ms = now_ms.saturating_sub(origin_ms) as u32;
-                self.rtt.sample(rtt_ms);
-            }
-            // Feed CC with the freshly-acked bytes + any RTT sample.
-            self.cc.on_ack(
-                outcome.bytes_freed,
+
+            // RTT measurement: prefer RTTM (timestamps) over Karn.
+            let rtt_sample = if self.ts_enabled {
+                parsed
+                    .as_ref()
+                    .and_then(|p| p.timestamp)
+                    .and_then(|(_, tsecr)| {
+                        if tsecr != 0 {
+                            Some((now_ms as u32).wrapping_sub(tsecr))
+                        } else {
+                            None
+                        }
+                    })
+            } else {
                 outcome
                     .rtt_sample_origin_ms
-                    .map(|origin| now_ms.saturating_sub(origin) as u32),
-            );
+                    .map(|origin| now_ms.saturating_sub(origin) as u32)
+            };
+            if let Some(rtt_ms) = rtt_sample {
+                self.rtt.sample(rtt_ms);
+            }
+            // Feed CC with the freshly-acked bytes + RTT sample.
+            self.cc.on_ack(outcome.bytes_freed, rtt_sample);
             self.dup_ack_count = 0;
             // Clear SACK scoreboard — forward ACK supersedes old blocks.
             self.sack_scoreboard_count = 0;
@@ -457,6 +542,7 @@ impl DataState {
                     ack_seg.sack_blocks = blocks;
                     ack_seg.sack_block_count = count;
                 }
+                ack_seg.timestamp = d.ts_option(now_ms);
                 actions.push_segment(ack_seg);
                 return NextTransition::StayInData;
             }
@@ -492,15 +578,18 @@ impl DataState {
             }
             // Emit an immediate ACK if delayed-ACK heuristic says so.
             if bufs.recv.should_ack_now(now_ms) {
-                let PcbState::Data(data) = &pcb.state else {
+                let PcbState::Data(data) = &mut pcb.state else {
                     unreachable!()
                 };
-                actions.push_segment(SegmentBuilder::ack(
+                let mut ack = SegmentBuilder::ack(
                     tuple,
                     data.snd_nxt.raw(),
                     data.rcv_nxt.raw(),
                     data.rcv_wnd,
-                ));
+                );
+                ack.timestamp = data.ts_option(now_ms);
+                data.last_ack_sent = ack.ack_num;
+                actions.push_segment(ack);
                 bufs.recv.ack_sent();
                 if !hdr.is_fin() {
                     return NextTransition::StayInData;
@@ -558,14 +647,14 @@ impl DataState {
             };
             let fin_seq = hdr.seq_num.wrapping_add(accepted_len as u32);
             if fin_seq != data.rcv_nxt.raw() {
-                // FIN arrived ahead of some payload — ignore the FIN
-                // and just re-ACK the current cursor.
-                actions.push_segment(SegmentBuilder::ack(
+                let mut ack = SegmentBuilder::ack(
                     tuple,
                     data.snd_nxt.raw(),
                     data.rcv_nxt.raw(),
                     data.rcv_wnd,
-                ));
+                );
+                ack.timestamp = data.ts_option(now_ms);
+                actions.push_segment(ack);
                 return NextTransition::StayInData;
             }
             data.rcv_nxt = data.rcv_nxt.wrapping_add(1);
@@ -573,49 +662,43 @@ impl DataState {
             let new_phase = match data.close_phase {
                 ClosePhase::Established => ClosePhase::CloseWait,
                 ClosePhase::FinWait1 => {
-                    // Our FIN not yet acked + peer FIN → Closing,
-                    // unless this same segment also carries the ACK
-                    // for our FIN (simultaneous close → TimeWait).
                     if hdr.ack_num == data.snd_nxt.raw() {
-                        // Simultaneous close confirmed.
-                        data.close_phase = ClosePhase::Closing; // transient
-                        // Emit an ACK for the peer's FIN + signal
-                        // the transition out of Data.
-                        actions.push_segment(SegmentBuilder::ack(
+                        data.close_phase = ClosePhase::Closing;
+                        let mut ack = SegmentBuilder::ack(
                             tuple,
                             data.snd_nxt.raw(),
                             data.rcv_nxt.raw(),
                             data.rcv_wnd,
-                        ));
+                        );
+                        ack.timestamp = data.ts_option(now_ms);
+                        actions.push_segment(ack);
                         return NextTransition::ToTimeWait;
                     }
                     ClosePhase::Closing
                 }
                 ClosePhase::FinWait2 => {
-                    // Cancel FIN_WAIT_2 timeout — the peer's FIN arrived.
                     if let Some(token) = data.fin_wait2_token.take() {
                         actions.push_timer(TimerOp::Cancel { token });
                     }
                     data.close_phase = ClosePhase::Closing;
-                    actions.push_segment(SegmentBuilder::ack(
+                    let mut ack = SegmentBuilder::ack(
                         tuple,
                         data.snd_nxt.raw(),
                         data.rcv_nxt.raw(),
                         data.rcv_wnd,
-                    ));
+                    );
+                    ack.timestamp = data.ts_option(now_ms);
+                    actions.push_segment(ack);
                     return NextTransition::ToTimeWait;
                 }
                 other => other,
             };
             data.close_phase = new_phase;
             actions.notify |= SocketNotify::PEER_CLOSED | SocketNotify::RECV_WAKE;
-            // Emit an ACK for the FIN.
-            actions.push_segment(SegmentBuilder::ack(
-                tuple,
-                data.snd_nxt.raw(),
-                data.rcv_nxt.raw(),
-                data.rcv_wnd,
-            ));
+            let mut ack =
+                SegmentBuilder::ack(tuple, data.snd_nxt.raw(), data.rcv_nxt.raw(), data.rcv_wnd);
+            ack.timestamp = data.ts_option(now_ms);
+            actions.push_segment(ack);
         }
 
         NextTransition::StayInData
@@ -658,7 +741,9 @@ impl DataState {
     ) -> Option<super::super::segment::TcpOutSegment> {
         if bufs.recv.should_ack_now(now_ms) {
             let window = bufs.recv.window();
-            let seg = SegmentBuilder::ack(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
+            let mut seg =
+                SegmentBuilder::ack(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
+            seg.timestamp = self.ts_option(now_ms);
             bufs.recv.ack_sent();
             Some(seg)
         } else {
@@ -681,12 +766,10 @@ impl DataState {
             return None;
         }
         let window = bufs.recv.window();
-        Some(SegmentBuilder::data_push(
-            tuple,
-            self.snd_nxt.raw(),
-            self.rcv_nxt.raw(),
-            window,
-        ))
+        let mut seg =
+            SegmentBuilder::data_push(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
+        seg.timestamp = self.ts_option(super::super::clock::now_ms());
+        Some(seg)
     }
 
     // -------------------------------------------------------------------------

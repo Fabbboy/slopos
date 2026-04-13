@@ -153,6 +153,8 @@ pub struct SynRecvEntry {
     pub peer_mss: u16,
     /// Unique key for timer dispatch — identifies this entry when the timer fires.
     pub key: u32,
+    /// Peer's TSval from their SYN (if they offered timestamps).
+    pub peer_tsval: Option<u32>,
 }
 
 impl core::fmt::Debug for SynRecvEntry {
@@ -188,6 +190,8 @@ pub struct AcceptedConn {
     pub peer_mss: u16,
     /// Peer offered SACK-Permitted in their SYN.
     pub sack_permitted: bool,
+    /// Peer's TSval from their SYN (if they offered timestamps).
+    pub peer_tsval: Option<u32>,
 }
 
 // =============================================================================
@@ -257,6 +261,7 @@ impl TcpListenState {
         irs: u32,
         peer_mss: u16,
         timestamp: u64,
+        peer_tsval: Option<u32>,
     ) -> Option<TcpOutSegment> {
         let four_tuple = TcpFourTuple {
             local_ip: self.local.ip,
@@ -301,6 +306,7 @@ impl TcpListenState {
             timestamp,
             peer_mss: effective_mss,
             key,
+            peer_tsval,
         };
 
         let syn_ack = self.build_syn_ack(&entry, &four_tuple);
@@ -369,6 +375,7 @@ impl TcpListenState {
             irs: entry.irs,
             peer_mss: entry.peer_mss,
             sack_permitted: false,
+            peer_tsval: entry.peer_tsval,
         };
 
         klog_debug!(
@@ -543,18 +550,23 @@ impl core::fmt::Debug for TcpListenState {
 
 /// Build a SYN-ACK segment from a SYN queue entry.
 fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment {
-    TcpOutSegment {
+    let mut seg = TcpOutSegment {
         tuple: ft.to_tcp_tuple(),
         seq_num: entry.iss,
         ack_num: entry.irs.wrapping_add(1),
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: DEFAULT_WINDOW_SIZE,
-        mss: DEFAULT_MSS,
-        wscale: 255,
+        mss: Some(DEFAULT_MSS),
+        wscale: None,
         sack_permitted: false,
         sack_blocks: [(0, 0); 4],
         sack_block_count: 0,
+        timestamp: None,
+    };
+    if let Some(tsval) = entry.peer_tsval {
+        seg.timestamp = Some((super::clock::now_ms() as u32, tsval));
     }
+    seg
 }
 
 // =============================================================================

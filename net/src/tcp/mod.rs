@@ -135,6 +135,10 @@ pub fn input(
         child_state.peer_mss = accepted.peer_mss;
         child_state.sack_permitted = accepted.sack_permitted;
         child_state.snd_wnd = hdr.window_size as u32;
+        if let Some(tsval) = accepted.peer_tsval {
+            child_state.ts_enabled = true;
+            child_state.peer_tsval = tsval;
+        }
         let parent_sock = table.get(id).and_then(|p| p.socket_id);
 
         let _ = table.install_with(incoming_tuple, PcbState::SynRecv(child_state), |child| {
@@ -274,7 +278,8 @@ pub fn connect(
         id.0
     );
 
-    let seg = SegmentBuilder::active_syn(tuple, iss, wscale);
+    let seg =
+        SegmentBuilder::active_syn(tuple, iss, wscale).with_timestamp(clock::now_ms() as u32, 0);
     Ok((id, seg))
 }
 
@@ -321,9 +326,11 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             let mut ds = DataState::from_syn_recv(s);
             ds.close_phase = ClosePhase::FinWait1;
             ds.snd_nxt = ds.snd_nxt.wrapping_add(1); // FIN consumes 1
+            let ts = ds.ts_option(clock::now_ms());
             pcb.state = PcbState::Data(ds);
             pcb.assert_invariants(bufs);
-            let seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+            let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+            seg.timestamp = ts;
             klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id.0);
             Ok(Some(seg))
         }
@@ -335,7 +342,8 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.snd_nxt = d.snd_nxt.wrapping_add(1);
                     d.close_phase = ClosePhase::FinWait1;
                     cancel_keepalive(d);
-                    let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    seg.timestamp = d.ts_option(clock::now_ms());
                     pcb.assert_invariants(bufs);
                     klog_debug!(
                         "tcp: CLOSE id={} ESTABLISHED -> FIN_WAIT_1, FIN seq={}",
@@ -349,7 +357,8 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.snd_nxt = d.snd_nxt.wrapping_add(1);
                     d.close_phase = ClosePhase::LastAck;
                     cancel_keepalive(d);
-                    let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    seg.timestamp = d.ts_option(clock::now_ms());
                     pcb.assert_invariants(bufs);
                     klog_debug!(
                         "tcp: CLOSE id={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
@@ -407,7 +416,8 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.snd_nxt = d.snd_nxt.wrapping_add(1);
                     d.close_phase = ClosePhase::FinWait1;
                     cancel_keepalive(d);
-                    let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    seg.timestamp = d.ts_option(clock::now_ms());
                     pcb.assert_invariants(bufs);
                     klog_debug!("tcp: SHUTDOWN_WR id={} ESTABLISHED -> FIN_WAIT_1", id.0);
                     Ok(Some(seg))
@@ -417,7 +427,8 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     d.snd_nxt = d.snd_nxt.wrapping_add(1);
                     d.close_phase = ClosePhase::LastAck;
                     cancel_keepalive(d);
-                    let seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
+                    seg.timestamp = d.ts_option(clock::now_ms());
                     pcb.assert_invariants(bufs);
                     klog_debug!("tcp: SHUTDOWN_WR id={} CLOSE_WAIT -> LAST_ACK", id.0);
                     Ok(Some(seg))
@@ -442,9 +453,11 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                 let mut ds = DataState::from_syn_recv(s);
                 ds.close_phase = ClosePhase::FinWait1;
                 ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
+                let ts = ds.ts_option(clock::now_ms());
                 pcb.state = PcbState::Data(ds);
                 pcb.assert_invariants(bufs);
-                let seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+                let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+                seg.timestamp = ts;
                 Ok(Some(seg))
             } else {
                 unreachable!()
@@ -699,7 +712,8 @@ pub fn poll_transmit(
     }
 
     let window = bufs.recv.window();
-    let seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+    let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+    seg.timestamp = d.ts_option(now_ms);
     pcb.assert_invariants(bufs);
 
     Some((seg, payload_len))
@@ -785,8 +799,9 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
         return None;
     }
 
-    let probe_seg =
+    let mut probe_seg =
         SegmentBuilder::keepalive_probe(pcb.tuple, d.snd_una.raw(), d.rcv_nxt.raw(), d.rcv_wnd);
+    probe_seg.timestamp = d.ts_option(clock::now_ms());
 
     d.keepalive_probes_sent = d.keepalive_probes_sent.saturating_add(1);
     let token = NET_TIMER_WHEEL.schedule(

@@ -71,6 +71,7 @@ fn make_data_pcb(phase: ClosePhase) -> Pcb {
         0,
         0,
         false,
+        false,
     );
     data.close_phase = phase;
     if matches!(

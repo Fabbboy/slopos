@@ -34,6 +34,7 @@ pub mod tcp_rtt_tests;
 pub mod tcp_seq_tests;
 pub mod tcp_socket_tests;
 pub mod tcp_tests;
+pub mod tcp_timestamp_tests;
 pub mod timer_tests;
 pub mod udp_demux_tests;
 pub mod udp_socket_tests;

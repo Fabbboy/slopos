@@ -756,14 +756,17 @@ fn be_port(port: u16) -> [u8; 2] {
 
 pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     let mut opt_len = 0usize;
-    if seg.mss != 0 {
+    if seg.mss.is_some() {
         opt_len += 4;
     }
-    if seg.wscale != 255 {
+    if seg.wscale.is_some() {
         opt_len += 4;
     }
     if seg.sack_permitted {
         opt_len += 2;
+    }
+    if seg.timestamp.is_some() {
+        opt_len += 12;
     }
     if seg.sack_block_count > 0 {
         opt_len += 2 + 2 + 8 * seg.sack_block_count as usize; // NOP NOP + kind len + blocks
@@ -921,6 +924,7 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                             irs: d.irs.raw(),
                             peer_mss: d.peer_mss,
                             sack_permitted: d.sack_permitted,
+                            peer_tsval: None,
                         })
                     })
                     .flatten();
