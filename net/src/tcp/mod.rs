@@ -47,10 +47,11 @@ pub use pcb::{Pcb, SocketId};
 pub use reasm::Assembler;
 pub use segment::{TcpOutSegment, write_tcp_segment};
 pub use seq::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
-pub use table::{ConnId, PCB_TABLE};
+pub use table::ConnId;
 
 use self::cong::CongestionControl;
 use self::segment::SegmentBuilder;
+use self::table::{TCP_LISTENERS, TCP_SHARDS, TcpShard};
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
 use slopos_utils::klog_debug;
@@ -88,10 +89,10 @@ pub(crate) use isn::generate_isn;
 
 /// Process an incoming TCP segment.
 ///
-/// Locks `PCB_TABLE`, dispatches to the matching `Pcb::on_segment`,
-/// applies timer ops, installs child PCBs from LISTEN accepts, and
-/// returns `Actions` for the caller to drain (segments to send,
-/// socket-layer wake-ups, etc.).
+/// Looks up the connection in shards, falls back to listeners, dispatches
+/// to the matching `Pcb::on_segment`, applies timer ops, installs child
+/// PCBs from LISTEN accepts, and returns `Actions` for the caller to
+/// drain (segments to send, socket-layer wake-ups, etc.).
 pub fn input(
     src_ip: [u8; 4],
     dst_ip: [u8; 4],
@@ -107,11 +108,30 @@ pub fn input(
         remote_port: hdr.src_port,
     };
 
-    let mut table = PCB_TABLE.lock();
+    // Phase 1: try exact match in the hash-indexed shard.
+    let shard_idx = table::tcp_hash(&incoming_tuple);
+    {
+        let mut shard = TCP_SHARDS[shard_idx].lock();
+        if let Some(slot) = shard.find_exact(&incoming_tuple) {
+            let id = ConnId::new_shard(shard_idx, slot);
+            return input_process_established(&mut shard, id, slot, hdr, options, payload, now_ms);
+        }
+    } // drop shard lock
 
-    let id = match table.find(&incoming_tuple) {
-        Some(id) => id,
-        None => {
+    // Phase 2: try listener wildcard match.
+    let (actions, parent_sock) = {
+        let mut listeners = TCP_LISTENERS.lock();
+        if let Some(slot) =
+            listeners.find_by_port(incoming_tuple.local_ip, incoming_tuple.local_port)
+        {
+            let id = ConnId::new_listener(slot);
+            let pcb = listeners.get_mut(slot).expect("find returned a live slot");
+            let mut actions = pcb.on_segment(None, hdr, options, payload, now_ms);
+            actions.conn_id = Some(id);
+            let parent_sock = pcb.socket_id;
+            (actions, parent_sock)
+        } else {
+            // No matching connection — send RST unless incoming is RST.
             if hdr.is_rst() {
                 return Actions::new();
             }
@@ -119,17 +139,12 @@ pub fn input(
             actions.push_segment(SegmentBuilder::rst_for(hdr, dst_ip, src_ip));
             return actions;
         }
-    };
-
-    let (pcb, bufs) = table
-        .get_pcb_and_opt_bufs(id)
-        .expect("find returned a live id");
-    let mut actions = pcb.on_segment(bufs, hdr, options, payload, now_ms);
-    actions.conn_id = Some(id);
+    }; // drop listener lock
 
     // Install child PCB from LISTEN accept.  ListenState::on_segment
     // populates `actions.accepted` with metadata but does not allocate
-    // the child — that's our job while the lock is held.
+    // the child — we install it into the child's shard now that the
+    // listener lock is dropped.
     if let Some(ref accepted) = actions.accepted {
         let child_iss = SeqNum::new(accepted.iss);
         let child_irs = SeqNum::new(accepted.irs);
@@ -141,15 +156,36 @@ pub fn input(
             child_state.ts_enabled = true;
             child_state.peer_tsval = tsval;
         }
-        let parent_sock = table.get(id).and_then(|p| p.socket_id);
 
-        let _ = table.install_with(incoming_tuple, PcbState::SynRecv(child_state), |child| {
-            child.socket_id = parent_sock;
-        });
+        let _ =
+            table::install_established(incoming_tuple, PcbState::SynRecv(child_state), |child| {
+                child.socket_id = parent_sock;
+            });
     }
 
-    // Apply timer operations while the lock is held.  State handlers
-    // emit `key: 0` as a sentinel — we substitute the real ConnId.
+    // Listener actions have no timer ops, buffer alloc, or release to handle.
+    actions
+}
+
+/// Process a segment for an established/transient connection already found
+/// in a shard.  Called with the shard lock held.
+fn input_process_established(
+    shard: &mut TcpShard,
+    id: ConnId,
+    slot: usize,
+    hdr: &TcpHeader,
+    options: &[u8],
+    payload: &[u8],
+    now_ms: u64,
+) -> Actions {
+    let (pcb, bufs) = shard
+        .get_pcb_and_opt_bufs(slot)
+        .expect("find returned a live slot");
+    let mut actions = pcb.on_segment(bufs, hdr, options, payload, now_ms);
+    actions.conn_id = Some(id);
+
+    // Apply timer operations.  State handlers emit `key: 0` as a
+    // sentinel — we substitute the real ConnId.
     for i in 0..actions.timer_ops_len as usize {
         if let Some(ref op) = actions.timer_ops[i] {
             match *op {
@@ -161,7 +197,7 @@ pub fn input(
                     let token = NET_TIMER_WHEEL.schedule(delay_ticks, kind, id.0);
                     // Store the token back into the PCB's state-specific
                     // timer slot so future transitions can cancel it.
-                    if let Some(pcb) = table.get_mut(id) {
+                    if let Some(pcb) = shard.get_mut(slot) {
                         match kind {
                             TimerKind::TcpRetransmit => {
                                 set_retransmit_token(pcb, Some(token));
@@ -194,19 +230,19 @@ pub fn input(
 
     // Allocate buffer for newly-established connections (SynRecv/SynSent→Data).
     if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
-        table.alloc_buffer_for(id.slot());
+        shard.alloc_buffer_for(slot);
     }
 
     // Free buffer on transition to TimeWait (Data→TimeWait).
-    if let Some(pcb) = table.get(id) {
-        if matches!(pcb.state, PcbState::TimeWait(_)) && table.has_buffer(id.slot()) {
-            table.free_buffer_for(id.slot());
+    if let Some(pcb) = shard.get(slot) {
+        if matches!(pcb.state, PcbState::TimeWait(_)) && shard.has_buffer(slot) {
+            shard.free_buffer_for(slot);
         }
     }
 
     // Schedule keepalive timer for newly-established connections.
     if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
-        if let Some(pcb) = table.get_mut(id) {
+        if let Some(pcb) = shard.get_mut(slot) {
             let keepalive_enabled = pcb
                 .socket_id
                 .map(|sid| crate::socket::socket_keepalive_enabled_by_index(sid.0 as usize))
@@ -226,7 +262,7 @@ pub fn input(
             .notify
             .intersects(SocketNotify::RECV_WAKE | SocketNotify::SEND_WAKE)
     {
-        if let Some(pcb) = table.get_mut(id) {
+        if let Some(pcb) = shard.get_mut(slot) {
             if let PcbState::Data(d) = &mut pcb.state {
                 if let Some((old_token, delay)) = d.reset_keepalive_on_activity() {
                     NET_TIMER_WHEEL.cancel(old_token);
@@ -238,7 +274,7 @@ pub fn input(
     }
 
     if actions.release {
-        table.release(id);
+        shard.release(slot);
     }
 
     actions
@@ -266,8 +302,7 @@ pub fn connect(
     remote_ip: [u8; 4],
     remote_port: u16,
 ) -> Result<(ConnId, TcpOutSegment), TcpError> {
-    let mut table = PCB_TABLE.lock();
-    let local_port = table.alloc_ephemeral_port().ok_or(TcpError::AddrInUse)?;
+    let local_port = table::alloc_ephemeral_port().ok_or(TcpError::AddrInUse)?;
     let tuple = TcpTuple {
         local_ip,
         local_port,
@@ -280,7 +315,7 @@ pub fn connect(
     let mut syn_sent = pcb::SynSentState::new(SeqNum::new(iss));
     syn_sent.our_wscale = wscale;
 
-    let id = table.install_with(tuple, PcbState::SynSent(syn_sent), |_| {})?;
+    let id = table::install_established(tuple, PcbState::SynSent(syn_sent), |_| {})?;
 
     klog_debug!(
         "tcp: CONNECT {}:{} -> {}:{} ISS={} id={}",
@@ -299,9 +334,7 @@ pub fn connect(
 
 /// Open a passive connection (server: → LISTEN).
 pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
-    let mut table = PCB_TABLE.lock();
-
-    if table.port_in_use(local_ip, local_port) {
+    if table::port_in_use(local_ip, local_port) {
         return Err(TcpError::AddrInUse);
     }
 
@@ -311,7 +344,7 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
         remote_ip: [0; 4],
         remote_port: 0,
     };
-    let id = table.install_with(tuple, PcbState::Listen(pcb::ListenState::new()), |_| {})?;
+    let id = table::install_listener(tuple, PcbState::Listen(pcb::ListenState::new()), |_| {})?;
 
     klog_debug!("tcp: LISTEN on port {} id={}", local_port, id.0);
     Ok(id)
@@ -321,13 +354,23 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
 ///
 /// Returns the outgoing FIN segment if one should be sent.
 pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
-    let mut table = PCB_TABLE.lock();
+    if id.is_listener() {
+        let mut listeners = TCP_LISTENERS.lock();
+        let pcb = listeners.get(id.slot()).ok_or(TcpError::NotFound)?;
+        let name = pcb.state.name();
+        listeners.release(id.slot());
+        klog_debug!("tcp: CLOSE id={} from {} — released", id.0, name);
+        return Ok(None);
+    }
+
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
 
     // Check existence + handle states that don't need mutable PCB access.
-    let pcb = table.get(id).ok_or(TcpError::NotFound)?;
+    let pcb = shard.get(slot).ok_or(TcpError::NotFound)?;
     if matches!(pcb.state, PcbState::Listen(_) | PcbState::SynSent(_)) {
         let name = pcb.state.name();
-        table.release(id);
+        shard.release(slot);
         klog_debug!("tcp: CLOSE id={} from {} — released", id.0, name);
         return Ok(None);
     }
@@ -337,12 +380,12 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     }
 
     // SynRecv → Data(FinWait1): allocate buffer before transition.
-    let is_syn_recv = matches!(table.get(id).unwrap().state, PcbState::SynRecv(_));
+    let is_syn_recv = matches!(shard.get(slot).unwrap().state, PcbState::SynRecv(_));
     if is_syn_recv {
-        table.alloc_buffer_for(id.slot());
+        shard.alloc_buffer_for(slot);
     }
 
-    let pcb = table.get_mut(id).unwrap();
+    let pcb = shard.get_mut(slot).unwrap();
     match &mut pcb.state {
         PcbState::SynRecv(s) => {
             let tuple = pcb.tuple;
@@ -409,8 +452,17 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
 
 /// Abort a connection (send RST, release immediately).
 pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
-    let mut table = PCB_TABLE.lock();
-    let pcb = table.get(id).ok_or(TcpError::NotFound)?;
+    if id.is_listener() {
+        let mut listeners = TCP_LISTENERS.lock();
+        let pcb = listeners.get(id.slot()).ok_or(TcpError::NotFound)?;
+        klog_debug!("tcp: ABORT id={} from {}", id.0, pcb.state.name());
+        listeners.release(id.slot());
+        return Ok(None);
+    }
+
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+    let pcb = shard.get(slot).ok_or(TcpError::NotFound)?;
 
     let seg = match &pcb.state {
         PcbState::Listen(_) => None,
@@ -421,24 +473,29 @@ pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     };
 
     klog_debug!("tcp: ABORT id={} from {}", id.0, pcb.state.name());
-    table.release(id);
+    shard.release(slot);
     Ok(seg)
 }
 
 /// Shutdown the write half of a connection (send FIN without releasing).
 pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
-    let mut table = PCB_TABLE.lock();
+    if id.is_listener() {
+        return Err(TcpError::InvalidState);
+    }
+
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
 
     // SynRecv → Data(FinWait1): allocate buffer before transition.
     let is_syn_recv = matches!(
-        table.get(id).ok_or(TcpError::NotFound)?.state,
+        shard.get(slot).ok_or(TcpError::NotFound)?.state,
         PcbState::SynRecv(_)
     );
     if is_syn_recv {
-        table.alloc_buffer_for(id.slot());
+        shard.alloc_buffer_for(slot);
     }
 
-    let pcb = table.get_mut(id).ok_or(TcpError::NotFound)?;
+    let pcb = shard.get_mut(slot).ok_or(TcpError::NotFound)?;
     match &mut pcb.state {
         PcbState::Data(d) => {
             let tuple = pcb.tuple;
@@ -496,9 +553,13 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
 
 /// Discard all data in the receive buffer (for SHUT_RD).
 pub fn recv_discard(id: ConnId) {
-    let mut table = PCB_TABLE.lock();
-    if table.get(id).is_some() {
-        if let Some(bufs) = table.bufs_mut(id) {
+    if id.is_listener() {
+        return;
+    }
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+    if shard.get(slot).is_some() {
+        if let Some(bufs) = shard.bufs_mut(slot) {
             bufs.recv.clear();
         }
         klog_debug!("tcp: RECV_DISCARD id={} — recv buffer cleared", id.0);
@@ -518,75 +579,89 @@ fn cancel_keepalive(d: &mut DataState) {
 
 /// Get the RFC 793 state name for a connection.
 pub fn get_state(id: ConnId) -> Option<TcpState> {
-    PCB_TABLE.lock().get(id).map(|pcb| pcb.state.tcp_state())
+    table::with_pcb(id, |pcb| pcb.state.tcp_state())
 }
 
 /// Get the number of active connections.
 pub fn active_count() -> usize {
-    PCB_TABLE.lock().active_count()
+    table::active_count()
 }
 
 /// Find a connection by tuple.
 pub fn find(tuple: &TcpTuple) -> Option<ConnId> {
-    PCB_TABLE.lock().find(tuple)
+    table::find(tuple)
 }
 
 /// Set or clear the socket back-pointer on a connection.
 pub fn set_socket_idx(id: ConnId, socket_id: Option<SocketId>) {
-    let mut table = PCB_TABLE.lock();
-    if let Some(pcb) = table.get_mut(id) {
+    table::with_pcb_mut(id, |pcb| {
         pcb.socket_id = socket_id;
-    }
+    });
 }
 
 /// Check whether the peer has closed their write half (sent FIN).
 pub fn is_peer_closed(id: ConnId) -> bool {
-    let table = PCB_TABLE.lock();
-    match table.get(id).map(|p| &p.state) {
-        Some(PcbState::Data(d)) => d.peer_closed,
-        Some(PcbState::TimeWait(_)) => true,
+    table::with_pcb(id, |pcb| match &pcb.state {
+        PcbState::Data(d) => d.peer_closed,
+        PcbState::TimeWait(_) => true,
         _ => false,
-    }
+    })
+    .unwrap_or(false)
 }
 
 /// Check whether the connection was reset.
 pub fn is_reset(id: ConnId) -> bool {
-    let table = PCB_TABLE.lock();
-    match table.get(id).map(|p| &p.state) {
-        Some(PcbState::Data(d)) => d.reset_received,
+    table::with_pcb(id, |pcb| match &pcb.state {
+        PcbState::Data(d) => d.reset_received,
         _ => false,
-    }
+    })
+    .unwrap_or(false)
 }
 
 /// Available send buffer space for a connection.
 pub fn send_buffer_space(id: ConnId) -> usize {
-    let table = PCB_TABLE.lock();
-    table.bufs(id).map(|b| b.send.free_space()).unwrap_or(0)
+    if id.is_listener() {
+        return 0;
+    }
+    TCP_SHARDS[id.shard()]
+        .lock()
+        .bufs(id.slot())
+        .map(|b| b.send.free_space())
+        .unwrap_or(0)
 }
 
 /// Bytes available to read from a connection's receive buffer.
 pub fn recv_available(id: ConnId) -> usize {
-    let table = PCB_TABLE.lock();
-    table.bufs(id).map(|b| b.recv.available()).unwrap_or(0)
+    if id.is_listener() {
+        return 0;
+    }
+    TCP_SHARDS[id.shard()]
+        .lock()
+        .bufs(id.slot())
+        .map(|b| b.recv.available())
+        .unwrap_or(0)
 }
 
 /// Whether a connection has data pending transmission.
 pub fn has_pending_data(id: ConnId) -> bool {
-    let table = PCB_TABLE.lock();
-    table
-        .bufs(id)
+    if id.is_listener() {
+        return false;
+    }
+    TCP_SHARDS[id.shard()]
+        .lock()
+        .bufs(id.slot())
         .map(|b| b.send.unsent_len() > 0)
         .unwrap_or(false)
 }
 
-/// Closure-based read access to a PCB (locks PCB_TABLE).
+/// Closure-based read access to a PCB.
 pub fn with_pcb<T>(id: ConnId, f: impl FnOnce(&Pcb) -> T) -> Option<T> {
-    PCB_TABLE.lock().with_pcb(id, f)
+    table::with_pcb(id, f)
 }
 
-/// Closure-based mutable access to a PCB (locks PCB_TABLE).
+/// Closure-based mutable access to a PCB.
 pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
-    PCB_TABLE.lock().with_pcb_mut(id, f)
+    table::with_pcb_mut(id, f)
 }
 
 // =============================================================================
@@ -596,9 +671,12 @@ pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
 /// Set the effective send buffer capacity (SO_SNDBUF).
 /// Values above TCP_BUFFER_SIZE are silently capped.
 pub fn set_sndbuf(id: ConnId, bytes: usize) {
-    let mut table = PCB_TABLE.lock();
+    if id.is_listener() {
+        return;
+    }
+    let mut shard = TCP_SHARDS[id.shard()].lock();
     let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
-    if let Some(bufs) = table.bufs_mut(id) {
+    if let Some(bufs) = shard.bufs_mut(id.slot()) {
         bufs.send.effective_capacity = capped;
     }
 }
@@ -606,21 +684,23 @@ pub fn set_sndbuf(id: ConnId, bytes: usize) {
 /// Set the effective receive buffer capacity (SO_RCVBUF).
 /// Values above TCP_BUFFER_SIZE are silently capped.
 pub fn set_rcvbuf(id: ConnId, bytes: usize) {
-    let mut table = PCB_TABLE.lock();
+    if id.is_listener() {
+        return;
+    }
+    let mut shard = TCP_SHARDS[id.shard()].lock();
     let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
-    if let Some(bufs) = table.bufs_mut(id) {
+    if let Some(bufs) = shard.bufs_mut(id.slot()) {
         bufs.recv.effective_capacity = capped;
     }
 }
 
 /// Set or clear TCP_NODELAY (disables/enables Nagle algorithm).
 pub fn set_nodelay(id: ConnId, nodelay: bool) {
-    let mut table = PCB_TABLE.lock();
-    if let Some(pcb) = table.get_mut(id) {
+    table::with_pcb_mut(id, |pcb| {
         if let PcbState::Data(d) = &mut pcb.state {
             d.nagle_enabled = !nodelay;
         }
-    }
+    });
 }
 
 // =============================================================================
@@ -629,8 +709,11 @@ pub fn set_nodelay(id: ConnId, nodelay: bool) {
 
 /// Write data into a connection's send buffer.
 pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
-    let mut table = PCB_TABLE.lock();
-    let (pcb, bufs) = table.get_with_bufs(id).ok_or(TcpError::NotFound)?;
+    if id.is_listener() {
+        return Err(TcpError::InvalidState);
+    }
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let (pcb, bufs) = shard.get_with_bufs(id.slot()).ok_or(TcpError::NotFound)?;
     match &pcb.state {
         PcbState::Data(d)
             if matches!(
@@ -644,8 +727,11 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
 
 /// Read data from a connection's receive buffer.
 pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
-    let mut table = PCB_TABLE.lock();
-    let (pcb, bufs) = table.get_with_bufs(id).ok_or(TcpError::NotFound)?;
+    if id.is_listener() {
+        return Err(TcpError::InvalidState);
+    }
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let (pcb, bufs) = shard.get_with_bufs(id.slot()).ok_or(TcpError::NotFound)?;
 
     let read = bufs.recv.dequeue(out);
     if read == 0 && bufs.recv.available() == 0 {
@@ -670,8 +756,12 @@ pub fn poll_transmit(
     payload_buf: &mut [u8],
     now_ms: u64,
 ) -> Option<(TcpOutSegment, usize)> {
-    let mut table = PCB_TABLE.lock();
-    let (pcb, bufs) = table.get_with_bufs(id)?;
+    if id.is_listener() {
+        return None;
+    }
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+    let (pcb, bufs) = shard.get_with_bufs(slot)?;
 
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
@@ -780,13 +870,18 @@ pub fn poll_transmit(
 
 /// Handle a retransmit timer firing for connection `conn_id`.
 pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
-    let mut table = PCB_TABLE.lock();
     let id = ConnId(conn_id);
+    if id.is_listener() {
+        return None;
+    }
+
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
 
     // Pre-check with a short borrow: bail if not applicable, flag if
     // max retransmits exceeded.
     let should_release = {
-        let (pcb, _bufs) = table.get_with_bufs(id)?;
+        let (pcb, _bufs) = shard.get_with_bufs(slot)?;
         let PcbState::Data(d) = &pcb.state else {
             return None;
         };
@@ -798,13 +893,13 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
     if should_release {
         klog_debug!("tcp: retransmit timeout id={} -> releasing", conn_id);
-        table.release(id);
+        shard.release(slot);
         return None;
     }
 
     // Main retransmit path: mark all entries Lost so the next
     // poll_transmit selectively retransmits them.
-    let (pcb, bufs) = table.get_with_bufs(id)?;
+    let (pcb, bufs) = shard.get_with_bufs(slot)?;
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
     };
@@ -831,9 +926,14 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
 /// Handle a keepalive timer firing.
 pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
-    let mut table = PCB_TABLE.lock();
     let id = ConnId(conn_id);
-    let pcb = table.get_mut(id)?;
+    if id.is_listener() {
+        return None;
+    }
+
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+    let pcb = shard.get_mut(slot)?;
 
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
@@ -849,7 +949,7 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
             "tcp: keepalive max probes reached id={} -> releasing",
             conn_id
         );
-        table.release(id);
+        shard.release(slot);
         return None;
     }
 
@@ -870,32 +970,42 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
 
 /// Handle a TIME_WAIT timer expiry.
 pub fn on_time_wait_expire(conn_id: u32) {
-    let mut table = PCB_TABLE.lock();
     let id = ConnId(conn_id);
+    if id.is_listener() {
+        return;
+    }
 
-    let Some(pcb) = table.get(id) else {
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+
+    let Some(pcb) = shard.get(slot) else {
         return;
     };
 
     if matches!(pcb.state, PcbState::TimeWait(_)) {
         klog_debug!("tcp: TIME_WAIT timer expired id={}", conn_id);
-        table.release(id);
+        shard.release(slot);
     }
 }
 
 /// Handle a FIN_WAIT_2 timer expiry.
 pub fn on_fin_wait2_timeout(conn_id: u32) {
-    let mut table = PCB_TABLE.lock();
     let id = ConnId(conn_id);
+    if id.is_listener() {
+        return;
+    }
 
-    let Some(pcb) = table.get(id) else {
+    let mut shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+
+    let Some(pcb) = shard.get(slot) else {
         return;
     };
 
     if let PcbState::Data(d) = &pcb.state {
         if d.close_phase == ClosePhase::FinWait2 {
             klog_debug!("tcp: FIN_WAIT_2 timeout id={}", conn_id);
-            table.release(id);
+            shard.release(slot);
         }
     }
 }
@@ -906,60 +1016,71 @@ pub fn on_fin_wait2_timeout(conn_id: u32) {
 
 /// Deterministic retransmit probe — test-only.
 ///
-/// Walks the connection table and triggers retransmit for the first
+/// Walks all shards and triggers retransmit for the first
 /// connection whose RTO deadline has expired at `now_ms`.
 #[cfg(feature = "itests")]
 pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
-    let mut table = PCB_TABLE.lock();
+    for (shard_idx, shard_lock) in TCP_SHARDS.iter().enumerate() {
+        let mut shard = shard_lock.lock();
 
-    let mut to_release: Option<ConnId> = None;
-    let mut retransmitted: Option<ConnId> = None;
+        let mut to_release: Option<usize> = None;
+        let mut retransmitted: Option<(usize, ConnId)> = None;
 
-    for (id, pcb, bufs) in table.iter_mut_with_bufs() {
-        let send = &bufs.send;
-        if send.inflight == 0 || send.rto_deadline_ms == 0 || now_ms < send.rto_deadline_ms {
-            continue;
-        }
+        for (slot, pcb, bufs) in shard.iter_mut_with_bufs() {
+            let send = &bufs.send;
+            if send.inflight == 0 || send.rto_deadline_ms == 0 || now_ms < send.rto_deadline_ms {
+                continue;
+            }
 
-        let PcbState::Data(d) = &mut pcb.state else {
-            continue;
-        };
+            let PcbState::Data(d) = &mut pcb.state else {
+                continue;
+            };
 
-        // Check max retransmits — if exceeded, mark for release.
-        let retransmits = d.rtt.consecutive_timeouts;
-        if retransmits >= MAX_RETRANSMITS {
-            to_release = Some(id);
+            let conn_id = ConnId::new_shard(shard_idx, slot);
+
+            // Check max retransmits — if exceeded, mark for release.
+            let retransmits = d.rtt.consecutive_timeouts;
+            if retransmits >= MAX_RETRANSMITS {
+                to_release = Some(slot);
+                break;
+            }
+
+            d.cc.on_timeout(d.sendmap.pipe());
+            d.sendmap.mark_all_lost();
+            d.rtt.back_off();
+            bufs.send.rto_deadline_ms = now_ms.saturating_add(d.rtt.rto_ms() as u64);
+            pcb.assert_invariants();
+
+            retransmitted = Some((slot, conn_id));
             break;
         }
 
-        d.cc.on_timeout(d.sendmap.pipe());
-        d.sendmap.mark_all_lost();
-        d.rtt.back_off();
-        bufs.send.rto_deadline_ms = now_ms.saturating_add(d.rtt.rto_ms() as u64);
-        pcb.assert_invariants();
+        if let Some(slot) = to_release {
+            shard.release(slot);
+            return None;
+        }
 
-        retransmitted = Some(id);
-        break;
+        if let Some((_slot, conn_id)) = retransmitted {
+            return Some(conn_id);
+        }
     }
 
-    if let Some(id) = to_release {
-        table.release(id);
-        return None;
-    }
-
-    retransmitted
+    None
 }
 
 /// Check all connections for pending delayed ACKs.
 pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
-    let mut table = PCB_TABLE.lock();
+    for (shard_idx, shard_lock) in TCP_SHARDS.iter().enumerate() {
+        let mut shard = shard_lock.lock();
 
-    for (id, pcb, bufs) in table.iter_mut_with_bufs() {
-        let PcbState::Data(d) = &pcb.state else {
-            continue;
-        };
-        if let Some(seg) = d.check_delayed_ack(pcb.tuple, bufs, now_ms) {
-            return Some((id, seg));
+        for (slot, pcb, bufs) in shard.iter_mut_with_bufs() {
+            let PcbState::Data(d) = &pcb.state else {
+                continue;
+            };
+            if let Some(seg) = d.check_delayed_ack(pcb.tuple, bufs, now_ms) {
+                let id = ConnId::new_shard(shard_idx, slot);
+                return Some((id, seg));
+            }
         }
     }
 
@@ -968,17 +1089,21 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
 
 /// Generate a zero-window probe for a connection with snd_wnd == 0.
 pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
-    let table = PCB_TABLE.lock();
-    let pcb = table.get(id)?;
+    if id.is_listener() {
+        return None;
+    }
+    let shard = TCP_SHARDS[id.shard()].lock();
+    let slot = id.slot();
+    let pcb = shard.get(slot)?;
     let PcbState::Data(d) = &pcb.state else {
         return None;
     };
-    d.check_zero_window_probe(pcb.tuple, table.bufs(id)?)
+    d.check_zero_window_probe(pcb.tuple, shard.bufs(slot)?)
 }
 
 /// Release all connections (for testing).
 pub fn reset_all() {
-    PCB_TABLE.lock().clear();
+    table::clear_all();
     isn::reset_for_tests();
     #[cfg(feature = "itests")]
     challenge_ack::reset_for_tests();

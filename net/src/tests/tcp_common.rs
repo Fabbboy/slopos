@@ -295,16 +295,21 @@ pub fn drain_transmit(id: ConnId) -> Vec<(TcpOutSegment, Vec<u8>)> {
 // State-access macros
 // -----------------------------------------------------------------------------
 
-/// Access the `DataState` of a PCB inside a closure under the `PCB_TABLE`
-/// lock.  Panics if the PCB doesn't exist or isn't in the `Data` state.
+/// Access the `DataState` of a PCB inside the shard lock.
+/// Panics if the PCB doesn't exist or isn't in the `Data` state.
 ///
 /// Usage: `with_data_state!(conn.id, |d| assert_eq!(d.snd_nxt.raw(), ...));`
+///
+/// Note: the body executes directly in the caller's scope (not a closure),
+/// so `return` and `?` propagate to the enclosing function — test assertion
+/// macros like `assert_test!` work correctly.
 #[macro_export]
 macro_rules! with_data_state {
     ($id:expr, |$d:ident| $body:expr) => {{
-        let table = crate::tcp::table::PCB_TABLE.lock();
-        let pcb = table.get($id).expect("PCB should exist");
-        match &pcb.state {
+        let __wds_id: crate::tcp::ConnId = $id;
+        let __wds_guard = crate::tcp::table::TCP_SHARDS[__wds_id.shard()].lock();
+        let __wds_pcb = __wds_guard.get(__wds_id.slot()).expect("PCB should exist");
+        match &__wds_pcb.state {
             crate::tcp::PcbState::Data($d) => $body,
             other => panic!("expected Data state, got {}", other.name()),
         }

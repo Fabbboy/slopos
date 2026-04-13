@@ -828,14 +828,11 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
 
     // Second poll: pipe=1 (retransmitted entry), cwnd=1460, effective=1459.
     // Nagle blocks: 1459 < MSS and pipe > 0.  Disable Nagle.
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.nagle_enabled = false;
-            }
+    tcp::table::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.nagle_enabled = false;
         }
-    }
+    });
     let (_, n1) = tcp::poll_transmit(id, &mut buf, 1002).unwrap();
     assert_eq_test!(n1, 1459, "second segment limited by cwnd - pipe");
 
@@ -852,14 +849,11 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     let c = tcp_common::establish_connection();
     let id = c.id;
     // Enable SACK for this connection.
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.sack_permitted = true;
-            }
+    tcp::table::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.sack_permitted = true;
         }
-    }
+    });
 
     // Send 4 MSS-sized segments.
     let _ = tcp::send(id, &[0xBB; 4 * DEFAULT_MSS as usize]).unwrap();
@@ -923,14 +917,11 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.sack_permitted = true;
-            }
+    tcp::table::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.sack_permitted = true;
         }
-    }
+    });
 
     // Send 4 MSS-sized segments.
     let _ = tcp::send(id, &[0xCC; 4 * DEFAULT_MSS as usize]).unwrap();
@@ -983,14 +974,11 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.sack_permitted = true;
-            }
+    tcp::table::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.sack_permitted = true;
         }
-    }
+    });
 
     // Send 5 segments so we can trigger SACK-based loss detection.
     let _ = tcp::send(id, &[0xDD; 5 * DEFAULT_MSS as usize]).unwrap();
@@ -1151,14 +1139,11 @@ pub fn test_sack_blocks_sent_on_ooo() -> TestResult {
     let c = tcp_common::establish_connection();
     let id = c.id;
     // Enable SACK on this connection for testing.
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.sack_permitted = true;
-            }
+    tcp::table::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.sack_permitted = true;
         }
-    }
+    });
 
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
@@ -1189,14 +1174,11 @@ pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
     let c = tcp_common::establish_connection();
     let id = c.id;
     // Enable SACK.
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.sack_permitted = true;
-            }
+    tcp::table::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.sack_permitted = true;
         }
-    }
+    });
 
     // Send data so we have inflight.
     let _ = tcp::send(id, &[0xAA; 100]).unwrap();
@@ -1321,8 +1303,8 @@ pub fn test_so_rcvbuf_affects_window() -> TestResult {
     tcp::set_rcvbuf(id, 4096);
 
     let window = {
-        let table = tcp::table::PCB_TABLE.lock();
-        table.bufs(id).unwrap().recv.window()
+        let shard = tcp::table::TCP_SHARDS[id.shard()].lock();
+        shard.bufs(id.slot()).unwrap().recv.window()
     };
     assert_test!(window <= 4096, "recv window capped by SO_RCVBUF");
     pass!()

@@ -11,7 +11,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::tcp::table::MAX_CONNECTIONS;
+use crate::tcp::table::SLOTS_PER_SHARD;
 use crate::tcp::{
     self, ConnId, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, SocketNotify, TCP_FLAG_ACK, TCP_FLAG_FIN,
     TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TcpError, TcpHeader, TcpState,
@@ -469,20 +469,27 @@ pub fn test_tcp_connect_creates_syn_sent() -> TestResult {
 
 pub fn test_tcp_table_full_returns_error() -> TestResult {
     reset();
-    // Fill all slots.
-    for i in 0..MAX_CONNECTIONS {
-        match tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], (80 + i) as u16) {
-            Ok(_) => {}
+    // With a sharded table, connections hash-distribute across shards.
+    // One shard fills (SLOTS_PER_SHARD) before others, so we can't fill
+    // to exact total capacity.  Just verify TableFull eventually fires.
+    let mut established = 0;
+    let mut saw_table_full = false;
+    for i in 0..512u32 {
+        match tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80 + (i as u16)) {
+            Ok(_) => established += 1,
+            Err(TcpError::TableFull) => {
+                saw_table_full = true;
+                break;
+            }
+            Err(TcpError::AddrInUse) => continue,
             Err(e) => return fail!("connect {} failed: {:?}", i, e),
         }
     }
-    assert_eq_test!(tcp::active_count(), MAX_CONNECTIONS, "table full");
-
-    // Next connect should fail.
-    match tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 9999) {
-        Err(TcpError::TableFull) => {}
-        other => return fail!("expected TableFull, got {:?}", other),
-    }
+    assert_test!(saw_table_full, "should eventually get TableFull");
+    assert_test!(
+        established >= SLOTS_PER_SHARD,
+        "should fill at least one shard"
+    );
     pass!()
 }
 
@@ -1397,11 +1404,9 @@ pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
 
 pub fn test_tcp_ephemeral_ports_unique() -> TestResult {
     reset();
-    let table = tcp::table::PCB_TABLE.lock();
-    let p1 = table.alloc_ephemeral_port().unwrap();
-    let p2 = table.alloc_ephemeral_port().unwrap();
-    let p3 = table.alloc_ephemeral_port().unwrap();
-    drop(table);
+    let p1 = tcp::table::alloc_ephemeral_port().unwrap();
+    let p2 = tcp::table::alloc_ephemeral_port().unwrap();
+    let p3 = tcp::table::alloc_ephemeral_port().unwrap();
     assert_test!(p1 >= 49152, "p1 in range");
     assert_test!(p2 >= 49152, "p2 in range");
     assert_test!(p3 >= 49152, "p3 in range");

@@ -894,25 +894,14 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
     if let Some(conn_id) = actions.conn_id {
         socket_notify_tcp_idx_waiters(conn_id);
 
-        // When a connection transitions to Established, register it
-        // in the TCP demux table for fast 4-tuple lookup.
+        // Wire completed 3WHS into the listener's accept queue.
+        // The child PCB inherits the parent listener's socket_id at
+        // install time, so we read it directly instead of looking up
+        // the old TCP_DEMUX table.
         if actions.notify.contains(tcp::SocketNotify::NEW_ESTABLISHED) {
-            if let Some(tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
-                let _ = tcp_listener::TCP_DEMUX.lock().register_established(
-                    Ipv4Addr(tuple.local_ip),
-                    Port(tuple.local_port),
-                    Ipv4Addr(tuple.remote_ip),
-                    Port(tuple.remote_port),
-                    conn_id.0,
-                );
-
-                // Wire completed 3WHS into the listener's accept queue.
-                // Read the PCB metadata to build the AcceptedConn — this
-                // is the ACK leg, not the SYN leg, so actions.accepted is
-                // not populated.
-                let listener_sock_idx = tcp_listener::TCP_DEMUX
-                    .lock()
-                    .lookup_listener(Ipv4Addr(tuple.local_ip), Port(tuple.local_port));
+            if let Some(_tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
+                let listener_sock_idx =
+                    tcp::with_pcb(conn_id, |pcb| pcb.socket_id.map(|s| s.0)).flatten();
                 if let Some(listener_idx) = listener_sock_idx {
                     let accepted_meta = tcp::with_pcb(conn_id, |pcb| {
                         let tcp::PcbState::Data(d) = &pcb.state else {
@@ -1409,12 +1398,8 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
             }
             sock.state = SocketState::Listening;
 
-            // Register listener in TCP demux table.
-            let _ = tcp_listener::TCP_DEMUX
-                .lock()
-                .register_listener(local.ip, local.port, sock_idx);
-
             // Set bidirectional link on the connection.
+            // (Listener is already registered in TCP_LISTENERS by tcp::listen.)
             tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
 
             0
@@ -2126,7 +2111,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
 }
 
 pub fn socket_close(sock_idx: u32) -> i32 {
-    let (tcp_idx, udp_unbind, icmp_unbind, recv_hint, send_hint, accept_hint, was_listener) = {
+    let (tcp_idx, udp_unbind, icmp_unbind, recv_hint, send_hint, accept_hint, _was_listener) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
@@ -2173,15 +2158,9 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         )
     };
 
-    // Unregister from TCP demux table.
-    if was_listener {
-        tcp_listener::TCP_DEMUX.lock().unregister_listener(sock_idx);
-    }
+    // Release the TCP connection (if any).  The sharded table handles
+    // cleanup internally via release(); no separate demux unregister needed.
     if let Some(tcp_idx) = tcp_idx {
-        tcp_listener::TCP_DEMUX
-            .lock()
-            .unregister_established(tcp_idx.0);
-        // Clear the bidirectional link.
         tcp::set_socket_idx(tcp_idx, None);
     }
 

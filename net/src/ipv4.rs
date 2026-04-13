@@ -208,40 +208,6 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: 
     let payload = &ip_payload[hdr_len..];
     let now_ms = slopos_utils::clock::uptime_ms();
 
-    // Demux table pre-lookup for debug/fast-path validation.
-    // The demux table provides O(n) lookup by 4-tuple (established) or
-    // 2-tuple (listener). The actual state machine processing still goes
-    // through tcp_input() which uses TcpConnectionTable internally.
-    {
-        use super::tcp::listener::TCP_DEMUX;
-        use super::types::{Ipv4Addr, Port};
-
-        let demux = TCP_DEMUX.lock();
-        let local_ip = Ipv4Addr(dst_ip);
-        let local_port = Port(hdr.dst_port);
-        let remote_ip = Ipv4Addr(src_ip);
-        let remote_port = Port(hdr.src_port);
-
-        if let Some(conn_id) =
-            demux.lookup_established(local_ip, local_port, remote_ip, remote_port)
-        {
-            klog_debug!(
-                "tcp demux: established conn_id={} for {}:{} -> {}:{}",
-                conn_id,
-                src_ip[0],
-                src_ip[1],
-                hdr.src_port,
-                hdr.dst_port
-            );
-        } else if let Some(sock_idx) = demux.lookup_listener(local_ip, local_port) {
-            klog_debug!(
-                "tcp demux: listener sock_idx={} for port {}",
-                sock_idx,
-                hdr.dst_port
-            );
-        }
-    }
-
     let actions = tcp::input(src_ip, dst_ip, &hdr, options, payload, now_ms);
 
     for seg in actions.segments() {

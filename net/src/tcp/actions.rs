@@ -148,8 +148,8 @@ bitflags! {
         /// can return 0 from `recv()` once buffered data is drained.
         const PEER_CLOSED     = 1 << 4;
         /// The connection just completed its 3-way handshake.  Signals
-        /// the glue layer to register the child in `tcp::listener::TCP_DEMUX`
-        /// for fast 4-tuple lookup on subsequent segments.
+        /// the glue layer to allocate a buffer and wire the child into
+        /// the listener's accept queue.
         const NEW_ESTABLISHED = 1 << 5;
     }
 }
