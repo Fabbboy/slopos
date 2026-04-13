@@ -186,11 +186,6 @@ impl DataState {
         let mut actions = Actions::new();
         let tuple = pcb.tuple;
 
-        // Grab a mutable view of the Data payload.
-        let PcbState::Data(_) = &pcb.state else {
-            unreachable!("DataState::on_segment called with non-Data state");
-        };
-
         // Fast-paths for RST and unexpected SYN.
         if hdr.is_rst() {
             return Self::on_rst(pcb, actions);
@@ -207,7 +202,7 @@ impl DataState {
         // signal transitions via the returned `NextTransition`.
         // Process ACK and free acknowledged bytes from the send buffer.
         let acked = {
-            let Some(data) = Self::as_mut(&mut pcb.state) else {
+            let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
             data.process_ack(tuple, hdr, options, now_ms, &mut actions)
@@ -221,16 +216,10 @@ impl DataState {
         // in recovery.  Rewinds the send cursor so the next poll_transmit
         // re-sends from snd_una with a halved congestion window.
         {
-            let should_fast_retransmit = {
-                let Some(data) = Self::as_ref(&pcb.state) else {
-                    unreachable!()
-                };
-                data.dup_ack_count == 3 && !data.cc.in_recovery()
+            let PcbState::Data(data) = &mut pcb.state else {
+                unreachable!()
             };
-            if should_fast_retransmit {
-                let Some(data) = Self::as_mut(&mut pcb.state) else {
-                    unreachable!()
-                };
+            if data.dup_ack_count == 3 && !data.cc.in_recovery() {
                 let flight = data.retx.inflight_bytes();
                 data.cc.on_fast_retransmit(flight, data.snd_nxt.raw());
                 data.retx.clear();
@@ -240,13 +229,11 @@ impl DataState {
             }
         }
 
-        let next = next_stub_placeholder();
-
         // `process_payload` + `process_fin_and_close_phase` need
         // combined access to bufs and pcb.state; do them
         // with a helper that takes both.
         let transition =
-            Self::process_payload_fin_and_ack(pcb, bufs, hdr, payload, now_ms, &mut actions, next);
+            Self::process_payload_fin_and_ack(pcb, bufs, hdr, payload, now_ms, &mut actions);
 
         // Apply any variant transition signalled by the sub-methods.
         match transition {
@@ -254,7 +241,7 @@ impl DataState {
             NextTransition::ToTimeWait => {
                 // Move the final rcv_nxt / snd_nxt / rcv_wnd out of
                 // the Data payload into a new TimeWaitState.
-                let Some(data) = Self::as_ref(&pcb.state) else {
+                let PcbState::Data(data) = &pcb.state else {
                     unreachable!()
                 };
                 let tw = TimeWaitState::new(data.rcv_nxt, data.snd_nxt, data.rcv_wnd, now_ms);
@@ -286,7 +273,7 @@ impl DataState {
     /// Handle an incoming RST.  The connection is dead; flag the
     /// reset to the socket layer and release the slot.
     fn on_rst(pcb: &mut Pcb, mut actions: Actions) -> Actions {
-        let Some(data) = Self::as_mut(&mut pcb.state) else {
+        let PcbState::Data(data) = &mut pcb.state else {
             unreachable!()
         };
         data.reset_received = true;
@@ -305,7 +292,7 @@ impl DataState {
     /// release the slot, flag the reset.
     fn on_unexpected_syn(pcb: &mut Pcb, _hdr: &TcpHeader, mut actions: Actions) -> Actions {
         let tuple = pcb.tuple;
-        let Some(data) = Self::as_ref(&pcb.state) else {
+        let PcbState::Data(data) = &pcb.state else {
             unreachable!()
         };
         actions.push_segment(SegmentBuilder::bare_rst(tuple, data.snd_nxt.raw()));
@@ -404,37 +391,39 @@ impl DataState {
         payload: &[u8],
         now_ms: u64,
         actions: &mut Actions,
-        _acked_hint: NextTransition,
     ) -> NextTransition {
         let tuple = pcb.tuple;
 
         // -------- Payload accept + OOO drain --------
         let mut accepted_len: usize = 0;
+        let PcbState::Data(d) = &pcb.state else {
+            unreachable!()
+        };
         let data_is_open = matches!(
-            Self::as_ref(&pcb.state).map(|d| d.close_phase),
-            Some(
-                ClosePhase::Established
-                    | ClosePhase::CloseWait
-                    | ClosePhase::FinWait1
-                    | ClosePhase::FinWait2
-            )
+            d.close_phase,
+            ClosePhase::Established
+                | ClosePhase::CloseWait
+                | ClosePhase::FinWait1
+                | ClosePhase::FinWait2
         );
 
         if !payload.is_empty() && data_is_open {
-            let expected_seq = Self::as_ref(&pcb.state).unwrap().rcv_nxt;
+            let PcbState::Data(d) = &pcb.state else {
+                unreachable!()
+            };
+            let expected_seq = d.rcv_nxt;
             if hdr.seq_num != expected_seq.raw() {
                 // Out-of-order — buffer ahead of rcv_nxt and emit
                 // a duplicate ACK so the peer retransmits the gap.
                 if seq_gt(hdr.seq_num, expected_seq.raw()) {
                     bufs.ooo.insert(hdr.seq_num, payload);
                 }
-                let data = Self::as_ref(&pcb.state).unwrap();
                 let window = bufs.recv.window();
                 let mut ack_seg =
-                    SegmentBuilder::ack(tuple, data.snd_nxt.raw(), data.rcv_nxt.raw(), window);
+                    SegmentBuilder::ack(tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window);
                 // Include SACK blocks so the peer knows which OOO
                 // ranges we hold (RFC 2018).
-                if data.sack_permitted {
+                if d.sack_permitted {
                     let (blocks, count) = bufs.ooo.sack_blocks();
                     ack_seg.sack_blocks = blocks;
                     ack_seg.sack_block_count = count;
@@ -444,31 +433,39 @@ impl DataState {
             }
             let wrote = bufs.recv.enqueue(payload, now_ms);
             accepted_len = wrote;
-            if let Some(data) = Self::as_mut(&mut pcb.state) {
-                data.rcv_nxt = data.rcv_nxt.wrapping_add(wrote as u32);
-            }
+            let PcbState::Data(data) = &mut pcb.state else {
+                unreachable!()
+            };
+            data.rcv_nxt = data.rcv_nxt.wrapping_add(wrote as u32);
             if !bufs.ooo.is_empty() {
-                let rcv_nxt = Self::as_ref(&pcb.state).unwrap().rcv_nxt;
+                let PcbState::Data(d) = &pcb.state else {
+                    unreachable!()
+                };
+                let rcv_nxt = d.rcv_nxt;
                 let drained = bufs
                     .ooo
                     .drain_contiguous(rcv_nxt.raw(), &mut bufs.recv, now_ms);
                 if drained > 0 {
                     accepted_len += drained;
-                    if let Some(data) = Self::as_mut(&mut pcb.state) {
-                        data.rcv_nxt = data.rcv_nxt.wrapping_add(drained as u32);
-                    }
+                    let PcbState::Data(data) = &mut pcb.state else {
+                        unreachable!()
+                    };
+                    data.rcv_nxt = data.rcv_nxt.wrapping_add(drained as u32);
                 }
             }
             let window = bufs.recv.window();
-            if let Some(data) = Self::as_mut(&mut pcb.state) {
-                data.rcv_wnd = window;
-            }
+            let PcbState::Data(data) = &mut pcb.state else {
+                unreachable!()
+            };
+            data.rcv_wnd = window;
             if accepted_len > 0 {
                 actions.notify |= SocketNotify::RECV_WAKE;
             }
             // Emit an immediate ACK if delayed-ACK heuristic says so.
             if bufs.recv.should_ack_now(now_ms) {
-                let data = Self::as_ref(&pcb.state).unwrap();
+                let PcbState::Data(data) = &pcb.state else {
+                    unreachable!()
+                };
                 actions.push_segment(SegmentBuilder::ack(
                     tuple,
                     data.snd_nxt.raw(),
@@ -489,7 +486,7 @@ impl DataState {
         // Closing → TimeWait, or LastAck → released.
         let ack = hdr.ack_num;
         {
-            let Some(data) = Self::as_mut(&mut pcb.state) else {
+            let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
             match data.close_phase {
@@ -519,7 +516,7 @@ impl DataState {
         // -------- FIN handling --------
         if hdr.is_fin() {
             let tuple = pcb.tuple;
-            let Some(data) = Self::as_mut(&mut pcb.state) else {
+            let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
             let fin_seq = hdr.seq_num.wrapping_add(accepted_len as u32);
@@ -581,28 +578,6 @@ impl DataState {
         }
 
         NextTransition::StayInData
-    }
-
-    // -------------------------------------------------------------------------
-    // Helpers for pattern-matching the Data variant
-    // -------------------------------------------------------------------------
-
-    #[inline]
-    fn as_ref(state: &PcbState) -> Option<&DataState> {
-        if let PcbState::Data(d) = state {
-            Some(d)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn as_mut(state: &mut PcbState) -> Option<&mut DataState> {
-        if let PcbState::Data(d) = state {
-            Some(d)
-        } else {
-            None
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -715,14 +690,4 @@ impl DataState {
             expected,
         );
     }
-}
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-/// Placeholder returned from the ACK sub-method before the combined
-/// payload/FIN block consumes the hint.  Always `StayInData` today.
-fn next_stub_placeholder() -> NextTransition {
-    NextTransition::StayInData
 }

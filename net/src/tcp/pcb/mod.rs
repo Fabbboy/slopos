@@ -10,23 +10,10 @@
 //! `[Option<Pcb>; MAX_CONNECTIONS]` slot without any `take()`/put-back
 //! dance.
 //!
-//! The per-state handlers ([`ListenState::on_segment`] etc.) land in
-//! Phase B as separate commits, each with its own unit-test suite.  This
-//! module declares the types and the top-level `Pcb::on_segment`
-//! dispatcher that routes a decoded segment to the matching handler.
-//!
-//! # Architecture (Phase A, Phase B, Phase C)
-//!
-//! - **A (skeleton).**  Types exist but `on_segment` bodies are
-//!   `todo!()` / return an empty `Actions`.  No production code routes
-//!   through this module yet; the legacy `TcpConnection` path in
-//!   `tcp/mod.rs` still owns all real traffic.
-//! - **B (per-state ports).**  Each `XxxState::on_segment` gets a real
-//!   implementation plus a dedicated `tcp_pcb_xxx_tests` suite.  The
-//!   new handlers are tested against synthetic inputs in isolation.
-//! - **C (atomic cutover).**  `tcp_input` switches from the legacy
-//!   `process_*` chain to `Pcb::on_segment`; `TcpConnection` is
-//!   deleted; every caller migrates directly with no compat shim.
+//! Each per-state handler ([`ListenState::on_segment`] etc.) lives in
+//! its own submodule with a dedicated test suite.  This module declares
+//! the types and the top-level `Pcb::on_segment` dispatcher that routes
+//! a decoded segment to the matching handler.
 //!
 //! # Why `&mut self` and not consume-by-value
 //!
