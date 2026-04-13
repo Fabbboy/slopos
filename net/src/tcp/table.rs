@@ -1,15 +1,22 @@
 //! `PcbTable` — the fixed-size storage for active TCP connections.
 //!
-//! Replaces the legacy `TcpConnectionTable` in the C.1 atomic cutover.
-//! Owns a `[Option<Pcb>; MAX_CONNECTIONS]`, a per-boot ephemeral port
-//! allocator, and the slot-allocation / lookup / release machinery the
-//! glue layer drives under a single `IrqMutex`.
+//! Owns a `[Option<Pcb>; MAX_CONNECTIONS]` slot array, a parallel
+//! `[Option<TcpBufferPair>; MAX_CONNECTIONS]` buffer array, a per-boot
+//! ephemeral port allocator, and the slot-allocation / lookup / release
+//! machinery the glue layer drives under a single `IrqMutex`.
 //!
-//! In Phase A the table is **inert**: no production code acquires
-//! [`PCB_TABLE`] yet; all real traffic still flows through the legacy
-//! `TCP_TABLE: IrqMutex<TcpConnectionTable>` in `tcp/mod.rs`.  The
-//! switchover happens in C.1 when `tcp_input` is rewritten to lock
-//! `PCB_TABLE` and dispatch through `Pcb::on_segment`.
+//! ## Lazy buffer lifecycle
+//!
+//! Buffers are stored as `Option<TcpBufferPair>` in a parallel array
+//! indexed by the same slot as the PCB.  Only Data-phase connections
+//! allocate a buffer (`Some`); Listen, SynSent, SynRecv, and TimeWait
+//! keep `None`.  The glue layer in `tcp::input` calls
+//! [`PcbTable::alloc_buffer_for`] on →Data and
+//! [`PcbTable::free_buffer_for`] on →TimeWait / release.
+//!
+//! This design uses **zero `unsafe`**: Rust's struct-level borrow
+//! splitting proves `slots` and `buffers` are disjoint, so
+//! `get_with_bufs` and `iter_mut_with_bufs` compile without raw pointers.
 //!
 //! ## Identifier scheme
 //!
@@ -29,10 +36,6 @@ use super::tuple::{TcpError, TcpTuple};
 use crate::timer::NET_TIMER_WHEEL;
 
 /// Maximum number of simultaneous TCP connections.
-///
-/// Each `Pcb` slot is ~64 KB (32 KB send + 32 KB recv + ~136 B OOO assembler),
-/// so this directly controls static memory usage.  64 × 64 KB ≈ 4.1 MB.
-/// Bump to 128/256 once the table moves to lazy/heap allocation (F.1).
 pub const MAX_CONNECTIONS: usize = 64;
 
 /// Type-safe handle to a `PcbTable` slot.
@@ -61,31 +64,31 @@ impl ConnId {
 /// Global PCB storage.
 ///
 /// Single-mutex form for Phase A–D.  F.1 shards this into
-/// `[IrqMutex<PcbShard>; 32]`; callers continue using [`PCB_TABLE`]
+/// `[IrqMutex<PcbShard>; 16]`; callers continue using [`PCB_TABLE`]
 /// as the entry point through a thin shard-router.
 pub static PCB_TABLE: IrqMutex<PcbTable> = IrqMutex::new(PcbTable::new(), LOCK_LEVEL_RESOURCE);
 
-/// The table itself.  Holds the slot array + the ephemeral-port
-/// counter (moved here from `tcp/mod.rs` in A.4 so the legacy and the
-/// new allocator don't race).
 /// The table itself.  PCB metadata and buffers are stored in parallel
-/// arrays — PCBs are small (~200 bytes, safe to move/drop on stack),
-/// while buffers (~75 KB each) live in a separate static pool indexed
-/// by slot, matching the architecture of Linux's sk_buff separation
-/// and the old `TcpConnectionTable`'s `connections[]` + `buffers[]`.
+/// `Option` arrays — PCBs are small (~200 bytes), while buffers
+/// (~65 KB each) are lazily allocated: `None` until the connection
+/// reaches Data state, `None` again on TimeWait / release.
+///
+/// The parallel-array layout lets Rust's borrow checker prove
+/// `slots` and `buffers` are disjoint, so `get_with_bufs` and
+/// `iter_mut_with_bufs` need zero `unsafe`.
 pub struct PcbTable {
     slots: [Option<Pcb>; MAX_CONNECTIONS],
-    pub buffers: [TcpBufferPair; MAX_CONNECTIONS],
+    buffers: [Option<TcpBufferPair>; MAX_CONNECTIONS],
     next_ephemeral_port: AtomicU16,
 }
 
 impl PcbTable {
     pub const fn new() -> Self {
-        const NONE: Option<Pcb> = None;
-        const BUF: TcpBufferPair = TcpBufferPair::new();
+        const NONE_PCB: Option<Pcb> = None;
+        const NONE_BUF: Option<TcpBufferPair> = None;
         Self {
-            slots: [NONE; MAX_CONNECTIONS],
-            buffers: [BUF; MAX_CONNECTIONS],
+            slots: [NONE_PCB; MAX_CONNECTIONS],
+            buffers: [NONE_BUF; MAX_CONNECTIONS],
             next_ephemeral_port: AtomicU16::new(49152),
         }
     }
@@ -105,28 +108,81 @@ impl PcbTable {
         self.slots.get_mut(id.slot()).and_then(|s| s.as_mut())
     }
 
-    /// Borrow a PCB and its associated buffer pool entry together.
+    /// Borrow a PCB and its lazily-allocated buffer together.
+    ///
+    /// Returns `None` if the slot is empty **or** the buffer has not
+    /// been allocated yet (non-Data state).  Callers that need the PCB
+    /// without a buffer should use [`get_mut`] instead.
     pub fn get_with_bufs(&mut self, id: ConnId) -> Option<(&mut Pcb, &mut TcpBufferPair)> {
+        let Self { slots, buffers, .. } = self;
         let slot = id.slot();
-        let pcb = self.slots.get_mut(slot)?.as_mut()?;
-        let bufs = &mut self.buffers[slot];
+        let pcb = slots.get_mut(slot)?.as_mut()?;
+        let bufs = buffers.get_mut(slot)?.as_mut()?;
         Some((pcb, bufs))
     }
 
-    /// Buffer pool entry for a slot (immutable).
-    pub fn bufs(&self, id: ConnId) -> &TcpBufferPair {
-        &self.buffers[id.slot()]
+    /// Borrow a PCB (always) and its buffer (if allocated).
+    ///
+    /// Returns `None` only if the slot is empty.  The buffer is `Some`
+    /// for Data-phase connections, `None` for others.
+    pub fn get_pcb_and_opt_bufs(
+        &mut self,
+        id: ConnId,
+    ) -> Option<(&mut Pcb, Option<&mut TcpBufferPair>)> {
+        let Self { slots, buffers, .. } = self;
+        let slot = id.slot();
+        let pcb = slots.get_mut(slot)?.as_mut()?;
+        let bufs = buffers.get_mut(slot).and_then(|b| b.as_mut());
+        Some((pcb, bufs))
     }
 
-    /// Buffer pool entry for a slot (mutable).
-    pub fn bufs_mut(&mut self, id: ConnId) -> &mut TcpBufferPair {
-        &mut self.buffers[id.slot()]
+    /// Buffer for a slot (immutable).  Returns `None` when unallocated.
+    pub fn bufs(&self, id: ConnId) -> Option<&TcpBufferPair> {
+        self.buffers.get(id.slot())?.as_ref()
     }
 
-    /// Allocate a free slot, install a PCB, and clear its buffer pool entry.
-    /// `Pcb` is small (~200 bytes) so constructing it on the stack is fine.
-    /// The ~75 KB buffers live in the parallel `buffers[]` array and are
-    /// cleared in-place without touching the stack.
+    /// Buffer for a slot (mutable).  Returns `None` when unallocated.
+    pub fn bufs_mut(&mut self, id: ConnId) -> Option<&mut TcpBufferPair> {
+        self.buffers.get_mut(id.slot())?.as_mut()
+    }
+
+    // -------------------------------------------------------------------------
+    // Lazy buffer lifecycle
+    // -------------------------------------------------------------------------
+
+    /// Allocate a fresh buffer for the given slot.
+    ///
+    /// Called by the glue layer when a connection transitions to Data.
+    /// Panics (debug) if a buffer is already allocated for this slot.
+    pub fn alloc_buffer_for(&mut self, slot: usize) {
+        debug_assert!(
+            self.buffers[slot].is_none(),
+            "alloc_buffer_for: slot {} already has a buffer",
+            slot
+        );
+        self.buffers[slot] = Some(TcpBufferPair::new());
+    }
+
+    /// Free the buffer for the given slot (if any).
+    ///
+    /// Called by the glue layer on →TimeWait or release.
+    pub fn free_buffer_for(&mut self, slot: usize) {
+        self.buffers[slot] = None;
+    }
+
+    /// Check whether a buffer is allocated for a slot.
+    pub fn has_buffer(&self, slot: usize) -> bool {
+        self.buffers.get(slot).is_some_and(|b| b.is_some())
+    }
+
+    // -------------------------------------------------------------------------
+    // Slot management
+    // -------------------------------------------------------------------------
+
+    /// Allocate a free slot and install a PCB.
+    ///
+    /// Buffers are **not** allocated here — they are lazily created via
+    /// [`alloc_buffer_for`] when the connection transitions to Data state.
     pub fn install_with(
         &mut self,
         tuple: TcpTuple,
@@ -136,7 +192,6 @@ impl PcbTable {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
                 let pcb = slot.insert(Pcb::new(tuple, state));
-                self.buffers[i].clear();
                 init(pcb);
                 return Ok(ConnId(i as u32));
             }
@@ -144,8 +199,8 @@ impl PcbTable {
         Err(TcpError::TableFull)
     }
 
-    /// Free the slot at `id`. Cancels outstanding timers, clears
-    /// buffers, and drops the small PCB metadata.
+    /// Free the slot at `id`.  Cancels outstanding timers, drops the
+    /// buffer (if allocated), and drops the PCB.
     pub fn release(&mut self, id: ConnId) {
         let slot = id.slot();
         if let Some(s) = self.slots.get_mut(slot) {
@@ -153,7 +208,7 @@ impl PcbTable {
                 Self::cancel_pcb_timers(pcb);
             }
             *s = None;
-            self.buffers[slot].clear();
+            self.buffers[slot] = None;
         }
     }
 
@@ -245,17 +300,24 @@ impl PcbTable {
             .filter_map(|(i, slot)| slot.as_mut().map(|pcb| (ConnId(i as u32), pcb)))
     }
 
-    /// Iterate over all live PCBs together with their buffer pool
-    /// entries.  Splits the borrow between `slots` and `buffers` so
-    /// both can be mutated in the loop body.
+    /// Iterate over all live PCBs that have an allocated buffer.
+    ///
+    /// Splits the borrow between `slots` and `buffers` so both can be
+    /// mutated in the loop body.  Only yields PCBs where
+    /// `buffers[i].is_some()` (i.e. Data-phase connections).
     pub fn iter_mut_with_bufs(
         &mut self,
     ) -> impl Iterator<Item = (ConnId, &mut Pcb, &mut TcpBufferPair)> {
-        self.slots
+        let Self { slots, buffers, .. } = self;
+        slots
             .iter_mut()
-            .zip(self.buffers.iter_mut())
+            .zip(buffers.iter_mut())
             .enumerate()
-            .filter_map(|(i, (slot, bufs))| slot.as_mut().map(|pcb| (ConnId(i as u32), pcb, bufs)))
+            .filter_map(|(i, (slot, buf))| {
+                let pcb = slot.as_mut()?;
+                let bufs = buf.as_mut()?;
+                Some((ConnId(i as u32), pcb, bufs))
+            })
     }
 
     /// Raw mutable access to the slot array — only for `tcp_reset_all`
@@ -268,11 +330,12 @@ impl PcbTable {
     /// in tests.  Cancels outstanding timer tokens before dropping PCBs
     /// so stale timers don't fire into freed slots.
     pub fn clear(&mut self) {
-        for slot in self.slots.iter_mut() {
+        for (slot, buf) in self.slots.iter_mut().zip(self.buffers.iter_mut()) {
             if let Some(pcb) = slot.as_ref() {
                 Self::cancel_pcb_timers(pcb);
             }
             *slot = None;
+            *buf = None;
         }
         self.next_ephemeral_port.store(49152, Ordering::Relaxed);
     }

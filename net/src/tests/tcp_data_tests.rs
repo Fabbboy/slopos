@@ -1322,7 +1322,7 @@ pub fn test_so_rcvbuf_affects_window() -> TestResult {
 
     let window = {
         let table = tcp::table::PCB_TABLE.lock();
-        table.bufs(id).recv.window()
+        table.bufs(id).unwrap().recv.window()
     };
     assert_test!(window <= 4096, "recv window capped by SO_RCVBUF");
     pass!()

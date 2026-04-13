@@ -3,6 +3,11 @@
 //! Each active connection owns a pair of [`RingBuffer`]s plus a small amount
 //! of delayed-ACK state.  The buffers are fixed-size (see [`TCP_BUFFER_SIZE`]);
 //! resizable buffers backed by `SO_SNDBUF` / `SO_RCVBUF` land in P4.
+//!
+//! Buffers are lazily allocated as `Option<TcpBufferPair>` in the parallel
+//! array inside [`super::table::PcbTable`].  Only Data-phase connections
+//! have a buffer (`Some`); Listen, SynSent, SynRecv, and TimeWait keep
+//! `None`.
 
 use slopos_utils::RingBuffer;
 

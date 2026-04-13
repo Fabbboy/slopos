@@ -129,17 +129,7 @@ impl ListenState {
         actions
     }
 
-    /// Per-state debug invariants.  Listen has no send buffer, no
-    /// retransmit timer, and no sequence-space state to validate.
-    #[cfg(debug_assertions)]
-    pub(super) fn debug_assert_invariants(&self, bufs: &crate::tcp::buffer::TcpBufferPair) {
-        debug_assert!(
-            bufs.send.buffered_len() == 0,
-            "Listen PCB has unexpected send data"
-        );
-        debug_assert!(
-            bufs.recv.available() == 0,
-            "Listen PCB has unexpected recv data"
-        );
-    }
+    // Listen-specific invariants are now checked by
+    // `Pcb::assert_invariants` (buffer_id must be None).  No
+    // per-state debug hook needed.
 }

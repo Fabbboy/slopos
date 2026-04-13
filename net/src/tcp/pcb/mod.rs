@@ -99,44 +99,40 @@ impl Pcb {
     /// compile the check away.
     pub fn on_segment(
         &mut self,
-        bufs: &mut TcpBufferPair,
+        bufs: Option<&mut TcpBufferPair>,
         hdr: &TcpHeader,
         options: &[u8],
         payload: &[u8],
         now_ms: u64,
     ) -> Actions {
-        self.assert_invariants(bufs);
+        self.assert_invariants();
         let actions = match &mut self.state {
             PcbState::Listen(_) => listen::ListenState::on_segment(self, hdr, options, now_ms),
             PcbState::SynSent(_) => syn_sent::SynSentState::on_segment(self, hdr, options, now_ms),
             PcbState::SynRecv(_) => syn_recv::SynRecvState::on_segment(self, hdr, now_ms),
             PcbState::Data(_) => {
+                let bufs = bufs.expect("Data state must have an allocated buffer");
                 data::DataState::on_segment(self, bufs, hdr, options, payload, now_ms)
             }
             PcbState::TimeWait(_) => time_wait::TimeWaitState::on_segment(self, hdr, now_ms),
         };
-        self.assert_invariants(bufs);
+        self.assert_invariants();
         actions
     }
 
     /// Debug-only invariant audit.  Zero cost in release builds.
     ///
-    /// Each `PcbState` variant has its own constraints (Listen carries
-    /// no send buffer, TimeWait carries no data, `DataState`'s
-    /// `snd_una <= snd_nxt` must hold, etc.).  The check is called
-    /// before and after every state transition so a bad mutation trips
-    /// the assertion *at the transition site* rather than at some
-    /// unrelated later read.
+    /// Each `PcbState` variant has its own constraints (`DataState`'s
+    /// `snd_una <= snd_nxt`, etc.).  Buffer-lifecycle invariants are
+    /// checked at the table level, not here.
     #[inline]
-    pub fn assert_invariants(&self, bufs: &TcpBufferPair) {
-        let _ = bufs;
+    pub fn assert_invariants(&self) {
         #[cfg(debug_assertions)]
         match &self.state {
-            PcbState::Listen(s) => s.debug_assert_invariants(bufs),
+            PcbState::Listen(_) | PcbState::TimeWait(_) => {}
             PcbState::SynSent(s) => s.debug_assert_invariants(self),
             PcbState::SynRecv(s) => s.debug_assert_invariants(self),
             PcbState::Data(s) => s.debug_assert_invariants(self),
-            PcbState::TimeWait(s) => s.debug_assert_invariants(bufs),
         }
     }
 }

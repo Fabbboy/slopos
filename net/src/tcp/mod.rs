@@ -121,7 +121,9 @@ pub fn input(
         }
     };
 
-    let (pcb, bufs) = table.get_with_bufs(id).expect("find returned a live id");
+    let (pcb, bufs) = table
+        .get_pcb_and_opt_bufs(id)
+        .expect("find returned a live id");
     let mut actions = pcb.on_segment(bufs, hdr, options, payload, now_ms);
     actions.conn_id = Some(id);
 
@@ -187,6 +189,18 @@ pub fn input(
                     NET_TIMER_WHEEL.cancel(token);
                 }
             }
+        }
+    }
+
+    // Allocate buffer for newly-established connections (SynRecv/SynSent→Data).
+    if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
+        table.alloc_buffer_for(id.slot());
+    }
+
+    // Free buffer on transition to TimeWait (Data→TimeWait).
+    if let Some(pcb) = table.get(id) {
+        if matches!(pcb.state, PcbState::TimeWait(_)) && table.has_buffer(id.slot()) {
+            table.free_buffer_for(id.slot());
         }
     }
 
@@ -308,27 +322,39 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
 /// Returns the outgoing FIN segment if one should be sent.
 pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     let mut table = PCB_TABLE.lock();
-    let (pcb, bufs) = table.get_with_bufs(id).ok_or(TcpError::NotFound)?;
 
+    // Check existence + handle states that don't need mutable PCB access.
+    let pcb = table.get(id).ok_or(TcpError::NotFound)?;
+    if matches!(pcb.state, PcbState::Listen(_) | PcbState::SynSent(_)) {
+        let name = pcb.state.name();
+        table.release(id);
+        klog_debug!("tcp: CLOSE id={} from {} — released", id.0, name);
+        return Ok(None);
+    }
+    if matches!(pcb.state, PcbState::TimeWait(_)) {
+        klog_debug!("tcp: CLOSE id={} TIME_WAIT — no-op", id.0);
+        return Ok(None);
+    }
+
+    // SynRecv → Data(FinWait1): allocate buffer before transition.
+    let is_syn_recv = matches!(table.get(id).unwrap().state, PcbState::SynRecv(_));
+    if is_syn_recv {
+        table.alloc_buffer_for(id.slot());
+    }
+
+    let pcb = table.get_mut(id).unwrap();
     match &mut pcb.state {
-        PcbState::Listen(_) | PcbState::SynSent(_) => {
-            let name = pcb.state.name();
-            table.release(id);
-            klog_debug!("tcp: CLOSE id={} from {} — released", id.0, name);
-            Ok(None)
-        }
         PcbState::SynRecv(s) => {
             let tuple = pcb.tuple;
             let seq = s.snd_nxt.raw();
             let ack = s.rcv_nxt.raw();
             let window = s.rcv_wnd;
-            // Transition to Data(FinWait1)
             let mut ds = DataState::from_syn_recv(s);
             ds.close_phase = ClosePhase::FinWait1;
-            ds.snd_nxt = ds.snd_nxt.wrapping_add(1); // FIN consumes 1
+            ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
             let ts = ds.ts_option(clock::now_ms());
             pcb.state = PcbState::Data(ds);
-            pcb.assert_invariants(bufs);
+            pcb.assert_invariants();
             let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
             seg.timestamp = ts;
             klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id.0);
@@ -344,7 +370,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     cancel_keepalive(d);
                     let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
                     seg.timestamp = d.ts_option(clock::now_ms());
-                    pcb.assert_invariants(bufs);
+                    pcb.assert_invariants();
                     klog_debug!(
                         "tcp: CLOSE id={} ESTABLISHED -> FIN_WAIT_1, FIN seq={}",
                         id.0,
@@ -359,7 +385,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     cancel_keepalive(d);
                     let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
                     seg.timestamp = d.ts_option(clock::now_ms());
-                    pcb.assert_invariants(bufs);
+                    pcb.assert_invariants();
                     klog_debug!(
                         "tcp: CLOSE id={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
                         id.0,
@@ -377,10 +403,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                 }
             }
         }
-        PcbState::TimeWait(_) => {
-            klog_debug!("tcp: CLOSE id={} TIME_WAIT — no-op", id.0);
-            Ok(None)
-        }
+        _ => Err(TcpError::InvalidState),
     }
 }
 
@@ -405,8 +428,17 @@ pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
 /// Shutdown the write half of a connection (send FIN without releasing).
 pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     let mut table = PCB_TABLE.lock();
-    let (pcb, bufs) = table.get_with_bufs(id).ok_or(TcpError::NotFound)?;
 
+    // SynRecv → Data(FinWait1): allocate buffer before transition.
+    let is_syn_recv = matches!(
+        table.get(id).ok_or(TcpError::NotFound)?.state,
+        PcbState::SynRecv(_)
+    );
+    if is_syn_recv {
+        table.alloc_buffer_for(id.slot());
+    }
+
+    let pcb = table.get_mut(id).ok_or(TcpError::NotFound)?;
     match &mut pcb.state {
         PcbState::Data(d) => {
             let tuple = pcb.tuple;
@@ -418,7 +450,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     cancel_keepalive(d);
                     let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
                     seg.timestamp = d.ts_option(clock::now_ms());
-                    pcb.assert_invariants(bufs);
+                    pcb.assert_invariants();
                     klog_debug!("tcp: SHUTDOWN_WR id={} ESTABLISHED -> FIN_WAIT_1", id.0);
                     Ok(Some(seg))
                 }
@@ -429,7 +461,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     cancel_keepalive(d);
                     let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
                     seg.timestamp = d.ts_option(clock::now_ms());
-                    pcb.assert_invariants(bufs);
+                    pcb.assert_invariants();
                     klog_debug!("tcp: SHUTDOWN_WR id={} CLOSE_WAIT -> LAST_ACK", id.0);
                     Ok(Some(seg))
                 }
@@ -443,25 +475,20 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                 }
             }
         }
-        PcbState::SynRecv(_) => {
-            // Transition through Data(FinWait1)
+        PcbState::SynRecv(s) => {
             let tuple = pcb.tuple;
-            if let PcbState::SynRecv(s) = &pcb.state {
-                let seq = s.snd_nxt.raw();
-                let ack = s.rcv_nxt.raw();
-                let window = s.rcv_wnd;
-                let mut ds = DataState::from_syn_recv(s);
-                ds.close_phase = ClosePhase::FinWait1;
-                ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-                let ts = ds.ts_option(clock::now_ms());
-                pcb.state = PcbState::Data(ds);
-                pcb.assert_invariants(bufs);
-                let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
-                seg.timestamp = ts;
-                Ok(Some(seg))
-            } else {
-                unreachable!()
-            }
+            let seq = s.snd_nxt.raw();
+            let ack = s.rcv_nxt.raw();
+            let window = s.rcv_wnd;
+            let mut ds = DataState::from_syn_recv(s);
+            ds.close_phase = ClosePhase::FinWait1;
+            ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
+            let ts = ds.ts_option(clock::now_ms());
+            pcb.state = PcbState::Data(ds);
+            pcb.assert_invariants();
+            let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+            seg.timestamp = ts;
+            Ok(Some(seg))
         }
         _ => Err(TcpError::InvalidState),
     }
@@ -471,7 +498,9 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
 pub fn recv_discard(id: ConnId) {
     let mut table = PCB_TABLE.lock();
     if table.get(id).is_some() {
-        table.bufs_mut(id).recv.clear();
+        if let Some(bufs) = table.bufs_mut(id) {
+            bufs.recv.clear();
+        }
         klog_debug!("tcp: RECV_DISCARD id={} — recv buffer cleared", id.0);
     }
 }
@@ -532,31 +561,22 @@ pub fn is_reset(id: ConnId) -> bool {
 /// Available send buffer space for a connection.
 pub fn send_buffer_space(id: ConnId) -> usize {
     let table = PCB_TABLE.lock();
-    if table.get(id).is_some() {
-        table.bufs(id).send.free_space()
-    } else {
-        0
-    }
+    table.bufs(id).map(|b| b.send.free_space()).unwrap_or(0)
 }
 
 /// Bytes available to read from a connection's receive buffer.
 pub fn recv_available(id: ConnId) -> usize {
     let table = PCB_TABLE.lock();
-    if table.get(id).is_some() {
-        table.bufs(id).recv.available()
-    } else {
-        0
-    }
+    table.bufs(id).map(|b| b.recv.available()).unwrap_or(0)
 }
 
 /// Whether a connection has data pending transmission.
 pub fn has_pending_data(id: ConnId) -> bool {
     let table = PCB_TABLE.lock();
-    if table.get(id).is_some() {
-        table.bufs(id).send.unsent_len() > 0
-    } else {
-        false
-    }
+    table
+        .bufs(id)
+        .map(|b| b.send.unsent_len() > 0)
+        .unwrap_or(false)
 }
 
 /// Closure-based read access to a PCB (locks PCB_TABLE).
@@ -578,7 +598,9 @@ pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
 pub fn set_sndbuf(id: ConnId, bytes: usize) {
     let mut table = PCB_TABLE.lock();
     let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
-    table.bufs_mut(id).send.effective_capacity = capped;
+    if let Some(bufs) = table.bufs_mut(id) {
+        bufs.send.effective_capacity = capped;
+    }
 }
 
 /// Set the effective receive buffer capacity (SO_RCVBUF).
@@ -586,7 +608,9 @@ pub fn set_sndbuf(id: ConnId, bytes: usize) {
 pub fn set_rcvbuf(id: ConnId, bytes: usize) {
     let mut table = PCB_TABLE.lock();
     let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
-    table.bufs_mut(id).recv.effective_capacity = capped;
+    if let Some(bufs) = table.bufs_mut(id) {
+        bufs.recv.effective_capacity = capped;
+    }
 }
 
 /// Set or clear TCP_NODELAY (disables/enables Nagle algorithm).
@@ -693,7 +717,7 @@ pub fn poll_transmit(
                         d.retransmit_token = Some(token);
                     }
                 }
-                pcb.assert_invariants(bufs);
+                pcb.assert_invariants();
                 return Some((seg, payload_len));
             }
         }
@@ -745,7 +769,7 @@ pub fn poll_transmit(
     let window = bufs.recv.window();
     let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
     seg.timestamp = d.ts_option(now_ms);
-    pcb.assert_invariants(bufs);
+    pcb.assert_invariants();
 
     Some((seg, payload_len))
 }
@@ -798,7 +822,7 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
     let now_ms = slopos_utils::clock::uptime_ms();
     bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
-    pcb.assert_invariants(bufs);
+    pcb.assert_invariants();
 
     klog_debug!("tcp: retransmit fired id={} rto_ms={}", conn_id, rto_ms);
 
@@ -912,7 +936,7 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
         d.sendmap.mark_all_lost();
         d.rtt.back_off();
         bufs.send.rto_deadline_ms = now_ms.saturating_add(d.rtt.rto_ms() as u64);
-        pcb.assert_invariants(bufs);
+        pcb.assert_invariants();
 
         retransmitted = Some(id);
         break;
@@ -949,7 +973,7 @@ pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
     let PcbState::Data(d) = &pcb.state else {
         return None;
     };
-    d.check_zero_window_probe(pcb.tuple, table.bufs(id))
+    d.check_zero_window_probe(pcb.tuple, table.bufs(id)?)
 }
 
 /// Release all connections (for testing).

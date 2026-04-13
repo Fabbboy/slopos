@@ -97,11 +97,7 @@ impl TimeWaitState {
         actions
     }
 
-    #[cfg(debug_assertions)]
-    pub(super) fn debug_assert_invariants(&self, bufs: &crate::tcp::buffer::TcpBufferPair) {
-        debug_assert!(
-            bufs.send.buffered_len() == 0,
-            "TimeWait must have no send data"
-        );
-    }
+    // TimeWait-specific invariants are now checked by
+    // `Pcb::assert_invariants` (buffer_id must be None).  No
+    // per-state debug hook needed.
 }
