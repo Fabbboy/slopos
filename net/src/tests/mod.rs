@@ -18,7 +18,7 @@ pub mod route_tests;
 pub mod socket_framework_tests;
 pub mod socket_option_tests;
 pub mod socket_tests;
-pub mod tcp_cong_newreno_tests;
+pub mod tcp_cong_cubic_tests;
 pub mod tcp_data_tests;
 pub mod tcp_keepalive_tests;
 pub mod tcp_live_tests;

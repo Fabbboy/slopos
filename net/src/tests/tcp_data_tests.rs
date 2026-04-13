@@ -945,10 +945,10 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     assert_eq_test!(total, 4 * DEFAULT_MSS as u32, "4 MSS in flight");
 
     // SACK segments 2, 3, 4 → segment 1 is Lost.
-    // pipe = seg1 (Lost=excluded) + segs 2,3,4 (SackConfirmed=excluded) = 0
-    // on_fast_retransmit(pipe=0, high_water)
-    // ssthresh = max(0/2, 2*1460) = 2920
-    // cwnd = ssthresh + 3*MSS = 2920 + 4380 = 7300
+    // CUBIC uses cwnd (not pipe) for the loss reduction:
+    //   origin_point = cwnd = 14600 (IW, no ACKs received yet)
+    //   ssthresh = origin_point * 0.7 = 10220
+    //   cwnd = ssthresh = 10220
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
     let mut opts = [0u8; 28];
@@ -975,7 +975,7 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     );
 
     let cwnd = with_data_state!(id, |d| d.cc.cwnd());
-    assert_eq_test!(cwnd, 7300, "cwnd = ssthresh + 3*MSS");
+    assert_eq_test!(cwnd, 10220, "cwnd = ssthresh (CUBIC β=0.7)");
     pass!()
 }
 

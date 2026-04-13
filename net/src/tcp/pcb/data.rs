@@ -143,7 +143,7 @@ impl DataState {
             nagle_enabled: true,
             close_phase: ClosePhase::Established,
             rtt: RttEstimator::new(),
-            cc: CcAlgo::new_reno(peer_mss.max(DEFAULT_MSS) as u32),
+            cc: CcAlgo::cubic(peer_mss.max(DEFAULT_MSS) as u32),
             sendmap: SendMap::new(),
             retransmit_token: None,
             keepalive_token: None,
@@ -440,10 +440,15 @@ impl DataState {
             if let Some(rtt_ms) = rtt_sample {
                 self.rtt.sample(rtt_ms);
             }
-            // Feed CC with the freshly-acked bytes + RTT sample + snd_una
-            // for recovery exit detection.
-            self.cc
-                .on_ack(outcome.bytes_freed, rtt_sample, self.snd_una.raw());
+            // Feed CC with the freshly-acked bytes, RTT sample, sequence
+            // state, and wall-clock time for CUBIC + Hystart++.
+            self.cc.on_ack(
+                outcome.bytes_freed,
+                rtt_sample,
+                self.snd_una.raw(),
+                self.snd_nxt.raw(),
+                now_ms,
+            );
             // Reschedule the retransmit timer.
             if let Some(token) = self.retransmit_token.take() {
                 actions.push_timer(TimerOp::Cancel { token });
