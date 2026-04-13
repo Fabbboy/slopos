@@ -1274,15 +1274,15 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
     pass!()
 }
 
-pub fn test_sack_blocks_from_ooo_queue() -> TestResult {
+pub fn test_sack_blocks_from_ooo_assembler() -> TestResult {
     reset();
-    // Test the OOO queue sack_blocks() method directly.
-    let mut q = tcp::TcpOooQueue::new();
-    q.insert(200, &[1; 10]); // range [200, 210)
-    q.insert(100, &[2; 5]); // range [100, 105)
-    q.insert(300, &[3; 20]); // range [300, 320)
+    // Test the Assembler sack_blocks() method directly.
+    let mut asm = tcp::Assembler::new();
+    asm.insert(200, 10); // range [200, 210)
+    asm.insert(100, 5); // range [100, 105)
+    asm.insert(300, 20); // range [300, 320)
 
-    let (blocks, count) = q.sack_blocks();
+    let (blocks, count) = asm.sack_blocks();
     assert_eq_test!(count, 3, "three SACK blocks");
     // Should be sorted by left edge.
     assert_eq_test!(blocks[0].0, 100, "first block left");
@@ -1651,7 +1651,7 @@ slopos_testing::define_test_suite!(
         test_sack_blocks_sent_on_ooo,
         test_sack_blocks_parsed_from_peer_ack,
         test_sack_scoreboard_cleared_on_forward_ack,
-        test_sack_blocks_from_ooo_queue,
+        test_sack_blocks_from_ooo_assembler,
         test_so_sndbuf_caps_send_space,
         test_so_rcvbuf_affects_window,
         test_nagle_defers_sub_mss_when_inflight,

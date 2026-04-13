@@ -186,7 +186,7 @@ impl TcpRecvState {
 pub struct TcpBufferPair {
     pub send: TcpSendState,
     pub recv: TcpRecvState,
-    pub ooo: super::reasm::TcpOooQueue,
+    pub ooo: super::reasm::Assembler,
 }
 
 impl TcpBufferPair {
@@ -194,7 +194,7 @@ impl TcpBufferPair {
         Self {
             send: TcpSendState::new(),
             recv: TcpRecvState::new(),
-            ooo: super::reasm::TcpOooQueue::new(),
+            ooo: super::reasm::Assembler::new(),
         }
     }
 

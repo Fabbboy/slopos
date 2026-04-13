@@ -30,8 +30,8 @@ use crate::timer::NET_TIMER_WHEEL;
 
 /// Maximum number of simultaneous TCP connections.
 ///
-/// Each `Pcb` slot is ~75 KB (32 KB send + 32 KB recv + 11.7 KB OOO),
-/// so this directly controls static memory usage.  64 × 75 KB ≈ 4.8 MB.
+/// Each `Pcb` slot is ~64 KB (32 KB send + 32 KB recv + ~136 B OOO assembler),
+/// so this directly controls static memory usage.  64 × 64 KB ≈ 4.1 MB.
 /// Bump to 128/256 once the table moves to lazy/heap allocation (F.1).
 pub const MAX_CONNECTIONS: usize = 64;
 

@@ -244,4 +244,43 @@ impl<const N: usize> RingBuffer<u8, N> {
 
         to_read
     }
+
+    /// Write `data` at position `head + offset` without advancing head or
+    /// count.  Used by the TCP OOO reassembly path to place out-of-order
+    /// payload directly into the receive ring buffer at its final offset.
+    ///
+    /// Returns the number of bytes written (capped so the write cannot
+    /// extend past the buffer's free space).
+    pub fn write_at_offset(&mut self, offset: usize, data: &[u8]) -> usize {
+        let free = N - self.count;
+        if offset >= free {
+            return 0;
+        }
+        let to_write = data.len().min(free - offset);
+        if to_write == 0 {
+            return 0;
+        }
+
+        let start = Self::wrap(self.head + offset);
+        let first = to_write.min(N - start);
+        self.data[start..start + first].copy_from_slice(&data[..first]);
+
+        let second = to_write - first;
+        if second > 0 {
+            self.data[..second].copy_from_slice(&data[first..first + second]);
+        }
+
+        to_write
+    }
+
+    /// Advance head by `n` bytes and increase count, without writing any
+    /// data.  Used after OOO drain: the bytes are already in the buffer
+    /// (placed earlier by [`write_at_offset`]), so we just need to extend
+    /// the valid region to cover them.
+    pub fn advance_head(&mut self, n: usize) {
+        debug_assert!(n <= N - self.count, "advance_head: would exceed capacity");
+        let advance = n.min(N - self.count);
+        self.head = Self::wrap(self.head + advance);
+        self.count += advance;
+    }
 }

@@ -44,7 +44,7 @@ pub use header::{
 pub use pcb::data::{ClosePhase, DataState};
 pub use pcb::{ObservedSocketState, PcbState, TcpState};
 pub use pcb::{Pcb, SocketId};
-pub use reasm::TcpOooQueue;
+pub use reasm::Assembler;
 pub use segment::{TcpOutSegment, write_tcp_segment};
 pub use seq::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
 pub use table::{ConnId, PCB_TABLE};

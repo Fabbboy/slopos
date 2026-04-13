@@ -522,7 +522,11 @@ impl DataState {
                 // Out-of-order — buffer ahead of rcv_nxt and emit
                 // a duplicate ACK so the peer retransmits the gap.
                 if seq_gt(hdr.seq_num, expected_seq.raw()) {
-                    bufs.ooo.insert(hdr.seq_num, payload);
+                    let offset = hdr.seq_num.wrapping_sub(expected_seq.raw()) as usize;
+                    let wrote_ooo = bufs.recv.buf.write_at_offset(offset, payload);
+                    if wrote_ooo > 0 {
+                        bufs.ooo.insert(hdr.seq_num, wrote_ooo);
+                    }
                 }
                 let window = bufs.recv.window();
                 let mut ack_seg =
@@ -572,10 +576,15 @@ impl DataState {
                     unreachable!()
                 };
                 let rcv_nxt = d.rcv_nxt;
-                let drained = bufs
-                    .ooo
-                    .drain_contiguous(rcv_nxt.raw(), &mut bufs.recv, now_ms);
+                let drained = bufs.ooo.drain_contiguous(rcv_nxt.raw());
                 if drained > 0 {
+                    bufs.recv.buf.advance_head(drained);
+                    bufs.recv.ack_pending = true;
+                    bufs.recv.segments_since_ack = bufs.recv.segments_since_ack.saturating_add(1);
+                    if bufs.recv.segments_since_ack == 1 {
+                        bufs.recv.delayed_ack_deadline_ms =
+                            now_ms.saturating_add(super::super::buffer::DELAYED_ACK_MS);
+                    }
                     accepted_len += drained;
                     let PcbState::Data(data) = &mut pcb.state else {
                         unreachable!()

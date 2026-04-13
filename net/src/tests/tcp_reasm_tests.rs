@@ -1,21 +1,19 @@
-//! Out-of-order reassembly edge-case tests.
+//! Out-of-order reassembly tests for the interval-merging [`Assembler`].
 //!
-//! Exercises `TcpOooQueue::insert` + `drain_contiguous` directly — no
-//! `tcp_input` path, no sockets, no timers.  The queue is a standalone
-//! data structure; this suite nails down its invariants so a later
-//! interval-merging rewrite has a regression oracle to aim at.
+//! Exercises `Assembler::insert`, `drain_contiguous`, `sack_blocks`, and
+//! `RingBuffer::write_at_offset` + `advance_head` — the full OOO receive
+//! path without going through `tcp_input`.
 //!
-//! Covers: single-gap fill, duplicate insertion, full-queue eviction,
-//! partial overlap against `rcv_nxt`, draining until the receive buffer
-//! fills, seq-space wrap-around, and a csprng-backed commutativity fuzz
-//! (inserting N non-overlapping segments in two random orders must yield
-//! identical drain output).
+//! Covers: single OOO segment, multiple non-contiguous ranges, overlapping
+//! inserts, adjacent merge, drain contiguous, SACK block generation,
+//! write_at_offset wrap-around, capacity limits, sequence-space wrap,
+//! recv-buffer-full, and a commutativity fuzz.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::buffer::TcpRecvState;
-use crate::tcp::reasm::TcpOooQueue;
+use crate::tcp::reasm::Assembler;
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -25,12 +23,11 @@ fn fresh_recv() -> TcpRecvState {
     TcpRecvState::new()
 }
 
-fn fresh_queue() -> TcpOooQueue {
-    TcpOooQueue::new()
+fn fresh_asm() -> Assembler {
+    Assembler::new()
 }
 
-/// Drain the receive buffer into a `Vec` so tests can assert on the
-/// reassembled byte stream directly.
+/// Drain the receive buffer into a `Vec`.
 fn drain_to_vec(recv: &mut TcpRecvState) -> alloc::vec::Vec<u8> {
     let mut out = alloc::vec::Vec::with_capacity(recv.available());
     let mut buf = [0u8; 512];
@@ -45,134 +42,246 @@ fn drain_to_vec(recv: &mut TcpRecvState) -> alloc::vec::Vec<u8> {
 }
 
 // -----------------------------------------------------------------------------
-// Basic single-gap fill
+// Single OOO segment
 // -----------------------------------------------------------------------------
 
-/// Insert a segment ahead of `rcv_nxt`, then advance `rcv_nxt` to the
-/// gap; `drain_contiguous` must deliver the buffered bytes.
-pub fn test_reasm_single_gap_fills() -> TestResult {
-    let mut q = fresh_queue();
+/// Write one OOO segment into the ring buffer via write_at_offset, record
+/// the interval in the Assembler, then drain after advancing past the gap.
+pub fn test_reasm_single_ooo_segment() -> TestResult {
+    let mut asm = fresh_asm();
     let mut recv = fresh_recv();
 
-    q.insert(200, b"world");
-    // Nothing to drain yet — the gap at 100..200 is unfilled.
-    assert_eq_test!(
-        q.drain_contiguous(100, &mut recv, 0),
-        0,
-        "no drain with gap"
-    );
-    assert_eq_test!(recv.available(), 0, "nothing written");
+    let rcv_nxt: u32 = 100;
+    let seg_seq: u32 = 200;
+    let payload = b"hello";
+    let offset = seg_seq.wrapping_sub(rcv_nxt) as usize; // 100
 
-    // Simulate the gap being filled via the normal fast path: advance
-    // rcv_nxt to 200 and drain.
-    assert_eq_test!(q.drain_contiguous(200, &mut recv, 0), 5, "drain 5 bytes");
-    assert_test!(q.is_empty(), "queue empty after drain");
+    let wrote = recv.buf.write_at_offset(offset, payload);
+    assert_eq_test!(wrote, 5, "wrote 5 bytes at offset");
+    asm.insert(seg_seq, wrote);
+
+    // Gap not filled yet — drain returns 0.
+    assert_eq_test!(asm.drain_contiguous(rcv_nxt), 0, "gap still open");
+
+    // Simulate gap fill: enqueue 100 bytes of in-order data.
+    let gap_data = [0xAAu8; 100];
+    let gap_wrote = recv.enqueue(&gap_data, 0);
+    assert_eq_test!(gap_wrote, 100, "gap fill wrote");
+    let new_rcv_nxt = rcv_nxt.wrapping_add(gap_wrote as u32); // 200
+
+    // Drain: Assembler has [200, 205), starts at new rcv_nxt.
+    let drained = asm.drain_contiguous(new_rcv_nxt);
+    assert_eq_test!(drained, 5, "drained OOO segment");
+    recv.buf.advance_head(drained);
+    assert_test!(asm.is_empty(), "assembler empty after drain");
+
+    // Read the full stream: 100 gap bytes + "hello".
     let out = drain_to_vec(&mut recv);
-    assert_eq_test!(&out[..], b"world", "payload delivered");
-    pass!()
-}
-
-/// Two non-contiguous segments: filling the first gap only delivers the
-/// first segment; the second stays queued until its own gap closes.
-pub fn test_reasm_non_contiguous_segments() -> TestResult {
-    let mut q = fresh_queue();
-    let mut recv = fresh_recv();
-
-    q.insert(100, b"aaa"); // 100..103
-    q.insert(200, b"bbb"); // 200..203, gap at 103..200
-
-    assert_eq_test!(
-        q.drain_contiguous(100, &mut recv, 0),
-        3,
-        "drain first block only"
-    );
-    assert_test!(!q.is_empty(), "second block remains");
-    assert_eq_test!(&drain_to_vec(&mut recv)[..], b"aaa", "first block content");
-
-    let mut recv2 = fresh_recv();
-    assert_eq_test!(
-        q.drain_contiguous(200, &mut recv2, 0),
-        3,
-        "drain second block"
-    );
-    assert_test!(q.is_empty(), "queue empty after second drain");
-    assert_eq_test!(
-        &drain_to_vec(&mut recv2)[..],
-        b"bbb",
-        "second block content"
-    );
+    assert_eq_test!(out.len(), 105, "total bytes");
+    assert_eq_test!(&out[100..], b"hello", "OOO payload correct");
     pass!()
 }
 
 // -----------------------------------------------------------------------------
-// Duplicates
+// Multiple non-contiguous ranges
 // -----------------------------------------------------------------------------
 
-/// Inserting the exact same `(seq, data)` twice stores one entry.
-pub fn test_reasm_duplicate_insertion_is_noop() -> TestResult {
-    let mut q = fresh_queue();
+/// Two disjoint OOO ranges; filling the first gap delivers only the first
+/// range — the second stays in the assembler.
+pub fn test_reasm_non_contiguous_ranges() -> TestResult {
+    let mut asm = fresh_asm();
     let mut recv = fresh_recv();
 
-    q.insert(100, b"dup");
-    q.insert(100, b"dup");
-    // Drain — should deliver one copy of "dup" and then report empty.
-    assert_eq_test!(q.drain_contiguous(100, &mut recv, 0), 3, "delivered once");
-    assert_test!(q.is_empty(), "one entry only");
-    assert_eq_test!(&drain_to_vec(&mut recv)[..], b"dup", "single copy");
+    // Range A: [100, 103)
+    recv.buf.write_at_offset(100, b"aaa");
+    asm.insert(100, 3);
+    // Range B: [200, 203)
+    recv.buf.write_at_offset(200, b"bbb");
+    asm.insert(200, 3);
+
+    assert_eq_test!(asm.range_count(), 2, "two disjoint ranges");
+
+    // Fill gap to 100: enqueue 100 bytes.
+    recv.enqueue(&[0u8; 100], 0);
+    let drained = asm.drain_contiguous(100);
+    assert_eq_test!(drained, 3, "drained first range");
+    recv.buf.advance_head(drained);
+
+    // Second range still present.
+    assert_eq_test!(asm.range_count(), 1, "one range remains");
+    assert_test!(!asm.is_empty(), "not empty");
+
+    // Verify bytes: 100 gap + "aaa".
+    let out = drain_to_vec(&mut recv);
+    assert_eq_test!(out.len(), 103, "103 bytes total");
+    assert_eq_test!(&out[100..], b"aaa", "first range payload");
     pass!()
 }
 
 // -----------------------------------------------------------------------------
-// Partial overlap with rcv_nxt
+// Overlapping inserts
 // -----------------------------------------------------------------------------
 
-/// Segment's seq is below `rcv_nxt` but extends past it.  Drain should
-/// deliver the portion past `rcv_nxt` only.
-pub fn test_reasm_partial_overlap_with_rcv_nxt() -> TestResult {
-    let mut q = fresh_queue();
-    let mut recv = fresh_recv();
+/// Insert [100,110) then [105,115) — should merge to [100,115).
+pub fn test_reasm_overlapping_merge() -> TestResult {
+    let mut asm = fresh_asm();
 
-    // Entry starts at 95, 10 bytes long → extends to 105.  rcv_nxt is 100.
-    q.insert(95, b"0123456789");
-    let drained = q.drain_contiguous(100, &mut recv, 0);
-    assert_eq_test!(drained, 5, "drained the tail past rcv_nxt");
-    assert_eq_test!(&drain_to_vec(&mut recv)[..], b"56789", "correct tail bytes");
+    asm.insert(100, 10); // [100, 110)
+    asm.insert(105, 10); // [105, 115) — overlaps
+    assert_eq_test!(asm.range_count(), 1, "merged to one range");
+
+    let (blocks, count) = asm.sack_blocks();
+    assert_eq_test!(count, 1, "one SACK block");
+    assert_eq_test!(blocks[0], (100, 115), "merged range [100,115)");
     pass!()
 }
 
 // -----------------------------------------------------------------------------
-// Full-queue eviction
+// Adjacent merge
 // -----------------------------------------------------------------------------
 
-/// The queue has a fixed capacity.  When a new higher-seq entry arrives and
-/// every slot is full, the current policy evicts the **highest-seq** entry
-/// (i.e. keep things closest to the gap).  Pinning that policy here lets a
-/// future rewrite replace it deliberately.
-pub fn test_reasm_full_queue_eviction_keeps_lowest_seq() -> TestResult {
-    let mut q = fresh_queue();
+/// Insert [100,110) then [110,120) — adjacent intervals merge.
+pub fn test_reasm_adjacent_merge() -> TestResult {
+    let mut asm = fresh_asm();
+
+    asm.insert(100, 10);
+    asm.insert(110, 10);
+    assert_eq_test!(asm.range_count(), 1, "adjacent merged");
+
+    let (blocks, _) = asm.sack_blocks();
+    assert_eq_test!(blocks[0], (100, 120), "merged [100,120)");
+    pass!()
+}
+
+// -----------------------------------------------------------------------------
+// Drain contiguous integration
+// -----------------------------------------------------------------------------
+
+/// Full integration: OOO data written into ring buffer, gap filled, drain
+/// advances head, user reads correct byte stream.
+pub fn test_reasm_drain_integration() -> TestResult {
+    let mut asm = fresh_asm();
+    let mut recv = fresh_recv();
+    let rcv_nxt: u32 = 1000;
+
+    // OOO segment at 1050, 30 bytes.
+    let ooo_data = [0xBBu8; 30];
+    let offset = 1050u32.wrapping_sub(rcv_nxt) as usize;
+    recv.buf.write_at_offset(offset, &ooo_data);
+    asm.insert(1050, 30);
+
+    // In-order: fill the 50-byte gap.
+    let gap = [0xAAu8; 50];
+    recv.enqueue(&gap, 0);
+    let new_rcv_nxt = rcv_nxt + 50; // 1050
+
+    let drained = asm.drain_contiguous(new_rcv_nxt);
+    assert_eq_test!(drained, 30, "drained 30 OOO bytes");
+    recv.buf.advance_head(drained);
+
+    let out = drain_to_vec(&mut recv);
+    assert_eq_test!(out.len(), 80, "50 gap + 30 OOO");
+    assert_test!(out[..50].iter().all(|&b| b == 0xAA), "gap bytes correct");
+    assert_test!(out[50..].iter().all(|&b| b == 0xBB), "OOO bytes correct");
+    pass!()
+}
+
+// -----------------------------------------------------------------------------
+// SACK blocks
+// -----------------------------------------------------------------------------
+
+/// Up to 4 SACK blocks, sorted by left edge.
+pub fn test_reasm_sack_blocks() -> TestResult {
+    let mut asm = fresh_asm();
+
+    asm.insert(500, 10);
+    asm.insert(300, 10);
+    asm.insert(100, 10);
+    asm.insert(700, 10);
+    asm.insert(900, 10); // 5th range — only 4 returned as SACK blocks
+
+    let (blocks, count) = asm.sack_blocks();
+    assert_eq_test!(count, 4, "capped at 4 SACK blocks");
+    // Sorted by left edge.
+    assert_eq_test!(blocks[0].0, 100, "first block");
+    assert_eq_test!(blocks[1].0, 300, "second block");
+    assert_eq_test!(blocks[2].0, 500, "third block");
+    assert_eq_test!(blocks[3].0, 700, "fourth block");
+    pass!()
+}
+
+// -----------------------------------------------------------------------------
+// Duplicate insertion
+// -----------------------------------------------------------------------------
+
+/// Inserting the same range twice is a no-op (merges with itself).
+pub fn test_reasm_duplicate_is_noop() -> TestResult {
+    let mut asm = fresh_asm();
+
+    asm.insert(100, 10);
+    asm.insert(100, 10);
+    assert_eq_test!(asm.range_count(), 1, "single range after duplicate");
+
+    let (blocks, _) = asm.sack_blocks();
+    assert_eq_test!(blocks[0], (100, 110), "unchanged");
+    pass!()
+}
+
+// -----------------------------------------------------------------------------
+// write_at_offset wrap-around
+// -----------------------------------------------------------------------------
+
+/// Ring buffer near-full with head near the end of the backing array;
+/// write_at_offset must wrap around correctly.
+pub fn test_reasm_write_at_offset_wrap() -> TestResult {
     let mut recv = fresh_recv();
 
-    // Fill with OOO_MAX_ENTRIES=8 entries at descending seq numbers.  The
-    // existing policy drops the highest when a lower-seq entry arrives
-    // after the queue is full.
-    for i in 0..8 {
-        let seq = 200 + (i as u32) * 16;
-        q.insert(seq, &[b'a' + i as u8; 16]);
-    }
-    // Insert a lower-seq entry: this should kick out the highest-seq one.
-    q.insert(100, b"lowest______1616"); // 16-byte payload
+    // Fill the buffer almost completely, then consume to move tail forward.
+    // This positions head near the end of the backing array.
+    let fill = [0u8; 32000];
+    recv.enqueue(&fill, 0);
+    let mut discard = [0u8; 32000];
+    recv.dequeue(&mut discard);
+    // Now: tail≈32000, head≈32000, count=0, free=32768.
 
-    // Drain from 100: we should get the "lowest" entry, then 200 onwards
-    // minus the evicted top.
-    let drained = q.drain_contiguous(100, &mut recv, 0);
-    // 16 (lowest) + skipped gap + ... don't assert the exact byte count,
-    // just that the lowest entry definitely made it in.
-    let bytes = drain_to_vec(&mut recv);
+    // Write at offset 700 (wraps past end of backing array).
+    let payload = [0xCCu8; 100];
+    let wrote = recv.buf.write_at_offset(700, &payload);
+    assert_eq_test!(wrote, 100, "wrote 100 bytes wrapping around");
+
+    // Fill the gap so we can read the OOO data.
+    let gap = [0xAAu8; 700];
+    recv.enqueue(&gap, 0);
+    recv.buf.advance_head(100);
+
+    let out = drain_to_vec(&mut recv);
+    assert_eq_test!(out.len(), 800, "800 total bytes");
     assert_test!(
-        bytes.starts_with(b"lowest"),
-        "lowest-seq entry preserved after eviction"
+        out[700..].iter().all(|&b| b == 0xCC),
+        "OOO payload correct after wrap"
     );
-    let _ = drained;
+    pass!()
+}
+
+// -----------------------------------------------------------------------------
+// Capacity limit
+// -----------------------------------------------------------------------------
+
+/// write_at_offset returns 0 when offset is beyond free space.
+pub fn test_reasm_write_at_offset_capacity() -> TestResult {
+    let mut recv = fresh_recv();
+
+    // Fill buffer to leave only 100 bytes free.
+    let fill = [0u8; 32668]; // 32768 - 100
+    recv.enqueue(&fill, 0);
+
+    // Offset 100 → exactly at the boundary, no room for data.
+    let wrote = recv.buf.write_at_offset(100, b"x");
+    assert_eq_test!(wrote, 0, "no room at offset=free_space");
+
+    // Offset 50 → 50 bytes available.
+    let wrote = recv.buf.write_at_offset(50, &[0xFFu8; 100]);
+    assert_eq_test!(wrote, 50, "capped at available space");
     pass!()
 }
 
@@ -180,57 +289,81 @@ pub fn test_reasm_full_queue_eviction_keeps_lowest_seq() -> TestResult {
 // Sequence-space wrap
 // -----------------------------------------------------------------------------
 
-/// Two entries that straddle the 32-bit wrap: the "later" entry has a
-/// numerically-smaller seq than the "earlier" one, but wrapping comparison
-/// must still drain them in correct order.
-pub fn test_reasm_wrap_across_seq_space() -> TestResult {
-    let mut q = fresh_queue();
-    let mut recv = fresh_recv();
+/// Assembler intervals near u32::MAX — wrapping-aware comparison must
+/// keep them sorted and merge correctly.
+pub fn test_reasm_seq_wrap() -> TestResult {
+    let mut asm = fresh_asm();
 
-    // rcv_nxt is near the wrap; the buffered segment straddles it.
-    let near_wrap: u32 = 0xFFFF_FFF8;
-    q.insert(near_wrap, b"abcdefgh"); // 8 bytes, ends at 0 (wraps)
-    q.insert(0, b"ijkl"); // starts exactly at wrap
+    let near_wrap: u32 = 0xFFFF_FFF0;
+    asm.insert(near_wrap, 16); // [FFF0, 0000) — wraps
+    asm.insert(0, 16); // [0000, 0010) — adjacent across wrap
 
-    let drained = q.drain_contiguous(near_wrap, &mut recv, 0);
-    assert_eq_test!(drained, 12, "drained both segments across wrap");
-    assert_eq_test!(
-        &drain_to_vec(&mut recv)[..],
-        b"abcdefghijkl",
-        "correct wrap ordering"
-    );
+    assert_eq_test!(asm.range_count(), 1, "merged across wrap");
+
+    let (blocks, count) = asm.sack_blocks();
+    assert_eq_test!(count, 1, "one block");
+    assert_eq_test!(blocks[0].0, near_wrap, "start at near_wrap");
+    assert_eq_test!(blocks[0].1, 16, "end wraps to 16");
     pass!()
 }
 
 // -----------------------------------------------------------------------------
-// Drain stops when recv buffer fills
+// Drain stops at recv buffer capacity
 // -----------------------------------------------------------------------------
 
-/// The drain loop must stop cleanly when the receive buffer can't accept
-/// any more bytes — it should not spin.
-pub fn test_reasm_drain_stops_at_recv_buffer_full() -> TestResult {
-    let mut q = fresh_queue();
+/// When the recv buffer is nearly full, drain cannot advance head past
+/// the buffer's capacity.
+pub fn test_reasm_drain_respects_capacity() -> TestResult {
+    let mut asm = fresh_asm();
     let mut recv = fresh_recv();
 
-    // Fill the recv buffer nearly full first.  Its capacity is
-    // TCP_BUFFER_SIZE = 32768.
-    let big = [7u8; 32_000];
-    let wrote = recv.enqueue(&big, 0);
-    assert_eq_test!(wrote, 32_000, "pre-fill recv buffer");
+    // Fill recv buffer to leave only 50 bytes free.
+    let fill = [0u8; 32718]; // 32768 - 50
+    recv.enqueue(&fill, 0);
 
-    // Now queue an OOO segment right after rcv_nxt's current tail:
-    let seq = big.len() as u32;
-    q.insert(seq, &[9u8; 1000]);
+    let rcv_nxt: u32 = fill.len() as u32;
 
-    // Drain should push *some* bytes (<= free space) and stop.
-    let drained = q.drain_contiguous(seq, &mut recv, 0);
-    assert_test!(drained > 0, "wrote some bytes");
-    assert_test!(drained <= 1000, "bounded by segment length");
+    // Write a 100-byte OOO segment — only 50 bytes fit.
+    let ooo = [0xDDu8; 100];
+    let wrote = recv.buf.write_at_offset(0, &ooo);
+    assert_eq_test!(wrote, 50, "capped at free space");
+    asm.insert(rcv_nxt, wrote);
+
+    // Drain: the assembler tracked 50 bytes.
+    let drained = asm.drain_contiguous(rcv_nxt);
+    assert_eq_test!(drained, 50, "drained what fit");
+    recv.buf.advance_head(drained);
+
+    assert_eq_test!(recv.buf.len(), 32768, "buffer now full");
     pass!()
 }
 
 // -----------------------------------------------------------------------------
-// CSPRNG commutativity
+// Eviction policy
+// -----------------------------------------------------------------------------
+
+/// When the assembler is full (16 ranges) and a lower-seq range arrives,
+/// the highest-seq range is evicted to keep segments near the gap.
+pub fn test_reasm_eviction_keeps_lowest() -> TestResult {
+    let mut asm = fresh_asm();
+
+    // Fill all 16 slots with ranges at seq 200, 216, 232, ...
+    for i in 0..16 {
+        asm.insert(200 + (i as u32) * 16, 8);
+    }
+    assert_eq_test!(asm.range_count(), 16, "full");
+
+    // Insert a lower-seq range — should evict the highest.
+    asm.insert(100, 8);
+    assert_eq_test!(asm.range_count(), 16, "still full after eviction");
+
+    let (blocks, _) = asm.sack_blocks();
+    assert_eq_test!(blocks[0].0, 100, "lowest range preserved");
+    pass!()
+}
+
+// -----------------------------------------------------------------------------
+// Commutativity fuzz
 // -----------------------------------------------------------------------------
 
 fn splitmix32(state: &mut u64) -> u32 {
@@ -241,14 +374,12 @@ fn splitmix32(state: &mut u64) -> u32 {
     (z ^ (z >> 31)) as u32
 }
 
-/// Non-overlapping contiguous fragments must drain identically regardless
-/// of the order in which they were inserted — a basic commutativity check
-/// for the sort/eviction logic.
+/// Insert the same set of non-overlapping ranges in different random orders.
+/// The Assembler (and ring buffer contents) must produce identical results.
 pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
     let mut seed = 0x01234567_89ABCDEFu64;
 
     for _trial in 0..16 {
-        // Generate 6 non-overlapping 32-byte chunks starting at 1000.
         const N: usize = 6;
         const CHUNK: usize = 32;
         const BASE: u32 = 1000;
@@ -256,17 +387,14 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
         for (i, p) in payloads.iter_mut().enumerate() {
             p[0] = b'A' + i as u8;
             p[1] = b'0' + i as u8;
-            // remaining bytes stay zero
         }
 
-        // Two random permutations of {0..N}.
         let mut order_a = [0usize; N];
         let mut order_b = [0usize; N];
         for i in 0..N {
             order_a[i] = i;
             order_b[i] = i;
         }
-        // Fisher–Yates shuffles with the PRNG.
         for i in (1..N).rev() {
             let j = (splitmix32(&mut seed) as usize) % (i + 1);
             order_a.swap(i, j);
@@ -276,23 +404,31 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
             order_b.swap(i, j);
         }
 
-        // Insert in order A, drain into recv_a.
-        let mut qa = fresh_queue();
-        let mut ra = fresh_recv();
+        // Order A: write into ring buffer + assembler.
+        let mut asm_a = fresh_asm();
+        let mut recv_a = fresh_recv();
         for idx in order_a {
-            qa.insert(BASE + (idx as u32) * CHUNK as u32, &payloads[idx]);
+            let seq = BASE + (idx as u32) * CHUNK as u32;
+            let offset = seq.wrapping_sub(BASE) as usize;
+            recv_a.buf.write_at_offset(offset, &payloads[idx]);
+            asm_a.insert(seq, CHUNK);
         }
-        qa.drain_contiguous(BASE, &mut ra, 0);
-        let out_a = drain_to_vec(&mut ra);
+        let drained_a = asm_a.drain_contiguous(BASE);
+        recv_a.buf.advance_head(drained_a);
+        let out_a = drain_to_vec(&mut recv_a);
 
-        // Insert in order B, drain into recv_b.
-        let mut qb = fresh_queue();
-        let mut rb = fresh_recv();
+        // Order B.
+        let mut asm_b = fresh_asm();
+        let mut recv_b = fresh_recv();
         for idx in order_b {
-            qb.insert(BASE + (idx as u32) * CHUNK as u32, &payloads[idx]);
+            let seq = BASE + (idx as u32) * CHUNK as u32;
+            let offset = seq.wrapping_sub(BASE) as usize;
+            recv_b.buf.write_at_offset(offset, &payloads[idx]);
+            asm_b.insert(seq, CHUNK);
         }
-        qb.drain_contiguous(BASE, &mut rb, 0);
-        let out_b = drain_to_vec(&mut rb);
+        let drained_b = asm_b.drain_contiguous(BASE);
+        recv_b.buf.advance_head(drained_b);
+        let out_b = drain_to_vec(&mut recv_b);
 
         if out_a != out_b {
             return fail!("drain output differs for permuted inserts");
@@ -308,13 +444,18 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
 slopos_testing::define_test_suite!(
     tcp_reasm,
     [
-        test_reasm_single_gap_fills,
-        test_reasm_non_contiguous_segments,
-        test_reasm_duplicate_insertion_is_noop,
-        test_reasm_partial_overlap_with_rcv_nxt,
-        test_reasm_full_queue_eviction_keeps_lowest_seq,
-        test_reasm_wrap_across_seq_space,
-        test_reasm_drain_stops_at_recv_buffer_full,
+        test_reasm_single_ooo_segment,
+        test_reasm_non_contiguous_ranges,
+        test_reasm_overlapping_merge,
+        test_reasm_adjacent_merge,
+        test_reasm_drain_integration,
+        test_reasm_sack_blocks,
+        test_reasm_duplicate_is_noop,
+        test_reasm_write_at_offset_wrap,
+        test_reasm_write_at_offset_capacity,
+        test_reasm_seq_wrap,
+        test_reasm_drain_respects_capacity,
+        test_reasm_eviction_keeps_lowest,
         test_reasm_insert_order_commutative_fuzz,
     ]
 );
