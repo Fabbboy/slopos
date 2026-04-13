@@ -87,6 +87,10 @@ pub fn establish_connection() -> EstablishedConn {
     };
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &syn_ack, &[], &[], 0);
 
+    // Disable Nagle so tests that don't explicitly test it are not
+    // affected by sub-MSS deferral.
+    tcp::set_nodelay(id, true);
+
     EstablishedConn {
         id,
         local_port,

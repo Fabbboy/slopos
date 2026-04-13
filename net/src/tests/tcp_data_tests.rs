@@ -1211,6 +1211,65 @@ pub fn test_so_rcvbuf_affects_window() -> TestResult {
 }
 
 // =============================================================================
+// Nagle / TCP_NODELAY (D.4)
+// =============================================================================
+
+pub fn test_nagle_defers_sub_mss_when_inflight() -> TestResult {
+    reset();
+    let (id, _, _) = establish_connection();
+    // Re-enable Nagle (test helper disables it).
+    tcp::set_nodelay(id, false);
+    // Send MSS bytes to create inflight data.
+    let _ = tcp::send(id, &[0xAA; DEFAULT_MSS as usize]).unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    // inflight = MSS now. Enqueue 10 more bytes (sub-MSS).
+    let _ = tcp::send(id, &[0xBB; 10]).unwrap();
+    // Nagle: sub-MSS with inflight → deferred.
+    assert_test!(
+        tcp::poll_transmit(id, &mut buf, 1).is_none(),
+        "Nagle defers sub-MSS when inflight"
+    );
+    pass!()
+}
+
+pub fn test_nagle_sends_when_nothing_inflight() -> TestResult {
+    reset();
+    let (id, _, _) = establish_connection();
+    // Nothing inflight. Send 10 bytes (sub-MSS).
+    let _ = tcp::send(id, &[0xCC; 10]).unwrap();
+    let mut buf = [0u8; 1500];
+    let result = tcp::poll_transmit(id, &mut buf, 0);
+    assert_test!(result.is_some(), "sends sub-MSS when nothing inflight");
+    let (_, n) = result.unwrap();
+    assert_eq_test!(n, 10, "full 10 bytes sent");
+    pass!()
+}
+
+pub fn test_tcp_nodelay_disables_nagle() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    // Verify the toggle: enable Nagle, check defer, disable, check send.
+    tcp::set_nodelay(c.id, false);
+    let _ = tcp::send(c.id, b"x").unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap(); // sends 1 byte
+    let _ = tcp::send(c.id, b"y").unwrap(); // sub-MSS with inflight
+    // Nagle ON: deferred.
+    assert_test!(
+        tcp::poll_transmit(c.id, &mut buf, 1).is_none(),
+        "nagle defers"
+    );
+    // Toggle to NODELAY: sends.
+    tcp::set_nodelay(c.id, true);
+    assert_test!(
+        tcp::poll_transmit(c.id, &mut buf, 2).is_some(),
+        "nodelay sends"
+    );
+    pass!()
+}
+
+// =============================================================================
 // Flow Control
 // =============================================================================
 
@@ -1477,6 +1536,9 @@ slopos_testing::define_test_suite!(
         test_sack_blocks_from_ooo_queue,
         test_so_sndbuf_caps_send_space,
         test_so_rcvbuf_affects_window,
+        test_nagle_defers_sub_mss_when_inflight,
+        test_nagle_sends_when_nothing_inflight,
+        test_tcp_nodelay_disables_nagle,
         test_tcp_respects_peer_window,
         test_tcp_zero_window_blocks_send,
         test_tcp_zero_window_probe,

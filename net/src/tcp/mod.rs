@@ -576,6 +576,16 @@ pub fn set_rcvbuf(id: ConnId, bytes: usize) {
     table.bufs_mut(id).recv.effective_capacity = capped;
 }
 
+/// Set or clear TCP_NODELAY (disables/enables Nagle algorithm).
+pub fn set_nodelay(id: ConnId, nodelay: bool) {
+    let mut table = PCB_TABLE.lock();
+    if let Some(pcb) = table.get_mut(id) {
+        if let PcbState::Data(d) = &mut pcb.state {
+            d.nagle_enabled = !nodelay;
+        }
+    }
+}
+
 // =============================================================================
 // Data path
 // =============================================================================
@@ -655,6 +665,11 @@ pub fn poll_transmit(
     let mut max_send = core::cmp::min(unsent, peer_mss);
     max_send = core::cmp::min(max_send, effective_wnd);
     max_send = core::cmp::min(max_send, payload_buf.len());
+
+    // Nagle (RFC 896): defer sub-MSS segments when data is in flight.
+    if d.nagle_enabled && max_send < peer_mss && inflight > 0 {
+        return None;
+    }
 
     if max_send == 0 {
         return None;

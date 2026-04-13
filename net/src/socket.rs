@@ -2556,6 +2556,11 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 }
                 let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
                 sock.options.tcp_nodelay = v != 0;
+                if let SocketInner::Tcp(tcp_inner) = &sock.inner {
+                    if let Some(conn_id) = tcp_inner.conn_id {
+                        tcp::set_nodelay(conn_id, v != 0);
+                    }
+                }
                 0
             }
             _ => errno_i32(ERRNO_EINVAL),
