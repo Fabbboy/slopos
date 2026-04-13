@@ -177,31 +177,23 @@ pub fn input(
         }
     }
 
-    // Schedule keepalive timer for newly-established connections
-    // (only if the owning socket has keepalive enabled).
+    // Schedule keepalive timer for newly-established connections.
     if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
         if let Some(pcb) = table.get_mut(id) {
             let keepalive_enabled = pcb
                 .socket_id
                 .map(|sid| crate::socket::socket_keepalive_enabled_by_index(sid.0 as usize))
                 .unwrap_or(false);
-            if keepalive_enabled {
-                if let PcbState::Data(d) = &mut pcb.state {
-                    if d.keepalive_token.is_none() {
-                        let token = NET_TIMER_WHEEL.schedule(
-                            TCP_KEEPALIVE_IDLE_TICKS,
-                            TimerKind::TcpKeepalive,
-                            id.0,
-                        );
-                        d.keepalive_token = Some(token);
-                    }
+            if let PcbState::Data(d) = &mut pcb.state {
+                if let Some(delay) = d.schedule_initial_keepalive(keepalive_enabled) {
+                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.0);
+                    d.keepalive_token = Some(token);
                 }
             }
         }
     }
 
-    // Reset keepalive timer on any data activity — only if keepalive
-    // was already active (has a token).  Don't create one from scratch.
+    // Reset keepalive timer on data activity.
     if !actions.release
         && actions
             .notify
@@ -209,17 +201,10 @@ pub fn input(
     {
         if let Some(pcb) = table.get_mut(id) {
             if let PcbState::Data(d) = &mut pcb.state {
-                if d.keepalive_token.is_some() {
-                    if let Some(token) = d.keepalive_token.take() {
-                        NET_TIMER_WHEEL.cancel(token);
-                    }
-                    let token = NET_TIMER_WHEEL.schedule(
-                        TCP_KEEPALIVE_IDLE_TICKS,
-                        TimerKind::TcpKeepalive,
-                        id.0,
-                    );
+                if let Some((old_token, delay)) = d.reset_keepalive_on_activity() {
+                    NET_TIMER_WHEEL.cancel(old_token);
+                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.0);
                     d.keepalive_token = Some(token);
-                    d.keepalive_probes_sent = 0;
                 }
             }
         }
@@ -868,13 +853,10 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
     let mut table = PCB_TABLE.lock();
 
     for (id, pcb, bufs) in table.iter_mut_with_bufs() {
-        if bufs.recv.should_ack_now(now_ms) {
-            let PcbState::Data(d) = &pcb.state else {
-                continue;
-            };
-            let window = bufs.recv.window();
-            let seg = SegmentBuilder::ack(pcb.tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window);
-            bufs.recv.ack_sent();
+        let PcbState::Data(d) = &pcb.state else {
+            continue;
+        };
+        if let Some(seg) = d.check_delayed_ack(pcb.tuple, bufs, now_ms) {
             return Some((id, seg));
         }
     }
@@ -886,28 +868,10 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
 pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
     let table = PCB_TABLE.lock();
     let pcb = table.get(id)?;
-
     let PcbState::Data(d) = &pcb.state else {
         return None;
     };
-    let bufs = table.bufs(id);
-    if d.snd_wnd != 0 || bufs.send.buffered_len() == 0 {
-        return None;
-    }
-
-    let mut byte = [0u8; 1];
-    let peeked = bufs.send.peek_unsent(&mut byte);
-    if peeked == 0 {
-        return None;
-    }
-
-    let window = bufs.recv.window();
-    Some(SegmentBuilder::data_push(
-        pcb.tuple,
-        d.snd_nxt.raw(),
-        d.rcv_nxt.raw(),
-        window,
-    ))
+    d.check_zero_window_probe(pcb.tuple, table.bufs(id))
 }
 
 /// Release all connections (for testing).

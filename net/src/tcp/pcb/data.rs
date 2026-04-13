@@ -605,6 +605,78 @@ impl DataState {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Keepalive / delayed-ACK / zero-window (D.5 extracted methods)
+    // -------------------------------------------------------------------------
+
+    /// If keepalive is enabled and no timer is active, return the idle
+    /// tick count to schedule.  Caller is responsible for calling
+    /// `NET_TIMER_WHEEL.schedule()` with this value.
+    pub fn schedule_initial_keepalive(&mut self, keepalive_enabled: bool) -> Option<u64> {
+        if keepalive_enabled && self.keepalive_token.is_none() {
+            Some(super::super::TCP_KEEPALIVE_IDLE_TICKS)
+        } else {
+            None
+        }
+    }
+
+    /// Reset the keepalive timer on data activity.  Returns the old
+    /// token to cancel and the idle tick count to reschedule, or `None`
+    /// if keepalive was not active.
+    pub fn reset_keepalive_on_activity(&mut self) -> Option<(TimerToken, u64)> {
+        if let Some(token) = self.keepalive_token.take() {
+            self.keepalive_probes_sent = 0;
+            Some((token, super::super::TCP_KEEPALIVE_IDLE_TICKS))
+        } else {
+            None
+        }
+    }
+
+    /// Check if a delayed ACK should fire.  Returns the ACK segment
+    /// if so, and marks the ACK as sent on the receive buffer.
+    pub fn check_delayed_ack(
+        &self,
+        tuple: super::super::tuple::TcpTuple,
+        bufs: &mut TcpBufferPair,
+        now_ms: u64,
+    ) -> Option<super::super::segment::TcpOutSegment> {
+        if bufs.recv.should_ack_now(now_ms) {
+            let window = bufs.recv.window();
+            let seg = SegmentBuilder::ack(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
+            bufs.recv.ack_sent();
+            Some(seg)
+        } else {
+            None
+        }
+    }
+
+    /// Generate a zero-window probe if `snd_wnd == 0` and there is
+    /// buffered data to send.
+    pub fn check_zero_window_probe(
+        &self,
+        tuple: super::super::tuple::TcpTuple,
+        bufs: &super::super::buffer::TcpBufferPair,
+    ) -> Option<super::super::segment::TcpOutSegment> {
+        if self.snd_wnd != 0 || bufs.send.buffered_len() == 0 {
+            return None;
+        }
+        let mut byte = [0u8; 1];
+        if bufs.send.peek_unsent(&mut byte) == 0 {
+            return None;
+        }
+        let window = bufs.recv.window();
+        Some(SegmentBuilder::data_push(
+            tuple,
+            self.snd_nxt.raw(),
+            self.rcv_nxt.raw(),
+            window,
+        ))
+    }
+
+    // -------------------------------------------------------------------------
+    // Invariants
+    // -------------------------------------------------------------------------
+
     #[cfg(debug_assertions)]
     pub(super) fn debug_assert_invariants(&self, _pcb: &Pcb) {
         debug_assert!(
