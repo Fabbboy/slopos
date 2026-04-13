@@ -14,6 +14,7 @@
 //! useful to do with data or other flags.
 
 use super::super::actions::{Actions, SocketNotify};
+use super::super::challenge_ack;
 use super::super::header::TcpHeader;
 use super::super::segment::SegmentBuilder;
 use super::super::seq::SeqNum;
@@ -58,11 +59,21 @@ impl TimeWaitState {
             unreachable!("TimeWaitState::on_segment called with non-TimeWait state");
         };
 
-        // RST → immediate release.
+        // RST — RFC 5961: validate sequence against frozen window.
+        // In TIME_WAIT, any in-window RST releases the slot early.
+        // No challenge ACK — the connection is already closing.
         if hdr.is_rst() {
-            actions.release = true;
-            actions.notify |= SocketNotify::RESET_RECEIVED;
-            return actions;
+            let effective_wnd = s.last_rcv_wnd as u32;
+            match challenge_ack::classify_rst(hdr.seq_num, s.last_rcv_nxt.raw(), effective_wnd) {
+                challenge_ack::RstAction::Accept | challenge_ack::RstAction::ChallengeAck => {
+                    actions.release = true;
+                    actions.notify |= SocketNotify::RESET_RECEIVED;
+                    return actions;
+                }
+                challenge_ack::RstAction::Drop => {
+                    return actions;
+                }
+            }
         }
 
         // Retransmitted FIN → re-ACK with the frozen-in-amber sequence

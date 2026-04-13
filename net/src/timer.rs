@@ -77,6 +77,8 @@ pub enum TimerKind {
     TcpTimeWait,
     /// TCP keepalive probe.
     TcpKeepalive,
+    /// TCP FIN_WAIT_2 timeout — releases stale half-closed connections.
+    TcpFinWait2,
     /// IP reassembly timeout for a fragment group.
     ReassemblyTimeout,
 }
@@ -484,6 +486,10 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             if let Some(probe_seg) = super::tcp::on_keepalive(timer.key) {
                 let _ = super::socket::socket_send_tcp_segment(&probe_seg, &[]);
             }
+        }
+        TimerKind::TcpFinWait2 => {
+            klog_debug!("net_timer: TCP FIN_WAIT_2 timeout, key={}", timer.key);
+            super::tcp::on_fin_wait2_timeout(timer.key);
         }
         TimerKind::ReassemblyTimeout => {
             klog_debug!("net_timer: reassembly timeout fired, key={}", timer.key);

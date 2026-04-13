@@ -1398,9 +1398,9 @@ pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
 pub fn test_tcp_ephemeral_ports_unique() -> TestResult {
     reset();
     let table = tcp::table::PCB_TABLE.lock();
-    let p1 = table.alloc_ephemeral_port();
-    let p2 = table.alloc_ephemeral_port();
-    let p3 = table.alloc_ephemeral_port();
+    let p1 = table.alloc_ephemeral_port().unwrap();
+    let p2 = table.alloc_ephemeral_port().unwrap();
+    let p3 = table.alloc_ephemeral_port().unwrap();
     drop(table);
     assert_test!(p1 >= 49152, "p1 in range");
     assert_test!(p2 >= 49152, "p2 in range");

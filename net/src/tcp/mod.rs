@@ -10,6 +10,7 @@
 
 pub mod actions;
 pub mod buffer;
+pub mod challenge_ack;
 pub mod checksum;
 pub mod clock;
 pub mod cong;
@@ -69,6 +70,9 @@ pub const TIME_WAIT_MS: u64 = 60_000;
 
 /// Maximum retransmission attempts before giving up.
 pub const MAX_RETRANSMITS: u8 = 8;
+
+/// FIN_WAIT_2 timeout in milliseconds (60 s, matches Linux `tcp_fin_timeout`).
+pub const FIN_WAIT2_TIMEOUT_MS: u64 = 60_000;
 
 const TICKS_PER_SEC: u64 = 100;
 const TCP_KEEPALIVE_IDLE_TICKS: u64 = 7_200 * TICKS_PER_SEC;
@@ -166,6 +170,11 @@ pub fn input(
                                     d.keepalive_token = Some(token);
                                 }
                             }
+                            TimerKind::TcpFinWait2 => {
+                                if let PcbState::Data(d) = &mut pcb.state {
+                                    d.fin_wait2_token = Some(token);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -240,7 +249,7 @@ pub fn connect(
     remote_port: u16,
 ) -> Result<(ConnId, TcpOutSegment), TcpError> {
     let mut table = PCB_TABLE.lock();
-    let local_port = table.alloc_ephemeral_port();
+    let local_port = table.alloc_ephemeral_port().ok_or(TcpError::AddrInUse)?;
     let tuple = TcpTuple {
         local_ip,
         local_port,
@@ -805,6 +814,23 @@ pub fn on_time_wait_expire(conn_id: u32) {
     }
 }
 
+/// Handle a FIN_WAIT_2 timer expiry.
+pub fn on_fin_wait2_timeout(conn_id: u32) {
+    let mut table = PCB_TABLE.lock();
+    let id = ConnId(conn_id);
+
+    let Some(pcb) = table.get(id) else {
+        return;
+    };
+
+    if let PcbState::Data(d) = &pcb.state {
+        if d.close_phase == ClosePhase::FinWait2 {
+            klog_debug!("tcp: FIN_WAIT_2 timeout id={}", conn_id);
+            table.release(id);
+        }
+    }
+}
+
 // =============================================================================
 // Test-only helpers
 // =============================================================================
@@ -887,4 +913,6 @@ pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
 pub fn reset_all() {
     PCB_TABLE.lock().clear();
     isn::reset_for_tests();
+    #[cfg(feature = "itests")]
+    challenge_ack::reset_for_tests();
 }

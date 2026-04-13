@@ -29,6 +29,7 @@ pub mod tcp_pcb_syn_sent_tests;
 pub mod tcp_pcb_time_wait_tests;
 pub mod tcp_reasm_tests;
 pub mod tcp_retx_tests;
+pub mod tcp_rst_validation_tests;
 pub mod tcp_rtt_tests;
 pub mod tcp_seq_tests;
 pub mod tcp_socket_tests;

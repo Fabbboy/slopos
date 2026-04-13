@@ -84,7 +84,16 @@ fn data_ref(pcb: &Pcb) -> &DataState {
 pub fn test_data_rst_releases_and_notifies() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new();
-    let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_RST, 0, 0), &[], &[], 0);
+    // RFC 5961: RST must have seq == rcv_nxt to be accepted.
+    let rcv_nxt = PEER_IRS + 1;
+    let actions = DataState::on_segment(
+        &mut pcb,
+        &mut bufs,
+        &hdr(TCP_FLAG_RST, rcv_nxt, 0),
+        &[],
+        &[],
+        0,
+    );
     assert_test!(actions.release, "release flag set");
     assert_test!(
         actions.notify.contains(SocketNotify::RESET_RECEIVED),

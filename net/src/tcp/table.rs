@@ -207,15 +207,21 @@ impl PcbTable {
     }
 
     /// Allocate the next ephemeral port from the 49152–65535 range
-    /// (RFC 6335).  Wraps on overflow back to 49152.
-    pub fn alloc_ephemeral_port(&self) -> u16 {
-        loop {
+    /// (RFC 6335).  Skips ports already in use and wraps on overflow.
+    /// Returns `None` if the entire range is exhausted.
+    pub fn alloc_ephemeral_port(&self) -> Option<u16> {
+        for _ in 0..16384u32 {
             let port = self.next_ephemeral_port.fetch_add(1, Ordering::Relaxed);
-            if port >= 49152 {
-                return port;
+            if port < 49152 {
+                // Wrapped past u16::MAX or below range — reset.
+                self.next_ephemeral_port.store(49152, Ordering::Relaxed);
+                continue;
             }
-            self.next_ephemeral_port.store(49152, Ordering::Relaxed);
+            if !self.port_in_use([0; 4], port) {
+                return Some(port);
+            }
         }
+        None
     }
 
     /// Closure-based read access to a PCB.  Acquires no locks itself —
@@ -290,6 +296,9 @@ impl PcbTable {
                     NET_TIMER_WHEEL.cancel(token);
                 }
                 if let Some(token) = d.keepalive_token {
+                    NET_TIMER_WHEEL.cancel(token);
+                }
+                if let Some(token) = d.fin_wait2_token {
                     NET_TIMER_WHEEL.cancel(token);
                 }
             }

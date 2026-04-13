@@ -28,6 +28,7 @@ use core::mem;
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::buffer::TcpBufferPair;
+use super::super::challenge_ack;
 use super::super::cong::{CcAlgo, CongestionControl};
 use super::super::header::{DEFAULT_MSS, TcpHeader};
 use super::super::retx::RetxQueue;
@@ -97,6 +98,9 @@ pub struct DataState {
     pub keepalive_probes_sent: u8,
     pub last_activity_tick: u64,
 
+    // -------- FIN_WAIT_2 timeout --------
+    pub fin_wait2_token: Option<TimerToken>,
+
     // -------- SACK scoreboard (RFC 2018) --------
     /// SACK blocks last received from the peer (left_edge, right_edge).
     pub sack_scoreboard: [(u32, u32); 4],
@@ -145,6 +149,7 @@ impl DataState {
             keepalive_token: None,
             keepalive_probes_sent: 0,
             last_activity_tick: 0,
+            fin_wait2_token: None,
             sack_scoreboard: [(0, 0); 4],
             sack_scoreboard_count: 0,
             reset_received: false,
@@ -186,9 +191,33 @@ impl DataState {
         let mut actions = Actions::new();
         let tuple = pcb.tuple;
 
-        // Fast-paths for RST and unexpected SYN.
+        // Fast-paths for RST (RFC 5961) and unexpected SYN.
         if hdr.is_rst() {
-            return Self::on_rst(pcb, actions);
+            let PcbState::Data(data) = &pcb.state else {
+                unreachable!()
+            };
+            let effective_wnd = if data.wscale_enabled {
+                (data.rcv_wnd as u32) << data.rcv_wscale
+            } else {
+                data.rcv_wnd as u32
+            };
+            let rcv_nxt = data.rcv_nxt.raw();
+            let snd_nxt = data.snd_nxt.raw();
+            let rcv_wnd = data.rcv_wnd;
+            match challenge_ack::classify_rst(hdr.seq_num, rcv_nxt, effective_wnd) {
+                challenge_ack::RstAction::Accept => {
+                    return Self::on_rst(pcb, actions);
+                }
+                challenge_ack::RstAction::ChallengeAck => {
+                    if challenge_ack::try_challenge_ack(now_ms) {
+                        actions.push_segment(SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd));
+                    }
+                    return actions;
+                }
+                challenge_ack::RstAction::Drop => {
+                    return actions;
+                }
+            }
         }
         if hdr.is_syn() {
             return Self::on_unexpected_syn(pcb, hdr, actions);
@@ -496,6 +525,14 @@ impl DataState {
                             // Simultaneous close: handled below.
                         } else {
                             data.close_phase = ClosePhase::FinWait2;
+                            // Schedule FIN_WAIT_2 timeout to release
+                            // stale half-closed connections.
+                            let delay_ticks = (super::super::FIN_WAIT2_TIMEOUT_MS / 10).max(1);
+                            actions.push_timer(TimerOp::Schedule {
+                                kind: TimerKind::TcpFinWait2,
+                                key: 0,
+                                delay_ticks,
+                            });
                         }
                     }
                 }
@@ -555,6 +592,10 @@ impl DataState {
                     ClosePhase::Closing
                 }
                 ClosePhase::FinWait2 => {
+                    // Cancel FIN_WAIT_2 timeout — the peer's FIN arrived.
+                    if let Some(token) = data.fin_wait2_token.take() {
+                        actions.push_timer(TimerOp::Cancel { token });
+                    }
                     data.close_phase = ClosePhase::Closing;
                     actions.push_segment(SegmentBuilder::ack(
                         tuple,

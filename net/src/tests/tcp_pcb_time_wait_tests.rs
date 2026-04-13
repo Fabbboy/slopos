@@ -47,10 +47,11 @@ fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {
     }
 }
 
-/// RST releases the PCB.
+/// RST releases the PCB (RFC 5961: must be in window).
 pub fn test_time_wait_rst_releases() -> TestResult {
     let mut pcb = make_pcb();
-    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, 0, 0), 2000);
+    // last_rcv_nxt = LAST_RCV_NXT; RST must be in-window to be accepted.
+    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, LAST_RCV_NXT, 0), 2000);
     assert_test!(actions.release, "release");
     assert_test!(
         actions.notify.contains(SocketNotify::RESET_RECEIVED),

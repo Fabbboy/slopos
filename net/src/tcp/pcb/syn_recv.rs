@@ -15,6 +15,7 @@
 use core::mem;
 
 use super::super::actions::{Actions, SocketNotify};
+use super::super::challenge_ack;
 use super::super::header::{DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TcpHeader};
 use super::super::segment::SegmentBuilder;
 use super::super::seq::{SeqNum, seq_gt, seq_lt};
@@ -72,11 +73,21 @@ impl SynRecvState {
             unreachable!("SynRecvState::on_segment called with non-SynRecv state");
         };
 
-        // RST → release.
+        // RST — RFC 5961: validate sequence against receive window.
+        // In SYN_RECEIVED, any in-window RST tears down the half-open
+        // connection (no challenge ACK — the connection isn't established).
         if hdr.is_rst() {
-            actions.release = true;
-            actions.notify |= SocketNotify::RESET_RECEIVED;
-            return actions;
+            let effective_wnd = s.rcv_wnd as u32;
+            match challenge_ack::classify_rst(hdr.seq_num, s.rcv_nxt.raw(), effective_wnd) {
+                challenge_ack::RstAction::Accept | challenge_ack::RstAction::ChallengeAck => {
+                    actions.release = true;
+                    actions.notify |= SocketNotify::RESET_RECEIVED;
+                    return actions;
+                }
+                challenge_ack::RstAction::Drop => {
+                    return actions;
+                }
+            }
         }
 
         // Must have ACK.

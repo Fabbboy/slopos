@@ -89,10 +89,11 @@ pub fn test_syn_recv_bad_high_ack_triggers_rst() -> TestResult {
     pass!()
 }
 
-/// RST releases the PCB and sets RESET_RECEIVED.
+/// RST releases the PCB and sets RESET_RECEIVED (RFC 5961: must be in window).
 pub fn test_syn_recv_rst_releases_pcb() -> TestResult {
     let mut pcb = make_pcb();
-    let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, 0, 0), 0);
+    // rcv_nxt = PEER_IRS + 1 after handshake; RST must be in-window.
+    let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, PEER_IRS + 1, 0), 0);
     assert_test!(actions.release, "release");
     assert_test!(
         actions.notify.contains(SocketNotify::RESET_RECEIVED),
