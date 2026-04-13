@@ -334,9 +334,11 @@ pub fn test_send_retransmit_timeout() -> TestResult {
     let mut payload = [0u8; 8];
     let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
-    assert_eq_test!(tcp::retransmit_check(1000), Some(id), "inflight reset");
+    assert_eq_test!(tcp::retransmit_check(1000), Some(id), "RTO fired");
+    // After RTO, entries are marked Lost. poll_transmit selectively
+    // retransmits them.
     let (_, n) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
-    assert_eq_test!(n, 4, "retransmit flag set");
+    assert_eq_test!(n, 4, "retransmit of Lost segment");
     assert_test!(&payload[..4] == b"abcd", "retransmit payload");
     pass!()
 }
@@ -790,7 +792,7 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
 }
 
 // =============================================================================
-// RetxQueue wiring + cwnd gating + fast retransmit (D.1)
+// SendMap wiring + cwnd gating + SACK-driven retransmit (D.1)
 // =============================================================================
 
 pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
@@ -800,9 +802,9 @@ pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
     let mut buf = [0u8; 1500];
     let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap();
 
-    let (inflight, entries) = with_data_state!(c.id, |d| (d.retx.inflight_bytes(), d.retx.len()));
-    assert_eq_test!(inflight, 100, "retx tracks 100 inflight bytes");
-    assert_eq_test!(entries, 1, "one retx entry");
+    let (total, entries) = with_data_state!(c.id, |d| (d.sendmap.total_bytes(), d.sendmap.len()));
+    assert_eq_test!(total, 100, "sendmap tracks 100 bytes");
+    assert_eq_test!(entries, 1, "one sendmap entry");
     pass!()
 }
 
@@ -814,19 +816,32 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
     let mut buf = [0u8; 1500];
     let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
 
-    // Trigger RTO → cwnd shrinks to MSS (1460).
+    // Trigger RTO → cwnd shrinks to MSS (1460), entry marked Lost.
     let _ = tcp::retransmit_check(1000);
+
+    // First poll: retransmits the Lost 1-byte entry.
+    let (_, n0) = tcp::poll_transmit(id, &mut buf, 1001).unwrap();
+    assert_eq_test!(n0, 1, "retransmit of Lost 1-byte entry");
 
     // Fill the buffer well past cwnd.
     let _ = tcp::send(id, &[0x42; 4380]).unwrap();
 
-    // First poll: sends MSS bytes (limited by peer_mss and cwnd).
-    let (_, n1) = tcp::poll_transmit(id, &mut buf, 1001).unwrap();
-    assert_eq_test!(n1, DEFAULT_MSS as usize, "first segment capped at MSS");
+    // Second poll: pipe=1 (retransmitted entry), cwnd=1460, effective=1459.
+    // Nagle blocks: 1459 < MSS and pipe > 0.  Disable Nagle.
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.nagle_enabled = false;
+            }
+        }
+    }
+    let (_, n1) = tcp::poll_transmit(id, &mut buf, 1002).unwrap();
+    assert_eq_test!(n1, 1459, "second segment limited by cwnd - pipe");
 
-    // Second poll: cwnd exhausted (inflight = MSS = cwnd). Returns None.
+    // Third poll: cwnd exhausted (pipe = 1 + 1459 = 1460 = cwnd).
     assert_test!(
-        tcp::poll_transmit(id, &mut buf, 1002).is_none(),
+        tcp::poll_transmit(id, &mut buf, 1003).is_none(),
         "blocked by cwnd"
     );
     pass!()
@@ -836,32 +851,71 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
+    // Enable SACK for this connection.
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.sack_permitted = true;
+            }
+        }
+    }
 
-    // Send MSS bytes and transmit.
-    let _ = tcp::send(id, &[0xBB; DEFAULT_MSS as usize]).unwrap();
+    // Send 4 MSS-sized segments.
+    let _ = tcp::send(id, &[0xBB; 4 * DEFAULT_MSS as usize]).unwrap();
     let mut buf = [0u8; 1500];
-    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    let mut segs = [(0u32, 0u32); 4];
+    for i in 0..4 {
+        let (seg, n) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+        segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
+    }
 
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let snd_nxt_before = with_data_state!(id, |d| d.snd_nxt.raw());
     assert_test!(snd_nxt_before > snd_una, "data in flight");
 
-    // Inject 3 duplicate ACKs (ack = snd_una, not advancing).
+    // Inject dup ACK with SACK blocks covering segments 2, 3, 4
+    // (skipping segment 1). This creates 3 SACKed entries past seg 1
+    // → seg 1 is declared Lost.
     let peer_seq = c.peer_iss.wrapping_add(1);
-    for _ in 0..3 {
-        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
-    }
+    let mut opts = [0u8; 28]; // NOP NOP SACK(kind=5, len=26, 3 blocks)
+    opts[0] = 1; // NOP
+    opts[1] = 1; // NOP
+    opts[2] = 5; // SACK kind
+    opts[3] = 26; // len = 2 + 3*8
+    opts[4..8].copy_from_slice(&segs[1].0.to_be_bytes());
+    opts[8..12].copy_from_slice(&segs[1].1.to_be_bytes());
+    opts[12..16].copy_from_slice(&segs[2].0.to_be_bytes());
+    opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
+    opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
+    opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
+    let _ = tcp_common::inject_with_options(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        peer_seq,
+        snd_una,
+        TCP_FLAG_ACK,
+        &opts,
+        &[],
+    );
 
-    // After 3rd dup ACK: fast retransmit rewound snd_nxt to snd_una.
+    // snd_nxt does NOT rewind (no go-back-N).
     let snd_nxt_after = with_data_state!(id, |d| d.snd_nxt.raw());
-    assert_eq_test!(snd_nxt_after, snd_una, "snd_nxt rewound to snd_una");
+    assert_eq_test!(snd_nxt_after, snd_nxt_before, "snd_nxt not rewound");
 
     let in_recovery = with_data_state!(id, |d| d.cc.in_recovery());
     assert_test!(in_recovery, "entered fast recovery");
 
-    // poll_transmit re-sends the data from snd_una.
+    let has_lost = with_data_state!(id, |d| d.sendmap.has_lost());
+    assert_test!(has_lost, "segment marked Lost");
+
+    // poll_transmit selectively retransmits the Lost segment.
     let resent = tcp::poll_transmit(id, &mut buf, 1);
-    assert_test!(resent.is_some(), "retransmit after fast retransmit");
+    assert_test!(resent.is_some(), "retransmit of Lost segment");
+    let (seg, _) = resent.unwrap();
+    assert_eq_test!(seg.seq_num, segs[0].0, "retransmit starts at seg 1");
     pass!()
 }
 
@@ -869,26 +923,57 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-
-    // Send 3 MSS-sized segments (4380 bytes total).
-    let _ = tcp::send(id, &[0xCC; 4380]).unwrap();
-    let mut buf = [0u8; 1500];
-    for _ in 0..3 {
-        let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.sack_permitted = true;
+            }
+        }
     }
 
-    let flight = with_data_state!(id, |d| d.retx.inflight_bytes());
-    assert_eq_test!(flight, 4380, "3 MSS in flight");
+    // Send 4 MSS-sized segments.
+    let _ = tcp::send(id, &[0xCC; 4 * DEFAULT_MSS as usize]).unwrap();
+    let mut buf = [0u8; 1500];
+    let mut segs = [(0u32, 0u32); 4];
+    for i in 0..4 {
+        let (seg, n) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+        segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
+    }
 
-    // 3 dup ACKs → fast retransmit.
+    let total = with_data_state!(id, |d| d.sendmap.total_bytes());
+    assert_eq_test!(total, 4 * DEFAULT_MSS as u32, "4 MSS in flight");
+
+    // SACK segments 2, 3, 4 → segment 1 is Lost.
+    // pipe = seg1 (Lost=excluded) + segs 2,3,4 (SackConfirmed=excluded) = 0
+    // on_fast_retransmit(pipe=0, high_water)
+    // ssthresh = max(0/2, 2*1460) = 2920
+    // cwnd = ssthresh + 3*MSS = 2920 + 4380 = 7300
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
-    for _ in 0..3 {
-        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
-    }
+    let mut opts = [0u8; 28];
+    opts[0] = 1;
+    opts[1] = 1;
+    opts[2] = 5;
+    opts[3] = 26;
+    opts[4..8].copy_from_slice(&segs[1].0.to_be_bytes());
+    opts[8..12].copy_from_slice(&segs[1].1.to_be_bytes());
+    opts[12..16].copy_from_slice(&segs[2].0.to_be_bytes());
+    opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
+    opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
+    opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
+    let _ = tcp_common::inject_with_options(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        peer_seq,
+        snd_una,
+        TCP_FLAG_ACK,
+        &opts,
+        &[],
+    );
 
-    // ssthresh = max(4380/2, 2*1460) = max(2190, 2920) = 2920
-    // cwnd = ssthresh + 3*MSS = 2920 + 4380 = 7300
     let cwnd = with_data_state!(id, |d| d.cc.cwnd());
     assert_eq_test!(cwnd, 7300, "cwnd = ssthresh + 3*MSS");
     pass!()
@@ -898,38 +983,80 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
+    {
+        let mut table = tcp::table::PCB_TABLE.lock();
+        if let Some(pcb) = table.get_mut(id) {
+            if let tcp::PcbState::Data(d) = &mut pcb.state {
+                d.sack_permitted = true;
+            }
+        }
+    }
 
-    let _ = tcp::send(id, &[0xDD; DEFAULT_MSS as usize]).unwrap();
+    // Send 5 segments so we can trigger SACK-based loss detection.
+    let _ = tcp::send(id, &[0xDD; 5 * DEFAULT_MSS as usize]).unwrap();
     let mut buf = [0u8; 1500];
-    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    let mut segs = [(0u32, 0u32); 5];
+    for i in 0..5 {
+        let (seg, n) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+        segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
+    }
 
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
 
-    // First 3 dup ACKs → fast retransmit.
-    for _ in 0..3 {
-        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
-    }
+    // SACK segs 2,3,4 → seg 1 is Lost, enters recovery.
+    let mut opts = [0u8; 28];
+    opts[0] = 1;
+    opts[1] = 1;
+    opts[2] = 5;
+    opts[3] = 26;
+    opts[4..8].copy_from_slice(&segs[1].0.to_be_bytes());
+    opts[8..12].copy_from_slice(&segs[1].1.to_be_bytes());
+    opts[12..16].copy_from_slice(&segs[2].0.to_be_bytes());
+    opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
+    opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
+    opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
+    let _ = tcp_common::inject_with_options(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        peer_seq,
+        snd_una,
+        TCP_FLAG_ACK,
+        &opts,
+        &[],
+    );
     assert_test!(with_data_state!(id, |d| d.cc.in_recovery()), "in recovery");
 
-    // Re-send data via poll_transmit.
-    let _ = tcp::poll_transmit(id, &mut buf, 1).unwrap();
-    let snd_nxt_before = with_data_state!(id, |d| d.snd_nxt.raw());
+    let cwnd_before = with_data_state!(id, |d| d.cc.cwnd());
 
-    // 3 more dup ACKs during recovery — must NOT trigger again.
-    for _ in 0..3 {
-        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
-    }
-    let snd_nxt_after = with_data_state!(id, |d| d.snd_nxt.raw());
-    assert_eq_test!(
-        snd_nxt_after,
-        snd_nxt_before,
-        "no re-trigger during recovery"
+    // Send another SACK covering seg 5 — loss detection fires again
+    // but should NOT re-enter recovery (already in recovery).
+    let mut opts2 = [0u8; 12];
+    opts2[0] = 1;
+    opts2[1] = 1;
+    opts2[2] = 5;
+    opts2[3] = 10;
+    opts2[4..8].copy_from_slice(&segs[4].0.to_be_bytes());
+    opts2[8..12].copy_from_slice(&segs[4].1.to_be_bytes());
+    let _ = tcp_common::inject_with_options(
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        peer_seq,
+        snd_una,
+        TCP_FLAG_ACK,
+        &opts2,
+        &[],
     );
+    let cwnd_after = with_data_state!(id, |d| d.cc.cwnd());
+    assert_eq_test!(cwnd_after, cwnd_before, "cwnd unchanged during recovery");
     pass!()
 }
 
-pub fn test_rto_resets_cwnd_and_clears_retx() -> TestResult {
+pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
     let _ = tcp::send(id, &[0xEE; 100]).unwrap();
@@ -937,9 +1064,9 @@ pub fn test_rto_resets_cwnd_and_clears_retx() -> TestResult {
     let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
 
     assert_eq_test!(
-        with_data_state!(id, |d| d.retx.inflight_bytes()),
+        with_data_state!(id, |d| d.sendmap.total_bytes()),
         100,
-        "retx inflight before RTO"
+        "sendmap total before RTO"
     );
 
     // Trigger RTO.
@@ -947,12 +1074,17 @@ pub fn test_rto_resets_cwnd_and_clears_retx() -> TestResult {
 
     let cwnd = with_data_state!(id, |d| d.cc.cwnd());
     assert_eq_test!(cwnd, DEFAULT_MSS as u32, "cwnd reset to MSS");
-    assert_test!(with_data_state!(id, |d| d.retx.is_empty()), "retx cleared");
-    assert_eq_test!(
-        with_data_state!(id, |d| d.retx.inflight_bytes()),
-        0,
-        "inflight zero"
+    // SendMap is NOT cleared — entries are marked Lost instead.
+    assert_test!(
+        !with_data_state!(id, |d| d.sendmap.is_empty()),
+        "sendmap not cleared"
     );
+    assert_test!(
+        with_data_state!(id, |d| d.sendmap.has_lost()),
+        "entries marked Lost"
+    );
+    // pipe is 0 because Lost entries are excluded.
+    assert_eq_test!(with_data_state!(id, |d| d.sendmap.pipe()), 0, "pipe zero");
     pass!()
 }
 
@@ -1102,14 +1234,10 @@ pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
         0,
     );
 
-    let (count, left, right) = with_data_state!(id, |d| (
-        d.sack_scoreboard_count,
-        d.sack_scoreboard[0].0,
-        d.sack_scoreboard[0].1
-    ));
-    assert_eq_test!(count, 1, "one SACK block parsed");
-    assert_eq_test!(left, sack_left, "SACK left edge stored");
-    assert_eq_test!(right, sack_right, "SACK right edge stored");
+    // SACK blocks are now fed directly into the SendMap (no separate
+    // scoreboard).  Verify the connection is still healthy.
+    let permitted = with_data_state!(id, |d| d.sack_permitted);
+    assert_test!(permitted, "sack_permitted still set");
     pass!()
 }
 
@@ -1117,17 +1245,6 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-    {
-        let mut table = tcp::table::PCB_TABLE.lock();
-        if let Some(pcb) = table.get_mut(id) {
-            if let tcp::PcbState::Data(d) = &mut pcb.state {
-                d.sack_permitted = true;
-                // Fake a scoreboard entry.
-                d.sack_scoreboard[0] = (1000, 2000);
-                d.sack_scoreboard_count = 1;
-            }
-        }
-    }
 
     // Send data and get it acked with a forward ACK.
     let _ = tcp::send(id, &[0xBB; 50]).unwrap();
@@ -1151,8 +1268,9 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
         1,
     );
 
-    let count = with_data_state!(id, |d| d.sack_scoreboard_count);
-    assert_eq_test!(count, 0, "scoreboard cleared on forward ACK");
+    // Forward ACK should have freed the entry from the sendmap.
+    let empty = with_data_state!(id, |d| d.sendmap.is_empty());
+    assert_test!(empty, "sendmap cleared after forward ACK");
     pass!()
 }
 
@@ -1527,7 +1645,7 @@ slopos_testing::define_test_suite!(
         test_fast_retransmit_triggers_on_3_dup_acks,
         test_fast_retransmit_cwnd_reduction,
         test_fast_retransmit_not_during_recovery,
-        test_rto_resets_cwnd_and_clears_retx,
+        test_rto_resets_cwnd_and_marks_lost,
         test_sack_permitted_negotiated_active_open,
         test_sack_permitted_not_set_without_peer,
         test_sack_blocks_sent_on_ooo,

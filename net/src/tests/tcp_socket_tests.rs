@@ -38,7 +38,7 @@ pub fn test_syn_queue_overflow() -> TestResult {
     // Fill the SYN queue to capacity.
     for i in 0..SYN_QUEUE_MAX as u16 {
         let client = client_addr(i);
-        let result = listen.on_syn(client, 1000 + i as u32, 1460, 0, None);
+        let result = listen.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
         assert_test!(
             result.is_some(),
             "SYN {} should succeed (queue not full yet)"
@@ -53,7 +53,7 @@ pub fn test_syn_queue_overflow() -> TestResult {
 
     // Next SYN should be silently dropped (no RST).
     let overflow_client = client_addr(SYN_QUEUE_MAX as u16);
-    let overflow_result = listen.on_syn(overflow_client, 9999, 1460, 0, None);
+    let overflow_result = listen.on_syn(overflow_client, 9999, 1460, false, 0, None);
     assert_test!(
         overflow_result.is_none(),
         "SYN queue full -> silently dropped (no RST)"
@@ -82,7 +82,7 @@ pub fn test_accept_queue_overflow() -> TestResult {
     // Send 3 SYNs.
     for i in 0..3u16 {
         let client = client_addr(i);
-        let syn_ack = listen.on_syn(client, 1000 + i as u32, 1460, 0, None);
+        let syn_ack = listen.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
         assert_test!(syn_ack.is_some(), "SYN should succeed");
     }
     assert_eq_test!(listen.syn_queue_len(), 3, "3 entries in SYN queue");
@@ -94,7 +94,7 @@ pub fn test_accept_queue_overflow() -> TestResult {
         // Each on_syn generates a unique ISS. We need to get the ISS from the
         // returned SYN-ACK. But we already consumed those. Re-approach: send a
         // duplicate SYN to get the SYN-ACK back (which retransmits existing).
-        let retransmit = listen.on_syn(client, 1000 + i as u32, 1460, 0, None);
+        let retransmit = listen.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
         let syn_ack = retransmit.expect("duplicate SYN retransmits SYN-ACK");
         let iss = syn_ack.seq_num;
         let ack_num = iss.wrapping_add(1);
@@ -111,7 +111,7 @@ pub fn test_accept_queue_overflow() -> TestResult {
 
     // Complete third — accept queue is full, should stay in SYN queue.
     let client2 = client_addr(2);
-    let retransmit2 = listen.on_syn(client2, 1002, 1460, 0, None);
+    let retransmit2 = listen.on_syn(client2, 1002, 1460, false, 0, None);
     let syn_ack2 = retransmit2.expect("duplicate SYN retransmits SYN-ACK");
     let iss2 = syn_ack2.seq_num;
     let ack_num2 = iss2.wrapping_add(1);
@@ -149,7 +149,7 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
     let mut listen = TcpListenState::new(16, local_addr());
 
     let client = client_addr(0);
-    let syn_ack = listen.on_syn(client, 5000, 1460, 0, None);
+    let syn_ack = listen.on_syn(client, 5000, 1460, false, 0, None);
     assert_test!(syn_ack.is_some(), "initial SYN accepted");
     assert_eq_test!(listen.syn_queue_len(), 1, "1 entry in SYN queue");
 
@@ -198,12 +198,12 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
     let mut listen = TcpListenState::new(16, local_addr());
 
     let client = client_addr(42);
-    let first = listen.on_syn(client, 7000, 1460, 0, None);
+    let first = listen.on_syn(client, 7000, 1460, false, 0, None);
     assert_test!(first.is_some(), "first SYN accepted");
     let first_iss = first.unwrap().seq_num;
 
     // Send duplicate SYN — should retransmit the same SYN-ACK.
-    let dup = listen.on_syn(client, 7000, 1460, 100, None);
+    let dup = listen.on_syn(client, 7000, 1460, false, 100, None);
     assert_test!(dup.is_some(), "duplicate SYN triggers SYN-ACK retransmit");
     let dup_iss = dup.unwrap().seq_num;
 
@@ -681,7 +681,7 @@ pub fn test_listen_state_clear() -> TestResult {
     let mut listen = TcpListenState::new(16, local_addr());
 
     // Add something to SYN queue.
-    let _ = listen.on_syn(client_addr(0), 1000, 1460, 0, None);
+    let _ = listen.on_syn(client_addr(0), 1000, 1460, false, 0, None);
     assert_eq_test!(listen.syn_queue_len(), 1, "SYN queue has 1 entry");
 
     // Push to accept queue.

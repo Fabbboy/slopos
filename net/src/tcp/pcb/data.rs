@@ -15,8 +15,9 @@
 //! 1. [`on_rst`] — handle RST fast-path (release or mark reset).
 //! 2. [`on_unexpected_syn`] — handle SYN-in-established (RST + release).
 //! 3. [`process_ack`] — update `snd_una`/`snd_wnd`, drive
-//!    [`RetxQueue::on_ack`], [`RttEstimator::sample`], and
-//!    [`CongestionControl::on_ack`].  Reschedules the RTO timer.
+//!    [`SendMap::on_cumulative_ack`], [`RttEstimator::sample`], and
+//!    [`CongestionControl::on_ack`].  Applies SACK blocks for loss
+//!    detection (RFC 6675).  Reschedules the RTO timer.
 //! 4. [`process_payload`] — accept in-order bytes into the recv
 //!    buffer, buffer OOO segments, drain contiguous ones back out.
 //! 5. [`process_fin_and_close_phase`] — advance [`ClosePhase`] in
@@ -31,7 +32,7 @@ use super::super::buffer::TcpBufferPair;
 use super::super::challenge_ack;
 use super::super::cong::{CcAlgo, CongestionControl};
 use super::super::header::{DEFAULT_MSS, TcpHeader};
-use super::super::retx::RetxQueue;
+use super::super::retx::SendMap;
 use super::super::rtt::RttEstimator;
 use super::super::segment::SegmentBuilder;
 use super::super::seq::{SeqNum, seq_gt, seq_le};
@@ -88,10 +89,9 @@ pub struct DataState {
     pub rtt: RttEstimator,
     pub cc: CcAlgo,
 
-    // -------- Retransmission --------
-    pub retx: RetxQueue,
+    // -------- Retransmission (SACK-driven, RFC 6675) --------
+    pub sendmap: SendMap,
     pub retransmit_token: Option<TimerToken>,
-    pub dup_ack_count: u8,
 
     // -------- Keepalive --------
     pub keepalive_token: Option<TimerToken>,
@@ -100,11 +100,6 @@ pub struct DataState {
 
     // -------- FIN_WAIT_2 timeout --------
     pub fin_wait2_token: Option<TimerToken>,
-
-    // -------- SACK scoreboard (RFC 2018) --------
-    /// SACK blocks last received from the peer (left_edge, right_edge).
-    pub sack_scoreboard: [(u32, u32); 4],
-    pub sack_scoreboard_count: u8,
 
     // -------- TCP Timestamps (RFC 7323) --------
     pub ts_enabled: bool,
@@ -149,15 +144,12 @@ impl DataState {
             close_phase: ClosePhase::Established,
             rtt: RttEstimator::new(),
             cc: CcAlgo::new_reno(peer_mss.max(DEFAULT_MSS) as u32),
-            retx: RetxQueue::new(),
+            sendmap: SendMap::new(),
             retransmit_token: None,
-            dup_ack_count: 0,
             keepalive_token: None,
             keepalive_probes_sent: 0,
             last_activity_tick: 0,
             fin_wait2_token: None,
-            sack_scoreboard: [(0, 0); 4],
-            sack_scoreboard_count: 0,
             ts_enabled,
             ts_recent: 0,
             last_ack_sent: 0,
@@ -311,24 +303,6 @@ impl DataState {
             bufs.send.process_ack(acked as usize);
         }
 
-        // -------- Fast retransmit (RFC 5681 §3.2) --------
-        // Trigger on the exact 3rd duplicate ACK, only if not already
-        // in recovery.  Rewinds the send cursor so the next poll_transmit
-        // re-sends from snd_una with a halved congestion window.
-        {
-            let PcbState::Data(data) = &mut pcb.state else {
-                unreachable!()
-            };
-            if data.dup_ack_count == 3 && !data.cc.in_recovery() {
-                let flight = data.retx.inflight_bytes();
-                data.cc.on_fast_retransmit(flight, data.snd_nxt.raw());
-                data.retx.clear();
-                data.snd_nxt = data.snd_una;
-                bufs.send.inflight = 0;
-                bufs.send.needs_retransmit = true;
-            }
-        }
-
         // `process_payload` + `process_fin_and_close_phase` need
         // combined access to bufs and pcb.state; do them
         // with a helper that takes both.
@@ -402,7 +376,7 @@ impl DataState {
     }
 
     /// Advance `snd_una`/`snd_wnd`, pop newly-acked entries from the
-    /// retx queue, drive RTT / congestion-control callbacks, and
+    /// send map, drive RTT / congestion-control callbacks, and
     /// reschedule the retransmission timer.  Returns the number of
     /// bytes newly acknowledged (0 if the ACK did not advance).
     fn process_ack(
@@ -422,16 +396,21 @@ impl DataState {
         } else {
             None
         };
-        if let Some(ref p) = parsed {
-            if self.sack_permitted && p.sack_block_count > 0 {
-                self.sack_scoreboard = p.sack_blocks;
-                self.sack_scoreboard_count = p.sack_block_count;
+
+        // Extract SACK blocks for use after the forward/dup ACK branch.
+        let (sack_blocks, sack_count) = if self.sack_permitted {
+            if let Some(ref p) = parsed {
+                (p.sack_blocks, p.sack_block_count)
+            } else {
+                ([(0, 0); 4], 0)
             }
-        }
+        } else {
+            ([(0, 0); 4], 0)
+        };
 
         // Only advance if the ACK is strictly greater than snd_una
         // and no greater than snd_nxt (RFC 793 §3.4).
-        if seq_gt(ack, old_snd_una.raw()) && seq_le(ack, self.snd_nxt.raw()) {
+        let acked = if seq_gt(ack, old_snd_una.raw()) && seq_le(ack, self.snd_nxt.raw()) {
             self.snd_una = SeqNum::new(ack);
             self.snd_wnd = if self.wscale_enabled {
                 (hdr.window_size as u32) << self.snd_wscale
@@ -439,7 +418,7 @@ impl DataState {
                 hdr.window_size as u32
             };
             let acked = ack.wrapping_sub(old_snd_una.raw());
-            let outcome = self.retx.on_ack(self.snd_una);
+            let outcome = self.sendmap.on_cumulative_ack(self.snd_una);
 
             // RTT measurement: prefer RTTM (timestamps) over Karn.
             let rtt_sample = if self.ts_enabled {
@@ -461,16 +440,15 @@ impl DataState {
             if let Some(rtt_ms) = rtt_sample {
                 self.rtt.sample(rtt_ms);
             }
-            // Feed CC with the freshly-acked bytes + RTT sample.
-            self.cc.on_ack(outcome.bytes_freed, rtt_sample);
-            self.dup_ack_count = 0;
-            // Clear SACK scoreboard — forward ACK supersedes old blocks.
-            self.sack_scoreboard_count = 0;
+            // Feed CC with the freshly-acked bytes + RTT sample + snd_una
+            // for recovery exit detection.
+            self.cc
+                .on_ack(outcome.bytes_freed, rtt_sample, self.snd_una.raw());
             // Reschedule the retransmit timer.
             if let Some(token) = self.retransmit_token.take() {
                 actions.push_timer(TimerOp::Cancel { token });
             }
-            if !self.retx.is_empty() {
+            if !self.sendmap.is_empty() {
                 let delay_ticks = (self.rtt.rto_ms() as u64 / 10).max(1);
                 actions.push_timer(TimerOp::Schedule {
                     kind: TimerKind::TcpRetransmit,
@@ -480,14 +458,23 @@ impl DataState {
             }
             actions.notify |= SocketNotify::SEND_WAKE;
             acked
-        } else if ack == old_snd_una.raw() && self.snd_nxt > old_snd_una {
-            // Duplicate ACK (same ack_num, still have inflight data).
-            self.cc.on_dup_ack();
-            self.dup_ack_count = self.dup_ack_count.saturating_add(1);
-            0
         } else {
             0
+        };
+
+        // Apply SACK blocks on both forward and duplicate ACKs.
+        // This feeds the SendMap for loss detection (RFC 6675).
+        if sack_count > 0 {
+            let new_losses = self
+                .sendmap
+                .apply_sack_blocks(&sack_blocks[..sack_count as usize], sack_count);
+            if new_losses && !self.cc.in_recovery() {
+                self.cc
+                    .on_fast_retransmit(self.sendmap.pipe(), self.snd_nxt.raw());
+            }
         }
+
+        acked
     }
 
     // -------------------------------------------------------------------------
@@ -535,12 +522,35 @@ impl DataState {
                 let window = bufs.recv.window();
                 let mut ack_seg =
                     SegmentBuilder::ack(tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window);
-                // Include SACK blocks so the peer knows which OOO
-                // ranges we hold (RFC 2018).
                 if d.sack_permitted {
-                    let (blocks, count) = bufs.ooo.sack_blocks();
-                    ack_seg.sack_blocks = blocks;
-                    ack_seg.sack_block_count = count;
+                    let (ooo_blocks, ooo_count) = bufs.ooo.sack_blocks();
+                    let seg_end = hdr.seq_num.wrapping_add(payload.len() as u32);
+
+                    // DSACK (RFC 2883): if the segment is a duplicate
+                    // (seq < rcv_nxt), report the duplicate range as
+                    // the first SACK block so the peer can detect
+                    // spurious retransmits.
+                    if super::super::seq::seq_lt(hdr.seq_num, expected_seq.raw()) {
+                        let dsack_right = if seq_gt(seg_end, expected_seq.raw()) {
+                            expected_seq.raw()
+                        } else {
+                            seg_end
+                        };
+                        ack_seg.sack_blocks[0] = (hdr.seq_num, dsack_right);
+                        let mut total = 1u8;
+                        for i in 0..ooo_count as usize {
+                            if total >= 4 {
+                                break;
+                            }
+                            ack_seg.sack_blocks[total as usize] = ooo_blocks[i];
+                            total += 1;
+                        }
+                        ack_seg.sack_block_count = total;
+                    } else {
+                        // Normal OOO SACK blocks.
+                        ack_seg.sack_blocks = ooo_blocks;
+                        ack_seg.sack_block_count = ooo_count;
+                    }
                 }
                 ack_seg.timestamp = d.ts_option(now_ms);
                 actions.push_segment(ack_seg);
@@ -796,8 +806,8 @@ impl DataState {
                 debug_assert!(self.peer_closed, "Closing/LastAck implies peer_closed");
             }
         }
-        // FIN consumes 1 sequence byte but is not tracked in retx
-        // (which only covers data segments).
+        // FIN consumes 1 sequence byte but is not tracked in the
+        // send map (which only covers data segments).
         let fin_offset = match self.close_phase {
             ClosePhase::FinWait1 | ClosePhase::LastAck | ClosePhase::Closing => 1u32,
             _ => 0,
@@ -807,10 +817,10 @@ impl DataState {
             .distance_to(self.snd_nxt)
             .saturating_sub(fin_offset);
         debug_assert_eq!(
-            self.retx.inflight_bytes(),
+            self.sendmap.total_bytes(),
             expected,
-            "retx inflight ({}) != snd_nxt - snd_una - fin_offset ({})",
-            self.retx.inflight_bytes(),
+            "sendmap total_bytes ({}) != snd_nxt - snd_una - fin_offset ({})",
+            self.sendmap.total_bytes(),
             expected,
         );
     }

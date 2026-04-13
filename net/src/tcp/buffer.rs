@@ -29,7 +29,6 @@ pub struct TcpSendState {
     pub buf: TcpBuffer,
     pub inflight: usize,
     pub rto_deadline_ms: u64,
-    pub needs_retransmit: bool,
     /// Soft cap on usable buffer capacity (SO_SNDBUF).
     /// Defaults to TCP_BUFFER_SIZE; values above that are silently capped.
     pub effective_capacity: usize,
@@ -41,7 +40,6 @@ impl TcpSendState {
             buf: TcpBuffer::new_zeroed(),
             inflight: 0,
             rto_deadline_ms: 0,
-            needs_retransmit: false,
             effective_capacity: TCP_BUFFER_SIZE,
         }
     }
@@ -73,13 +71,16 @@ impl TcpSendState {
         self.buf.peek_at(self.inflight, out)
     }
 
+    /// Read data at an arbitrary offset within the buffered (unacked) range.
+    /// Used by the selective retransmit path to re-read lost segment data.
+    pub fn peek_retransmit(&self, offset: usize, out: &mut [u8]) -> usize {
+        self.buf.peek_at(offset, out)
+    }
+
     pub fn mark_sent(&mut self, n: usize) {
         let unsent = self.unsent_len();
         let sent = core::cmp::min(n, unsent);
         self.inflight += sent;
-        if sent > 0 {
-            self.needs_retransmit = false;
-        }
     }
 
     pub fn process_ack(&mut self, acked: usize) {
@@ -95,16 +96,10 @@ impl TcpSendState {
         }
     }
 
-    pub fn retransmit_timeout(&mut self) {
-        self.inflight = 0;
-        self.needs_retransmit = true;
-    }
-
     pub fn clear(&mut self) {
         self.buf.reset();
         self.inflight = 0;
         self.rto_deadline_ms = 0;
-        self.needs_retransmit = false;
     }
 }
 

@@ -151,6 +151,8 @@ pub struct SynRecvEntry {
     pub timestamp: u64,
     /// Peer's advertised MSS (or [`DEFAULT_MSS`] if not specified).
     pub peer_mss: u16,
+    /// Peer offered SACK-Permitted in their SYN.
+    pub sack_permitted: bool,
     /// Unique key for timer dispatch — identifies this entry when the timer fires.
     pub key: u32,
     /// Peer's TSval from their SYN (if they offered timestamps).
@@ -260,6 +262,7 @@ impl TcpListenState {
         remote: SockAddr,
         irs: u32,
         peer_mss: u16,
+        sack_permitted: bool,
         timestamp: u64,
         peer_tsval: Option<u32>,
     ) -> Option<TcpOutSegment> {
@@ -305,6 +308,7 @@ impl TcpListenState {
             timer_token,
             timestamp,
             peer_mss: effective_mss,
+            sack_permitted,
             key,
             peer_tsval,
         };
@@ -374,7 +378,7 @@ impl TcpListenState {
             iss: entry.iss,
             irs: entry.irs,
             peer_mss: entry.peer_mss,
-            sack_permitted: false,
+            sack_permitted: entry.sack_permitted,
             peer_tsval: entry.peer_tsval,
         };
 
@@ -558,7 +562,7 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
         window_size: DEFAULT_WINDOW_SIZE,
         mss: Some(DEFAULT_MSS),
         wscale: None,
-        sack_permitted: false,
+        sack_permitted: entry.sack_permitted,
         sack_blocks: [(0, 0); 4],
         sack_block_count: 0,
         timestamp: None,

@@ -1,11 +1,7 @@
 //! TCP congestion control.
 //!
 //! Provides a [`CongestionControl`] trait and a default [`NewReno`]
-//! implementation per RFC 5681 + RFC 6582.  The TCP state machine is not
-//! yet wired to consume this module — the data path still sends unbounded
-//! by the peer's advertised window — but landing the algorithm and its
-//! unit tests separately lets the enum-of-structs PCB refactor plug it in
-//! without inventing the math too.
+//! implementation per RFC 5681 + RFC 6582.
 //!
 //! ## Algorithm summary
 //!
@@ -15,37 +11,34 @@
 //! - **Congestion avoidance**: grows `cwnd` linearly by roughly one MSS
 //!   per RTT (we track a residual byte counter to approximate this on
 //!   per-ACK granularity — `cwnd += (MSS*MSS)/cwnd` rounded).
-//! - **Fast retransmit / fast recovery** (RFC 5681 §3.2, RFC 6582): three
-//!   duplicate ACKs trigger an immediate retransmit of the oldest
-//!   unacknowledged segment; `ssthresh = max(FlightSize/2, 2*MSS)`,
-//!   `cwnd = ssthresh + 3*MSS`, and the connection enters "recovery" until
-//!   the RECOVER point (snapshot of snd_nxt at the moment of fast
-//!   retransmit) is fully ACKed.
+//! - **Fast retransmit / fast recovery** (RFC 5681 §3.2, RFC 6582): SACK-
+//!   based loss detection triggers an immediate retransmit of lost segments;
+//!   `ssthresh = max(FlightSize/2, 2*MSS)`, `cwnd = ssthresh + 3*MSS`,
+//!   and the connection enters "recovery" until `snd_una` passes the
+//!   RECOVER point.
 //! - **RTO timeout**: `ssthresh = max(FlightSize/2, 2*MSS)`, `cwnd = MSS`,
 //!   drop back to slow start.  RTT estimator separately applies Karn's
 //!   back-off.
 
+use crate::tcp::seq::seq_ge;
+
 /// Trait every congestion-control algorithm must implement.
 ///
-/// The state machine will hold the trait object as an enum variant (see
+/// The state machine holds the trait object as an enum variant (see
 /// [`CcAlgo`]) so no heap allocation is needed.
 pub trait CongestionControl {
     /// Advance the algorithm after an ACK that advanced `snd_una` by
-    /// `acked_bytes`.  `rtt_sample_ms` is `Some(r)` when the ACK was for
-    /// a non-retransmitted segment and Karn's rules permit sampling.
-    fn on_ack(&mut self, acked_bytes: u32, rtt_sample_ms: Option<u32>);
-
-    /// Called when a duplicate ACK arrives (same `ack_num` as previously,
-    /// carrying no new data).  After the third dup ACK the algorithm
-    /// enters fast retransmit.
-    fn on_dup_ack(&mut self);
+    /// `acked_bytes`.  `rtt_sample_ms` is `Some(r)` when the ACK yields
+    /// an eligible RTT sample.  `snd_una` is the new cumulative ACK
+    /// point — used to detect recovery exit.
+    fn on_ack(&mut self, acked_bytes: u32, rtt_sample_ms: Option<u32>, snd_una: u32);
 
     /// Called when the retransmission timer fires for the oldest
     /// unacknowledged segment.  Resets to slow start.
     fn on_timeout(&mut self, flight_size: u32);
 
-    /// Called when fast retransmit has just been triggered.  Halves
-    /// cwnd, sets the recovery high-water mark, and enters recovery.
+    /// Called when SACK-based loss detection finds the first lost segment.
+    /// Halves cwnd, sets the recovery high-water mark, and enters recovery.
     fn on_fast_retransmit(&mut self, flight_size: u32, high_water: u32);
 
     /// Current congestion window in bytes.
@@ -79,10 +72,8 @@ pub struct NewReno {
     cwnd: u32,
     ssthresh: u32,
     mss: u32,
-    /// Dup-ack counter; reset on any ACK that advances `snd_una`.
-    dup_acks: u8,
-    /// When `Some(seq)`, we are in recovery and ignore dup acks that
-    /// cross this line.  RFC 6582's `recover` variable.
+    /// When `Some(seq)`, we are in recovery.  Recovery ends when
+    /// `snd_una >= recover`.  RFC 6582's `recover` variable.
     recover: Option<u32>,
     /// Residual bytes counter for fractional congestion-avoidance growth.
     /// Accumulates `(MSS*MSS)/cwnd` every ACK until it ticks over `mss`.
@@ -95,7 +86,6 @@ impl NewReno {
             cwnd: 10 * mss,
             ssthresh: INITIAL_SSTHRESH,
             mss,
-            dup_acks: 0,
             recover: None,
             ca_residual: 0,
         }
@@ -114,35 +104,30 @@ impl Default for NewReno {
 }
 
 impl CongestionControl for NewReno {
-    fn on_ack(&mut self, acked_bytes: u32, _rtt_sample_ms: Option<u32>) {
+    fn on_ack(&mut self, acked_bytes: u32, _rtt_sample_ms: Option<u32>, snd_una: u32) {
         if acked_bytes == 0 {
             return;
         }
-        self.dup_acks = 0;
 
-        // If we were in recovery, check whether this ACK covered the
-        // recovery high-water mark.  RFC 6582 §3.2.
+        // Recovery exit check: if snd_una has passed the recover point,
+        // exit recovery and deflate cwnd to ssthresh.  RFC 6582 §3.2.
         if let Some(recover) = self.recover {
-            // Assume caller passes the _cumulative_ snd_una delta, not the
-            // ACK number.  We approximate "ACK >= recover" by requiring
-            // at least `recover`'s worth of bytes since the cwnd-halving
-            // moment.  Callers that want strict RFC semantics should pass
-            // `snd_una` and compare.
-            let _ = recover;
-            self.recover = None;
-            // Exit inflate: cwnd = ssthresh (deflation).
-            self.cwnd = self.ssthresh;
+            if seq_ge(snd_una, recover) {
+                self.recover = None;
+                self.cwnd = self.ssthresh;
+                // Fall through to normal cwnd growth below.
+            } else {
+                // Still in recovery — don't grow cwnd.
+                return;
+            }
         }
 
         if self.cwnd < self.ssthresh {
             // Slow start: cwnd += MSS per MSS-ish of ACK'd data.
-            // Capped at one MSS of growth per call (avoids runaway when
-            // a single ACK covers many segments).
             let growth = core::cmp::min(acked_bytes, self.mss);
             self.cwnd = self.cwnd.saturating_add(growth);
         } else {
             // Congestion avoidance: cwnd += (MSS*MSS)/cwnd per ACK.
-            // Accumulate in `ca_residual` to handle fractional bytes.
             let increment = self.mss.saturating_mul(self.mss) / self.cwnd.max(1);
             self.ca_residual = self.ca_residual.saturating_add(increment);
             while self.ca_residual >= self.mss {
@@ -152,14 +137,9 @@ impl CongestionControl for NewReno {
         }
     }
 
-    fn on_dup_ack(&mut self) {
-        self.dup_acks = self.dup_acks.saturating_add(1);
-    }
-
     fn on_timeout(&mut self, flight_size: u32) {
         self.ssthresh = core::cmp::max(flight_size / 2, 2 * self.mss);
         self.cwnd = self.mss;
-        self.dup_acks = 0;
         self.recover = None;
         self.ca_residual = 0;
     }
@@ -187,14 +167,6 @@ impl CongestionControl for NewReno {
     }
 }
 
-impl NewReno {
-    /// Test-only accessor for the internal dup-ack counter.  Stable
-    /// across API changes because the internal field is private.
-    pub fn dup_acks(&self) -> u8 {
-        self.dup_acks
-    }
-}
-
 // -----------------------------------------------------------------------------
 // Pluggable algorithm enum (no Box<dyn>, no_std-friendly)
 // -----------------------------------------------------------------------------
@@ -219,14 +191,9 @@ impl Default for CcAlgo {
 }
 
 impl CongestionControl for CcAlgo {
-    fn on_ack(&mut self, acked_bytes: u32, rtt_sample_ms: Option<u32>) {
+    fn on_ack(&mut self, acked_bytes: u32, rtt_sample_ms: Option<u32>, snd_una: u32) {
         match self {
-            Self::NewReno(r) => r.on_ack(acked_bytes, rtt_sample_ms),
-        }
-    }
-    fn on_dup_ack(&mut self) {
-        match self {
-            Self::NewReno(r) => r.on_dup_ack(),
+            Self::NewReno(r) => r.on_ack(acked_bytes, rtt_sample_ms, snd_una),
         }
     }
     fn on_timeout(&mut self, flight_size: u32) {

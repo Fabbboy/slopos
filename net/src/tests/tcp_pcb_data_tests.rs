@@ -339,9 +339,9 @@ pub fn test_data_ack_advances_snd_una() -> TestResult {
     // Bump snd_nxt so there's room for the ACK to advance.
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
-        // Fake up 99 bytes in flight so retx.inflight_bytes matches
+        // Fake up 99 bytes in flight so sendmap.total_bytes matches
         // snd_nxt - snd_una and the invariant passes.
-        let _ = d.retx.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
+        let _ = d.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
     }
     let actions = DataState::on_segment(
         &mut pcb,
@@ -381,13 +381,13 @@ pub fn test_data_stale_ack_ignored() -> TestResult {
     pass!()
 }
 
-pub fn test_data_duplicate_ack_counter_increments() -> TestResult {
+pub fn test_data_duplicate_ack_does_not_advance_snd_una() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new();
-    // Set up inflight data so dup-ack logic is reachable.
+    // Set up inflight data so dup-ack is meaningful.
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
-        let _ = d.retx.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
+        let _ = d.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
     }
     let _ = DataState::on_segment(
         &mut pcb,
@@ -398,7 +398,7 @@ pub fn test_data_duplicate_ack_counter_increments() -> TestResult {
         0,
     );
     let d = data_ref(&pcb);
-    assert_eq_test!(d.dup_ack_count, 1, "dup-ack counter incremented");
+    assert_eq_test!(d.snd_una.raw(), OUR_ISS + 1, "snd_una unchanged on dup ACK");
     pass!()
 }
 
@@ -419,6 +419,6 @@ slopos_testing::define_test_suite!(
         test_data_ack_in_last_ack_releases,
         test_data_ack_advances_snd_una,
         test_data_stale_ack_ignored,
-        test_data_duplicate_ack_counter_increments,
+        test_data_duplicate_ack_does_not_advance_snd_una,
     ]
 );

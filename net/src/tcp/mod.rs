@@ -659,28 +659,58 @@ pub fn poll_transmit(
         return None;
     }
 
-    // Back-pressure: don't send if the retx queue is full.
-    if d.retx.capacity_remaining() == 0 {
-        return None;
-    }
-
     let tuple = pcb.tuple;
-    let seq = d.snd_nxt.raw();
     let rto_ms = d.rtt.rto_ms() as u64;
     let peer_mss = d.peer_mss as usize;
     let snd_wnd = d.snd_wnd as usize;
 
-    let inflight = bufs.send.inflight;
-    let wnd_avail = snd_wnd.saturating_sub(inflight);
-    let cwnd_avail = (d.cc.cwnd() as usize).saturating_sub(inflight);
+    // Window calculation uses pipe (RFC 6675) — bytes believed to be
+    // in the network — instead of raw inflight.
+    let pipe = d.sendmap.pipe() as usize;
+    let wnd_avail = snd_wnd.saturating_sub(pipe);
+    let cwnd_avail = (d.cc.cwnd() as usize).saturating_sub(pipe);
     let effective_wnd = core::cmp::min(wnd_avail, cwnd_avail);
+
+    // Priority 1: selective retransmit of Lost entries.
+    if let Some(lost) = d.sendmap.next_lost() {
+        let len = lost.len as usize;
+        if len <= effective_wnd && len <= payload_buf.len() {
+            let offset = d.snd_una.distance_to(lost.seq) as usize;
+            let seq = lost.seq.raw();
+            let payload_len = bufs.send.peek_retransmit(offset, &mut payload_buf[..len]);
+            if payload_len > 0 {
+                d.sendmap.mark_retransmitted(lost.seq);
+                let window = bufs.recv.window();
+                let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+                seg.timestamp = d.ts_option(now_ms);
+                // Schedule retransmit timer if none active.
+                if bufs.send.rto_deadline_ms == 0 {
+                    bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
+                    if d.retransmit_token.is_none() {
+                        let delay_ticks = (rto_ms / 10).max(1);
+                        let token =
+                            NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, id.0);
+                        d.retransmit_token = Some(token);
+                    }
+                }
+                pcb.assert_invariants(bufs);
+                return Some((seg, payload_len));
+            }
+        }
+    }
+
+    // Priority 2: send new data.
+    if d.sendmap.capacity_remaining() == 0 {
+        return None;
+    }
+
     let unsent = bufs.send.unsent_len();
     let mut max_send = core::cmp::min(unsent, peer_mss);
     max_send = core::cmp::min(max_send, effective_wnd);
     max_send = core::cmp::min(max_send, payload_buf.len());
 
     // Nagle (RFC 896): defer sub-MSS segments when data is in flight.
-    if d.nagle_enabled && max_send < peer_mss && inflight > 0 {
+    if d.nagle_enabled && max_send < peer_mss && pipe > 0 {
         return None;
     }
 
@@ -688,6 +718,7 @@ pub fn poll_transmit(
         return None;
     }
 
+    let seq = d.snd_nxt.raw();
     let payload_len = bufs.send.peek_unsent(&mut payload_buf[..max_send]);
     if payload_len == 0 {
         return None;
@@ -696,9 +727,9 @@ pub fn poll_transmit(
     bufs.send.mark_sent(payload_len);
     d.snd_nxt = d.snd_nxt.wrapping_add(payload_len as u32);
 
-    // Record sent segment for retransmission tracking + RTT sampling.
+    // Record sent segment in the send map.
     let _ = d
-        .retx
+        .sendmap
         .push_sent(SeqNum::new(seq), payload_len as u32, now_ms);
 
     // Schedule retransmit timer if none active.
@@ -731,11 +762,11 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
     // Pre-check with a short borrow: bail if not applicable, flag if
     // max retransmits exceeded.
     let should_release = {
-        let (pcb, bufs) = table.get_with_bufs(id)?;
+        let (pcb, _bufs) = table.get_with_bufs(id)?;
         let PcbState::Data(d) = &pcb.state else {
             return None;
         };
-        if bufs.send.inflight == 0 {
+        if d.sendmap.is_empty() {
             return None;
         }
         d.rtt.consecutive_timeouts >= MAX_RETRANSMITS
@@ -747,7 +778,8 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
         return None;
     }
 
-    // Main retransmit path.
+    // Main retransmit path: mark all entries Lost so the next
+    // poll_transmit selectively retransmits them.
     let (pcb, bufs) = table.get_with_bufs(id)?;
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
@@ -755,10 +787,8 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
     d.retransmit_token = None;
 
-    d.cc.on_timeout(d.retx.inflight_bytes());
-    d.retx.clear();
-    bufs.send.retransmit_timeout();
-    d.snd_nxt = d.snd_una;
+    d.cc.on_timeout(d.sendmap.pipe());
+    d.sendmap.mark_all_lost();
     d.rtt.back_off();
 
     let rto_ms = d.rtt.rto_ms() as u64;
@@ -878,10 +908,8 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
             break;
         }
 
-        d.cc.on_timeout(d.retx.inflight_bytes());
-        d.retx.clear();
-        bufs.send.retransmit_timeout();
-        d.snd_nxt = d.snd_una;
+        d.cc.on_timeout(d.sendmap.pipe());
+        d.sendmap.mark_all_lost();
         d.rtt.back_off();
         bufs.send.rto_deadline_ms = now_ms.saturating_add(d.rtt.rto_ms() as u64);
         pcb.assert_invariants(bufs);

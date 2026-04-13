@@ -27,9 +27,9 @@ pub fn test_newreno_initial_cwnd_is_iw10() -> TestResult {
 pub fn test_newreno_slow_start_grows_per_ack() -> TestResult {
     let mut r = NewReno::default();
     let c0 = r.cwnd();
-    r.on_ack(MSS, Some(50));
+    r.on_ack(MSS, Some(50), 0);
     assert_eq_test!(r.cwnd(), c0 + MSS, "cwnd grew by MSS");
-    r.on_ack(500, Some(50));
+    r.on_ack(500, Some(50), 0);
     assert_eq_test!(r.cwnd(), c0 + MSS + 500, "cwnd grew by partial ACK");
     pass!()
 }
@@ -45,12 +45,12 @@ pub fn test_newreno_exits_slow_start_at_ssthresh() -> TestResult {
     // Now grow cwnd in slow start until it reaches ssthresh.
     let ssthresh = r.ssthresh();
     while r.cwnd() < ssthresh {
-        r.on_ack(MSS, Some(50));
+        r.on_ack(MSS, Some(50), 0);
     }
     // Next ACK enters congestion avoidance — cwnd increment becomes
     // fractional, not a full MSS.
     let before = r.cwnd();
-    r.on_ack(MSS, Some(50));
+    r.on_ack(MSS, Some(50), 0);
     let after = r.cwnd();
     assert_test!(after < before + MSS, "CA grows sublinearly");
     pass!()
@@ -69,13 +69,13 @@ pub fn test_newreno_ca_grows_one_mss_per_rtt() -> TestResult {
     r.on_timeout(2 * MSS); // ssthresh = max(MSS, 2MSS) = 2MSS, cwnd = MSS
     // Grow cwnd past ssthresh in slow start first.
     while r.cwnd() < r.ssthresh() {
-        r.on_ack(MSS, Some(50));
+        r.on_ack(MSS, Some(50), 0);
     }
     let before_ca = r.cwnd();
     let acks_per_rtt = before_ca / MSS;
     // Fire `acks_per_rtt` back-to-back ACKs.
     for _ in 0..acks_per_rtt {
-        r.on_ack(MSS, Some(50));
+        r.on_ack(MSS, Some(50), 0);
     }
     let after = r.cwnd();
     let growth = after - before_ca;
@@ -92,22 +92,11 @@ pub fn test_newreno_ca_grows_one_mss_per_rtt() -> TestResult {
 // Fast retransmit / fast recovery
 // -----------------------------------------------------------------------------
 
-pub fn test_newreno_dup_ack_counter_increments() -> TestResult {
-    let mut r = NewReno::new(MSS);
-    assert_eq_test!(r.dup_acks(), 0, "starts at 0");
-    r.on_dup_ack();
-    r.on_dup_ack();
-    assert_eq_test!(r.dup_acks(), 2, "increments on dup");
-    r.on_ack(MSS, None);
-    assert_eq_test!(r.dup_acks(), 0, "resets on forward progress");
-    pass!()
-}
-
 pub fn test_newreno_fast_retransmit_halves_cwnd() -> TestResult {
     let mut r = NewReno::new(MSS);
     // Push cwnd up so halving is observable.
     for _ in 0..20 {
-        r.on_ack(MSS, Some(50));
+        r.on_ack(MSS, Some(50), 0);
     }
     let flight_size = r.cwnd();
     r.on_fast_retransmit(flight_size, 100_000);
@@ -123,12 +112,33 @@ pub fn test_newreno_fast_retransmit_halves_cwnd() -> TestResult {
 pub fn test_newreno_timeout_resets_to_one_mss() -> TestResult {
     let mut r = NewReno::new(MSS);
     for _ in 0..10 {
-        r.on_ack(MSS, Some(50));
+        r.on_ack(MSS, Some(50), 0);
     }
     r.on_timeout(r.cwnd());
     assert_eq_test!(r.cwnd(), MSS, "cwnd = MSS after timeout");
     assert_test!(r.ssthresh() >= 2 * MSS, "ssthresh at least 2*MSS");
     assert_test!(!r.in_recovery(), "recovery cleared on timeout");
+    pass!()
+}
+
+/// Recovery should exit once snd_una advances past the recover point.
+pub fn test_newreno_recovery_exit_on_snd_una_past_recover() -> TestResult {
+    let mut r = NewReno::new(MSS);
+    r.on_fast_retransmit(14600, 5000);
+    assert_test!(r.in_recovery(), "in recovery after fast retransmit");
+
+    // snd_una (4000) below recover point (5000) — stay in recovery.
+    r.on_ack(MSS, None, 4000);
+    assert_test!(r.in_recovery(), "still in recovery when snd_una < recover");
+
+    // snd_una (5000) at recover point — exit recovery.
+    r.on_ack(MSS, None, 5000);
+    assert_test!(!r.in_recovery(), "exited recovery when snd_una >= recover");
+    assert_eq_test!(
+        r.cwnd(),
+        r.ssthresh(),
+        "cwnd == ssthresh after recovery exit"
+    );
     pass!()
 }
 
@@ -139,7 +149,7 @@ pub fn test_newreno_timeout_resets_to_one_mss() -> TestResult {
 pub fn test_cc_algo_enum_dispatches_to_newreno() -> TestResult {
     let mut algo = CcAlgo::new_reno(MSS);
     let c0 = algo.cwnd();
-    algo.on_ack(MSS, Some(10));
+    algo.on_ack(MSS, Some(10), 0);
     assert_eq_test!(algo.cwnd(), c0 + MSS, "enum dispatches to NewReno");
     pass!()
 }
@@ -155,8 +165,8 @@ slopos_testing::define_test_suite!(
         test_newreno_slow_start_grows_per_ack,
         test_newreno_exits_slow_start_at_ssthresh,
         test_newreno_ca_grows_one_mss_per_rtt,
-        test_newreno_dup_ack_counter_increments,
         test_newreno_fast_retransmit_halves_cwnd,
+        test_newreno_recovery_exit_on_snd_una_past_recover,
         test_newreno_timeout_resets_to_one_mss,
         test_cc_algo_enum_dispatches_to_newreno,
     ]
