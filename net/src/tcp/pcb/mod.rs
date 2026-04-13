@@ -164,7 +164,14 @@ pub enum PcbState {
     /// Data transfer + graceful close.  Covers the RFC 793 states
     /// `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`,
     /// `CLOSING`, and `LAST_ACK` — see [`data::ClosePhase`].
-    Data(DataState),
+    ///
+    /// Boxed because `DataState` is ~750 bytes (congestion control,
+    /// send-map, RTT estimator) while the other variants are ≤100 bytes.
+    /// Without boxing, every `Option<Pcb>` slot would be ~1 KB even for
+    /// a listener or TIME_WAIT entry, inflating the static table by
+    /// hundreds of KB.  The allocation happens once, on SynRecv→Data
+    /// transition.
+    Data(alloc::boxed::Box<DataState>),
     /// Connection fully torn down, waiting out `2 × MSL` before the
     /// slot can be reused (RFC 793 §3.5).
     TimeWait(TimeWaitState),

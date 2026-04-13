@@ -52,8 +52,12 @@ use crate::timer::NET_TIMER_WHEEL;
 /// Number of independently-locked shards for established connections.
 pub const NUM_SHARDS: usize = 16;
 
-/// Slots per shard.  16 × 8 = 128 total established-connection capacity.
-pub const SLOTS_PER_SHARD: usize = 8;
+/// Slots per shard.  16 × 4 = 64 total established-connection capacity.
+///
+/// Kept at 4 (not 8) so the static buffer memory matches the pre-sharding
+/// footprint (~4.1 MB).  Doubling to 8 would push BSS past the point
+/// where the scheduler's task-creation tests run out of kernel memory.
+pub const SLOTS_PER_SHARD: usize = 4;
 
 /// Maximum number of LISTEN sockets.
 pub const MAX_LISTENERS: usize = 16;

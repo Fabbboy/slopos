@@ -155,7 +155,7 @@ impl SynSentState {
             if ts_enabled {
                 data.ts_recent = peer_tsval;
             }
-            let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
+            let _old = mem::replace(&mut pcb.state, PcbState::Data(alloc::boxed::Box::new(data)));
 
             // Emit plain ACK that closes out the 3WHS from our side.
             let mut ack_seg =

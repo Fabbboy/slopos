@@ -54,7 +54,7 @@ fn make_pcb_in_phase(phase: ClosePhase) -> Pcb {
     ) {
         data.peer_closed = true;
     }
-    Pcb::new(tuple, PcbState::Data(data))
+    Pcb::new(tuple, PcbState::Data(alloc::boxed::Box::new(data)))
 }
 
 fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {

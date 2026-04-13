@@ -396,7 +396,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             ds.close_phase = ClosePhase::FinWait1;
             ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
             let ts = ds.ts_option(clock::now_ms());
-            pcb.state = PcbState::Data(ds);
+            pcb.state = PcbState::Data(alloc::boxed::Box::new(ds));
             pcb.assert_invariants();
             let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
             seg.timestamp = ts;
@@ -541,7 +541,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             ds.close_phase = ClosePhase::FinWait1;
             ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
             let ts = ds.ts_option(clock::now_ms());
-            pcb.state = PcbState::Data(ds);
+            pcb.state = PcbState::Data(alloc::boxed::Box::new(ds));
             pcb.assert_invariants();
             let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
             seg.timestamp = ts;

@@ -138,7 +138,7 @@ impl SynRecvState {
             wscale_enabled,
             ts_enabled,
         );
-        let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
+        let _old = mem::replace(&mut pcb.state, PcbState::Data(alloc::boxed::Box::new(data)));
 
         actions.notify |= SocketNotify::NEW_ESTABLISHED | SocketNotify::ACCEPT_WAKE;
         // Note: no outgoing segment — the 3WHS is complete; the peer's
