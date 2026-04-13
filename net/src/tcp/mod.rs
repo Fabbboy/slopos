@@ -48,6 +48,7 @@ pub use segment::{TcpOutSegment, write_tcp_segment};
 pub use seq::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
 pub use table::{ConnId, PCB_TABLE};
 
+use self::cong::CongestionControl;
 use self::segment::SegmentBuilder;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
@@ -596,8 +597,6 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
 }
 
 /// Generate the next outgoing data segment for a connection.
-// TODO(D.1): push RetxEntry into d.retx per sent segment so the
-// retx.inflight_bytes invariant can be re-enabled.
 pub fn poll_transmit(
     id: ConnId,
     payload_buf: &mut [u8],
@@ -616,6 +615,11 @@ pub fn poll_transmit(
         return None;
     }
 
+    // Back-pressure: don't send if the retx queue is full.
+    if d.retx.capacity_remaining() == 0 {
+        return None;
+    }
+
     let tuple = pcb.tuple;
     let seq = d.snd_nxt.raw();
     let rto_ms = d.rtt.rto_ms() as u64;
@@ -624,9 +628,11 @@ pub fn poll_transmit(
 
     let inflight = bufs.send.inflight;
     let wnd_avail = snd_wnd.saturating_sub(inflight);
+    let cwnd_avail = (d.cc.cwnd() as usize).saturating_sub(inflight);
+    let effective_wnd = core::cmp::min(wnd_avail, cwnd_avail);
     let unsent = bufs.send.unsent_len();
     let mut max_send = core::cmp::min(unsent, peer_mss);
-    max_send = core::cmp::min(max_send, wnd_avail);
+    max_send = core::cmp::min(max_send, effective_wnd);
     max_send = core::cmp::min(max_send, payload_buf.len());
 
     if max_send == 0 {
@@ -640,6 +646,11 @@ pub fn poll_transmit(
 
     bufs.send.mark_sent(payload_len);
     d.snd_nxt = d.snd_nxt.wrapping_add(payload_len as u32);
+
+    // Record sent segment for retransmission tracking + RTT sampling.
+    let _ = d
+        .retx
+        .push_sent(SeqNum::new(seq), payload_len as u32, now_ms);
 
     // Schedule retransmit timer if none active.
     if bufs.send.rto_deadline_ms == 0 {
@@ -693,6 +704,8 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
     d.retransmit_token = None;
 
+    d.cc.on_timeout(d.retx.inflight_bytes());
+    d.retx.clear();
     bufs.send.retransmit_timeout();
     d.snd_nxt = d.snd_una;
     d.rtt.back_off();
@@ -795,6 +808,8 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
             break;
         }
 
+        d.cc.on_timeout(d.retx.inflight_bytes());
+        d.retx.clear();
         bufs.send.retransmit_timeout();
         d.snd_nxt = d.snd_una;
         d.rtt.back_off();

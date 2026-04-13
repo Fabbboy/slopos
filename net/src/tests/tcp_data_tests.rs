@@ -7,6 +7,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use crate::tcp::cong::CongestionControl;
 use crate::tcp::{
     self, ConnId, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
     TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpState,
@@ -789,6 +790,173 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
 }
 
 // =============================================================================
+// RetxQueue wiring + cwnd gating + fast retransmit (D.1)
+// =============================================================================
+
+pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let _ = tcp::send(c.id, &[0xAA; 100]).unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap();
+
+    let (inflight, entries) = with_data_state!(c.id, |d| (d.retx.inflight_bytes(), d.retx.len()));
+    assert_eq_test!(inflight, 100, "retx tracks 100 inflight bytes");
+    assert_eq_test!(entries, 1, "one retx entry");
+    pass!()
+}
+
+pub fn test_poll_transmit_respects_cwnd() -> TestResult {
+    reset();
+    let (id, _, _) = establish_connection();
+    // Send a small payload and transmit it.
+    let _ = tcp::send(id, b"x").unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+
+    // Trigger RTO → cwnd shrinks to MSS (1460).
+    let _ = tcp::retransmit_check(1000);
+
+    // Fill the buffer well past cwnd.
+    let _ = tcp::send(id, &[0x42; 4380]).unwrap();
+
+    // First poll: sends MSS bytes (limited by peer_mss and cwnd).
+    let (_, n1) = tcp::poll_transmit(id, &mut buf, 1001).unwrap();
+    assert_eq_test!(n1, DEFAULT_MSS as usize, "first segment capped at MSS");
+
+    // Second poll: cwnd exhausted (inflight = MSS = cwnd). Returns None.
+    assert_test!(
+        tcp::poll_transmit(id, &mut buf, 1002).is_none(),
+        "blocked by cwnd"
+    );
+    pass!()
+}
+
+pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+
+    // Send MSS bytes and transmit.
+    let _ = tcp::send(id, &[0xBB; DEFAULT_MSS as usize]).unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+
+    let snd_una = with_data_state!(id, |d| d.snd_una.raw());
+    let snd_nxt_before = with_data_state!(id, |d| d.snd_nxt.raw());
+    assert_test!(snd_nxt_before > snd_una, "data in flight");
+
+    // Inject 3 duplicate ACKs (ack = snd_una, not advancing).
+    let peer_seq = c.peer_iss.wrapping_add(1);
+    for _ in 0..3 {
+        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
+    }
+
+    // After 3rd dup ACK: fast retransmit rewound snd_nxt to snd_una.
+    let snd_nxt_after = with_data_state!(id, |d| d.snd_nxt.raw());
+    assert_eq_test!(snd_nxt_after, snd_una, "snd_nxt rewound to snd_una");
+
+    let in_recovery = with_data_state!(id, |d| d.cc.in_recovery());
+    assert_test!(in_recovery, "entered fast recovery");
+
+    // poll_transmit re-sends the data from snd_una.
+    let resent = tcp::poll_transmit(id, &mut buf, 1);
+    assert_test!(resent.is_some(), "retransmit after fast retransmit");
+    pass!()
+}
+
+pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+
+    // Send 3 MSS-sized segments (4380 bytes total).
+    let _ = tcp::send(id, &[0xCC; 4380]).unwrap();
+    let mut buf = [0u8; 1500];
+    for _ in 0..3 {
+        let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    }
+
+    let flight = with_data_state!(id, |d| d.retx.inflight_bytes());
+    assert_eq_test!(flight, 4380, "3 MSS in flight");
+
+    // 3 dup ACKs → fast retransmit.
+    let snd_una = with_data_state!(id, |d| d.snd_una.raw());
+    let peer_seq = c.peer_iss.wrapping_add(1);
+    for _ in 0..3 {
+        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
+    }
+
+    // ssthresh = max(4380/2, 2*1460) = max(2190, 2920) = 2920
+    // cwnd = ssthresh + 3*MSS = 2920 + 4380 = 7300
+    let cwnd = with_data_state!(id, |d| d.cc.cwnd());
+    assert_eq_test!(cwnd, 7300, "cwnd = ssthresh + 3*MSS");
+    pass!()
+}
+
+pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
+    reset();
+    let c = tcp_common::establish_connection();
+    let id = c.id;
+
+    let _ = tcp::send(id, &[0xDD; DEFAULT_MSS as usize]).unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+
+    let snd_una = with_data_state!(id, |d| d.snd_una.raw());
+    let peer_seq = c.peer_iss.wrapping_add(1);
+
+    // First 3 dup ACKs → fast retransmit.
+    for _ in 0..3 {
+        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
+    }
+    assert_test!(with_data_state!(id, |d| d.cc.in_recovery()), "in recovery");
+
+    // Re-send data via poll_transmit.
+    let _ = tcp::poll_transmit(id, &mut buf, 1).unwrap();
+    let snd_nxt_before = with_data_state!(id, |d| d.snd_nxt.raw());
+
+    // 3 more dup ACKs during recovery — must NOT trigger again.
+    for _ in 0..3 {
+        let _ = tcp_common::inject_ack(&c, peer_seq, snd_una);
+    }
+    let snd_nxt_after = with_data_state!(id, |d| d.snd_nxt.raw());
+    assert_eq_test!(
+        snd_nxt_after,
+        snd_nxt_before,
+        "no re-trigger during recovery"
+    );
+    pass!()
+}
+
+pub fn test_rto_resets_cwnd_and_clears_retx() -> TestResult {
+    reset();
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, &[0xEE; 100]).unwrap();
+    let mut buf = [0u8; 1500];
+    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+
+    assert_eq_test!(
+        with_data_state!(id, |d| d.retx.inflight_bytes()),
+        100,
+        "retx inflight before RTO"
+    );
+
+    // Trigger RTO.
+    let _ = tcp::retransmit_check(1000);
+
+    let cwnd = with_data_state!(id, |d| d.cc.cwnd());
+    assert_eq_test!(cwnd, DEFAULT_MSS as u32, "cwnd reset to MSS");
+    assert_test!(with_data_state!(id, |d| d.retx.is_empty()), "retx cleared");
+    assert_eq_test!(
+        with_data_state!(id, |d| d.retx.inflight_bytes()),
+        0,
+        "inflight zero"
+    );
+    pass!()
+}
+
+// =============================================================================
 // Flow Control
 // =============================================================================
 
@@ -1041,6 +1209,12 @@ slopos_testing::define_test_suite!(
         test_tcp_retransmit_exponential_backoff,
         test_tcp_retransmit_max_exceeded,
         test_tcp_retransmit_canceled_by_ack,
+        test_retx_queue_populated_by_poll_transmit,
+        test_poll_transmit_respects_cwnd,
+        test_fast_retransmit_triggers_on_3_dup_acks,
+        test_fast_retransmit_cwnd_reduction,
+        test_fast_retransmit_not_during_recovery,
+        test_rto_resets_cwnd_and_clears_retx,
         test_tcp_respects_peer_window,
         test_tcp_zero_window_blocks_send,
         test_tcp_zero_window_probe,

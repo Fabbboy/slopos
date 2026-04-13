@@ -33,7 +33,7 @@ use super::super::header::{DEFAULT_MSS, TcpHeader};
 use super::super::retx::RetxQueue;
 use super::super::rtt::RttEstimator;
 use super::super::segment::SegmentBuilder;
-use super::super::seq::{SeqNum, seq_gt, seq_le, seq_lt};
+use super::super::seq::{SeqNum, seq_gt, seq_le};
 use super::time_wait::{TIME_WAIT_MS, TimeWaitState};
 use super::{Pcb, PcbState};
 use crate::timer::{TimerKind, TimerToken};
@@ -205,6 +205,31 @@ impl DataState {
         if acked > 0 {
             bufs.send.process_ack(acked as usize);
         }
+
+        // -------- Fast retransmit (RFC 5681 §3.2) --------
+        // Trigger on the exact 3rd duplicate ACK, only if not already
+        // in recovery.  Rewinds the send cursor so the next poll_transmit
+        // re-sends from snd_una with a halved congestion window.
+        {
+            let should_fast_retransmit = {
+                let Some(data) = Self::as_ref(&pcb.state) else {
+                    unreachable!()
+                };
+                data.dup_ack_count == 3 && !data.cc.in_recovery()
+            };
+            if should_fast_retransmit {
+                let Some(data) = Self::as_mut(&mut pcb.state) else {
+                    unreachable!()
+                };
+                let flight = data.retx.inflight_bytes();
+                data.cc.on_fast_retransmit(flight, data.snd_nxt.raw());
+                data.retx.clear();
+                data.snd_nxt = data.snd_una;
+                bufs.send.inflight = 0;
+                bufs.send.needs_retransmit = true;
+            }
+        }
+
         let next = next_stub_placeholder();
 
         // `process_payload` + `process_fin_and_close_phase` need
@@ -576,8 +601,23 @@ impl DataState {
                 debug_assert!(self.peer_closed, "Closing/LastAck implies peer_closed");
             }
         }
-        // TODO(D.1): re-enable retx.inflight_bytes == snd_nxt - snd_una
-        // invariant once poll_transmit pushes RetxEntry per sent segment.
+        // FIN consumes 1 sequence byte but is not tracked in retx
+        // (which only covers data segments).
+        let fin_offset = match self.close_phase {
+            ClosePhase::FinWait1 | ClosePhase::LastAck | ClosePhase::Closing => 1u32,
+            _ => 0,
+        };
+        let expected = self
+            .snd_una
+            .distance_to(self.snd_nxt)
+            .saturating_sub(fin_offset);
+        debug_assert_eq!(
+            self.retx.inflight_bytes(),
+            expected,
+            "retx inflight ({}) != snd_nxt - snd_una - fin_offset ({})",
+            self.retx.inflight_bytes(),
+            expected,
+        );
     }
 }
 
@@ -589,12 +629,4 @@ impl DataState {
 /// payload/FIN block consumes the hint.  Always `StayInData` today.
 fn next_stub_placeholder() -> NextTransition {
     NextTransition::StayInData
-}
-
-// Suppress unused-symbol warnings for items reserved for D.1/D.2/D.5.
-#[allow(dead_code)]
-fn _reserved_for_d_phases() {
-    // Touching seq_lt prevents "unused import" if the sub-methods
-    // above are rewritten in D.1 to no longer reference it.
-    let _ = seq_lt(0u32, 0u32);
 }
