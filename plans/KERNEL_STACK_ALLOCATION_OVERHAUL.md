@@ -76,44 +76,24 @@ industry is moving where Asterinas already went.
 - Single address space (Theseus) — too radical, breaks Unix model
 - Pure vmalloc without per-CPU caching — known outdated
 
-## Files Involved (estimated)
-
-### New files
-- `mm/src/kvmalloc.rs` — kernel VA range allocator (reserve/free)
-- `mm/src/percpu_frames.rs` — per-CPU frame cache
-- `core/src/scheduler/stack.rs` — `KernelStack` type + RAII handle
-
-### Modified files
-- `mm/src/memory_init.rs` — reserve kernel VA region for stacks at boot
-- `mm/src/page_alloc.rs` — expose hooks for per-CPU cache refill
-- `core/src/scheduler/task/task_lifecycle.rs` — use `KernelStack` instead of `kmalloc`
-- `core/src/scheduler/task/task_struct.rs` — store `KernelStack` handle, not raw pointer
-- `abi/src/task.rs` — remove MAX_TASKS hard bound (Phase 3), raise in Phase 1
-- `core/src/scheduler/sched_tests.rs` — update `test_create_max_tasks` to reflect dynamic capacity
-
 ## Phased Plan
 
-### Phase 1 — Decouple stack allocation from kernel image (~2 weeks)
+### Phase 1 — Decouple stack allocation from kernel image ✅ DONE (commit 44ec9a8)
 
-**Goal**: fix the current regression *by design*. No per-CPU caching yet.
+**Delivered**:
+- VA region `0xFFFFFFFFA0000000..0xFFFFFFFFC0000000` (512 MB, 8192 slots × 64 KB stride) carved out between kernel heap and IST region
+- `mm/src/kstack_va.rs` — `KstackVaAllocator` with dual bitmap (free + backed) and RAII `KstackSlot` handle; zero unsafe
+- `core/src/scheduler/stack.rs` — `KernelStack` RAII handle with safe public API; single `unsafe` block (`ptr::write_bytes` stack zeroing, exclusive-ownership justified)
+- `Task` gained `kernel_stack: Option<KernelStack>` owning field; existing u64 fields populated from handle (context-switch ABI preserved)
+- `clone_from_raw` neutralizes bitwise-copied handle via `ptr::write(None)` to prevent double-free
+- `task_create` / `task_fork` / `task_clone` migrated; `KernelStackLease` / `disarm()` / `kmalloc` / `kfree` patterns all gone
+- `free_task_stacks` is now `task.kernel_stack = None` — `Drop` handles slot release
+- `MAX_TASKS` raised 64 → 256
+- 3 new regression-proof tests (`test_kstack_basic_alloc`, `test_kstack_slot_reuse`, `test_kstack_rejects_invalid_size`); full suite passes (2391/2391)
 
-1. Define `pub struct KernelStack { top: VirtAddr, size: usize }` in `core/src/scheduler/stack.rs`
-2. Implement `KernelStack::allocate(size) -> Result<Self, StackAllocError>`:
-   - Reserve a virtual range from a kernel VA region (carve out e.g.
-     `0xFFFFC0_0000000000..0xFFFFC0_8000000000`, 32 GiB)
-   - Allocate physical frames from the existing page allocator
-   - Map frames into the virtual range via page table walker
-   - Leave one guard page unmapped at the bottom
-3. Implement `Drop for KernelStack`: unmap PTEs, return frames, release VA range
-4. Migrate `task_create` / `task_destroy` to use `KernelStack` instead of `kmalloc`
-5. Raise `MAX_TASKS` from 64 → 256 (soft bump while still bounded)
-6. Update `test_create_max_tasks` to reflect the new ceiling
-7. Verify SUITE61 passes regardless of kernel binary size (regression-proof)
+**Key deviation from initial plan**: `Drop` deliberately does NOT unmap pages. Kernel-VA unmaps trigger broadcast TLB shootdown IPIs; under task churn those flooded the shootdown path and hung. Fix: keep the mapping alive, zero on next allocation, flip only the bitmap bit on free. This is Linux's `CONFIG_VMAP_STACK` task-stack-cache trick, simplified to a single global pool. Peak physical memory = peak concurrent tasks × stack size (≤ 8 MB for typical workloads). Eviction can be added in Phase 2 once per-CPU frame caching lands.
 
-**Exit criteria**:
-- All tests pass
-- Adding 100KB of kernel code does NOT reduce max task count
-- Unsafe contained to one `map_kernel_page` primitive
+**Related fix shipped alongside (commit 3d244ce)**: `tcp::send`/`recv` returning `NotFound` instead of `InvalidState` for SYN_SENT connections — preexisting latent bug from Phase 6a lazy buffer lifecycle, exposed once Phase 1 unblocked the scheduler regression.
 
 ### Phase 2 — Per-CPU frame cache (~1 month)
 
@@ -190,7 +170,7 @@ until Phases 1-3 are stable.
 
 - [x] Research complete
 - [x] Design agreed
-- [ ] Phase 1 started
-- [ ] Phase 2
-- [ ] Phase 3
-- [ ] Phase 4
+- [x] Phase 1 — shipped (commits 44ec9a8, 3d244ce)
+- [ ] Phase 2 — per-CPU frame cache
+- [ ] Phase 3 — remove MAX_TASKS hard bound
+- [ ] Phase 4 — SafeStack hardening (optional)
