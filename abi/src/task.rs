@@ -8,8 +8,17 @@
 // --- Task Configuration ---
 
 pub const MAX_TASKS: usize = 256;
-pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
-pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
+/// Task stack size.
+///
+/// Raised from 32 KiB to 48 KiB when the Phase 1 `KernelStack`
+/// allocator landed.  The old `kmalloc`-backed stacks silently
+/// overflowed into adjacent heap memory (corrupting it); the new
+/// guard-page allocator correctly traps overflow, and the compositor
+/// / FS startup path uses ~35 KiB — more than the previous 32 KiB
+/// ceiling.  48 KiB fits within the 64 KiB slot stride (4 KiB guard
+/// + 48 KiB usable + 12 KiB headroom for future growth).
+pub const TASK_STACK_SIZE: u64 = 0xC000; // 48 KiB
+pub const TASK_KERNEL_STACK_SIZE: u64 = 0xC000; // 48 KiB
 pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
