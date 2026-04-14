@@ -27,7 +27,10 @@
 use slopos_abi::addr::VirtAddr;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_ALLOCATOR};
 
-use crate::memory_layout_defs::{KSTACK_MAX_SLOTS, KSTACK_STRIDE, KSTACK_VA_BASE};
+use crate::memory_layout_defs::{KSTACK_MAX_SLOTS, KSTACK_STRIDE, KSTACK_VA_BASE, KSTACK_VA_END};
+use crate::page_alloc::alloc_page_frame;
+use crate::paging::map_page_4kb;
+use crate::paging_defs::{PAGE_SIZE_2MB, PageFlags};
 
 /// Words of `u64` needed to cover `KSTACK_MAX_SLOTS` bits.
 ///
@@ -195,6 +198,22 @@ impl KstackVaAllocator {
         self.free_bitmap[word_idx] |= mask;
         self.in_use = self.in_use.saturating_sub(1);
     }
+
+    /// Permanently mark a slot as allocated (removes it from the free
+    /// pool forever).  Used at init to reserve one sentinel slot per
+    /// 2 MB PD chunk — the sentinel's mapping forces the intermediate
+    /// page table into existence so runtime allocations never race on
+    /// PT creation.
+    fn reserve_sentinel(&mut self, idx: u32) {
+        let slot = idx as usize;
+        debug_assert!(slot < KSTACK_MAX_SLOTS);
+        let word_idx = slot / 64;
+        let bit = slot % 64;
+        let mask = 1u64 << bit;
+        self.free_bitmap[word_idx] &= !mask;
+        // Mark as backed so nothing tries to re-map it.
+        self.backed_bitmap[word_idx] |= mask;
+    }
 }
 
 /// Global state.
@@ -272,9 +291,72 @@ pub fn alloc_slot() -> Option<KstackSlot> {
 }
 
 /// Initialise the allocator.  Call once from memory-system bring-up,
-/// after paging is online.  Safe to re-call (idempotent reset).
+/// after paging is online.
+///
+/// Two jobs:
+///
+/// 1. Initialise the bitmap to all-free, all-unbacked.
+/// 2. Pre-reserve **one sentinel slot per 2 MB PD chunk** across the
+///    KSTACK region, then map a sentinel page into each — forcing the
+///    intermediate page table for that chunk to be allocated *now*,
+///    while boot is still single-threaded.
+///
+/// Why: `mm::paging::map_page_in_directory` is not SMP-safe for
+/// intermediate-table creation — two CPUs can both see
+/// `pd_entry.is_present() == false`, both allocate a PT frame, and
+/// the loser's PT gets orphaned (its just-installed leaf entries
+/// vanish).  That's exactly the race we hit when two APs created
+/// their idle tasks concurrently: each mapped a KSTACK page, one
+/// CPU's PT won, the other CPU's page fault'd on the missing PTE.
+///
+/// Fix: pre-create every PT the KSTACK region will ever need, at
+/// boot, while only the BSP is running.  After init, every
+/// `map_page_4kb` call into KSTACK only sets a leaf PTE — an atomic
+/// 8-byte store, no race possible.
+///
+/// Cost: 256 sentinel pages + 256 PT pages = ~2 MB of physical
+/// memory permanently reserved, and 256 slots (one per chunk) lost
+/// to sentinels.  With 8192 slots total and MAX_TASKS=256, plenty
+/// of headroom remains.
 pub fn init() {
-    KSTACK_VA_ALLOCATOR.lock().init();
+    {
+        let mut alloc = KSTACK_VA_ALLOCATOR.lock();
+        alloc.init();
+    }
+    install_pt_sentinels();
+}
+
+fn install_pt_sentinels() {
+    // One slot per 2 MB PD chunk.
+    let slots_per_chunk = (PAGE_SIZE_2MB / KSTACK_STRIDE) as u32;
+    let chunk_count = ((KSTACK_VA_END - KSTACK_VA_BASE) / PAGE_SIZE_2MB) as u32;
+
+    let flags = (PageFlags::KERNEL_RW | PageFlags::NO_EXECUTE).bits();
+
+    for chunk in 0..chunk_count {
+        let sentinel_slot = chunk * slots_per_chunk;
+        // Reserve the slot so `alloc_slot` never hands it out.
+        KSTACK_VA_ALLOCATOR.lock().reserve_sentinel(sentinel_slot);
+
+        // Map one sentinel page inside the reserved slot's VA range.
+        // This forces the PD entry to point at a freshly-allocated PT.
+        // The sentinel is never unmapped, so the PT stays installed
+        // for the kernel's lifetime.
+        let pa = alloc_page_frame(0);
+        if pa.is_null() {
+            panic!(
+                "kstack_va::init: out of frames for sentinel (chunk {})",
+                chunk
+            );
+        }
+        let va = VirtAddr::new(KSTACK_VA_BASE + sentinel_slot as u64 * KSTACK_STRIDE);
+        if map_page_4kb(va, pa, flags) != 0 {
+            panic!(
+                "kstack_va::init: failed to map sentinel at {:#x}",
+                va.as_u64()
+            );
+        }
+    }
 }
 
 /// Number of slots currently allocated.  Diagnostic / test-only helper.
