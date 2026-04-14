@@ -10,7 +10,6 @@ use super::super::scheduler;
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, Task, TaskExitRecord, TaskIterateCb, TaskStatus,
 };
-use slopos_mm::kernel_heap::kfree;
 
 // =============================================================================
 // Zombie List for Deferred Task Reclamation
@@ -56,24 +55,32 @@ pub(super) fn defer_task_cleanup(task: *mut Task) {
     ZOMBIE_LIST.lock().push(task);
 }
 
-/// Free a task's kernel and user stacks without invalidating the task struct.
-/// The slot remains in its current status (typically Terminated) so that
-/// task_find_by_id can still locate it for idempotent terminate calls.
+/// Free a task's kernel-mode stack without invalidating the task struct.
+///
+/// Dropping `task.kernel_stack = None` runs the `KernelStack::drop`
+/// handler: unmaps PTEs, returns physical frames to the page allocator,
+/// releases the VA slot.  All automatic; no manual `kfree`.
+///
+/// The slot remains in its current status (typically Terminated) so
+/// that `task_find_by_id` can still locate it for idempotent terminate
+/// calls.
+///
+/// User-space stacks live in the owning process's VM and are reclaimed
+/// by `destroy_process_vm`, not here.
 pub(super) fn free_task_stacks(task: *mut Task) {
     if task.is_null() {
         return;
     }
     unsafe {
-        let kstack = (*task).kernel_stack_base;
-        let ustack = (*task).stack_base;
+        // Dropping the handle releases the stack's VA slot + physical frames.
+        (*task).kernel_stack = None;
+        (*task).kernel_stack_base = 0;
+        (*task).kernel_stack_top = 0;
+        (*task).kernel_stack_size = 0;
 
-        if kstack != 0 {
-            kfree(kstack as *mut c_void);
-            (*task).kernel_stack_base = 0;
-        }
-
-        if (*task).process_id == INVALID_PROCESS_ID && ustack != 0 && ustack != kstack {
-            kfree(ustack as *mut c_void);
+        // For kernel-mode tasks, `stack_base` aliased the kernel stack.
+        // Now that the stack is gone, clear the alias so nothing reads it.
+        if (*task).process_id == INVALID_PROCESS_ID {
             (*task).stack_base = 0;
         }
     }

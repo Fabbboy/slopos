@@ -12,6 +12,7 @@ pub mod safe_switch;
 pub mod sched_tests;
 pub mod scheduler;
 pub mod sleep;
+pub mod stack;
 pub mod switch_asm;
 pub mod switch_context;
 pub mod task;
