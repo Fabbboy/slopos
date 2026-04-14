@@ -713,7 +713,13 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
         return Err(TcpError::InvalidState);
     }
     let mut shard = TCP_SHARDS[id.shard()].lock();
-    let (pcb, bufs) = shard.get_with_bufs(id.slot()).ok_or(TcpError::NotFound)?;
+    // Check existence separately from buffer presence so a valid PCB in
+    // a non-Data state returns InvalidState (not NotFound, which would
+    // mislead callers about the connection's existence).  Only Data
+    // states have a buffer allocated (lazy buffer lifecycle, Phase 6a).
+    let (pcb, bufs) = shard
+        .get_pcb_and_opt_bufs(id.slot())
+        .ok_or(TcpError::NotFound)?;
     match &pcb.state {
         PcbState::Data(d)
             if matches!(
@@ -722,6 +728,8 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
             ) => {}
         _ => return Err(TcpError::InvalidState),
     }
+    // State check succeeded → Data state → buffer is always allocated.
+    let bufs = bufs.expect("Data state must have a buffer");
     Ok(bufs.send.enqueue(data))
 }
 
@@ -731,7 +739,16 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
         return Err(TcpError::InvalidState);
     }
     let mut shard = TCP_SHARDS[id.shard()].lock();
-    let (pcb, bufs) = shard.get_with_bufs(id.slot()).ok_or(TcpError::NotFound)?;
+    let (pcb, bufs) = shard
+        .get_pcb_and_opt_bufs(id.slot())
+        .ok_or(TcpError::NotFound)?;
+
+    // Only Data-phase connections have a receive buffer to read from.
+    // Any other state (SynSent, SynRecv, Listen, TimeWait) is invalid
+    // for recv().
+    let Some(bufs) = bufs else {
+        return Err(TcpError::InvalidState);
+    };
 
     let read = bufs.recv.dequeue(out);
     if read == 0 && bufs.recv.available() == 0 {
