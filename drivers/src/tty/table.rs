@@ -39,6 +39,7 @@ use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
+use slopos_alloc::{AllocError, PinBox};
 use slopos_sync::WaitQueue;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_utils::{AtomicBitmap, words_for};
@@ -57,7 +58,7 @@ use slopos_utils::{AtomicBitmap, words_for};
 /// The remaining slots are reserved for future PTY support.
 ///
 /// Access a slot by index: `TTY_SLOTS[idx].lock()`.
-pub static TTY_SLOTS: [IrqMutex<Option<Tty>>; MAX_TTYS] =
+pub static TTY_SLOTS: [IrqMutex<Option<PinBox<Tty>>>; MAX_TTYS] =
     [const { IrqMutex::new(None, LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
 
 /// Per-TTY input wait queues — separate from TTY_SLOTS to avoid lock ordering
@@ -148,17 +149,20 @@ pub fn tty_table_init() {
 
     {
         let mut slot = TTY_SLOTS[0].lock();
-        *slot = Some(Tty::new(
-            TtyIndex(0),
-            TtyDriverKind::SerialConsole(SerialConsoleDriver),
-        ));
+        *slot = Some(
+            Tty::new(
+                TtyIndex(0),
+                TtyDriverKind::SerialConsole(SerialConsoleDriver),
+            )
+            .expect("kernel OOM during serial-console Tty init"),
+        );
     }
     {
         let mut slot = TTY_SLOTS[1].lock();
-        *slot = Some(Tty::new(
-            TtyIndex(1),
-            TtyDriverKind::VConsole(VConsoleDriver),
-        ));
+        *slot = Some(
+            Tty::new(TtyIndex(1), TtyDriverKind::VConsole(VConsoleDriver))
+                .expect("kernel OOM during vconsole Tty init"),
+        );
     }
     TTY_ALLOC_BITMAP.set(0);
     TTY_ALLOC_BITMAP.set(1);
@@ -181,7 +185,7 @@ where
         return None;
     }
     let mut guard = TTY_SLOTS[slot].lock();
-    guard.as_mut().map(f)
+    guard.as_deref_mut().map(f)
 }
 
 /// Execute a closure with an immutable reference to the `Tty` at `idx`.
@@ -194,15 +198,21 @@ where
         return None;
     }
     let guard = TTY_SLOTS[slot].lock();
-    guard.as_ref().map(f)
+    guard.as_deref().map(f)
 }
 
 impl Tty {
     /// Create a new TTY with the given index and driver backend.
-    pub fn new(index: TtyIndex, driver: TtyDriverKind) -> Self {
-        Self {
+    ///
+    /// Allocates the TTY on the heap through `slopos-alloc::PinBox` so
+    /// the struct never materialises on a caller's stack.  The
+    /// line-discipline allocation is the dominant cost (~12 KiB for
+    /// `LineDisc`); that routes through `LineDisc::new_pinned`.
+    pub fn new(index: TtyIndex, driver: TtyDriverKind) -> Result<PinBox<Self>, AllocError> {
+        let ldisc = LdiscKind::NTty(LineDisc::new_pinned()?);
+        PinBox::try_new(Self {
             index,
-            ldisc: LdiscKind::NTty(LineDisc::new_boxed()),
+            ldisc,
             driver,
             session: TtySession::new(),
             winsize: UserWinsize {
@@ -214,13 +224,17 @@ impl Tty {
             open_count: 0,
             flags: TtyFlags::empty(),
             packet_events: PacketEvents::empty(),
-        }
+        })
     }
 
-    pub fn new_pty_master(index: TtyIndex, peer: PtyPeerHandle) -> Self {
-        Self {
+    pub fn new_pty_master(
+        index: TtyIndex,
+        peer: PtyPeerHandle,
+    ) -> Result<PinBox<Self>, AllocError> {
+        let ldisc = LdiscKind::Raw(super::ldisc::RawDisc::new_pinned()?);
+        PinBox::try_new(Self {
             index,
-            ldisc: LdiscKind::Raw(super::ldisc::RawDisc::new_boxed()),
+            ldisc,
             driver: TtyDriverKind::PtyMaster { peer },
             session: TtySession::new(),
             winsize: UserWinsize {
@@ -232,13 +246,14 @@ impl Tty {
             open_count: 0,
             flags: TtyFlags::empty(),
             packet_events: PacketEvents::empty(),
-        }
+        })
     }
 
-    pub fn new_pty_slave(index: TtyIndex, peer: PtyPeerHandle) -> Self {
-        Self {
+    pub fn new_pty_slave(index: TtyIndex, peer: PtyPeerHandle) -> Result<PinBox<Self>, AllocError> {
+        let ldisc = LdiscKind::NTty(LineDisc::new_pinned()?);
+        PinBox::try_new(Self {
             index,
-            ldisc: LdiscKind::NTty(LineDisc::new_boxed()),
+            ldisc,
             driver: TtyDriverKind::PtySlave { peer },
             session: TtySession::new(),
             winsize: UserWinsize {
@@ -250,7 +265,7 @@ impl Tty {
             open_count: 0,
             flags: TtyFlags::SLAVE_LOCKED,
             packet_events: PacketEvents::empty(),
-        }
+        })
     }
 }
 

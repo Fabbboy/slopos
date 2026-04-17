@@ -446,8 +446,10 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
 
         let mut termios = *tty.ldisc.termios();
         termios.c_line = ldisc_id as u8;
-        let Some(new_ldisc) = LdiscKind::from_id(ldisc_id, termios) else {
-            return Err(TtyError::UnsupportedLineDiscipline);
+        let new_ldisc = match LdiscKind::from_id(ldisc_id, termios) {
+            Ok(Some(ld)) => ld,
+            Ok(None) => return Err(TtyError::UnsupportedLineDiscipline),
+            Err(_) => return Err(TtyError::OutOfMemory),
         };
 
         tty.ldisc.flush_input();

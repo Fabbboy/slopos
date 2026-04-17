@@ -230,7 +230,9 @@ fn input_process_established(
 
     // Allocate buffer for newly-established connections (SynRecv/SynSent→Data).
     if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
-        shard.alloc_buffer_for(slot);
+        shard
+            .alloc_buffer_for(slot)
+            .expect("tcp: kernel OOM allocating connection buffer");
     }
 
     // Free buffer on transition to TimeWait (Data→TimeWait).
@@ -382,7 +384,9 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     // SynRecv → Data(FinWait1): allocate buffer before transition.
     let is_syn_recv = matches!(shard.get(slot).unwrap().state, PcbState::SynRecv(_));
     if is_syn_recv {
-        shard.alloc_buffer_for(slot);
+        shard
+            .alloc_buffer_for(slot)
+            .expect("tcp: kernel OOM allocating connection buffer on close");
     }
 
     let pcb = shard.get_mut(slot).unwrap();
@@ -492,7 +496,9 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
         PcbState::SynRecv(_)
     );
     if is_syn_recv {
-        shard.alloc_buffer_for(slot);
+        shard
+            .alloc_buffer_for(slot)
+            .expect("tcp: kernel OOM allocating connection buffer on shutdown_write");
     }
 
     let pcb = shard.get_mut(slot).ok_or(TcpError::NotFound)?;

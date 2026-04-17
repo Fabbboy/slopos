@@ -25,7 +25,8 @@ use alloc::boxed::Box;
 
 pub use alloc::alloc::AllocError;
 pub use pinned_init::{
-    InPlaceInit, Init, MaybeZeroable, PinInit, Zeroable, init_zeroed, pin_data, pinned_drop,
+    InPlaceInit, Init, MaybeZeroable, PinInit, Zeroable, init, init_from_closure, init_zeroed,
+    pin_data, pin_init, pin_init_from_closure, pinned_drop, try_init, try_pin_init,
 };
 
 /// Kernel-wide pinned heap cell. The sole public constructor takes a
@@ -49,6 +50,27 @@ impl<T: Zeroable> PinBox<T> {
     /// certifies an all-zero bit pattern is a valid `T`.
     pub fn zeroed() -> Result<Self, AllocError> {
         boxed_zeroed()
+    }
+}
+
+impl<T> PinBox<T> {
+    /// Wrap an existing rvalue `T` in a fresh heap allocation.
+    ///
+    /// Intended for **small** types where the brief stack
+    /// materialisation of `value` is not a stack-safety concern.
+    /// Large types (anything close to or above 1 KiB) should use
+    /// [`pin_init`] or [`zeroed`] instead so the `T` never touches a
+    /// caller's stack — this is the whole reason `PinBox` exists.
+    ///
+    /// The ELF post-link stack-sizes gate (`scripts/check_stack_sizes.sh`)
+    /// enforces that rule from the other direction: a frame growing
+    /// beyond the threshold will fail the build regardless of which
+    /// constructor produced it.
+    pub fn try_new(value: T) -> Result<Self, AllocError> {
+        let boxed = Box::try_new(value)?;
+        Ok(Self {
+            inner: Box::into_pin(boxed),
+        })
     }
 }
 

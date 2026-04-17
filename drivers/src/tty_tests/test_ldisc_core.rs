@@ -2700,7 +2700,7 @@ pub fn test_raw_disc_bytes_available() -> TestResult {
 
 /// LdiscKind bytes_available dispatches correctly.
 pub fn test_ldisc_kind_bytes_available() -> TestResult {
-    let mut lk = LdiscKind::NTty(LineDisc::new_boxed());
+    let mut lk = LdiscKind::NTty(LineDisc::new());
     {
         let mut t = *lk.termios();
         t.c_lflag = LocalFlags::empty(); // non-canonical
@@ -2963,7 +2963,7 @@ pub fn test_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
 /// `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
 /// Verifies NTty variant routing.
 pub fn test_dispatch_macro_ntty_routing() -> TestResult {
-    let mut lk = LdiscKind::NTty(LineDisc::new_boxed());
+    let mut lk = LdiscKind::NTty(LineDisc::new());
     // id() is manually implemented, not via macro.
     if lk.id() != slopos_abi::syscall::N_TTY {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty id() wrong");
@@ -3002,7 +3002,7 @@ pub fn test_dispatch_macro_ntty_routing() -> TestResult {
 /// `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
 /// Verifies Raw variant routing.
 pub fn test_dispatch_macro_raw_routing() -> TestResult {
-    let mut lk = LdiscKind::Raw(RawDisc::new_boxed());
+    let mut lk = LdiscKind::Raw(RawDisc::new());
     if lk.id() != slopos_abi::syscall::N_RAW {
         klog_info!("TTY_TEST: BUG - LdiscKind::Raw id() wrong");
         return TestResult::Fail;
@@ -3039,7 +3039,7 @@ pub fn test_dispatch_macro_raw_routing() -> TestResult {
 pub fn test_from_id_still_works() -> TestResult {
     let default_termios = LineDisc::new().termios().clone();
     // N_TTY
-    let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios);
+    let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios).expect("alloc");
     if ntty.is_none() {
         klog_info!("TTY_TEST: BUG - from_id(N_TTY) returned None");
         return TestResult::Fail;
@@ -3049,7 +3049,7 @@ pub fn test_from_id_still_works() -> TestResult {
         return TestResult::Fail;
     }
     // N_RAW
-    let nraw = LdiscKind::from_id(slopos_abi::syscall::N_RAW, default_termios);
+    let nraw = LdiscKind::from_id(slopos_abi::syscall::N_RAW, default_termios).expect("alloc");
     if nraw.is_none() {
         klog_info!("TTY_TEST: BUG - from_id(N_RAW) returned None");
         return TestResult::Fail;
@@ -3059,7 +3059,10 @@ pub fn test_from_id_still_works() -> TestResult {
         return TestResult::Fail;
     }
     // Invalid ID
-    if LdiscKind::from_id(999, default_termios).is_some() {
+    if LdiscKind::from_id(999, default_termios)
+        .expect("alloc")
+        .is_some()
+    {
         klog_info!("TTY_TEST: BUG - from_id(999) should return None");
         return TestResult::Fail;
     }
@@ -3069,7 +3072,7 @@ pub fn test_from_id_still_works() -> TestResult {
 /// Output processing via macro-dispatched `process_output_byte`.
 pub fn test_process_output_byte_dispatch() -> TestResult {
     // NTty with OPOST+ONLCR: '\n' should produce CR+LF.
-    let mut ntty = LdiscKind::NTty(LineDisc::new_boxed());
+    let mut ntty = LdiscKind::NTty(LineDisc::new());
     let action = ntty.process_output_byte(b'\n');
     match action {
         OutputAction::Emit { buf, len } => {
@@ -3084,7 +3087,7 @@ pub fn test_process_output_byte_dispatch() -> TestResult {
         }
     }
     // Raw: '\n' should pass through unchanged.
-    let mut raw = LdiscKind::Raw(RawDisc::new_boxed());
+    let mut raw = LdiscKind::Raw(RawDisc::new());
     let action = raw.process_output_byte(b'\n');
     match action {
         OutputAction::Emit { buf, len } => {
@@ -3104,7 +3107,7 @@ pub fn test_process_output_byte_dispatch() -> TestResult {
 /// `edit_content` dispatch works for both variants.
 pub fn test_edit_content_dispatch() -> TestResult {
     // NTty: type some chars (no newline), edit_content should show them.
-    let mut ntty = LdiscKind::NTty(LineDisc::new_boxed());
+    let mut ntty = LdiscKind::NTty(LineDisc::new());
     let _ = ntty.input_char(b'h');
     let _ = ntty.input_char(b'i');
     let content = ntty.edit_content();
@@ -3113,7 +3116,7 @@ pub fn test_edit_content_dispatch() -> TestResult {
         return TestResult::Fail;
     }
     // Raw: edit_content is always empty.
-    let raw = LdiscKind::Raw(RawDisc::new_boxed());
+    let raw = LdiscKind::Raw(RawDisc::new());
     if !raw.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - Raw edit_content should be empty");
         return TestResult::Fail;

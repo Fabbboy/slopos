@@ -1847,7 +1847,7 @@ pub fn test_rawdisc_recovery() -> TestResult {
 /// LdiscKind dispatch forwards no_room/overflow_count.
 pub fn test_ldisc_kind_dispatch() -> TestResult {
     use crate::tty::ldisc::LdiscKind;
-    let mut lk = LdiscKind::NTty(LineDisc::new_boxed());
+    let mut lk = LdiscKind::NTty(LineDisc::new());
     if lk.no_room() {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty no_room initially true");
         return TestResult::Fail;

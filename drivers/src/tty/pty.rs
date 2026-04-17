@@ -136,13 +136,15 @@ pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
     let slave_peer = PtyPeerHandle::snapshot(slave_idx);
     let master_peer = PtyPeerHandle::snapshot(master_idx);
 
+    let master = Tty::new_pty_master(master_idx, slave_peer).map_err(|_| TtyError::OutOfMemory)?;
+    let slave = Tty::new_pty_slave(slave_idx, master_peer).map_err(|_| TtyError::OutOfMemory)?;
     {
         let mut guard = TTY_SLOTS[master_slot].lock();
-        *guard = Some(Tty::new_pty_master(master_idx, slave_peer));
+        *guard = Some(master);
     }
     {
         let mut guard = TTY_SLOTS[slave_slot].lock();
-        *guard = Some(Tty::new_pty_slave(slave_idx, master_peer));
+        *guard = Some(slave);
     }
     mark_slot_allocated(master_slot);
     mark_slot_allocated(slave_slot);
@@ -179,7 +181,7 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 
     let (count, peer_idx) = {
         let mut guard = TTY_SLOTS[slot].lock();
-        let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
+        let tty: &mut Tty = guard.as_deref_mut().ok_or(TtyError::NotAllocated)?;
 
         match tty.driver {
             TtyDriverKind::PtySlave { ref peer } => {

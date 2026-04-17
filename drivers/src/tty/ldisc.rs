@@ -19,13 +19,12 @@
 //! [`InputAction`] / [`OutputAction`] values that the caller (the TTY core in
 //! `mod.rs`) translates into driver writes.
 
-use alloc::boxed::Box;
-
 use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
     UserTermios,
 };
+use slopos_alloc::{AllocError, PinBox, Zeroable};
 use slopos_utils::ring_buffer::RingBuffer;
 
 use super::driver::{InputEvent, InputStatus};
@@ -356,6 +355,17 @@ fn is_word_codepoint(cp: u32) -> bool {
 /// Each `Tty` owns one `LineDisc` instance.  It maintains an edit buffer
 /// (for canonical mode line editing) and a cooked ring buffer (ready for
 /// userland `read()`).
+// SAFETY: Every field of `LineDisc` accepts an all-zero bit-pattern:
+// `UserTermios` is bitflags (empty set = 0), `u8`, `[u8; NCCS]`, and
+// `u32` — all zero-valid. `[u8; EDIT_BUF_SIZE]` is trivially zero-valid.
+// `RingBuffer<u8, COOKED_BUF_SIZE>` is zero-valid via its blanket
+// `Zeroable` impl in `slopos-utils` (an all-zero ring is semantically
+// empty: head = tail = count = 0). The remaining fields are `usize`,
+// `u8`, `u32`, or `bool`, all of which accept zero. Overwriting
+// `termios` with `Self::default_termios()` after zeroing does not
+// affect soundness of the prior all-zero state.
+unsafe impl Zeroable for LineDisc {}
+
 pub struct LineDisc {
     termios: UserTermios,
 
@@ -432,9 +442,9 @@ impl LineDisc {
     /// Default termios applied to a freshly constructed `LineDisc`
     /// (canonical + echo + signals).
     ///
-    /// Kept as a small helper so both `new` (on-stack, for tests and
-    /// `LdiscKind::from_id`) and `new_boxed` (heap-direct) can share the
-    /// same defaults.
+    /// Kept as a small helper so both the fallible heap-direct
+    /// constructor [`new_pinned`] and the panicking convenience wrapper
+    /// [`new`] share the same defaults.
     pub const fn default_termios() -> UserTermios {
         let cc = [
             0x03, // VINTR   = Ctrl+C
@@ -483,59 +493,25 @@ impl LineDisc {
         }
     }
 
-    /// Create a new `LineDisc` with default termios (canonical + echo + signals).
+    /// Allocate a default `LineDisc` directly on the heap via
+    /// `slopos-alloc::PinBox::zeroed`, then overwrite `termios` with
+    /// the default canonical-mode settings.  The ≈12 KiB struct never
+    /// lands on the caller's stack — materialising it there would
+    /// consume ~20 KiB per invocation and overflow the 32 KiB kernel
+    /// stack during PTY pair setup.
     ///
-    /// Returns by value, so callers must arrange for a destination big
-    /// enough for the ≈12 KiB struct.  Prefer [`new_boxed`] for any code
-    /// path that would otherwise place this on the kernel stack — the
-    /// compiler materialises the return value on the callee's stack
-    /// regardless of NRVO, which consumed ~20 KiB per invocation and
-    /// overflowed the kernel stack during PTY pair setup.
-    pub const fn new() -> Self {
-        Self {
-            termios: Self::default_termios(),
-            edit_buf: [0; EDIT_BUF_SIZE],
-            edit_len: 0,
-            cooked: RingBuffer::new_zeroed(),
-            line_count: 0,
-            stopped: false,
-            literal_next: false,
-            column: 0,
-            utf8_remaining: 0,
-            xoff_sent: false,
-            pending_reprint: false,
-            in_erase_seq: false,
-            wake_chars_pending: 0,
-            no_room: false,
-            overflow_count: 0,
-            flushing_output: false,
-        }
+    /// Returns [`AllocError`] on allocator failure; callers in the
+    /// syscall path surface it as `-ENOMEM`, boot-time callers panic.
+    pub fn new_pinned() -> Result<PinBox<Self>, AllocError> {
+        let mut pb = PinBox::<Self>::zeroed()?;
+        pb.termios = Self::default_termios();
+        Ok(pb)
     }
 
-    /// Allocate a default `LineDisc` directly on the heap.
-    ///
-    /// Uses `Box::new_zeroed` so the ≈12 KiB struct never lands on the
-    /// caller's stack.  All fields of `LineDisc` accept an all-zero
-    /// bit-pattern (bitflags, `[u8; N]`, `RingBuffer<u8, N>`, integers,
-    /// bools); only `termios` has non-zero defaults, and we overwrite
-    /// it in place after `assume_init`.
-    ///
-    /// # Safety
-    ///
-    /// The `assume_init` is safe because zero is a valid bit-pattern
-    /// for every field of `LineDisc`:
-    /// - `UserTermios` contains only `bitflags!` types (where `0` is
-    ///   the empty set), `u8`, `[u8; NCCS]`, and `u32` — all zero-valid.
-    /// - `RingBuffer<u8, N>` is `[u8; N]` plus three `usize` indices;
-    ///   an all-zero ring is semantically empty (head = tail = count = 0).
-    /// - Every other field is `usize`, `u8`, `u32`, or `bool`, all of
-    ///   which accept zero.
-    pub fn new_boxed() -> Box<Self> {
-        // SAFETY: see the doc comment above — zero is a valid
-        // bit-pattern for every field of `LineDisc`.
-        let mut boxed: Box<Self> = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        boxed.termios = Self::default_termios();
-        boxed
+    /// Panic-on-OOM convenience for unit tests and boot-time callers
+    /// that cannot usefully recover from allocator failure.
+    pub fn new() -> PinBox<Self> {
+        Self::new_pinned().expect("kernel OOM during LineDisc allocation")
     }
 
     pub fn termios(&self) -> &UserTermios {
@@ -1787,6 +1763,12 @@ const RAW_BUF_SIZE: usize = 4096;
 /// No input processing, no echo, no signals, no canonical editing.
 /// Bytes pushed via `input_char` go directly to the cooked ring buffer;
 /// output bytes pass through without `c_oflag` processing.
+// SAFETY: Every field of `RawDisc` accepts an all-zero bit-pattern:
+// `UserTermios` is zero-valid (see `LineDisc`'s impl), `RingBuffer<u8,
+// N>` is zero-valid via its `slopos-utils` impl, and the remaining
+// fields are primitives.
+unsafe impl Zeroable for RawDisc {}
+
 pub struct RawDisc {
     termios: UserTermios,
     buf: RingBuffer<u8, RAW_BUF_SIZE>,
@@ -1821,37 +1803,20 @@ impl RawDisc {
         }
     }
 
-    /// Create a new `RawDisc` with default raw-mode termios.
-    ///
-    /// Returns by value.  Prefer [`new_boxed`] in kernel call paths so
-    /// the ≈4 KiB ring buffer is not materialised on the caller's stack.
-    pub const fn new() -> Self {
-        Self {
-            termios: Self::default_termios(),
-            buf: RingBuffer::new_zeroed(),
-            wake_chars_pending: 0,
-            no_room: false,
-            overflow_count: 0,
-        }
+    /// Allocate a default `RawDisc` directly on the heap via
+    /// `slopos-alloc::PinBox::zeroed`.  Avoids the ~4 KiB
+    /// compiler-generated stack temporary that `Self`-returning
+    /// constructors produced.  See [`LineDisc::new_pinned`] for the
+    /// full rationale.
+    pub fn new_pinned() -> Result<PinBox<Self>, AllocError> {
+        let mut pb = PinBox::<Self>::zeroed()?;
+        pb.termios = Self::default_termios();
+        Ok(pb)
     }
 
-    /// Allocate a default `RawDisc` directly on the heap.
-    ///
-    /// Same idea as [`LineDisc::new_boxed`] — avoids the ~4 KiB
-    /// compiler-generated stack temporary on the return path.
-    ///
-    /// # Safety
-    ///
-    /// Zero is a valid bit-pattern for every field of `RawDisc`:
-    /// `UserTermios` contains only bitflags (empty at 0), integers, and
-    /// `[u8; NCCS]`; `RingBuffer<u8, N>` is zero-valid; and the
-    /// remaining fields are primitives.
-    pub fn new_boxed() -> Box<Self> {
-        // SAFETY: see the doc comment above — every field of `RawDisc`
-        // accepts an all-zero bit-pattern.
-        let mut boxed: Box<Self> = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        boxed.termios = Self::default_termios();
-        boxed
+    /// Panic-on-OOM convenience for unit tests and boot-time callers.
+    pub fn new() -> PinBox<Self> {
+        Self::new_pinned().expect("kernel OOM during RawDisc allocation")
     }
 
     // -- Accessors -----------------------------------------------------------
@@ -2018,9 +1983,9 @@ impl RawDisc {
 /// creation.
 pub enum LdiscKind {
     /// Full N_TTY processing (canonical, echo, signals, etc.)
-    NTty(Box<LineDisc>),
+    NTty(PinBox<LineDisc>),
     /// Raw passthrough (for PTY master, future SLIP/PPP).
-    Raw(Box<RawDisc>),
+    Raw(PinBox<RawDisc>),
 }
 
 impl LdiscKind {
@@ -2034,19 +1999,23 @@ impl LdiscKind {
     }
 
     /// Construct an `LdiscKind` from a numeric id, applying the given termios.
-    pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Option<Self> {
+    ///
+    /// Returns `Ok(None)` for an unknown ldisc id and `Err(AllocError)`
+    /// on allocator failure; callers in the ioctl path surface either as
+    /// an errno.
+    pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Result<Option<Self>, AllocError> {
         match ldisc_id {
             N_TTY => {
-                let mut ld = LineDisc::new_boxed();
+                let mut ld = LineDisc::new_pinned()?;
                 ld.set_termios(&termios);
-                Some(LdiscKind::NTty(ld))
+                Ok(Some(LdiscKind::NTty(ld)))
             }
             N_RAW => {
-                let mut rd = RawDisc::new_boxed();
+                let mut rd = RawDisc::new_pinned()?;
                 rd.set_termios(&termios);
-                Some(LdiscKind::Raw(rd))
+                Ok(Some(LdiscKind::Raw(rd)))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 

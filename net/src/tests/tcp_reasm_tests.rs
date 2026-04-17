@@ -12,7 +12,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::tcp::buffer::TcpRecvState;
+use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpRecvState};
 use crate::tcp::reasm::Assembler;
 
 // -----------------------------------------------------------------------------
@@ -20,7 +20,7 @@ use crate::tcp::reasm::Assembler;
 // -----------------------------------------------------------------------------
 
 fn fresh_recv() -> TcpRecvState {
-    TcpRecvState::new()
+    TcpRecvState::new(TCP_BUFFER_SIZE).expect("alloc")
 }
 
 fn fresh_asm() -> Assembler {

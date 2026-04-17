@@ -429,7 +429,9 @@ issues.
 - 2026-04-17 — Phase B.0 infrastructure landed; threshold 8192 B,
   measured max frame 7288 B in a `core::array::IntoIter<_, 100>`
   instantiation inside `slopos-mm`. See §8 below.
-- (Phase B.1 completion date) — Hot-subsystem migration complete.
+- 2026-04-18 — Phase B.1 hot-subsystem migration complete.
+  Threshold still 8 KiB; migrated subsystems' max frame 1 240 B
+  (`ReassemblyTable::insert`). See §9 below.
 - (Phase B.2 completion date) — Syscall/FS/scheduler migration
   complete; threshold tightened to 4 KiB.
 - (Phase B.3 completion date) — Full workspace flipped to
@@ -553,3 +555,208 @@ threshold is kept at 8192 — no fallback needed.
 - No threshold tightening below 8192. Phase B.1 drops to 4 KiB.
 - `just stack-audit` recipe (pre-existing `sub rsp,0xNN` asm parser)
   left untouched — kept as a diagnostic shortcut per §4 of this plan.
+
+---
+
+## 9. Phase B.1 results (2026-04-18)
+
+Hot-subsystem migration complete. Every subsystem originally flagged
+in §1 now routes its heap allocations through `slopos-alloc`'s
+pin-init surface; no `fn new() -> Self` on any migrated struct
+produces a stack frame over 1.3 KiB.
+
+### What landed
+
+- **`slopos-alloc` API extensions**
+  - Re-exports added: `pin_init`, `try_pin_init`, `init`,
+    `try_init`, `init_from_closure`, `pin_init_from_closure`.
+  - `PinBox::try_new(value: T)` helper for small-type callers where
+    a brief stack materialisation is not a stack-safety concern
+    (`Tty`, `ReassembledPacket`). Documented to prefer
+    `PinBox::pin_init` / `PinBox::zeroed` for any large type.
+- **`slopos-utils`** — `unsafe impl Zeroable for RingBuffer<T: Zeroable, N>`.
+  Single blanket impl; enables every parent struct that embeds a
+  `RingBuffer<u8, N>` to `#[derive(Zeroable)]` or
+  `unsafe impl Zeroable`.
+- **`net/src/reassembly.rs`** — `Fragment.data` migrated to `KVec<u8>`;
+  `ReassembledPacket.data` migrated to `KVec<u8>` via `KVec::zeroed(MAX_REASSEMBLED_DATA)`;
+  `ReassemblyGroup::empty()` stays `const fn` for static init, but
+  the non-const `*group = Self::empty()` assignment pattern in
+  `clear_group` / `init_group` is replaced with
+  `reset_in_place()`, eliminating the ~700 B stack temp. Size
+  tripwires (`Fragment ≤ 64 B`, `ReassembledPacket ≤ 64 B`,
+  `ReassemblyGroup ≤ 1024 B`) planted at end of module.
+- **`net/src/unix_socket.rs`** — `RingBuf.buf` migrated from
+  `Option<Box<[u8]>>` to `Option<KVec<u8>>`; `alloc_buf()` now
+  fallible, returning `Option<KVec<u8>>` (None surfaces as
+  `-ENOMEM` in `unix_connect`). All `extern crate alloc;` / `use
+  alloc::*;` removed from this file.
+- **`drivers/src/tty/ldisc.rs`**
+  - `pub const fn LineDisc::new() -> Self` **deleted** (12 KiB
+    return-by-value hazard).
+  - `new_boxed()` replaced with
+    `new_pinned() -> Result<PinBox<Self>, AllocError>`, backed by
+    `unsafe impl Zeroable for LineDisc` + `PinBox::<Self>::zeroed()`.
+  - `new() -> PinBox<Self>` convenience (panics on OOM) for tests
+    and boot-time callers — tests still write
+    `let mut ld = LineDisc::new();` and get a `PinBox<LineDisc>`
+    that derefs to `&mut LineDisc`.
+  - Same triplet for `RawDisc`.
+  - `LdiscKind::{NTty, Raw}` variants flipped from
+    `Box<{LineDisc,RawDisc}>` to `PinBox<{LineDisc,RawDisc}>`.
+  - `LdiscKind::from_id` now returns
+    `Result<Option<Self>, AllocError>`.
+- **`drivers/src/tty/{mod.rs,table.rs,pty.rs}`** — `Tty` wrapped in
+  `PinBox<Tty>`; `TTY_SLOTS: [IrqMutex<Option<PinBox<Tty>>>;
+  MAX_TTYS]`; `Tty::{new, new_pty_master, new_pty_slave}` return
+  `Result<PinBox<Self>, AllocError>`; `tty_table_init` panics on
+  OOM (`.expect`) for the two boot-time console slots; `pty_alloc`
+  surfaces `AllocError` as `TtyError::OutOfMemory` → `-ENOMEM`.
+  - New `TtyError::OutOfMemory` variant in `abi/src/tty_error.rs`
+    mapping to `ERRNO_ENOMEM`.
+- **`net/src/tcp/buffer.rs`** — fields `pub` → `pub(crate)`;
+  `buf: Box<TcpBuffer>` → `buf: KBox<TcpBuffer>`; constructors take
+  a `cap: usize` parameter (all call sites pass `TCP_BUFFER_SIZE`
+  for now; the hook is there for the future `SO_SNDBUF` / `SO_RCVBUF`
+  work in the TCP modernization roadmap) and return
+  `Result<Self, AllocError>`. Added accessor methods (`send`,
+  `send_mut`, `recv`, `recv_mut`, `ooo`, `ooo_mut`,
+  `inflight`, `effective_capacity`, …) for callers outside the
+  `tcp` module. Size tripwires: `TcpSendState ≤ 64 B`,
+  `TcpRecvState ≤ 64 B`, `TcpBufferPair ≤ 256 B`.
+- **`net/src/tcp/table.rs`** — `TcpShard.buffers` kept as the
+  inline `[Option<TcpBufferPair>; SLOTS_PER_SHARD]` (see
+  "Deviations" below). `alloc_buffer_for` now
+  `-> Result<(), AllocError>` and takes the fallible inner
+  `TcpBufferPair::new(TCP_BUFFER_SIZE)?`.
+- **Test call sites** — 26 occurrences across
+  `net/src/tests/{tcp_pcb_data_tests.rs, tcp_rst_validation_tests.rs, tcp_reasm_tests.rs}`
+  migrated to `TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc")`
+  etc. Test files in
+  `drivers/src/tty_tests/{test_ldisc_core,test_ldisc_regression,test_pty_core}.rs`
+  flipped from `LineDisc::new_boxed()` → `LineDisc::new()` (now
+  returns `PinBox<LineDisc>`).
+
+### Measured baseline
+
+Top-10 frames in the production `kernel.elf` at this commit
+(`llvm-readobj --stack-sizes`, production build — not the
+`builtin-tests` variant):
+
+| Size (B) | Function (demangled) |
+| -------: | :------------------- |
+|   7 288 | `core::array::IntoIter<_, 100>::into_iter` instantiated in `slopos-mm` |
+|   6 520 | `slopos_tests::xsave_tests::test_sse_multi_register_isolation` |
+|   6 264 | `slopos_tests::xsave_tests::test_avx_xsave_xrstor_roundtrip` |
+|   6 200 | `slopos_tests::xsave_tests::test_sse_xsave_xrstor_roundtrip` |
+|   6 008 | `slopos_tests::tests_run_all` |
+|   5 768 | `slopos_mm::process_vm::process_vm_load_elf_data` |
+|   5 496 | `slopos_core::syscall::net_handlers::syscall_recvmsg` |
+|   5 416 | `slopos_core::syscall::net_handlers::syscall_sendmsg` |
+|   5 160 | `slopos_core::syscall::fs::poll_ioctl_handlers::syscall_poll` |
+|   4 856 | `slopos_core::scheduler::task::task_table::init_task_manager{closure}` |
+
+Migrated-subsystem frames (post-B.1):
+
+| Size (B) | Function |
+| -------: | :------- |
+|   1 240 | `ReassemblyTable::insert` (was 57 616 B at the §1 baseline) |
+|     888 | `TcpShard::alloc_buffer_for` (was 131 600 B) |
+|     760 | `unix_connect` (was 33 376 B) |
+|     616 | `TcpBufferPair::new` (was 65 792 B) |
+|     424 | `LineDisc::{read, receive_buf}` |
+|     408 | `RawDisc::receive_buf` |
+|     344 | `TcpShard::release` (was ~65 KiB) |
+|     264 | `TcpSendState::enqueue` |
+|     248 | `TcpShard::free_buffer_for` |
+
+All migrated-subsystem frames **≤ 4 KiB**, satisfying the Phase B.1
+exit criterion. The top-10 offenders all live in the still-
+unmigrated syscall / mm / xsave-tests surface, which is Phase B.2
+scope.
+
+### Deviations from the plan text (§3 Phase B.1)
+
+1. **`TcpShard.buffers` stays inline** — the plan text said flip to
+   `[Option<PinBox<TcpBufferPair>>; SLOTS_PER_SHARD]`. After the
+   `KBox<TcpBuffer>` migration `TcpBufferPair` is only ~48 B, so
+   inlining four per shard is ~192 B of `.bss` per shard.
+   Wrapping each in `PinBox` would cost an extra per-slot heap
+   allocation and an indirection on every TCP hot-path access for
+   zero stack-safety benefit (the big 32 KiB buffers live inside
+   `KBox` already). Kept inline.
+2. **`ReassemblyTable.groups` stays inline** — same argument as (1).
+   `ReassemblyGroup` is ~700 B after the Box-slim-down that §1
+   baseline's 25 680 B figure predates, and the whole
+   `ReassemblyTable` is a single `.bss` static. The *actual* hazard
+   was the `*group = ReassemblyGroup::empty()` stack temp, which is
+   fixed by the new `reset_in_place()`.
+3. **`ReassembledPacket` stays returned by value** — 32 B struct.
+   Wrapping in `PinBox` would add indirection without a
+   stack-safety win; the real hazard was the 24 KiB data buffer,
+   which is now routed through `KVec::zeroed`.
+4. **Macro re-export quirk** — `pub use pinned_init::pin_init;`
+   through `slopos-alloc` is a name re-export; the macro's
+   `$crate::__init_internal!` still resolves to `::pinned_init::`.
+   Verified via `try_init!` usage path; kernel crates using
+   `slopos_alloc::try_init!` would need `pinned-init` in their
+   own `Cargo.toml` for the expansion to resolve. **Worked around
+   by not using `try_init!` / `pin_init!` in migrated call sites —
+   pre-allocate the inner `KBox<...>` / `KVec<...>` outside the
+   `Self { ... }` literal and rely on plain `Self`-struct init
+   for small outer types.** If a future type genuinely needs
+   chain-init across allocation boundaries (TCP `effective_capacity`
+   plumbing for SO_SNDBUF would), either add `pinned-init` as a
+   direct dep there or forward the macros through slopos-alloc
+   with a local helper macro.
+5. **`LineDisc::new()` kept, repurposed** — plan said delete. In
+   practice ~40 test sites call `LineDisc::new()` and rely on it
+   producing a value that supports `&mut` access. Changed
+   signature to `pub fn new() -> PinBox<Self>` (panic on OOM); the
+   12 KiB hazard is gone because there is no return-by-value path,
+   and tests continue to compile unchanged modulo their call to
+   `new_boxed` which flipped to `new`. The fallible production
+   constructor is `LineDisc::new_pinned() -> Result<PinBox<Self>,
+   AllocError>`.
+6. **Rust-analyzer / PinBox NLL interactions** — a few test sites
+   hit E0502 "cannot borrow `*tty` as mutable because it is also
+   borrowed as immutable" after the PinBox wrap. The compiler
+   can't project auto-deref calls into disjoint field borrows the
+   way it can for a direct `&mut T`. Fix: materialise
+   `let tty: &mut Tty = guard.as_deref_mut().ok_or(...)?` once
+   (instead of chaining `guard.as_mut().ok_or(...)?` + repeated
+   auto-deref), or hoist the offending reborrow into a `let` —
+   both done in-place in `drivers/src/tty/pty.rs:182` and
+   `drivers/src/tty_tests/test_ldisc_noncanon.rs:435`.
+7. **`slopos-alloc` no longer the only crate naming `alloc`** —
+   still true at the Cargo.toml level (gate `check_alloc_dep.sh`
+   passes). But `net` and `drivers` now enable
+   `#![feature(allocator_api)]` to reach `AllocError` from
+   slopos-alloc re-exports. Phase B.3 (the final
+   `extern crate alloc` purge) is where this asymmetry disappears.
+
+### Verification performed
+
+- `just build` — green; both gates pass (`check_alloc_dep: OK`,
+  `check_stack_sizes: OK`).
+- `just test` — 2391/2391 pass (auto-shutdown fired clean).
+- `llvm-readobj --stack-sizes builddir/kernel.elf | sort -rn` —
+  top-10 dumped above; migrated-subsystem functions all ≤ 4 KiB.
+- `just boot-log` — shell reaches PID 2 and the roulette starts
+  drawing before the 15 s timeout; no panic, no kernel-stack
+  faults on any of the migrated call paths.
+
+### Not done in B.1 (per scope)
+
+- Syscall / FS / scheduler frames — the top-10 still shows
+  `syscall_recvmsg` (5 496 B), `syscall_sendmsg` (5 416 B),
+  `syscall_poll` (5 160 B), `init_task_manager{closure}` (4 856 B),
+  `process_vm_load_elf_data` (5 768 B). These are Phase B.2 scope;
+  the stack-sizes threshold stays at 8192 B for this phase and
+  drops to 4 KiB only after B.2 clears them.
+- `extern crate alloc;` in non-`slopos-alloc` crates — left in
+  place for B.1; removal is Phase B.3 ("full workspace flipped to
+  `slopos-alloc`").
+- `scripts/check_return_types.sh` AST walk — Phase B.3 end-state
+  verification only.
+

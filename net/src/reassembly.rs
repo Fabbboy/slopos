@@ -1,9 +1,8 @@
 extern crate alloc;
 
-use alloc::boxed::Box;
-use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_alloc::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::{klog_debug, klog_warn};
 
@@ -32,18 +31,29 @@ struct ReassemblyKey {
     protocol: u8,
 }
 
+impl ReassemblyKey {
+    const fn zero() -> Self {
+        Self {
+            src_ip: Ipv4Addr([0, 0, 0, 0]),
+            dst_ip: Ipv4Addr([0, 0, 0, 0]),
+            identification: 0,
+            protocol: 0,
+        }
+    }
+}
+
 /// A single IPv4 fragment.
 ///
-/// `data` is heap-allocated and trimmed to the fragment's actual
-/// payload length — we don't reserve the full [`MAX_FRAGMENT_DATA`]
-/// inline because that would make [`ReassemblyGroup`] ≈24 KiB and
-/// drag every ingress function that touches a group (insert,
-/// init_group, clear_group, empty) over the kernel stack budget.
+/// `data` is a heap-direct zero-filled `KVec<u8>` routed through
+/// `slopos-alloc`, trimmed to the fragment's actual payload length.
+/// We intentionally do not reserve `MAX_FRAGMENT_DATA` inline —
+/// inlining that buffer would drag every ingress function that
+/// touches a group over the kernel-stack budget.
 struct Fragment {
     offset: u16,
     len: u16,
     more_fragments: bool,
-    data: Box<[u8]>,
+    data: KVec<u8>,
 }
 
 struct ReassemblyGroup {
@@ -58,15 +68,14 @@ struct ReassemblyGroup {
 
 /// A fully reassembled IPv4 datagram.
 ///
-/// `data` is heap-backed so the struct itself is ~32 bytes.  Keeping
-/// this type small matters because `ipv4::handle_rx` holds an
-/// `Option<ReassembledPacket>` on its stack for every inbound packet
-/// — inlining the 24 KiB buffer here was the dominant contributor to
-/// `handle_rx`'s 72 KiB kernel-stack frame.
+/// Fields are `pub(crate)` so the net crate can read them without
+/// indirection; the type itself is reached only through `PinBox` so
+/// the backing data buffer is heap-allocated by `slopos-alloc` rather
+/// than materialised on a caller's stack.
 pub struct ReassembledPacket {
-    pub protocol: u8,
-    pub len: u16,
-    pub data: Box<[u8]>,
+    pub(crate) protocol: u8,
+    pub(crate) len: u16,
+    pub(crate) data: KVec<u8>,
 }
 
 pub struct ReassemblyTable {
@@ -76,20 +85,20 @@ pub struct ReassemblyTable {
 pub static REASSEMBLY_TABLE: IrqMutex<ReassemblyTable> =
     IrqMutex::new(ReassemblyTable::new(), LOCK_LEVEL_REGISTRY);
 
+// Size tripwires: catch any future struct bloat that would bring
+// back large kernel-stack frames along the ingress / reassembly path.
+const _: () = assert!(core::mem::size_of::<Fragment>() <= 64);
+const _: () = assert!(core::mem::size_of::<ReassembledPacket>() <= 64);
+const _: () = assert!(core::mem::size_of::<ReassemblyGroup>() <= 1024);
+
 impl ReassemblyGroup {
     const fn empty() -> Self {
         Self {
             active: false,
-            key: ReassemblyKey {
-                src_ip: Ipv4Addr([0, 0, 0, 0]),
-                dst_ip: Ipv4Addr([0, 0, 0, 0]),
-                identification: 0,
-                protocol: 0,
-            },
-            // `Option<Fragment>` no longer implements `Copy` (Fragment
-            // owns a `Box<[u8]>`), so the `[None; N]` repeat syntax —
-            // which requires `Copy` — is replaced with `[const { None };
-            // N]`, which evaluates `None` as a const expression per slot.
+            key: ReassemblyKey::zero(),
+            // `Option<Fragment>` is not `Copy` (Fragment owns a `KVec<u8>`),
+            // so `[None; N]` repeat syntax is unavailable.  `[const { None };
+            // N]` evaluates `None` as a const expression per slot.
             fragments: [const { None }; MAX_FRAGMENTS_PER_GROUP],
             fragment_count: 0,
             total_len: None,
@@ -97,18 +106,38 @@ impl ReassemblyGroup {
             group_id: 0,
         }
     }
+
+    /// Reset this group in place without producing a stack temporary.
+    /// Using `*self = Self::empty()` would materialise a ~700 B group
+    /// on the caller's frame and move-assign it into place; field-level
+    /// resets keep the frame free of the temporary, preserving the
+    /// kernel-stack budget on the ingress path.
+    fn reset_in_place(&mut self) {
+        self.active = false;
+        self.key = ReassemblyKey::zero();
+        for slot in self.fragments.iter_mut() {
+            *slot = None;
+        }
+        self.fragment_count = 0;
+        self.total_len = None;
+        self.timer_token = None;
+        self.group_id = 0;
+    }
 }
 
 impl ReassembledPacket {
-    fn new(protocol: u8, len: u16) -> Self {
-        Self {
+    /// Allocate a reassembled-packet slot with a zero-filled 24 KiB
+    /// backing buffer.  The struct itself is ~32 B so passing it by
+    /// value is not a stack hazard; the buffer allocation is routed
+    /// through `slopos-alloc`'s `KVec::zeroed` to keep the 24 KiB out
+    /// of the caller's frame.
+    fn new(protocol: u8, len: u16) -> Option<Self> {
+        let data = KVec::<u8>::zeroed(MAX_REASSEMBLED_DATA).ok()?;
+        Some(Self {
             protocol,
             len,
-            // Heap-direct zero-fill via `alloc_zeroed`; avoids the
-            // 24 KiB stack temporary that `[0; MAX_REASSEMBLED_DATA]`
-            // would produce on the caller's frame.
-            data: vec![0u8; MAX_REASSEMBLED_DATA].into_boxed_slice(),
-        }
+            data,
+        })
     }
 }
 
@@ -153,21 +182,27 @@ impl ReassemblyTable {
 
         let group_idx = match self.find_group_index(&key) {
             Some(idx) => idx,
-            None => self.alloc_group_slot(key),
+            None => self.alloc_group_slot(key)?,
         };
 
         let group = &mut self.groups[group_idx];
 
-        // Heap-allocate the fragment payload sized to the actual
-        // wire length.  `Box::<[u8]>::from(&[u8])` routes through
-        // the global allocator without ever placing `MAX_FRAGMENT_DATA`
-        // bytes on the caller's stack, which would otherwise push
-        // `insert` past the 32 KiB task-kernel-stack budget.
+        // Heap-direct zero-fill + byte copy.  Sized to the wire
+        // payload, never `MAX_FRAGMENT_DATA`, so the full 1500-byte
+        // upper bound is never reserved per slot.
+        let mut frag_data = match KVec::<u8>::zeroed(data.len()) {
+            Ok(buf) => buf,
+            Err(_) => {
+                klog_warn!("reassembly: fragment alloc failed len={}", data.len());
+                return None;
+            }
+        };
+        frag_data.as_mut_slice().copy_from_slice(data);
         let frag = Fragment {
             offset: frag_offset,
             len: data.len() as u16,
             more_fragments,
-            data: Box::<[u8]>::from(data),
+            data: frag_data,
         };
 
         if let Some(existing_idx) = group
@@ -205,7 +240,13 @@ impl ReassemblyTable {
             return None;
         }
 
-        let mut out = ReassembledPacket::new(protocol, total_len);
+        let mut out = match ReassembledPacket::new(protocol, total_len) {
+            Some(pkt) => pkt,
+            None => {
+                klog_warn!("reassembly: reassembled-packet alloc failed");
+                return None;
+            }
+        };
         let mut expected_offset = 0u16;
         while expected_offset < total_len {
             let Some(fragment) = Self::find_fragment_by_offset(group, expected_offset) else {
@@ -215,7 +256,8 @@ impl ReassemblyTable {
             let frag_len = fragment.len as usize;
             let out_start = expected_offset as usize;
             let out_end = out_start + frag_len;
-            out.data[out_start..out_end].copy_from_slice(&fragment.data[..frag_len]);
+            out.data.as_mut_slice()[out_start..out_end]
+                .copy_from_slice(&fragment.data.as_slice()[..frag_len]);
             expected_offset = expected_offset.wrapping_add(fragment.len);
         }
 
@@ -242,16 +284,16 @@ impl ReassemblyTable {
             .position(|group| group.active && group.key == *key)
     }
 
-    fn alloc_group_slot(&mut self, key: ReassemblyKey) -> usize {
+    fn alloc_group_slot(&mut self, key: ReassemblyKey) -> Option<usize> {
         if let Some(idx) = self.groups.iter().position(|group| !group.active) {
             self.init_group(idx, key);
-            return idx;
+            return Some(idx);
         }
 
         let idx = self.find_oldest_group_idx();
         self.clear_group(idx);
         self.init_group(idx, key);
-        idx
+        Some(idx)
     }
 
     fn init_group(&mut self, idx: usize, key: ReassemblyKey) {
@@ -262,8 +304,11 @@ impl ReassemblyTable {
             group_id,
         );
 
+        // In-place init; avoid `*group = ReassemblyGroup::empty();`,
+        // which materialises the group on the caller's stack before
+        // move-assigning it.
         let group = &mut self.groups[idx];
-        *group = ReassemblyGroup::empty();
+        group.reset_in_place();
         group.active = true;
         group.key = key;
         group.timer_token = Some(token);
@@ -288,7 +333,7 @@ impl ReassemblyTable {
         if let Some(token) = self.groups[idx].timer_token.take() {
             NET_TIMER_WHEEL.cancel(token);
         }
-        self.groups[idx] = ReassemblyGroup::empty();
+        self.groups[idx].reset_in_place();
     }
 
     fn is_complete(group: &ReassemblyGroup, total_len: u16) -> bool {
