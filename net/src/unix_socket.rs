@@ -22,6 +22,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec;
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, WaitQueue};
 
@@ -135,7 +136,16 @@ pub enum UnixState {
 struct RingBuf {
     /// Heap-allocated buffer, created on demand when a connection is
     /// established.  `None` means no buffer has been allocated yet.
-    buf: Option<Box<[u8; UNIX_BUF_SIZE]>>,
+    ///
+    /// The buffer is stored as `Box<[u8]>` (boxed slice) rather than
+    /// `Box<[u8; UNIX_BUF_SIZE]>` so that allocation goes through
+    /// `alloc_zeroed` directly via `vec!` and never materialises a
+    /// `UNIX_BUF_SIZE`-byte temporary on the caller's stack.  Rust's
+    /// `Box::new([0u8; N])` idiom pre-builds the `[u8; N]` on the
+    /// stack before moving it to the heap, which produced 32 KiB of
+    /// stack pressure per `unix_connect` call and overflowed the
+    /// kernel stack once the guard-page allocator started trapping it.
+    buf: Option<Box<[u8]>>,
     read_pos: usize,
     write_pos: usize,
     len: usize,
@@ -152,7 +162,11 @@ impl RingBuf {
     }
 
     /// Install a pre-allocated buffer and reset cursors.
-    fn install(&mut self, buf: Box<[u8; UNIX_BUF_SIZE]>) {
+    ///
+    /// The buffer must be exactly `UNIX_BUF_SIZE` bytes long; see
+    /// [`alloc_buf`].
+    fn install(&mut self, buf: Box<[u8]>) {
+        debug_assert_eq!(buf.len(), UNIX_BUF_SIZE);
         self.buf = Some(buf);
         self.read_pos = 0;
         self.write_pos = 0;
@@ -204,6 +218,19 @@ impl RingBuf {
     fn has_space(&self) -> bool {
         self.buf.is_some() && self.len < UNIX_BUF_SIZE
     }
+}
+
+/// Allocate a zeroed `UNIX_BUF_SIZE`-byte buffer directly on the heap.
+///
+/// Uses `vec![0u8; N].into_boxed_slice()` so the allocation is serviced
+/// by the global allocator (optimised to `alloc_zeroed` for `u8`) with
+/// no intermediate stack copy.  Writing `Box::new([0u8; UNIX_BUF_SIZE])`
+/// would first build the array on the caller's stack before moving it
+/// into the box, consuming `UNIX_BUF_SIZE` bytes of stack per buffer —
+/// far more than the kernel stack budget.
+#[inline]
+fn alloc_buf() -> Box<[u8]> {
+    vec![0u8; UNIX_BUF_SIZE].into_boxed_slice()
 }
 
 // ---------------------------------------------------------------------------
@@ -547,9 +574,11 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
 
     // Pre-allocate ring buffers BEFORE acquiring the global lock.
     // This avoids blocking all socket operations during the heap allocation
-    // (each buffer is UNIX_BUF_SIZE = 16 KB).
-    let pre_buf_a = Box::new([0u8; UNIX_BUF_SIZE]);
-    let pre_buf_b = Box::new([0u8; UNIX_BUF_SIZE]);
+    // (each buffer is UNIX_BUF_SIZE = 16 KB).  `alloc_buf` heap-allocates
+    // directly; see its docs for why the idiomatic `Box::new([0; N])`
+    // shape is unsafe here (blows the kernel stack).
+    let pre_buf_a = alloc_buf();
+    let pre_buf_b = alloc_buf();
 
     let mut state = UNIX_STATE.lock();
     let Some(i) = validate_socket_handle(&state, handle) else {
