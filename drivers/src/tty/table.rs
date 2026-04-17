@@ -202,7 +202,7 @@ impl Tty {
     pub fn new(index: TtyIndex, driver: TtyDriverKind) -> Self {
         Self {
             index,
-            ldisc: LdiscKind::NTty(LineDisc::new()),
+            ldisc: LdiscKind::NTty(LineDisc::new_boxed()),
             driver,
             session: TtySession::new(),
             winsize: UserWinsize {
@@ -220,7 +220,7 @@ impl Tty {
     pub fn new_pty_master(index: TtyIndex, peer: PtyPeerHandle) -> Self {
         Self {
             index,
-            ldisc: LdiscKind::Raw(super::ldisc::RawDisc::new()),
+            ldisc: LdiscKind::Raw(super::ldisc::RawDisc::new_boxed()),
             driver: TtyDriverKind::PtyMaster { peer },
             session: TtySession::new(),
             winsize: UserWinsize {
@@ -238,7 +238,7 @@ impl Tty {
     pub fn new_pty_slave(index: TtyIndex, peer: PtyPeerHandle) -> Self {
         Self {
             index,
-            ldisc: LdiscKind::NTty(LineDisc::new()),
+            ldisc: LdiscKind::NTty(LineDisc::new_boxed()),
             driver: TtyDriverKind::PtySlave { peer },
             session: TtySession::new(),
             winsize: UserWinsize {

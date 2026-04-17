@@ -179,7 +179,7 @@ pub fn test_raw_disc_flush() -> TestResult {
 
 /// LdiscKind::NTty delegates to LineDisc correctly.
 pub fn test_ldisc_kind_ntty_delegation() -> TestResult {
-    let mut lk = LdiscKind::NTty(LineDisc::new());
+    let mut lk = LdiscKind::NTty(LineDisc::new_boxed());
     // NTty should be canonical by default.
     if !lk.is_canonical() {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty should be canonical by default");
@@ -208,7 +208,7 @@ pub fn test_ldisc_kind_ntty_delegation() -> TestResult {
 
 /// LdiscKind::Raw delegates to RawDisc correctly.
 pub fn test_ldisc_kind_raw_delegation() -> TestResult {
-    let mut lk = LdiscKind::Raw(RawDisc::new());
+    let mut lk = LdiscKind::Raw(RawDisc::new_boxed());
     // Raw should NOT be canonical.
     if lk.is_canonical() {
         klog_info!("TTY_TEST: BUG - LdiscKind::Raw should not be canonical");

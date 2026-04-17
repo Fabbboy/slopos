@@ -19,6 +19,8 @@
 //! [`InputAction`] / [`OutputAction`] values that the caller (the TTY core in
 //! `mod.rs`) translates into driver writes.
 
+use alloc::boxed::Box;
+
 use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
@@ -427,8 +429,13 @@ pub struct LineDisc {
 }
 
 impl LineDisc {
-    /// Create a new `LineDisc` with default termios (canonical + echo + signals).
-    pub const fn new() -> Self {
+    /// Default termios applied to a freshly constructed `LineDisc`
+    /// (canonical + echo + signals).
+    ///
+    /// Kept as a small helper so both `new` (on-stack, for tests and
+    /// `LdiscKind::from_id`) and `new_boxed` (heap-direct) can share the
+    /// same defaults.
+    pub const fn default_termios() -> UserTermios {
         let cc = [
             0x03, // VINTR   = Ctrl+C
             0x1C, // VQUIT   = Ctrl+backslash
@@ -449,34 +456,44 @@ impl LineDisc {
             0,    // VEOL2 (disabled)
             0, 0,
         ];
+        UserTermios {
+            c_iflag: InputFlags::ICRNL,
+            c_oflag: OutputFlags::from_bits_retain(
+                OutputFlags::OPOST.bits() | OutputFlags::ONLCR.bits() | OutputFlags::XTABS.bits(),
+            ),
+            c_cflag: ControlFlags::from_bits_retain(
+                ControlFlags::CS8.bits()
+                    | ControlFlags::CREAD.bits()
+                    | ControlFlags::HUPCL.bits()
+                    | slopos_abi::syscall::B38400,
+            ),
+            c_lflag: LocalFlags::from_bits_retain(
+                LocalFlags::ISIG.bits()
+                    | LocalFlags::ICANON.bits()
+                    | LocalFlags::ECHO.bits()
+                    | LocalFlags::ECHOE.bits()
+                    | LocalFlags::ECHOK.bits()
+                    | LocalFlags::ECHOCTL.bits()
+                    | LocalFlags::ECHOKE.bits(),
+            ),
+            c_line: N_TTY as u8,
+            c_cc: cc,
+            c_ispeed: 0,
+            c_ospeed: 0,
+        }
+    }
+
+    /// Create a new `LineDisc` with default termios (canonical + echo + signals).
+    ///
+    /// Returns by value, so callers must arrange for a destination big
+    /// enough for the ≈12 KiB struct.  Prefer [`new_boxed`] for any code
+    /// path that would otherwise place this on the kernel stack — the
+    /// compiler materialises the return value on the callee's stack
+    /// regardless of NRVO, which consumed ~20 KiB per invocation and
+    /// overflowed the kernel stack during PTY pair setup.
+    pub const fn new() -> Self {
         Self {
-            termios: UserTermios {
-                c_iflag: InputFlags::ICRNL,
-                c_oflag: OutputFlags::from_bits_retain(
-                    OutputFlags::OPOST.bits()
-                        | OutputFlags::ONLCR.bits()
-                        | OutputFlags::XTABS.bits(),
-                ),
-                c_cflag: ControlFlags::from_bits_retain(
-                    ControlFlags::CS8.bits()
-                        | ControlFlags::CREAD.bits()
-                        | ControlFlags::HUPCL.bits()
-                        | slopos_abi::syscall::B38400,
-                ),
-                c_lflag: LocalFlags::from_bits_retain(
-                    LocalFlags::ISIG.bits()
-                        | LocalFlags::ICANON.bits()
-                        | LocalFlags::ECHO.bits()
-                        | LocalFlags::ECHOE.bits()
-                        | LocalFlags::ECHOK.bits()
-                        | LocalFlags::ECHOCTL.bits()
-                        | LocalFlags::ECHOKE.bits(),
-                ),
-                c_line: N_TTY as u8,
-                c_cc: cc,
-                c_ispeed: 0,
-                c_ospeed: 0,
-            },
+            termios: Self::default_termios(),
             edit_buf: [0; EDIT_BUF_SIZE],
             edit_len: 0,
             cooked: RingBuffer::new_zeroed(),
@@ -493,6 +510,32 @@ impl LineDisc {
             overflow_count: 0,
             flushing_output: false,
         }
+    }
+
+    /// Allocate a default `LineDisc` directly on the heap.
+    ///
+    /// Uses `Box::new_zeroed` so the ≈12 KiB struct never lands on the
+    /// caller's stack.  All fields of `LineDisc` accept an all-zero
+    /// bit-pattern (bitflags, `[u8; N]`, `RingBuffer<u8, N>`, integers,
+    /// bools); only `termios` has non-zero defaults, and we overwrite
+    /// it in place after `assume_init`.
+    ///
+    /// # Safety
+    ///
+    /// The `assume_init` is safe because zero is a valid bit-pattern
+    /// for every field of `LineDisc`:
+    /// - `UserTermios` contains only `bitflags!` types (where `0` is
+    ///   the empty set), `u8`, `[u8; NCCS]`, and `u32` — all zero-valid.
+    /// - `RingBuffer<u8, N>` is `[u8; N]` plus three `usize` indices;
+    ///   an all-zero ring is semantically empty (head = tail = count = 0).
+    /// - Every other field is `usize`, `u8`, `u32`, or `bool`, all of
+    ///   which accept zero.
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: see the doc comment above — zero is a valid
+        // bit-pattern for every field of `LineDisc`.
+        let mut boxed: Box<Self> = unsafe { Box::<Self>::new_zeroed().assume_init() };
+        boxed.termios = Self::default_termios();
+        boxed
     }
 
     pub fn termios(&self) -> &UserTermios {
@@ -1758,29 +1801,57 @@ pub struct RawDisc {
 }
 
 impl RawDisc {
+    /// Default termios applied to a freshly constructed `RawDisc`
+    /// (raw mode — no echo, no canonical processing).
+    pub const fn default_termios() -> UserTermios {
+        UserTermios {
+            c_iflag: InputFlags::empty(),
+            c_oflag: OutputFlags::empty(),
+            c_cflag: ControlFlags::from_bits_retain(
+                ControlFlags::CS8.bits()
+                    | ControlFlags::CREAD.bits()
+                    | ControlFlags::HUPCL.bits()
+                    | slopos_abi::syscall::B38400,
+            ),
+            c_lflag: LocalFlags::empty(),
+            c_line: N_RAW as u8,
+            c_cc: [0; NCCS],
+            c_ispeed: 0,
+            c_ospeed: 0,
+        }
+    }
+
     /// Create a new `RawDisc` with default raw-mode termios.
+    ///
+    /// Returns by value.  Prefer [`new_boxed`] in kernel call paths so
+    /// the ≈4 KiB ring buffer is not materialised on the caller's stack.
     pub const fn new() -> Self {
         Self {
-            termios: UserTermios {
-                c_iflag: InputFlags::empty(),
-                c_oflag: OutputFlags::empty(),
-                c_cflag: ControlFlags::from_bits_retain(
-                    ControlFlags::CS8.bits()
-                        | ControlFlags::CREAD.bits()
-                        | ControlFlags::HUPCL.bits()
-                        | slopos_abi::syscall::B38400,
-                ),
-                c_lflag: LocalFlags::empty(),
-                c_line: N_RAW as u8,
-                c_cc: [0; NCCS],
-                c_ispeed: 0,
-                c_ospeed: 0,
-            },
+            termios: Self::default_termios(),
             buf: RingBuffer::new_zeroed(),
             wake_chars_pending: 0,
             no_room: false,
             overflow_count: 0,
         }
+    }
+
+    /// Allocate a default `RawDisc` directly on the heap.
+    ///
+    /// Same idea as [`LineDisc::new_boxed`] — avoids the ~4 KiB
+    /// compiler-generated stack temporary on the return path.
+    ///
+    /// # Safety
+    ///
+    /// Zero is a valid bit-pattern for every field of `RawDisc`:
+    /// `UserTermios` contains only bitflags (empty at 0), integers, and
+    /// `[u8; NCCS]`; `RingBuffer<u8, N>` is zero-valid; and the
+    /// remaining fields are primitives.
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: see the doc comment above — every field of `RawDisc`
+        // accepts an all-zero bit-pattern.
+        let mut boxed: Box<Self> = unsafe { Box::<Self>::new_zeroed().assume_init() };
+        boxed.termios = Self::default_termios();
+        boxed
     }
 
     // -- Accessors -----------------------------------------------------------
@@ -1938,11 +2009,18 @@ impl RawDisc {
 ///
 /// This allows PTY masters (and future SLIP/PPP) to use raw passthrough
 /// while normal terminals use full N_TTY processing.
+///
+/// The discipline state (`LineDisc` ≈ 12 KiB, `RawDisc` ≈ 4 KiB) lives on
+/// the heap via `Box`, so `LdiscKind` — and therefore `Tty` — is small on
+/// the stack.  Constructing a `Tty` inside a syscall path (e.g. `pty_alloc`)
+/// now costs a handful of bytes instead of ~12 KiB per instance, which
+/// previously pushed kernel stacks past the guard page during pair
+/// creation.
 pub enum LdiscKind {
     /// Full N_TTY processing (canonical, echo, signals, etc.)
-    NTty(LineDisc),
+    NTty(Box<LineDisc>),
     /// Raw passthrough (for PTY master, future SLIP/PPP).
-    Raw(RawDisc),
+    Raw(Box<RawDisc>),
 }
 
 impl LdiscKind {
@@ -1959,12 +2037,12 @@ impl LdiscKind {
     pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Option<Self> {
         match ldisc_id {
             N_TTY => {
-                let mut ld = LineDisc::new();
+                let mut ld = LineDisc::new_boxed();
                 ld.set_termios(&termios);
                 Some(LdiscKind::NTty(ld))
             }
             N_RAW => {
-                let mut rd = RawDisc::new();
+                let mut rd = RawDisc::new_boxed();
                 rd.set_termios(&termios);
                 Some(LdiscKind::Raw(rd))
             }
