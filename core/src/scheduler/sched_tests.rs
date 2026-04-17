@@ -420,11 +420,10 @@ pub fn test_kstack_basic_alloc() -> TestResult {
 /// Test: after dropping a `KernelStack`, the slot is returned to the
 /// allocator and can be reused for a subsequent allocation.
 ///
-/// This is the regression-proof test referenced in
-/// `plans/KERNEL_STACK_ALLOCATION_OVERHAUL.md`: it confirms that task
-/// stack capacity is **independent of kernel binary size**, because
-/// the slot allocator tracks availability in its own bitmap rather
-/// than reading from (kernel-image-reserved) physical pages.
+/// Confirms that task stack capacity is **independent of kernel binary
+/// size**, because the slot allocator tracks availability in its own
+/// bitmap rather than reading from (kernel-image-reserved) physical
+/// pages.
 pub fn test_kstack_slot_reuse() -> TestResult {
     use super::stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;

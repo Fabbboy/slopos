@@ -14,9 +14,9 @@
 //! The backing region is a fixed slice of kernel virtual address space
 //! declared in `memory_layout_defs`.  Growing the kernel image moves
 //! `_kernel_end` but has no effect on this region — task-stack capacity
-//! is therefore independent of kernel binary size.  This is the fix for
-//! the SUITE61 regression described in
-//! `plans/KERNEL_STACK_ALLOCATION_OVERHAUL.md`.
+//! is therefore independent of kernel binary size.  This decoupling is
+//! what allowed the SUITE61 stack-reuse regression to stay fixed across
+//! kernel growth.
 //!
 //! # Safety
 //!

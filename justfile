@@ -190,6 +190,11 @@ show-qemu-resolution:
 fmt:
     {{cargo}} +{{rust_channel}} fmt --all -- --check
 
+[doc("Enforce kernel allocation + stack-frame invariants against the current kernel.elf")]
+check:
+    scripts/check_alloc_dep.sh
+    scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
+
 [doc("Audit kernel ELF for functions whose stack frame exceeds the 32 KiB task-stack budget")]
 stack-audit:
     #!/usr/bin/env bash

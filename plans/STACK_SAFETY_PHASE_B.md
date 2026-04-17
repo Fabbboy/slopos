@@ -426,8 +426,9 @@ issues.
 
 - 2026-04-17 — Plan created on branch `stack-safety-overhaul` after
   big-bang approval.
-- (Phase B.0 completion date) — Infrastructure landed; threshold
-  8 KiB, zero offenders.
+- 2026-04-17 — Phase B.0 infrastructure landed; threshold 8192 B,
+  measured max frame 7288 B in a `core::array::IntoIter<_, 100>`
+  instantiation inside `slopos-mm`. See §8 below.
 - (Phase B.1 completion date) — Hot-subsystem migration complete.
 - (Phase B.2 completion date) — Syscall/FS/scheduler migration
   complete; threshold tightened to 4 KiB.
@@ -435,3 +436,120 @@ issues.
   `slopos-alloc`; `.stack_sizes` audit green.
 - (Phase B.4 / merge date) — Merged to `develop`; threshold 2 KiB;
   invariants active.
+
+---
+
+## 8. Phase B.0 results (2026-04-17)
+
+Infrastructure sub-phase complete. Three enforcement layers now stand up
+on branch `stack-safety-overhaul`.
+
+### What landed
+
+- **`slopos-alloc` workspace crate** — wraps `pinned-init` (crates.io
+  `0.0.10`, the Rust-for-Linux legacy branch) with `PinBox<T>`,
+  `KBox<T: Zeroable>`, `KVec<T: Zeroable>`, and `boxed_zeroed<T>`. Two
+  tight `unsafe` blocks (`boxed_zeroed` and `KVec::zeroed`), both guarded
+  by `T: Zeroable`. No kernel crate consumes it yet; adoption begins in
+  B.1.
+- **`.stack_sizes` ELF backstop** — `-Zemit-stack-sizes` now actually
+  reaches rustc (see "Deviation 1" below); post-link script
+  `scripts/check_stack_sizes.sh` parses the section via toolchain
+  `llvm-readobj --stack-sizes` and fails the build on any frame larger
+  than `STACK_SIZE_THRESHOLD` (env var, default `8192`).
+- **Alloc-dep gate** — `scripts/check_alloc_dep.sh` enumerates every
+  kernel `Cargo.toml`, skips userland and `slopos-alloc`, and fails if
+  any kernel crate declares a direct `alloc` dependency (section-aware;
+  `[features]` stanzas are ignored).
+- Both gates wired into `scripts/build_kernel.sh` so every build path
+  (`just build`, `_iso-tests`, `boot-prod`) exercises them. New `just
+  check` recipe allows standalone invocation.
+
+### Measured baseline
+
+Top 10 frames in the `dev`-profile `kernel.elf` at commit HEAD, from
+`.stack_sizes`:
+
+| Size (B) | Function (mangled) |
+| -------: | :----------------- |
+|   7 288 | `core::array::IntoIter<_, 100>::into_iter` instantiated in `slopos-mm` |
+|   6 520 | `slopos_tests::xsave_tests::test_sse_multi_register_isolation` |
+|   6 264 | `slopos_tests::xsave_tests::test_avx_xsave_xrstor_roundtrip` |
+|   6 200 | `slopos_tests::xsave_tests::test_sse_xsave_xrstor_roundtrip` |
+|   6 008 | `slopos_tests::tests_run_all` |
+|   5 768 | `slopos_mm::process_vm::process_vm_load_elf_data` |
+|   5 496 | `slopos_core::syscall::net_handlers::syscall_recvmsg` |
+|   5 416 | `slopos_core::syscall::net_handlers::syscall_sendmsg` |
+|   5 160 | `slopos_core::syscall::fs::poll_ioctl_handlers::syscall_poll` |
+|   4 856 | `slopos_core::scheduler::task::task_table::init_task_manager{closure}` |
+
+Max frame 7 288 B is below the 8 KiB plan target, so the default
+threshold is kept at 8192 — no fallback needed.
+
+### Deviations from the plan text (§3 Phase B.0)
+
+1. **`-Zemit-stack-sizes` placement** — plan step 3 says "enable in
+   `targets/x86_64-slos.json`". The flag was already live in
+   `.cargo/config.toml:25` but never reached rustc: `scripts/build_kernel.sh`
+   overrides the whole `RUSTFLAGS` layer via env var, which takes
+   precedence over `[target.*]` in `config.toml` (cargo does **not**
+   merge the two). Fixed by appending `-Zunstable-options
+   -Zemit-stack-sizes` to the RUSTFLAGS export inside the build script.
+   No `link.ld` patch was needed — rust-lld preserves the
+   `SHT_LLVM_STACK_SIZE` section by default for our linker script
+   layout.
+2. **pin-init crate** — plan §6 referenced `pin-init 0.0.9` but crates.io
+   now hosts two distinct projects: `pin-init 0.2.x` (nbdd0121's unrelated
+   library) and `pinned-init 0.0.10` (the Rust-for-Linux legacy branch,
+   which is what we want). Adopted `pinned-init 0.0.10` — it already
+   provides `#[pin_data]`, `pin_init!`, `try_pin_init!`, `Zeroable`,
+   `InPlaceInit`, and `Box::try_pin_init`. Migration to the new
+   `pin-init` name will be a one-line rename when R4L completes its own
+   migration.
+3. **`unsafe` blocks in `slopos-alloc`** — plan §3 step 1 said "one
+   centralised `unsafe`". Ended up with two (`boxed_zeroed` and
+   `KVec::zeroed`) because `Vec<T>` cannot route through
+   `Box::new_zeroed` without capacity bloat. Both cite the `T: Zeroable`
+   bound identically.
+4. **Stack-sizes parser tool** — plan step 4 mentions
+   `llvm-objdump --section-headers`, which only reports a section's
+   existence, not its contents. Switched to `llvm-readobj --stack-sizes`,
+   which is the correct primitive and is already shipped by
+   `llvm-tools-preview` in our pinned nightly.
+5. **Alloc-dep gate parsing** — plan step 6 sketches a `grep | grep -v`
+   one-liner. That matches `[features]` `alloc = [...]` stanzas (false
+   positive — already tripped on `gfx`, `appkit`, `windowing` during
+   initial testing). Rewrote as a section-aware `awk` script that only
+   considers `[dependencies]` / `[*-dependencies]` / `[target.*.*dependencies]`.
+6. **`extern crate alloc;` audit** — deferred to Phase B.3. Adding it in
+   B.0 would emit noise without enforcement payoff until migration
+   begins.
+7. **Stack-sizes gate scope** — skipped on builds with the
+   `kernel/builtin-tests` feature (`just test` / `_iso-tests`). Test
+   builds compile in per-subsystem regression suites whose 8–12 KiB
+   frames never reach the production kernel. The alloc-dep check still
+   runs unconditionally. B.1+ will either migrate the test scaffolding
+   (most of the offenders are `LineDisc::new` / `RawDisc::new` returning
+   by value — the same pattern as the real drivers) or keep the
+   test-build exemption permanent.
+
+### Verification performed
+
+- `just build` — green, both gates pass post-link.
+- `just check` — green.
+- `just test` — 2391/2391 pass; stack-sizes gate correctly skipped on
+  test builds.
+- `cargo +nightly-2026-03-22 build -p slopos-alloc --target targets/x86_64-slos.json
+  -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem` — green.
+- `STACK_SIZE_THRESHOLD=1024` on a fresh production build — correctly
+  exits non-zero and lists 135 offenders, confirming the gate bites.
+- Simulated `alloc = { workspace = true }` injection into
+  `net/Cargo.toml` — `check_alloc_dep.sh` correctly fires, state
+  restored clean afterward.
+
+### Not done in B.0 (per scope)
+
+- No kernel crate yet consumes `slopos-alloc`. Adoption is Phase B.1+.
+- No threshold tightening below 8192. Phase B.1 drops to 4 KiB.
+- `just stack-audit` recipe (pre-existing `sub rsp,0xNN` asm parser)
+  left untouched — kept as a diagnostic shortcut per §4 of this plan.

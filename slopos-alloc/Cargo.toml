@@ -1,0 +1,11 @@
+[package]
+name = "slopos-alloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pinned-init = { workspace = true, default-features = false, features = ["alloc"] }

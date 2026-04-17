@@ -642,8 +642,7 @@ pub fn init_memory_system(
 
         // Kernel stack VA allocator — must come after paging + heap so
         // its `IrqMutex` is usable and paging primitives can be called.
-        // Backs all task kernel stacks via the `KernelStack` type; see
-        // `plans/PHASE1_KERNEL_STACK_IMPLEMENTATION.md`.
+        // Backs all task kernel stacks via the `KernelStack` type.
         crate::kstack_va::init();
         // Per-CPU heap magazine caches: infrastructure is in place but
         // disabled pending investigation of a crash in the exec/fork test
