@@ -484,7 +484,23 @@ pub struct ValidatedSegment {
     pub flags: u32,
 }
 
+// SAFETY: every field is a primitive integer, whose all-zero bit pattern
+// is a valid `u32`/`u64`. No references, pointers, or enums with
+// non-zero discriminants are present.
+unsafe impl slopos_alloc::Zeroable for ValidatedSegment {}
+
 impl ValidatedSegment {
+    /// All-zero sentinel suitable for filling uninitialised scratch.
+    pub const ZERO: Self = Self {
+        vaddr_start: 0,
+        vaddr_end: 0,
+        file_offset: 0,
+        file_size: 0,
+        original_vaddr: 0,
+        mem_size: 0,
+        flags: 0,
+    };
+
     /// Calculate the total number of pages this segment requires.
     pub fn page_count(&self) -> u64 {
         (self.vaddr_end - self.vaddr_start) / PAGE_SIZE_4KB
@@ -553,26 +569,22 @@ impl<'a> ElfValidator<'a> {
         &self.header
     }
 
-    /// Parse and validate all PT_LOAD segments.
+    /// Parse and validate all PT_LOAD segments into a caller-provided slice.
     ///
-    /// Returns a vector of validated segments ready for loading.
-    /// Performs overlap detection between all segments.
-    pub fn validate_load_segments(
-        &self,
-    ) -> ElfResult<([ValidatedSegment; MAX_LOAD_SEGMENTS], usize)> {
-        let mut segments = [ValidatedSegment {
-            vaddr_start: 0,
-            vaddr_end: 0,
-            file_offset: 0,
-            file_size: 0,
-            original_vaddr: 0,
-            mem_size: 0,
-            flags: 0,
-        }; MAX_LOAD_SEGMENTS];
-        let mut count = 0;
+    /// Returns the number of segments written. `out` must have length
+    /// at least `MAX_LOAD_SEGMENTS`; the caller owns the backing
+    /// storage (typically a `KVec` on the heap) so a 896 B array
+    /// does not materialise on the caller's stack.
+    pub fn validate_load_segments_into(&self, out: &mut [ValidatedSegment]) -> ElfResult<usize> {
+        if out.len() < MAX_LOAD_SEGMENTS {
+            return Err(ElfError::TooManyLoadSegments);
+        }
+        for slot in out.iter_mut().take(MAX_LOAD_SEGMENTS) {
+            *slot = ValidatedSegment::ZERO;
+        }
+        let mut count = 0usize;
         let mut total_size: u64 = 0;
 
-        // First pass: validate each segment individually
         for i in 0..self.header.e_phnum as usize {
             let phdr = self.get_program_header(i)?;
 
@@ -586,7 +598,6 @@ impl<'a> ElfValidator<'a> {
 
             let validated = self.validate_segment(&phdr)?;
 
-            // Track total size
             let segment_size = validated.vaddr_end - validated.vaddr_start;
             total_size = total_size
                 .checked_add(segment_size)
@@ -596,7 +607,7 @@ impl<'a> ElfValidator<'a> {
                 return Err(ElfError::TotalSizeExceeded);
             }
 
-            segments[count] = validated;
+            out[count] = validated;
             count += 1;
         }
 
@@ -606,12 +617,23 @@ impl<'a> ElfValidator<'a> {
 
         for i in 0..count {
             for j in (i + 1)..count {
-                if segments[i].has_conflicting_overlap(&segments[j]) {
+                if out[i].has_conflicting_overlap(&out[j]) {
                     return Err(ElfError::SegmentOverlap);
                 }
             }
         }
 
+        Ok(count)
+    }
+
+    /// Test-only wrapper that keeps the stack-allocated return-by-value
+    /// shape. Production code must use [`validate_load_segments_into`].
+    #[cfg(feature = "itests")]
+    pub fn validate_load_segments(
+        &self,
+    ) -> ElfResult<([ValidatedSegment; MAX_LOAD_SEGMENTS], usize)> {
+        let mut segments = [ValidatedSegment::ZERO; MAX_LOAD_SEGMENTS];
+        let count = self.validate_load_segments_into(&mut segments)?;
         Ok((segments, count))
     }
 

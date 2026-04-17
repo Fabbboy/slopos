@@ -15,6 +15,7 @@ test = false
 doctest = false
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-alloc = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }

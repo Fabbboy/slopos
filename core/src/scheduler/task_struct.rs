@@ -343,6 +343,14 @@ pub const FPU_STATE_OFFSET: usize = {
     0xD0
 };
 const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
+// Tripwire: the Task struct is inherently large (dominated by FpuState).
+// The stack-safety contract is that nobody ever materialises a Task
+// rvalue on the stack — see `Task::reset_in_place`. This bound keeps
+// Task from growing past one full memory page so its static array
+// fits comfortably in `.bss` and heap callers budget a single-page
+// allocation when they need a scratch slot. Adjust only in concert
+// with a re-audit of every Task mutation site.
+const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 
 #[repr(C)]
 pub struct Task {
@@ -494,6 +502,56 @@ impl Task {
             next_ready: ptr::null_mut(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
+        }
+    }
+
+    /// Reset a Task slot in place to the `invalid` state.
+    ///
+    /// `*slot = Task::invalid()` materialises a ~3.8 KiB Task rvalue on
+    /// the caller's stack before the assignment; this primitive skips
+    /// that rvalue entirely. Owned resources the Task holds (currently
+    /// just `kernel_stack: Option<KernelStack>`) are released
+    /// explicitly via field-level `take()` before the rest of the
+    /// struct is zero-overwritten, matching the old assignment's drop
+    /// semantics without running a full `Task::drop` that might
+    /// re-release already-freed state when called on a slot that has
+    /// been partially cleaned up through other paths.
+    ///
+    /// # Safety
+    /// - `this` must be non-null, aligned, and point to a writable
+    ///   `Task` slot that the caller has exclusive access to.
+    /// - The slot must currently hold a valid `Task`.
+    pub unsafe fn reset_in_place(this: *mut Task) {
+        unsafe {
+            // Release the only owning field up front. `Option::take`
+            // drops the old `Some(KernelStack)` exactly once and is
+            // a no-op if `kernel_stack` is already `None` (e.g. the
+            // caller ran `free_task_stacks` first).
+            let _ = (*this).kernel_stack.take();
+            // Zero the non-drop-bearing fields. We stay away from the
+            // `kernel_stack: Option<KernelStack>` slot because `Option`
+            // has no layout guarantee that the all-zeros bit pattern
+            // corresponds to the `None` variant — re-establishing
+            // `None` below would be the only safe move if we
+            // clobbered it.
+            let bytes = core::mem::size_of::<Task>();
+            let kernel_stack_off = core::mem::offset_of!(Task, kernel_stack);
+            let kernel_stack_size =
+                core::mem::size_of::<Option<crate::scheduler::stack::KernelStack>>();
+            let base = this as *mut u8;
+            core::ptr::write_bytes(base, 0, kernel_stack_off);
+            let tail = base.add(kernel_stack_off + kernel_stack_size);
+            core::ptr::write_bytes(tail, 0, bytes - kernel_stack_off - kernel_stack_size);
+            (*this).task_id = INVALID_TASK_ID;
+            (*this).priority = TASK_PRIORITY_NORMAL;
+            (*this).process_id = INVALID_PROCESS_ID;
+            (*this).parent_task_id = INVALID_TASK_ID;
+            (*this).tgid = INVALID_TASK_ID;
+            (*this).pgid = INVALID_TASK_ID;
+            (*this).sid = INVALID_TASK_ID;
+            (*this).cwd[0] = b'/';
+            (*this).cwd_len = 1;
+            (*this).waiting_on.store(INVALID_TASK_ID, Ordering::Relaxed);
         }
     }
 

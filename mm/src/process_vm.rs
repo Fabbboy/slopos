@@ -698,8 +698,11 @@ pub fn process_vm_load_elf_data(
         return Err(ElfError::DynamicNotSupported);
     }
 
-    let (segments, segment_count) = validator.validate_load_segments()?;
-    let segments = &segments[..segment_count];
+    let mut segments_store =
+        slopos_alloc::KVec::<crate::elf::ValidatedSegment>::zeroed(crate::elf::MAX_LOAD_SEGMENTS)
+            .map_err(|_| ElfError::NullPointer)?;
+    let segment_count = validator.validate_load_segments_into(segments_store.as_mut_slice())?;
+    let segments = &segments_store.as_slice()[..segment_count];
 
     let tls_segment = validator.find_tls_segment()?;
     let tls_offset = validator.find_tls_offset()?;
@@ -728,7 +731,8 @@ pub fn process_vm_load_elf_data(
 
     unmap_existing_code_region(page_dir, code_base);
 
-    let mut section_mappings: [(u64, u64, u64); MAX_LOAD_SEGMENTS] = [(0, 0, 0); MAX_LOAD_SEGMENTS];
+    let mut section_mappings = slopos_alloc::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
+        .map_err(|_| ElfError::NullPointer)?;
     let mut mapping_count = 0usize;
     let mut mapped_pages: u32 = 0;
 
@@ -1422,20 +1426,10 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     0
 }
 
-fn collect_active_pids() -> [u32; MAX_PROCESSES] {
-    let mut pids = [INVALID_PROCESS_ID; MAX_PROCESSES];
-    for i in 0..MAX_PROCESSES {
-        // SAFETY: lock-free read of naturally-aligned u32.
-        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
-        if pid != INVALID_PROCESS_ID {
-            pids[i] = pid;
-        }
-    }
-    pids
-}
-
 pub fn init_process_vm() -> c_int {
-    for pid in collect_active_pids() {
+    for i in 0..MAX_PROCESSES {
+        // SAFETY: lock-free read of naturally-aligned u32 sentinel.
+        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
         if pid != INVALID_PROCESS_ID {
             destroy_process_vm(pid);
         }

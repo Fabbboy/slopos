@@ -432,8 +432,9 @@ issues.
 - 2026-04-18 — Phase B.1 hot-subsystem migration complete.
   Threshold still 8 KiB; migrated subsystems' max frame 1 240 B
   (`ReassemblyTable::insert`). See §9 below.
-- (Phase B.2 completion date) — Syscall/FS/scheduler migration
-  complete; threshold tightened to 4 KiB.
+- 2026-04-18 — Phase B.2 syscall / FS / scheduler migration
+  complete; threshold tightened to **4 KiB**; production max frame
+  4 056 B (`net::tcp::close`). See §10 below.
 - (Phase B.3 completion date) — Full workspace flipped to
   `slopos-alloc`; `.stack_sizes` audit green.
 - (Phase B.4 / merge date) — Merged to `develop`; threshold 2 KiB;
@@ -759,4 +760,205 @@ scope.
   `slopos-alloc`").
 - `scripts/check_return_types.sh` AST walk — Phase B.3 end-state
   verification only.
+
+
+---
+
+## 10. Phase B.2 results (2026-04-18)
+
+Syscall, FS, and scheduler migration complete. `scripts/check_stack_sizes.sh`
+default threshold dropped from 8 192 B to **4 096 B**; every function
+in the production `kernel.elf` now fits.
+
+### What landed
+
+- **`slopos-alloc` wiring** — `core`, `mm`, `fs` now declare
+  `slopos-alloc = { workspace = true }`. `#![feature(allocator_api)]`
+  added per-crate only at the first site that actually names
+  `AllocError`, to avoid `unused_features` lint.
+- **`init_process_vm`** (`mm/src/process_vm.rs`) — the
+  `collect_active_pids() -> [u32; MAX_PROCESSES]` helper (the
+  7 288 B `IntoIter<[u32; 0x100]>` offender per §1) was the sole
+  caller; folded into `init_process_vm`'s loop so no `[u32; 256]`
+  array ever materialises.
+- **Scratch-buffer pattern (Pattern 1)** — 11 production call
+  sites migrated from `let mut scratch = [0u8; 4096]` to
+  `slopos_alloc::KVec::<u8>::zeroed(4096)`:
+  - `core/src/syscall/net_handlers.rs` — `syscall_send`,
+    `syscall_recv`, `syscall_sendto`, `syscall_recvfrom`,
+    `syscall_sendmsg`, `syscall_recvmsg`
+  - `core/src/syscall/ui_handlers.rs` — `syscall_clipboard_copy`,
+    `syscall_clipboard_paste`
+  - `core/src/syscall/process_handlers.rs` — `read_user_cstr_list`
+    (`[u8; EXEC_MAX_ARG_STRLEN]` scratch, shared across argv
+    iterations)
+  - `fs/src/vfs_file_ops.rs` — `VfsFileOps::{read, write}`
+  - `fs/src/pipe_file_ops.rs` — `PipeReadOps::read`,
+    `PipeWriteOps::write`
+  - `fs/src/fileio/mod.rs` — `LocalTtyOps::{read, write}`
+  - `drivers/src/tty_file_ops.rs` — `TtyFileOps::{read, write}`
+  - `net/src/unix_socket_file_ops.rs` — `UnixSocketFileOps::{read, write}`
+  - `net/src/socket_file_ops.rs` — `SocketFileOps::{read, write}`
+  Every migration surfaces allocation failure as `-ENOMEM` at the
+  existing error-return boundary.
+- **`Task::reset_in_place`** (`core/src/scheduler/task_struct.rs`) —
+  replaces the 4 792 B `*slot = Task::invalid()` pattern in
+  `task_table.rs` and `task_session.rs`. Takes `kernel_stack`
+  explicitly (Option::take) to guarantee exactly-once drop of the
+  owning `KernelStack`, then `write_bytes`-zeroes the rest of the
+  struct **except** the `Option<KernelStack>` slot (Rust makes no
+  layout guarantee that the all-zero bit pattern of an un-niched
+  `Option<T>` is the `None` variant — writing zeros there would
+  corrupt the discriminant and set up a later double-release).
+  Non-zero sentinels (`INVALID_TASK_ID`, `TASK_PRIORITY_NORMAL`,
+  the `/` in `cwd`) are set after the zero fill. A
+  `size_of::<Task>() <= 8192` tripwire planted next to the
+  existing `FPU_STATE_OFFSET` assertion.
+- **`task_iterate_active` + `release_task_dependents`** — the
+  `[Option<*mut Task>; MAX_TASKS]` stack buffer (~4 KiB) flipped to
+  `KVec<usize>::zeroed(MAX_TASKS)`.
+- **ELF validator out-param** — `ElfValidator::validate_load_segments_into(&mut [ValidatedSegment])`
+  replaces the return-by-value API on the production path; test
+  callers keep the old `validate_load_segments()` wrapper under
+  `#[cfg(feature = "itests")]`. `ValidatedSegment` got an
+  `unsafe impl Zeroable` + `ZERO` const. `process_vm_load_elf_data`'s
+  `segments` array and `section_mappings` `[(u64,u64,u64); 16]` both
+  now live in `KVec`.
+- **TLB iterator** — `online_cpu_targets(exclude) -> ([usize; MAX_CPUS], usize)`
+  replaced with `online_cpus(exclude) -> impl Iterator<Item = usize>`.
+  `wait_for_acks` takes `impl IntoIterator<Item = usize>`; the four
+  `flush_*` entry points (`flush_page`, `flush_range`, `flush_all`,
+  `flush_asid`) pass the iterator directly — zero allocation, zero
+  stack array. `targeted_flush_request` keeps its local `[usize; MAX_CPUS]`
+  (2 536 B, under the 4 KiB ceiling) and now passes
+  `targets[..n].iter().copied()` into `wait_for_acks`.
+- **`syscall_poll`** — three parallel `[T; SELECT_MAX_FDS]` arrays
+  (~3.5 KiB on the stack, rebuilt every poll iteration) lifted to
+  the heap: `cached_revents` → `KVec<u16>`, `registered_ofis` →
+  `KVec<u32>`, and `poll_fds` → `KVec<u8>` reinterpreted as
+  `&mut [UserPollFd]` at use (UserPollFd = `i32 + u16 + u16`, all
+  primitives, bit-wise zero-valid).
+- **Additional struct-constructor migrations** needed to hit the
+  4 KiB ceiling (not explicitly called out in §3 but covered by
+  the same Pattern 2 rewrite):
+  - `fs/src/pipe.rs::PipeSlot` — `buffer: [u8; PIPE_BUFFER_SIZE = 4096]`
+    embedded directly. `*slot = PipeSlot::new()` in `alloc_slot`
+    migrated to `PipeSlot::reset_in_place(ptr)` (`write_bytes` is
+    sufficient — every field is zero-valued).
+  - `fs/src/ext2/cache.rs::CacheEntry` — `data: Box<[u8; 4096]>`
+    flipped to `KBox<[u8; 4096]>` so the `Box::new([0u8; 4096])`
+    stack intermediate is gone. `BlockCache::new` becomes
+    fallible; callers (`Ext2Fs::init_internal`, `Ext2Fs::from_parts`)
+    propagate the error. A new `Ext2Error::OutOfMemory` variant
+    carries it through `ext2_error_to_vfs`.
+  - `net/src/route.rs::RouteTable::add` — `bucket.sort_by_key(|r| r.metric)`
+    pulled in `core::slice::sort::driftsort_main` and its 4 KiB
+    `AlignedStorage` scratch. Replaced with an insertion sort
+    (bucket cap is 16).
+- **Test-crate cfg gating** — `slopos_tests::{exception_tests,
+  fpu_tests, xsave_tests}` modules gated on `#[cfg(feature =
+  "builtin-tests")]`. `tests_run_all` body likewise gated; a
+  zero-stub keeps the unconditional signature boot-drivers imports.
+  Removes the ~6 KiB `TestRunSummary` stack frame from production.
+
+### Measured baseline (just build, no `builtin-tests`)
+
+Top 15 production frames post-B.2, all ≤ 4 096 B:
+
+| Size (B) | Function |
+| -------: | :------- |
+|   4 056 | `slopos_net::tcp::close` |
+|   3 576 | `SynSentState::on_segment` |
+|   3 384 | `slopos_net::tcp::shutdown_write` |
+|   3 320 | `task_lifecycle::init_task_context` |
+|   3 208 | `syscall_select` |
+|   2 936 | `slopos_net::socket::socket_send` |
+|   2 808 | `syscall_ioctl`, `boot_step_interrupt_tests_fn`, `FpuState::new` (tied) |
+|   2 776 | `SynRecvState::on_segment` |
+|   2 712 | `FpuState::zero` |
+|   2 648 | `TestRunSummary::default`, `syscall_poll` (tied) |
+|   2 616 | `panic_handler_impl` |
+|   2 536 | `fs::tests::build_ext2_image`, `tlb::targeted_flush_request` (tied) |
+
+Compare against the Phase B.1 baseline (§9): every entry that was
+then 4–6 KiB now sits below 4 KiB.
+
+### Deviations from the plan text (§3 Phase B.2)
+
+1. **Mystery 7 288 B frame was `collect_active_pids`, not a
+   `[u32; 100]`.** The v0 symbol-mangling length field is
+   lowercase-hex: `Amj100_` decodes as `[u32; 0x100 = 256]`, which
+   matches `MAX_PROCESSES`. `collect_active_pids` was the sole
+   caller; inlining the read loop into `init_process_vm`
+   eliminated the helper entirely (no KVec needed — the loop can
+   call `destroy_process_vm` directly without an intermediate array).
+2. **`Task::reset_in_place` does not use `drop_in_place` on the
+   whole struct**, contrary to the simplest "drop + re-write"
+   approach. A first attempt that called `drop_in_place(this)`
+   before `write_bytes` hit a double-release on `KstackSlot[0]`
+   (the sentinel) during `init_task_manager`'s second invocation
+   inside the test harness: `free_task_stacks` had already
+   released the owning `KernelStack` and set `kernel_stack = None`,
+   then `drop_in_place` inside `reset_in_place` ran the implicit
+   Task::drop glue — whose Option<KernelStack>::drop found the
+   field's bits zeroed by a preceding `write_bytes` and
+   interpreted them as a `Some(KernelStack { slot: 0, … })`
+   (layout is unspecified for un-niched `Option`). Final design:
+   take `kernel_stack` via `Option::take` first, then
+   `write_bytes` the two ranges on either side of the
+   `kernel_stack` field, never touching its bit pattern.
+3. **`tcp::close` stays at 4 056 B**. It builds a `DataState`
+   (~3 KiB) via `Self::new(...)` into a local then
+   `Box::new(ds)`-es it. Making that heap-direct requires either
+   `pin-init` with `#[pin_data]` on `DataState` (Phase B.3 scope)
+   or manual `Box::<DataState>::new_uninit` + field-by-field
+   `ptr::write`. Left as-is: 4 056 B is below the 4 096 B gate.
+4. **`net::route::RouteTable::add` insertion-sort swap**. The
+   plan text didn't mention route sorting; measurement flagged a
+   4 328 B `driftsort_main<RouteEntry, …>` frame from a single
+   `bucket.sort_by_key(|r| r.metric)` call. Buckets are capped at
+   `MAX_ROUTES_PER_BUCKET = 16`, so an open-coded insertion sort
+   is strictly cheaper and avoids the generic sort's stack-resident
+   `AlignedStorage`.
+5. **ext2 `CacheEntry` field type flipped to `KBox`**, not just
+   the allocation call. Keeping `Box<[u8; 4096]>` would have left
+   the `Box::new([0u8; 4096])` stack hazard wherever a new entry
+   is constructed (`BlockCache::new` at boot, and any future
+   eviction/grow path). `KBox::zeroed` is inherently heap-direct.
+6. **Test modules cfg-gated at module declarations**. Preexisting
+   `boot_drivers.rs` imports from `slopos_tests` were not optional,
+   so `slopos-tests` got linked into the production ELF even
+   without `builtin-tests`, dragging `test_sse_*` and
+   `tests_run_all` with their 6 KiB XSAVE/summary frames. Fix:
+   gate the three suite modules + `tests_run_all`'s body with
+   `#[cfg(feature = "builtin-tests")]`; provide a zero-stub
+   `tests_run_all` for production. Alternative (skipping
+   `slopos_tests::*` inside `check_stack_sizes.sh`) was rejected:
+   the gate should fail on real leaks, and a crate-name filter
+   dilutes that signal.
+
+### Verification performed
+
+- `just build` — green (both gates, 4 KiB threshold active).
+- `just test` — 2391/2391 pass with no new regressions; panic
+  handler never fires, auto-shutdown reports success.
+- `llvm-readobj --stack-sizes builddir/kernel.elf | sort -rn | head` —
+  top frame 4 056 B (`slopos_net::tcp::close`); no production
+  frame above the 4 KiB gate.
+- Production ELF boots the full shell path under `just boot-log`
+  — `init` (PID 1) execs `shell` (PID 2) and hits the roulette
+  within the 15 s timeout, no kernel-stack fault on any of the
+  migrated call paths.
+
+### Not done in B.2 (deferred to later phases)
+
+- `net::tcp::close` / `DataState::from_syn_recv` — pin-init
+  migration is Phase B.3 (full workspace `pin-init` / `PinBox`
+  migration).
+- `extern crate alloc;` purge — Phase B.3.
+- `scripts/check_return_types.sh` AST walk — Phase B.4 end-state
+  verification only.
+- `.stack_sizes` threshold to 2 KiB — Phase B.4. Current top of
+  4 056 B makes a 2 KiB gate unrealistic without the Phase B.3
+  heap-direct migrations.
 

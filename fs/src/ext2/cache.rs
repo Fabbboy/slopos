@@ -1,8 +1,9 @@
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+
+use slopos_alloc::KBox;
 
 use super::Ext2Error;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
@@ -13,7 +14,7 @@ const CACHE_ENTRIES: usize = 128;
 
 struct CacheEntry {
     block: BlockNum,
-    data: Box<[u8; EXT2_MAX_BLOCK_SIZE as usize]>,
+    data: KBox<[u8; EXT2_MAX_BLOCK_SIZE as usize]>,
     dirty: bool,
     pinned: u16,
     lru: u64,
@@ -21,15 +22,18 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self, Ext2Error> {
+        Ok(Self {
             block: BlockNum::ZERO,
-            data: Box::new([0u8; EXT2_MAX_BLOCK_SIZE as usize]),
+            // Heap-direct zeroed allocation: avoids materialising a
+            // 4 KiB `[0u8; EXT2_MAX_BLOCK_SIZE]` rvalue on the stack.
+            data: KBox::<[u8; EXT2_MAX_BLOCK_SIZE as usize]>::zeroed()
+                .map_err(|_| Ext2Error::OutOfMemory)?,
             dirty: false,
             pinned: 0,
             lru: 0,
             valid: false,
-        }
+        })
     }
 }
 
@@ -41,17 +45,17 @@ pub struct BlockCache {
 }
 
 impl BlockCache {
-    pub fn new(block_size: u32) -> Self {
+    pub fn new(block_size: u32) -> Result<Self, Ext2Error> {
         let mut entries = Vec::with_capacity(CACHE_ENTRIES);
         for _ in 0..CACHE_ENTRIES {
-            entries.push(CacheEntry::new());
+            entries.push(CacheEntry::new()?);
         }
-        Self {
+        Ok(Self {
             entries,
             index: BTreeMap::new(),
             lru_clock: 0,
             block_size,
-        }
+        })
     }
 
     /// Get a block from the cache, reading from device if not cached.

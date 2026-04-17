@@ -92,7 +92,7 @@ pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
     }
     free_task_stacks(task);
     unsafe {
-        *task = Task::invalid();
+        Task::reset_in_place(task);
     }
 }
 
@@ -201,7 +201,9 @@ pub fn init_task_manager() -> c_int {
                 );
                 continue;
             }
-            *task = Task::invalid();
+            // SAFETY: `task` is a `&mut Task` from the static task table;
+            // converting to *mut for the in-place reset is sound.
+            unsafe { Task::reset_in_place(task as *mut Task) };
         }
         for rec in mgr.exit_records.iter_mut() {
             *rec = TaskExitRecord::empty();
@@ -332,7 +334,7 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             for task in mgr.tasks.iter_mut() {
                 if task.status() == TaskStatus::Terminated && task.ref_count() == 0 {
                     let p = task as *mut Task;
-                    unsafe { *p = Task::invalid() };
+                    unsafe { Task::reset_in_place(p) };
                     slot = p;
                     break;
                 }
@@ -366,7 +368,7 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
 pub(super) fn release_task_slot(slot: *mut Task) {
     with_task_manager(|mgr| {
         if !slot.is_null() {
-            unsafe { *slot = Task::invalid() };
+            unsafe { Task::reset_in_place(slot) };
             mgr.num_tasks = mgr.num_tasks.saturating_sub(1);
         }
     });
@@ -439,18 +441,26 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
         None => return,
     };
 
-    let task_ptrs = with_task_manager(|mgr| {
-        let mut ptrs = [None; MAX_TASKS];
-        for (i, task) in mgr.tasks.iter_mut().enumerate() {
+    // Collect active task pointers into a heap-backed KVec so the
+    // caller's stack frame doesn't carry a 2–4 KiB array of pointers.
+    // `usize` stores the raw address — 0 acts as the "inactive" sentinel.
+    let mut addrs = match slopos_alloc::KVec::<usize>::zeroed(MAX_TASKS) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let count = with_task_manager(|mgr| {
+        let mut n = 0usize;
+        for task in mgr.tasks.iter_mut() {
             if task.status() != TaskStatus::Invalid && task.task_id != INVALID_TASK_ID {
-                ptrs[i] = Some(task as *mut Task);
+                addrs[n] = task as *mut Task as usize;
+                n += 1;
             }
         }
-        ptrs
+        n
     });
 
-    for task in task_ptrs.iter().flatten() {
-        cb(*task, context);
+    for addr in addrs.as_slice()[..count].iter() {
+        cb(*addr as *mut Task, context);
     }
 }
 

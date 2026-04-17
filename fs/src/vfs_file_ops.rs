@@ -149,7 +149,10 @@ impl FileOps for VfsFileOps {
             (fs, slot.inode)
         };
 
-        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let mut total = 0usize;
         let want = buf.len();
 
@@ -198,7 +201,10 @@ impl FileOps for VfsFileOps {
             (fs, slot.inode)
         };
 
-        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let mut total = 0usize;
         let want = buf.len();
 

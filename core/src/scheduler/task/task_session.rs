@@ -48,9 +48,15 @@ pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) ->
 }
 
 pub(super) fn release_task_dependents(completed_task_id: u32) {
-    let candidates: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
-        let mut result = [None; MAX_TASKS];
-        let mut idx = 0;
+    // Collect blocked-on-`completed_task_id` task pointers into a
+    // heap-backed KVec. A stack-resident `[Option<*mut Task>; MAX_TASKS]`
+    // would cost ~4 KiB per call on the kernel stack.
+    let mut candidates = match slopos_alloc::KVec::<usize>::zeroed(MAX_TASKS) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let count = with_task_manager(|mgr| {
+        let mut n = 0usize;
         for dependent in mgr.tasks.iter_mut() {
             if !task_is_blocked(dependent) {
                 continue;
@@ -58,24 +64,22 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
             if dependent.waiting_on.load(Ordering::Acquire) != completed_task_id {
                 continue;
             }
-            result[idx] = Some(dependent as *mut Task);
-            idx += 1;
+            candidates[n] = dependent as *mut Task as usize;
+            n += 1;
         }
-        result
+        n
     });
 
-    for candidate_opt in candidates.iter() {
-        if let Some(task_ptr) = candidate_opt {
-            let task = *task_ptr;
-            let task_id = unsafe { (*task).task_id };
+    for addr in candidates.as_slice()[..count].iter() {
+        let task = *addr as *mut Task;
+        let task_id = unsafe { (*task).task_id };
 
-            if scheduler::try_wake_from_task_wait(task, completed_task_id) {
-                klog_info!(
-                    "release_task_dependents: Woke task {} (was waiting on {})",
-                    task_id,
-                    completed_task_id
-                );
-            }
+        if scheduler::try_wake_from_task_wait(task, completed_task_id) {
+            klog_info!(
+                "release_task_dependents: Woke task {} (was waiting on {})",
+                task_id,
+                completed_task_id
+            );
         }
     }
 }

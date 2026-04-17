@@ -72,17 +72,40 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let base_ptr = args.arg0;
     let start_ms = slopos_kernel_services::platform::get_time_ms();
 
-    // Kernel-side revents cache.  Written back to userspace only on
-    // return (ready FDs found, timeout, or signal) to avoid per-
-    // iteration page-table walks and observable intermediate writes.
-    let mut cached_revents = [0u16; SELECT_MAX_FDS];
+    // All three scratch arrays hoisted to the heap: a stack-resident
+    // `[u16 + UserPollFd + u32; SELECT_MAX_FDS]` would cost ~3.5 KiB
+    // per poll(2) call on the kernel stack.
+    let mut cached_revents = match slopos_alloc::KVec::<u16>::zeroed(SELECT_MAX_FDS) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
+    let mut poll_fds_bytes = match slopos_alloc::KVec::<u8>::zeroed(
+        SELECT_MAX_FDS * core::mem::size_of::<UserPollFd>(),
+    ) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
+    let mut registered_ofis = match slopos_alloc::KVec::<u32>::zeroed(SELECT_MAX_FDS) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
 
     loop {
         run_bottom_halves();
 
+        // Reinterpret the zeroed byte buffer as a slice of UserPollFd.
+        // SAFETY: UserPollFd = { i32, u16, u16 } — all primitives,
+        // zero bit-pattern valid. Buffer capacity is exactly
+        // SELECT_MAX_FDS * size_of::<UserPollFd>() (see KVec above).
+        let poll_fds: &mut [UserPollFd] = unsafe {
+            core::slice::from_raw_parts_mut(
+                poll_fds_bytes.as_mut_ptr() as *mut UserPollFd,
+                SELECT_MAX_FDS,
+            )
+        };
+
         // Pre-copy all poll FDs from userspace before registering waiters
         // so a user-copy failure cannot leak prepare_to_wait / fused refs.
-        let mut poll_fds = [UserPollFd::default(); SELECT_MAX_FDS];
         for idx in 0..nfds {
             let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
                 base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
@@ -94,10 +117,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
 
         // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready_count = 0u64;
-        // Store open_file_idx for cleanup instead of FD numbers to avoid
-        // the TOCTOU where an FD is closed and reassigned between
-        // registration and cleanup.
-        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
+        // Reset per-iteration count; storage is reused across iterations.
         let mut reg_count = 0usize;
 
         for idx in 0..nfds {

@@ -76,16 +76,27 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<Vec<Vec<u8>>, ()> {
         return Err(());
     }
 
+    // Single heap-backed scratch reused across the iterations; a
+    // stack-resident `[u8; EXEC_MAX_ARG_STRLEN]` would cost 4 KiB per
+    // execve path.
+    let mut buf = slopos_alloc::KVec::<u8>::zeroed(exec::EXEC_MAX_ARG_STRLEN).map_err(|_| ())?;
+
     for &ptr in ptrs {
-        let mut buf = [0u8; exec::EXEC_MAX_ARG_STRLEN];
-        syscall_copy_user_str(&mut buf, ptr).map_err(|_| ())?;
-        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        for b in buf.as_mut_slice().iter_mut() {
+            *b = 0;
+        }
+        syscall_copy_user_str(buf.as_mut_slice(), ptr).map_err(|_| ())?;
+        let len = buf
+            .as_slice()
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(buf.len());
 
         let mut s = Vec::new();
         if s.try_reserve(len).is_err() {
             return Err(());
         }
-        s.extend_from_slice(&buf[..len]);
+        s.extend_from_slice(&buf.as_slice()[..len]);
         out.push(s);
     }
 

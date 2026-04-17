@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ELF="${1:-$REPO_ROOT/builddir/kernel.elf}"
-THRESHOLD="${STACK_SIZE_THRESHOLD:-8192}"
+THRESHOLD="${STACK_SIZE_THRESHOLD:-4096}"
 
 if [ ! -f "$ELF" ]; then
     echo "check_stack_sizes: missing $ELF (run \`just build\` first)" >&2

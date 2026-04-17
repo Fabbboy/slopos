@@ -10,8 +10,15 @@ pub use slopos_testing::{
 };
 use slopos_utils::klog_info;
 
+// The per-subsystem test suites carry multi-KiB stack frames (XSAVE
+// regions, pattern buffers, etc.) that would trip the production
+// stack-size gate. Gate the modules themselves so they are only
+// compiled when the kernel is built with `kernel/builtin-tests`.
+#[cfg(feature = "builtin-tests")]
 pub mod exception_tests;
+#[cfg(feature = "builtin-tests")]
 pub mod fpu_tests;
+#[cfg(feature = "builtin-tests")]
 pub mod xsave_tests;
 
 pub const TESTS_MAX_SUITES: usize = HARNESS_MAX_SUITES;
@@ -24,6 +31,21 @@ pub fn tests_reset_panic_state() {
     PANIC_REPORTED.store(false, Ordering::Relaxed);
 }
 
+#[cfg(not(feature = "builtin-tests"))]
+pub fn tests_run_all(
+    _config: *const TestConfig,
+    _summary: *mut TestRunSummary,
+    _registry_start: *const TestSuiteDesc,
+    _registry_end: *const TestSuiteDesc,
+) -> i32 {
+    // No-op in production: `TestRunSummary` is 6 KiB on the kernel
+    // stack, tripping the stack-size gate. The real body compiles
+    // under the `builtin-tests` feature (which lifts the gate via
+    // scripts/build_kernel.sh).
+    0
+}
+
+#[cfg(feature = "builtin-tests")]
 pub fn tests_run_all(
     config: *const TestConfig,
     summary: *mut TestRunSummary,

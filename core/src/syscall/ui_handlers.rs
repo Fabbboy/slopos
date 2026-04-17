@@ -94,7 +94,10 @@ define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {
 
     let copy_len = src_len.min(slopos_abi::CLIPBOARD_MAX_SIZE);
     let user_bytes = try_or_err!(ctx, UserBytes::try_new(src_ptr, copy_len));
-    let mut buf = [0u8; slopos_abi::CLIPBOARD_MAX_SIZE];
+    let mut buf = match slopos_alloc::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
     try_or_err!(ctx, copy_bytes_from_user(user_bytes, &mut buf[..copy_len]));
     let stored = input::clipboard_copy(&buf[..copy_len]);
     ctx.ok(stored as u64)
@@ -109,7 +112,10 @@ define_syscall!(syscall_clipboard_paste(ctx, args) requires(let task_id) {
         return ctx.ok(0);
     }
 
-    let mut buf = [0u8; slopos_abi::CLIPBOARD_MAX_SIZE];
+    let mut buf = match slopos_alloc::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
     let pasted = input::clipboard_paste(&mut buf);
     if pasted == 0 {
         return ctx.ok(0);

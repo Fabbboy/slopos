@@ -40,6 +40,7 @@ pub enum Ext2Error {
     NotEmpty,
     IsDirectory,
     TooManyLinks,
+    OutOfMemory,
 }
 
 // ---- Backward-compat type aliases for ext2_vfs.rs / tests.rs ----
@@ -75,7 +76,7 @@ impl<'a> Ext2Fs<'a> {
         Ok(Self {
             device,
             superblock,
-            cache: BlockCache::new(block_size),
+            cache: BlockCache::new(block_size)?,
             block_size,
             inode_size,
             ptrs_per_block: block_size / 4,
@@ -87,15 +88,15 @@ impl<'a> Ext2Fs<'a> {
         superblock: Superblock,
         block_size: u32,
         inode_size: u16,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Ext2Error> {
+        Ok(Self {
             device,
             superblock,
-            cache: BlockCache::new(block_size),
+            cache: BlockCache::new(block_size)?,
             block_size,
             inode_size,
             ptrs_per_block: block_size / 4,
-        }
+        })
     }
 
     pub fn superblock(&self) -> Superblock {

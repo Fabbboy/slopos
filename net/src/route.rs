@@ -189,8 +189,19 @@ impl RouteTable {
                 );
                 existing.gateway = entry.gateway;
                 existing.metric = entry.metric;
-                // Re-sort by metric after update.
-                bucket.sort_by_key(|r| r.metric);
+                // Re-sort by metric after update. Buckets are capped at
+                // MAX_ROUTES_PER_BUCKET (16), so an insertion sort is
+                // both correct and cheaper than `sort_by_key` — the
+                // latter pulls in core::slice::sort::driftsort, which
+                // carries a 4 KiB aligned-storage stack buffer that
+                // blows the kernel frame budget.
+                for i in 1..bucket.len() {
+                    let mut j = i;
+                    while j > 0 && bucket[j - 1].metric > bucket[j].metric {
+                        bucket.swap(j - 1, j);
+                        j -= 1;
+                    }
+                }
                 return false;
             }
         }
