@@ -448,11 +448,16 @@ impl<'a> Ext2Fs<'a> {
         }
         if inode.block[12].is_valid() {
             let indirect = inode.block[12];
-            let ptrs = {
+            // Heap-box the indirect-block pointer buffer.  An inline
+            // `[BlockNum::ZERO; 1024]` would put ≈4 KiB on the kernel
+            // stack here (dominating this function's frame at ≈8.7 KiB
+            // and leaving little headroom for callees on a 32 KiB task
+            // stack), so materialise it through `vec!` instead.
+            let ptrs: alloc::boxed::Box<[BlockNum]> = {
                 let block = self.cache.get(indirect, self.device)?;
                 let data = block.data();
                 let count = self.block_size as usize / 4;
-                let mut ptrs = [BlockNum::ZERO; 1024];
+                let mut ptrs = alloc::vec![BlockNum::ZERO; 1024].into_boxed_slice();
                 for i in 0..count.min(1024) {
                     let off = i * 4;
                     ptrs[i] = BlockNum(u32::from_le_bytes([

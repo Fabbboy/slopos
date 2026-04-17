@@ -231,10 +231,16 @@ define_syscall!(syscall_process_list(ctx, args) {
 
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
+    use alloc::boxed::Box;
+    use alloc::vec;
     use crate::task::task_iterate_active;
 
+    // `IterCtx` used to hold `[UserTaskEntry; MAX_TASKS]` inline, which
+    // pushed this syscall's frame to ≈41 KiB — above the 32 KiB kernel
+    // stack budget.  The entries array now lives on the heap as a
+    // `Box<[UserTaskEntry]>`, leaving `IterCtx` a few dozen bytes.
     struct IterCtx {
-        entries: [UserTaskEntry; MAX_TASKS],
+        entries: Box<[UserTaskEntry]>,
         count: usize,
         max: usize,
     }
@@ -268,7 +274,7 @@ define_syscall!(syscall_process_list(ctx, args) {
 
     let max_entries = (args.arg1 as usize).min(slopos_abi::task::MAX_TASKS);
     let mut iter_ctx = IterCtx {
-        entries: [UserTaskEntry::default(); MAX_TASKS],
+        entries: vec![UserTaskEntry::default(); MAX_TASKS].into_boxed_slice(),
         count: 0,
         max: max_entries,
     };

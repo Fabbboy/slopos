@@ -1,3 +1,7 @@
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
@@ -28,12 +32,18 @@ struct ReassemblyKey {
     protocol: u8,
 }
 
-#[derive(Clone, Copy)]
+/// A single IPv4 fragment.
+///
+/// `data` is heap-allocated and trimmed to the fragment's actual
+/// payload length — we don't reserve the full [`MAX_FRAGMENT_DATA`]
+/// inline because that would make [`ReassemblyGroup`] ≈24 KiB and
+/// drag every ingress function that touches a group (insert,
+/// init_group, clear_group, empty) over the kernel stack budget.
 struct Fragment {
     offset: u16,
     len: u16,
-    data: [u8; MAX_FRAGMENT_DATA],
     more_fragments: bool,
+    data: Box<[u8]>,
 }
 
 struct ReassemblyGroup {
@@ -46,10 +56,17 @@ struct ReassemblyGroup {
     group_id: u32,
 }
 
+/// A fully reassembled IPv4 datagram.
+///
+/// `data` is heap-backed so the struct itself is ~32 bytes.  Keeping
+/// this type small matters because `ipv4::handle_rx` holds an
+/// `Option<ReassembledPacket>` on its stack for every inbound packet
+/// — inlining the 24 KiB buffer here was the dominant contributor to
+/// `handle_rx`'s 72 KiB kernel-stack frame.
 pub struct ReassembledPacket {
     pub protocol: u8,
     pub len: u16,
-    pub data: [u8; MAX_REASSEMBLED_DATA],
+    pub data: Box<[u8]>,
 }
 
 pub struct ReassemblyTable {
@@ -69,7 +86,11 @@ impl ReassemblyGroup {
                 identification: 0,
                 protocol: 0,
             },
-            fragments: [None; MAX_FRAGMENTS_PER_GROUP],
+            // `Option<Fragment>` no longer implements `Copy` (Fragment
+            // owns a `Box<[u8]>`), so the `[None; N]` repeat syntax —
+            // which requires `Copy` — is replaced with `[const { None };
+            // N]`, which evaluates `None` as a const expression per slot.
+            fragments: [const { None }; MAX_FRAGMENTS_PER_GROUP],
             fragment_count: 0,
             total_len: None,
             timer_token: None,
@@ -79,11 +100,14 @@ impl ReassemblyGroup {
 }
 
 impl ReassembledPacket {
-    const fn new(protocol: u8, len: u16) -> Self {
+    fn new(protocol: u8, len: u16) -> Self {
         Self {
             protocol,
             len,
-            data: [0; MAX_REASSEMBLED_DATA],
+            // Heap-direct zero-fill via `alloc_zeroed`; avoids the
+            // 24 KiB stack temporary that `[0; MAX_REASSEMBLED_DATA]`
+            // would produce on the caller's frame.
+            data: vec![0u8; MAX_REASSEMBLED_DATA].into_boxed_slice(),
         }
     }
 }
@@ -134,13 +158,17 @@ impl ReassemblyTable {
 
         let group = &mut self.groups[group_idx];
 
-        let mut frag = Fragment {
+        // Heap-allocate the fragment payload sized to the actual
+        // wire length.  `Box::<[u8]>::from(&[u8])` routes through
+        // the global allocator without ever placing `MAX_FRAGMENT_DATA`
+        // bytes on the caller's stack, which would otherwise push
+        // `insert` past the 32 KiB task-kernel-stack budget.
+        let frag = Fragment {
             offset: frag_offset,
             len: data.len() as u16,
-            data: [0; MAX_FRAGMENT_DATA],
             more_fragments,
+            data: Box::<[u8]>::from(data),
         };
-        frag.data[..data.len()].copy_from_slice(data);
 
         if let Some(existing_idx) = group
             .fragments

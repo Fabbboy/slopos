@@ -8,6 +8,23 @@
 //! array inside [`super::table::PcbTable`].  Only Data-phase connections
 //! have a buffer (`Some`); Listen, SynSent, SynRecv, and TimeWait keep
 //! `None`.
+//!
+//! # Heap-backed ring buffers
+//!
+//! The 32 KiB send and receive ring buffers (`TcpBuffer`) live behind
+//! `Box<TcpBuffer>` inside [`TcpSendState`] / [`TcpRecvState`].  That
+//! keeps the state structs themselves small (≈48 bytes), so every
+//! function along the `alloc_buffer_for` → `TcpBufferPair::new` →
+//! `TcpSendState::new` / `TcpRecvState::new` chain has a tiny frame
+//! instead of the 64–128 KiB frames produced when each constructor
+//! returned the full buffer by value.  The buffers are allocated via
+//! `Box::<TcpBuffer>::new_zeroed().assume_init()` — zero is a valid
+//! bit-pattern for `RingBuffer<u8, N>` (the head/tail/count indices
+//! just mean "empty") so no stack temporary is needed.
+
+extern crate alloc;
+
+use alloc::boxed::Box;
 
 use slopos_utils::RingBuffer;
 
@@ -29,9 +46,9 @@ pub type TcpBuffer = RingBuffer<u8, TCP_BUFFER_SIZE>;
 // Send state
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct TcpSendState {
-    pub buf: TcpBuffer,
+    pub buf: Box<TcpBuffer>,
     pub inflight: usize,
     pub rto_deadline_ms: u64,
     /// Soft cap on usable buffer capacity (SO_SNDBUF).
@@ -40,9 +57,14 @@ pub struct TcpSendState {
 }
 
 impl TcpSendState {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            buf: TcpBuffer::new_zeroed(),
+            // SAFETY: `TcpBuffer` is `RingBuffer<u8, TCP_BUFFER_SIZE>` —
+            // `[u8; N]` plus three `usize` indices.  An all-zero
+            // bit-pattern is a valid, empty ring buffer, so `new_zeroed`
+            // + `assume_init` is sound and keeps the 32 KiB buffer off
+            // the caller's stack.
+            buf: unsafe { Box::<TcpBuffer>::new_zeroed().assume_init() },
             inflight: 0,
             rto_deadline_ms: 0,
             effective_capacity: TCP_BUFFER_SIZE,
@@ -112,9 +134,9 @@ impl TcpSendState {
 // Receive state
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct TcpRecvState {
-    pub buf: TcpBuffer,
+    pub buf: Box<TcpBuffer>,
     pub segments_since_ack: u8,
     pub ack_pending: bool,
     pub delayed_ack_deadline_ms: u64,
@@ -123,9 +145,12 @@ pub struct TcpRecvState {
 }
 
 impl TcpRecvState {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            buf: TcpBuffer::new_zeroed(),
+            // SAFETY: see `TcpSendState::new` — `TcpBuffer` is
+            // zero-valid, so heap-zeroing avoids the 32 KiB stack
+            // temporary `TcpBuffer::new_zeroed()` would produce.
+            buf: unsafe { Box::<TcpBuffer>::new_zeroed().assume_init() },
             segments_since_ack: 0,
             ack_pending: false,
             delayed_ack_deadline_ms: 0,
@@ -187,7 +212,7 @@ impl TcpRecvState {
 // Bundled send+recv+OOO
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct TcpBufferPair {
     pub send: TcpSendState,
     pub recv: TcpRecvState,
@@ -195,7 +220,7 @@ pub struct TcpBufferPair {
 }
 
 impl TcpBufferPair {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             send: TcpSendState::new(),
             recv: TcpRecvState::new(),

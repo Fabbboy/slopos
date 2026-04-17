@@ -190,6 +190,28 @@ show-qemu-resolution:
 fmt:
     {{cargo}} +{{rust_channel}} fmt --all -- --check
 
+[doc("Audit kernel ELF for functions whose stack frame exceeds the 32 KiB task-stack budget")]
+stack-audit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "{{build_dir}}/kernel.elf" ]; then
+        echo "kernel.elf missing — run \`just build\` first" >&2
+        exit 1
+    fi
+    # Anything above 8 KiB eats into the call-depth budget on a 32 KiB
+    # task stack.  See `clippy.toml` for the matching compile-time rail.
+    THRESHOLD="${THRESHOLD:-8192}"
+    echo "Kernel functions with frame > ${THRESHOLD} bytes:"
+    objdump -d --no-show-raw-insn --disassembler-options=intel \
+        "{{build_dir}}/kernel.elf" 2>/dev/null \
+      | awk -v t="${THRESHOLD}" '
+          /^ffffffff[0-9a-f]+ <.*>:/ { fn=$0 }
+          /sub[[:space:]]+rsp,0x/ {
+              m=$0; sub(/.*sub[[:space:]]+rsp,0x/,"",m); v=strtonum("0x" m);
+              if (v>t) printf "%8d  %s\n", v, fn;
+          }' \
+      | sort -rn
+
 [doc("Clean build artifacts")]
 clean:
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
