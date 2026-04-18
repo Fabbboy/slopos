@@ -1,8 +1,6 @@
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::ptr;
+use slopos_alloc::KVec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
@@ -2030,11 +2028,9 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             klog_info!("process_vm_clone_cow: Parent has no page directory");
             return INVALID_PROCESS_ID;
         }
-        let vmas: Vec<(u64, u64, VmaRegion)> = guard
-            .vma_map
-            .iter()
-            .map(|(s, e, r)| (s, e, r.clone()))
-            .collect();
+        let vmas: KVec<(u64, u64, VmaRegion)> =
+            KVec::from_iter_fallible(guard.vma_map.iter().map(|(s, e, r)| (s, e, r.clone())))
+                .expect("clone_cow: vmas alloc");
         (
             guard.page_dir,
             guard.code_start,

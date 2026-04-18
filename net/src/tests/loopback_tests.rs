@@ -5,8 +5,6 @@
 //! - 3.T7: DHCP lease (NetStack::configure) populates route table correctly
 //! - 3.T8: IfaceConfig readable via NetStack after configure
 
-extern crate alloc;
-
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 

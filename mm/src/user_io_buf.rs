@@ -1,34 +1,23 @@
-extern crate alloc;
-
-use alloc::vec::Vec;
-
 use slopos_abi::Errno;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
+use slopos_alloc::KVec;
 
 use crate::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use crate::user_ptr::{UserBytes, UserVirtAddr};
 
-// Returns `alloc::vec::Vec<u8>` rather than `slopos_alloc::KVec<u8>` for
-// now: the consumer chain (font::atlas::from_raw_coverage, GlyphAtlas
-// fields) is still on `Vec<u8>`. Migrating that surface is its own
-// cascade and is tracked for the font-crate cleanup pass.
 /// Allocate a kernel buffer and copy user data into it in one step.
 ///
 /// Returns `ENOMEM` if the allocation fails (never panics), `EFAULT`
 /// if the copy fails. Rejects requests larger than `max_size` bytes
 /// with `EINVAL`.
-pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<Vec<u8>, Errno> {
+pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<KVec<u8>, Errno> {
     if len > max_size {
         return Err(Errno::EINVAL);
     }
     let user_bytes = UserBytes::try_new(addr, len).map_err(|_| Errno::EFAULT)?;
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len).map_err(|_| Errno::ENOMEM)?;
-    // SAFETY: capacity ≥ len from try_reserve_exact above. The bytes
-    // at [0, len) are immediately overwritten by copy_bytes_from_user.
-    unsafe {
-        buf.set_len(len);
-    }
+    // `KVec::<u8>::zeroed` allocates `len` bytes directly into the heap;
+    // the byte buffer never materialises on the caller's stack.
+    let mut buf = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     copy_bytes_from_user(user_bytes, &mut buf).map_err(|_| Errno::EFAULT)?;
     Ok(buf)
 }

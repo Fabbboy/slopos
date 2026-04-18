@@ -1,5 +1,3 @@
-extern crate alloc;
-
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_alloc::KVec;

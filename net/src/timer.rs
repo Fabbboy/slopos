@@ -8,7 +8,7 @@
 //!
 //! # Architecture (CAD-4)
 //!
-//! The wheel has 256 slots.  Each slot is a `Vec<TimerEntry>`.  On each tick,
+//! The wheel has 256 slots.  Each slot is a `KVec<TimerEntry>`.  On each tick,
 //! the wheel advances `current_tick` and drains all entries in the current slot
 //! whose `deadline_tick <= current_tick`.  Entries with `cancelled == true` are
 //! skipped.  Long delays (>256 ticks) use multiple rotations tracked by the
@@ -35,11 +35,9 @@
 //! loop and the idle wakeup callback to ensure timers fire both during active
 //! networking and during idle periods.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use slopos_alloc::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
@@ -155,7 +153,7 @@ pub struct FiredTimer {
 /// Internal mutable state of the timer wheel, protected by [`IrqMutex`].
 struct TimerWheelInner {
     /// 256 slots, each containing pending timer entries.
-    slots: [Vec<TimerEntry>; NUM_SLOTS],
+    slots: [KVec<TimerEntry>; NUM_SLOTS],
     /// Current position in the wheel (monotonically increasing).
     ///
     /// This is the last tick that was processed.  `tick()` advances this by
@@ -209,7 +207,7 @@ impl NetTimerWheel {
         Self {
             inner: IrqMutex::new(
                 TimerWheelInner {
-                    slots: [const { Vec::new() }; NUM_SLOTS],
+                    slots: [const { KVec::new() }; NUM_SLOTS],
                     current_tick: 0,
                 },
                 LOCK_LEVEL_REGISTRY,
@@ -238,7 +236,7 @@ impl NetTimerWheel {
         let mut inner = self.inner.lock();
         let deadline = inner.current_tick.wrapping_add(delay_ticks);
         let slot_idx = (deadline % NUM_SLOTS as u64) as usize;
-        inner.slots[slot_idx].push(TimerEntry {
+        let _ = inner.slots[slot_idx].push(TimerEntry {
             deadline_tick: deadline,
             kind,
             key,
@@ -288,7 +286,7 @@ impl NetTimerWheel {
 
     /// Advance the wheel by one tick and collect expired entries.
     ///
-    /// Returns a `Vec<FiredTimer>` containing all entries whose `deadline_tick`
+    /// Returns a `KVec<FiredTimer>` containing all entries whose `deadline_tick`
     /// has been reached and that were not cancelled.  The caller dispatches
     /// each entry based on its `kind` field.
     ///
@@ -304,14 +302,14 @@ impl NetTimerWheel {
     /// released before this function returns, so dispatch handlers are free to
     /// call [`schedule`](Self::schedule) or [`cancel`](Self::cancel) without
     /// deadlocking.
-    pub fn tick(&self) -> Vec<FiredTimer> {
+    pub fn tick(&self) -> KVec<FiredTimer> {
         let mut inner = self.inner.lock();
         inner.current_tick = inner.current_tick.wrapping_add(1);
         let current = inner.current_tick;
         let slot_idx = (current % NUM_SLOTS as u64) as usize;
 
         let slot = &mut inner.slots[slot_idx];
-        let mut fired = Vec::new();
+        let mut fired = KVec::new();
         let mut i = 0;
         let mut fired_count = 0usize;
 
@@ -336,7 +334,7 @@ impl NetTimerWheel {
                 let kind = entry.kind;
                 let key = entry.key;
                 slot.swap_remove(i);
-                fired.push(FiredTimer { kind, key });
+                let _ = fired.push(FiredTimer { kind, key });
                 fired_count += 1;
                 // Don't increment i — swap_remove moved the last element here.
             } else {
@@ -358,21 +356,21 @@ impl NetTimerWheel {
     /// To prevent unbounded work on first call (when `current_tick` is 0 and
     /// `target_tick` may be very large), the catch-up is capped at `NUM_SLOTS`
     /// ticks per call.
-    pub fn advance_to(&self, target_tick: u64) -> Vec<FiredTimer> {
+    pub fn advance_to(&self, target_tick: u64) -> KVec<FiredTimer> {
         let current = {
             let inner = self.inner.lock();
             inner.current_tick
         };
 
         if target_tick <= current {
-            return Vec::new();
+            return KVec::new();
         }
 
         // Cap catch-up to NUM_SLOTS ticks to prevent unbounded work.
         let ticks_behind = target_tick.saturating_sub(current);
         let ticks_to_process = ticks_behind.min(NUM_SLOTS as u64);
 
-        let mut all_fired = Vec::new();
+        let mut all_fired = KVec::new();
         for _ in 0..ticks_to_process {
             let mut fired = self.tick();
             all_fired.append(&mut fired);

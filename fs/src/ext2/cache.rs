@@ -1,9 +1,4 @@
-extern crate alloc;
-
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-
-use slopos_alloc::KBox;
+use slopos_alloc::{KBTreeMap, KBox, KVec};
 
 use super::Ext2Error;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
@@ -38,21 +33,23 @@ impl CacheEntry {
 }
 
 pub struct BlockCache {
-    entries: Vec<CacheEntry>,
-    index: BTreeMap<BlockNum, usize>,
+    entries: KVec<CacheEntry>,
+    index: KBTreeMap<BlockNum, usize>,
     lru_clock: u64,
     block_size: u32,
 }
 
 impl BlockCache {
     pub fn new(block_size: u32) -> Result<Self, Ext2Error> {
-        let mut entries = Vec::with_capacity(CACHE_ENTRIES);
+        let mut entries = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;
         for _ in 0..CACHE_ENTRIES {
-            entries.push(CacheEntry::new()?);
+            entries
+                .push(CacheEntry::new()?)
+                .map_err(|_| Ext2Error::OutOfMemory)?;
         }
         Ok(Self {
             entries,
-            index: BTreeMap::new(),
+            index: KBTreeMap::new(),
             lru_clock: 0,
             block_size,
         })

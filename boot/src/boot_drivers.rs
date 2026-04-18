@@ -334,9 +334,19 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     let registry_start: *const slopos_testing::TestSuiteDesc = unsafe { &__start_test_registry };
     let registry_end: *const slopos_testing::TestSuiteDesc = unsafe { &__stop_test_registry };
 
-    let mut summary = TestRunSummary::default();
+    // Heap-box the summary: TestRunSummary is ~2.6 KiB and inlining it
+    // keeps this function's stack frame above the gate even though the
+    // entire test run is skipped on production builds.
+    let mut summary_box = match slopos_alloc::KBox::<TestRunSummary>::zeroed() {
+        Ok(b) => b,
+        Err(_) => {
+            klog_info!("INTERRUPT_TEST: alloc failed");
+            return -1;
+        }
+    };
+    let summary: &mut TestRunSummary = &mut *summary_box;
 
-    let rc = tests_run_all(&test_config, &mut summary, registry_start, registry_end);
+    let rc = tests_run_all(&test_config, summary, registry_start, registry_end);
 
     if test_config.shutdown {
         klog_debug!("TESTS: Auto shutdown enabled after harness");

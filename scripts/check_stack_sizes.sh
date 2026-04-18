@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Fail the build if any function in the kernel ELF has a stack frame larger
-# than STACK_SIZE_THRESHOLD bytes (default 8192).
+# than STACK_SIZE_THRESHOLD bytes. Default: 2560 (2.5 KiB).
+#
+# Dropping further requires follow-up work on pin-init macro internals
+# (DataState::init_*), driver probe paths (virtio_net_probe,
+# pci_probe_device), test scaffolding (build_ext2_image), and ACPI MCFG
+# parsing.
 #
 # Relies on `-Zemit-stack-sizes` populating the `.stack_sizes` ELF section;
 # see scripts/build_kernel.sh for where the flag is injected.
@@ -11,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ELF="${1:-$REPO_ROOT/builddir/kernel.elf}"
-THRESHOLD="${STACK_SIZE_THRESHOLD:-4096}"
+THRESHOLD="${STACK_SIZE_THRESHOLD:-2560}"
 
 if [ ! -f "$ELF" ]; then
     echo "check_stack_sizes: missing $ELF (run \`just build\` first)" >&2

@@ -19,9 +19,9 @@ use super::task_table::{
     reserve_task_slot, task_find_by_id, with_task_manager,
 };
 use super::{
-    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskStatus,
+    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, Task, TaskContext, TaskEntry,
+    TaskExitReason, TaskFaultReason, TaskStatus,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
@@ -332,7 +332,12 @@ pub(crate) unsafe fn build_ret_from_fork_frame(
 
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
-    task.fpu_state = FpuState::new();
+    // SAFETY: `task.fpu_state` is a valid in-place FpuState owned by the
+    // caller-provided `&mut Task`. Writing into it does not alias with
+    // any other reference because we hold the unique `&mut`.
+    unsafe {
+        FpuState::reset_in_place(&raw mut task.fpu_state);
+    }
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
@@ -678,22 +683,22 @@ fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut T
     task.task_id != INVALID_TASK_ID
 }
 
-fn collect_shutdown_task_ids(current: *mut Task) -> [Option<u32>; MAX_TASKS] {
+fn collect_shutdown_task_ids(current: *mut Task) -> slopos_alloc::KVec<u32> {
     with_task_manager(|mgr| {
-        let mut ids = [None; MAX_TASKS];
-        for (i, task) in mgr.tasks.iter().enumerate() {
+        let mut ids: slopos_alloc::KVec<u32> = slopos_alloc::KVec::new();
+        for task in mgr.tasks.iter() {
             let task_ptr = task as *const Task as *mut Task;
             if should_collect_for_shutdown(task, task_ptr, current) {
-                ids[i] = Some(task.task_id);
+                let _ = ids.push(task.task_id);
             }
         }
         ids
     })
 }
 
-fn terminate_task_ids(task_ids: &[Option<u32>; MAX_TASKS]) -> c_int {
+fn terminate_task_ids(task_ids: &slopos_alloc::KVec<u32>) -> c_int {
     let mut result = 0;
-    for task_id in task_ids.iter().flatten() {
+    for task_id in task_ids.iter() {
         if task_terminate(*task_id) != 0 {
             result = -1;
         }

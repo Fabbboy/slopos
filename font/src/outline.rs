@@ -3,9 +3,7 @@
 //! Handles quadratic Bézier curve flattening, scaling from font units to
 //! pixels, and implied on-curve point insertion.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use crate::ttf_parser::{GlyphOutline, OutlinePoint};
 
@@ -27,8 +25,8 @@ pub struct Edge {
 /// 4. Translated so the glyph's bounding box starts near (0, 0)
 ///
 /// Returns a list of edges suitable for the scan-line rasterizer.
-pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> Vec<Edge> {
-    let mut edges = Vec::new();
+pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> KVec<Edge> {
+    let mut edges: KVec<Edge> = KVec::new();
 
     for contour in &outline.contours {
         if contour.points.is_empty() {
@@ -56,7 +54,7 @@ pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> Ve
                 let y1 = y_offset - p1.y as f32 * scale;
 
                 if (y0 - y1).abs() > 0.001 {
-                    edges.push(Edge { x0, y0, x1, y1 });
+                    edges.push(Edge { x0, y0, x1, y1 }).expect("edges: alloc");
                 }
                 i += 1;
             } else {
@@ -84,27 +82,29 @@ pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> Ve
 ///
 /// In TrueType, when two consecutive points are both off-curve, there is an
 /// implied on-curve point at their midpoint.
-fn expand_implied_points(points: &[OutlinePoint]) -> Vec<OutlinePoint> {
+fn expand_implied_points(points: &[OutlinePoint]) -> KVec<OutlinePoint> {
     let n = points.len();
     if n == 0 {
-        return Vec::new();
+        return KVec::new();
     }
 
-    let mut result = Vec::with_capacity(n * 2);
+    let mut result: KVec<OutlinePoint> = KVec::with_capacity(n * 2).expect("expand: alloc");
 
     for i in 0..n {
         let curr = points[i];
         let next = points[(i + 1) % n];
 
-        result.push(curr);
+        result.push(curr).expect("expand: alloc");
 
         if !curr.on_curve && !next.on_curve {
             // Insert implied on-curve midpoint
-            result.push(OutlinePoint {
-                x: ((curr.x as i32 + next.x as i32) / 2) as i16,
-                y: ((curr.y as i32 + next.y as i32) / 2) as i16,
-                on_curve: true,
-            });
+            result
+                .push(OutlinePoint {
+                    x: ((curr.x as i32 + next.x as i32) / 2) as i16,
+                    y: ((curr.y as i32 + next.y as i32) / 2) as i16,
+                    on_curve: true,
+                })
+                .expect("expand: alloc");
         }
     }
 
@@ -112,7 +112,7 @@ fn expand_implied_points(points: &[OutlinePoint]) -> Vec<OutlinePoint> {
     if !result.is_empty() && !result[0].on_curve {
         // Find the first on-curve point and rotate
         if let Some(first_on) = result.iter().position(|p| p.on_curve) {
-            result.rotate_left(first_on);
+            result.as_mut_slice().rotate_left(first_on);
         }
     }
 
@@ -129,7 +129,7 @@ fn flatten_quadratic_bezier(
     cy: f32,
     x1: f32,
     y1: f32,
-    edges: &mut Vec<Edge>,
+    edges: &mut KVec<Edge>,
 ) {
     // Flatness test: distance of control point from line p0-p1
     let mx = (x0 + x1) * 0.5;
@@ -141,7 +141,7 @@ fn flatten_quadratic_bezier(
     if flatness < 0.25 {
         // Flat enough — emit a single line segment
         if (y0 - y1).abs() > 0.001 {
-            edges.push(Edge { x0, y0, x1, y1 });
+            edges.push(Edge { x0, y0, x1, y1 }).expect("edges: alloc");
         }
         return;
     }

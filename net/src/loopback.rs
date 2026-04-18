@@ -16,11 +16,7 @@
 //! The internal queue is protected by an [`IrqMutex`] since both `tx()` (from
 //! any socket context) and `poll_rx()` (from the NAPI loop) access it.
 
-extern crate alloc;
-
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
-
+use slopos_alloc::{KBox, KVec, KVecDeque};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
@@ -34,7 +30,7 @@ const LOOPBACK_QUEUE_CAPACITY: usize = 256;
 /// Inner state of the loopback device, behind [`IrqMutex`].
 struct LoopbackInner {
     /// Packets waiting to be "received" by the ingress pipeline.
-    queue: VecDeque<PacketBuf>,
+    queue: KVecDeque<PacketBuf>,
     /// Cumulative statistics.
     stats: NetDeviceStats,
 }
@@ -57,7 +53,7 @@ impl LoopbackDev {
         Self {
             inner: IrqMutex::new(
                 LoopbackInner {
-                    queue: VecDeque::with_capacity(64),
+                    queue: KVecDeque::with_capacity(64).expect("loopback: alloc"),
                     stats: NetDeviceStats::new(),
                 },
                 LOCK_LEVEL_RESOURCE,
@@ -74,21 +70,21 @@ impl NetDevice for LoopbackDev {
             return Err(NetError::NoBufferSpace);
         }
         let len = pkt.len();
-        inner.queue.push_back(pkt);
+        let _ = inner.queue.push_back(pkt);
         inner.stats.tx_packets += 1;
         inner.stats.tx_bytes += len as u64;
         Ok(())
     }
 
-    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> Vec<PacketBuf> {
+    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
         let mut inner = self.inner.lock();
         let count = budget.min(inner.queue.len());
-        let mut packets = Vec::with_capacity(count);
+        let mut packets = KVec::with_capacity(count).unwrap_or_else(|_| KVec::new());
         for _ in 0..count {
             if let Some(pkt) = inner.queue.pop_front() {
                 inner.stats.rx_packets += 1;
                 inner.stats.rx_bytes += pkt.len() as u64;
-                packets.push(pkt);
+                let _ = packets.push(pkt);
             }
         }
         packets
@@ -125,7 +121,6 @@ impl NetDevice for LoopbackDev {
 // 3C.2 — Loopback registration
 // =============================================================================
 
-use alloc::boxed::Box;
 use slopos_utils::klog_info;
 
 /// Register the loopback device in the global device registry and configure
@@ -143,7 +138,13 @@ pub fn init_loopback() {
     use super::route::ROUTE_TABLE;
     use super::types::Ipv4Addr;
 
-    let dev = Box::new(LoopbackDev::new());
+    let dev: KBox<dyn NetDevice + Send + Sync> = match KBox::try_new(LoopbackDev::new()) {
+        Ok(d) => d,
+        Err(_) => {
+            klog_info!("loopback: alloc failed");
+            return;
+        }
+    };
     let Some(handle) = DEVICE_REGISTRY.register(dev) else {
         klog_info!("loopback: failed to register in device registry");
         return;

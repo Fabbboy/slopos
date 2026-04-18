@@ -1,8 +1,6 @@
 //! LRU glyph cache for avoiding re-rasterization of frequently used glyphs.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use crate::rasterizer::RasterizedGlyph;
 
@@ -23,7 +21,7 @@ struct CacheEntry {
 /// Stores rasterized glyphs keyed by `(codepoint, size_px)` and evicts the
 /// least-recently-used entry when full.
 pub struct GlyphCache {
-    entries: Vec<CacheEntry>,
+    entries: KVec<CacheEntry>,
     access_counter: u64,
 }
 
@@ -31,7 +29,7 @@ impl GlyphCache {
     /// Create a new empty glyph cache.
     pub fn new() -> Self {
         Self {
-            entries: Vec::with_capacity(64),
+            entries: KVec::with_capacity(64).expect("GlyphCache: alloc"),
             access_counter: 0,
         }
     }
@@ -86,7 +84,7 @@ impl GlyphCache {
             self.entries.swap_remove(min_idx);
         }
 
-        self.entries.push(CacheEntry {
+        let _ = self.entries.push(CacheEntry {
             key,
             glyph,
             access_count: self.access_counter,

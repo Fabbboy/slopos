@@ -1,10 +1,7 @@
-extern crate alloc;
-
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use slopos_alloc::{KBox, KVec};
 
 use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
@@ -174,8 +171,8 @@ pub fn get_device_handle() -> Option<&'static DeviceHandle> {
 }
 
 fn set_device_handle(handle: DeviceHandle) {
-    let boxed = Box::new(handle);
-    let ptr = Box::into_raw(boxed);
+    let boxed = KBox::try_new(handle).expect("virtio_net: device handle alloc");
+    let ptr = KBox::into_raw(boxed);
     DEVICE_HANDLE_PTR.store(ptr, Ordering::Release);
 }
 
@@ -227,11 +224,11 @@ impl NetDevice for VirtioNetDev {
         }
     }
 
-    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> Vec<PacketBuf> {
+    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
         let mut state = VIRTIO_NET_STATE.lock();
         let _ = virtnet_clean_tx(&mut state);
 
-        let mut packets = Vec::with_capacity(budget.min(64));
+        let mut packets = KVec::with_capacity(budget.min(64)).unwrap_or_else(|_| KVec::new());
         let mut posted = 0usize;
 
         for _ in 0..budget {
@@ -251,7 +248,7 @@ impl NetDevice for VirtioNetDev {
                     core::slice::from_raw_parts(page.as_mut_ptr::<u8>().add(hdr_len), payload_len)
                 };
                 if let Some(pkt) = PacketBuf::from_raw_copy(frame) {
-                    packets.push(pkt);
+                    let _ = packets.push(pkt);
                 }
             }
 
@@ -1277,7 +1274,14 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 
         PACKET_POOL.init();
 
-        let dev = Box::new(VirtioNetDev);
+        let dev: KBox<dyn slopos_net::netdev::NetDevice + Send + Sync> =
+            match KBox::try_new(VirtioNetDev) {
+                Ok(d) => d,
+                Err(_) => {
+                    klog_info!("virtio-net: alloc failed");
+                    return -1;
+                }
+            };
         if let Some(handle) = DEVICE_REGISTRY.register(dev) {
             let actual_idx = handle.index();
             klog_info!(

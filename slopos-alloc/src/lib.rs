@@ -16,7 +16,7 @@
 //! certifies an all-zero bit pattern is a valid `T`.
 
 #![no_std]
-#![feature(allocator_api)]
+#![feature(allocator_api, coerce_unsized, unsize)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
@@ -250,6 +250,13 @@ impl<T: ?Sized + core::fmt::Debug> core::fmt::Debug for KBox<T> {
     }
 }
 
+impl<T, U> core::ops::CoerceUnsized<KBox<U>> for KBox<T>
+where
+    T: ?Sized + core::marker::Unsize<U>,
+    U: ?Sized,
+{
+}
+
 impl<T: ?Sized + core::fmt::Debug> core::fmt::Debug for PinBox<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         core::fmt::Debug::fmt(&*self.inner, f)
@@ -301,6 +308,19 @@ impl<T> KVec<T> {
 
     pub fn truncate(&mut self, len: usize) {
         self.inner.truncate(len);
+    }
+
+    /// Drop excess capacity (best-effort; allocator may not honour).
+    pub fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit();
+    }
+
+    /// Move every element from `other` into `self`, leaving `other` empty.
+    pub fn append(&mut self, other: &mut Self) {
+        self.inner
+            .try_reserve(other.inner.len())
+            .expect("KVec::append: alloc");
+        self.inner.append(&mut other.inner);
     }
 
     /// Reserve capacity for `additional` more elements. Fallible.
@@ -449,11 +469,66 @@ impl<T: Zeroable> KVec<T> {
     }
 }
 
+impl<T: Clone> KVec<T> {
+    /// Allocate `len` copies of `value`. Fallible counterpart to the
+    /// `vec![value; len]` literal.
+    pub fn filled(value: T, len: usize) -> Result<Self, AllocError> {
+        let mut out = Self::with_capacity(len)?;
+        for _ in 0..len {
+            out.inner.push(value.clone());
+        }
+        Ok(out)
+    }
+}
+
 impl<T> Default for KVec<T> {
     fn default() -> Self {
         Self::new()
     }
 }
+
+impl<T: Clone> Clone for KVec<T> {
+    /// Panics on allocation failure. Kernel call sites that need
+    /// fallible clone should iterate manually with `KVec::push`.
+    fn clone(&self) -> Self {
+        let mut out = Self::with_capacity(self.inner.len()).expect("KVec::clone: alloc");
+        for v in self.inner.iter() {
+            out.inner.push(v.clone());
+        }
+        out
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for KVec<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&self.inner, f)
+    }
+}
+
+impl<T> FromIterator<T> for KVec<T> {
+    /// Panics on allocation failure. Use `KVec::from_iter_fallible` for
+    /// `Result`-returning variants.
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::from_iter_fallible(iter).expect("KVec::from_iter: alloc")
+    }
+}
+
+impl<T> Extend<T> for KVec<T> {
+    /// Panics on allocation failure.
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for v in iter {
+            self.push(v).expect("KVec::extend: alloc");
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for KVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl<T: Eq> Eq for KVec<T> {}
 
 impl<T> Deref for KVec<T> {
     type Target = [T];
@@ -714,6 +789,24 @@ impl<K: Ord, V> KBTreeMap<K, V> {
 
     pub fn entry(&mut self, key: K) -> alloc::collections::btree_map::Entry<'_, K, V> {
         self.inner.entry(key)
+    }
+
+    pub fn range<R>(&self, range: R) -> alloc::collections::btree_map::Range<'_, K, V>
+    where
+        R: core::ops::RangeBounds<K>,
+    {
+        self.inner.range(range)
+    }
+
+    pub fn range_mut<R>(&mut self, range: R) -> alloc::collections::btree_map::RangeMut<'_, K, V>
+    where
+        R: core::ops::RangeBounds<K>,
+    {
+        self.inner.range_mut(range)
+    }
+
+    pub fn clear(&mut self) {
+        self.inner.clear();
     }
 }
 

@@ -25,6 +25,16 @@ Use `python knowledge/query.py \"<question>\"` to ask about signatures, drivers,
 ## Coding Style & Naming Conventions
 All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) are Intel syntax (`*.s`) and should document register contracts.
 
+### Allocation surface
+**`slopos-alloc` is the only kernel allocation surface.** Every kernel crate (everything outside `userland/`, `slibc/`, `slop-protocol/`, `ktesting/`, and `slopos-alloc/` itself) routes heap allocation through `slopos_alloc`'s `KBox`, `KVec`, `KArc`, `KVecDeque`, `KBTreeMap`, and `PinBox` rather than `alloc::*`. The lone exception is `kernel/src/main.rs`, which keeps `extern crate alloc;` for the `#[global_allocator]` / `#[alloc_error_handler]` declarations.
+
+Two build-time gates enforce the discipline (run on every `just build`, also via `just check`):
+
+- **`scripts/check_alloc_dep.sh`** — fails if any kernel crate's `Cargo.toml` declares a direct `alloc` dependency.
+- **`scripts/check_stack_sizes.sh`** — fails if any function in `builddir/kernel.elf` has a stack frame larger than `STACK_SIZE_THRESHOLD` (default 2560 bytes / 2.5 KiB). Driven by `-Zemit-stack-sizes`.
+
+`scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.
+
 ## Testing Guidelines
 There are no unit tests yet; rely on QEMU boot verification and the interrupt test harness. Before sending changes, rebuild the ISO and run `just test` (non-interactive, auto-shutdown). For manual inspection use `just boot` (interactive) or `just boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Inspect the output for the roulette banner (`=== KERNEL ROULETTE: Spinning the Wheel of Fate ===`) and any warnings. Note any observed regressions or warnings in your PR description.
 

@@ -7,7 +7,7 @@
 //! Format: 256 glyphs × 16 rows × 1 byte/row = 4096 bytes.
 //! Each byte represents 8 pixels (MSB = leftmost).
 
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 pub const BITMAP_FONT_WIDTH: u16 = 8;
 pub const BITMAP_FONT_HEIGHT: u16 = 16;
@@ -46,7 +46,7 @@ pub fn bitmap_to_coverage(
     width: u16,
     height: u16,
     glyph_count: usize,
-) -> Option<(Vec<u8>, Vec<u8>)> {
+) -> Option<(KVec<u8>, KVec<u8>)> {
     if width != 8 || height == 0 || glyph_count == 0 {
         return None;
     }
@@ -60,7 +60,7 @@ pub fn bitmap_to_coverage(
 
     let stride = cell_w.checked_mul(cell_h)?;
     let coverage_len = ASCII_COUNT.checked_mul(stride)?;
-    let mut coverage = alloc::vec![0u8; coverage_len];
+    let mut coverage = KVec::<u8>::zeroed(coverage_len).ok()?;
 
     let expand_glyph = |glyph_index: usize, out: &mut [u8]| {
         let glyph_offset = glyph_index * cell_h;
@@ -81,7 +81,7 @@ pub fn bitmap_to_coverage(
         }
     }
 
-    let mut replacement = alloc::vec![0u8; stride];
+    let mut replacement = KVec::<u8>::zeroed(stride).ok()?;
     let replacement_glyph = if (b'?' as usize) < glyph_count {
         b'?' as usize
     } else {
@@ -101,7 +101,8 @@ mod tests {
         let width = 8u16;
         let height = 16u16;
         let glyph_count = 128usize;
-        let mut data = alloc::vec![0u8; glyph_count * height as usize];
+        let mut data =
+            slopos_alloc::KVec::<u8>::zeroed(glyph_count * height as usize).expect("test alloc");
 
         let glyph0 = 0usize;
         data[glyph0 * 16] = 0b1111_0000;
@@ -131,13 +132,13 @@ mod tests {
 
     #[test]
     fn bitmap_to_coverage_rejects_non_8_width() {
-        let data = alloc::vec![0u8; 16];
+        let data = slopos_alloc::KVec::<u8>::zeroed(16).expect("test alloc");
         assert!(bitmap_to_coverage(&data, 9, 16, 1).is_none());
     }
 
     #[test]
     fn bitmap_to_coverage_rejects_zero_height() {
-        let data = alloc::vec![0u8; 16];
+        let data = slopos_alloc::KVec::<u8>::zeroed(16).expect("test alloc");
         assert!(bitmap_to_coverage(&data, 8, 0, 1).is_none());
     }
 

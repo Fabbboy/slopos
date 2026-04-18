@@ -22,12 +22,9 @@
 //! key. Exponential backoff: 1s, 2s, 4s, 8s, 16s. After [`SYN_RETRIES_MAX`]
 //! (5) failed attempts, the entry is silently removed.
 
-extern crate alloc;
-
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_alloc::{KVec, KVecDeque};
 use slopos_utils::klog_debug;
 
 use crate::tcp::{
@@ -214,12 +211,12 @@ pub struct TcpListenState {
     /// Half-open connections: SYN received, SYN-ACK sent, waiting for ACK.
     ///
     /// Keyed by four-tuple for O(n) lookup (n ≤ 128, linear scan is fine).
-    syn_queue: Vec<(TcpFourTuple, SynRecvEntry)>,
+    syn_queue: KVec<(TcpFourTuple, SynRecvEntry)>,
 
     /// Completed connections waiting for `accept()`.
     ///
     /// Capacity is bounded by the listen `backlog`.
-    accept_queue: VecDeque<AcceptedConn>,
+    accept_queue: KVecDeque<AcceptedConn>,
 
     /// Maximum accept queue size (from `listen(fd, backlog)`).
     backlog: usize,
@@ -235,8 +232,9 @@ impl TcpListenState {
     pub fn new(backlog: usize, local: SockAddr) -> Self {
         let backlog = backlog.clamp(BACKLOG_MIN, BACKLOG_MAX);
         Self {
-            syn_queue: Vec::with_capacity(core::cmp::min(SYN_QUEUE_MAX, 32)),
-            accept_queue: VecDeque::with_capacity(backlog),
+            syn_queue: KVec::with_capacity(core::cmp::min(SYN_QUEUE_MAX, 32))
+                .expect("listener: alloc"),
+            accept_queue: KVecDeque::with_capacity(backlog).expect("listener: alloc"),
             backlog,
             local,
         }
@@ -313,7 +311,7 @@ impl TcpListenState {
         };
 
         let syn_ack = self.build_syn_ack(&entry, &four_tuple);
-        self.syn_queue.push((four_tuple, entry));
+        let _ = self.syn_queue.push((four_tuple, entry));
 
         klog_debug!(
             "tcp_listen: SYN from {}:{} -> SYN_RECEIVED (key={}, iss={}, irs={})",
@@ -389,7 +387,7 @@ impl TcpListenState {
             entry.irs
         );
 
-        self.accept_queue.push_back(accepted);
+        let _ = self.accept_queue.push_back(accepted);
         Some(accepted)
     }
 
@@ -469,7 +467,7 @@ impl TcpListenState {
         if self.accept_queue.len() >= self.backlog {
             return false;
         }
-        self.accept_queue.push_back(conn);
+        let _ = self.accept_queue.push_back(conn);
         true
     }
 

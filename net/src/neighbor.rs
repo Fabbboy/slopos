@@ -30,11 +30,9 @@
 //! - `NET_TIMER_WHEEL` (timer schedule/cancel)
 //! - `DeviceHandle::tx_lock` (packet transmission)
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::fmt;
 
+use slopos_alloc::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
@@ -80,7 +78,7 @@ pub enum NeighborState {
     /// arrives.
     Incomplete {
         retries: u8,
-        pending: Vec<PacketBuf>,
+        pending: KVec<PacketBuf>,
     },
     /// ARP reply received; the MAC address is fresh and confirmed.
     Reachable { mac: MacAddr, confirmed_tick: u64 },
@@ -148,7 +146,7 @@ pub enum NeighborAction {
     TransmitPacket { pkt: PacketBuf },
     /// Multiple packets to transmit (flushed from Incomplete → Reachable).
     FlushPending {
-        packets: Vec<PacketBuf>,
+        packets: KVec<PacketBuf>,
         dst_mac: MacAddr,
         dev: DevIndex,
     },
@@ -159,7 +157,7 @@ pub enum NeighborAction {
 /// Inner state of the neighbor cache, behind [`IrqMutex`].
 struct NeighborCacheInner {
     /// All entries.  Fixed capacity of [`MAX_ENTRIES`].
-    entries: Vec<NeighborEntry>,
+    entries: KVec<NeighborEntry>,
     /// Monotonically increasing ID generator for entry_id.
     next_entry_id: u32,
 }
@@ -184,7 +182,7 @@ impl NeighborCache {
         Self {
             inner: IrqMutex::new(
                 NeighborCacheInner {
-                    entries: Vec::new(),
+                    entries: KVec::new(),
                     next_entry_id: 1,
                 },
                 LOCK_LEVEL_REGISTRY,
@@ -262,7 +260,7 @@ impl NeighborCache {
 
             // Collect pending packets if transitioning from Incomplete.
             let pending = if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
-                let packets: Vec<PacketBuf> = pending.drain(..).collect();
+                let packets: KVec<PacketBuf> = pending.drain(..).collect();
                 if !packets.is_empty() {
                     klog_debug!(
                         "neighbor: flushing {} pending packets for {} on dev {}",
@@ -273,7 +271,7 @@ impl NeighborCache {
                 }
                 packets
             } else {
-                Vec::new()
+                KVec::new()
             };
 
             // Transition to Reachable.
@@ -312,7 +310,7 @@ impl NeighborCache {
             let token =
                 NET_TIMER_WHEEL.schedule(REACHABLE_TIME_TICKS, TimerKind::ArpExpire, entry_id);
 
-            inner.entries.push(NeighborEntry {
+            let _ = inner.entries.push(NeighborEntry {
                 dev,
                 ip,
                 state: NeighborState::Reachable {
@@ -390,7 +388,7 @@ impl NeighborCache {
                 }
                 NeighborState::Incomplete { pending, .. } => {
                     if pending.len() < MAX_PENDING_PKTS {
-                        pending.push(pkt);
+                        let _ = pending.push(pkt);
                     } else {
                         klog_debug!(
                             "neighbor: pending queue full for {} on dev {}, dropping",
@@ -420,10 +418,10 @@ impl NeighborCache {
             let token =
                 NET_TIMER_WHEEL.schedule(RETRANSMIT_TIME_TICKS, TimerKind::ArpRetransmit, entry_id);
 
-            let mut pending = Vec::with_capacity(MAX_PENDING_PKTS);
-            pending.push(pkt);
+            let mut pending = KVec::with_capacity(MAX_PENDING_PKTS).expect("neighbor: alloc");
+            let _ = pending.push(pkt);
 
-            inner.entries.push(NeighborEntry {
+            let _ = inner.entries.push(NeighborEntry {
                 dev,
                 ip,
                 state: NeighborState::Incomplete {
@@ -479,10 +477,10 @@ impl NeighborCache {
     /// Called when an [`ArpRetransmit`](TimerKind::ArpRetransmit) timer fires.
     /// Returns an action to send an ARP request (if retrying) or `None` (if
     /// transitioning to `Failed`).
-    pub fn on_retransmit(&self, entry_id: u32) -> (Option<NeighborAction>, Vec<PacketBuf>) {
+    pub fn on_retransmit(&self, entry_id: u32) -> (Option<NeighborAction>, KVec<PacketBuf>) {
         let mut inner = self.inner.lock();
         let Some(entry) = inner.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
-            return (None, Vec::new());
+            return (None, KVec::new());
         };
 
         match &mut entry.state {
@@ -512,11 +510,11 @@ impl NeighborCache {
 
                     (
                         Some(NeighborAction::SendArpRequest { dev, target_ip: ip }),
-                        Vec::new(),
+                        KVec::new(),
                     )
                 } else {
                     // Max retries exceeded — transition to Failed.
-                    let dropped: Vec<PacketBuf> = pending.drain(..).collect();
+                    let dropped: KVec<PacketBuf> = pending.drain(..).collect();
                     let drop_count = dropped.len();
                     let ip = entry.ip;
                     let dev = entry.dev;
@@ -548,12 +546,12 @@ impl NeighborCache {
 
                 (
                     Some(NeighborAction::SendArpRequest { dev, target_ip: ip }),
-                    Vec::new(),
+                    KVec::new(),
                 )
             }
             _ => {
                 // Not Incomplete or Stale — timer-cancellation race.  Ignore.
-                (None, Vec::new())
+                (None, KVec::new())
             }
         }
     }

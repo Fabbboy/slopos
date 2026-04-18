@@ -26,7 +26,7 @@ use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_arch::cpu;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_utils::{klog_debug, klog_info, klog_warn};
 
 use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -669,7 +669,16 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
         info.last_flushed_gen[initiator].store(request_gen, Ordering::Release);
     }
 
-    let mut targets = [0usize; MAX_CPUS];
+    // Allocate the per-CPU target list on the heap: a stack-resident
+    // `[usize; MAX_CPUS]` is 2 KiB on its own and pushes this function
+    // over the stack-sizes gate.
+    let mut targets = match slopos_alloc::KVec::<usize>::zeroed(MAX_CPUS) {
+        Ok(v) => v,
+        Err(_) => {
+            klog_warn!("tlb: targeted_flush_request alloc failed; falling back to local");
+            return;
+        }
+    };
     let mut target_count = 0usize;
 
     for cpu_idx in info.cpumask.iter_set() {

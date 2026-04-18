@@ -22,13 +22,10 @@
 //! (e.g., `IrqMutex`) for their internal state.  This allows concurrent TX and
 //! RX without aliasing `&mut` references through the raw pointer in `DeviceHandle`.
 
-extern crate alloc;
-
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::fmt;
 
 use bitflags::bitflags;
+use slopos_alloc::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 
 use super::packetbuf::PacketBuf;
@@ -65,7 +62,7 @@ pub trait NetDevice: Send + Sync {
     /// Returns the received packets.  An empty `Vec` means no packets are pending.
     /// Implementations should use `Vec::with_capacity(budget.min(reasonable_max))`
     /// to minimize reallocation.
-    fn poll_rx(&self, budget: usize, pool: &'static PacketPool) -> Vec<PacketBuf>;
+    fn poll_rx(&self, budget: usize, pool: &'static PacketPool) -> KVec<PacketBuf>;
 
     /// Bring the link up (enable RX/TX rings, start interrupt delivery).
     fn set_up(&self);
@@ -278,7 +275,7 @@ impl DeviceHandle {
     /// **Must be called from the NAPI loop only** (single consumer).
     /// Does not acquire any lock — the NAPI loop is the sole consumer of the
     /// RX ring for a given device.
-    pub fn poll_rx(&self, budget: usize, pool: &'static PacketPool) -> Vec<PacketBuf> {
+    pub fn poll_rx(&self, budget: usize, pool: &'static PacketPool) -> KVec<PacketBuf> {
         // SAFETY: The pointer is valid for the device's registered lifetime.
         // The trait method takes `&self`, and this is the single RX consumer.
         let dev = unsafe { &*self.dev };
@@ -356,7 +353,7 @@ pub struct NetDeviceRegistry {
 /// Inner state behind the registry's `IrqMutex`.
 pub(crate) struct RegistryInner {
     /// Device slots.  `None` = empty slot.
-    slots: [Option<Box<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
+    slots: [Option<KBox<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
     /// Number of occupied slots.
     count: usize,
 }
@@ -393,7 +390,7 @@ impl NetDeviceRegistry {
     /// bypasses the registry lock for data-plane operations.
     ///
     /// Returns `None` if all `MAX_DEVICES` slots are occupied.
-    pub fn register(&self, dev: Box<dyn NetDevice + Send + Sync>) -> Option<DeviceHandle> {
+    pub fn register(&self, dev: KBox<dyn NetDevice + Send + Sync>) -> Option<DeviceHandle> {
         let mut inner = self.inner.lock();
         for (i, slot) in inner.slots.iter_mut().enumerate() {
             if slot.is_none() {
@@ -445,12 +442,12 @@ impl NetDeviceRegistry {
     /// Returns a list of `(DevIndex, MacAddr, is_up)` tuples.  Currently
     /// `is_up` is always `true` for registered devices (link-state tracking
     /// is deferred).
-    pub fn enumerate(&self) -> Vec<(DevIndex, MacAddr, bool)> {
+    pub fn enumerate(&self) -> KVec<(DevIndex, MacAddr, bool)> {
         let inner = self.inner.lock();
-        let mut result = Vec::new();
+        let mut result = KVec::new();
         for (i, slot) in inner.slots.iter().enumerate() {
             if let Some(dev) = slot {
-                result.push((DevIndex(i), dev.mac(), true));
+                let _ = result.push((DevIndex(i), dev.mac(), true));
             }
         }
         result
@@ -503,11 +500,11 @@ impl NetDeviceRegistry {
         index: DevIndex,
         budget: usize,
         pool: &'static super::pool::PacketPool,
-    ) -> Vec<PacketBuf> {
+    ) -> KVec<PacketBuf> {
         let inner = self.inner.lock();
         match inner.slots.get(index.0) {
             Some(Some(dev)) => dev.poll_rx(budget, pool),
-            _ => Vec::new(),
+            _ => KVec::new(),
         }
     }
 }

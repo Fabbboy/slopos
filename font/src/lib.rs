@@ -15,8 +15,6 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-extern crate alloc;
-
 pub mod atlas;
 pub mod bitmap;
 pub mod cache;
@@ -222,15 +220,14 @@ impl<'a> FontRenderer<'a> {
                 let edges = outline_to_edges(out, scale, y_offset);
 
                 // Shift edges by x_offset
-                let shifted_edges: alloc::vec::Vec<_> = edges
-                    .iter()
-                    .map(|e| outline::Edge {
+                let shifted_edges: slopos_alloc::KVec<outline::Edge> =
+                    slopos_alloc::KVec::from_iter_fallible(edges.iter().map(|e| outline::Edge {
                         x0: e.x0 + x_offset,
                         y0: e.y0,
                         x1: e.x1 + x_offset,
                         y1: e.y1,
-                    })
-                    .collect();
+                    }))
+                    .expect("shifted_edges: alloc");
 
                 let coverage =
                     rasterize(&shifted_edges, glyph_width as usize, glyph_height as usize);
@@ -252,7 +249,7 @@ impl<'a> FontRenderer<'a> {
                     bearing_x: 0,
                     bearing_y: 0,
                     advance: scaled_advance,
-                    coverage: alloc::vec::Vec::new(),
+                    coverage: slopos_alloc::KVec::new(),
                 })
             }
         }
@@ -331,7 +328,7 @@ mod tests {
     ));
 
     struct TestCanvas {
-        data: alloc::vec::Vec<u8>,
+        data: slopos_alloc::KVec<u8>,
         width: u32,
         height: u32,
     }
@@ -339,7 +336,8 @@ mod tests {
     impl TestCanvas {
         fn new(width: u32, height: u32) -> Self {
             Self {
-                data: alloc::vec![0u8; (width * height * 4) as usize],
+                data: slopos_alloc::KVec::<u8>::zeroed((width * height * 4) as usize)
+                    .expect("test alloc"),
                 width,
                 height,
             }

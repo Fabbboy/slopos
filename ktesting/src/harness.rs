@@ -83,6 +83,11 @@ pub struct TestSuiteDesc {
 unsafe impl Sync for TestSuiteDesc {}
 
 /// Aggregated results from running all test suites.
+///
+/// SAFETY: All fields are integer/byte-array primitives; the all-zero
+/// bit pattern is a valid value, allowing heap-direct allocation via
+/// `KBox::<TestRunSummary>::zeroed()` to avoid materialising the
+/// ~2.6 KiB `Default::default()` rvalue on a caller's stack.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TestRunSummary {
@@ -96,6 +101,9 @@ pub struct TestRunSummary {
     pub elapsed_ms: u32,
     pub timed_out: c_int,
 }
+
+// SAFETY: see struct doc; all fields zero-valid.
+unsafe impl slopos_alloc::Zeroable for TestRunSummary {}
 
 impl Default for TestRunSummary {
     fn default() -> Self {

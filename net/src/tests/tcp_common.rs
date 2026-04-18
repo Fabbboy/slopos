@@ -8,7 +8,7 @@
 //! Matchers and macros that take on non-trivial state (like [`SegmentMatcher`])
 //! carry inline documentation.
 
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use crate::socket;
 use crate::tcp::{
@@ -275,18 +275,21 @@ pub fn establish_connection_with_ts() -> EstablishedConn {
 
 /// Poll once for an outgoing segment.  Returns `None` if the connection has
 /// nothing to send under the current window.
-pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, Vec<u8>)> {
+pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, KVec<u8>)> {
     let mut buf = [0u8; 1500];
-    tcp::poll_transmit(id, &mut buf, tcp::clock::now_ms())
-        .map(|(seg, len)| (seg, buf[..len].to_vec()))
+    tcp::poll_transmit(id, &mut buf, tcp::clock::now_ms()).map(|(seg, len)| {
+        let mut payload = KVec::<u8>::with_capacity(len).expect("test alloc");
+        payload.extend_from_slice(&buf[..len]).expect("test alloc");
+        (seg, payload)
+    })
 }
 
 /// Drain `tcp_poll_transmit` until it returns `None`.  Used by data-transfer
 /// tests that want to observe exactly what bytes were serialized.
-pub fn drain_transmit(id: ConnId) -> Vec<(TcpOutSegment, Vec<u8>)> {
-    let mut out = Vec::new();
+pub fn drain_transmit(id: ConnId) -> KVec<(TcpOutSegment, KVec<u8>)> {
+    let mut out: KVec<(TcpOutSegment, KVec<u8>)> = KVec::new();
     while let Some(item) = poll_once(id) {
-        out.push(item);
+        let _ = out.push(item);
     }
     out
 }
@@ -339,69 +342,69 @@ macro_rules! with_data_state {
 #[must_use]
 pub struct SegmentMatcher<'a> {
     seg: &'a TcpOutSegment,
-    failures: Vec<&'static str>,
+    failures: KVec<&'static str>,
 }
 
 impl<'a> SegmentMatcher<'a> {
     pub fn new(seg: &'a TcpOutSegment) -> Self {
         Self {
             seg,
-            failures: Vec::new(),
+            failures: KVec::new(),
         }
     }
 
     pub fn seq(mut self, s: u32) -> Self {
         if self.seg.seq_num != s {
-            self.failures.push("seq_num mismatch");
+            let _ = self.failures.push("seq_num mismatch");
         }
         self
     }
 
     pub fn ack(mut self, a: u32) -> Self {
         if self.seg.ack_num != a {
-            self.failures.push("ack_num mismatch");
+            let _ = self.failures.push("ack_num mismatch");
         }
         self
     }
 
     pub fn flags_eq(mut self, f: u8) -> Self {
         if self.seg.flags != f {
-            self.failures.push("flags mismatch");
+            let _ = self.failures.push("flags mismatch");
         }
         self
     }
 
     pub fn has_flag(mut self, f: u8) -> Self {
         if (self.seg.flags & f) == 0 {
-            self.failures.push("required flag missing");
+            let _ = self.failures.push("required flag missing");
         }
         self
     }
 
     pub fn no_flag(mut self, f: u8) -> Self {
         if (self.seg.flags & f) != 0 {
-            self.failures.push("forbidden flag set");
+            let _ = self.failures.push("forbidden flag set");
         }
         self
     }
 
     pub fn window_gt(mut self, w: u16) -> Self {
         if self.seg.window_size <= w {
-            self.failures.push("window_size not greater than bound");
+            let _ = self.failures.push("window_size not greater than bound");
         }
         self
     }
 
     pub fn mss(mut self, mss: u16) -> Self {
         if self.seg.mss != Some(mss) {
-            self.failures.push("mss mismatch");
+            let _ = self.failures.push("mss mismatch");
         }
         self
     }
 
     pub fn tuple(mut self, t: TcpTuple) -> Self {
         if self.seg.tuple != t {
-            self.failures.push("tuple mismatch");
+            let _ = self.failures.push("tuple mismatch");
         }
         self
     }

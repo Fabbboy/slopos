@@ -249,6 +249,33 @@ impl FpuState {
         state
     }
 
+    /// Initialise an `FpuState` directly at `ptr` without materialising the
+    /// 2.6 KiB rvalue on the caller's stack. Equivalent to writing the
+    /// result of [`Self::new`] but with no temp.
+    ///
+    /// The assembly in `context_switch.s` relies on `FpuState` living
+    /// inline at `FPU_STATE_OFFSET` from the `TaskContext` field, so the
+    /// in-place factory is the right shape — `KBox<FpuState>` would force
+    /// asm changes for no extra stack-safety win once the rvalue is gone.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid, properly-aligned, writable pointer to an
+    /// `FpuState`-sized region (≥ `FPU_STATE_SIZE` bytes, 64-byte
+    /// aligned). The caller must ensure no other reference to that region
+    /// is live for the duration of this call.
+    pub unsafe fn reset_in_place(ptr: *mut Self) {
+        // SAFETY: ptr is a valid FpuState by caller contract.
+        unsafe {
+            let bytes = ptr as *mut u8;
+            core::ptr::write_bytes(bytes, 0u8, FPU_STATE_SIZE);
+            // Legacy FCW = 0x037F, MXCSR = 0x1F80.
+            *bytes.add(LEGACY_FCW_OFFSET) = 0x7F;
+            *bytes.add(LEGACY_FCW_OFFSET + 1) = 0x03;
+            *bytes.add(LEGACY_MXCSR_OFFSET) = 0x80;
+            *bytes.add(LEGACY_MXCSR_OFFSET + 1) = 0x1F;
+        }
+    }
+
     #[inline]
     pub fn as_ptr(&self) -> *const u8 {
         self.data.as_ptr()

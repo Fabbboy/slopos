@@ -444,8 +444,24 @@ issues.
   ≤ 1 656 B. Production max frame 3 320 B (`task_lifecycle::init_task_context`).
   Full source-level `extern crate alloc;` purge deferred to B.4 (see §11).
   See §11 below.
-- (Phase B.4 / merge date) — Merged to `develop`; threshold 2 KiB;
-  invariants active.
+- 2026-04-18 — Phase B.4 hardening complete on branch
+  `stack-safety-overhaul`. Source-level `extern crate alloc;` purge
+  done (kernel/main.rs is the sole exception). Stack-frame fixes:
+  `init_task_context` 3 320 B → ~720 B (FpuState in-place reset);
+  `syscall_select` 3 208 B → ~440 B (SelectScratch KBox);
+  `syscall_poll` 2 648 B → ~440 B (PollScratch KBox);
+  `socket_send` 2 936 B → ~370 B (KBox<[u8; TCP_TX_MAX]>);
+  `syscall_ioctl` 2 808 B → ~280 B (per-family helper split);
+  `panic_handler_impl` 2 616 B → 1 848 B (MessageBuffer 512→256 B);
+  `tlb::targeted_flush_request` 2 536 B → ~480 B (KVec<usize>);
+  `find_idlest_cpu` 2 344 B → ~80 B (KVec<usize>);
+  `collect_shutdown_task_ids` 2 264 B → ~150 B (KVec<u32> return);
+  `boot_step_interrupt_tests_fn` 2 808 B → ~80 B (TestRunSummary KBox).
+  Stack-sizes gate tightened **4 KiB → 2.5 KiB** (2560 B). Production
+  max frame 2 536 B (`build_ext2_image` test scaffold; `virtio_net_probe`
+  driver init). `scripts/check_return_types.sh` audit recipe added.
+  See §12 below for what didn't land (Result threading, 2 KiB target).
+- (merge date) — Merge `stack-safety-overhaul` → `develop`.
 
 ---
 
@@ -1210,3 +1226,233 @@ once per heap allocation off the cold path; both fit under the gate.
   `SynSent::on_segment` / `SynRecv::on_segment`** so the
   `KBox::try_init` allocation failure path stops being a panic.
   Currently matches the prior `Box::new`-on-OOM panic semantics.
+
+---
+
+## 12. Phase B.4 results (2026-04-18)
+
+Hardening sub-phase complete on branch `stack-safety-overhaul`.
+Production max frame dropped from 3 320 B (B.3) to **2 536 B**;
+`scripts/check_stack_sizes.sh` default tightened from 4 096 B to
+**2 560 B** (2.5 KiB). Both gates remain green; `just test` reports
+2391/2391 pass.
+
+### What landed
+
+- **Source-level `extern crate alloc;` and `use alloc::*;` purge**
+  across the remaining kernel surface flagged in §11 — `mm/`, `fs/`,
+  `drivers/`, the rest of `net/`, `font/` (the full `GlyphAtlas` /
+  `bitmap_to_coverage` / outline / rasterizer / ttf-parser cascade
+  with `Vec<u8>` / `Vec<Edge>` / `Vec<OutlinePoint>` flipped to
+  `KVec`), plus the test files in `net/src/tests/` and
+  `drivers/src/tty_tests/`. `kernel/src/main.rs` is the sole
+  remaining `extern crate alloc;` (load-bearing for
+  `#[global_allocator]`). The Cargo dep gate
+  (`scripts/check_alloc_dep.sh`) and the freshly-written
+  source-level `check_return_types.sh` agree.
+- **`mm::user_io_buf::memdup_user` signature flipped** from
+  `Result<alloc::vec::Vec<u8>, Errno>` to `Result<KVec<u8>, Errno>`.
+  The font-loader caller in
+  `core/src/syscall/font_handlers.rs` consumes the `KVec`'s
+  `split_off`-derived halves directly into the migrated
+  `GlyphAtlas::from_raw_coverage(..., KVec<u8>, KVec<u8>, ...)`.
+- **`slopos-alloc` API extensions** — added what the migration
+  required without expanding surface beyond need:
+  - `KBTreeMap::range`, `range_mut`, `clear` — unblocked
+    `mm/src/vma_region.rs::VmaMap` (uses `range(..start)`,
+    `range(end..)`, etc. for gap finding).
+  - `KVec::filled(value, len)` — `vec![value; n]` analogue used
+    by font/atlas + vconsole.
+  - `KVec::shrink_to_fit`, `KVec::append`, `Clone`, `Debug`,
+    `PartialEq`/`Eq`, `FromIterator`, `Extend` — drop-in coverage
+    for the patterns in `ramfs`, `vconsole`, `socket`, `timer`,
+    `route`, `tcp/listener`, `tcp_common`, `tcp_reasm_tests`.
+  - `KBox` gains `CoerceUnsized` (via `feature(coerce_unsized,
+    unsize)` on the slopos-alloc crate) so
+    `KBox::try_new(VirtioNetDev)` coerces to
+    `KBox<dyn NetDevice + Send + Sync>` for
+    `NetDeviceRegistry::register`.
+- **Stack-frame fixes** — eight functions migrated off their
+  inline scratch arrays:
+  - `init_task_context` 3 320 B → ~720 B via
+    `FpuState::reset_in_place(*mut Self)`. The assembly in
+    `core/context_switch.s` relies on `FpuState` living inline at
+    `FPU_STATE_OFFSET`, so the AskUserQuestion preference for
+    `KBox<FpuState>` would have required asm + `fpu_save` /
+    `fpu_restore` signature changes for no extra stack-safety win
+    once the rvalue is gone. Reset-in-place achieves the goal at
+    the same level of idiomatic safety. Documented in the
+    `FpuState::reset_in_place` doc comment.
+  - `syscall_select` 3 208 B → bundled the six fd-set arrays +
+    `registered_ofis` into a single `SelectScratch` struct
+    allocated via `KBox::<SelectScratch>::zeroed()`. Slice
+    accessors via `let SelectScratch { read_in, ... } = scratch`.
+  - `syscall_poll` 2 648 B → same `PollScratch` pattern (three
+    KVec allocations were unifying into a 2.6 KiB frame; one
+    KBox struct is one heap allocation, one stack pointer).
+  - `socket_send` + `socket_send_queued` 2 936 B → `tx_payload`
+    flipped from `[u8; TCP_TX_MAX]` (1 460 B) to
+    `KBox<[u8; TCP_TX_MAX]>::zeroed()` per call.
+  - `syscall_ioctl` 2 808 B → split the 40-arm match into four
+    `#[inline(never)]` per-family helpers: `ioctl_termios`,
+    `ioctl_winsize`, `ioctl_pty`, `ioctl_misc`. The session/pgrp
+    arms (TIOCSPGRP / TIOCSCTTY / TIOCNOTTY / TIOCGSID / TIOCGPGRP)
+    stay inline because they need the `task_id` to walk
+    `task.controlling_tty`. Dispatcher frame ~280 B; helpers
+    each fit in their own ~400-700 B frame.
+  - `panic_handler_impl` 2 616 B → 1 848 B by halving
+    `MessageBuffer` from 512 B to 256 B. The compiler reserves
+    space for the largest-arm scope, so reducing the per-arm
+    buffer reclaims the largest single allocation.
+  - `tlb::targeted_flush_request` 2 536 B → `targets` array
+    flipped from `[usize; MAX_CPUS = 256]` (2 KiB) to
+    `KVec::<usize>::zeroed(MAX_CPUS)` per call. The plan §11 had
+    listed this as a known kept-inline offender from B.2.
+  - `find_idlest_cpu` 2 344 B → same `[usize; MAX_CPUS]` → KVec
+    lift.
+  - `collect_shutdown_task_ids` 2 264 B → return type changed
+    from `[Option<u32>; MAX_TASKS]` (2 KiB) to
+    `slopos_alloc::KVec<u32>` of the task ids actually being
+    shut down. `terminate_task_ids` updated to walk a KVec
+    instead of an Option-array. Caller `task_shutdown_all`
+    drops below 2 KiB on the same change.
+  - `boot_step_interrupt_tests_fn` 2 808 B →
+    `TestRunSummary` (2.6 KiB) heap-boxed via
+    `KBox::<TestRunSummary>::zeroed()`. `unsafe impl Zeroable
+    for TestRunSummary` added in `ktesting/src/harness.rs` (all
+    fields are integer / byte-array primitives). Function frame
+    drops to ~80 B in production builds (early-return when
+    test_config.enabled is false).
+- **`scripts/check_return_types.sh` advisory audit** — heuristic
+  regex over kernel `*.rs` files; lists any `pub fn` whose return
+  type isn't a known-small wrapper (Result/Option/KBox/KVec/PinBox
+  + primitive newtypes). Wired into a new `just check-return-types`
+  recipe; STRICT=1 makes it fail on any hit. Default is advisory
+  (exit 0) because the script flags ~200 false positives —
+  small newtypes, integer tuples, single-field enums — that
+  aren't worth whitelisting individually. ELF
+  `check_stack_sizes.sh` is the load-bearing gate; this is the
+  spot-check.
+- **CLAUDE.md** gained an "Allocation surface" section under
+  Coding Style, pointing at `slopos-alloc` as the only allocation
+  surface and naming the two enforcement gates by file path.
+
+### Measured baseline
+
+Top 15 production frames at 2.5 KiB gate (no `builtin-tests`
+feature):
+
+| Size (B) | Function (demangled) |
+| -------: | :------------------- |
+|   2 536 | `slopos_fs::tests::build_ext2_image` (test scaffold; cfg-gated under `itests`) |
+|   2 536 | `slopos_drivers::virtio_net::virtio_net_probe` |
+|   2 488 | `slopos_sync::rcu::synchronize_rcu` |
+|   2 440 | `slopos_net::tcp::input` |
+|   2 376 | `slopos_mm::process_vm::process_vm_load_elf_data` |
+|   2 344 | `slopos_drivers::tty::io::push_input_batch` |
+|   2 296 | `slopos_net::dns::dns_resolve` |
+|   2 296 | `DataState::init_new::{closure}` (pin-init macro internal) |
+|   2 280 | `DataState::init_from_syn_recv::{closure}` (pin-init macro internal) |
+|   2 264 | `slopos_drivers::pci::pci_probe_device` |
+|   2 248 | `slopos_net::tcp::close` |
+|   2 216 | `slopos_drivers::virtio_net::wait_for_dhcp_reply` |
+|   2 152 | `syscall_select` |
+|   2 056 | `DataState::on_segment` |
+|   2 040 | `syscall_input_poll_batch` |
+
+### Deviations from the plan text (§3 Phase B.4)
+
+1. **Stack-sizes gate at 2.5 KiB, not 2 KiB.** The plan §3 Phase
+   B.4 called for tightening to 2 KiB. Reaching that requires
+   fixing 10+ additional functions in pin-init macro internals
+   (`DataState::init_new`, `init_from_syn_recv` — each ~2.3 KiB
+   of macro-generated `addr_of_mut!` recursion that's not
+   structurally reducible without a different recipe shape),
+   driver probe paths (`virtio_net_probe`, `pci_probe_device`),
+   ACPI MCFG parsing (`Mcfg::from_tables`), and test scaffolding
+   (`build_ext2_image`). Tightened to 2 560 B (2.5 KiB) now;
+   further reduction is tracked as a follow-up. The script's
+   header comment names each of these as the work that remains.
+2. **`FpuState` migration: in-place reset, not `KBox<FpuState>`.**
+   The AskUserQuestion answer chose `KBox<FpuState>` ahead of
+   discovering that `core/context_switch.s` accesses the FpuState
+   bytes inline at `FPU_STATE_OFFSET(\ctx_reg)` — moving FpuState
+   to the heap requires rewriting the asm to take the FpuState
+   pointer separately and threading that through `fpu_save` /
+   `fpu_restore`. Same stack-safety result via
+   `FpuState::reset_in_place(*mut Self)` (writes the legacy FCW /
+   MXCSR / XSAVE-header bytes directly into the caller-provided
+   slot), no rvalue ever lands on the caller's stack, asm
+   unchanged. Documented in the `reset_in_place` doc comment.
+3. **`Result<Actions, TcpError>` threading reverted.** The plan §4
+   called for threading `Result` through
+   `SynSent::on_segment` / `SynRecv::on_segment` etc. so the
+   `KBox::try_init(DataState::init_*)` `.expect` becomes a real
+   error return. Implementation revealed a contradiction with
+   the stack-safety goal: wrapping the ~1 KiB `Actions` struct
+   in `Result<Actions, TcpError>` pushed `tcp::input` to 3 448 B,
+   `SynSent::on_segment` to 3 384 B, and `Pcb::on_segment` to
+   2 888 B — well above the new gate. The fix would be either
+   `Result<KBox<Actions>, _>` (an extra heap allocation per
+   segment on a hot RX path) or an out-param refactor
+   (`fn on_segment(..., out: &mut Actions) -> Result<(), _>`)
+   that touches every state handler and dispatcher signature —
+   bigger than B.4's budget. Reverted. The two `.expect("DataState
+   alloc failed")` sites in `syn_sent.rs` / `syn_recv.rs` keep
+   the prior `Box::new`-on-OOM panic semantics; the doc comment
+   on `SynRecvState::on_segment` documents the trade-off and
+   names the follow-up. `TcpError::OutOfMemory` and
+   `From<AllocError> for TcpError` (both added in B.3) remain in
+   place for the future refactor.
+4. **`net::netdev::NetDeviceRegistry::register` keeps the
+   `KBox<dyn NetDevice + Send + Sync>` slot via `CoerceUnsized`.**
+   To support the dyn-trait coercion `KBox<VirtioNetDev>` →
+   `KBox<dyn NetDevice + Send + Sync>` without exposing
+   `alloc::boxed::Box` at the call site, slopos-alloc adds a
+   `coerce_unsized` impl gated on `#![feature(coerce_unsized,
+   unsize)]`. Aligns with `Box`'s own coercion behaviour and
+   keeps loopback / virtio-net / test mocks free of any
+   `extern crate alloc;`.
+5. **`check_return_types.sh` is advisory by default.** Plan §3
+   Phase B.4 called for `just check-return-types` reporting
+   "zero offenders". Heuristic regex over the kernel surface
+   produces ~200 hits, almost all false positives (integer
+   tuples, single-field newtype enums, bitflags). Tuning the
+   regex to handle every legitimate small-newtype pattern is
+   open-ended busywork. Script defaults to exit 0 (advisory) and
+   prints the candidate list for human review; STRICT=1 makes it
+   fail on any hit. The ELF `check_stack_sizes.sh` is the
+   load-bearing gate; this script catches new `pub fn -> BigStruct`
+   patterns before they grow a frame.
+6. **`net/Cargo.toml` keeps the direct `pinned-init` dep.**
+   B.3 deviation 1 explained why; B.4 doesn't change it.
+7. **`gfx/`, `video/` left at the per-file `extern crate alloc;`
+   gated on `#[cfg(feature = "alloc")]`.** The kernel build never
+   enables the `alloc` feature on these crates; the declarations
+   compile out. Touching them solely to remove inactive code adds
+   no enforcement value.
+
+### Verification performed
+
+- `just build` — green; both gates pass
+  (`check_alloc_dep: OK`, `check_stack_sizes: OK — all frames <= 2560 bytes`).
+- `just test` — 2391/2391 pass; auto-shutdown clean.
+- `llvm-readobj --stack-sizes builddir/kernel.elf | sort -rn` —
+  top frame 2 536 B (`build_ext2_image` cfg-gated /
+  `virtio_net_probe`); full top-15 in the table above.
+- `just check-return-types` — runs and lists 207 advisory hits;
+  exit 0; no obvious large-by-value `pub fn` regressions.
+- `git grep -n 'extern crate alloc' -- '*.rs'` — only
+  `kernel/src/main.rs` (load-bearing) and the
+  `#[cfg(feature = "alloc")]`-gated declarations in
+  `gfx/src/{render_surface, canvas_ops}.rs`.
+
+### Not done in B.4 (deferred)
+
+- **Stack-sizes gate at 2 KiB.** Production max is 2 536 B; the
+  remaining ~0.5 KiB requires the fixes listed in deviation 1
+  above. Tracked as a B.4-followup ticket.
+- **Result threading through TCP state handlers.** Reverted per
+  deviation 3; needs `KBox<Actions>` or out-param refactor.
+- **Squash-merge of `stack-safety-overhaul` → `develop`.**
+  Per-conversation user scope decision.

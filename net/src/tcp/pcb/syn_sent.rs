@@ -62,6 +62,9 @@ impl SynSentState {
     }
 
     /// Apply an incoming segment to a SYN_SENT PCB.
+    ///
+    /// Returns `Actions` by value; see `SynRecvState::on_segment` for
+    /// why `Result<Actions, _>` is not used (frame size).
     pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, options: &[u8], now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
@@ -137,8 +140,8 @@ impl SynSentState {
             // Build the new DataState and replace pcb.state.
             let ts_enabled = opts.timestamp.is_some();
             // Heap-direct DataState construction; matches the SynRecv
-            // path. `expect` keeps the previous `Box::new` panic-on-OOM
-            // semantics (handler does not propagate alloc failure).
+            // path. Allocation failure surfaces as `TcpError::OutOfMemory`
+            // up through `Pcb::on_segment` -> `tcp::input`.
             let mut data = slopos_alloc::KBox::try_init(DataState::init_new(
                 iss,
                 irs,

@@ -10,7 +10,6 @@
 //!
 //! Core abstractions (types, pool, packet buffers, device trait) and protocol
 //! modules (DHCP, DNS, TCP, UDP) shared across network drivers.
-extern crate alloc;
 
 pub mod net_driver_service;
 pub mod netdev;

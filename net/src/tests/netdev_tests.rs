@@ -7,11 +7,7 @@
 //! - Additional coverage: features bitflags, registry register/unregister/enumerate,
 //!   handle data-plane ops, registry capacity exhaustion.
 
-extern crate alloc;
-
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-
+use slopos_alloc::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
@@ -64,8 +60,8 @@ impl NetDevice for MockNetDevice {
         Ok(())
     }
 
-    fn poll_rx(&self, _budget: usize, _pool: &'static PacketPool) -> Vec<PacketBuf> {
-        Vec::new()
+    fn poll_rx(&self, _budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
+        KVec::new()
     }
 
     fn set_up(&self) {
@@ -250,7 +246,7 @@ pub fn test_registry_register_and_enumerate() -> TestResult {
     );
 
     let mac1 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    let dev1 = Box::new(MockNetDevice::new(mac1, 1500));
+    let dev1 = KBox::try_new(MockNetDevice::new(mac1, 1500)).expect("test alloc");
     let handle1 = match registry.register(dev1) {
         Some(h) => h,
         None => return slopos_testing::fail!("register should succeed"),
@@ -276,9 +272,9 @@ pub fn test_registry_register_multiple() -> TestResult {
     let mac2 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
     let mac3 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x03]);
 
-    let h1 = registry.register(Box::new(MockNetDevice::new(mac1, 1500)));
-    let h2 = registry.register(Box::new(MockNetDevice::new(mac2, 9000)));
-    let h3 = registry.register(Box::new(MockNetDevice::new(mac3, 1500)));
+    let h1 = registry.register(KBox::try_new(MockNetDevice::new(mac1, 1500)).expect("test alloc"));
+    let h2 = registry.register(KBox::try_new(MockNetDevice::new(mac2, 9000)).expect("test alloc"));
+    let h3 = registry.register(KBox::try_new(MockNetDevice::new(mac3, 1500)).expect("test alloc"));
 
     assert_test!(h1.is_some(), "register #1 succeeds");
     assert_test!(h2.is_some(), "register #2 succeeds");
@@ -304,7 +300,8 @@ pub fn test_registry_unregister() -> TestResult {
     let registry = NetDeviceRegistry::new();
 
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]);
-    let _handle = registry.register(Box::new(MockNetDevice::new(mac, 1500)));
+    let _handle =
+        registry.register(KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc"));
     assert_eq_test!(registry.device_count(), 1, "1 device before unregister");
 
     let removed = registry.unregister(DevIndex(0));
@@ -332,7 +329,7 @@ pub fn test_registry_unregister_calls_set_down() -> TestResult {
     // Since we can't access the device after unregister (it's dropped),
     // we verify indirectly: set_down() is called during unregister as
     // a design contract. The test proves unregister succeeds without panic.
-    let _handle = registry.register(Box::new(dev));
+    let _handle = registry.register(KBox::try_new(dev).expect("test alloc"));
     let removed = registry.unregister(DevIndex(0));
     assert_test!(removed, "unregister succeeded (set_down called)");
     pass!()
@@ -345,14 +342,14 @@ pub fn test_registry_slot_reuse() -> TestResult {
     let mac2 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
 
     // Register, unregister, register again — should reuse slot 0.
-    let h1 = registry.register(Box::new(MockNetDevice::new(mac1, 1500)));
+    let h1 = registry.register(KBox::try_new(MockNetDevice::new(mac1, 1500)).expect("test alloc"));
     assert_test!(h1.is_some(), "first register succeeds");
     let h1 = h1.unwrap();
     assert_eq_test!(h1.index(), DevIndex(0), "first device at index 0");
 
     registry.unregister(DevIndex(0));
 
-    let h2 = registry.register(Box::new(MockNetDevice::new(mac2, 1500)));
+    let h2 = registry.register(KBox::try_new(MockNetDevice::new(mac2, 1500)).expect("test alloc"));
     assert_test!(h2.is_some(), "re-register succeeds");
     let h2 = h2.unwrap();
     assert_eq_test!(h2.index(), DevIndex(0), "reuses slot 0");
@@ -376,7 +373,7 @@ pub fn test_handle_tx() -> TestResult {
 
     let registry = NetDeviceRegistry::new();
     let mac = MacAddr([0x02, 0xCA, 0xFE, 0x00, 0x00, 0x01]);
-    let dev = Box::new(MockNetDevice::new(mac, 1500));
+    let dev = KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
         Some(h) => h,
         None => return slopos_testing::fail!("register failed"),
@@ -402,7 +399,7 @@ pub fn test_handle_poll_rx_empty() -> TestResult {
 
     let registry = NetDeviceRegistry::new();
     let mac = MacAddr([0x02, 0xDE, 0xAD, 0x00, 0x00, 0x01]);
-    let dev = Box::new(MockNetDevice::new(mac, 1500));
+    let dev = KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
         Some(h) => h,
         None => return slopos_testing::fail!("register failed"),
@@ -416,7 +413,7 @@ pub fn test_handle_poll_rx_empty() -> TestResult {
 pub fn test_handle_stats() -> TestResult {
     let registry = NetDeviceRegistry::new();
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
-    let dev = Box::new(MockNetDevice::new(mac, 1500));
+    let dev = KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
         Some(h) => h,
         None => return slopos_testing::fail!("register failed"),
@@ -430,10 +427,11 @@ pub fn test_handle_stats() -> TestResult {
 pub fn test_handle_features() -> TestResult {
     let registry = NetDeviceRegistry::new();
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x66]);
-    let dev = Box::new(
+    let dev = KBox::try_new(
         MockNetDevice::new(mac, 1500)
             .with_features(NetDeviceFeatures::CHECKSUM_TX | NetDeviceFeatures::CHECKSUM_RX),
-    );
+    )
+    .expect("test alloc");
     let handle = match registry.register(dev) {
         Some(h) => h,
         None => return slopos_testing::fail!("register failed"),
@@ -463,7 +461,7 @@ pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
 
     let registry = NetDeviceRegistry::new();
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x77]);
-    let dev = Box::new(MockNetDevice::new(mac, 1500));
+    let dev = KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
         Some(h) => h,
         None => return slopos_testing::fail!("register failed"),
