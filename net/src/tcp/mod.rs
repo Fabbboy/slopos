@@ -396,11 +396,21 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             let seq = s.snd_nxt.raw();
             let ack = s.rcv_nxt.raw();
             let window = s.rcv_wnd;
-            let mut ds = DataState::from_syn_recv(s);
+            let now_ms = clock::now_ms();
+            let ts_enabled = s.ts_enabled;
+            // Heap-direct: build the new DataState in place inside a
+            // fresh KBox, then patch the close-phase / snd_nxt fields
+            // through DerefMut. Avoids the 3 KiB `from_syn_recv` rvalue
+            // that previously dominated `tcp::close`'s frame.
+            let mut ds = slopos_alloc::KBox::try_init(DataState::init_from_syn_recv(s))?;
             ds.close_phase = ClosePhase::FinWait1;
             ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-            let ts = ds.ts_option(clock::now_ms());
-            pcb.state = PcbState::Data(alloc::boxed::Box::new(ds));
+            let ts = if ts_enabled {
+                Some((now_ms as u32, ds.ts_recent))
+            } else {
+                None
+            };
+            pcb.state = PcbState::Data(ds);
             pcb.assert_invariants();
             let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
             seg.timestamp = ts;
@@ -543,11 +553,19 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             let seq = s.snd_nxt.raw();
             let ack = s.rcv_nxt.raw();
             let window = s.rcv_wnd;
-            let mut ds = DataState::from_syn_recv(s);
+            let now_ms = clock::now_ms();
+            let ts_enabled = s.ts_enabled;
+            // Heap-direct DataState construction; same pattern as
+            // `tcp::close` above.
+            let mut ds = slopos_alloc::KBox::try_init(DataState::init_from_syn_recv(s))?;
             ds.close_phase = ClosePhase::FinWait1;
             ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-            let ts = ds.ts_option(clock::now_ms());
-            pcb.state = PcbState::Data(alloc::boxed::Box::new(ds));
+            let ts = if ts_enabled {
+                Some((now_ms as u32, ds.ts_recent))
+            } else {
+                None
+            };
+            pcb.state = PcbState::Data(ds);
             pcb.assert_invariants();
             let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
             seg.timestamp = ts;
@@ -789,6 +807,10 @@ pub fn poll_transmit(
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
     };
+    // Project once through the KBox `DerefMut` so the borrow checker
+    // can split sub-field borrows below (KBox lacks Box's compiler-
+    // magic projection rules).
+    let d: &mut DataState = &mut **d;
     if !matches!(
         d.close_phase,
         ClosePhase::Established | ClosePhase::CloseWait | ClosePhase::FinWait1
@@ -926,6 +948,9 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
     };
+    // Project once through the KBox `DerefMut` so the borrow checker
+    // can split disjoint field borrows below.
+    let d: &mut DataState = &mut **d;
 
     d.retransmit_token = None;
 
@@ -1058,6 +1083,9 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
             let PcbState::Data(d) = &mut pcb.state else {
                 continue;
             };
+            // Project once through the KBox `DerefMut` so the borrow
+            // checker can split disjoint field borrows below.
+            let d: &mut DataState = &mut **d;
 
             let conn_id = ConnId::new_shard(shard_idx, slot);
 

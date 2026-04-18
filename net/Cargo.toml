@@ -27,3 +27,8 @@ slopos-sync = { workspace = true }
 slopos-utils = { workspace = true }
 slopos-service-core = { path = "../service-core" }
 bitflags = { workspace = true }
+# Direct dep needed for the `init!` / `pin_init!` macros, whose
+# expansion references `$crate::__init_internal!` and so cannot be
+# routed through `slopos-alloc`'s re-exports. Allowed by the
+# alloc-dep gate (`pinned-init` is not the `alloc` crate).
+pinned-init = { workspace = true, default-features = false, features = ["alloc"] }

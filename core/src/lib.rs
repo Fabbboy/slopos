@@ -1,8 +1,6 @@
 #![no_std]
 #![feature(sync_unsafe_cell)]
 
-extern crate alloc;
-
 use core::arch::global_asm;
 
 global_asm!(include_str!("../context_switch.s"), options(att_syntax));

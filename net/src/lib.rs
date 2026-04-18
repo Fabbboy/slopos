@@ -1,6 +1,10 @@
 #![no_std]
 #![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
+// Bumped from the 128 default for the `pinned_init::try_init!` macro
+// expansion in `tcp::pcb::data` (DataState has 27 fields; the macro
+// recursively munches them via `addr_of_mut!`).
+#![recursion_limit = "512"]
 
 //! Network subsystem.
 //!

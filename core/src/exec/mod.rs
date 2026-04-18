@@ -3,9 +3,10 @@
 #[cfg(feature = "itests")]
 pub mod tests;
 
-use alloc::vec::Vec;
 use core::ffi::c_char;
 use core::ptr;
+
+use slopos_alloc::KVec;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
@@ -28,8 +29,6 @@ use crate::sched::schedule_new_task;
 use crate::scheduler::task_struct::Task;
 use crate::task::{TaskEntry, task_create, task_find_by_id, task_get_info, task_terminate};
 use slopos_abi::task::INVALID_TASK_ID;
-
-extern crate alloc;
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
@@ -255,11 +254,7 @@ pub fn do_exec(
         return Err(ExecError::NoExec);
     }
 
-    let mut elf_data: Vec<u8> = Vec::new();
-    elf_data
-        .try_reserve(file_size)
-        .map_err(|_| ExecError::NoMem)?;
-    elf_data.resize(file_size, 0);
+    let mut elf_data: KVec<u8> = KVec::<u8>::zeroed(file_size).map_err(|_| ExecError::NoMem)?;
 
     let mut offset = 0u64;
     while (offset as usize) < file_size {
@@ -334,10 +329,8 @@ fn setup_user_stack(
     sp = sp.wrapping_sub(128);
     sp &= !0xF;
 
-    let mut string_ptrs: Vec<u64> = Vec::new();
-    string_ptrs
-        .try_reserve(argc + envc + 2)
-        .map_err(|_| ExecError::NoMem)?;
+    let mut string_ptrs: KVec<u64> =
+        KVec::<u64>::with_capacity(argc + envc + 2).map_err(|_| ExecError::NoMem)?;
 
     if let Some(args) = argv {
         for arg in args.iter() {
@@ -346,7 +339,7 @@ fn setup_user_stack(
             sp &= !0x7;
             write_to_user_stack(page_dir, sp, arg)?;
             write_byte_to_user_stack(page_dir, sp + arg.len() as u64, 0)?;
-            string_ptrs.push(sp);
+            string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
 
@@ -359,7 +352,7 @@ fn setup_user_stack(
             sp &= !0x7;
             write_to_user_stack(page_dir, sp, env)?;
             write_byte_to_user_stack(page_dir, sp + env.len() as u64, 0)?;
-            string_ptrs.push(sp);
+            string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
 

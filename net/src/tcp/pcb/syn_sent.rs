@@ -136,7 +136,10 @@ impl SynSentState {
             // SYN+ACK acknowledging our SYN → ESTABLISHED.
             // Build the new DataState and replace pcb.state.
             let ts_enabled = opts.timestamp.is_some();
-            let mut data = DataState::new(
+            // Heap-direct DataState construction; matches the SynRecv
+            // path. `expect` keeps the previous `Box::new` panic-on-OOM
+            // semantics (handler does not propagate alloc failure).
+            let mut data = slopos_alloc::KBox::try_init(DataState::init_new(
                 iss,
                 irs,
                 snd_una,
@@ -149,13 +152,14 @@ impl SynSentState {
                 our_wscale,
                 wscale_enabled,
                 ts_enabled,
-            );
+            ))
+            .expect("DataState alloc failed");
             data.sack_permitted = opts.sack_permitted;
             let peer_tsval = opts.timestamp.map(|(tsval, _)| tsval).unwrap_or(0);
             if ts_enabled {
                 data.ts_recent = peer_tsval;
             }
-            let _old = mem::replace(&mut pcb.state, PcbState::Data(alloc::boxed::Box::new(data)));
+            let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
             // Emit plain ACK that closes out the 3WHS from our side.
             let mut ack_seg =

@@ -1,9 +1,9 @@
 use super::task_struct::Task;
-use alloc::sync::Arc;
 use slopos_abi::task::{BlockReason, INVALID_TASK_ID, TaskStatus};
+use slopos_alloc::KArc;
 use slopos_sync::{IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard};
 
-pub type TaskRef = Arc<TaskLock>;
+pub type TaskRef = KArc<TaskLock>;
 pub type TaskLock = IrqRwLock<Task>;
 pub type TaskReadGuard<'a> = IrqRwLockReadGuard<'a, Task>;
 pub type TaskWriteGuard<'a> = IrqRwLockWriteGuard<'a, Task>;

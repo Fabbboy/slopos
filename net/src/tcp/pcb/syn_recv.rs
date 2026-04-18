@@ -124,7 +124,12 @@ impl SynRecvState {
         let ts_enabled = s.ts_enabled;
         let _peer_tsval = s.peer_tsval;
         let _ = s;
-        let data = DataState::new(
+        // Heap-direct: build the new DataState in place inside a fresh
+        // KBox. `expect` matches the previous `Box::new` semantics on
+        // OOM (state-transition handlers do not currently propagate
+        // alloc failure; threading `Result` through them is its own
+        // refactor).
+        let data = slopos_alloc::KBox::try_init(DataState::init_new(
             iss,
             irs,
             snd_una,
@@ -137,8 +142,9 @@ impl SynRecvState {
             our_wscale,
             wscale_enabled,
             ts_enabled,
-        );
-        let _old = mem::replace(&mut pcb.state, PcbState::Data(alloc::boxed::Box::new(data)));
+        ))
+        .expect("DataState alloc failed");
+        let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
         actions.notify |= SocketNotify::NEW_ESTABLISHED | SocketNotify::ACCEPT_WAKE;
         // Note: no outgoing segment — the 3WHS is complete; the peer's

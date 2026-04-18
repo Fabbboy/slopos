@@ -165,13 +165,15 @@ pub enum PcbState {
     /// `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`,
     /// `CLOSING`, and `LAST_ACK` — see [`data::ClosePhase`].
     ///
-    /// Boxed because `DataState` is ~750 bytes (congestion control,
+    /// Boxed because `DataState` is ~3 KiB (congestion control,
     /// send-map, RTT estimator) while the other variants are ≤100 bytes.
-    /// Without boxing, every `Option<Pcb>` slot would be ~1 KB even for
+    /// Without boxing, every `Option<Pcb>` slot would be ~3 KB even for
     /// a listener or TIME_WAIT entry, inflating the static table by
     /// hundreds of KB.  The allocation happens once, on SynRecv→Data
-    /// transition.
-    Data(alloc::boxed::Box<DataState>),
+    /// transition. Constructed via `KBox::try_init` from one of
+    /// [`DataState::init_new`] / [`DataState::init_from_syn_recv`] so
+    /// the 3 KiB rvalue never lands on a caller's stack.
+    Data(slopos_alloc::KBox<DataState>),
     /// Connection fully torn down, waiting out `2 × MSL` before the
     /// slot can be reused (RFC 793 §3.5).
     TimeWait(TimeWaitState),

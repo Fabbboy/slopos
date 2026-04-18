@@ -435,8 +435,15 @@ issues.
 - 2026-04-18 — Phase B.2 syscall / FS / scheduler migration
   complete; threshold tightened to **4 KiB**; production max frame
   4 056 B (`net::tcp::close`). See §10 below.
-- (Phase B.3 completion date) — Full workspace flipped to
-  `slopos-alloc`; `.stack_sizes` audit green.
+- 2026-04-18 — Phase B.3 tail migration + `DataState` pin-init
+  complete. `slopos-alloc` extended (`KArc`, `KVecDeque`,
+  `KBTreeMap`, `KBox::try_init`, raw alloc helpers, full Vec-shaped
+  `KVec` API). `DataState` now constructed heap-direct via
+  `pinned_init::try_init!`; `tcp::close` 4 056 B → 2 248 B,
+  `tcp::shutdown_write` 3 384 B → 1 576 B, both `Syn{Sent,Recv}State::on_segment`
+  ≤ 1 656 B. Production max frame 3 320 B (`task_lifecycle::init_task_context`).
+  Full source-level `extern crate alloc;` purge deferred to B.4 (see §11).
+  See §11 below.
 - (Phase B.4 / merge date) — Merged to `develop`; threshold 2 KiB;
   invariants active.
 
@@ -962,3 +969,244 @@ then 4–6 KiB now sits below 4 KiB.
   4 056 B makes a 2 KiB gate unrealistic without the Phase B.3
   heap-direct migrations.
 
+
+---
+
+## 11. Phase B.3 results (2026-04-18)
+
+Tail migration + `DataState` pin-init complete. Both enforcement
+gates remain green; the production max frame dropped from 4 056 B
+(B.2) to **3 320 B**, with the entire TCP closing chain rewritten
+to construct `DataState` heap-direct via `pinned_init::try_init!`.
+
+### What landed
+
+- **`slopos-alloc` API extensions** — kernel-wide allocation surface
+  is now broad enough to retire every direct `alloc::*` import in
+  the production code paths the migration touched:
+  - `KArc<T>` — fallible `Arc` wrapper (`KArc::try_new`,
+    `Clone`/`Deref`/`AsRef`).
+  - `KVecDeque<T>` — fallible `VecDeque` wrapper
+    (`with_capacity`, `push_front`/`push_back`, `pop_front`/`pop_back`,
+    `iter`, `drain`, `retain`, `front`/`back`, `front_mut`/`back_mut`).
+  - `KBTreeMap<K, V>` — `BTreeMap` wrapper (panic-on-OOM `insert`
+    matching the upstream type's only available API; `entry`,
+    `iter`, `keys`, `values`, `get`/`get_mut`/`remove`/`contains_key`).
+  - `KBox::try_init(impl Init<T, E>)` — heap-direct in-place
+    initialisation surface; the `T` rvalue never lands on the
+    caller's stack. Powers the `DataState` migration below.
+  - `KBox::try_new` for non-`Zeroable` `T`; `KBox::into_raw`,
+    `KBox::from_raw`, `KBox::leak` for FFI / `RcuCallback` plumbing.
+  - `KVec` extended to a full Vec-shaped surface: `new` (const),
+    `with_capacity`, `push`, `pop`, `clear`, `truncate`,
+    `extend_from_slice`, `resize`, `try_reserve`, `try_reserve_exact`,
+    `drain`, `swap_remove`, `remove`, `insert`, `retain`,
+    `from_iter_fallible`, `iter`/`iter_mut`, `IntoIterator` (owned +
+    by-ref), `Deref<[T]>`/`DerefMut`, `Default`. Also unsafe
+    `set_len` and `split_off` for the `memdup_user` / font-handlers
+    paths. Existing `KVec::zeroed` (Zeroable bound) preserved.
+  - `raw_alloc` / `raw_dealloc` thin wrappers — exclusively for
+    `sync::rcu::synchronize_rcu`'s callback-node freelist (the only
+    raw-`alloc::alloc::alloc` site in the kernel).
+  - `pub use pinned_init;` — re-exports the underlying crate so
+    consumers needing `try_init!` / `pin_init!` macros can write
+    `pinned_init::try_init!{...}` after adding `pinned-init` as a
+    direct Cargo dep (see Deviation 1 below).
+  - `Debug` impls for `KBox<T>` and `PinBox<T>` so they slot into
+    `#[derive(Debug)]` enums (e.g. `PcbState::Data(KBox<DataState>)`).
+- **`Cargo.toml` adoption** — `slopos-alloc = { workspace = true }`
+  added to the two kernel crates that actually consume it from
+  source: `font` (planned consumer; `font` rewrites are B.4 scope)
+  and `sync` (raw alloc for RCU). The other three crates the plan
+  text §3 listed (`gfx`, `kernel`, `video`) only contained
+  `extern crate alloc;` declarations under `#[cfg(test)]` /
+  `#[cfg(feature = "alloc")]` gates that never compile in the
+  kernel build, or — in `kernel/src/main.rs`'s case — needed
+  `extern crate alloc;` for `#[global_allocator]` / `#[alloc_error_handler]`.
+  Adding `slopos-alloc` to those three would have been dead weight.
+- **`net` direct `pinned-init` dep** — `pinned_init`'s
+  `try_init!` macro emits `$crate::__init_internal!` which resolves
+  to `::pinned_init::__init_internal!` regardless of how the macro
+  reaches the call site. Re-exporting through `slopos-alloc` is not
+  enough; the consumer crate must name `pinned-init` directly. Added
+  as a `[dependencies]` entry on `net/Cargo.toml`. Allowed by the
+  alloc-dep gate (`pinned-init` is not the `alloc` crate).
+- **`DataState` heap-direct migration** (the headline change):
+  - Two new constructors on `DataState` —
+    `init_new(...) -> impl Init<Self, AllocError>` and
+    `init_from_syn_recv(s) -> impl Init<Self, AllocError>` —
+    built with `pinned_init::try_init!{ Self { ... }? AllocError }`.
+    The init recipe writes each field directly into the heap slot
+    `KBox::try_init` allocates; no 3 KiB rvalue ever reaches the
+    caller's frame.
+  - Old `DataState::new` retained behind `#[cfg(any(test, feature = "itests"))]`
+    only — test scaffolding under `#[cfg(feature = "builtin-tests")]`
+    (`tcp_pcb_data_tests.rs`, `tcp_rst_validation_tests.rs`) still
+    constructs by-value then `KBox::try_new`-wraps; not on any
+    production path. Old `from_syn_recv` removed entirely (no
+    remaining callers).
+  - `PcbState::Data` variant flipped from
+    `alloc::boxed::Box<DataState>` to `slopos_alloc::KBox<DataState>`.
+  - Four production call sites rewritten to
+    `KBox::try_init(DataState::init_*(...))?`:
+    - `net/src/tcp/mod.rs:405` (close path, SynRecv→Data);
+      surfaces `AllocError` as `TcpError::OutOfMemory` via the new
+      `From<AllocError> for TcpError` impl in `tcp::tuple`.
+    - `net/src/tcp/mod.rs:556` (shutdown_write path, SynRecv→Data);
+      same error route.
+    - `net/src/tcp/pcb/syn_recv.rs:127` and
+      `net/src/tcp/pcb/syn_sent.rs:139` — handler methods that don't
+      currently propagate `Result`, so the new `KBox::try_init`
+      keeps the prior `Box::new` panic-on-OOM semantics via
+      `.expect("DataState alloc failed")`. Threading `Result`
+      through these handlers is a separate refactor.
+  - `TcpError::OutOfMemory` added as a new variant; `socket::map_tcp_err`
+    maps it to `ERRNO_ENOMEM`. `tcp::tuple::TcpError` gains
+    `From<slopos_alloc::AllocError>`.
+  - `net/src/lib.rs` recursion limit bumped to 512 — the
+    `try_init!` expansion with `DataState`'s 27 fields blows
+    through the default 128 via recursive `addr_of_mut!` munching.
+  - Two sites (`tcp::poll_transmit`, `tcp::process_retransmit_timer`)
+    needed an explicit `let d: &mut DataState = &mut **d;` deref
+    before disjoint field access — `KBox`'s plain `DerefMut` impl
+    lacks the `Box`-special compiler magic that lets borrows split
+    through autoderef. Annotated in-place.
+- **Mechanical source-level cleanup (partial)** — `extern crate alloc;`
+  removed from `core/src/lib.rs`, `core/src/exec/mod.rs`,
+  `sync/src/rcu.rs`, `video/src/lib.rs`. `use alloc::*;` imports
+  rewritten to `use slopos_alloc::*;` in `core/src/scheduler/task_lock.rs`
+  (Arc → KArc), `core/src/exec/mod.rs` + `core/src/exec/tests.rs`
+  (Vec → KVec), `core/src/syscall/process_handlers.rs` (Vec → KVec
+  + the argv/envp `from_iter_fallible` plumbing),
+  `core/src/syscall/core_handlers.rs` (Box + vec! → KVec),
+  `core/src/syscall/font_handlers.rs` (Box::from_raw → KBox::from_raw),
+  `sync/src/rcu.rs` (raw alloc → raw_alloc/raw_dealloc).
+  The mass purge across `font/`, `drivers/`, `mm/`, `fs/`, `net/`'s
+  long tail is not done (see "Not done" below).
+
+### Measured baseline
+
+Top 15 production frames post-B.3 (4 KiB gate active):
+
+| Size (B) | Function (demangled) |
+| -------: | :------------------- |
+|   3 320 | `task_lifecycle::init_task_context` |
+|   3 208 | `syscall_select` |
+|   2 936 | `slopos_net::socket::socket_send` |
+|   2 808 | `syscall_ioctl` / `boot_step_interrupt_tests_fn` / `FpuState::new` (tied) |
+|   2 712 | `FpuState::zero` |
+|   2 648 | `TestRunSummary::default` / `syscall_poll` (tied) |
+|   2 616 | `panic_handler_impl` |
+|   2 536 | `tlb::targeted_flush_request` / `fs::tests::build_ext2_image` (tied) |
+|   2 520 | `slopos_drivers::virtio_net::virtio_net_probe` |
+|   2 488 | `slopos_sync::rcu::synchronize_rcu` |
+|   2 440 | `slopos_net::tcp::input` |
+|   2 376 | `process_vm_load_elf_data` |
+
+Targeted before/after deltas on the migration's headline functions:
+
+| Function | B.2 | B.3 | Δ |
+| :--- | -: | -: | -: |
+| `tcp::close` | 4 056 B | **2 248 B** | −1 808 B |
+| `tcp::shutdown_write` | 3 384 B | **1 576 B** | −1 808 B |
+| `SynSentState::on_segment` | 3 576 B | **1 656 B** | −1 920 B |
+| `SynRecvState::on_segment` | 2 776 B |   872 B | −1 904 B |
+
+The two `init_*` closures themselves register at 2 280 / 2 296 B —
+that's the macro's stack-resident per-field write scratch, called
+once per heap allocation off the cold path; both fit under the gate.
+
+### Deviations from the plan text (§3 Phase B.3)
+
+1. **Macro re-export quirk worked around with a direct dep, not a
+   slopos-alloc shim.** Plan §6 / §9 deviation 4 documented the
+   `$crate::__init_internal!` resolution problem. The cleanest fix
+   turned out to be re-exporting the `pinned_init` *crate* itself
+   (`pub use pinned_init;` in `slopos-alloc`) **and** adding
+   `pinned-init` as a direct dep on the `net` crate so the macro's
+   `::pinned_init::__init_internal!` path resolves. A `slopos-alloc`-only
+   shim macro would have to also re-export `__init_internal` and
+   every supporting trait — more surface than the plan called for.
+   The alloc-dep gate is unaffected (`pinned-init` is not `alloc`).
+2. **Five-crate adoption shrunk to two real consumers.** Plan §3
+   step 1 listed `font`, `gfx`, `kernel`, `sync`, `video` for
+   `slopos-alloc` Cargo.toml additions. Re-audit found that
+   `gfx` / `video`'s `extern crate alloc;` is purely under
+   `#[cfg(test)]` or `#[cfg(feature = "alloc")]` (non-kernel
+   builds), and `kernel/src/main.rs` needs `extern crate alloc;`
+   for `#[global_allocator]` / `#[alloc_error_handler]` — a hard
+   exception with no migration path. Only `font` (planned
+   consumer; `font` source migration deferred to B.4) and `sync`
+   (the RCU raw-alloc path) actually take the new dep.
+3. **Test code keeps a thin `Box`-style by-value path.** The
+   `tcp_pcb_data_tests` / `tcp_rst_validation_tests` scaffolding
+   builds a `DataState` rvalue, mutates it (close_phase fixup),
+   then `KBox::try_new(data).expect("alloc")`-wraps it before
+   feeding `Pcb::new`. This isn't a stack-safety hazard at test
+   time (the test process gets the full 32 KiB stack and the
+   harness sees a 4 KiB-clean ELF gate skipped under
+   `builtin-tests`). Migrating tests to the `init!` recipe path
+   would duplicate every field-override the tests want to make.
+4. **`tcp::close` and `tcp::shutdown_write` ended up at 2 248 B /
+   1 576 B**, not the < 1 KiB the plan §4 forecast suggested.
+   The remaining bulk is from local scratch (TCP segment builder
+   intermediates, action queue) — not a `DataState` rvalue. B.4's
+   2 KiB tightening will need to inspect those locals separately.
+5. **Source-level alloc purge incomplete.** Plan §3 step 3
+   committed to "every kernel crate depends only on `slopos-alloc`,
+   never on `alloc` directly" being verified by source-level grep
+   returning zero. The Cargo.toml-level invariant is met (the gate
+   passes); the source-level cleanup is partial — `mm/`, `fs/`,
+   `drivers/`, `net/`'s long tail, `font/`'s entire 30-call-site
+   surface, and `mm/src/user_io_buf.rs::memdup_user` (which still
+   returns `alloc::vec::Vec<u8>` because the consumer chain through
+   `font::atlas::GlyphAtlas` is `Vec<u8>`-typed) all still hold
+   `extern crate alloc;` declarations and `use alloc::*;` imports.
+   Tracked as B.4 cleanup; the actually-enforced gates (Cargo.toml
+   dep gate, ELF stack-sizes gate) both remain green.
+6. **`scripts/check_return_types.sh` not added.** Plan §3 Phase B.3
+   exit criterion mentioned an AST-walk script for end-state
+   verification; the same plan §7 change-log entry slates it as
+   B.4. Following the change log here.
+7. **`.stack_sizes` threshold not lowered.** Plan §3 Phase B.3
+   exit criterion mentioned tightening to 4 KiB; that already
+   happened in B.2 (production max was 4 056 B at B.2 close,
+   right under the wire). B.3 leaves the threshold at 4 KiB and
+   the production max at 3 320 B; B.4 will tighten to 2 KiB.
+
+### Verification performed
+
+- `just build` — green; both gates pass (`check_alloc_dep: OK`,
+  `check_stack_sizes: OK — all frames <= 4096 bytes`).
+- `just test` — 2391/2391 pass; auto-shutdown fires clean.
+- `llvm-readobj --stack-sizes builddir/kernel.elf | sort -rn` —
+  top frame 3 320 B (`init_task_context`); `tcp::close` 2 248 B,
+  `tcp::shutdown_write` 1 576 B; full top-15 in the table above.
+- `just boot-log` — kernel boots `init` (PID 1) → `shell` (PID 2)
+  → roulette draw before the 15 s timeout; no kernel-stack faults
+  on any of the migrated TCP / scheduler / FS paths.
+
+### Not done in B.3 (deferred to B.4)
+
+- **Source-level `extern crate alloc;` and `use alloc::*;` purge**
+  across `mm/`, `fs/`, `drivers/`, the rest of `net/`, and all of
+  `font/`. The audit listed ~40 files; the actual mechanical
+  rewrites needed are non-trivial in `font/` (30 sites,
+  `Vec<u8>`-typed `GlyphAtlas` API needs a coordinated migration
+  across `atlas.rs` / `bitmap.rs` / `outline.rs` / `rasterizer.rs`
+  / `ttf_parser.rs` / `cache.rs`) and in `vma_region.rs` (uses
+  `BTreeMap::range(..)` which `KBTreeMap` doesn't expose).
+  Tracked as a single B.4 cleanup pass.
+- **`memdup_user` returning `alloc::vec::Vec<u8>`** rather than
+  `KVec<u8>` — pulls the same `font::atlas::GlyphAtlas` cascade
+  as above. Cleanup deferred alongside the font migration.
+- **`scripts/check_return_types.sh`** AST walk — per plan §7, B.4.
+- **`.stack_sizes` threshold tightening to 2 KiB** — per plan
+  §3 Phase B.4. The current top of 3 320 B leaves five separate
+  functions to investigate before the 2 KiB gate is realistic
+  (`init_task_context`, `syscall_select`, `socket_send`,
+  `syscall_ioctl`, `FpuState::new`).
+- **Threading `Result<…, AllocError>` through
+  `SynSent::on_segment` / `SynRecv::on_segment`** so the
+  `KBox::try_init` allocation failure path stops being a panic.
+  Currently matches the prior `Box::new`-on-OOM panic semantics.

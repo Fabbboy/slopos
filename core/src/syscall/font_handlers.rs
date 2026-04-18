@@ -11,9 +11,11 @@ static FONT_WRITER_LOCK: slopos_sync::IrqMutex<()> =
 
 unsafe fn free_atlas_box(ptr: *mut u8) {
     unsafe {
-        drop(alloc::boxed::Box::from_raw(
-            ptr as *mut slopos_font::atlas::GlyphAtlas,
-        ));
+        drop(
+            slopos_alloc::KBox::<slopos_font::atlas::GlyphAtlas>::from_raw(
+                ptr as *mut slopos_font::atlas::GlyphAtlas,
+            ),
+        );
     }
 }
 

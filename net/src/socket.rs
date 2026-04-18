@@ -724,6 +724,7 @@ fn map_tcp_err(err: TcpError) -> i32 {
         TcpError::ConnectionReset => errno_i32(ERRNO_ECONNRESET),
         TcpError::TimedOut => errno_i32(ERRNO_EAGAIN),
         TcpError::InvalidSegment => errno_i32(ERRNO_EINVAL),
+        TcpError::OutOfMemory => errno_i32(ERRNO_ENOMEM),
     }
 }
 

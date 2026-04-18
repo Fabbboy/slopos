@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use crate::exec;
 use crate::sched::task_wait_for;
@@ -20,11 +20,8 @@ use slopos_mm::user_ptr::UserPtr;
 
 use crate::task::task_get_exit_record;
 
-fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<Vec<u64>, ()> {
-    let mut out = Vec::new();
-    if out.try_reserve(max_count).is_err() {
-        return Err(());
-    }
+fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVec<u64>, ()> {
+    let mut out = KVec::<u64>::with_capacity(max_count).map_err(|_| ())?;
 
     for idx in 0..max_count {
         let slot_addr = base_ptr
@@ -35,7 +32,7 @@ fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<Vec
         if value == 0 {
             return Ok(out);
         }
-        out.push(value);
+        out.push(value).map_err(|_| ())?;
     }
 
     Err(())
@@ -45,15 +42,12 @@ fn read_user_ptr_array_count(
     base_ptr: u64,
     count: usize,
     max_count: usize,
-) -> Result<Vec<u64>, ()> {
+) -> Result<KVec<u64>, ()> {
     if count > max_count {
         return Err(());
     }
 
-    let mut out = Vec::new();
-    if out.try_reserve(count).is_err() {
-        return Err(());
-    }
+    let mut out = KVec::<u64>::with_capacity(count).map_err(|_| ())?;
 
     for idx in 0..count {
         let slot_addr = base_ptr
@@ -64,22 +58,19 @@ fn read_user_ptr_array_count(
         if value == 0 {
             break;
         }
-        out.push(value);
+        out.push(value).map_err(|_| ())?;
     }
 
     Ok(out)
 }
 
-fn read_user_cstr_list(ptrs: &[u64]) -> Result<Vec<Vec<u8>>, ()> {
-    let mut out = Vec::new();
-    if out.try_reserve(ptrs.len()).is_err() {
-        return Err(());
-    }
+fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
+    let mut out = KVec::<KVec<u8>>::with_capacity(ptrs.len()).map_err(|_| ())?;
 
     // Single heap-backed scratch reused across the iterations; a
     // stack-resident `[u8; EXEC_MAX_ARG_STRLEN]` would cost 4 KiB per
     // execve path.
-    let mut buf = slopos_alloc::KVec::<u8>::zeroed(exec::EXEC_MAX_ARG_STRLEN).map_err(|_| ())?;
+    let mut buf = KVec::<u8>::zeroed(exec::EXEC_MAX_ARG_STRLEN).map_err(|_| ())?;
 
     for &ptr in ptrs {
         for b in buf.as_mut_slice().iter_mut() {
@@ -92,12 +83,10 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<Vec<Vec<u8>>, ()> {
             .position(|&b| b == 0)
             .unwrap_or(buf.len());
 
-        let mut s = Vec::new();
-        if s.try_reserve(len).is_err() {
-            return Err(());
-        }
-        s.extend_from_slice(&buf.as_slice()[..len]);
-        out.push(s);
+        let mut s = KVec::<u8>::with_capacity(len).map_err(|_| ())?;
+        s.extend_from_slice(&buf.as_slice()[..len])
+            .map_err(|_| ())?;
+        out.push(s).map_err(|_| ())?;
     }
 
     Ok(out)
@@ -141,9 +130,14 @@ define_syscall!(syscall_spawn_path(ctx, args) {
         None
     };
 
-    let argv_refs = argv_storage
+    let argv_refs = match argv_storage
         .as_ref()
-        .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
+        .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
+    {
+        Some(Ok(refs)) => Some(refs),
+        Some(Err(_)) => return ctx.err(),
+        None => None,
+    };
 
     let parent_pid = ctx.process_id().unwrap_or(slopos_abi::task::INVALID_PROCESS_ID);
     let parent_tid = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
@@ -260,12 +254,22 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         None
     };
 
-    let argv_refs = argv_storage
+    let argv_refs = match argv_storage
         .as_ref()
-        .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
-    let envp_refs = envp_storage
+        .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
+    {
+        Some(Ok(refs)) => Some(refs),
+        Some(Err(_)) => return ctx.err(),
+        None => None,
+    };
+    let envp_refs = match envp_storage
         .as_ref()
-        .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
+        .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
+    {
+        Some(Ok(refs)) => Some(refs),
+        Some(Err(_)) => return ctx.err(),
+        None => None,
+    };
 
     let mut entry_point = 0u64;
     let mut stack_ptr = 0u64;

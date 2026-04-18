@@ -80,7 +80,10 @@ fn make_data_pcb(phase: ClosePhase) -> Pcb {
     ) {
         data.peer_closed = true;
     }
-    Pcb::new(tuple(), PcbState::Data(alloc::boxed::Box::new(data)))
+    Pcb::new(
+        tuple(),
+        PcbState::Data(slopos_alloc::KBox::try_new(data).expect("alloc")),
+    )
 }
 
 fn make_syn_recv_pcb() -> Pcb {

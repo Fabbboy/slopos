@@ -27,6 +27,8 @@
 
 use core::mem;
 
+use slopos_alloc::{AllocError, Init};
+
 use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::buffer::TcpBufferPair;
 use super::super::challenge_ack;
@@ -112,7 +114,118 @@ pub struct DataState {
 }
 
 impl DataState {
-    /// Create a fresh `DataState` for a newly-established connection.
+    /// Heap-direct initialiser for a freshly-established `DataState`.
+    /// Returns an `Init` recipe rather than a `Self` rvalue so the
+    /// 3 KiB struct never materialises on the caller's stack — the
+    /// macro writes each field directly into the heap slot supplied by
+    /// `KBox::try_init` / `PinBox::pin_init`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn init_new(
+        iss: SeqNum,
+        irs: SeqNum,
+        snd_una: SeqNum,
+        snd_nxt: SeqNum,
+        rcv_nxt: SeqNum,
+        snd_wnd: u32,
+        rcv_wnd: u16,
+        peer_mss: u16,
+        snd_wscale: u8,
+        rcv_wscale: u8,
+        wscale_enabled: bool,
+        ts_enabled: bool,
+    ) -> impl Init<Self, AllocError> {
+        let cc_mss = peer_mss.max(DEFAULT_MSS) as u32;
+        pinned_init::try_init!(Self {
+            iss,
+            irs,
+            snd_una,
+            snd_nxt,
+            snd_wnd,
+            rcv_nxt,
+            rcv_wnd,
+            peer_mss,
+            rcv_wscale,
+            snd_wscale,
+            wscale_enabled,
+            sack_permitted: false,
+            nagle_enabled: true,
+            close_phase: ClosePhase::Established,
+            rtt: RttEstimator::new(),
+            cc: CcAlgo::cubic(cc_mss),
+            sendmap: SendMap::new(),
+            retransmit_token: None,
+            keepalive_token: None,
+            keepalive_probes_sent: 0,
+            last_activity_tick: 0,
+            fin_wait2_token: None,
+            ts_enabled,
+            ts_recent: 0,
+            last_ack_sent: 0,
+            reset_received: false,
+            peer_closed: false,
+        }? AllocError)
+    }
+
+    /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED`
+    /// transition path. Mirrors the field-overrides the previous
+    /// `from_syn_recv` constructor applied (sack/ts_recent fixups), but
+    /// builds in place so the 3 KiB struct never lands on a caller's
+    /// stack.
+    pub fn init_from_syn_recv(
+        s: &super::syn_recv::SynRecvState,
+    ) -> impl Init<Self, AllocError> + '_ {
+        let cc_mss = s.peer_mss.max(DEFAULT_MSS) as u32;
+        let ts_recent = if s.ts_enabled { s.peer_tsval } else { 0 };
+        let iss = s.iss;
+        let irs = s.irs;
+        let snd_una = s.snd_una;
+        let snd_nxt = s.snd_nxt;
+        let rcv_nxt = s.rcv_nxt;
+        let snd_wnd = s.snd_wnd;
+        let rcv_wnd = s.rcv_wnd;
+        let peer_mss = s.peer_mss;
+        let rcv_wscale = s.our_wscale;
+        let snd_wscale = s.snd_wscale;
+        let wscale_enabled = s.wscale_enabled;
+        let sack_permitted = s.sack_permitted;
+        let ts_enabled = s.ts_enabled;
+        pinned_init::try_init!(Self {
+            iss,
+            irs,
+            snd_una,
+            snd_nxt,
+            snd_wnd,
+            rcv_nxt,
+            rcv_wnd,
+            peer_mss,
+            rcv_wscale,
+            snd_wscale,
+            wscale_enabled,
+            sack_permitted,
+            nagle_enabled: true,
+            close_phase: ClosePhase::Established,
+            rtt: RttEstimator::new(),
+            cc: CcAlgo::cubic(cc_mss),
+            sendmap: SendMap::new(),
+            retransmit_token: None,
+            keepalive_token: None,
+            keepalive_probes_sent: 0,
+            last_activity_tick: 0,
+            fin_wait2_token: None,
+            ts_enabled,
+            ts_recent,
+            last_ack_sent: 0,
+            reset_received: false,
+            peer_closed: false,
+        }? AllocError)
+    }
+
+    /// Test-and-itests-only by-value constructor. Materialises a `Self`
+    /// rvalue on the caller's stack — only safe when the caller is a
+    /// `Box<DataState>` consumer that immediately heap-moves the
+    /// result. Production code must use [`init_new`] / [`init_from_syn_recv`].
+    #[cfg(any(test, feature = "itests"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         iss: SeqNum,
         irs: SeqNum,
@@ -156,31 +269,6 @@ impl DataState {
             reset_received: false,
             peer_closed: false,
         }
-    }
-
-    /// Create a `DataState` from a `SynRecvState` that has completed
-    /// the 3-way handshake.  Used by the lifecycle close path when
-    /// closing from `SYN_RECEIVED`.
-    pub fn from_syn_recv(s: &super::syn_recv::SynRecvState) -> Self {
-        let mut ds = Self::new(
-            s.iss,
-            s.irs,
-            s.snd_una,
-            s.snd_nxt,
-            s.rcv_nxt,
-            s.snd_wnd,
-            s.rcv_wnd,
-            s.peer_mss,
-            s.snd_wscale,
-            s.our_wscale,
-            s.wscale_enabled,
-            s.ts_enabled,
-        );
-        ds.sack_permitted = s.sack_permitted;
-        if s.ts_enabled {
-            ds.ts_recent = s.peer_tsval;
-        }
-        ds
     }
 
     /// Build TSopt value for outgoing segments, or `None` if timestamps
