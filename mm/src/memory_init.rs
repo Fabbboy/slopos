@@ -644,6 +644,10 @@ pub fn init_memory_system(
         // its `IrqMutex` is usable and paging primitives can be called.
         // Backs all task kernel stacks via the `KernelStack` type.
         crate::kstack_va::init();
+        // Unsafe-stack VA allocator — mirror of kstack_va for the
+        // SafeStack-sanitizer data stacks.  Must also come after paging
+        // + heap for identical reasons.
+        crate::ustack_va::init();
         // Per-CPU heap magazine caches: infrastructure is in place but
         // disabled pending investigation of a crash in the exec/fork test
         // suites. The magazine code (magazine_refill, magazine_drain,

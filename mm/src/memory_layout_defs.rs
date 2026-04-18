@@ -91,6 +91,40 @@ pub const KSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 pub const KSTACK_MAX_SLOTS: usize = ((KSTACK_VA_END - KSTACK_VA_BASE) / KSTACK_STRIDE) as usize;
 
 // =============================================================================
+// Unsafe-Stack Virtual Region (SafeStack dual-stack data stacks)
+// =============================================================================
+//
+// Mirror of the KSTACK VA region, dedicated to the SafeStack-sanitizer unsafe
+// (data) stacks.  Each task that owns a kernel stack also owns one unsafe
+// stack in this region.  Address-taken locals and dynamic allocas live on
+// the unsafe stack; return addresses and register spills remain on the
+// kernel stack — isolating the two is what defeats ROP by design.
+//
+// Layout (above the exception-stack region):
+//   EXCEPTION_STACK_REGION_BASE  = 0xFFFF_FFFF_C000_0000
+//   ... IST slots (MAX_CPUS * 7 * 64 KB) ...
+//   USTACK_VA_BASE               = 0xFFFF_FFFF_D000_0000  (unsafe-stack region)
+//   USTACK_VA_END                = 0xFFFF_FFFF_F000_0000
+//
+// 512 MB / 64 KB stride = 8192 slots — matches the KSTACK cap so every live
+// task can own one of each.
+
+/// Base of the unsafe-stack virtual region.
+pub const USTACK_VA_BASE: u64 = 0xFFFF_FFFF_D000_0000;
+
+/// End of the unsafe-stack virtual region (exclusive).
+pub const USTACK_VA_END: u64 = 0xFFFF_FFFF_F000_0000;
+
+/// Stride per unsafe-stack slot (64 KB, matches KSTACK_STRIDE).
+pub const USTACK_STRIDE: u64 = 0x10000;
+
+/// Guard page size for the unsafe stack (one 4 KB page, unmapped).
+pub const USTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
+
+/// Maximum concurrent unsafe stacks (matches KSTACK_MAX_SLOTS).
+pub const USTACK_MAX_SLOTS: usize = ((USTACK_VA_END - USTACK_VA_BASE) / USTACK_STRIDE) as usize;
+
+// =============================================================================
 // User Virtual Address Space
 // =============================================================================
 

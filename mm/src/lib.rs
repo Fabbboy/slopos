@@ -29,6 +29,7 @@ pub mod tlb;
 pub mod user_copy;
 pub mod user_io_buf;
 pub mod user_ptr;
+pub mod ustack_va;
 pub mod vma_region;
 
 use core::alloc::{GlobalAlloc, Layout};

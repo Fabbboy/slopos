@@ -11,6 +11,7 @@ use super::super::scheduler;
 use super::super::stack::KernelStack;
 use super::super::switch_asm::task_entry_trampoline;
 use super::super::task_struct::SwitchContext;
+use super::super::unsafe_stack::UnsafeStack;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::{record_task_created, record_task_exit};
@@ -20,8 +21,8 @@ use super::task_table::{
 };
 use super::{
     FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, Task, TaskContext, TaskEntry,
-    TaskExitReason, TaskFaultReason, TaskStatus,
+    TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
+    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskStatus,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
@@ -49,6 +50,9 @@ struct TaskCreateResources {
     /// Owning handle to the kernel-mode stack.  Moves into `Task` on
     /// success; dropped on failure to auto-release all backing memory.
     kernel_stack: KernelStack,
+    /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
+    /// Allocated alongside `kernel_stack` so every live task owns both.
+    unsafe_stack: UnsafeStack,
 }
 
 struct ProcessResourceLease {
@@ -146,13 +150,25 @@ fn allocate_kernel_stack(size: u64, what: &'static str) -> Option<KernelStack> {
     }
 }
 
+fn allocate_unsafe_stack(size: u64, what: &'static str) -> Option<UnsafeStack> {
+    match UnsafeStack::allocate(size as usize) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            klog_info!("task_create: {} failed: {:?}", what, e);
+            None
+        }
+    }
+}
+
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
     let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
         stack_base,
         kernel_stack,
+        unsafe_stack,
     })
 }
 
@@ -167,11 +183,13 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     }
 
     let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
 
     Some(TaskCreateResources {
         process_id: process.disarm(),
         stack_base: stack_top - TASK_STACK_SIZE,
         kernel_stack,
+        unsafe_stack,
     })
 }
 
@@ -186,11 +204,17 @@ fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
 /// Release resources allocated by `allocate_task_create_resources` when
 /// the surrounding `task_create` bails out mid-flight.
 ///
-/// The caller passes `kernel_stack` by value so its `Drop` runs here
-/// (unmapping pages, freeing frames, releasing the VA slot).
-fn cleanup_task_create_resources(process_id: u32, kernel_stack: KernelStack) {
+/// The caller passes both stacks by value so their `Drop` runs here
+/// (releasing VA slots; the physical frames remain mapped for reuse by
+/// the next slot allocation — see `KernelStack::drop` / `UnsafeStack::drop`).
+fn cleanup_task_create_resources(
+    process_id: u32,
+    kernel_stack: KernelStack,
+    unsafe_stack: UnsafeStack,
+) {
     ProcessResourceLease::cleanup_owned_process(process_id, true, true);
     drop(kernel_stack);
+    drop(unsafe_stack);
 }
 
 fn reset_task_runtime_fields(task: &mut Task) {
@@ -486,7 +510,11 @@ pub fn task_create(
     task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
-        cleanup_task_create_resources(resources.process_id, resources.kernel_stack);
+        cleanup_task_create_resources(
+            resources.process_id,
+            resources.kernel_stack,
+            resources.unsafe_stack,
+        );
         release_task_slot(task);
         return INVALID_TASK_ID;
     }
@@ -501,6 +529,11 @@ pub fn task_create(
     task_ref.kernel_stack_top = kstack_top;
     task_ref.kernel_stack_size = kstack_size;
     task_ref.kernel_stack = Some(resources.kernel_stack);
+    // Install the unsafe stack and prime its RSP at the top.  Every
+    // instrumented function prologue walks this pointer downward; at
+    // context-switch time it is saved/restored exactly like RSP.
+    task_ref.unsafe_stack_sp = resources.unsafe_stack.top().as_u64();
+    task_ref.unsafe_stack = Some(resources.unsafe_stack);
     task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
@@ -768,6 +801,16 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     };
     let child_kernel_stack_base = child_kernel_stack.base().as_u64();
 
+    let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(stack) => stack,
+        Err(e) => {
+            klog_info!("task_fork: unsafe stack alloc failed: {:?}", e);
+            drop(child_kernel_stack);
+            return INVALID_TASK_ID;
+        }
+    };
+    let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
+
     let (child_task_ptr, child_task_id) = match reserve_task_slot() {
         Ok(values) => values,
         Err(_) => {
@@ -831,6 +874,8 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     // `Drop` on this handle will only run when the task's slot is
     // cleared (`task.kernel_stack = None` in `free_task_stacks`).
     child.kernel_stack = Some(child_kernel_stack);
+    child.unsafe_stack_sp = child_unsafe_stack_top;
+    child.unsafe_stack = Some(child_unsafe_stack);
 
     record_task_created();
 
@@ -925,6 +970,16 @@ pub fn task_clone(
     };
     let child_kernel_stack_base = child_kernel_stack.base().as_u64();
 
+    let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(stack) => stack,
+        Err(e) => {
+            klog_info!("task_clone: unsafe stack alloc failed: {:?}", e);
+            drop(child_kernel_stack);
+            return Err(ERRNO_ENOMEM);
+        }
+    };
+    let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
+
     let (child_task_ptr, child_task_id) = match reserve_task_slot() {
         Ok(values) => values,
         Err(_) => return Err(ERRNO_EAGAIN),
@@ -997,6 +1052,8 @@ pub fn task_clone(
     }
     // Transfer ownership of the kernel stack to the task slot.
     child.kernel_stack = Some(child_kernel_stack);
+    child.unsafe_stack_sp = child_unsafe_stack_top;
+    child.unsafe_stack = Some(child_unsafe_stack);
     record_task_created();
 
     if flags & CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {

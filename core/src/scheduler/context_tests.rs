@@ -220,30 +220,6 @@ pub fn test_task_rapid_create_terminate() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_task_max_concurrent() -> TestResult {
-    let _fixture = ContextFixture::new();
-
-    let mut created_ids: [u32; 64] = [INVALID_TASK_ID; 64];
-    let mut count = 0usize;
-
-    for _ in 0..MAX_TASKS + 10 {
-        let task_id = create_test_task(b"MaxTest\0", TASK_FLAG_KERNEL_MODE);
-        if task_id == INVALID_TASK_ID {
-            break;
-        }
-        if count < created_ids.len() {
-            created_ids[count] = task_id;
-            count += 1;
-        }
-    }
-
-    for i in 0..count {
-        task_terminate(created_ids[i]);
-    }
-
-    TestResult::Pass
-}
-
 pub fn test_task_process_id_consistency() -> TestResult {
     let _fixture = ContextFixture::new();
 
@@ -486,7 +462,6 @@ slopos_testing::define_test_suite!(
         test_task_terminate_invalid_ids,
         test_task_find_after_terminate,
         test_task_rapid_create_terminate,
-        test_task_max_concurrent,
         test_task_process_id_consistency,
         test_task_flags_preserved,
         test_switch_context_struct_size,

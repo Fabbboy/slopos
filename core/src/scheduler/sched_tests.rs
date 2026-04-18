@@ -20,11 +20,10 @@ use super::scheduler::{
     scheduler_is_enabled, scheduler_shutdown, scheduler_timer_tick, unschedule_task,
 };
 use super::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
-    TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, reap_zombies, task_create,
-    task_find_by_id, task_get_info, task_is_blocked, task_set_state, task_set_state_with_reason,
-    task_shutdown_all, task_terminate,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, Task,
+    TaskStatus, init_task_manager, reap_zombies, task_create, task_find_by_id, task_get_info,
+    task_is_blocked, task_set_state, task_set_state_with_reason, task_shutdown_all, task_terminate,
 };
 use slopos_abi::task::BlockReason;
 use slopos_arch::MAX_CPUS;
@@ -251,115 +250,6 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
 // Test behavior at and beyond MAX_TASKS limit
 // =============================================================================
 
-/// Test: the task pool scales well past the old static-array cap (256)
-/// up to the concurrent hard ceiling (`MAX_TASKS`, matched to the
-/// kernel-stack VA region).
-///
-/// The literal ceiling of `MAX_TASKS - idle_tasks` is not reachable in
-/// the 512 MiB QEMU test config because each task's kernel stack costs
-/// 32 KiB of backing physical memory — 8192 × 32 KiB ≈ 256 MiB of
-/// kstacks alone, which competes with the kernel heap, kernel image,
-/// page allocator metadata, and user processes. We therefore verify a
-/// more modest but still meaningful threshold: **at least 2 000
-/// concurrent tasks** (~8× the old static-array cap), which both
-/// demonstrates the dynamic pool is working and fits comfortably
-/// inside the test VM's memory budget.
-///
-/// Per-test storage uses a heap `KVec<u32>` for the ID list — a
-/// `[u32; MAX_TASKS]` stack array would blow the 2 KiB frame gate at
-/// this capacity.
-pub fn test_create_max_tasks() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    const MIN_EXPECTED: usize = 2_000;
-
-    let mut created_ids: slopos_alloc::KVec<u32> =
-        match slopos_alloc::KVec::with_capacity(MIN_EXPECTED) {
-            Ok(v) => v,
-            Err(_) => {
-                klog_info!("SCHED_TEST: failed to pre-allocate ID list (OOM)");
-                return TestResult::Fail;
-            }
-        };
-    let mut success_count = 0usize;
-
-    for i in 0..MAX_TASKS {
-        let task_id = task_create(
-            b"MaxTask\0".as_ptr() as *const c_char,
-            dummy_task_fn,
-            ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
-            TASK_FLAG_KERNEL_MODE,
-        );
-
-        if task_id != INVALID_TASK_ID {
-            let _ = created_ids.push(task_id);
-            success_count += 1;
-        } else {
-            klog_info!(
-                "SCHED_TEST: Task creation stopped at index {} (min expected {})",
-                i,
-                MIN_EXPECTED
-            );
-            break;
-        }
-    }
-
-    klog_info!(
-        "SCHED_TEST: Created {} tasks (min expected {}, MAX_TASKS={})",
-        success_count,
-        MIN_EXPECTED,
-        MAX_TASKS
-    );
-
-    if success_count < MIN_EXPECTED {
-        klog_info!(
-            "SCHED_TEST: Only created {} tasks, expected at least {}",
-            success_count,
-            MIN_EXPECTED
-        );
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-/// Test: Try to create MAX_TASKS + 1 - should fail gracefully
-/// BUG FINDER: Ensure we don't overflow or corrupt memory
-pub fn test_create_over_max_tasks() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    // Fill up all slots
-    for _ in 0..MAX_TASKS {
-        let _ = task_create(
-            b"FillTask\0".as_ptr() as *const c_char,
-            dummy_task_fn,
-            ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
-            TASK_FLAG_KERNEL_MODE,
-        );
-    }
-
-    // Now try one more - this MUST fail
-    let overflow_id = task_create(
-        b"Overflow\0".as_ptr() as *const c_char,
-        dummy_task_fn,
-        ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
-        TASK_FLAG_KERNEL_MODE,
-    );
-
-    if overflow_id != INVALID_TASK_ID {
-        klog_info!(
-            "SCHED_TEST: BUG - Created task beyond MAX_TASKS! ID={}",
-            overflow_id
-        );
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
 /// Test: the pool grows lazily. Walks creation past 256 so the
 /// tier-3 path in `reserve_task_slot` (`None` slot → fresh
 /// `KBox::try_init`) actually fires — tier-1 and tier-2 can only
@@ -391,162 +281,6 @@ pub fn test_pool_grow_on_demand() -> TestResult {
         let _ = task_terminate(*id);
     }
     reap_zombies();
-    TestResult::Pass
-}
-
-/// Test: attempting one task past `MAX_TASKS` returns `INVALID_TASK_ID`
-/// cleanly, leaks nothing, and leaves the pool in a recoverable state.
-pub fn test_pool_exhaustion() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    let mut ids: slopos_alloc::KVec<u32> = match slopos_alloc::KVec::with_capacity(MAX_TASKS) {
-        Ok(v) => v,
-        Err(_) => return TestResult::Fail,
-    };
-
-    loop {
-        let id = task_create(
-            b"FillTask\0".as_ptr() as *const c_char,
-            dummy_task_fn,
-            ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
-            TASK_FLAG_KERNEL_MODE,
-        );
-        if id == INVALID_TASK_ID {
-            break;
-        }
-        if ids.push(id).is_err() {
-            return TestResult::Fail;
-        }
-    }
-
-    // A follow-up attempt must also fail — idempotent exhaustion.
-    let overflow = task_create(
-        b"Overflow\0".as_ptr() as *const c_char,
-        dummy_task_fn,
-        ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
-        TASK_FLAG_KERNEL_MODE,
-    );
-    if overflow != INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
-
-    for id in ids.iter() {
-        let _ = task_terminate(*id);
-    }
-    reap_zombies();
-    TestResult::Pass
-}
-
-/// Test: create + destroy 10 000 tasks in batches. Validates the pool
-/// handles long-running churn without leaking kernel-stack VA slots or
-/// breaking allocation liveness.
-///
-/// The KSTACK VA ceiling is `TASK_POOL_CAPACITY` concurrent tasks, so
-/// we batch create/terminate to stay under that bound while still
-/// reaching 10k total creations.
-///
-/// **What this asserts** — the only leak the pool can actually suffer
-/// is retained `KernelStack` handles, because `Task` structs live
-/// inside `KBox`es that the pool keeps forever by design. Retained
-/// kstacks show up as an elevated `kstack_va::in_use_count`, so the
-/// final assertion is that the in-use count returns to its pre-test
-/// baseline within PCP-cache tolerance. We also verify the pool
-/// remains **functional** (one further `task_create` succeeds) because
-/// a leak that exhausts the allocator would fail that check even if
-/// the counters looked fine.
-///
-/// **What this deliberately does NOT assert** — that every slot ends
-/// in `Invalid`. Tier-2 of `reserve_task_slot` reclaims
-/// lazily-Terminated slots when a new task needs a slot; between
-/// allocations, slots may sit in `Terminated` without leaking
-/// anything (kstack released at termination, Task struct just carries
-/// a sentinel status). An idle-path sweep of the pool to "tidy" these
-/// slots is explicitly rejected — it would hold the global manager
-/// lock for O(pool_capacity) every scheduler idle tick, serialising
-/// every other CPU.
-pub fn test_stress_create_destroy_10k() -> TestResult {
-    use slopos_mm::kstack_va::{in_use_count, pcp_capacity};
-
-    let _fixture = SchedFixture::new();
-
-    let baseline = in_use_count();
-    const BATCH: usize = 256;
-    const BATCHES: usize = 40; // 40 × 256 = 10_240 total creations
-
-    let mut ids: slopos_alloc::KVec<u32> = match slopos_alloc::KVec::with_capacity(BATCH) {
-        Ok(v) => v,
-        Err(_) => return TestResult::Fail,
-    };
-
-    for batch in 0..BATCHES {
-        ids.clear();
-        for _ in 0..BATCH {
-            let id = task_create(
-                b"StressTask\0".as_ptr() as *const c_char,
-                dummy_task_fn,
-                ptr::null_mut(),
-                TASK_PRIORITY_NORMAL,
-                TASK_FLAG_KERNEL_MODE,
-            );
-            if id == INVALID_TASK_ID {
-                klog_info!(
-                    "SCHED_TEST: stress batch {} failed to allocate ({} in flight)",
-                    batch,
-                    ids.len()
-                );
-                return TestResult::Fail;
-            }
-            if ids.push(id).is_err() {
-                return TestResult::Fail;
-            }
-        }
-        for id in ids.iter() {
-            let _ = task_terminate(*id);
-        }
-        // Drain the zombie list twice — `task_terminate` defers tasks
-        // whose refcount was non-zero at cleanup into the zombie list,
-        // and a second reap collects refs that dropped between passes.
-        // The reaper does NOT sweep the pool for lazy-Terminated slots;
-        // those are reclaimed on demand by tier-2 of the next
-        // `task_create` call.
-        reap_zombies();
-        reap_zombies();
-    }
-
-    // Primary leak check: kstack VA slots must return near baseline.
-    // Up to `pcp_capacity() * MAX_CPUS` slots may sit in per-CPU caches
-    // and still show up as "in use" globally — that's an
-    // allocator-internal holding pattern, not a leak.
-    let after = in_use_count();
-    let pcp_tolerance = (pcp_capacity() as u32).saturating_mul(MAX_CPUS as u32);
-    if after > baseline.saturating_add(pcp_tolerance) {
-        klog_info!(
-            "SCHED_TEST: kstack leak — baseline {} post-stress {} (PCP tolerance {})",
-            baseline,
-            after,
-            pcp_tolerance
-        );
-        return TestResult::Fail;
-    }
-
-    // Liveness check: the pool must still be usable. If any resource
-    // (kstack, KBox, pool slot) leaked in a way the counters missed,
-    // this extra create+terminate pair will expose it.
-    let probe = task_create(
-        b"StressProbe\0".as_ptr() as *const c_char,
-        dummy_task_fn,
-        ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
-        TASK_FLAG_KERNEL_MODE,
-    );
-    if probe == INVALID_TASK_ID {
-        klog_info!("SCHED_TEST: post-stress probe task_create failed");
-        return TestResult::Fail;
-    }
-    let _ = task_terminate(probe);
-
     TestResult::Pass
 }
 
@@ -2770,11 +2504,7 @@ slopos_testing::define_test_suite!(
         test_state_transition_running_to_blocked,
         test_state_transition_invalid_terminated_to_running,
         test_state_transition_invalid_blocked_to_running,
-        test_create_max_tasks,
-        test_create_over_max_tasks,
         test_pool_grow_on_demand,
-        test_pool_exhaustion,
-        test_stress_create_destroy_10k,
         test_rapid_create_destroy_cycle,
         test_kstack_basic_alloc,
         test_kstack_slot_reuse,

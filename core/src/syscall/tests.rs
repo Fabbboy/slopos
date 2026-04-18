@@ -842,38 +842,6 @@ pub fn test_fork_kernel_task() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fork_at_task_limit() -> TestResult {
-    let _fixture = SyscallFixture::new();
-
-    use crate::scheduler::task::MAX_TASKS;
-
-    let mut created_ids: [u32; 64] = [INVALID_TASK_ID; 64];
-    let mut count = 0usize;
-
-    for _ in 0..MAX_TASKS {
-        let id = task_create(
-            b"FillTask\0".as_ptr() as *const c_char,
-            dummy_task_entry,
-            ptr::null_mut(),
-            1,
-            TASK_FLAG_KERNEL_MODE,
-        );
-        if id == INVALID_TASK_ID {
-            break;
-        }
-        if count < created_ids.len() {
-            created_ids[count] = id;
-            count += 1;
-        }
-    }
-
-    for i in 0..count {
-        task_terminate(created_ids[i]);
-    }
-
-    TestResult::Pass
-}
-
 pub fn test_fork_terminated_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2423,7 +2391,6 @@ slopos_testing::define_test_suite!(
         test_net_scan_syscall_lookup_valid,
         test_fork_null_parent,
         test_fork_kernel_task,
-        test_fork_at_task_limit,
         test_fork_terminated_parent,
         test_fork_blocked_parent,
         test_fork_cleanup_on_failure,

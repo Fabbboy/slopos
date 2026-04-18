@@ -10,7 +10,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, Task, TaskEntry, reap_zombies,
-    task_create, task_get_info, task_set_current,
+    task_create, task_get_info,
 };
 use super::work_steal::try_work_steal;
 
@@ -169,9 +169,11 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
         (*idle_task).last_cpu = cpu_id as u8;
     }
 
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_idle_task(idle_task);
-    });
+    // Install via the consolidated helper so `PCR.idle_task`
+    // becomes the source of truth for idle-resolve.  Dual-writes
+    // the transitional `PerCpuScheduler.idle_task_atomic` until
+    // readers migrate in a follow-up commit.
+    super::scheduler::install_idle_task(cpu_id, idle_task);
 
     0
 }
@@ -263,10 +265,12 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         super::switch_asm::init_current_context(return_ctx);
     }
 
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(idle_task);
-    });
-    task_set_current(idle_task);
+    // Hand SafeStack off from the bootstrap stub to the real idle
+    // task here — once `dispatch()` stores `PCR.current_task`,
+    // every subsequent instrumented prologue on this CPU reads
+    // `idle_task.unsafe_stack_sp` via `gs:[CURRENT_TASK]` instead of
+    // the per-CPU bootstrap stub's.
+    super::scheduler::dispatch(cpu_id, idle_task);
 
     unsafe { enter_scheduler_on_idle_stack(cpu_id, idle_task, idle_stack_top) }
 }

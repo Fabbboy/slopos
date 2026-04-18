@@ -22,6 +22,7 @@
   "stack-probes": {
     "kind": "none"
   },
+  "supported-sanitizers": ["safestack"],
   "target-pointer-width": 64,
   "trap-unreachable": true,
   "vendor": "slopos"

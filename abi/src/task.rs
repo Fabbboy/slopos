@@ -28,6 +28,20 @@ pub const MAX_TASKS: usize = 8192;
 /// memory.
 pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
+
+/// SafeStack-sanitizer unsafe (data) stack size — 8 KiB.
+///
+/// LLVM's SafeStack pass moves address-taken locals and dynamic allocas
+/// onto this stack at every instrumented function prologue.  Kernel
+/// functions rarely have more than a few hundred bytes of such
+/// unsafe-qualified storage at a time, so 8 KiB is ample (vs. the
+/// 32 KiB safe kernel stack, which has to hold the full call-frame
+/// chain plus the SYSCALL/IST transition frames).  Keeping this small
+/// matters: every live task owns one, and at peak 8192 concurrent
+/// tasks an 8 KiB USTACK slot costs 64 MiB of RAM vs. 256 MiB if we
+/// sized it identically to the safe stack.
+pub const TASK_UNSAFE_STACK_SIZE: u64 = 0x2000; // 8 KiB
+
 pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;

@@ -119,6 +119,10 @@ pub(super) fn free_task_stacks(task: *mut Task) {
         (*task).kernel_stack_top = 0;
         (*task).kernel_stack_size = 0;
 
+        // Same for the SafeStack unsafe (data) stack.
+        (*task).unsafe_stack = None;
+        (*task).unsafe_stack_sp = 0;
+
         // For kernel-mode tasks, `stack_base` aliased the kernel stack.
         // Now that the stack is gone, clear the alias so nothing reads it.
         if (*task).process_id == INVALID_PROCESS_ID {

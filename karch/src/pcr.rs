@@ -79,10 +79,23 @@ pub struct ProcessorControlRegion {
     _pad1: [u8; 3], // offset 37-39
 
     /// Pointer to currently running task (opaque).
+    ///
+    /// Written by the scheduler's `dispatch()` helper every context
+    /// switch.  Read by the SafeStack sanitizer's naked
+    /// `__safestack_pointer_address()` on every instrumented function
+    /// prologue via `gs:[CURRENT_TASK]`.  Must always point at a valid
+    /// Task (or bootstrap stub) with a primed `unsafe_stack_sp`
+    /// whenever instrumented code may run; nulling it crashes the next
+    /// instrumented prologue.
     pub current_task: AtomicPtr<()>, // offset 40
 
-    /// Pointer to this CPU's scheduler instance (opaque).
-    pub scheduler: AtomicPtr<()>, // offset 48
+    /// Pointer to this CPU's idle task (opaque).
+    ///
+    /// Written once per CPU by `install_idle_task()` during
+    /// `create_idle_task_for_cpu()`; read by the scheduler's
+    /// idle-stack resolve and `run_ready_task_from_idle` dispatch
+    /// paths.
+    pub idle_task: AtomicPtr<()>, // offset 48
 
     /// CPU is online and accepting scheduled work.
     pub online: AtomicBool, // offset 56
@@ -137,6 +150,8 @@ const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, kernel_rsp) == 16);
     assert!(core::mem::offset_of!(ProcessorControlRegion, cpu_id) == 24);
     assert!(core::mem::offset_of!(ProcessorControlRegion, apic_id) == 28);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, current_task) == 40);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, idle_task) == 48);
     assert!(core::mem::align_of::<ProcessorControlRegion>() == 4096);
 };
 
@@ -158,7 +173,7 @@ impl ProcessorControlRegion {
             in_interrupt: AtomicBool::new(false),
             _pad1: [0; 3],
             current_task: AtomicPtr::new(ptr::null_mut()),
-            scheduler: AtomicPtr::new(ptr::null_mut()),
+            idle_task: AtomicPtr::new(ptr::null_mut()),
             online: AtomicBool::new(false),
             _pad2: [0; 3],
             reschedule_pending: AtomicU32::new(0),
@@ -260,19 +275,90 @@ pub mod offsets {
     pub const CPU_ID: usize = 24;
     /// Offset of apic_id field (hardware APIC ID).
     pub const APIC_ID: usize = 28;
+    /// Offset of the `current_task` field (`AtomicPtr<()>`).
+    /// Consumed by `__safestack_pointer_address` as a `const` operand
+    /// to locate the running task's `unsafe_stack_sp` via
+    /// `gs:[CURRENT_TASK]`.
+    pub const CURRENT_TASK: usize = 40;
+    /// Offset of the `idle_task` field (`AtomicPtr<()>`).  Read by
+    /// the scheduler's idle-resolve paths.
+    pub const IDLE_TASK: usize = 48;
 }
 
 // ==================== STATIC STORAGE ====================
 
 /// BSP's PCR (statically allocated).
-static BSP_PCR: SyncUnsafeCell<ProcessorControlRegion> =
+///
+/// Exported with a stable symbol name so the `_start` assembly
+/// trampoline in `boot/limine_entry.s` can reference it via
+/// `[rip + BSP_PCR]` to initialise `self_ref`, `unsafe_sp`, and
+/// `GS_BASE` *before* the first instrumented Rust function runs.
+/// (Every function compiled with `-Zsanitizer=safestack` calls
+/// `__safestack_pointer_address()` in its prologue — which reads
+/// `gs:[0]` expecting a valid PCR pointer.)
+#[unsafe(no_mangle)]
+pub static BSP_PCR: SyncUnsafeCell<ProcessorControlRegion> =
     SyncUnsafeCell::new(ProcessorControlRegion::new());
 
 /// Statically-allocated AP PCRs.
-static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> = SyncUnsafeCell::new({
-    const INIT: ProcessorControlRegion = ProcessorControlRegion::new();
-    [INIT; MAX_STATIC_APS]
-});
+///
+/// Exported with a stable symbol so the AP naked bootstrap trampoline
+/// in `boot/src/smp.rs` can reference individual entries as
+/// `[rip + AP_PCRS] + slot * sizeof(PCR)` — though in practice the
+/// trampoline goes through the [`AP_PCR_PTRS`] lookup table below
+/// because the PCR is ~72 KiB and not a power of two.
+#[unsafe(no_mangle)]
+pub static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> =
+    SyncUnsafeCell::new({
+        const INIT: ProcessorControlRegion = ProcessorControlRegion::new();
+        [INIT; MAX_STATIC_APS]
+    });
+
+/// Lookup table mapping AP slot index (0..MAX_STATIC_APS) to the
+/// corresponding AP_PCRS entry pointer.  Populated once on the BSP in
+/// [`init_ap_pcr_lookup`] before any AP is started.  The AP bootstrap
+/// trampoline (which has to install GS_BASE *before* any instrumented
+/// Rust can run — see `karch::safestack_rt`) uses this table rather
+/// than reimplementing "multiply by sizeof(PCR)" in hand-rolled asm.
+///
+/// Raw pointers are not `Sync`; wrapped in [`PcrPtrLookup`] for a
+/// single-writer-during-boot discipline.
+#[repr(transparent)]
+pub struct PcrPtrLookup(pub [*mut ProcessorControlRegion; MAX_STATIC_APS]);
+unsafe impl Sync for PcrPtrLookup {}
+
+#[unsafe(no_mangle)]
+pub static AP_PCR_PTRS: SyncUnsafeCell<PcrPtrLookup> =
+    SyncUnsafeCell::new(PcrPtrLookup([ptr::null_mut(); MAX_STATIC_APS]));
+
+/// Pre-populate [`AP_PCR_PTRS`] and prime each AP PCR's `self_ref`
+/// + `current_task` fields so the naked AP trampoline can install
+/// GS_BASE and have `__safestack_pointer_address` find a valid
+/// bootstrap task on the very first instrumented call of `ap_entry`.
+///
+/// Must run on the BSP *before* any AP is started.  Indexed by
+/// 0-based AP slot (AP slot i ↔ PCR at `AP_PCRS[i]`).
+/// `bootstrap_tasks[i]` is a pointer to the AP's bootstrap Task stub
+/// whose `unsafe_stack_sp` has already been primed — see
+/// `slopos_core::scheduler::safestack_rt::init_bootstrap_tasks`.
+///
+/// # Safety
+///
+/// Single-writer (BSP in a sequential pre-SMP phase), must be called
+/// exactly once.
+pub unsafe fn init_ap_pcr_lookup(bootstrap_tasks: &[*mut ()]) {
+    debug_assert!(bootstrap_tasks.len() <= MAX_STATIC_APS);
+    let ptrs = &raw mut (*AP_PCR_PTRS.get()).0;
+    let pcrs = AP_PCRS.get();
+    for (i, task) in bootstrap_tasks.iter().enumerate() {
+        let pcr = &raw mut (*pcrs)[i];
+        (*pcr).self_ref = pcr;
+        (*pcr)
+            .current_task
+            .store(*task, core::sync::atomic::Ordering::Release);
+        (*ptrs)[i] = pcr;
+    }
+}
 
 /// Wrapper to allow `[*mut ProcessorControlRegion; N]` in a static.
 /// Raw pointers are not `Sync`; this is safe because all access is
@@ -353,6 +439,9 @@ pub unsafe fn init_bsp_pcr(apic_id: u32) {
 
     let pcr = BSP_PCR.get();
 
+    // NOTE: `self_ref`, `unsafe_sp`, and GS_BASE were already primed by
+    // the `_start` asm trampoline in `boot/limine_entry.s` before any
+    // instrumented Rust ran.  Re-writing them here is idempotent.
     (*pcr).self_ref = pcr;
     (*pcr).cpu_id = 0;
     (*pcr).apic_id = apic_id;
@@ -582,6 +671,38 @@ pub fn get_current_task() -> *mut () {
         return ptr::null_mut();
     }
     unsafe { current_pcr().current_task.load(Ordering::Acquire) }
+}
+
+/// Set the idle-task pointer for `cpu_id`.
+///
+/// Cross-CPU-safe (takes explicit `cpu_id`) so the BSP can seed every
+/// AP's idle slot during bring-up before that AP's GS_BASE is
+/// installed.  Single-writer discipline: each idle task is installed
+/// exactly once per CPU, at `create_idle_task_for_cpu()` time.
+#[inline]
+pub fn set_idle_task(cpu_id: usize, task: *mut ()) {
+    if let Some(pcr) = get_pcr(cpu_id) {
+        pcr.idle_task.store(task, Ordering::Release);
+    }
+}
+
+/// Get the idle-task pointer for `cpu_id`.  Returns null for
+/// uninitialised / out-of-range CPUs.
+#[inline]
+pub fn get_idle_task(cpu_id: usize) -> *mut () {
+    get_pcr(cpu_id)
+        .map(|pcr| pcr.idle_task.load(Ordering::Acquire))
+        .unwrap_or(ptr::null_mut())
+}
+
+/// Get the current-task pointer for `cpu_id`.  Cross-CPU variant of
+/// [`get_current_task`]; used by the scheduler when it needs to read
+/// another CPU's running task (e.g. remote-wakeup fast paths).
+#[inline]
+pub fn get_current_task_for(cpu_id: usize) -> *mut () {
+    get_pcr(cpu_id)
+        .map(|pcr| pcr.current_task.load(Ordering::Acquire))
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Increment the context switch counter for this CPU.

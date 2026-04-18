@@ -24,8 +24,25 @@ RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*
 RUST_TARGET="${RUST_TARGET:-${REPO_ROOT}/targets/x86_64-slos.json}"
 KERNEL_RUSTFLAGS="${KERNEL_RUSTFLAGS:--C force-frame-pointers=yes}"
 
+# SafeStack dual-stack sanitizer — on by default.  The kernel's
+# `karch::safestack_rt` supplies `__safestack_pointer_address`
+# (via `-C llvm-args=-safestack-use-pointer-address`), its
+# `_start` trampoline primes BSP_PCR + GS_BASE before any
+# instrumented Rust runs, and `scripts/safestack_stub.sh`
+# materialises an empty `librustc-nightly_rt.safestack.a` stub
+# that rustc auto-links.  Set `KERNEL_SAFESTACK=0` to disable.
+KERNEL_SAFESTACK="${KERNEL_SAFESTACK:-1}"
+if [ "$KERNEL_SAFESTACK" = "1" ]; then
+    KERNEL_RUSTFLAGS="$KERNEL_RUSTFLAGS -Z sanitizer=safestack -C llvm-args=-safestack-use-pointer-address"
+fi
+
 # Ensure toolchain is available
 "$SCRIPT_DIR/ensure_toolchain.sh"
+
+# Ensure the safestack runtime stub archive exists at rustc's expected path.
+if [ "$KERNEL_SAFESTACK" = "1" ]; then
+    RUST_CHANNEL="$RUST_CHANNEL" RUST_TARGET="$RUST_TARGET" "$SCRIPT_DIR/safestack_stub.sh"
+fi
 
 mkdir -p "$BUILD_DIR"
 rm -f "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"

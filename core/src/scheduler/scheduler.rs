@@ -157,12 +157,83 @@ fn scheduler_ready_count(cpu_id: usize) -> u32 {
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0)
 }
 
+/// Atomically install `task` as the task running on `cpu_id`.
+///
+/// Single source of truth for "which task is on this CPU":
+///   - `PCR.current_task`  — SafeStack reads via `gs:[CURRENT_TASK]`
+///     on every instrumented function prologue.
+///   - `PCR.syscall_pid`   — `copy_from_user` page-dir resolution.
+///   - `Task.state`        — (Ready | Running) → Running.
+///   - `sched.total_switches` — observability counter.
+///
+/// Writes `PerCpuScheduler.current_task_atomic` in lockstep so
+/// scheduler-facing readers stay in sync with the PCR slot.
+///
+/// # Preconditions
+///
+/// - `cpu_id == slopos_arch::pcr::get_current_cpu()`.  SafeStack only
+///   reads the *local* PCR via GS; cross-CPU dispatch would write
+///   the wrong PCR and corrupt the remote CPU's unsafe-SP resolution.
+/// - `task` is non-null, lives in the task pool (or is a bootstrap
+///   stub), and has its `unsafe_stack_sp` primed.
+/// - Caller runs with preemption disabled OR inside the
+///   interrupts-off context-switch window.
 #[inline]
-fn set_scheduler_current_task(cpu_id: usize, task: *mut Task) {
+pub(super) fn dispatch(cpu_id: usize, task: *mut Task) {
+    debug_assert!(!task.is_null(), "dispatch() must receive a non-null task");
+    debug_assert!(
+        cpu_id == slopos_arch::pcr::get_current_cpu(),
+        "dispatch() must run on the target CPU (SafeStack slot is gs-local)"
+    );
+
+    // SafeStack reads this on every instrumented prologue.
+    slopos_arch::pcr::set_current_task(task as *mut ());
+
+    // Scheduler-copy kept in lockstep with the PCR slot.
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_current_task(task);
+        sched.increment_switches();
     });
+
+    // Lifecycle state transition — Ready → Running.  Also synchronises
+    // `PCR.syscall_pid` via `PerCpuScheduler::set_current_task`'s
+    // existing side effect so `copy_from_user` sees the right pid
+    // after preemption.
     task_set_current(task);
+}
+
+/// Install `task` as `cpu_id`'s idle task.  Writes both
+/// `PCR.idle_task` and the scheduler-copy field in lockstep.
+/// Called once per CPU by `create_idle_task_for_cpu`.
+#[inline]
+pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
+    debug_assert!(
+        !task.is_null(),
+        "install_idle_task() must receive a non-null task"
+    );
+    slopos_arch::pcr::set_idle_task(cpu_id, task as *mut ());
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_idle_task(task);
+    });
+}
+
+/// Scheduler-facing task-install helper.
+///
+/// Non-null `task` is routed through [`dispatch`]; null is the
+/// "scheduler bookkeeping clear" signal used by retirement paths
+/// and intentionally does NOT null `PCR.current_task` — the dying
+/// task's SafeStack slot must stay readable until `schedule()`
+/// switches to idle.
+#[inline]
+fn set_scheduler_current_task(cpu_id: usize, task: *mut Task) {
+    if task.is_null() {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.set_current_task(ptr::null_mut());
+        });
+        // task_set_current is a no-op on null; skip it.
+        return;
+    }
+    dispatch(cpu_id, task);
 }
 
 #[allow(dead_code)]
@@ -638,11 +709,10 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         (*to_task).on_cpu.store(true, Ordering::Release);
     }
 
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(to_task);
-        sched.increment_switches();
-    });
-    task_set_current(to_task);
+    // Single source-of-truth install: writes PCR.current_task
+    // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
+    // the per-CPU switch counter in one place.
+    dispatch(cpu_id, to_task);
     slopos_sync::rcu_note_qs();
 
     unsafe {
@@ -1084,6 +1154,18 @@ pub fn scheduler_is_enabled() -> c_int {
 pub fn scheduler_get_current_task() -> *mut Task {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task()).unwrap_or(ptr::null_mut())
+}
+
+/// Cross-CPU variant — read `cpu_id`'s current task pointer.
+#[inline]
+pub fn scheduler_get_current_task_for(cpu_id: usize) -> *mut Task {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task()).unwrap_or(ptr::null_mut())
+}
+
+/// Cross-CPU idle-task getter.
+#[inline]
+pub fn scheduler_get_idle_task_for(cpu_id: usize) -> *mut Task {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut())
 }
 
 pub fn current_task_id() -> u32 {

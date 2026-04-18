@@ -3,6 +3,21 @@
 //! This module replaces the external `context_switch.s` assembly file with
 //! Rust `naked` functions that use `offset_of!` for struct field access.
 //! This eliminates ABI fragility - struct layout changes are caught at compile time.
+//!
+//! # SafeStack unsafe-stack pointer
+//!
+//! The SafeStack slot lives inside the `Task` struct
+//! (`Task.unsafe_stack_sp`) rather than per-CPU.
+//! `__safestack_pointer_address` returns `&current_task->unsafe_stack_sp`,
+//! so the slot moves with the task by construction.  Context switch
+//! therefore has no SafeStack-specific work to do — updating
+//! `PCR.current_task` (which happens before `switch_registers` is
+//! called) is what redirects future instrumented prologues to the
+//! incoming task's slot.
+//!
+//! This avoids the class of races inherent to a per-CPU-slot scheme,
+//! where a cached slot pointer on the safe stack would go stale
+//! across CPU migrations.  See `safestack_rt.rs` for the design notes.
 
 use core::arch::naked_asm;
 use core::mem::offset_of;
@@ -24,8 +39,16 @@ use super::task_struct::SwitchContext;
 #[unsafe(naked)]
 pub extern "sysv64" fn switch_registers(prev: *mut SwitchContext, next: *const SwitchContext) {
     naked_asm!(
-        // rdi = prev context pointer
+        // rdi = prev context pointer (nullable)
         // rsi = next context pointer
+        //
+        // The SafeStack unsafe-SP slot lives inside the Task struct
+        // (`Task.unsafe_stack_sp`), addressable via
+        // `gs:[CURRENT_TASK] + TASK_UNSAFE_STACK_SP_OFFSET` rather than
+        // per-CPU.  Switching `PCR.current_task` (done by the caller
+        // before invoking this fn) already redirects future
+        // instrumented prologues at the new task's slot — there is no
+        // per-CPU snapshot to save or restore here.
 
         // Test if prev is null (first switch from boot)
         "test rdi, rdi",

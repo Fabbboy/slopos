@@ -8,6 +8,7 @@ pub mod lifecycle;
 pub mod per_cpu;
 pub mod runtime;
 pub mod safe_switch;
+pub mod safestack_rt;
 #[cfg(feature = "itests")]
 pub mod sched_tests;
 pub mod scheduler;
@@ -19,4 +20,5 @@ pub mod task;
 pub mod task_lock;
 pub mod task_struct;
 pub mod trap;
+pub mod unsafe_stack;
 pub mod work_steal;

@@ -19,8 +19,8 @@ pub use slopos_abi::task::{
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_FPU_INITIALIZED, TASK_FLAG_KERNEL_MODE,
     TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE,
     TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
-    TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, TaskExitReason, TaskExitRecord, TaskFaultReason,
-    TaskStatus,
+    TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, TaskExitReason, TaskExitRecord,
+    TaskFaultReason, TaskStatus,
 };
 
 // =============================================================================
@@ -372,6 +372,19 @@ pub const FPU_STATE_OFFSET: usize = {
     0xD0
 };
 const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
+
+/// Offset of `Task.unsafe_stack_sp` — consumed by the naked
+/// `__safestack_pointer_address` trampoline in `karch::safestack_rt`
+/// as a `const` operand, so the asm cannot drift out of sync with the
+/// struct layout.
+///
+/// The slot is **task-local** (not per-CPU) on purpose: LLVM's
+/// `-safestack-use-pointer-address` mode caches the slot pointer on
+/// the safe stack across calls, and a per-CPU slot address would
+/// become stale the moment a task migrates between CPUs.  Embedding
+/// the slot inside the Task struct means the address survives every
+/// migration — the Task heap allocation never moves.
+pub const TASK_UNSAFE_STACK_SP_OFFSET: usize = offset_of!(Task, unsafe_stack_sp);
 // Tripwire: the Task struct is inherently large (dominated by FpuState).
 // The stack-safety contract is that nobody ever materialises a Task
 // rvalue on the stack — see `Task::reset_in_place`. This bound keeps
@@ -416,6 +429,25 @@ pub struct Task {
     /// because some assembly / syscall paths read them as plain `u64`
     /// rather than going through the handle.
     pub kernel_stack: Option<crate::scheduler::stack::KernelStack>,
+    /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
+    ///
+    /// Lives alongside `kernel_stack` — allocated at task creation,
+    /// dropped in `reset_in_place`/Drop like `kernel_stack`.  While the
+    /// task is running, its top-of-stack pointer is copied into the
+    /// current CPU's per-CPU `unsafe_sp` slot (inside the PCR) so that
+    /// LLVM-emitted instrumentation can find it via
+    /// `__safestack_pointer_address`; see `safestack_rt` in the `karch`
+    /// crate.  Context switch saves/restores `unsafe_stack_sp` to/from
+    /// the PCR slot exactly the same way the CPU's regular RSP is
+    /// saved/restored to/from `switch_ctx.rsp`.
+    pub unsafe_stack: Option<crate::scheduler::unsafe_stack::UnsafeStack>,
+    /// Current SafeStack unsafe-stack pointer (data-stack RSP).
+    ///
+    /// Initialised to `unsafe_stack.as_ref().unwrap().top()` at task
+    /// creation and then advanced/retreated by the SafeStack sanitizer
+    /// on every instrumented function prologue/epilogue.  Saved on
+    /// switch-out, restored on switch-in.
+    pub unsafe_stack_sp: u64,
     /// Index of this Task's slot in the `TASK_MANAGER` pool spine,
     /// populated by `reserve_task_slot` and invariant for the lifetime
     /// of the Task. `u32::MAX` on fresh/invalid slots that have not
@@ -499,6 +531,8 @@ impl Task {
             context: TaskContext::zero(),
             fpu_state: FpuState::new(),
             kernel_stack: None,
+            unsafe_stack: None,
+            unsafe_stack_sp: 0,
             slot_index: u32::MAX,
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
@@ -591,6 +625,9 @@ impl Task {
 
                 // Kernel stack: no handle yet.
                 addr_of_mut!((*slot).kernel_stack).write(None);
+                // Unsafe stack (SafeStack data stack): no handle yet.
+                addr_of_mut!((*slot).unsafe_stack).write(None);
+                addr_of_mut!((*slot).unsafe_stack_sp).write(0);
 
                 // Pool-slot index sentinel: set by `reserve_task_slot`
                 // once the slot is assigned.
@@ -639,25 +676,32 @@ impl Task {
             // reserving this identity means callers (e.g. zombie reap)
             // don't need to re-learn the Task's position in the pool.
             let preserved_slot_index = (*this).slot_index;
-            // Release the only owning field up front. `Option::take`
-            // drops the old `Some(KernelStack)` exactly once and is
-            // a no-op if `kernel_stack` is already `None` (e.g. the
-            // caller ran `free_task_stacks` first).
+            // Release the owning Option fields up front. `Option::take`
+            // drops the old `Some(..)` exactly once and is a no-op if
+            // the field is already `None` (e.g. the caller ran
+            // `free_task_stacks` first).  The two stacks are adjacent
+            // in the struct so we keep one hole in the byte-zero pass
+            // that spans both.
             let _ = (*this).kernel_stack.take();
+            let _ = (*this).unsafe_stack.take();
             // Zero the non-drop-bearing fields. We stay away from the
-            // `kernel_stack: Option<KernelStack>` slot because `Option`
-            // has no layout guarantee that the all-zeros bit pattern
-            // corresponds to the `None` variant — re-establishing
-            // `None` below would be the only safe move if we
-            // clobbered it.
+            // `kernel_stack`/`unsafe_stack` slots because `Option` has
+            // no layout guarantee that the all-zeros bit pattern is
+            // `None` — overwriting the bytes would corrupt the
+            // `None` discriminant we just established via `take()`.
             let bytes = core::mem::size_of::<Task>();
             let kernel_stack_off = core::mem::offset_of!(Task, kernel_stack);
-            let kernel_stack_size =
-                core::mem::size_of::<Option<crate::scheduler::stack::KernelStack>>();
+            let unsafe_stack_off = core::mem::offset_of!(Task, unsafe_stack);
+            let unsafe_stack_size =
+                core::mem::size_of::<Option<crate::scheduler::unsafe_stack::UnsafeStack>>();
+            debug_assert!(
+                kernel_stack_off < unsafe_stack_off,
+                "Task: kernel_stack must precede unsafe_stack for reset_in_place hole span"
+            );
+            let tail_start = unsafe_stack_off + unsafe_stack_size;
             let base = this as *mut u8;
             core::ptr::write_bytes(base, 0, kernel_stack_off);
-            let tail = base.add(kernel_stack_off + kernel_stack_size);
-            core::ptr::write_bytes(tail, 0, bytes - kernel_stack_off - kernel_stack_size);
+            core::ptr::write_bytes(base.add(tail_start), 0, bytes - tail_start);
             (*this).task_id = INVALID_TASK_ID;
             (*this).priority = TASK_PRIORITY_NORMAL;
             (*this).process_id = INVALID_PROCESS_ID;
@@ -830,6 +874,8 @@ impl Task {
             // not free resources that still belong to the parent.  Caller
             // installs real values after this returns.
             core::ptr::write(&mut self.kernel_stack as *mut _, None);
+            core::ptr::write(&mut self.unsafe_stack as *mut _, None);
+            self.unsafe_stack_sp = 0;
         }
         // Child keeps its own pool position.
         self.slot_index = preserved_slot_index;
