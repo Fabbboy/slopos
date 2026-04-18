@@ -871,6 +871,80 @@ pub fn alloc_page_frame(flags: u32) -> PhysAddr {
     alloc_page_frames(1, flags)
 }
 
+/// Batch-allocate up to [`PCP_CAPACITY`] order-0 frames under a single
+/// [`PreemptGuard`].
+///
+/// Designed for callers that need several contiguous (in time, not phys)
+/// single pages — typically a kernel stack's backing frames. Holding one
+/// guard across the whole batch amortises the PCP bookkeeping and the
+/// address-translation lock. PCP misses fall back to the global buddy
+/// allocator transparently.
+///
+/// Returns the number of slots in `out` that now contain a valid
+/// [`PhysAddr`]. On short return, the caller is responsible for freeing
+/// whatever they got and deciding whether to retry with a different
+/// allocation strategy (e.g. larger-order block).
+pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if out.len() > PCP_CAPACITY {
+        // Exceeds per-CPU cache capacity; fall back to per-page calls so
+        // we don't silently short-return for pathological requests.
+        let mut filled = 0usize;
+        for slot in out.iter_mut() {
+            let pa = alloc_page_frame(0);
+            if pa.is_null() {
+                break;
+            }
+            *slot = pa;
+            filled += 1;
+        }
+        return filled;
+    }
+
+    let mut frames = [INVALID_PAGE_FRAME; PCP_CAPACITY];
+    let mut filled = 0usize;
+
+    if PCP_INIT.is_set() {
+        let _no_migrate = PreemptGuard::new();
+        let cpu = get_current_cpu();
+        while filled < out.len() {
+            let mut frame = pcp_try_alloc(cpu);
+            if frame == INVALID_PAGE_FRAME {
+                pcp_refill(cpu, 0);
+                frame = pcp_try_alloc(cpu);
+                if frame == INVALID_PAGE_FRAME {
+                    break;
+                }
+            }
+            frames[filled] = frame;
+            filled += 1;
+        }
+    }
+
+    // Anything the PCP couldn't satisfy goes through the global buddy.
+    while filled < out.len() {
+        let frame_num = {
+            let mut alloc = PAGE_ALLOCATOR.lock();
+            alloc.allocate_block(0, 0)
+        };
+        if frame_num == INVALID_PAGE_FRAME {
+            break;
+        }
+        frames[filled] = frame_num;
+        filled += 1;
+    }
+
+    if filled > 0 {
+        let alloc = PAGE_ALLOCATOR.lock();
+        for i in 0..filled {
+            out[i] = alloc.frame_to_phys(frames[i]);
+        }
+    }
+    filled
+}
+
 pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
     // Pin to CPU for safe PCP access and do ALL state checks + transitions
     // under a single lock acquisition to eliminate TOCTOU races where two

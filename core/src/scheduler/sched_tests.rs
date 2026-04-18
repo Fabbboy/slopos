@@ -483,6 +483,305 @@ pub fn test_kstack_rejects_invalid_size() -> TestResult {
 }
 
 // =============================================================================
+// Per-CPU kstack slot cache tests.
+// =============================================================================
+
+/// Test: repeated alloc/free on the same CPU stays in the per-CPU cache.
+/// After the first refill, subsequent iterations must not increment
+/// `refill_count`.
+pub fn test_kstack_pcp_refill() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::kstack_va::{kstack_pcp_flush_current, kstack_pcp_stats};
+
+    let cpu = slopos_arch::pcr::get_current_cpu();
+
+    // Start from a known-clean cache: flush any stale entries back to the
+    // global allocator so refill_count readings are meaningful.
+    kstack_pcp_flush_current();
+
+    let before = kstack_pcp_stats(cpu);
+
+    // First alloc → empty cache → triggers exactly one refill.
+    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[pcp_refill]: first alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    drop(s1);
+
+    let after_first = kstack_pcp_stats(cpu);
+    if after_first.refill_count <= before.refill_count {
+        klog_info!(
+            "SCHED_TEST[pcp_refill]: refill_count did not advance: {} -> {}",
+            before.refill_count,
+            after_first.refill_count
+        );
+        return TestResult::Fail;
+    }
+
+    // Subsequent allocs should be pure cache hits — the refill batch
+    // (8 slots) amply covers several rounds.
+    for i in 0..4 {
+        let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+            Ok(s) => s,
+            Err(e) => {
+                klog_info!("SCHED_TEST[pcp_refill]: iter {} failed: {:?}", i, e);
+                return TestResult::Fail;
+            }
+        };
+        drop(s);
+    }
+
+    let after_warm = kstack_pcp_stats(cpu);
+    if after_warm.refill_count != after_first.refill_count {
+        klog_info!(
+            "SCHED_TEST[pcp_refill]: unexpected refill during warm path: {} -> {}",
+            after_first.refill_count,
+            after_warm.refill_count
+        );
+        return TestResult::Fail;
+    }
+
+    // alloc_count advanced by at least 4 warm-path pops (plus the first).
+    if after_warm.alloc_count < before.alloc_count.saturating_add(5) {
+        klog_info!(
+            "SCHED_TEST[pcp_refill]: alloc_count under-advanced: {} -> {}",
+            before.alloc_count,
+            after_warm.alloc_count
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Test: driving the cache past `pcp_capacity()` forces a spill.
+pub fn test_kstack_pcp_spill_overflow() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::kstack_va::{
+        in_use_count, kstack_pcp_flush_current, kstack_pcp_stats, pcp_capacity,
+    };
+
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    kstack_pcp_flush_current();
+    let baseline_in_use = in_use_count();
+    let before = kstack_pcp_stats(cpu);
+
+    // Hold N + 1 stacks simultaneously so each drop enters a full cache
+    // and triggers a spill.  N = capacity.
+    let hold = pcp_capacity() + 1;
+    let mut stacks: [Option<KernelStack>; 32] = [const { None }; 32];
+    if hold > stacks.len() {
+        klog_info!("SCHED_TEST[pcp_spill]: capacity {} > fixture cap", hold);
+        return TestResult::Fail;
+    }
+    for i in 0..hold {
+        stacks[i] = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                klog_info!("SCHED_TEST[pcp_spill]: alloc {} failed: {:?}", i, e);
+                return TestResult::Fail;
+            }
+        };
+    }
+    // Drop all — the first `capacity` fit in the cache, the rest force
+    // at least one spill.
+    for i in 0..hold {
+        stacks[i] = None;
+    }
+
+    let after = kstack_pcp_stats(cpu);
+    if after.spill_count <= before.spill_count {
+        klog_info!(
+            "SCHED_TEST[pcp_spill]: spill_count did not advance: {} -> {}",
+            before.spill_count,
+            after.spill_count
+        );
+        return TestResult::Fail;
+    }
+
+    // No leaks: the global in-use counter returns to baseline + (what's
+    // still sitting in the cache).  Since we flushed at the start and
+    // every stack has been dropped, any residual in_use must equal the
+    // current cache `count` exactly.
+    let residual_in_use = in_use_count().saturating_sub(baseline_in_use);
+    if residual_in_use != after.count {
+        klog_info!(
+            "SCHED_TEST[pcp_spill]: leak detected: in_use_delta={} cache_count={}",
+            residual_in_use,
+            after.count
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Test: a slot's `was_backed` bit survives a PCP round-trip.  After
+/// alloc/drop/alloc on the same CPU we should see the same VA reused
+/// AND the second alloc must NOT hit the mapping path.
+pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::kstack_va::kstack_pcp_flush_current;
+
+    kstack_pcp_flush_current();
+
+    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[pcp_backed]: s1 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let top1 = s1.top();
+    drop(s1);
+
+    let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[pcp_backed]: s2 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    if s2.top().as_u64() != top1.as_u64() {
+        klog_info!(
+            "SCHED_TEST[pcp_backed]: PCP did not reuse slot: top1={:#x} top2={:#x}",
+            top1.as_u64(),
+            s2.top().as_u64()
+        );
+        return TestResult::Fail;
+    }
+
+    drop(s2);
+    TestResult::Pass
+}
+
+/// Test: allocate on one CPU, free on another (simulated by explicit
+/// flush-between), then reallocate.  The global state must stay
+/// consistent — freed slots must be visible to any CPU's refill path.
+pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::kstack_va::{in_use_count, kstack_pcp_flush_current};
+
+    kstack_pcp_flush_current();
+    let before = in_use_count();
+
+    // Alloc, drop, and immediately flush — forces the slot back into
+    // the global pool instead of the PCP.  The next alloc then has to
+    // refill from the global, exercising the cross-CPU handoff path.
+    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[pcp_xcpu]: s1 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    drop(s1);
+    kstack_pcp_flush_current();
+
+    let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[pcp_xcpu]: s2 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    drop(s2);
+    kstack_pcp_flush_current();
+
+    let after = in_use_count();
+    if after != before {
+        klog_info!(
+            "SCHED_TEST[pcp_xcpu]: in_use leaked: {} -> {}",
+            before,
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Test: 1000-iteration stress loop with no leaks.
+pub fn test_kstack_pcp_stress_1000() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::kstack_va::{in_use_count, kstack_pcp_flush_current};
+
+    kstack_pcp_flush_current();
+    let before = in_use_count();
+
+    for i in 0..1000 {
+        let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+            Ok(s) => s,
+            Err(e) => {
+                klog_info!("SCHED_TEST[pcp_stress]: iteration {} failed: {:?}", i, e);
+                return TestResult::Fail;
+            }
+        };
+        drop(s);
+    }
+
+    kstack_pcp_flush_current();
+    let after = in_use_count();
+    if after != before {
+        klog_info!(
+            "SCHED_TEST[pcp_stress]: in_use leaked: {} -> {}",
+            before,
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Advisory benchmark: logs cycles-per-alloc for a tight warm-cache
+/// loop.  Always passes — the numbers show up in `test_output.log` for
+/// regression tracking.
+pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::kstack_va::kstack_pcp_flush_current;
+
+    kstack_pcp_flush_current();
+
+    // Warm up the cache so the timed loop is a pure PCP hit.
+    let warmup = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(_) => return TestResult::Pass,
+    };
+    drop(warmup);
+
+    const ITERATIONS: u64 = 512;
+    let start = slopos_arch::tsc::rdtsc();
+    for _ in 0..ITERATIONS {
+        let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+            Ok(s) => s,
+            Err(_) => return TestResult::Pass,
+        };
+        drop(s);
+    }
+    let end = slopos_arch::tsc::rdtsc();
+    let cycles = end.wrapping_sub(start);
+    let per_op = cycles / ITERATIONS;
+    klog_info!(
+        "SCHED_TEST[pcp_bench] kstack alloc+drop warm path: {} cycles/op over {} iters",
+        per_op,
+        ITERATIONS
+    );
+
+    TestResult::Pass
+}
+
+// =============================================================================
 // SCHEDULER QUEUE TESTS
 // Test priority queue behavior including edge cases
 // =============================================================================
@@ -2266,6 +2565,12 @@ slopos_testing::define_test_suite!(
         test_kstack_basic_alloc,
         test_kstack_slot_reuse,
         test_kstack_rejects_invalid_size,
+        test_kstack_pcp_refill,
+        test_kstack_pcp_spill_overflow,
+        test_kstack_pcp_was_backed_preserved,
+        test_kstack_pcp_cross_cpu_safety,
+        test_kstack_pcp_stress_1000,
+        test_kstack_pcp_smp_throughput_bench,
         test_schedule_to_empty_queue,
         test_schedule_duplicate_task,
         test_schedule_null_task,

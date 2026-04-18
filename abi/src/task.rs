@@ -11,12 +11,9 @@ pub const MAX_TASKS: usize = 256;
 /// Task kernel-mode stack size.
 ///
 /// 32 KiB usable, backed by a 64 KiB slot (4 KiB guard + 32 KiB usable
-/// + 28 KiB reserve).  The Phase 1 guard-page `KernelStack` allocator
-/// promoted a previously silent overflow into a deterministic fault,
-/// which surfaced that `tty::pty_alloc` was materialising two full
-/// `Tty` structures (~12 KiB each) on the stack.  With those
-/// line-discipline buffers moved behind `Box` inside `LdiscKind`, the
-/// shell's `/dev/ptmx` syscall path now fits comfortably in 32 KiB.
+/// + 28 KiB reserve).  The guard page turns kernel-stack overflow into
+/// a deterministic page fault instead of silently corrupting adjacent
+/// memory.
 pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_NAME_MAX_LEN: usize = 32;

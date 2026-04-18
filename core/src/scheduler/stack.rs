@@ -16,10 +16,9 @@
 //!
 //! When the slot is reused later, `was_backed == true` tells the
 //! allocator to skip frame allocation and page mapping entirely — it
-//! just re-zeroes the stack.  This is the same "kernel-stack cache"
-//! trick Linux's `CONFIG_VMAP_STACK` uses, simplified to a single
-//! global pool for Phase 1.  Peak physical memory = peak concurrent
-//! tasks × stack size (≤ 8 MB for typical workloads).
+//! just re-zeroes the stack.  A per-CPU cache in front of the global
+//! slot bitmap keeps the warm path lock-free.  Peak physical memory =
+//! peak concurrent tasks × stack size (≤ 8 MB for typical workloads).
 //!
 //! # Layout (stack of `size` bytes, stride 64 KB)
 //!
@@ -54,7 +53,7 @@ use core::ptr;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_mm::kstack_va::{KstackSlot, alloc_slot};
 use slopos_mm::memory_layout_defs::{KSTACK_GUARD_SIZE, KSTACK_STRIDE};
-use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame};
+use slopos_mm::page_alloc::{alloc_page_frames_pcp_batch, free_page_frame};
 use slopos_mm::paging::{map_page_4kb, unmap_page};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
@@ -121,17 +120,29 @@ impl KernelStack {
         // --- First time this slot is used: allocate frames and map -------
         let flags = (PageFlags::KERNEL_RW | PageFlags::NO_EXECUTE).bits();
 
-        for i in 0..page_count {
-            let pa = alloc_page_frame(0);
-            if pa.is_null() {
-                Self::cleanup_partial(&slot, i);
-                return Err(StackAllocError::OutOfPhysicalFrames);
-            }
+        // Maximum pages a single slot can hold.
+        const MAX_STACK_PAGES: usize = (KSTACK_STRIDE / PAGE_SIZE_4KB) as usize;
+        debug_assert!(page_count <= MAX_STACK_PAGES);
 
+        // Batch-allocate every backing frame under one PreemptGuard.
+        let mut frames = [PhysAddr::NULL; MAX_STACK_PAGES];
+        let got = alloc_page_frames_pcp_batch(&mut frames[..page_count]);
+        if got < page_count {
+            for j in 0..got {
+                free_page_frame(frames[j]);
+            }
+            return Err(StackAllocError::OutOfPhysicalFrames);
+        }
+
+        for i in 0..page_count {
             let va = VirtAddr::new(base + (i as u64) * PAGE_SIZE_4KB);
-            let map_rc = map_page_4kb(va, pa, flags);
+            let map_rc = map_page_4kb(va, frames[i], flags);
             if map_rc != 0 {
-                free_page_frame(pa);
+                // Free the frames we haven't mapped yet.
+                for j in i..page_count {
+                    free_page_frame(frames[j]);
+                }
+                // Unmap + free anything already installed.
                 Self::cleanup_partial(&slot, i);
                 return Err(StackAllocError::MappingFailed);
             }
