@@ -242,7 +242,7 @@ fn cleanup_task_process_resources(
 
 fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool {
     with_task_manager(|mgr| {
-        for task in mgr.tasks.iter() {
+        for task in mgr.iter_tasks() {
             if task.task_id == excluding_task_id {
                 continue;
             }
@@ -686,7 +686,7 @@ fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut T
 fn collect_shutdown_task_ids(current: *mut Task) -> slopos_alloc::KVec<u32> {
     with_task_manager(|mgr| {
         let mut ids: slopos_alloc::KVec<u32> = slopos_alloc::KVec::new();
-        for task in mgr.tasks.iter() {
+        for task in mgr.iter_tasks() {
             let task_ptr = task as *const Task as *mut Task;
             if should_collect_for_shutdown(task, task_ptr, current) {
                 let _ = ids.push(task.task_id);
@@ -709,7 +709,7 @@ fn terminate_task_ids(task_ids: &slopos_alloc::KVec<u32>) -> c_int {
 fn refresh_num_tasks_after_shutdown() {
     with_task_manager(|mgr| {
         let mut preserved = 0u32;
-        for task in mgr.tasks.iter() {
+        for task in mgr.iter_tasks() {
             let status = task.status();
             if status != TaskStatus::Invalid && status != TaskStatus::Terminated {
                 preserved += 1;

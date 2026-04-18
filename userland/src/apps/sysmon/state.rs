@@ -1,7 +1,11 @@
 use core::cmp::Ordering;
 use core::option::Option::{self, None, Some};
 
-use slopos_abi::task::MAX_TASKS;
+/// Sysmon's display-side cap on visible tasks. Independent of the
+/// kernel's `MAX_TASKS`: the TUI can only show a bounded set on screen
+/// regardless of how many tasks the kernel actually supports. The
+/// `process_list` syscall truncates to this many entries.
+pub(crate) const MAX_TASKS: usize = 256;
 
 use crate::syscall::{
     UserCpuInfo, UserNetInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry, core as sys_core,

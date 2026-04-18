@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(allocator_api)]
 #![feature(sync_unsafe_cell)]
 
 use core::arch::global_asm;

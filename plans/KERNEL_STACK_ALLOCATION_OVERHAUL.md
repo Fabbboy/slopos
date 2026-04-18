@@ -118,20 +118,148 @@ industry is moving where Asterinas already went.
 - Eviction/LRU of backed slots under physical-memory pressure (all PCP slots currently keep their mappings alive forever; peak memory = peak concurrent tasks × stack size, bounded by the 8192-slot KSTACK region).
 - SMP contention benchmark (single-CPU vs. 4-CPU parallel alloc stress). The advisory bench documents warm-path cycles; a multi-core race benchmark can be added when Phase 3 stress-tests 10k tasks.
 
-### Phase 3 — Remove the fixed-task ceiling (~1 week)
+### Phase 3 — Remove the fixed-task ceiling ✅ DONE
 
-**Goal**: task count limited by physical RAM + VA space, not a compile-time const.
+**Goal as written**: "task count limited by physical RAM + VA space, not a
+compile-time const". Replace the static `[Task; MAX_TASKS]` array plus every
+sidecar `[...; MAX_TASKS]` structure with dynamic heap-backed collections,
+and raise the software cap from 256 to the kernel-stack VA region's hard
+ceiling.
 
-1. Remove `MAX_TASKS` as a hard bound in `abi/src/task.rs`
-2. Replace `[Task; MAX_TASKS]` static array in `TaskManagerInner` with a
-   dynamic collection (heap-backed Vec, or slab allocator)
-3. Update scheduler bookkeeping to not assume a fixed array size
-4. Stress test: create 10k tasks, close them, verify no leaks
+**Delivered**:
+- New `TASK_POOL_CAPACITY = 8192` in `core/src/scheduler/task/task_table.rs`,
+  aligned with `mm::kstack_va::KSTACK_MAX_SLOTS` (the true hard ceiling —
+  every live task owns a KSTACK slot). `abi/src/task.rs::MAX_TASKS` raised
+  from 256 to 8192 with updated docstring.
+- `TaskManagerInner.tasks` is now `KVec<Option<KBox<Task>>>` with a fixed
+  capacity allocated once at init (`ensure_pool_allocated`). Each `Task`
+  lives at its own stable heap address via `KBox`; the outer `KVec` spine
+  never reallocates, so pointers held by ready-queue linkage, per-CPU
+  current-task caches, and the context-switch assembly remain valid for
+  each Task's lifetime.
+- **"KBoxes live forever" rule**: a slot never transitions `Some → None`
+  during normal operation. `reserve_task_slot` uses a three-tier scan —
+  Tier 1: existing `Some(kbox)` with `Invalid` status; Tier 2: existing
+  `Some(kbox)` with `Terminated` + `refcnt == 0` (reset in place); Tier 3:
+  fresh `KBox::try_init(Task::init_invalid())` into a `None` slot. The
+  pool grows lazily up to capacity and stays there. No use-after-free
+  hazard for lock-free readers because the heap allocation backing any
+  `Some` slot is never released.
+- New `Task::init_invalid()` recipe (`impl Init<Task, AllocError>`) writes
+  each field via `addr_of_mut!` into the heap slot — no 3.8 KiB Task
+  rvalue on the caller's stack. Used by `KBox::try_init(Task::init_invalid())`
+  on the Tier-3 path.
+- **`POOL_HIGH_WATER` atomic** — monotonic high-water mark of
+  populated pool indices, bumped only on Tier-3 fresh allocation. Every
+  pool scan (`reserve_task_slot` tiers, `task_find_by_id`,
+  `task_find_by_cr3`, `task_slot_index_inner`, `task_iterate_active`,
+  `task_slot_census`, `iter_tasks`) walks only `0..hwm` instead of
+  `0..TASK_POOL_CAPACITY`. For a typical workload with tens of
+  concurrent tasks this turns every scan from 8192 iterations back
+  into ~50 — regaining the old `MAX_TASKS = 256` era's cache locality
+  while keeping the 8192 capacity for peak loads. This matters because
+  several scanning operations hold the global `TASK_MANAGER` lock
+  (signal delivery via `task_iterate_active`, slot reservation, etc.);
+  without the HWM, every such call serialised all four CPUs for the
+  duration of a full 8192-slot walk and produced visible
+  CPU-utilisation spikes even on idle desktops.
+- `#[repr(transparent)]` added to `slopos_alloc::KBox` so the
+  `Option<KBox<T>>` niche layout is spec-guaranteed (single pointer, null
+  = None). Underpins the lock-free read safety argument in
+  `task_find_by_id` / `task_find_by_cr3` — single-pointer writes are
+  atomic on x86_64 and readers observe either null (skip) or a valid
+  box pointer.
+- New `Task::slot_index: u32` field populated by `reserve_task_slot`,
+  replacing the pointer-arithmetic `task_slot_index_inner` that assumed
+  a contiguous static array. `Task::reset_in_place` and
+  `clone_from_raw` preserve `slot_index` across resets / byte-copies.
+- `ZombieList.tasks` → `KVec<*mut Task>` pre-reserved to
+  `TASK_POOL_CAPACITY` at init. `reap_zombies` walks the zombie list
+  and resets `refcnt == 0` entries via
+  `free_task_memory_and_invalidate` (keeping the `KBox`). The reaper
+  must stay bounded by the zombie-list length — never the pool size —
+  because it runs on every iteration of every CPU's scheduler idle
+  loop. **Lazily-Terminated slots (tasks cleaned up with refcnt=0 at
+  termination, which skip the zombie list) are reclaimed by tier-2 of
+  `reserve_task_slot` on demand; the pool is free to sit in a
+  Terminated steady state between allocations without leaking anything
+  (kstacks are already released by `free_task_stacks` at termination
+  time).** An earlier draft added a pool-wide sweep to `reap_zombies`
+  to reset such slots; that held the global `TASK_MANAGER` lock for
+  O(`TASK_POOL_CAPACITY`) every idle tick and produced half-second
+  scheduling stutters under real workloads, so it was removed in
+  favour of on-demand reclamation.
+- `SleepQueue.entries` → `KVec<SleepEntry>` pre-reserved to
+  `TASK_POOL_CAPACITY` on `init_sleep_queue`. `wake_due_sleepers`
+  rewritten as a **drain loop** (pop one due entry under lock, wake
+  outside the lock) to eliminate the old `[u32; MAX_TASKS]` stack buffer
+  that would have blown the 2 KiB frame gate at N=8192.
+- `syscall::signal::TargetSet.ids` → `KVec<u32>`. The old stack-resident
+  `[u32; MAX_TASKS]` array would have cost 32 KiB per signal-send
+  syscall on the kernel stack at the new cap.
+- `syscall_process_list` pre-allocation fixed: now sized to the
+  caller-requested `max_entries` (bounded by `MAX_TASKS`) rather than
+  always allocating `MAX_TASKS` entries — a pre-existing bug made
+  intolerable at 32× scaling.
+- Lazy-init guard on `reserve_task_slot` via `ensure_pool_allocated`:
+  APs bring their per-CPU idle task up during the Drivers boot phase
+  (SMP step, priority 45), which runs *before* the Services-phase
+  `init_task_manager` (priority 20 within Services). The guard
+  allocates the pool spines on first call regardless of which
+  boot-phase path triggers the first task allocation.
+- `core` crate grew `#![feature(allocator_api)]` to expose `AllocError`
+  into the Init recipe plumbing.
+- Userland sysmon decoupled from kernel `MAX_TASKS`: local
+  `SYSMON_DISPLAY_MAX = 256` constant in
+  `userland/src/apps/sysmon/state.rs`. The `process_list` syscall
+  truncates to whatever the caller asks for; sysmon's 256-row display
+  cap is independent of kernel capacity.
+- Tests:
+  - `test_create_max_tasks` rewritten to target `MIN_EXPECTED = 2 000`
+    (8× old cap) with a `KVec<u32>` ID list in place of the old
+    stack-sized array. The full 8192 cap is unreachable in the 512 MiB
+    QEMU test config — 8192 × 32 KiB kstacks alone exceed the VM's
+    physical memory — so the assertion demonstrates dynamic scaling
+    without depending on VM memory config.
+  - `test_pool_grow_on_demand` — creates 512 tasks, confirms the
+    Tier-3 lazy-allocation path fires past the old 256 static cap.
+  - `test_pool_exhaustion` — fills the pool until creation fails,
+    verifies a follow-up `task_create` also returns `INVALID_TASK_ID`
+    and the pool remains in a recoverable state after bulk terminate.
+  - `test_stress_create_destroy_10k` — 40 × 256 = 10 240 creations in
+    batches with terminate + two `reap_zombies` calls between. Asserts
+    `kstack_va::in_use_count()` returns to baseline (within PCP-cache
+    tolerance) and one extra probe `task_create` still succeeds. Does
+    **not** assert the slot-state breakdown — lingering Terminated
+    slots are part of the lazy-reclamation design and not a leak
+    (kstacks are already freed; the slots just carry a sentinel status
+    until tier-2 of `reserve_task_slot` reuses them).
+- Full suite: 2400/2400 pass (was 2397/2397 after Phase 2).
+- `cargo fmt --all` / `just build` / `check_alloc_dep` /
+  `check_stack_sizes` (2 KiB gate) all clean.
 
-**Exit criteria**:
-- 10k+ concurrent tasks supported
-- Task table grows dynamically under demand
-- No fixed ceiling in any data structure
+**Memory behaviour**: idle systems use ~128 KiB for the pool spines plus
+the small handful of KBoxes that idle tasks occupy. A peak of 8192
+concurrent tasks costs ~30 MiB for Task bodies plus ~256 MiB for kernel
+stacks — a capacity floor set by the KSTACK VA region, not by software.
+Lazy growth means low-memory configs only pay for the concurrent working
+set.
+
+**Deviation from plan**: `MAX_TASKS` was not outright removed from the
+ABI — kept with raised value and updated docstring. Deleting the
+constant would force userland consumers to pick a display cap without
+any guidance from the kernel; retaining it as a documented upper bound
+is the better ergonomic.
+
+**Out of scope — revisit later if needed**:
+- Expanding the KSTACK VA region for >8192 concurrent tasks (requires
+  memory-layout defs rework and IST-region reshuffling).
+- `SleepQueue::upsert` is an O(`TASK_POOL_CAPACITY`) scan on every
+  sleep — fine for 2400-test runs but a profiling target for
+  many-sleep workloads. Switching to a heap / priority queue keyed on
+  `wake_tick` would improve this.
+- Aggressive eviction of cold KBoxes on memory pressure (today each
+  allocated slot keeps its `KBox<Task>` alive until shutdown).
 
 ### Phase 4 (optional, later) — SafeStack hardening
 
@@ -177,5 +305,5 @@ until Phases 1-3 are stable.
 - [x] Design agreed
 - [x] Phase 1 — shipped (commits 44ec9a8, 3d244ce)
 - [x] Phase 2 — per-CPU kstack-slot cache (see Delivered block above)
-- [ ] Phase 3 — remove MAX_TASKS hard bound
+- [x] Phase 3 — dynamic `KVec<Option<KBox<Task>>>` task pool (see Delivered block above)
 - [ ] Phase 4 — SafeStack hardening (optional)

@@ -7,10 +7,12 @@
 use core::ffi::c_void;
 use core::mem::offset_of;
 use core::ptr;
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
+use slopos_alloc::{AllocError, Init, init_from_closure};
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -414,6 +416,13 @@ pub struct Task {
     /// because some assembly / syscall paths read them as plain `u64`
     /// rather than going through the handle.
     pub kernel_stack: Option<crate::scheduler::stack::KernelStack>,
+    /// Index of this Task's slot in the `TASK_MANAGER` pool spine,
+    /// populated by `reserve_task_slot` and invariant for the lifetime
+    /// of the Task. `u32::MAX` on fresh/invalid slots that have not
+    /// been assigned a pool index yet. Gives O(1) lookup of the owning
+    /// pool slot from a Task pointer, used for `exit_records`
+    /// parallel-indexing and pointer-validity checks.
+    pub slot_index: u32,
     pub parent_task_id: u32,
     /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
     /// switching to user mode, and read back on context save.
@@ -490,6 +499,7 @@ impl Task {
             context: TaskContext::zero(),
             fpu_state: FpuState::new(),
             kernel_stack: None,
+            slot_index: u32::MAX,
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
             tgid: INVALID_TASK_ID,
@@ -532,6 +542,80 @@ impl Task {
         }
     }
 
+    /// In-place Init recipe for a fresh `Invalid` Task, equivalent in
+    /// observable state to [`Task::invalid`] but constructed field-by-field
+    /// at the destination slot — no 3.8 KiB rvalue on the caller's stack.
+    ///
+    /// Used by `KBox::try_init(Task::init_invalid())` when the task pool
+    /// grows a fresh slot. The closure writes every field of `slot`
+    /// through `addr_of_mut!` so the stack-size gate stays under 2 KiB
+    /// even on the unoptimised debug build.
+    pub fn init_invalid() -> impl Init<Self, AllocError> {
+        // SAFETY: the closure writes every byte of `slot` — first via
+        // `write_bytes` to zero the struct, then targeted writes for the
+        // fields whose valid `Invalid` value is not all-zero. Returns
+        // `Ok(())` only after every write has completed.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                // Zero the entire struct, giving every Atomic, padding
+                // byte, and pointer a defined all-zero state.
+                core::ptr::write_bytes(slot as *mut u8, 0, core::mem::size_of::<Self>());
+
+                // Scalar fields whose `Invalid` value is non-zero.
+                addr_of_mut!((*slot).task_id).write(INVALID_TASK_ID);
+                addr_of_mut!((*slot).priority).write(TASK_PRIORITY_NORMAL);
+                addr_of_mut!((*slot).process_id).write(INVALID_PROCESS_ID);
+                addr_of_mut!((*slot).entry_arg).write(ptr::null_mut());
+                addr_of_mut!((*slot).parent_task_id).write(INVALID_TASK_ID);
+                addr_of_mut!((*slot).tgid).write(INVALID_TASK_ID);
+                addr_of_mut!((*slot).pgid).write(INVALID_TASK_ID);
+                addr_of_mut!((*slot).sid).write(INVALID_TASK_ID);
+
+                // Option<TtyIndex>: non-niche Option layout — discriminant
+                // byte 0 = None, which matches the zero-fill above, but
+                // write explicitly for clarity and layout-independence.
+                addr_of_mut!((*slot).controlling_tty).write(None);
+
+                // cwd = "/", cwd_len = 1.
+                addr_of_mut!((*slot).cwd_len).write(1);
+                // Write the first byte of cwd directly; the remaining
+                // 255 bytes stay zero from the initial write_bytes.
+                (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
+
+                // Waiting-on sentinel.
+                addr_of_mut!((*slot).waiting_on).write(AtomicU32::new(INVALID_TASK_ID));
+
+                // FPU state: FCW = 0x037F, MXCSR = 0x1F80, XSAVE header
+                // zeroed — handled by FpuState's own in-place initialiser.
+                FpuState::reset_in_place(addr_of_mut!((*slot).fpu_state));
+
+                // Kernel stack: no handle yet.
+                addr_of_mut!((*slot).kernel_stack).write(None);
+
+                // Pool-slot index sentinel: set by `reserve_task_slot`
+                // once the slot is assigned.
+                addr_of_mut!((*slot).slot_index).write(u32::MAX);
+
+                // Signal bookkeeping: SigSet and SignalAction are all-zero
+                // for the invalid disposition (SIG_EMPTY = 0, SIG_DFL = 0,
+                // default flags/mask/restorer = 0). The initial write_bytes
+                // already satisfies this; an explicit belt-and-braces write
+                // follows for layout-independence.
+                addr_of_mut!((*slot).signal_blocked).write(SIG_EMPTY);
+                for i in 0..NSIG {
+                    let p = (addr_of_mut!((*slot).signal_actions) as *mut SignalAction).add(i);
+                    p.write(SignalAction::default());
+                }
+
+                // Software-switch context: rflags default is 0x202
+                // (IF=1, reserved bit1=1) rather than 0.
+                addr_of_mut!((*slot).switch_ctx).write(SwitchContext::zero());
+
+                Ok(())
+            })
+        }
+    }
+
     /// Reset a Task slot in place to the `invalid` state.
     ///
     /// `*slot = Task::invalid()` materialises a ~3.8 KiB Task rvalue on
@@ -550,6 +634,11 @@ impl Task {
     /// - The slot must currently hold a valid `Task`.
     pub unsafe fn reset_in_place(this: *mut Task) {
         unsafe {
+            // Preserve the pool slot index across the reset — the Task
+            // is still owned by the same pool slot after reset, and
+            // reserving this identity means callers (e.g. zombie reap)
+            // don't need to re-learn the Task's position in the pool.
+            let preserved_slot_index = (*this).slot_index;
             // Release the only owning field up front. `Option::take`
             // drops the old `Some(KernelStack)` exactly once and is
             // a no-op if `kernel_stack` is already `None` (e.g. the
@@ -572,6 +661,7 @@ impl Task {
             (*this).task_id = INVALID_TASK_ID;
             (*this).priority = TASK_PRIORITY_NORMAL;
             (*this).process_id = INVALID_PROCESS_ID;
+            (*this).slot_index = preserved_slot_index;
             (*this).parent_task_id = INVALID_TASK_ID;
             (*this).tgid = INVALID_TASK_ID;
             (*this).pgid = INVALID_TASK_ID;
@@ -724,6 +814,12 @@ impl Task {
     pub unsafe fn clone_from_raw(&mut self, other: &Task) {
         // SAFETY: Both pointers are valid, non-overlapping Task instances.
         // The caller guarantees exclusive write access to `self`.
+        //
+        // The child lives in its own pool slot; the parent's slot_index
+        // is irrelevant. Preserve the destination's slot_index across
+        // the bulk copy so the child stays associated with the slot it
+        // was reserved into.
+        let preserved_slot_index = self.slot_index;
         unsafe {
             core::ptr::copy_nonoverlapping(
                 other as *const Task as *const u8,
@@ -735,6 +831,8 @@ impl Task {
             // installs real values after this returns.
             core::ptr::write(&mut self.kernel_stack as *mut _, None);
         }
+        // Child keeps its own pool position.
+        self.slot_index = preserved_slot_index;
         // Reset scheduler linkage and refcount — the copy is a fresh entity.
         self.next_ready = ptr::null_mut();
         self.next_inbox = AtomicPtr::new(ptr::null_mut());

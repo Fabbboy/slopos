@@ -7,7 +7,19 @@
 
 // --- Task Configuration ---
 
-pub const MAX_TASKS: usize = 256;
+/// Maximum number of concurrently live tasks.
+///
+/// Aligned with the kernel-stack VA region cap
+/// (`mm::memory_layout_defs::KSTACK_MAX_SLOTS`): every live task
+/// requires a KSTACK slot, so the task pool cannot usefully exceed
+/// that number. Growing beyond this requires expanding the KSTACK VA
+/// window.
+///
+/// The kernel's task pool (`core/scheduler/task/task_table.rs`) is
+/// heap-backed and grows lazily — this constant is the upper bound,
+/// not the initial resident set. Idle systems hold only a handful of
+/// KBoxes regardless of this value.
+pub const MAX_TASKS: usize = 8192;
 /// Task kernel-mode stack size.
 ///
 /// 32 KiB usable, backed by a 64 KiB slot (4 KiB guard + 32 KiB usable

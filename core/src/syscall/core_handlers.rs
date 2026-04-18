@@ -233,11 +233,15 @@ define_syscall!(syscall_process_list(ctx, args) {
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_alloc::KVec;
     use crate::task::task_iterate_active;
+    // Allocate exactly `max_entries` (caller-requested, bounded by
+    // `MAX_TASKS`) — not `MAX_TASKS` unconditionally; scanning 8192
+    // default-initialised entries per syscall is unacceptable overhead
+    // when the caller only wants the first few.
 
-    // `IterCtx` used to hold `[UserTaskEntry; MAX_TASKS]` inline, which
-    // pushed this syscall's frame to ≈41 KiB — above the 32 KiB kernel
-    // stack budget.  The entries array now lives on the heap as a
-    // `KVec<UserTaskEntry>`, leaving `IterCtx` a few dozen bytes.
+    // `IterCtx` holds the entries on the heap via `KVec` rather than
+    // inline — a `[UserTaskEntry; MAX_TASKS]` array would push this
+    // syscall's frame past the 2 KiB stack-gate at the current
+    // `MAX_TASKS` value.
     struct IterCtx {
         entries: KVec<UserTaskEntry>,
         count: usize,
@@ -271,10 +275,10 @@ define_syscall!(syscall_process_list(ctx, args) {
         iter_ctx.count += 1;
     }
 
-    let max_entries = (args.arg1 as usize).min(slopos_abi::task::MAX_TASKS);
-    let entries = match KVec::<UserTaskEntry>::with_capacity(MAX_TASKS) {
+    let max_entries = (args.arg1 as usize).min(MAX_TASKS);
+    let entries = match KVec::<UserTaskEntry>::with_capacity(max_entries) {
         Ok(mut v) => {
-            for _ in 0..MAX_TASKS {
+            for _ in 0..max_entries {
                 if v.push(UserTaskEntry::default()).is_err() {
                     return ctx.err();
                 }

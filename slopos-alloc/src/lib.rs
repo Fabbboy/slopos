@@ -173,6 +173,13 @@ pub fn boxed_zeroed<T: Zeroable>() -> Result<PinBox<T>, AllocError> {
 /// Kernel-blessed boxed slot. Fallible. The `zeroed` constructor allocates
 /// in place (no stack temp) and requires `T: Zeroable`; `try_new` is the
 /// small-`T` escape hatch and shares its caveat with [`PinBox::try_new`].
+///
+/// `#[repr(transparent)]` over the single `Box<T>` field makes the
+/// niche-optimisation layout spec-guaranteed: `Option<KBox<T>>` is
+/// exactly one pointer wide, with `None` encoded as null. Lock-free
+/// readers rely on this so a word-sized atomic load observes either
+/// null or a valid box without tearing.
+#[repr(transparent)]
 pub struct KBox<T: ?Sized> {
     inner: Box<T>,
 }

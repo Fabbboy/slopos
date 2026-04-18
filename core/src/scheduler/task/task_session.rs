@@ -7,8 +7,8 @@ use slopos_utils::klog_info;
 
 use super::super::scheduler;
 use super::task_state::task_is_blocked;
-use super::task_table::{task_find_by_id, task_iterate_active, with_task_manager};
-use super::{INVALID_TASK_ID, MAX_TASKS, Task};
+use super::task_table::{pool_high_water, task_find_by_id, task_iterate_active, with_task_manager};
+use super::{INVALID_TASK_ID, Task};
 
 struct ClearControllingTtyContext {
     session_id: u32,
@@ -49,28 +49,30 @@ pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) ->
 
 pub(super) fn release_task_dependents(completed_task_id: u32) {
     // Collect blocked-on-`completed_task_id` task pointers into a
-    // heap-backed KVec. A stack-resident `[Option<*mut Task>; MAX_TASKS]`
-    // would cost ~4 KiB per call on the kernel stack.
-    let mut candidates = match slopos_alloc::KVec::<usize>::zeroed(MAX_TASKS) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let count = with_task_manager(|mgr| {
-        let mut n = 0usize;
-        for dependent in mgr.tasks.iter_mut() {
-            if !task_is_blocked(dependent) {
+    // heap-backed KVec. A stack-resident array sized for the whole
+    // pool would cost tens of KiB per call — well over the 2 KiB
+    // frame gate. Scratch capacity is sized to the pool high-water
+    // mark so a lightly-loaded system pays for a small allocation.
+    let capacity = pool_high_water().max(1);
+    let mut candidates: slopos_alloc::KVec<usize> =
+        match slopos_alloc::KVec::with_capacity(capacity) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+    with_task_manager(|mgr| {
+        for dependent in mgr.iter_tasks_mut() {
+            let dep_ptr = dependent as *mut Task;
+            if !task_is_blocked(dep_ptr) {
                 continue;
             }
             if dependent.waiting_on.load(Ordering::Acquire) != completed_task_id {
                 continue;
             }
-            candidates[n] = dependent as *mut Task as usize;
-            n += 1;
+            let _ = candidates.push(dep_ptr as usize);
         }
-        n
     });
 
-    for addr in candidates.as_slice()[..count].iter() {
+    for addr in candidates.iter() {
         let task = *addr as *mut Task;
         let task_id = unsafe { (*task).task_id };
 

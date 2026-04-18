@@ -6,9 +6,7 @@ use slopos_abi::signal::{
     SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
 };
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_ESRCH};
-use slopos_abi::task::{
-    INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
-};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
 use slopos_arch::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
@@ -27,30 +25,43 @@ fn parse_signum(raw: u64) -> Option<u8> {
     }
 }
 
+/// Heap-backed list of unique task IDs collected during signal
+/// delivery. Uses a `KVec` so the struct is fixed size on the stack
+/// (just the three `KVec` header words) regardless of how many tasks
+/// we end up targeting — sized arrays would force the whole stack
+/// frame over the 2 KiB gate.
 struct TargetSet {
-    ids: [u32; MAX_TASKS],
-    len: usize,
+    ids: slopos_alloc::KVec<u32>,
 }
 
 impl TargetSet {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
-            ids: [INVALID_TASK_ID; MAX_TASKS],
-            len: 0,
+            ids: slopos_alloc::KVec::new(),
         }
     }
 
     fn push(&mut self, task_id: u32) {
-        if task_id == INVALID_TASK_ID || self.len >= self.ids.len() {
+        if task_id == INVALID_TASK_ID {
             return;
         }
-        for id in &self.ids[..self.len] {
+        for id in self.ids.iter() {
             if *id == task_id {
                 return;
             }
         }
-        self.ids[self.len] = task_id;
-        self.len += 1;
+        // Best-effort: on OOM the target is silently dropped. A rare
+        // signal-send to an exhausted heap is acceptable — the caller
+        // receives at most `signaled == 0 → ERRNO_ESRCH`.
+        let _ = self.ids.push(task_id);
+    }
+
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn iter(&self) -> core::slice::Iter<'_, u32> {
+        self.ids.iter()
     }
 }
 
@@ -284,7 +295,7 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         collect_targets_for_group(group_id, &mut targets);
     }
 
-    if targets.len == 0 {
+    if targets.len() == 0 {
         return ctx.err_with(ERRNO_ESRCH);
     }
 
@@ -299,7 +310,7 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     let mut signaled = 0usize;
     let mut caller_terminated = false;
 
-    for target_id in &targets.ids[..targets.len] {
+    for target_id in targets.iter() {
         let target = task_find_by_id(*target_id);
         if target.is_null() {
             continue;
