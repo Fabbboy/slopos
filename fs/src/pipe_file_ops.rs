@@ -96,7 +96,10 @@ impl FileOps for PipeReadOps {
         }
         let h = PipeHandle::from_usize(handle);
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut local = [0u8; IO_STAGING_SIZE];
+        let mut local = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let mut total = 0usize;
         let mut remaining = buf.len();
 
@@ -230,7 +233,10 @@ impl FileOps for PipeWriteOps {
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         let buf_len = buf.len();
         let mut total = 0usize;
-        let mut local = [0u8; IO_STAGING_SIZE];
+        let mut local = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
 
         loop {
             let mut need_block = false;

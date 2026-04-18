@@ -19,12 +19,180 @@ use slopos_kernel_services::driver_runtime::{
     signal_process_group,
 };
 use slopos_kernel_services::syscall_services::tty;
-use slopos_mm::user_copy::{
-    copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
-};
+use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 const SELECT_MAX_FDS: usize = 256;
+
+// ioctl helper return: Ok(value) → ctx.ok(value); Err(()) → ctx.err().
+type IoctlResult = Result<u64, ()>;
+
+#[inline(never)]
+fn ioctl_termios(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> IoctlResult {
+    if arg == 0 {
+        return Err(());
+    }
+    let ptr = UserPtr::<UserTermios>::try_new(arg).map_err(|_| ())?;
+    match cmd {
+        TCGETS => {
+            let t = tty::get_termios(tty_idx).map_err(|_| ())?;
+            copy_to_user(ptr, &t).map_err(|_| ())?;
+            Ok(0)
+        }
+        TCSETS => {
+            let val = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_termios(tty_idx, &val).map(|_| 0).map_err(|_| ())
+        }
+        TCSETSW => {
+            let val = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_termios_wait(tty_idx, &val)
+                .map(|_| 0)
+                .map_err(|_| ())
+        }
+        TCSETSF => {
+            let val = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_termios_flush(tty_idx, &val)
+                .map(|_| 0)
+                .map_err(|_| ())
+        }
+        _ => Err(()),
+    }
+}
+
+#[inline(never)]
+fn ioctl_winsize(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> IoctlResult {
+    if arg == 0 {
+        return Err(());
+    }
+    let ptr = UserPtr::<UserWinsize>::try_new(arg).map_err(|_| ())?;
+    match cmd {
+        TIOCGWINSZ => {
+            let ws = tty::get_winsize(tty_idx).map_err(|_| ())?;
+            copy_to_user(ptr, &ws).map_err(|_| ())?;
+            Ok(0)
+        }
+        slopos_abi::syscall::TIOCSWINSZ => {
+            let val = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_winsize(tty_idx, &val).map(|_| 0).map_err(|_| ())
+        }
+        _ => Err(()),
+    }
+}
+
+#[inline(never)]
+fn ioctl_pty(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64, pid: u32) -> IoctlResult {
+    match cmd {
+        TIOCGPTN => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<u32>::try_new(arg).map_err(|_| ())?;
+            let pty_number = tty::get_pty_number(tty_idx).map_err(|_| ())?;
+            copy_to_user(ptr, &pty_number).map_err(|_| ())?;
+            Ok(0)
+        }
+        TIOCGPTPEER => {
+            let peer_tty = tty::open_pty_peer(tty_idx).map_err(|_| ())?;
+            let new_fd = file_open_tty_fd(pid, peer_tty, arg as u32);
+            if new_fd < 0 {
+                let _ = tty::close_ref(peer_tty);
+                Err(())
+            } else {
+                Ok(new_fd as u64)
+            }
+        }
+        TIOCSPTLCK => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let val = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_pty_lock(tty_idx, val != 0)
+                .map(|_| 0)
+                .map_err(|_| ())
+        }
+        TIOCGPTLCK => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let state = tty::get_pty_lock(tty_idx).map_err(|_| ())?;
+            let state_i = i32::from(state);
+            copy_to_user(ptr, &state_i).map_err(|_| ())?;
+            Ok(0)
+        }
+        TIOCPKT => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let val = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_packet_mode(tty_idx, val != 0)
+                .map(|_| 0)
+                .map_err(|_| ())
+        }
+        _ => Err(()),
+    }
+}
+
+#[inline(never)]
+fn ioctl_misc(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> IoctlResult {
+    match cmd {
+        TIOCGETD => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<u32>::try_new(arg).map_err(|_| ())?;
+            let ldisc_id = tty::get_ldisc(tty_idx).unwrap_or(slopos_abi::syscall::N_TTY);
+            copy_to_user(ptr, &ldisc_id).map_err(|_| ())?;
+            Ok(0)
+        }
+        TIOCSETD => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<u32>::try_new(arg).map_err(|_| ())?;
+            let ldisc_id = copy_from_user(ptr).map_err(|_| ())?;
+            tty::set_ldisc(tty_idx, ldisc_id).map(|_| 0).map_err(|_| ())
+        }
+        FIONREAD => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let count = tty::bytes_available(tty_idx).map_err(|_| ())? as i32;
+            copy_to_user(ptr, &count).map_err(|_| ())?;
+            Ok(0)
+        }
+        TIOCOUTQ => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let count = tty::output_queued_bytes(tty_idx).map_err(|_| ())? as i32;
+            copy_to_user(ptr, &count).map_err(|_| ())?;
+            Ok(0)
+        }
+        TCFLSH => tty::tcflush(tty_idx, arg as i32).map(|_| 0).map_err(|_| ()),
+        TCSBRK => tty::tcsbrk(tty_idx, arg as i32).map(|_| 0).map_err(|_| ()),
+        TCXONC => tty::tcxonc(tty_idx, arg as i32).map(|_| 0).map_err(|_| ()),
+        TIOCEXCL => tty::set_exclusive(tty_idx, true).map(|_| 0).map_err(|_| ()),
+        TIOCNXCL => tty::set_exclusive(tty_idx, false)
+            .map(|_| 0)
+            .map_err(|_| ()),
+        TIOCGEXCL => {
+            if arg == 0 {
+                return Err(());
+            }
+            let ptr = UserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let state = tty::get_exclusive(tty_idx).map_err(|_| ())?;
+            let state_i = i32::from(state);
+            copy_to_user(ptr, &state_i).map_err(|_| ())?;
+            Ok(0)
+        }
+        _ => Err(()),
+    }
+}
 
 #[inline]
 fn fdset_bytes_len(nfds: usize) -> usize {
@@ -72,17 +240,33 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let base_ptr = args.arg0;
     let start_ms = slopos_kernel_services::platform::get_time_ms();
 
-    // Kernel-side revents cache.  Written back to userspace only on
-    // return (ready FDs found, timeout, or signal) to avoid per-
-    // iteration page-table walks and observable intermediate writes.
-    let mut cached_revents = [0u16; SELECT_MAX_FDS];
+    // Bundle the three scratch arrays into one heap struct so the
+    // function frame stays small. A stack-resident
+    // `[u16 + UserPollFd + u32; SELECT_MAX_FDS]` triplet would cost
+    // ~3.5 KiB per poll(2) call.
+    #[repr(C)]
+    struct PollScratch {
+        cached_revents: [u16; SELECT_MAX_FDS],
+        poll_fds: [UserPollFd; SELECT_MAX_FDS],
+        registered_ofis: [u32; SELECT_MAX_FDS],
+    }
+    // SAFETY: every field is a primitive integer/struct of integers;
+    // the all-zero bit pattern is a valid value.
+    unsafe impl slopos_alloc::Zeroable for PollScratch {}
+    let mut scratch_box = match slopos_alloc::KBox::<PollScratch>::zeroed() {
+        Ok(b) => b,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
+    let scratch: &mut PollScratch = &mut *scratch_box;
+    let cached_revents = &mut scratch.cached_revents;
+    let poll_fds: &mut [UserPollFd] = &mut scratch.poll_fds;
+    let registered_ofis = &mut scratch.registered_ofis;
 
     loop {
         run_bottom_halves();
 
         // Pre-copy all poll FDs from userspace before registering waiters
         // so a user-copy failure cannot leak prepare_to_wait / fused refs.
-        let mut poll_fds = [UserPollFd::default(); SELECT_MAX_FDS];
         for idx in 0..nfds {
             let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
                 base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
@@ -94,10 +278,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
 
         // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready_count = 0u64;
-        // Store open_file_idx for cleanup instead of FD numbers to avoid
-        // the TOCTOU where an FD is closed and reassigned between
-        // registration and cleanup.
-        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
+        // Reset per-iteration count; storage is reused across iterations.
         let mut reg_count = 0usize;
 
         for idx in 0..nfds {
@@ -197,34 +378,69 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
     }
 
     let bytes_len = fdset_bytes_len(nfds);
-    let mut read_in = [0u8; SELECT_MAX_FDS / 8];
-    let mut write_in = [0u8; SELECT_MAX_FDS / 8];
-    let mut except_in = [0u8; SELECT_MAX_FDS / 8];
-    let mut read_out = [0u8; SELECT_MAX_FDS / 8];
-    let mut write_out = [0u8; SELECT_MAX_FDS / 8];
-    let mut except_out = [0u8; SELECT_MAX_FDS / 8];
+    // Hoist the six fd-sets and the per-iteration registered_ofis array
+    // into a single heap struct so this function fits the stack-sizes
+    // gate. Inline `[u8; FDSET_BYTES]` × 6 + `[u32; SELECT_MAX_FDS]`
+    // would put ~1.2 KiB on the stack on every call.
+    const FDSET_BYTES: usize = SELECT_MAX_FDS / 8;
+    #[repr(C)]
+    struct SelectScratch {
+        read_in: [u8; FDSET_BYTES],
+        write_in: [u8; FDSET_BYTES],
+        except_in: [u8; FDSET_BYTES],
+        read_out: [u8; FDSET_BYTES],
+        write_out: [u8; FDSET_BYTES],
+        except_out: [u8; FDSET_BYTES],
+        registered_ofis: [u32; SELECT_MAX_FDS],
+    }
+    // SAFETY: `SelectScratch` is composed entirely of byte/integer arrays;
+    // the all-zero bit pattern is a valid value.
+    unsafe impl slopos_alloc::Zeroable for SelectScratch {}
+    let mut scratch_box = match slopos_alloc::KBox::<SelectScratch>::zeroed() {
+        Ok(b) => b,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM as u64),
+    };
+    let scratch: &mut SelectScratch = &mut *scratch_box;
 
     if args.arg1 != 0 {
         let in_bytes = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
-        let copied = try_or_err!(ctx, copy_bytes_from_user(in_bytes, &mut read_in[..bytes_len]));
+        let copied = try_or_err!(
+            ctx,
+            copy_bytes_from_user(in_bytes, &mut scratch.read_in[..bytes_len])
+        );
         if copied != bytes_len {
             return ctx.err();
         }
     }
     if args.arg2 != 0 {
         let in_bytes = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
-        let copied = try_or_err!(ctx, copy_bytes_from_user(in_bytes, &mut write_in[..bytes_len]));
+        let copied = try_or_err!(
+            ctx,
+            copy_bytes_from_user(in_bytes, &mut scratch.write_in[..bytes_len])
+        );
         if copied != bytes_len {
             return ctx.err();
         }
     }
     if args.arg3 != 0 {
         let in_bytes = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
-        let copied = try_or_err!(ctx, copy_bytes_from_user(in_bytes, &mut except_in[..bytes_len]));
+        let copied = try_or_err!(
+            ctx,
+            copy_bytes_from_user(in_bytes, &mut scratch.except_in[..bytes_len])
+        );
         if copied != bytes_len {
             return ctx.err();
         }
     }
+    let SelectScratch {
+        read_in,
+        write_in,
+        except_in,
+        read_out,
+        write_out,
+        except_out,
+        registered_ofis,
+    } = scratch;
 
     let timeout_ms = if args.arg4 == 0 {
         -1i64
@@ -241,22 +457,52 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
 
     let start_ms = slopos_kernel_services::platform::get_time_ms();
 
-    // Helper: copy out the result fd sets.
+    /// Copy the three result fd-sets back to userspace. `#[inline(never)]`
+    /// so each call reuses one stack frame for the three
+    /// `UserBytes::try_new` + `copy_bytes_to_user` pairs — the previous
+    /// macro inlined the same scratch four times in the loop below.
+    #[inline(never)]
+    fn copy_out_select_results(
+        read_ptr: u64,
+        write_ptr: u64,
+        except_ptr: u64,
+        read_out: &[u8],
+        write_out: &[u8],
+        except_out: &[u8],
+        bytes_len: usize,
+    ) -> Result<(), u32> {
+        use slopos_mm::user_copy::copy_bytes_to_user;
+        use slopos_mm::user_ptr::UserBytes;
+        const EFAULT: u32 = slopos_abi::syscall::ERRNO_EFAULT as u32;
+        if read_ptr != 0 {
+            let out = UserBytes::try_new(read_ptr, bytes_len).map_err(|_| EFAULT)?;
+            copy_bytes_to_user(out, &read_out[..bytes_len]).map_err(|_| EFAULT)?;
+        }
+        if write_ptr != 0 {
+            let out = UserBytes::try_new(write_ptr, bytes_len).map_err(|_| EFAULT)?;
+            copy_bytes_to_user(out, &write_out[..bytes_len]).map_err(|_| EFAULT)?;
+        }
+        if except_ptr != 0 {
+            let out = UserBytes::try_new(except_ptr, bytes_len).map_err(|_| EFAULT)?;
+            copy_bytes_to_user(out, &except_out[..bytes_len]).map_err(|_| EFAULT)?;
+        }
+        Ok(())
+    }
+
     macro_rules! copy_out_sets {
-        () => {
-            if args.arg1 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &read_out[..bytes_len]));
+        () => {{
+            if let Err(errno) = copy_out_select_results(
+                args.arg1,
+                args.arg2,
+                args.arg3,
+                read_out,
+                write_out,
+                except_out,
+                bytes_len,
+            ) {
+                return ctx.err_with(errno as u64);
             }
-            if args.arg2 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &write_out[..bytes_len]));
-            }
-            if args.arg3 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &except_out[..bytes_len]));
-            }
-        };
+        }};
     }
 
     loop {
@@ -270,8 +516,9 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         let mut ready = 0u64;
         // Store open_file_idx for cleanup instead of FD numbers to avoid
         // the TOCTOU where an FD is closed and reassigned between
-        // registration and cleanup.
-        let mut registered_ofis = [0u32; SELECT_MAX_FDS];
+        // registration and cleanup. `registered_ofis` is the heap-resident
+        // array borrowed from `scratch` above; reset its first reg_count
+        // entries each iteration.
         let mut reg_count = 0usize;
 
         for fd in 0..nfds {
@@ -387,106 +634,25 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
     }
 
     match cmd {
-        TCGETS => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
-            let t = match tty::get_termios(tty_idx) {
-                Ok(v) => v,
-                Err(_) => return ctx.err(),
-            };
-            try_or_err!(ctx, copy_to_user(ptr, &t));
-            ctx.ok(0)
-        }
-        TCSETS => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
-            let val = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_termios(tty_idx, &val).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
+        TCGETS | TCSETS | TCSETSW | TCSETSF => match ioctl_termios(tty_idx, cmd, arg) {
+            Ok(v) => ctx.ok(v),
+            Err(_) => ctx.err(),
+        },
+        TIOCGWINSZ | slopos_abi::syscall::TIOCSWINSZ => match ioctl_winsize(tty_idx, cmd, arg) {
+            Ok(v) => ctx.ok(v),
+            Err(_) => ctx.err(),
+        },
+        TIOCGPTN | TIOCGPTPEER | TIOCSPTLCK | TIOCGPTLCK | TIOCPKT => {
+            match ioctl_pty(tty_idx, cmd, arg, pid) {
+                Ok(v) => ctx.ok(v),
+                Err(_) => ctx.err(),
             }
         }
-        TCSETSW => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
-            let val = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_termios_wait(tty_idx, &val).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TCSETSF => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
-            let val = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_termios_flush(tty_idx, &val).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TIOCGETD => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let ldisc_id = tty::get_ldisc(tty_idx).unwrap_or(slopos_abi::syscall::N_TTY);
-            try_or_err!(ctx, copy_to_user(ptr, &ldisc_id));
-            ctx.ok(0)
-        }
-        TIOCGPTN => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            if let Ok(pty_number) = tty::get_pty_number(tty_idx) {
-                try_or_err!(ctx, copy_to_user(ptr, &pty_number));
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TIOCGPTPEER => {
-            let peer_tty = match tty::open_pty_peer(tty_idx) {
-                Ok(idx) => idx,
-                Err(_) => return ctx.err(),
-            };
-            let new_fd = file_open_tty_fd(pid, peer_tty, arg as u32);
-            if new_fd < 0 {
-                let _ = tty::close_ref(peer_tty);
-                ctx.err()
-            } else {
-                ctx.ok(new_fd as u64)
-            }
-        }
-        TIOCSETD => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let ldisc_id = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_ldisc(tty_idx, ldisc_id).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TIOCGWINSZ => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
-            let ws = match tty::get_winsize(tty_idx) {
-                Ok(v) => v,
-                Err(_) => return ctx.err(),
-            };
-            try_or_err!(ctx, copy_to_user(ptr, &ws));
-            ctx.ok(0)
-        }
-        slopos_abi::syscall::TIOCSWINSZ => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
-            let val = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_winsize(tty_idx, &val).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
+        TIOCGETD | TIOCSETD | FIONREAD | TIOCOUTQ | TCFLSH | TCSBRK | TCXONC | TIOCEXCL
+        | TIOCNXCL | TIOCGEXCL => match ioctl_misc(tty_idx, cmd, arg) {
+            Ok(v) => ctx.ok(v),
+            Err(_) => ctx.err(),
+        },
         TIOCGPGRP => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
@@ -608,107 +774,6 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let _ = tty::detach_controlling_terminal(tty_idx, caller_sid, is_session_leader);
 
             ctx.ok(0)
-        }
-        FIONREAD => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            if let Ok(count) = tty::bytes_available(tty_idx) {
-                let count = count as i32;
-                try_or_err!(ctx, copy_to_user(ptr, &count));
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        // PTY slave lock ioctls.
-        TIOCSPTLCK => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            let val = try_or_err!(ctx, copy_from_user(ptr));
-            let locked = val != 0;
-            if tty::set_pty_lock(tty_idx, locked).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TIOCGPTLCK => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            if let Ok(state) = tty::get_pty_lock(tty_idx) {
-                let state = i32::from(state);
-                try_or_err!(ctx, copy_to_user(ptr, &state));
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        // PTY packet mode.
-        TIOCPKT => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            let val = try_or_err!(ctx, copy_from_user(ptr));
-            let enable = val != 0;
-            if tty::set_packet_mode(tty_idx, enable).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        // Missing ioctls.
-        TCFLSH => {
-            let queue = arg as i32;
-            if tty::tcflush(tty_idx, queue).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TCSBRK => {
-            let brk_arg = arg as i32;
-            if tty::tcsbrk(tty_idx, brk_arg).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TCXONC => {
-            let action = arg as i32;
-            if tty::tcxonc(tty_idx, action).is_ok() {
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        // Output queue visibility.
-        TIOCOUTQ => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            if let Ok(count) = tty::output_queued_bytes(tty_idx) {
-                let count = count as i32;
-                try_or_err!(ctx, copy_to_user(ptr, &count));
-                ctx.ok(0)
-            } else {
-                ctx.err()
-            }
-        }
-        TIOCEXCL => {
-            if tty::set_exclusive(tty_idx, true).is_ok() { ctx.ok(0) } else { ctx.err() }
-        }
-        TIOCNXCL => {
-            if tty::set_exclusive(tty_idx, false).is_ok() { ctx.ok(0) } else { ctx.err() }
-        }
-        TIOCGEXCL => {
-            require_nonzero!(ctx, arg);
-            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            match tty::get_exclusive(tty_idx) {
-                Ok(v) => {
-                    let state = i32::from(v);
-                    try_or_err!(ctx, copy_to_user(ptr, &state));
-                    ctx.ok(0)
-                }
-                Err(_) => ctx.err()
-            }
         }
         _ => ctx.err(),
     }

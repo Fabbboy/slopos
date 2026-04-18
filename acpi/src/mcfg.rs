@@ -122,6 +122,52 @@ pub struct Mcfg {
     count: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Out-of-line log helpers so `Mcfg::from_tables` doesn't carry the
+// cumulative `format_args!` scratch of five distinct call sites in one
+// stack frame — the kernel-wide stack-safety gate forbids frames over
+// the current threshold, and this function is close to it.
+// ---------------------------------------------------------------------------
+
+#[inline(never)]
+fn log_mcfg_missing() {
+    klog_info!("ACPI: MCFG table not found");
+}
+
+#[inline(never)]
+fn log_mcfg_too_short(length: usize, min_size: usize) {
+    klog_info!(
+        "ACPI: MCFG table too short ({} bytes, minimum {})",
+        length,
+        min_size
+    );
+}
+
+#[inline(never)]
+fn log_mcfg_empty() {
+    klog_info!("ACPI: MCFG table present but contains no entries");
+}
+
+#[inline(never)]
+fn log_mcfg_capped(entry_count: usize, max: usize) {
+    klog_info!("ACPI: MCFG has {} entries, capping at {}", entry_count, max);
+}
+
+#[inline(never)]
+fn log_mcfg_entry_zero(i: usize) {
+    klog_info!("ACPI: MCFG entry {} has zero base address, skipping", i);
+}
+
+#[inline(never)]
+fn log_mcfg_bad_bus_range(i: usize, bus_start: u8, bus_end: u8) {
+    klog_info!(
+        "ACPI: MCFG entry {} has invalid bus range (start={}, end={}), skipping",
+        i,
+        bus_start,
+        bus_end
+    );
+}
+
 impl Mcfg {
     /// Look up the `"MCFG"` table in the ACPI hierarchy and parse it.
     ///
@@ -130,18 +176,14 @@ impl Mcfg {
     pub fn from_tables(tables: &AcpiTables) -> Option<Self> {
         let header = tables.find_table(MCFG_SIGNATURE);
         if header.is_null() {
-            klog_info!("ACPI: MCFG table not found");
+            log_mcfg_missing();
             return None;
         }
 
         let length = unsafe { (*header).length } as usize;
         let min_size = mem::size_of::<RawMcfgTable>();
         if length < min_size {
-            klog_info!(
-                "ACPI: MCFG table too short ({} bytes, minimum {})",
-                length,
-                min_size
-            );
+            log_mcfg_too_short(length, min_size);
             return None;
         }
 
@@ -150,36 +192,27 @@ impl Mcfg {
         let entry_size = mem::size_of::<RawMcfgEntry>();
         let entry_count = entry_bytes / entry_size;
 
-        if entry_count == 0 {
-            klog_info!("ACPI: MCFG table present but contains no entries");
-            return Some(Self {
-                entries: [McfgEntry {
-                    base_phys: 0,
-                    segment: 0,
-                    bus_start: 0,
-                    bus_end: 0,
-                }; MAX_MCFG_ENTRIES],
-                count: 0,
-            });
-        }
-
-        let capped = entry_count.min(MAX_MCFG_ENTRIES);
-        if entry_count > MAX_MCFG_ENTRIES {
-            klog_info!(
-                "ACPI: MCFG has {} entries, capping at {}",
-                entry_count,
-                MAX_MCFG_ENTRIES
-            );
-        }
-
-        let entries_base = (header as *const u8).wrapping_add(min_size) as *const RawMcfgEntry;
-
-        let mut entries = [McfgEntry {
+        // Shared zero-filled entries array for both empty-table and
+        // populated-table paths — previously materialised twice.
+        let zero_entry = McfgEntry {
             base_phys: 0,
             segment: 0,
             bus_start: 0,
             bus_end: 0,
-        }; MAX_MCFG_ENTRIES];
+        };
+        let mut entries = [zero_entry; MAX_MCFG_ENTRIES];
+
+        if entry_count == 0 {
+            log_mcfg_empty();
+            return Some(Self { entries, count: 0 });
+        }
+
+        let capped = entry_count.min(MAX_MCFG_ENTRIES);
+        if entry_count > MAX_MCFG_ENTRIES {
+            log_mcfg_capped(entry_count, MAX_MCFG_ENTRIES);
+        }
+
+        let entries_base = (header as *const u8).wrapping_add(min_size) as *const RawMcfgEntry;
 
         for i in 0..capped {
             let raw = unsafe { &*entries_base.add(i) };
@@ -190,16 +223,11 @@ impl Mcfg {
 
             // Sanity: base address must be non-zero and bus range valid.
             if base == 0 {
-                klog_info!("ACPI: MCFG entry {} has zero base address, skipping", i);
+                log_mcfg_entry_zero(i);
                 continue;
             }
             if bus_end < bus_start {
-                klog_info!(
-                    "ACPI: MCFG entry {} has invalid bus range (start={}, end={}), skipping",
-                    i,
-                    bus_start,
-                    bus_end
-                );
+                log_mcfg_bad_bus_range(i, bus_start, bus_end);
                 continue;
             }
 

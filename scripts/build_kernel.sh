@@ -43,7 +43,7 @@ if [ "$KERNEL_RELEASE" = "1" ]; then
 fi
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS" \
+RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS -Zunstable-options -Zemit-stack-sizes" \
 $CARGO +"$RUST_CHANNEL" build \
     -Zbuild-std=core,alloc \
     -Zbuild-std-features=compiler-builtins-mem \
@@ -59,4 +59,16 @@ if [ -f "$BUILD_DIR/kernel" ]; then
     if [ ! -e "$BUILD_DIR/kernel.elf" ] || [ ! "$BUILD_DIR/kernel" -ef "$BUILD_DIR/kernel.elf" ]; then
         mv "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
     fi
+fi
+
+# Kernel allocation + stack-frame invariant gates.
+"$SCRIPT_DIR/check_alloc_dep.sh"
+
+# The stack-sizes gate applies to the production kernel only. Test builds
+# (`kernel/builtin-tests` feature) compile in per-subsystem regression
+# tests whose large stack frames are irrelevant to the real kernel image.
+if [[ "$FEATURES" != *"builtin-tests"* ]]; then
+    "$SCRIPT_DIR/check_stack_sizes.sh" "$BUILD_DIR/kernel.elf"
+else
+    echo "check_stack_sizes: skipped (builtin-tests feature enabled)"
 fi

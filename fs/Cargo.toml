@@ -13,8 +13,18 @@ crate-type = ["rlib"]
 
 test = false
 doctest = false
+
+[features]
+default = []
+# Gate test-scaffold helpers (`build_ext2_image`, VFS roundtrip harness,
+# etc.) behind an opt-in feature so they compile out of production
+# builds — they carry per-function stack frames well above the
+# production gate and have no runtime callers outside regression tests.
+builtin-tests = []
+
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-alloc = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }

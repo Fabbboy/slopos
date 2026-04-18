@@ -1,10 +1,7 @@
-extern crate alloc;
-
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use slopos_alloc::{KBox, KVec};
 
 use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
@@ -27,7 +24,7 @@ use slopos_net::{
     self, PACKET_POOL, dhcp, ingress,
     napi::NapiContext,
     net_driver_service::{NetDriverServices, register_net_driver_services},
-    netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
+    netdev::{DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
     packetbuf::PacketBuf,
     pool::PacketPool,
     socket, tcp,
@@ -174,8 +171,8 @@ pub fn get_device_handle() -> Option<&'static DeviceHandle> {
 }
 
 fn set_device_handle(handle: DeviceHandle) {
-    let boxed = Box::new(handle);
-    let ptr = Box::into_raw(boxed);
+    let boxed = KBox::try_new(handle).expect("virtio_net: device handle alloc");
+    let ptr = KBox::into_raw(boxed);
     DEVICE_HANDLE_PTR.store(ptr, Ordering::Release);
 }
 
@@ -227,11 +224,11 @@ impl NetDevice for VirtioNetDev {
         }
     }
 
-    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> Vec<PacketBuf> {
+    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
         let mut state = VIRTIO_NET_STATE.lock();
         let _ = virtnet_clean_tx(&mut state);
 
-        let mut packets = Vec::with_capacity(budget.min(64));
+        let mut packets = KVec::with_capacity(budget.min(64)).unwrap_or_else(|_| KVec::new());
         let mut posted = 0usize;
 
         for _ in 0..budget {
@@ -251,7 +248,7 @@ impl NetDevice for VirtioNetDev {
                     core::slice::from_raw_parts(page.as_mut_ptr::<u8>().add(hdr_len), payload_len)
                 };
                 if let Some(pkt) = PacketBuf::from_raw_copy(frame) {
-                    packets.push(pkt);
+                    let _ = packets.push(pkt);
                 }
             }
 
@@ -928,9 +925,12 @@ fn wait_for_dhcp_reply(
     xid: u32,
     expected_type: u8,
 ) -> Option<dhcp::DhcpOffer> {
-    let mut frame = [0u8; PACKET_BUFFER_SIZE];
+    // Heap-allocate the receive buffer. An inline
+    // `[u8; PACKET_BUFFER_SIZE]` would add ~2 KiB to this function's
+    // stack frame, over the stack-safety gate.
+    let mut frame = slopos_alloc::KVec::<u8>::zeroed(PACKET_BUFFER_SIZE).ok()?;
     for _ in 0..DHCP_RX_MAX_POLLS {
-        let len = poll_one_rx_frame(state, Some(&mut frame))?;
+        let len = poll_one_rx_frame(state, Some(frame.as_mut()))?;
         if len > 0
             && let Some(reply) = parse_dhcp_reply(&frame[..len], xid, expected_type)
         {
@@ -1127,6 +1127,83 @@ extern "C" fn virtio_net_irq_handler(
     }
 }
 
+/// Single 12-arg `klog_info!` pulled out so its `format_args!` scratch
+/// stays local.
+#[inline(never)]
+fn virtio_net_log_dhcp_lease(lease: &dhcp::DhcpLease) {
+    klog_info!(
+        "virtio-net: DHCP lease ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
+        lease.ipv4[0],
+        lease.ipv4[1],
+        lease.ipv4[2],
+        lease.ipv4[3],
+        lease.router[0],
+        lease.router[1],
+        lease.router[2],
+        lease.router[3],
+        lease.dns[0],
+        lease.dns[1],
+        lease.dns[2],
+        lease.dns[3]
+    );
+}
+
+/// DHCP acquire + lease-field propagation + prepost-RX + PACKET_POOL init
+/// + netstack configuration. Extracted from `virtio_net_probe` so its
+/// locked-state block scratch doesn't inflate the probe's frame.
+/// Returns `false` on `KBox::try_new(VirtioNetDev)` allocation failure.
+#[inline(never)]
+fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
+    let dhcp_lease = dhcp_acquire_lease(state);
+    if let Some(ref lease) = dhcp_lease {
+        state.ipv4_addr = lease.ipv4;
+        state.subnet_mask = lease.subnet_mask;
+        state.router = lease.router;
+        state.dns = lease.dns;
+        virtio_net_log_dhcp_lease(lease);
+    } else {
+        klog_info!("virtio-net: DHCP lease unavailable");
+    }
+
+    virtnet_prepost_rx_buffers(state);
+
+    PACKET_POOL.init();
+
+    use slopos_net::netdev::DEVICE_REGISTRY;
+    let dev: KBox<dyn slopos_net::netdev::NetDevice + Send + Sync> =
+        match KBox::try_new(VirtioNetDev) {
+            Ok(d) => d,
+            Err(_) => {
+                klog_info!("virtio-net: alloc failed");
+                return false;
+            }
+        };
+    if let Some(handle) = DEVICE_REGISTRY.register(dev) {
+        let actual_idx = handle.index();
+        klog_info!(
+            "virtio-net: registered as dev {} in device registry",
+            actual_idx
+        );
+
+        if let Some(ref lease) = dhcp_lease {
+            use slopos_net::netstack::NET_STACK;
+            use slopos_net::types::Ipv4Addr;
+            NET_STACK.configure(
+                actual_idx,
+                Ipv4Addr::from_bytes(lease.ipv4),
+                Ipv4Addr::from_bytes(lease.subnet_mask),
+                Ipv4Addr::from_bytes(lease.router),
+                [Ipv4Addr::from_bytes(lease.dns), Ipv4Addr::UNSPECIFIED],
+            );
+        }
+
+        set_device_handle(handle);
+    } else {
+        klog_info!("virtio-net: failed to register in device registry");
+    }
+    true
+}
+
 fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-net: already claimed");
@@ -1248,58 +1325,8 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         state.router = [0; 4];
         state.dns = [0; 4];
 
-        let dhcp_lease = dhcp_acquire_lease(&mut state);
-        if let Some(ref lease) = dhcp_lease {
-            state.ipv4_addr = lease.ipv4;
-            state.subnet_mask = lease.subnet_mask;
-            state.router = lease.router;
-            state.dns = lease.dns;
-            klog_info!(
-                "virtio-net: DHCP lease ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
-                lease.ipv4[0],
-                lease.ipv4[1],
-                lease.ipv4[2],
-                lease.ipv4[3],
-                lease.router[0],
-                lease.router[1],
-                lease.router[2],
-                lease.router[3],
-                lease.dns[0],
-                lease.dns[1],
-                lease.dns[2],
-                lease.dns[3]
-            );
-        } else {
-            klog_info!("virtio-net: DHCP lease unavailable");
-        }
-
-        virtnet_prepost_rx_buffers(&mut state);
-
-        PACKET_POOL.init();
-
-        let dev = Box::new(VirtioNetDev);
-        if let Some(handle) = DEVICE_REGISTRY.register(dev) {
-            let actual_idx = handle.index();
-            klog_info!(
-                "virtio-net: registered as dev {} in device registry",
-                actual_idx
-            );
-
-            if let Some(ref lease) = dhcp_lease {
-                use slopos_net::netstack::NET_STACK;
-                use slopos_net::types::Ipv4Addr;
-                NET_STACK.configure(
-                    actual_idx,
-                    Ipv4Addr::from_bytes(lease.ipv4),
-                    Ipv4Addr::from_bytes(lease.subnet_mask),
-                    Ipv4Addr::from_bytes(lease.router),
-                    [Ipv4Addr::from_bytes(lease.dns), Ipv4Addr::UNSPECIFIED],
-                );
-            }
-
-            set_device_handle(handle);
-        } else {
-            klog_info!("virtio-net: failed to register in device registry");
+        if !virtio_net_acquire_dhcp_and_register(&mut state) {
+            return -1;
         }
     }
 

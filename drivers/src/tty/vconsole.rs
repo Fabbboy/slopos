@@ -11,11 +11,9 @@
 //! Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
 //! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
-extern crate alloc;
-
-use alloc::vec;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_alloc::{KBox, KVec};
 
 use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};
@@ -98,7 +96,7 @@ impl Cell {
 }
 
 pub(crate) struct CellGrid {
-    cells: Option<alloc::boxed::Box<[Cell]>>,
+    cells: Option<KVec<Cell>>,
     cols: usize,
 }
 
@@ -123,7 +121,7 @@ impl CellGrid {
                 return;
             }
         }
-        self.cells = Some(vec![Cell::blank(); total].into_boxed_slice());
+        self.cells = KVec::filled(Cell::blank(), total).ok();
         self.cols = cols;
     }
 
@@ -280,7 +278,7 @@ unsafe impl Send for VConsoleFbInfo {}
 /// Flat ring buffer of `SCROLLBACK_LINES` rows.  Allocated once on the heap
 /// via `ScrollbackBuf::new()` so `VConsoleState` stores only a pointer.
 struct ScrollbackBuf {
-    buf: alloc::boxed::Box<[Cell]>,
+    buf: KVec<Cell>,
     cols: usize,
     head: usize,
     count: usize,
@@ -290,14 +288,13 @@ struct ScrollbackBuf {
 impl ScrollbackBuf {
     fn new(cols: usize) -> Self {
         let total = SCROLLBACK_LINES.saturating_mul(cols);
-        let mut v = alloc::vec::Vec::new();
-        if total > 0 {
-            if v.try_reserve_exact(total).is_ok() {
-                v.resize(total, Cell::blank());
-            }
-        }
+        let buf = if total > 0 {
+            KVec::filled(Cell::blank(), total).unwrap_or_else(|_| KVec::new())
+        } else {
+            KVec::new()
+        };
         Self {
-            buf: v.into_boxed_slice(),
+            buf,
             cols,
             head: 0,
             count: 0,
@@ -392,7 +389,7 @@ pub(crate) struct VConsoleState {
     pub(crate) scroll_bottom: u16,
     /// Shadow framebuffer — cached RAM, same dimensions as hardware FB.
     /// All glyph rendering targets this buffer; `flush_dirty()` blits to HW.
-    shadow: Option<alloc::boxed::Box<[u8]>>,
+    shadow: Option<KVec<u8>>,
     shadow_pitch: usize,
     /// Bitmask of rows modified since last flush. Bit N = row N is dirty.
     dirty_rows: u128,
@@ -1591,8 +1588,7 @@ impl VConsoleState {
 
 static VCONSOLE_STATE: IrqMutex<VConsoleState> =
     IrqMutex::new(VConsoleState::new(), LOCK_LEVEL_RESOURCE);
-static SCROLLBACK: IrqMutex<Option<alloc::boxed::Box<ScrollbackBuf>>> =
-    IrqMutex::new(None, LOCK_LEVEL_RESOURCE);
+static SCROLLBACK: IrqMutex<Option<KBox<ScrollbackBuf>>> = IrqMutex::new(None, LOCK_LEVEL_RESOURCE);
 
 pub fn register_framebuffer(
     base: *mut u8,
@@ -1626,15 +1622,11 @@ pub fn register_framebuffer(
 
     // Heap allocation outside the IrqMutex — allocating with interrupts
     // disabled triggers UB checks in the global allocator.
-    let scrollback = alloc::boxed::Box::new(ScrollbackBuf::new(cols));
-    let shadow = {
-        let mut bytes = alloc::vec::Vec::new();
-        if shadow_size > 0 && bytes.try_reserve_exact(shadow_size).is_ok() {
-            bytes.resize(shadow_size, 0);
-            Some(bytes.into_boxed_slice())
-        } else {
-            None
-        }
+    let scrollback = KBox::try_new(ScrollbackBuf::new(cols)).expect("vconsole: scrollback alloc");
+    let shadow = if shadow_size > 0 {
+        KVec::<u8>::zeroed(shadow_size).ok()
+    } else {
+        None
     };
 
     {
@@ -1721,38 +1713,20 @@ pub fn notify_font_changed() {
     }
 
     let shadow_size = (fb_info.pitch as usize).saturating_mul(fb_info.height as usize);
-    let new_shadow = {
-        let mut bytes = alloc::vec::Vec::new();
-        if shadow_size > 0 && bytes.try_reserve_exact(shadow_size).is_ok() {
-            bytes.resize(shadow_size, 0);
-            Some(bytes.into_boxed_slice())
-        } else {
-            None
-        }
+    let new_shadow = if shadow_size > 0 {
+        KVec::<u8>::zeroed(shadow_size).ok()
+    } else {
+        None
     };
-    let new_scrollback: Option<alloc::boxed::Box<ScrollbackBuf>> = {
-        let sb = ScrollbackBuf::new(new_cols);
-        Some(alloc::boxed::Box::new(sb))
-    };
+    let new_scrollback: Option<KBox<ScrollbackBuf>> =
+        KBox::try_new(ScrollbackBuf::new(new_cols)).ok();
     let new_grid = {
         let grid_len = new_rows * new_cols;
-        let mut v = alloc::vec::Vec::new();
-        if v.try_reserve_exact(grid_len).is_ok() {
-            v.resize(grid_len, Cell::blank());
-            Some(v.into_boxed_slice())
-        } else {
-            None
-        }
+        KVec::filled(Cell::blank(), grid_len).ok()
     };
     let new_alt_grid = {
         let grid_len = new_rows * new_cols;
-        let mut v = alloc::vec::Vec::new();
-        if v.try_reserve_exact(grid_len).is_ok() {
-            v.resize(grid_len, Cell::blank());
-            Some(v.into_boxed_slice())
-        } else {
-            None
-        }
+        KVec::filled(Cell::blank(), grid_len).ok()
     };
 
     if new_scrollback.is_none() || new_grid.is_none() || new_alt_grid.is_none() {

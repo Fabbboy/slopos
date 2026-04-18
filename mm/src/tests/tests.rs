@@ -1,10 +1,8 @@
-extern crate alloc;
-
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::cpu;
@@ -339,9 +337,9 @@ pub fn test_heap_stats() -> TestResult {
 }
 
 pub fn test_global_alloc_vec() -> TestResult {
-    let mut vec = Vec::new();
+    let mut vec: KVec<u64> = KVec::new();
     for i in 0..128u64 {
-        vec.push(i);
+        vec.push(i).expect("test alloc");
     }
     assert_test!(vec.len() == 128, "vec length should be 128");
     pass!()

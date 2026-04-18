@@ -54,6 +54,43 @@ pub const KERNEL_HEAP_SIZE: u64 = 256 * 1024 * 1024;
 pub const KERNEL_HEAP_VEND: u64 = KERNEL_HEAP_VBASE + KERNEL_HEAP_SIZE;
 
 // =============================================================================
+// Kernel Stack Virtual Region (dynamic task stacks)
+// =============================================================================
+//
+// A dedicated kernel virtual address region backs `KernelStack` allocations.
+// Physical frames are requested on demand from the page allocator and mapped
+// into this region; each stack has an unmapped guard page below it to catch
+// overflow via page fault.
+//
+// This region is **independent of the kernel image**, so growing kernel code
+// (adjusting `_kernel_end`) does not reduce task-stack capacity — unlike the
+// previous scheme that allocated stacks from the kernel heap, whose free
+// pages compete with the reserved kernel-image region.
+//
+// Layout (between the heap and the IST/exception-stack region):
+//   KERNEL_HEAP_VEND      = 0xFFFF_FFFF_A000_0000  (heap ends)
+//   KSTACK_VA_BASE        = 0xFFFF_FFFF_A000_0000  (new region starts)
+//   KSTACK_VA_END         = 0xFFFF_FFFF_C000_0000  (new region ends)
+//   EXCEPTION_STACK_BASE  = 0xFFFF_FFFF_C000_0000  (IST region begins)
+//
+// 512 MB / 64 KB stride = 8192 slots.
+
+/// Base of the kernel-stack virtual region.
+pub const KSTACK_VA_BASE: u64 = 0xFFFF_FFFF_A000_0000;
+
+/// End of the kernel-stack virtual region (exclusive).
+pub const KSTACK_VA_END: u64 = 0xFFFF_FFFF_C000_0000;
+
+/// Stride per slot: 1 guard page + up to 60 KB usable, rounded to 64 KB.
+pub const KSTACK_STRIDE: u64 = 0x10000;
+
+/// Guard page size (one unmapped 4 KB page per slot).
+pub const KSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
+
+/// Maximum number of concurrently allocated kernel stacks.
+pub const KSTACK_MAX_SLOTS: usize = ((KSTACK_VA_END - KSTACK_VA_BASE) / KSTACK_STRIDE) as usize;
+
+// =============================================================================
 // User Virtual Address Space
 // =============================================================================
 

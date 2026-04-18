@@ -284,3 +284,9 @@ impl<const N: usize> RingBuffer<u8, N> {
         self.count += advance;
     }
 }
+
+// SAFETY: `RingBuffer<T, N>` has layout `{ data: [T; N], head, tail, count: usize }`.
+// When `T: Zeroable`, `[T; N]` is also zero-valid; `head = tail = count = 0` is
+// the canonical empty-buffer state. An all-zero bit pattern is therefore a
+// valid `RingBuffer<T, N>`.
+unsafe impl<T: slopos_alloc::Zeroable, const N: usize> slopos_alloc::Zeroable for RingBuffer<T, N> {}

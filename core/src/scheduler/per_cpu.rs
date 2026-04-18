@@ -870,9 +870,13 @@ fn find_idlest_cpu(affinity: u32) -> Option<usize> {
         return None;
     }
 
-    // Collect eligible CPUs into a stack array so the RR counter
-    // rotates over the candidate set, not the full CPU range.
-    let mut eligible = [0usize; slopos_arch::MAX_CPUS];
+    // Heap-allocate the eligible-CPU list: a stack [usize; MAX_CPUS]
+    // is 2 KiB on its own and pushes this hot path over the
+    // stack-sizes gate.
+    let mut eligible = match slopos_alloc::KVec::<usize>::zeroed(slopos_arch::MAX_CPUS) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
     let mut n_eligible = 0usize;
     for cpu_id in 0..cpu_count {
         if is_schedulable_cpu(cpu_id, affinity) {

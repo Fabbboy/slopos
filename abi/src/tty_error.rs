@@ -47,6 +47,8 @@ pub enum TtyError {
     /// ERESTARTSYS (-512) — the syscall return path converts this to EINTR
     /// or restarts depending on SA_RESTART.  MUST NEVER reach userland.
     Restart,
+    /// Allocator returned out of memory during a TTY operation.
+    OutOfMemory,
 }
 
 impl crate::KernelErrno for TtyError {
@@ -68,6 +70,7 @@ impl crate::KernelErrno for TtyError {
             Self::InvalidArg => ERRNO_EINVAL as i32,
             Self::DeviceBusy => ERRNO_EBUSY as i32,
             Self::Restart => ERRNO_ERESTARTSYS as i32,
+            Self::OutOfMemory => ERRNO_ENOMEM as i32,
         }
     }
 }

@@ -449,22 +449,25 @@ pub fn test_vconsole_write_byte_backspace() -> TestResult {
 
 pub fn test_vconsole_scroll_at_bottom() -> TestResult {
     let mut state = boxed_vconsole_state();
+    let state: &mut VConsoleState = &mut *state;
     state.rows = 2;
     state.cols = 4;
+    let attrs_0 = state.cells.get(0, 0).attrs;
     state.cells.set(
         0,
         0,
         Cell {
             codepoint: b'A' as u32,
-            attrs: state.cells.get(0, 0).attrs,
+            attrs: attrs_0,
         },
     );
+    let attrs_1 = state.cells.get(1, 0).attrs;
     state.cells.set(
         1,
         0,
         Cell {
             codepoint: b'B' as u32,
-            attrs: state.cells.get(1, 0).attrs,
+            attrs: attrs_1,
         },
     );
     state.cursor_row = 1;

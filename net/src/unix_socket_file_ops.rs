@@ -4,6 +4,7 @@
 //! as `usize`.  Every method reconstructs the handle at the boundary via
 //! `SocketHandle::from_usize(handle)` before forwarding to `unix_socket::*`.
 
+use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 
@@ -21,7 +22,10 @@ impl FileOps for UnixSocketFileOps {
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
         let h = SocketHandle::from_usize(handle);
-        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let buf_len = buf.len();
         let mut total = 0usize;
 
@@ -58,7 +62,10 @@ impl FileOps for UnixSocketFileOps {
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         let h = SocketHandle::from_usize(handle);
-        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let buf_len = buf.len();
         let mut total = 0usize;
 

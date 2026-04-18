@@ -33,7 +33,8 @@ impl StaticExt2Vfs {
             cached.superblock,
             cached.block_size,
             cached.inode_size,
-        );
+        )
+        .map_err(ext2_error_to_vfs)?;
         let result = f(&mut fs).map_err(ext2_error_to_vfs);
         // Persist any superblock mutations (free counts change on alloc/dealloc)
         cached.superblock = fs.superblock();
@@ -217,6 +218,7 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
         Ext2Error::NotEmpty => VfsError::NotEmpty,
         Ext2Error::IsDirectory => VfsError::IsDirectory,
         Ext2Error::TooManyLinks => VfsError::TooManyLinks,
+        Ext2Error::OutOfMemory => VfsError::IoError,
     }
 }
 

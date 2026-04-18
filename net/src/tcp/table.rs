@@ -230,13 +230,14 @@ impl TcpShard {
         self.buffers.get_mut(slot)?.as_mut()
     }
 
-    pub fn alloc_buffer_for(&mut self, slot: usize) {
+    pub fn alloc_buffer_for(&mut self, slot: usize) -> Result<(), slopos_alloc::AllocError> {
         debug_assert!(
             self.buffers[slot].is_none(),
             "alloc_buffer_for: slot {} already has a buffer",
             slot
         );
-        self.buffers[slot] = Some(TcpBufferPair::new());
+        self.buffers[slot] = Some(TcpBufferPair::new(super::buffer::TCP_BUFFER_SIZE)?);
+        Ok(())
     }
 
     pub fn free_buffer_for(&mut self, slot: usize) {

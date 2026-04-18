@@ -1,14 +1,30 @@
 //! Per-connection send and receive buffers.
 //!
 //! Each active connection owns a pair of [`RingBuffer`]s plus a small amount
-//! of delayed-ACK state.  The buffers are fixed-size (see [`TCP_BUFFER_SIZE`]);
-//! resizable buffers backed by `SO_SNDBUF` / `SO_RCVBUF` land in P4.
+//! of delayed-ACK state.  The buffers are fixed-size today; resizable
+//! buffers backed by `SO_SNDBUF` / `SO_RCVBUF` are a future feature, and
+//! the `cap` parameter on [`TcpSendState::new`] / [`TcpRecvState::new`] /
+//! [`TcpBufferPair::new`] is the hook it will plug into.  For now every
+//! caller passes [`TCP_BUFFER_SIZE`].
 //!
 //! Buffers are lazily allocated as `Option<TcpBufferPair>` in the parallel
 //! array inside [`super::table::PcbTable`].  Only Data-phase connections
 //! have a buffer (`Some`); Listen, SynSent, SynRecv, and TimeWait keep
 //! `None`.
+//!
+//! # Heap-backed ring buffers
+//!
+//! The 32 KiB send and receive ring buffers (`TcpBuffer`) live behind
+//! `KBox<TcpBuffer>` inside [`TcpSendState`] / [`TcpRecvState`] — that is,
+//! through `slopos-alloc`'s kernel-blessed allocation surface.  The
+//! `KBox<T: Zeroable>::zeroed()` path routes to `alloc_zeroed` with no
+//! stack temporary, so no function along
+//! `alloc_buffer_for` → `TcpBufferPair::new` → `TcpSendState::new` /
+//! `TcpRecvState::new` ever reserves 32 KiB on its frame.  `TcpBuffer`
+//! satisfies `Zeroable` through the blanket impl on `RingBuffer<u8, N>`
+//! shipped by `slopos-utils`.
 
+use slopos_alloc::{AllocError, KBox};
 use slopos_utils::RingBuffer;
 
 /// Size of per-connection send/receive ring buffers.
@@ -29,24 +45,28 @@ pub type TcpBuffer = RingBuffer<u8, TCP_BUFFER_SIZE>;
 // Send state
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
 pub struct TcpSendState {
-    pub buf: TcpBuffer,
-    pub inflight: usize,
-    pub rto_deadline_ms: u64,
+    pub(crate) buf: KBox<TcpBuffer>,
+    pub(crate) inflight: usize,
+    pub(crate) rto_deadline_ms: u64,
     /// Soft cap on usable buffer capacity (SO_SNDBUF).
-    /// Defaults to TCP_BUFFER_SIZE; values above that are silently capped.
-    pub effective_capacity: usize,
+    /// Defaults to `TCP_BUFFER_SIZE`; values above that are silently capped
+    /// by the caller.
+    pub(crate) effective_capacity: usize,
 }
 
 impl TcpSendState {
-    pub const fn new() -> Self {
-        Self {
-            buf: TcpBuffer::new_zeroed(),
+    /// Allocate a zero-filled send state.  `cap` becomes the initial
+    /// `effective_capacity`; all current callers pass `TCP_BUFFER_SIZE`,
+    /// the parameter exists so future per-connection send-buffer sizing
+    /// (SO_SNDBUF) has a hook.
+    pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            buf: KBox::<TcpBuffer>::zeroed()?,
             inflight: 0,
             rto_deadline_ms: 0,
-            effective_capacity: TCP_BUFFER_SIZE,
-        }
+            effective_capacity: cap,
+        })
     }
 
     pub fn enqueue(&mut self, data: &[u8]) -> usize {
@@ -106,31 +126,46 @@ impl TcpSendState {
         self.inflight = 0;
         self.rto_deadline_ms = 0;
     }
+
+    pub fn inflight(&self) -> usize {
+        self.inflight
+    }
+
+    pub fn rto_deadline_ms(&self) -> u64 {
+        self.rto_deadline_ms
+    }
+
+    pub fn set_rto_deadline_ms(&mut self, deadline: u64) {
+        self.rto_deadline_ms = deadline;
+    }
+
+    pub fn effective_capacity(&self) -> usize {
+        self.effective_capacity
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Receive state
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
 pub struct TcpRecvState {
-    pub buf: TcpBuffer,
-    pub segments_since_ack: u8,
-    pub ack_pending: bool,
-    pub delayed_ack_deadline_ms: u64,
+    pub(crate) buf: KBox<TcpBuffer>,
+    pub(crate) segments_since_ack: u8,
+    pub(crate) ack_pending: bool,
+    pub(crate) delayed_ack_deadline_ms: u64,
     /// Soft cap on usable buffer capacity (SO_RCVBUF).
-    pub effective_capacity: usize,
+    pub(crate) effective_capacity: usize,
 }
 
 impl TcpRecvState {
-    pub const fn new() -> Self {
-        Self {
-            buf: TcpBuffer::new_zeroed(),
+    pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            buf: KBox::<TcpBuffer>::zeroed()?,
             segments_since_ack: 0,
             ack_pending: false,
             delayed_ack_deadline_ms: 0,
-            effective_capacity: TCP_BUFFER_SIZE,
-        }
+            effective_capacity: cap,
+        })
     }
 
     pub fn enqueue(&mut self, data: &[u8], now_ms: u64) -> usize {
@@ -181,26 +216,43 @@ impl TcpRecvState {
         self.ack_pending = false;
         self.delayed_ack_deadline_ms = 0;
     }
+
+    pub fn ack_pending(&self) -> bool {
+        self.ack_pending
+    }
+
+    pub fn segments_since_ack(&self) -> u8 {
+        self.segments_since_ack
+    }
+
+    pub fn delayed_ack_deadline_ms(&self) -> u64 {
+        self.delayed_ack_deadline_ms
+    }
+
+    pub fn effective_capacity(&self) -> usize {
+        self.effective_capacity
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Bundled send+recv+OOO
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
 pub struct TcpBufferPair {
-    pub send: TcpSendState,
-    pub recv: TcpRecvState,
-    pub ooo: super::reasm::Assembler,
+    pub(crate) send: TcpSendState,
+    pub(crate) recv: TcpRecvState,
+    pub(crate) ooo: super::reasm::Assembler,
 }
 
 impl TcpBufferPair {
-    pub const fn new() -> Self {
-        Self {
-            send: TcpSendState::new(),
-            recv: TcpRecvState::new(),
+    /// Allocate a fresh buffer pair.  Both ring buffers are zero-filled
+    /// via `slopos-alloc::KBox::zeroed`; the whole chain is heap-direct.
+    pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            send: TcpSendState::new(cap)?,
+            recv: TcpRecvState::new(cap)?,
             ooo: super::reasm::Assembler::new(),
-        }
+        })
     }
 
     pub fn clear(&mut self) {
@@ -208,4 +260,36 @@ impl TcpBufferPair {
         self.recv.clear();
         self.ooo.clear();
     }
+
+    pub fn send(&self) -> &TcpSendState {
+        &self.send
+    }
+
+    pub fn send_mut(&mut self) -> &mut TcpSendState {
+        &mut self.send
+    }
+
+    pub fn recv(&self) -> &TcpRecvState {
+        &self.recv
+    }
+
+    pub fn recv_mut(&mut self) -> &mut TcpRecvState {
+        &mut self.recv
+    }
+
+    pub fn ooo(&self) -> &super::reasm::Assembler {
+        &self.ooo
+    }
+
+    pub fn ooo_mut(&mut self) -> &mut super::reasm::Assembler {
+        &mut self.ooo
+    }
 }
+
+// Size tripwires: the point of routing buffer allocation through
+// `KBox` is to keep these state types small so every function along
+// the buffer-allocation chain has a tiny frame.  If these grow,
+// bring out a bigger rewrite — don't paper it over.
+const _: () = assert!(core::mem::size_of::<TcpSendState>() <= 64);
+const _: () = assert!(core::mem::size_of::<TcpRecvState>() <= 64);
+const _: () = assert!(core::mem::size_of::<TcpBufferPair>() <= 256);

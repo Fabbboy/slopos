@@ -10,10 +10,6 @@
 //! fg_pgrp split, check_read() as sole read gate, TtyIndex type safety,
 //! and signal constant verification.
 
-extern crate alloc;
-
-pub(super) use alloc::boxed::Box;
-
 pub(super) use slopos_abi::KernelErrno;
 pub(super) use slopos_abi::signal::{
     SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH,
@@ -45,8 +41,8 @@ pub(super) use crate::tty::{PacketEvents, TtyFlags};
 
 pub(super) use crate::tty::pty::PtyPeerHandle;
 
-pub(super) fn boxed_vconsole_state() -> Box<VConsoleState> {
-    let mut state = Box::new(VConsoleState::new());
+pub(super) fn boxed_vconsole_state() -> slopos_alloc::KBox<VConsoleState> {
+    let mut state = slopos_alloc::KBox::try_new(VConsoleState::new()).expect("test alloc");
     state.rows = 25;
     state.cols = 80;
     state.cursor_attrs = CursorAttributes {

@@ -103,6 +103,21 @@ impl PipeSlot {
         }
     }
 
+    /// Reset a PipeSlot in place without materialising a fresh
+    /// `PipeSlot` rvalue on the caller's stack (`*slot = PipeSlot::new()`
+    /// would cost 4 KiB).  Every field's default is zero, so a
+    /// `write_bytes` zero-fill is the entire reset.
+    ///
+    /// # Safety
+    /// `this` must point to a properly aligned, exclusively-owned
+    /// `PipeSlot` slot that the caller guarantees has already released
+    /// any logical resources (buffer content, wait queue refs).
+    pub(crate) unsafe fn reset_in_place(this: *mut PipeSlot) {
+        unsafe {
+            core::ptr::write_bytes(this, 0, 1);
+        }
+    }
+
     /// Atomically read and consume bytes from the pipe buffer.
     ///
     /// Data is consumed from the ring buffer in a single operation while
@@ -195,7 +210,8 @@ pub(crate) fn alloc_slot() -> Option<PipeHandle> {
             drop(alloc); // Release alloc lock before taking pipe lock.
             let gn = PIPE_GENERATION.fetch_add(1, Ordering::Relaxed);
             let mut slot = PIPE_SLOTS[idx].lock();
-            *slot = PipeSlot::new();
+            // Reset via pointer to avoid a 4 KiB stack rvalue.
+            unsafe { PipeSlot::reset_in_place(&mut *slot as *mut PipeSlot) };
             slot.valid = true;
             slot.generation = gn;
             return Some(PipeHandle::new(idx, gn));

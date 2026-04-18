@@ -26,6 +26,9 @@
 //! 6. [`emit_ack_if_needed`] — delayed-ACK decision.
 
 use core::mem;
+use core::ptr::addr_of_mut;
+
+use slopos_alloc::{AllocError, Init, init_from_closure};
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::buffer::TcpBufferPair;
@@ -112,7 +115,147 @@ pub struct DataState {
 }
 
 impl DataState {
-    /// Create a fresh `DataState` for a newly-established connection.
+    /// Heap-direct initialiser for a freshly-established `DataState`.
+    /// Returns an [`Init`] recipe rather than a `Self` rvalue so the
+    /// 3 KiB struct never materialises on the caller's stack — the
+    /// closure writes each field directly into the heap slot supplied
+    /// by [`slopos_alloc::KBox::try_init`] / [`slopos_alloc::PinBox::try_init`].
+    ///
+    /// Hand-written `init_from_closure` (rather than a macro that
+    /// expands into a field-capturing closure) keeps the closure's
+    /// stack frame small — the stack-safety gate verifies this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn init_new(
+        iss: SeqNum,
+        irs: SeqNum,
+        snd_una: SeqNum,
+        snd_nxt: SeqNum,
+        rcv_nxt: SeqNum,
+        snd_wnd: u32,
+        rcv_wnd: u16,
+        peer_mss: u16,
+        snd_wscale: u8,
+        rcv_wscale: u8,
+        wscale_enabled: bool,
+        ts_enabled: bool,
+    ) -> impl Init<Self, AllocError> {
+        let cc_mss = peer_mss.max(DEFAULT_MSS) as u32;
+        // SAFETY: we write every field of `Self` exactly once via
+        // `addr_of_mut!` + `.write()` before returning `Ok(())`,
+        // satisfying `Init::__init`'s contract. No intermediate
+        // `Self` rvalue is built.
+        unsafe {
+            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
+                // SAFETY: `slot` is writable for `size_of::<Self>()`
+                // and aligned for `Self` per `Init::__init`'s
+                // precondition; each `.write()` below initialises one
+                // field.
+                addr_of_mut!((*slot).iss).write(iss);
+                addr_of_mut!((*slot).irs).write(irs);
+                addr_of_mut!((*slot).snd_una).write(snd_una);
+                addr_of_mut!((*slot).snd_nxt).write(snd_nxt);
+                addr_of_mut!((*slot).snd_wnd).write(snd_wnd);
+                addr_of_mut!((*slot).rcv_nxt).write(rcv_nxt);
+                addr_of_mut!((*slot).rcv_wnd).write(rcv_wnd);
+                addr_of_mut!((*slot).peer_mss).write(peer_mss);
+                addr_of_mut!((*slot).rcv_wscale).write(rcv_wscale);
+                addr_of_mut!((*slot).snd_wscale).write(snd_wscale);
+                addr_of_mut!((*slot).wscale_enabled).write(wscale_enabled);
+                addr_of_mut!((*slot).sack_permitted).write(false);
+                addr_of_mut!((*slot).nagle_enabled).write(true);
+                addr_of_mut!((*slot).close_phase).write(ClosePhase::Established);
+                addr_of_mut!((*slot).rtt).write(RttEstimator::new());
+                addr_of_mut!((*slot).cc).write(CcAlgo::cubic(cc_mss));
+                // SAFETY: the field slot is valid per the surrounding
+                // `Init::__init` precondition; `new_in_slot` zeroes
+                // the entire ~800 B struct in place, avoiding the
+                // by-value return that would otherwise inflate the
+                // closure's stack frame.
+                SendMap::new_in_slot(addr_of_mut!((*slot).sendmap));
+                addr_of_mut!((*slot).retransmit_token).write(None);
+                addr_of_mut!((*slot).keepalive_token).write(None);
+                addr_of_mut!((*slot).keepalive_probes_sent).write(0);
+                addr_of_mut!((*slot).last_activity_tick).write(0);
+                addr_of_mut!((*slot).fin_wait2_token).write(None);
+                addr_of_mut!((*slot).ts_enabled).write(ts_enabled);
+                addr_of_mut!((*slot).ts_recent).write(0);
+                addr_of_mut!((*slot).last_ack_sent).write(0);
+                addr_of_mut!((*slot).reset_received).write(false);
+                addr_of_mut!((*slot).peer_closed).write(false);
+                Ok(())
+            })
+        }
+    }
+
+    /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED`
+    /// transition path. Mirrors the field-overrides the previous
+    /// `from_syn_recv` constructor applied (sack/ts_recent fixups), but
+    /// builds in place so the 3 KiB struct never lands on a caller's
+    /// stack.
+    pub fn init_from_syn_recv(
+        s: &super::syn_recv::SynRecvState,
+    ) -> impl Init<Self, AllocError> + '_ {
+        let cc_mss = s.peer_mss.max(DEFAULT_MSS) as u32;
+        let ts_recent = if s.ts_enabled { s.peer_tsval } else { 0 };
+        let iss = s.iss;
+        let irs = s.irs;
+        let snd_una = s.snd_una;
+        let snd_nxt = s.snd_nxt;
+        let rcv_nxt = s.rcv_nxt;
+        let snd_wnd = s.snd_wnd;
+        let rcv_wnd = s.rcv_wnd;
+        let peer_mss = s.peer_mss;
+        let rcv_wscale = s.our_wscale;
+        let snd_wscale = s.snd_wscale;
+        let wscale_enabled = s.wscale_enabled;
+        let sack_permitted = s.sack_permitted;
+        let ts_enabled = s.ts_enabled;
+        // SAFETY: see `init_new` above — identical invariant.
+        unsafe {
+            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
+                addr_of_mut!((*slot).iss).write(iss);
+                addr_of_mut!((*slot).irs).write(irs);
+                addr_of_mut!((*slot).snd_una).write(snd_una);
+                addr_of_mut!((*slot).snd_nxt).write(snd_nxt);
+                addr_of_mut!((*slot).snd_wnd).write(snd_wnd);
+                addr_of_mut!((*slot).rcv_nxt).write(rcv_nxt);
+                addr_of_mut!((*slot).rcv_wnd).write(rcv_wnd);
+                addr_of_mut!((*slot).peer_mss).write(peer_mss);
+                addr_of_mut!((*slot).rcv_wscale).write(rcv_wscale);
+                addr_of_mut!((*slot).snd_wscale).write(snd_wscale);
+                addr_of_mut!((*slot).wscale_enabled).write(wscale_enabled);
+                addr_of_mut!((*slot).sack_permitted).write(sack_permitted);
+                addr_of_mut!((*slot).nagle_enabled).write(true);
+                addr_of_mut!((*slot).close_phase).write(ClosePhase::Established);
+                addr_of_mut!((*slot).rtt).write(RttEstimator::new());
+                addr_of_mut!((*slot).cc).write(CcAlgo::cubic(cc_mss));
+                // SAFETY: the field slot is valid per the surrounding
+                // `Init::__init` precondition; `new_in_slot` zeroes
+                // the entire ~800 B struct in place, avoiding the
+                // by-value return that would otherwise inflate the
+                // closure's stack frame.
+                SendMap::new_in_slot(addr_of_mut!((*slot).sendmap));
+                addr_of_mut!((*slot).retransmit_token).write(None);
+                addr_of_mut!((*slot).keepalive_token).write(None);
+                addr_of_mut!((*slot).keepalive_probes_sent).write(0);
+                addr_of_mut!((*slot).last_activity_tick).write(0);
+                addr_of_mut!((*slot).fin_wait2_token).write(None);
+                addr_of_mut!((*slot).ts_enabled).write(ts_enabled);
+                addr_of_mut!((*slot).ts_recent).write(ts_recent);
+                addr_of_mut!((*slot).last_ack_sent).write(0);
+                addr_of_mut!((*slot).reset_received).write(false);
+                addr_of_mut!((*slot).peer_closed).write(false);
+                Ok(())
+            })
+        }
+    }
+
+    /// Test-and-itests-only by-value constructor. Materialises a `Self`
+    /// rvalue on the caller's stack — only safe when the caller is a
+    /// `Box<DataState>` consumer that immediately heap-moves the
+    /// result. Production code must use [`init_new`] / [`init_from_syn_recv`].
+    #[cfg(any(test, feature = "itests"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         iss: SeqNum,
         irs: SeqNum,
@@ -158,31 +301,6 @@ impl DataState {
         }
     }
 
-    /// Create a `DataState` from a `SynRecvState` that has completed
-    /// the 3-way handshake.  Used by the lifecycle close path when
-    /// closing from `SYN_RECEIVED`.
-    pub fn from_syn_recv(s: &super::syn_recv::SynRecvState) -> Self {
-        let mut ds = Self::new(
-            s.iss,
-            s.irs,
-            s.snd_una,
-            s.snd_nxt,
-            s.rcv_nxt,
-            s.snd_wnd,
-            s.rcv_wnd,
-            s.peer_mss,
-            s.snd_wscale,
-            s.our_wscale,
-            s.wscale_enabled,
-            s.ts_enabled,
-        );
-        ds.sack_permitted = s.sack_permitted;
-        if s.ts_enabled {
-            ds.ts_recent = s.peer_tsval;
-        }
-        ds
-    }
-
     /// Build TSopt value for outgoing segments, or `None` if timestamps
     /// are not negotiated on this connection.
     #[inline]
@@ -204,68 +322,23 @@ impl DataState {
         payload: &[u8],
         now_ms: u64,
     ) -> Actions {
+        // Early RST fast-path — isolated to its own frame so the
+        // classify_rst + SegmentBuilder::ack scratch doesn't land
+        // on this dispatcher's stack.
+        if hdr.is_rst() {
+            return handle_data_rst(pcb, hdr, now_ms);
+        }
+
         let mut actions = Actions::new();
         let tuple = pcb.tuple;
 
-        // Fast-paths for RST (RFC 5961) and unexpected SYN.
-        if hdr.is_rst() {
-            let PcbState::Data(data) = &pcb.state else {
-                unreachable!()
-            };
-            let effective_wnd = if data.wscale_enabled {
-                (data.rcv_wnd as u32) << data.rcv_wscale
-            } else {
-                data.rcv_wnd as u32
-            };
-            let rcv_nxt = data.rcv_nxt.raw();
-            let snd_nxt = data.snd_nxt.raw();
-            let rcv_wnd = data.rcv_wnd;
-            let ts_opt = data.ts_option(now_ms);
-            match challenge_ack::classify_rst(hdr.seq_num, rcv_nxt, effective_wnd) {
-                challenge_ack::RstAction::Accept => {
-                    return Self::on_rst(pcb, actions);
-                }
-                challenge_ack::RstAction::ChallengeAck => {
-                    if challenge_ack::try_challenge_ack(now_ms) {
-                        let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd);
-                        ack.timestamp = ts_opt;
-                        actions.push_segment(ack);
-                    }
-                    return actions;
-                }
-                challenge_ack::RstAction::Drop => {
-                    return actions;
-                }
-            }
-        }
         if hdr.is_syn() {
             return Self::on_unexpected_syn(pcb, hdr, actions);
         }
 
-        // PAWS: Protection Against Wrapped Sequences (RFC 7323 §5.2).
-        // Drop segments with an old timestamp before any further processing.
-        // RSTs bypass PAWS (handled above).
-        {
-            let PcbState::Data(data) = &pcb.state else {
-                unreachable!()
-            };
-            if data.ts_enabled && data.ts_recent != 0 {
-                let parsed = super::super::header::parse_tcp_options(options);
-                if let Some((tsval, _)) = parsed.timestamp {
-                    if super::super::header::ts_less_than(tsval, data.ts_recent) {
-                        // Old duplicate — drop silently, send ACK.
-                        let mut ack = SegmentBuilder::ack(
-                            tuple,
-                            data.snd_nxt.raw(),
-                            data.rcv_nxt.raw(),
-                            data.rcv_wnd,
-                        );
-                        ack.timestamp = data.ts_option(now_ms);
-                        actions.push_segment(ack);
-                        return actions;
-                    }
-                }
-            }
+        // PAWS check — compute dropped-old-duplicate ACK out-of-line.
+        if data_paws_should_drop(pcb, options) {
+            return paws_drop_ack(pcb, now_ms);
         }
 
         // Everything past this point requires an ACK flag.
@@ -838,4 +911,84 @@ impl DataState {
             expected,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inline-never helpers extracted from `DataState::on_segment` so their
+// SegmentBuilder / challenge-ack scratch doesn't inflate the dispatcher's
+// stack frame — the kernel-wide stack-safety gate forbids it.
+// ---------------------------------------------------------------------------
+
+/// Handle an incoming RST on a Data PCB (RFC 5961 classification).
+/// Returns the completed [`Actions`] the caller should propagate.
+/// `#[inline(never)]` so the 400 B `Actions` return slot plus the
+/// `SegmentBuilder::ack` challenge-ACK scratch stay in this helper's
+/// frame, not the dispatcher's.
+#[inline(never)]
+fn handle_data_rst(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
+    let tuple = pcb.tuple;
+    let mut actions = Actions::new();
+    let PcbState::Data(data) = &pcb.state else {
+        unreachable!()
+    };
+    let effective_wnd = if data.wscale_enabled {
+        (data.rcv_wnd as u32) << data.rcv_wscale
+    } else {
+        data.rcv_wnd as u32
+    };
+    let rcv_nxt = data.rcv_nxt.raw();
+    let snd_nxt = data.snd_nxt.raw();
+    let rcv_wnd = data.rcv_wnd;
+    let ts_opt = data.ts_option(now_ms);
+    match challenge_ack::classify_rst(hdr.seq_num, rcv_nxt, effective_wnd) {
+        challenge_ack::RstAction::Accept => DataState::on_rst(pcb, actions),
+        challenge_ack::RstAction::ChallengeAck => {
+            if challenge_ack::try_challenge_ack(now_ms) {
+                let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd);
+                ack.timestamp = ts_opt;
+                actions.push_segment(ack);
+            }
+            actions
+        }
+        challenge_ack::RstAction::Drop => actions,
+    }
+}
+
+/// Pure-check helper: does the incoming segment's timestamp option
+/// trip PAWS? Takes no `Actions` and produces no segments; the
+/// dispatcher delegates the drop-ACK build to [`paws_drop_ack`] only
+/// when this returns `true`.
+#[inline(never)]
+fn data_paws_should_drop(pcb: &Pcb, options: &[u8]) -> bool {
+    let PcbState::Data(data) = &pcb.state else {
+        return false;
+    };
+    if !data.ts_enabled || data.ts_recent == 0 {
+        return false;
+    }
+    let parsed = super::super::header::parse_tcp_options(options);
+    let Some((tsval, _)) = parsed.timestamp else {
+        return false;
+    };
+    super::super::header::ts_less_than(tsval, data.ts_recent)
+}
+
+/// Build the drop-ACK [`Actions`] for a PAWS-rejected segment. Separate
+/// frame so the `SegmentBuilder::ack` scratch doesn't inflate the
+/// dispatcher.
+#[inline(never)]
+fn paws_drop_ack(pcb: &Pcb, now_ms: u64) -> Actions {
+    let mut actions = Actions::new();
+    let PcbState::Data(data) = &pcb.state else {
+        return actions;
+    };
+    let mut ack = SegmentBuilder::ack(
+        pcb.tuple,
+        data.snd_nxt.raw(),
+        data.rcv_nxt.raw(),
+        data.rcv_wnd,
+    );
+    ack.timestamp = data.ts_option(now_ms);
+    actions.push_segment(ack);
+    actions
 }

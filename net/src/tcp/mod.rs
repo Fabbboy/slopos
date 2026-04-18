@@ -119,56 +119,101 @@ pub fn input(
     } // drop shard lock
 
     // Phase 2: try listener wildcard match.
-    let (actions, parent_sock) = {
-        let mut listeners = TCP_LISTENERS.lock();
-        if let Some(slot) =
-            listeners.find_by_port(incoming_tuple.local_ip, incoming_tuple.local_port)
-        {
-            let id = ConnId::new_listener(slot);
-            let pcb = listeners.get_mut(slot).expect("find returned a live slot");
-            let mut actions = pcb.on_segment(None, hdr, options, payload, now_ms);
-            actions.conn_id = Some(id);
-            let parent_sock = pcb.socket_id;
-            (actions, parent_sock)
-        } else {
-            // No matching connection — send RST unless incoming is RST.
-            if hdr.is_rst() {
-                return Actions::new();
+    let (actions, parent_sock) =
+        match input_try_listener(&incoming_tuple, hdr, options, payload, now_ms) {
+            ListenerOutcome::Matched(a, s) => (a, s),
+            ListenerOutcome::NoMatchSendRst => {
+                return input_no_match_rst(hdr, dst_ip, src_ip);
             }
-            let mut actions = Actions::new();
-            actions.push_segment(SegmentBuilder::rst_for(hdr, dst_ip, src_ip));
-            return actions;
-        }
-    }; // drop listener lock
+            ListenerOutcome::NoMatchDrop => return Actions::new(),
+        };
 
-    // Install child PCB from LISTEN accept.  ListenState::on_segment
-    // populates `actions.accepted` with metadata but does not allocate
-    // the child — we install it into the child's shard now that the
-    // listener lock is dropped.
-    if let Some(ref accepted) = actions.accepted {
-        let child_iss = SeqNum::new(accepted.iss);
-        let child_irs = SeqNum::new(accepted.irs);
-        let mut child_state = pcb::SynRecvState::new(child_iss, child_irs);
-        child_state.peer_mss = accepted.peer_mss;
-        child_state.sack_permitted = accepted.sack_permitted;
-        child_state.snd_wnd = hdr.window_size as u32;
-        if let Some(tsval) = accepted.peer_tsval {
-            child_state.ts_enabled = true;
-            child_state.peer_tsval = tsval;
-        }
-
-        let _ =
-            table::install_established(incoming_tuple, PcbState::SynRecv(child_state), |child| {
-                child.socket_id = parent_sock;
-            });
+    // Install child PCB from LISTEN accept.
+    if actions.accepted.is_some() {
+        install_accepted_child(&incoming_tuple, &actions, hdr, parent_sock);
     }
 
-    // Listener actions have no timer ops, buffer alloc, or release to handle.
     actions
+}
+
+/// What `input_try_listener` resolved to.
+enum ListenerOutcome {
+    Matched(Actions, Option<pcb::SocketId>),
+    NoMatchDrop,
+    NoMatchSendRst,
+}
+
+/// Listener-lock phase. Returns matched `Actions` + parent socket id, or a
+/// no-match outcome. `#[inline(never)]` so the ~400 B `Actions` return
+/// value stays in this helper's frame.
+#[inline(never)]
+fn input_try_listener(
+    incoming_tuple: &TcpTuple,
+    hdr: &TcpHeader,
+    options: &[u8],
+    payload: &[u8],
+    now_ms: u64,
+) -> ListenerOutcome {
+    let mut listeners = TCP_LISTENERS.lock();
+    if let Some(slot) = listeners.find_by_port(incoming_tuple.local_ip, incoming_tuple.local_port) {
+        let id = ConnId::new_listener(slot);
+        let pcb = listeners.get_mut(slot).expect("find returned a live slot");
+        let mut actions = pcb.on_segment(None, hdr, options, payload, now_ms);
+        actions.conn_id = Some(id);
+        let parent_sock = pcb.socket_id;
+        ListenerOutcome::Matched(actions, parent_sock)
+    } else if hdr.is_rst() {
+        ListenerOutcome::NoMatchDrop
+    } else {
+        ListenerOutcome::NoMatchSendRst
+    }
+}
+
+/// Build a single-RST `Actions` for the no-matching-connection path.
+/// Separate function so the 400 B `Actions` return slot isn't merged
+/// into `tcp::input`'s frame.
+#[inline(never)]
+fn input_no_match_rst(hdr: &TcpHeader, dst_ip: [u8; 4], src_ip: [u8; 4]) -> Actions {
+    let mut actions = Actions::new();
+    actions.push_segment(SegmentBuilder::rst_for(hdr, dst_ip, src_ip));
+    actions
+}
+
+/// Install a child PCB accepted by the listener phase. `SynRecvState` is
+/// ~80 B; isolating this path keeps `tcp::input`'s frame small.
+#[inline(never)]
+fn install_accepted_child(
+    incoming_tuple: &TcpTuple,
+    actions: &Actions,
+    hdr: &TcpHeader,
+    parent_sock: Option<pcb::SocketId>,
+) {
+    let accepted = match &actions.accepted {
+        Some(a) => a,
+        None => return,
+    };
+    let child_iss = SeqNum::new(accepted.iss);
+    let child_irs = SeqNum::new(accepted.irs);
+    let mut child_state = pcb::SynRecvState::new(child_iss, child_irs);
+    child_state.peer_mss = accepted.peer_mss;
+    child_state.sack_permitted = accepted.sack_permitted;
+    child_state.snd_wnd = hdr.window_size as u32;
+    if let Some(tsval) = accepted.peer_tsval {
+        child_state.ts_enabled = true;
+        child_state.peer_tsval = tsval;
+    }
+
+    let _ = table::install_established(*incoming_tuple, PcbState::SynRecv(child_state), |child| {
+        child.socket_id = parent_sock;
+    });
 }
 
 /// Process a segment for an established/transient connection already found
 /// in a shard.  Called with the shard lock held.
+///
+/// `#[inline(never)]` so the ~400 B `Actions` return value stays in this
+/// function's frame rather than doubling `tcp::input`'s frame via inlining.
+#[inline(never)]
 fn input_process_established(
     shard: &mut TcpShard,
     id: ConnId,
@@ -230,7 +275,9 @@ fn input_process_established(
 
     // Allocate buffer for newly-established connections (SynRecv/SynSent→Data).
     if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
-        shard.alloc_buffer_for(slot);
+        shard
+            .alloc_buffer_for(slot)
+            .expect("tcp: kernel OOM allocating connection buffer");
     }
 
     // Free buffer on transition to TimeWait (Data→TimeWait).
@@ -382,27 +429,14 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     // SynRecv → Data(FinWait1): allocate buffer before transition.
     let is_syn_recv = matches!(shard.get(slot).unwrap().state, PcbState::SynRecv(_));
     if is_syn_recv {
-        shard.alloc_buffer_for(slot);
+        shard
+            .alloc_buffer_for(slot)
+            .expect("tcp: kernel OOM allocating connection buffer on close");
     }
 
     let pcb = shard.get_mut(slot).unwrap();
     match &mut pcb.state {
-        PcbState::SynRecv(s) => {
-            let tuple = pcb.tuple;
-            let seq = s.snd_nxt.raw();
-            let ack = s.rcv_nxt.raw();
-            let window = s.rcv_wnd;
-            let mut ds = DataState::from_syn_recv(s);
-            ds.close_phase = ClosePhase::FinWait1;
-            ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-            let ts = ds.ts_option(clock::now_ms());
-            pcb.state = PcbState::Data(alloc::boxed::Box::new(ds));
-            pcb.assert_invariants();
-            let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
-            seg.timestamp = ts;
-            klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id.0);
-            Ok(Some(seg))
-        }
+        PcbState::SynRecv(_) => close_syn_recv_transition(pcb, id),
         PcbState::Data(d) => {
             let tuple = pcb.tuple;
             match d.close_phase {
@@ -450,6 +484,43 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     }
 }
 
+/// `SynRecv → Data(FinWait1)` transition for `tcp::close`. Extracted so
+/// the `KBox::try_init(DataState::init_from_syn_recv)` closure frame
+/// doesn't inflate `tcp::close`'s stack frame via inlining — the
+/// stack-safety gate otherwise rejects `close`.
+#[inline(never)]
+fn close_syn_recv_transition(
+    pcb: &mut pcb::Pcb,
+    id: ConnId,
+) -> Result<Option<TcpOutSegment>, TcpError> {
+    let s = match &pcb.state {
+        PcbState::SynRecv(s) => s,
+        _ => unreachable!("close_syn_recv_transition called on non-SynRecv pcb"),
+    };
+    let tuple = pcb.tuple;
+    let seq = s.snd_nxt.raw();
+    let ack = s.rcv_nxt.raw();
+    let window = s.rcv_wnd;
+    let now_ms = clock::now_ms();
+    let ts_enabled = s.ts_enabled;
+    // Heap-direct: build the new DataState in place inside a fresh
+    // KBox, then patch close_phase / snd_nxt through DerefMut.
+    let mut ds = slopos_alloc::KBox::try_init(DataState::init_from_syn_recv(s))?;
+    ds.close_phase = ClosePhase::FinWait1;
+    ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
+    let ts = if ts_enabled {
+        Some((now_ms as u32, ds.ts_recent))
+    } else {
+        None
+    };
+    pcb.state = PcbState::Data(ds);
+    pcb.assert_invariants();
+    let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+    seg.timestamp = ts;
+    klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id.0);
+    Ok(Some(seg))
+}
+
 /// Abort a connection (send RST, release immediately).
 pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     if id.is_listener() {
@@ -492,7 +563,9 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
         PcbState::SynRecv(_)
     );
     if is_syn_recv {
-        shard.alloc_buffer_for(slot);
+        shard
+            .alloc_buffer_for(slot)
+            .expect("tcp: kernel OOM allocating connection buffer on shutdown_write");
     }
 
     let pcb = shard.get_mut(slot).ok_or(TcpError::NotFound)?;
@@ -532,23 +605,44 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                 }
             }
         }
-        PcbState::SynRecv(s) => {
-            let tuple = pcb.tuple;
-            let seq = s.snd_nxt.raw();
-            let ack = s.rcv_nxt.raw();
-            let window = s.rcv_wnd;
-            let mut ds = DataState::from_syn_recv(s);
-            ds.close_phase = ClosePhase::FinWait1;
-            ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-            let ts = ds.ts_option(clock::now_ms());
-            pcb.state = PcbState::Data(alloc::boxed::Box::new(ds));
-            pcb.assert_invariants();
-            let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
-            seg.timestamp = ts;
-            Ok(Some(seg))
-        }
+        PcbState::SynRecv(_) => shutdown_write_syn_recv_transition(pcb, id),
         _ => Err(TcpError::InvalidState),
     }
+}
+
+/// `SynRecv → Data(FinWait1)` transition for `tcp::shutdown_write`.
+/// Identical shape to `close_syn_recv_transition` but with
+/// `shutdown_write` logging semantics. `#[inline(never)]` for the same
+/// stack-frame reason.
+#[inline(never)]
+fn shutdown_write_syn_recv_transition(
+    pcb: &mut pcb::Pcb,
+    id: ConnId,
+) -> Result<Option<TcpOutSegment>, TcpError> {
+    let s = match &pcb.state {
+        PcbState::SynRecv(s) => s,
+        _ => unreachable!(),
+    };
+    let tuple = pcb.tuple;
+    let seq = s.snd_nxt.raw();
+    let ack = s.rcv_nxt.raw();
+    let window = s.rcv_wnd;
+    let now_ms = clock::now_ms();
+    let ts_enabled = s.ts_enabled;
+    let mut ds = slopos_alloc::KBox::try_init(DataState::init_from_syn_recv(s))?;
+    ds.close_phase = ClosePhase::FinWait1;
+    ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
+    let ts = if ts_enabled {
+        Some((now_ms as u32, ds.ts_recent))
+    } else {
+        None
+    };
+    pcb.state = PcbState::Data(ds);
+    pcb.assert_invariants();
+    let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+    seg.timestamp = ts;
+    klog_debug!("tcp: SHUTDOWN_WR id={} SYN_RECV -> FIN_WAIT_1", id.0);
+    Ok(Some(seg))
 }
 
 /// Discard all data in the receive buffer (for SHUT_RD).
@@ -713,7 +807,13 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
         return Err(TcpError::InvalidState);
     }
     let mut shard = TCP_SHARDS[id.shard()].lock();
-    let (pcb, bufs) = shard.get_with_bufs(id.slot()).ok_or(TcpError::NotFound)?;
+    // Check existence separately from buffer presence so a valid PCB in
+    // a non-Data state returns InvalidState (not NotFound, which would
+    // mislead callers about the connection's existence).  Only Data
+    // states have a buffer allocated (lazy buffer lifecycle, Phase 6a).
+    let (pcb, bufs) = shard
+        .get_pcb_and_opt_bufs(id.slot())
+        .ok_or(TcpError::NotFound)?;
     match &pcb.state {
         PcbState::Data(d)
             if matches!(
@@ -722,6 +822,8 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
             ) => {}
         _ => return Err(TcpError::InvalidState),
     }
+    // State check succeeded → Data state → buffer is always allocated.
+    let bufs = bufs.expect("Data state must have a buffer");
     Ok(bufs.send.enqueue(data))
 }
 
@@ -731,7 +833,16 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
         return Err(TcpError::InvalidState);
     }
     let mut shard = TCP_SHARDS[id.shard()].lock();
-    let (pcb, bufs) = shard.get_with_bufs(id.slot()).ok_or(TcpError::NotFound)?;
+    let (pcb, bufs) = shard
+        .get_pcb_and_opt_bufs(id.slot())
+        .ok_or(TcpError::NotFound)?;
+
+    // Only Data-phase connections have a receive buffer to read from.
+    // Any other state (SynSent, SynRecv, Listen, TimeWait) is invalid
+    // for recv().
+    let Some(bufs) = bufs else {
+        return Err(TcpError::InvalidState);
+    };
 
     let read = bufs.recv.dequeue(out);
     if read == 0 && bufs.recv.available() == 0 {
@@ -766,6 +877,10 @@ pub fn poll_transmit(
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
     };
+    // Project once through the KBox `DerefMut` so the borrow checker
+    // can split sub-field borrows below (KBox lacks Box's compiler-
+    // magic projection rules).
+    let d: &mut DataState = &mut **d;
     if !matches!(
         d.close_phase,
         ClosePhase::Established | ClosePhase::CloseWait | ClosePhase::FinWait1
@@ -903,6 +1018,9 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
     let PcbState::Data(d) = &mut pcb.state else {
         return None;
     };
+    // Project once through the KBox `DerefMut` so the borrow checker
+    // can split disjoint field borrows below.
+    let d: &mut DataState = &mut **d;
 
     d.retransmit_token = None;
 
@@ -1035,6 +1153,9 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
             let PcbState::Data(d) = &mut pcb.state else {
                 continue;
             };
+            // Project once through the KBox `DerefMut` so the borrow
+            // checker can split disjoint field borrows below.
+            let d: &mut DataState = &mut **d;
 
             let conn_id = ConnId::new_shard(shard_idx, slot);
 

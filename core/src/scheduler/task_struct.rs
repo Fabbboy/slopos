@@ -249,6 +249,33 @@ impl FpuState {
         state
     }
 
+    /// Initialise an `FpuState` directly at `ptr` without materialising the
+    /// 2.6 KiB rvalue on the caller's stack. Equivalent to writing the
+    /// result of [`Self::new`] but with no temp.
+    ///
+    /// The assembly in `context_switch.s` relies on `FpuState` living
+    /// inline at `FPU_STATE_OFFSET` from the `TaskContext` field, so the
+    /// in-place factory is the right shape — `KBox<FpuState>` would force
+    /// asm changes for no extra stack-safety win once the rvalue is gone.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid, properly-aligned, writable pointer to an
+    /// `FpuState`-sized region (≥ `FPU_STATE_SIZE` bytes, 64-byte
+    /// aligned). The caller must ensure no other reference to that region
+    /// is live for the duration of this call.
+    pub unsafe fn reset_in_place(ptr: *mut Self) {
+        // SAFETY: ptr is a valid FpuState by caller contract.
+        unsafe {
+            let bytes = ptr as *mut u8;
+            core::ptr::write_bytes(bytes, 0u8, FPU_STATE_SIZE);
+            // Legacy FCW = 0x037F, MXCSR = 0x1F80.
+            *bytes.add(LEGACY_FCW_OFFSET) = 0x7F;
+            *bytes.add(LEGACY_FCW_OFFSET + 1) = 0x03;
+            *bytes.add(LEGACY_MXCSR_OFFSET) = 0x80;
+            *bytes.add(LEGACY_MXCSR_OFFSET + 1) = 0x1F;
+        }
+    }
+
     #[inline]
     pub fn as_ptr(&self) -> *const u8 {
         self.data.as_ptr()
@@ -343,6 +370,14 @@ pub const FPU_STATE_OFFSET: usize = {
     0xD0
 };
 const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
+// Tripwire: the Task struct is inherently large (dominated by FpuState).
+// The stack-safety contract is that nobody ever materialises a Task
+// rvalue on the stack — see `Task::reset_in_place`. This bound keeps
+// Task from growing past one full memory page so its static array
+// fits comfortably in `.bss` and heap callers budget a single-page
+// allocation when they need a scratch slot. Adjust only in concert
+// with a re-audit of every Task mutation site.
+const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 
 #[repr(C)]
 pub struct Task {
@@ -365,6 +400,20 @@ pub struct Task {
     pub context: TaskContext,
     pub fpu_state: FpuState,
     // --- Fields below are NOT accessed by assembly and can be freely reordered ---
+    /// Owning handle to the kernel-mode stack.
+    ///
+    /// `Some` for every live task; `None` only on `invalid()` slots and
+    /// freed tasks (after `free_task_stacks`).  Dropping the `KernelStack`
+    /// unmaps the stack pages, returns the physical frames to the page
+    /// allocator, and releases the VA slot — so freeing a task is just
+    /// `task.kernel_stack = None`.
+    ///
+    /// The adjacent raw `kernel_stack_base / _top / _size` fields above
+    /// are populated from this handle at `task_create` time and must
+    /// remain consistent with it while the task is live.  They exist
+    /// because some assembly / syscall paths read them as plain `u64`
+    /// rather than going through the handle.
+    pub kernel_stack: Option<crate::scheduler::stack::KernelStack>,
     pub parent_task_id: u32,
     /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
     /// switching to user mode, and read back on context save.
@@ -440,6 +489,7 @@ impl Task {
             entry_arg: ptr::null_mut(),
             context: TaskContext::zero(),
             fpu_state: FpuState::new(),
+            kernel_stack: None,
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
             tgid: INVALID_TASK_ID,
@@ -479,6 +529,56 @@ impl Task {
             next_ready: ptr::null_mut(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
+        }
+    }
+
+    /// Reset a Task slot in place to the `invalid` state.
+    ///
+    /// `*slot = Task::invalid()` materialises a ~3.8 KiB Task rvalue on
+    /// the caller's stack before the assignment; this primitive skips
+    /// that rvalue entirely. Owned resources the Task holds (currently
+    /// just `kernel_stack: Option<KernelStack>`) are released
+    /// explicitly via field-level `take()` before the rest of the
+    /// struct is zero-overwritten, matching the old assignment's drop
+    /// semantics without running a full `Task::drop` that might
+    /// re-release already-freed state when called on a slot that has
+    /// been partially cleaned up through other paths.
+    ///
+    /// # Safety
+    /// - `this` must be non-null, aligned, and point to a writable
+    ///   `Task` slot that the caller has exclusive access to.
+    /// - The slot must currently hold a valid `Task`.
+    pub unsafe fn reset_in_place(this: *mut Task) {
+        unsafe {
+            // Release the only owning field up front. `Option::take`
+            // drops the old `Some(KernelStack)` exactly once and is
+            // a no-op if `kernel_stack` is already `None` (e.g. the
+            // caller ran `free_task_stacks` first).
+            let _ = (*this).kernel_stack.take();
+            // Zero the non-drop-bearing fields. We stay away from the
+            // `kernel_stack: Option<KernelStack>` slot because `Option`
+            // has no layout guarantee that the all-zeros bit pattern
+            // corresponds to the `None` variant — re-establishing
+            // `None` below would be the only safe move if we
+            // clobbered it.
+            let bytes = core::mem::size_of::<Task>();
+            let kernel_stack_off = core::mem::offset_of!(Task, kernel_stack);
+            let kernel_stack_size =
+                core::mem::size_of::<Option<crate::scheduler::stack::KernelStack>>();
+            let base = this as *mut u8;
+            core::ptr::write_bytes(base, 0, kernel_stack_off);
+            let tail = base.add(kernel_stack_off + kernel_stack_size);
+            core::ptr::write_bytes(tail, 0, bytes - kernel_stack_off - kernel_stack_size);
+            (*this).task_id = INVALID_TASK_ID;
+            (*this).priority = TASK_PRIORITY_NORMAL;
+            (*this).process_id = INVALID_PROCESS_ID;
+            (*this).parent_task_id = INVALID_TASK_ID;
+            (*this).tgid = INVALID_TASK_ID;
+            (*this).pgid = INVALID_TASK_ID;
+            (*this).sid = INVALID_TASK_ID;
+            (*this).cwd[0] = b'/';
+            (*this).cwd_len = 1;
+            (*this).waiting_on.store(INVALID_TASK_ID, Ordering::Relaxed);
         }
     }
 
@@ -607,11 +707,20 @@ impl Task {
     }
 
     /// Bulk-copy task state using `ptr::copy_nonoverlapping`, then reset
-    /// linkage and refcount. Replaces the old 44-field manual `clone_from`.
+    /// linkage, refcount, and owned resources. Replaces the old 44-field
+    /// manual `clone_from`.
     ///
     /// # Safety
     /// Caller must ensure `self` and `other` do not overlap and that `self`
     /// is not concurrently accessed by another CPU.
+    ///
+    /// The byte copy bitwise-duplicates non-trivially-owned fields such as
+    /// `kernel_stack: Option<KernelStack>`.  Letting those duplicate values
+    /// drop would free the parent's resources, so they are overwritten with
+    /// neutral values using `ptr::write` (which does not run `Drop` on the
+    /// existing bytes).  The caller is responsible for installing a fresh
+    /// `KernelStack` (and any other owned handle) before the child is
+    /// dispatched — see `task_fork` / `task_clone`.
     pub unsafe fn clone_from_raw(&mut self, other: &Task) {
         // SAFETY: Both pointers are valid, non-overlapping Task instances.
         // The caller guarantees exclusive write access to `self`.
@@ -621,6 +730,10 @@ impl Task {
                 self as *mut Task as *mut u8,
                 core::mem::size_of::<Task>(),
             );
+            // Neutralize bitwise-copied owned handles so their `Drop` does
+            // not free resources that still belong to the parent.  Caller
+            // installs real values after this returns.
+            core::ptr::write(&mut self.kernel_stack as *mut _, None);
         }
         // Reset scheduler linkage and refcount — the copy is a fresh entity.
         self.next_ready = ptr::null_mut();

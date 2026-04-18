@@ -10,8 +10,6 @@
 //! - 3A.T7: `NetStack::is_our_addr()` matches configured interfaces
 //! - 3A.T8: `NetStack::first_ipv4()` returns first up+configured address
 
-extern crate alloc;
-
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 

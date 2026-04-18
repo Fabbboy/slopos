@@ -1,3 +1,4 @@
+use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
@@ -14,7 +15,10 @@ impl FileOps for SocketFileOps {
     }
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
-        let mut tmp = [0u8; IO_STAGING_SIZE];
+        let mut tmp = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let read_len = buf.len().min(tmp.len());
         let n = socket::socket_recv(handle as u32, tmp.as_mut_ptr(), read_len);
         if n <= 0 {
@@ -35,7 +39,10 @@ impl FileOps for SocketFileOps {
     }
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
-        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+            Ok(v) => v,
+            Err(_) => return Errno::ENOMEM.as_isize(),
+        };
         let buf_len = buf.len();
         let mut total = 0usize;
 

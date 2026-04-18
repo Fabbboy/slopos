@@ -9,6 +9,7 @@ pub mod elf;
 pub mod error;
 pub mod hhdm;
 pub mod kernel_heap;
+pub mod kstack_va;
 pub mod memfd;
 pub mod memory_init;
 pub mod memory_layout;

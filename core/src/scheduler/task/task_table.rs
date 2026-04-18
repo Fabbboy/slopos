@@ -10,7 +10,6 @@ use super::super::scheduler;
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, Task, TaskExitRecord, TaskIterateCb, TaskStatus,
 };
-use slopos_mm::kernel_heap::kfree;
 
 // =============================================================================
 // Zombie List for Deferred Task Reclamation
@@ -56,24 +55,32 @@ pub(super) fn defer_task_cleanup(task: *mut Task) {
     ZOMBIE_LIST.lock().push(task);
 }
 
-/// Free a task's kernel and user stacks without invalidating the task struct.
-/// The slot remains in its current status (typically Terminated) so that
-/// task_find_by_id can still locate it for idempotent terminate calls.
+/// Free a task's kernel-mode stack without invalidating the task struct.
+///
+/// Dropping `task.kernel_stack = None` runs the `KernelStack::drop`
+/// handler: unmaps PTEs, returns physical frames to the page allocator,
+/// releases the VA slot.  All automatic; no manual `kfree`.
+///
+/// The slot remains in its current status (typically Terminated) so
+/// that `task_find_by_id` can still locate it for idempotent terminate
+/// calls.
+///
+/// User-space stacks live in the owning process's VM and are reclaimed
+/// by `destroy_process_vm`, not here.
 pub(super) fn free_task_stacks(task: *mut Task) {
     if task.is_null() {
         return;
     }
     unsafe {
-        let kstack = (*task).kernel_stack_base;
-        let ustack = (*task).stack_base;
+        // Dropping the handle releases the stack's VA slot + physical frames.
+        (*task).kernel_stack = None;
+        (*task).kernel_stack_base = 0;
+        (*task).kernel_stack_top = 0;
+        (*task).kernel_stack_size = 0;
 
-        if kstack != 0 {
-            kfree(kstack as *mut c_void);
-            (*task).kernel_stack_base = 0;
-        }
-
-        if (*task).process_id == INVALID_PROCESS_ID && ustack != 0 && ustack != kstack {
-            kfree(ustack as *mut c_void);
+        // For kernel-mode tasks, `stack_base` aliased the kernel stack.
+        // Now that the stack is gone, clear the alias so nothing reads it.
+        if (*task).process_id == INVALID_PROCESS_ID {
             (*task).stack_base = 0;
         }
     }
@@ -85,7 +92,7 @@ pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
     }
     free_task_stacks(task);
     unsafe {
-        *task = Task::invalid();
+        Task::reset_in_place(task);
     }
 }
 
@@ -194,7 +201,9 @@ pub fn init_task_manager() -> c_int {
                 );
                 continue;
             }
-            *task = Task::invalid();
+            // SAFETY: `task` is a `&mut Task` from the static task table;
+            // converting to *mut for the in-place reset is sound.
+            unsafe { Task::reset_in_place(task as *mut Task) };
         }
         for rec in mgr.exit_records.iter_mut() {
             *rec = TaskExitRecord::empty();
@@ -325,7 +334,7 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             for task in mgr.tasks.iter_mut() {
                 if task.status() == TaskStatus::Terminated && task.ref_count() == 0 {
                     let p = task as *mut Task;
-                    unsafe { *p = Task::invalid() };
+                    unsafe { Task::reset_in_place(p) };
                     slot = p;
                     break;
                 }
@@ -359,7 +368,7 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
 pub(super) fn release_task_slot(slot: *mut Task) {
     with_task_manager(|mgr| {
         if !slot.is_null() {
-            unsafe { *slot = Task::invalid() };
+            unsafe { Task::reset_in_place(slot) };
             mgr.num_tasks = mgr.num_tasks.saturating_sub(1);
         }
     });
@@ -432,18 +441,26 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
         None => return,
     };
 
-    let task_ptrs = with_task_manager(|mgr| {
-        let mut ptrs = [None; MAX_TASKS];
-        for (i, task) in mgr.tasks.iter_mut().enumerate() {
+    // Collect active task pointers into a heap-backed KVec so the
+    // caller's stack frame doesn't carry a 2–4 KiB array of pointers.
+    // `usize` stores the raw address — 0 acts as the "inactive" sentinel.
+    let mut addrs = match slopos_alloc::KVec::<usize>::zeroed(MAX_TASKS) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let count = with_task_manager(|mgr| {
+        let mut n = 0usize;
+        for task in mgr.tasks.iter_mut() {
             if task.status() != TaskStatus::Invalid && task.task_id != INVALID_TASK_ID {
-                ptrs[i] = Some(task as *mut Task);
+                addrs[n] = task as *mut Task as usize;
+                n += 1;
             }
         }
-        ptrs
+        n
     });
 
-    for task in task_ptrs.iter().flatten() {
-        cb(*task, context);
+    for addr in addrs.as_slice()[..count].iter() {
+        cb(*addr as *mut Task, context);
     }
 }
 

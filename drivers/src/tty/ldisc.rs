@@ -24,6 +24,7 @@ use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
     UserTermios,
 };
+use slopos_alloc::{AllocError, PinBox, Zeroable};
 use slopos_utils::ring_buffer::RingBuffer;
 
 use super::driver::{InputEvent, InputStatus};
@@ -354,6 +355,17 @@ fn is_word_codepoint(cp: u32) -> bool {
 /// Each `Tty` owns one `LineDisc` instance.  It maintains an edit buffer
 /// (for canonical mode line editing) and a cooked ring buffer (ready for
 /// userland `read()`).
+// SAFETY: Every field of `LineDisc` accepts an all-zero bit-pattern:
+// `UserTermios` is bitflags (empty set = 0), `u8`, `[u8; NCCS]`, and
+// `u32` — all zero-valid. `[u8; EDIT_BUF_SIZE]` is trivially zero-valid.
+// `RingBuffer<u8, COOKED_BUF_SIZE>` is zero-valid via its blanket
+// `Zeroable` impl in `slopos-utils` (an all-zero ring is semantically
+// empty: head = tail = count = 0). The remaining fields are `usize`,
+// `u8`, `u32`, or `bool`, all of which accept zero. Overwriting
+// `termios` with `Self::default_termios()` after zeroing does not
+// affect soundness of the prior all-zero state.
+unsafe impl Zeroable for LineDisc {}
+
 pub struct LineDisc {
     termios: UserTermios,
 
@@ -427,8 +439,13 @@ pub struct LineDisc {
 }
 
 impl LineDisc {
-    /// Create a new `LineDisc` with default termios (canonical + echo + signals).
-    pub const fn new() -> Self {
+    /// Default termios applied to a freshly constructed `LineDisc`
+    /// (canonical + echo + signals).
+    ///
+    /// Kept as a small helper so both the fallible heap-direct
+    /// constructor [`new_pinned`] and the panicking convenience wrapper
+    /// [`new`] share the same defaults.
+    pub const fn default_termios() -> UserTermios {
         let cc = [
             0x03, // VINTR   = Ctrl+C
             0x1C, // VQUIT   = Ctrl+backslash
@@ -449,50 +466,52 @@ impl LineDisc {
             0,    // VEOL2 (disabled)
             0, 0,
         ];
-        Self {
-            termios: UserTermios {
-                c_iflag: InputFlags::ICRNL,
-                c_oflag: OutputFlags::from_bits_retain(
-                    OutputFlags::OPOST.bits()
-                        | OutputFlags::ONLCR.bits()
-                        | OutputFlags::XTABS.bits(),
-                ),
-                c_cflag: ControlFlags::from_bits_retain(
-                    ControlFlags::CS8.bits()
-                        | ControlFlags::CREAD.bits()
-                        | ControlFlags::HUPCL.bits()
-                        | slopos_abi::syscall::B38400,
-                ),
-                c_lflag: LocalFlags::from_bits_retain(
-                    LocalFlags::ISIG.bits()
-                        | LocalFlags::ICANON.bits()
-                        | LocalFlags::ECHO.bits()
-                        | LocalFlags::ECHOE.bits()
-                        | LocalFlags::ECHOK.bits()
-                        | LocalFlags::ECHOCTL.bits()
-                        | LocalFlags::ECHOKE.bits(),
-                ),
-                c_line: N_TTY as u8,
-                c_cc: cc,
-                c_ispeed: 0,
-                c_ospeed: 0,
-            },
-            edit_buf: [0; EDIT_BUF_SIZE],
-            edit_len: 0,
-            cooked: RingBuffer::new_zeroed(),
-            line_count: 0,
-            stopped: false,
-            literal_next: false,
-            column: 0,
-            utf8_remaining: 0,
-            xoff_sent: false,
-            pending_reprint: false,
-            in_erase_seq: false,
-            wake_chars_pending: 0,
-            no_room: false,
-            overflow_count: 0,
-            flushing_output: false,
+        UserTermios {
+            c_iflag: InputFlags::ICRNL,
+            c_oflag: OutputFlags::from_bits_retain(
+                OutputFlags::OPOST.bits() | OutputFlags::ONLCR.bits() | OutputFlags::XTABS.bits(),
+            ),
+            c_cflag: ControlFlags::from_bits_retain(
+                ControlFlags::CS8.bits()
+                    | ControlFlags::CREAD.bits()
+                    | ControlFlags::HUPCL.bits()
+                    | slopos_abi::syscall::B38400,
+            ),
+            c_lflag: LocalFlags::from_bits_retain(
+                LocalFlags::ISIG.bits()
+                    | LocalFlags::ICANON.bits()
+                    | LocalFlags::ECHO.bits()
+                    | LocalFlags::ECHOE.bits()
+                    | LocalFlags::ECHOK.bits()
+                    | LocalFlags::ECHOCTL.bits()
+                    | LocalFlags::ECHOKE.bits(),
+            ),
+            c_line: N_TTY as u8,
+            c_cc: cc,
+            c_ispeed: 0,
+            c_ospeed: 0,
         }
+    }
+
+    /// Allocate a default `LineDisc` directly on the heap via
+    /// `slopos-alloc::PinBox::zeroed`, then overwrite `termios` with
+    /// the default canonical-mode settings.  The ≈12 KiB struct never
+    /// lands on the caller's stack — materialising it there would
+    /// consume ~20 KiB per invocation and overflow the 32 KiB kernel
+    /// stack during PTY pair setup.
+    ///
+    /// Returns [`AllocError`] on allocator failure; callers in the
+    /// syscall path surface it as `-ENOMEM`, boot-time callers panic.
+    pub fn new_pinned() -> Result<PinBox<Self>, AllocError> {
+        let mut pb = PinBox::<Self>::zeroed()?;
+        pb.termios = Self::default_termios();
+        Ok(pb)
+    }
+
+    /// Panic-on-OOM convenience for unit tests and boot-time callers
+    /// that cannot usefully recover from allocator failure.
+    pub fn new() -> PinBox<Self> {
+        Self::new_pinned().expect("kernel OOM during LineDisc allocation")
     }
 
     pub fn termios(&self) -> &UserTermios {
@@ -1744,6 +1763,12 @@ const RAW_BUF_SIZE: usize = 4096;
 /// No input processing, no echo, no signals, no canonical editing.
 /// Bytes pushed via `input_char` go directly to the cooked ring buffer;
 /// output bytes pass through without `c_oflag` processing.
+// SAFETY: Every field of `RawDisc` accepts an all-zero bit-pattern:
+// `UserTermios` is zero-valid (see `LineDisc`'s impl), `RingBuffer<u8,
+// N>` is zero-valid via its `slopos-utils` impl, and the remaining
+// fields are primitives.
+unsafe impl Zeroable for RawDisc {}
+
 pub struct RawDisc {
     termios: UserTermios,
     buf: RingBuffer<u8, RAW_BUF_SIZE>,
@@ -1758,29 +1783,40 @@ pub struct RawDisc {
 }
 
 impl RawDisc {
-    /// Create a new `RawDisc` with default raw-mode termios.
-    pub const fn new() -> Self {
-        Self {
-            termios: UserTermios {
-                c_iflag: InputFlags::empty(),
-                c_oflag: OutputFlags::empty(),
-                c_cflag: ControlFlags::from_bits_retain(
-                    ControlFlags::CS8.bits()
-                        | ControlFlags::CREAD.bits()
-                        | ControlFlags::HUPCL.bits()
-                        | slopos_abi::syscall::B38400,
-                ),
-                c_lflag: LocalFlags::empty(),
-                c_line: N_RAW as u8,
-                c_cc: [0; NCCS],
-                c_ispeed: 0,
-                c_ospeed: 0,
-            },
-            buf: RingBuffer::new_zeroed(),
-            wake_chars_pending: 0,
-            no_room: false,
-            overflow_count: 0,
+    /// Default termios applied to a freshly constructed `RawDisc`
+    /// (raw mode — no echo, no canonical processing).
+    pub const fn default_termios() -> UserTermios {
+        UserTermios {
+            c_iflag: InputFlags::empty(),
+            c_oflag: OutputFlags::empty(),
+            c_cflag: ControlFlags::from_bits_retain(
+                ControlFlags::CS8.bits()
+                    | ControlFlags::CREAD.bits()
+                    | ControlFlags::HUPCL.bits()
+                    | slopos_abi::syscall::B38400,
+            ),
+            c_lflag: LocalFlags::empty(),
+            c_line: N_RAW as u8,
+            c_cc: [0; NCCS],
+            c_ispeed: 0,
+            c_ospeed: 0,
         }
+    }
+
+    /// Allocate a default `RawDisc` directly on the heap via
+    /// `slopos-alloc::PinBox::zeroed`.  Avoids the ~4 KiB
+    /// compiler-generated stack temporary that `Self`-returning
+    /// constructors produced.  See [`LineDisc::new_pinned`] for the
+    /// full rationale.
+    pub fn new_pinned() -> Result<PinBox<Self>, AllocError> {
+        let mut pb = PinBox::<Self>::zeroed()?;
+        pb.termios = Self::default_termios();
+        Ok(pb)
+    }
+
+    /// Panic-on-OOM convenience for unit tests and boot-time callers.
+    pub fn new() -> PinBox<Self> {
+        Self::new_pinned().expect("kernel OOM during RawDisc allocation")
     }
 
     // -- Accessors -----------------------------------------------------------
@@ -1938,11 +1974,18 @@ impl RawDisc {
 ///
 /// This allows PTY masters (and future SLIP/PPP) to use raw passthrough
 /// while normal terminals use full N_TTY processing.
+///
+/// The discipline state (`LineDisc` ≈ 12 KiB, `RawDisc` ≈ 4 KiB) lives on
+/// the heap via `Box`, so `LdiscKind` — and therefore `Tty` — is small on
+/// the stack.  Constructing a `Tty` inside a syscall path (e.g. `pty_alloc`)
+/// now costs a handful of bytes instead of ~12 KiB per instance, which
+/// previously pushed kernel stacks past the guard page during pair
+/// creation.
 pub enum LdiscKind {
     /// Full N_TTY processing (canonical, echo, signals, etc.)
-    NTty(LineDisc),
+    NTty(PinBox<LineDisc>),
     /// Raw passthrough (for PTY master, future SLIP/PPP).
-    Raw(RawDisc),
+    Raw(PinBox<RawDisc>),
 }
 
 impl LdiscKind {
@@ -1956,19 +1999,23 @@ impl LdiscKind {
     }
 
     /// Construct an `LdiscKind` from a numeric id, applying the given termios.
-    pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Option<Self> {
+    ///
+    /// Returns `Ok(None)` for an unknown ldisc id and `Err(AllocError)`
+    /// on allocator failure; callers in the ioctl path surface either as
+    /// an errno.
+    pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Result<Option<Self>, AllocError> {
         match ldisc_id {
             N_TTY => {
-                let mut ld = LineDisc::new();
+                let mut ld = LineDisc::new_pinned()?;
                 ld.set_termios(&termios);
-                Some(LdiscKind::NTty(ld))
+                Ok(Some(LdiscKind::NTty(ld)))
             }
             N_RAW => {
-                let mut rd = RawDisc::new();
+                let mut rd = RawDisc::new_pinned()?;
                 rd.set_termios(&termios);
-                Some(LdiscKind::Raw(rd))
+                Ok(Some(LdiscKind::Raw(rd)))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 

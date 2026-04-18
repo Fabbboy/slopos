@@ -23,7 +23,8 @@ members = [
   "video",
   "windowing",
   "tests",
-  "slop-protocol"
+  "slop-protocol",
+  "slopos-alloc"
 ]
 resolver = "2"
 
@@ -56,6 +57,7 @@ slopos-drivers = { path = "drivers" }
 slopos-font = { path = "font" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
+slopos-alloc = { path = "slopos-alloc" }
   slopos-utils = { path = "utils" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }

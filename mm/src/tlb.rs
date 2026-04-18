@@ -26,7 +26,7 @@ use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_arch::cpu;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_utils::{klog_debug, klog_info, klog_warn};
 
 use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -510,7 +510,7 @@ static ACK_SPIN_WARNED: [AtomicBool; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
-fn wait_for_acks(targets: &[usize], initiator_cpu: usize) {
+fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) {
     // SYSCALL entry clears IF (SFMASK bit 9) so callers often arrive
     // with interrupts disabled.  Re-enable them for the spin-wait so
     // that (a) we can receive TLB IPIs from other CPUs that need our
@@ -522,16 +522,16 @@ fn wait_for_acks(targets: &[usize], initiator_cpu: usize) {
     }
 
     for cpu_idx in targets {
-        if *cpu_idx >= MAX_CPUS || *cpu_idx == initiator_cpu {
+        if cpu_idx >= MAX_CPUS || cpu_idx == initiator_cpu {
             continue;
         }
 
         let mut spin_count: u64 = 0;
-        while !TLB_STATE.cpu_state[*cpu_idx].ack.load(Ordering::Acquire) {
+        while !TLB_STATE.cpu_state[cpu_idx].ack.load(Ordering::Acquire) {
             spin_count = spin_count.wrapping_add(1);
             #[cfg(debug_assertions)]
             if spin_count == 100_000_000
-                && ACK_SPIN_WARNED[*cpu_idx]
+                && ACK_SPIN_WARNED[cpu_idx]
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             {
@@ -543,7 +543,7 @@ fn wait_for_acks(targets: &[usize], initiator_cpu: usize) {
             cpu::pause();
         }
 
-        TLB_STATE.cpu_state[*cpu_idx]
+        TLB_STATE.cpu_state[cpu_idx]
             .ack
             .store(false, Ordering::Release);
     }
@@ -669,7 +669,16 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
         info.last_flushed_gen[initiator].store(request_gen, Ordering::Release);
     }
 
-    let mut targets = [0usize; MAX_CPUS];
+    // Allocate the per-CPU target list on the heap: a stack-resident
+    // `[usize; MAX_CPUS]` is 2 KiB on its own and pushes this function
+    // over the stack-sizes gate.
+    let mut targets = match slopos_alloc::KVec::<usize>::zeroed(MAX_CPUS) {
+        Ok(v) => v,
+        Err(_) => {
+            klog_warn!("tlb: targeted_flush_request alloc failed; falling back to local");
+            return;
+        }
+    };
     let mut target_count = 0usize;
 
     for cpu_idx in info.cpumask.iter_set() {
@@ -695,7 +704,7 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
     for cpu_idx in targets.iter().take(target_count) {
         send_shootdown_ipi_to_cpu(*cpu_idx);
     }
-    wait_for_acks(&targets[..target_count], initiator);
+    wait_for_acks(targets[..target_count].iter().copied(), initiator);
 }
 
 // =============================================================================
@@ -710,16 +719,16 @@ pub fn init() {
     klog_info!("TLB: Subsystem initialized");
 }
 
-fn online_cpu_targets(exclude: usize) -> ([usize; MAX_CPUS], usize) {
-    let mut targets = [0usize; MAX_CPUS];
-    let mut count = 0;
-    for cpu_idx in TLB_STATE.online_cpus.iter_set() {
-        if cpu_idx != exclude {
-            targets[count] = cpu_idx;
-            count += 1;
-        }
-    }
-    (targets, count)
+/// Iterate online CPUs excluding `exclude` (typically the initiator).
+///
+/// Returning an iterator — rather than a stack-resident `[usize; MAX_CPUS]`
+/// array — keeps TLB flush entry points off the 2 KiB-per-call frame
+/// hit that a full mask copy would incur.
+fn online_cpus(exclude: usize) -> impl Iterator<Item = usize> + 'static {
+    TLB_STATE
+        .online_cpus
+        .iter_set()
+        .filter(move |&cpu| cpu != exclude)
 }
 
 /// Flush a single page from all CPUs' TLBs.
@@ -735,8 +744,7 @@ pub fn flush_page(vaddr: VirtAddr) {
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::SinglePage, vaddr.as_u64(), 0, 0);
         send_shootdown_ipi();
-        let (targets, count) = online_cpu_targets(initiator);
-        wait_for_acks(&targets[..count], initiator);
+        wait_for_acks(online_cpus(initiator), initiator);
     }
 }
 
@@ -756,8 +764,7 @@ pub fn flush_range(start: VirtAddr, end: VirtAddr) {
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Range, start.as_u64(), end.as_u64(), 0);
         send_shootdown_ipi();
-        let (targets, count) = online_cpu_targets(initiator);
-        wait_for_acks(&targets[..count], initiator);
+        wait_for_acks(online_cpus(initiator), initiator);
     }
 }
 
@@ -777,8 +784,7 @@ pub fn flush_all() {
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, 0);
         send_shootdown_ipi();
-        let (targets, count) = online_cpu_targets(initiator);
-        wait_for_acks(&targets[..count], initiator);
+        wait_for_acks(online_cpus(initiator), initiator);
     }
 }
 
@@ -802,8 +808,7 @@ pub fn flush_asid(asid: u64) {
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, asid);
         send_shootdown_ipi();
-        let (targets, count) = online_cpu_targets(initiator);
-        wait_for_acks(&targets[..count], initiator);
+        wait_for_acks(online_cpus(initiator), initiator);
     }
 }
 

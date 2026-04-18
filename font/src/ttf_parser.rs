@@ -3,9 +3,7 @@
 //! Parses the subset of TTF tables needed for basic Latin text rendering:
 //! `head`, `maxp`, `cmap`, `hhea`, `hmtx`, `loca`, `glyf`.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 /// A parsed TrueType font backed by a borrowed byte slice.
 pub struct TtfFont<'a> {
@@ -49,13 +47,13 @@ pub struct OutlinePoint {
 /// A contour is a closed loop of outline points.
 #[derive(Clone, Debug)]
 pub struct Contour {
-    pub points: Vec<OutlinePoint>,
+    pub points: KVec<OutlinePoint>,
 }
 
 /// A complete glyph outline with metrics.
 #[derive(Clone, Debug)]
 pub struct GlyphOutline {
-    pub contours: Vec<Contour>,
+    pub contours: KVec<Contour>,
     pub x_min: i16,
     pub y_min: i16,
     pub x_max: i16,
@@ -340,7 +338,7 @@ impl<'a> TtfFont<'a> {
         let nc = num_contours as usize;
         if nc == 0 {
             return Some(GlyphOutline {
-                contours: Vec::new(),
+                contours: KVec::new(),
                 x_min,
                 y_min,
                 x_max,
@@ -349,9 +347,9 @@ impl<'a> TtfFont<'a> {
         }
 
         // Read end-of-contour indices
-        let mut end_pts = Vec::with_capacity(nc);
+        let mut end_pts: KVec<u16> = KVec::with_capacity(nc).ok()?;
         for i in 0..nc {
-            end_pts.push(read_u16(data, glyph_off + 10 + i * 2)?);
+            end_pts.push(read_u16(data, glyph_off + 10 + i * 2)?).ok()?;
         }
 
         let last_point = *end_pts.last()? as usize;
@@ -363,18 +361,18 @@ impl<'a> TtfFont<'a> {
         let flags_off = instr_len_off + 2 + instr_len;
 
         // Read flags
-        let mut flags = Vec::with_capacity(num_points);
+        let mut flags: KVec<u8> = KVec::with_capacity(num_points).ok()?;
         let mut pos = flags_off;
         while flags.len() < num_points {
             let flag = read_u8(data, pos)?;
             pos += 1;
-            flags.push(flag);
+            flags.push(flag).ok()?;
             if flag & 0x08 != 0 {
                 // Repeat flag
                 let repeat = read_u8(data, pos)? as usize;
                 pos += 1;
                 for _ in 0..repeat {
-                    flags.push(flag);
+                    flags.push(flag).ok()?;
                     if flags.len() >= num_points {
                         break;
                     }
@@ -383,7 +381,7 @@ impl<'a> TtfFont<'a> {
         }
 
         // Read x coordinates
-        let mut x_coords = Vec::with_capacity(num_points);
+        let mut x_coords: KVec<i16> = KVec::with_capacity(num_points).ok()?;
         let mut x: i16 = 0;
         for &flag in &flags[..num_points] {
             let x_short = flag & 0x02 != 0;
@@ -399,11 +397,11 @@ impl<'a> TtfFont<'a> {
                 x += dx;
             }
             // else: x_same_or_positive && !x_short => same as previous
-            x_coords.push(x);
+            x_coords.push(x).ok()?;
         }
 
         // Read y coordinates
-        let mut y_coords = Vec::with_capacity(num_points);
+        let mut y_coords: KVec<i16> = KVec::with_capacity(num_points).ok()?;
         let mut y: i16 = 0;
         for &flag in &flags[..num_points] {
             let y_short = flag & 0x04 != 0;
@@ -418,26 +416,28 @@ impl<'a> TtfFont<'a> {
                 pos += 2;
                 y += dy;
             }
-            y_coords.push(y);
+            y_coords.push(y).ok()?;
         }
 
         // Build contours
-        let mut contours = Vec::with_capacity(nc);
+        let mut contours: KVec<Contour> = KVec::with_capacity(nc).ok()?;
         let mut start = 0usize;
         for &end in &end_pts {
             let end = end as usize;
             if end >= num_points {
                 break;
             }
-            let mut points = Vec::with_capacity(end - start + 1);
+            let mut points: KVec<OutlinePoint> = KVec::with_capacity(end - start + 1).ok()?;
             for i in start..=end {
-                points.push(OutlinePoint {
-                    x: x_coords[i],
-                    y: y_coords[i],
-                    on_curve: flags[i] & 0x01 != 0,
-                });
+                points
+                    .push(OutlinePoint {
+                        x: x_coords[i],
+                        y: y_coords[i],
+                        on_curve: flags[i] & 0x01 != 0,
+                    })
+                    .ok()?;
             }
-            contours.push(Contour { points });
+            contours.push(Contour { points }).ok()?;
             start = end + 1;
         }
 
@@ -461,7 +461,7 @@ impl<'a> TtfFont<'a> {
     ) -> Option<GlyphOutline> {
         let data = self.data;
         let mut pos = glyph_off + 10; // skip header
-        let mut all_contours = Vec::new();
+        let mut all_contours: KVec<Contour> = KVec::new();
 
         loop {
             let flags = read_u16(data, pos)?;
@@ -497,18 +497,18 @@ impl<'a> TtfFont<'a> {
             // Recursively get the component outline and translate
             if let Some(component) = self.glyph_outline(component_glyph_id) {
                 for contour in component.contours {
-                    let translated_points = contour
-                        .points
-                        .iter()
-                        .map(|p| OutlinePoint {
+                    let translated_points: KVec<OutlinePoint> =
+                        KVec::from_iter_fallible(contour.points.iter().map(|p| OutlinePoint {
                             x: (p.x as i32 + dx) as i16,
                             y: (p.y as i32 + dy) as i16,
                             on_curve: p.on_curve,
+                        }))
+                        .ok()?;
+                    all_contours
+                        .push(Contour {
+                            points: translated_points,
                         })
-                        .collect();
-                    all_contours.push(Contour {
-                        points: translated_points,
-                    });
+                        .ok()?;
                 }
             }
 

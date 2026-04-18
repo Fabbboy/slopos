@@ -7,8 +7,6 @@
 //! - 3.T4: Prefix-length bucketing: /24 beats /16 for matching address
 //! - 3.T5: Metric tie-breaking: lower metric wins within same prefix length
 
-extern crate alloc;
-
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 

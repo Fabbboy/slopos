@@ -3,10 +3,7 @@
 //! Contains coverage bitmaps for ASCII 32-126 at a fixed cell size.
 //! Each pixel has a coverage value 0-255 for anti-aliased rendering.
 
-extern crate alloc;
-
-use alloc::vec;
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
@@ -24,9 +21,9 @@ pub struct GlyphAtlas {
     cell_w: u16,
     cell_h: u16,
     /// Flat coverage data: 95 glyphs × cell_w × cell_h bytes.
-    data: Vec<u8>,
+    data: KVec<u8>,
     /// Replacement glyph for non-ASCII codepoints.
-    replacement: Vec<u8>,
+    replacement: KVec<u8>,
     /// Where the font data came from.
     source: FontSource,
 }
@@ -66,7 +63,7 @@ impl GlyphAtlas {
         let cell_w = max_advance;
 
         let stride = cell_w as usize * cell_h as usize;
-        let mut data = vec![0u8; ASCII_COUNT * stride];
+        let mut data = KVec::<u8>::zeroed(ASCII_COUNT * stride).ok()?;
 
         for cp in ASCII_FIRST..=ASCII_LAST {
             let idx = (cp - ASCII_FIRST) as usize;
@@ -100,7 +97,7 @@ impl GlyphAtlas {
         }
 
         // Replacement glyph: filled diamond.
-        let mut replacement = vec![0u8; stride];
+        let mut replacement = KVec::<u8>::zeroed(stride).ok()?;
         let mx = cell_w as usize / 2;
         let my = cell_h as usize / 2;
         let rx = (cell_w as usize / 3).max(2);
@@ -134,8 +131,8 @@ impl GlyphAtlas {
     pub fn from_raw_coverage(
         cell_w: u16,
         cell_h: u16,
-        coverage: Vec<u8>,
-        replacement: Vec<u8>,
+        coverage: KVec<u8>,
+        replacement: KVec<u8>,
         source: FontSource,
     ) -> Option<Self> {
         if cell_w == 0 || cell_h == 0 {
@@ -491,8 +488,8 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 #[cfg(feature = "kernel")]
 mod global_atlas {
     use super::*;
-    use alloc::boxed::Box;
     use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+    use slopos_alloc::KBox;
     use slopos_sync::RcuReadGuard;
 
     /// Self-owning RCU-protected borrow of the global glyph atlas.
@@ -559,11 +556,11 @@ mod global_atlas {
         if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
             let old = replace_global(atlas);
             if !old.is_null() {
-                // SAFETY: old was allocated via Box::into_raw in a previous
+                // SAFETY: old was allocated via KBox::into_raw in a previous
                 // replace_global call.  During early boot no concurrent
                 // readers exist, so immediate free is safe.
                 unsafe {
-                    drop(Box::from_raw(old));
+                    drop(KBox::from_raw(old));
                 }
             }
             true
@@ -593,7 +590,7 @@ mod global_atlas {
                         if !old.is_null() {
                             // SAFETY: see init_global — early boot, no readers.
                             unsafe {
-                                drop(Box::from_raw(old));
+                                drop(KBox::from_raw(old));
                             }
                         }
                         true
@@ -614,7 +611,10 @@ mod global_atlas {
     /// pointer may be freed immediately since no concurrent readers are
     /// possible.
     pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
-        let new_ptr = Box::into_raw(Box::new(new_atlas));
+        let new_ptr = match KBox::try_new(new_atlas) {
+            Ok(b) => KBox::into_raw(b),
+            Err(_) => return core::ptr::null_mut(),
+        };
         let old = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
         ATLAS_GENERATION.fetch_add(1, Ordering::Release);
         old
@@ -654,8 +654,8 @@ mod tests {
         let cell_w = 8u16;
         let cell_h = 16u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage = alloc::vec![7u8; 95 * stride];
-        let replacement = alloc::vec![9u8; stride];
+        let coverage = slopos_alloc::KVec::<u8>::filled(7u8, 95 * stride).expect("test alloc");
+        let replacement = slopos_alloc::KVec::<u8>::filled(9u8, stride).expect("test alloc");
 
         let atlas = GlyphAtlas::from_raw_coverage(
             cell_w,
@@ -678,8 +678,8 @@ mod tests {
         let cell_w = 8u16;
         let cell_h = 16u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage = alloc::vec![0u8; 95 * stride - 1];
-        let replacement = alloc::vec![0u8; stride];
+        let coverage = slopos_alloc::KVec::<u8>::zeroed(95 * stride - 1).expect("test alloc");
+        let replacement = slopos_alloc::KVec::<u8>::zeroed(stride).expect("test alloc");
 
         assert!(
             GlyphAtlas::from_raw_coverage(

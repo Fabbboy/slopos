@@ -1,14 +1,13 @@
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicU16, Ordering};
+
+use slopos_alloc::KVec;
+use slopos_utils::{Bitmap, words_for};
 
 use crate::packetbuf::PacketBuf;
 use crate::tcp;
 use crate::tcp::listener as tcp_listener;
 use crate::types::{Ipv4Addr, NetError, Port, SockAddr};
-use slopos_utils::{Bitmap, words_for};
 
 /// Internal storage for protocol-specific socket state.
 pub enum SocketInner {
@@ -166,7 +165,7 @@ impl Default for SocketOptions {
 /// Fixed-capacity queue with ring-buffer semantics.
 /// Push never overwrites; it returns `false` when full.
 pub struct BoundedQueue<T> {
-    slots: Vec<Option<T>>,
+    slots: KVec<Option<T>>,
     head: usize,
     len: usize,
 }
@@ -174,7 +173,7 @@ pub struct BoundedQueue<T> {
 impl<T> BoundedQueue<T> {
     /// Create a queue with `capacity` slots.
     pub fn new(capacity: usize) -> Self {
-        let slots = core::iter::repeat_with(|| None).take(capacity).collect();
+        let slots: KVec<Option<T>> = core::iter::repeat_with(|| None).take(capacity).collect();
         Self {
             slots,
             head: 0,
@@ -248,14 +247,15 @@ impl<T> BoundedQueue<T> {
     /// If `new_capacity` is smaller than current length, oldest items are kept
     /// until capacity is reached and the rest are dropped.
     pub fn resize(&mut self, new_capacity: usize) {
-        let mut drained = Vec::with_capacity(self.len);
+        let mut drained: KVec<T> =
+            KVec::with_capacity(self.len).expect("BoundedQueue::resize: alloc");
         while let Some(item) = self.pop() {
-            drained.push(item);
+            let _ = drained.push(item);
         }
 
         self.slots = core::iter::repeat_with(|| None)
             .take(new_capacity)
-            .collect::<Vec<Option<T>>>();
+            .collect::<KVec<Option<T>>>();
         self.head = 0;
         self.len = 0;
 
@@ -360,8 +360,8 @@ impl Socket {
 
 /// Slab-like socket table with freelist allocation.
 pub struct SlabSocketTable {
-    slots: Vec<Option<Socket>>,
-    freelist: Vec<usize>,
+    slots: KVec<Option<Socket>>,
+    freelist: KVec<usize>,
     max_capacity: usize,
 }
 
@@ -377,8 +377,8 @@ impl SlabSocketTable {
     /// [`init_if_needed`](Self::init_if_needed).
     pub const fn empty() -> Self {
         Self {
-            slots: Vec::new(),
-            freelist: Vec::new(),
+            slots: KVec::new(),
+            freelist: KVec::new(),
             max_capacity: 0,
         }
     }
@@ -398,9 +398,8 @@ impl SlabSocketTable {
     /// Freelist is populated in reverse so index 0 is allocated first.
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         let init_cap = core::cmp::min(initial_capacity, max_capacity);
-        let mut slots = core::iter::repeat_with(|| None)
-            .take(init_cap)
-            .collect::<Vec<Option<Socket>>>();
+        let mut slots: KVec<Option<Socket>> =
+            core::iter::repeat_with(|| None).take(init_cap).collect();
         if slots.len() != init_cap {
             slots.clear();
         }
@@ -447,7 +446,7 @@ impl SlabSocketTable {
     pub fn free(&mut self, idx: usize) {
         if let Some(slot) = self.slots.get_mut(idx) {
             if slot.take().is_some() {
-                self.freelist.push(idx);
+                let _ = self.freelist.push(idx);
                 SOCKET_ALLOC.lock().free(idx);
             }
         }
@@ -487,13 +486,10 @@ impl SlabSocketTable {
         }
 
         let add = new_cap - current;
-        self.slots.extend(
-            core::iter::repeat_with(|| None)
-                .take(add)
-                .collect::<Vec<_>>(),
-        );
+        self.slots
+            .extend(core::iter::repeat_with(|| None).take(add));
         for idx in (current..new_cap).rev() {
-            self.freelist.push(idx);
+            let _ = self.freelist.push(idx);
         }
         SOCKET_ALLOC.lock().set_capacity(new_cap);
     }
@@ -724,6 +720,7 @@ fn map_tcp_err(err: TcpError) -> i32 {
         TcpError::ConnectionReset => errno_i32(ERRNO_ECONNRESET),
         TcpError::TimedOut => errno_i32(ERRNO_EAGAIN),
         TcpError::InvalidSegment => errno_i32(ERRNO_EINVAL),
+        TcpError::OutOfMemory => errno_i32(ERRNO_ENOMEM),
     }
 }
 
@@ -774,8 +771,10 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     let padded_opt_len = (opt_len + 3) & !3;
     let tcp_len = TCP_HEADER_LEN + padded_opt_len + payload.len();
 
-    let mut tcp_segment = Vec::with_capacity(tcp_len);
-    tcp_segment.resize(tcp_len, 0u8);
+    let mut tcp_segment = KVec::<u8>::zeroed(tcp_len).unwrap_or_else(|_| KVec::new());
+    if tcp_segment.len() != tcp_len {
+        return map_net_err(NetError::NoBufferSpace);
+    }
     let tcp_len = match tcp::write_tcp_segment(seg, payload, tcp_segment.as_mut_slice()) {
         Some(n) => n,
         None => return errno_i32(ERRNO_EINVAL),
@@ -1895,10 +1894,16 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         total_wrote += wrote;
     }
 
-    let mut tx_payload = [0u8; TCP_TX_MAX];
+    // Heap-allocate the per-segment scratch so the 1460 B buffer
+    // doesn't pad this function's frame above the stack-sizes gate.
+    let mut tx_payload_box = match slopos_alloc::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
+        Ok(b) => b,
+        Err(_) => return errno_i32(ERRNO_ENOMEM) as i64,
+    };
+    let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
     let now_ms = slopos_utils::clock::uptime_ms();
     loop {
-        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
+        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
             break;
         };
         let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
@@ -2699,10 +2704,14 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
         None => return errno_i32(ERRNO_ENOTCONN),
     };
 
-    let mut tx_payload = [0u8; TCP_TX_MAX];
+    let mut tx_payload_box = match slopos_alloc::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
+        Ok(b) => b,
+        Err(_) => return errno_i32(ERRNO_ENOMEM),
+    };
+    let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
     let now_ms = slopos_utils::clock::uptime_ms();
     loop {
-        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
+        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
             break;
         };
         let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);

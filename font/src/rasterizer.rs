@@ -6,10 +6,7 @@
 //! stb_truetype, and ab-glyph — boundary pixels get smooth sub-pixel
 //! coverage instead of binary in/out.
 
-extern crate alloc;
-
-use alloc::vec;
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use crate::outline::Edge;
 
@@ -28,7 +25,7 @@ pub struct RasterizedGlyph {
     pub advance: u16,
     /// Coverage values, row-major, `width * height` bytes.
     /// Each byte is 0 (transparent) to 255 (fully covered).
-    pub coverage: Vec<u8>,
+    pub coverage: KVec<u8>,
 }
 
 /// Number of vertical sub-scanlines per pixel row.
@@ -39,19 +36,19 @@ const SUPERSAMPLE: usize = 8;
 /// Uses analytical horizontal coverage (the fractional x-intercept
 /// determines how much of the boundary pixel is covered) combined with
 /// vertical supersampling for diagonal edges.
-pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<u8> {
+pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
     if width == 0 || height == 0 || edges.is_empty() {
-        return vec![0u8; width * height];
+        return KVec::<u8>::zeroed(width * height).expect("rasterize: alloc");
     }
 
     let sub_height = height * SUPERSAMPLE;
     let inv_ss = 1.0f32 / SUPERSAMPLE as f32;
 
     // Per-pixel area accumulator (0.0 = uncovered, ±1.0 = fully covered).
-    let mut area = vec![0.0f32; width * height];
+    let mut area = KVec::<f32>::zeroed(width * height).expect("rasterize: alloc");
 
     // Per-scanline winding delta buffer (reused each sub-scanline).
-    let mut scanline_fill = vec![0.0f32; width + 1];
+    let mut scanline_fill = KVec::<f32>::zeroed(width + 1).expect("rasterize: alloc");
 
     for sub_y in 0..sub_height {
         // Sample at the centre of each sub-scanline.
@@ -121,7 +118,7 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<u8> {
     }
 
     // Convert accumulated area to 0-255 coverage.
-    let mut coverage = vec![0u8; width * height];
+    let mut coverage = KVec::<u8>::zeroed(width * height).expect("rasterize: alloc");
     for (idx, &a) in area.iter().enumerate() {
         let cov = libm::fabsf(a);
         coverage[idx] = if cov >= 1.0 {

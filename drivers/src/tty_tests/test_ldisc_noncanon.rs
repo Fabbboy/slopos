@@ -432,7 +432,8 @@ pub fn test_veol_and_eof_coexist() -> TestResult {
 
     // EOF-flushed line (Ctrl+D).
     ld.input_char(b'b');
-    ld.input_char(ld.termios().cc(CcIndex::Veof));
+    let veof = ld.termios().cc(CcIndex::Veof);
+    ld.input_char(veof);
 
     // Read VEOL line first.
     let mut buf = [0u8; 64];

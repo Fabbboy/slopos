@@ -1,5 +1,4 @@
 #![no_std]
-extern crate alloc;
 
 pub const MAX_PATH_LEN: usize = 256;
 pub const MAX_NAME_LEN: usize = 32;
@@ -15,6 +14,7 @@ pub mod ramfs;
 pub mod vfs;
 pub mod vfs_file_ops;
 
+#[cfg(feature = "builtin-tests")]
 pub mod tests;
 
 #[cfg(test)]

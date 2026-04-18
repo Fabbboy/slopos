@@ -59,18 +59,32 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
     }
 
     // Drain into a kernel scratch buffer, then copy to userspace.
+    // Heap-allocate so the ~2 KiB scratch never lands on the kernel
+    // stack — `InputEvent` is `#[repr(C)]` with
+    // `InputEventType::KeyPress = 0`, so the all-zero pattern is a
+    // valid default `InputEvent` (matching this syscall's prior
+    // `const { … KeyPress … }` initialiser).
+    //
+    // SAFETY of the Zeroable impl below: `InputEvent` is `#[repr(C)]`;
+    // `InputEventType` is `#[repr(u8)]` with discriminant 0 for
+    // `KeyPress` (the `#[default]` variant). `_padding`, `timestamp_ms`,
+    // and `data` (two `u32`s) are all zero-valid primitives.
+    #[allow(dead_code)]
+    struct InputEventScratch(InputEvent);
+    unsafe impl slopos_alloc::Zeroable for InputEventScratch {}
+
     const MAX_BATCH: usize = 64;
     let batch = max_count.min(MAX_BATCH);
-    let mut scratch: [InputEvent; MAX_BATCH] = [const {
-        InputEvent {
-            event_type: slopos_abi::input::InputEventType::KeyPress,
-            _padding: [0; 3],
-            timestamp_ms: 0,
-            data: slopos_abi::input::InputEventData { data0: 0, data1: 0 },
-        }
-    }; MAX_BATCH];
+    let mut scratch = match slopos_alloc::KVec::<InputEventScratch>::zeroed(batch) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
 
-    let count = input::drain_batch(task_id, scratch.as_mut_ptr(), batch);
+    let count = input::drain_batch(
+        task_id,
+        scratch.as_mut_ptr() as *mut InputEvent,
+        batch,
+    );
     if count > 0 {
         let byte_len = count * core::mem::size_of::<InputEvent>();
         let user_out = try_or_err!(ctx, UserBytes::try_new(args.arg0, byte_len));
@@ -94,7 +108,10 @@ define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {
 
     let copy_len = src_len.min(slopos_abi::CLIPBOARD_MAX_SIZE);
     let user_bytes = try_or_err!(ctx, UserBytes::try_new(src_ptr, copy_len));
-    let mut buf = [0u8; slopos_abi::CLIPBOARD_MAX_SIZE];
+    let mut buf = match slopos_alloc::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
     try_or_err!(ctx, copy_bytes_from_user(user_bytes, &mut buf[..copy_len]));
     let stored = input::clipboard_copy(&buf[..copy_len]);
     ctx.ok(stored as u64)
@@ -109,7 +126,10 @@ define_syscall!(syscall_clipboard_paste(ctx, args) requires(let task_id) {
         return ctx.ok(0);
     }
 
-    let mut buf = [0u8; slopos_abi::CLIPBOARD_MAX_SIZE];
+    let mut buf = match slopos_alloc::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+    };
     let pasted = input::clipboard_paste(&mut buf);
     if pasted == 0 {
         return ctx.ok(0);

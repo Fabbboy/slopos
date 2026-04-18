@@ -651,12 +651,21 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
 
     let mut last_error = DnsResolveError::Timeout;
 
+    // Allocate both buffers once, reuse across retries. 512 + DNS_MAX_RESPONSE
+    // on the stack would push this function past the stack-safety gate.
+    let mut query_buf =
+        slopos_alloc::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
+    let mut resp_buf = slopos_alloc::KVec::<u8>::zeroed(DNS_MAX_RESPONSE)
+        .map_err(|_| DnsResolveError::NoDnsServer)?;
+
     for attempt in 0..DNS_MAX_RETRIES {
         let id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
 
         // Build query — hostname encoding failure is permanent, no retry.
-        let mut query_buf = [0u8; 512];
-        let query_len = dns_build_query(id, hostname, DnsType::A, &mut query_buf)
+        // Zero between attempts so stale bytes from the prior iteration
+        // don't leak into a new query.
+        query_buf.as_mut().fill(0);
+        let query_len = dns_build_query(id, hostname, DnsType::A, query_buf.as_mut())
             .ok_or(DnsResolveError::InvalidHostname)?;
 
         // Use an ephemeral source port
@@ -696,9 +705,9 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
         }
 
         // Read response
-        let mut resp_buf = [0u8; DNS_MAX_RESPONSE];
+        resp_buf.as_mut().fill(0);
         let resp_len = crate::net_driver_service::net_driver()
-            .map(|d| (d.dns_rx_read)(&mut resp_buf))
+            .map(|d| (d.dns_rx_read)(resp_buf.as_mut()))
             .unwrap_or(0);
         if resp_len == 0 {
             klog_debug!("dns: empty response (attempt {})", attempt);

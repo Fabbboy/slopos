@@ -698,21 +698,16 @@ fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
     }
 }
 
-fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8) {
-    let vendor = pci_read_vendor_id(bus, device, function);
-    if vendor == 0xFFFF {
-        return;
-    }
-
-    let device_id = pci_config_read16(bus, device, function, PCI_DEVICE_ID_OFFSET);
-    let class = pci_config_read8(bus, device, function, PCI_CLASS_CODE_OFFSET);
-    let subclass = pci_config_read8(bus, device, function, PCI_SUBCLASS_OFFSET);
-    let prog_if = pci_config_read8(bus, device, function, PCI_PROG_IF_OFFSET);
-    let revision = pci_config_read8(bus, device, function, PCI_REVISION_ID_OFFSET);
-    let header_type = pci_read_header_type(bus, device, function) & 0x7F;
-    let interrupt_line = pci_config_read8(bus, device, function, PCI_INTERRUPT_LINE_OFFSET);
-    let interrupt_pin = pci_config_read8(bus, device, function, PCI_INTERRUPT_PIN_OFFSET);
-
+/// Enumerate BARs for a non-bridge function and return the `[PciBarInfo;
+/// 6]` array plus the populated-entry count. `#[inline(never)]` so the
+/// 144 B BAR array lives in this helper's frame, not the caller's.
+#[inline(never)]
+fn pci_enumerate_bars(
+    bus: u8,
+    device: u8,
+    function: u8,
+    header_type: u8,
+) -> ([PciBarInfo; PCI_MAX_BARS], u8) {
     let mut bars = [PciBarInfo::zeroed(); PCI_MAX_BARS];
     let mut bar_count = 0u8;
     if header_type == 0 {
@@ -729,11 +724,14 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
             bar_idx += 1;
         }
     }
+    (bars, bar_count)
+}
 
-    // ----- Capability list discovery (single walk) -----
+/// Walk the capability list once, extracting MSI and MSI-X offsets.
+#[inline(never)]
+fn pci_find_msi_caps(bus: u8, device: u8, function: u8) -> (Option<u16>, Option<u16>) {
     let mut msi_cap_offset: Option<u16> = None;
     let mut msix_cap_offset: Option<u16> = None;
-
     for cap in PciCapabilityIter::new(bus, device, function) {
         match cap.id {
             PCI_CAP_ID_MSI if msi_cap_offset.is_none() => msi_cap_offset = Some(cap.offset),
@@ -741,6 +739,87 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
             _ => {}
         }
     }
+    (msi_cap_offset, msix_cap_offset)
+}
+
+/// Log summary + capability + BAR lines for one device. `#[inline(never)]`
+/// so each `klog_info!`'s `format_args!` scratch stays in this helper's
+/// frame, keeping `pci_probe_device` below the 1 KiB stack gate.
+#[inline(never)]
+fn pci_log_device_summary(info: &PciDeviceInfo) {
+    klog_info!(
+        "PCI: [Bus {} Dev {} Func {}] VID=0x{:04x} DID=0x{:04x} Class=0x{:02x}:{:02x} ProgIF=0x{:02x} Rev=0x{:02x}",
+        info.bus,
+        info.device,
+        info.function,
+        info.vendor_id,
+        info.device_id,
+        info.class_code,
+        info.subclass,
+        info.prog_if,
+        info.revision
+    );
+
+    for cap in info.capabilities() {
+        klog_info!(
+            "    CAP: 0x{:02x} ({}) at offset 0x{:02x}",
+            cap.id,
+            pci_cap_id_name(cap.id),
+            cap.offset
+        );
+    }
+
+    for ext_cap in info.ext_capabilities() {
+        klog_info!(
+            "    EXT_CAP: 0x{:04x} ({}) v{} at offset 0x{:03x}",
+            ext_cap.id,
+            pci_ext_cap_id_name(ext_cap.id),
+            ext_cap.version,
+            ext_cap.offset
+        );
+    }
+
+    for (i, bar) in info.bars.iter().enumerate() {
+        if bar.base != 0 || bar.size != 0 {
+            if bar.is_io != 0 {
+                klog_info!("    BAR{}: IO base=0x{:x} size={}", i, bar.base, bar.size);
+            } else {
+                let pf = if bar.prefetchable != 0 {
+                    "prefetch"
+                } else {
+                    "non-prefetch"
+                };
+                let bits = if bar.is_64bit != 0 { "64bit" } else { "32bit" };
+                klog_info!(
+                    "    BAR{}: MMIO base=0x{:x} size=0x{:x} {} {}",
+                    i,
+                    bar.base,
+                    bar.size,
+                    pf,
+                    bits
+                );
+            }
+        }
+    }
+}
+
+fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8) {
+    let vendor = pci_read_vendor_id(bus, device, function);
+    if vendor == 0xFFFF {
+        return;
+    }
+
+    let device_id = pci_config_read16(bus, device, function, PCI_DEVICE_ID_OFFSET);
+    let class = pci_config_read8(bus, device, function, PCI_CLASS_CODE_OFFSET);
+    let subclass = pci_config_read8(bus, device, function, PCI_SUBCLASS_OFFSET);
+    let prog_if = pci_config_read8(bus, device, function, PCI_PROG_IF_OFFSET);
+    let revision = pci_config_read8(bus, device, function, PCI_REVISION_ID_OFFSET);
+    let header_type = pci_read_header_type(bus, device, function) & 0x7F;
+    let interrupt_line = pci_config_read8(bus, device, function, PCI_INTERRUPT_LINE_OFFSET);
+    let interrupt_pin = pci_config_read8(bus, device, function, PCI_INTERRUPT_PIN_OFFSET);
+
+    let (bars, bar_count) = pci_enumerate_bars(bus, device, function, header_type);
+    let (msi_cap_offset, msix_cap_offset) = pci_find_msi_caps(bus, device, function);
 
     let info = PciDeviceInfo {
         bus,
@@ -766,62 +845,7 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
         state.device_count += 1;
     }
 
-    klog_info!(
-        "PCI: [Bus {} Dev {} Func {}] VID=0x{:04x} DID=0x{:04x} Class=0x{:02x}:{:02x} ProgIF=0x{:02x} Rev=0x{:02x}",
-        bus,
-        device,
-        function,
-        vendor,
-        device_id,
-        class,
-        subclass,
-        prog_if,
-        revision
-    );
-
-    // Log capabilities (if any)
-    for cap in info.capabilities() {
-        klog_info!(
-            "    CAP: 0x{:02x} ({}) at offset 0x{:02x}",
-            cap.id,
-            pci_cap_id_name(cap.id),
-            cap.offset
-        );
-    }
-
-    // Log extended capabilities (ECAM-only, offset 0x100+)
-    for ext_cap in info.ext_capabilities() {
-        klog_info!(
-            "    EXT_CAP: 0x{:04x} ({}) v{} at offset 0x{:03x}",
-            ext_cap.id,
-            pci_ext_cap_id_name(ext_cap.id),
-            ext_cap.version,
-            ext_cap.offset
-        );
-    }
-
-    for (i, bar) in bars.iter().enumerate() {
-        if bar.base != 0 || bar.size != 0 {
-            if bar.is_io != 0 {
-                klog_info!("    BAR{}: IO base=0x{:x} size={}", i, bar.base, bar.size);
-            } else {
-                let pf = if bar.prefetchable != 0 {
-                    "prefetch"
-                } else {
-                    "non-prefetch"
-                };
-                let bits = if bar.is_64bit != 0 { "64bit" } else { "32bit" };
-                klog_info!(
-                    "    BAR{}: MMIO base=0x{:x} size=0x{:x} {} {}",
-                    i,
-                    bar.base,
-                    bar.size,
-                    pf,
-                    bits
-                );
-            }
-        }
-    }
+    pci_log_device_summary(&info);
 
     if class == 0x03 && subclass == 0x00 {
         for bar in &bars {

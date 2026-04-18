@@ -12,7 +12,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::tcp::buffer::TcpRecvState;
+use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpRecvState};
 use crate::tcp::reasm::Assembler;
 
 // -----------------------------------------------------------------------------
@@ -20,23 +20,23 @@ use crate::tcp::reasm::Assembler;
 // -----------------------------------------------------------------------------
 
 fn fresh_recv() -> TcpRecvState {
-    TcpRecvState::new()
+    TcpRecvState::new(TCP_BUFFER_SIZE).expect("alloc")
 }
 
 fn fresh_asm() -> Assembler {
     Assembler::new()
 }
 
-/// Drain the receive buffer into a `Vec`.
-fn drain_to_vec(recv: &mut TcpRecvState) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::with_capacity(recv.available());
+/// Drain the receive buffer into a `KVec`.
+fn drain_to_vec(recv: &mut TcpRecvState) -> slopos_alloc::KVec<u8> {
+    let mut out = slopos_alloc::KVec::<u8>::with_capacity(recv.available()).expect("test alloc");
     let mut buf = [0u8; 512];
     loop {
         let n = recv.dequeue(&mut buf);
         if n == 0 {
             break;
         }
-        out.extend_from_slice(&buf[..n]);
+        out.extend_from_slice(&buf[..n]).expect("test alloc");
     }
     out
 }

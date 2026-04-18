@@ -378,6 +378,110 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
     TestResult::Pass
 }
 
+/// Test: `KernelStack::allocate` returns a handle whose `top > base`
+/// and is page-aligned.  Verifies the VA region carving + guard-page
+/// layout are correct.
+pub fn test_kstack_basic_alloc() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+
+    let stack = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST: KernelStack::allocate failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    let base = stack.base().as_u64();
+    let top = stack.top().as_u64();
+
+    if top <= base {
+        klog_info!("SCHED_TEST: kstack top 0x{:x} <= base 0x{:x}", top, base);
+        return TestResult::Fail;
+    }
+    if top - base != TASK_STACK_SIZE {
+        klog_info!(
+            "SCHED_TEST: kstack size mismatch: top-base=0x{:x} want 0x{:x}",
+            top - base,
+            TASK_STACK_SIZE
+        );
+        return TestResult::Fail;
+    }
+    if (base & 0xFFF) != 0 {
+        klog_info!("SCHED_TEST: kstack base 0x{:x} not page-aligned", base);
+        return TestResult::Fail;
+    }
+
+    drop(stack);
+    TestResult::Pass
+}
+
+/// Test: after dropping a `KernelStack`, the slot is returned to the
+/// allocator and can be reused for a subsequent allocation.
+///
+/// Confirms that task stack capacity is **independent of kernel binary
+/// size**, because the slot allocator tracks availability in its own
+/// bitmap rather than reading from (kernel-image-reserved) physical
+/// pages.
+pub fn test_kstack_slot_reuse() -> TestResult {
+    use super::stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+
+    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST: first alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let top1 = s1.top();
+    drop(s1);
+
+    let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST: second alloc after free failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    if s2.top().as_u64() != top1.as_u64() {
+        klog_info!(
+            "SCHED_TEST: kstack slot not reused: top1=0x{:x} top2=0x{:x}",
+            top1.as_u64(),
+            s2.top().as_u64()
+        );
+        return TestResult::Fail;
+    }
+
+    drop(s2);
+    TestResult::Pass
+}
+
+/// Test: invalid sizes are rejected without touching global state.
+pub fn test_kstack_rejects_invalid_size() -> TestResult {
+    use super::stack::KernelStack;
+
+    // Zero size.
+    if KernelStack::allocate(0).is_ok() {
+        klog_info!("SCHED_TEST: zero-size alloc unexpectedly succeeded");
+        return TestResult::Fail;
+    }
+    // Not a multiple of page size.
+    if KernelStack::allocate(4097).is_ok() {
+        klog_info!("SCHED_TEST: unaligned alloc unexpectedly succeeded");
+        return TestResult::Fail;
+    }
+    // Bigger than the slot stride (64 KB minus guard).
+    if KernelStack::allocate(64 * 1024).is_ok() {
+        klog_info!("SCHED_TEST: oversized alloc unexpectedly succeeded");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 // =============================================================================
 // SCHEDULER QUEUE TESTS
 // Test priority queue behavior including edge cases
@@ -2159,6 +2263,9 @@ slopos_testing::define_test_suite!(
         test_create_max_tasks,
         test_create_over_max_tasks,
         test_rapid_create_destroy_cycle,
+        test_kstack_basic_alloc,
+        test_kstack_slot_reuse,
+        test_kstack_rejects_invalid_size,
         test_schedule_to_empty_queue,
         test_schedule_duplicate_task,
         test_schedule_null_task,

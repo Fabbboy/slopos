@@ -4,11 +4,7 @@
 //! - 1.T9:  Ingress pipeline correctly dispatches IPv4 frames
 //! - 1.T10: Ingress pipeline drops malformed / unknown frames
 
-extern crate alloc;
-
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-
+use slopos_alloc::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::pass;
@@ -57,8 +53,8 @@ impl NetDevice for MockNetDevice {
         Ok(())
     }
 
-    fn poll_rx(&self, _budget: usize, _pool: &'static PacketPool) -> Vec<PacketBuf> {
-        Vec::new()
+    fn poll_rx(&self, _budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
+        KVec::new()
     }
 
     fn set_up(&self) {
@@ -95,18 +91,20 @@ fn ensure_pool_init() {
 /// Create a test device handle with a given MAC address.
 /// The registry is leaked so the device allocation lives for the test.
 fn make_test_handle(mac: MacAddr) -> DeviceHandle {
-    let registry = Box::leak(Box::new(NetDeviceRegistry::new()));
-    let dev = Box::new(MockNetDevice::new(mac, 1500));
+    let registry = KBox::leak(KBox::try_new(NetDeviceRegistry::new()).expect("test alloc"));
+    let dev = KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     registry.register(dev).expect("register must succeed")
 }
 
 /// Build an Ethernet frame with the given parameters.
-fn build_frame(dst_mac: [u8; 6], src_mac: [u8; 6], ethertype: u16, payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(ETH_HEADER_LEN + payload.len());
-    frame.extend_from_slice(&dst_mac);
-    frame.extend_from_slice(&src_mac);
-    frame.extend_from_slice(&ethertype.to_be_bytes());
-    frame.extend_from_slice(payload);
+fn build_frame(dst_mac: [u8; 6], src_mac: [u8; 6], ethertype: u16, payload: &[u8]) -> KVec<u8> {
+    let mut frame = KVec::<u8>::with_capacity(ETH_HEADER_LEN + payload.len()).expect("test alloc");
+    frame.extend_from_slice(&dst_mac).expect("test alloc");
+    frame.extend_from_slice(&src_mac).expect("test alloc");
+    frame
+        .extend_from_slice(&ethertype.to_be_bytes())
+        .expect("test alloc");
+    frame.extend_from_slice(payload).expect("test alloc");
     frame
 }
 
@@ -211,9 +209,9 @@ pub fn test_ingress_accepts_broadcast_mac() -> TestResult {
     // Build a frame with broadcast MAC and IPv4 ethertype.
     let broadcast_mac = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
     let ipv4_hdr = build_ipv4_header(17, [192, 168, 1, 100], [192, 168, 1, 1], 8);
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&ipv4_hdr);
-    payload.extend_from_slice(&[0u8; 8]); // minimal UDP header
+    let mut payload: KVec<u8> = KVec::new();
+    payload.extend_from_slice(&ipv4_hdr).expect("test alloc");
+    payload.extend_from_slice(&[0u8; 8]).expect("test alloc"); // minimal UDP header
 
     let frame = build_frame(
         broadcast_mac,
@@ -241,9 +239,9 @@ pub fn test_ingress_accepts_our_mac() -> TestResult {
 
     // Build a frame with our MAC and IPv4 ethertype.
     let ipv4_hdr = build_ipv4_header(17, [192, 168, 1, 100], [192, 168, 1, 1], 8);
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&ipv4_hdr);
-    payload.extend_from_slice(&[0u8; 8]); // minimal UDP header
+    let mut payload: KVec<u8> = KVec::new();
+    payload.extend_from_slice(&ipv4_hdr).expect("test alloc");
+    payload.extend_from_slice(&[0u8; 8]).expect("test alloc"); // minimal UDP header
 
     let frame = build_frame(
         device_mac.0,
@@ -280,9 +278,9 @@ pub fn test_ingress_ipv4_bad_version() -> TestResult {
     let csum = crate::checksum::internet_checksum(&ipv4_hdr);
     ipv4_hdr[10..12].copy_from_slice(&csum.to_be_bytes());
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&ipv4_hdr);
-    payload.extend_from_slice(&[0u8; 8]);
+    let mut payload: KVec<u8> = KVec::new();
+    payload.extend_from_slice(&ipv4_hdr).expect("test alloc");
+    payload.extend_from_slice(&[0u8; 8]).expect("test alloc");
 
     let frame = build_frame(
         device_mac.0,
@@ -339,9 +337,9 @@ pub fn test_ingress_ipv4_bad_checksum() -> TestResult {
     // Corrupt the checksum field.
     ipv4_hdr[10..12].copy_from_slice(&[0xff, 0xff]);
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&ipv4_hdr);
-    payload.extend_from_slice(&[0u8; 8]);
+    let mut payload: KVec<u8> = KVec::new();
+    payload.extend_from_slice(&ipv4_hdr).expect("test alloc");
+    payload.extend_from_slice(&[0u8; 8]).expect("test alloc");
 
     let frame = build_frame(
         device_mac.0,

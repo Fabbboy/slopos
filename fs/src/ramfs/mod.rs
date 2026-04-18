@@ -1,6 +1,4 @@
-extern crate alloc;
-
-use alloc::vec::Vec;
+use slopos_alloc::KVec;
 
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
@@ -32,7 +30,7 @@ impl DirEntry {
 struct RamInode {
     in_use: bool,
     file_type: FileType,
-    data: Vec<u8>,
+    data: KVec<u8>,
     dir_entries: [DirEntry; MAX_DIR_ENTRIES],
     dir_entry_count: usize,
     parent: InodeId,
@@ -45,7 +43,7 @@ impl RamInode {
         Self {
             in_use: false,
             file_type: FileType::Regular,
-            data: Vec::new(),
+            data: KVec::new(),
             dir_entries: [DirEntry::empty(); MAX_DIR_ENTRIES],
             dir_entry_count: 0,
             parent: 0,
@@ -58,7 +56,7 @@ impl RamInode {
         self.in_use = false;
         self.file_type = FileType::Regular;
         self.data.clear();
-        self.data.shrink_to(0);
+        self.data.shrink_to_fit();
         self.dir_entries = [DirEntry::empty(); MAX_DIR_ENTRIES];
         self.dir_entry_count = 0;
         self.parent = 0;
@@ -120,16 +118,16 @@ impl RamInode {
 }
 
 struct RamFsInner {
-    inodes: Vec<RamInode>,
+    inodes: KVec<RamInode>,
     next_inode: InodeId,
     initialized: bool,
 }
 
 impl RamFsInner {
     fn new() -> Self {
-        let mut inodes = Vec::with_capacity(MAX_INODES);
+        let mut inodes = KVec::with_capacity(MAX_INODES).expect("ramfs: alloc");
         for _ in 0..MAX_INODES {
-            inodes.push(RamInode::new());
+            inodes.push(RamInode::new()).expect("ramfs: alloc");
         }
         let mut inner = Self {
             inodes,
@@ -147,7 +145,7 @@ impl RamFsInner {
         if self.inodes.is_empty() {
             // Deferred allocation for const-constructed instances
             for _ in 0..MAX_INODES {
-                self.inodes.push(RamInode::new());
+                self.inodes.push(RamInode::new()).expect("ramfs: alloc");
             }
         }
         self.initialized = true;
@@ -219,7 +217,7 @@ impl RamFs {
         Self {
             inner: IrqMutex::new(
                 RamFsInner {
-                    inodes: Vec::new(),
+                    inodes: KVec::new(),
                     next_inode: ROOT_INODE + 1,
                     initialized: false,
                 },
@@ -326,7 +324,10 @@ impl FileSystem for RamFs {
 
             // Grow the data vector if needed
             if end > ram_inode.data.len() {
-                ram_inode.data.resize(end, 0);
+                ram_inode
+                    .data
+                    .resize(end, 0)
+                    .map_err(|_| VfsError::NoSpace)?;
             }
 
             ram_inode.data[offset..end].copy_from_slice(buf);
@@ -451,7 +452,10 @@ impl FileSystem for RamFs {
             }
 
             let new_size = (size as usize).min(RAMFS_MAX_FILE_SIZE);
-            ram_inode.data.resize(new_size, 0);
+            ram_inode
+                .data
+                .resize(new_size, 0)
+                .map_err(|_| VfsError::NoSpace)?;
 
             Ok(())
         })

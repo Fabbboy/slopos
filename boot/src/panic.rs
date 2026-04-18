@@ -224,14 +224,14 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 }
 
 struct MessageBuffer {
-    buf: [u8; 512],
+    buf: [u8; 256],
     len: usize,
 }
 
 impl MessageBuffer {
     const fn new() -> Self {
         Self {
-            buf: [0u8; 512],
+            buf: [0u8; 256],
             len: 0,
         }
     }

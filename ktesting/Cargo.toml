@@ -9,6 +9,7 @@ test = false
 doctest = false
 
 [dependencies]
+slopos-alloc = { workspace = true }
 slopos-arch = { path = "../karch" }
 slopos-service-core = { path = "../service-core" }
 slopos-utils = { path = "../utils" }

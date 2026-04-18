@@ -1,32 +1,23 @@
-extern crate alloc;
-
-use alloc::vec::Vec;
 use slopos_abi::Errno;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
+use slopos_alloc::KVec;
 
 use crate::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use crate::user_ptr::{UserBytes, UserVirtAddr};
 
 /// Allocate a kernel buffer and copy user data into it in one step.
 ///
-/// Inspired by Linux `memdup_user()`. Returns `ENOMEM` if the
-/// allocation fails (never panics), `EFAULT` if the copy fails.
-/// Rejects requests larger than `max_size` bytes with `EINVAL`.
-pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<Vec<u8>, Errno> {
+/// Returns `ENOMEM` if the allocation fails (never panics), `EFAULT`
+/// if the copy fails. Rejects requests larger than `max_size` bytes
+/// with `EINVAL`.
+pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<KVec<u8>, Errno> {
     if len > max_size {
         return Err(Errno::EINVAL);
     }
     let user_bytes = UserBytes::try_new(addr, len).map_err(|_| Errno::EFAULT)?;
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len).map_err(|_| Errno::ENOMEM)?;
-    // SAFETY: `try_reserve_exact` succeeded so capacity >= len.  The
-    // bytes are immediately overwritten by `copy_bytes_from_user` below
-    // and never read uninitialised — this avoids a redundant zero-fill
-    // (matching Linux's `memdup_user` which copies directly into
-    // uninitialized kmalloc'd memory).
-    unsafe {
-        buf.set_len(len);
-    }
+    // `KVec::<u8>::zeroed` allocates `len` bytes directly into the heap;
+    // the byte buffer never materialises on the caller's stack.
+    let mut buf = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     copy_bytes_from_user(user_bytes, &mut buf).map_err(|_| Errno::EFAULT)?;
     Ok(buf)
 }

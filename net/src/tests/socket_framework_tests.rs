@@ -1,7 +1,6 @@
-use alloc::vec::Vec;
-
 use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, SHUT_RD, SO_RCVBUF, SO_REUSEADDR, SOL_SOCKET};
+use slopos_alloc::KVec;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -20,13 +19,13 @@ fn reset() {
 pub fn test_slab_alloc_free_cycle() -> TestResult {
     reset();
 
-    let mut sockets = Vec::new();
+    let mut sockets: KVec<u32> = KVec::new();
     for _ in 0..100 {
         let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
         if idx < 0 {
             return fail!("socket_create failed before reaching 100 allocations");
         }
-        sockets.push(idx as u32);
+        let _ = sockets.push(idx as u32);
     }
     assert_eq_test!(socket_count_active(), 100, "100 active after first wave");
 

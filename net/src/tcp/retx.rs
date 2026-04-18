@@ -37,16 +37,19 @@ const DUP_THRESH: usize = 3;
 
 /// Lifecycle state of a single in-flight segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SegmentState {
-    /// Sent, not yet acknowledged or SACKed by the peer.
-    InFlight,
+    /// Sent, not yet acknowledged or SACKed by the peer. **Discriminant
+    /// 0** — a zero byte is a valid `SegmentState::InFlight`, which the
+    /// [`SendMap`]'s `new_in_slot` zero-fill relies on.
+    InFlight = 0,
     /// Covered by a SACK block from the peer — they have this data.
-    SackConfirmed,
+    SackConfirmed = 1,
     /// Declared lost: ≥ DupThresh SACKed entries exist past this hole,
     /// or an RTO fired.  `poll_transmit` should retransmit this entry.
-    Lost,
+    Lost = 2,
     /// Was `Lost`, has been retransmitted, now in flight again.
-    Retransmitted,
+    Retransmitted = 3,
 }
 
 impl Default for SegmentState {
@@ -119,6 +122,23 @@ impl SendMap {
             }; SENDMAP_CAPACITY],
             len: 0,
         }
+    }
+
+    /// Initialise an empty `SendMap` directly in a caller-provided
+    /// slot. Used by heap-direct constructors (e.g. `DataState::init_*`)
+    /// so the ~800 B `Self::new()` rvalue never lands on the caller's
+    /// stack — the entire ~800 B struct is zeroed in place instead.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must point to writable, properly aligned memory sized
+    /// for `Self`. On return, `*slot` is a valid empty `SendMap`.
+    pub unsafe fn new_in_slot(slot: *mut Self) {
+        // SAFETY: `Self` is all zero-valid — `entries[]` of
+        // `SendMapEntry { seq: SeqNum::ZERO, len: 0, first_send_ms: 0,
+        // state: SegmentState::InFlight = 0 (repr(u8)) }`, and
+        // `len: 0`. Zeroing every byte produces that state exactly.
+        unsafe { core::ptr::write_bytes(slot as *mut u8, 0, core::mem::size_of::<Self>()) }
     }
 
     // -----------------------------------------------------------------------

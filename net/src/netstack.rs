@@ -21,11 +21,9 @@
 //! - **Socket layer**: calls [`NetStack::our_ip`] for source address selection.
 //! - TODO: add routing table updates triggered by `configure()`.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::fmt;
 
+use slopos_alloc::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
@@ -119,7 +117,7 @@ impl fmt::Display for IfaceConfig {
 /// Inner state of the network stack, behind [`IrqMutex`].
 struct NetStackInner {
     /// Per-interface configurations.  One entry per configured device.
-    ifaces: Vec<IfaceConfig>,
+    ifaces: KVec<IfaceConfig>,
 }
 
 /// Centralised network stack state — the single source of truth for per-interface
@@ -152,7 +150,12 @@ impl NetStack {
     /// Create an empty network stack.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(NetStackInner { ifaces: Vec::new() }, LOCK_LEVEL_REGISTRY),
+            inner: IrqMutex::new(
+                NetStackInner {
+                    ifaces: KVec::new(),
+                },
+                LOCK_LEVEL_REGISTRY,
+            ),
         }
     }
 
@@ -205,7 +208,7 @@ impl NetStack {
                 gateway,
             );
 
-            inner.ifaces.push(config);
+            let _ = inner.ifaces.push(config);
         }
 
         // trigger route table update.

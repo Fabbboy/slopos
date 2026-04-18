@@ -54,10 +54,10 @@
 //!   `synchronize_rcu()` could sit unprocessed until the next timer tick
 //!   raises the softirq flag — an unbounded latency hole.
 
-extern crate alloc;
-
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+
+use slopos_alloc::{raw_alloc, raw_dealloc};
 
 use crate::preempt::PreemptGuard;
 use slopos_arch::pcr::{
@@ -166,7 +166,11 @@ pub fn synchronize_rcu() {
     let this_cpu = get_current_cpu();
     let n = get_cpu_count().min(MAX_CPUS);
 
-    let mut snaps = [0u64; MAX_CPUS];
+    // Heap-allocate the per-CPU snapshot vector rather than placing a
+    // 2 KiB `[u64; MAX_CPUS]` on the stack — stack-safety gate forbids
+    // frames that large, and an RCU grace-period that can't allocate
+    // 2 KiB of scratch is already on a wedged path.
+    let mut snaps = slopos_alloc::KVec::<u64>::zeroed(n).expect("rcu: snaps alloc");
     for cpu in 0..n {
         snaps[cpu] = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
     }
@@ -250,7 +254,8 @@ static RCU_CB_PENDING: AtomicBool = AtomicBool::new(false);
 fn try_alloc_callback_node(ptr: *mut u8, callback: RcuCallback) -> *mut RcuCallbackNode {
     let layout = Layout::new::<RcuCallbackNode>();
     // SAFETY: layout is non-zero-sized (RcuCallbackNode contains pointers).
-    let raw = unsafe { alloc::alloc::alloc(layout) };
+    // SAFETY: layout is non-zero-sized (RcuCallbackNode contains pointers).
+    let raw = unsafe { raw_alloc(layout) };
     if raw.is_null() {
         return core::ptr::null_mut();
     }
@@ -277,7 +282,7 @@ unsafe fn dealloc_callback_node(node: *mut RcuCallbackNode) {
     let layout = Layout::new::<RcuCallbackNode>();
     // SAFETY: caller guarantees `node` was allocated with this layout.
     unsafe {
-        alloc::alloc::dealloc(node as *mut u8, layout);
+        raw_dealloc(node as *mut u8, layout);
     }
 }
 

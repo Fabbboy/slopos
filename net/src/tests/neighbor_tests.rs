@@ -6,8 +6,6 @@
 //! - 2.T3: `Incomplete` state — queued packets flushed when reply arrives
 //! - 2.T4: `Failed` state — packets are dropped
 
-extern crate alloc;
-
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 

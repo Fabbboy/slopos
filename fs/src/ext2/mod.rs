@@ -40,6 +40,7 @@ pub enum Ext2Error {
     NotEmpty,
     IsDirectory,
     TooManyLinks,
+    OutOfMemory,
 }
 
 // ---- Backward-compat type aliases for ext2_vfs.rs / tests.rs ----
@@ -75,7 +76,7 @@ impl<'a> Ext2Fs<'a> {
         Ok(Self {
             device,
             superblock,
-            cache: BlockCache::new(block_size),
+            cache: BlockCache::new(block_size)?,
             block_size,
             inode_size,
             ptrs_per_block: block_size / 4,
@@ -87,15 +88,15 @@ impl<'a> Ext2Fs<'a> {
         superblock: Superblock,
         block_size: u32,
         inode_size: u16,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Ext2Error> {
+        Ok(Self {
             device,
             superblock,
-            cache: BlockCache::new(block_size),
+            cache: BlockCache::new(block_size)?,
             block_size,
             inode_size,
             ptrs_per_block: block_size / 4,
-        }
+        })
     }
 
     pub fn superblock(&self) -> Superblock {
@@ -448,11 +449,17 @@ impl<'a> Ext2Fs<'a> {
         }
         if inode.block[12].is_valid() {
             let indirect = inode.block[12];
-            let ptrs = {
+            // Heap-allocate the indirect-block pointer buffer.  An
+            // inline `[BlockNum::ZERO; 1024]` would put ≈4 KiB on the
+            // kernel stack here (dominating this function's frame and
+            // leaving little headroom for callees on a 32 KiB task
+            // stack), so route through `slopos_alloc::KVec` instead.
+            let ptrs: slopos_alloc::KVec<BlockNum> = {
                 let block = self.cache.get(indirect, self.device)?;
                 let data = block.data();
                 let count = self.block_size as usize / 4;
-                let mut ptrs = [BlockNum::ZERO; 1024];
+                let mut ptrs = slopos_alloc::KVec::<BlockNum>::zeroed(1024)
+                    .map_err(|_| Ext2Error::OutOfMemory)?;
                 for i in 0..count.min(1024) {
                     let off = i * 4;
                     ptrs[i] = BlockNum(u32::from_le_bytes([

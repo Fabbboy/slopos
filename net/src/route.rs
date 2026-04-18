@@ -25,11 +25,9 @@
 //!   device and next-hop address for each packet.
 //! - **Loopback**: the `127.0.0.0/8` connected route is added at kernel init.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::fmt;
 
+use slopos_alloc::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 
@@ -126,13 +124,13 @@ struct RouteTableInner {
     /// Routes bucketed by prefix length.  Index 0 = /0 (default routes),
     /// index 32 = /32 (host routes).  Within each bucket, routes are sorted
     /// by metric (lowest first).
-    buckets: [Vec<RouteEntry>; 33],
+    buckets: [KVec<RouteEntry>; 33],
 }
 
 impl RouteTableInner {
     const fn new() -> Self {
         Self {
-            buckets: [const { Vec::new() }; 33],
+            buckets: [const { KVec::new() }; 33],
         }
     }
 }
@@ -189,8 +187,19 @@ impl RouteTable {
                 );
                 existing.gateway = entry.gateway;
                 existing.metric = entry.metric;
-                // Re-sort by metric after update.
-                bucket.sort_by_key(|r| r.metric);
+                // Re-sort by metric after update. Buckets are capped at
+                // MAX_ROUTES_PER_BUCKET (16), so an insertion sort is
+                // both correct and cheaper than `sort_by_key` — the
+                // latter pulls in core::slice::sort::driftsort, which
+                // carries a 4 KiB aligned-storage stack buffer that
+                // blows the kernel frame budget.
+                for i in 1..bucket.len() {
+                    let mut j = i;
+                    while j > 0 && bucket[j - 1].metric > bucket[j].metric {
+                        bucket.swap(j - 1, j);
+                        j -= 1;
+                    }
+                }
                 return false;
             }
         }
@@ -209,7 +218,7 @@ impl RouteTable {
 
         // Insert sorted by metric.
         let pos = bucket.partition_point(|r| r.metric <= entry.metric);
-        bucket.insert(pos, entry);
+        let _ = bucket.insert(pos, entry);
         true
     }
 
@@ -281,9 +290,9 @@ impl RouteTable {
     }
 
     /// Collect all routes into a Vec (for ifconfig/diagnostic display).
-    pub fn all_routes(&self) -> Vec<RouteEntry> {
+    pub fn all_routes(&self) -> KVec<RouteEntry> {
         let inner = self.inner.lock();
-        let mut routes = Vec::new();
+        let mut routes = KVec::new();
         for bucket in inner.buckets.iter() {
             routes.extend(bucket.iter().copied());
         }

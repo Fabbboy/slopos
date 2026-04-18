@@ -287,7 +287,10 @@ define_syscall!(syscall_send(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = [0u8; 4096];
+    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
+    };
 
     match sock_fd {
         SocketFd::Unix(sh) => {
@@ -321,7 +324,10 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = [0u8; 4096];
+    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
+    };
 
     match sock_fd {
         SocketFd::Unix(sh) => {
@@ -376,7 +382,10 @@ define_syscall!(syscall_sendto(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = [0u8; 4096];
+    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
+    };
     let copied = if len > 0 {
         let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
         try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]))
@@ -418,7 +427,10 @@ define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = [0u8; 4096];
+    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
+    };
     let mut src_ip = [0u8; 4];
     let mut src_port = 0u16;
 
@@ -603,7 +615,10 @@ define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
 
     // Copy data bytes.
     let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = [0u8; 4096];
+    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
+    };
     if data_len > 0 && msg.iov_base != 0 {
         let user_data = try_or_err!(ctx, UserBytes::try_new(msg.iov_base, data_len));
         try_or_err!(ctx, copy_bytes_from_user(user_data, &mut scratch[..data_len]));
@@ -697,7 +712,10 @@ define_syscall!(syscall_recvmsg(ctx, args) requires(let process_id) {
     let msg: MsgHdr = try_or_err!(ctx, copy_from_user(msg_ptr));
 
     let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = [0u8; 4096];
+    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+        Ok(v) => v,
+        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
+    };
 
     // Receive data + fds
     let mut received_fds: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =

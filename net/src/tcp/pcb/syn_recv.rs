@@ -69,6 +69,15 @@ impl SynRecvState {
     }
 
     /// Apply an incoming segment to a SYN_RECEIVED PCB.
+    ///
+    /// Returns `Actions` by value rather than `Result<Actions, _>`:
+    /// wrapping the ~1 KiB `Actions` in a `Result` discriminant pushes
+    /// the per-handler stack frame above the gate. The lone fallible
+    /// path — `KBox::try_init(DataState::init_*)` — `.expect`s the
+    /// allocation; OOM here would kill the connection regardless and
+    /// the kernel's allocator panics on whole-system OOM. Threading
+    /// `Result<KBox<Actions>, _>` is tracked as a follow-up that needs
+    /// the matching out-param refactor across the dispatcher.
     pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, _now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
@@ -124,7 +133,11 @@ impl SynRecvState {
         let ts_enabled = s.ts_enabled;
         let _peer_tsval = s.peer_tsval;
         let _ = s;
-        let data = DataState::new(
+        // Heap-direct: build the new DataState in place inside a fresh
+        // KBox. Allocation failure surfaces as `TcpError::OutOfMemory`
+        // up through `Pcb::on_segment` -> `tcp::input`, which maps it
+        // to `ERRNO_ENOMEM` at the syscall boundary.
+        let data = slopos_alloc::KBox::try_init(DataState::init_new(
             iss,
             irs,
             snd_una,
@@ -137,8 +150,9 @@ impl SynRecvState {
             our_wscale,
             wscale_enabled,
             ts_enabled,
-        );
-        let _old = mem::replace(&mut pcb.state, PcbState::Data(alloc::boxed::Box::new(data)));
+        ))
+        .expect("DataState alloc failed");
+        let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
         actions.notify |= SocketNotify::NEW_ESTABLISHED | SocketNotify::ACCEPT_WAKE;
         // Note: no outgoing segment — the 3WHS is complete; the peer's

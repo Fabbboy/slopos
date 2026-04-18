@@ -8,6 +8,7 @@ use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
 use super::super::scheduler;
+use super::super::stack::KernelStack;
 use super::super::switch_asm::task_entry_trampoline;
 use super::super::task_struct::SwitchContext;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
@@ -18,16 +19,15 @@ use super::task_table::{
     reserve_task_slot, task_find_by_id, with_task_manager,
 };
 use super::{
-    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskStatus,
+    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, Task, TaskContext, TaskEntry,
+    TaskExitReason, TaskFaultReason, TaskStatus,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
     fileio_destroy_table_for_process,
 };
 use slopos_kernel_services::syscall_services::tty;
-use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm::{
     create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_page_dir,
@@ -43,9 +43,12 @@ fn user_entry_is_allowed(addr: u64) -> bool {
 
 struct TaskCreateResources {
     process_id: u32,
+    /// User-mode stack base (for user tasks, this lives in process VM;
+    /// for kernel tasks, this aliases the kernel stack base).
     stack_base: u64,
-    kernel_stack_base: u64,
-    kernel_stack_size: u64,
+    /// Owning handle to the kernel-mode stack.  Moves into `Task` on
+    /// success; dropped on failure to auto-release all backing memory.
+    kernel_stack: KernelStack,
 }
 
 struct ProcessResourceLease {
@@ -133,52 +136,23 @@ impl Drop for ProcessResourceLease {
     }
 }
 
-struct KernelStackLease {
-    base: *mut c_void,
-}
-
-impl KernelStackLease {
-    fn allocate(size: u64, failure_message: &'static str) -> Option<Self> {
-        let stack = kmalloc(size as usize);
-        if stack.is_null() {
-            klog_info!("{}", failure_message);
-            return None;
-        }
-        Some(Self { base: stack })
-    }
-
-    #[inline]
-    fn base_u64(&self) -> u64 {
-        self.base as u64
-    }
-
-    fn disarm(mut self) -> *mut c_void {
-        let base = self.base;
-        self.base = ptr::null_mut();
-        base
-    }
-}
-
-impl Drop for KernelStackLease {
-    fn drop(&mut self) {
-        if !self.base.is_null() {
-            kfree(self.base);
-            self.base = ptr::null_mut();
+fn allocate_kernel_stack(size: u64, what: &'static str) -> Option<KernelStack> {
+    match KernelStack::allocate(size as usize) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            klog_info!("task_create: {} failed: {:?}", what, e);
+            None
         }
     }
 }
 
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
-    let stack = KernelStackLease::allocate(
-        TASK_STACK_SIZE,
-        "task_create: Failed to allocate kernel stack",
-    )?;
-    let stack_base = stack.disarm() as u64;
+    let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack")?;
+    let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
         stack_base,
-        kernel_stack_base: stack_base,
-        kernel_stack_size: TASK_STACK_SIZE,
+        kernel_stack,
     })
 }
 
@@ -192,16 +166,12 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
         return None;
     }
 
-    let kstack = KernelStackLease::allocate(
-        TASK_KERNEL_STACK_SIZE,
-        "task_create: Failed to allocate kernel RSP0 stack",
-    )?;
+    let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
 
     Some(TaskCreateResources {
         process_id: process.disarm(),
         stack_base: stack_top - TASK_STACK_SIZE,
-        kernel_stack_base: kstack.disarm() as u64,
-        kernel_stack_size: TASK_KERNEL_STACK_SIZE,
+        kernel_stack,
     })
 }
 
@@ -213,12 +183,14 @@ fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
     }
 }
 
-fn cleanup_task_create_resources(process_id: u32, kernel_stack_base: u64) {
+/// Release resources allocated by `allocate_task_create_resources` when
+/// the surrounding `task_create` bails out mid-flight.
+///
+/// The caller passes `kernel_stack` by value so its `Drop` runs here
+/// (unmapping pages, freeing frames, releasing the VA slot).
+fn cleanup_task_create_resources(process_id: u32, kernel_stack: KernelStack) {
     ProcessResourceLease::cleanup_owned_process(process_id, true, true);
-
-    if kernel_stack_base != 0 {
-        kfree(kernel_stack_base as *mut c_void);
-    }
+    drop(kernel_stack);
 }
 
 fn reset_task_runtime_fields(task: &mut Task) {
@@ -360,7 +332,12 @@ pub(crate) unsafe fn build_ret_from_fork_frame(
 
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
-    task.fpu_state = FpuState::new();
+    // SAFETY: `task.fpu_state` is a valid in-place FpuState owned by the
+    // caller-provided `&mut Task`. Writing into it does not alias with
+    // any other reference because we hold the unique `&mut`.
+    unsafe {
+        FpuState::reset_in_place(&raw mut task.fpu_state);
+    }
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
@@ -509,14 +486,21 @@ pub fn task_create(
     task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
-        cleanup_task_create_resources(resources.process_id, resources.kernel_stack_base);
+        cleanup_task_create_resources(resources.process_id, resources.kernel_stack);
         release_task_slot(task);
         return INVALID_TASK_ID;
     }
 
-    task_ref.kernel_stack_base = resources.kernel_stack_base;
-    task_ref.kernel_stack_top = resources.kernel_stack_base + resources.kernel_stack_size;
-    task_ref.kernel_stack_size = resources.kernel_stack_size;
+    // Populate the plain-u64 fields from the `KernelStack` handle, then
+    // move ownership of the handle into the task slot.  Dropping the
+    // task's `kernel_stack = None` later releases all backing memory.
+    let kstack_base = resources.kernel_stack.base().as_u64();
+    let kstack_top = resources.kernel_stack.top().as_u64();
+    let kstack_size = resources.kernel_stack.size() as u64;
+    task_ref.kernel_stack_base = kstack_base;
+    task_ref.kernel_stack_top = kstack_top;
+    task_ref.kernel_stack_size = kstack_size;
+    task_ref.kernel_stack = Some(resources.kernel_stack);
     task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
@@ -699,22 +683,22 @@ fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut T
     task.task_id != INVALID_TASK_ID
 }
 
-fn collect_shutdown_task_ids(current: *mut Task) -> [Option<u32>; MAX_TASKS] {
+fn collect_shutdown_task_ids(current: *mut Task) -> slopos_alloc::KVec<u32> {
     with_task_manager(|mgr| {
-        let mut ids = [None; MAX_TASKS];
-        for (i, task) in mgr.tasks.iter().enumerate() {
+        let mut ids: slopos_alloc::KVec<u32> = slopos_alloc::KVec::new();
+        for task in mgr.tasks.iter() {
             let task_ptr = task as *const Task as *mut Task;
             if should_collect_for_shutdown(task, task_ptr, current) {
-                ids[i] = Some(task.task_id);
+                let _ = ids.push(task.task_id);
             }
         }
         ids
     })
 }
 
-fn terminate_task_ids(task_ids: &[Option<u32>; MAX_TASKS]) -> c_int {
+fn terminate_task_ids(task_ids: &slopos_alloc::KVec<u32>) -> c_int {
     let mut result = 0;
-    for task_id in task_ids.iter().flatten() {
+    for task_id in task_ids.iter() {
         if task_terminate(*task_id) != 0 {
             result = -1;
         }
@@ -775,14 +759,14 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     };
     let child_process_id = child_process.process_id();
 
-    let child_kernel_stack = match KernelStackLease::allocate(
-        TASK_KERNEL_STACK_SIZE,
-        "task_fork: failed to allocate kernel stack",
-    ) {
-        Some(stack) => stack,
-        None => return INVALID_TASK_ID,
+    let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
+        Ok(stack) => stack,
+        Err(e) => {
+            klog_info!("task_fork: kernel stack alloc failed: {:?}", e);
+            return INVALID_TASK_ID;
+        }
     };
-    let child_kernel_stack_base = child_kernel_stack.base_u64();
+    let child_kernel_stack_base = child_kernel_stack.base().as_u64();
 
     let (child_task_ptr, child_task_id) = match reserve_task_slot() {
         Ok(values) => values,
@@ -807,7 +791,7 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     child.clear_child_tid = 0;
 
     child.kernel_stack_base = child_kernel_stack_base;
-    child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
+    child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // Build the child's InterruptFrame: copy from syscall_frame if
@@ -843,7 +827,10 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
 
     reset_task_runtime_fields(child);
     let _ = child_process.disarm();
-    let _ = child_kernel_stack.disarm();
+    // Transfer ownership of the kernel stack into the task slot.  The
+    // `Drop` on this handle will only run when the task's slot is
+    // cleared (`task.kernel_stack = None` in `free_task_stacks`).
+    child.kernel_stack = Some(child_kernel_stack);
 
     record_task_created();
 
@@ -929,14 +916,14 @@ pub fn task_clone(
         child_process.process_id()
     };
 
-    let child_kernel_stack = match KernelStackLease::allocate(
-        TASK_KERNEL_STACK_SIZE,
-        "task_clone: failed to allocate kernel stack",
-    ) {
-        Some(stack) => stack,
-        None => return Err(ERRNO_ENOMEM),
+    let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
+        Ok(stack) => stack,
+        Err(e) => {
+            klog_info!("task_clone: kernel stack alloc failed: {:?}", e);
+            return Err(ERRNO_ENOMEM);
+        }
     };
-    let child_kernel_stack_base = child_kernel_stack.base_u64();
+    let child_kernel_stack_base = child_kernel_stack.base().as_u64();
 
     let (child_task_ptr, child_task_id) = match reserve_task_slot() {
         Ok(values) => values,
@@ -966,7 +953,7 @@ pub fn task_clone(
     child.sid = parent.sid;
 
     child.kernel_stack_base = child_kernel_stack_base;
-    child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
+    child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // Build InterruptFrame on child's kernel stack from inherited context.
@@ -1008,7 +995,8 @@ pub fn task_clone(
     if !share_vm {
         let _ = child_process.disarm();
     }
-    let _ = child_kernel_stack.disarm();
+    // Transfer ownership of the kernel stack to the task slot.
+    child.kernel_stack = Some(child_kernel_stack);
     record_task_created();
 
     if flags & CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {

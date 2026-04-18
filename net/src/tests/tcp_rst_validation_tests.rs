@@ -6,7 +6,7 @@
 use slopos_testing::{TestResult, assert_eq_test, assert_test, pass};
 
 use crate::tcp::actions::SocketNotify;
-use crate::tcp::buffer::TcpBufferPair;
+use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpBufferPair};
 use crate::tcp::challenge_ack::{self, RstAction};
 use crate::tcp::header::{TCP_FLAG_ACK, TCP_FLAG_RST, TcpHeader};
 use crate::tcp::pcb::data::{ClosePhase, DataState};
@@ -80,7 +80,10 @@ fn make_data_pcb(phase: ClosePhase) -> Pcb {
     ) {
         data.peer_closed = true;
     }
-    Pcb::new(tuple(), PcbState::Data(alloc::boxed::Box::new(data)))
+    Pcb::new(
+        tuple(),
+        PcbState::Data(slopos_alloc::KBox::try_new(data).expect("alloc")),
+    )
 }
 
 fn make_syn_recv_pcb() -> Pcb {
@@ -181,7 +184,7 @@ pub fn test_classify_rst_wrapping_seq() -> TestResult {
 
 pub fn test_data_rst_exact_seq_tears_down() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new();
+    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
     let rcv_nxt = PEER_IRS + 1;
     let actions = DataState::on_segment(
         &mut pcb,
@@ -202,7 +205,7 @@ pub fn test_data_rst_exact_seq_tears_down() -> TestResult {
 pub fn test_data_rst_in_window_sends_challenge_ack() -> TestResult {
     challenge_ack::reset_for_tests();
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new();
+    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
     // In-window but not exact: rcv_nxt + 100.
     let in_window_seq = (PEER_IRS + 1).wrapping_add(100);
     let actions = DataState::on_segment(
@@ -225,7 +228,7 @@ pub fn test_data_rst_in_window_sends_challenge_ack() -> TestResult {
 
 pub fn test_data_rst_outside_window_dropped() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new();
+    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
     // Far outside window.
     let outside_seq = (PEER_IRS + 1).wrapping_add(50_000);
     let actions = DataState::on_segment(
@@ -254,7 +257,7 @@ pub fn test_data_rst_challenge_ack_each_close_phase() -> TestResult {
     let in_window_seq = (PEER_IRS + 1).wrapping_add(100);
     for (i, phase) in phases.iter().enumerate() {
         let mut pcb = make_data_pcb(*phase);
-        let mut bufs = TcpBufferPair::new();
+        let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
         let actions = DataState::on_segment(
             &mut pcb,
             &mut bufs,
@@ -282,7 +285,7 @@ pub fn test_data_rst_exact_seq_each_close_phase() -> TestResult {
     let rcv_nxt = PEER_IRS + 1;
     for (i, phase) in phases.iter().enumerate() {
         let mut pcb = make_data_pcb(*phase);
-        let mut bufs = TcpBufferPair::new();
+        let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
         let actions = DataState::on_segment(
             &mut pcb,
             &mut bufs,

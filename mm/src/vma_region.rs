@@ -8,10 +8,7 @@
 //! gaps between existing entries, and `insert` merges compatible adjacent
 //! regions automatically.
 
-extern crate alloc;
-
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use slopos_alloc::{KBTreeMap, KVec};
 
 use crate::memfd::MemfdHandle;
 use crate::paging_defs::PageFlags;
@@ -165,13 +162,13 @@ impl VmaRegion {
 /// All intervals are half-open: [start, end).
 /// Invariant: no two entries overlap; maintained by construction.
 pub struct VmaMap {
-    map: BTreeMap<u64, (u64, VmaRegion)>,
+    map: KBTreeMap<u64, (u64, VmaRegion)>,
 }
 
 impl VmaMap {
     pub const fn new() -> Self {
         Self {
-            map: BTreeMap::new(),
+            map: KBTreeMap::new(),
         }
     }
 
@@ -336,12 +333,13 @@ impl VmaMap {
         mut on_removed: impl FnMut(u64, u64, &VmaRegion),
     ) {
         // Collect affected keys to avoid borrow conflict.
-        let affected: Vec<u64> = self
-            .map
-            .range(..end)
-            .filter(|entry| entry.1.0 > start && *entry.0 < end)
-            .map(|entry| *entry.0)
-            .collect();
+        let affected: KVec<u64> = KVec::from_iter_fallible(
+            self.map
+                .range(..end)
+                .filter(|entry| entry.1.0 > start && *entry.0 < end)
+                .map(|entry| *entry.0),
+        )
+        .expect("remove_range: affected alloc");
 
         // Also check predecessor that might straddle `start`.
         let pred = self
@@ -350,7 +348,7 @@ impl VmaMap {
             .next_back()
             .map(|entry| (*entry.0, entry.1.0));
         if let Some((pred_start, pred_end)) = pred {
-            if pred_end > start && !affected.contains(&pred_start) {
+            if pred_end > start && !affected.iter().any(|k| *k == pred_start) {
                 // This predecessor overlaps but wasn't caught by the range query.
                 let (pred_end_val, region) = self.map.remove(&pred_start).unwrap();
                 let overlap_start = start;
@@ -403,7 +401,8 @@ impl VmaMap {
     /// Drain all regions, calling `on_each(start, end, &region)` before removal.
     pub fn drain(&mut self, mut on_each: impl FnMut(u64, u64, &VmaRegion)) {
         // Collect all keys first (can't mutate during iteration).
-        let keys: Vec<u64> = self.map.keys().copied().collect();
+        let keys: KVec<u64> =
+            KVec::from_iter_fallible(self.map.keys().copied()).expect("vma drain: alloc");
         for key in keys {
             if let Some((end, region)) = self.map.remove(&key) {
                 on_each(key, end, &region);

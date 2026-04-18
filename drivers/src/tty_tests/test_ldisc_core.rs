@@ -3039,7 +3039,7 @@ pub fn test_dispatch_macro_raw_routing() -> TestResult {
 pub fn test_from_id_still_works() -> TestResult {
     let default_termios = LineDisc::new().termios().clone();
     // N_TTY
-    let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios);
+    let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios).expect("alloc");
     if ntty.is_none() {
         klog_info!("TTY_TEST: BUG - from_id(N_TTY) returned None");
         return TestResult::Fail;
@@ -3049,7 +3049,7 @@ pub fn test_from_id_still_works() -> TestResult {
         return TestResult::Fail;
     }
     // N_RAW
-    let nraw = LdiscKind::from_id(slopos_abi::syscall::N_RAW, default_termios);
+    let nraw = LdiscKind::from_id(slopos_abi::syscall::N_RAW, default_termios).expect("alloc");
     if nraw.is_none() {
         klog_info!("TTY_TEST: BUG - from_id(N_RAW) returned None");
         return TestResult::Fail;
@@ -3059,7 +3059,10 @@ pub fn test_from_id_still_works() -> TestResult {
         return TestResult::Fail;
     }
     // Invalid ID
-    if LdiscKind::from_id(999, default_termios).is_some() {
+    if LdiscKind::from_id(999, default_termios)
+        .expect("alloc")
+        .is_some()
+    {
         klog_info!("TTY_TEST: BUG - from_id(999) should return None");
         return TestResult::Fail;
     }

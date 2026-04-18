@@ -53,4 +53,12 @@ pub enum TcpError {
     ConnectionRefused,
     /// Invalid segment or parameter.
     InvalidSegment,
+    /// Heap allocation failure during a state transition.
+    OutOfMemory,
+}
+
+impl From<slopos_alloc::AllocError> for TcpError {
+    fn from(_: slopos_alloc::AllocError) -> Self {
+        TcpError::OutOfMemory
+    }
 }

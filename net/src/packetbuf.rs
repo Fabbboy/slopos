@@ -24,10 +24,8 @@
 //! * RX path: `from_raw_copy()` starts with `head = 0`, `tail = data.len()`.
 //!   Headers are consumed via [`pull_header`](PacketBuf::pull_header).
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::fmt;
+use slopos_alloc::KVec;
 
 use super::pool::{BUF_SIZE, PACKET_POOL, PacketPool};
 use super::types::{Ipv4Addr, NetError};
@@ -50,7 +48,7 @@ enum PacketBufInner {
         slot: u16,
     },
     /// Heap-allocated fallback for oversized reassembly buffers.
-    Oversized { data: Vec<u8> },
+    Oversized { data: KVec<u8> },
 }
 
 // =============================================================================
@@ -175,7 +173,7 @@ impl PacketBuf {
     pub fn oversized(capacity: usize) -> Self {
         Self {
             inner: PacketBufInner::Oversized {
-                data: alloc::vec![0u8; capacity],
+                data: KVec::<u8>::zeroed(capacity).expect("packetbuf oversized: alloc"),
             },
             head: 0,
             tail: 0,
