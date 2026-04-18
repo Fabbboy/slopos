@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Fail the build if any function in the kernel ELF has a stack frame larger
-# than STACK_SIZE_THRESHOLD bytes. Default: 2560 (2.5 KiB).
+# than STACK_SIZE_THRESHOLD bytes. Default: 2048 (2 KiB) — matches Linux
+# mainline's default `CONFIG_FRAME_WARN` on x86_64/arm64, but SlopOS
+# fails the build rather than merely warning, and inspects the
+# post-link ELF rather than a compile-time heuristic (so inline
+# expansion, NRVO failures, and trait-object dispatch are all accounted
+# for).
 #
-# Dropping further requires follow-up work on pin-init macro internals
-# (DataState::init_*), driver probe paths (virtio_net_probe,
-# pci_probe_device), test scaffolding (build_ext2_image), and ACPI MCFG
-# parsing.
+# Tightening below 2 KiB requires follow-up work on a handful of
+# warm-path functions (`DataState::process_payload_fin_and_ack`,
+# `syscall_getsockname`, `dns_resolve`, `ipv4::handle_rx`,
+# `panic_handler_impl`, `tcp::input`, `tcp::close`,
+# `virtio_net_probe`, ramfs insertion).
 #
 # Relies on `-Zemit-stack-sizes` populating the `.stack_sizes` ELF section;
 # see scripts/build_kernel.sh for where the flag is injected.
@@ -16,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ELF="${1:-$REPO_ROOT/builddir/kernel.elf}"
-THRESHOLD="${STACK_SIZE_THRESHOLD:-2560}"
+THRESHOLD="${STACK_SIZE_THRESHOLD:-2048}"
 
 if [ ! -f "$ELF" ]; then
     echo "check_stack_sizes: missing $ELF (run \`just build\` first)" >&2

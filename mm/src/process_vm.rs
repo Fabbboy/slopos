@@ -689,7 +689,6 @@ pub fn process_vm_load_elf_data(
     let code_base = crate::memory_layout_defs::PROCESS_CODE_START_VA;
 
     let validator = ElfValidator::new(data)?.with_load_base(code_base);
-    let header = validator.header();
 
     // Reject dynamically-linked binaries (PT_INTERP present).
     if validator.has_interpreter()? {
@@ -700,7 +699,39 @@ pub fn process_vm_load_elf_data(
         slopos_alloc::KVec::<crate::elf::ValidatedSegment>::zeroed(crate::elf::MAX_LOAD_SEGMENTS)
             .map_err(|_| ElfError::NullPointer)?;
     let segment_count = validator.validate_load_segments_into(segments_store.as_mut_slice())?;
-    let segments = &segments_store.as_slice()[..segment_count];
+
+    let slot = find_slot_for_pid(process_id).ok_or(ElfError::NullPointer)?;
+
+    // Heap-allocated section_mappings; `load_segments_and_tls` also
+    // holds the locked page dir and the ~9-field `ElfExecInfo` return
+    // value. Splitting that work into an `#[inline(never)]` helper
+    // keeps this function's frame under the stack-safety gate.
+    let info = load_segments_and_tls(
+        &validator,
+        data,
+        code_base,
+        slot,
+        process_id,
+        &segments_store.as_slice()[..segment_count],
+    )?;
+    *entry_out = info.entry;
+    Ok(info)
+}
+
+/// Inner body of `process_vm_load_elf_data`: resolves page dir, runs
+/// the segment mapping + TLS + relocation passes, and assembles the
+/// [`ElfExecInfo`] result. Extracted to keep the outer function's
+/// frame small.
+#[inline(never)]
+fn load_segments_and_tls(
+    validator: &ElfValidator<'_>,
+    data: &[u8],
+    code_base: u64,
+    slot: usize,
+    process_id: u32,
+    segments: &[crate::elf::ValidatedSegment],
+) -> Result<crate::elf::ElfExecInfo, ElfError> {
+    let header = validator.header();
 
     let tls_segment = validator.find_tls_segment()?;
     let tls_offset = validator.find_tls_offset()?;
@@ -712,7 +743,6 @@ pub fn process_vm_load_elf_data(
         None => (0, 0, 0, 0, None),
     };
 
-    let slot = find_slot_for_pid(process_id).ok_or(ElfError::NullPointer)?;
     let page_dir = {
         let guard = PROCESS_VMS[slot].lock();
         if guard.process_id != process_id {
@@ -770,33 +800,12 @@ pub fn process_vm_load_elf_data(
     }
 
     let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);
-
-    // Compute the user-space address of the program headers. The ELF spec says
-    // the phdr table lives at file offset e_phoff, which usually falls inside
-    // the first PT_LOAD segment. Walk mapped segments to find the one that
-    // contains it.
-    let phdr_user_addr = {
-        let phoff = header.e_phoff;
-        let phdr_end = phoff + (header.e_phnum as u64) * (header.e_phentsize as u64);
-        let mut addr = 0u64;
-        for seg in segments.iter() {
-            let seg_file_end = seg.file_offset + seg.file_size;
-            if phoff >= seg.file_offset && phdr_end <= seg_file_end {
-                let offset_in_seg = phoff - seg.file_offset;
-                let seg_user =
-                    process_vm_translate_elf_address(seg.original_vaddr, min_vaddr, code_base);
-                addr = seg_user + offset_in_seg;
-                break;
-            }
-        }
-        addr
-    };
+    let phdr_user_addr = compute_phdr_user_addr(header, segments, min_vaddr, code_base);
 
     {
         let mut guard = PROCESS_VMS[slot].lock();
         guard.total_pages = guard.total_pages.saturating_add(mapped_pages);
     }
-    *entry_out = user_entry;
 
     Ok(crate::elf::ElfExecInfo {
         entry: user_entry,
@@ -809,6 +818,30 @@ pub fn process_vm_load_elf_data(
         tls_vaddr,
         tls_tp,
     })
+}
+
+/// Walk loaded segments to locate the user-space mapping of the program
+/// headers. Isolated into its own frame so the containing loader body
+/// doesn't pick up its `for` loop locals.
+#[inline(never)]
+fn compute_phdr_user_addr(
+    header: &crate::elf::Elf64Header,
+    segments: &[crate::elf::ValidatedSegment],
+    min_vaddr: u64,
+    code_base: u64,
+) -> u64 {
+    let phoff = header.e_phoff;
+    let phdr_end = phoff + (header.e_phnum as u64) * (header.e_phentsize as u64);
+    for seg in segments.iter() {
+        let seg_file_end = seg.file_offset + seg.file_size;
+        if phoff >= seg.file_offset && phdr_end <= seg_file_end {
+            let offset_in_seg = phoff - seg.file_offset;
+            let seg_user =
+                process_vm_translate_elf_address(seg.original_vaddr, min_vaddr, code_base);
+            return seg_user + offset_in_seg;
+        }
+    }
+    0
 }
 
 fn calculate_load_offset(segments: &[ValidatedSegment], code_base: u64) -> (u64, bool) {

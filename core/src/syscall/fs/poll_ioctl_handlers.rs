@@ -19,9 +19,7 @@ use slopos_kernel_services::driver_runtime::{
     signal_process_group,
 };
 use slopos_kernel_services::syscall_services::tty;
-use slopos_mm::user_copy::{
-    copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
-};
+use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 const SELECT_MAX_FDS: usize = 256;
@@ -459,22 +457,52 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
 
     let start_ms = slopos_kernel_services::platform::get_time_ms();
 
-    // Helper: copy out the result fd sets.
+    /// Copy the three result fd-sets back to userspace. `#[inline(never)]`
+    /// so each call reuses one stack frame for the three
+    /// `UserBytes::try_new` + `copy_bytes_to_user` pairs — the previous
+    /// macro inlined the same scratch four times in the loop below.
+    #[inline(never)]
+    fn copy_out_select_results(
+        read_ptr: u64,
+        write_ptr: u64,
+        except_ptr: u64,
+        read_out: &[u8],
+        write_out: &[u8],
+        except_out: &[u8],
+        bytes_len: usize,
+    ) -> Result<(), u32> {
+        use slopos_mm::user_copy::copy_bytes_to_user;
+        use slopos_mm::user_ptr::UserBytes;
+        const EFAULT: u32 = slopos_abi::syscall::ERRNO_EFAULT as u32;
+        if read_ptr != 0 {
+            let out = UserBytes::try_new(read_ptr, bytes_len).map_err(|_| EFAULT)?;
+            copy_bytes_to_user(out, &read_out[..bytes_len]).map_err(|_| EFAULT)?;
+        }
+        if write_ptr != 0 {
+            let out = UserBytes::try_new(write_ptr, bytes_len).map_err(|_| EFAULT)?;
+            copy_bytes_to_user(out, &write_out[..bytes_len]).map_err(|_| EFAULT)?;
+        }
+        if except_ptr != 0 {
+            let out = UserBytes::try_new(except_ptr, bytes_len).map_err(|_| EFAULT)?;
+            copy_bytes_to_user(out, &except_out[..bytes_len]).map_err(|_| EFAULT)?;
+        }
+        Ok(())
+    }
+
     macro_rules! copy_out_sets {
-        () => {
-            if args.arg1 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &read_out[..bytes_len]));
+        () => {{
+            if let Err(errno) = copy_out_select_results(
+                args.arg1,
+                args.arg2,
+                args.arg3,
+                read_out,
+                write_out,
+                except_out,
+                bytes_len,
+            ) {
+                return ctx.err_with(errno as u64);
             }
-            if args.arg2 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg2, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &write_out[..bytes_len]));
-            }
-            if args.arg3 != 0 {
-                let out = try_or_err!(ctx, UserBytes::try_new(args.arg3, bytes_len));
-                try_or_err!(ctx, copy_bytes_to_user(out, &except_out[..bytes_len]));
-            }
-        };
+        }};
     }
 
     loop {

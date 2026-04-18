@@ -28,10 +28,12 @@ All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_uns
 ### Allocation surface
 **`slopos-alloc` is the only kernel allocation surface.** Every kernel crate (everything outside `userland/`, `slibc/`, `slop-protocol/`, `ktesting/`, and `slopos-alloc/` itself) routes heap allocation through `slopos_alloc`'s `KBox`, `KVec`, `KArc`, `KVecDeque`, `KBTreeMap`, and `PinBox` rather than `alloc::*`. The lone exception is `kernel/src/main.rs`, which keeps `extern crate alloc;` for the `#[global_allocator]` / `#[alloc_error_handler]` declarations.
 
-Two build-time gates enforce the discipline (run on every `just build`, also via `just check`):
+The in-place-init primitive (`slopos_alloc::Init<T, E>`, `Zeroable`, `init_from_closure`, `init_zeroed`) is **in-house** — defined in `slopos-alloc/src/init.rs` with no external dependency on `pinned-init` or Rust-for-Linux's `pin-init`. Large structs must be constructed via `KBox::try_init(T::init_…())` / `PinBox::try_init(T::init_…())` so the `T` rvalue never materialises on the caller's stack.
 
-- **`scripts/check_alloc_dep.sh`** — fails if any kernel crate's `Cargo.toml` declares a direct `alloc` dependency.
-- **`scripts/check_stack_sizes.sh`** — fails if any function in `builddir/kernel.elf` has a stack frame larger than `STACK_SIZE_THRESHOLD` (default 2560 bytes / 2.5 KiB). Driven by `-Zemit-stack-sizes`.
+Build-time gates enforce the discipline (run on every `just build`, also via `just check`):
+
+- **`scripts/check_alloc_dep.sh`** — fails if any kernel crate's `Cargo.toml` declares a direct `alloc` dependency **and** fails if any kernel `.rs` file (other than `kernel/src/main.rs`) contains a bare `extern crate alloc;` / `use alloc::` / `use ::alloc::` statement (with `#[cfg(...)]`-aware lookback so cfg-gated usages that compile out of the kernel build are accepted).
+- **`scripts/check_stack_sizes.sh`** — fails if any function in `builddir/kernel.elf` has a stack frame larger than `STACK_SIZE_THRESHOLD` (default **2048 bytes / 2 KiB**, matching Linux mainline's `CONFIG_FRAME_WARN` default on x86_64/arm64 but stricter in enforcement — SlopOS fails the build, Linux merely warns). Driven by `-Zemit-stack-sizes`; inspects the final ELF's `.stack_sizes` section, so it catches NRVO failures, inlining, and trait-object dispatch that a source-level heuristic would miss.
 
 `scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.
 

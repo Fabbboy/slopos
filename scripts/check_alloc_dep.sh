@@ -67,7 +67,75 @@ done < <(find "$REPO_ROOT" -maxdepth 3 -name Cargo.toml \
              -not -path "$REPO_ROOT/target/*" \
              -print0)
 
+# -----------------------------------------------------------------------
+# Source-level pass: catch `extern crate alloc;` / `use alloc::` / `use
+# ::alloc::` patterns that a Cargo.toml scan would miss. The only kernel
+# file allowed to name `alloc` from source is `kernel/src/main.rs`,
+# which needs `extern crate alloc;` for its `#[global_allocator]` /
+# `#[alloc_error_handler]` declarations. Userland + slopos-alloc itself
+# are exempt per the Cargo-level whitelist above.
+# -----------------------------------------------------------------------
+
+SOURCE_WHITELIST="kernel/src/main.rs"
+
+# A minimal awk scan of each `.rs` that flags `extern crate alloc;` or
+# `use alloc::` / `use ::alloc::` lines *only* if the preceding line is
+# not a `#[cfg(...)]` attribute. The cfg-gate cases live in `gfx/` and
+# compile out of the kernel build; they're safe and we don't want to
+# touch them.
+#
+# `git ls-files` respects `.gitignore` and skips third_party / builddir
+# / target automatically.
+source_offenders="$(
+    cd "$REPO_ROOT"
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git ls-files '*.rs'
+    else
+        find . -type f -name '*.rs' \
+            -not -path './builddir/*' \
+            -not -path './third_party/*' \
+            -not -path './target/*'
+    fi \
+      | grep -Ev '^(userland|slibc|slop-protocol|ktesting|slopos-alloc)/' \
+      | grep -vxF "$SOURCE_WHITELIST" \
+      | while IFS= read -r file; do
+            awk '
+                BEGIN { bad = 0; n = 0 }
+                {
+                    lines[NR] = $0
+                    if (n < NR) n = NR
+                }
+                /^[[:space:]]*(extern crate alloc;|use alloc::|use ::alloc::)/ {
+                    # Accept if line N-1 is `#[cfg(...)]` (applies to
+                    # this line directly) OR line N-2 is `#[cfg(...)]`
+                    # AND line N-1 is a `mod ... {` declaration (the
+                    # cfg then gates the enclosing mod block, making
+                    # the inner `extern crate alloc;` safe).
+                    gated = 0
+                    if (NR - 1 >= 1 && lines[NR - 1] ~ /^[[:space:]]*#\[cfg\(/) {
+                        gated = 1
+                    } else if (NR - 2 >= 1 \
+                               && lines[NR - 2] ~ /^[[:space:]]*#\[cfg\(/ \
+                               && lines[NR - 1] ~ /mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/) {
+                        gated = 1
+                    }
+                    if (!gated) bad = 1
+                }
+                END { if (bad) exit 1 }
+            ' "$file" || echo "$file"
+        done \
+      || true
+)"
+
+if [ -n "$source_offenders" ]; then
+    echo "check_alloc_dep: source-level 'alloc' usage detected:" >&2
+    echo "$source_offenders" | sed 's/^/    /' >&2
+    echo "  only kernel/src/main.rs may name 'alloc' directly — everything" >&2
+    echo "  else must go through slopos_alloc::*" >&2
+    bad=1
+fi
+
 if [ "$bad" -eq 0 ]; then
-    echo "check_alloc_dep: OK — no kernel crate declares a direct 'alloc' dep"
+    echo "check_alloc_dep: OK — no kernel crate or source file names 'alloc' directly"
 fi
 exit "$bad"

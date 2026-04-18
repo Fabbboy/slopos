@@ -166,7 +166,11 @@ pub fn synchronize_rcu() {
     let this_cpu = get_current_cpu();
     let n = get_cpu_count().min(MAX_CPUS);
 
-    let mut snaps = [0u64; MAX_CPUS];
+    // Heap-allocate the per-CPU snapshot vector rather than placing a
+    // 2 KiB `[u64; MAX_CPUS]` on the stack — stack-safety gate forbids
+    // frames that large, and an RCU grace-period that can't allocate
+    // 2 KiB of scratch is already on a wedged path.
+    let mut snaps = slopos_alloc::KVec::<u64>::zeroed(n).expect("rcu: snaps alloc");
     for cpu in 0..n {
         snaps[cpu] = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
     }

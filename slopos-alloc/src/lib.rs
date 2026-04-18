@@ -4,16 +4,21 @@
 //! (via `extern crate alloc;`). Every other kernel crate must route heap
 //! allocation through the primitives re-exported here. The wrappers exist
 //! so that large structs cannot materialise on a caller's stack: the only
-//! public constructor for `PinBox<T>` takes a `PinInit<T>`, and the only
-//! constructors for `KBox<T>` / `KVec<T>` that allocate-and-fill in place
-//! require `T: Zeroable`. By-value constructors (`KBox::try_new`,
-//! `KVec::push`, `KArc::try_new`, etc.) exist for small `T`; the ELF
-//! post-link `.stack_sizes` gate (`scripts/check_stack_sizes.sh`) enforces
-//! the upper bound on what counts as "small".
+//! public constructor for `PinBox<T>` / `KBox<T>` that allocates-and-fills
+//! in place takes an [`Init<T, E>`] recipe, and the zero-fill
+//! constructors (`KBox::zeroed`, `KVec::zeroed`, `PinBox::zeroed`) require
+//! `T: Zeroable`. By-value constructors (`KBox::try_new`, `KVec::push`,
+//! `KArc::try_new`, etc.) exist for small `T`; the ELF post-link
+//! `.stack_sizes` gate (`scripts/check_stack_sizes.sh`) enforces the
+//! upper bound on what counts as "small".
 //!
-//! Two `unsafe` blocks live in this module: `boxed_zeroed` and
-//! `KVec::zeroed`. Both are guarded by a `T: Zeroable` bound that
-//! certifies an all-zero bit pattern is a valid `T`.
+//! The [`Init<T, E>`] / [`Zeroable`] surface is in-house (see
+//! [`init`] module) — SlopOS deliberately does not depend on the
+//! crates.io `pinned-init` crate or Rust-for-Linux's in-tree
+//! `pin-init`. SlopOS has no self-referential kernel types and no
+//! in-kernel async, so the `Pin` machinery that motivates those
+//! projects is unneeded complexity; our surface is a strict subset
+//! tuned for our allocator and our stack-frame gate.
 
 #![no_std]
 #![feature(allocator_api, coerce_unsized, unsize)]
@@ -29,33 +34,48 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 
 pub use alloc::alloc::AllocError;
-pub use pinned_init::{
-    InPlaceInit, Init, MaybeZeroable, PinInit, Zeroable, init, init_from_closure, init_zeroed,
-    pin_data, pin_init, pin_init_from_closure, pinned_drop, try_init, try_pin_init,
-};
 
-/// Re-export of the underlying `pinned_init` crate. Consumers needing the
-/// `pin_init!` / `try_pin_init!` macros should reach them through this
-/// path (`slopos_alloc::pinned_init::pin_init!`) so that the macros'
-/// internal `$crate::__init_internal!` reference resolves correctly. The
-/// re-exports above are item-level shortcuts that work for trait imports
-/// but break macro hygiene across crate boundaries.
-pub use pinned_init;
+mod init;
+pub use init::{Init, InitClosure, Zeroable, init_from_closure, init_zeroed};
 
 /// Kernel-wide pinned heap cell. The sole public constructor that runs
-/// initialisation in-place takes a `PinInit<T>`, so a `T` value never
-/// materialises on a caller's stack for the heap-direct path.
+/// initialisation in-place takes an [`Init<T, E>`] recipe, so a `T`
+/// value never materialises on a caller's stack for the heap-direct
+/// path.
 pub struct PinBox<T: ?Sized> {
     inner: Pin<Box<T>>,
 }
 
 impl<T> PinBox<T> {
-    /// Heap-allocate and pin-initialise a `T` in place.
-    pub fn pin_init<E>(init: impl PinInit<T, E>) -> Result<Self, E>
+    /// Heap-allocate and initialise a `T` in place from an
+    /// [`Init<T, E>`] recipe. The `T` rvalue never materialises on
+    /// the caller's stack — the recipe writes the fields directly
+    /// into the freshly allocated heap slot, then we pin it.
+    pub fn try_init<E>(init: impl Init<T, E>) -> Result<Self, E>
     where
         E: From<AllocError>,
     {
-        Box::try_pin_init(init).map(|inner| Self { inner })
+        let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit().map_err(E::from)?;
+        // SAFETY: `boxed` is a freshly-allocated, properly aligned,
+        // writable slot for a `T`. `init.__init` writes a valid `T`
+        // into the slot on `Ok(())`, satisfying `assume_init`.
+        // On `Err(e)`, we drop `boxed` (a `MaybeUninit<T>`) which
+        // does not run `T`'s drop glue — the allocation is freed
+        // without touching uninitialised memory.
+        unsafe {
+            let raw = Box::into_raw(boxed);
+            let slot: *mut T = (*raw).as_mut_ptr();
+            if let Err(e) = init.__init(slot) {
+                // Rebuild `Box<MaybeUninit<T>>` so Drop frees the
+                // allocation without running `T`'s glue.
+                let _ = Box::from_raw(raw);
+                return Err(e);
+            }
+            let initialised: Box<T> = Box::from_raw(raw as *mut T);
+            Ok(Self {
+                inner: Box::into_pin(initialised),
+            })
+        }
     }
 }
 
@@ -73,7 +93,7 @@ impl<T> PinBox<T> {
     /// Intended for **small** types where the brief stack
     /// materialisation of `value` is not a stack-safety concern.
     /// Large types (anything close to or above 1 KiB) should use
-    /// [`PinBox::pin_init`] or [`PinBox::zeroed`] instead so the `T`
+    /// [`PinBox::try_init`] or [`PinBox::zeroed`] instead so the `T`
     /// never touches a caller's stack — this is the whole reason
     /// `PinBox` exists.
     ///
@@ -178,15 +198,27 @@ impl<T> KBox<T> {
         Box::try_new(value).map(|inner| Self { inner })
     }
 
-    /// Heap-allocate and initialise a `T` in place from an `impl Init<T, E>`
-    /// recipe. The `T` rvalue never materialises on the caller's stack —
-    /// the `init!` macro writes the fields directly into the freshly
-    /// allocated heap slot.
+    /// Heap-allocate and initialise a `T` in place from an
+    /// [`Init<T, E>`] recipe. The `T` rvalue never materialises on
+    /// the caller's stack — the recipe writes fields directly into
+    /// the freshly-allocated heap slot.
     pub fn try_init<E>(init: impl Init<T, E>) -> Result<Self, E>
     where
         E: From<AllocError>,
     {
-        Box::try_init(init).map(|inner| Self { inner })
+        let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit().map_err(E::from)?;
+        // SAFETY: see `PinBox::try_init` — identical invariants.
+        unsafe {
+            let raw = Box::into_raw(boxed);
+            let slot: *mut T = (*raw).as_mut_ptr();
+            if let Err(e) = init.__init(slot) {
+                let _ = Box::from_raw(raw);
+                return Err(e);
+            }
+            Ok(Self {
+                inner: Box::from_raw(raw as *mut T),
+            })
+        }
     }
 
     /// Convert to a raw pointer; caller becomes responsible for freeing
@@ -588,8 +620,9 @@ impl<'a, T> IntoIterator for &'a mut KVec<T> {
 ///
 /// As with [`KBox::try_new`] the rvalue passed to [`KArc::try_new`] does
 /// briefly land on the caller's stack; large `T` should be constructed
-/// via a future `KArc::pin_init` (not yet wired — no kernel call site
-/// requires it) or via `pinned_init`'s `Arc::pin_init` directly.
+/// via a future `KArc::try_init` (not yet wired — no kernel call site
+/// requires it) so the `T` is written directly into the Arc's heap
+/// allocation without a stack materialisation step.
 pub struct KArc<T: ?Sized> {
     inner: Arc<T>,
 }

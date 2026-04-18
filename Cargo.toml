@@ -58,7 +58,6 @@ slopos-font = { path = "font" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
 slopos-alloc = { path = "slopos-alloc" }
-pinned-init = { version = "0.0.10", default-features = false }
   slopos-utils = { path = "utils" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }

@@ -111,7 +111,15 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     }
 
     let mut deferred = PostLockWork::new();
-    let mut route: Option<(super::driver::DriverId, [u8; 256], usize)> = None;
+    // Echo payload is routed via a heap-allocated 256-byte buffer so
+    // the 256 B inline array never lands in this function's stack
+    // frame. `KBox::zeroed()` is only invoked in the `if echo_len > 0`
+    // arm below — the no-echo hot path stays allocation-free.
+    let mut route: Option<(
+        super::driver::DriverId,
+        slopos_alloc::KBox<[u8; 256]>,
+        usize,
+    )> = None;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -149,9 +157,13 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
         let echo_len = batch.echo.len();
         if echo_len > 0 {
-            let mut out = [0u8; 256];
-            out[..echo_len].copy_from_slice(batch.echo.as_slice());
-            route = Some((tty.driver.id(), out, echo_len));
+            if let Ok(mut out) = slopos_alloc::KBox::<[u8; 256]>::zeroed() {
+                out[..echo_len].copy_from_slice(batch.echo.as_slice());
+                route = Some((tty.driver.id(), out, echo_len));
+            }
+            // Echo drop on alloc failure is not a correctness issue:
+            // the next input tick re-echoes if the terminal is still
+            // live.
         }
 
         if let Some((sig, _)) = batch.signal {
@@ -167,6 +179,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         write_driver_unlocked(driver_id, &out[..out_len]);
         drop(_inflight);
         drop(_write_guard);
+        drop(out);
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
