@@ -88,8 +88,11 @@ pub(crate) fn is_scheduling_active() -> bool {
         && PREEMPTION_ENABLED.load(Ordering::Acquire) != 0
 }
 
+use slopos_mm::mmu;
 use slopos_mm::paging::paging_get_kernel_directory;
-use slopos_mm::process_vm::{process_vm_get_cr3_phys, process_vm_sync_kernel_mappings};
+use slopos_mm::process_vm::{
+    process_vm_get_cr3_phys, process_vm_get_mm_ctx_id, process_vm_sync_kernel_mappings,
+};
 use slopos_mm::tlb;
 
 use super::ffi_boundary::kernel_stack_top;
@@ -251,14 +254,20 @@ fn requeue_running_task(cpu_id: usize, current: *mut Task) {
 }
 
 fn switch_to_kernel_address_space(_task: *mut Task) {
-    tlb::enter_lazy_tlb(slopos_arch::pcr::get_current_cpu());
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    tlb::enter_lazy_tlb(cpu_id);
     unsafe {
         let kernel_dir = paging_get_kernel_directory();
         if !(*kernel_dir).pml4_phys.is_null() {
-            let kd_phys = (*kernel_dir).pml4_phys.as_u64();
-            let current_cr3 = cpu::read_cr3() & !0xFFF;
-            if kd_phys != current_cr3 {
-                cpu::write_cr3(kd_phys);
+            let target = mmu::select_cr3(
+                cpu_id,
+                mmu::MmContextId::INVALID,
+                (*kernel_dir).pml4_phys,
+                0,
+            );
+            let current = mmu::read_cr3_value();
+            if target.pml4_phys() != current.pml4_phys() || target.pcid() != current.pcid() {
+                mmu::write_cr3_value(target);
             }
         }
     }
@@ -367,26 +376,42 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     platform::gdt_set_kernel_rsp0(kernel_rsp);
 
     // --- CR3 ---
+    //
+    // Runs through `mmu::select_cr3` so PCID, tlb_gen, and NOFLUSH are
+    // decided in one place. The hot path writes CR3 with NOFLUSH=1 and
+    // PCID=<slot>, retaining the TLB across the switch. Cold paths
+    // (miss, stale generation) clear NOFLUSH after `INVPCID`-ing the
+    // evicted slot.
     let next_pid = unsafe { (*next).process_id };
-    if next_pid != INVALID_PROCESS_ID {
+    let (ctx_id, pml4_phys, tlb_gen) = if next_pid != INVALID_PROCESS_ID {
         process_vm_sync_kernel_mappings(next_pid);
         let cr3_phys = process_vm_get_cr3_phys(next_pid);
-        if cr3_phys != 0 {
-            let current_cr3 = cpu::read_cr3() & !0xFFF;
-            if cr3_phys != current_cr3 {
-                cpu::write_cr3(cr3_phys);
+        if cr3_phys == 0 {
+            // No VM set up — fall back to kernel PML4.
+            unsafe {
+                let kernel_dir = paging_get_kernel_directory();
+                (mmu::MmContextId::INVALID, (*kernel_dir).pml4_phys, 0u64)
             }
+        } else {
+            let ctx_id = process_vm_get_mm_ctx_id(next_pid);
+            // `tlb_gen` is a constant 0: the per-CPU ASID pool treats
+            // every switch-in into an existing slot as "still valid"
+            // (NOFLUSH). Cross-CPU coherence is owned by `mm::mmu::luf`
+            // at frame reuse, not by a per-process generation counter.
+            (ctx_id, slopos_abi::addr::PhysAddr::new(cr3_phys), 0u64)
         }
     } else {
         unsafe {
             let kernel_dir = paging_get_kernel_directory();
-            let kd_phys = (*kernel_dir).pml4_phys.as_u64();
-            if kd_phys != 0 {
-                let current_cr3 = cpu::read_cr3() & !0xFFF;
-                if kd_phys != current_cr3 {
-                    cpu::write_cr3(kd_phys);
-                }
-            }
+            (mmu::MmContextId::INVALID, (*kernel_dir).pml4_phys, 0u64)
+        }
+    };
+
+    if !pml4_phys.is_null() {
+        let target = mmu::select_cr3(cpu_id, ctx_id, pml4_phys, tlb_gen);
+        let current = mmu::read_cr3_value();
+        if target.pml4_phys() != current.pml4_phys() || target.pcid() != current.pcid() {
+            mmu::write_cr3_value(target);
         }
     }
 

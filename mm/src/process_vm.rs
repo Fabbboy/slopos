@@ -239,6 +239,27 @@ pub fn process_vm_get_cr3_phys(process_id: u32) -> u64 {
     unsafe { (*page_dir).pml4_phys.as_u64() }
 }
 
+/// Look up the stable 64-bit `MmContextId` associated with this process.
+///
+/// Returns `MmContextId::INVALID` if the process slot has been freed or
+/// the page directory is not yet populated. The scheduler uses this value
+/// to key the per-CPU ASID cache so PCID reuse survives `process_id`
+/// recycling and works across the pre-/post-`MmContext` transition.
+pub fn process_vm_get_mm_ctx_id(process_id: u32) -> crate::mmu::MmContextId {
+    let Some(slot) = find_slot_for_pid(process_id) else {
+        return crate::mmu::MmContextId::INVALID;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return crate::mmu::MmContextId::INVALID;
+    }
+    let page_dir = guard.page_dir;
+    if page_dir.is_null() {
+        return crate::mmu::MmContextId::INVALID;
+    }
+    unsafe { (*page_dir).mm_ctx_id }
+}
+
 pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
     let cr3_phys = cr3 & !0xFFF;
     if cr3_phys == 0 {
@@ -334,11 +355,20 @@ fn teardown_inner_mappings(inner: &mut ProcessVmInner) {
     }
     let page_dir = inner.page_dir;
     let mut total = inner.total_pages;
+
+    // SAFETY: callers (`destroy_process_vm`, failed `create_process_vm`
+    // rollback, `process_vm_clone_cow` rollback) all call this with
+    // every live task for `page_dir` already terminated. The guard's
+    // constructor issues the one authoritative TLB flush for the
+    // address space; from here on, per-page unmaps through the guard
+    // skip all further flush / LUF work.
+    let mut tearing = unsafe { crate::paging::MmTeardownGuard::begin(page_dir) };
+
     inner.vma_map.drain(|start, end, region| {
         let freed = if region.is_shared() {
-            unmap_range_nofree_dir(page_dir, start, end)
+            unmap_range_teardown(&mut tearing, start, end)
         } else {
-            unmap_and_free_range_dir(page_dir, start, end)
+            unmap_and_free_range_teardown(&mut tearing, start, end)
         };
         total = total.saturating_sub(freed);
         if region.is_shared() && !region.memfd_handle().is_none() {
@@ -347,6 +377,48 @@ fn teardown_inner_mappings(inner: &mut ProcessVmInner) {
     });
     inner.total_pages = total;
     inner.heap_end = inner.heap_start;
+}
+
+/// Unmap-and-free under a [`MmTeardownGuard`] — see that type for the
+/// safety contract. The guard's construction has already done the
+/// one global TLB flush; every unmap here is a pure PTE clear.
+fn unmap_and_free_range_teardown(
+    tearing: &mut crate::paging::MmTeardownGuard,
+    start: u64,
+    end: u64,
+) -> u32 {
+    if !vma_range_valid(start, end) {
+        return 0;
+    }
+    let mut freed = 0u32;
+    let mut addr = start;
+    while addr < end {
+        let phys = tearing.unmap_page(VirtAddr::new(addr));
+        if !phys.is_null() {
+            free_page_frame(phys);
+            freed += 1;
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    freed
+}
+
+/// Memfd-backed unmap under [`MmTeardownGuard`] — frames stay live in
+/// the memfd's refcount, we only clear PTEs.
+fn unmap_range_teardown(tearing: &mut crate::paging::MmTeardownGuard, start: u64, end: u64) -> u32 {
+    if !vma_range_valid(start, end) {
+        return 0;
+    }
+    let mut unmapped = 0u32;
+    let mut addr = start;
+    while addr < end {
+        let phys = tearing.unmap_page(VirtAddr::new(addr));
+        if !phys.is_null() {
+            unmapped += 1;
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    unmapped
 }
 
 /// Unmap and free pages in a range using a raw page_dir pointer.
@@ -383,6 +455,19 @@ fn unmap_range_nofree_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64) -
             unmapped += 1;
         }
         addr += PAGE_SIZE_4KB;
+    }
+    // Memfd-backed unmaps bypass LUF's drain-on-reuse invariant: the
+    // frame is never returned to the page allocator (it lives on in
+    // the memfd refcount), so `drain_if_reusing_frame` never fires. A
+    // remote CPU running the same process could still hold the stale
+    // translation and observe the memfd's live contents through the
+    // now-unmapped VA. Issue a targeted shootdown across every CPU in
+    // the process's cpumask so all threads drop the stale entry.
+    if unmapped > 0 {
+        let pid = unsafe { (*page_dir).process_id };
+        if pid != INVALID_PROCESS_ID {
+            tlb::flush_all_for_process(pid);
+        }
     }
     unmapped
 }
@@ -1188,6 +1273,7 @@ pub fn create_process_vm() -> u32 {
         (*page_dir_ptr).process_id = process_id;
         (*page_dir_ptr).next = ptr::null_mut();
         (*page_dir_ptr).kernel_mapping_gen = 0;
+        (*page_dir_ptr).mm_ctx_id = crate::mmu::alloc_mm_context_id();
         paging_copy_kernel_mappings((*page_dir_ptr).pml4);
     }
 
@@ -1328,9 +1414,8 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
         }
     }
     klog_info!("Destroying process VM space for PID {}", process_id);
-
-    tlb::flush_all_for_process(process_id);
-    tlb::unregister_process_tlb(process_id);
+    // The authoritative cross-CPU flush is issued inside
+    // `teardown_inner_mappings` by `MmTeardownGuard::begin`.
 
     // Teardown under the per-process lock.
     {
@@ -2137,6 +2222,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         (*child_page_dir).process_id = child_id;
         (*child_page_dir).next = ptr::null_mut();
         (*child_page_dir).kernel_mapping_gen = 0;
+        (*child_page_dir).mm_ctx_id = crate::mmu::alloc_mm_context_id();
         paging_copy_kernel_mappings((*child_page_dir).pml4);
     }
 

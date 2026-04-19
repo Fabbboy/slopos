@@ -146,8 +146,6 @@ struct PerCpuTlbState {
     target_asid: AtomicU64,
     /// Process ID for targeted process flushes, INVALID_PROCESS_ID for broadcast.
     target_process_id: AtomicU32,
-    /// Requested TLB generation for targeted process flushes.
-    request_tlb_gen: AtomicU64,
     /// Acknowledgment flag: set by target CPU when flush is complete.
     ack: AtomicBool,
     /// True when CPU runs kernel/idle and can defer user TLB flushes.
@@ -164,7 +162,6 @@ impl PerCpuTlbState {
             flush_end: AtomicU64::new(0),
             target_asid: AtomicU64::new(0),
             target_process_id: AtomicU32::new(INVALID_PROCESS_ID),
-            request_tlb_gen: AtomicU64::new(0),
             ack: AtomicBool::new(false),
             is_lazy: AtomicBool::new(false),
             current_process_id: AtomicU32::new(INVALID_PROCESS_ID),
@@ -273,19 +270,20 @@ impl Iterator for CpuMaskIter {
     }
 }
 
+/// Per-process shootdown tracking.
+///
+/// Tracks only which CPUs currently hold a mapping for a process, so
+/// broadcast flushes (`flush_all_for_process`) can target the cpumask
+/// instead of every online CPU. Cross-CPU coherence for individual
+/// page unmaps lives in `mm::mmu::luf`.
 struct ProcessTlbInfo {
     cpumask: CpuMask,
-    tlb_gen: AtomicU64,
-    last_flushed_gen: [AtomicU64; MAX_CPUS],
 }
 
 impl ProcessTlbInfo {
     const fn new() -> Self {
-        const INIT: AtomicU64 = AtomicU64::new(0);
         Self {
             cpumask: CpuMask::new(),
-            tlb_gen: AtomicU64::new(1),
-            last_flushed_gen: [INIT; MAX_CPUS],
         }
     }
 }
@@ -308,24 +306,14 @@ pub fn register_process_tlb(process_id: u32) {
     let Some(info) = process_tlb_info(process_id) else {
         return;
     };
-
     info.cpumask.clear_all();
-    info.tlb_gen.store(1, Ordering::Release);
-    for local_gen in &info.last_flushed_gen {
-        local_gen.store(0, Ordering::Release);
-    }
 }
 
 pub fn unregister_process_tlb(process_id: u32) {
     let Some(info) = process_tlb_info(process_id) else {
         return;
     };
-
     info.cpumask.clear_all();
-    info.tlb_gen.store(1, Ordering::Release);
-    for local_gen in &info.last_flushed_gen {
-        local_gen.store(0, Ordering::Release);
-    }
 }
 
 pub fn notify_mm_switch(old_process_id: u32, new_process_id: u32, cpu_id: usize) {
@@ -417,19 +405,9 @@ fn flush_page_local(vaddr: VirtAddr) {
     cpu::invlpg(vaddr.as_u64());
 }
 
-/// Flush a single user page locally and bump the process TLB generation
-/// so remote CPUs know their cached translations are stale.  Used for
-/// process page-table modifications that happen under a lock where a
-/// broadcast IPI would risk deadlock.
-#[inline]
-pub fn flush_page_local_for_process(process_id: u32, vaddr: VirtAddr) {
-    flush_page_local(vaddr);
-    if process_id != INVALID_PROCESS_ID {
-        if let Some(info) = process_tlb_info(process_id) {
-            info.tlb_gen.fetch_add(1, Ordering::Release);
-        }
-    }
-}
+// User-address unmap flushes go through `mm::mmu::luf::queue_unmap`
+// rather than a per-process generation bump. Kept as a private alias
+// above (`flush_page_local`) for the shootdown-handler path only.
 
 /// Flush a range of pages on the local CPU.
 fn flush_range_local(start: VirtAddr, end: VirtAddr) {
@@ -603,20 +581,12 @@ pub fn exit_lazy_tlb(cpu: usize) {
     let state = &TLB_STATE.cpu_state[cpu];
     state.is_lazy.store(false, Ordering::Release);
 
-    let process_id = state.current_process_id.load(Ordering::Acquire);
-    if process_id == INVALID_PROCESS_ID {
-        return;
-    }
-    let Some(info) = process_tlb_info(process_id) else {
-        return;
-    };
-
-    let local_gen = info.last_flushed_gen[cpu].load(Ordering::Acquire);
-    let global_gen = info.tlb_gen.load(Ordering::Acquire);
-    if local_gen < global_gen {
-        flush_tlb_local_full();
-        info.last_flushed_gen[cpu].store(global_gen, Ordering::Release);
-    }
+    // Cross-CPU coherence for user-space unmaps is driven entirely
+    // by `mm::mmu::luf::drain_by_phys_cross_cpu` at frame reuse. No
+    // generation-based catch-up needed on lazy-TLB exit — if this
+    // CPU held a stale translation pointing at a now-freed frame,
+    // the drain IPI already invalidated it before the frame was
+    // handed out to a new owner.
 }
 
 fn queue_request_for_cpu(
@@ -626,7 +596,6 @@ fn queue_request_for_cpu(
     end: u64,
     asid: u64,
     process_id: u32,
-    tlb_gen: u64,
 ) {
     let state = &TLB_STATE.cpu_state[cpu_idx];
     state.ack.store(false, Ordering::Release);
@@ -634,7 +603,6 @@ fn queue_request_for_cpu(
     state.flush_end.store(end, Ordering::Release);
     state.target_asid.store(asid, Ordering::Release);
     state.target_process_id.store(process_id, Ordering::Release);
-    state.request_tlb_gen.store(tlb_gen, Ordering::Release);
     state
         .pending_type
         .store(flush_type as u32, Ordering::Release);
@@ -644,7 +612,7 @@ fn broadcast_flush_request(flush_type: FlushType, start: u64, end: u64, asid: u6
     let flush_type = promote_remote_flush_type(flush_type, start, end);
 
     for cpu_idx in TLB_STATE.online_cpus.iter_set() {
-        queue_request_for_cpu(cpu_idx, flush_type, start, end, asid, INVALID_PROCESS_ID, 0);
+        queue_request_for_cpu(cpu_idx, flush_type, start, end, asid, INVALID_PROCESS_ID);
     }
 
     core::sync::atomic::fence(Ordering::SeqCst);
@@ -656,7 +624,6 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
     };
 
     let flush_type = promote_remote_flush_type(flush_type, start, end);
-    let request_gen = info.tlb_gen.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     let initiator = slopos_arch::pcr::get_current_cpu();
 
     if should_flush_tlb_for_process(initiator, process_id) {
@@ -666,7 +633,6 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
             FlushType::Full => flush_tlb_local_full(),
             FlushType::None => {}
         }
-        info.last_flushed_gen[initiator].store(request_gen, Ordering::Release);
     }
 
     // Allocate the per-CPU target list on the heap: a stack-resident
@@ -689,7 +655,7 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
             continue;
         }
 
-        queue_request_for_cpu(cpu_idx, flush_type, start, end, 0, process_id, request_gen);
+        queue_request_for_cpu(cpu_idx, flush_type, start, end, 0, process_id);
         if target_count < MAX_CPUS {
             targets[target_count] = cpu_idx;
             target_count += 1;
@@ -737,14 +703,17 @@ fn online_cpus(exclude: usize) -> impl Iterator<Item = usize> + 'static {
 /// On uniprocessor systems, it performs a local invlpg.
 /// On SMP systems, it broadcasts an IPI to all CPUs.
 pub fn flush_page(vaddr: VirtAddr) {
-    flush_page_local(vaddr);
-
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::SinglePage, vaddr.as_u64(), 0, 0);
         send_shootdown_ipi();
+        // Overlap our own invlpg with the remote CPUs' handlers instead
+        // of running it serially up front (Amit et al. EuroSys '20).
+        flush_page_local(vaddr);
         wait_for_acks(online_cpus(initiator), initiator);
+    } else {
+        flush_page_local(vaddr);
     }
 }
 
@@ -757,14 +726,15 @@ pub fn flush_page_for_process(process_id: u32, vaddr: VirtAddr) {
 /// For small ranges, invalidates each page individually.
 /// For large ranges, performs a full TLB flush.
 pub fn flush_range(start: VirtAddr, end: VirtAddr) {
-    flush_range_local(start, end);
-
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Range, start.as_u64(), end.as_u64(), 0);
         send_shootdown_ipi();
+        flush_range_local(start, end);
         wait_for_acks(online_cpus(initiator), initiator);
+    } else {
+        flush_range_local(start, end);
     }
 }
 
@@ -777,14 +747,15 @@ pub fn flush_range_for_process(process_id: u32, start: VirtAddr, end: VirtAddr) 
 /// This is the most expensive operation but sometimes necessary,
 /// e.g., when changing CR3 or modifying many pages.
 pub fn flush_all() {
-    flush_tlb_local_full();
-
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, 0);
         send_shootdown_ipi();
+        flush_tlb_local_full();
         wait_for_acks(online_cpus(initiator), initiator);
+    } else {
+        flush_tlb_local_full();
     }
 }
 
@@ -798,17 +769,19 @@ pub fn flush_all_for_process(process_id: u32) {
 /// entries associated with that process's page tables.
 pub fn flush_asid(asid: u64) {
     let current_cr3 = cpu::read_cr3();
-
-    if (current_cr3 & !0xFFF) == (asid & !0xFFF) {
-        flush_tlb_local_full();
-    }
+    let local_needs_flush = (current_cr3 & !0xFFF) == (asid & !0xFFF);
 
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, asid);
         send_shootdown_ipi();
+        if local_needs_flush {
+            flush_tlb_local_full();
+        }
         wait_for_acks(online_cpus(initiator), initiator);
+    } else if local_needs_flush {
+        flush_tlb_local_full();
     }
 }
 
@@ -832,8 +805,7 @@ pub fn handle_shootdown_ipi(cpu_idx: usize) {
     let start = state.flush_start.load(Ordering::Acquire);
     let end = state.flush_end.load(Ordering::Acquire);
     let target_asid = state.target_asid.load(Ordering::Acquire);
-    let target_process_id = state.target_process_id.load(Ordering::Acquire);
-    let request_tlb_gen = state.request_tlb_gen.load(Ordering::Acquire);
+    let _target_process_id = state.target_process_id.load(Ordering::Acquire);
 
     state.pending_type.store(0, Ordering::Release);
 
@@ -845,43 +817,18 @@ pub fn handle_shootdown_ipi(cpu_idx: usize) {
         }
     }
 
-    let mut do_full_flush = false;
-    let mut skip_flush = false;
-
-    if target_process_id != INVALID_PROCESS_ID {
-        if let Some(info) = process_tlb_info(target_process_id) {
-            let local_gen = info.last_flushed_gen[cpu_idx].load(Ordering::Acquire);
-            if local_gen >= request_tlb_gen {
-                skip_flush = true;
-            } else {
-                if request_tlb_gen.wrapping_sub(local_gen) > 1 {
-                    do_full_flush = true;
-                }
-                info.last_flushed_gen[cpu_idx].store(request_tlb_gen, Ordering::Release);
-            }
-        }
-    }
-
-    if !skip_flush {
-        if do_full_flush {
-            flush_tlb_local_full();
-        } else {
-            match flush_type {
-                FlushType::None => {}
-                FlushType::SinglePage => {
-                    flush_page_local(VirtAddr::new(start));
-                }
-                FlushType::Range => {
-                    flush_range_local(VirtAddr::new(start), VirtAddr::new(end));
-                }
-                FlushType::Full => {
-                    flush_tlb_local_full();
-                }
-            }
-        }
-    }
-
+    // Early ACK (Amit et al., EuroSys '20): the initiator may proceed
+    // as soon as it sees the ack. We are still inside the ISR so no
+    // memory access that depends on the new mapping state can occur
+    // until IRETQ, which serialises with the pending invalidation.
     state.ack.store(true, Ordering::Release);
+
+    match flush_type {
+        FlushType::None => {}
+        FlushType::SinglePage => flush_page_local(VirtAddr::new(start)),
+        FlushType::Range => flush_range_local(VirtAddr::new(start), VirtAddr::new(end)),
+        FlushType::Full => flush_tlb_local_full(),
+    }
 }
 
 /// Batched TLB flush for multiple pages.

@@ -28,18 +28,27 @@ static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
 global_asm!(
     // fn raw_usercopy(dst: *mut u8 [rdi], src: *const u8 [rsi], len: usize [rdx]) -> usize
     // Returns 0 on success, >0 (remaining bytes) on fault.
+    //
+    // SMAP: `stac` opens the user-page access window; `clac` closes it on
+    // every exit path (success + fault-recovery). Hardware clears AC on
+    // exception entry, so nested kernel code running between the fault and
+    // IRETQ sees SMAP enforced normally; IRETQ restores AC from the saved
+    // RFLAGS, so we resume inside the stac window.
     ".global raw_usercopy",
     ".global __usercopy_start",
     ".global __usercopy_end",
     ".global __usercopy_fault",
     "raw_usercopy:",
     "   mov rcx, rdx", // len → rcx for rep prefix
+    "   stac",
     "__usercopy_start:",
     "   rep movsb", // copy [rsi] → [rdi], rcx bytes
     "__usercopy_end:",
+    "   clac",
     "   xor eax, eax", // return 0 = success
     "   ret",
     "__usercopy_fault:",
+    "   clac",
     "   mov rax, rcx", // return remaining byte count
     "   ret",
 );

@@ -88,11 +88,17 @@ pub const CPUID_FEAT_ECX_OSXSAVE: u32 = 1 << 27;
 // CPUID Leaf 7 (Subleaf 0) - EBX Structured Extended Feature Flags
 // =============================================================================
 
+/// Supervisor Mode Execution Prevention (SMEP).
+pub const CPUID_SEXT_EBX_SMEP: u32 = 1 << 7;
+
 /// INVPCID instruction support.
 pub const CPUID_SEXT_EBX_INVPCID: u32 = 1 << 10;
 
 /// RDSEED instruction support (hardware entropy seed).
 pub const CPUID_SEXT_EBX_RDSEED: u32 = 1 << 18;
+
+/// Supervisor Mode Access Prevention (SMAP).
+pub const CPUID_SEXT_EBX_SMAP: u32 = 1 << 20;
 
 // =============================================================================
 // CPUID Extended Leaf 0x80000001 - EDX Flags

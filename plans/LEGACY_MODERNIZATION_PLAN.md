@@ -1188,71 +1188,128 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 ---
 
-## 9. Phase 6: PCID / TLB Optimization
+## 9. Phase 6: PCID / TLB Optimization — **SHIPPED**
 
-> **Avoids unnecessary TLB flushes on context switch.**
-> **Kernel changes required**: Yes — page table management, context switch
-> **Difficulty**: Medium
-> **Depends on**: Nothing (self-contained, but best after Phase 0 and 2)
+> **Status**: landed as a ground-up MMU redesign that supersedes the
+> original 4096-PCID-bitmap sketch below. See §9.1 for what actually
+> shipped; the pre-implementation checklist is kept only for historical
+> reference.
 
-### Background
+### 9.1 What landed
 
-PCID (Process-Context Identifiers) tags TLB entries with a 12-bit ID, allowing multiple address spaces to coexist in the TLB. Without PCID, every `CR3` write flushes the entire TLB.
+The simple per-process-PCID-bitmap sketch in §9.3 was replaced with a
+Linux-style per-CPU ASID dance, Amit-style shootdowns, LUF, and a
+typed MMU surface. The work lives under `mm/src/mmu/`, `mm/src/tlb.rs`,
+and touchpoints across `boot/`, `core/`, `karch/`, `sync/`, `tests/`.
 
-SlopOS already detects PCID and INVPCID support in `mm/src/tlb.rs`:
-```rust
-pcid_supported    // from CPUID
-invpcid_supported // from CPUID
-```
+**Supervisor hardening**
 
-But these are never used — every context switch does a full TLB flush.
+- `CR4.PGE`, `CR4.SMEP`, `CR4.SMAP` enabled on BSP + every AP
+  (`karch/src/cpu/security.rs`).
+- Kernel leaf PTEs stamped with the `GLOBAL` bit
+  (`paging_mark_kernel_global`).
+- `raw_usercopy` wraps `rep movsb` with `stac`/`clac`.
 
-### 6A: PCID Allocation
+**Typed CR3 primitives** (`mm/src/mmu/cr3.rs`)
 
-- [ ] **6A.1** Create PCID allocator in `mm/src/tlb.rs`:
+- `Cr3Value` newtype, `Pcid` (12-bit), `MmContextId` (64-bit, monotonic,
+  never reused). Every `cpu::write_cr3` call routed through
+  `mmu::write_cr3_value`.
+
+**Per-CPU ASID dance** (`mm/src/mmu/asid.rs`)
+
+- 16 slots/CPU, Linux-style `(ctx_id, tlb_gen, loaded_mm)` keyed off
+  the stable 64-bit `MmContextId`. Hot-path context switch writes
+  CR3 with `NOFLUSH=1` when the ASID is still loaded; miss rotates
+  slots and issues `INVPCID type 1`.
+- `CR4.PCIDE` enabled at boot via `mmu::init_bsp` / `mmu::init_ap`.
+
+**Amit-style shootdown** (`mm/src/tlb.rs`)
+
+- Early ACK in `handle_shootdown_ipi` (ack before flush).
+- Concurrent local flush on the initiator, overlapping the IPI
+  round-trip.
+
+**LUF (Lazy Unmap Flush)** (`mm/src/mmu/luf.rs`)
+
+- Per-CPU 64-entry ring of `(vaddr, phys, ctx_id, pcid)`.
+- Global `LUF_NONEMPTY_MASK` → fast-path skip when no CPU has
+  pending entries.
+- `LUF_DRAIN_IPI_VECTOR = 0xFA` cross-CPU drain-by-phys, Amit-style
+  early ACK. Targets only CPUs with bits in the mask.
+- `alloc_page_frame` calls `drain_if_reusing_frame(phys)`; `sys_munmap`
+  calls `drain_local()` before sysret.
+- Legacy `ProcessTlbInfo::tlb_gen` / `exit_lazy_tlb` catch-up /
+  `flush_page_local_for_process` **ripped**.
+
+**Typed kernel mappings** (`mm/src/mmu/mapping.rs`)
+
+- `#[must_use]` `KernelMapping` with owned/borrowed frame semantics,
+  Drop-safe unmap + TLB flush + conditional frame free.
+
+**Typed teardown guard** (`mm/src/paging/tables.rs`)
+
+- `MmTeardownGuard::begin(page_dir)` issues one
+  `flush_all_for_process` + `unregister_process_tlb`, then
+  `unmap_page` on the guard skips LUF / per-page coherence by type
+  construction. `teardown_inner_mappings` uses it; closed a shutdown
+  regression where LUF overflows during destroy re-enabled IRQs.
+
+**Errata + scaffolding**
+
+- `mmu::errata` — Alder/Raptor Lake INVLPG+PCID blacklist.
+- `mmu::rar` — `trait ShootdownBackend`, `SoftwareIpi` concrete,
+  `IntelRar::detect` stub.
+- `mmu::kpti` + `mm/src/mmu/trampoline.s` — dual-PML4 scaffolding,
+  CR3-swap template; `KPTI_ENABLED` defaults `false`, activation is
+  a one-file change once the trampoline is linked into the IDT /
+  SYSCALL MSR targets.
+
+**Also landed along the way**
+
+- `karch/src/pcr.rs` AP-count race: `init_ap_pcr` uses
+  `fetch_max` instead of load+compare+store, fixing sysmon reporting
+  fewer cores than online when APs came up out of order.
+
+### 9.2 Gate
+
+- [x] PCID allocated per context (per-CPU, not per-process bitmap) —
+  delivered via ASID dance.
+- [x] Context switch writes PCID-aware CR3 with `NOFLUSH` bit.
+- [x] TLB entries survive context switches (hot-path CR3 writes set
+  `NOFLUSH=1`).
+- [x] TLB shootdown uses INVPCID when available (`mmu::asid::flush_pcid`
+  → `INVPCID type 1`, fallback CR3 reload otherwise).
+- [x] Fallback to non-PCID path works on errata-affected /
+  unsupported CPUs (`mmu::errata::should_disable_pcid`).
+- [x] `just test` passes — 2393/2393 green with live LUF counters.
+- [x] No TLB-related crashes or stale mapping bugs under the
+  exercised workloads.
+
+### 9.3 Original sketch (historical)
+
+Kept for reference — the pre-implementation plan, superseded by §9.1.
+
+~~- **6A.1** Create PCID allocator in `mm/src/tlb.rs`:
   - 12-bit PCID → 4096 possible values (0 is reserved for kernel)
   - Simple bitmap allocator: `pcid_bitmap: [AtomicU64; 64]` (4096 bits)
-  - `alloc_pcid() -> Option<u16>`, `free_pcid(pcid: u16)`
-- [ ] **6A.2** Assign PCID to each process:
-  - Add `pcid: u16` to the process/task struct
-  - Allocate on process creation, free on process exit
-  - Kernel always uses PCID 0
-- [ ] **6A.3** Handle PCID exhaustion:
-  - If all 4095 PCIDs are in use: global TLB flush + reset all PCIDs
-  - This is the "PCID generation" approach (used by Linux)
+  - `alloc_pcid() -> Option<u16>`, `free_pcid(pcid: u16)`~~ (replaced
+  by per-CPU 16-slot pool keyed off `MmContextId`, matching Linux's
+  model; a global bitmap across 4096 PCIDs has worse steady-state
+  behaviour than a small per-CPU pool with generation-based reuse).
 
-### 6B: PCID-Aware CR3 Writes
+~~- **6A.2** Assign PCID to each process~~ — replaced by `MmContextId`
+  (64-bit, stable, never reused). Hardware PCID is a per-CPU slot
+  binding, not a per-process attribute.
 
-- [ ] **6B.1** Modify context switch to set PCID in CR3:
-  - CR3 format with PCID: `[bits 63: noflush] [bits 51:12: PML4 phys] [bits 11:0: PCID]`
-  - Set bit 63 (noflush) to avoid flushing the TLB on CR3 write
-  - The new process's TLB entries are already tagged with its PCID
-- [ ] **6B.2** Update `core/context_switch.s` to write PCID-aware CR3:
-  - Load `task.cr3` with PCID embedded in low 12 bits
-  - Set noflush bit (bit 63) in the value written to CR3
-- [ ] **6B.3** INVPCID-based selective flush:
-  - Replace `invlpg` with `invpcid` (type 0: individual address + PCID)
-  - TLB shootdown sends PCID along with virtual address
-  - `invpcid` type 1: flush all entries for a given PCID (process exit)
+~~- **6A.3** Handle PCID exhaustion~~ — the per-CPU 16-slot pool
+  rotates via `next_asid`; `INVPCID type 1` flushes the evicted slot.
 
-### 6C: TLB Shootdown Update
+~~- **6B.*** — replaced by `mmu::write_cr3_value(Cr3Value)` choke
+  point and the ASID dance in `mmu::select_cr3`.
 
-- [ ] **6C.1** Update `mm/src/tlb.rs` flush request to include PCID:
-  - `FlushRequest { flush_type, vaddr, pcid }` — add PCID field
-  - Receiving CPU uses `invpcid` with the PCID to flush only the relevant entries
-- [ ] **6C.2** On process exit: flush all TLB entries for that PCID across all CPUs
-  - `invpcid` type 1 (single-context invalidation)
-- [ ] **6C.3** Fallback: if INVPCID not supported, use `invlpg` + full flush on CR3 switch
-
-### Phase 6 Gate
-
-- [ ] **GATE**: PCID allocated per process, freed on exit
-- [ ] **GATE**: Context switch writes PCID-aware CR3 with noflush bit
-- [ ] **GATE**: TLB entries survive context switches (measured: fewer TLB misses)
-- [ ] **GATE**: TLB shootdown uses INVPCID when available
-- [ ] **GATE**: Fallback to non-PCID path works on older CPUs
-- [ ] **GATE**: `just test` passes
-- [ ] **GATE**: No TLB-related crashes or stale mapping bugs
+~~- **6C.*** — replaced by LUF cross-CPU drain-by-phys IPI
+  (`LUF_DRAIN_IPI_VECTOR`) plus Amit-style shootdown in `mm::tlb`.
 
 ---
 
@@ -1383,7 +1440,7 @@ Features that **cannot be implemented** until specific phases complete:
 | HTTP, SSH, any TCP protocol | No TCP state machine | Phase 5 (TCP) |
 | NTP, mDNS, any UDP protocol | No UDP socket send/receive | Phase 5E (UDP Sockets) |
 | DNS hostname resolution | No DNS resolver | Phase 5F (DNS) |
-| TLB-efficient context switch | PCID unused, full flush every switch | Phase 6 (PCID) |
+| TLB-efficient context switch | ✓ shipped via per-CPU ASID dance + LUF | Phase 6 ✓ |
 | USB keyboard/mouse | No xHCI driver | Phase 7A (USB) |
 | Hardware-accelerated graphics | No VirtIO GPU driver | Phase 7B |
 | Wall-clock time / date | No RTC integration | Phase 7C |
@@ -1403,6 +1460,6 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
 | **Phase 4**: PCIe ECAM | **Complete** | 9 | 9 | — |
 | **Phase 5**: Network Stack | 5A+5B+5C+5D+5E **Complete**, 5F next | 97 | 73 | — |
-| **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
+| **Phase 6**: PCID / TLB | **Complete** (ground-up MMU redesign: PGE/SMEP/SMAP, typed CR3, per-CPU ASID dance, Amit shootdown, LUF with cross-CPU drain, MmTeardownGuard, KPTI scaffold) | 9 | 9 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **196** | **132** | |
+| **Total** | | **196** | **141** | |

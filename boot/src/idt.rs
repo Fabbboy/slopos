@@ -20,8 +20,8 @@ pub use slopos_arch::arch::idt::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    IdtEntry, LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, RCU_QS_IPI_VECTOR,
-    RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    IdtEntry, LAPIC_TIMER_VECTOR, LUF_DRAIN_IPI_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT,
+    RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
 #[repr(C, packed)]
@@ -106,6 +106,7 @@ unsafe extern "C" {
     fn isr128();
     fn isr_reschedule_ipi();
     fn isr_rcu_qs_ipi();
+    fn isr_luf_drain_ipi();
     fn isr_tlb_shootdown();
     fn isr_shutdown_ipi();
     fn isr_spurious();
@@ -191,6 +192,12 @@ pub fn idt_init() {
     idt_set_gate(
         RCU_QS_IPI_VECTOR,
         handler_ptr(isr_rcu_qs_ipi),
+        0x08,
+        IDT_GATE_INTERRUPT,
+    );
+    idt_set_gate(
+        LUF_DRAIN_IPI_VECTOR,
+        handler_ptr(isr_luf_drain_ipi),
         0x08,
         IDT_GATE_INTERRUPT,
     );
@@ -330,6 +337,19 @@ fn handle_tlb_shootdown_ipi() {
     send_eoi();
 }
 
+fn handle_luf_drain_ipi() {
+    let apic_id = slopos_drivers::apic::get_id();
+    if let Some(cpu_idx) = slopos_arch::pcr::cpu_index_from_apic_id(apic_id) {
+        slopos_mm::mmu::luf::handle_drain_ipi(cpu_idx);
+    } else {
+        klog_debug!(
+            "LUF: Missing CPU index for APIC 0x{:x}; cannot ack drain",
+            apic_id
+        );
+    }
+    send_eoi();
+}
+
 /// RAII guard that holds preempt_count elevated without triggering the
 /// reschedule callback on drop.  Used for IST-based exception handlers
 /// where yielding would leave the handler suspended on a reusable IST stack.
@@ -432,6 +452,11 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
     if vector == TLB_SHOOTDOWN_VECTOR {
         handle_tlb_shootdown_ipi();
+        return;
+    }
+
+    if vector == LUF_DRAIN_IPI_VECTOR {
+        handle_luf_drain_ipi();
         return;
     }
 

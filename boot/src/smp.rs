@@ -98,6 +98,15 @@ unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
     // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
     slopos_arch::cpu::xsave::enable_on_current_cpu();
 
+    // Match the BSP supervisor-mode feature mask (CR4.PGE + SMEP + SMAP).
+    // Must happen before this AP's first CR3 reload so global kernel
+    // mappings are tagged consistently with the BSP.
+    slopos_arch::cpu::security::enable_supervisor_features();
+
+    // Enable CR4.PCIDE on this AP if the BSP decided PCID is live.
+    // Must run before any CR3 load that embeds a non-zero PCID.
+    slopos_mm::mmu::init_ap();
+
     // Limine may start APs in x2APIC mode (MSR-based register access).
     // The kernel uses xAPIC MMIO for all LAPIC access, so if x2APIC is
     // active we must transition back: x2APIC → disabled → xAPIC.

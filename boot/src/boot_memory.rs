@@ -1,10 +1,26 @@
 use slopos_utils::klog::{self, KlogLevel};
 use slopos_utils::{klog_debug, klog_info};
 
-use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
+use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap, boot_init_priority};
 
+use slopos_arch::cpu::security::{SupervisorFeatures, enable_supervisor_features};
 use slopos_mm::memory_init::init_memory_system;
 use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
+
+fn boot_step_supervisor_features_fn() {
+    let SupervisorFeatures { pge, smep, smap } = enable_supervisor_features();
+    klog_info!(
+        "CPU: supervisor features enabled (PGE={}, SMEP={}, SMAP={})",
+        pge,
+        smep,
+        smap
+    );
+}
+
+fn boot_step_mmu_asid_init_fn() {
+    let pcid_live = slopos_mm::mmu::init_bsp();
+    klog_debug!("MMU: PCID {}", if pcid_live { "live" } else { "disabled" });
+}
 
 fn boot_step_memory_init() -> i32 {
     let memmap = boot_get_memmap();
@@ -51,15 +67,31 @@ fn boot_step_memory_verify() {
 }
 
 crate::boot_init!(
+    BOOT_STEP_SUPERVISOR_FEATURES,
+    memory,
+    b"cpu supervisor features\0",
+    boot_step_supervisor_features_fn,
+    flags = boot_init_priority(1)
+);
+crate::boot_init!(
     BOOT_STEP_MEMORY_INIT,
     memory,
     b"memory init\0",
     boot_step_memory_init,
-    fallible
+    fallible,
+    flags = boot_init_priority(10)
 );
 crate::boot_init!(
     BOOT_STEP_MEMORY_VERIFY,
     memory,
     b"address verification\0",
-    boot_step_memory_verify
+    boot_step_memory_verify,
+    flags = boot_init_priority(20)
+);
+crate::boot_init!(
+    BOOT_STEP_MMU_ASID_INIT,
+    memory,
+    b"mmu asid init\0",
+    boot_step_mmu_asid_init_fn,
+    flags = boot_init_priority(30)
 );

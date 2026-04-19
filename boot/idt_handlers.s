@@ -432,6 +432,11 @@ isr_tlb_shootdown:
 isr_rcu_qs_ipi:
     INTERRUPT_HANDLER 251, 0
 
+# LUF drain IPI handler (vector 0xFA = 250)
+.global isr_luf_drain_ipi
+isr_luf_drain_ipi:
+    INTERRUPT_HANDLER 250, 0
+
 # Shutdown IPI handler (vector 0xFE = 254)
 .global isr_shutdown_ipi
 isr_shutdown_ipi:

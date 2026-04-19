@@ -868,7 +868,16 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
 }
 
 pub fn alloc_page_frame(flags: u32) -> PhysAddr {
-    alloc_page_frames(1, flags)
+    let phys = alloc_page_frames(1, flags);
+    // LUF reuse-drain hook: if the frame we're about to hand out is
+    // still referenced by a deferred TLB flush on this CPU, drain the
+    // queue before the new owner installs its own mapping. Missing
+    // this would let a fresh translation for the same `phys` race a
+    // stale non-global TLB entry belonging to the previous owner.
+    if !phys.is_null() {
+        crate::mmu::luf::drain_if_reusing_frame(phys);
+    }
+    phys
 }
 
 /// Batch-allocate up to [`PCP_CAPACITY`] order-0 frames under a single

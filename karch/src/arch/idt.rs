@@ -112,6 +112,13 @@ pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
 /// Used by synchronize_rcu() to force holdout CPUs to report a QS.
 pub const RCU_QS_IPI_VECTOR: u8 = 0xFB;
 
+/// LUF drain-by-phys IPI vector (0xFA).
+/// Used by `mm::mmu::luf` when a freed frame is about to be reused —
+/// the allocating CPU pings every CPU that still has queued LUF entries
+/// so they can drain stale translations for the reclaimed frame before
+/// the new owner maps it.
+pub const LUF_DRAIN_IPI_VECTOR: u8 = 0xFA;
+
 /// LAPIC timer vector (0xEC).
 /// Each CPU's local APIC timer fires on this vector for scheduler preemption.
 /// Handled directly in the IDT path (not through the IOAPIC IRQ dispatch table).

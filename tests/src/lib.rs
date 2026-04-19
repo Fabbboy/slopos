@@ -152,6 +152,32 @@ pub fn tests_run_all(
         summary.elapsed_ms,
     );
 
+    // LUF (Lazy Unmap Flush) counters aggregated over all CPUs — proves
+    // that cross-CPU coherence is actually flowing through the ring
+    // and the drain IPI, not silently short-circuiting. Non-zero
+    // `queued` on a fork-heavy or munmap-heavy run means the migration
+    // is live; `reuse_drains` reflects how many times a frame was
+    // reclaimed while still carrying a deferred entry.
+    {
+        let mut q = 0u64;
+        let mut d = 0u64;
+        let mut r = 0u64;
+        let mut o = 0u64;
+        for cpu in 0..slopos_arch::pcr::MAX_CPUS {
+            q = q.saturating_add(slopos_mm::mmu::luf::queued_count(cpu));
+            d = d.saturating_add(slopos_mm::mmu::luf::deferred_saves_count(cpu));
+            r = r.saturating_add(slopos_mm::mmu::luf::reuse_drains_count(cpu));
+            o = o.saturating_add(slopos_mm::mmu::luf::overflow_drains_count(cpu));
+        }
+        klog_info!(
+            "LUF SUMMARY: queued={} reuse_drains={} overflow_drains={} deferred_saves={}",
+            q,
+            r,
+            o,
+            d,
+        );
+    }
+
     if summary.failed == 0 { 0 } else { -1 }
 }
 

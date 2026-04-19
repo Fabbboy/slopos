@@ -48,6 +48,15 @@ define_syscall!(syscall_munmap(ctx, args) requires(let process_id) {
     let addr = args.arg0;
     let length = args.arg1;
     let rc = slopos_mm::process_vm::process_vm_munmap(process_id, addr, length);
+    // Drain any LUF entries this unmap queued on the current CPU before
+    // returning to userspace. `queue_unmap` already issued an INVLPG on
+    // each page as it enqueued, but a ring entry that is still live
+    // when user code resumes means the frame may be reclaimed on
+    // another CPU while this CPU's drain is still pending. Collapsing
+    // everything into a single `tlb::flush_all` here closes the
+    // initiator-UAF window at the cost of one full flush per munmap
+    // batch — cheap compared to the shootdown we just avoided.
+    slopos_mm::mmu::luf::drain_local();
     ctx.from_rc(rc)
 });
 

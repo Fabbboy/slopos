@@ -209,6 +209,41 @@ pub const CR4_SMAP: u64 = Cr4Flags::SMAP.bits();
 pub const CR4_PKE: u64 = Cr4Flags::PKE.bits();
 
 // =============================================================================
+// RFLAGS.AC helpers (SMAP)
+// =============================================================================
+
+/// Set `RFLAGS.AC` via `STAC`, allowing supervisor-mode code to access
+/// user pages while SMAP (CR4.SMAP) is enabled.
+///
+/// Wrap a user-memory access as tightly as possible:
+///
+/// ```ignore
+/// stac();
+/// // ... touch user page ...
+/// clac();
+/// ```
+///
+/// Hardware clears `AC` on exception/interrupt entry, so a page fault
+/// during the windowed region cannot leak SMAP-disabled state back to
+/// unrelated code — on `iretq`, the saved `RFLAGS` restores the prior
+/// `AC` value. Callers are still responsible for pairing every `stac`
+/// with a `clac` on the success path.
+#[inline(always)]
+pub fn stac() {
+    unsafe {
+        asm!("stac", options(nomem, nostack));
+    }
+}
+
+/// Clear `RFLAGS.AC` via `CLAC`. See [`stac`] for usage.
+#[inline(always)]
+pub fn clac() {
+    unsafe {
+        asm!("clac", options(nomem, nostack));
+    }
+}
+
+// =============================================================================
 // XCR0 (Extended Control Register 0) — XSAVE feature enable mask
 // =============================================================================
 

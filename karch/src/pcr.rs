@@ -479,10 +479,7 @@ pub unsafe fn init_ap_pcr(cpu_id: usize, apic_id: u32) -> *mut ProcessorControlR
 
     (*ALL_PCRS.get()).0[cpu_id] = pcr;
 
-    let current_count = PCR_COUNT.load(Ordering::Acquire);
-    if cpu_id as u32 >= current_count {
-        PCR_COUNT.store(cpu_id as u32 + 1, Ordering::Release);
-    }
+    PCR_COUNT.fetch_max(cpu_id as u32 + 1, Ordering::AcqRel);
 
     // Register APIC mapping.
     register_apic_mapping(cpu_id, apic_id);

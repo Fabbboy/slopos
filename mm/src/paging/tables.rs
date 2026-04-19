@@ -7,7 +7,6 @@ use super::page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, Page
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_arch::cpu;
 use slopos_utils::{klog_debug, klog_info};
 
 use super::walker::{PageTableWalker, WalkAction};
@@ -30,6 +29,13 @@ pub struct ProcessPageDir {
     pub process_id: u32,
     pub next: *mut ProcessPageDir,
     pub kernel_mapping_gen: u64,
+    /// Stable 64-bit identifier for this address space.
+    ///
+    /// Unlike `process_id` (capped at 256, monotonically incremented,
+    /// never reused), `mm_ctx_id` is an opaque 64-bit handle allocated
+    /// by `mmu::alloc_mm_context_id()` and used by the per-CPU ASID
+    /// dance to bind PCIDs.
+    pub mm_ctx_id: crate::mmu::MmContextId,
 }
 
 unsafe impl Send for ProcessPageDir {}
@@ -46,6 +52,7 @@ static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(Pro
     process_id: 0,
     next: ptr::null_mut(),
     kernel_mapping_gen: 0,
+    mm_ctx_id: crate::mmu::MmContextId::INVALID,
 });
 
 fn table_empty(table: &PageTable) -> bool {
@@ -72,6 +79,24 @@ fn intermediate_flags(user_mapping: bool) -> PageFlags {
         base | PageFlags::USER
     } else {
         base
+    }
+}
+
+/// Force the GLOBAL bit on any leaf mapping that is kernel-only.
+///
+/// The global bit is architecturally meaningful only on leaf PTEs (4 KiB
+/// PTEs in a PT, 2 MiB PDEs and 1 GiB PDPTEs when `HUGE` is set) and only
+/// when `CR4.PGE` is enabled. Intermediate directory entries ignore it.
+///
+/// We stamp it here so every CR3 reload and every context switch preserves
+/// kernel TLB entries across address spaces — kernel mappings are identical
+/// in every process, so flushing them is pure waste.
+#[inline]
+fn leaf_flags_with_global(flags: PageFlags, user_mapping: bool) -> PageFlags {
+    if user_mapping {
+        flags
+    } else {
+        flags | PageFlags::GLOBAL
     }
 }
 
@@ -143,37 +168,72 @@ fn is_user_address(vaddr: VirtAddr) -> bool {
     raw < KERNEL_VIRTUAL_BASE && raw >= crate::memory_layout_defs::USER_SPACE_START_VA
 }
 
+/// Flush path for **user-space unmaps** — the frame has been cleared
+/// from the PTE and is about to be freed (or returned to the caller
+/// who will free it). Routes through the LUF ring so the initiator
+/// does one INVLPG, any remote CPU still holding a stale translation
+/// is caught via `drain_by_phys_cross_cpu` at reuse time, and no IPI
+/// is issued in the common case.
+///
+/// Caller must have already cleared the leaf PTE and know the freed
+/// physical frame.
+#[inline]
+fn flush_user_page_after_unmap(
+    page_dir: *mut ProcessPageDir,
+    vaddr: VirtAddr,
+    unmapped_phys: PhysAddr,
+) {
+    if page_dir.is_null() || !is_user_address(vaddr) {
+        // Non-user modification: synchronous broadcast. LUF is strictly
+        // user-mapping-only; kernel changes are shared across every
+        // address space and must be coherent immediately.
+        tlb::flush_page(vaddr);
+        return;
+    }
+    unsafe {
+        let ctx_id = (*page_dir).mm_ctx_id;
+        // `pcid` left 0 — queue_unmap issues INVLPG against whatever
+        // PCID is currently loaded. A future INVPCID-type-0 upgrade
+        // will target the exact slot; for now INVLPG in the current
+        // context plus the cross-CPU drain covers every live case.
+        crate::mmu::luf::queue_unmap(vaddr, unmapped_phys, ctx_id, 0);
+    }
+    // Cross-CPU coherence after this point is owned by LUF:
+    // `alloc_page_frame::drain_if_reusing_frame` will issue the
+    // cross-CPU drain IPI the moment this frame is re-allocated, and
+    // `luf::drain_local` on munmap syscall return covers the
+    // initiator-UAF window. The legacy `tlb_gen` / `exit_lazy_tlb`
+    // catch-up path has been removed.
+}
+
+/// Flush path for **kernel-space or in-place permission** changes.
+/// Always broadcasts — the mapping is shared (kernel half, or the
+/// still-live user mapping whose permissions we just tightened /
+/// flipped COW off) and must be coherent on every CPU before the
+/// caller proceeds.
+#[inline]
+fn flush_kernel_page_after_mod(vaddr: VirtAddr) {
+    tlb::flush_page(vaddr);
+}
+
+/// Legacy combined flush entry — routes to the new kernel variant
+/// when the VA is kernel-side, otherwise still a broadcast (safe
+/// default). Callers that know they just unmapped a user page should
+/// use `flush_user_page_after_unmap` directly.
 #[inline]
 fn flush_page_for_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) {
-    if !page_dir.is_null() && is_user_address(vaddr) {
-        // User-address modifications in a process page directory only
-        // need a local INVLPG.  Other CPUs running this process will
-        // pick up the change when they context-switch in (CR3 reload
-        // flushes the entire TLB) or via exit_lazy_tlb's generation
-        // check.  This avoids the broadcast IPI which (a) is wasteful
-        // since all processes share the same user virtual ranges and
-        // (b) cannot safely wait for acks while the caller holds a
-        // page-table lock.
-        //
-        // Bump the process TLB generation so remote CPUs know their
-        // cached entries are stale.
-        let pid = unsafe { (*page_dir).process_id };
-        tlb::flush_page_local_for_process(pid, vaddr);
-    } else {
-        // Kernel-space modifications are shared across all page tables,
-        // so a broadcast is necessary.
-        tlb::flush_page(vaddr);
-    }
+    let _ = page_dir;
+    flush_kernel_page_after_mod(vaddr);
 }
 
 #[inline(always)]
 fn get_cr3() -> PhysAddr {
-    PhysAddr::new(cpu::read_cr3() & !0xFFF)
+    crate::mmu::read_cr3_value().pml4_phys()
 }
 
 #[inline(always)]
 fn set_cr3(pml4_phys: PhysAddr) {
-    cpu::write_cr3(pml4_phys.as_u64());
+    crate::mmu::write_cr3_value(crate::mmu::Cr3Value::kernel(pml4_phys));
 }
 
 pub fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
@@ -216,6 +276,94 @@ pub fn paging_sync_kernel_mappings(page_dir: *mut ProcessPageDir) {
 
 pub fn paging_bump_kernel_mapping_gen() {
     KERNEL_MAPPING_GEN.fetch_add(1, Ordering::Release);
+}
+
+/// Stamp the `GLOBAL` bit on every leaf entry reachable from the kernel
+/// half of the kernel PML4 (indices 256..512).
+///
+/// Limine builds the initial higher-half mapping without setting the
+/// `G` bit, so the TLB cannot treat kernel translations as CR3-invariant.
+/// This walk runs once (BSP, `init_paging` time) and also stamps leaves
+/// reachable via huge pages (1 GiB PDPTEs, 2 MiB PDEs) in place.
+///
+/// The walk never touches user-half entries (< 256), never descends into
+/// non-present subtables, and never mutates intermediate directory entries
+/// — the `G` bit is only architecturally meaningful on leaves when
+/// `CR4.PGE` is set.
+///
+/// Must be called only after `init_paging` has populated
+/// `KERNEL_PAGE_DIR.pml4`. Safe to call twice; stamping an already-global
+/// leaf is idempotent.
+pub fn paging_mark_kernel_global() {
+    unsafe {
+        let pml4 = (*KERNEL_PAGE_DIR.get()).pml4;
+        if pml4.is_null() {
+            return;
+        }
+        for pml4_idx in 256..512 {
+            let pml4_entry = (&mut *pml4).entry_mut(pml4_idx);
+            if !pml4_entry.is_present() || pml4_entry.is_huge() {
+                // PML4 entries are never leaves; ignore malformed huge.
+                continue;
+            }
+            let pdpt = phys_to_table(pml4_entry.address());
+            if pdpt.is_null() {
+                continue;
+            }
+            mark_pdpt_global(pdpt);
+        }
+    }
+}
+
+unsafe fn mark_pdpt_global(pdpt: *mut PageTable) {
+    unsafe {
+        for i in 0..PAGE_TABLE_ENTRIES {
+            let entry = (&mut *pdpt).entry_mut(i);
+            if !entry.is_present() {
+                continue;
+            }
+            if entry.is_huge() {
+                entry.add_flags(PageFlags::GLOBAL);
+                continue;
+            }
+            let pd = phys_to_table(entry.address());
+            if pd.is_null() {
+                continue;
+            }
+            mark_pd_global(pd);
+        }
+    }
+}
+
+unsafe fn mark_pd_global(pd: *mut PageTable) {
+    unsafe {
+        for i in 0..PAGE_TABLE_ENTRIES {
+            let entry = (&mut *pd).entry_mut(i);
+            if !entry.is_present() {
+                continue;
+            }
+            if entry.is_huge() {
+                entry.add_flags(PageFlags::GLOBAL);
+                continue;
+            }
+            let pt = phys_to_table(entry.address());
+            if pt.is_null() {
+                continue;
+            }
+            mark_pt_global(pt);
+        }
+    }
+}
+
+unsafe fn mark_pt_global(pt: *mut PageTable) {
+    unsafe {
+        for i in 0..PAGE_TABLE_ENTRIES {
+            let entry = (&mut *pt).entry_mut(i);
+            if entry.is_present() {
+                entry.add_flags(PageFlags::GLOBAL);
+            }
+        }
+    }
 }
 
 fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
@@ -304,7 +452,10 @@ fn map_page_in_directory(
             if pdpt_entry.is_present() {
                 return -1;
             }
-            pdpt_entry.set(paddr, flags | PageFlags::PRESENT | PageFlags::HUGE);
+            pdpt_entry.set(
+                paddr,
+                leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT | PageFlags::HUGE,
+            );
             flush_page_for_directory(page_dir, vaddr);
             return 0;
         }
@@ -339,7 +490,10 @@ fn map_page_in_directory(
             if pd_entry.is_present() {
                 return -1;
             }
-            pd_entry.set(paddr, flags | PageFlags::PRESENT | PageFlags::HUGE);
+            pd_entry.set(
+                paddr,
+                leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT | PageFlags::HUGE,
+            );
             flush_page_for_directory(page_dir, vaddr);
             return 0;
         }
@@ -378,7 +532,10 @@ fn map_page_in_directory(
             }
         }
 
-        pt_entry.set(paddr, flags | PageFlags::PRESENT);
+        pt_entry.set(
+            paddr,
+            leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT,
+        );
 
         if was_present {
             flush_page_for_directory(page_dir, vaddr);
@@ -427,7 +584,30 @@ pub fn paging_map_shared_kernel_page(
     map_page_4kb_in_dir(page_dir, user_vaddr, phys, flags | PageFlags::USER.bits())
 }
 
+/// Per-page flush discipline for the `unmap_page_in_directory` core.
+///
+/// `Flush` is the normal contract: every user-VA unmap enqueues into
+/// LUF, every kernel-VA unmap broadcasts a shootdown. `Skip` is the
+/// teardown contract: the caller has already issued a single global
+/// `flush_all_for_process` (typically via [`MmTeardownGuard::begin`])
+/// and guarantees no CPU will ever re-populate the TLB from this
+/// page directory. Skipping turns the per-page work into a pure
+/// PTE clear + tree rollup — no LUF traffic, no IPI.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlushMode {
+    Flush,
+    Skip,
+}
+
 fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
+    unmap_page_in_directory_inner(page_dir, vaddr, FlushMode::Flush)
+}
+
+fn unmap_page_in_directory_inner(
+    page_dir: *mut ProcessPageDir,
+    vaddr: VirtAddr,
+    flush: FlushMode,
+) -> PhysAddr {
     if page_dir.is_null() {
         return PhysAddr::NULL;
     }
@@ -457,7 +637,9 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         if pdpt_entry.is_huge() {
             let phys = pdpt_entry.address();
             pdpt_entry.clear();
-            flush_page_for_directory(page_dir, vaddr);
+            if flush == FlushMode::Flush {
+                flush_user_page_after_unmap(page_dir, vaddr, phys);
+            }
             if table_empty(&*pdpt) {
                 pml4_entry.clear();
                 if page_frame_can_free(pml4_entry_phys) != 0 {
@@ -479,7 +661,9 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         if pd_entry.is_huge() {
             unmapped_phys = pd_entry.address();
             pd_entry.clear();
-            flush_page_for_directory(page_dir, vaddr);
+            if flush == FlushMode::Flush {
+                flush_user_page_after_unmap(page_dir, vaddr, unmapped_phys);
+            }
         } else {
             let pd_entry_phys = pd_entry.address();
             let pt = phys_to_table(pd_entry_phys);
@@ -490,7 +674,9 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
             if pt_entry.is_present() {
                 unmapped_phys = pt_entry.address();
                 pt_entry.clear();
-                flush_page_for_directory(page_dir, vaddr);
+                if flush == FlushMode::Flush {
+                    flush_user_page_after_unmap(page_dir, vaddr, unmapped_phys);
+                }
             } else {
                 unmapped_phys = PhysAddr::NULL;
             }
@@ -526,6 +712,67 @@ pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Phys
 
 pub fn unmap_page(vaddr: VirtAddr) -> PhysAddr {
     unmap_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr)
+}
+
+/// Typed proof-of-teardown: holding a `&mut MmTeardownGuard` is a
+/// compile-time assertion that
+///
+///   1. the caller has issued exactly one
+///      [`tlb::flush_all_for_process`] covering every CPU that could
+///      still be running in this page directory, and
+///   2. no task will ever execute in this page directory again — all
+///      its threads are terminated.
+///
+/// Under that contract, per-page PTE clears do not need any further
+/// TLB coherence work. The guard's [`unmap_page`] method calls into
+/// the paging core with `FlushMode::Skip`, so teardown never enqueues
+/// into LUF and never triggers a `wait_for_acks` round.
+///
+/// `MmTeardownGuard::begin` performs the one authoritative flush at
+/// construction so callers cannot forget it.
+pub struct MmTeardownGuard {
+    page_dir: *mut ProcessPageDir,
+}
+
+// SAFETY: the guard carries only a raw page-dir pointer; all mutation
+// goes through the owning `&mut Self`. Kernel-mode-only; never crosses
+// task boundaries.
+unsafe impl Send for MmTeardownGuard {}
+
+impl MmTeardownGuard {
+    /// Start teardown of the address space backing `page_dir`.
+    /// Issues the one global TLB flush the guard's contract relies on.
+    ///
+    /// # Safety
+    /// Caller must have already terminated every task scheduled
+    /// against this page directory. Using the parent page directory
+    /// on any CPU after this call is undefined behaviour — the guard
+    /// deliberately stops invalidating its TLB.
+    pub unsafe fn begin(page_dir: *mut ProcessPageDir) -> Self {
+        if !page_dir.is_null() {
+            // SAFETY: caller asserted no task runs here anymore; the
+            // field read is a plain load of a stable u32.
+            let pid = unsafe { (*page_dir).process_id };
+            if pid != INVALID_PROCESS_ID {
+                tlb::flush_all_for_process(pid);
+            }
+            tlb::unregister_process_tlb(pid);
+        }
+        Self { page_dir }
+    }
+
+    #[inline]
+    pub fn page_dir(&self) -> *mut ProcessPageDir {
+        self.page_dir
+    }
+
+    /// Clear the PTE at `vaddr` and return its backing frame.
+    /// **No TLB flush, no LUF enqueue** — the guard's construction
+    /// covered that up-front.
+    #[inline]
+    pub fn unmap_page(&mut self, vaddr: VirtAddr) -> PhysAddr {
+        unmap_page_in_directory_inner(self.page_dir, vaddr, FlushMode::Skip)
+    }
 }
 
 pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
@@ -646,6 +893,20 @@ pub fn init_paging() {
         } else {
             klog_debug!("Identity mapping not found (may be normal after early boot)");
         }
+
+        // Stamp GLOBAL onto kernel leaf PTEs (upper half). Must be done
+        // before any process page directory copies the kernel half, so
+        // every child address space inherits the global tagging. CR4.PGE
+        // is enabled separately by the boot security step; the bit is
+        // architecturally inert until then.
+        paging_mark_kernel_global();
+
+        // Force the TLB to re-walk and re-tag kernel entries as global.
+        // Intel SDM §4.10.2.4: the CPU may have cached kernel entries
+        // before the G bit was set; a CR3 reload drops those non-global
+        // entries. Writing the same PML4 value back is architecturally
+        // defined to invalidate non-global entries.
+        crate::mmu::write_cr3_value(crate::mmu::read_cr3_value());
 
         klog_debug!("Paging system initialized successfully");
     }
