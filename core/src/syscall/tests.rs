@@ -41,11 +41,11 @@ use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use slopos_utils::klog_info;
 
 use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown, unblock_task};
+use crate::scheduler::task;
 use crate::scheduler::task::{
     init_task_manager, task_clone, task_create, task_find_by_id, task_fork, task_set_state,
     task_set_state_from_with_reason, task_shutdown_all, task_terminate, task_try_transition_from,
 };
-use crate::scheduler::{per_cpu, task};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
 use slopos_abi::task::BlockReason;
@@ -66,6 +66,7 @@ struct SyscallFixture {
 impl SyscallFixture {
     fn new() -> Self {
         let aps_paused = crate::scheduler::per_cpu::pause_all_aps();
+        park_bootstrap_on_current_cpu();
         task_shutdown_all();
         scheduler_shutdown();
         let _ = init_task_manager();
@@ -76,10 +77,23 @@ impl SyscallFixture {
 
 impl Drop for SyscallFixture {
     fn drop(&mut self) {
+        park_bootstrap_on_current_cpu();
         task_shutdown_all();
         scheduler_shutdown();
         crate::scheduler::per_cpu::resume_all_aps_if_not_nested(self.aps_paused);
     }
+}
+
+fn park_bootstrap_on_current_cpu() {
+    slopos_arch::pcr::set_current_task(
+        crate::scheduler::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    );
+}
+
+fn make_task_current(task_ptr: *mut Task) {
+    assert!(!task_ptr.is_null(), "make_task_current: null task_ptr");
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    crate::scheduler::scheduler::dispatch(cpu_id, task_ptr);
 }
 
 fn dummy_task_entry(_arg: *mut c_void) {}
@@ -544,14 +558,13 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
 
     let pid = unsafe { (*task_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    make_task_current(task_ptr);
     let fd = file_open_for_process(
         pid,
         path.as_ptr() as *const c_char,
         O_RDONLY | O_NOCTTY as u32,
     );
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
     assert_test!(fd >= 0, "open(/dev/tty, O_NOCTTY) failed");
 
     let flags = file_fcntl_fd(pid, fd, F_GETFL, 0);
@@ -694,10 +707,9 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    make_task_current(task_ptr);
     let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N) failed");
     assert_eq_test!(
@@ -746,14 +758,13 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    make_task_current(task_ptr);
     let fd = file_open_for_process(
         pid,
         path.as_ptr() as *const c_char,
         O_RDONLY | O_NOCTTY as u32,
     );
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N, O_NOCTTY) failed");
     assert_eq_test!(
@@ -2079,10 +2090,9 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
 
     // Make task1 appear as current so task_terminate() takes the current-task
     // cleanup path (the path that previously leaked file descriptors).
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(p1));
+    make_task_current(p1);
     assert_eq_test!(task::task_terminate(t1), 0, "current-task terminate failed");
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     // If writer refs were released correctly, empty nonblocking read returns EOF (0),
     // not EAGAIN (-11).
@@ -2200,10 +2210,9 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
 
     let pid = unsafe { (*task_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    make_task_current(task_ptr);
     let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
         fd,
@@ -2241,10 +2250,9 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     // Now open /dev/tty — should succeed.
     let pid = unsafe { (*task_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    make_task_current(task_ptr);
     let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/tty) with ctty should succeed");
 
@@ -2300,10 +2308,9 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     // Now child tries to open /dev/tty — should fail with ENXIO.
     let child_pid = unsafe { (*child_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
+    make_task_current(child_ptr);
     let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
         fd,
@@ -2353,10 +2360,9 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     // Child opens /dev/tty — should succeed (inherits parent's ctty).
     let child_pid = unsafe { (*child_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
+    make_task_current(child_ptr);
     let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
-    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "child open(/dev/tty) should succeed");
 

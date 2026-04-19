@@ -11,7 +11,7 @@ use slopos_arch::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 
-use crate::sched::{clear_scheduler_current_task, schedule, unblock_task};
+use crate::sched::{schedule, unblock_task};
 use crate::scheduler::task::{task_find_by_id, task_iterate_active, task_terminate};
 use crate::scheduler::task_struct::{SignalAction, Task};
 use crate::syscall::common::{SyscallDisposition, syscall_return_err};
@@ -340,7 +340,6 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
 
     if caller_terminated {
-        clear_scheduler_current_task();
         schedule();
         return SyscallDisposition::NoReturn;
     }
@@ -431,7 +430,6 @@ pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
                     (*task).fault_reason = TaskFaultReason::None;
                     (*task).exit_code = 128 + signum as u32;
                     if task_terminate(task_id) == 0 {
-                        clear_scheduler_current_task();
                         schedule();
                     }
                     return;

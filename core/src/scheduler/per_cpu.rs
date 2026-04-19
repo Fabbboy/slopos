@@ -198,8 +198,6 @@ pub struct PerCpuScheduler {
     pub cpu_id: usize,
     ready_queues: UnsafeCell<[ReadyQueue; NUM_PRIORITY_LEVELS]>,
     queue_lock: IrqMutex<()>,
-    current_task_atomic: AtomicPtr<Task>,
-    idle_task_atomic: AtomicPtr<Task>,
     pub enabled: AtomicBool,
     pub time_slice: u16,
     pub total_switches: AtomicU64,
@@ -224,8 +222,6 @@ impl PerCpuScheduler {
             cpu_id: 0,
             ready_queues: UnsafeCell::new([EMPTY_QUEUE; NUM_PRIORITY_LEVELS]),
             queue_lock: IrqMutex::new((), LOCK_LEVEL_SCHEDULER),
-            current_task_atomic: AtomicPtr::new(ptr::null_mut()),
-            idle_task_atomic: AtomicPtr::new(ptr::null_mut()),
             enabled: AtomicBool::new(false),
             time_slice: 10,
             total_switches: AtomicU64::new(0),
@@ -250,38 +246,6 @@ impl PerCpuScheduler {
         self.executing_task.load(Ordering::SeqCst)
     }
 
-    #[inline]
-    pub fn current_task(&self) -> *mut Task {
-        self.current_task_atomic.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub fn set_current_task(&self, task: *mut Task) {
-        self.current_task_atomic.store(task, Ordering::Release);
-        // Keep pcr.syscall_pid in sync so copy_from_user always resolves
-        // the correct process page directory — even after preemption.
-        let pid = if task.is_null() {
-            slopos_abi::task::INVALID_PROCESS_ID
-        } else {
-            unsafe { (*task).process_id }
-        };
-        unsafe {
-            slopos_arch::pcr::current_pcr()
-                .syscall_pid
-                .store(pid, Ordering::Release);
-        }
-    }
-
-    #[inline]
-    pub fn idle_task(&self) -> *mut Task {
-        self.idle_task_atomic.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub fn set_idle_task_atomic(&self, task: *mut Task) {
-        self.idle_task_atomic.store(task, Ordering::Release);
-    }
-
     /// # Safety
     /// Must be called exactly once per CPU during single-threaded init.
     pub unsafe fn init(&self, cpu_id: usize) {
@@ -295,12 +259,6 @@ impl PerCpuScheduler {
             for queue in queues.iter_mut() {
                 queue.clear_with_ref_release();
             }
-        }
-        self.current_task_atomic
-            .store(ptr::null_mut(), Ordering::Release);
-        if !self.is_initialized() {
-            self.idle_task_atomic
-                .store(ptr::null_mut(), Ordering::Release);
         }
         self.enabled.store(false, Ordering::Relaxed);
         self.total_switches.store(0, Ordering::Relaxed);
@@ -398,9 +356,11 @@ impl PerCpuScheduler {
         } else {
             inbox
         };
-        let current = self.current_task_atomic.load(Ordering::Relaxed);
-        let idle = self.idle_task_atomic.load(Ordering::Relaxed);
-        let running_real = !current.is_null() && current != idle;
+        let current = slopos_arch::pcr::get_current_task_for(self.cpu_id) as *mut Task;
+        let idle = slopos_arch::pcr::get_idle_task(self.cpu_id) as *mut Task;
+        let running_real = !current.is_null()
+            && !crate::scheduler::safestack_rt::is_bootstrap_task_ptr(current)
+            && current != idle;
         let load = queued.saturating_add(inbox);
         if running_real {
             load.saturating_add(1)
@@ -427,10 +387,6 @@ impl PerCpuScheduler {
             }
         }
         None
-    }
-
-    pub fn set_idle_task(&self, task: *mut Task) {
-        self.idle_task_atomic.store(task, Ordering::Release);
     }
 
     pub fn enable(&self) {
@@ -1006,14 +962,13 @@ pub fn is_idle_task(task: *const Task) -> bool {
         return false;
     }
 
+    // PCR.idle_task is the source of truth post-consolidation; the
+    // scheduler-copy field is kept in lockstep by `install_idle_task`
+    // until its deletion in a follow-up commit.
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
-        if let Some(is_idle) =
-            with_cpu_scheduler(cpu_id, |sched| sched.idle_task() == task as *mut Task)
-        {
-            if is_idle {
-                return true;
-            }
+        if slopos_arch::pcr::get_idle_task(cpu_id) == task as *mut () {
+            return true;
         }
     }
 
@@ -1108,9 +1063,6 @@ pub fn clear_cpu_queues(cpu_id: usize) {
     }
     drop(_guard);
     sched.clear_remote_inbox_with_ref_release();
-    sched
-        .current_task_atomic
-        .store(ptr::null_mut(), Ordering::Release);
 }
 
 /// Clear all per-CPU ready queues across all CPUs. Used during scheduler shutdown.

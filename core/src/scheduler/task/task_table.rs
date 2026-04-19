@@ -528,7 +528,23 @@ pub(super) fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -
 }
 
 pub fn task_pointer_is_valid(task: *const Task) -> bool {
-    with_task_manager(|mgr| task_slot_index_inner(mgr, task).is_some())
+    if task.is_null() {
+        return false;
+    }
+    // Pool-allocated tasks are the common case.
+    if with_task_manager(|mgr| task_slot_index_inner(mgr, task).is_some()) {
+        return true;
+    }
+    // SafeStack bootstrap Task stubs live in `.data` (Task::invalid()
+    // initializer + init_bootstrap_tasks seed of `unsafe_stack_sp`).
+    // They are NEVER inserted into the pool but ARE valid `Task`
+    // allocations that the scheduler legitimately observes as
+    // `PCR.current_task` during the pre-first-dispatch window AND
+    // across test-fixture transitions (when the previously-current
+    // task has been `reset_in_place`'d and the next test hasn't
+    // dispatched anything yet).  Whitelisting prevents the
+    // corruption-recovery loop in `scheduler_tasks_for_cpu`.
+    crate::scheduler::safestack_rt::is_bootstrap_task_ptr(task)
 }
 
 pub(super) enum ReserveTaskSlotError {
@@ -684,24 +700,6 @@ pub fn task_get_current_id() -> u32 {
 
 pub fn task_get_current() -> *mut Task {
     scheduler::scheduler_get_current_task()
-}
-
-pub fn task_set_current(task: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-    unsafe {
-        let current_status = (*task).status();
-        if current_status != TaskStatus::Ready && current_status != TaskStatus::Running {
-            klog_info!(
-                "task_set_current: unexpected state {} for task {} ('{}')",
-                current_status.as_u8() as u32,
-                (*task).task_id,
-                bytes_as_str(&(*task).name)
-            );
-        }
-        (*task).set_status(TaskStatus::Running);
-    }
 }
 
 pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {

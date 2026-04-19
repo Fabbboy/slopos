@@ -46,6 +46,18 @@ impl SchedFixture {
     pub fn new() -> Self {
         let aps_paused = pause_all_aps();
 
+        // Park PCR.current_task on the BSP SafeStack bootstrap stub
+        // BEFORE init_task_manager resets pool tasks in place.  Any
+        // previous test that went through `dispatch()` may have left
+        // PCR.current_task pointing at a pool-backed Task that
+        // `init_task_manager` is about to `reset_in_place` — reading
+        // through it after that zeroes `unsafe_stack_sp` and crashes
+        // the next instrumented prologue.  The bootstrap stub is not
+        // in the pool (whitelisted by `task_pointer_is_valid`) and
+        // retains a primed `unsafe_stack_sp` for the lifetime of the
+        // kernel image.
+        slopos_arch::pcr::set_current_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
+
         task_shutdown_all();
         scheduler_shutdown();
 
@@ -976,16 +988,6 @@ pub fn test_idle_priority_last() -> TestResult {
 // TIMER TICK / PREEMPTION TESTS
 // =============================================================================
 
-/// Test: Timer tick with no current task
-pub fn test_timer_tick_no_current_task() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    // Just call timer tick - should not crash even with no current task
-    scheduler_timer_tick();
-
-    TestResult::Pass
-}
-
 /// Test: Timer tick should decrement time slice
 pub fn test_timer_tick_decrements_slice() -> TestResult {
     let _fixture = SchedFixture::new();
@@ -1317,12 +1319,9 @@ pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResu
 pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let previous_idle = super::per_cpu::with_cpu_scheduler(0, |sched| {
-        let old = sched.idle_task();
-        sched.set_idle_task(ptr::null_mut());
-        old
-    })
-    .unwrap_or(ptr::null_mut());
+    // PCR.idle_task is the single source of truth for the idle slot.
+    let previous_idle = slopos_arch::pcr::get_idle_task(0) as *mut Task;
+    slopos_arch::pcr::set_idle_task(0, ptr::null_mut());
 
     let result = match runtime::resolve_idle_stack_for_cpu(0) {
         Err(IdleStackResolveError::MissingIdleTask) => TestResult::Pass,
@@ -1342,9 +1341,7 @@ pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
         }
     };
 
-    super::per_cpu::with_cpu_scheduler(0, |sched| {
-        sched.set_idle_task(previous_idle);
-    });
+    slopos_arch::pcr::set_idle_task(0, previous_idle as *mut ());
 
     result
 }
@@ -1358,13 +1355,11 @@ pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
         return TestResult::Fail;
     }
 
-    let idle_task = match super::per_cpu::with_cpu_scheduler(0, |sched| sched.idle_task()) {
-        Some(task) if !task.is_null() => task,
-        _ => {
-            klog_info!("SCHED_TEST: Failed to fetch BSP idle task from per-CPU scheduler");
-            return TestResult::Fail;
-        }
-    };
+    let idle_task = slopos_arch::pcr::get_idle_task(0) as *mut Task;
+    if idle_task.is_null() {
+        klog_info!("SCHED_TEST: Failed to fetch BSP idle task from PCR");
+        return TestResult::Fail;
+    }
 
     let original_top = unsafe { (*idle_task).kernel_stack_top };
     unsafe {
@@ -2085,14 +2080,13 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Set current task to the idle task so timer_tick recognises us as idle.
-    let idle_task = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task())
-        .unwrap_or(ptr::null_mut());
+    // `dispatch()` writes PCR.current_task + scheduler-copy + syscall_pid
+    // + state=Running in lockstep — single-writer invariant.
+    let idle_task = slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task;
     if idle_task.is_null() {
         return TestResult::Fail;
     }
-    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(idle_task);
-    });
+    super::scheduler::dispatch(cpu_id, idle_task);
 
     let (ticks_before, idle_before) = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         (
@@ -2302,9 +2296,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     if task_get_info(runner_id, &mut runner_ptr) != 0 || runner_ptr.is_null() {
         return TestResult::Fail;
     }
-    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(runner_ptr);
-    });
+    super::scheduler::dispatch(cpu_id, runner_ptr);
 
     let load =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load()).unwrap_or(0);
@@ -2394,9 +2386,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     if task_get_info(parent_id, &mut parent_ptr) != 0 {
         return TestResult::Fail;
     }
-    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(parent_ptr);
-    });
+    super::scheduler::dispatch(cpu_id, parent_ptr);
 
     // Spawn N children using schedule_new_task (the fork path).
     let n = cpu_count.min(4);
@@ -2521,7 +2511,6 @@ slopos_testing::define_test_suite!(
         test_unschedule_not_in_queue,
         test_priority_ordering,
         test_idle_priority_last,
-        test_timer_tick_no_current_task,
         test_timer_tick_decrements_slice,
         test_terminate_invalid_id,
         test_terminate_nonexistent_id,

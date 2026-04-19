@@ -53,7 +53,6 @@ pub extern "C" fn context_switch_bad_target(new_context: *const TaskContext) -> 
         let _ = crate::task::task_terminate(task_id);
     }
 
-    super::scheduler::clear_scheduler_current_task();
     super::scheduler::schedule();
 
     loop {

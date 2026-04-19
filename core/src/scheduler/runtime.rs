@@ -169,10 +169,6 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
         (*idle_task).last_cpu = cpu_id as u8;
     }
 
-    // Install via the consolidated helper so `PCR.idle_task`
-    // becomes the source of truth for idle-resolve.  Dual-writes
-    // the transitional `PerCpuScheduler.idle_task_atomic` until
-    // readers migrate in a follow-up commit.
     super::scheduler::install_idle_task(cpu_id, idle_task);
 
     0
@@ -187,8 +183,7 @@ pub(crate) enum IdleStackResolveError {
 pub(crate) fn resolve_idle_stack_for_cpu(
     cpu_id: usize,
 ) -> Result<(*mut Task, u64), IdleStackResolveError> {
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+    let idle_task = super::scheduler::scheduler_get_idle_task_for(cpu_id);
     if idle_task.is_null() {
         return Err(IdleStackResolveError::MissingIdleTask);
     }

@@ -9,8 +9,7 @@ use slopos_arch::InterruptFrame;
 use slopos_utils::klog_debug;
 
 use crate::sched::{
-    clear_scheduler_current_task, get_scheduler_stats, schedule, scheduler_is_preemption_enabled,
-    sleep_current_task_ms, yield_,
+    get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
 };
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
@@ -106,7 +105,6 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
     klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
     task_terminate(task_id);
-    clear_scheduler_current_task();
     schedule();
     klog_debug!(
         "SYSCALL_EXIT: task {} schedule returned (should not happen)",
