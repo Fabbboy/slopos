@@ -1,4 +1,5 @@
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_SUPER};
+use slopos_abi::task::TaskPriority;
 use slopos_abi::window::{CURSOR_SHAPE_DEFAULT, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING};
 use slopos_abi::{InputEvent, InputEventType};
 
@@ -864,7 +865,7 @@ impl InputHandler {
             }
         } else {
             // Fall back to direct path spawn with default attrs.
-            let tid = process::spawn_path_with_attrs(path.as_bytes(), 4, 0);
+            let tid = process::spawn_path_with_attrs(path.as_bytes(), TaskPriority::Normal, 0);
             if tid <= 0 {
                 tty::write(b"COMPOSITOR: spawn failed for program\n");
             } else {

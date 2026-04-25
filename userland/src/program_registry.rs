@@ -1,10 +1,12 @@
-use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_USER_MODE};
+use slopos_abi::task::{
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_USER_MODE, TaskPriority,
+};
 
 #[derive(Clone, Copy)]
 pub struct ProgramSpec {
     pub name: &'static str,
     pub path: &'static str,
-    pub priority: u8,
+    pub priority: TaskPriority,
     pub flags: u16,
     pub desc: &'static str,
     /// If true, the program owns a display surface and should be spawned
@@ -17,7 +19,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "init",
         path: "/sbin/init",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
         gui: false,
@@ -25,7 +27,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "shell",
         path: "/bin/shell",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
         gui: false,
@@ -33,7 +35,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "compositor",
         path: "/bin/compositor",
-        priority: 4,
+        priority: TaskPriority::High,
         flags: TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR,
         desc: "",
         gui: true,
@@ -41,7 +43,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "roulette",
         path: "/bin/roulette",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE | TASK_FLAG_DISPLAY_EXCLUSIVE,
         desc: "Spin the Wheel of Fate",
         gui: true,
@@ -49,7 +51,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "file_manager",
         path: "/bin/file_manager",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Browse filesystem",
         gui: true,
@@ -57,7 +59,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "sysmon",
         path: "/bin/sysmon",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "System Monitor",
         gui: true,
@@ -65,7 +67,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "nmap",
         path: "/bin/nmap",
-        priority: 5,
+        priority: TaskPriority::Low,
         flags: TASK_FLAG_USER_MODE,
         desc: "Scan network for hosts",
         gui: false,
@@ -73,7 +75,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "ifconfig",
         path: "/bin/ifconfig",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Show network configuration",
         gui: false,
@@ -81,7 +83,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "nc",
         path: "/bin/nc",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Network Swiss army knife",
         gui: false,
@@ -89,7 +91,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "curl",
         path: "/bin/curl",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Transfer data from URLs",
         gui: false,
@@ -97,7 +99,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "ping",
         path: "/bin/ping",
-        priority: 5,
+        priority: TaskPriority::Low,
         flags: TASK_FLAG_USER_MODE,
         desc: "Send ICMP ECHO_REQUEST to network hosts",
         gui: false,
@@ -106,7 +108,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "fork_test",
         path: "/bin/fork_test",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
         gui: false,
@@ -115,7 +117,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "io_capture_test",
         path: "/bin/io_capture_test",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
         gui: false,
@@ -124,7 +126,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "heap_allocator_test",
         path: "/bin/heap_allocator_test",
-        priority: 5,
+        priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
         gui: false,

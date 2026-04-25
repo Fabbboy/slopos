@@ -2,6 +2,7 @@ use std::format;
 use std::string::String;
 
 use slopos_abi::draw::Color32;
+use slopos_abi::task::TaskPriority;
 
 use crate::syscall::UserTaskEntry;
 
@@ -48,13 +49,20 @@ pub(crate) fn task_state(state: u8) -> (&'static str, Color32) {
 }
 
 pub(crate) fn priority_label(priority: u8) -> &'static str {
-    match priority {
-        0 => "Hi",
-        1 => "Norm",
-        2 => "Low",
-        3 => "Idle",
-        _ => "?",
+    match TaskPriority::from_u8(priority) {
+        TaskPriority::High => "Hi",
+        TaskPriority::Normal => "Norm",
+        TaskPriority::Low => "Low",
+        TaskPriority::Idle => "Idle",
     }
+}
+
+/// True for the per-CPU kernel idle tasks. Sysmon dims these rows so they
+/// don't dominate the visible process list. The syscall boundary now
+/// rejects userland spawn calls with `Idle` priority, so this check is
+/// sufficient — only the kernel idle loop can carry that priority.
+pub(crate) fn is_idle_task(task: &UserTaskEntry) -> bool {
+    TaskPriority::from_u8(task.priority) == TaskPriority::Idle
 }
 
 pub(crate) fn trim_ascii(bytes: &[u8]) -> String {
@@ -113,11 +121,17 @@ pub(crate) fn format_uptime(ms: u64) -> String {
 }
 
 pub(crate) fn format_runtime(us: u64) -> String {
-    let total_sec = us / 1_000_000;
+    let total_cs = us / 10_000;
+    let cs = total_cs % 100;
+    let total_sec = total_cs / 100;
     let h = total_sec / 3600;
     let m = (total_sec % 3600) / 60;
     let s = total_sec % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    if h == 0 {
+        format!("{:02}:{:02}.{:02}", m, s, cs)
+    } else {
+        format!("{}:{:02}:{:02}.{:02}", h, m, s, cs)
+    }
 }
 
 pub(crate) fn format_pct(pct_x10: u32) -> String {

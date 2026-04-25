@@ -11,7 +11,7 @@ use crate::syscall::common::{
 use crate::syscall::context::SyscallContext;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::syscall::*;
-use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
+use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
 
 use slopos_arch::{InterruptFrame, cpu};
@@ -95,7 +95,10 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
 define_syscall!(syscall_spawn_path(ctx, args) {
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
-    let priority = args.arg2 as u8;
+    let priority = match TaskPriority::try_from_u8(args.arg2 as u8) {
+        Some(p) => p,
+        None => return ctx.err(),
+    };
     let flags = args.arg3 as u16;
     let argv_ptr = args.arg4;
     let argc = args.arg5 as usize;

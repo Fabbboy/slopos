@@ -151,12 +151,65 @@ impl BlockReason {
     }
 }
 
-// --- Task Priority ---
+// --- TaskPriority ---
 
-pub const TASK_PRIORITY_HIGH: u8 = 0;
-pub const TASK_PRIORITY_NORMAL: u8 = 1;
-pub const TASK_PRIORITY_LOW: u8 = 2;
-pub const TASK_PRIORITY_IDLE: u8 = 3;
+/// Scheduler priority class. Lower numeric value = higher priority,
+/// matching the order used by `dequeue_highest_priority`. The repr value
+/// is the index into the per-CPU `ready_queues` array; adding a variant
+/// requires bumping `NUM_PRIORITY_LEVELS` in the scheduler.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TaskPriority {
+    /// Latency-critical work: compositor, RT kernel paths.
+    High = 0,
+    /// Default class for ordinary user tasks and kernel threads.
+    #[default]
+    Normal = 1,
+    /// Background work that should yield to anything else.
+    Low = 2,
+    /// Per-CPU idle loop only — never used by user-spawned tasks.
+    Idle = 3,
+}
+
+impl TaskPriority {
+    /// Total decoder: out-of-range values coerce to `Normal`. Used for
+    /// trusted kernel-internal reads (e.g. unmarshalling a `u8` field
+    /// that the kernel itself wrote).
+    #[inline]
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::High,
+            1 => Self::Normal,
+            2 => Self::Low,
+            3 => Self::Idle,
+            _ => Self::Normal,
+        }
+    }
+
+    /// Strict decoder: returns `None` on out-of-range. Use at the
+    /// syscall boundary to reject untrusted input instead of silently
+    /// coercing it.
+    #[inline]
+    pub const fn try_from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::High),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Low),
+            3 => Some(Self::Idle),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[inline]
+    pub const fn queue_index(self) -> usize {
+        self as usize
+    }
+}
 
 // --- Task Flags ---
 

@@ -11,7 +11,7 @@ use slopos_alloc::KVec;
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
-    INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN,
+    INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
 };
 use slopos_fs::fileio::{fileio_clone_table_for_process, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
@@ -35,7 +35,6 @@ pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
 pub const EXEC_MAX_ARGS: usize = 32;
 pub const EXEC_MAX_ENVS: usize = 32;
 pub const EXEC_MAX_ELF_SIZE: usize = 16 * 1024 * 1024;
-pub const EXEC_SPAWN_DEFAULT_PRIORITY: u8 = 5;
 
 pub const INIT_PATH: &[u8] = b"/sbin/init";
 
@@ -66,7 +65,7 @@ pub fn launch_init() -> Result<u32, ExecError> {
     spawn_program_with_attrs(
         INIT_PATH,
         None,
-        EXEC_SPAWN_DEFAULT_PRIORITY,
+        TaskPriority::Normal,
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
         INVALID_PROCESS_ID,
         INVALID_TASK_ID,
@@ -97,7 +96,7 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError
 pub fn spawn_program_with_attrs(
     path: &[u8],
     argv: Option<&[&[u8]]>,
-    priority: u8,
+    priority: TaskPriority,
     mut flags: u16,
     inherit_fds_from: u32,
     parent_task_id: u32,
@@ -117,7 +116,7 @@ pub fn spawn_program_with_attrs(
             task_name.as_ptr() as *const c_char,
             user_code_entry,
             ptr::null_mut(),
-            priority,
+            priority.as_u8(),
             flags,
         );
 

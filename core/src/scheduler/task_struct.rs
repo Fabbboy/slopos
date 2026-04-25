@@ -18,9 +18,8 @@ pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_FPU_INITIALIZED, TASK_FLAG_KERNEL_MODE,
     TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE,
-    TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
-    TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, TaskExitReason, TaskExitRecord,
-    TaskFaultReason, TaskStatus,
+    TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, TaskExitReason, TaskExitRecord,
+    TaskFaultReason, TaskPriority, TaskStatus,
 };
 
 // =============================================================================
@@ -399,7 +398,7 @@ pub struct Task {
     pub task_id: u32,
     pub name: [u8; TASK_NAME_MAX_LEN],
     state_atomic: AtomicU8,
-    pub priority: u8,
+    pub priority: TaskPriority,
     pub flags: u16,
     block_reason: AtomicU8,
     _pad0: [u8; 3],
@@ -515,7 +514,7 @@ impl Task {
             task_id: INVALID_TASK_ID,
             name: [0; TASK_NAME_MAX_LEN],
             state_atomic: AtomicU8::new(TaskStatus::Invalid.as_u8()),
-            priority: TASK_PRIORITY_NORMAL,
+            priority: TaskPriority::Normal,
             flags: 0,
             block_reason: AtomicU8::new(BlockReason::None.as_u8()),
             _pad0: [0; 3],
@@ -597,7 +596,7 @@ impl Task {
 
                 // Scalar fields whose `Invalid` value is non-zero.
                 addr_of_mut!((*slot).task_id).write(INVALID_TASK_ID);
-                addr_of_mut!((*slot).priority).write(TASK_PRIORITY_NORMAL);
+                addr_of_mut!((*slot).priority).write(TaskPriority::Normal);
                 addr_of_mut!((*slot).process_id).write(INVALID_PROCESS_ID);
                 addr_of_mut!((*slot).entry_arg).write(ptr::null_mut());
                 addr_of_mut!((*slot).parent_task_id).write(INVALID_TASK_ID);
@@ -703,7 +702,7 @@ impl Task {
             core::ptr::write_bytes(base, 0, kernel_stack_off);
             core::ptr::write_bytes(base.add(tail_start), 0, bytes - tail_start);
             (*this).task_id = INVALID_TASK_ID;
-            (*this).priority = TASK_PRIORITY_NORMAL;
+            (*this).priority = TaskPriority::Normal;
             (*this).process_id = INVALID_PROCESS_ID;
             (*this).slot_index = preserved_slot_index;
             (*this).parent_task_id = INVALID_TASK_ID;

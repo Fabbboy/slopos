@@ -12,7 +12,7 @@ use crate::syscall::{
     net as sys_net,
 };
 
-use super::{MAX_CPUS, REFRESH_INTERVAL_MS, task_name_bytes};
+use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Tab {
@@ -94,12 +94,26 @@ impl SysmonApp {
 
         let _ = sys_core::sys_info(&mut self.sys_info);
 
-        let task_count = sys_core::process_list(&mut self.tasks);
-        self.task_count = if task_count <= 0 {
+        let raw_count = sys_core::process_list(&mut self.tasks);
+        let raw_count = if raw_count <= 0 {
             0
         } else {
-            (task_count as usize).min(MAX_TASKS)
+            (raw_count as usize).min(MAX_TASKS)
         };
+
+        // Hide kernel idle tasks from the process list. The per-CPU
+        // usage bar already surfaces system idleness; rows like
+        // `idle/0`, `idle/1`, ... would just dominate the table.
+        let mut kept = 0;
+        for i in 0..raw_count {
+            if !is_idle_task(&self.tasks[i]) {
+                if kept != i {
+                    self.tasks[kept] = self.tasks[i];
+                }
+                kept += 1;
+            }
+        }
+        self.task_count = kept;
 
         let cpu_count = sys_core::percpu_stats(&mut self.percpu);
         self.cpu_count = if cpu_count <= 0 {

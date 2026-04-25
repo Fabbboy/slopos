@@ -266,6 +266,48 @@ impl WindowManager {
         }
     }
 
+    fn resync_windows_post_input(&mut self) {
+        let pre_count = self.window_count as usize;
+        let mut pre_windows = [UserWindowInfo::default(); MAX_WINDOWS];
+        let mut pre_bounds = [WindowBounds::default(); MAX_WINDOWS];
+        for i in 0..pre_count {
+            pre_windows[i] = self.windows[i];
+            pre_bounds[i] = WindowBounds::from_window(&self.windows[i]);
+        }
+
+        let raw_count = if let Some(ref proto) = self.protocol {
+            proto.get_windows(&mut self.windows) as i64
+        } else {
+            return;
+        };
+        self.window_count = if raw_count > 0 {
+            (raw_count as usize).min(MAX_WINDOWS) as u32
+        } else {
+            0
+        };
+
+        for i in 0..self.window_count as usize {
+            let curr_bounds = WindowBounds::from_window(&self.windows[i]);
+            let task_id = self.windows[i].task_id;
+            let prev = pre_windows[..pre_count]
+                .iter()
+                .position(|w| w.task_id == task_id)
+                .map(|j| pre_bounds[j]);
+            if let Some(p) = prev {
+                if p.x != curr_bounds.x
+                    || p.y != curr_bounds.y
+                    || p.width != curr_bounds.width
+                    || p.height != curr_bounds.height
+                    || p.visible != curr_bounds.visible
+                {
+                    self.add_bounds_damage(&p);
+                    self.add_bounds_damage(&curr_bounds);
+                }
+            }
+            self.prev_window_bounds[i] = curr_bounds;
+        }
+    }
+
     fn add_window_damage(&mut self, window: &UserWindowInfo) {
         if window.damage_count == u8::MAX {
             let bounds = WindowBounds::from_window(window);
@@ -504,6 +546,8 @@ pub fn compositor_user_main() {
             wm.add_title_bar_damage_for_task(focus_before);
             wm.add_title_bar_damage_for_task(focus_after);
         }
+
+        wm.resync_windows_post_input();
 
         // Compute uptime for the system bar clock.
         let uptime_secs = time_origin.elapsed().as_secs();

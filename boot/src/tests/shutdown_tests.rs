@@ -7,7 +7,7 @@ use slopos_core::scheduler::scheduler::{
     init_scheduler, scheduler_enable, scheduler_is_enabled, scheduler_shutdown,
 };
 use slopos_core::scheduler::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, TaskStatus, init_task_manager,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, init_task_manager,
     task_create, task_find_by_id, task_shutdown_all, task_terminate,
 };
 use slopos_sync::StateFlag;
@@ -52,7 +52,7 @@ fn create_n_tasks(n: usize) -> usize {
             b"TestTask\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
         if id == INVALID_TASK_ID {
@@ -178,7 +178,7 @@ pub fn test_scheduler_shutdown_clears_state() -> TestResult {
         b"ShutdownTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
@@ -218,7 +218,7 @@ pub fn test_task_shutdown_all_idempotent() -> TestResult {
         b"IdempotentTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     assert_test!(task_id != INVALID_TASK_ID);
@@ -243,7 +243,7 @@ pub fn test_shutdown_sequence_ordering() -> TestResult {
         b"SeqTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     assert_test!(task_id != INVALID_TASK_ID);
@@ -280,7 +280,7 @@ pub fn test_rapid_shutdown_cycles() -> TestResult {
             b"CycleTask\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
         assert_test!(task_id != INVALID_TASK_ID, "cycle task creation failed");
@@ -300,15 +300,13 @@ pub fn test_shutdown_many_tasks() -> TestResult {
 }
 
 pub fn test_shutdown_mixed_priorities() -> TestResult {
-    use slopos_core::scheduler::task::{TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW};
-
     let _fixture = ShutdownFixture::new();
 
     let priorities = [
-        TASK_PRIORITY_HIGH,
-        TASK_PRIORITY_NORMAL,
-        TASK_PRIORITY_LOW,
-        TASK_PRIORITY_IDLE,
+        TaskPriority::High.as_u8(),
+        TaskPriority::Normal.as_u8(),
+        TaskPriority::Low.as_u8(),
+        TaskPriority::Idle.as_u8(),
     ];
 
     for &priority in &priorities {
@@ -334,7 +332,7 @@ pub fn test_task_shutdown_skips_current() -> TestResult {
             b"SkipTest\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
     }
@@ -356,7 +354,7 @@ pub fn test_scheduler_reinit_after_shutdown() -> TestResult {
         b"ReinitTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     assert_test!(
@@ -419,7 +417,7 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
                 b"StressTask\0".as_ptr() as *const c_char,
                 dummy_task_fn,
                 ptr::null_mut(),
-                TASK_PRIORITY_NORMAL,
+                TaskPriority::Normal.as_u8(),
                 TASK_FLAG_KERNEL_MODE,
             );
         }
@@ -468,7 +466,7 @@ pub fn test_task_terminate_idempotent() -> TestResult {
         b"TermIdem\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");

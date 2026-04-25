@@ -1,9 +1,10 @@
 use slopos_testing::{assert_test, TestResult};
 use slopos_utils::klog_info;
 
-use crate::exec::{spawn_program_with_attrs, EXEC_SPAWN_DEFAULT_PRIORITY};
+use crate::exec::spawn_program_with_attrs;
 use crate::task::{
-    task_get_exit_record, TaskExitRecord, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_USER_MODE,
+    task_get_exit_record, TaskExitRecord, TaskPriority, INVALID_PROCESS_ID, INVALID_TASK_ID,
+    TASK_FLAG_USER_MODE,
 };
 
 const HEAP_TEST_BIN: &[u8] = b"/bin/heap_allocator_test";
@@ -12,7 +13,7 @@ pub fn test_heap_allocator_suite() -> TestResult {
     let task_id = match spawn_program_with_attrs(
         HEAP_TEST_BIN,
         None,
-        EXEC_SPAWN_DEFAULT_PRIORITY,
+        TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
         INVALID_PROCESS_ID,
         INVALID_TASK_ID,

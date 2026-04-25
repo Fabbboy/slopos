@@ -3,6 +3,7 @@
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
 use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
+use slopos_abi::task::TaskPriority;
 
 /// Signal restorer trampoline — called when a signal handler returns.
 ///
@@ -38,18 +39,18 @@ pub fn getcwd(buf: &mut [u8]) -> i64 {
 
 #[inline(always)]
 pub fn spawn_path(path: impl AsRef<[u8]>) -> i32 {
-    spawn_path_with_attrs(path, 5, 0)
+    spawn_path_with_attrs(path, TaskPriority::Normal, 0)
 }
 
 #[inline(always)]
-pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: u8, flags: u16) -> i32 {
+pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: TaskPriority, flags: u16) -> i32 {
     let path = path.as_ref();
     unsafe {
         syscall6(
             SYSCALL_SPAWN_PATH,
             path.as_ptr() as u64,
             path.len() as u64,
-            priority as u64,
+            priority.as_u8() as u64,
             flags as u64,
             0,
             0,
@@ -58,13 +59,18 @@ pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: u8, flags: u16) -
 }
 
 #[inline(always)]
-pub fn spawn_path_with_argv(path: &[u8], argv: &[*const u8], priority: u8, flags: u16) -> i32 {
+pub fn spawn_path_with_argv(
+    path: &[u8],
+    argv: &[*const u8],
+    priority: TaskPriority,
+    flags: u16,
+) -> i32 {
     unsafe {
         syscall6(
             SYSCALL_SPAWN_PATH,
             path.as_ptr() as u64,
             path.len() as u64,
-            priority as u64,
+            priority.as_u8() as u64,
             flags as u64,
             argv.as_ptr() as u64,
             argv.len() as u64,

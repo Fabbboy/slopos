@@ -9,7 +9,7 @@ use super::scheduler::{
     run_ready_task_from_idle, schedule_new_task, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, Task, TaskEntry, reap_zombies,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskEntry, TaskPriority, reap_zombies,
     task_create, task_get_info,
 };
 use super::work_steal::try_work_steal;
@@ -146,13 +146,48 @@ pub fn create_idle_task() -> c_int {
     create_idle_task_for_cpu(0)
 }
 
+/// Build an `idle/<cpu>` NUL-terminated name in a stack buffer sized to
+/// `TASK_NAME_MAX_LEN`.  Stays no_std and alloc-free; the decimal
+/// converter handles up to 10 digits which is far beyond any plausible
+/// CPU index.
+fn idle_task_name(cpu: usize) -> [u8; super::task::TASK_NAME_MAX_LEN] {
+    let mut buf = [0u8; super::task::TASK_NAME_MAX_LEN];
+    const PREFIX: &[u8] = b"idle/";
+    buf[..PREFIX.len()].copy_from_slice(PREFIX);
+    let mut pos = PREFIX.len();
+
+    let mut digits = [0u8; 10];
+    let mut len = 0usize;
+    let mut n = cpu;
+    if n == 0 {
+        digits[0] = b'0';
+        len = 1;
+    } else {
+        while n > 0 && len < digits.len() {
+            digits[len] = b'0' + (n % 10) as u8;
+            n /= 10;
+            len += 1;
+        }
+    }
+
+    let max_digits = (super::task::TASK_NAME_MAX_LEN - 1).saturating_sub(pos);
+    let take = len.min(max_digits);
+    for i in 0..take {
+        buf[pos + i] = digits[len - 1 - i];
+    }
+    pos += take;
+    buf[pos] = 0;
+    buf
+}
+
 pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
+    let name = idle_task_name(cpu_id);
     let idle_task_id = unsafe {
         crate::task::task_create(
-            b"idle\0".as_ptr() as *const i8,
+            name.as_ptr() as *const i8,
             core::mem::transmute(unified_idle_loop as *const ()),
             ptr::null_mut(),
-            TASK_PRIORITY_IDLE,
+            TaskPriority::Idle.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         )
     };

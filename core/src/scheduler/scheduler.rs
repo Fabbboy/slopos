@@ -44,7 +44,7 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskStatus, task_get_info, task_is_blocked,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_get_info, task_is_blocked,
     task_is_invalid, task_is_ready, task_is_running, task_is_terminated, task_is_will_block,
     task_pointer_is_valid, task_record_context_switch, task_record_yield, task_set_state,
     task_try_transition_from,
@@ -281,11 +281,14 @@ fn task_name_looks_idle(task: *mut Task) -> bool {
 
     unsafe {
         let name = &(*task).name;
-        name[0] == b'i'
-            && name[1] == b'd'
-            && name[2] == b'l'
-            && name[3] == b'e'
-            && (name[4] == 0 || name[4] == b'_')
+        if name[0] != b'i' || name[1] != b'd' || name[2] != b'l' || name[3] != b'e' {
+            return false;
+        }
+        match name[4] {
+            0 | b'_' => true,
+            b'/' => name[5].is_ascii_digit(),
+            _ => false,
+        }
     }
 }
 
@@ -299,7 +302,7 @@ fn task_is_idle_candidate(task: *mut Task) -> bool {
         if (*task).task_id == INVALID_TASK_ID {
             return false;
         }
-        if (*task).priority != TASK_PRIORITY_IDLE {
+        if (*task).priority != TaskPriority::Idle {
             return false;
         }
         if ((*task).flags & TASK_FLAG_KERNEL_MODE) == 0 {

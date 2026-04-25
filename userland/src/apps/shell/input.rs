@@ -1,8 +1,8 @@
 use core::cmp;
 
 use crate::syscall::core as sys_core;
-use crate::syscall::{InputEvent, InputEventData, InputEventType, fs};
-use slopos_abi::syscall::LocalFlags;
+use crate::syscall::{InputEvent, InputEventData, InputEventType, UserPollFd, fs};
+use slopos_abi::syscall::{LocalFlags, POLLIN};
 use slopos_protocol::types::Event as ProtocolEvent;
 use slopos_windowing::ProtocolHandle;
 use std::time::{Duration, Instant};
@@ -193,6 +193,11 @@ fn input_loop(
         };
     }
 
+    // Cache the compositor socket fd once. The connection's lifetime
+    // matches the shell process, so the fd is stable for the duration
+    // of read_input.
+    let protocol_fd = with_handle(|h| h.borrow_client().fd());
+
     rd!();
 
     loop {
@@ -300,13 +305,24 @@ fn input_loop(
         };
         if rc < 0 {
             let now = Instant::now();
-            if now.duration_since(last_blink) >= BLINK_INTERVAL {
+            let elapsed = now.duration_since(last_blink);
+            if elapsed >= BLINK_INTERVAL {
                 cursor_visible = !cursor_visible;
                 last_blink = now;
                 rd!();
+                continue;
             }
             if !mouse_acted {
-                sys_core::yield_now();
+                // Sleep until either the compositor socket has data or
+                // the next blink flip is due. Replaces the busy yield
+                // loop that used to bill ~15% CPU at the prompt.
+                let remaining_ms = (BLINK_INTERVAL - elapsed).as_millis() as i64;
+                let mut pfd = [UserPollFd {
+                    fd: protocol_fd,
+                    events: POLLIN,
+                    revents: 0,
+                }];
+                let _ = fs::poll(&mut pfd, remaining_ms.max(1));
             }
             continue;
         }

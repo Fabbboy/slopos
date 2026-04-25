@@ -5,9 +5,7 @@ use slopos_utils::string;
 
 use super::scheduler;
 use super::scheduler::task_wait_for;
-use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, TaskEntry, task_create,
-};
+use super::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskEntry, TaskPriority, task_create};
 
 pub type KthreadId = u32;
 pub fn kthread_spawn(
@@ -15,7 +13,7 @@ pub fn kthread_spawn(
     entry_point: Option<TaskEntry>,
     arg: *mut c_void,
 ) -> KthreadId {
-    kthread_spawn_ex(name, entry_point, arg, TASK_PRIORITY_NORMAL, 0)
+    kthread_spawn_ex(name, entry_point, arg, TaskPriority::Normal.as_u8(), 0)
 }
 pub fn kthread_spawn_ex(
     name: *const c_char,

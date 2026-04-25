@@ -22,7 +22,7 @@ use super::task_table::{
 use super::{
     FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskStatus,
+    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
@@ -496,7 +496,7 @@ pub fn task_create(
     task_ref.task_id = task_id;
     unsafe { copy_name(&mut task_ref.name, name) };
     // Status stays Blocked (set by reserve_task_slot) until fully initialised.
-    task_ref.priority = priority;
+    task_ref.priority = TaskPriority::from_u8(priority);
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
     task_ref.tgid = task_id;

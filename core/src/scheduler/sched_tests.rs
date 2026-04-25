@@ -21,9 +21,9 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, Task,
-    TaskStatus, init_task_manager, reap_zombies, task_create, task_find_by_id, task_get_info,
-    task_is_blocked, task_set_state, task_set_state_with_reason, task_shutdown_all, task_terminate,
+    Task, TaskPriority, TaskStatus, init_task_manager, reap_zombies, task_create, task_find_by_id,
+    task_get_info, task_is_blocked, task_set_state, task_set_state_with_reason, task_shutdown_all,
+    task_terminate,
 };
 use slopos_abi::task::BlockReason;
 use slopos_arch::MAX_CPUS;
@@ -120,7 +120,7 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         b"StateTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -164,7 +164,7 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
         b"BlockTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -198,7 +198,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
         b"InvalidTransition\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -233,7 +233,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
         b"BlockedRunning\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -279,7 +279,7 @@ pub fn test_pool_grow_on_demand() -> TestResult {
             b"GrowTask\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
         if id == INVALID_TASK_ID {
@@ -308,7 +308,7 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
             b"CycleTask\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
 
@@ -761,7 +761,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
         b"EmptyQueue\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -805,7 +805,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
         b"Duplicate\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -873,7 +873,7 @@ pub fn test_unschedule_not_in_queue() -> TestResult {
         b"NotQueued\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -904,7 +904,7 @@ pub fn test_priority_ordering() -> TestResult {
         b"LowPri\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_LOW, // 2
+        TaskPriority::Low.as_u8(), // 2
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -912,7 +912,7 @@ pub fn test_priority_ordering() -> TestResult {
         b"NormalPri\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL, // 1
+        TaskPriority::Normal.as_u8(), // 1
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -920,7 +920,7 @@ pub fn test_priority_ordering() -> TestResult {
         b"HighPri\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_HIGH, // 0
+        TaskPriority::High.as_u8(), // 0
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -952,7 +952,7 @@ pub fn test_idle_priority_last() -> TestResult {
         b"IdlePri\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_IDLE, // 3
+        TaskPriority::Idle.as_u8(), // 3
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -960,7 +960,7 @@ pub fn test_idle_priority_last() -> TestResult {
         b"NormalPri2\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1001,7 +1001,7 @@ pub fn test_timer_tick_decrements_slice() -> TestResult {
         b"SliceTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1057,7 +1057,7 @@ pub fn test_double_terminate() -> TestResult {
         b"DoubleTerm\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1103,7 +1103,7 @@ pub fn test_get_info_null_output() -> TestResult {
         b"NullOutput\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1147,7 +1147,7 @@ pub fn test_create_conflicting_flags() -> TestResult {
         b"BadFlags\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         bad_flags,
     );
 
@@ -1168,7 +1168,7 @@ pub fn test_create_null_name() -> TestResult {
         ptr::null(),
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1230,7 +1230,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
         b"BootPreInit\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
@@ -1407,7 +1407,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
             b"SamePri\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
 
@@ -1450,7 +1450,7 @@ pub fn test_interleaved_operations() -> TestResult {
             b"Inter1\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
 
@@ -1458,7 +1458,7 @@ pub fn test_interleaved_operations() -> TestResult {
             b"Inter2\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_HIGH,
+            TaskPriority::High.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
 
@@ -1506,7 +1506,7 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
         b"InboxTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1582,7 +1582,7 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
             b"MultiInbox\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
 
@@ -1639,7 +1639,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
         b"TimerDrain\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1694,7 +1694,7 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
         b"InboxBlocked\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
@@ -1788,7 +1788,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         b"CrossCPU\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -1855,7 +1855,7 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         b"UserStub\0".as_ptr() as *const c_char,
         unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) },
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_USER_MODE,
     );
     if user_task_id == INVALID_TASK_ID {
@@ -1926,7 +1926,7 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
             b"WakeStress\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
         if id == INVALID_TASK_ID {
@@ -1972,7 +1972,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
         b"SleepRace\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
@@ -2184,7 +2184,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             b"Filler\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
         if tid == INVALID_TASK_ID {
@@ -2210,7 +2210,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         b"Migratee\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
@@ -2286,7 +2286,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
         b"Runner\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if runner_id == INVALID_TASK_ID {
@@ -2314,7 +2314,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
         b"WakeTest\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
@@ -2376,7 +2376,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         b"Parent\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if parent_id == INVALID_TASK_ID {
@@ -2396,7 +2396,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
             b"Child\0".as_ptr() as *const c_char,
             dummy_task_fn,
             ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
+            TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
         if tid == INVALID_TASK_ID {
@@ -2459,7 +2459,7 @@ pub fn test_effective_load_accuracy() -> TestResult {
         b"LoadCheck\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
-        TASK_PRIORITY_NORMAL,
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
