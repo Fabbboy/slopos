@@ -1,6 +1,6 @@
 //! Context switch and task lifecycle edge case tests.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 use core::ptr;
 
 use super::task_struct::Task;
@@ -38,12 +38,12 @@ impl Drop for ContextFixture {
     }
 }
 
-fn dummy_entry(_arg: *mut c_void) {}
+use crate::tests::helpers::dummy_task_entry;
 
 fn create_test_task(name: &[u8], flags: u16) -> u32 {
     task_create(
         name.as_ptr() as *const c_char,
-        dummy_entry,
+        dummy_task_entry,
         ptr::null_mut(),
         1,
         flags,

@@ -102,9 +102,7 @@ impl Drop for SchedFixture {
 // Test Helper Functions
 // =============================================================================
 
-fn dummy_task_fn(_arg: *mut c_void) {
-    // Minimal task that does nothing - for structural tests
-}
+use crate::tests::helpers::dummy_task_entry;
 
 // =============================================================================
 // STATE MACHINE TESTS
@@ -118,7 +116,7 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
 
     let task_id = task_create(
         b"StateTest\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -162,7 +160,7 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
 
     let task_id = task_create(
         b"BlockTest\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -196,7 +194,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
 
     let task_id = task_create(
         b"InvalidTransition\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -231,7 +229,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
 
     let task_id = task_create(
         b"BlockedRunning\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -277,7 +275,7 @@ pub fn test_pool_grow_on_demand() -> TestResult {
     for _ in 0..TARGET {
         let id = task_create(
             b"GrowTask\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -306,7 +304,7 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
     for i in 0..CYCLES {
         let task_id = task_create(
             b"CycleTask\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -759,7 +757,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
 
     let task_id = task_create(
         b"EmptyQueue\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -803,7 +801,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
 
     let task_id = task_create(
         b"Duplicate\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -871,7 +869,7 @@ pub fn test_unschedule_not_in_queue() -> TestResult {
 
     let task_id = task_create(
         b"NotQueued\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -902,7 +900,7 @@ pub fn test_priority_ordering() -> TestResult {
     // Priority 0 = highest, Priority 3 = lowest (IDLE)
     let low_id = task_create(
         b"LowPri\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Low.as_u8(), // 2
         TASK_FLAG_KERNEL_MODE,
@@ -910,7 +908,7 @@ pub fn test_priority_ordering() -> TestResult {
 
     let normal_id = task_create(
         b"NormalPri\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(), // 1
         TASK_FLAG_KERNEL_MODE,
@@ -918,7 +916,7 @@ pub fn test_priority_ordering() -> TestResult {
 
     let high_id = task_create(
         b"HighPri\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::High.as_u8(), // 0
         TASK_FLAG_KERNEL_MODE,
@@ -950,7 +948,7 @@ pub fn test_idle_priority_last() -> TestResult {
 
     let idle_id = task_create(
         b"IdlePri\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Idle.as_u8(), // 3
         TASK_FLAG_KERNEL_MODE,
@@ -958,7 +956,7 @@ pub fn test_idle_priority_last() -> TestResult {
 
     let normal_id = task_create(
         b"NormalPri2\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -999,7 +997,7 @@ pub fn test_timer_tick_decrements_slice() -> TestResult {
 
     let task_id = task_create(
         b"SliceTest\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1055,7 +1053,7 @@ pub fn test_double_terminate() -> TestResult {
 
     let task_id = task_create(
         b"DoubleTerm\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1101,7 +1099,7 @@ pub fn test_get_info_null_output() -> TestResult {
 
     let task_id = task_create(
         b"NullOutput\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1145,7 +1143,7 @@ pub fn test_create_conflicting_flags() -> TestResult {
 
     let task_id = task_create(
         b"BadFlags\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         bad_flags,
@@ -1166,7 +1164,7 @@ pub fn test_create_null_name() -> TestResult {
 
     let task_id = task_create(
         ptr::null(),
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1228,7 +1226,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
 
     let task_id = task_create(
         b"BootPreInit\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1405,7 +1403,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
     for i in 0..COUNT {
         ids[i] = task_create(
             b"SamePri\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -1448,7 +1446,7 @@ pub fn test_interleaved_operations() -> TestResult {
         // Create
         let id1 = task_create(
             b"Inter1\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -1456,7 +1454,7 @@ pub fn test_interleaved_operations() -> TestResult {
 
         let id2 = task_create(
             b"Inter2\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::High.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -1504,7 +1502,7 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
 
     let task_id = task_create(
         b"InboxTest\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1580,7 +1578,7 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
     for i in 0..NUM_TASKS {
         task_ids[i] = task_create(
             b"MultiInbox\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -1637,7 +1635,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
 
     let task_id = task_create(
         b"TimerDrain\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1692,7 +1690,7 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
 
     let task_id = task_create(
         b"InboxBlocked\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1786,7 +1784,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
 
     let task_id = task_create(
         b"CrossCPU\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -1924,7 +1922,7 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
     for slot in &mut task_ids {
         let id = task_create(
             b"WakeStress\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -1970,7 +1968,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
 
     let task_id = task_create(
         b"SleepRace\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -2182,7 +2180,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     for i in 0..3 {
         let tid = task_create(
             b"Filler\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -2208,7 +2206,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     // Create a test task whose last_cpu is cpu_id (busy), with affinity=0 (any CPU).
     let task_id = task_create(
         b"Migratee\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -2284,7 +2282,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     // be 1 because a non-idle task is running.
     let runner_id = task_create(
         b"Runner\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -2312,7 +2310,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     // is empty, the scheduler should NOT consider it idle.
     let task_id = task_create(
         b"WakeTest\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -2374,7 +2372,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     // Simulate the parent (shell) running on cpu_id by setting current_task.
     let parent_id = task_create(
         b"Parent\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -2394,7 +2392,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     for i in 0..n {
         let tid = task_create(
             b"Child\0".as_ptr() as *const c_char,
-            dummy_task_fn,
+            dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
@@ -2457,7 +2455,7 @@ pub fn test_effective_load_accuracy() -> TestResult {
     // Enqueue a task — effective_load should increase.
     let task_id = task_create(
         b"LoadCheck\0".as_ptr() as *const c_char,
-        dummy_task_fn,
+        dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,

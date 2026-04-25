@@ -3,7 +3,7 @@
 //! Targets: invalid/null pointer handling, boundary conditions,
 //! permission checks, resource exhaustion, and dispatch edge cases.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
@@ -96,7 +96,7 @@ fn make_task_current(task_ptr: *mut Task) {
     crate::scheduler::scheduler::dispatch(cpu_id, task_ptr);
 }
 
-fn dummy_task_entry(_arg: *mut c_void) {}
+use crate::tests::helpers::dummy_task_entry;
 
 fn create_test_kernel_task() -> u32 {
     task_create(
