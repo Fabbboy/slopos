@@ -8,9 +8,20 @@ pub mod harness;
 mod runner;
 
 mod assertions;
+#[cfg(feature = "qemu-exit")]
+pub mod qemu_signal;
+
+#[cfg(feature = "tests")]
+pub mod exception_tests;
+#[cfg(feature = "tests")]
+pub mod fpu_tests;
+#[cfg(feature = "tests")]
+pub mod xsave_tests;
+
 pub use config::{config_from_cmdline, TestConfig, Verbosity};
 pub use harness::{
-    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, TestRunSummary, TestSuiteDesc,
+    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
+    tests_request_shutdown, tests_reset_panic_state, tests_run_all, TestRunSummary, TestSuiteDesc,
     TestSuiteResult, HARNESS_MAX_SUITES,
 };
 pub use runner::run_single_test;

@@ -20,7 +20,7 @@ default = []
 # etc.) behind an opt-in feature so they compile out of production
 # builds — they carry per-function stack frames well above the
 # production gate and have no runtime callers outside regression tests.
-builtin-tests = []
+tests = []
 
 [dependencies]
 slopos-abi = { workspace = true }

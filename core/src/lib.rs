@@ -10,18 +10,18 @@ pub mod driver_hooks;
 pub mod exec;
 pub mod irq;
 pub mod scheduler;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 #[macro_use]
 pub mod syscall;
 
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub use scheduler::context_tests;
 pub use scheduler::fate_api;
 pub use scheduler::ffi_boundary;
 pub use scheduler::kthread;
 pub use scheduler::per_cpu;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub use scheduler::sched_tests;
 pub use scheduler::scheduler as sched;
 pub use scheduler::task;

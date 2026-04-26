@@ -17,7 +17,7 @@ pub mod ist_stacks;
 pub mod limine_protocol;
 pub mod panic;
 pub mod smp;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod user_fault;
 pub mod safe_stack {

@@ -56,7 +56,7 @@ fn is_reset(id: tcp::ConnId) -> bool {
 
 pub fn test_active_open_ts_negotiation() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(100);
 
     let conn = establish_connection_with_ts();
@@ -68,7 +68,7 @@ pub fn test_active_open_ts_negotiation() -> TestResult {
 
 pub fn test_ts_declined_by_peer() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(100);
 
     let conn = establish_connection();
@@ -91,7 +91,7 @@ pub fn test_ts_declined_by_peer() -> TestResult {
 
 pub fn test_data_segments_carry_tsopt() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(500);
 
     let conn = establish_connection_with_ts();
@@ -111,7 +111,7 @@ pub fn test_data_segments_carry_tsopt() -> TestResult {
 
 pub fn test_paws_rejects_old_duplicate() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(100);
 
     let conn = establish_connection_with_ts();
@@ -154,7 +154,7 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
 
 pub fn test_paws_allows_rst() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(100);
 
     let conn = establish_connection_with_ts();
@@ -197,7 +197,7 @@ pub fn test_paws_allows_rst() -> TestResult {
 
 pub fn test_rttm_samples_every_ack() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(1000);
 
     let conn = establish_connection_with_ts();
@@ -206,7 +206,7 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
     let (seg, _) = poll_once(conn.id).expect("should have data");
     let our_tsval = seg.timestamp.unwrap().0;
 
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::advance(50);
 
     let tsopt = build_tsopt(3000, our_tsval);
@@ -232,7 +232,7 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
 
 pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::install_at(1000);
 
     let conn = establish_connection();
@@ -242,7 +242,7 @@ pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     tcp::send(conn.id, b"hello").ok();
     let _ = poll_once(conn.id).expect("should have data");
 
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::advance(30);
 
     inject_ack(&conn, conn.peer_iss + 1, conn.our_iss + 1 + 5);

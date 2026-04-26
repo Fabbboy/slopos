@@ -628,7 +628,7 @@ impl<'a> ElfValidator<'a> {
 
     /// Test-only wrapper that keeps the stack-allocated return-by-value
     /// shape. Production code must use [`validate_load_segments_into`].
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     pub fn validate_load_segments(
         &self,
     ) -> ElfResult<([ValidatedSegment; MAX_LOAD_SEGMENTS], usize)> {

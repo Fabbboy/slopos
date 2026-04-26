@@ -285,7 +285,7 @@ case "$MODE" in
         ;;
 
     test)
-        echo "Starting QEMU for interrupt test harness..."
+        echo "Starting QEMU for test harness..."
         set +e
         "$QEMU_BIN" "${QEMU_ARGS[@]}"
         status=$?
@@ -293,9 +293,9 @@ case "$MODE" in
         trap - EXIT INT TERM
         rm -f "$OVMF_VARS_RUNTIME"
         if [ $status -eq 1 ]; then
-            echo "Interrupt tests passed."
+            echo "Tests passed."
         elif [ $status -eq 3 ]; then
-            echo "Interrupt tests reported failures." >&2
+            echo "Tests reported failures." >&2
             exit 1
         else
             echo "Unexpected QEMU exit status $status" >&2

@@ -36,10 +36,10 @@ fn alloc_error(layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    #[cfg(feature = "builtin-tests")]
+    #[cfg(feature = "tests")]
     {
         if !slopos_utils::panic_recovery::recovery_is_active() {
-            slopos_tests::tests_mark_panic();
+            slopos_testing::tests_mark_panic();
         }
     }
     slopos_boot::panic_handler_impl(info)

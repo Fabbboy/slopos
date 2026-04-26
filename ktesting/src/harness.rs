@@ -4,6 +4,12 @@
 use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use slopos_sync::StateFlag;
+use slopos_utils::klog_info;
+
+use crate::config::TestConfig;
 
 /// Maximum number of test suites that can be registered.
 pub const HARNESS_MAX_SUITES: usize = 64;
@@ -195,4 +201,163 @@ pub fn cycles_to_ms(cycles: u64) -> u32 {
 #[inline]
 pub fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
     cycles_to_ms(end.wrapping_sub(start))
+}
+
+// =============================================================================
+// Harness driver: panic glue + tests_run_all
+// =============================================================================
+
+pub const TESTS_MAX_SUITES: usize = HARNESS_MAX_SUITES;
+
+static PANIC_SEEN: StateFlag = StateFlag::new();
+static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
+
+pub fn tests_reset_panic_state() {
+    PANIC_SEEN.set_inactive();
+    PANIC_REPORTED.store(false, Ordering::Relaxed);
+}
+
+#[cfg(not(feature = "tests"))]
+pub fn tests_run_all(
+    _config: *const TestConfig,
+    _summary: *mut TestRunSummary,
+    _registry_start: *const TestSuiteDesc,
+    _registry_end: *const TestSuiteDesc,
+) -> i32 {
+    // No-op in production: `TestRunSummary` is 6 KiB on the kernel
+    // stack, tripping the stack-size gate. The real body compiles
+    // under the `tests` feature (which lifts the gate via
+    // scripts/build_kernel.sh).
+    0
+}
+
+#[cfg(feature = "tests")]
+pub fn tests_run_all(
+    config: *const TestConfig,
+    summary: *mut TestRunSummary,
+    registry_start: *const TestSuiteDesc,
+    registry_end: *const TestSuiteDesc,
+) -> i32 {
+    if config.is_null() {
+        return -1;
+    }
+
+    let mut local_summary = TestRunSummary::default();
+    let summary = if summary.is_null() {
+        &mut local_summary
+    } else {
+        unsafe {
+            *summary = TestRunSummary::default();
+            &mut *summary
+        }
+    };
+
+    let cfg = unsafe { &*config };
+    if !cfg.enabled {
+        klog_info!("TESTS: Harness disabled");
+        return 0;
+    }
+
+    klog_info!("TESTS: Starting test suites");
+
+    let start_cycles = slopos_arch::tsc::rdtsc();
+    let mut idx = 0usize;
+    let mut cursor = registry_start;
+    while cursor < registry_end {
+        if PANIC_SEEN.is_active() {
+            summary.unexpected_exceptions = summary.unexpected_exceptions.saturating_add(1);
+            summary.failed = summary.failed.saturating_add(1);
+            if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+                klog_info!("TESTS: panic flagged, stopping suite execution");
+            }
+            break;
+        }
+
+        let desc = unsafe { &*cursor };
+
+        let suite_start = slopos_arch::tsc::rdtsc();
+        let mut res = TestSuiteResult::default();
+        res.name = desc.name;
+
+        if let Some(run) = desc.run {
+            let config_ptr = config as *const ();
+            // Call the suite runner directly — no outer catch_panic!.
+            // Individual tests use catch_panic! internally (run_single_test)
+            // to catch intentional panics. Unexpected suite-level panics
+            // propagate to the default panic handler which exits QEMU with
+            // a failure code in test mode, avoiding deadlocks from longjmp
+            // through held locks or corrupted state.
+            run(config_ptr, &mut res);
+        }
+
+        if PANIC_SEEN.is_active() {
+            res.unexpected_exceptions = res.unexpected_exceptions.saturating_add(1);
+            res.failed = res.failed.saturating_add(1);
+        }
+
+        if cfg.timeout_ms != 0 {
+            let elapsed = measure_elapsed_ms(suite_start, slopos_arch::tsc::rdtsc());
+            if elapsed > cfg.timeout_ms {
+                res.timed_out = 1;
+                res.failed = res.failed.saturating_add(1);
+                if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+                    klog_info!("TESTS: suite timeout exceeded");
+                }
+            }
+        }
+
+        if summary.suite_count < TESTS_MAX_SUITES {
+            summary.suites[summary.suite_count] = res;
+            summary.suite_count += 1;
+        }
+
+        klog_info!(
+            "SUITE{} total={} pass={} fail={} elapsed={}ms",
+            idx as u32,
+            res.total,
+            res.passed,
+            res.failed,
+            res.elapsed_ms,
+        );
+        summary.add_suite_result(&res);
+
+        idx += 1;
+        cursor = unsafe { cursor.add(1) };
+    }
+    let end_cycles = slopos_arch::tsc::rdtsc();
+    let overall_ms = measure_elapsed_ms(start_cycles, end_cycles);
+    if overall_ms > summary.elapsed_ms {
+        summary.elapsed_ms = overall_ms;
+    }
+
+    klog_info!(
+        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}",
+        summary.total_tests,
+        summary.passed,
+        summary.failed,
+        summary.elapsed_ms,
+    );
+
+    if summary.failed == 0 {
+        0
+    } else {
+        -1
+    }
+}
+
+#[cfg(feature = "qemu-exit")]
+pub fn tests_request_shutdown(failed: i32) {
+    crate::qemu_signal::qemu_signal_exit(failed);
+}
+
+#[cfg(not(feature = "qemu-exit"))]
+pub fn tests_request_shutdown(_failed: i32) {
+    // No-op when qemu-exit feature is disabled (production builds).
+}
+
+pub fn tests_mark_panic() {
+    PANIC_SEEN.set_active();
+    if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+        klog_info!("TESTS: panic observed");
+    }
 }

@@ -24,7 +24,7 @@ pub mod paging_defs;
 pub mod pat;
 pub mod process_vm;
 pub mod symbols;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod tlb;
 pub mod user_copy;

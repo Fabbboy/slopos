@@ -1,3 +1,6 @@
+use slopos_sync::StateFlag;
+use slopos_utils::klog_info;
+
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
 const DEFAULT_TIMEOUT_MS: u32 = 0;
@@ -78,34 +81,76 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+/// One-shot guard ensuring the legacy `itests.*` cmdline warning fires at
+/// most once per boot, even if the cmdline contains multiple legacy keys.
+static LEGACY_WARNED: StateFlag = StateFlag::new();
+
+fn warn_legacy_once() {
+    if !LEGACY_WARNED.is_active() {
+        LEGACY_WARNED.set_active();
+        klog_info!("TESTS: legacy 'itests.*' cmdline key in use; rename to 'tests.*'");
+    }
+}
+
+/// Match either a new `tests.<suffix>` prefix or its legacy `itests.<suffix>`
+/// alias. Returns the value substring on match. Emits a one-shot legacy
+/// warning if the legacy form was used.
+fn match_dual_prefix<'a>(token: &'a str, suffix: &'static str) -> Option<&'a str> {
+    if let Some(rest) = token.strip_prefix("tests.") {
+        rest.strip_prefix(suffix)
+    } else if let Some(rest) = token.strip_prefix("itests.") {
+        if let Some(value) = rest.strip_prefix(suffix) {
+            warn_legacy_once();
+            Some(value)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
     let mut cfg = TestConfig::default();
     if let Some(cmdline) = cmdline {
         for token in cmdline.split_whitespace() {
-            if let Some(value) = token.strip_prefix("itests=") {
+            if let Some(value) = token.strip_prefix("tests=") {
                 if let Some(enabled) = parse_bool(value) {
                     cfg.enabled = enabled;
                     if !enabled {
                         cfg.shutdown = false;
                     }
                 } else {
-                    // Any non-boolean value (e.g. "basic", "memory") just enables tests.
                     cfg.enabled = true;
                 }
-            } else if token.starts_with("itests.suite=") {
+            } else if let Some(value) = token.strip_prefix("itests=") {
+                warn_legacy_once();
+                if let Some(enabled) = parse_bool(value) {
+                    cfg.enabled = enabled;
+                    if !enabled {
+                        cfg.shutdown = false;
+                    }
+                } else {
+                    cfg.enabled = true;
+                }
+            } else if match_dual_prefix(token, "suite=").is_some() {
                 // Accepted for backward compatibility; all suites always run.
                 cfg.enabled = true;
-            } else if let Some(value) = token.strip_prefix("itests.verbosity=") {
+            } else if let Some(value) = match_dual_prefix(token, "verbosity=") {
                 cfg.verbosity = Verbosity::from_str(value);
-            } else if let Some(value) = token.strip_prefix("itests.timeout=") {
+            } else if let Some(value) = match_dual_prefix(token, "timeout=") {
                 if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
                     cfg.timeout_ms = parsed;
                 }
-            } else if let Some(value) = token.strip_prefix("itests.shutdown=") {
+            } else if let Some(value) = match_dual_prefix(token, "warn_ms=") {
+                if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
+                    cfg.timeout_ms = parsed;
+                }
+            } else if let Some(value) = match_dual_prefix(token, "shutdown=") {
                 if let Some(shutdown) = parse_bool(value) {
                     cfg.shutdown = shutdown;
                 }
-            } else if let Some(value) = token.strip_prefix("itests.stacktrace_demo=") {
+            } else if let Some(value) = match_dual_prefix(token, "stacktrace_demo=") {
                 if let Some(demo) = parse_bool(value) {
                     cfg.stacktrace_demo = demo;
                 }

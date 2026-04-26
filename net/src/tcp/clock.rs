@@ -1,7 +1,7 @@
 //! Monotonic clock abstraction used by the TCP state machine.
 //!
 //! Production code reads `now_ms()` which returns [`slopos_utils::clock::uptime_ms`].
-//! Under `#[cfg(feature = "itests")]` the same call routes through a global
+//! Under `#[cfg(feature = "test-hooks")]` the same call routes through a global
 //! mock clock: when the mock is inactive (value zero) it falls back to real
 //! wall time so live tests are unaffected, otherwise it returns the value set
 //! by the test.  This lets unit tests drive retransmit / TIME_WAIT / keepalive
@@ -30,7 +30,7 @@ impl Clock for SystemClock {
 /// Read the current time in milliseconds.
 ///
 /// Production builds resolve directly to `slopos_utils::clock::uptime_ms()`.
-#[cfg(not(feature = "itests"))]
+#[cfg(not(feature = "test-hooks"))]
 #[inline]
 pub fn now_ms() -> u64 {
     slopos_utils::clock::uptime_ms()
@@ -41,20 +41,20 @@ pub fn now_ms() -> u64 {
 /// Test builds consult the mock clock; a value of zero means "pass through to
 /// real wall time" so that live tests (which never install a mock) keep using
 /// `slopos_utils::clock::uptime_ms()`.
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 #[inline]
 pub fn now_ms() -> u64 {
     mock::current_ms()
 }
 
 // -----------------------------------------------------------------------------
-// Mock clock (itests only)
+// Mock clock (test-hooks only)
 // -----------------------------------------------------------------------------
 
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub use mock::{MOCK_CLOCK, MockClock};
 
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 mod mock {
     use core::sync::atomic::{AtomicU64, Ordering};
 

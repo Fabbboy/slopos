@@ -111,7 +111,7 @@ pub fn try_challenge_ack(now_ms: u64) -> bool {
 
 /// Reset the rate limiter to its initial state.  Called by
 /// [`super::reset_all`] so tests see a clean epoch.
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn reset_for_tests() {
     EPOCH_START.store(0, Ordering::Relaxed);
     CHALLENGE_COUNT.store(0, Ordering::Relaxed);

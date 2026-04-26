@@ -366,7 +366,7 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
     cancel_sleep(task_id);
 }
 
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub(crate) fn test_insert_sleep_entry(task_id: u32, wake_tick: u64) -> bool {
     SLEEP_QUEUE.lock().upsert(task_id, wake_tick)
 }

@@ -15,9 +15,8 @@ test = false
 doctest = false
 [features]
 default = []
-qemu-exit = []
 xe-gpu = []
-itests = ["slopos-net/itests"]
+test-hooks = ["slopos-net/test-hooks"]
 
 [dependencies]
 slopos-abi = { workspace = true }

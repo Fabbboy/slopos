@@ -17,11 +17,11 @@
 //! codepath tested here, so regressions in the instruction encoding or
 //! component mask will be caught.
 
-use slopos_arch::cpu::control_regs::{Cr4Flags, Xcr0Flags, read_cr4, xcr0_read};
+use crate::TestResult;
+use crate::{fail, pass};
+use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Xcr0Flags};
 use slopos_arch::cpu::cpuid::XsaveFeatures;
 use slopos_arch::cpu::xsave;
-use slopos_testing::TestResult;
-use slopos_testing::{fail, pass};
 
 // =============================================================================
 // 1. XSAVE Detection Sanity
@@ -559,7 +559,7 @@ pub fn test_xsave_variant_flags_consistent() -> TestResult {
 // Suite Registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
+crate::define_test_suite!(
     xsave,
     [
         // Detection sanity

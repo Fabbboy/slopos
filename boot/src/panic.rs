@@ -194,10 +194,10 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     // In test mode, exit QEMU immediately with a failure code instead of
     // waiting for keyboard input. The kernel panic handler already called
     // tests_mark_panic() before we got here, so just request shutdown.
-    #[cfg(feature = "builtin-tests")]
+    #[cfg(feature = "tests")]
     {
         panic_serial_write("TEST MODE: Exiting QEMU with failure code");
-        slopos_tests::tests_request_shutdown(1);
+        slopos_testing::tests_request_shutdown(1);
     }
 
     if panic_screen::display_panic_screen(

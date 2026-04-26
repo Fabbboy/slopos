@@ -182,8 +182,8 @@ impl PostLockWork {
     }
 
     #[cfg_attr(
-        not(any(feature = "itests", debug_assertions)),
-        expect(dead_code, reason = "used in itests and debug Drop impl")
+        not(any(feature = "test-hooks", debug_assertions)),
+        expect(dead_code, reason = "used in test-hooks and debug Drop impl")
     )]
     pub(crate) fn is_empty(&self) -> bool {
         self.signal.is_none()
@@ -299,7 +299,7 @@ impl PostLockWork {
     }
 }
 
-#[cfg(all(debug_assertions, not(feature = "itests")))]
+#[cfg(all(debug_assertions, not(feature = "test-hooks")))]
 impl Drop for PostLockWork {
     fn drop(&mut self) {
         debug_assert!(

@@ -15,7 +15,7 @@ use crate::tcp::{
     self, Actions, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN,
     TcpHeader, TcpOutSegment, TcpTuple,
 };
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 use crate::timer::NET_TIMER_WHEEL;
 
 // -----------------------------------------------------------------------------
@@ -43,7 +43,7 @@ pub const PEER_ISS: u32 = 7000;
 pub fn reset_all() {
     socket::socket_reset_all();
     tcp::reset_all();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::clear();
 }
 
@@ -426,7 +426,7 @@ impl<'a> SegmentMatcher<'a> {
 
 /// Advance the mock clock by `ms` milliseconds then dispatch any expired
 /// timers.  Returns the number of timers dispatched.
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn tick_ms(ms: u64) -> usize {
     tcp::clock::MockClock::advance(ms);
     dispatch_fired_timers()
@@ -438,7 +438,7 @@ pub fn tick_ms(ms: u64) -> usize {
 /// Mirrors the production dispatcher in `net/src/timer.rs` so that tests can
 /// exercise retransmit, keepalive, and TIME_WAIT paths deterministically
 /// without waiting for the scheduler's real tick.
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn dispatch_fired_timers() -> usize {
     use crate::timer::TimerKind;
 

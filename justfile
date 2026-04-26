@@ -47,8 +47,8 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 # ── Boot / Test cmdlines ────────────────────────────────────────────────────
 
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
-boot_cmdline     := env("BOOT_CMDLINE", "itests=off")
-test_cmdline     := "itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on"
+boot_cmdline     := env("BOOT_CMDLINE", "tests=off")
+test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on"
 
 debug         := env("DEBUG", "0")
 debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
@@ -118,7 +118,7 @@ _iso-tests: _fs-image-tests
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
-            "slopos-drivers/qemu-exit kernel/builtin-tests"
+            "slopos-testing/qemu-exit kernel/tests"
     LIMINE_DIR={{limine_dir}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -146,12 +146,12 @@ boot:
 
 [doc("Boot SlopOS skipping the Wheel of Fate (fast dev iteration)")]
 boot-fast:
-    BOOT_CMDLINE="itests=off roulette=skip" just _iso-notests
+    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot SlopOS with release-optimized kernel (production build)")]
 boot-prod:
-    BOOT_CMDLINE="itests=off roulette=skip" KERNEL_RELEASE=1 just _iso-notests
+    BOOT_CMDLINE="tests=off roulette=skip" KERNEL_RELEASE=1 just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot SlopOS headless (serial only, ports= for forwarding)")]

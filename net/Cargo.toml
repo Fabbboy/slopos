@@ -15,7 +15,7 @@ doctest = false
 
 [features]
 default = []
-itests = []
+test-hooks = []
 
 [dependencies]
 slopos-abi = { workspace = true }

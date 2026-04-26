@@ -1,4 +1,4 @@
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod context_tests;
 pub mod fate_api;
 pub mod ffi_boundary;
@@ -9,7 +9,7 @@ pub mod per_cpu;
 pub mod runtime;
 pub mod safe_switch;
 pub mod safestack_rt;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod sched_tests;
 pub mod scheduler;
 pub mod sleep;

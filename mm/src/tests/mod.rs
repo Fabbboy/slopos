@@ -1,5 +1,5 @@
 // Test modules for mm.
-// The parent lib.rs gates this entire module behind #[cfg(feature = "itests")].
+// The parent lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
 
 pub mod mmio_tests;
 pub mod test_fixtures;

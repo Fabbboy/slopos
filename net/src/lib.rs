@@ -12,7 +12,7 @@ pub mod netdev;
 pub mod netinfo;
 pub mod packetbuf;
 pub mod pool;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod types;
 

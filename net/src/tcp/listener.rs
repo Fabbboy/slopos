@@ -76,7 +76,7 @@ fn alloc_syn_entry_key() -> u32 {
 }
 
 /// Reset the key generator (for deterministic tests).
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn reset_syn_entry_keys() {
     NEXT_SYN_ENTRY_KEY.store(1, Ordering::Relaxed);
 }

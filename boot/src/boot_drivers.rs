@@ -2,7 +2,7 @@ use core::ffi::CStr;
 #[cfg(feature = "xe-gpu")]
 use core::ffi::c_char;
 
-use slopos_tests::{
+use slopos_testing::{
     TestRunSummary, tests_request_shutdown, tests_reset_panic_state, tests_run_all,
 };
 use slopos_utils::klog::{self, KlogLevel};
@@ -306,7 +306,7 @@ fn boot_step_pci_init_fn() {
 
 use slopos_testing::config_from_cmdline;
 
-fn boot_step_interrupt_tests_fn() -> i32 {
+fn boot_step_run_tests_fn() -> i32 {
     // Parse command line to get test config
     let cmdline = boot_get_cmdline();
     let cmdline_str = if cmdline.is_null() {
@@ -317,15 +317,15 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     let test_config = config_from_cmdline(cmdline_str);
 
     if !test_config.enabled {
-        klog_debug!("INTERRUPT_TEST: Harness disabled");
+        klog_debug!("TESTS: Harness disabled");
         return 0;
     }
 
-    klog_info!("INTERRUPT_TEST: Running orchestrated harness");
+    klog_info!("TESTS: Running orchestrated harness");
 
     if klog::is_enabled_level(KlogLevel::Debug) {
-        klog_info!("INTERRUPT_TEST: Verbosity -> {}", test_config.verbosity);
-        klog_info!("INTERRUPT_TEST: Timeout (ms) -> {}", test_config.timeout_ms);
+        klog_info!("TESTS: Verbosity -> {}", test_config.verbosity);
+        klog_info!("TESTS: Timeout (ms) -> {}", test_config.timeout_ms);
     }
 
     tests_reset_panic_state();
@@ -340,13 +340,39 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     let mut summary_box = match slopos_alloc::KBox::<TestRunSummary>::zeroed() {
         Ok(b) => b,
         Err(_) => {
-            klog_info!("INTERRUPT_TEST: alloc failed");
+            klog_info!("TESTS: alloc failed");
             return -1;
         }
     };
     let summary: &mut TestRunSummary = &mut *summary_box;
 
     let rc = tests_run_all(&test_config, summary, registry_start, registry_end);
+
+    // LUF (Lazy Unmap Flush) counters aggregated over all CPUs — proves
+    // that cross-CPU coherence is actually flowing through the ring
+    // and the drain IPI, not silently short-circuiting. Non-zero
+    // `queued` on a fork-heavy or munmap-heavy run means the migration
+    // is live; `reuse_drains` reflects how many times a frame was
+    // reclaimed while still carrying a deferred entry.
+    {
+        let mut q = 0u64;
+        let mut d = 0u64;
+        let mut r = 0u64;
+        let mut o = 0u64;
+        for cpu in 0..slopos_arch::pcr::MAX_CPUS {
+            q = q.saturating_add(slopos_mm::mmu::luf::queued_count(cpu));
+            d = d.saturating_add(slopos_mm::mmu::luf::deferred_saves_count(cpu));
+            r = r.saturating_add(slopos_mm::mmu::luf::reuse_drains_count(cpu));
+            o = o.saturating_add(slopos_mm::mmu::luf::overflow_drains_count(cpu));
+        }
+        klog_info!(
+            "LUF SUMMARY: queued={} reuse_drains={} overflow_drains={} deferred_saves={}",
+            q,
+            r,
+            o,
+            d,
+        );
+    }
 
     if test_config.shutdown {
         klog_debug!("TESTS: Auto shutdown enabled after harness");
@@ -492,10 +518,10 @@ crate::boot_init!(
     flags = boot_init_priority(80)
 );
 crate::boot_init!(
-    BOOT_STEP_INTERRUPT_TESTS,
+    BOOT_STEP_RUN_TESTS,
     drivers,
-    b"interrupt tests\0",
-    boot_step_interrupt_tests_fn,
+    b"tests\0",
+    boot_step_run_tests_fn,
     fallible,
     flags = boot_init_priority(90)
 );

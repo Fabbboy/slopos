@@ -15,7 +15,7 @@ test = false
 doctest = false
 [features]
 default = []
-itests = []
+test-hooks = []
 
 [dependencies]
 bitflags.workspace = true

@@ -1,6 +1,6 @@
 use core::ffi::c_char;
 
-use slopos_testing::{TestSuiteDesc, TestSuiteResult, measure_elapsed_ms};
+use crate::{measure_elapsed_ms, TestSuiteDesc, TestSuiteResult};
 
 const FPU_NAME: &[u8] = b"fpu_sse\0";
 
@@ -70,7 +70,11 @@ fn run_fpu_suite(_config: *const (), out: *mut TestSuiteResult) -> i32 {
         out_ref.failed = total.saturating_sub(passed);
         out_ref.elapsed_ms = elapsed;
     }
-    if passed == total { 0 } else { -1 }
+    if passed == total {
+        0
+    } else {
+        -1
+    }
 }
 
 #[used]

@@ -82,10 +82,10 @@ fi
 "$SCRIPT_DIR/check_alloc_dep.sh"
 
 # The stack-sizes gate applies to the production kernel only. Test builds
-# (`kernel/builtin-tests` feature) compile in per-subsystem regression
+# (`kernel/tests` feature) compile in per-subsystem regression
 # tests whose large stack frames are irrelevant to the real kernel image.
-if [[ "$FEATURES" != *"builtin-tests"* ]]; then
+if [[ "$FEATURES" != *"kernel/tests"* ]]; then
     "$SCRIPT_DIR/check_stack_sizes.sh" "$BUILD_DIR/kernel.elf"
 else
-    echo "check_stack_sizes: skipped (builtin-tests feature enabled)"
+    echo "check_stack_sizes: skipped (kernel/tests feature enabled)"
 fi

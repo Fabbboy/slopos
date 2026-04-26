@@ -1,5 +1,5 @@
 // Test modules for net.
-// The parent lib.rs gates this entire module behind #[cfg(feature = "itests")].
+// The parent lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
 
 pub mod tcp_common;
 

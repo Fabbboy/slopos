@@ -22,7 +22,6 @@ members = [
   "userland",
   "video",
   "windowing",
-  "tests",
   "slop-protocol",
   "slopos-alloc"
 ]
@@ -65,7 +64,6 @@ slopos-sync = { path = "sync" }
 slopos-mm = { path = "mm" }
 slopos-net = { path = "net" }
 slopos-slibc = { path = "slibc" }
-slopos-tests = { path = "tests" }
 slopos-userland = { path = "userland" }
 slopos-protocol = { path = "slop-protocol" }
 slopos-video = { path = "video" }

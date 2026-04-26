@@ -16,9 +16,9 @@ doctest = false
 
 [features]
 default = []
-builtin-tests = ["slopos-tests/builtin-tests", "itests"]
+tests = ["slopos-testing/tests", "test-hooks"]
 xe-gpu = ["slopos-drivers/xe-gpu", "slopos-video/xe-gpu"]
-itests = ["slopos-core/itests", "slopos-mm/itests", "slopos-drivers/itests"]
+test-hooks = ["slopos-core/test-hooks", "slopos-mm/test-hooks", "slopos-drivers/test-hooks"]
 
 [dependencies]
 limine = { workspace = true }
@@ -34,5 +34,4 @@ slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-net = { workspace = true }
-slopos-tests = { workspace = true }
 slopos-video = { workspace = true }

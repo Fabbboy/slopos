@@ -1,5 +1,5 @@
 pub(crate) mod regs;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 
 use core::cell::UnsafeCell;

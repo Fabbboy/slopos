@@ -14,7 +14,7 @@ pub mod ramfs;
 pub mod vfs;
 pub mod vfs_file_ops;
 
-#[cfg(feature = "builtin-tests")]
+#[cfg(feature = "tests")]
 pub mod tests;
 
 #[cfg(test)]

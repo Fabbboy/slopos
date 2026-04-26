@@ -5,10 +5,9 @@
 pub mod apic;
 pub mod hpet;
 pub mod input_event;
-pub mod interrupt_test;
 pub mod ioapic;
 pub mod irq;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 // line_disc is now a submodule of tty/ (drivers/src/tty/ldisc.rs)
 pub mod msi;
@@ -24,7 +23,7 @@ pub mod serial;
 pub mod syscall_services_init;
 pub mod tty;
 pub mod tty_file_ops;
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tty_tests;
 pub mod virtio;
 pub mod virtio_blk;

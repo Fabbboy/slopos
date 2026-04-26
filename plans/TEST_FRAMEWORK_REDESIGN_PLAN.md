@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Not started
+> **Status**: Phase 0 **complete**; Phase 1 not started
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -317,61 +317,72 @@ Same `.test_registry` section, `kind = TestKind::Userland`. The kernel knows abo
 
 ### 0A. Move QEMU exit out of drivers
 
-- [ ] **0A.1** Create `ktesting/src/qemu_signal.rs` with content from `drivers/src/interrupt_test.rs`, renaming the function:
+- [x] **0A.1** Create `ktesting/src/qemu_signal.rs` with content from `drivers/src/interrupt_test.rs`, renaming the function:
   - `interrupt_test_request_shutdown(failed_tests: i32)` → `qemu_signal_exit(failed_tests: i32)`
-- [ ] **0A.2** Add `pub mod qemu_signal;` to `ktesting/src/lib.rs`
-- [ ] **0A.3** Move the `qemu-exit` feature from `drivers/Cargo.toml` to `ktesting/Cargo.toml`
-- [ ] **0A.4** Delete `drivers/src/interrupt_test.rs`
-- [ ] **0A.5** Remove `pub mod interrupt_test;` from `drivers/src/lib.rs`
-- [ ] **0A.6** Update justfile feature string: `slopos-drivers/qemu-exit` → `slopos-testing/qemu-exit`
+- [x] **0A.2** Add `pub mod qemu_signal;` to `ktesting/src/lib.rs` (gated `#[cfg(feature = "qemu-exit")]`)
+- [x] **0A.3** Move the `qemu-exit` feature from `drivers/Cargo.toml` to `ktesting/Cargo.toml`
+- [x] **0A.4** Delete `drivers/src/interrupt_test.rs`
+- [x] **0A.5** Remove `pub mod interrupt_test;` from `drivers/src/lib.rs`
+- [x] **0A.6** Update justfile feature string: `slopos-drivers/qemu-exit` → `slopos-testing/qemu-exit`
 
 ### 0B. Rename boot wiring
 
-- [ ] **0B.1** In `boot/src/boot_drivers.rs:309-363`, rename `boot_step_interrupt_tests_fn` → `boot_step_run_tests_fn`
-- [ ] **0B.2** In same file, rename `BOOT_STEP_INTERRUPT_TESTS` → `BOOT_STEP_RUN_TESTS`
-- [ ] **0B.3** Change boot step name string `b"interrupt tests\0"` → `b"tests\0"` (visible in boot logs)
-- [ ] **0B.4** Replace klog prefixes `"INTERRUPT_TEST: ..."` → `"TESTS: ..."` (multiple sites in `boot_drivers.rs`)
-- [ ] **0B.5** Update import path for the QEMU-exit fn (now `slopos_testing::qemu_signal::qemu_signal_exit`)
-- [ ] **0B.6** Update `boot/src/panic.rs` `tests_mark_panic` import path if it changed
+- [x] **0B.1** In `boot/src/boot_drivers.rs:309-363`, rename `boot_step_interrupt_tests_fn` → `boot_step_run_tests_fn`
+- [x] **0B.2** In same file, rename `BOOT_STEP_INTERRUPT_TESTS` → `BOOT_STEP_RUN_TESTS`
+- [x] **0B.3** Change boot step name string `b"interrupt tests\0"` → `b"tests\0"` (visible in boot logs)
+- [x] **0B.4** Replace klog prefixes `"INTERRUPT_TEST: ..."` → `"TESTS: ..."` (multiple sites in `boot_drivers.rs`)
+- [x] **0B.5** Update import path for the QEMU-exit fn (now `slopos_testing::qemu_signal::qemu_signal_exit`; consumed via `slopos_testing::tests_request_shutdown` re-export)
+- [x] **0B.6** ~Update `boot/src/panic.rs` `tests_mark_panic` import path~ — n/a: `boot/src/panic.rs` uses `slopos_tests::tests_request_shutdown` (now `slopos_testing::tests_request_shutdown`); `tests_mark_panic` is actually called from `kernel/src/main.rs:42`, which was updated to `slopos_testing::tests_mark_panic`.
 
 ### 0C. Fold `tests/` crate into `ktesting/` and `karch/`
 
-- [ ] **0C.1** Move `tests/src/exception_tests.rs` → `karch/src/tests/exception_tests.rs`
-- [ ] **0C.2** Move `tests/src/fpu_tests.rs` → `karch/src/tests/fpu_tests.rs`
-- [ ] **0C.3** Move `tests/src/xsave_tests.rs` → `karch/src/tests/xsave_tests.rs`
-- [ ] **0C.4** Create `karch/src/tests/mod.rs` re-exporting the three modules under `#[cfg(feature = "test-hooks")]`
-- [ ] **0C.5** Add `pub mod tests;` (gated) to `karch/src/lib.rs`
-- [ ] **0C.6** Add `test-hooks = []` feature to `karch/Cargo.toml`; add `slopos-testing` dep gated on the feature
-- [ ] **0C.7** Move content of `tests/src/lib.rs` (`tests_run_all`, `tests_mark_panic`, `tests_reset_panic_state`, panic glue) into `ktesting/src/harness.rs`
-- [ ] **0C.8** Delete `tests/Cargo.toml` and `tests/src/`
-- [ ] **0C.9** Drop `"tests"` from workspace members in root `Cargo.toml`
-- [ ] **0C.10** Update every `slopos-tests = …` workspace dep reference to `slopos-testing = …` (kernel/Cargo.toml is the main consumer)
-- [ ] **0C.11** Update boot's import of `tests_run_all` etc. to `slopos_testing::harness::*`
+> **Deviation**: arch test files placed in `ktesting/src/` rather than `karch/src/tests/`.
+> Reason: `slopos-testing` already depends on `slopos-arch` (uses `tsc::rdtsc`,
+> `cpu::cpuid`, `pcr`); making karch depend on testing forms a Cargo-rejected
+> cycle even when feature-gated. Direct placement in ktesting under the `tests`
+> feature gate is functionally equivalent — the `.test_registry` linker section
+> picks them up identically. Tasks 0C.4-0C.6 (karch test-hooks feature) are
+> therefore not applicable; the three test files were instead added directly
+> under `ktesting/src/{exception,fpu,xsave}_tests.rs` gated by
+> `#[cfg(feature = "tests")]`.
+
+- [x] **0C.1** Move `tests/src/exception_tests.rs` → `ktesting/src/exception_tests.rs` (deviation: not karch)
+- [x] **0C.2** Move `tests/src/fpu_tests.rs` → `ktesting/src/fpu_tests.rs` (deviation: not karch)
+- [x] **0C.3** Move `tests/src/xsave_tests.rs` → `ktesting/src/xsave_tests.rs` (deviation: not karch)
+- [x] **0C.4** ~Create `karch/src/tests/mod.rs`~ — n/a (deviation; see above)
+- [x] **0C.5** ~Add `pub mod tests;` (gated) to `karch/src/lib.rs`~ — n/a (deviation; see above)
+- [x] **0C.6** ~Add `test-hooks = []` feature to `karch/Cargo.toml`~ — n/a (deviation; see above)
+- [x] **0C.7** Move content of `tests/src/lib.rs` (`tests_run_all`, `tests_mark_panic`, `tests_reset_panic_state`, panic glue) into `ktesting/src/harness.rs`. **Deviation**: LUF SUMMARY emission (`slopos_mm::mmu::luf::*` aggregation) was moved out of `tests_run_all` into `boot_step_run_tests_fn` (boot already depends on `slopos-mm`); ktesting takes no `slopos-mm` dep, which would have cycled (mm → testing → mm). Output ordering identical (LUF line still follows TESTS SUMMARY line).
+- [x] **0C.8** Delete `tests/Cargo.toml` and `tests/src/`
+- [x] **0C.9** Drop `"tests"` from workspace members in root `Cargo.toml`
+- [x] **0C.10** Update every `slopos-tests = …` workspace dep reference (dropped from `[workspace.dependencies]`, `boot/Cargo.toml`, `kernel/Cargo.toml`)
+- [x] **0C.11** Update boot's import of `tests_run_all` etc. to `slopos_testing::*`
 
 ### 0D. Rename per-crate Cargo features
 
-- [ ] **0D.1** Sweep every `Cargo.toml` in workspace: feature `itests` → `test-hooks`. Affected crates (verify with grep): `boot`, `core`, `mm`, `drivers`, `net`, `fs`, `kernel`, `karch`, `ktesting`. Update every `[features]` entry and every `dep/itests` cross-reference.
-- [ ] **0D.2** In `kernel/Cargo.toml`: rename feature `builtin-tests` → `tests`. Update transitive references (every `kernel/builtin-tests` in scripts/justfile/CI).
-- [ ] **0D.3** Verify with `git grep -nE 'itests|builtin-tests'` — should match only the legacy-cmdline-alias code in `ktesting/src/config.rs` and (now-stale) doc strings.
-- [ ] **0D.4** Update `scripts/build_kernel.sh:85-90` test-feature gate references.
-- [ ] **0D.5** Update `justfile:117-126` `_iso-tests` recipe to use `kernel/tests` and `slopos-testing/qemu-exit`.
+- [x] **0D.1** Sweep every `Cargo.toml` in workspace: feature `itests` → `test-hooks`. Touched: `boot`, `core`, `mm`, `drivers`, `net`, `kernel`. (`karch`, `ktesting`, `fs` — n/a; `karch`/`ktesting` never had it; `fs` only had `builtin-tests`.) All `[features]` entries and `dep/itests` cross-references updated.
+- [x] **0D.2** Rename feature `builtin-tests` → `tests` in `kernel/Cargo.toml`, `boot/Cargo.toml`, `fs/Cargo.toml`. Updated transitive references in scripts/justfile.
+- [x] **0D.3** Verified with `git grep -nE 'itests|builtin-tests' -- ':!plans'` — matches only the legacy-cmdline-alias code in `ktesting/src/config.rs` and one explanatory note in `AGENTS.md`.
+- [x] **0D.4** Updated `scripts/build_kernel.sh:87` substring check `*"builtin-tests"*` → `*"kernel/tests"*` (more specific to avoid spurious matches).
+- [x] **0D.5** Updated `justfile:117-126` `_iso-tests` recipe to use `slopos-testing/qemu-exit kernel/tests`.
 
 ### 0E. Cmdline rename (with one-cycle backward-compat alias)
 
-- [ ] **0E.1** In `ktesting/src/config.rs`, accept both `tests.*` and `itests.*` keys. On `itests.*` match, also write to the corresponding new field and emit one `klog_warn!("TESTS: legacy 'itests.*' cmdline key in use; rename to 'tests.*'");` per run (use a `StateFlag` to print at most once).
-- [ ] **0E.2** In `justfile:50-51, 165-166`, change default boot/test cmdline strings:
+- [x] **0E.1** In `ktesting/src/config.rs`, both `tests.*` and `itests.*` keys are accepted. On any `itests.*` match, a one-shot `klog_info!("TESTS: legacy 'itests.*' cmdline key in use; rename to 'tests.*'")` fires (gated by a `StateFlag` so it prints at most once per boot). **Note**: used `klog_info!` since `klog_warn!` is not exported; behaviourally equivalent for the warning's purpose.
+- [x] **0E.2** Updated `justfile:50-51`:
   - `itests=off` → `tests=off`
   - `itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on` → `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`
-- [ ] **0E.3** Confirm `BOOT_CMDLINE` env-override path still works (`scripts/qemu_run.sh`).
+  - Also updated lines 149, 154 (`boot-fast`, `boot-prod` recipes).
+- [x] **0E.3** `BOOT_CMDLINE` env-override path through `scripts/qemu_run.sh` confirmed unchanged. **Bonus**: also reworded `scripts/qemu_run.sh:288,296,298` status messages from "Interrupt tests …" → "Tests …" for consistency.
 
 ### Phase 0 Gate
 
-- [ ] **GATE 0.1**: `just build` passes
-- [ ] **GATE 0.2**: `just test` passes with 2393/2393 tests
-- [ ] **GATE 0.3**: `git grep -nE 'itests|interrupt_test|builtin-tests'` returns matches only in `ktesting/src/config.rs` (legacy alias) and possibly `plans/` docs
-- [ ] **GATE 0.4**: Boot log shows `BOOT: tests` (not `BOOT: interrupt tests`)
-- [ ] **GATE 0.5**: `cargo fmt --all` is a no-op
-- [ ] **GATE 0.6**: One commit; `<area>: <imperative summary>` ≤72 chars, e.g., `tests: rename itests/interrupt_test → tests/qemu_signal`
+- [x] **GATE 0.1**: `just build` passes (clean production build, alloc + stack-size gates green)
+- [x] **GATE 0.2**: `just test` passes with 2393/2393 tests
+- [x] **GATE 0.3**: `git grep -nE 'itests|interrupt_test|builtin-tests'` returns matches only in `ktesting/src/config.rs` (legacy alias parser), `AGENTS.md` (one-line note documenting the alias), and `plans/` docs
+- [x] **GATE 0.4**: Boot log shows `TESTS:` prefix (and boot step `b"tests\0"`); QEMU runner now reports "Tests passed."
+- [x] **GATE 0.5**: `cargo fmt --all` is a no-op
+- [x] **GATE 0.6**: One commit: `tests: rename itests/interrupt_test → tests/qemu_signal` (54 chars)
 
 ---
 

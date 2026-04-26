@@ -9,8 +9,8 @@ workspace = true
 
 [features]
 default = []
-builtin-tests = ["slopos-boot/builtin-tests", "slopos-fs/builtin-tests", "slopos-tests"]
-itests = ["slopos-boot/itests"]
+tests = ["slopos-boot/tests", "slopos-fs/tests", "slopos-testing/tests", "test-hooks"]
+test-hooks = ["slopos-boot/test-hooks"]
 xe-gpu = ["slopos-boot/xe-gpu"]
 
 [dependencies]
@@ -19,9 +19,9 @@ slopos-core = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-mm = { workspace = true }
+slopos-testing = { workspace = true }
 slopos-utils = { workspace = true }
 slopos-video = { workspace = true }
-slopos-tests = { workspace = true, optional = true }
 
 [[bin]]
 name = "kernel"

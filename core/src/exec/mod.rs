@@ -1,6 +1,6 @@
 //! exec() syscall implementation for loading and executing ELF binaries from filesystem.
 
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub mod tests;
 
 use core::ffi::c_char;

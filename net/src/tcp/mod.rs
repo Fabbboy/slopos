@@ -1136,7 +1136,7 @@ pub fn on_fin_wait2_timeout(conn_id: u32) {
 ///
 /// Walks all shards and triggers retransmit for the first
 /// connection whose RTO deadline has expired at `now_ms`.
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
     for (shard_idx, shard_lock) in TCP_SHARDS.iter().enumerate() {
         let mut shard = shard_lock.lock();
@@ -1226,6 +1226,6 @@ pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
 pub fn reset_all() {
     table::clear_all();
     isn::reset_for_tests();
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     challenge_ack::reset_for_tests();
 }

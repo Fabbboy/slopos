@@ -1,5 +1,5 @@
 // Test modules for core.
-// The parent lib.rs gates this entire module behind #[cfg(feature = "itests")].
+// The parent lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
 
 pub mod helpers;
 pub mod irq_tests;

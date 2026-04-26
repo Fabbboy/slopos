@@ -6,7 +6,7 @@
 //! teardown (active close, passive close, simultaneous close), RST handling,
 //! MSS option parsing, ephemeral port allocation, and TIME_WAIT expiry.
 //!
-//! All tests run in-kernel during the integration test harness (`itests=on`).
+//! All tests run in-kernel during the integration test harness (`tests=on`).
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};

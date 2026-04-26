@@ -470,9 +470,9 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
 
 /// Return a snapshot of the MSI-X state for the claimed VirtIO-blk device.
 ///
-/// Only available in test builds (`itests` feature).  Returns `None` if the
+/// Only available in test builds (`test-hooks` feature).  Returns `None` if the
 /// device was not probed or MSI-X was not configured (i.e. MSI fallback).
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn virtio_blk_msix_state() -> Option<VirtioMsixState> {
     VIRTIO_BLK_STATE.lock().msix_state
 }

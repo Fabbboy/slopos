@@ -1615,9 +1615,9 @@ pub fn dns_rx_read(out: &mut [u8]) -> usize {
 
 /// Return a snapshot of the MSI-X state for the claimed VirtIO-net device.
 ///
-/// Only available in test builds (`itests` feature).  Returns `None` if the
+/// Only available in test builds (`test-hooks` feature).  Returns `None` if the
 /// device was not probed or MSI-X was not configured (i.e. MSI fallback).
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub fn virtio_net_msix_state() -> Option<VirtioMsixState> {
     VIRTIO_NET_STATE.lock().msix_state
 }

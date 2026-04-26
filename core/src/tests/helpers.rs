@@ -1,4 +1,4 @@
-//! Shared fixtures for itests-gated test modules in this crate.
+//! Shared fixtures for test-hooks-gated test modules in this crate.
 
 use core::ffi::c_void;
 

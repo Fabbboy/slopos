@@ -250,11 +250,11 @@ impl DataState {
         }
     }
 
-    /// Test-and-itests-only by-value constructor. Materialises a `Self`
+    /// Test-and-test-hooks-only by-value constructor. Materialises a `Self`
     /// rvalue on the caller's stack — only safe when the caller is a
     /// `Box<DataState>` consumer that immediately heap-moves the
     /// result. Production code must use [`init_new`] / [`init_from_syn_recv`].
-    #[cfg(any(test, feature = "itests"))]
+    #[cfg(any(test, feature = "test-hooks"))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         iss: SeqNum,

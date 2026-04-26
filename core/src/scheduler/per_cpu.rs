@@ -371,7 +371,7 @@ impl PerCpuScheduler {
 
     /// Reset inbox_count to zero.  For test fixtures only — clears stale
     /// counts that leak between test runs due to SMP timing.
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     pub fn force_clear_inbox_count(&self) {
         self.clear_remote_inbox_with_ref_release();
         self.inbox_count.store(0, Ordering::Relaxed);

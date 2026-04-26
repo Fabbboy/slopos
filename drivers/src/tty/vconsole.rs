@@ -354,7 +354,7 @@ impl ScrollbackBuf {
         self.view_offset > 0
     }
 
-    #[cfg(feature = "itests")]
+    #[cfg(feature = "test-hooks")]
     fn clear(&mut self) {
         self.head = 0;
         self.count = 0;
@@ -1159,8 +1159,8 @@ impl VConsoleState {
     // -----------------------------------------------------------------------
 
     #[cfg_attr(
-        not(feature = "itests"),
-        expect(dead_code, reason = "used by itests feature")
+        not(feature = "test-hooks"),
+        expect(dead_code, reason = "used by test-hooks feature")
     )]
     pub(crate) fn write_byte(&mut self, b: u8) {
         match b {
@@ -1831,7 +1831,7 @@ pub fn scrollback_line_count() -> usize {
     SCROLLBACK.lock().as_ref().map_or(0, |sb| sb.line_count())
 }
 
-#[cfg(feature = "itests")]
+#[cfg(feature = "test-hooks")]
 pub(crate) fn reset_for_tests() {
     let mut state = VCONSOLE_STATE.lock();
     state.cursor_row = 0;
