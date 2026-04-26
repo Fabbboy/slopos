@@ -489,28 +489,83 @@ pub fn test_read_with_data_succeeds() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_signals,
-    [
-        test_ldisc_signal_ctrl_backslash,
-        test_ldisc_signal_ctrl_z,
-        test_canonical_eof_empty_no_phantom,
-        test_canonical_eof_with_pending_text_no_phantom,
-        test_isig_flush_no_noflsh,
-        test_isig_flush_with_noflsh,
-        test_isig_ctrl_c_clears_edit_buffer,
-        test_isig_flush_sigquit,
-        test_isig_flush_sigtstp,
-        test_double_eof_no_phantom_accumulation,
-        test_restart_error_to_errno,
-        test_restart_distinct_from_signal_interrupt,
-        test_erestartsys_constant_value,
-        test_eintr_constant_value,
-        test_sa_restart_flag_value,
-        test_sa_restart_distinct,
-        test_signal_interrupt_still_eintr,
-        test_all_error_variants_preserved,
-        test_nonblock_empty_returns_wouldblock,
-        test_read_with_data_succeeds,
-    ]
+slopos_testing::stest!(
+    name = test_ldisc_signal_ctrl_backslash,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_ldisc_signal_ctrl_z,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_canonical_eof_empty_no_phantom,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_canonical_eof_with_pending_text_no_phantom,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_flush_no_noflsh,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_flush_with_noflsh,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_ctrl_c_clears_edit_buffer,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_flush_sigquit,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_flush_sigtstp,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_double_eof_no_phantom_accumulation,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_restart_error_to_errno,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_restart_distinct_from_signal_interrupt,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_erestartsys_constant_value,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_eintr_constant_value,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_sa_restart_flag_value,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_sa_restart_distinct,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_signal_interrupt_still_eintr,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_all_error_variants_preserved,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_nonblock_empty_returns_wouldblock,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_read_with_data_succeeds,
+    suite = tty_test_ldisc_signals
 );

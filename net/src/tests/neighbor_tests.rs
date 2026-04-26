@@ -298,15 +298,19 @@ pub fn test_neighbor_expire_reachable_to_stale() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    neighbor,
-    [
-        test_neighbor_lookup_empty_cache,
-        test_neighbor_insert_then_lookup,
-        test_neighbor_update_overwrites_mac,
-        test_neighbor_incomplete_to_reachable_flush,
-        test_neighbor_failed_drops_packets,
-        test_neighbor_resolve_reachable_returns_mac,
-        test_neighbor_expire_reachable_to_stale,
-    ]
+slopos_testing::stest!(name = test_neighbor_lookup_empty_cache, suite = neighbor);
+slopos_testing::stest!(name = test_neighbor_insert_then_lookup, suite = neighbor);
+slopos_testing::stest!(name = test_neighbor_update_overwrites_mac, suite = neighbor);
+slopos_testing::stest!(
+    name = test_neighbor_incomplete_to_reachable_flush,
+    suite = neighbor
+);
+slopos_testing::stest!(name = test_neighbor_failed_drops_packets, suite = neighbor);
+slopos_testing::stest!(
+    name = test_neighbor_resolve_reachable_returns_mac,
+    suite = neighbor
+);
+slopos_testing::stest!(
+    name = test_neighbor_expire_reachable_to_stale,
+    suite = neighbor
 );

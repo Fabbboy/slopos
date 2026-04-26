@@ -444,28 +444,23 @@ pub fn test_timer_pending_count_with_cancels() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    timer,
-    [
-        // 2.T5 — Schedule + tick dispatch
-        test_timer_schedule_and_fire,
-        test_timer_fires_correct_kind_and_key,
-        test_timer_delay_zero_fires_next_tick,
-        // 2.T6 — Cancellation
-        test_timer_cancel_before_deadline,
-        test_timer_cancel_already_fired,
-        test_timer_cancel_invalid_token,
-        test_timer_cancel_one_of_many,
-        test_timer_double_cancel,
-        // 2.T7 — MAX_TIMERS_PER_TICK bound
-        test_timer_max_per_tick_bound,
-        test_timer_max_per_tick_bound_exact,
-        // Edge cases
-        test_timer_empty_wheel_tick,
-        test_timer_advance_to_catchup,
-        test_timer_advance_to_noop,
-        test_timer_long_delay,
-        test_timer_multiple_schedule_same_slot,
-        test_timer_pending_count_with_cancels,
-    ]
-);
+// 2.T5 — Schedule + tick dispatch
+slopos_testing::stest!(name = test_timer_schedule_and_fire, suite = timer);
+slopos_testing::stest!(name = test_timer_fires_correct_kind_and_key, suite = timer);
+slopos_testing::stest!(name = test_timer_delay_zero_fires_next_tick, suite = timer);
+// 2.T6 — Cancellation
+slopos_testing::stest!(name = test_timer_cancel_before_deadline, suite = timer);
+slopos_testing::stest!(name = test_timer_cancel_already_fired, suite = timer);
+slopos_testing::stest!(name = test_timer_cancel_invalid_token, suite = timer);
+slopos_testing::stest!(name = test_timer_cancel_one_of_many, suite = timer);
+slopos_testing::stest!(name = test_timer_double_cancel, suite = timer);
+// 2.T7 — MAX_TIMERS_PER_TICK bound
+slopos_testing::stest!(name = test_timer_max_per_tick_bound, suite = timer);
+slopos_testing::stest!(name = test_timer_max_per_tick_bound_exact, suite = timer);
+// Edge cases
+slopos_testing::stest!(name = test_timer_empty_wheel_tick, suite = timer);
+slopos_testing::stest!(name = test_timer_advance_to_catchup, suite = timer);
+slopos_testing::stest!(name = test_timer_advance_to_noop, suite = timer);
+slopos_testing::stest!(name = test_timer_long_delay, suite = timer);
+slopos_testing::stest!(name = test_timer_multiple_schedule_same_slot, suite = timer);
+slopos_testing::stest!(name = test_timer_pending_count_with_cancels, suite = timer);

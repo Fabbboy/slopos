@@ -1403,54 +1403,139 @@ pub fn test_get_lock_non_master_error() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_pty_core,
-    [
-        test_session_id_zero_is_none,
-        test_session_id_round_trip,
-        test_pgrp_id_zero_is_none,
-        test_pgrp_id_round_trip,
-        test_session_option_fields,
-        test_session_option_attach_detach,
-        test_raw_disc_new_empty,
-        test_raw_disc_input_read,
-        test_raw_disc_output_passthrough,
-        test_raw_disc_flush,
-        test_ldisc_kind_ntty_delegation,
-        test_ldisc_kind_raw_delegation,
-        test_pty_driver_id_variants,
-        test_pty_master_driver_kind,
-        test_pty_slave_driver_kind,
-        test_pty_alloc_pair_both_initialized,
-        test_pty_close_master_first_frees_pair,
-        test_pty_close_slave_first_frees_pair,
-        test_pty_reallocation_after_free,
-        test_pty_open_slave_validates_type,
-        test_pty_open_slave_prevents_free,
-        test_partial_open_no_free,
-        test_rapid_alloc_free_realloc,
-        test_pty_open_slave_after_free,
-        test_max_ttys_is_32,
-        test_pty_peer_handle_creation,
-        test_pty_peer_handle_snapshot,
-        test_generation_bumped_on_free,
-        test_stale_handle_detected,
-        test_pty_alloc_captures_generation,
-        test_stale_write_safe_noop,
-        test_rapid_alloc_free_stress,
-        test_data_flow_with_generation,
-        test_validate_peer_out_of_range,
-        test_multiple_pty_pairs,
-        test_pty_lock_ioctl_constants,
-        test_slave_locked_by_default,
-        test_locked_slave_open_rejected,
-        test_unlock_enables_open,
-        test_get_lock_round_trip,
-        test_set_lock_non_master_rejected,
-        test_data_flow_after_unlock,
-        test_master_close_slave_hangup,
-        test_multiple_pairs_with_locks,
-        test_non_pty_not_locked,
-        test_get_lock_non_master_error,
-    ]
+slopos_testing::stest!(
+    name = test_session_id_zero_is_none,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_session_id_round_trip, suite = tty_test_pty_core);
+slopos_testing::stest!(name = test_pgrp_id_zero_is_none, suite = tty_test_pty_core);
+slopos_testing::stest!(name = test_pgrp_id_round_trip, suite = tty_test_pty_core);
+slopos_testing::stest!(name = test_session_option_fields, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_session_option_attach_detach,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_raw_disc_new_empty, suite = tty_test_pty_core);
+slopos_testing::stest!(name = test_raw_disc_input_read, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_raw_disc_output_passthrough,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_raw_disc_flush, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_ldisc_kind_ntty_delegation,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_kind_raw_delegation,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_driver_id_variants,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_master_driver_kind,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_pty_slave_driver_kind, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_pty_alloc_pair_both_initialized,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_close_master_first_frees_pair,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_close_slave_first_frees_pair,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_reallocation_after_free,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_open_slave_validates_type,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_open_slave_prevents_free,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_partial_open_no_free, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_rapid_alloc_free_realloc,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_open_slave_after_free,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_max_ttys_is_32, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_pty_peer_handle_creation,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_peer_handle_snapshot,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_generation_bumped_on_free,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_stale_handle_detected, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_pty_alloc_captures_generation,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_stale_write_safe_noop, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_rapid_alloc_free_stress,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_data_flow_with_generation,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_validate_peer_out_of_range,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_multiple_pty_pairs, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_pty_lock_ioctl_constants,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_slave_locked_by_default,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_locked_slave_open_rejected,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_unlock_enables_open, suite = tty_test_pty_core);
+slopos_testing::stest!(name = test_get_lock_round_trip, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_set_lock_non_master_rejected,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_data_flow_after_unlock,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_master_close_slave_hangup,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_multiple_pairs_with_locks,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_non_pty_not_locked, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_get_lock_non_master_error,
+    suite = tty_test_pty_core
 );

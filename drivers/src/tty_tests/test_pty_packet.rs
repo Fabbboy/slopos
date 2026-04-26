@@ -332,16 +332,29 @@ pub fn test_set_packet_mode_non_master() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_pty_packet,
-    [
-        test_abi_constants,
-        test_tiocpkt_on_data_prefixed,
-        test_tiocpkt_off_normal_read,
-        test_tiocpkt_slave_flush_read,
-        test_tiocpkt_ixon_toggle,
-        test_tiocpkt_disable_clears_events,
-        test_poll_packet_events_pollin,
-        test_set_packet_mode_non_master,
-    ]
+slopos_testing::stest!(name = test_abi_constants, suite = tty_test_pty_packet);
+slopos_testing::stest!(
+    name = test_tiocpkt_on_data_prefixed,
+    suite = tty_test_pty_packet
+);
+slopos_testing::stest!(
+    name = test_tiocpkt_off_normal_read,
+    suite = tty_test_pty_packet
+);
+slopos_testing::stest!(
+    name = test_tiocpkt_slave_flush_read,
+    suite = tty_test_pty_packet
+);
+slopos_testing::stest!(name = test_tiocpkt_ixon_toggle, suite = tty_test_pty_packet);
+slopos_testing::stest!(
+    name = test_tiocpkt_disable_clears_events,
+    suite = tty_test_pty_packet
+);
+slopos_testing::stest!(
+    name = test_poll_packet_events_pollin,
+    suite = tty_test_pty_packet
+);
+slopos_testing::stest!(
+    name = test_set_packet_mode_non_master,
+    suite = tty_test_pty_packet
 );

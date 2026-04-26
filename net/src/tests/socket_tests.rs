@@ -860,54 +860,91 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    socket,
-    [
-        test_socket_create_tcp,
-        test_socket_create_udp,
-        test_socket_create_invalid_domain,
-        test_socket_create_invalid_type,
-        test_socket_table_full,
-        test_socket_bind_valid,
-        test_socket_bind_specific_addr,
-        test_socket_bind_invalid_idx,
-        test_socket_bind_already_bound,
-        test_socket_listen_after_bind,
-        test_socket_listen_without_bind,
-        test_socket_listen_on_connected,
-        test_socket_connect_creates_tcp_connection,
-        test_socket_connect_invalid_socket,
-        test_socket_connect_already_connected,
-        test_socket_send_returns_error_not_connected,
-        test_socket_recv_returns_error_not_connected,
-        test_socket_send_buffer_space,
-        test_socket_recv_empty,
-        test_socket_close_valid,
-        test_socket_close_invalid,
-        test_socket_close_frees_slot,
-        test_socket_poll_readable_not_connected,
-        test_socket_poll_writable_connected,
-        test_socket_state_after_create,
-        test_socket_state_after_bind,
-        test_socket_reset_all,
-        test_socket_accept_no_pending_returns_eagain,
-        test_bounded_queue_push_pop_capacity,
-        test_bounded_queue_overflow_returns_false,
-        test_bounded_queue_clear_and_resize,
-        test_slab_socket_table_alloc_free_get_get_mut,
-        test_slab_socket_table_grows_and_enforces_max,
-        test_ephemeral_port_allocator_alloc_release_round_robin,
-        test_ephemeral_port_allocator_exhaustion_and_no_duplicates,
-        test_socket_options_defaults_and_validation,
-        test_socket_flags_set_clear_contains,
-        test_socket_new_defaults_and_helpers,
-        test_tcp_send_on_established_returns_bytes,
-        test_tcp_recv_after_peer_data,
-        test_tcp_shutdown_wr_transitions_to_fin_wait1,
-        test_tcp_shutdown_wr_recv_still_works,
-        test_tcp_send_after_shutdown_wr_fails,
-        test_tcp_send_after_blocking_connect,
-        test_tcp_send_before_handshake_complete,
-        test_tcp_listen_accept_incoming_syn,
-    ]
+slopos_testing::stest!(name = test_socket_create_tcp, suite = socket);
+slopos_testing::stest!(name = test_socket_create_udp, suite = socket);
+slopos_testing::stest!(name = test_socket_create_invalid_domain, suite = socket);
+slopos_testing::stest!(name = test_socket_create_invalid_type, suite = socket);
+slopos_testing::stest!(name = test_socket_table_full, suite = socket);
+slopos_testing::stest!(name = test_socket_bind_valid, suite = socket);
+slopos_testing::stest!(name = test_socket_bind_specific_addr, suite = socket);
+slopos_testing::stest!(name = test_socket_bind_invalid_idx, suite = socket);
+slopos_testing::stest!(name = test_socket_bind_already_bound, suite = socket);
+slopos_testing::stest!(name = test_socket_listen_after_bind, suite = socket);
+slopos_testing::stest!(name = test_socket_listen_without_bind, suite = socket);
+slopos_testing::stest!(name = test_socket_listen_on_connected, suite = socket);
+slopos_testing::stest!(
+    name = test_socket_connect_creates_tcp_connection,
+    suite = socket
 );
+slopos_testing::stest!(name = test_socket_connect_invalid_socket, suite = socket);
+slopos_testing::stest!(name = test_socket_connect_already_connected, suite = socket);
+slopos_testing::stest!(
+    name = test_socket_send_returns_error_not_connected,
+    suite = socket
+);
+slopos_testing::stest!(
+    name = test_socket_recv_returns_error_not_connected,
+    suite = socket
+);
+slopos_testing::stest!(name = test_socket_send_buffer_space, suite = socket);
+slopos_testing::stest!(name = test_socket_recv_empty, suite = socket);
+slopos_testing::stest!(name = test_socket_close_valid, suite = socket);
+slopos_testing::stest!(name = test_socket_close_invalid, suite = socket);
+slopos_testing::stest!(name = test_socket_close_frees_slot, suite = socket);
+slopos_testing::stest!(
+    name = test_socket_poll_readable_not_connected,
+    suite = socket
+);
+slopos_testing::stest!(name = test_socket_poll_writable_connected, suite = socket);
+slopos_testing::stest!(name = test_socket_state_after_create, suite = socket);
+slopos_testing::stest!(name = test_socket_state_after_bind, suite = socket);
+slopos_testing::stest!(name = test_socket_reset_all, suite = socket);
+slopos_testing::stest!(
+    name = test_socket_accept_no_pending_returns_eagain,
+    suite = socket
+);
+slopos_testing::stest!(name = test_bounded_queue_push_pop_capacity, suite = socket);
+slopos_testing::stest!(
+    name = test_bounded_queue_overflow_returns_false,
+    suite = socket
+);
+slopos_testing::stest!(name = test_bounded_queue_clear_and_resize, suite = socket);
+slopos_testing::stest!(
+    name = test_slab_socket_table_alloc_free_get_get_mut,
+    suite = socket
+);
+slopos_testing::stest!(
+    name = test_slab_socket_table_grows_and_enforces_max,
+    suite = socket
+);
+slopos_testing::stest!(
+    name = test_ephemeral_port_allocator_alloc_release_round_robin,
+    suite = socket
+);
+slopos_testing::stest!(
+    name = test_ephemeral_port_allocator_exhaustion_and_no_duplicates,
+    suite = socket
+);
+slopos_testing::stest!(
+    name = test_socket_options_defaults_and_validation,
+    suite = socket
+);
+slopos_testing::stest!(name = test_socket_flags_set_clear_contains, suite = socket);
+slopos_testing::stest!(name = test_socket_new_defaults_and_helpers, suite = socket);
+slopos_testing::stest!(
+    name = test_tcp_send_on_established_returns_bytes,
+    suite = socket
+);
+slopos_testing::stest!(name = test_tcp_recv_after_peer_data, suite = socket);
+slopos_testing::stest!(
+    name = test_tcp_shutdown_wr_transitions_to_fin_wait1,
+    suite = socket
+);
+slopos_testing::stest!(name = test_tcp_shutdown_wr_recv_still_works, suite = socket);
+slopos_testing::stest!(name = test_tcp_send_after_shutdown_wr_fails, suite = socket);
+slopos_testing::stest!(name = test_tcp_send_after_blocking_connect, suite = socket);
+slopos_testing::stest!(
+    name = test_tcp_send_before_handshake_complete,
+    suite = socket
+);
+slopos_testing::stest!(name = test_tcp_listen_accept_incoming_syn, suite = socket);

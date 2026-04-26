@@ -161,13 +161,11 @@ fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_live,
-    [
-        test_route_table_has_default,
-        test_netstack_has_ipv4,
-        test_arp_resolve_gateway,
-        test_tcp_syn_transmit,
-        test_tcp_nonblocking_connect_returns_einprogress,
-    ]
+slopos_testing::stest!(name = test_route_table_has_default, suite = tcp_live);
+slopos_testing::stest!(name = test_netstack_has_ipv4, suite = tcp_live);
+slopos_testing::stest!(name = test_arp_resolve_gateway, suite = tcp_live);
+slopos_testing::stest!(name = test_tcp_syn_transmit, suite = tcp_live);
+slopos_testing::stest!(
+    name = test_tcp_nonblocking_connect_returns_einprogress,
+    suite = tcp_live
 );

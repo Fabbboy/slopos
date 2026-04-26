@@ -887,34 +887,29 @@ pub fn test_lstar_points_to_executable_code() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    gdt,
-    [
-        test_gdt_loaded_valid_limit,
-        test_current_cs_is_kernel,
-        test_current_ss_is_kernel,
-        test_data_segment_selectors,
-        test_tss_loaded,
-        test_gdt_set_kernel_rsp0_valid,
-        test_gdt_set_kernel_rsp0_null,
-        test_gdt_set_kernel_rsp0_user_address,
-        test_gdt_set_ist_valid_indices,
-        test_gdt_set_ist_index_zero,
-        test_gdt_set_ist_index_overflow,
-        test_efer_sce_enabled,
-        test_star_msr_valid,
-        test_lstar_msr_valid,
-        test_sfmask_msr_valid,
-        test_double_fault_uses_ist,
-        test_page_fault_handler_valid,
-        test_gp_fault_handler_valid,
-        test_syscall_idt_entry,
-        test_gdt_double_init,
-        test_syscall_msr_double_init,
-        test_gdt_entry_order_matches_selectors,
-        test_star_sysret_selector_calculation,
-        test_tss_rsp0_value_valid,
-        test_ist_stacks_have_guard_pages,
-        test_lstar_points_to_executable_code,
-    ]
-);
+slopos_testing::stest!(name = test_gdt_loaded_valid_limit, suite = gdt);
+slopos_testing::stest!(name = test_current_cs_is_kernel, suite = gdt);
+slopos_testing::stest!(name = test_current_ss_is_kernel, suite = gdt);
+slopos_testing::stest!(name = test_data_segment_selectors, suite = gdt);
+slopos_testing::stest!(name = test_tss_loaded, suite = gdt);
+slopos_testing::stest!(name = test_gdt_set_kernel_rsp0_valid, suite = gdt);
+slopos_testing::stest!(name = test_gdt_set_kernel_rsp0_null, suite = gdt);
+slopos_testing::stest!(name = test_gdt_set_kernel_rsp0_user_address, suite = gdt);
+slopos_testing::stest!(name = test_gdt_set_ist_valid_indices, suite = gdt);
+slopos_testing::stest!(name = test_gdt_set_ist_index_zero, suite = gdt);
+slopos_testing::stest!(name = test_gdt_set_ist_index_overflow, suite = gdt);
+slopos_testing::stest!(name = test_efer_sce_enabled, suite = gdt);
+slopos_testing::stest!(name = test_star_msr_valid, suite = gdt);
+slopos_testing::stest!(name = test_lstar_msr_valid, suite = gdt);
+slopos_testing::stest!(name = test_sfmask_msr_valid, suite = gdt);
+slopos_testing::stest!(name = test_double_fault_uses_ist, suite = gdt);
+slopos_testing::stest!(name = test_page_fault_handler_valid, suite = gdt);
+slopos_testing::stest!(name = test_gp_fault_handler_valid, suite = gdt);
+slopos_testing::stest!(name = test_syscall_idt_entry, suite = gdt);
+slopos_testing::stest!(name = test_gdt_double_init, suite = gdt);
+slopos_testing::stest!(name = test_syscall_msr_double_init, suite = gdt);
+slopos_testing::stest!(name = test_gdt_entry_order_matches_selectors, suite = gdt);
+slopos_testing::stest!(name = test_star_sysret_selector_calculation, suite = gdt);
+slopos_testing::stest!(name = test_tss_rsp0_value_valid, suite = gdt);
+slopos_testing::stest!(name = test_ist_stacks_have_guard_pages, suite = gdt);
+slopos_testing::stest!(name = test_lstar_points_to_executable_code, suite = gdt);

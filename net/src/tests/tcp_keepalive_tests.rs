@@ -305,13 +305,17 @@ pub fn test_keepalive_cancelled_on_close() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_keepalive,
-    [
-        test_keepalive_fires_after_idle,
-        test_keepalive_reset_on_data,
-        test_keepalive_max_probes_rst,
-        test_keepalive_disabled_no_timer,
-        test_keepalive_cancelled_on_close,
-    ]
+slopos_testing::stest!(
+    name = test_keepalive_fires_after_idle,
+    suite = tcp_keepalive
+);
+slopos_testing::stest!(name = test_keepalive_reset_on_data, suite = tcp_keepalive);
+slopos_testing::stest!(name = test_keepalive_max_probes_rst, suite = tcp_keepalive);
+slopos_testing::stest!(
+    name = test_keepalive_disabled_no_timer,
+    suite = tcp_keepalive
+);
+slopos_testing::stest!(
+    name = test_keepalive_cancelled_on_close,
+    suite = tcp_keepalive
 );

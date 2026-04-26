@@ -275,16 +275,14 @@ pub fn test_shutdown_read_behavior() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    socket_framework,
-    [
-        test_slab_alloc_free_cycle,
-        test_ephemeral_port_exhaustion,
-        test_udp_demux_dispatch,
-        test_inaddr_any_wildcard,
-        test_recv_queue_overflow,
-        test_so_reuseaddr,
-        test_so_rcvbuf_resize,
-        test_shutdown_read_behavior,
-    ]
+slopos_testing::stest!(name = test_slab_alloc_free_cycle, suite = socket_framework);
+slopos_testing::stest!(
+    name = test_ephemeral_port_exhaustion,
+    suite = socket_framework
 );
+slopos_testing::stest!(name = test_udp_demux_dispatch, suite = socket_framework);
+slopos_testing::stest!(name = test_inaddr_any_wildcard, suite = socket_framework);
+slopos_testing::stest!(name = test_recv_queue_overflow, suite = socket_framework);
+slopos_testing::stest!(name = test_so_reuseaddr, suite = socket_framework);
+slopos_testing::stest!(name = test_so_rcvbuf_resize, suite = socket_framework);
+slopos_testing::stest!(name = test_shutdown_read_behavior, suite = socket_framework);

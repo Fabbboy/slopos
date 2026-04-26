@@ -2386,108 +2386,284 @@ pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    syscall_valid,
-    [
-        test_syscall_lookup_invalid_number,
-        test_syscall_lookup_empty_slot,
-        test_syscall_lookup_valid,
-        test_process_syscall_lookup_valid,
-        test_io_syscall_lookup_valid,
-        test_net_scan_syscall_lookup_valid,
-        test_fork_null_parent,
-        test_fork_kernel_task,
-        test_fork_terminated_parent,
-        test_fork_blocked_parent,
-        test_fork_cleanup_on_failure,
-        test_user_ptr_null,
-        test_user_ptr_kernel_address,
-        test_user_ptr_misaligned,
-        test_user_ptr_overflow_boundary,
-        test_brk_extreme_values,
-        test_memfd_create_boundaries,
-        test_terminate_already_terminated,
-        test_operations_on_terminated_task,
-        test_fork_memory_pressure,
-        test_task_id_wraparound,
-        test_clone_thread_tls_isolation,
-        test_clone_then_fork_interaction,
-        test_futex_wait_mismatch_and_wake_no_waiters,
-        test_futex_lost_wakeup_regression,
-        test_futex_contention_path_stability,
-        test_signal_install_deliver_and_sigreturn,
-        test_sigprocmask_block_then_unblock_delivery,
-        test_sigchld_and_wait_interaction,
-        test_arch_prctl_set_get_fs_roundtrip,
-        test_pipe_poll_eof_baseline,
-        test_pipe_write_read_basic,
-        test_pipe_eof_returns_zero,
-        test_pipe_broken_pipe,
-        test_pipe_multi_write_read,
-        test_pipe_partial_read,
-        test_pipe_buffer_full,
-        test_exit_current_task_releases_pipe_refs,
-        test_process_group_session_syscalls_baseline,
-        test_kill_process_group_semantics,
-        test_tiocsctty_session_leader_acquires_ctty,
-        test_tiocsctty_non_leader_rejected,
-        test_open_dev_tty_with_o_noctty_preserves_flag,
-        test_setsid_child_preserves_parent_controlling_tty,
-        test_hangup_clears_all_session_controlling_ttys,
-        test_pts_open_acquires_controlling_tty_without_o_noctty,
-        test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
-        test_vm_mmap_munmap_stress_baseline,
-        test_spawn_path_stale_argv_regression,
-        // /dev/tty Controlling Terminal Device
-        test_dev_tty_no_ctty_returns_enxio,
-        test_dev_tty_with_ctty_succeeds,
-        test_setsid_then_dev_tty_returns_enxio,
-        test_fork_child_inherits_dev_tty,
-        // EXTPROC & vhangup
-        test_vhangup_syscall_in_dispatch_table,
-    ]
+slopos_testing::stest!(
+    name = test_syscall_lookup_invalid_number,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_syscall_lookup_empty_slot, suite = syscall_valid);
+slopos_testing::stest!(name = test_syscall_lookup_valid, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_process_syscall_lookup_valid,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_io_syscall_lookup_valid, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_net_scan_syscall_lookup_valid,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_fork_null_parent, suite = syscall_valid);
+slopos_testing::stest!(name = test_fork_kernel_task, suite = syscall_valid);
+slopos_testing::stest!(name = test_fork_terminated_parent, suite = syscall_valid);
+slopos_testing::stest!(name = test_fork_blocked_parent, suite = syscall_valid);
+slopos_testing::stest!(name = test_fork_cleanup_on_failure, suite = syscall_valid);
+slopos_testing::stest!(name = test_user_ptr_null, suite = syscall_valid);
+slopos_testing::stest!(name = test_user_ptr_kernel_address, suite = syscall_valid);
+slopos_testing::stest!(name = test_user_ptr_misaligned, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_user_ptr_overflow_boundary,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_brk_extreme_values, suite = syscall_valid);
+slopos_testing::stest!(name = test_memfd_create_boundaries, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_terminate_already_terminated,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_operations_on_terminated_task,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_fork_memory_pressure, suite = syscall_valid);
+slopos_testing::stest!(name = test_task_id_wraparound, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_clone_thread_tls_isolation,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_clone_then_fork_interaction,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_futex_wait_mismatch_and_wake_no_waiters,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_futex_lost_wakeup_regression,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_futex_contention_path_stability,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_signal_install_deliver_and_sigreturn,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_sigprocmask_block_then_unblock_delivery,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_sigchld_and_wait_interaction,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_arch_prctl_set_get_fs_roundtrip,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_pipe_poll_eof_baseline, suite = syscall_valid);
+slopos_testing::stest!(name = test_pipe_write_read_basic, suite = syscall_valid);
+slopos_testing::stest!(name = test_pipe_eof_returns_zero, suite = syscall_valid);
+slopos_testing::stest!(name = test_pipe_broken_pipe, suite = syscall_valid);
+slopos_testing::stest!(name = test_pipe_multi_write_read, suite = syscall_valid);
+slopos_testing::stest!(name = test_pipe_partial_read, suite = syscall_valid);
+slopos_testing::stest!(name = test_pipe_buffer_full, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_exit_current_task_releases_pipe_refs,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_process_group_session_syscalls_baseline,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_kill_process_group_semantics,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_tiocsctty_session_leader_acquires_ctty,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_tiocsctty_non_leader_rejected,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_open_dev_tty_with_o_noctty_preserves_flag,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_setsid_child_preserves_parent_controlling_tty,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_hangup_clears_all_session_controlling_ttys,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_pts_open_acquires_controlling_tty_without_o_noctty,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_vm_mmap_munmap_stress_baseline,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_spawn_path_stale_argv_regression,
+    suite = syscall_valid
+);
+// /dev/tty Controlling Terminal Device
+slopos_testing::stest!(
+    name = test_dev_tty_no_ctty_returns_enxio,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_dev_tty_with_ctty_succeeds,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_setsid_then_dev_tty_returns_enxio,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_fork_child_inherits_dev_tty,
+    suite = syscall_valid
+);
+// EXTPROC & vhangup
+slopos_testing::stest!(
+    name = test_vhangup_syscall_in_dispatch_table,
+    suite = syscall_valid
 );
 
-slopos_testing::define_test_suite!(
-    syscall_compat_smoke,
-    [
-        test_syscall_lookup_valid,
-        test_process_syscall_lookup_valid,
-        test_net_scan_syscall_lookup_valid,
-        test_pipe_poll_eof_baseline,
-        test_pipe_write_read_basic,
-        test_pipe_eof_returns_zero,
-        test_pipe_broken_pipe,
-        test_pipe_multi_write_read,
-        test_pipe_partial_read,
-        test_pipe_buffer_full,
-        test_exit_current_task_releases_pipe_refs,
-        test_process_group_session_syscalls_baseline,
-        test_kill_process_group_semantics,
-        test_tiocsctty_session_leader_acquires_ctty,
-        test_tiocsctty_non_leader_rejected,
-        test_open_dev_tty_with_o_noctty_preserves_flag,
-        test_setsid_child_preserves_parent_controlling_tty,
-        test_hangup_clears_all_session_controlling_ttys,
-        test_pts_open_acquires_controlling_tty_without_o_noctty,
-        test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
-        test_sigchld_and_wait_interaction,
-        test_clone_thread_tls_isolation,
-        test_futex_wait_mismatch_and_wake_no_waiters,
-        test_arch_prctl_set_get_fs_roundtrip,
-        test_spawn_path_stale_argv_regression,
-        // /dev/tty Controlling Terminal Device
-        test_dev_tty_no_ctty_returns_enxio,
-        test_dev_tty_with_ctty_succeeds,
-        test_setsid_then_dev_tty_returns_enxio,
-        test_fork_child_inherits_dev_tty,
-        // EXTPROC & vhangup
-        test_vhangup_syscall_in_dispatch_table,
-        // AF_UNIX sockets
-        test_unix_socket_send_recv_basic,
-        test_unix_socket_poll_after_send,
-        test_unix_socket_poll_before_send,
-    ]
+slopos_testing::stest!(
+    name = test_syscall_lookup_valid,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_process_syscall_lookup_valid,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_net_scan_syscall_lookup_valid,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_pipe_poll_eof_baseline,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_pipe_write_read_basic,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_pipe_eof_returns_zero,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(name = test_pipe_broken_pipe, suite = syscall_compat_smoke);
+slopos_testing::stest!(
+    name = test_pipe_multi_write_read,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(name = test_pipe_partial_read, suite = syscall_compat_smoke);
+slopos_testing::stest!(name = test_pipe_buffer_full, suite = syscall_compat_smoke);
+slopos_testing::stest!(
+    name = test_exit_current_task_releases_pipe_refs,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_process_group_session_syscalls_baseline,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_kill_process_group_semantics,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_tiocsctty_session_leader_acquires_ctty,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_tiocsctty_non_leader_rejected,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_open_dev_tty_with_o_noctty_preserves_flag,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_setsid_child_preserves_parent_controlling_tty,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_hangup_clears_all_session_controlling_ttys,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_pts_open_acquires_controlling_tty_without_o_noctty,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_sigchld_and_wait_interaction,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_clone_thread_tls_isolation,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_futex_wait_mismatch_and_wake_no_waiters,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_arch_prctl_set_get_fs_roundtrip,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_spawn_path_stale_argv_regression,
+    suite = syscall_compat_smoke
+);
+// /dev/tty Controlling Terminal Device
+slopos_testing::stest!(
+    name = test_dev_tty_no_ctty_returns_enxio,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_dev_tty_with_ctty_succeeds,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_setsid_then_dev_tty_returns_enxio,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_fork_child_inherits_dev_tty,
+    suite = syscall_compat_smoke
+);
+// EXTPROC & vhangup
+slopos_testing::stest!(
+    name = test_vhangup_syscall_in_dispatch_table,
+    suite = syscall_compat_smoke
+);
+// AF_UNIX sockets
+slopos_testing::stest!(
+    name = test_unix_socket_send_recv_basic,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_unix_socket_poll_after_send,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_unix_socket_poll_before_send,
+    suite = syscall_compat_smoke
 );
 
 // =============================================================================
@@ -3340,19 +3516,47 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    poll_wakeup_race,
-    [
-        test_sleep_ms_cas_overwrites_wakeup,
-        test_block_current_task_toctou_allows_reblock,
-        test_wq_wrong_order_wakeup_lost,
-        test_wq_correct_order_wakeup_preserved,
-        test_try_transition_from_rejects_wrong_state,
-        test_unix_socket_poll_syscall_e2e,
-        test_compositor_handshake_listen_accept_send_poll,
-        test_unix_send_wakes_willblock_poll_waiter,
-        test_ready_to_willblock_transition,
-        test_poll_fused_gap_demonstrates_race,
-        test_poll_fused_register_first_catches_wakeup,
-    ]
+slopos_testing::stest!(
+    name = test_sleep_ms_cas_overwrites_wakeup,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_block_current_task_toctou_allows_reblock,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_wq_wrong_order_wakeup_lost,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_wq_correct_order_wakeup_preserved,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_try_transition_from_rejects_wrong_state,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_unix_socket_poll_syscall_e2e,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_compositor_handshake_listen_accept_send_poll,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_unix_send_wakes_willblock_poll_waiter,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_ready_to_willblock_transition,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_poll_fused_gap_demonstrates_race,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_poll_fused_register_first_catches_wakeup,
+    suite = poll_wakeup_race
 );

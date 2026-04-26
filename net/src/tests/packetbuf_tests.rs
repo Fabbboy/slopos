@@ -552,32 +552,27 @@ pub fn test_tcp_checksum() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    packetbuf,
-    [
-        // 1.T1 — Pool alloc + release
-        test_pool_alloc_and_release,
-        test_pool_exhaust_and_recover,
-        // 1.T2 — PacketBuf::alloc
-        test_packetbuf_alloc_empty,
-        // 1.T3 — push_header / pull_header
-        test_push_header,
-        test_pull_header,
-        test_push_header_exhausts_headroom,
-        // 1.T4 — from_raw_copy
-        test_from_raw_copy,
-        test_from_raw_copy_empty,
-        // 1.T5 — Drop returns to pool
-        test_drop_returns_to_pool,
-        test_drop_multiple,
-        // Layer offset helpers
-        test_layer_offsets,
-        test_layer_offsets_unset,
-        // Append
-        test_append,
-        // Checksum helpers
-        test_ipv4_checksum,
-        test_udp_checksum,
-        test_tcp_checksum,
-    ]
-);
+// 1.T1 — Pool alloc + release
+slopos_testing::stest!(name = test_pool_alloc_and_release, suite = packetbuf);
+slopos_testing::stest!(name = test_pool_exhaust_and_recover, suite = packetbuf);
+// 1.T2 — PacketBuf::alloc
+slopos_testing::stest!(name = test_packetbuf_alloc_empty, suite = packetbuf);
+// 1.T3 — push_header / pull_header
+slopos_testing::stest!(name = test_push_header, suite = packetbuf);
+slopos_testing::stest!(name = test_pull_header, suite = packetbuf);
+slopos_testing::stest!(name = test_push_header_exhausts_headroom, suite = packetbuf);
+// 1.T4 — from_raw_copy
+slopos_testing::stest!(name = test_from_raw_copy, suite = packetbuf);
+slopos_testing::stest!(name = test_from_raw_copy_empty, suite = packetbuf);
+// 1.T5 — Drop returns to pool
+slopos_testing::stest!(name = test_drop_returns_to_pool, suite = packetbuf);
+slopos_testing::stest!(name = test_drop_multiple, suite = packetbuf);
+// Layer offset helpers
+slopos_testing::stest!(name = test_layer_offsets, suite = packetbuf);
+slopos_testing::stest!(name = test_layer_offsets_unset, suite = packetbuf);
+// Append
+slopos_testing::stest!(name = test_append, suite = packetbuf);
+// Checksum helpers
+slopos_testing::stest!(name = test_ipv4_checksum, suite = packetbuf);
+slopos_testing::stest!(name = test_udp_checksum, suite = packetbuf);
+slopos_testing::stest!(name = test_tcp_checksum, suite = packetbuf);

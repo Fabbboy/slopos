@@ -284,14 +284,21 @@ pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    reassembly,
-    [
-        test_reassembly_two_fragments,
-        test_reassembly_timeout_drops_incomplete,
-        test_reassembly_out_of_order,
-        test_reassembly_duplicate_fragment,
-        test_reassembly_max_groups_eviction,
-        test_non_fragmented_bypasses_reassembly,
-    ]
+slopos_testing::stest!(name = test_reassembly_two_fragments, suite = reassembly);
+slopos_testing::stest!(
+    name = test_reassembly_timeout_drops_incomplete,
+    suite = reassembly
+);
+slopos_testing::stest!(name = test_reassembly_out_of_order, suite = reassembly);
+slopos_testing::stest!(
+    name = test_reassembly_duplicate_fragment,
+    suite = reassembly
+);
+slopos_testing::stest!(
+    name = test_reassembly_max_groups_eviction,
+    suite = reassembly
+);
+slopos_testing::stest!(
+    name = test_non_fragmented_bypasses_reassembly,
+    suite = reassembly
 );

@@ -2431,103 +2431,326 @@ pub fn test_no_driver_kind_none() -> TestResult {
     }
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ioctls_ext,
-    [
-        test_is_output_idle_initially_true,
-        test_inflight_counter_initial_zero,
-        test_write_updates_inflight_counter,
-        test_tcsetsw_preserves_input_after_drain,
-        test_tcsetsf_flushes_input_after_drain,
-        test_is_output_idle_invalid_index,
-        test_is_output_idle_unallocated,
-        test_drain_invalid_index_error,
-        test_driver_output_pending_default_false,
-        test_driver_kind_output_pending_dispatch,
-        test_pty_output_idle_immediate,
-        test_console_drain_immediate,
-        test_tcsets_now_skips_drain,
-        test_hangup_read_returns_eof,
-        test_hangup_write_returns_eio,
-        test_hangup_poll_returns_pollhup_pollin,
-        test_hangup_set_termios_returns_eio,
-        test_hangup_set_winsize_returns_eio,
-        test_hangup_set_ldisc_returns_eio,
-        test_hangup_get_fg_pgrp_still_works,
-        test_pty_master_close_slave_eof_eio,
-        test_hangup_permanent_eof,
-        test_pty_slave_poll_pollhup_after_master_close,
-        test_hungup_errno_is_eio,
-        test_control_flag_values,
-        test_default_cflag,
-        test_cflag_roundtrip,
-        test_speed_fields_populated,
-        test_speed_follows_baud_change,
-        test_cread_value_preserved,
-        test_flush_flow_ioctl_constants,
-        test_tcflush_input,
-        test_tcflush_output,
-        test_tcflush_both,
-        test_tcflush_invalid_arg,
-        test_tcsbrk_noop,
-        test_tcsbrk_drain,
-        test_tcxonc_all_actions,
-        test_tcooff_blocks_nonblock_write,
-        test_tcoon_resumes_write,
-        test_tcooff_idempotent,
-        test_tcoon_idempotent,
-        test_stop_resume_cycle,
-        test_tcioff_tcion_succeed,
-        test_tcioff_tcion_no_output_stop,
-        test_invalid_action_still_errors,
-        test_tcooff_pty_slave_write,
-        test_output_stopped_independent_of_ixon,
-        test_tcxonc_unallocated_slot,
-        test_tcxonc_invalid_index,
-        test_tiocoutq_abi_constant,
-        test_output_queued_zero_when_idle,
-        test_output_queued_reflects_inflight,
-        test_output_queued_zero_after_flush,
-        test_output_queued_unallocated,
-        test_output_queued_invalid_index,
-        test_fionread_unchanged,
-        test_output_queued_vconsole,
-        test_inflight_byte_granularity,
-        test_tiocoutq_returns_bytes_not_ops,
-        test_tiocoutq_zero_after_sync_write,
-        test_tiocoutq_various_byte_counts,
-        test_packet_mode_1byte_with_events,
-        test_packet_mode_1byte_data_no_events,
-        test_packet_mode_1byte_no_data_nonblock,
-        test_packet_mode_2byte_works,
-        test_tiocoutq_byte_accounting_regression_idle,
-        test_packet_mode_data_prefix_regression,
-        test_echo_inflight_byte_granularity,
-        test_excl_hupcl_tiocgsid_abi_constant,
-        test_excl_hupcl_tiocexcl_abi_constants,
-        test_excl_hupcl_errno_ebusy_value,
-        test_excl_hupcl_get_session_id_returns_correct_sid,
-        test_excl_hupcl_get_session_id_unallocated,
-        test_excl_hupcl_exclusive_initially_false,
-        test_excl_hupcl_set_exclusive_roundtrip,
-        test_excl_hupcl_exclusive_blocks_second_open,
-        test_excl_hupcl_nxcl_allows_second_open,
-        test_excl_hupcl_exclusive_unallocated_slot,
-        test_excl_hupcl_hupcl_last_close_triggers_hangup,
-        test_excl_hupcl_no_hupcl_last_close_no_hangup,
-        test_excl_hupcl_hupcl_pty_no_double_hangup,
-        test_excl_hupcl_close_clears_exclusive,
-        test_ttyflags_default_empty,
-        test_ttyflags_insert_remove_contains,
-        test_mark_hung_up_clears_output_stopped,
-        test_packet_events_default_empty,
-        test_packet_events_from_bits_matches_tiocpkt,
-        test_packet_events_bits_roundtrip,
-        test_tty_fields_pub_crate_smoke,
-        test_session_fields_pub_crate_smoke,
-        test_slave_starts_locked,
-        test_ttyflags_set_method,
-        test_ttyflags_multi_flag_operations,
-        test_no_driver_kind_none,
-    ]
+slopos_testing::stest!(
+    name = test_is_output_idle_initially_true,
+    suite = tty_test_ioctls_ext
 );
+slopos_testing::stest!(
+    name = test_inflight_counter_initial_zero,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_write_updates_inflight_counter,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcsetsw_preserves_input_after_drain,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcsetsf_flushes_input_after_drain,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_is_output_idle_invalid_index,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_is_output_idle_unallocated,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_drain_invalid_index_error,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_driver_output_pending_default_false,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_driver_kind_output_pending_dispatch,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_pty_output_idle_immediate,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_console_drain_immediate,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcsets_now_skips_drain,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_read_returns_eof,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_write_returns_eio,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_poll_returns_pollhup_pollin,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_set_termios_returns_eio,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_set_winsize_returns_eio,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_set_ldisc_returns_eio,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_get_fg_pgrp_still_works,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_pty_master_close_slave_eof_eio,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_hangup_permanent_eof,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_pty_slave_poll_pollhup_after_master_close,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(name = test_hungup_errno_is_eio, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_control_flag_values, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_default_cflag, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_cflag_roundtrip, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(
+    name = test_speed_fields_populated,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_speed_follows_baud_change,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_cread_value_preserved,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_flush_flow_ioctl_constants,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(name = test_tcflush_input, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcflush_output, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcflush_both, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcflush_invalid_arg, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcsbrk_noop, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcsbrk_drain, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcxonc_all_actions, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(
+    name = test_tcooff_blocks_nonblock_write,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(name = test_tcoon_resumes_write, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcooff_idempotent, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_tcoon_idempotent, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_stop_resume_cycle, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(
+    name = test_tcioff_tcion_succeed,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcioff_tcion_no_output_stop,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_invalid_action_still_errors,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcooff_pty_slave_write,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_output_stopped_independent_of_ixon,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcxonc_unallocated_slot,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tcxonc_invalid_index,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tiocoutq_abi_constant,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_output_queued_zero_when_idle,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_output_queued_reflects_inflight,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_output_queued_zero_after_flush,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_output_queued_unallocated,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_output_queued_invalid_index,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(name = test_fionread_unchanged, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(
+    name = test_output_queued_vconsole,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_inflight_byte_granularity,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tiocoutq_returns_bytes_not_ops,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tiocoutq_zero_after_sync_write,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tiocoutq_various_byte_counts,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_mode_1byte_with_events,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_mode_1byte_data_no_events,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_mode_1byte_no_data_nonblock,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_mode_2byte_works,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tiocoutq_byte_accounting_regression_idle,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_mode_data_prefix_regression,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_echo_inflight_byte_granularity,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_tiocgsid_abi_constant,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_tiocexcl_abi_constants,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_errno_ebusy_value,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_get_session_id_returns_correct_sid,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_get_session_id_unallocated,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_exclusive_initially_false,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_set_exclusive_roundtrip,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_exclusive_blocks_second_open,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_nxcl_allows_second_open,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_exclusive_unallocated_slot,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_hupcl_last_close_triggers_hangup,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_no_hupcl_last_close_no_hangup,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_hupcl_pty_no_double_hangup,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_excl_hupcl_close_clears_exclusive,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_ttyflags_default_empty,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_ttyflags_insert_remove_contains,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_mark_hung_up_clears_output_stopped,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_events_default_empty,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_events_from_bits_matches_tiocpkt,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_packet_events_bits_roundtrip,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_tty_fields_pub_crate_smoke,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(
+    name = test_session_fields_pub_crate_smoke,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(name = test_slave_starts_locked, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(name = test_ttyflags_set_method, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(
+    name = test_ttyflags_multi_flag_operations,
+    suite = tty_test_ioctls_ext
+);
+slopos_testing::stest!(name = test_no_driver_kind_none, suite = tty_test_ioctls_ext);

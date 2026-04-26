@@ -828,26 +828,33 @@ pub fn test_fin_full_teardown() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_socket,
-    [
-        // tests
-        test_syn_queue_overflow,
-        test_accept_queue_overflow,
-        test_syn_ack_retransmit_exhaustion,
-        test_duplicate_syn_retransmits,
-        // tests
-        test_push_accepted_basic,
-        test_push_accepted_respects_backlog,
-        test_listen_state_backlog_clamping,
-        test_accept_fifo_order,
-        test_listen_state_clear,
-        // tests
-        test_fin_handling_eof,
-        test_shutdown_write_sends_fin,
-        test_shutdown_read_discards_buffer,
-        test_tcp_data_roundtrip,
-        test_tcp_send_buffer_space,
-        test_fin_full_teardown,
-    ]
+// tests
+slopos_testing::stest!(name = test_syn_queue_overflow, suite = tcp_socket);
+slopos_testing::stest!(name = test_accept_queue_overflow, suite = tcp_socket);
+slopos_testing::stest!(
+    name = test_syn_ack_retransmit_exhaustion,
+    suite = tcp_socket
 );
+slopos_testing::stest!(name = test_duplicate_syn_retransmits, suite = tcp_socket);
+// tests
+slopos_testing::stest!(name = test_push_accepted_basic, suite = tcp_socket);
+slopos_testing::stest!(
+    name = test_push_accepted_respects_backlog,
+    suite = tcp_socket
+);
+slopos_testing::stest!(
+    name = test_listen_state_backlog_clamping,
+    suite = tcp_socket
+);
+slopos_testing::stest!(name = test_accept_fifo_order, suite = tcp_socket);
+slopos_testing::stest!(name = test_listen_state_clear, suite = tcp_socket);
+// tests
+slopos_testing::stest!(name = test_fin_handling_eof, suite = tcp_socket);
+slopos_testing::stest!(name = test_shutdown_write_sends_fin, suite = tcp_socket);
+slopos_testing::stest!(
+    name = test_shutdown_read_discards_buffer,
+    suite = tcp_socket
+);
+slopos_testing::stest!(name = test_tcp_data_roundtrip, suite = tcp_socket);
+slopos_testing::stest!(name = test_tcp_send_buffer_space, suite = tcp_socket);
+slopos_testing::stest!(name = test_fin_full_teardown, suite = tcp_socket);

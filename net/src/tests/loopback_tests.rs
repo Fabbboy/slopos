@@ -400,20 +400,21 @@ pub fn test_iface_config_multiple_interfaces() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    loopback,
-    [
-        // 3.T6 — loopback delivery
-        test_loopback_tx_then_poll_rx,
-        test_loopback_multiple_tx_poll,
-        test_loopback_stats,
-        test_loopback_properties,
-        test_loopback_queue_capacity,
-        // 3.T7 — DHCP/configure populates route table
-        test_configure_populates_route_table,
-        test_reconfigure_replaces_routes,
-        // 3.T8 — ifconfig reads IfaceConfig
-        test_iface_config_readable,
-        test_iface_config_multiple_interfaces,
-    ]
+// 3.T6 — loopback delivery
+slopos_testing::stest!(name = test_loopback_tx_then_poll_rx, suite = loopback);
+slopos_testing::stest!(name = test_loopback_multiple_tx_poll, suite = loopback);
+slopos_testing::stest!(name = test_loopback_stats, suite = loopback);
+slopos_testing::stest!(name = test_loopback_properties, suite = loopback);
+slopos_testing::stest!(name = test_loopback_queue_capacity, suite = loopback);
+// 3.T7 — DHCP/configure populates route table
+slopos_testing::stest!(
+    name = test_configure_populates_route_table,
+    suite = loopback
+);
+slopos_testing::stest!(name = test_reconfigure_replaces_routes, suite = loopback);
+// 3.T8 — ifconfig reads IfaceConfig
+slopos_testing::stest!(name = test_iface_config_readable, suite = loopback);
+slopos_testing::stest!(
+    name = test_iface_config_multiple_interfaces,
+    suite = loopback
 );

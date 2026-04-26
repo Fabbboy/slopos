@@ -413,28 +413,29 @@ pub fn test_route_entry_next_hop() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    route,
-    [
-        // 3.T1 — connected route lookup
-        test_route_lookup_connected,
-        test_route_lookup_connected_edge_addresses,
-        // 3.T2 — default route lookup
-        test_route_lookup_default_gateway,
-        test_route_lookup_connected_preferred_over_default,
-        // 3.T3 — empty table / no matching route
-        test_route_lookup_empty_table,
-        test_route_lookup_no_matching_route,
-        // 3.T4 — prefix-length bucketing (LPM)
-        test_route_prefix_length_priority,
-        test_route_host_route_beats_subnet,
-        // 3.T5 — metric tie-breaking
-        test_route_metric_tiebreak,
-        test_route_metric_update,
-        // Additional coverage
-        test_route_add_and_remove,
-        test_route_remove_device_routes,
-        test_route_entry_matches,
-        test_route_entry_next_hop,
-    ]
+// 3.T1 — connected route lookup
+slopos_testing::stest!(name = test_route_lookup_connected, suite = route);
+slopos_testing::stest!(
+    name = test_route_lookup_connected_edge_addresses,
+    suite = route
 );
+// 3.T2 — default route lookup
+slopos_testing::stest!(name = test_route_lookup_default_gateway, suite = route);
+slopos_testing::stest!(
+    name = test_route_lookup_connected_preferred_over_default,
+    suite = route
+);
+// 3.T3 — empty table / no matching route
+slopos_testing::stest!(name = test_route_lookup_empty_table, suite = route);
+slopos_testing::stest!(name = test_route_lookup_no_matching_route, suite = route);
+// 3.T4 — prefix-length bucketing (LPM)
+slopos_testing::stest!(name = test_route_prefix_length_priority, suite = route);
+slopos_testing::stest!(name = test_route_host_route_beats_subnet, suite = route);
+// 3.T5 — metric tie-breaking
+slopos_testing::stest!(name = test_route_metric_tiebreak, suite = route);
+slopos_testing::stest!(name = test_route_metric_update, suite = route);
+// Additional coverage
+slopos_testing::stest!(name = test_route_add_and_remove, suite = route);
+slopos_testing::stest!(name = test_route_remove_device_routes, suite = route);
+slopos_testing::stest!(name = test_route_entry_matches, suite = route);
+slopos_testing::stest!(name = test_route_entry_next_hop, suite = route);

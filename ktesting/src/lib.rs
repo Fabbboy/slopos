@@ -31,7 +31,7 @@ pub use harness::{
 };
 pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC};
 pub use result::{TestOutcome, TestResult};
-pub use runner::{execute_test, run_single_test};
+pub use runner::execute_test;
 pub use slopos_service_core::paste;
 
 #[macro_export]
@@ -53,26 +53,6 @@ macro_rules! fail {
     ($fmt:expr, $($arg:tt)*) => {{
         slopos_utils::klog_info!(concat!("TEST FAIL: ", $fmt), $($arg)*);
         $crate::TestResult::Fail
-    }};
-}
-
-#[macro_export]
-macro_rules! run_test {
-    ($passed:expr, $total:expr, $test_fn:expr) => {{
-        $total += 1;
-        let result = $crate::run_single_test(stringify!($test_fn), || $test_fn());
-        if result.is_pass() {
-            $passed += 1;
-        }
-        result
-    }};
-
-    ($test_fn:expr) => {{
-        $crate::run_single_test(stringify!($test_fn), || $test_fn())
-    }};
-
-    ($name:expr, $test_fn:expr) => {{
-        $crate::run_single_test($name, || $test_fn())
     }};
 }
 
@@ -140,24 +120,5 @@ macro_rules! stest {
                 argv: &[],
             };
         }
-    };
-}
-
-/// Bridge: rewrites the legacy `define_test_suite!` form to one
-/// `stest!` invocation per listed test function. The `suite_name`
-/// argument is preserved for source-level continuity but is not used
-/// — `module_path!()` at the call site already disambiguates per-test
-/// descriptors. The bridge is removed in Phase 2 along with all 69
-/// remaining call sites.
-#[macro_export]
-macro_rules! define_test_suite {
-    ($suite_name:ident, [$($test_fn:ident),* $(,)?]) => {
-        $(
-            $crate::stest!(name = $test_fn, suite = $suite_name);
-        )*
-    };
-
-    ($suite_name:ident, $runner_fn:ident, single) => {
-        $crate::stest!(name = $runner_fn, suite = $suite_name);
     };
 }

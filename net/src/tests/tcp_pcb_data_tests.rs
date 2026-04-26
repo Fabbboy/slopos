@@ -405,23 +405,57 @@ pub fn test_data_duplicate_ack_does_not_advance_snd_una() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_pcb_data,
-    [
-        test_data_rst_releases_and_notifies,
-        test_data_unexpected_syn_triggers_rst_and_release,
-        test_data_in_order_payload_accepted,
-        test_data_in_order_payload_sets_recv_wake,
-        test_data_ooo_payload_queued_and_dup_ack_emitted,
-        test_data_fin_in_established_goes_close_wait,
-        test_data_fin_in_fin_wait_1_goes_closing,
-        test_data_fin_ack_in_fin_wait_1_simultaneous_close,
-        test_data_fin_in_fin_wait_2_goes_time_wait,
-        test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2,
-        test_data_ack_in_closing_transitions_to_time_wait,
-        test_data_ack_in_last_ack_releases,
-        test_data_ack_advances_snd_una,
-        test_data_stale_ack_ignored,
-        test_data_duplicate_ack_does_not_advance_snd_una,
-    ]
+slopos_testing::stest!(
+    name = test_data_rst_releases_and_notifies,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_unexpected_syn_triggers_rst_and_release,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_in_order_payload_accepted,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_in_order_payload_sets_recv_wake,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_ooo_payload_queued_and_dup_ack_emitted,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_fin_in_established_goes_close_wait,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_fin_in_fin_wait_1_goes_closing,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_fin_ack_in_fin_wait_1_simultaneous_close,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_fin_in_fin_wait_2_goes_time_wait,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_ack_in_closing_transitions_to_time_wait,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(
+    name = test_data_ack_in_last_ack_releases,
+    suite = tcp_pcb_data
+);
+slopos_testing::stest!(name = test_data_ack_advances_snd_una, suite = tcp_pcb_data);
+slopos_testing::stest!(name = test_data_stale_ack_ignored, suite = tcp_pcb_data);
+slopos_testing::stest!(
+    name = test_data_duplicate_ack_does_not_advance_snd_una,
+    suite = tcp_pcb_data
 );

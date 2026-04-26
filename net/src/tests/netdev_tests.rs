@@ -494,33 +494,34 @@ pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    netdev,
-    [
-        // 1.T8 — NetDeviceStats accumulation
-        test_netdev_stats_default_zeroed,
-        test_netdev_stats_new_equals_default,
-        test_netdev_stats_accumulation,
-        test_netdev_stats_copy,
-        // NetDeviceFeatures
-        test_features_empty,
-        test_features_individual,
-        test_features_combination,
-        test_features_all,
-        test_features_default_is_empty,
-        // Registry
-        test_registry_register_and_enumerate,
-        test_registry_register_multiple,
-        test_registry_unregister,
-        test_registry_unregister_calls_set_down,
-        test_registry_slot_reuse,
-        test_registry_unregister_out_of_range,
-        // DeviceHandle data-plane
-        test_handle_tx,
-        test_handle_poll_rx_empty,
-        test_handle_stats,
-        test_handle_features,
-        // 1.T11 — Handle TX doesn't acquire registry lock
-        test_handle_tx_does_not_acquire_registry_lock,
-    ]
+// 1.T8 — NetDeviceStats accumulation
+slopos_testing::stest!(name = test_netdev_stats_default_zeroed, suite = netdev);
+slopos_testing::stest!(name = test_netdev_stats_new_equals_default, suite = netdev);
+slopos_testing::stest!(name = test_netdev_stats_accumulation, suite = netdev);
+slopos_testing::stest!(name = test_netdev_stats_copy, suite = netdev);
+// NetDeviceFeatures
+slopos_testing::stest!(name = test_features_empty, suite = netdev);
+slopos_testing::stest!(name = test_features_individual, suite = netdev);
+slopos_testing::stest!(name = test_features_combination, suite = netdev);
+slopos_testing::stest!(name = test_features_all, suite = netdev);
+slopos_testing::stest!(name = test_features_default_is_empty, suite = netdev);
+// Registry
+slopos_testing::stest!(name = test_registry_register_and_enumerate, suite = netdev);
+slopos_testing::stest!(name = test_registry_register_multiple, suite = netdev);
+slopos_testing::stest!(name = test_registry_unregister, suite = netdev);
+slopos_testing::stest!(
+    name = test_registry_unregister_calls_set_down,
+    suite = netdev
+);
+slopos_testing::stest!(name = test_registry_slot_reuse, suite = netdev);
+slopos_testing::stest!(name = test_registry_unregister_out_of_range, suite = netdev);
+// DeviceHandle data-plane
+slopos_testing::stest!(name = test_handle_tx, suite = netdev);
+slopos_testing::stest!(name = test_handle_poll_rx_empty, suite = netdev);
+slopos_testing::stest!(name = test_handle_stats, suite = netdev);
+slopos_testing::stest!(name = test_handle_features, suite = netdev);
+// 1.T11 — Handle TX doesn't acquire registry lock
+slopos_testing::stest!(
+    name = test_handle_tx_does_not_acquire_registry_lock,
+    suite = netdev
 );

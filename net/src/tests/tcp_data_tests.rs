@@ -1588,63 +1588,97 @@ pub fn test_tcp_immediate_ack_for_fin() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_data,
-    [
-        test_ring_buffer_new_empty,
-        test_ring_buffer_write_read_basic,
-        test_ring_buffer_write_full,
-        test_ring_buffer_wrap_around,
-        test_ring_buffer_peek_offset,
-        test_ring_buffer_consume,
-        test_ring_buffer_clear,
-        test_ring_buffer_partial_write,
-        test_send_enqueue_and_peek,
-        test_send_mark_sent_and_ack,
-        test_send_retransmit_timeout,
-        test_send_free_space,
-        test_send_partial_ack,
-        test_send_ack_stops_rto_timer,
-        test_recv_enqueue_dequeue,
-        test_recv_window_decreases,
-        test_recv_ack_tracking,
-        test_recv_delayed_ack_segments,
-        test_recv_delayed_ack_timeout,
-        test_tcp_send_in_established,
-        test_tcp_recv_in_established,
-        test_tcp_send_wrong_state,
-        test_tcp_poll_transmit_basic,
-        test_tcp_poll_transmit_mss_segmentation,
-        test_tcp_poll_transmit_none_when_empty,
-        test_tcp_data_roundtrip,
-        test_tcp_recv_updates_window,
-        test_tcp_retransmit_on_timeout,
-        test_tcp_retransmit_exponential_backoff,
-        test_tcp_retransmit_max_exceeded,
-        test_tcp_retransmit_canceled_by_ack,
-        test_retx_queue_populated_by_poll_transmit,
-        test_poll_transmit_respects_cwnd,
-        test_fast_retransmit_triggers_on_3_dup_acks,
-        test_fast_retransmit_cwnd_reduction,
-        test_fast_retransmit_not_during_recovery,
-        test_rto_resets_cwnd_and_marks_lost,
-        test_sack_permitted_negotiated_active_open,
-        test_sack_permitted_not_set_without_peer,
-        test_sack_blocks_sent_on_ooo,
-        test_sack_blocks_parsed_from_peer_ack,
-        test_sack_scoreboard_cleared_on_forward_ack,
-        test_sack_blocks_from_ooo_assembler,
-        test_so_sndbuf_caps_send_space,
-        test_so_rcvbuf_affects_window,
-        test_nagle_defers_sub_mss_when_inflight,
-        test_nagle_sends_when_nothing_inflight,
-        test_tcp_nodelay_disables_nagle,
-        test_tcp_respects_peer_window,
-        test_tcp_zero_window_blocks_send,
-        test_tcp_zero_window_probe,
-        test_tcp_window_update_resumes_send,
-        test_tcp_delayed_ack_after_two_segments,
-        test_tcp_delayed_ack_timeout,
-        test_tcp_immediate_ack_for_fin,
-    ]
+slopos_testing::stest!(name = test_ring_buffer_new_empty, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_write_read_basic, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_write_full, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_wrap_around, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_peek_offset, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_consume, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_clear, suite = tcp_data);
+slopos_testing::stest!(name = test_ring_buffer_partial_write, suite = tcp_data);
+slopos_testing::stest!(name = test_send_enqueue_and_peek, suite = tcp_data);
+slopos_testing::stest!(name = test_send_mark_sent_and_ack, suite = tcp_data);
+slopos_testing::stest!(name = test_send_retransmit_timeout, suite = tcp_data);
+slopos_testing::stest!(name = test_send_free_space, suite = tcp_data);
+slopos_testing::stest!(name = test_send_partial_ack, suite = tcp_data);
+slopos_testing::stest!(name = test_send_ack_stops_rto_timer, suite = tcp_data);
+slopos_testing::stest!(name = test_recv_enqueue_dequeue, suite = tcp_data);
+slopos_testing::stest!(name = test_recv_window_decreases, suite = tcp_data);
+slopos_testing::stest!(name = test_recv_ack_tracking, suite = tcp_data);
+slopos_testing::stest!(name = test_recv_delayed_ack_segments, suite = tcp_data);
+slopos_testing::stest!(name = test_recv_delayed_ack_timeout, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_send_in_established, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_recv_in_established, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_send_wrong_state, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_poll_transmit_basic, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_tcp_poll_transmit_mss_segmentation,
+    suite = tcp_data
 );
+slopos_testing::stest!(
+    name = test_tcp_poll_transmit_none_when_empty,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_tcp_data_roundtrip, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_recv_updates_window, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_retransmit_on_timeout, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_tcp_retransmit_exponential_backoff,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_tcp_retransmit_max_exceeded, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_retransmit_canceled_by_ack, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_retx_queue_populated_by_poll_transmit,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_poll_transmit_respects_cwnd, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_fast_retransmit_triggers_on_3_dup_acks,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_fast_retransmit_cwnd_reduction, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_fast_retransmit_not_during_recovery,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_rto_resets_cwnd_and_marks_lost, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_sack_permitted_negotiated_active_open,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_sack_permitted_not_set_without_peer,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_sack_blocks_sent_on_ooo, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_sack_blocks_parsed_from_peer_ack,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_sack_scoreboard_cleared_on_forward_ack,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_sack_blocks_from_ooo_assembler, suite = tcp_data);
+slopos_testing::stest!(name = test_so_sndbuf_caps_send_space, suite = tcp_data);
+slopos_testing::stest!(name = test_so_rcvbuf_affects_window, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_nagle_defers_sub_mss_when_inflight,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_nagle_sends_when_nothing_inflight,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_tcp_nodelay_disables_nagle, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_respects_peer_window, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_zero_window_blocks_send, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_zero_window_probe, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_window_update_resumes_send, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_tcp_delayed_ack_after_two_segments,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_tcp_delayed_ack_timeout, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_immediate_ack_for_fin, suite = tcp_data);

@@ -424,16 +424,11 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
     fail!("NAPI scheduling broken: no ICMP reply after 3s without force_napi_poll")
 }
 
-slopos_testing::define_test_suite!(
-    icmp,
-    [
-        test_icmp_socket_create,
-        test_icmp_socket_bind,
-        test_icmp_send_echo_raw,
-        test_icmp_ping_gateway_e2e,
-        test_icmp_socket_sendto_recvfrom_e2e,
-        test_dns_resolve_google,
-        test_ping_resolved_host_e2e,
-        test_icmp_napi_scheduling_e2e,
-    ]
-);
+slopos_testing::stest!(name = test_icmp_socket_create, suite = icmp);
+slopos_testing::stest!(name = test_icmp_socket_bind, suite = icmp);
+slopos_testing::stest!(name = test_icmp_send_echo_raw, suite = icmp);
+slopos_testing::stest!(name = test_icmp_ping_gateway_e2e, suite = icmp);
+slopos_testing::stest!(name = test_icmp_socket_sendto_recvfrom_e2e, suite = icmp);
+slopos_testing::stest!(name = test_dns_resolve_google, suite = icmp);
+slopos_testing::stest!(name = test_ping_resolved_host_e2e, suite = icmp);
+slopos_testing::stest!(name = test_icmp_napi_scheduling_e2e, suite = icmp);

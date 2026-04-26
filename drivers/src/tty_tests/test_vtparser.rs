@@ -408,26 +408,33 @@ pub fn test_vconsole_scroll_up() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_vtparser,
-    [
-        test_parser_print_ascii,
-        test_parser_execute_control,
-        test_clear_screen,
-        test_cursor_position,
-        test_sgr_red_foreground,
-        test_sgr_reset,
-        test_cursor_up,
-        test_malformed_sequence_resilience,
-        test_sgr_multi_param,
-        test_vconsole_clear_screen,
-        test_vconsole_cursor_pos,
-        test_vconsole_sgr_color,
-        test_vconsole_sgr_reset,
-        test_vconsole_save_restore_cursor,
-        test_parser_fuzz_no_panic,
-        test_vconsole_erase_line,
-        test_cursor_movement_clamping,
-        test_vconsole_scroll_up,
-    ]
+slopos_testing::stest!(name = test_parser_print_ascii, suite = tty_test_vtparser);
+slopos_testing::stest!(
+    name = test_parser_execute_control,
+    suite = tty_test_vtparser
 );
+slopos_testing::stest!(name = test_clear_screen, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_cursor_position, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_sgr_red_foreground, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_sgr_reset, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_cursor_up, suite = tty_test_vtparser);
+slopos_testing::stest!(
+    name = test_malformed_sequence_resilience,
+    suite = tty_test_vtparser
+);
+slopos_testing::stest!(name = test_sgr_multi_param, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_vconsole_clear_screen, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_vconsole_cursor_pos, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_vconsole_sgr_color, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_vconsole_sgr_reset, suite = tty_test_vtparser);
+slopos_testing::stest!(
+    name = test_vconsole_save_restore_cursor,
+    suite = tty_test_vtparser
+);
+slopos_testing::stest!(name = test_parser_fuzz_no_panic, suite = tty_test_vtparser);
+slopos_testing::stest!(name = test_vconsole_erase_line, suite = tty_test_vtparser);
+slopos_testing::stest!(
+    name = test_cursor_movement_clamping,
+    suite = tty_test_vtparser
+);
+slopos_testing::stest!(name = test_vconsole_scroll_up, suite = tty_test_vtparser);

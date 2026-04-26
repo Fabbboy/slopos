@@ -358,19 +358,41 @@ pub fn test_lapic_timer_tick_rate_reasonable() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    apic_timer,
-    [
-        test_lapic_timer_is_calibrated,
-        test_lapic_timer_frequency_nonzero,
-        test_lapic_timer_frequency_in_range,
-        test_lapic_timer_recalibration_consistent,
-        test_lapic_timer_periodic_zero_ms_rejected,
-        test_lapic_timer_periodic_programs_timer,
-        test_lapic_timer_stop_clears_counter,
-        test_lapic_timer_ticks_advance,
-        test_lapic_timer_mask_suppresses_ticks,
-        test_lapic_timer_idt_gate_installed,
-        test_lapic_timer_tick_rate_reasonable,
-    ]
+slopos_testing::stest!(name = test_lapic_timer_is_calibrated, suite = apic_timer);
+slopos_testing::stest!(
+    name = test_lapic_timer_frequency_nonzero,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_frequency_in_range,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_recalibration_consistent,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_periodic_zero_ms_rejected,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_periodic_programs_timer,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_stop_clears_counter,
+    suite = apic_timer
+);
+slopos_testing::stest!(name = test_lapic_timer_ticks_advance, suite = apic_timer);
+slopos_testing::stest!(
+    name = test_lapic_timer_mask_suppresses_ticks,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_idt_gate_installed,
+    suite = apic_timer
+);
+slopos_testing::stest!(
+    name = test_lapic_timer_tick_rate_reasonable,
+    suite = apic_timer
 );

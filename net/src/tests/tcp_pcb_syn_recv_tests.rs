@@ -119,14 +119,27 @@ pub fn test_syn_recv_bare_fin_dropped() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_pcb_syn_recv,
-    [
-        test_syn_recv_valid_ack_transitions_to_data,
-        test_syn_recv_bad_low_ack_triggers_rst,
-        test_syn_recv_bad_high_ack_triggers_rst,
-        test_syn_recv_rst_releases_pcb,
-        test_syn_recv_bare_syn_dropped,
-        test_syn_recv_bare_fin_dropped,
-    ]
+slopos_testing::stest!(
+    name = test_syn_recv_valid_ack_transitions_to_data,
+    suite = tcp_pcb_syn_recv
+);
+slopos_testing::stest!(
+    name = test_syn_recv_bad_low_ack_triggers_rst,
+    suite = tcp_pcb_syn_recv
+);
+slopos_testing::stest!(
+    name = test_syn_recv_bad_high_ack_triggers_rst,
+    suite = tcp_pcb_syn_recv
+);
+slopos_testing::stest!(
+    name = test_syn_recv_rst_releases_pcb,
+    suite = tcp_pcb_syn_recv
+);
+slopos_testing::stest!(
+    name = test_syn_recv_bare_syn_dropped,
+    suite = tcp_pcb_syn_recv
+);
+slopos_testing::stest!(
+    name = test_syn_recv_bare_fin_dropped,
+    suite = tcp_pcb_syn_recv
 );

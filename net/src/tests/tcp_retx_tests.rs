@@ -297,18 +297,28 @@ pub fn test_sendmap_invariant_fuzz() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_retx,
-    [
-        test_sendmap_empty_is_empty,
-        test_sendmap_push_single_segment,
-        test_sendmap_full_ack_frees_entry_and_reports_rtt_origin,
-        test_sendmap_partial_ack_shrinks_head,
-        test_sendmap_cumulative_ack_across_entries,
-        test_sendmap_karn_suppresses_rtt_on_retransmit,
-        test_sendmap_push_fails_when_full,
-        test_sendmap_sack_confirmed_no_rtt_sample,
-        test_sendmap_total_bytes_vs_pipe,
-        test_sendmap_invariant_fuzz,
-    ]
+slopos_testing::stest!(name = test_sendmap_empty_is_empty, suite = tcp_retx);
+slopos_testing::stest!(name = test_sendmap_push_single_segment, suite = tcp_retx);
+slopos_testing::stest!(
+    name = test_sendmap_full_ack_frees_entry_and_reports_rtt_origin,
+    suite = tcp_retx
 );
+slopos_testing::stest!(
+    name = test_sendmap_partial_ack_shrinks_head,
+    suite = tcp_retx
+);
+slopos_testing::stest!(
+    name = test_sendmap_cumulative_ack_across_entries,
+    suite = tcp_retx
+);
+slopos_testing::stest!(
+    name = test_sendmap_karn_suppresses_rtt_on_retransmit,
+    suite = tcp_retx
+);
+slopos_testing::stest!(name = test_sendmap_push_fails_when_full, suite = tcp_retx);
+slopos_testing::stest!(
+    name = test_sendmap_sack_confirmed_no_rtt_sample,
+    suite = tcp_retx
+);
+slopos_testing::stest!(name = test_sendmap_total_bytes_vs_pipe, suite = tcp_retx);
+slopos_testing::stest!(name = test_sendmap_invariant_fuzz, suite = tcp_retx);

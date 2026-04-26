@@ -559,28 +559,23 @@ pub fn test_xsave_variant_flags_consistent() -> TestResult {
 // Suite Registration
 // =============================================================================
 
-crate::define_test_suite!(
-    xsave,
-    [
-        // Detection sanity
-        test_xsave_enabled_matches_cpuid,
-        test_xsave_area_size_sane,
-        test_xsave_xcr0_mandatory_bits,
-        test_xsave_features_consistency,
-        // CR4 / XCR0 consistency
-        test_cr4_osxsave_set,
-        test_xcr0_matches_active,
-        test_xcr0_avx_consistent,
-        // SSE round-trip
-        test_sse_xsave_xrstor_roundtrip,
-        // AVX round-trip (THE critical test)
-        test_avx_xsave_xrstor_roundtrip,
-        // Multi-register isolation
-        test_sse_multi_register_isolation,
-        // Area size verification
-        test_xsave_area_size_matches_cpuid,
-        test_xsave_area_size_covers_avx,
-        // Variant flags
-        test_xsave_variant_flags_consistent,
-    ]
-);
+// Detection sanity
+crate::stest!(name = test_xsave_enabled_matches_cpuid, suite = xsave);
+crate::stest!(name = test_xsave_area_size_sane, suite = xsave);
+crate::stest!(name = test_xsave_xcr0_mandatory_bits, suite = xsave);
+crate::stest!(name = test_xsave_features_consistency, suite = xsave);
+// CR4 / XCR0 consistency
+crate::stest!(name = test_cr4_osxsave_set, suite = xsave);
+crate::stest!(name = test_xcr0_matches_active, suite = xsave);
+crate::stest!(name = test_xcr0_avx_consistent, suite = xsave);
+// SSE round-trip
+crate::stest!(name = test_sse_xsave_xrstor_roundtrip, suite = xsave);
+// AVX round-trip (THE critical test)
+crate::stest!(name = test_avx_xsave_xrstor_roundtrip, suite = xsave);
+// Multi-register isolation
+crate::stest!(name = test_sse_multi_register_isolation, suite = xsave);
+// Area size verification
+crate::stest!(name = test_xsave_area_size_matches_cpuid, suite = xsave);
+crate::stest!(name = test_xsave_area_size_covers_avx, suite = xsave);
+// Variant flags
+crate::stest!(name = test_xsave_variant_flags_consistent, suite = xsave);

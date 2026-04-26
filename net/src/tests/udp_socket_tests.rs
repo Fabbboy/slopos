@@ -278,17 +278,39 @@ pub fn test_udp_t10_reset_clears_udp_queues() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    udp_socket,
-    [
-        test_udp_t2_dispatch_delivery_and_unbound_drop,
-        test_udp_t3_generic_udp_tx_no_crash,
-        test_udp_t4_sendto_recvfrom_kernel_level,
-        test_udp_t5_connected_udp_send_and_peer_filter_recv,
-        test_udp_t6_poll_readiness_for_udp,
-        test_udp_t7_nonblocking_recvfrom_eagain,
-        test_udp_t8_sendto_auto_bind_ephemeral_port,
-        test_udp_t9_parse_udp_header_valid_invalid,
-        test_udp_t10_reset_clears_udp_queues,
-    ]
+slopos_testing::stest!(
+    name = test_udp_t2_dispatch_delivery_and_unbound_drop,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t3_generic_udp_tx_no_crash,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t4_sendto_recvfrom_kernel_level,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t5_connected_udp_send_and_peer_filter_recv,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t6_poll_readiness_for_udp,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t7_nonblocking_recvfrom_eagain,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t8_sendto_auto_bind_ephemeral_port,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t9_parse_udp_header_valid_invalid,
+    suite = udp_socket
+);
+slopos_testing::stest!(
+    name = test_udp_t10_reset_clears_udp_queues,
+    suite = udp_socket
 );

@@ -1,6 +1,4 @@
 use slopos_alloc::KVec;
-use slopos_sync::StateFlag;
-use slopos_utils::klog_info;
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
@@ -43,9 +41,8 @@ impl core::fmt::Display for Verbosity {
 
 /// Test-harness runtime configuration.
 ///
-/// Globs are stored owned (`KVec<u8>`) so the source of each pattern —
-/// cmdline buffer slice or synthesised legacy alias — is irrelevant to
-/// the matcher.
+/// Globs are stored owned (`KVec<u8>`) so the parsing path can synthesise
+/// patterns (e.g. `tests.suite=foo` → `*foo*`) without juggling lifetimes.
 #[derive(Debug, Default)]
 pub struct TestConfig {
     pub enabled: bool,
@@ -102,33 +99,8 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// One-shot guard ensuring the legacy `itests.*` cmdline warning fires at
-/// most once per boot, even if the cmdline contains multiple legacy keys.
-static LEGACY_WARNED: StateFlag = StateFlag::new();
-
-fn warn_legacy_once() {
-    if !LEGACY_WARNED.is_active() {
-        LEGACY_WARNED.set_active();
-        klog_info!("TESTS: legacy 'itests.*' cmdline key in use; rename to 'tests.*'");
-    }
-}
-
-/// Match either a new `tests.<suffix>` prefix or its legacy `itests.<suffix>`
-/// alias. Returns the value substring on match. Emits a one-shot legacy
-/// warning if the legacy form was used.
-fn match_dual_prefix<'a>(token: &'a str, suffix: &'static str) -> Option<&'a str> {
-    if let Some(rest) = token.strip_prefix("tests.") {
-        rest.strip_prefix(suffix)
-    } else if let Some(rest) = token.strip_prefix("itests.") {
-        if let Some(value) = rest.strip_prefix(suffix) {
-            warn_legacy_once();
-            Some(value)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
+fn match_tests_prefix<'a>(token: &'a str, suffix: &'static str) -> Option<&'a str> {
+    token.strip_prefix("tests.")?.strip_prefix(suffix)
 }
 
 fn push_owned_glob(target: &mut KVec<KVec<u8>>, pattern: &[u8]) {
@@ -162,46 +134,36 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
                 } else {
                     cfg.enabled = true;
                 }
-            } else if let Some(value) = token.strip_prefix("itests=") {
-                warn_legacy_once();
-                if let Some(enabled) = parse_bool(value) {
-                    cfg.enabled = enabled;
-                    if !enabled {
-                        cfg.shutdown = false;
-                    }
-                } else {
-                    cfg.enabled = true;
-                }
-            } else if let Some(value) = match_dual_prefix(token, "suite=") {
+            } else if let Some(value) = match_tests_prefix(token, "suite=") {
                 cfg.enabled = true;
                 push_suite_glob(&mut cfg.run_globs, value);
-            } else if let Some(value) = match_dual_prefix(token, "verbosity=") {
+            } else if let Some(value) = match_tests_prefix(token, "verbosity=") {
                 cfg.verbosity = Verbosity::from_str(value);
-            } else if let Some(value) = match_dual_prefix(token, "timeout=") {
+            } else if let Some(value) = match_tests_prefix(token, "timeout=") {
                 if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
                     cfg.warn_ms = parsed;
                 }
-            } else if let Some(value) = match_dual_prefix(token, "warn_ms=") {
+            } else if let Some(value) = match_tests_prefix(token, "warn_ms=") {
                 if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
                     cfg.warn_ms = parsed;
                 }
-            } else if let Some(value) = match_dual_prefix(token, "run=") {
+            } else if let Some(value) = match_tests_prefix(token, "run=") {
                 for piece in value.split(',') {
                     if !piece.is_empty() {
                         push_owned_glob(&mut cfg.run_globs, piece.as_bytes());
                     }
                 }
-            } else if let Some(value) = match_dual_prefix(token, "skip=") {
+            } else if let Some(value) = match_tests_prefix(token, "skip=") {
                 for piece in value.split(',') {
                     if !piece.is_empty() {
                         push_owned_glob(&mut cfg.skip_globs, piece.as_bytes());
                     }
                 }
-            } else if let Some(value) = match_dual_prefix(token, "shutdown=") {
+            } else if let Some(value) = match_tests_prefix(token, "shutdown=") {
                 if let Some(shutdown) = parse_bool(value) {
                     cfg.shutdown = shutdown;
                 }
-            } else if let Some(value) = match_dual_prefix(token, "stacktrace_demo=") {
+            } else if let Some(value) = match_tests_prefix(token, "stacktrace_demo=") {
                 if let Some(demo) = parse_bool(value) {
                     cfg.stacktrace_demo = demo;
                 }
@@ -211,8 +173,9 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
     cfg
 }
 
-/// Translate `tests.suite=foo` (legacy alias) into the glob `*foo*` so
-/// that any test fully-qualified name containing `foo` is admitted.
+/// Translate `tests.suite=foo` into the glob `*foo*` so that any test
+/// fully-qualified name containing `foo` is admitted. Kept as a
+/// convenience alias for the more general `tests.run=` form.
 fn push_suite_glob(target: &mut KVec<KVec<u8>>, suite: &str) {
     let mut owned = KVec::<u8>::new();
     if owned.push(b'*').is_err() {

@@ -260,19 +260,17 @@ pub fn test_known_exception_names() -> TestResult {
     TestResult::Pass
 }
 
-crate::define_test_suite!(
-    exception,
-    [
-        test_exception_names_valid,
-        test_critical_exception_classification,
-        test_page_fault_error_codes,
-        test_frame_mode_detection,
-        test_frame_invalid_cs,
-        test_frame_noncanonical_addresses,
-        test_exception_names_all_vectors,
-        test_vector_boundaries,
-        test_error_code_preservation,
-        test_frame_integrity_patterns,
-        test_known_exception_names,
-    ]
+crate::stest!(name = test_exception_names_valid, suite = exception);
+crate::stest!(
+    name = test_critical_exception_classification,
+    suite = exception
 );
+crate::stest!(name = test_page_fault_error_codes, suite = exception);
+crate::stest!(name = test_frame_mode_detection, suite = exception);
+crate::stest!(name = test_frame_invalid_cs, suite = exception);
+crate::stest!(name = test_frame_noncanonical_addresses, suite = exception);
+crate::stest!(name = test_exception_names_all_vectors, suite = exception);
+crate::stest!(name = test_vector_boundaries, suite = exception);
+crate::stest!(name = test_error_code_preservation, suite = exception);
+crate::stest!(name = test_frame_integrity_patterns, suite = exception);
+crate::stest!(name = test_known_exception_names, suite = exception);

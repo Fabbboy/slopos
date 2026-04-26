@@ -480,49 +480,47 @@ pub fn test_interleaved_flush_operations() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tlb,
-    [
-        test_flush_page_null_address,
-        test_flush_page_kernel_address,
-        test_flush_page_user_max_address,
-        test_flush_page_high_kernel_address,
-        test_flush_range_empty,
-        test_flush_range_inverted,
-        test_flush_range_single_page,
-        test_flush_range_large,
-        test_flush_range_threshold_boundary,
-        test_flush_all_basic,
-        test_flush_asid_kernel_cr3,
-        test_flush_asid_zero,
-        test_batch_empty_finish,
-        test_batch_single_page,
-        test_batch_multiple_pages,
-        test_batch_at_threshold,
-        test_batch_overflow,
-        test_batch_scattered_addresses,
-        test_batch_drop_flushes,
-        test_batch_double_finish,
-        test_is_smp_active_initial,
-        test_get_active_cpu_count,
-        test_bsp_apic_id_from_pcr,
-        test_handle_shootdown_ipi_cpu_zero,
-        test_handle_shootdown_ipi_cpu_max_minus_one,
-        test_handle_shootdown_ipi_cpu_overflow,
-        test_has_invpcid_consistent,
-        test_has_pcid_consistent,
-        test_tlb_shootdown_vector_valid,
-        test_max_cpus_reasonable,
-        test_flush_type_from_valid,
-        test_flush_type_from_invalid,
-        test_cpumask_set_clear,
-        test_cpumask_iter_set,
-        test_cpumask_boundary_cpus,
-        test_cpumask_clear_all,
-        test_lazy_tlb_flag,
-        test_should_flush_tlb_lazy_skips,
-        test_rapid_flush_pages,
-        test_rapid_flush_all,
-        test_interleaved_flush_operations,
-    ]
+slopos_testing::stest!(name = test_flush_page_null_address, suite = tlb);
+slopos_testing::stest!(name = test_flush_page_kernel_address, suite = tlb);
+slopos_testing::stest!(name = test_flush_page_user_max_address, suite = tlb);
+slopos_testing::stest!(name = test_flush_page_high_kernel_address, suite = tlb);
+slopos_testing::stest!(name = test_flush_range_empty, suite = tlb);
+slopos_testing::stest!(name = test_flush_range_inverted, suite = tlb);
+slopos_testing::stest!(name = test_flush_range_single_page, suite = tlb);
+slopos_testing::stest!(name = test_flush_range_large, suite = tlb);
+slopos_testing::stest!(name = test_flush_range_threshold_boundary, suite = tlb);
+slopos_testing::stest!(name = test_flush_all_basic, suite = tlb);
+slopos_testing::stest!(name = test_flush_asid_kernel_cr3, suite = tlb);
+slopos_testing::stest!(name = test_flush_asid_zero, suite = tlb);
+slopos_testing::stest!(name = test_batch_empty_finish, suite = tlb);
+slopos_testing::stest!(name = test_batch_single_page, suite = tlb);
+slopos_testing::stest!(name = test_batch_multiple_pages, suite = tlb);
+slopos_testing::stest!(name = test_batch_at_threshold, suite = tlb);
+slopos_testing::stest!(name = test_batch_overflow, suite = tlb);
+slopos_testing::stest!(name = test_batch_scattered_addresses, suite = tlb);
+slopos_testing::stest!(name = test_batch_drop_flushes, suite = tlb);
+slopos_testing::stest!(name = test_batch_double_finish, suite = tlb);
+slopos_testing::stest!(name = test_is_smp_active_initial, suite = tlb);
+slopos_testing::stest!(name = test_get_active_cpu_count, suite = tlb);
+slopos_testing::stest!(name = test_bsp_apic_id_from_pcr, suite = tlb);
+slopos_testing::stest!(name = test_handle_shootdown_ipi_cpu_zero, suite = tlb);
+slopos_testing::stest!(
+    name = test_handle_shootdown_ipi_cpu_max_minus_one,
+    suite = tlb
 );
+slopos_testing::stest!(name = test_handle_shootdown_ipi_cpu_overflow, suite = tlb);
+slopos_testing::stest!(name = test_has_invpcid_consistent, suite = tlb);
+slopos_testing::stest!(name = test_has_pcid_consistent, suite = tlb);
+slopos_testing::stest!(name = test_tlb_shootdown_vector_valid, suite = tlb);
+slopos_testing::stest!(name = test_max_cpus_reasonable, suite = tlb);
+slopos_testing::stest!(name = test_flush_type_from_valid, suite = tlb);
+slopos_testing::stest!(name = test_flush_type_from_invalid, suite = tlb);
+slopos_testing::stest!(name = test_cpumask_set_clear, suite = tlb);
+slopos_testing::stest!(name = test_cpumask_iter_set, suite = tlb);
+slopos_testing::stest!(name = test_cpumask_boundary_cpus, suite = tlb);
+slopos_testing::stest!(name = test_cpumask_clear_all, suite = tlb);
+slopos_testing::stest!(name = test_lazy_tlb_flag, suite = tlb);
+slopos_testing::stest!(name = test_should_flush_tlb_lazy_skips, suite = tlb);
+slopos_testing::stest!(name = test_rapid_flush_pages, suite = tlb);
+slopos_testing::stest!(name = test_rapid_flush_all, suite = tlb);
+slopos_testing::stest!(name = test_interleaved_flush_operations, suite = tlb);

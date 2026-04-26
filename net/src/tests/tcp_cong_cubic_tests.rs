@@ -419,20 +419,36 @@ pub fn test_cc_algo_enum_dispatches_to_cubic() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_cong_cubic,
-    [
-        test_cubic_initial_cwnd_is_iw10,
-        test_cubic_slow_start_grows_per_ack,
-        test_cubic_ca_concave_growth,
-        test_cubic_tcp_friendliness,
-        test_cubic_fast_retransmit_beta_07,
-        test_cubic_timeout_resets_to_one_mss,
-        test_cubic_recovery_exit,
-        test_cubic_fast_convergence,
-        test_cubic_hystart_rtt_exit_to_css,
-        test_cubic_css_to_ca_after_5_rounds,
-        test_cubic_integer_cbrt,
-        test_cc_algo_enum_dispatches_to_cubic,
-    ]
+slopos_testing::stest!(
+    name = test_cubic_initial_cwnd_is_iw10,
+    suite = tcp_cong_cubic
+);
+slopos_testing::stest!(
+    name = test_cubic_slow_start_grows_per_ack,
+    suite = tcp_cong_cubic
+);
+slopos_testing::stest!(name = test_cubic_ca_concave_growth, suite = tcp_cong_cubic);
+slopos_testing::stest!(name = test_cubic_tcp_friendliness, suite = tcp_cong_cubic);
+slopos_testing::stest!(
+    name = test_cubic_fast_retransmit_beta_07,
+    suite = tcp_cong_cubic
+);
+slopos_testing::stest!(
+    name = test_cubic_timeout_resets_to_one_mss,
+    suite = tcp_cong_cubic
+);
+slopos_testing::stest!(name = test_cubic_recovery_exit, suite = tcp_cong_cubic);
+slopos_testing::stest!(name = test_cubic_fast_convergence, suite = tcp_cong_cubic);
+slopos_testing::stest!(
+    name = test_cubic_hystart_rtt_exit_to_css,
+    suite = tcp_cong_cubic
+);
+slopos_testing::stest!(
+    name = test_cubic_css_to_ca_after_5_rounds,
+    suite = tcp_cong_cubic
+);
+slopos_testing::stest!(name = test_cubic_integer_cbrt, suite = tcp_cong_cubic);
+slopos_testing::stest!(
+    name = test_cc_algo_enum_dispatches_to_cubic,
+    suite = tcp_cong_cubic
 );

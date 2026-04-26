@@ -363,16 +363,14 @@ pub fn test_ingress_ipv4_bad_checksum() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    ingress,
-    [
-        test_ingress_drops_short_frame,
-        test_ingress_drops_unknown_ethertype,
-        test_ingress_drops_wrong_destination_mac,
-        test_ingress_accepts_broadcast_mac,
-        test_ingress_accepts_our_mac,
-        test_ingress_ipv4_bad_version,
-        test_ingress_ipv4_short_header,
-        test_ingress_ipv4_bad_checksum,
-    ]
+slopos_testing::stest!(name = test_ingress_drops_short_frame, suite = ingress);
+slopos_testing::stest!(name = test_ingress_drops_unknown_ethertype, suite = ingress);
+slopos_testing::stest!(
+    name = test_ingress_drops_wrong_destination_mac,
+    suite = ingress
 );
+slopos_testing::stest!(name = test_ingress_accepts_broadcast_mac, suite = ingress);
+slopos_testing::stest!(name = test_ingress_accepts_our_mac, suite = ingress);
+slopos_testing::stest!(name = test_ingress_ipv4_bad_version, suite = ingress);
+slopos_testing::stest!(name = test_ingress_ipv4_short_header, suite = ingress);
+slopos_testing::stest!(name = test_ingress_ipv4_bad_checksum, suite = ingress);

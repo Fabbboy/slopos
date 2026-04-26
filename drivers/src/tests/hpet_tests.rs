@@ -247,18 +247,13 @@ pub fn test_hpet_period_valid() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    hpet,
-    [
-        test_hpet_is_available,
-        test_hpet_period_valid,
-        test_hpet_nanoseconds_zero,
-        test_hpet_nanoseconds_one_tick,
-        test_hpet_nanoseconds_linearity,
-        test_hpet_nanoseconds_large_ticks,
-        test_hpet_counter_advancing,
-        test_hpet_counter_monotonic,
-        test_hpet_delay_zero,
-        test_hpet_delay_accuracy,
-    ]
-);
+slopos_testing::stest!(name = test_hpet_is_available, suite = hpet);
+slopos_testing::stest!(name = test_hpet_period_valid, suite = hpet);
+slopos_testing::stest!(name = test_hpet_nanoseconds_zero, suite = hpet);
+slopos_testing::stest!(name = test_hpet_nanoseconds_one_tick, suite = hpet);
+slopos_testing::stest!(name = test_hpet_nanoseconds_linearity, suite = hpet);
+slopos_testing::stest!(name = test_hpet_nanoseconds_large_ticks, suite = hpet);
+slopos_testing::stest!(name = test_hpet_counter_advancing, suite = hpet);
+slopos_testing::stest!(name = test_hpet_counter_monotonic, suite = hpet);
+slopos_testing::stest!(name = test_hpet_delay_zero, suite = hpet);
+slopos_testing::stest!(name = test_hpet_delay_accuracy, suite = hpet);

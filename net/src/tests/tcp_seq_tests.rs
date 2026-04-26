@@ -187,22 +187,23 @@ pub fn test_seqnum_partial_ord_antisymmetric_fuzz() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_seq,
-    [
-        test_seq_lt_adjacent,
-        test_seq_le_adjacent,
-        test_seq_gt_adjacent,
-        test_seq_ge_adjacent,
-        test_seq_wrap_across_zero,
-        test_seqnum_partial_ord_adjacent,
-        test_seqnum_wrap_across_zero,
-        test_seqnum_wrapping_add_wraps,
-        test_seqnum_add_op_matches_wrapping_add,
-        test_seqnum_sub_returns_distance,
-        test_seqnum_distance_to_forward,
-        test_seqnum_delta_signed,
-        test_seqnum_round_trip_fuzz,
-        test_seqnum_partial_ord_antisymmetric_fuzz,
-    ]
+slopos_testing::stest!(name = test_seq_lt_adjacent, suite = tcp_seq);
+slopos_testing::stest!(name = test_seq_le_adjacent, suite = tcp_seq);
+slopos_testing::stest!(name = test_seq_gt_adjacent, suite = tcp_seq);
+slopos_testing::stest!(name = test_seq_ge_adjacent, suite = tcp_seq);
+slopos_testing::stest!(name = test_seq_wrap_across_zero, suite = tcp_seq);
+slopos_testing::stest!(name = test_seqnum_partial_ord_adjacent, suite = tcp_seq);
+slopos_testing::stest!(name = test_seqnum_wrap_across_zero, suite = tcp_seq);
+slopos_testing::stest!(name = test_seqnum_wrapping_add_wraps, suite = tcp_seq);
+slopos_testing::stest!(
+    name = test_seqnum_add_op_matches_wrapping_add,
+    suite = tcp_seq
+);
+slopos_testing::stest!(name = test_seqnum_sub_returns_distance, suite = tcp_seq);
+slopos_testing::stest!(name = test_seqnum_distance_to_forward, suite = tcp_seq);
+slopos_testing::stest!(name = test_seqnum_delta_signed, suite = tcp_seq);
+slopos_testing::stest!(name = test_seqnum_round_trip_fuzz, suite = tcp_seq);
+slopos_testing::stest!(
+    name = test_seqnum_partial_ord_antisymmetric_fuzz,
+    suite = tcp_seq
 );

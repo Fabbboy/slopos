@@ -509,45 +509,63 @@ pub fn test_legacy_irq_vectors_intact() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    msi_alloc,
-    [
-        test_msi_alloc_returns_valid_range,
-        test_msi_alloc_and_free_roundtrip,
-        test_msi_alloc_uniqueness,
-        test_msi_free_makes_vector_available,
-        test_msi_alloc_count_tracking,
-        test_msi_vector_is_allocated_check,
-        test_msi_free_invalid_vector_no_panic,
-        test_msi_free_unallocated_no_panic,
-        test_msi_alloc_skips_syscall_vector,
-    ]
+slopos_testing::stest!(name = test_msi_alloc_returns_valid_range, suite = msi_alloc);
+slopos_testing::stest!(name = test_msi_alloc_and_free_roundtrip, suite = msi_alloc);
+slopos_testing::stest!(name = test_msi_alloc_uniqueness, suite = msi_alloc);
+slopos_testing::stest!(
+    name = test_msi_free_makes_vector_available,
+    suite = msi_alloc
+);
+slopos_testing::stest!(name = test_msi_alloc_count_tracking, suite = msi_alloc);
+slopos_testing::stest!(name = test_msi_vector_is_allocated_check, suite = msi_alloc);
+slopos_testing::stest!(
+    name = test_msi_free_invalid_vector_no_panic,
+    suite = msi_alloc
+);
+slopos_testing::stest!(name = test_msi_free_unallocated_no_panic, suite = msi_alloc);
+slopos_testing::stest!(
+    name = test_msi_alloc_skips_syscall_vector,
+    suite = msi_alloc
 );
 
-slopos_testing::define_test_suite!(
-    msi_handler,
-    [
-        test_msi_register_handler_success,
-        test_msi_register_handler_invalid_vector,
-        test_msi_register_handler_above_range,
-        test_msi_unregister_handler_cleans_up,
-        test_msi_unregister_unregistered_no_panic,
-        test_msi_register_with_context,
-        test_msi_register_with_device_bdf,
-        test_msi_double_register_same_vector,
-    ]
+slopos_testing::stest!(
+    name = test_msi_register_handler_success,
+    suite = msi_handler
+);
+slopos_testing::stest!(
+    name = test_msi_register_handler_invalid_vector,
+    suite = msi_handler
+);
+slopos_testing::stest!(
+    name = test_msi_register_handler_above_range,
+    suite = msi_handler
+);
+slopos_testing::stest!(
+    name = test_msi_unregister_handler_cleans_up,
+    suite = msi_handler
+);
+slopos_testing::stest!(
+    name = test_msi_unregister_unregistered_no_panic,
+    suite = msi_handler
+);
+slopos_testing::stest!(name = test_msi_register_with_context, suite = msi_handler);
+slopos_testing::stest!(
+    name = test_msi_register_with_device_bdf,
+    suite = msi_handler
+);
+slopos_testing::stest!(
+    name = test_msi_double_register_same_vector,
+    suite = msi_handler
 );
 
-slopos_testing::define_test_suite!(
-    msi_idt,
-    [
-        test_msi_idt_entries_present,
-        test_msi_idt_entries_are_interrupt_gates,
-        test_msi_idt_entries_dpl_zero,
-        test_msi_idt_entries_have_handlers,
-        test_msi_idt_entries_use_kernel_cs,
-        test_syscall_vector_not_overwritten,
-        test_syscall_vector_handler_nonzero,
-        test_legacy_irq_vectors_intact,
-    ]
+slopos_testing::stest!(name = test_msi_idt_entries_present, suite = msi_idt);
+slopos_testing::stest!(
+    name = test_msi_idt_entries_are_interrupt_gates,
+    suite = msi_idt
 );
+slopos_testing::stest!(name = test_msi_idt_entries_dpl_zero, suite = msi_idt);
+slopos_testing::stest!(name = test_msi_idt_entries_have_handlers, suite = msi_idt);
+slopos_testing::stest!(name = test_msi_idt_entries_use_kernel_cs, suite = msi_idt);
+slopos_testing::stest!(name = test_syscall_vector_not_overwritten, suite = msi_idt);
+slopos_testing::stest!(name = test_syscall_vector_handler_nonzero, suite = msi_idt);
+slopos_testing::stest!(name = test_legacy_irq_vectors_intact, suite = msi_idt);

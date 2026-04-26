@@ -225,24 +225,19 @@ pub fn test_ioapic_gsi_range() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    ioapic,
-    [
-        test_ioapic_ready_state,
-        test_apic_enabled_state,
-        test_apic_id_valid,
-        test_ioapic_legacy_irq_info_invalid,
-        test_ioapic_legacy_irq_info_valid,
-        test_ioapic_mask_invalid_gsi,
-        test_ioapic_unmask_invalid_gsi,
-        test_ioapic_config_invalid_gsi,
-        test_ioapic_config_boundary_vector,
-        test_ioapic_flag_constants,
-        test_ioapic_register_constants,
-        test_apic_eoi_safe,
-        test_ioapic_double_init,
-        test_ioapic_all_legacy_irqs,
-        test_apic_spurious_vector,
-        test_ioapic_gsi_range,
-    ]
-);
+slopos_testing::stest!(name = test_ioapic_ready_state, suite = ioapic);
+slopos_testing::stest!(name = test_apic_enabled_state, suite = ioapic);
+slopos_testing::stest!(name = test_apic_id_valid, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_legacy_irq_info_invalid, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_legacy_irq_info_valid, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_mask_invalid_gsi, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_unmask_invalid_gsi, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_config_invalid_gsi, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_config_boundary_vector, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_flag_constants, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_register_constants, suite = ioapic);
+slopos_testing::stest!(name = test_apic_eoi_safe, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_double_init, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_all_legacy_irqs, suite = ioapic);
+slopos_testing::stest!(name = test_apic_spurious_vector, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_gsi_range, suite = ioapic);

@@ -180,16 +180,32 @@ pub fn test_syn_sent_parses_wscale() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_pcb_syn_sent,
-    [
-        test_syn_sent_syn_ack_transitions_to_data,
-        test_syn_sent_simultaneous_open,
-        test_syn_sent_rst_ack_refused,
-        test_syn_sent_bare_rst_ignored,
-        test_syn_sent_bad_ack_triggers_rst,
-        test_syn_sent_bare_fin_ignored,
-        test_syn_sent_parses_mss_from_syn_ack,
-        test_syn_sent_parses_wscale,
-    ]
+slopos_testing::stest!(
+    name = test_syn_sent_syn_ack_transitions_to_data,
+    suite = tcp_pcb_syn_sent
 );
+slopos_testing::stest!(
+    name = test_syn_sent_simultaneous_open,
+    suite = tcp_pcb_syn_sent
+);
+slopos_testing::stest!(
+    name = test_syn_sent_rst_ack_refused,
+    suite = tcp_pcb_syn_sent
+);
+slopos_testing::stest!(
+    name = test_syn_sent_bare_rst_ignored,
+    suite = tcp_pcb_syn_sent
+);
+slopos_testing::stest!(
+    name = test_syn_sent_bad_ack_triggers_rst,
+    suite = tcp_pcb_syn_sent
+);
+slopos_testing::stest!(
+    name = test_syn_sent_bare_fin_ignored,
+    suite = tcp_pcb_syn_sent
+);
+slopos_testing::stest!(
+    name = test_syn_sent_parses_mss_from_syn_ack,
+    suite = tcp_pcb_syn_sent
+);
+slopos_testing::stest!(name = test_syn_sent_parses_wscale, suite = tcp_pcb_syn_sent);

@@ -376,19 +376,14 @@ pub fn test_cow_handle_invalid_address() -> TestResult {
     }
 }
 
-slopos_testing::define_test_suite!(
-    cow_edge,
-    [
-        test_cow_read_not_cow_fault,
-        test_cow_not_present_not_cow,
-        test_cow_handle_null_pagedir,
-        test_cow_handle_not_cow_page,
-        test_cow_single_ref_upgrade,
-        test_cow_multi_ref_copy,
-        test_cow_page_boundary,
-        test_cow_clone_modify_both,
-        test_cow_multiple_clones,
-        test_cow_no_collateral_damage,
-        test_cow_handle_invalid_address,
-    ]
-);
+slopos_testing::stest!(name = test_cow_read_not_cow_fault, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_not_present_not_cow, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_handle_null_pagedir, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_handle_not_cow_page, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_single_ref_upgrade, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_multi_ref_copy, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_page_boundary, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_clone_modify_both, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_multiple_clones, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_no_collateral_damage, suite = cow_edge);
+slopos_testing::stest!(name = test_cow_handle_invalid_address, suite = cow_edge);

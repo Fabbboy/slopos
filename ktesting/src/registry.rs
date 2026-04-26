@@ -1,10 +1,9 @@
 //! Per-test registry walked by the harness.
 //!
-//! Every `stest!` (or fanned-out `define_test_suite!`) emits a static
-//! `TestDesc` into the `.test_registry` linker section. The harness reads the
-//! section between the linker-provided symbols `__start_test_registry` and
-//! `__stop_test_registry`, sorts by `(module_path, name)`, then runs each
-//! entry.
+//! Every `stest!` invocation emits a static `TestDesc` into the
+//! `.test_registry` linker section. The harness reads the section between the
+//! linker-provided symbols `__start_test_registry` and `__stop_test_registry`,
+//! sorts by `(module_path, name)`, then runs each entry.
 
 use core::cmp::Ordering;
 
@@ -110,13 +109,4 @@ pub fn registry_sorted() -> Result<KVec<&'static TestDesc>, AllocError> {
         i += 1;
     }
     Ok(out)
-}
-
-/// First `::`-segment of a module path (e.g. `"slopos_mm::tests::heap"` →
-/// `"slopos_mm"`). Used by the legacy `SUITE_N` aggregator.
-pub fn module_root(module: &'static str) -> &'static str {
-    match module.find("::") {
-        Some(i) => &module[..i],
-        None => module,
-    }
 }

@@ -115,14 +115,21 @@ pub fn test_time_wait_fin_refreshes_entry_ms_every_call() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    tcp_pcb_time_wait,
-    [
-        test_time_wait_rst_releases,
-        test_time_wait_fin_re_acks,
-        test_time_wait_data_dropped,
-        test_time_wait_syn_dropped,
-        test_time_wait_empty_dropped,
-        test_time_wait_fin_refreshes_entry_ms_every_call,
-    ]
+slopos_testing::stest!(
+    name = test_time_wait_rst_releases,
+    suite = tcp_pcb_time_wait
+);
+slopos_testing::stest!(name = test_time_wait_fin_re_acks, suite = tcp_pcb_time_wait);
+slopos_testing::stest!(
+    name = test_time_wait_data_dropped,
+    suite = tcp_pcb_time_wait
+);
+slopos_testing::stest!(name = test_time_wait_syn_dropped, suite = tcp_pcb_time_wait);
+slopos_testing::stest!(
+    name = test_time_wait_empty_dropped,
+    suite = tcp_pcb_time_wait
+);
+slopos_testing::stest!(
+    name = test_time_wait_fin_refreshes_entry_ms_every_call,
+    suite = tcp_pcb_time_wait
 );

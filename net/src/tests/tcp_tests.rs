@@ -1703,92 +1703,99 @@ pub fn test_tcp_isn_not_monotonic_counter() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp,
-    [
-        // Header parsing (6)
-        test_tcp_parse_minimal_header,
-        test_tcp_parse_too_short,
-        test_tcp_parse_invalid_data_offset,
-        test_tcp_parse_with_options,
-        test_tcp_parse_data_offset_exceeds_buffer,
-        test_tcp_parse_all_flags,
-        // Header construction (3)
-        test_tcp_write_header_roundtrip,
-        test_tcp_write_header_buffer_too_small,
-        test_tcp_write_header_with_options,
-        // MSS options (5)
-        test_tcp_parse_mss_option,
-        test_tcp_parse_mss_option_with_nop_padding,
-        test_tcp_parse_mss_option_not_present,
-        test_tcp_write_mss_option,
-        test_tcp_write_mss_option_buffer_too_small,
-        // Checksum (5)
-        test_tcp_checksum_zero_payload,
-        test_tcp_checksum_with_payload,
-        test_tcp_checksum_odd_payload_length,
-        test_tcp_checksum_wrong_ip_fails_verify,
-        test_tcp_checksum_deterministic,
-        // Sequence number arithmetic (4)
-        test_tcp_seq_lt,
-        test_tcp_seq_le,
-        test_tcp_seq_gt,
-        test_tcp_seq_ge,
-        // Connection table (10)
-        test_tcp_table_initially_empty,
-        test_tcp_connect_creates_syn_sent,
-        test_tcp_table_full_returns_error,
-        test_tcp_listen_creates_listen_state,
-        test_tcp_listen_duplicate_port_fails,
-        test_tcp_close_listen_releases_slot,
-        test_tcp_close_syn_sent_releases_slot,
-        test_tcp_abort_sends_rst,
-        test_tcp_abort_listen_no_rst,
-        test_tcp_close_not_found,
-        // Active open handshake (4)
-        test_tcp_active_handshake_complete,
-        test_tcp_active_rst_in_syn_sent,
-        test_tcp_active_bad_ack_in_syn_sent,
-        test_tcp_active_mss_negotiation,
-        // Passive open handshake (3)
-        test_tcp_passive_handshake_complete,
-        test_tcp_passive_rst_in_syn_received,
-        test_tcp_passive_ack_to_listen_sends_rst,
-        // Connection teardown (3)
-        test_tcp_active_close,
-        test_tcp_passive_close,
-        test_tcp_simultaneous_close,
-        // TIME_WAIT (2)
-        test_tcp_time_wait_expiry,
-        test_tcp_time_wait_retransmitted_fin,
-        test_tcp_retransmit_timer,
-        test_tcp_time_wait_timer,
-        // RST handling (3)
-        test_tcp_rst_in_established,
-        test_tcp_rst_to_unknown_ignored,
-        test_tcp_syn_in_established_sends_rst,
-        // Misc (1)
-        test_tcp_segment_no_connection_sends_rst,
-        // Ephemeral ports (1)
-        test_tcp_ephemeral_ports_unique,
-        // State helpers (3)
-        test_tcp_state_names,
-        test_tcp_state_is_open,
-        test_tcp_state_is_closing,
-        // Table find (2)
-        test_tcp_find_exact_match,
-        test_tcp_find_wildcard_listen,
-        // Tuple matching (3)
-        test_tcp_tuple_matches_exact,
-        test_tcp_tuple_matches_wildcard,
-        test_tcp_tuple_mismatch,
-        // Simultaneous open (1)
-        test_tcp_simultaneous_open,
-        // Multiple connections (1)
-        test_tcp_multiple_connections,
-        // ISN generator, RFC 6528-ish (3 — fixes SLOPOS-2026-0007)
-        test_tcp_isn_same_tuple_delta_is_drift_only,
-        test_tcp_isn_varies_by_tuple,
-        test_tcp_isn_not_monotonic_counter,
-    ]
+// Header parsing (6)
+slopos_testing::stest!(name = test_tcp_parse_minimal_header, suite = tcp);
+slopos_testing::stest!(name = test_tcp_parse_too_short, suite = tcp);
+slopos_testing::stest!(name = test_tcp_parse_invalid_data_offset, suite = tcp);
+slopos_testing::stest!(name = test_tcp_parse_with_options, suite = tcp);
+slopos_testing::stest!(
+    name = test_tcp_parse_data_offset_exceeds_buffer,
+    suite = tcp
 );
+slopos_testing::stest!(name = test_tcp_parse_all_flags, suite = tcp);
+// Header construction (3)
+slopos_testing::stest!(name = test_tcp_write_header_roundtrip, suite = tcp);
+slopos_testing::stest!(name = test_tcp_write_header_buffer_too_small, suite = tcp);
+slopos_testing::stest!(name = test_tcp_write_header_with_options, suite = tcp);
+// MSS options (5)
+slopos_testing::stest!(name = test_tcp_parse_mss_option, suite = tcp);
+slopos_testing::stest!(
+    name = test_tcp_parse_mss_option_with_nop_padding,
+    suite = tcp
+);
+slopos_testing::stest!(name = test_tcp_parse_mss_option_not_present, suite = tcp);
+slopos_testing::stest!(name = test_tcp_write_mss_option, suite = tcp);
+slopos_testing::stest!(
+    name = test_tcp_write_mss_option_buffer_too_small,
+    suite = tcp
+);
+// Checksum (5)
+slopos_testing::stest!(name = test_tcp_checksum_zero_payload, suite = tcp);
+slopos_testing::stest!(name = test_tcp_checksum_with_payload, suite = tcp);
+slopos_testing::stest!(name = test_tcp_checksum_odd_payload_length, suite = tcp);
+slopos_testing::stest!(name = test_tcp_checksum_wrong_ip_fails_verify, suite = tcp);
+slopos_testing::stest!(name = test_tcp_checksum_deterministic, suite = tcp);
+// Sequence number arithmetic (4)
+slopos_testing::stest!(name = test_tcp_seq_lt, suite = tcp);
+slopos_testing::stest!(name = test_tcp_seq_le, suite = tcp);
+slopos_testing::stest!(name = test_tcp_seq_gt, suite = tcp);
+slopos_testing::stest!(name = test_tcp_seq_ge, suite = tcp);
+// Connection table (10)
+slopos_testing::stest!(name = test_tcp_table_initially_empty, suite = tcp);
+slopos_testing::stest!(name = test_tcp_connect_creates_syn_sent, suite = tcp);
+slopos_testing::stest!(name = test_tcp_table_full_returns_error, suite = tcp);
+slopos_testing::stest!(name = test_tcp_listen_creates_listen_state, suite = tcp);
+slopos_testing::stest!(name = test_tcp_listen_duplicate_port_fails, suite = tcp);
+slopos_testing::stest!(name = test_tcp_close_listen_releases_slot, suite = tcp);
+slopos_testing::stest!(name = test_tcp_close_syn_sent_releases_slot, suite = tcp);
+slopos_testing::stest!(name = test_tcp_abort_sends_rst, suite = tcp);
+slopos_testing::stest!(name = test_tcp_abort_listen_no_rst, suite = tcp);
+slopos_testing::stest!(name = test_tcp_close_not_found, suite = tcp);
+// Active open handshake (4)
+slopos_testing::stest!(name = test_tcp_active_handshake_complete, suite = tcp);
+slopos_testing::stest!(name = test_tcp_active_rst_in_syn_sent, suite = tcp);
+slopos_testing::stest!(name = test_tcp_active_bad_ack_in_syn_sent, suite = tcp);
+slopos_testing::stest!(name = test_tcp_active_mss_negotiation, suite = tcp);
+// Passive open handshake (3)
+slopos_testing::stest!(name = test_tcp_passive_handshake_complete, suite = tcp);
+slopos_testing::stest!(name = test_tcp_passive_rst_in_syn_received, suite = tcp);
+slopos_testing::stest!(name = test_tcp_passive_ack_to_listen_sends_rst, suite = tcp);
+// Connection teardown (3)
+slopos_testing::stest!(name = test_tcp_active_close, suite = tcp);
+slopos_testing::stest!(name = test_tcp_passive_close, suite = tcp);
+slopos_testing::stest!(name = test_tcp_simultaneous_close, suite = tcp);
+// TIME_WAIT (2)
+slopos_testing::stest!(name = test_tcp_time_wait_expiry, suite = tcp);
+slopos_testing::stest!(name = test_tcp_time_wait_retransmitted_fin, suite = tcp);
+slopos_testing::stest!(name = test_tcp_retransmit_timer, suite = tcp);
+slopos_testing::stest!(name = test_tcp_time_wait_timer, suite = tcp);
+// RST handling (3)
+slopos_testing::stest!(name = test_tcp_rst_in_established, suite = tcp);
+slopos_testing::stest!(name = test_tcp_rst_to_unknown_ignored, suite = tcp);
+slopos_testing::stest!(name = test_tcp_syn_in_established_sends_rst, suite = tcp);
+// Misc (1)
+slopos_testing::stest!(name = test_tcp_segment_no_connection_sends_rst, suite = tcp);
+// Ephemeral ports (1)
+slopos_testing::stest!(name = test_tcp_ephemeral_ports_unique, suite = tcp);
+// State helpers (3)
+slopos_testing::stest!(name = test_tcp_state_names, suite = tcp);
+slopos_testing::stest!(name = test_tcp_state_is_open, suite = tcp);
+slopos_testing::stest!(name = test_tcp_state_is_closing, suite = tcp);
+// Table find (2)
+slopos_testing::stest!(name = test_tcp_find_exact_match, suite = tcp);
+slopos_testing::stest!(name = test_tcp_find_wildcard_listen, suite = tcp);
+// Tuple matching (3)
+slopos_testing::stest!(name = test_tcp_tuple_matches_exact, suite = tcp);
+slopos_testing::stest!(name = test_tcp_tuple_matches_wildcard, suite = tcp);
+slopos_testing::stest!(name = test_tcp_tuple_mismatch, suite = tcp);
+// Simultaneous open (1)
+slopos_testing::stest!(name = test_tcp_simultaneous_open, suite = tcp);
+// Multiple connections (1)
+slopos_testing::stest!(name = test_tcp_multiple_connections, suite = tcp);
+// ISN generator, RFC 6528-ish (3 — fixes SLOPOS-2026-0007)
+slopos_testing::stest!(
+    name = test_tcp_isn_same_tuple_delta_is_drift_only,
+    suite = tcp
+);
+slopos_testing::stest!(name = test_tcp_isn_varies_by_tuple, suite = tcp);
+slopos_testing::stest!(name = test_tcp_isn_not_monotonic_counter, suite = tcp);

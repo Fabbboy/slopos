@@ -316,18 +316,37 @@ pub fn test_iutf8_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_utf8,
-    [
-        test_utf8_char_width,
-        test_iutf8_backspace_ascii,
-        test_iutf8_backspace_2byte,
-        test_iutf8_backspace_3byte_cjk,
-        test_iutf8_backspace_4byte_emoji,
-        test_no_iutf8_backspace_multibyte,
-        test_iutf8_insert_column_tracking,
-        test_iutf8_word_erase_mixed,
-        test_iutf8_word_erase_preserves_prefix,
-        test_iutf8_flag_value,
-    ]
+slopos_testing::stest!(name = test_utf8_char_width, suite = tty_test_ldisc_utf8);
+slopos_testing::stest!(
+    name = test_iutf8_backspace_ascii,
+    suite = tty_test_ldisc_utf8
 );
+slopos_testing::stest!(
+    name = test_iutf8_backspace_2byte,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(
+    name = test_iutf8_backspace_3byte_cjk,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(
+    name = test_iutf8_backspace_4byte_emoji,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(
+    name = test_no_iutf8_backspace_multibyte,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(
+    name = test_iutf8_insert_column_tracking,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(
+    name = test_iutf8_word_erase_mixed,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(
+    name = test_iutf8_word_erase_preserves_prefix,
+    suite = tty_test_ldisc_utf8
+);
+slopos_testing::stest!(name = test_iutf8_flag_value, suite = tty_test_ldisc_utf8);

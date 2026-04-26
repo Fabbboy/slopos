@@ -127,14 +127,18 @@ pub fn test_listen_two_syns_get_distinct_iss() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_pcb_listen,
-    [
-        test_listen_rst_is_ignored,
-        test_listen_ack_triggers_rst,
-        test_listen_syn_emits_syn_ack_and_accepts,
-        test_listen_syn_parses_mss_option,
-        test_listen_stray_fin_dropped,
-        test_listen_two_syns_get_distinct_iss,
-    ]
+slopos_testing::stest!(name = test_listen_rst_is_ignored, suite = tcp_pcb_listen);
+slopos_testing::stest!(name = test_listen_ack_triggers_rst, suite = tcp_pcb_listen);
+slopos_testing::stest!(
+    name = test_listen_syn_emits_syn_ack_and_accepts,
+    suite = tcp_pcb_listen
+);
+slopos_testing::stest!(
+    name = test_listen_syn_parses_mss_option,
+    suite = tcp_pcb_listen
+);
+slopos_testing::stest!(name = test_listen_stray_fin_dropped, suite = tcp_pcb_listen);
+slopos_testing::stest!(
+    name = test_listen_two_syns_get_distinct_iss,
+    suite = tcp_pcb_listen
 );

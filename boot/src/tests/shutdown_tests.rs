@@ -529,32 +529,42 @@ pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    shutdown,
-    [
-        test_stateflag_lifecycle,
-        test_stateflag_take,
-        test_stateflag_independence,
-        test_stateflag_concurrent_pattern,
-        test_stateflag_relaxed_access,
-        test_scheduler_shutdown_disables,
-        test_scheduler_shutdown_idempotent,
-        test_scheduler_shutdown_clears_state,
-        test_task_shutdown_all_terminates,
-        test_task_shutdown_all_empty,
-        test_task_shutdown_all_idempotent,
-        test_shutdown_sequence_ordering,
-        test_shutdown_from_clean_state,
-        test_shutdown_partial_init,
-        test_rapid_shutdown_cycles,
-        test_shutdown_many_tasks,
-        test_shutdown_mixed_priorities,
-        test_task_shutdown_skips_current,
-        test_scheduler_reinit_after_shutdown,
-        test_kernel_page_directory_available,
-        test_serial_flush_terminates,
-        test_shutdown_e2e_stress_with_allocation,
-        test_task_terminate_idempotent,
-        test_shutdown_scheduler_alive_during_task_teardown,
-    ]
+slopos_testing::stest!(name = test_stateflag_lifecycle, suite = shutdown);
+slopos_testing::stest!(name = test_stateflag_take, suite = shutdown);
+slopos_testing::stest!(name = test_stateflag_independence, suite = shutdown);
+slopos_testing::stest!(name = test_stateflag_concurrent_pattern, suite = shutdown);
+slopos_testing::stest!(name = test_stateflag_relaxed_access, suite = shutdown);
+slopos_testing::stest!(name = test_scheduler_shutdown_disables, suite = shutdown);
+slopos_testing::stest!(name = test_scheduler_shutdown_idempotent, suite = shutdown);
+slopos_testing::stest!(
+    name = test_scheduler_shutdown_clears_state,
+    suite = shutdown
+);
+slopos_testing::stest!(name = test_task_shutdown_all_terminates, suite = shutdown);
+slopos_testing::stest!(name = test_task_shutdown_all_empty, suite = shutdown);
+slopos_testing::stest!(name = test_task_shutdown_all_idempotent, suite = shutdown);
+slopos_testing::stest!(name = test_shutdown_sequence_ordering, suite = shutdown);
+slopos_testing::stest!(name = test_shutdown_from_clean_state, suite = shutdown);
+slopos_testing::stest!(name = test_shutdown_partial_init, suite = shutdown);
+slopos_testing::stest!(name = test_rapid_shutdown_cycles, suite = shutdown);
+slopos_testing::stest!(name = test_shutdown_many_tasks, suite = shutdown);
+slopos_testing::stest!(name = test_shutdown_mixed_priorities, suite = shutdown);
+slopos_testing::stest!(name = test_task_shutdown_skips_current, suite = shutdown);
+slopos_testing::stest!(
+    name = test_scheduler_reinit_after_shutdown,
+    suite = shutdown
+);
+slopos_testing::stest!(
+    name = test_kernel_page_directory_available,
+    suite = shutdown
+);
+slopos_testing::stest!(name = test_serial_flush_terminates, suite = shutdown);
+slopos_testing::stest!(
+    name = test_shutdown_e2e_stress_with_allocation,
+    suite = shutdown
+);
+slopos_testing::stest!(name = test_task_terminate_idempotent, suite = shutdown);
+slopos_testing::stest!(
+    name = test_shutdown_scheduler_alive_during_task_teardown,
+    suite = shutdown
 );

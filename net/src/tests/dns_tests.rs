@@ -391,16 +391,11 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    dns,
-    [
-        test_dns_t1_name_encoding,
-        test_dns_t2_query_construction,
-        test_dns_t3_name_decoding,
-        test_dns_t4_response_parsing,
-        test_dns_t5_cache,
-        test_dns_t6_resolver_integration,
-        test_dns_t7_resolver_timeout,
-        test_dns_t8_regression_network_stack,
-    ]
-);
+slopos_testing::stest!(name = test_dns_t1_name_encoding, suite = dns);
+slopos_testing::stest!(name = test_dns_t2_query_construction, suite = dns);
+slopos_testing::stest!(name = test_dns_t3_name_decoding, suite = dns);
+slopos_testing::stest!(name = test_dns_t4_response_parsing, suite = dns);
+slopos_testing::stest!(name = test_dns_t5_cache, suite = dns);
+slopos_testing::stest!(name = test_dns_t6_resolver_integration, suite = dns);
+slopos_testing::stest!(name = test_dns_t7_resolver_timeout, suite = dns);
+slopos_testing::stest!(name = test_dns_t8_regression_network_stack, suite = dns);

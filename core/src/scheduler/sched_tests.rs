@@ -2485,60 +2485,109 @@ pub fn test_effective_load_accuracy() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    sched_core,
-    [
-        test_state_transition_ready_to_running,
-        test_state_transition_running_to_blocked,
-        test_state_transition_invalid_terminated_to_running,
-        test_state_transition_invalid_blocked_to_running,
-        test_pool_grow_on_demand,
-        test_rapid_create_destroy_cycle,
-        test_kstack_basic_alloc,
-        test_kstack_slot_reuse,
-        test_kstack_rejects_invalid_size,
-        test_kstack_pcp_refill,
-        test_kstack_pcp_spill_overflow,
-        test_kstack_pcp_was_backed_preserved,
-        test_kstack_pcp_cross_cpu_safety,
-        test_kstack_pcp_stress_1000,
-        test_kstack_pcp_smp_throughput_bench,
-        test_schedule_to_empty_queue,
-        test_schedule_duplicate_task,
-        test_schedule_null_task,
-        test_unschedule_not_in_queue,
-        test_priority_ordering,
-        test_idle_priority_last,
-        test_timer_tick_decrements_slice,
-        test_terminate_invalid_id,
-        test_terminate_nonexistent_id,
-        test_double_terminate,
-        test_find_invalid_id,
-        test_get_info_null_output,
-        test_create_null_entry,
-        test_create_conflicting_flags,
-        test_create_null_name,
-        test_scheduler_starts_disabled,
-        test_schedule_while_disabled,
-        test_schedule_task_before_scheduler_enable_on_current_cpu,
-        test_resolve_idle_stack_reports_missing_idle_task,
-        test_resolve_idle_stack_reports_missing_kernel_stack,
-        test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack,
-        test_many_same_priority_tasks,
-        test_interleaved_operations,
-        test_remote_inbox_push_drain,
-        test_remote_inbox_multiple_tasks,
-        test_timer_tick_drains_inbox,
-        test_remote_inbox_drops_non_ready_tasks,
-        test_cross_cpu_schedule_lockfree,
-        test_privilege_separation_invariants,
-        test_scheduler_wakeup_race_stress_baseline,
-        test_sleep_wake_race_regression,
-        test_timer_tick_always_increments_ticks,
-        test_idle_time_tracks_ticks_not_iterations,
-        test_select_target_cpu_prefers_idle_cpu,
-        test_select_target_cpu_running_task_not_idle,
-        test_schedule_new_task_spreads_across_cpus,
-        test_effective_load_accuracy,
-    ]
+slopos_testing::stest!(
+    name = test_state_transition_ready_to_running,
+    suite = sched_core
 );
+slopos_testing::stest!(
+    name = test_state_transition_running_to_blocked,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_state_transition_invalid_terminated_to_running,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_state_transition_invalid_blocked_to_running,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_pool_grow_on_demand, suite = sched_core);
+slopos_testing::stest!(name = test_rapid_create_destroy_cycle, suite = sched_core);
+slopos_testing::stest!(name = test_kstack_basic_alloc, suite = sched_core);
+slopos_testing::stest!(name = test_kstack_slot_reuse, suite = sched_core);
+slopos_testing::stest!(name = test_kstack_rejects_invalid_size, suite = sched_core);
+slopos_testing::stest!(name = test_kstack_pcp_refill, suite = sched_core);
+slopos_testing::stest!(name = test_kstack_pcp_spill_overflow, suite = sched_core);
+slopos_testing::stest!(
+    name = test_kstack_pcp_was_backed_preserved,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_kstack_pcp_cross_cpu_safety, suite = sched_core);
+slopos_testing::stest!(name = test_kstack_pcp_stress_1000, suite = sched_core);
+slopos_testing::stest!(
+    name = test_kstack_pcp_smp_throughput_bench,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_schedule_to_empty_queue, suite = sched_core);
+slopos_testing::stest!(name = test_schedule_duplicate_task, suite = sched_core);
+slopos_testing::stest!(name = test_schedule_null_task, suite = sched_core);
+slopos_testing::stest!(name = test_unschedule_not_in_queue, suite = sched_core);
+slopos_testing::stest!(name = test_priority_ordering, suite = sched_core);
+slopos_testing::stest!(name = test_idle_priority_last, suite = sched_core);
+slopos_testing::stest!(name = test_timer_tick_decrements_slice, suite = sched_core);
+slopos_testing::stest!(name = test_terminate_invalid_id, suite = sched_core);
+slopos_testing::stest!(name = test_terminate_nonexistent_id, suite = sched_core);
+slopos_testing::stest!(name = test_double_terminate, suite = sched_core);
+slopos_testing::stest!(name = test_find_invalid_id, suite = sched_core);
+slopos_testing::stest!(name = test_get_info_null_output, suite = sched_core);
+slopos_testing::stest!(name = test_create_null_entry, suite = sched_core);
+slopos_testing::stest!(name = test_create_conflicting_flags, suite = sched_core);
+slopos_testing::stest!(name = test_create_null_name, suite = sched_core);
+slopos_testing::stest!(name = test_scheduler_starts_disabled, suite = sched_core);
+slopos_testing::stest!(name = test_schedule_while_disabled, suite = sched_core);
+slopos_testing::stest!(
+    name = test_schedule_task_before_scheduler_enable_on_current_cpu,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_resolve_idle_stack_reports_missing_idle_task,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_resolve_idle_stack_reports_missing_kernel_stack,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_many_same_priority_tasks, suite = sched_core);
+slopos_testing::stest!(name = test_interleaved_operations, suite = sched_core);
+slopos_testing::stest!(name = test_remote_inbox_push_drain, suite = sched_core);
+slopos_testing::stest!(name = test_remote_inbox_multiple_tasks, suite = sched_core);
+slopos_testing::stest!(name = test_timer_tick_drains_inbox, suite = sched_core);
+slopos_testing::stest!(
+    name = test_remote_inbox_drops_non_ready_tasks,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_cross_cpu_schedule_lockfree, suite = sched_core);
+slopos_testing::stest!(
+    name = test_privilege_separation_invariants,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_scheduler_wakeup_race_stress_baseline,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_sleep_wake_race_regression, suite = sched_core);
+slopos_testing::stest!(
+    name = test_timer_tick_always_increments_ticks,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_idle_time_tracks_ticks_not_iterations,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_select_target_cpu_prefers_idle_cpu,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_select_target_cpu_running_task_not_idle,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_schedule_new_task_spreads_across_cpus,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_effective_load_accuracy, suite = sched_core);

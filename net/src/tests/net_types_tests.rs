@@ -464,41 +464,39 @@ pub fn test_ip_protocol_as_u8() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    net_types,
-    [
-        // Ipv4Addr (1.T6)
-        test_ipv4_addr_constants,
-        test_ipv4_addr_loopback,
-        test_ipv4_addr_broadcast,
-        test_ipv4_addr_multicast,
-        test_ipv4_addr_in_subnet,
-        test_ipv4_addr_byte_conversions,
-        test_ipv4_addr_unspecified,
-        // Port (1.T7)
-        test_port_network_bytes_roundtrip,
-        test_port_well_known_values,
-        test_port_ranges,
-        test_port_as_u16,
-        // MacAddr
-        test_mac_addr_constants,
-        test_mac_addr_multicast,
-        test_mac_addr_as_bytes,
-        // DevIndex
-        test_dev_index_equality,
-        // NetError
-        test_net_error_errno_mapping,
-        test_net_error_all_negative,
-        // SockAddr
-        test_sock_addr_from_user_valid,
-        test_sock_addr_from_user_invalid_family,
-        test_sock_addr_to_user_roundtrip,
-        test_sock_addr_unspecified,
-        // EtherType
-        test_ether_type_from_u16,
-        test_ether_type_as_u16,
-        // IpProtocol
-        test_ip_protocol_from_u8,
-        test_ip_protocol_as_u8,
-    ]
+// Ipv4Addr (1.T6)
+slopos_testing::stest!(name = test_ipv4_addr_constants, suite = net_types);
+slopos_testing::stest!(name = test_ipv4_addr_loopback, suite = net_types);
+slopos_testing::stest!(name = test_ipv4_addr_broadcast, suite = net_types);
+slopos_testing::stest!(name = test_ipv4_addr_multicast, suite = net_types);
+slopos_testing::stest!(name = test_ipv4_addr_in_subnet, suite = net_types);
+slopos_testing::stest!(name = test_ipv4_addr_byte_conversions, suite = net_types);
+slopos_testing::stest!(name = test_ipv4_addr_unspecified, suite = net_types);
+// Port (1.T7)
+slopos_testing::stest!(name = test_port_network_bytes_roundtrip, suite = net_types);
+slopos_testing::stest!(name = test_port_well_known_values, suite = net_types);
+slopos_testing::stest!(name = test_port_ranges, suite = net_types);
+slopos_testing::stest!(name = test_port_as_u16, suite = net_types);
+// MacAddr
+slopos_testing::stest!(name = test_mac_addr_constants, suite = net_types);
+slopos_testing::stest!(name = test_mac_addr_multicast, suite = net_types);
+slopos_testing::stest!(name = test_mac_addr_as_bytes, suite = net_types);
+// DevIndex
+slopos_testing::stest!(name = test_dev_index_equality, suite = net_types);
+// NetError
+slopos_testing::stest!(name = test_net_error_errno_mapping, suite = net_types);
+slopos_testing::stest!(name = test_net_error_all_negative, suite = net_types);
+// SockAddr
+slopos_testing::stest!(name = test_sock_addr_from_user_valid, suite = net_types);
+slopos_testing::stest!(
+    name = test_sock_addr_from_user_invalid_family,
+    suite = net_types
 );
+slopos_testing::stest!(name = test_sock_addr_to_user_roundtrip, suite = net_types);
+slopos_testing::stest!(name = test_sock_addr_unspecified, suite = net_types);
+// EtherType
+slopos_testing::stest!(name = test_ether_type_from_u16, suite = net_types);
+slopos_testing::stest!(name = test_ether_type_as_u16, suite = net_types);
+// IpProtocol
+slopos_testing::stest!(name = test_ip_protocol_from_u8, suite = net_types);
+slopos_testing::stest!(name = test_ip_protocol_as_u8, suite = net_types);

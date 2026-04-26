@@ -1546,124 +1546,80 @@ pub fn test_pat_wc_enabled() -> TestResult {
 // SUITE REGISTRATION — tests are auto-collected via linker section
 // ============================================================================
 
-use slopos_testing::define_test_suite;
+use slopos_testing::stest;
 
-define_test_suite!(
-    vm,
-    [test_process_vm_slot_reuse, test_process_vm_counter_reset,]
-);
+stest!(name = test_process_vm_slot_reuse, suite = vm);
+stest!(name = test_process_vm_counter_reset, suite = vm);
 
-define_test_suite!(
-    heap,
-    [
-        test_heap_free_list_search,
-        test_heap_fragmentation_behind_head,
-    ]
-);
+stest!(name = test_heap_free_list_search, suite = heap);
+stest!(name = test_heap_fragmentation_behind_head, suite = heap);
 
-define_test_suite!(
-    page_alloc,
-    [
-        test_page_alloc_single,
-        test_page_alloc_multi_order,
-        test_page_alloc_free_cycle,
-        test_page_alloc_zeroed,
-        test_page_alloc_refcount,
-        test_page_alloc_stats,
-        test_page_alloc_free_null,
-        test_page_alloc_fragmentation,
-    ]
-);
+stest!(name = test_page_alloc_single, suite = page_alloc);
+stest!(name = test_page_alloc_multi_order, suite = page_alloc);
+stest!(name = test_page_alloc_free_cycle, suite = page_alloc);
+stest!(name = test_page_alloc_zeroed, suite = page_alloc);
+stest!(name = test_page_alloc_refcount, suite = page_alloc);
+stest!(name = test_page_alloc_stats, suite = page_alloc);
+stest!(name = test_page_alloc_free_null, suite = page_alloc);
+stest!(name = test_page_alloc_fragmentation, suite = page_alloc);
 
-define_test_suite!(
-    heap_ext,
-    [
-        test_heap_warmup_pages_minimum,
-        test_heap_small_alloc,
-        test_heap_medium_alloc,
-        test_heap_large_alloc,
-        test_heap_kzalloc_zeroed,
-        test_heap_kfree_null,
-        test_heap_alloc_zero,
-        test_heap_stats,
-        test_global_alloc_vec,
-    ]
-);
+stest!(name = test_heap_warmup_pages_minimum, suite = heap_ext);
+stest!(name = test_heap_small_alloc, suite = heap_ext);
+stest!(name = test_heap_medium_alloc, suite = heap_ext);
+stest!(name = test_heap_large_alloc, suite = heap_ext);
+stest!(name = test_heap_kzalloc_zeroed, suite = heap_ext);
+stest!(name = test_heap_kfree_null, suite = heap_ext);
+stest!(name = test_heap_alloc_zero, suite = heap_ext);
+stest!(name = test_heap_stats, suite = heap_ext);
+stest!(name = test_global_alloc_vec, suite = heap_ext);
 
-define_test_suite!(
-    paging,
-    [
-        test_paging_virt_to_phys,
-        test_paging_get_kernel_dir,
-        test_paging_user_accessible_kernel,
-        test_paging_cow_kernel,
-        test_pat_wc_enabled,
-    ]
-);
+stest!(name = test_paging_virt_to_phys, suite = paging);
+stest!(name = test_paging_get_kernel_dir, suite = paging);
+stest!(name = test_paging_user_accessible_kernel, suite = paging);
+stest!(name = test_paging_cow_kernel, suite = paging);
+stest!(name = test_pat_wc_enabled, suite = paging);
 
-define_test_suite!(
-    ring_buf,
-    [
-        test_ring_buffer_basic,
-        test_ring_buffer_fifo,
-        test_ring_buffer_empty_pop,
-        test_ring_buffer_full,
-        test_ring_buffer_overwrite,
-        test_ring_buffer_wrap,
-        test_ring_buffer_reset,
-        test_ring_buffer_capacity,
-    ]
-);
+stest!(name = test_ring_buffer_basic, suite = ring_buf);
+stest!(name = test_ring_buffer_fifo, suite = ring_buf);
+stest!(name = test_ring_buffer_empty_pop, suite = ring_buf);
+stest!(name = test_ring_buffer_full, suite = ring_buf);
+stest!(name = test_ring_buffer_overwrite, suite = ring_buf);
+stest!(name = test_ring_buffer_wrap, suite = ring_buf);
+stest!(name = test_ring_buffer_reset, suite = ring_buf);
+stest!(name = test_ring_buffer_capacity, suite = ring_buf);
 
-define_test_suite!(
-    irqmutex,
-    [
-        test_irqmutex_basic,
-        test_irqmutex_mutation,
-        test_irqmutex_try_lock,
-    ]
-);
+stest!(name = test_irqmutex_basic, suite = irqmutex);
+stest!(name = test_irqmutex_mutation, suite = irqmutex);
+stest!(name = test_irqmutex_try_lock, suite = irqmutex);
 
-define_test_suite!(
-    shm,
-    [
-        test_memfd_create_and_release,
-        test_memfd_ftruncate_valid,
-        test_memfd_ftruncate_zero,
-        test_memfd_ftruncate_excessive,
-        test_memfd_ftruncate_twice,
-        test_memfd_refcount,
-        test_memfd_invalid_handle,
-        test_memfd_mapcount,
-        test_memfd_get_info,
-        test_memfd_size_query,
-    ]
-);
+stest!(name = test_memfd_create_and_release, suite = shm);
+stest!(name = test_memfd_ftruncate_valid, suite = shm);
+stest!(name = test_memfd_ftruncate_zero, suite = shm);
+stest!(name = test_memfd_ftruncate_excessive, suite = shm);
+stest!(name = test_memfd_ftruncate_twice, suite = shm);
+stest!(name = test_memfd_refcount, suite = shm);
+stest!(name = test_memfd_invalid_handle, suite = shm);
+stest!(name = test_memfd_mapcount, suite = shm);
+stest!(name = test_memfd_get_info, suite = shm);
+stest!(name = test_memfd_size_query, suite = shm);
 
-define_test_suite!(
-    rigorous,
-    [
-        test_page_alloc_write_verify,
-        test_page_alloc_zero_full_page,
-        test_page_alloc_no_stale_data,
-        test_heap_boundary_write,
-        test_heap_no_overlap,
-        test_heap_double_free_defensive,
-        test_heap_large_block_integrity,
-        test_heap_stress_cycles,
-        test_page_alloc_multipage_integrity,
-    ]
-);
+stest!(name = test_page_alloc_write_verify, suite = rigorous);
+stest!(name = test_page_alloc_zero_full_page, suite = rigorous);
+stest!(name = test_page_alloc_no_stale_data, suite = rigorous);
+stest!(name = test_heap_boundary_write, suite = rigorous);
+stest!(name = test_heap_no_overlap, suite = rigorous);
+stest!(name = test_heap_double_free_defensive, suite = rigorous);
+stest!(name = test_heap_large_block_integrity, suite = rigorous);
+stest!(name = test_heap_stress_cycles, suite = rigorous);
+stest!(name = test_page_alloc_multipage_integrity, suite = rigorous);
 
-define_test_suite!(
-    process_vm,
-    [
-        test_process_vm_create_destroy_memory,
-        test_process_vm_alloc_and_access,
-        test_process_vm_brk_expansion,
-        test_cow_page_isolation,
-        test_cow_fault_handling,
-        test_multiple_process_vms,
-        test_vma_region_retrieval,
-    ]
+stest!(
+    name = test_process_vm_create_destroy_memory,
+    suite = process_vm
 );
+stest!(name = test_process_vm_alloc_and_access, suite = process_vm);
+stest!(name = test_process_vm_brk_expansion, suite = process_vm);
+stest!(name = test_cow_page_isolation, suite = process_vm);
+stest!(name = test_cow_fault_handling, suite = process_vm);
+stest!(name = test_multiple_process_vms, suite = process_vm);
+stest!(name = test_vma_region_retrieval, suite = process_vm);

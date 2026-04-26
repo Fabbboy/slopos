@@ -564,25 +564,38 @@ pub fn test_flags_disabled_by_default() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_flags,
-    [
-        test_ldisc_icrnl,
-        test_ldisc_igncr,
-        test_ldisc_inlcr,
-        test_ldisc_istrip,
-        test_ldisc_opost_onlcr,
-        test_ldisc_opost_ocrnl,
-        test_ldisc_output_raw,
-        test_ldisc_echoctl,
-        test_ldisc_vlnext,
-        test_ldisc_vwerase,
-        test_ldisc_edit_content,
-        test_echoprt_erase_format,
-        test_echoprt_close_on_input,
-        test_iuclc_maps_upper_to_lower,
-        test_iuclc_no_effect_non_alpha,
-        test_olcuc_maps_lower_to_upper,
-        test_flags_disabled_by_default,
-    ]
+slopos_testing::stest!(name = test_ldisc_icrnl, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_igncr, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_inlcr, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_istrip, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_opost_onlcr, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_opost_ocrnl, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_output_raw, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_echoctl, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_vlnext, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_vwerase, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(name = test_ldisc_edit_content, suite = tty_test_ldisc_flags);
+slopos_testing::stest!(
+    name = test_echoprt_erase_format,
+    suite = tty_test_ldisc_flags
+);
+slopos_testing::stest!(
+    name = test_echoprt_close_on_input,
+    suite = tty_test_ldisc_flags
+);
+slopos_testing::stest!(
+    name = test_iuclc_maps_upper_to_lower,
+    suite = tty_test_ldisc_flags
+);
+slopos_testing::stest!(
+    name = test_iuclc_no_effect_non_alpha,
+    suite = tty_test_ldisc_flags
+);
+slopos_testing::stest!(
+    name = test_olcuc_maps_lower_to_upper,
+    suite = tty_test_ldisc_flags
+);
+slopos_testing::stest!(
+    name = test_flags_disabled_by_default,
+    suite = tty_test_ldisc_flags
 );

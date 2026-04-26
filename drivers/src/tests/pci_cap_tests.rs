@@ -419,28 +419,41 @@ fn find_first_device_with_caps() -> Option<PciDeviceInfo> {
 // Suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    pci_cap,
-    [
-        // Enumeration sanity
-        test_pci_enumeration_nonempty,
-        // Iterator correctness
-        test_cap_iter_empty_for_no_caps_device,
-        test_cap_iter_deterministic,
-        test_cap_offsets_valid,
-        // Known QEMU device chains
-        test_virtio_blk_has_msix,
-        test_virtio_net_has_msix,
-        test_virtio_has_vendor_caps,
-        test_sata_has_msi,
-        // Stored field consistency
-        test_has_msi_matches_offset,
-        test_has_msix_matches_offset,
-        test_stored_msi_offset_matches_live_walk,
-        test_stored_msix_offset_matches_live_walk,
-        test_find_capability_method_matches_free_fn,
-        // Edge cases
-        test_find_nonexistent_cap_returns_none,
-        test_find_cap_on_nonexistent_device_returns_none,
-    ]
+// Enumeration sanity
+slopos_testing::stest!(name = test_pci_enumeration_nonempty, suite = pci_cap);
+// Iterator correctness
+slopos_testing::stest!(
+    name = test_cap_iter_empty_for_no_caps_device,
+    suite = pci_cap
+);
+slopos_testing::stest!(name = test_cap_iter_deterministic, suite = pci_cap);
+slopos_testing::stest!(name = test_cap_offsets_valid, suite = pci_cap);
+// Known QEMU device chains
+slopos_testing::stest!(name = test_virtio_blk_has_msix, suite = pci_cap);
+slopos_testing::stest!(name = test_virtio_net_has_msix, suite = pci_cap);
+slopos_testing::stest!(name = test_virtio_has_vendor_caps, suite = pci_cap);
+slopos_testing::stest!(name = test_sata_has_msi, suite = pci_cap);
+// Stored field consistency
+slopos_testing::stest!(name = test_has_msi_matches_offset, suite = pci_cap);
+slopos_testing::stest!(name = test_has_msix_matches_offset, suite = pci_cap);
+slopos_testing::stest!(
+    name = test_stored_msi_offset_matches_live_walk,
+    suite = pci_cap
+);
+slopos_testing::stest!(
+    name = test_stored_msix_offset_matches_live_walk,
+    suite = pci_cap
+);
+slopos_testing::stest!(
+    name = test_find_capability_method_matches_free_fn,
+    suite = pci_cap
+);
+// Edge cases
+slopos_testing::stest!(
+    name = test_find_nonexistent_cap_returns_none,
+    suite = pci_cap
+);
+slopos_testing::stest!(
+    name = test_find_cap_on_nonexistent_device_returns_none,
+    suite = pci_cap
 );

@@ -699,32 +699,36 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    exec,
-    [
-        test_elf_invalid_magic,
-        test_elf_wrong_class,
-        test_elf_wrong_endian,
-        test_elf_wrong_machine,
-        test_elf_truncated_header,
-        test_elf_empty_file,
-        test_elf_no_load_segments,
-        test_elf_segment_overflow_vaddr,
-        test_elf_segment_filesz_greater_than_memsz,
-        test_elf_segment_offset_overflow,
-        test_elf_kernel_address_entry,
-        test_path_too_long,
-        test_path_empty,
-        test_translate_address_kernel_to_user,
-        test_translate_address_user_passthrough,
-        test_process_vm_null_page_dir,
-        test_elf_huge_segment_count,
-        test_elf_phentsize_mismatch,
-        test_exec_max_size_boundary,
-        test_init_path_is_absolute,
-        test_init_path_within_exec_limit,
-        test_setup_user_stack_contract_layout,
-        test_setup_user_stack_auxv_required_entries,
-        test_setup_user_stack_argv_string_content,
-    ]
+slopos_testing::stest!(name = test_elf_invalid_magic, suite = exec);
+slopos_testing::stest!(name = test_elf_wrong_class, suite = exec);
+slopos_testing::stest!(name = test_elf_wrong_endian, suite = exec);
+slopos_testing::stest!(name = test_elf_wrong_machine, suite = exec);
+slopos_testing::stest!(name = test_elf_truncated_header, suite = exec);
+slopos_testing::stest!(name = test_elf_empty_file, suite = exec);
+slopos_testing::stest!(name = test_elf_no_load_segments, suite = exec);
+slopos_testing::stest!(name = test_elf_segment_overflow_vaddr, suite = exec);
+slopos_testing::stest!(
+    name = test_elf_segment_filesz_greater_than_memsz,
+    suite = exec
+);
+slopos_testing::stest!(name = test_elf_segment_offset_overflow, suite = exec);
+slopos_testing::stest!(name = test_elf_kernel_address_entry, suite = exec);
+slopos_testing::stest!(name = test_path_too_long, suite = exec);
+slopos_testing::stest!(name = test_path_empty, suite = exec);
+slopos_testing::stest!(name = test_translate_address_kernel_to_user, suite = exec);
+slopos_testing::stest!(name = test_translate_address_user_passthrough, suite = exec);
+slopos_testing::stest!(name = test_process_vm_null_page_dir, suite = exec);
+slopos_testing::stest!(name = test_elf_huge_segment_count, suite = exec);
+slopos_testing::stest!(name = test_elf_phentsize_mismatch, suite = exec);
+slopos_testing::stest!(name = test_exec_max_size_boundary, suite = exec);
+slopos_testing::stest!(name = test_init_path_is_absolute, suite = exec);
+slopos_testing::stest!(name = test_init_path_within_exec_limit, suite = exec);
+slopos_testing::stest!(name = test_setup_user_stack_contract_layout, suite = exec);
+slopos_testing::stest!(
+    name = test_setup_user_stack_auxv_required_entries,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_setup_user_stack_argv_string_content,
+    suite = exec
 );

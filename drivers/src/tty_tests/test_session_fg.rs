@@ -2037,90 +2037,313 @@ pub fn test_extproc_raw_mode_same_behavior() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_session_fg,
-    [
-        test_sigttou_constant,
-        test_check_write_tostop_blocks_background,
-        test_check_write_no_tostop_allows_background,
-        test_check_write_tostop_allows_foreground,
-        test_check_read_cross_session_rejected,
-        test_check_read_same_session_foreground,
-        test_check_read_kernel_task_allowed,
-        test_tty_write_foreground_with_tostop,
-        test_bootstrap_allowed_no_session_read,
-        test_bootstrap_allowed_no_fg_pgrp,
-        test_denied_cross_session_read,
-        test_denied_cross_session_write_tostop,
-        test_cross_session_write_no_tostop_still_denied,
-        test_kernel_task_exempted_cross_session_read,
-        test_kernel_task_exempted_cross_session_write,
-        test_same_session_background_read_sigttin,
-        test_same_session_background_write_sigttou,
-        test_check_write_no_session_allowed,
-        test_cross_session_denied_error_variant,
-        test_set_fg_pgrp_checked_nonexistent_pgrp,
-        test_set_fg_pgrp_checked_clear_allowed,
-        test_set_fg_pgrp_checked_no_session_skips_validation,
-        test_detach_ctty_non_leader,
-        test_detach_ctty_session_leader,
-        test_detach_ctty_cross_session_denied,
-        test_tiocnotty_constant,
-        test_open_ref_second_fd_increments_count,
-        test_dev_tty_operations_identical_to_direct,
-        test_open_ref_does_not_modify_session,
-        test_open_ref_invalid_index_returns_error,
-        test_close_ref_decrements_after_open,
-        test_multiple_open_ref_sequential,
-        test_dev_tty_winsize_matches_direct,
-        test_tcsetattr_background_blocked,
-        test_tcsetattr_foreground_allowed,
-        test_tcsetattr_no_session_allowed,
-        test_tcsetattr_cross_session_denied,
-        test_orphaned_pgrp_errno,
-        test_tcsetattr_kernel_task_bypass,
-        test_tcsetsw_tcsetsf_kernel_task_bypass,
-        test_tostop_background_write_check,
-        test_kernel_task_check_write_allowed,
-        test_acquire_ctty_fresh_tty,
-        test_acquire_ctty_same_session_idempotent,
-        test_acquire_ctty_different_session_denied,
-        test_release_ctty_owning_session,
-        test_release_ctty_wrong_session_noop,
-        test_hangup_detaches_session,
-        test_o_noctty_suppresses_acquire,
-        test_detach_ctty_non_leader_preserves_session,
-        test_detach_ctty_session_leader_detaches,
-        test_full_lifecycle_acquire_release_reacquire,
-        test_double_acquire_race_guard,
-        test_hangup_no_session_safe,
-        test_rapid_acquire_release_stress,
-        test_acquire_invalid_index,
-        test_release_invalid_index,
-        test_detach_invalid_index,
-        test_ctty_can_be_ctty_serial,
-        test_ctty_can_be_ctty_vconsole,
-        test_ctty_can_be_ctty_pty_slave,
-        test_ctty_cannot_be_ctty_pty_master,
-        test_ctty_acquire_ctty_pty_master_rejected,
-        test_ctty_acquire_ctty_pty_slave_succeeds,
-        test_ctty_acquire_ctty_serial_console_succeeds,
-        test_ctty_acquire_ctty_vconsole_succeeds,
-        test_ctty_o_noctty_constant_value,
-        test_ctty_set_fg_pgrp_completes_without_deadlock,
-        test_ctty_set_fg_pgrp_checked_completes_without_deadlock,
-        test_ctty_pty_master_ctty_does_not_attach_session,
-        test_ctty_can_be_ctty_none_driver,
-        test_extproc_flag_value,
-        test_extproc_no_echo,
-        test_extproc_no_canonical_editing,
-        test_extproc_signals_still_delivered,
-        test_extproc_cleared_resumes_normal,
-        test_extproc_bypasses_iexten_editing,
-        test_extproc_flow_control_works,
-        test_extproc_imaxbel,
-        test_vhangup_syscall_constant,
-        test_vhangup_triggers_hangup,
-        test_extproc_raw_mode_same_behavior,
-    ]
+slopos_testing::stest!(name = test_sigttou_constant, suite = tty_test_session_fg);
+slopos_testing::stest!(
+    name = test_check_write_tostop_blocks_background,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_check_write_no_tostop_allows_background,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_check_write_tostop_allows_foreground,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_check_read_cross_session_rejected,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_check_read_same_session_foreground,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_check_read_kernel_task_allowed,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tty_write_foreground_with_tostop,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_bootstrap_allowed_no_session_read,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_bootstrap_allowed_no_fg_pgrp,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_denied_cross_session_read,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_denied_cross_session_write_tostop,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_cross_session_write_no_tostop_still_denied,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_kernel_task_exempted_cross_session_read,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_kernel_task_exempted_cross_session_write,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_same_session_background_read_sigttin,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_same_session_background_write_sigttou,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_check_write_no_session_allowed,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_cross_session_denied_error_variant,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_set_fg_pgrp_checked_nonexistent_pgrp,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_set_fg_pgrp_checked_clear_allowed,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_set_fg_pgrp_checked_no_session_skips_validation,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_detach_ctty_non_leader,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_detach_ctty_session_leader,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_detach_ctty_cross_session_denied,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(name = test_tiocnotty_constant, suite = tty_test_session_fg);
+slopos_testing::stest!(
+    name = test_open_ref_second_fd_increments_count,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_dev_tty_operations_identical_to_direct,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_open_ref_does_not_modify_session,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_open_ref_invalid_index_returns_error,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_close_ref_decrements_after_open,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_multiple_open_ref_sequential,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_dev_tty_winsize_matches_direct,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tcsetattr_background_blocked,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tcsetattr_foreground_allowed,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tcsetattr_no_session_allowed,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tcsetattr_cross_session_denied,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(name = test_orphaned_pgrp_errno, suite = tty_test_session_fg);
+slopos_testing::stest!(
+    name = test_tcsetattr_kernel_task_bypass,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tcsetsw_tcsetsf_kernel_task_bypass,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_tostop_background_write_check,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_kernel_task_check_write_allowed,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_acquire_ctty_fresh_tty,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_acquire_ctty_same_session_idempotent,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_acquire_ctty_different_session_denied,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_release_ctty_owning_session,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_release_ctty_wrong_session_noop,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_hangup_detaches_session,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_o_noctty_suppresses_acquire,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_detach_ctty_non_leader_preserves_session,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_detach_ctty_session_leader_detaches,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_full_lifecycle_acquire_release_reacquire,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_double_acquire_race_guard,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_hangup_no_session_safe,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_rapid_acquire_release_stress,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_acquire_invalid_index,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_release_invalid_index,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_detach_invalid_index,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_can_be_ctty_serial,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_can_be_ctty_vconsole,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_can_be_ctty_pty_slave,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_cannot_be_ctty_pty_master,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_acquire_ctty_pty_master_rejected,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_acquire_ctty_pty_slave_succeeds,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_acquire_ctty_serial_console_succeeds,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_acquire_ctty_vconsole_succeeds,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_o_noctty_constant_value,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_set_fg_pgrp_completes_without_deadlock,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_set_fg_pgrp_checked_completes_without_deadlock,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_pty_master_ctty_does_not_attach_session,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_ctty_can_be_ctty_none_driver,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(name = test_extproc_flag_value, suite = tty_test_session_fg);
+slopos_testing::stest!(name = test_extproc_no_echo, suite = tty_test_session_fg);
+slopos_testing::stest!(
+    name = test_extproc_no_canonical_editing,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_extproc_signals_still_delivered,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_extproc_cleared_resumes_normal,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_extproc_bypasses_iexten_editing,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_extproc_flow_control_works,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(name = test_extproc_imaxbel, suite = tty_test_session_fg);
+slopos_testing::stest!(
+    name = test_vhangup_syscall_constant,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_vhangup_triggers_hangup,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_extproc_raw_mode_same_behavior,
+    suite = tty_test_session_fg
 );

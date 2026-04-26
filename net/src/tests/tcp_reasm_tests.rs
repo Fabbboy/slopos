@@ -441,21 +441,22 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_reasm,
-    [
-        test_reasm_single_ooo_segment,
-        test_reasm_non_contiguous_ranges,
-        test_reasm_overlapping_merge,
-        test_reasm_adjacent_merge,
-        test_reasm_drain_integration,
-        test_reasm_sack_blocks,
-        test_reasm_duplicate_is_noop,
-        test_reasm_write_at_offset_wrap,
-        test_reasm_write_at_offset_capacity,
-        test_reasm_seq_wrap,
-        test_reasm_drain_respects_capacity,
-        test_reasm_eviction_keeps_lowest,
-        test_reasm_insert_order_commutative_fuzz,
-    ]
+slopos_testing::stest!(name = test_reasm_single_ooo_segment, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_non_contiguous_ranges, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_overlapping_merge, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_adjacent_merge, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_drain_integration, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_sack_blocks, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_duplicate_is_noop, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_write_at_offset_wrap, suite = tcp_reasm);
+slopos_testing::stest!(
+    name = test_reasm_write_at_offset_capacity,
+    suite = tcp_reasm
+);
+slopos_testing::stest!(name = test_reasm_seq_wrap, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_drain_respects_capacity, suite = tcp_reasm);
+slopos_testing::stest!(name = test_reasm_eviction_keeps_lowest, suite = tcp_reasm);
+slopos_testing::stest!(
+    name = test_reasm_insert_order_commutative_fuzz,
+    suite = tcp_reasm
 );

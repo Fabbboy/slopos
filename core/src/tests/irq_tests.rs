@@ -227,27 +227,22 @@ pub fn test_irq_vector_calculation() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    irq,
-    [
-        test_irq_register_invalid_line,
-        test_irq_register_null_handler,
-        test_irq_double_register,
-        test_irq_unregister_never_registered,
-        test_irq_stats_invalid_line,
-        test_irq_stats_null_output,
-        test_irq_mask_unmask_invalid,
-        test_irq_is_masked_boundary,
-        test_irq_route_invalid,
-        test_irq_enable_disable_invalid,
-        test_irq_initialized_flag,
-        test_irq_rapid_register_unregister,
-        test_irq_all_lines_mask_state,
-        test_irq_stats_valid_line,
-        test_irq_context_pointer_preserved,
-        test_irq_handler_with_long_name,
-        test_irq_timer_ticks_accessible,
-        test_irq_keyboard_events_accessible,
-        test_irq_vector_calculation,
-    ]
-);
+slopos_testing::stest!(name = test_irq_register_invalid_line, suite = irq);
+slopos_testing::stest!(name = test_irq_register_null_handler, suite = irq);
+slopos_testing::stest!(name = test_irq_double_register, suite = irq);
+slopos_testing::stest!(name = test_irq_unregister_never_registered, suite = irq);
+slopos_testing::stest!(name = test_irq_stats_invalid_line, suite = irq);
+slopos_testing::stest!(name = test_irq_stats_null_output, suite = irq);
+slopos_testing::stest!(name = test_irq_mask_unmask_invalid, suite = irq);
+slopos_testing::stest!(name = test_irq_is_masked_boundary, suite = irq);
+slopos_testing::stest!(name = test_irq_route_invalid, suite = irq);
+slopos_testing::stest!(name = test_irq_enable_disable_invalid, suite = irq);
+slopos_testing::stest!(name = test_irq_initialized_flag, suite = irq);
+slopos_testing::stest!(name = test_irq_rapid_register_unregister, suite = irq);
+slopos_testing::stest!(name = test_irq_all_lines_mask_state, suite = irq);
+slopos_testing::stest!(name = test_irq_stats_valid_line, suite = irq);
+slopos_testing::stest!(name = test_irq_context_pointer_preserved, suite = irq);
+slopos_testing::stest!(name = test_irq_handler_with_long_name, suite = irq);
+slopos_testing::stest!(name = test_irq_timer_ticks_accessible, suite = irq);
+slopos_testing::stest!(name = test_irq_keyboard_events_accessible, suite = irq);
+slopos_testing::stest!(name = test_irq_vector_calculation, suite = irq);

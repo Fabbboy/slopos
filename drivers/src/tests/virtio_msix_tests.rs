@@ -404,29 +404,48 @@ pub fn test_queue_msix_entry_helper() -> TestResult {
 // Suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    virtio_msix,
-    [
-        // VirtIO-blk
-        test_virtio_blk_ready,
-        test_virtio_blk_has_msix_state,
-        test_virtio_blk_vector_in_range,
-        test_virtio_blk_table_entry_matches_vector,
-        test_virtio_blk_table_entry_targets_bsp,
-        test_virtio_blk_entry_unmasked,
-        test_virtio_blk_msix_enabled_in_config,
-        // VirtIO-net
-        test_virtio_net_ready,
-        test_virtio_net_has_msix_state,
-        test_virtio_net_vectors_in_range,
-        test_virtio_net_vectors_distinct,
-        test_virtio_net_table_entries_match_vectors,
-        test_virtio_net_table_entries_target_bsp,
-        test_virtio_net_entries_unmasked,
-        test_virtio_net_msix_enabled_in_config,
-        // Cross-device
-        test_blk_and_net_vectors_disjoint,
-        test_msix_preferred_over_msi_on_q35,
-        test_queue_msix_entry_helper,
-    ]
+// VirtIO-blk
+slopos_testing::stest!(name = test_virtio_blk_ready, suite = virtio_msix);
+slopos_testing::stest!(name = test_virtio_blk_has_msix_state, suite = virtio_msix);
+slopos_testing::stest!(name = test_virtio_blk_vector_in_range, suite = virtio_msix);
+slopos_testing::stest!(
+    name = test_virtio_blk_table_entry_matches_vector,
+    suite = virtio_msix
 );
+slopos_testing::stest!(
+    name = test_virtio_blk_table_entry_targets_bsp,
+    suite = virtio_msix
+);
+slopos_testing::stest!(name = test_virtio_blk_entry_unmasked, suite = virtio_msix);
+slopos_testing::stest!(
+    name = test_virtio_blk_msix_enabled_in_config,
+    suite = virtio_msix
+);
+// VirtIO-net
+slopos_testing::stest!(name = test_virtio_net_ready, suite = virtio_msix);
+slopos_testing::stest!(name = test_virtio_net_has_msix_state, suite = virtio_msix);
+slopos_testing::stest!(name = test_virtio_net_vectors_in_range, suite = virtio_msix);
+slopos_testing::stest!(name = test_virtio_net_vectors_distinct, suite = virtio_msix);
+slopos_testing::stest!(
+    name = test_virtio_net_table_entries_match_vectors,
+    suite = virtio_msix
+);
+slopos_testing::stest!(
+    name = test_virtio_net_table_entries_target_bsp,
+    suite = virtio_msix
+);
+slopos_testing::stest!(name = test_virtio_net_entries_unmasked, suite = virtio_msix);
+slopos_testing::stest!(
+    name = test_virtio_net_msix_enabled_in_config,
+    suite = virtio_msix
+);
+// Cross-device
+slopos_testing::stest!(
+    name = test_blk_and_net_vectors_disjoint,
+    suite = virtio_msix
+);
+slopos_testing::stest!(
+    name = test_msix_preferred_over_msi_on_q35,
+    suite = virtio_msix
+);
+slopos_testing::stest!(name = test_queue_msix_entry_helper, suite = virtio_msix);

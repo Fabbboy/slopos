@@ -475,21 +475,16 @@ pub fn test_refcount_during_oom() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    oom,
-    [
-        test_page_alloc_until_oom,
-        test_page_alloc_fragmentation_oom,
-        test_dma_allocation_exhaustion,
-        test_heap_alloc_pressure,
-        test_heap_alloc_one_gib,
-        test_process_vm_creation_pressure,
-        test_heap_expansion_under_pressure,
-        test_zero_flag_under_pressure,
-        test_kzalloc_zeroed_under_pressure,
-        test_alloc_free_cycles_no_leak,
-        test_multiorder_alloc_failure,
-        test_process_heap_expansion_oom,
-        test_refcount_during_oom,
-    ]
-);
+slopos_testing::stest!(name = test_page_alloc_until_oom, suite = oom);
+slopos_testing::stest!(name = test_page_alloc_fragmentation_oom, suite = oom);
+slopos_testing::stest!(name = test_dma_allocation_exhaustion, suite = oom);
+slopos_testing::stest!(name = test_heap_alloc_pressure, suite = oom);
+slopos_testing::stest!(name = test_heap_alloc_one_gib, suite = oom);
+slopos_testing::stest!(name = test_process_vm_creation_pressure, suite = oom);
+slopos_testing::stest!(name = test_heap_expansion_under_pressure, suite = oom);
+slopos_testing::stest!(name = test_zero_flag_under_pressure, suite = oom);
+slopos_testing::stest!(name = test_kzalloc_zeroed_under_pressure, suite = oom);
+slopos_testing::stest!(name = test_alloc_free_cycles_no_leak, suite = oom);
+slopos_testing::stest!(name = test_multiorder_alloc_failure, suite = oom);
+slopos_testing::stest!(name = test_process_heap_expansion_oom, suite = oom);
+slopos_testing::stest!(name = test_refcount_during_oom, suite = oom);

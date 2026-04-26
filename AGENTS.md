@@ -46,7 +46,6 @@ There are no unit tests yet; rely on QEMU boot verification and the kernel test 
 - Toggle automatic shutdown after the harness with `tests.shutdown=on|off`; when enabled the kernel writes to QEMU’s debug-exit port after printing the summary so the VM terminates without intervention.
 - Boot logs summarize the active configuration before running tests when debug logging is enabled, and the harness reports totals in `test_output.log`.
 - The timeout value is parsed but currently not enforced by the stub harness; keep it at 0 for now.
-- Legacy `itests.*` cmdline keys are still accepted for one release cycle and emit a one-shot warning; rename to `tests.*`.
 
 ## Test Harness
 - The harness is Rust-based; enable it with `tests=on|off` on the Limine command line (defaults to off).

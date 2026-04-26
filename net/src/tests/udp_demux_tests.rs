@@ -163,15 +163,10 @@ pub fn test_udp_demux_overflow() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    udp_demux,
-    [
-        test_udp_demux_register_lookup,
-        test_udp_demux_inaddr_any,
-        test_udp_demux_exact_over_wildcard,
-        test_udp_demux_reuse_addr,
-        test_udp_demux_unregister,
-        test_udp_demux_clear,
-        test_udp_demux_overflow,
-    ]
-);
+slopos_testing::stest!(name = test_udp_demux_register_lookup, suite = udp_demux);
+slopos_testing::stest!(name = test_udp_demux_inaddr_any, suite = udp_demux);
+slopos_testing::stest!(name = test_udp_demux_exact_over_wildcard, suite = udp_demux);
+slopos_testing::stest!(name = test_udp_demux_reuse_addr, suite = udp_demux);
+slopos_testing::stest!(name = test_udp_demux_unregister, suite = udp_demux);
+slopos_testing::stest!(name = test_udp_demux_clear, suite = udp_demux);
+slopos_testing::stest!(name = test_udp_demux_overflow, suite = udp_demux);

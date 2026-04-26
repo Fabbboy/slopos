@@ -1268,53 +1268,177 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_flow,
-    [
-        test_ldisc_flow_control_ixon,
-        test_poll_events_pollin_with_data,
-        test_poll_events_no_pollin_without_data,
-        test_poll_events_pollout_when_not_stopped,
-        test_poll_events_no_pollout_when_stopped,
-        test_poll_events_pollhup_on_hangup,
-        test_poll_events_invalid_index_returns_zero,
-        test_ixon_stopped_state_via_push_input,
-        test_ixon_any_char_resumes,
-        test_poll_events_respects_requested_mask,
-        test_pollhup_always_reported,
-        test_poll_events_peer_closed_pollhup,
-        test_default_console_tty_initial_value,
-        test_set_default_console_tty,
-        test_switch_active_tty_valid,
-        test_switch_active_tty_invalid_index,
-        test_switch_active_tty_unallocated,
-        test_vconsole_state_initial,
-        test_vconsole_write_byte_printable,
-        test_vconsole_write_byte_newline,
-        test_vconsole_write_byte_cr,
-        test_vconsole_write_byte_backspace,
-        test_vconsole_scroll_at_bottom,
-        test_active_tty_independent_of_fg_pgrp,
-        test_vconsole_has_framebuffer_default_false,
-        test_cread_enabled_input_processed,
-        test_cread_disabled_input_discarded,
-        test_cread_disabled_rawdisc,
-        test_imaxbel_buffer_full_rings_bell,
-        test_imaxbel_not_set_buffer_full_silent,
-        test_imaxbel_buffer_not_full_normal,
-        test_imaxbel_raw_mode_buffer_full,
-        test_ixoff_high_water_sends_xoff,
-        test_ixoff_low_water_sends_xon,
-        test_ixoff_not_set_no_flow_control,
-        test_cread_flag_value,
-        test_imaxbel_flag_value,
-        test_throttle_watermark_constants,
-        test_pty_initially_unthrottled,
-        test_throttle_activates_at_high_water,
-        test_master_write_short_write_when_throttled,
-        test_read_unthrottles_slave,
-        test_throttle_cycle_no_data_loss,
-        test_console_not_throttled,
-        test_master_write_full_when_not_throttled,
-    ]
+slopos_testing::stest!(
+    name = test_ldisc_flow_control_ixon,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_pollin_with_data,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_no_pollin_without_data,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_pollout_when_not_stopped,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_no_pollout_when_stopped,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_pollhup_on_hangup,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_invalid_index_returns_zero,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_ixon_stopped_state_via_push_input,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_ixon_any_char_resumes,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_respects_requested_mask,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_pollhup_always_reported,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_poll_events_peer_closed_pollhup,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_default_console_tty_initial_value,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_set_default_console_tty,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_switch_active_tty_valid,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_switch_active_tty_invalid_index,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_switch_active_tty_unallocated,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_state_initial,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_write_byte_printable,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_write_byte_newline,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_write_byte_cr,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_write_byte_backspace,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_scroll_at_bottom,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_active_tty_independent_of_fg_pgrp,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_vconsole_has_framebuffer_default_false,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_cread_enabled_input_processed,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_cread_disabled_input_discarded,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_cread_disabled_rawdisc,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_imaxbel_buffer_full_rings_bell,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_imaxbel_not_set_buffer_full_silent,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_imaxbel_buffer_not_full_normal,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_imaxbel_raw_mode_buffer_full,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_ixoff_high_water_sends_xoff,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_ixoff_low_water_sends_xon,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_ixoff_not_set_no_flow_control,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(name = test_cread_flag_value, suite = tty_test_ldisc_flow);
+slopos_testing::stest!(name = test_imaxbel_flag_value, suite = tty_test_ldisc_flow);
+slopos_testing::stest!(
+    name = test_throttle_watermark_constants,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_pty_initially_unthrottled,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_throttle_activates_at_high_water,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_master_write_short_write_when_throttled,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_read_unthrottles_slave,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_throttle_cycle_no_data_loss,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_console_not_throttled,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_master_write_full_when_not_throttled,
+    suite = tty_test_ldisc_flow
 );

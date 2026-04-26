@@ -2885,113 +2885,420 @@ pub fn test_p21_existing_api_smoke_read_write() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_regression,
-    [
-        test_pendin_flag_value,
-        test_pendin_auto_set_on_echo_change,
-        test_pendin_one_shot,
-        test_vreprint_clears_pendin,
-        test_pendin_not_set_for_non_echo_flags,
-        test_pendin_empty_edit_buffer,
-        test_flush_clears_pendin,
-        test_flush_input_clears_pendin,
-        test_review_tcflush_unthrottles_pty,
-        test_review_tcflush_both_unthrottles_pty,
-        test_review_master_write_batch_boundary,
-        test_review_speed_fields_merge_into_cflag,
-        test_review_speed_ispeed_fallback,
-        test_review_speed_unrecognised_noop,
-        test_review_pollerr_on_hangup,
-        test_review_pollerr_on_peer_closed,
-        test_bugfix_flush_edit_preserves_remainder,
-        test_bugfix_nonblock_write_throttled_pty,
-        test_bugfix_nonblock_write_unthrottled_pty,
-        test_bugfix_rawdisc_input_full,
-        test_bugfix_slave_write_stops_on_full,
-        test_bugfix_linedisc_input_full,
-        test_bugfix_parmrk_atomic_full_insert,
-        test_bugfix_parmrk_drop_when_insufficient_space,
-        test_bugfix_parmrk_imaxbel_bell_on_insufficient_space,
-        test_bugfix_parmrk_drop_when_buffer_completely_full,
-        test_bugfix_tcxonc_invalid_action_returns_error,
-        test_bugfix_tcxonc_boundary_values,
-        test_wakeup_chars_constant,
-        test_canonical_wake_on_newline,
-        test_noncanonical_no_wake_per_byte,
-        test_noncanonical_wake_at_threshold,
-        test_noncanonical_wake_near_full,
-        test_flush_input_resets_wake_counter,
-        test_flush_all_resets_wake_counter,
-        test_rawdisc_wake_batching,
-        test_wake_resets_counter,
-        test_canonical_eof_wakes,
-        test_no_room_initially_false,
-        test_no_room_set_on_cooked_full,
-        test_no_room_not_set_before_full,
-        test_overflow_count_increments,
-        test_overflow_count_saturates,
-        test_no_room_clears_on_drain_below_threshold,
-        test_no_room_stays_above_threshold,
-        test_flush_input_clears_no_room,
-        test_flush_all_clears_no_room,
-        test_fill_drain_cycle_preserves_throttle,
-        test_rawdisc_no_room,
-        test_imaxbel_preserved_with_no_room,
-        test_rawdisc_recovery,
-        test_ldisc_kind_dispatch,
-        test_drain_idle_fast_path,
-        test_drain_hangup_vacuously_complete,
-        test_tcsbrk_hangup_returns_error,
-        test_tcsbrk_zero_hangup_returns_error,
-        test_tcsbrk_zero_healthy_succeeds,
-        test_tcsbrk_and_tcsetsw_share_drain,
-        test_drain_invalid_index,
-        test_drain_unallocated_slot,
-        test_pty_tcsbrk_drain_immediate,
-        test_console_drain_synchronous,
-        test_output_pending_bytes_all_drivers,
-        test_output_queued_uses_pending_bytes,
-        test_tcsetsw_hangup_returns_error,
-        test_tcsetsf_hangup_returns_error,
-        test_inflight_accounting_round_trip,
-        test_input_event_normal_behavior,
-        test_input_event_break_brkint,
-        test_input_event_break_ignbrk,
-        test_input_event_parity_parmrk,
-        test_input_event_parity_ignpar,
-        test_input_event_overrun_noop,
-        test_poll_output_stopped_masks_pollout,
-        test_poll_output_not_stopped_has_pollout,
-        test_grantpt_unlocks_slave,
-        test_b0_hangup,
-        test_speed_roundtrip,
-        test_batched_ingress_no_data_loss,
-        test_batched_ingress_signal_in_middle,
-        test_background_read_sigttin_blocked_eio,
-        test_receive_buf_accumulates_echo,
-        test_mod_reexports_io_functions,
-        test_mod_reexports_termios_functions,
-        test_mod_reexports_job_control_functions,
-        test_mod_reexports_lifecycle_functions,
-        test_mod_reexports_poll_functions,
-        test_mod_reexports_pty_functions,
-        test_tty_struct_fields_accessible,
-        test_tty_error_variants_unchanged,
-        test_max_ttys_constant,
-        test_existing_api_smoke_test,
-        test_p21_postlockwork_default_is_empty,
-        test_p21_postlockwork_signal_makes_nonempty,
-        test_p21_postlockwork_execute_completes,
-        test_p21_postlockwork_ixoff_byte,
-        test_p21_postlockwork_packet_event,
-        test_p21_postlockwork_packet_event_merge,
-        test_p21_postlockwork_wake_helpers,
-        test_p21_postlockwork_zero_pgid_signal_ignored,
-        test_p21_postlockwork_zero_event_bits_ignored,
-        test_p21_write_path_peer_cache_consolidation,
-        test_p21_forward_ldisc_ops_linedisc,
-        test_p21_forward_ldisc_ops_rawdisc,
-        test_p21_existing_api_smoke_read_write,
-    ]
+slopos_testing::stest!(
+    name = test_pendin_flag_value,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_pendin_auto_set_on_echo_change,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_pendin_one_shot,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_vreprint_clears_pendin,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_pendin_not_set_for_non_echo_flags,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_pendin_empty_edit_buffer,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_flush_clears_pendin,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_flush_input_clears_pendin,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_tcflush_unthrottles_pty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_tcflush_both_unthrottles_pty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_master_write_batch_boundary,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_speed_fields_merge_into_cflag,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_speed_ispeed_fallback,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_speed_unrecognised_noop,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_pollerr_on_hangup,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_review_pollerr_on_peer_closed,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_flush_edit_preserves_remainder,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_nonblock_write_throttled_pty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_nonblock_write_unthrottled_pty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_rawdisc_input_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_slave_write_stops_on_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_linedisc_input_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_parmrk_atomic_full_insert,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_parmrk_drop_when_insufficient_space,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_parmrk_imaxbel_bell_on_insufficient_space,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_parmrk_drop_when_buffer_completely_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_tcxonc_invalid_action_returns_error,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_bugfix_tcxonc_boundary_values,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_wakeup_chars_constant,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_canonical_wake_on_newline,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_noncanonical_no_wake_per_byte,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_noncanonical_wake_at_threshold,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_noncanonical_wake_near_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_flush_input_resets_wake_counter,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_flush_all_resets_wake_counter,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_rawdisc_wake_batching,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_wake_resets_counter,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_canonical_eof_wakes,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_no_room_initially_false,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_no_room_set_on_cooked_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_no_room_not_set_before_full,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_overflow_count_increments,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_overflow_count_saturates,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_no_room_clears_on_drain_below_threshold,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_no_room_stays_above_threshold,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_flush_input_clears_no_room,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_flush_all_clears_no_room,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_fill_drain_cycle_preserves_throttle,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_rawdisc_no_room,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_imaxbel_preserved_with_no_room,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_rawdisc_recovery,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_ldisc_kind_dispatch,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_drain_idle_fast_path,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_drain_hangup_vacuously_complete,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tcsbrk_hangup_returns_error,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tcsbrk_zero_hangup_returns_error,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tcsbrk_zero_healthy_succeeds,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tcsbrk_and_tcsetsw_share_drain,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_drain_invalid_index,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_drain_unallocated_slot,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_pty_tcsbrk_drain_immediate,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_console_drain_synchronous,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_output_pending_bytes_all_drivers,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_output_queued_uses_pending_bytes,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tcsetsw_hangup_returns_error,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tcsetsf_hangup_returns_error,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_inflight_accounting_round_trip,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_input_event_normal_behavior,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_input_event_break_brkint,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_input_event_break_ignbrk,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_input_event_parity_parmrk,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_input_event_parity_ignpar,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_input_event_overrun_noop,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_poll_output_stopped_masks_pollout,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_poll_output_not_stopped_has_pollout,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_grantpt_unlocks_slave,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(name = test_b0_hangup, suite = tty_test_ldisc_regression);
+slopos_testing::stest!(
+    name = test_speed_roundtrip,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_batched_ingress_no_data_loss,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_batched_ingress_signal_in_middle,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_background_read_sigttin_blocked_eio,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_receive_buf_accumulates_echo,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_mod_reexports_io_functions,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_mod_reexports_termios_functions,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_mod_reexports_job_control_functions,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_mod_reexports_lifecycle_functions,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_mod_reexports_poll_functions,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_mod_reexports_pty_functions,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tty_struct_fields_accessible,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_tty_error_variants_unchanged,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_max_ttys_constant,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_existing_api_smoke_test,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_default_is_empty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_signal_makes_nonempty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_execute_completes,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_ixoff_byte,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_packet_event,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_packet_event_merge,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_wake_helpers,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_zero_pgid_signal_ignored,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_postlockwork_zero_event_bits_ignored,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_write_path_peer_cache_consolidation,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_forward_ldisc_ops_linedisc,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_forward_ldisc_ops_rawdisc,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_p21_existing_api_smoke_read_write,
+    suite = tty_test_ldisc_regression
 );

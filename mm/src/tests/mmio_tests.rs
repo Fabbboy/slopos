@@ -132,16 +132,11 @@ pub fn test_mmio_map_near_phys_limit() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    mmio,
-    [
-        test_mmio_empty_region_state,
-        test_mmio_is_valid_offset_overflow,
-        test_mmio_sub_region_overflow,
-        test_mmio_empty_region_invalid_reads,
-        test_mmio_map_zero_size,
-        test_mmio_map_null_addr,
-        test_mmio_map_large_size,
-        test_mmio_map_near_phys_limit,
-    ]
-);
+slopos_testing::stest!(name = test_mmio_empty_region_state, suite = mmio);
+slopos_testing::stest!(name = test_mmio_is_valid_offset_overflow, suite = mmio);
+slopos_testing::stest!(name = test_mmio_sub_region_overflow, suite = mmio);
+slopos_testing::stest!(name = test_mmio_empty_region_invalid_reads, suite = mmio);
+slopos_testing::stest!(name = test_mmio_map_zero_size, suite = mmio);
+slopos_testing::stest!(name = test_mmio_map_null_addr, suite = mmio);
+slopos_testing::stest!(name = test_mmio_map_large_size, suite = mmio);
+slopos_testing::stest!(name = test_mmio_map_near_phys_limit, suite = mmio);

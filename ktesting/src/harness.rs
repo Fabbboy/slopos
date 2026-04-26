@@ -1,6 +1,6 @@
 //! Per-test harness: walks the `.test_registry` linker section, runs each
 //! `TestDesc` under `catch_panic!` with klog capture installed, and emits
-//! both KTAP and legacy `SUITE_<root>` lines.
+//! KTAP per-test lines plus a final `TESTS SUMMARY:` log line.
 
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -13,11 +13,9 @@ use crate::config::TestConfig;
 #[cfg(feature = "tests")]
 use crate::config::Verbosity;
 #[cfg(feature = "tests")]
-use crate::registry::{module_root, registry_sorted, TestDesc};
+use crate::registry::{registry_sorted, TestDesc};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
-#[cfg(feature = "tests")]
-use slopos_alloc::KVec;
 
 /// Default cycles per millisecond estimate (3 GHz).
 const DEFAULT_CYCLES_PER_MS: u64 = 3_000_000;
@@ -127,15 +125,6 @@ pub fn tests_request_shutdown(_failed: i32) {
 // =============================================================================
 
 #[cfg(feature = "tests")]
-#[derive(Default)]
-struct GroupTotals {
-    total: u32,
-    passed: u32,
-    failed: u32,
-    elapsed_ms: u32,
-}
-
-#[cfg(feature = "tests")]
 const FQN_BUF_BYTES: usize = 512;
 
 /// Render `module::name` into a stack scratch buffer; returns the populated
@@ -200,7 +189,6 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
     }
     crate::ktap::emit_header(planned);
 
-    let mut groups: KVec<(&'static str, GroupTotals)> = KVec::new();
     let start_cycles = slopos_arch::tsc::rdtsc();
     let mut idx: u32 = 0;
     let mut bailed = false;
@@ -237,11 +225,6 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
             summary.over_time = summary.over_time.saturating_add(1);
         }
 
-        // Aggregate into the legacy `SUITE_<root>` bucket by first
-        // module-path segment (e.g., `slopos_mm::*` → `slopos_mm`).
-        let root = module_root(desc.module);
-        accumulate_group(&mut groups, root, &outcome);
-
         if outcome.bail {
             crate::ktap::emit_bail(desc.name);
             bailed = true;
@@ -252,8 +235,6 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
     summary.total = idx;
     let end_cycles = slopos_arch::tsc::rdtsc();
     summary.elapsed_ms = measure_elapsed_ms(start_cycles, end_cycles);
-
-    emit_legacy_suite_lines(&groups);
 
     klog_info!(
         "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}",
@@ -281,7 +262,6 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
 #[cfg(feature = "tests")]
 struct OutcomeRecord {
     outcome: TestResult,
-    time_ms: u32,
     bail: bool,
 }
 
@@ -347,7 +327,6 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
     let bail = desc.name.starts_with("bootstrap_") && final_outcome.is_failure();
     OutcomeRecord {
         outcome: final_outcome,
-        time_ms,
         bail,
     }
 }
@@ -387,50 +366,6 @@ fn emit_verbose_log(cpu0_log: &[u8], truncated_bytes: usize) {
         }
     }
     klog_info!("KTAP\t  ...");
-}
-
-#[cfg(feature = "tests")]
-fn accumulate_group(
-    groups: &mut KVec<(&'static str, GroupTotals)>,
-    root: &'static str,
-    rec: &OutcomeRecord,
-) {
-    for (key, totals) in groups.iter_mut() {
-        if *key == root {
-            totals.total = totals.total.saturating_add(1);
-            if rec.outcome.is_failure() {
-                totals.failed = totals.failed.saturating_add(1);
-            } else {
-                totals.passed = totals.passed.saturating_add(1);
-            }
-            totals.elapsed_ms = totals.elapsed_ms.saturating_add(rec.time_ms);
-            return;
-        }
-    }
-    let mut t = GroupTotals::default();
-    t.total = 1;
-    if rec.outcome.is_failure() {
-        t.failed = 1;
-    } else {
-        t.passed = 1;
-    }
-    t.elapsed_ms = rec.time_ms;
-    let _ = groups.push((root, t));
-}
-
-#[cfg(feature = "tests")]
-fn emit_legacy_suite_lines(groups: &KVec<(&'static str, GroupTotals)>) {
-    for (i, (name, totals)) in groups.iter().enumerate() {
-        klog_info!(
-            "SUITE{} name={} total={} pass={} fail={} elapsed={}ms",
-            i,
-            name,
-            totals.total,
-            totals.passed,
-            totals.failed,
-            totals.elapsed_ms,
-        );
-    }
 }
 
 #[cfg(feature = "tests")]

@@ -450,26 +450,30 @@ pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestR
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    context,
-    [
-        test_task_context_initial_state,
-        test_task_state_transitions_exhaustive,
-        test_task_invalid_state_transition,
-        test_task_get_info_null_output,
-        test_task_get_info_invalid_id,
-        test_task_double_terminate,
-        test_task_terminate_invalid_ids,
-        test_task_find_after_terminate,
-        test_task_rapid_create_terminate,
-        test_task_process_id_consistency,
-        test_task_flags_preserved,
-        test_switch_context_struct_size,
-        test_switch_context_offsets,
-        test_switch_context_zero_init,
-        test_switch_context_setup_initial,
-        test_task_has_switch_ctx,
-        test_save_task_context_from_interrupt_frame_marks_started,
-        test_save_task_context_from_interrupt_frame_keeps_user_started,
-    ]
+slopos_testing::stest!(name = test_task_context_initial_state, suite = context);
+slopos_testing::stest!(
+    name = test_task_state_transitions_exhaustive,
+    suite = context
+);
+slopos_testing::stest!(name = test_task_invalid_state_transition, suite = context);
+slopos_testing::stest!(name = test_task_get_info_null_output, suite = context);
+slopos_testing::stest!(name = test_task_get_info_invalid_id, suite = context);
+slopos_testing::stest!(name = test_task_double_terminate, suite = context);
+slopos_testing::stest!(name = test_task_terminate_invalid_ids, suite = context);
+slopos_testing::stest!(name = test_task_find_after_terminate, suite = context);
+slopos_testing::stest!(name = test_task_rapid_create_terminate, suite = context);
+slopos_testing::stest!(name = test_task_process_id_consistency, suite = context);
+slopos_testing::stest!(name = test_task_flags_preserved, suite = context);
+slopos_testing::stest!(name = test_switch_context_struct_size, suite = context);
+slopos_testing::stest!(name = test_switch_context_offsets, suite = context);
+slopos_testing::stest!(name = test_switch_context_zero_init, suite = context);
+slopos_testing::stest!(name = test_switch_context_setup_initial, suite = context);
+slopos_testing::stest!(name = test_task_has_switch_ctx, suite = context);
+slopos_testing::stest!(
+    name = test_save_task_context_from_interrupt_frame_marks_started,
+    suite = context
+);
+slopos_testing::stest!(
+    name = test_save_task_context_from_interrupt_frame_keeps_user_started,
+    suite = context
 );

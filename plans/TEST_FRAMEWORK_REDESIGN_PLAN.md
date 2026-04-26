@@ -485,45 +485,43 @@ Same `.test_registry` section, `kind = TestKind::Userland`. The kernel knows abo
 
 ### 2A. Mechanical site conversion
 
-- [ ] **2A.1** Identify all sites: `git grep -lF 'define_test_suite!' | sort -u`. Expected: ~75-86 files.
-- [ ] **2A.2** Write a small AWK or Python script `tools/migrate_test_sites.py` that, for each file:
-  - Parses `define_test_suite!(suite_name, [test_fn1, test_fn2, ...])` (handling multi-line lists)
-  - Replaces the macro call with one `slopos_testing::stest!(name = test_fnN);` per fn
-  - Preserves trailing comments and surrounding code
-  - Skips the `single`-form (handle those manually; few in count — `fs/src/tests.rs:633`, `tests/src/fpu_tests.rs:76`)
-- [ ] **2A.3** Run the script across the workspace. Spot-check 5 random files for correctness.
-- [ ] **2A.4** Manually convert the `single`-form sites (the runner stays as the test fn body itself).
-- [ ] **2A.5** Run `cargo fmt --all`.
-- [ ] **2A.6** Build + test; expect higher visible test count (each suite's tests now individually visible).
+- [x] **2A.1** Workspace audit: 74 source files, 87 grep-line matches, 85 actual macro invocations (the other two hits are doc-comment references in `ktesting/src/lib.rs` and `ktesting/src/registry.rs`). Three prefix forms in use: `slopos_testing::define_test_suite!` (71 files), `crate::define_test_suite!` (2 in `ktesting/`), bare `define_test_suite!` (1 file: `mm/src/tests/tests.rs`). Zero `single`-form call sites; zero non-bare-ident arguments.
+- [x] **2A.2** Wrote `tools/migrate_test_sites.py` (~290 LoC). Paren-depth-aware tokenizer respects Rust strings, char literals, and line/block comments; `parse_invocation` extracts `(suite, "array", elements)` where each element is `(kind, value)` — `kind ∈ {"comment", "ident"}` so standalone `// section heading` comments inside the bracket survive and end up as plain `//` lines between the new `stest!` calls. Prefix preserved verbatim. **Deviation from spec**: emits `<prefix>stest!(name = T, suite = SUITE);` (always with `suite =`) rather than the spec's bare `name = T` — uniform `suite =` keeps the `TEST_DESC_<suite>_<name>` link-time symbol unique, which matters for the duplicates concentrated in `core/src/syscall/tests.rs` (e.g. `test_setsid_then_dev_tty_returns_enxio` lives in both `syscall_valid` and `syscall_compat_smoke`). The per-test KTAP `name` field is unaffected (it's `stringify!($ident)`, not the static name). The `single`-form parser is implemented but the migration aborts with `file:line` if it encounters one — defensive guard, never tripped.
+- [x] **2A.3** Script ran clean: 72 files modified, 85 invocations rewritten, 2375 idents emitted. Spot-checked all five representative call sites listed in the plan; all behave correctly.
+- [x] **2A.4** Skipped — zero `single`-form call sites (audit confirmed).
+- [x] **2A.5** `cargo fmt --all` ran with one round of post-edit reformatting; tree clean.
+- [x] **2A.6** `just build` clean, `just test` 2398 tests pass — count matches Phase 1 baseline exactly because the bridge was already producing the same per-test registry shape as the migration's output.
+
+Bare `define_test_suite!` invocations relied on `use slopos_testing::define_test_suite;` — that import was rewritten to `use slopos_testing::stest;` in `mm/src/tests/tests.rs:1549` so the bare `stest!` calls resolve.
 
 ### 2B. Delete bridge
 
-- [ ] **2B.1** Delete `define_test_suite!` macro from `ktesting/src/lib.rs`
-- [ ] **2B.2** `git grep -F 'define_test_suite!'` should return zero matches
-- [ ] **2B.3** Delete legacy `SUITE_N total=… pass=… fail=…` log emissions from `ktesting/src/harness.rs`
-- [ ] **2B.4** Delete the per-test legacy `TEST FAIL: <name>: <result>` log line (KTAP `not ok` covers it)
-- [ ] **2B.5** Keep the trailing `TESTS SUMMARY: …` line (raw-serial reader convenience)
-- [ ] **2B.6** Keep `LUF SUMMARY: …` line
+- [x] **2B.1** Removed `define_test_suite!` macro definition from `ktesting/src/lib.rs:146-163`.
+- [x] **2B.2** `git grep -F 'define_test_suite!' -- ':!plans/'` returns zero matches.
+- [x] **2B.3** Removed `struct GroupTotals` (harness.rs:130-136), `fn accumulate_group` (harness.rs:393-419), `fn emit_legacy_suite_lines` (harness.rs:421-434), the per-iteration `accumulate_group(...)` call (harness.rs:240-243), the `emit_legacy_suite_lines(...)` call (harness.rs:256), the `groups: KVec<...>` init (harness.rs:203), and the now-unused `time_ms: u32` field on `OutcomeRecord`. Also dropped `module_root` from `ktesting/src/registry.rs:115-122` (only consumer was `accumulate_group`) and the `slopos_alloc::KVec` import that became unused.
+- [x] **2B.4** Removed `pub fn run_single_test` from `ktesting/src/runner.rs` (its only emission was the legacy `klog_info!("TEST FAIL: {}: {:?}", name, result)`). Also removed the orphaned `run_test!` macro that called it, and the `run_single_test` re-export from `ktesting/src/lib.rs`. The `fail!` macro's `klog_info!("TEST FAIL: {message}")` emissions were intentionally **kept**: source-plan §2B.4 deletes only the runner's per-test post-result line, and `fail!`-emitted lines are captured into the per-test ring and surface inside the `KTAP\t  log: |` YAML block — they are the assertion-failure context that bare `not ok` lacks.
+- [x] **2B.5** `TESTS SUMMARY: total=… passed=… failed=… elapsed_ms=…` still emitted at `harness.rs:251` (verified in latest `just test` output).
+- [x] **2B.6** `LUF SUMMARY:` still emitted from `boot/src/boot_drivers.rs` (verified in latest `just test` output).
 
 ### 2C. Drop cmdline back-compat
 
-- [ ] **2C.1** Remove `itests.*` legacy alias parsing from `ktesting/src/config.rs`
-- [ ] **2C.2** Remove the one-shot `klog_warn!` for legacy keys
-- [ ] **2C.3** `git grep -nE 'itests'` should return zero matches outside `plans/` docs
+- [x] **2C.1** Removed `match_dual_prefix` (`ktesting/src/config.rs:116-132`), the `itests=` bare-flag arm (165-174), and every `itests.<suffix>` parsing path. Replaced with a tiny `match_tests_prefix(token, "<suffix>=")` helper that only strips `tests.<suffix>=`. Removed unused `slopos_sync::StateFlag` and `slopos_utils::klog_info` imports.
+- [x] **2C.2** Removed `LEGACY_WARNED: StateFlag` static and `fn warn_legacy_once()` (config.rs:105-114). No more one-shot warning.
+- [x] **2C.3** Updated `AGENTS.md:49` (the only non-`plans/` documentation reference) to drop the legacy-alias paragraph. `git grep -nE 'itests' -- ':!plans/'` returns zero matches.
 
 ### 2D. Bootstrap self-test for migration completeness
 
-- [ ] **2D.1** Add `bootstrap_no_define_test_suite_macro`: a compile-time test (or `static_assertions`-style check) that `define_test_suite` is not in scope. Optional — `git grep` in CI is sufficient.
+- [x] **2D.1** Skipped per source-plan footnote ("Optional — `git grep` in CI is sufficient"). The bridge macro is gone, so any leftover `define_test_suite!` call would fail to compile; the gate `git grep` is the load-bearing check.
 
 ### Phase 2 Gate
 
-- [ ] **GATE 2.1**: `just build` passes
-- [ ] **GATE 2.2**: `just test` runs the same or higher test count as Phase 1; all pass
-- [ ] **GATE 2.3**: KTAP-only output (no `SUITE_N` or `TEST FAIL:` legacy lines)
-- [ ] **GATE 2.4**: `git grep -F 'define_test_suite!'` zero matches
-- [ ] **GATE 2.5**: `git grep -nE 'itests'` zero matches outside `plans/`
-- [ ] **GATE 2.6**: Induced-failure UX still surfaces the failing test name + captured log clearly
-- [ ] **GATE 2.7**: `cargo fmt --all` no-op
+- [x] **GATE 2.1**: `just build` clean, including `check_alloc_dep` and `check_stack_sizes`.
+- [x] **GATE 2.2**: `just test` runs **2398 tests, all pass** — matches Phase 1 GATE 1.2 baseline exactly. Bridge already emitted the same per-test registry shape, so no count delta.
+- [x] **GATE 2.3**: KTAP-only output. `grep -cE 'SUITE[0-9]+ name=' /tmp/phase2_test.log` → 0; `grep -cE '^TEST FAIL: [a-zA-Z_][a-zA-Z0-9_]*: ' /tmp/phase2_test.log` → 0.
+- [x] **GATE 2.4**: `git grep -F 'define_test_suite!' -- ':!plans/'` → zero matches.
+- [x] **GATE 2.5**: `git grep -nE 'itests' -- ':!plans/'` → zero matches.
+- [x] **GATE 2.6**: Induced an `assert_eq_test!(1, 2, "phase-2 induced failure")` in a temporary `fpu_phase2_induced_failure` stest. Output: `KTAP\tnot ok 2384 - slopos_testing::fpu_tests::fpu_phase2_induced_failure # time_ms=0` followed by the YAML diagnostic (`outcome: Fail`, `file: ktesting/src/fpu_tests.rs:79`, `log: |` containing both the `INDUCED:` klog line and the `ASSERT_EQ:` message); idx 2385/2386 still pass — failure isolated. Test then reverted.
+- [x] **GATE 2.7**: `cargo fmt --all -- --check` exit 0.
 
 ---
 

@@ -23,13 +23,3 @@ pub fn execute_test(f: fn() -> TestResult) -> TestResult {
     });
     TestResult::from_u8(LAST_OUTCOME.load(Ordering::Relaxed))
 }
-
-/// Legacy entry point kept for assertion macros that still call it.
-/// The new harness loop calls `execute_test` directly.
-pub fn run_single_test(name: &str, test_fn: fn() -> TestResult) -> TestResult {
-    let result = test_fn();
-    if !result.is_pass() {
-        slopos_utils::klog_info!("TEST FAIL: {}: {:?}", name, result);
-    }
-    result
-}

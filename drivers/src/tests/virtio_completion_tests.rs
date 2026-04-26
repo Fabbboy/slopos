@@ -276,30 +276,79 @@ pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
 // Suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    virtio_completion,
-    [
-        // IrqEdgeEvent unit tests
-        test_edge_event_new_not_signaled,
-        test_edge_event_signal_then_consume,
-        test_edge_event_double_consume,
-        test_edge_event_reset_clears_signal,
-        test_edge_event_signal_after_reset,
-        test_edge_event_multiple_signals,
-        test_edge_event_wait_presignaled,
-        test_edge_event_wait_timeout,
-        // CompletionEvent unit tests
-        test_completion_event_new_not_signaled,
-        test_completion_event_signal_then_consume,
-        test_completion_event_double_consume,
-        test_completion_event_reset_clears_signal,
-        test_completion_event_wait_presignaled,
-        // HPET accessor
-        test_hpet_period_fs_nonzero,
-        test_hpet_period_fs_matches_full_name,
-        // Integration: CompletionEvent-driven I/O
-        test_virtio_blk_read_interrupt_driven,
-        test_virtio_blk_consecutive_reads,
-        test_virtio_blk_write_readback_interrupt_driven,
-    ]
+// IrqEdgeEvent unit tests
+slopos_testing::stest!(
+    name = test_edge_event_new_not_signaled,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_signal_then_consume,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_double_consume,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_reset_clears_signal,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_signal_after_reset,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_multiple_signals,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_wait_presignaled,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_edge_event_wait_timeout,
+    suite = virtio_completion
+);
+// CompletionEvent unit tests
+slopos_testing::stest!(
+    name = test_completion_event_new_not_signaled,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_completion_event_signal_then_consume,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_completion_event_double_consume,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_completion_event_reset_clears_signal,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_completion_event_wait_presignaled,
+    suite = virtio_completion
+);
+// HPET accessor
+slopos_testing::stest!(
+    name = test_hpet_period_fs_nonzero,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_hpet_period_fs_matches_full_name,
+    suite = virtio_completion
+);
+// Integration: CompletionEvent-driven I/O
+slopos_testing::stest!(
+    name = test_virtio_blk_read_interrupt_driven,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_consecutive_reads,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_write_readback_interrupt_driven,
+    suite = virtio_completion
 );

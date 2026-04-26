@@ -42,4 +42,4 @@ pub fn test_heap_allocator_suite() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(heap_allocator, [test_heap_allocator_suite,]);
+slopos_testing::stest!(name = test_heap_allocator_suite, suite = heap_allocator);

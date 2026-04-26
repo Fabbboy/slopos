@@ -49,10 +49,8 @@ pub fn test_virtio_net_scan_discovers_network_members() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    virtio_net,
-    [
-        test_virtio_net_ready_and_link_up,
-        test_virtio_net_scan_discovers_network_members,
-    ]
+slopos_testing::stest!(name = test_virtio_net_ready_and_link_up, suite = virtio_net);
+slopos_testing::stest!(
+    name = test_virtio_net_scan_discovers_network_members,
+    suite = virtio_net
 );

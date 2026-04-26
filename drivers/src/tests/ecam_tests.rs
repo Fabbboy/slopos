@@ -746,61 +746,68 @@ pub fn test_ecam_sweep_all_devices() -> TestResult {
 // Suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    ecam,
-    [
-        // MCFG discovery sanity
-        test_ecam_available,
-        test_ecam_entry_count_nonzero,
-        // Primary entry validation
-        test_ecam_base_nonzero,
-        test_ecam_base_page_aligned,
-        test_primary_entry_covers_bus_zero,
-        // Entry field validity
-        test_all_entries_base_nonzero,
-        test_all_entries_bus_range_valid,
-        // region_size() correctness
-        test_region_size_formula,
-        test_region_size_full_range,
-        // ecam_offset() correctness
-        test_ecam_offset_zero_bdf,
-        test_ecam_offset_known_bdf,
-        // ecam_offset() boundary checks
-        test_ecam_offset_bus_below_range,
-        test_ecam_offset_bus_above_range,
-        test_ecam_offset_device_out_of_range,
-        test_ecam_offset_function_out_of_range,
-        // find_entry() lookup
-        test_find_entry_segment0_bus0,
-        test_find_entry_nonexistent_segment,
-        // Lock-free vs mutex consistency
-        test_ecam_base_matches_primary_entry,
-        test_entry_count_matches_indexable,
-        // Deterministic reads
-        test_ecam_state_deterministic,
-        // ECAM MMIO mapping
-        test_ecam_mmio_is_active,
-        test_ecam_backend_is_ecam,
-        test_ecam_primary_virt_nonzero,
-        test_ecam_mapped_region_exists,
-        // Cross-validated MMIO reads
-        test_ecam_read32_vendor_device_id,
-        test_ecam_read16_vendor_id,
-        test_ecam_read16_device_id,
-        test_ecam_read8_class_code,
-        test_ecam_read8_revision,
-        // Extended config space
-        test_ecam_extended_config_readable,
-        test_ecam_extended_config_end_boundary,
-        // Boundary/error handling
-        test_ecam_read32_misaligned_returns_none,
-        test_ecam_read16_misaligned_returns_none,
-        test_ecam_read32_overflow_returns_none,
-        test_ecam_read_invalid_device_returns_none,
-        test_ecam_read_invalid_function_returns_none,
-        // Read determinism
-        test_ecam_reads_deterministic,
-        // All-device sweep
-        test_ecam_sweep_all_devices,
-    ]
+// MCFG discovery sanity
+slopos_testing::stest!(name = test_ecam_available, suite = ecam);
+slopos_testing::stest!(name = test_ecam_entry_count_nonzero, suite = ecam);
+// Primary entry validation
+slopos_testing::stest!(name = test_ecam_base_nonzero, suite = ecam);
+slopos_testing::stest!(name = test_ecam_base_page_aligned, suite = ecam);
+slopos_testing::stest!(name = test_primary_entry_covers_bus_zero, suite = ecam);
+// Entry field validity
+slopos_testing::stest!(name = test_all_entries_base_nonzero, suite = ecam);
+slopos_testing::stest!(name = test_all_entries_bus_range_valid, suite = ecam);
+// region_size() correctness
+slopos_testing::stest!(name = test_region_size_formula, suite = ecam);
+slopos_testing::stest!(name = test_region_size_full_range, suite = ecam);
+// ecam_offset() correctness
+slopos_testing::stest!(name = test_ecam_offset_zero_bdf, suite = ecam);
+slopos_testing::stest!(name = test_ecam_offset_known_bdf, suite = ecam);
+// ecam_offset() boundary checks
+slopos_testing::stest!(name = test_ecam_offset_bus_below_range, suite = ecam);
+slopos_testing::stest!(name = test_ecam_offset_bus_above_range, suite = ecam);
+slopos_testing::stest!(name = test_ecam_offset_device_out_of_range, suite = ecam);
+slopos_testing::stest!(name = test_ecam_offset_function_out_of_range, suite = ecam);
+// find_entry() lookup
+slopos_testing::stest!(name = test_find_entry_segment0_bus0, suite = ecam);
+slopos_testing::stest!(name = test_find_entry_nonexistent_segment, suite = ecam);
+// Lock-free vs mutex consistency
+slopos_testing::stest!(name = test_ecam_base_matches_primary_entry, suite = ecam);
+slopos_testing::stest!(name = test_entry_count_matches_indexable, suite = ecam);
+// Deterministic reads
+slopos_testing::stest!(name = test_ecam_state_deterministic, suite = ecam);
+// ECAM MMIO mapping
+slopos_testing::stest!(name = test_ecam_mmio_is_active, suite = ecam);
+slopos_testing::stest!(name = test_ecam_backend_is_ecam, suite = ecam);
+slopos_testing::stest!(name = test_ecam_primary_virt_nonzero, suite = ecam);
+slopos_testing::stest!(name = test_ecam_mapped_region_exists, suite = ecam);
+// Cross-validated MMIO reads
+slopos_testing::stest!(name = test_ecam_read32_vendor_device_id, suite = ecam);
+slopos_testing::stest!(name = test_ecam_read16_vendor_id, suite = ecam);
+slopos_testing::stest!(name = test_ecam_read16_device_id, suite = ecam);
+slopos_testing::stest!(name = test_ecam_read8_class_code, suite = ecam);
+slopos_testing::stest!(name = test_ecam_read8_revision, suite = ecam);
+// Extended config space
+slopos_testing::stest!(name = test_ecam_extended_config_readable, suite = ecam);
+slopos_testing::stest!(name = test_ecam_extended_config_end_boundary, suite = ecam);
+// Boundary/error handling
+slopos_testing::stest!(
+    name = test_ecam_read32_misaligned_returns_none,
+    suite = ecam
 );
+slopos_testing::stest!(
+    name = test_ecam_read16_misaligned_returns_none,
+    suite = ecam
+);
+slopos_testing::stest!(name = test_ecam_read32_overflow_returns_none, suite = ecam);
+slopos_testing::stest!(
+    name = test_ecam_read_invalid_device_returns_none,
+    suite = ecam
+);
+slopos_testing::stest!(
+    name = test_ecam_read_invalid_function_returns_none,
+    suite = ecam
+);
+// Read determinism
+slopos_testing::stest!(name = test_ecam_reads_deterministic, suite = ecam);
+// All-device sweep
+slopos_testing::stest!(name = test_ecam_sweep_all_devices, suite = ecam);

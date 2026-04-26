@@ -194,18 +194,13 @@ pub fn test_regression_existing() -> TestResult {
     }
 }
 
-slopos_testing::define_test_suite!(
-    napi,
-    [
-        test_napi_budget_limiting,
-        test_tx_fire_and_forget,
-        test_waitqueue_basic,
-        test_blocking_recv,
-        test_blocking_accept,
-        test_socket_poll_flags,
-        test_nonblocking_preserved,
-        test_recv_timeout,
-        test_send_backpressure,
-        test_regression_existing,
-    ]
-);
+slopos_testing::stest!(name = test_napi_budget_limiting, suite = napi);
+slopos_testing::stest!(name = test_tx_fire_and_forget, suite = napi);
+slopos_testing::stest!(name = test_waitqueue_basic, suite = napi);
+slopos_testing::stest!(name = test_blocking_recv, suite = napi);
+slopos_testing::stest!(name = test_blocking_accept, suite = napi);
+slopos_testing::stest!(name = test_socket_poll_flags, suite = napi);
+slopos_testing::stest!(name = test_nonblocking_preserved, suite = napi);
+slopos_testing::stest!(name = test_recv_timeout, suite = napi);
+slopos_testing::stest!(name = test_send_backpressure, suite = napi);
+slopos_testing::stest!(name = test_regression_existing, suite = napi);

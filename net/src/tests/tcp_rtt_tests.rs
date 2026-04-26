@@ -124,16 +124,17 @@ pub fn test_rtt_reset_clears_state() -> TestResult {
 // Register the test suite
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_rtt,
-    [
-        test_rtt_first_sample_seeds_srtt,
-        test_rtt_subsequent_samples_smooth_srtt,
-        test_rtt_stable_samples_decrease_rttvar,
-        test_rtt_rto_floor_enforced,
-        test_rtt_rto_ceiling_enforced,
-        test_rtt_back_off_doubles_rto_only,
-        test_rtt_back_off_stops_at_max,
-        test_rtt_reset_clears_state,
-    ]
+slopos_testing::stest!(name = test_rtt_first_sample_seeds_srtt, suite = tcp_rtt);
+slopos_testing::stest!(
+    name = test_rtt_subsequent_samples_smooth_srtt,
+    suite = tcp_rtt
 );
+slopos_testing::stest!(
+    name = test_rtt_stable_samples_decrease_rttvar,
+    suite = tcp_rtt
+);
+slopos_testing::stest!(name = test_rtt_rto_floor_enforced, suite = tcp_rtt);
+slopos_testing::stest!(name = test_rtt_rto_ceiling_enforced, suite = tcp_rtt);
+slopos_testing::stest!(name = test_rtt_back_off_doubles_rto_only, suite = tcp_rtt);
+slopos_testing::stest!(name = test_rtt_back_off_stops_at_max, suite = tcp_rtt);
+slopos_testing::stest!(name = test_rtt_reset_clears_state, suite = tcp_rtt);

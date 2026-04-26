@@ -385,29 +385,72 @@ pub fn test_challenge_ack_rate_resets_after_epoch() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    tcp_rst_validation,
-    [
-        // classify_rst unit tests
-        test_classify_rst_exact_match,
-        test_classify_rst_in_window,
-        test_classify_rst_outside_window,
-        test_classify_rst_zero_window,
-        test_classify_rst_wrapping_seq,
-        // DataState RST
-        test_data_rst_exact_seq_tears_down,
-        test_data_rst_in_window_sends_challenge_ack,
-        test_data_rst_outside_window_dropped,
-        test_data_rst_challenge_ack_each_close_phase,
-        test_data_rst_exact_seq_each_close_phase,
-        // SynRecv RST
-        test_syn_recv_rst_in_window_releases,
-        test_syn_recv_rst_outside_window_dropped,
-        // TimeWait RST
-        test_time_wait_rst_in_window_releases,
-        test_time_wait_rst_outside_window_dropped,
-        // Rate limiter
-        test_challenge_ack_rate_limit,
-        test_challenge_ack_rate_resets_after_epoch,
-    ]
+// classify_rst unit tests
+slopos_testing::stest!(
+    name = test_classify_rst_exact_match,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_classify_rst_in_window,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_classify_rst_outside_window,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_classify_rst_zero_window,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_classify_rst_wrapping_seq,
+    suite = tcp_rst_validation
+);
+// DataState RST
+slopos_testing::stest!(
+    name = test_data_rst_exact_seq_tears_down,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_data_rst_in_window_sends_challenge_ack,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_data_rst_outside_window_dropped,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_data_rst_challenge_ack_each_close_phase,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_data_rst_exact_seq_each_close_phase,
+    suite = tcp_rst_validation
+);
+// SynRecv RST
+slopos_testing::stest!(
+    name = test_syn_recv_rst_in_window_releases,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_syn_recv_rst_outside_window_dropped,
+    suite = tcp_rst_validation
+);
+// TimeWait RST
+slopos_testing::stest!(
+    name = test_time_wait_rst_in_window_releases,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_time_wait_rst_outside_window_dropped,
+    suite = tcp_rst_validation
+);
+// Rate limiter
+slopos_testing::stest!(
+    name = test_challenge_ack_rate_limit,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_challenge_ack_rate_resets_after_epoch,
+    suite = tcp_rst_validation
 );

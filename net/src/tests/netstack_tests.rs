@@ -420,31 +420,35 @@ pub fn test_netstack_first_iface() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    netstack,
-    [
-        // 3A.T1 — broadcast
-        test_iface_config_broadcast_24,
-        test_iface_config_broadcast_16,
-        test_iface_config_broadcast_32,
-        // 3A.T2 — is_local
-        test_iface_config_is_local_same_subnet,
-        test_iface_config_is_local_different_subnet,
-        // 3A.T3 — prefix_len
-        test_iface_config_prefix_len,
-        // 3A.T4 — configure new
-        test_netstack_configure_new_iface,
-        // 3A.T5 — reconfigure
-        test_netstack_reconfigure_iface,
-        // 3A.T6 — unknown device
-        test_netstack_lookup_unknown_device,
-        // 3A.T7 — is_our_addr
-        test_netstack_is_our_addr,
-        // 3A.T8 — first_ipv4
-        test_netstack_first_ipv4_empty,
-        test_netstack_first_ipv4_with_ifaces,
-        // Edge cases
-        test_netstack_multiple_devices,
-        test_netstack_first_iface,
-    ]
+// 3A.T1 — broadcast
+slopos_testing::stest!(name = test_iface_config_broadcast_24, suite = netstack);
+slopos_testing::stest!(name = test_iface_config_broadcast_16, suite = netstack);
+slopos_testing::stest!(name = test_iface_config_broadcast_32, suite = netstack);
+// 3A.T2 — is_local
+slopos_testing::stest!(
+    name = test_iface_config_is_local_same_subnet,
+    suite = netstack
 );
+slopos_testing::stest!(
+    name = test_iface_config_is_local_different_subnet,
+    suite = netstack
+);
+// 3A.T3 — prefix_len
+slopos_testing::stest!(name = test_iface_config_prefix_len, suite = netstack);
+// 3A.T4 — configure new
+slopos_testing::stest!(name = test_netstack_configure_new_iface, suite = netstack);
+// 3A.T5 — reconfigure
+slopos_testing::stest!(name = test_netstack_reconfigure_iface, suite = netstack);
+// 3A.T6 — unknown device
+slopos_testing::stest!(name = test_netstack_lookup_unknown_device, suite = netstack);
+// 3A.T7 — is_our_addr
+slopos_testing::stest!(name = test_netstack_is_our_addr, suite = netstack);
+// 3A.T8 — first_ipv4
+slopos_testing::stest!(name = test_netstack_first_ipv4_empty, suite = netstack);
+slopos_testing::stest!(
+    name = test_netstack_first_ipv4_with_ifaces,
+    suite = netstack
+);
+// Edge cases
+slopos_testing::stest!(name = test_netstack_multiple_devices, suite = netstack);
+slopos_testing::stest!(name = test_netstack_first_iface, suite = netstack);

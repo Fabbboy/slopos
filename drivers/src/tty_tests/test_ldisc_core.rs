@@ -3459,143 +3459,471 @@ pub fn test_existing_output_unaffected() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_core,
-    [
-        test_ldisc_new_has_no_data,
-        test_ldisc_read_empty,
-        test_ldisc_canonical_newline,
-        test_ldisc_canonical_backspace,
-        test_ldisc_canonical_kill,
-        test_ldisc_canonical_eof,
-        test_ldisc_signal_ctrl_c,
-        test_ldisc_raw_mode,
-        test_ldisc_set_termios_flush,
-        test_ldisc_flush_all,
-        test_ldisc_echo_printable,
-        test_ldisc_echo_newline,
-        test_tty_index_eq,
-        test_ldisc_multiple_reads,
-        test_ldisc_backspace_empty,
-        test_tty_write_returns_input_len,
-        test_keyboard_input_event_delivery,
-        test_keyboard_break_code_no_input,
-        test_keyboard_modifier_no_input,
-        test_keyboard_press_release_single_char,
-        test_vconsole_drain_via_drain_hw_input,
-        test_keyboard_multi_key_sequence,
-        test_tty_write_output_processing,
-        test_tty_write_raw_passthrough,
-        test_tty_write_invalid_index,
-        test_tty_per_tty_termios_isolation,
-        test_tty_per_tty_winsize_isolation,
-        test_tty_per_tty_fg_pgrp_isolation,
-        test_tty_per_tty_has_data_isolation,
-        test_tty_per_tty_session_isolation,
-        test_tty_read_invalid_tty_returns_error,
-        test_tty_index_abi_type,
-        test_signal_constants,
-        test_set_compositor_focus_does_not_set_fg_pgrp,
-        test_check_read_sole_gate_background,
-        test_tty_open_count_lifecycle,
-        test_tty_hangup_sets_flag_and_detaches_session,
-        test_tty_hangup_nonblock_read_eio,
-        test_tty_hangup_blocking_read_eof,
-        test_tty_error_variants,
-        test_read_returns_result,
-        test_read_invalid_index_error,
-        test_read_not_allocated_error,
-        test_write_returns_result,
-        test_get_termios_returns_result,
-        test_vmin0_vtime0_immediate_return,
-        test_vmin_enforcement,
-        test_vmin0_vtime0_with_data_immediate_return,
-        test_vmin_limited_by_buffer_size,
-        test_canonical_to_noncanonical_preserves_buffered_data,
-        test_set_fg_pgrp_checked_permission_denied,
-        test_hangup_read_returns_hung_up,
-        test_per_tty_lock_independence,
-        test_driver_id_round_trip,
-        test_split_write_returns_input_len,
-        test_idle_cb_iterates_all_ttys,
-        test_merged_drain_read,
-        test_with_tty_per_slot,
-        test_driver_id_traits,
-        test_default_termios_has_icrnl,
-        test_default_termios_has_opost_onlcr,
-        test_default_termios_has_full_lflag,
-        test_output_column_tracking_printable,
-        test_output_column_tracking_newline,
-        test_output_column_tracking_cr,
-        test_output_column_tracking_tab,
-        test_output_column_tracking_backspace,
-        test_onocr_at_column_zero,
-        test_default_onlcr_newline_expands,
-        test_signal_values_from_signal_module,
-        test_ldisc_signal_uses_signal_module,
-        test_hangup_signals_from_signal_module,
-        test_job_control_signals_from_signal_module,
-        test_canonical_one_line_per_read,
-        test_canonical_has_data_line_count,
-        test_canonical_eof_line_boundary,
-        test_sigwinch_constant,
-        test_word_erase_path_boundary,
-        test_word_erase_mixed_boundary,
-        test_word_erase_trailing_spaces,
-        test_canonical_small_buffer_read,
-        test_tcsetsw_preserves_pending_input,
-        test_tcsetsf_flushes_pending_input,
-        test_read_with_attach_false_skips_auto_attach,
-        test_read_with_attach_true_skips_durable_attach,
-        test_acquire_and_release_controlling_terminal,
-        test_release_wrong_session_is_noop,
-        test_get_ldisc_default_is_ntty,
-        test_set_ldisc_round_trip_preserves_termios,
-        test_set_ldisc_invalid_id_rejected,
-        test_pty_alloc_returns_master_and_slave,
-        test_pty_master_to_slave_flow,
-        test_pty_slave_to_master_flow,
-        test_master_close_hangs_up_slave,
-        test_slave_close_returns_master_eof,
-        test_pty_canonical_editing_on_slave,
-        test_ignbrk_discards_break,
-        test_brkint_generates_sigint,
-        test_parmrk_inserts_marker,
-        test_nul_without_break_flags_passes_through,
-        test_echoke_visual_erase,
-        test_echok_newline_on_kill,
-        test_echoctl_erase_two_columns,
-        test_bytes_available,
-        test_raw_disc_bytes_available,
-        test_ldisc_kind_bytes_available,
-        test_fionread_constant,
-        test_kill_empty_line_no_echo,
-        test_ignbrk_takes_priority_over_brkint,
-        test_input_flags_from_bits,
-        test_output_flags_from_bits,
-        test_local_flags_from_bits,
-        test_cc_index_values,
-        test_posix_vdisable,
-        test_tty_error_to_errno,
-        test_tty_error_signal_interrupt,
-        test_user_termios_typed_accessors,
-        test_ldisc_typed_flags_behavioral_equivalence,
-        test_control_flags_empty,
-        test_ldisc_ops_linedisc_trait_delegation,
-        test_ldisc_ops_rawdisc_trait_delegation,
-        test_dispatch_macro_ntty_routing,
-        test_dispatch_macro_raw_routing,
-        test_from_id_still_works,
-        test_process_output_byte_dispatch,
-        test_edit_content_dispatch,
-        test_tabdly_abi_constants,
-        test_default_oflag_includes_xtabs,
-        test_xtabs_expands_tab_to_spaces,
-        test_tab0_passes_literal_tab,
-        test_tab0_column_tracking,
-        test_xtabs_column_tracking_mixed,
-        test_tabdly_termios_roundtrip,
-        test_no_opost_tab_passthrough,
-        test_existing_output_unaffected,
-    ]
+slopos_testing::stest!(
+    name = test_ldisc_new_has_no_data,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_ldisc_read_empty, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_ldisc_canonical_newline,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_canonical_backspace,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_canonical_kill,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_ldisc_canonical_eof, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_ldisc_signal_ctrl_c, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_ldisc_raw_mode, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_ldisc_set_termios_flush,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_ldisc_flush_all, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_ldisc_echo_printable,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_ldisc_echo_newline, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_tty_index_eq, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_ldisc_multiple_reads,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_backspace_empty,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_write_returns_input_len,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_keyboard_input_event_delivery,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_keyboard_break_code_no_input,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_keyboard_modifier_no_input,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_keyboard_press_release_single_char,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_vconsole_drain_via_drain_hw_input,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_keyboard_multi_key_sequence,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_write_output_processing,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_write_raw_passthrough,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_write_invalid_index,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_per_tty_termios_isolation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_per_tty_winsize_isolation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_per_tty_fg_pgrp_isolation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_per_tty_has_data_isolation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_per_tty_session_isolation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_read_invalid_tty_returns_error,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_tty_index_abi_type, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_signal_constants, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_set_compositor_focus_does_not_set_fg_pgrp,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_check_read_sole_gate_background,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_open_count_lifecycle,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_hangup_sets_flag_and_detaches_session,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_hangup_nonblock_read_eio,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tty_hangup_blocking_read_eof,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_tty_error_variants, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_read_returns_result, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_read_invalid_index_error,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_read_not_allocated_error,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_write_returns_result,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_get_termios_returns_result,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_vmin0_vtime0_immediate_return,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_vmin_enforcement, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_vmin0_vtime0_with_data_immediate_return,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_vmin_limited_by_buffer_size,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_canonical_to_noncanonical_preserves_buffered_data,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_set_fg_pgrp_checked_permission_denied,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_hangup_read_returns_hung_up,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_per_tty_lock_independence,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_driver_id_round_trip,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_split_write_returns_input_len,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_idle_cb_iterates_all_ttys,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_merged_drain_read, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_with_tty_per_slot, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_driver_id_traits, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_default_termios_has_icrnl,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_default_termios_has_opost_onlcr,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_default_termios_has_full_lflag,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_output_column_tracking_printable,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_output_column_tracking_newline,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_output_column_tracking_cr,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_output_column_tracking_tab,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_output_column_tracking_backspace,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_onocr_at_column_zero,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_default_onlcr_newline_expands,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_signal_values_from_signal_module,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_signal_uses_signal_module,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_hangup_signals_from_signal_module,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_job_control_signals_from_signal_module,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_canonical_one_line_per_read,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_canonical_has_data_line_count,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_canonical_eof_line_boundary,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_sigwinch_constant, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_word_erase_path_boundary,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_word_erase_mixed_boundary,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_word_erase_trailing_spaces,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_canonical_small_buffer_read,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tcsetsw_preserves_pending_input,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tcsetsf_flushes_pending_input,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_read_with_attach_false_skips_auto_attach,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_read_with_attach_true_skips_durable_attach,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_acquire_and_release_controlling_terminal,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_release_wrong_session_is_noop,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_get_ldisc_default_is_ntty,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_set_ldisc_round_trip_preserves_termios,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_set_ldisc_invalid_id_rejected,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_pty_alloc_returns_master_and_slave,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_pty_master_to_slave_flow,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_pty_slave_to_master_flow,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_master_close_hangs_up_slave,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_slave_close_returns_master_eof,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_pty_canonical_editing_on_slave,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ignbrk_discards_break,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_brkint_generates_sigint,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_parmrk_inserts_marker,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_nul_without_break_flags_passes_through,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_echoke_visual_erase, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_echok_newline_on_kill,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_echoctl_erase_two_columns,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_bytes_available, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_raw_disc_bytes_available,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_kind_bytes_available,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_fionread_constant, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_kill_empty_line_no_echo,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ignbrk_takes_priority_over_brkint,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_input_flags_from_bits,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_output_flags_from_bits,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_local_flags_from_bits,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_cc_index_values, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_posix_vdisable, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_tty_error_to_errno, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_tty_error_signal_interrupt,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_user_termios_typed_accessors,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_typed_flags_behavioral_equivalence,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_control_flags_empty, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_ldisc_ops_linedisc_trait_delegation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_ldisc_ops_rawdisc_trait_delegation,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_dispatch_macro_ntty_routing,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_dispatch_macro_raw_routing,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(name = test_from_id_still_works, suite = tty_test_ldisc_core);
+slopos_testing::stest!(
+    name = test_process_output_byte_dispatch,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_edit_content_dispatch,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tabdly_abi_constants,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_default_oflag_includes_xtabs,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_xtabs_expands_tab_to_spaces,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tab0_passes_literal_tab,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tab0_column_tracking,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_xtabs_column_tracking_mixed,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_tabdly_termios_roundtrip,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_no_opost_tab_passthrough,
+    suite = tty_test_ldisc_core
+);
+slopos_testing::stest!(
+    name = test_existing_output_unaffected,
+    suite = tty_test_ldisc_core
 );

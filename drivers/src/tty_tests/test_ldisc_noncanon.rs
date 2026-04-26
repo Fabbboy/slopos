@@ -557,25 +557,65 @@ pub fn test_backspace_in_expanded_buffer() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::define_test_suite!(
-    tty_test_ldisc_noncanon,
-    [
-        test_vmin_vtime_enough_data_returns_immediately,
-        test_vmin_vtime_partial_nonblock,
-        test_vmin_vtime_no_data_nonblock,
-        test_vmin_vtime_interbyte_timeout_returns_partial,
-        test_ldisc_vmin_vtime_helper,
-        test_veol_completes_line,
-        test_veol2_completes_line,
-        test_veol_disabled_no_effect,
-        test_veol_and_newline_coexist,
-        test_veol_echo_behavior,
-        test_veol_no_echo,
-        test_veol2_cc_index,
-        test_veol_veol2_both_active,
-        test_veol_and_eof_coexist,
-        test_canonical_input_over_1024,
-        test_large_paste_canonical,
-        test_backspace_in_expanded_buffer,
-    ]
+slopos_testing::stest!(
+    name = test_vmin_vtime_enough_data_returns_immediately,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_vmin_vtime_partial_nonblock,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_vmin_vtime_no_data_nonblock,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_vmin_vtime_interbyte_timeout_returns_partial,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_ldisc_vmin_vtime_helper,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_veol_completes_line,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_veol2_completes_line,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_veol_disabled_no_effect,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_veol_and_newline_coexist,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_veol_echo_behavior,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(name = test_veol_no_echo, suite = tty_test_ldisc_noncanon);
+slopos_testing::stest!(name = test_veol2_cc_index, suite = tty_test_ldisc_noncanon);
+slopos_testing::stest!(
+    name = test_veol_veol2_both_active,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_veol_and_eof_coexist,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_canonical_input_over_1024,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_large_paste_canonical,
+    suite = tty_test_ldisc_noncanon
+);
+slopos_testing::stest!(
+    name = test_backspace_in_expanded_buffer,
+    suite = tty_test_ldisc_noncanon
 );

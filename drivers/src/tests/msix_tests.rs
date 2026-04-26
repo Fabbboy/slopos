@@ -807,43 +807,47 @@ pub fn test_sata_no_msix() -> TestResult {
 // Suite registration
 // =============================================================================
 
-slopos_testing::define_test_suite!(
-    msix,
-    [
-        // Capability parsing — VirtIO block
-        test_virtio_blk_msix_cap_present,
-        test_virtio_blk_msix_table_size_nonzero,
-        test_virtio_blk_msix_bir_valid,
-        test_virtio_blk_msix_cap_offset_matches,
-        test_virtio_blk_msix_table_offset_aligned,
-        // Capability parsing — VirtIO net
-        test_virtio_net_msix_cap_present,
-        // Parsing consistency
-        test_msix_capability_parse_deterministic,
-        // Table mapping
-        test_msix_map_table_success,
-        test_msix_read_vector_control_valid,
-        test_msix_read_vector_control_out_of_range,
-        test_msix_is_pending_bounds,
-        // Entry configuration
-        test_msix_configure_entry_success,
-        test_msix_configure_invalid_vector,
-        test_msix_configure_invalid_entry,
-        // Mask / Unmask
-        test_msix_mask_entry_valid,
-        test_msix_unmask_entry_valid,
-        test_msix_mask_unmask_out_of_range,
-        // Enable / Disable
-        test_msix_enable_sets_enable_bit,
-        test_msix_disable_clears_enable_bit,
-        test_msix_function_mask_toggling,
-        test_msix_refresh_control_updates_cap,
-        // Capability helper methods
-        test_msix_cap_is_enabled_method,
-        test_msix_cap_is_function_masked_method,
-        // Sweep all MSI-X devices
-        test_all_msix_devices_fields_valid,
-        // Negative — device without MSI-X
-        test_sata_no_msix,
-    ]
+// Capability parsing — VirtIO block
+slopos_testing::stest!(name = test_virtio_blk_msix_cap_present, suite = msix);
+slopos_testing::stest!(name = test_virtio_blk_msix_table_size_nonzero, suite = msix);
+slopos_testing::stest!(name = test_virtio_blk_msix_bir_valid, suite = msix);
+slopos_testing::stest!(name = test_virtio_blk_msix_cap_offset_matches, suite = msix);
+slopos_testing::stest!(
+    name = test_virtio_blk_msix_table_offset_aligned,
+    suite = msix
 );
+// Capability parsing — VirtIO net
+slopos_testing::stest!(name = test_virtio_net_msix_cap_present, suite = msix);
+// Parsing consistency
+slopos_testing::stest!(
+    name = test_msix_capability_parse_deterministic,
+    suite = msix
+);
+// Table mapping
+slopos_testing::stest!(name = test_msix_map_table_success, suite = msix);
+slopos_testing::stest!(name = test_msix_read_vector_control_valid, suite = msix);
+slopos_testing::stest!(
+    name = test_msix_read_vector_control_out_of_range,
+    suite = msix
+);
+slopos_testing::stest!(name = test_msix_is_pending_bounds, suite = msix);
+// Entry configuration
+slopos_testing::stest!(name = test_msix_configure_entry_success, suite = msix);
+slopos_testing::stest!(name = test_msix_configure_invalid_vector, suite = msix);
+slopos_testing::stest!(name = test_msix_configure_invalid_entry, suite = msix);
+// Mask / Unmask
+slopos_testing::stest!(name = test_msix_mask_entry_valid, suite = msix);
+slopos_testing::stest!(name = test_msix_unmask_entry_valid, suite = msix);
+slopos_testing::stest!(name = test_msix_mask_unmask_out_of_range, suite = msix);
+// Enable / Disable
+slopos_testing::stest!(name = test_msix_enable_sets_enable_bit, suite = msix);
+slopos_testing::stest!(name = test_msix_disable_clears_enable_bit, suite = msix);
+slopos_testing::stest!(name = test_msix_function_mask_toggling, suite = msix);
+slopos_testing::stest!(name = test_msix_refresh_control_updates_cap, suite = msix);
+// Capability helper methods
+slopos_testing::stest!(name = test_msix_cap_is_enabled_method, suite = msix);
+slopos_testing::stest!(name = test_msix_cap_is_function_masked_method, suite = msix);
+// Sweep all MSI-X devices
+slopos_testing::stest!(name = test_all_msix_devices_fields_valid, suite = msix);
+// Negative — device without MSI-X
+slopos_testing::stest!(name = test_sata_no_msix, suite = msix);

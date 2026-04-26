@@ -234,15 +234,13 @@ pub fn test_unknown_option_returns_einval() -> TestResult {
     pass!()
 }
 
-slopos_testing::define_test_suite!(
-    socket_option,
-    [
-        test_so_reuseaddr_roundtrip,
-        test_socket_option_roundtrips,
-        test_so_rcvbuf_validation,
-        test_so_error_clear_on_read,
-        test_shutdown_read,
-        test_shutdown_write,
-        test_unknown_option_returns_einval,
-    ]
+slopos_testing::stest!(name = test_so_reuseaddr_roundtrip, suite = socket_option);
+slopos_testing::stest!(name = test_socket_option_roundtrips, suite = socket_option);
+slopos_testing::stest!(name = test_so_rcvbuf_validation, suite = socket_option);
+slopos_testing::stest!(name = test_so_error_clear_on_read, suite = socket_option);
+slopos_testing::stest!(name = test_shutdown_read, suite = socket_option);
+slopos_testing::stest!(name = test_shutdown_write, suite = socket_option);
+slopos_testing::stest!(
+    name = test_unknown_option_returns_einval,
+    suite = socket_option
 );
