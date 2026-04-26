@@ -325,28 +325,13 @@ fn boot_step_run_tests_fn() -> i32 {
 
     if klog::is_enabled_level(KlogLevel::Debug) {
         klog_info!("TESTS: Verbosity -> {}", test_config.verbosity);
-        klog_info!("TESTS: Timeout (ms) -> {}", test_config.timeout_ms);
+        klog_info!("TESTS: Warn (ms) -> {}", test_config.warn_ms);
     }
 
     tests_reset_panic_state();
 
-    use crate::ffi_boundary::{__start_test_registry, __stop_test_registry};
-    let registry_start: *const slopos_testing::TestSuiteDesc = unsafe { &__start_test_registry };
-    let registry_end: *const slopos_testing::TestSuiteDesc = unsafe { &__stop_test_registry };
-
-    // Heap-box the summary: TestRunSummary is ~2.6 KiB and inlining it
-    // keeps this function's stack frame above the gate even though the
-    // entire test run is skipped on production builds.
-    let mut summary_box = match slopos_alloc::KBox::<TestRunSummary>::zeroed() {
-        Ok(b) => b,
-        Err(_) => {
-            klog_info!("TESTS: alloc failed");
-            return -1;
-        }
-    };
-    let summary: &mut TestRunSummary = &mut *summary_box;
-
-    let rc = tests_run_all(&test_config, summary, registry_start, registry_end);
+    let mut summary = TestRunSummary::default();
+    let rc = tests_run_all(&test_config, &mut summary);
 
     // LUF (Lazy Unmap Flush) counters aggregated over all CPUs — proves
     // that cross-CPU coherence is actually flowing through the ring

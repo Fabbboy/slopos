@@ -575,62 +575,45 @@ fn ext2_tests_init() -> bool {
     true
 }
 
-const EXT2_SUITE_NAME: &[u8] = b"ext2\0";
+// VFS initialisation is performed once on first test invocation; lex sort
+// of test names guarantees `test_ext2_aaa_init` runs before any other
+// `test_ext2_*` / `test_vfs_*` entry in this file.
+static EXT2_VFS_READY: slopos_sync::StateFlag = slopos_sync::StateFlag::new();
 
-fn run_ext2_suite(_config: *const (), out: *mut slopos_testing::TestSuiteResult) -> i32 {
-    let start = slopos_arch::tsc::rdtsc();
-
+fn ensure_ext2_vfs_ready() -> bool {
+    if EXT2_VFS_READY.is_active() {
+        return true;
+    }
     if !ext2_tests_init() {
-        if let Some(out_ref) = unsafe { out.as_mut() } {
-            out_ref.name = EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char;
-            out_ref.total = 0;
-            out_ref.passed = 0;
-            out_ref.failed = 0;
-            out_ref.elapsed_ms = 0;
-        }
-        return 0;
+        return false;
     }
-
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    slopos_testing::run_test!(passed, total, test_vfs_initialized);
-    slopos_testing::run_test!(passed, total, test_vfs_root_stat);
-    slopos_testing::run_test!(passed, total, test_vfs_file_roundtrip);
-    slopos_testing::run_test!(passed, total, test_vfs_list);
-    slopos_testing::run_test!(passed, total, test_vfs_unlink);
-    slopos_testing::run_test!(passed, total, test_vfs_storage_contention_stress_baseline);
-    slopos_testing::run_test!(passed, total, test_ext2_invalid_superblock_magic);
-    slopos_testing::run_test!(passed, total, test_ext2_unsupported_block_size);
-    slopos_testing::run_test!(passed, total, test_ext2_directory_format_error);
-    slopos_testing::run_test!(passed, total, test_ext2_invalid_inode);
-    slopos_testing::run_test!(passed, total, test_ext2_read_file_not_regular);
-    slopos_testing::run_test!(passed, total, test_ext2_device_read_error);
-    slopos_testing::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
-    slopos_testing::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
-    slopos_testing::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
-    slopos_testing::run_test!(passed, total, test_ext2_path_resolution_not_found);
-    slopos_testing::run_test!(passed, total, test_ext2_remove_path_not_file);
-
-    let elapsed = slopos_testing::measure_elapsed_ms(start, slopos_arch::tsc::rdtsc());
-
-    if let Some(out_ref) = unsafe { out.as_mut() } {
-        out_ref.name = EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char;
-        out_ref.total = total;
-        out_ref.passed = passed;
-        out_ref.failed = total.saturating_sub(passed);
-        out_ref.exceptions_caught = 0;
-        out_ref.unexpected_exceptions = 0;
-        out_ref.elapsed_ms = elapsed;
-        out_ref.timed_out = 0;
-    }
-
-    if passed == total { 0 } else { -1 }
+    EXT2_VFS_READY.set_active();
+    true
 }
 
-#[used]
-#[unsafe(link_section = ".test_registry")]
-static EXT2_SUITE_DESC: slopos_testing::TestSuiteDesc = slopos_testing::TestSuiteDesc {
-    name: EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char,
-    run: Some(run_ext2_suite),
-};
+fn test_ext2_aaa_init() -> TestResult {
+    if ensure_ext2_vfs_ready() {
+        TestResult::Pass
+    } else {
+        TestResult::Skipped
+    }
+}
+
+slopos_testing::stest!(name = test_ext2_aaa_init);
+slopos_testing::stest!(name = test_vfs_initialized);
+slopos_testing::stest!(name = test_vfs_root_stat);
+slopos_testing::stest!(name = test_vfs_file_roundtrip);
+slopos_testing::stest!(name = test_vfs_list);
+slopos_testing::stest!(name = test_vfs_unlink);
+slopos_testing::stest!(name = test_vfs_storage_contention_stress_baseline);
+slopos_testing::stest!(name = test_ext2_invalid_superblock_magic);
+slopos_testing::stest!(name = test_ext2_unsupported_block_size);
+slopos_testing::stest!(name = test_ext2_directory_format_error);
+slopos_testing::stest!(name = test_ext2_invalid_inode);
+slopos_testing::stest!(name = test_ext2_read_file_not_regular);
+slopos_testing::stest!(name = test_ext2_device_read_error);
+slopos_testing::stest!(name = test_ext2_device_write_error_on_metadata);
+slopos_testing::stest!(name = test_ext2_read_block_out_of_bounds);
+slopos_testing::stest!(name = test_ext2_read_file_data_roundtrip);
+slopos_testing::stest!(name = test_ext2_path_resolution_not_found);
+slopos_testing::stest!(name = test_ext2_remove_path_not_file);

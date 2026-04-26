@@ -29,7 +29,8 @@ pub use bitmap::Bitmap;
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use kdiag::{kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
-    klog_get_level, klog_init, klog_is_enabled, klog_register_backend, klog_set_level, KlogLevel,
+    klog_force_restore_default, klog_get_level, klog_init, klog_is_enabled, klog_register_backend,
+    klog_set_level, klog_swap_backend, KlogBackend, KlogLevel,
 };
 pub use ring_buffer::RingBuffer;
 pub use stacktrace::StacktraceEntry;

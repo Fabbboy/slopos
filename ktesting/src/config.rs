@@ -1,9 +1,10 @@
+use slopos_alloc::KVec;
 use slopos_sync::StateFlag;
 use slopos_utils::klog_info;
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
-const DEFAULT_TIMEOUT_MS: u32 = 0;
+const DEFAULT_WARN_MS: u32 = 0;
 const DEFAULT_SHUTDOWN: bool = false;
 const DEFAULT_STACKTRACE_DEMO: bool = false;
 
@@ -40,24 +41,44 @@ impl core::fmt::Display for Verbosity {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Test-harness runtime configuration.
+///
+/// Globs are stored owned (`KVec<u8>`) so the source of each pattern —
+/// cmdline buffer slice or synthesised legacy alias — is irrelevant to
+/// the matcher.
+#[derive(Debug, Default)]
 pub struct TestConfig {
     pub enabled: bool,
     pub verbosity: Verbosity,
-    pub timeout_ms: u32,
+    pub warn_ms: u32,
     pub shutdown: bool,
     pub stacktrace_demo: bool,
+    pub run_globs: KVec<KVec<u8>>,
+    pub skip_globs: KVec<KVec<u8>>,
 }
 
-impl Default for TestConfig {
+impl Default for Verbosity {
     fn default() -> Self {
-        Self {
-            enabled: DEFAULT_ENABLED,
-            verbosity: DEFAULT_VERBOSITY,
-            timeout_ms: DEFAULT_TIMEOUT_MS,
-            shutdown: DEFAULT_SHUTDOWN,
-            stacktrace_demo: DEFAULT_STACKTRACE_DEMO,
+        DEFAULT_VERBOSITY
+    }
+}
+
+impl TestConfig {
+    /// True iff `name` should run under the current filter.
+    pub fn passes_filter(&self, name: &[u8]) -> bool {
+        let run_match = self.run_globs.is_empty()
+            || self
+                .run_globs
+                .iter()
+                .any(|p| crate::filter::glob_match(p.as_slice(), name));
+        if !run_match {
+            return false;
         }
+        let skip_match = self
+            .skip_globs
+            .iter()
+            .any(|p| crate::filter::glob_match(p.as_slice(), name));
+        !skip_match
     }
 }
 
@@ -110,8 +131,26 @@ fn match_dual_prefix<'a>(token: &'a str, suffix: &'static str) -> Option<&'a str
     }
 }
 
+fn push_owned_glob(target: &mut KVec<KVec<u8>>, pattern: &[u8]) {
+    let mut owned = KVec::<u8>::new();
+    for &b in pattern {
+        if owned.push(b).is_err() {
+            return;
+        }
+    }
+    let _ = target.push(owned);
+}
+
 pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
-    let mut cfg = TestConfig::default();
+    let mut cfg = TestConfig {
+        enabled: DEFAULT_ENABLED,
+        verbosity: DEFAULT_VERBOSITY,
+        warn_ms: DEFAULT_WARN_MS,
+        shutdown: DEFAULT_SHUTDOWN,
+        stacktrace_demo: DEFAULT_STACKTRACE_DEMO,
+        run_globs: KVec::new(),
+        skip_globs: KVec::new(),
+    };
     if let Some(cmdline) = cmdline {
         for token in cmdline.split_whitespace() {
             if let Some(value) = token.strip_prefix("tests=") {
@@ -133,18 +172,30 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
                 } else {
                     cfg.enabled = true;
                 }
-            } else if match_dual_prefix(token, "suite=").is_some() {
-                // Accepted for backward compatibility; all suites always run.
+            } else if let Some(value) = match_dual_prefix(token, "suite=") {
                 cfg.enabled = true;
+                push_suite_glob(&mut cfg.run_globs, value);
             } else if let Some(value) = match_dual_prefix(token, "verbosity=") {
                 cfg.verbosity = Verbosity::from_str(value);
             } else if let Some(value) = match_dual_prefix(token, "timeout=") {
                 if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
-                    cfg.timeout_ms = parsed;
+                    cfg.warn_ms = parsed;
                 }
             } else if let Some(value) = match_dual_prefix(token, "warn_ms=") {
                 if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
-                    cfg.timeout_ms = parsed;
+                    cfg.warn_ms = parsed;
+                }
+            } else if let Some(value) = match_dual_prefix(token, "run=") {
+                for piece in value.split(',') {
+                    if !piece.is_empty() {
+                        push_owned_glob(&mut cfg.run_globs, piece.as_bytes());
+                    }
+                }
+            } else if let Some(value) = match_dual_prefix(token, "skip=") {
+                for piece in value.split(',') {
+                    if !piece.is_empty() {
+                        push_owned_glob(&mut cfg.skip_globs, piece.as_bytes());
+                    }
                 }
             } else if let Some(value) = match_dual_prefix(token, "shutdown=") {
                 if let Some(shutdown) = parse_bool(value) {
@@ -158,4 +209,22 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
         }
     }
     cfg
+}
+
+/// Translate `tests.suite=foo` (legacy alias) into the glob `*foo*` so
+/// that any test fully-qualified name containing `foo` is admitted.
+fn push_suite_glob(target: &mut KVec<KVec<u8>>, suite: &str) {
+    let mut owned = KVec::<u8>::new();
+    if owned.push(b'*').is_err() {
+        return;
+    }
+    for &b in suite.as_bytes() {
+        if owned.push(b).is_err() {
+            return;
+        }
+    }
+    if owned.push(b'*').is_err() {
+        return;
+    }
+    let _ = target.push(owned);
 }

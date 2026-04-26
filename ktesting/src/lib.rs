@@ -1,16 +1,22 @@
 #![no_std]
+#![feature(allocator_api)]
 #![feature(sync_unsafe_cell)]
 
-use core::ffi::c_int;
-
+pub mod capture;
 pub mod config;
+pub mod filter;
 pub mod harness;
+pub mod ktap;
+pub mod registry;
+mod result;
 mod runner;
 
 mod assertions;
 #[cfg(feature = "qemu-exit")]
 pub mod qemu_signal;
 
+#[cfg(feature = "tests")]
+pub mod bootstrap_tests;
 #[cfg(feature = "tests")]
 pub mod exception_tests;
 #[cfg(feature = "tests")]
@@ -21,39 +27,12 @@ pub mod xsave_tests;
 pub use config::{config_from_cmdline, TestConfig, Verbosity};
 pub use harness::{
     cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
-    tests_request_shutdown, tests_reset_panic_state, tests_run_all, TestRunSummary, TestSuiteDesc,
-    TestSuiteResult, HARNESS_MAX_SUITES,
+    tests_request_shutdown, tests_reset_panic_state, tests_run_all, TestRunSummary,
 };
-pub use runner::run_single_test;
+pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC};
+pub use result::{TestOutcome, TestResult};
+pub use runner::{execute_test, run_single_test};
 pub use slopos_service_core::paste;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TestResult {
-    Pass,
-    Fail,
-    Panic,
-    Skipped,
-}
-
-impl TestResult {
-    #[inline]
-    pub fn is_pass(&self) -> bool {
-        matches!(self, Self::Pass | Self::Skipped)
-    }
-
-    #[inline]
-    pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Fail | Self::Panic)
-    }
-
-    #[inline]
-    pub fn to_c_int(self) -> c_int {
-        match self {
-            Self::Pass | Self::Skipped => 0,
-            Self::Fail | Self::Panic => -1,
-        }
-    }
-}
 
 #[macro_export]
 macro_rules! pass {
@@ -97,82 +76,88 @@ macro_rules! run_test {
     }};
 }
 
+/// Register a single test function as a `TestDesc` in `.test_registry`.
+///
+/// The function must have signature `fn() -> TestResult`. The harness
+/// runs each entry under `catch_panic!`, capturing klog output for the
+/// duration of the test.
+///
+/// ```ignore
+/// fn my_test() -> TestResult { TestResult::Pass }
+/// slopos_testing::stest!(name = my_test);
+/// ```
 #[macro_export]
-macro_rules! define_test_suite {
-    ($suite_name:ident, [$($test_fn:path),* $(,)?]) => {
+macro_rules! stest {
+    (name = $ident:ident) => {
+        $crate::stest!(name = $ident, flags = 0);
+    };
+
+    (name = $ident:ident, flags = $flags:expr) => {
         $crate::paste::paste! {
-            const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
-
-            fn [<run_ $suite_name _suite>](
-                _config: *const (),
-                out: *mut $crate::TestSuiteResult,
-            ) -> i32 {
-                let start = slopos_arch::tsc::rdtsc();
-                let mut passed = 0u32;
-                let mut total = 0u32;
-
-                $(
-                    $crate::run_test!(passed, total, $test_fn);
-                )*
-
-                let elapsed = $crate::measure_elapsed_ms(start, slopos_arch::tsc::rdtsc());
-
-                if let Some(out_ref) = unsafe { out.as_mut() } {
-                    out_ref.name = [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char;
-                    out_ref.total = total;
-                    out_ref.passed = passed;
-                    out_ref.failed = total.saturating_sub(passed);
-                    out_ref.exceptions_caught = 0;
-                    out_ref.unexpected_exceptions = 0;
-                    out_ref.elapsed_ms = elapsed;
-                    out_ref.timed_out = 0;
-                }
-
-                if passed == total { 0 } else { -1 }
+            fn [<__stest_thunk_ $ident>]() -> $crate::TestResult {
+                $crate::execute_test($ident as fn() -> $crate::TestResult)
             }
 
             #[used]
+            #[allow(non_upper_case_globals)]
             #[unsafe(link_section = ".test_registry")]
-            pub static [<$suite_name:upper _SUITE_DESC>]: $crate::TestSuiteDesc = $crate::TestSuiteDesc {
-                name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
-                run: Some([<run_ $suite_name _suite>]),
+            pub static [<TEST_DESC_ $ident>]: $crate::TestDesc = $crate::TestDesc {
+                name: stringify!($ident),
+                module: module_path!(),
+                file: file!(),
+                line: line!(),
+                run: [<__stest_thunk_ $ident>],
+                kind: $crate::TestKind::Kernel,
+                flags: $flags,
+                bin: None,
+                argv: &[],
             };
         }
     };
 
-    ($suite_name:ident, $runner_fn:path, single) => {
+    (name = $ident:ident, suite = $suite:ident) => {
+        $crate::stest!(name = $ident, suite = $suite, flags = 0);
+    };
+
+    (name = $ident:ident, suite = $suite:ident, flags = $flags:expr) => {
         $crate::paste::paste! {
-            const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
-
-            fn [<run_ $suite_name _suite>](
-                _config: *const (),
-                out: *mut $crate::TestSuiteResult,
-            ) -> i32 {
-                let start = slopos_arch::tsc::rdtsc();
-                let result = slopos_utils::catch_panic!({ $runner_fn().to_c_int() });
-                let passed = if result == 0 { 1u32 } else { 0u32 };
-                let elapsed = $crate::measure_elapsed_ms(start, slopos_arch::tsc::rdtsc());
-
-                if let Some(out_ref) = unsafe { out.as_mut() } {
-                    out_ref.name = [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char;
-                    out_ref.total = 1;
-                    out_ref.passed = passed;
-                    out_ref.failed = 1 - passed;
-                    out_ref.exceptions_caught = 0;
-                    out_ref.unexpected_exceptions = 0;
-                    out_ref.elapsed_ms = elapsed;
-                    out_ref.timed_out = 0;
-                }
-
-                if result == 0 { 0 } else { -1 }
+            fn [<__stest_thunk_ $suite _ $ident>]() -> $crate::TestResult {
+                $crate::execute_test($ident as fn() -> $crate::TestResult)
             }
 
             #[used]
+            #[allow(non_upper_case_globals)]
             #[unsafe(link_section = ".test_registry")]
-            pub static [<$suite_name:upper _SUITE_DESC>]: $crate::TestSuiteDesc = $crate::TestSuiteDesc {
-                name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
-                run: Some([<run_ $suite_name _suite>]),
+            pub static [<TEST_DESC_ $suite _ $ident>]: $crate::TestDesc = $crate::TestDesc {
+                name: stringify!($ident),
+                module: module_path!(),
+                file: file!(),
+                line: line!(),
+                run: [<__stest_thunk_ $suite _ $ident>],
+                kind: $crate::TestKind::Kernel,
+                flags: $flags,
+                bin: None,
+                argv: &[],
             };
         }
+    };
+}
+
+/// Bridge: rewrites the legacy `define_test_suite!` form to one
+/// `stest!` invocation per listed test function. The `suite_name`
+/// argument is preserved for source-level continuity but is not used
+/// — `module_path!()` at the call site already disambiguates per-test
+/// descriptors. The bridge is removed in Phase 2 along with all 69
+/// remaining call sites.
+#[macro_export]
+macro_rules! define_test_suite {
+    ($suite_name:ident, [$($test_fn:ident),* $(,)?]) => {
+        $(
+            $crate::stest!(name = $test_fn, suite = $suite_name);
+        )*
+    };
+
+    ($suite_name:ident, $runner_fn:ident, single) => {
+        $crate::stest!(name = $runner_fn, suite = $suite_name);
     };
 }

@@ -1,9 +1,8 @@
-// Test harness types: TestSuiteResult, TestSuiteDesc, TestRunSummary.
-// Suites are auto-registered via #[link_section = ".test_registry"] in define_test_suite!.
+//! Per-test harness: walks the `.test_registry` linker section, runs each
+//! `TestDesc` under `catch_panic!` with klog capture installed, and emits
+//! both KTAP and legacy `SUITE_<root>` lines.
 
 use core::cell::SyncUnsafeCell;
-use core::ffi::{c_char, c_int};
-use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_sync::StateFlag;
@@ -11,143 +10,34 @@ use slopos_utils::klog_info;
 
 use crate::config::TestConfig;
 
-/// Maximum number of test suites that can be registered.
-pub const HARNESS_MAX_SUITES: usize = 64;
+#[cfg(feature = "tests")]
+use crate::config::Verbosity;
+#[cfg(feature = "tests")]
+use crate::registry::{module_root, registry_sorted, TestDesc};
+#[cfg(feature = "tests")]
+use crate::result::TestResult;
+#[cfg(feature = "tests")]
+use slopos_alloc::KVec;
 
 /// Default cycles per millisecond estimate (3 GHz).
 const DEFAULT_CYCLES_PER_MS: u64 = 3_000_000;
 
-/// Result of executing a single test suite.
+/// Aggregated counters returned to the boot caller.
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TestSuiteResult {
-    pub name: *const c_char,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TestRunSummary {
     pub total: u32,
     pub passed: u32,
     pub failed: u32,
-    pub exceptions_caught: u32,
-    pub unexpected_exceptions: u32,
+    pub skipped: u32,
+    pub over_time: u32,
+    pub panics: u32,
     pub elapsed_ms: u32,
-    pub timed_out: c_int,
-}
-
-impl Default for TestSuiteResult {
-    fn default() -> Self {
-        Self {
-            name: ptr::null(),
-            total: 0,
-            passed: 0,
-            failed: 0,
-            exceptions_caught: 0,
-            unexpected_exceptions: 0,
-            elapsed_ms: 0,
-            timed_out: 0,
-        }
-    }
-}
-
-impl TestSuiteResult {
-    /// Create a new result with just the suite name set.
-    pub const fn new(name: *const c_char) -> Self {
-        Self {
-            name,
-            total: 0,
-            passed: 0,
-            failed: 0,
-            exceptions_caught: 0,
-            unexpected_exceptions: 0,
-            elapsed_ms: 0,
-            timed_out: 0,
-        }
-    }
-
-    /// Fill in results from a (passed, total) tuple and elapsed time.
-    pub fn fill(&mut self, passed: u32, total: u32, elapsed_ms: u32) {
-        self.total = total;
-        self.passed = passed;
-        self.failed = total.saturating_sub(passed);
-        self.elapsed_ms = elapsed_ms;
-    }
-
-    /// Check if all tests in this suite passed.
-    pub fn all_passed(&self) -> bool {
-        self.failed == 0 && self.unexpected_exceptions == 0 && self.timed_out == 0
-    }
-}
-
-pub type SuiteRunnerFn = fn(*const (), *mut TestSuiteResult) -> i32;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TestSuiteDesc {
-    pub name: *const c_char,
-    pub run: Option<SuiteRunnerFn>,
-}
-
-// SAFETY: TestSuiteDesc contains only raw pointers to static data and function pointers.
-// These are inherently thread-safe for read-only access.
-unsafe impl Sync for TestSuiteDesc {}
-
-/// Aggregated results from running all test suites.
-///
-/// SAFETY: All fields are integer/byte-array primitives; the all-zero
-/// bit pattern is a valid value, allowing heap-direct allocation via
-/// `KBox::<TestRunSummary>::zeroed()` to avoid materialising the
-/// ~2.6 KiB `Default::default()` rvalue on a caller's stack.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TestRunSummary {
-    pub suites: [TestSuiteResult; HARNESS_MAX_SUITES],
-    pub suite_count: usize,
-    pub total_tests: u32,
-    pub passed: u32,
-    pub failed: u32,
-    pub exceptions_caught: u32,
-    pub unexpected_exceptions: u32,
-    pub elapsed_ms: u32,
-    pub timed_out: c_int,
-}
-
-// SAFETY: see struct doc; all fields zero-valid.
-unsafe impl slopos_alloc::Zeroable for TestRunSummary {}
-
-impl Default for TestRunSummary {
-    fn default() -> Self {
-        Self {
-            suites: [TestSuiteResult::default(); HARNESS_MAX_SUITES],
-            suite_count: 0,
-            total_tests: 0,
-            passed: 0,
-            failed: 0,
-            exceptions_caught: 0,
-            unexpected_exceptions: 0,
-            elapsed_ms: 0,
-            timed_out: 0,
-        }
-    }
 }
 
 impl TestRunSummary {
-    /// Add results from a single suite to the summary.
-    pub fn add_suite_result(&mut self, result: &TestSuiteResult) {
-        self.total_tests = self.total_tests.saturating_add(result.total);
-        self.passed = self.passed.saturating_add(result.passed);
-        self.failed = self.failed.saturating_add(result.failed);
-        self.exceptions_caught = self
-            .exceptions_caught
-            .saturating_add(result.exceptions_caught);
-        self.unexpected_exceptions = self
-            .unexpected_exceptions
-            .saturating_add(result.unexpected_exceptions);
-        self.elapsed_ms = self.elapsed_ms.saturating_add(result.elapsed_ms);
-        if result.timed_out != 0 {
-            self.timed_out = 1;
-        }
-    }
-
-    /// Check if all tests across all suites passed.
     pub fn all_passed(&self) -> bool {
-        self.failed == 0 && self.unexpected_exceptions == 0 && self.timed_out == 0
+        self.failed == 0 && self.panics == 0
     }
 }
 
@@ -204,10 +94,8 @@ pub fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
 }
 
 // =============================================================================
-// Harness driver: panic glue + tests_run_all
+// Panic glue
 // =============================================================================
-
-pub const TESTS_MAX_SUITES: usize = HARNESS_MAX_SUITES;
 
 static PANIC_SEEN: StateFlag = StateFlag::new();
 static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -217,131 +105,10 @@ pub fn tests_reset_panic_state() {
     PANIC_REPORTED.store(false, Ordering::Relaxed);
 }
 
-#[cfg(not(feature = "tests"))]
-pub fn tests_run_all(
-    _config: *const TestConfig,
-    _summary: *mut TestRunSummary,
-    _registry_start: *const TestSuiteDesc,
-    _registry_end: *const TestSuiteDesc,
-) -> i32 {
-    // No-op in production: `TestRunSummary` is 6 KiB on the kernel
-    // stack, tripping the stack-size gate. The real body compiles
-    // under the `tests` feature (which lifts the gate via
-    // scripts/build_kernel.sh).
-    0
-}
-
-#[cfg(feature = "tests")]
-pub fn tests_run_all(
-    config: *const TestConfig,
-    summary: *mut TestRunSummary,
-    registry_start: *const TestSuiteDesc,
-    registry_end: *const TestSuiteDesc,
-) -> i32 {
-    if config.is_null() {
-        return -1;
-    }
-
-    let mut local_summary = TestRunSummary::default();
-    let summary = if summary.is_null() {
-        &mut local_summary
-    } else {
-        unsafe {
-            *summary = TestRunSummary::default();
-            &mut *summary
-        }
-    };
-
-    let cfg = unsafe { &*config };
-    if !cfg.enabled {
-        klog_info!("TESTS: Harness disabled");
-        return 0;
-    }
-
-    klog_info!("TESTS: Starting test suites");
-
-    let start_cycles = slopos_arch::tsc::rdtsc();
-    let mut idx = 0usize;
-    let mut cursor = registry_start;
-    while cursor < registry_end {
-        if PANIC_SEEN.is_active() {
-            summary.unexpected_exceptions = summary.unexpected_exceptions.saturating_add(1);
-            summary.failed = summary.failed.saturating_add(1);
-            if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
-                klog_info!("TESTS: panic flagged, stopping suite execution");
-            }
-            break;
-        }
-
-        let desc = unsafe { &*cursor };
-
-        let suite_start = slopos_arch::tsc::rdtsc();
-        let mut res = TestSuiteResult::default();
-        res.name = desc.name;
-
-        if let Some(run) = desc.run {
-            let config_ptr = config as *const ();
-            // Call the suite runner directly — no outer catch_panic!.
-            // Individual tests use catch_panic! internally (run_single_test)
-            // to catch intentional panics. Unexpected suite-level panics
-            // propagate to the default panic handler which exits QEMU with
-            // a failure code in test mode, avoiding deadlocks from longjmp
-            // through held locks or corrupted state.
-            run(config_ptr, &mut res);
-        }
-
-        if PANIC_SEEN.is_active() {
-            res.unexpected_exceptions = res.unexpected_exceptions.saturating_add(1);
-            res.failed = res.failed.saturating_add(1);
-        }
-
-        if cfg.timeout_ms != 0 {
-            let elapsed = measure_elapsed_ms(suite_start, slopos_arch::tsc::rdtsc());
-            if elapsed > cfg.timeout_ms {
-                res.timed_out = 1;
-                res.failed = res.failed.saturating_add(1);
-                if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
-                    klog_info!("TESTS: suite timeout exceeded");
-                }
-            }
-        }
-
-        if summary.suite_count < TESTS_MAX_SUITES {
-            summary.suites[summary.suite_count] = res;
-            summary.suite_count += 1;
-        }
-
-        klog_info!(
-            "SUITE{} total={} pass={} fail={} elapsed={}ms",
-            idx as u32,
-            res.total,
-            res.passed,
-            res.failed,
-            res.elapsed_ms,
-        );
-        summary.add_suite_result(&res);
-
-        idx += 1;
-        cursor = unsafe { cursor.add(1) };
-    }
-    let end_cycles = slopos_arch::tsc::rdtsc();
-    let overall_ms = measure_elapsed_ms(start_cycles, end_cycles);
-    if overall_ms > summary.elapsed_ms {
-        summary.elapsed_ms = overall_ms;
-    }
-
-    klog_info!(
-        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}",
-        summary.total_tests,
-        summary.passed,
-        summary.failed,
-        summary.elapsed_ms,
-    );
-
-    if summary.failed == 0 {
-        0
-    } else {
-        -1
+pub fn tests_mark_panic() {
+    PANIC_SEEN.set_active();
+    if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+        klog_info!("TESTS: panic observed");
     }
 }
 
@@ -355,9 +122,330 @@ pub fn tests_request_shutdown(_failed: i32) {
     // No-op when qemu-exit feature is disabled (production builds).
 }
 
-pub fn tests_mark_panic() {
-    PANIC_SEEN.set_active();
-    if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
-        klog_info!("TESTS: panic observed");
+// =============================================================================
+// Harness driver
+// =============================================================================
+
+#[cfg(feature = "tests")]
+#[derive(Default)]
+struct GroupTotals {
+    total: u32,
+    passed: u32,
+    failed: u32,
+    elapsed_ms: u32,
+}
+
+#[cfg(feature = "tests")]
+const FQN_BUF_BYTES: usize = 512;
+
+/// Render `module::name` into a stack scratch buffer; returns the populated
+/// prefix slice. Truncates if the buffer is too small (test names that long
+/// don't exist in this kernel).
+#[cfg(feature = "tests")]
+fn full_name_into<'a>(desc: &TestDesc, buf: &'a mut [u8; FQN_BUF_BYTES]) -> &'a [u8] {
+    let m = desc.module.as_bytes();
+    let n = desc.name.as_bytes();
+    let mut i = 0usize;
+    let cap = buf.len();
+    let take_m = m.len().min(cap.saturating_sub(i));
+    buf[i..i + take_m].copy_from_slice(&m[..take_m]);
+    i += take_m;
+    if i + 2 <= cap {
+        buf[i] = b':';
+        buf[i + 1] = b':';
+        i += 2;
     }
+    let take_n = n.len().min(cap.saturating_sub(i));
+    buf[i..i + take_n].copy_from_slice(&n[..take_n]);
+    i += take_n;
+    &buf[..i]
+}
+
+#[cfg(not(feature = "tests"))]
+pub fn tests_run_all(_config: &TestConfig, _summary: &mut TestRunSummary) -> i32 {
+    // No-op in production: the harness body would spike stack frames
+    // above the 2 KiB gate. The real body compiles under the `tests`
+    // feature (which lifts the gate via scripts/build_kernel.sh).
+    0
+}
+
+#[cfg(feature = "tests")]
+pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
+    *summary = TestRunSummary::default();
+    if !cfg.enabled {
+        klog_info!("TESTS: Harness disabled");
+        return 0;
+    }
+
+    klog_info!("TESTS: Starting test suites");
+    register_panic_klog_cleanup();
+
+    let descs = match registry_sorted() {
+        Ok(v) => v,
+        Err(_) => {
+            klog_info!("TESTS: registry_sorted alloc failed");
+            return -1;
+        }
+    };
+
+    // First pass: count entries that pass the filter so the KTAP plan
+    // matches actual emission count.
+    let mut name_buf = [0u8; FQN_BUF_BYTES];
+    let mut planned: u32 = 0;
+    for desc in &descs {
+        let fqn = full_name_into(desc, &mut name_buf);
+        if cfg.passes_filter(fqn) {
+            planned += 1;
+        }
+    }
+    crate::ktap::emit_header(planned);
+
+    let mut groups: KVec<(&'static str, GroupTotals)> = KVec::new();
+    let start_cycles = slopos_arch::tsc::rdtsc();
+    let mut idx: u32 = 0;
+    let mut bailed = false;
+
+    for desc in &descs {
+        if PANIC_SEEN.is_active() {
+            summary.panics = summary.panics.saturating_add(1);
+            if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+                klog_info!("TESTS: panic flagged, stopping registry walk");
+            }
+            break;
+        }
+        let fqn = full_name_into(desc, &mut name_buf);
+        if !cfg.passes_filter(fqn) {
+            continue;
+        }
+        idx += 1;
+
+        let outcome = run_one(desc, cfg, idx);
+
+        match outcome.outcome {
+            TestResult::Pass | TestResult::OverTime | TestResult::Skipped => {
+                summary.passed = summary.passed.saturating_add(1);
+            }
+            TestResult::Fail => {
+                summary.failed = summary.failed.saturating_add(1);
+            }
+            TestResult::Panic => {
+                summary.panics = summary.panics.saturating_add(1);
+                summary.failed = summary.failed.saturating_add(1);
+            }
+        }
+        if outcome.outcome == TestResult::OverTime {
+            summary.over_time = summary.over_time.saturating_add(1);
+        }
+
+        // Aggregate into the legacy `SUITE_<root>` bucket by first
+        // module-path segment (e.g., `slopos_mm::*` → `slopos_mm`).
+        let root = module_root(desc.module);
+        accumulate_group(&mut groups, root, &outcome);
+
+        if outcome.bail {
+            crate::ktap::emit_bail(desc.name);
+            bailed = true;
+            break;
+        }
+    }
+
+    summary.total = idx;
+    let end_cycles = slopos_arch::tsc::rdtsc();
+    summary.elapsed_ms = measure_elapsed_ms(start_cycles, end_cycles);
+
+    emit_legacy_suite_lines(&groups);
+
+    klog_info!(
+        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}",
+        summary.total,
+        summary.passed,
+        summary.failed,
+        summary.elapsed_ms,
+    );
+
+    crate::ktap::emit_footer(
+        summary.elapsed_ms,
+        summary.passed,
+        summary.failed,
+        summary.skipped,
+        summary.over_time,
+    );
+
+    if bailed || summary.failed > 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+#[cfg(feature = "tests")]
+struct OutcomeRecord {
+    outcome: TestResult,
+    time_ms: u32,
+    bail: bool,
+}
+
+#[cfg(feature = "tests")]
+fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
+    let truncated;
+    let raw_outcome;
+    let time_ms;
+    let captured_log: &[u8];
+    {
+        let _g = crate::capture::begin();
+        let t0 = slopos_arch::tsc::rdtsc();
+        raw_outcome = (desc.run)();
+        let t1 = slopos_arch::tsc::rdtsc();
+        time_ms = measure_elapsed_ms(t0, t1);
+        captured_log = crate::capture::drain_cpu0();
+        truncated = crate::capture::truncated_bytes();
+    }
+
+    // EXPECTED_PANIC: a test marked with the flag treats a Panic outcome
+    // as Pass-with-suffix. Used by the bootstrap panic-isolation canary.
+    let expected_panic = (desc.flags & crate::registry::FLAG_EXPECTED_PANIC) != 0;
+    let outcome = if raw_outcome == TestResult::Panic && expected_panic {
+        TestResult::Pass
+    } else {
+        raw_outcome
+    };
+
+    let final_outcome = if outcome == TestResult::Pass && cfg.warn_ms > 0 && time_ms > cfg.warn_ms {
+        TestResult::OverTime
+    } else {
+        outcome
+    };
+
+    let suppress_pass = matches!(cfg.verbosity, Verbosity::Quiet);
+    let pass_suffix: Option<&str> = if expected_panic && raw_outcome == TestResult::Panic {
+        Some("EXPECTED_PANIC")
+    } else if final_outcome == TestResult::OverTime {
+        Some("OVER_TIME")
+    } else {
+        None
+    };
+
+    match final_outcome {
+        TestResult::Pass | TestResult::OverTime => {
+            if !suppress_pass {
+                crate::ktap::emit_ok(idx, desc, time_ms, pass_suffix);
+            }
+            if matches!(cfg.verbosity, Verbosity::Verbose) {
+                emit_verbose_log(captured_log, truncated);
+            }
+        }
+        TestResult::Skipped => {
+            if !suppress_pass {
+                crate::ktap::emit_skip(idx, desc, "test returned Skipped");
+            }
+        }
+        TestResult::Fail | TestResult::Panic => {
+            crate::ktap::emit_not_ok(idx, desc, time_ms, final_outcome, captured_log, truncated);
+        }
+    }
+
+    let bail = desc.name.starts_with("bootstrap_") && final_outcome.is_failure();
+    OutcomeRecord {
+        outcome: final_outcome,
+        time_ms,
+        bail,
+    }
+}
+
+#[cfg(feature = "tests")]
+fn emit_verbose_log(cpu0_log: &[u8], truncated_bytes: usize) {
+    let has_foreign = crate::capture::drain_all().any(|(cpu, slice)| cpu != 0 && !slice.is_empty());
+    if cpu0_log.is_empty() && !has_foreign {
+        return;
+    }
+    klog_info!("KTAP\t  ---");
+    klog_info!("KTAP\t  log: |");
+    for line in cpu0_log.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let s = core::str::from_utf8(line).unwrap_or("<non-utf8 log line>");
+        klog_info!("KTAP\t   {}", s);
+    }
+    if truncated_bytes > 0 {
+        klog_info!(
+            "KTAP\t   [cpu0 tail trimmed: {} bytes lost to ring overflow]",
+            truncated_bytes
+        );
+    }
+    for (cpu, slice) in crate::capture::drain_all() {
+        if cpu == 0 || slice.is_empty() {
+            continue;
+        }
+        klog_info!("KTAP\t   --- cpu{} ---", cpu);
+        for line in slice.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let s = core::str::from_utf8(line).unwrap_or("<non-utf8 log line>");
+            klog_info!("KTAP\t   {}", s);
+        }
+    }
+    klog_info!("KTAP\t  ...");
+}
+
+#[cfg(feature = "tests")]
+fn accumulate_group(
+    groups: &mut KVec<(&'static str, GroupTotals)>,
+    root: &'static str,
+    rec: &OutcomeRecord,
+) {
+    for (key, totals) in groups.iter_mut() {
+        if *key == root {
+            totals.total = totals.total.saturating_add(1);
+            if rec.outcome.is_failure() {
+                totals.failed = totals.failed.saturating_add(1);
+            } else {
+                totals.passed = totals.passed.saturating_add(1);
+            }
+            totals.elapsed_ms = totals.elapsed_ms.saturating_add(rec.time_ms);
+            return;
+        }
+    }
+    let mut t = GroupTotals::default();
+    t.total = 1;
+    if rec.outcome.is_failure() {
+        t.failed = 1;
+    } else {
+        t.passed = 1;
+    }
+    t.elapsed_ms = rec.time_ms;
+    let _ = groups.push((root, t));
+}
+
+#[cfg(feature = "tests")]
+fn emit_legacy_suite_lines(groups: &KVec<(&'static str, GroupTotals)>) {
+    for (i, (name, totals)) in groups.iter().enumerate() {
+        klog_info!(
+            "SUITE{} name={} total={} pass={} fail={} elapsed={}ms",
+            i,
+            name,
+            totals.total,
+            totals.passed,
+            totals.failed,
+            totals.elapsed_ms,
+        );
+    }
+}
+
+#[cfg(feature = "tests")]
+static PANIC_HOOK_REGISTERED: StateFlag = StateFlag::new();
+
+#[cfg(feature = "tests")]
+fn register_panic_klog_cleanup() {
+    if PANIC_HOOK_REGISTERED.is_active() {
+        return;
+    }
+    PANIC_HOOK_REGISTERED.set_active();
+    slopos_utils::panic_recovery::register_panic_cleanup(klog_panic_cleanup);
+}
+
+#[cfg(feature = "tests")]
+fn klog_panic_cleanup() {
+    slopos_utils::klog_force_restore_default();
 }

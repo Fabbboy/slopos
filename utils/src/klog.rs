@@ -120,7 +120,36 @@ fn dispatch(args: fmt::Arguments<'_>) {
 ///
 /// Typically called once by the serial driver during its initialisation.
 pub fn klog_register_backend(backend: KlogBackend) {
-    BACKEND.store(backend as *mut (), Ordering::Release);
+    let _ = klog_swap_backend(Some(backend));
+}
+
+/// Atomically install `new` and return whatever was active before.
+///
+/// `None` represents the early-boot null-pointer fallback. The test harness
+/// uses this to stash the prior backend, install a buffering capture backend
+/// for the duration of one test, and restore the original on drop.
+pub fn klog_swap_backend(new: Option<KlogBackend>) -> Option<KlogBackend> {
+    let new_ptr = match new {
+        Some(b) => b as *mut (),
+        None => core::ptr::null_mut(),
+    };
+    let prev = BACKEND.swap(new_ptr, Ordering::AcqRel);
+    if prev.is_null() {
+        None
+    } else {
+        // SAFETY: `BACKEND` only ever holds pointers we put there, which are
+        // valid `KlogBackend` fn pointers (same size as `*mut ()` on x86_64).
+        Some(unsafe { core::mem::transmute::<*mut (), KlogBackend>(prev) })
+    }
+}
+
+/// Force the backend back to the early-boot fallback.
+///
+/// Intended for the panic-recovery cleanup path: if a panicking test
+/// longjmps out of `catch_panic!`, its `CaptureGuard` never runs, so
+/// the buffering backend would otherwise stay installed forever.
+pub fn klog_force_restore_default() {
+    BACKEND.store(core::ptr::null_mut(), Ordering::Release);
 }
 
 /// Initialise klog (sets default level).  Called very early in boot.

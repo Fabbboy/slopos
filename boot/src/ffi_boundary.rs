@@ -50,6 +50,6 @@ unsafe extern "C" {
     pub static __stop_boot_init_services: crate::early_init::BootInitStep;
     pub static __start_boot_init_optional: crate::early_init::BootInitStep;
     pub static __stop_boot_init_optional: crate::early_init::BootInitStep;
-    pub static __start_test_registry: slopos_testing::TestSuiteDesc;
-    pub static __stop_test_registry: slopos_testing::TestSuiteDesc;
+    pub static __start_test_registry: slopos_testing::TestDesc;
+    pub static __stop_test_registry: slopos_testing::TestDesc;
 }

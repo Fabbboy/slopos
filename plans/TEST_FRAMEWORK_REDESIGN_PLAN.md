@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Phase 0 **complete**; Phase 1 not started
+> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 not started
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -392,55 +392,27 @@ Same `.test_registry` section, `kind = TestKind::Userland`. The kernel knows abo
 
 ### 1A. New `ktesting` modules
 
-- [ ] **1A.1** Create `ktesting/src/result.rs`:
-  - `pub enum TestOutcome { Pass, Fail, Panic, Skipped, OverTime }`
-  - Convenience `is_pass`, `is_failure`, conversion to KTAP status word
-  - Re-export old `TestResult` aliased to `TestOutcome` for one phase
-- [ ] **1A.2** Create `ktesting/src/registry.rs`:
-  - `#[repr(C)] pub struct TestDesc` per Architecture section, with `name_cstr`, `module_cstr`, `file_cstr`, `line`, `run`, `kind`, `flags`, `bin_cstr`, `argv_ptr`
-  - `pub enum TestKind { Kernel, Userland }`
-  - `pub fn registry_iter() -> impl Iterator<Item = &'static TestDesc>` — walks `__start_test_registry`/`__stop_test_registry`
-  - `pub fn registry_sorted() -> KVec<&'static TestDesc>` — sorts by `(module_path, name)` lex order; uses `slopos_alloc::KVec`
-- [ ] **1A.3** Create `ktesting/src/capture.rs`:
-  - Per-CPU static rings: `static mut CAPTURE_RING: [SyncUnsafeCell<[u8; 65536]>; MAX_CPUS]` in `.bss`
-  - `pub struct CaptureGuard { prev_backend: KlogBackend }` with `Drop` that restores backend
-  - `pub fn begin() -> CaptureGuard`, restores on drop
-  - `pub fn drain_cpu0() -> &'static [u8]`, returns slice of CPU0 ring
-  - `pub fn drain_all() -> impl Iterator<Item=(usize, &'static [u8])>` for verbose mode
-  - Internal `BufferingBackend::write` appends to `current_cpu`'s ring; tracks truncation flag
-- [ ] **1A.4** Create `ktesting/src/filter.rs`:
-  - `pub fn glob_match(pat: &[u8], name: &[u8]) -> bool` — supports `*` (any sequence, no anchoring) and `?` (single char). Recursive backtracking. ~50 lines, no_std, no alloc.
-  - `pub fn matches_any(pats: &[&[u8]], name: &[u8]) -> bool`
-  - `pub fn passes_filter(name: &[u8], cfg: &TestConfig) -> bool`
-- [ ] **1A.5** Create `ktesting/src/ktap.rs`:
-  - `pub fn emit_header(plan_count: u32)` — `KTAP\tTAP version 14\nKTAP\t1..N`
-  - `pub fn emit_ok(idx: u32, name: &CStr, time_ms: u64, suffix: Option<&str>)`
-  - `pub fn emit_not_ok(idx: u32, name: &CStr, time_ms: u64, file: &CStr, line: u32, outcome: TestOutcome, log: &[u8])`
-  - `pub fn emit_skip(idx: u32, name: &CStr, reason: &str)`
-  - `pub fn emit_subtest_indented(parent_indent: u32, idx: u32, status: u32, name: &str)`
-  - `pub fn emit_footer(totals: &Totals)`
-  - All output via `klog_info!` with literal `KTAP\t` prefix; YAML block bodies indented `KTAP\t  `
+- [x] **1A.1** Create `ktesting/src/result.rs` with `pub enum TestOutcome` as the canonical name and `pub type TestResult = TestOutcome;` alias for back-compat. Existing assertion macros that already write `$crate::TestResult::Fail` resolve through the alias unchanged; Phase 2 will rewrite those references at the source level and drop the alias.
+- [x] **1A.2** Create `ktesting/src/registry.rs`. **Deviation**: `TestDesc` uses `&'static str` for `name`/`module`/`file` instead of `*const c_char` — eliminates the need for null-termination concat helpers; `module_path!()` / `file!()` are already `&'static str` literals. Added `Option<&'static str> bin` and `&'static [&'static str] argv` for forward-compat with Phase 3 utests. Added `flags: u32` with public `FLAG_EXPECTED_PANIC = 0x1` consumed by the harness so a deliberately-panicking test (e.g., the bootstrap canary) reports as Pass with `EXPECTED_PANIC` suffix. The cmp comparator clusters every `bootstrap_*` entry at the front of the registry walk so framework smoke tests run before any subsystem test.
+- [x] **1A.3** Create `ktesting/src/capture.rs` with **per-CPU rings** (8 KiB × MAX_CPUS=256 = 2 MiB `.bss`). **Deviation from spec sizing**: per-CPU ring is 8 KiB (not 64 KiB) because the spec assumed `MAX_CPUS=8` (giving 512 KiB total); reality is `MAX_CPUS=256` and 64 KiB rings would consume 16 MiB. 8 KiB per CPU keeps the per-CPU semantics the spec wanted while staying within reasonable `.bss` budget. `BufferingBackend` routes each write to `RINGS[current_cpu_id()]`. `drain_cpu0()` returns CPU0's slice (the harness-running CPU); `drain_all()` iterates every non-empty ring for verbose mode (used in `harness::emit_verbose_log` to surface foreign-CPU klog with a `--- cpuN ---` separator). `RingSlot` uses a per-slot `AtomicBool` spinlock so concurrent writes from interrupts/IPIs on the same CPU don't corrupt the ring.
+- [x] **1A.4** Create `ktesting/src/filter.rs`. `passes_filter(name, &cfg)` lives as a method on `TestConfig` (avoids circular dependency between `filter.rs` and `config.rs`). `glob_match`/`matches_any` are in `filter.rs` as planned.
+- [x] **1A.5** Create `ktesting/src/ktap.rs`. `emit_subtest_indented` deferred to Phase 3 (utests); not used in Phase 1.
 
 ### 1B. `stest!` macro and TestDesc emission
 
-- [ ] **1B.1** In `ktesting/src/lib.rs`, add `pub macro_rules! stest`:
-  ```
-  stest!(name = $ident:ident);
-  stest!(name = $ident:ident, kind = Kernel);
-  ```
-  Expansion produces `#[used] #[unsafe(link_section = ".test_registry")] pub static [<TEST_DESC_ $ident:upper>]: TestDesc { ... }` using `paste::paste!` for ident munging. Includes `module_path!()`, `file!()`, `line!()` as cstrs (via a small `c_concat!` helper that null-terminates a string-concat).
-- [ ] **1B.2** Provide a thunk wrapper around the user's `fn $ident() -> TestOutcome` that runs inside `catch_panic!` and returns the outcome.
-- [ ] **1B.3** Wire `slopos-testing` re-exports of `paste::paste!` + helpers needed by the macro.
+- [x] **1B.1** In `ktesting/src/lib.rs`, added `#[macro_export] macro_rules! stest` with four arms covering `name`, `name + suite`, `name + flags`, `name + suite + flags`. The `suite` form disambiguates the per-suite static symbol when the same test fn is listed in multiple `define_test_suite!` invocations within one module (real case: `core/src/syscall/tests.rs` lists `test_setsid_then_dev_tty_returns_enxio` in both `syscall_valid` and `syscall_compat_smoke` — without disambiguation the bridge would emit duplicate `TEST_DESC_*` symbols). The `flags` form is what the bootstrap canary uses to flip `EXPECTED_PANIC`.
+- [x] **1B.2** `runner::execute_test` thunk uses a side-channel `static LAST_OUTCOME: AtomicU8`: pre-set to `Panic`, the test stores its actual return value before `catch_panic!` exits; longjmp leaves it `Panic`.
+- [x] **1B.3** `paste::paste!` re-export already in place (`ktesting/src/lib.rs:34` re-exports from `slopos_service_core::paste`). No new direct dep.
 
 ### 1C. Bridge `define_test_suite!`
 
-- [ ] **1C.1** Rewrite `define_test_suite!(suite_name, [$($test_fn:path),* $(,)?])` to expand to one `stest!(name = $test_fn)` invocation per test fn — with the suite name baked into the test's `module` field via the existing `module_path!()`. NO behavior change at any call site; existing 75+ files keep compiling.
-- [ ] **1C.2** Rewrite the `define_test_suite!(suite_name, runner_fn, single)` form similarly — emit a single `stest!` for the runner, but tag it as a "wrapper" (no nested fan-out is possible at this form; that's fine, the runner already iterates internally).
-- [ ] **1C.3** Mark `define_test_suite!` `#[deprecated(note = "use stest! per test function; bridge will be removed in Phase 2")]` if feasible.
+- [x] **1C.1** Rewrote `define_test_suite!($suite, [$($test_fn:ident),*])` to fan out one `stest!(name = $test_fn, suite = $suite)` per fn. **Deviation**: matcher is `:ident` not `:path` — the workspace audit found zero `mod::test_fn` style call sites; all 69 sites use bare idents. Existing call sites unchanged.
+- [x] **1C.2** `($suite, $runner, single)` form rewritten identically. Confirmed zero call sites in the workspace use this form.
+- [x] **1C.3** Skipped `#[deprecated]` — workspace builds with `-Dwarnings` would explode at all 69 call sites; Phase 2's mass migration removes the bridge entirely.
 
 ### 1D. New harness loop
 
-- [ ] **1D.1** Rewrite `ktesting/src/harness.rs::tests_run_all` to iterate the per-test registry (sorted), apply filter, capture+run+emit per test:
+- [x] **1D.1** Rewrote `ktesting/src/harness.rs::tests_run_all` to iterate the per-test registry (sorted), apply filter, capture+run+emit per test:
   ```
   let descs = registry_sorted();
   let plan: u32 = descs.iter().filter(|d| passes_filter(...)).count() as u32;
@@ -459,52 +431,51 @@ Same `.test_registry` section, `kind = TestKind::Userland`. The kernel knows abo
   }
   emit_footer(&totals);
   ```
-- [ ] **1D.2** Shrink `TestRunSummary` to counter-only struct (32 bytes max). Remove `HARNESS_MAX_SUITES` const and the `suites: [...; 64]` array. This removes the silent-truncation bug and lets `boot_drivers.rs` drop the `KBox::<TestRunSummary>::zeroed` workaround.
-- [ ] **1D.3** During Phase 1, ALSO emit legacy `SUITE_N total=… pass=… fail=… elapsed=…ms` and `TESTS SUMMARY: …` lines to keep existing scrapers working. Group by module_path's first crate-component for the synthesised SUITE rollup. (These legacy lines get deleted in Phase 2.)
-- [ ] **1D.4** Keep `LUF SUMMARY: …` line emission unchanged.
+- [x] **1D.2** Shrunk `TestRunSummary` from ~2.6 KiB (`suites: [TestSuiteResult; 64]` + counters) to 28 bytes (`{total, passed, failed, skipped, over_time, panics, elapsed_ms}`). Dropped `HARNESS_MAX_SUITES`, `TESTS_MAX_SUITES`, `TestSuiteResult`, `TestSuiteDesc`, `Zeroable` impl. `boot/src/boot_drivers.rs` now stack-allocates the summary (no more `KBox::zeroed`); `boot/src/ffi_boundary.rs:53-54` retypes the registry symbols to `slopos_testing::TestDesc`.
+- [x] **1D.3** Legacy `SUITE_<root> name=… total=… pass=… fail=… elapsed=…ms` lines emit per module-path root (first `::` segment, e.g., `slopos_mm`, `slopos_net`). `TESTS SUMMARY:` line preserved. Both deleted in Phase 2.
+- [x] **1D.4** LUF SUMMARY emission untouched in `boot/src/boot_drivers.rs:357-375`.
 
 ### 1E. Cmdline + filter wiring
 
-- [ ] **1E.1** In `ktesting/src/config.rs`, add fields to `TestConfig`:
-  - `run_globs: KVec<&'static [u8]>` (heap-owned via slopos-alloc; populated from cmdline)
-  - `skip_globs: KVec<&'static [u8]>`
-  - `warn_ms: u32` (replacing `timeout_ms`; backward-compat alias `tests.timeout=` still parsed and mapped to `warn_ms`)
-- [ ] **1E.2** Parse `tests.run=...,...,...`, `tests.skip=...,...,...`, `tests.warn_ms=N`. Comma-separated.
-- [ ] **1E.3** Map legacy `itests.suite=foo` → push `*::foo::*` glob into `run_globs`. Emit `klog_warn!` once.
-- [ ] **1E.4** Honor `tests.verbosity={quiet,summary,verbose}` — gate `emit_ok` log-block and per-CPU drain accordingly.
+- [x] **1E.1** Extended `TestConfig` with `run_globs: KVec<KVec<u8>>`, `skip_globs: KVec<KVec<u8>>`, `warn_ms: u32`. **Deviation from spec**: globs are `KVec<KVec<u8>>` (owned bytes) rather than `KVec<&'static [u8]>` — the cmdline-derived legacy `suite=foo` glob `*foo*` is built at runtime, and uniformly owning all glob bytes avoids mixing borrowed and owned slices. Drops `Copy` derive on `TestConfig`.
+- [x] **1E.2** Parse `tests.run=...,...,...`, `tests.skip=...,...,...`, `tests.warn_ms=N`. Both `tests.timeout=` (legacy alias) and `tests.warn_ms=` map to the new `warn_ms` field.
+- [x] **1E.3** Legacy `tests.suite=foo` / `itests.suite=foo` → `*foo*` glob pushed into `run_globs`. The legacy-key warning fires once via the existing `warn_legacy_once` StateFlag.
+- [x] **1E.4** Verbosity wired in harness `run_one`: `Verbose` emits the captured-log YAML block on Pass too (and includes any non-empty foreign-CPU rings via `drain_all` with a `--- cpuN ---` separator); `Quiet` suppresses ok/skip lines (footer + not-ok still emit); `Summary` emits status-line per test, log block on failure only.
+- [x] **1E.5** Filter glob matches against the **fully-qualified** `module::name` (rendered into a 512-byte stack scratch buffer per check), per spec §4 "Comma-separated globs matched against `<module_path>::<test_fn>`". Initial implementation matched only `desc.name` (test fn ident); fixed during gate hand-verification when `tests.skip=*tcp_tests*` failed to exclude any tests.
 
 ### 1F. Per-test capture + panic recovery
 
-- [ ] **1F.1** In `utils/src/klog.rs`, expose `klog_swap_backend(KlogBackend) -> KlogBackend` (atomic-RMW returns prior). If only `klog_register_backend` exists, add a sibling that returns the prior pointer.
-- [ ] **1F.2** Add `klog_restore_backend(KlogBackend)` to be called by `call_panic_cleanup` (or wherever the per-test catch_panic longjmp returns).
-- [ ] **1F.3** In `utils/src/panic_recovery.rs` (or wherever `call_panic_cleanup` lives), add a hook that the harness registers to restore klog backend after a longjmp out of a test.
-- [ ] **1F.4** Verify induced panic in a test does not leak the `BufferingBackend` to subsequent tests (`bootstrap_panic_isolation` test in §12).
+- [x] **1F.1** Added `pub fn klog_swap_backend(new: Option<KlogBackend>) -> Option<KlogBackend>` to `utils/src/klog.rs` using `AtomicPtr::swap` — `None` is the early-boot fallback. Existing `klog_register_backend` reduced to a wrapper that ignores the prior.
+- [x] **1F.2** Added `pub fn klog_force_restore_default()` that stores null. Re-exported from `slopos_utils` as `klog_force_restore_default` plus `klog_swap_backend` and `KlogBackend` type.
+- [x] **1F.3** Harness's first call to `tests_run_all` registers `klog_force_restore_default` via `slopos_utils::panic_recovery::register_panic_cleanup`. Idempotent via a `StateFlag`.
+- [x] **1F.4** `CaptureGuard::Drop` calls `klog_swap_backend(self.prev)`. If a test panics, `catch_panic!` longjmps and the registered cleanup runs `klog_force_restore_default` before the next test's `capture::begin` swaps in a fresh buffering backend. Hand-verification of GATE 1.7 (panic isolation) is reserved for the next manual smoke run.
 
 ### 1G. Slow-test reporting
 
-- [ ] **1G.1** In `runner.rs`, after `cycles_to_ms`, if `time_ms > cfg.warn_ms && cfg.warn_ms > 0`, emit `OVER_TIME` suffix in the KTAP `ok` line. Outcome stays Pass.
-- [ ] **1G.2** Aggregate `over_time` count in `Totals`; emit in footer.
+- [x] **1G.1** In `harness::run_one`, if `outcome == Pass && cfg.warn_ms > 0 && time_ms > cfg.warn_ms`, the outcome promotes to `TestResult::OverTime`; KTAP emits suffix `OVER_TIME`. Counter is `summary.over_time`.
+- [x] **1G.2** Aggregated and emitted in the KTAP footer: `KTAP\t# elapsed_ms=N pass=N fail=N skip=N over_time=N`.
 
 ### 1H. Bootstrap self-tests
 
-- [ ] **1H.1** Create `ktesting/src/bootstrap_tests.rs` (gated by `kernel/tests`). Add three `stest!` invocations:
-  - `bootstrap_glob_match`: `assert_test!(filter::glob_match(b"a::*", b"a::b"))`, `assert_test!(!filter::glob_match(b"a::*", b"a"))`
-  - `bootstrap_capture_roundtrip`: `let _g = capture::begin(); klog_info!("MARKER_X9"); drop(_g); let log = capture::drain_cpu0(); assert_test!(log.contains_subslice(b"MARKER_X9"))`
-  - `bootstrap_panic_isolation`: a sibling `stest!` that intentionally `panic!()`s; the bootstrap test asserts the next test still ran by checking a `static AtomicU32` counter
-- [ ] **1H.2** Bootstrap tests run first (lex sort guarantees this if names start with `bootstrap_`). On bootstrap fail, harness emits `KTAP\tBail out! ktesting bootstrap failed: <reason>` and exits non-zero.
+- [x] **1H.1** Created `ktesting/src/bootstrap_tests.rs` with **four** `stest!`s gated `#[cfg(feature = "tests")]`:
+  - `bootstrap_aaa_glob_match`: positive + negative cases of `filter::glob_match` (increments shared `BOOTSTRAP_CTR`)
+  - `bootstrap_bbb_capture_roundtrip`: `begin → klog_info!("MARKER_X9") → drop → drain_cpu0` returns slice containing `MARKER_X9`
+  - `bootstrap_ccc_panic_canary`: marked `flags = FLAG_EXPECTED_PANIC`, deliberately `panic!()`s after incrementing the counter; harness reports it as `ok N - … # time_ms=… EXPECTED_PANIC`
+  - `bootstrap_ddd_isolation_check`: reads `BOOTSTRAP_CTR` (must be ≥ 3, proving prior tests ran in order), then does a fresh `capture::begin → klog → drain` roundtrip to verify the klog backend recovered cleanly from the canary's longjmp
+- [x] **1H.2** Bootstrap tests run **first**: the `cmp_desc` comparator in `registry.rs` clusters every `desc.name.starts_with("bootstrap_")` entry at the front of the sort regardless of module path. Confirmed in serial output — KTAP indices 1, 2, 3, 4 are the four bootstrap entries before any subsystem test. On a `bootstrap_*` failure that isn't `EXPECTED_PANIC`, the harness emits `KTAP\tBail out!` and halts.
 
 ### Phase 1 Gate
 
-- [ ] **GATE 1.1**: `just build` passes
-- [ ] **GATE 1.2**: `just test` runs ≥2393 tests; KTAP `1..N` plan line shows N ≥ 2393
-- [ ] **GATE 1.3**: Both legacy `SUITE_N total=…` lines AND new `KTAP\t...` lines visible in serial output
-- [ ] **GATE 1.4**: `tests.run='*sched*'` filter reduces test count significantly; all matched still pass
-- [ ] **GATE 1.5**: `tests.skip='*tcp_live*'` excludes those tests
-- [ ] **GATE 1.6**: Induce a fail in one test → KTAP `not ok` line includes captured log block; surrounding tests unaffected
-- [ ] **GATE 1.7**: Induce a panic in one test → next test still runs; klog backend not stuck on `BufferingBackend`
-- [ ] **GATE 1.8**: Bootstrap self-tests pass (visible as first three KTAP lines)
-- [ ] **GATE 1.9**: `cargo fmt --all` no-op
-- [ ] **GATE 1.10**: `scripts/check_alloc_dep.sh` and stack-size gate still pass
+- [x] **GATE 1.1**: `just build` passes (clean production build, alloc + stack-size gates green)
+- [x] **GATE 1.2**: `just test` runs 2398 tests; `KTAP\t1..2398` plan line emitted. **Note**: per-test count is higher than the source-plan baseline of 2393 because each test fn previously rolled up under a suite is now individually counted; some tests appear twice (across multiple suites in `core/src/syscall/tests.rs`) — preserved by the bridge with disambiguating `suite =` names.
+- [x] **GATE 1.3**: Both legacy `SUITE0..SUITE6 name=… total=…` lines AND new `KTAP\tok N - …` lines visible in serial output (confirmed in `just test` final transcript).
+- [x] **GATE 1.4**: `BOOT_CMDLINE='tests=on tests.run=*sched* …'` reduces the plan from 2398 → **78** (FQN-matched against `module::name`); all 78 pass.
+- [x] **GATE 1.5**: `BOOT_CMDLINE='tests=on tests.skip=*tcp_tests* …'` reduces the plan from 2398 → **2333** (65 `tcp_tests` entries excluded); zero `::tcp_tests::` entries in the run.
+- [x] **GATE 1.6**: Induced `assert_eq_test!(1, 2)` in a temporary `fpu_phase1_induced_failure` stest. Result: `KTAP\tnot ok 2384 - slopos_testing::fpu_tests::fpu_phase1_induced_failure # time_ms=0` followed by a YAML diagnostic block (`outcome: Fail`, `file: ktesting/src/fpu_tests.rs:81`, `log: |` with all three captured klog lines including the `ASSERT_EQ:` message). Surrounding tests (idx 2382, 2383, 2385, 2386) all pass — failure is properly isolated. Test then reverted.
+- [x] **GATE 1.7**: Verified in-band by `bootstrap_ccc_panic_canary` (deliberate panic with `EXPECTED_PANIC` flag) followed by `bootstrap_ddd_isolation_check` (asserts the counter saw the canary increment AND a fresh capture roundtrip works after the panic-recovery longjmp). Both pass on every run; serial output shows `ok 3 - …bootstrap_ccc_panic_canary # time_ms=1 EXPECTED_PANIC` then `ok 4 - …bootstrap_ddd_isolation_check # time_ms=0`.
+- [x] **GATE 1.8**: Bootstrap self-tests visible as **first four KTAP lines** (idx 1, 2, 3, 4) thanks to the bootstrap-first sort comparator in `registry::cmp_desc`. All four pass.
+- [x] **GATE 1.9**: `cargo fmt --all -- --check` is clean.
+- [x] **GATE 1.10**: `scripts/check_alloc_dep.sh` and `scripts/check_stack_sizes.sh` pass (run automatically by `just build`).
 
 ---
 
