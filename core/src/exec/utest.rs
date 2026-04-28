@@ -16,6 +16,7 @@ use slopos_testing::{TestDesc, TestResult, ktap};
 use slopos_utils::{catch_panic, klog_info};
 
 use crate::exec::spawn_program_with_attrs;
+use crate::sched::scheduler_get_current_task;
 use crate::scheduler::scheduler::task_wait_for;
 use crate::task::{task_drain_test_reports, task_find_by_id, task_get_exit_record};
 
@@ -77,13 +78,30 @@ fn exit_reason_str(reason: TaskExitReason) -> &'static str {
 }
 
 fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
+    // Pull init's pid/tid out of the current task so spawned utests inherit
+    // the fd table and have a real `parent_task_id` set. Without this, the
+    // spawned task has `parent_task_id = INVALID_TASK_ID` and
+    // `inherit_fds_from = INVALID_PROCESS_ID` — which leaves it with no
+    // stdin/stdout/stderr and matches the `notify_parent_of_child_exit`
+    // early-return path. Wakeup still flows through `release_task_dependents`
+    // (which scans for `waiting_on==completed_id`), but a child with no
+    // fd table can fault before reporting any subtest results.
+    let (parent_pid, parent_tid) = unsafe {
+        let cur = scheduler_get_current_task();
+        if cur.is_null() {
+            (INVALID_PROCESS_ID, INVALID_TASK_ID)
+        } else {
+            ((*cur).process_id, (*cur).task_id)
+        }
+    };
+
     let pid = match spawn_program_with_attrs(
         bin.as_bytes(),
         argv,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
-        INVALID_PROCESS_ID,
-        INVALID_TASK_ID,
+        parent_pid,
+        parent_tid,
     ) {
         Ok(pid) => pid,
         Err(e) => {
@@ -96,13 +114,12 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         }
     };
 
-    // Hold a refcount on the spawned task across `task_wait_for` so that
+    // Hold a refcount on the spawned task across the wait so that
     // `reap_zombies` (which fires on every CPU's idle iteration) cannot
     // recycle the slot — and zero out `test_reports` via
-    // `Task::reset_in_place` — between the wait returning and us draining
-    // the per-task report ring. Without this hold, every utest reported
-    // `Fail` because the drained ring was always empty by the time we
-    // looked.
+    // `Task::reset_in_place` — between the child exiting and us draining
+    // the per-task report ring. Without this hold, the drained ring is
+    // empty by the time we look.
     let task_ptr = task_find_by_id(pid);
     if !task_ptr.is_null() {
         unsafe {
@@ -110,21 +127,24 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         }
     }
 
-    // Park on the scheduler's blocked list until the child terminates. The
-    // userland-test runner is invoked from `/sbin/init`'s syscall context
-    // (`SYSCALL_RUN_USERLAND_TESTS`), so `scheduler_get_current_task()`
-    // returns init's real Task and `task_wait_for` blocks correctly —
-    // unlike a boot-bootstrap-stub context, where the same call would
-    // short-circuit with -1.
-    let _ = task_wait_for(pid);
-
+    // Mirror `syscall_waitpid`: try the exit-record cache first, and only
+    // park on `task_wait_for` if the child is still live. Two reasons:
+    // (1) it sidesteps the case where the child terminated before we
+    //     reach `task_wait_for` and the wake fired before our
+    //     `prepare_to_wait`, which would leave us blocked forever; and
+    // (2) it's the same shape as the production waitpid path, so future
+    //     scheduler invariants stay in lockstep.
     let mut record = TaskExitRecord {
         task_id: 0,
         exit_reason: TaskExitReason::None,
         fault_reason: TaskFaultReason::None,
         exit_code: 0,
     };
-    let exit_rc = task_get_exit_record(pid, &mut record as *mut _);
+    let mut exit_rc = task_get_exit_record(pid, &mut record as *mut _);
+    if exit_rc != 0 {
+        let _ = task_wait_for(pid);
+        exit_rc = task_get_exit_record(pid, &mut record as *mut _);
+    }
     let reports = task_drain_test_reports(pid);
 
     // Drop the post-wait refcount. The slot is now reusable; the next
