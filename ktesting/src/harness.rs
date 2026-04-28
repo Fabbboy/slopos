@@ -312,7 +312,12 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
         raw_outcome = (desc.run)();
         let t1 = slopos_arch::tsc::rdtsc();
         time_ms = measure_elapsed_ms(t0, t1);
-        captured_log = crate::capture::drain_cpu0();
+        // Userland-test thunks run from `/sbin/init`'s syscall context and
+        // can execute on any CPU; their klog (subtest emits, exit-record
+        // diagnostics) lands in *that* CPU's per-CPU ring, not CPU 0. Use
+        // `drain_current_cpu` so the YAML log block is populated regardless
+        // of which CPU dispatched the harness.
+        captured_log = crate::capture::drain_current_cpu();
         truncated = crate::capture::truncated_bytes();
     }
 

@@ -173,8 +173,9 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         exit_rc == 0 && record.exit_reason == TaskExitReason::Normal && record.exit_code == 0;
     if !exited_normally && reports.is_empty() {
         klog_info!(
-            "UTEST: '{}' exited reason={} code={} with no reports",
+            "UTEST: '{}' exited rc={} reason={} code={} with no reports",
             bin,
+            exit_rc,
             exit_reason_str(record.exit_reason),
             record.exit_code
         );

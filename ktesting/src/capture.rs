@@ -147,6 +147,17 @@ pub fn drain_cpu0() -> &'static [u8] {
     RINGS[0].slice()
 }
 
+/// Bytes captured into the current CPU's ring since the last `begin`.
+///
+/// Used by callers that may run on a non-BSP CPU — notably the userland
+/// test runner, which is invoked from `/sbin/init`'s syscall context and
+/// can therefore execute on any CPU. Pairs with `drain_cpu0` for kernel
+/// tests, which always run on CPU 0 via the `SchedFixture` BSP-parking.
+pub fn drain_current_cpu() -> &'static [u8] {
+    let cpu = current_cpu_id().min(MAX_CPUS - 1);
+    RINGS[cpu].slice()
+}
+
 /// Iterate every per-CPU ring that has bytes in it. Used by the verbose
 /// emit path to surface foreign-CPU klog (e.g., from interrupts that
 /// fired during a test).
