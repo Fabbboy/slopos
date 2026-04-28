@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **complete** (with deviations); Phase 4 not started
+> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **in progress** (framework wired, runtime broken — see §8 Phase 3 Notes); Phase 4 not started
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -623,24 +623,50 @@ Bare `define_test_suite!` invocations relied on `use slopos_testing::define_test
 
 - [x] **GATE 3.1**: `just build` passes
 - [x] **GATE 3.2**: `just test` runs 2398 kernel tests + 3 utests = 2401 entries (`TESTS SUMMARY (cumulative)` line confirms)
-- [x] **GATE 3.3**: KTAP output shows utest parent lines (`KTAP\tnot ok N - slopos_core::utests::utest_X`); indented subtest lines emitted by kernel `run_thunk` are visible in raw serial despite concurrent userland chatter
-- [x] **GATE 3.4**: Per-subtest pass/fail roll-up exercised — subtest reports drained from `TestReportRing` are surfaced via the parent KTAP outcome
-- [~] **GATE 3.5**: Adding a new utest is a one-line `utest!` in `core/src/utests.rs`, but the binary list in `justfile:60` is still hardcoded (deviation §3I — see Phase 3 Notes)
-- [~] **GATE 3.6**: `SYSCALL_TEST_REPORT` is callable from any user task. The lazy ring allocation means non-test tasks pay zero cost unless they actually invoke it (deviation; see Phase 3 Notes)
+- [~] **GATE 3.3**: Parent KTAP lines emit (`KTAP\tnot ok N - slopos_core::utests::utest_X`). **Indented subtest lines never appear** because `task_drain_test_reports(pid)` returns an empty `KVec` — see Phase 3 Notes §"Open bug" below.
+- [ ] **GATE 3.4**: Per-subtest pass/fail roll-up **NOT verified end-to-end**. All 3 utests roll up to `Fail` because of the open bug, not because their subtests reported `Fail`. Inducing a real subtest failure cannot be distinguished from the current "always fails" path.
+- [~] **GATE 3.5**: Adding a new utest is a one-line `utest!` in `core/src/utests.rs`, but the binary list in `justfile:60` is still hardcoded (deviation §3I).
+- [~] **GATE 3.6**: `SYSCALL_TEST_REPORT` is callable from any user task. The lazy ring allocation means non-test tasks pay zero cost unless they actually invoke it (gate-text deviation).
 - [x] **GATE 3.7**: `cargo fmt --all` no-op
 - [x] **GATE 3.8**: stack-size and alloc-discipline gates pass
 
-### Phase 3 Notes (deviations)
+### Phase 3 Notes
+
+#### Open bug (BLOCKER for marking the phase complete)
+
+**Symptom.** All three utests (`utest_fork`, `utest_heap_allocator`, `utest_io_capture`) roll up to `not ok` with the YAML log:
+
+```
+UTEST: '/bin/<name>' exited rc=-1 reason=None code=0 with no reports
+```
+
+`exit_rc=-1` means `task_get_exit_record(pid)` returned -1 (no record found in `mgr.exit_records`). `with no reports` means `task_drain_test_reports(pid)` returned an empty `KVec`. Both conditions trip even though the kernel logs `Terminating task '<bin>' (ID N)` for each spawned task — so `task_terminate` → `mark_task_terminated` → `record_task_exit` *did* run for those tasks. The data is being written and then disappearing before init can read it.
+
+**What I ruled out.**
+- Boot-pipeline race: switching from a boot-priority kthread to a synchronous `SYSCALL_RUN_USERLAND_TESTS` from `/sbin/init` did not change the symptom.
+- CPU-pinning of the harness: switching `capture::drain_cpu0` to `drain_current_cpu` populated the YAML log block (so we can now *see* the diagnostic) but did not change the underlying rc=-1.
+- Parent task wiring: passing `init`'s pid/tid as the spawn's `inherit_fds_from`/`parent_task_id` and following the `syscall_waitpid` "try-record-first, only park if live" pattern did not change the rc=-1.
+
+**What I suspect.** The framework consumes existing kernel primitives (`task_wait_for`, `task_get_exit_record`, `task_drain_test_reports`, `inc_ref`/`dec_ref`) in a pattern that those primitives weren't designed for: a **non-parent waiter draining a child slot's per-task state after the child exits**. Specifically:
+
+1. `core/src/exec/utest.rs::dispatch` bumps the child's refcount before `task_wait_for` to keep `reap_zombies` from `Task::reset_in_place`-ing the slot. Whether that hold actually closes the race is unverified — there's no other call site in the kernel that uses `inc_ref` on a recently-spawned child this way, and the CAS pattern in `inc_ref` (load → fetch_add) has a window where another CPU could observe refcnt=0 and start tier-2 reuse via `reserve_task_slot` (which clears `exit_records[idx]`) before our increment lands.
+2. Even if (1) is sound, `record_task_exit` writes to `exit_records[idx]` keyed by `task_slot_index_inner(mgr, task)`, and `task_get_exit_record` searches by `task_id`. If the slot has been reused under us (the new task gets `exit_records[idx]` cleared at line 640 of `task_table.rs`), the original record is lost.
+
+**What still needs investigation.** Diagnostics inside `task_get_exit_record` / `record_task_exit` (klog inside or right after `with_task_manager`) consistently destabilise the kernel test phase — flakes at sched_tests test 113/134 with the diag in, no flakes without. Instrumenting the lock-held path needs a klog-free approach (e.g., a per-CPU u64 counter dumped after the run, or a panic that fires only when the bad condition occurs).
+
+**Proposed fix shape (not implemented).** Either:
+- (a) Add a `task_pin_for_drain(pid) -> DrainGuard` primitive in `core/src/scheduler/task/task_table.rs` that takes the manager lock once, increments refcount, and returns a guard whose `drop` decrements. Use it in `utest::dispatch` instead of bare `inc_ref`/`dec_ref`. This makes the pinning atomic with respect to `reserve_task_slot`'s reuse check.
+- (b) Drain `test_reports` and stash the exit record into a per-pid "pending drain" cache from inside `mark_task_terminated`, so the data survives slot reuse. The cache is read (and entry removed) by `task_drain_test_reports` and `task_get_exit_record`. This decouples the test framework from slot lifecycle entirely.
+
+(b) is more invasive but architecturally cleaner. (a) is smaller but still leaves `exit_records[idx]` vulnerable to clobber if the manager-lock contract isn't watertight.
+
+#### Other deviations (do not block phase completion)
 
 - **§3I `tools/list-utests/` xtask skipped.** With only 3 utests today, a host-target binary that walks the registry is overkill. The `utest!` macro emits a `bin: Some("/bin/<name>")` field; the kernel-side runner reports `Fail` with `UTEST: spawn '<bin>' failed: ...` if the path is missing from the FS image, so drift between `core/src/utests.rs` and `justfile:60` is caught at runtime in the test harness itself rather than at build time. Revisit at >10 utests.
 
 - **GATE 3.6 reworded.** The original wording — "from a non-test task returns an error and does not allocate" — implied a compile-time test/non-test distinction that doesn't exist. There is no kernel-side flag separating test tasks from regular ones; `SYSCALL_TEST_REPORT` is open to any user task with the lazy-ring cost model documented above.
 
 - **Driver via `/sbin/init` syscall, not a kthread.** The first attempt spawned a `utest_runner` kthread from a boot init step; the kthread was enqueued but not reliably dispatched (the BSP scheduler queue had it but compositor/shell starved it post-init). The final design adds `SYSCALL_RUN_USERLAND_TESTS` (slot 156) which `/sbin/init` invokes when the new `BOOT_FLAG_TESTS_ENABLED` boot flag is set. The handler runs `tests_run_userland` synchronously in init's task context, where `task_wait_for(child)` works without any pre-scheduler race. The kernel-phase summary is stashed via `slopos_testing::kernel_phase_summary::{store_kernel_phase, load_kernel_phase}` so the syscall handler can roll up cumulative totals and signal QEMU shutdown.
-
-- **Spawned-task slot pinning during drain.** `task_wait_for(pid)` returning does not increment the parent's refcount on the child task, so `reap_zombies` on any idle CPU can race in and `Task::reset_in_place` the slot — clearing `test_reports` — between the wait returning and `task_drain_test_reports(pid)` running. `core/src/exec/utest.rs::dispatch` now bumps the child's refcount before `task_wait_for` and decrements it after the drain, keeping the slot intact for the read window.
-
-- **Subtest reporting noise.** Three utests run end-to-end and the cumulative summary + shutdown signal both work, but the spawned binaries currently report fewer subtests than they declare (heap allocator surfaces a single drained subtest before the binary exits). The framework wires the spawn → wait → drain → emit chain correctly; isolating why the spawned binaries don't complete every case is a follow-up tracked outside this plan.
 
 ---
 
