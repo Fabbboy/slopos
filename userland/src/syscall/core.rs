@@ -91,6 +91,14 @@ pub fn sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall1(SYSCALL_SYS_INFO, info as *mut _ as u64) as i64 }
 }
 
+/// Drive the kernel-side userland-test phase from this task. Used by
+/// `/sbin/init` when the kernel was booted with `tests=on`. Returns the
+/// raw syscall result (0 on success, negative errno otherwise).
+#[inline(always)]
+pub fn run_userland_tests() -> i64 {
+    unsafe { syscall0(SYSCALL_RUN_USERLAND_TESTS) as i64 }
+}
+
 #[inline(always)]
 pub fn process_list(buf: &mut [UserTaskEntry]) -> i64 {
     unsafe {

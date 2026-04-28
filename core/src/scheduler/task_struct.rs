@@ -440,6 +440,16 @@ pub struct Task {
     /// the PCR slot exactly the same way the CPU's regular RSP is
     /// saved/restored to/from `switch_ctx.rsp`.
     pub unsafe_stack: Option<crate::scheduler::unsafe_stack::UnsafeStack>,
+    /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
+    ///
+    /// `None` for non-test tasks (the syscall is never invoked). The first
+    /// `SYSCALL_TEST_REPORT` from a task lazily allocates a fresh ring; the
+    /// kernel-side userland-test runner takes ownership via
+    /// [`task_drain_test_reports`](crate::scheduler::task::task_table::task_drain_test_reports)
+    /// once the task has exited. The handle is contiguous with
+    /// `kernel_stack`/`unsafe_stack` so `reset_in_place`'s zero-byte hole
+    /// covers all three Option<KBox>-style owned handles in one span.
+    pub test_reports: Option<slopos_alloc::KBox<crate::scheduler::test_reports::TestReportRing>>,
     /// Current SafeStack unsafe-stack pointer (data-stack RSP).
     ///
     /// Initialised to `unsafe_stack.as_ref().unwrap().top()` at task
@@ -531,6 +541,7 @@ impl Task {
             fpu_state: FpuState::new(),
             kernel_stack: None,
             unsafe_stack: None,
+            test_reports: None,
             unsafe_stack_sp: 0,
             slot_index: u32::MAX,
             parent_task_id: INVALID_TASK_ID,
@@ -626,6 +637,9 @@ impl Task {
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 // Unsafe stack (SafeStack data stack): no handle yet.
                 addr_of_mut!((*slot).unsafe_stack).write(None);
+                // Userland test-report ring: lazily allocated on first
+                // SYSCALL_TEST_REPORT.
+                addr_of_mut!((*slot).test_reports).write(None);
                 addr_of_mut!((*slot).unsafe_stack_sp).write(0);
 
                 // Pool-slot index sentinel: set by `reserve_task_slot`
@@ -678,26 +692,28 @@ impl Task {
             // Release the owning Option fields up front. `Option::take`
             // drops the old `Some(..)` exactly once and is a no-op if
             // the field is already `None` (e.g. the caller ran
-            // `free_task_stacks` first).  The two stacks are adjacent
+            // `free_task_stacks` first).  The three handles are adjacent
             // in the struct so we keep one hole in the byte-zero pass
-            // that spans both.
+            // that spans all of them.
             let _ = (*this).kernel_stack.take();
             let _ = (*this).unsafe_stack.take();
+            let _ = (*this).test_reports.take();
             // Zero the non-drop-bearing fields. We stay away from the
-            // `kernel_stack`/`unsafe_stack` slots because `Option` has
-            // no layout guarantee that the all-zeros bit pattern is
-            // `None` — overwriting the bytes would corrupt the
-            // `None` discriminant we just established via `take()`.
+            // `kernel_stack`/`unsafe_stack`/`test_reports` slots because
+            // `Option` has no layout guarantee that the all-zeros bit
+            // pattern is `None` — overwriting the bytes would corrupt
+            // the `None` discriminant we just established via `take()`.
             let bytes = core::mem::size_of::<Task>();
             let kernel_stack_off = core::mem::offset_of!(Task, kernel_stack);
-            let unsafe_stack_off = core::mem::offset_of!(Task, unsafe_stack);
-            let unsafe_stack_size =
-                core::mem::size_of::<Option<crate::scheduler::unsafe_stack::UnsafeStack>>();
+            let test_reports_off = core::mem::offset_of!(Task, test_reports);
+            let test_reports_size = core::mem::size_of::<
+                Option<slopos_alloc::KBox<crate::scheduler::test_reports::TestReportRing>>,
+            >();
             debug_assert!(
-                kernel_stack_off < unsafe_stack_off,
-                "Task: kernel_stack must precede unsafe_stack for reset_in_place hole span"
+                kernel_stack_off < test_reports_off,
+                "Task: kernel_stack must precede test_reports for reset_in_place hole span"
             );
-            let tail_start = unsafe_stack_off + unsafe_stack_size;
+            let tail_start = test_reports_off + test_reports_size;
             let base = this as *mut u8;
             core::ptr::write_bytes(base, 0, kernel_stack_off);
             core::ptr::write_bytes(base.add(tail_start), 0, bytes - tail_start);
@@ -874,6 +890,10 @@ impl Task {
             // installs real values after this returns.
             core::ptr::write(&mut self.kernel_stack as *mut _, None);
             core::ptr::write(&mut self.unsafe_stack as *mut _, None);
+            // Test-report ring is per-task: do not share with parent. The
+            // child gets a fresh `None`; first SYSCALL_TEST_REPORT lazily
+            // allocates a new ring.
+            core::ptr::write(&mut self.test_reports as *mut _, None);
             self.unsafe_stack_sp = 0;
         }
         // Child keeps its own pool position.

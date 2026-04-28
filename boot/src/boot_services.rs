@@ -6,6 +6,8 @@ use slopos_core::sched::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
 };
 use slopos_drivers::virtio_blk;
+use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
+use slopos_fs::vfs::{mount, unmount};
 use slopos_fs::{
     ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,
 };
@@ -30,7 +32,23 @@ fn boot_step_fs_init() -> i32 {
 
     if vfs_init_builtin_filesystems().is_ok() {
         if ext2_vfs_is_initialized() {
-            klog_info!("VFS: mounted / (ext2), /tmp (ramfs), /dev (devfs)");
+            // The kernel-test phase (drivers/90) runs before this step and
+            // may have called `vfs_init_builtin_filesystems` itself; with
+            // ext2 not yet ready, that call mounted RamFs at `/` and set
+            // the one-shot init flag, so this `vfs_init_builtin_filesystems`
+            // returned without mounting ext2. Force-replace any existing
+            // root mount with the live ext2 backing so init/utests can
+            // resolve `/sbin/init` and `/bin/*`.
+            let _ = unmount(b"/");
+            match mount(b"/", &EXT2_VFS_STATIC, 0) {
+                Ok(_) => {
+                    klog_info!("VFS: mounted / (ext2), /tmp (ramfs), /dev (devfs)");
+                }
+                Err(e) => {
+                    klog_info!("VFS: failed to install ext2 root: {:?}", e);
+                    return -1;
+                }
+            }
         } else {
             klog_info!("VFS: mounted /tmp (ramfs), /dev (devfs)");
         }

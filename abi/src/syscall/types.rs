@@ -35,6 +35,7 @@ pub struct UserSysInfo {
 }
 
 pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
+pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;
 
 /// POSIX-style timespec returned by `SYSCALL_CLOCK_GETTIME`.
 #[repr(C)]

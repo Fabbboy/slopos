@@ -11,6 +11,7 @@ pub mod memory_handlers;
 pub mod net_handlers;
 pub mod process_handlers;
 pub mod signal;
+pub mod test_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod ui_handlers;

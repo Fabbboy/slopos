@@ -21,6 +21,7 @@ pub mod process;
 pub mod signal;
 pub mod stdio;
 pub mod string;
+pub mod test_harness;
 pub mod thread;
 pub mod time;
 pub mod tty;

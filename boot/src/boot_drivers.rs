@@ -3,7 +3,7 @@ use core::ffi::CStr;
 use core::ffi::c_char;
 
 use slopos_testing::{
-    TestRunSummary, tests_request_shutdown, tests_reset_panic_state, tests_run_all,
+    TestRunSummary, kernel_phase_summary, tests_reset_panic_state, tests_run_all,
 };
 use slopos_utils::klog::{self, KlogLevel};
 use slopos_utils::{klog_debug, klog_info};
@@ -359,15 +359,21 @@ fn boot_step_run_tests_fn() -> i32 {
         );
     }
 
-    if test_config.shutdown {
-        klog_debug!("TESTS: Auto shutdown enabled after harness");
-        tests_request_shutdown(summary.failed as i32);
-    }
+    // Stash the kernel-phase summary so the userland-phase syscall
+    // (`SYSCALL_RUN_USERLAND_TESTS`, invoked from /sbin/init) can merge
+    // counters and decide shutdown. Shutdown is *always* deferred to that
+    // syscall so both phases run before QEMU exits.
+    kernel_phase_summary::store_kernel_phase(
+        &summary,
+        rc,
+        test_config.enabled,
+        test_config.shutdown,
+    );
 
     if summary.failed > 0 {
-        klog_info!("TESTS: Failures detected");
+        klog_info!("TESTS: Failures detected (kernel phase)");
     } else {
-        klog_info!("TESTS: Completed successfully");
+        klog_info!("TESTS: Kernel phase completed successfully");
     }
 
     rc
@@ -510,3 +516,16 @@ crate::boot_init!(
     fallible,
     flags = boot_init_priority(90)
 );
+
+// The userland-test phase used to live in a kthread spawned here from the
+// `optional` boot phase. That approach hit two compounding problems:
+// (1) the kthread was enqueued onto a per-CPU scheduler queue but never
+// dispatched in practice — by the time BSP entered the scheduler, init's
+// own children (compositor, shell) starved it; (2) the wait-gate the
+// kthread needed before touching FS/`task_wait_for` re-introduced the
+// races the kthread was supposed to avoid in the first place.
+//
+// The runner now lives in `core/src/syscall/test_handlers.rs` as
+// `SYSCALL_RUN_USERLAND_TESTS` and is invoked synchronously from
+// `/sbin/init`'s task context, where `task_wait_for` works by
+// construction. See `userland/src/apps/init_process.rs`.

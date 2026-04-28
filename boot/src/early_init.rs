@@ -462,6 +462,11 @@ fn boot_step_boot_config_fn() {
         slopos_utils::boot_flags::set_flag(slopos_utils::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
         boot_info(b"Boot option: roulette skip enabled\0");
     }
+
+    if cmdline.contains("tests=on") {
+        slopos_utils::boot_flags::set_flag(slopos_utils::boot_flags::BOOT_FLAG_TESTS_ENABLED);
+        boot_info(b"Boot option: userland test mode enabled\0");
+    }
 }
 
 boot_init!(

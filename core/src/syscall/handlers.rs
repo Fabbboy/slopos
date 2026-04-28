@@ -36,6 +36,7 @@ pub use crate::syscall::process_handlers::{
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
+pub use crate::syscall::test_handlers::{syscall_run_userland_tests, syscall_test_report};
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_fb_flip, syscall_fb_info,
     syscall_getrandom, syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty,
@@ -192,6 +193,10 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
 
     // Font management
     [SYSCALL_FONT_SET] => syscall_font_set, "font_set";
+
+    // Userland test harness
+    [SYSCALL_TEST_REPORT] => syscall_test_report, "test_report";
+    [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

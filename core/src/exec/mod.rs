@@ -2,6 +2,8 @@
 
 #[cfg(feature = "test-hooks")]
 pub mod tests;
+#[cfg(feature = "test-hooks")]
+pub mod utest;
 
 use core::ffi::c_char;
 use core::ptr;

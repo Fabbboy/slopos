@@ -2,47 +2,60 @@
 
 use slopos_userland::apps::shell;
 
-fn main() {
-    eprintln!("io_capture_test: start");
-
+fn ensure_shell_initialized() {
     shell::cwd_set(b"/");
     shell::env::initialize_defaults();
     shell::exec::initialize_job_control();
+}
 
-    // Test 1: run `ifconfig` (known working registry-spawn program)
+fn test_ifconfig() -> bool {
+    ensure_shell_initialized();
     eprintln!("io_capture_test: running ifconfig...");
-    let mut tokens1 = shell::buffers::ParsedTokens::new();
-    tokens1.push_token(b"ifconfig");
-    let rc1 = shell::exec::execute_tokens(&tokens1);
-    eprintln!("io_capture_test: ifconfig exit={}", rc1);
+    let mut tokens = shell::buffers::ParsedTokens::new();
+    tokens.push_token(b"ifconfig");
+    let rc = shell::exec::execute_tokens(&tokens);
+    eprintln!("io_capture_test: ifconfig exit={}", rc);
+    // ifconfig is allowed to return any code; we just want to confirm it
+    // can be spawned through the registry path without crashing.
+    true
+}
 
-    // Test 2: run `nc -h` (registry-spawn, prints usage, exits immediately)
+fn test_nc_help() -> bool {
+    ensure_shell_initialized();
     eprintln!("io_capture_test: running nc -h...");
-    let mut tokens2 = shell::buffers::ParsedTokens::new();
-    tokens2.push_token(b"nc");
-    tokens2.push_token(b"-h");
-    let rc2 = shell::exec::execute_tokens(&tokens2);
-    eprintln!("io_capture_test: nc -h exit={}", rc2);
-
-    // Test 3: run `nc` with no args (should show usage, exit 1)
-    eprintln!("io_capture_test: running nc (no args)...");
-    let mut tokens3 = shell::buffers::ParsedTokens::new();
-    tokens3.push_token(b"nc");
-    let rc3 = shell::exec::execute_tokens(&tokens3);
-    eprintln!("io_capture_test: nc exit={}", rc3);
-
-    if rc2 != 0 {
-        eprintln!("io_capture_test: FAIL nc -h returned {}, expected 0", rc2);
-        std::process::exit(1);
+    let mut tokens = shell::buffers::ParsedTokens::new();
+    tokens.push_token(b"nc");
+    tokens.push_token(b"-h");
+    let rc = shell::exec::execute_tokens(&tokens);
+    eprintln!("io_capture_test: nc -h exit={}", rc);
+    if rc != 0 {
+        eprintln!("io_capture_test: FAIL nc -h returned {}, expected 0", rc);
+        return false;
     }
-    if rc3 != 1 {
+    true
+}
+
+fn test_nc_no_args() -> bool {
+    ensure_shell_initialized();
+    eprintln!("io_capture_test: running nc (no args)...");
+    let mut tokens = shell::buffers::ParsedTokens::new();
+    tokens.push_token(b"nc");
+    let rc = shell::exec::execute_tokens(&tokens);
+    eprintln!("io_capture_test: nc exit={}", rc);
+    if rc != 1 {
         eprintln!(
             "io_capture_test: FAIL nc (no args) returned {}, expected 1",
-            rc3
+            rc
         );
-        std::process::exit(1);
+        return false;
     }
+    true
+}
 
-    eprintln!("io_capture_test: PASS");
-    std::process::exit(0);
+fn main() {
+    slopos_slibc::test_harness::run(&[
+        ("ifconfig", test_ifconfig),
+        ("nc_help", test_nc_help),
+        ("nc_no_args", test_nc_no_args),
+    ]);
 }

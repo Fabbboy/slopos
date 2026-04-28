@@ -773,3 +773,25 @@ pub unsafe fn task_manager_force_unlock() {
 pub unsafe fn task_manager_poison_unlock() {
     unsafe { TASK_MANAGER.poison_unlock() };
 }
+
+/// Take ownership of the per-task `SYSCALL_TEST_REPORT` ring and drain its
+/// contents. Returns an empty vector if the task never reported (ring was
+/// never lazily allocated) or if the slot is no longer the original task
+/// (recycled or invalid). Caller-required invariant: invoke only after the
+/// child task has exited, so no further pushes can race with the take.
+pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::scheduler::test_reports::TestReport> {
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return KVec::new();
+    }
+    // SAFETY: `task_find_by_id` returns a stable pointer into the lock-free
+    // task pool; the slot does not transition `Some → None` while the
+    // caller holds responsibility for the post-exit window. The child has
+    // already terminated (caller invariant), so no syscall thread is
+    // concurrently pushing into the ring on its behalf.
+    let mut ring = match unsafe { (*task).test_reports.take() } {
+        Some(r) => r,
+        None => return KVec::new(),
+    };
+    ring.drain().unwrap_or_else(|_| KVec::new())
+}

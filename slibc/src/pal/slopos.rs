@@ -663,4 +663,25 @@ impl Pal for Sys {
         to_result(ret)?;
         Ok(())
     }
+
+    fn test_report(status: u32, name: &[u8], msg: &[u8]) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall5(
+                SYSCALL_TEST_REPORT,
+                status as u64,
+                name.as_ptr() as u64,
+                name.len() as u64,
+                msg.as_ptr() as u64,
+                msg.len() as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn run_userland_tests() -> Result<(), Errno> {
+        let ret = unsafe { syscall0(SYSCALL_RUN_USERLAND_TESTS) };
+        to_result(ret)?;
+        Ok(())
+    }
 }

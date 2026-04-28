@@ -1,4 +1,4 @@
-use slopos_abi::syscall::BOOT_FLAG_ROULETTE_SKIP;
+use slopos_abi::syscall::{BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED};
 use slopos_font::atlas::GlyphAtlas;
 
 use crate::program_registry;
@@ -42,8 +42,25 @@ pub fn init_user_main() {
     upgrade_console_font();
 
     let mut info = UserSysInfo::default();
-    let skip_roulette =
-        sys_core::sys_info(&mut info) == 0 && (info.boot_flags & BOOT_FLAG_ROULETTE_SKIP) != 0;
+    let info_ok = sys_core::sys_info(&mut info) == 0;
+    let skip_roulette = info_ok && (info.boot_flags & BOOT_FLAG_ROULETTE_SKIP) != 0;
+    let tests_enabled = info_ok && (info.boot_flags & BOOT_FLAG_TESTS_ENABLED) != 0;
+
+    if tests_enabled {
+        // Drive the kernel-side userland-test phase from this task's
+        // context. The syscall handler walks the `.test_registry`,
+        // spawns each utest binary, blocks on its exit via
+        // `task_wait_for`, drains its `SYSCALL_TEST_REPORT` ring, emits
+        // KTAP, merges with the kernel-phase summary, and triggers the
+        // QEMU shutdown. On success it returns; we then exit so the
+        // boot pipeline doesn't keep the system running waiting for
+        // input. On failure we fall through to the normal init flow so
+        // the user can still reach a shell to investigate.
+        let rc = sys_core::run_userland_tests();
+        if rc == 0 {
+            sys_core::exit_with_code(0);
+        }
+    }
 
     if !skip_roulette {
         let roulette_tid = spawn_service("roulette");

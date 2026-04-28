@@ -19,6 +19,7 @@ pub mod switch_context;
 pub mod task;
 pub mod task_lock;
 pub mod task_struct;
+pub mod test_reports;
 pub mod trap;
 pub mod unsafe_stack;
 pub mod work_steal;

@@ -2,6 +2,12 @@
 
 use core::ffi::c_void;
 
+// Pull in the `slopos-userland` lib crate so its `_start` ELF entry
+// point is linked into the binary. Without this `use _` reference, the
+// binary has no `_start`, the linker emits an entry of 0x0, and the
+// kernel's `do_exec` rejects the ELF as `NoExec`.
+use slopos_userland as _;
+
 use slopos_slibc::mem::malloc;
 
 fn test_alloc_dealloc_basic() -> bool {
@@ -196,20 +202,16 @@ fn test_small_recycling() -> bool {
 }
 
 fn main() {
-    let tests: &[fn() -> bool] = &[
-        test_alloc_dealloc_basic,
-        test_forward_coalesce,
-        test_backward_coalesce,
-        test_format_pattern_stability,
-        test_mmap_fallback,
-        test_realloc_grow,
-        test_small_recycling,
-    ];
-
-    for test_fn in tests {
-        if !test_fn() {
-            std::process::exit(1);
-        }
-    }
-    std::process::exit(0);
+    // Reports each subtest to the kernel via SYSCALL_TEST_REPORT; exit
+    // code is the failure count. Kernel utest runner uses the structured
+    // reports for fine-grained roll-up.
+    slopos_slibc::test_harness::run(&[
+        ("alloc_dealloc_basic", test_alloc_dealloc_basic),
+        ("forward_coalesce", test_forward_coalesce),
+        ("backward_coalesce", test_backward_coalesce),
+        ("format_pattern_stability", test_format_pattern_stability),
+        ("mmap_fallback", test_mmap_fallback),
+        ("realloc_grow", test_realloc_grow),
+        ("small_recycling", test_small_recycling),
+    ]);
 }

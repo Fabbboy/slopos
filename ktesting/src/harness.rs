@@ -13,7 +13,7 @@ use crate::config::TestConfig;
 #[cfg(feature = "tests")]
 use crate::config::Verbosity;
 #[cfg(feature = "tests")]
-use crate::registry::{registry_sorted, TestDesc};
+use crate::registry::{registry_sorted, TestDesc, TestKind};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
 
@@ -158,15 +158,43 @@ pub fn tests_run_all(_config: &TestConfig, _summary: &mut TestRunSummary) -> i32
     0
 }
 
+#[cfg(not(feature = "tests"))]
+pub fn tests_run_userland(_config: &TestConfig, _summary: &mut TestRunSummary) -> i32 {
+    // No-op in production builds; the userland-test runner does not exist.
+    0
+}
+
 #[cfg(feature = "tests")]
 pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
+    run_phase(cfg, summary, TestKind::Kernel, "kernel")
+}
+
+/// Run only `TestKind::Userland` entries. Invoked from the `services`
+/// phase (after `boot_step_init_launch`) so the runner can spawn `/bin/*`
+/// binaries against a mounted filesystem with `init` already running.
+///
+/// Emits its own KTAP plan/header/footer + `TESTS SUMMARY:` line so each
+/// phase is self-contained. The host-side wrapper (Phase 4) merges the
+/// two phases into a single dotted progress display.
+#[cfg(feature = "tests")]
+pub fn tests_run_userland(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
+    run_phase(cfg, summary, TestKind::Userland, "userland")
+}
+
+#[cfg(feature = "tests")]
+fn run_phase(
+    cfg: &TestConfig,
+    summary: &mut TestRunSummary,
+    kind_filter: TestKind,
+    phase_label: &str,
+) -> i32 {
     *summary = TestRunSummary::default();
     if !cfg.enabled {
-        klog_info!("TESTS: Harness disabled");
+        klog_info!("TESTS: Harness disabled ({} phase)", phase_label);
         return 0;
     }
 
-    klog_info!("TESTS: Starting test suites");
+    klog_info!("TESTS: Starting {} phase", phase_label);
     register_panic_klog_cleanup();
 
     let descs = match registry_sorted() {
@@ -177,11 +205,14 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
         }
     };
 
-    // First pass: count entries that pass the filter so the KTAP plan
-    // matches actual emission count.
+    // First pass: count entries that pass the kind filter AND the user
+    // glob filter so the KTAP plan matches actual emission count.
     let mut name_buf = [0u8; FQN_BUF_BYTES];
     let mut planned: u32 = 0;
     for desc in &descs {
+        if desc.kind != kind_filter {
+            continue;
+        }
         let fqn = full_name_into(desc, &mut name_buf);
         if cfg.passes_filter(fqn) {
             planned += 1;
@@ -200,6 +231,9 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
                 klog_info!("TESTS: panic flagged, stopping registry walk");
             }
             break;
+        }
+        if desc.kind != kind_filter {
+            continue;
         }
         let fqn = full_name_into(desc, &mut name_buf);
         if !cfg.passes_filter(fqn) {
@@ -237,7 +271,8 @@ pub fn tests_run_all(cfg: &TestConfig, summary: &mut TestRunSummary) -> i32 {
     summary.elapsed_ms = measure_elapsed_ms(start_cycles, end_cycles);
 
     klog_info!(
-        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}",
+        "TESTS SUMMARY ({} phase): total={} passed={} failed={} elapsed_ms={}",
+        phase_label,
         summary.total,
         summary.passed,
         summary.failed,

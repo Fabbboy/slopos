@@ -145,4 +145,18 @@ pub trait Pal {
     fn recvmsg(fd: i32, msg: *mut slopos_abi::syscall::MsgHdr, flags: i32) -> Result<usize, Errno>;
     fn memfd_create(flags: u32) -> Result<i32, Errno>;
     fn ftruncate(fd: i32, size: u64) -> Result<(), Errno>;
+
+    /// Report a single subtest result to the kernel-side userland-test
+    /// runner. Best-effort: returning `Err` means the kernel has no test
+    /// runner waiting for this task and the report was discarded.
+    fn test_report(status: u32, name: &[u8], msg: &[u8]) -> Result<(), Errno>;
+
+    /// Drive the kernel-side userland-test phase from this task's context.
+    ///
+    /// Intended to be called once from `/sbin/init` when the kernel was
+    /// booted with `tests=on`. Blocks until every registered utest has
+    /// completed; returns `Ok(())` once the harness signalled shutdown
+    /// (or completed without it). Returning `Err` means the syscall is
+    /// not registered or the kernel was not built with `tests=on`.
+    fn run_userland_tests() -> Result<(), Errno>;
 }

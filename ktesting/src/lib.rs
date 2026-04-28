@@ -6,6 +6,7 @@ pub mod capture;
 pub mod config;
 pub mod filter;
 pub mod harness;
+pub mod kernel_phase_summary;
 pub mod ktap;
 pub mod registry;
 mod result;
@@ -27,7 +28,8 @@ pub mod xsave_tests;
 pub use config::{config_from_cmdline, TestConfig, Verbosity};
 pub use harness::{
     cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
-    tests_request_shutdown, tests_reset_panic_state, tests_run_all, TestRunSummary,
+    tests_request_shutdown, tests_reset_panic_state, tests_run_all, tests_run_userland,
+    TestRunSummary,
 };
 pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC};
 pub use result::{TestOutcome, TestResult};

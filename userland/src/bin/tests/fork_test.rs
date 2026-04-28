@@ -6,12 +6,12 @@ use slopos_userland::apps::shell;
 
 const EXPECTED: &[u8] = b"piped text\n";
 
-fn fail(msg: &str, code: i32) -> ! {
-    eprintln!("{msg}");
-    std::process::exit(code);
-}
-
-fn main() {
+/// Single integration subtest: build an `echo … | tee` pipeline through
+/// the shell's exec path and verify the file contents. Exit-code
+/// distinctions from the legacy harness (20/22/23) collapse to a single
+/// pass/fail bool; the kernel-side runner attaches one indented KTAP
+/// subtest line for this case.
+fn test_fork_pipe_echo_tee() -> bool {
     eprintln!("fork_test: pipeline repro start");
 
     shell::cwd_set(b"/");
@@ -29,18 +29,27 @@ fn main() {
 
     let rc = shell::exec::execute_tokens(&tokens);
     if rc != 0 {
-        fail("fork_test: execute_tokens failed", 20);
+        eprintln!("fork_test: execute_tokens failed (rc={rc})");
+        return false;
     }
 
     let out = match fs::read("/tmp/tee.txt") {
         Ok(out) => out,
-        Err(_) => fail("fork_test: verify read failed", 22),
+        Err(e) => {
+            eprintln!("fork_test: verify read failed: {e:?}");
+            return false;
+        }
     };
 
     if out.as_slice() != EXPECTED {
-        fail("fork_test: verify mismatch", 23);
+        eprintln!("fork_test: verify mismatch");
+        return false;
     }
 
     eprintln!("fork_test: pipeline repro PASS");
-    std::process::exit(0);
+    true
+}
+
+fn main() {
+    slopos_slibc::test_harness::run(&[("fork_pipe_echo_tee", test_fork_pipe_echo_tee)]);
 }

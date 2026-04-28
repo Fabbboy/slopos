@@ -109,3 +109,34 @@ pub fn emit_footer(elapsed_ms: u32, pass: u32, fail: u32, skip: u32, over_time: 
 pub fn emit_bail(reason: &str) {
     klog_info!("KTAP\tBail out! {}", reason);
 }
+
+// =============================================================================
+// Nested subtest emit (Phase 3 utests)
+// =============================================================================
+//
+// Subtests are emitted *during* the parent utest's run, while the parent
+// `ok N - …`/`not ok N - …` line follows after `(desc.run)()` returns.
+// Result on the wire: subtest lines come *before* their parent line. The
+// host wrapper (Phase 4) treats subtests as siblings of the next-emitted
+// parent line. Two-space indent before `ok`/`not ok` keys the parser into
+// nested mode.
+
+/// Pass subtest line. `sub_idx` is the 1-based position within the parent.
+pub fn emit_subtest_ok(sub_idx: u32, name: &str) {
+    klog_info!("KTAP\t  ok {} - {}", sub_idx, name);
+}
+
+/// Fail subtest line. `msg` is the optional diagnostic; empty strings are
+/// emitted without a `# …` suffix to keep the wire-format clean.
+pub fn emit_subtest_not_ok(sub_idx: u32, name: &str, msg: &str) {
+    if msg.is_empty() {
+        klog_info!("KTAP\t  not ok {} - {}", sub_idx, name);
+    } else {
+        klog_info!("KTAP\t  not ok {} - {} # {}", sub_idx, name, msg);
+    }
+}
+
+/// Skip subtest line. KTAP encodes skips as `ok` with a `# SKIP` suffix.
+pub fn emit_subtest_skip(sub_idx: u32, name: &str) {
+    klog_info!("KTAP\t  ok {} - {} # SKIP", sub_idx, name);
+}

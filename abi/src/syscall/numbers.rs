@@ -709,7 +709,46 @@ pub const SYSCALL_GETPEERNAME: u64 = 153;
 /// * Negative errno on failure
 pub const SYSCALL_GETSOCKNAME: u64 = 154;
 
-pub const SYSCALL_TABLE_SIZE: usize = 156;
+// =============================================================================
+// Userland test harness
+// =============================================================================
+
+/// Userland test harness: report a single subtest result to the kernel.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): status (0=Pass, 1=Fail, 2=Skip)
+/// * rsi (arg1): pointer to test name (UTF-8, no NUL)
+/// * rdx (arg2): test name length in bytes (truncated at TEST_REPORT_NAME_MAX)
+/// * r10 (arg3): pointer to message (UTF-8, no NUL; may be NULL if msg_len=0)
+/// * r8  (arg4): message length in bytes (truncated at TEST_REPORT_MSG_MAX)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (EINVAL bad pointer/status, ENOMEM ring alloc)
+pub const SYSCALL_TEST_REPORT: u64 = 155;
+
+/// Userland test harness: drive the kernel-side userland-test phase.
+///
+/// Walks the `.test_registry` for `TestKind::Userland` entries, spawns each
+/// binary, waits for it to exit, drains its `SYSCALL_TEST_REPORT` ring, emits
+/// indented KTAP subtest lines, and rolls up to a parent KTAP outcome per
+/// utest. Merges the userland summary with the kernel-phase summary stashed
+/// at boot and signals shutdown via the `qemu-exit` mechanism when
+/// `tests.shutdown=on`.
+///
+/// Caller MUST be a real kernel-scheduled task (`/sbin/init` is the
+/// canonical caller) — `task_wait_for` requires `current_task != null`.
+///
+/// # Arguments
+/// (none — all configuration comes from the boot command line and the
+/// kernel-stashed summary state.)
+///
+/// # Returns
+/// * 0 on success (or harness disabled)
+/// * Negative errno on failure
+pub const SYSCALL_RUN_USERLAND_TESTS: u64 = 156;
+
+pub const SYSCALL_TABLE_SIZE: usize = 158;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
