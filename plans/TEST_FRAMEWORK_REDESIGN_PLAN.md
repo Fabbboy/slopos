@@ -948,14 +948,171 @@ dispatch onto a polluted BSP triple-faulted somewhere downstream
 
 **Independent secondary issue still present**: a full
 `just test` run (kernel tests + userland tests in the same boot)
-hangs at fork_test's first eprintln. This is **not** a
-fixture-pollution leak — proven by the `just test-userland-only`
-success above. It is a separate kernel-side regression exposed by
-running the full kernel-test workload before the userland phase
-(likely heap fragmentation, ASID/PCID exhaustion, or similar
-global resource state that no per-fixture snapshot can cover).
-Tracked separately; out of scope for closing the fixture-pollution
-class.
+hangs in fork_test (specifically inside `shell::exec::execute_tokens`).
+The 2026-04-30 deep-dive below characterises the failure mode and
+the inhibition it surfaces, but no candidate fix landed cleanly —
+every patch either reintroduced a different regression or did not
+move the failure point. The diagnosis stands; the cure does not.
+
+#### 2026-04-30 second deep-dive — characterising the userland fork hang
+
+After commit 51765f91 (hermetic `KernelTestScope`), the symptom
+described in the older note ("fork_test hangs before reaching its
+first eprintln") has evolved. With userland probes inserted into
+`fork_test::test_fork_pipe_echo_tee`, every preceding step now
+runs to completion: `pipeline repro start`, A `cwd_set`, B
+`env init`, C `jc init`, D `remove`, E `build`, F1 `pipe`,
+F2 `pipe ok r=3 w=4`, F3 `fork`. Kernel-side probes show
+`FORK_ENTRY` → `task_fork` runs through `TF1` … `TF5 returning`
+→ `FORK_RET` is reached. The kernel's syscall return path
+completes. But the parent's userland code AFTER the fork() call
+never produces output. The child task gets dispatched and
+eventually emits its message ("CHILD ran, exiting" from a
+synthetic single-fork probe), but only after a long delay. The
+real `echo | tee` pipeline that `execute_tokens` builds requires
+the parent's foreground-capture loop to make progress, and that
+never resumes.
+
+**The bisect.** With every kernel-test subsystem run alone, the
+userland phase passes:
+
+| Filter                                | kernel | userland |
+|---------------------------------------|--------|----------|
+| `slopos_testing::*`                   | 30     | 3 PASS   |
+| `slopos_core::scheduler::*`           | 70     | 3 PASS   |
+| `slopos_mm::*`                        | 136    | 3 PASS   |
+| `slopos_drivers::*`                   | 1431   | 3 PASS   |
+| `slopos_net::*`                       | 497    | 3 PASS   |
+| `slopos_drivers::* + ::net::*`        | 1928   | 3 PASS   |
+| `…+ scheduler::* + mm::*`             | 2134   | 3 PASS   |
+| `slopos_core::*` + above              | 2300   | 3 PASS   |
+| **+ `slopos_boot::tests::gdt_tests::*`** | **+26 → 2326** | **HANG** |
+
+The smallest reproducer for the userland-fork hang is
+`slopos_boot::tests::gdt_tests::*` (26 trivial read-only
+MSR/IDT/GDT checks — no `KernelTestScope`, no `task_create`). So
+the wedge is NOT triggered by anything the kernel tests *do*; it
+is triggered by running the test-harness machinery
+(`tests_run_all`'s `for desc in &descs` loop, `capture::begin`/
+`drain_current_cpu` per test, `klog_swap_backend`, per-test KTAP
+`emit_ok`) in a long enough loop. The single-test path
+(`test_create_null_entry` alone, with no fixture body) does NOT
+wedge — so the threshold is somewhere between 1 and 26
+test-harness iterations.
+
+**Where the hang is.** Tracing isolates the symptom to the
+parent task's user-mode resumption AFTER a successful fork
+syscall return:
+
+- `task_fork` completes successfully (`TF5 returning` probe fires).
+- `syscall_fork` returns Disposition::Ok (`FORK_RET` probe fires).
+- The kernel's syscall-exit path runs (sysret/iretq).
+- The CHILD task is dispatched and runs (eventually).
+- The PARENT task does NOT make further forward progress within
+  the test timeout.
+
+The parent isn't crashed (no panic) and isn't in a hard-locked
+critical section (other CPUs continue ticking, AP idle loops
+heartbeat). It is simply not getting scheduled often enough for
+the userland test's foreground-capture loop to drain pipes and
+reap children.
+
+**What `just test-userland-only` does that `just test` does not.**
+`test-userland-only` builds the same kernel ISO with
+`tests.run=__userland_only__`, which makes the kernel-test phase
+filter to zero matches — the harness's `for desc in &descs` loop
+runs but `passes_filter` returns false for every entry, so
+`run_one`/`capture::begin`/`emit_ok` never execute. It produces
+TESTS SUMMARY (kernel phase): total=0 and proceeds straight to
+the userland phase, which then passes 3/3. So the inhibitor is
+specifically the per-test machinery executing N≥26 times, not
+the kernel-test phase boundary itself.
+
+**Hypotheses that did not pan out** (each tried, each rolled
+back when it broke a known-working path):
+
+1. *AP per-CPU `enabled` flag is reset by `init_all_percpu_schedulers`
+   on the FIRST call.* True, but: the no-test-mode path
+   (`test-userland-only`) hits the same `enabled=false` reset at
+   services-30 `boot_step_scheduler_init`, and that path works.
+   So the enabled-bit reset isn't the differentiator.
+
+2. *`init_all_percpu_schedulers` re-init races with running APs.*
+   Plausible — `PerCpuScheduler::init()` writes `cpu_id`,
+   `time_slice`, `enabled`, counters, queues, inbox via raw
+   pointer cast WITHOUT taking the queue_lock, and APs could be
+   in `drain_remote_inbox` or other paths from interrupt context
+   even while "paused" (`pause_all_aps` only checks
+   `is_executing_task`). Patch: skip already-initialised CPUs.
+   Result: doesn't fix the userland hang, AND breaks the
+   `test-userland-only` baseline (which still relies on the
+   re-init to pull AP `enabled` to false at the right point in
+   boot).
+
+3. *`clear_remote_inbox_with_ref_release` /
+   `force_clear_inbox_count` race with concurrent
+   `push_remote_wake` and leak `inbox_count` drift.* True race;
+   patch: hold queue_lock through the swap+walk+count-update.
+   Result: doesn't fix the userland hang, doesn't break anything,
+   but also doesn't measurably move the threshold.
+
+4. *`KernelTestScope::Drop`'s `clear_all_cpu_queues()` reaches into
+   AP queues and races with their live drain.* Patch: replace with
+   `clear_cpu_queues(0)` (BSP only). Result: kernel panic
+   downstream during shutdown-test workload — the production
+   `task_shutdown_all` path expects the wide sweep. Reverted.
+
+5. *Removing `init_scheduler` from `KernelTestScope::enter` entirely
+   to avoid the gated init_once side effect.* Result:
+   `shutdown_tests::test_*` calls `init_scheduler` directly inside
+   their test bodies, which then panics
+   `KernelTestScope: per-CPU scheduler missing after init`
+   because `with_cpu_scheduler(0, ...)` returns None until BSP's
+   `is_initialized` is set. Reverted.
+
+**Where to look next:**
+
+1. The capture mechanism — `capture::begin()` swaps the klog
+   backend on every test; over 26 cycles, any per-CPU ring
+   write-index drift, atomic-ptr ABA, or tail-of-truncated-bytes
+   accumulation could degrade something downstream. Probe:
+   compare per-CPU ring write index before drivers-90 vs after
+   the kernel-test phase.
+2. The panic-recovery registration —
+   `register_panic_klog_cleanup` claims idempotence via
+   `StateFlag`, but the underlying `slopos_utils::panic_recovery`
+   may accumulate cleanup-fn pointers across calls. Check by
+   logging the registered count after each test.
+3. A timing-only effect — running the test loop adds ~9 seconds
+   of wall-time before the userland phase starts. If something
+   in init's spawn path or the userland-spawn cadence is
+   timing-fragile, the extra delay might be enough to put it on
+   the wrong side of a deadline. `QEMU_SMP=1` (single CPU) would
+   distinguish racy cross-CPU scheduling from a pure timing or
+   resource issue.
+4. Per-iteration timing of `fork_test` parent's
+   `waitpid_nohang` poll — measure how often the parent gets
+   CPU time during `execute_tokens`. If it's once per ~10ms
+   timer tick instead of free-running on AP, that confirms the
+   parent is starving on a serialised CPU.
+5. SafeStack `unsafe_stack_sp` accounting across the test loop.
+6. Heap-allocator high-water mark (KVec::with_capacity calls per
+   test) — if the buddy allocator's free list fragments enough,
+   the userland-phase fork's
+   `process_vm_clone_cow` (PML4 frame alloc) could degrade to
+   slow-path scans.
+
+**Status.** No fix landed. The investigation conclusively
+localizes the wedge to "the per-test harness machinery, ≥26
+iterations, on the parent task's user-mode resumption after
+fork", but does not isolate the exact mutated state that causes
+the wedge. The hermetic-fixture work in commit 51765f91
+remains correct and still passes
+`just test-userland-only`. The full `just test` run still hangs
+exactly where the older note documented (now better localised:
+in `execute_tokens`, after fork(), waiting on children that
+never get enough CPU). All exploratory diagnostic patches are
+reverted; HEAD is clean.
 
 #### Other deviations (do not block phase completion)
 
