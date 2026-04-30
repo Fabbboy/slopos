@@ -1,29 +1,34 @@
 //! Userland-test runner.
 //!
 //! Lives in `slopos-core` because it needs the spawn API, the per-task
-//! `TestReportRing`, and the `task_wait_for`/`task_get_exit_record`
-//! helpers — all of which are core-internal. The companion
-//! [`utest!`](crate::utest) macro emits a `TestDesc` whose `run` thunk
-//! dispatches into [`run_thunk`]. The macro lives in this crate too so
-//! `slopos-testing` does not need to depend on `slopos-core` (which would
-//! cycle: core already deps testing for the `stest!` macros).
+//! `TestReportRing`, and the `task_wait_for`/pending-drain helpers — all of
+//! which are core-internal. The companion [`utest!`](crate::utest) macro
+//! emits a `TestDesc` whose `run` thunk dispatches into [`run_thunk`]. The
+//! macro lives in this crate too so `slopos-testing` does not need to depend
+//! on `slopos-core` (which would cycle: core already deps testing for the
+//! `stest!` macros).
 
 use slopos_abi::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason,
-    TaskExitRecord, TaskFaultReason, TaskPriority,
+    TaskPriority,
 };
+use slopos_alloc::KVec;
 use slopos_testing::{TestDesc, TestResult, ktap};
 use slopos_utils::{catch_panic, klog_info};
 
 use crate::exec::spawn_program_with_attrs;
 use crate::sched::scheduler_get_current_task;
-use crate::scheduler::scheduler::task_wait_for;
-use crate::task::{task_drain_test_reports, task_find_by_id, task_get_exit_record};
+use crate::scheduler::scheduler::{sleep_current_task_ms, task_wait_for};
+use crate::scheduler::task::task_find_by_id;
+use crate::scheduler::test_reports::{
+    PendingDrain, TestReport, consume_pending_drain, pending_drain_present,
+};
 
 /// Per-utest entry point installed in every `TestDesc::run` produced by the
 /// [`utest!`](crate::utest) macro. Spawns the binary, waits for it to
-/// terminate, drains its `SYSCALL_TEST_REPORT` ring, emits one indented
-/// KTAP subtest line per report, then rolls up to a parent outcome.
+/// terminate, drains its `SYSCALL_TEST_REPORT` ring via the slot-lifecycle-
+/// independent pending-drain cache, emits one indented KTAP subtest line
+/// per report, then rolls up to a parent outcome.
 ///
 /// Wrapped in `catch_panic!` so a kernel-side panic inside spawn / wait /
 /// drain does not crash the harness — it is reported as a `Panic` outcome
@@ -82,10 +87,8 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     // the fd table and have a real `parent_task_id` set. Without this, the
     // spawned task has `parent_task_id = INVALID_TASK_ID` and
     // `inherit_fds_from = INVALID_PROCESS_ID` — which leaves it with no
-    // stdin/stdout/stderr and matches the `notify_parent_of_child_exit`
-    // early-return path. Wakeup still flows through `release_task_dependents`
-    // (which scans for `waiting_on==completed_id`), but a child with no
-    // fd table can fault before reporting any subtest results.
+    // stdin/stdout/stderr and would prevent `notify_parent_of_child_exit`
+    // from delivering SIGCHLD anywhere meaningful.
     let (parent_pid, parent_tid) = unsafe {
         let cur = scheduler_get_current_task();
         if cur.is_null() {
@@ -114,50 +117,92 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         }
     };
 
-    // Hold a refcount on the spawned task across the wait so that
-    // `reap_zombies` (which fires on every CPU's idle iteration) cannot
-    // recycle the slot — and zero out `test_reports` via
-    // `Task::reset_in_place` — between the child exiting and us draining
-    // the per-task report ring. Without this hold, the drained ring is
-    // empty by the time we look.
-    let task_ptr = task_find_by_id(pid);
-    if !task_ptr.is_null() {
-        unsafe {
-            (*task_ptr).inc_ref();
-        }
-    }
-
-    // Mirror `syscall_waitpid`: try the exit-record cache first, and only
-    // park on `task_wait_for` if the child is still live. Two reasons:
-    // (1) it sidesteps the case where the child terminated before we
-    //     reach `task_wait_for` and the wake fired before our
-    //     `prepare_to_wait`, which would leave us blocked forever; and
-    // (2) it's the same shape as the production waitpid path, so future
-    //     scheduler invariants stay in lockstep.
-    let mut record = TaskExitRecord {
-        task_id: 0,
-        exit_reason: TaskExitReason::None,
-        fault_reason: TaskFaultReason::None,
-        exit_code: 0,
-    };
-    let mut exit_rc = task_get_exit_record(pid, &mut record as *mut _);
-    if exit_rc != 0 {
+    // Wait for the child to terminate. The pending-drain cache is the
+    // ground truth — `mark_task_terminated` writes the entry there before
+    // releasing waiters. The wait pattern below combines two strategies:
+    //
+    //   1. `task_wait_for(pid)` — the standard scheduler-blocking wait.
+    //      Wakes when the target exits via the existing `waiting_on`
+    //      protocol. This works for the common case where the runner-side
+    //      registration beats the target's termination.
+    //
+    //   2. A short polling loop afterward — re-checks `pending_drain_present`
+    //      and `task_find_by_id(pid)`. This covers two scenarios that
+    //      `task_wait_for` alone does NOT cover:
+    //
+    //        a. The runner missed the wake because of the wake-before-park
+    //           race in `task_wait_for` (target terminated before our
+    //           `waiting_on` was published, and the wake was issued against
+    //           a `waiting_on=INVALID` we hadn't set yet).
+    //        b. The runner was woken spuriously by some other path before
+    //           the target had actually run and stashed its drain. (We have
+    //           empirically observed this on this kernel: `task_wait_for`
+    //           returns within ~10ms of spawn even when the target hasn't
+    //           been dispatched yet, well before any termination.)
+    //
+    //      The poll terminates on three conditions: drain present, slot
+    //      reset (task gone), or the iteration cap. The 1 ms `sleep_ms`
+    //      step lets other CPUs make progress without burning the runner's
+    //      CPU; the cap (5000 ms) is a safety bound — a real test
+    //      shouldn't take that long.
+    if !pending_drain_present(pid) {
         let _ = task_wait_for(pid);
-        exit_rc = task_get_exit_record(pid, &mut record as *mut _);
     }
-    let reports = task_drain_test_reports(pid);
-
-    // Drop the post-wait refcount. The slot is now reusable; the next
-    // `reap_zombies` pass will recycle it.
-    if !task_ptr.is_null() {
-        unsafe {
-            (*task_ptr).dec_ref();
+    let mut polled_ms: u32 = 0;
+    const POLL_STEP_MS: u32 = 1;
+    const POLL_LIMIT_MS: u32 = 5000;
+    while !pending_drain_present(pid) {
+        if task_find_by_id(pid).is_null() {
+            // Slot reset under us with no drain stashed — task crashed or
+            // was terminated by an external path that bypassed our stash.
+            break;
         }
+        if polled_ms >= POLL_LIMIT_MS {
+            klog_info!(
+                "UTEST: '{}' pid={} exceeded {}ms poll cap with no drain entry",
+                bin,
+                pid,
+                POLL_LIMIT_MS
+            );
+            break;
+        }
+        sleep_current_task_ms(POLL_STEP_MS);
+        polled_ms = polled_ms.saturating_add(POLL_STEP_MS);
     }
+
+    let drain = match consume_pending_drain(pid) {
+        Some(d) => d,
+        None => {
+            // No drain entry was stashed. The task either:
+            //   - never lazy-allocated `test_reports` (binary crashed before
+            //     calling `SYSCALL_TEST_REPORT` / never reached its first
+            //     reportable test case), OR
+            //   - somehow bypassed `mark_task_terminated`'s stash path.
+            // In either case there are no subtest results to surface.
+            klog_info!(
+                "UTEST: '{}' pid={} produced no drain entry — binary crashed before reporting?",
+                bin,
+                pid
+            );
+            return TestResult::Fail;
+        }
+    };
+
+    let PendingDrain {
+        exit_record,
+        reports: maybe_ring,
+    } = drain;
+
+    // Move the entries out of the heap-resident ring so we can release the
+    // ring's KBox before the (potentially many) per-subtest klog emissions.
+    let report_vec: KVec<TestReport> = match maybe_ring {
+        Some(mut ring) => ring.drain().unwrap_or_else(|_| KVec::new()),
+        None => KVec::new(),
+    };
 
     let mut sub_idx: u32 = 0;
     let mut sub_failed: u32 = 0;
-    for r in reports.iter() {
+    for r in report_vec.iter() {
         sub_idx += 1;
         let name_slice = &r.name[..r.name_len as usize];
         let msg_slice = &r.msg[..r.msg_len as usize];
@@ -190,14 +235,13 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         return TestResult::Fail;
     }
     let exited_normally =
-        exit_rc == 0 && record.exit_reason == TaskExitReason::Normal && record.exit_code == 0;
-    if !exited_normally && reports.is_empty() {
+        exit_record.exit_reason == TaskExitReason::Normal && exit_record.exit_code == 0;
+    if !exited_normally && report_vec.is_empty() {
         klog_info!(
-            "UTEST: '{}' exited rc={} reason={} code={} with no reports",
+            "UTEST: '{}' exited reason={} code={} with no reports",
             bin,
-            exit_rc,
-            exit_reason_str(record.exit_reason),
-            record.exit_code
+            exit_reason_str(exit_record.exit_reason),
+            exit_record.exit_code
         );
         return TestResult::Fail;
     }

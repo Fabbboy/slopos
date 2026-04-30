@@ -22,7 +22,8 @@ use super::task_table::{
 use super::{
     FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
+    TaskContext, TaskEntry, TaskExitReason, TaskExitRecord, TaskFaultReason, TaskPriority,
+    TaskStatus,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
@@ -644,6 +645,33 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
             (*task_ptr).fault_reason,
             (*task_ptr).exit_code,
         );
+
+        // Stash a slot-lifecycle-independent copy of the exit record + the
+        // per-task test-report ring (if any) into the pending-drain cache.
+        // The userland-test runner reads it from there, so its drain is
+        // robust to subsequent slot reuse / reset_in_place that would
+        // clobber the original `Task` and `mgr.exit_records[idx]`.
+        //
+        // Restricted to tasks that had test_reports populated: non-test
+        // tasks (the vast majority) skip the cache entirely, paying zero
+        // cost.
+        if (*task_ptr).test_reports.is_some() {
+            let exit_record = TaskExitRecord {
+                task_id: resolved_id,
+                exit_reason: (*task_ptr).exit_reason,
+                fault_reason: (*task_ptr).fault_reason,
+                exit_code: (*task_ptr).exit_code,
+            };
+            let reports = (*task_ptr).test_reports.take();
+            crate::scheduler::test_reports::stash_pending_drain(
+                resolved_id,
+                crate::scheduler::test_reports::PendingDrain {
+                    exit_record,
+                    reports,
+                },
+            );
+        }
+
         (*task_ptr).set_status(TaskStatus::Terminated);
         scheduler::cancel_sleep(resolved_id);
         (*task_ptr).fate_token = 0;
