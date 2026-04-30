@@ -703,24 +703,118 @@ The poll loop covers two scenarios `task_wait_for` alone does not:
       `eprintln`/`SYSCALL_TEST_REPORT`; the runner reports
       "exceeded 5000ms poll cap with no drain entry". The `Created task
       'fork_test' with ID N` and `exec: loaded ELF` lines emit, but the
-      binary's user code does not stash a drain. Likely a userland-side
-      bug in `shell::env::initialize_defaults` /
-      `shell::exec::initialize_job_control` / the pipeline fork-exec path.
-      **Independent of the test framework — heap_allocator_test, which uses
-      the same `slibc::test_harness::run` entry point but no shell calls,
-      passes cleanly.**
+      binary's user code does not stash a drain.
 - [~] `utest_io_capture` fails — `io_capture_test` reaches its first
       `eprintln!("io_capture_test: running ifconfig...")` (visible in
       captured klog), then hangs in `shell::exec::execute_tokens` waiting
-      on the spawned `ifconfig` child. Same independence note as above:
-      this is a binary-level deadlock in the userland shell exec path,
-      not a framework regression.
+      on the spawned `ifconfig` child.
 
-The two remaining failures are gated by **userland shell stability**, not
-by the test framework. Fixing them is out of scope for the test-framework
-redesign and belongs in a separate plan once the shell's fork-exec path
-is reliable enough to run `echo | tee` and an `ifconfig` spawn under a
-test wrapper without deadlocking.
+#### 2026-04-30 deep investigation — the prior diagnosis was wrong
+
+The original "userland-shell-deadlock" diagnosis above was incorrect. The
+hang is **order-dependent and lives in the kernel-side spawn / scheduler
+path**, not in `shell::exec` and not in any specific test binary's code.
+
+**Smoking gun.** Reordering the `utest!` registrations swaps which
+binary fails:
+
+| Position | Original order  | Result | Reordered (fork→last) | Result |
+|----------|-----------------|--------|-----------------------|--------|
+| 1st      | utest_fork      | HANG   | utest_heap_allocator  | HANG   |
+| 2nd      | utest_heap_alloc| pass   | utest_io_capture      | partial — `ifconfig` runs, hangs at `nc -h` |
+| 3rd      | utest_io_capture| HANG   | utest_zfork (=fork)   | HANG   |
+
+The first utest spawned by `init`'s `SYSCALL_RUN_USERLAND_TESTS` handler
+**always** hangs, regardless of which binary holds that slot. That rules
+out every userland-side hypothesis (eprintln / std init / shell statics /
+fork-exec pipeline / TLS).
+
+**What was confirmed by direct serial-port probes (bypassing klog so the
+ring-buffer capture window does not swallow the trace):**
+
+1. *Dispatch* — patching `core/src/scheduler/scheduler.rs::dispatch` to
+   poke a marker on COM1 on every Ready→Running transition for a
+   user-mode task showed pid 11 (`fork_test`) IS dispatched once on
+   CPU 0. So the kernel scheduler does pick it up.
+2. *Syscalls* — patching `core/src/syscall/test_handlers.rs::syscall_test_report`
+   to poke a marker shows seven `!!RP:12` entries (heap_allocator's seven
+   subtests) and **zero** entries for pid 11 (fork) or pid 13
+   (io_capture). Neither hung binary ever reaches its first
+   `SYSCALL_TEST_REPORT`, but io_capture's user code DOES reach its first
+   `write(2,…)` (the eprintln output is visible on the serial console
+   — interleaved into the runner output, not into the per-test ring).
+3. *Minimal repro* — replacing `fork_test::main` with a single line —
+   `slibc::test_harness::run(&[("fork_min", || true)])` — and dropping
+   every shell/std::fs import still hangs as the first utest, with the
+   same 5000 ms timeout. Even an empty user main hangs in the first slot.
+4. *CPU placement* — every user-task first-dispatch the probe printed
+   landed on `C0` (BSP). Other CPUs apparently never run user tasks.
+
+**Inheritance pattern that may be related.** Inside `io_capture_test`
+(when it is the 2nd direct child of init, so its main runs to completion):
+the *first* shell-spawned child (`ifconfig`) runs and prints output; the
+*second* (`nc -h`) hangs. So the "first child of any process hangs"
+shape may also recur recursively, though I did not nail down whether the
+recursion is the same root cause as init's first-child hang.
+
+**What is NOT the bug:**
+- Not `shell::exec::execute_tokens`, `shell::env::initialize_defaults`,
+  or job-control setup. fork_test hangs even when its main is empty.
+- Not `slibc::test_harness::run`. heap_allocator_test uses it identically
+  and works.
+- Not the std::io stderr lazy init. io_capture_test reaches `eprintln`
+  successfully when not in slot 1.
+- Not TLS / `fs_base` / TLS template layout. The fork_test binary has the
+  same TLS shape as heap_allocator_test (`tls_tp=0xc00008` in both kernel
+  log lines).
+- Not the pending-drain cache or any of the Phase 3 plumbing. The first
+  binary never reaches *any* syscall, so `SYSCALL_TEST_REPORT` is never
+  invoked and the cache logic is irrelevant.
+- Not test-binary code at all. Empty `fork_test::main` reproduces.
+
+**Where the bug must live (narrowed scope):**
+1. Path between `spawn_program_with_attrs` returning and the spawned
+   child's first user-mode instruction successfully completing one
+   syscall. Candidates:
+   - `fileio_destroy_table_for_process` + `fileio_clone_table_for_process`
+     for the *first* time they are called from a userland-syscall
+     context (init's fd table is cloned to the child here);
+   - `task_wait_for` wake-before-park behaviour combined with the runner's
+     5 s poll loop — but the runner empirically observes spurious wakes,
+     so the loop runs; the child still doesn't make progress;
+   - Some scheduler enqueue path that places the first user-task child of
+     init on a CPU which never gets to run it. The diagnostic probe shows
+     the child IS dispatched at least once on CPU 0; the question is
+     why it never makes a syscall after that single dispatch.
+2. Whatever loop / fault state the child enters on its very first
+   instruction. With `entry=0x4000a8` and a known-good ELF that works
+   when not first, the binary's first instructions are
+   `xor rbp, rbp; mov rdi, [rsp]; lea rsi, [rsp+8]; and rsp, -16; call main`.
+   The `mov rdi, [rsp]` reads `argc` from the stack the kernel set up;
+   if that page is unmapped or fs_base is wrong on the resume path the
+   task could fault repeatedly.
+
+**Next investigative steps a follow-up should take:**
+- Enable `boot.debug=on` page-fault logging and look for repeated faults
+  on pid 11 / pid 13 during the 5 s window.
+- Add a probe inside `prepare_switch_to` that records *every* re-dispatch
+  of pid 11 (not only the first Ready→Running), to see whether the task
+  is being preempted in a tight loop or simply running indefinitely.
+- Check whether the SMP scheduler has actually finished initialising AP
+  CPUs by the time `tests_run_userland` runs. If APs are not running
+  user tasks, the only CPU available is BSP, which init also uses.
+- Single-CPU run (`QEMU_SMP=1 just test`) to see whether the problem
+  reproduces under uniprocessor scheduling, which would distinguish
+  IPI / cross-CPU enqueue races from a pure kernel bug.
+- Insert a "warmup" spawn (run any user binary, wait, drain) before the
+  real utest loop in `tests_run_userland`. If that makes all three
+  utests pass, the root cause is "first user-task child of init", and
+  the scheduler / spawn path post-init can be bisected from there.
+
+**Tasks 1H bootstrap canary aside.** The kernel-phase 2398/2398 result is
+unaffected; the failure is purely in the userland phase, and it is
+reproducible on every run of `just test` from `develop` HEAD
+(`cd940267`).
 
 #### Other deviations (do not block phase completion)
 
