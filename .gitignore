@@ -30,6 +30,7 @@ mcp/.cache/
 mcp/*.tsbuildinfo
 
 # Rust build artifacts
+target/
 rust/target/
 rust/**/target/
 Cargo.lock
