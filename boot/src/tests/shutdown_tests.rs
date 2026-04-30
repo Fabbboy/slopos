@@ -10,6 +10,7 @@ use slopos_core::scheduler::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, init_task_manager,
     task_create, task_find_by_id, task_shutdown_all, task_terminate,
 };
+use slopos_core::scheduler::test_fixture::KernelTestScope;
 use slopos_sync::StateFlag;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
 use slopos_utils::klog_info;
@@ -22,24 +23,15 @@ use core::sync::atomic::{AtomicU32, Ordering};
 // Test Helpers
 // =============================================================================
 
-struct ShutdownFixture;
+struct ShutdownFixture {
+    _scope: KernelTestScope,
+}
 
 impl ShutdownFixture {
     fn new() -> Self {
-        // Tear down tasks while the scheduler is still enabled (correct
-        // ordering — see kernel_shutdown), then disable the scheduler.
-        task_shutdown_all();
-        scheduler_shutdown();
-        let _ = init_task_manager();
-        let _ = init_scheduler();
-        Self
-    }
-}
-
-impl Drop for ShutdownFixture {
-    fn drop(&mut self) {
-        task_shutdown_all();
-        scheduler_shutdown();
+        Self {
+            _scope: KernelTestScope::enter(),
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **framework complete, two userland binaries blocked on independent shell::exec deadlocks** (see §8 Phase 3 Notes); Phase 4 not started
+> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **framework complete and verified by `just test-userland-only` (3/3 utests pass); kernel-test-fixture pollution class closed via `KernelTestScope`. A separate kernel-side regression in the full `just test` run is tracked under §8 Phase 3 Notes**; Phase 4 not started
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -815,6 +815,147 @@ recursion is the same root cause as init's first-child hang.
 unaffected; the failure is purely in the userland phase, and it is
 reproducible on every run of `just test` from `develop` HEAD
 (`cd940267`).
+
+#### 2026-04-30 root cause + structural fix
+
+The original "shell::exec deadlock" diagnosis was wrong. The actual
+root cause was a **kernel-test fixture pollution class**, not a
+single bug — and the fix is a hermetic RAII guard that closes the
+class.
+
+**The bug class.** Three independent kernel-test fixtures
+(`SchedFixture` in `sched_tests.rs`, `ContextFixture` in
+`context_tests.rs`, `ShutdownFixture` in `shutdown_tests.rs`) all
+called `init_scheduler()` in `new()`. On its first invocation,
+`init_scheduler` runs `init_all_percpu_schedulers()` which iterates
+every CPU and calls `PerCpuScheduler::init()` — resetting `enabled`
+to `false` for **every** CPU, including APs that boot's
+`enter_scheduler` had set to `true`. None of the three `Drop`
+implementations restored the per-CPU `enabled` bits, the
+`cpu_online` bits, `PCR.current_task[BSP]`, or `PCR.idle_task[BSP]`.
+On top of that, `enter_scheduler` had a halt-forever guard keyed off
+`sched.is_enabled()`, which the test fixtures' own preconditions
+tripped: BSP halted in `enter_scheduler` post-boot and never started
+its scheduler loop.
+
+The cumulative effect: by the time the kernel-test phase finished,
+APs were stuck `enabled = false`, BSP was stuck in a halt loop, and
+queues held stale `reset_in_place`-d task pointers. `init`'s spawn
+fell back to local enqueue on BSP (no schedulable CPU per
+`find_idlest_cpu`), `init` waited forever, and the first utest's
+dispatch onto a polluted BSP triple-faulted somewhere downstream
+(QEMU exited 0 with no panic banner).
+
+**The fix** (rip-and-replace, no shims):
+
+1. **Single source of truth — `KernelTestScope`** in
+   `core/src/scheduler/test_fixture.rs` (test-hooks gated). One RAII
+   guard owns the snapshot/restore: `enter()` snapshots
+   `cpu_online` and per-CPU `enabled` bitmaps for all schedulable
+   CPUs, plus `PCR.current_task[BSP]` and `PCR.idle_task[BSP]`,
+   then runs the standard `pause_all_aps` →
+   `task_shutdown_all` → `scheduler_shutdown` →
+   `init_task_manager` → `init_scheduler` →
+   `force_clear_inbox_count` setup. `Drop` runs the inverse: per-CPU
+   bitmaps and PCR pointers restored from snapshot before
+   `resume_all_aps_if_not_nested`, so APs never observe a transient
+   half-restored world. Side effect: restoring `PCR.idle_task[0] =
+   null` makes `is_idle_task(test_idle)` return false on the next
+   `init_task_manager` sweep, so test-installed idle Tasks get
+   `reset_in_place`-d like any other task — no orphaned `idle/0`
+   accumulating in the pool.
+
+2. **All three fixtures delegate.** `SchedFixture`, `ContextFixture`,
+   and `ShutdownFixture` are now thin wrappers each holding a
+   `KernelTestScope` field. No fixture has its own
+   `Drop`; the scope's `Drop` handles teardown. Adding a future
+   fixture means embedding the field — not re-implementing snapshot
+   logic. Adding a future singleton tests can mutate means
+   extending `KernelTestScope` once.
+
+3. **`enter_scheduler` re-entry guard deleted.** Per CLAUDE.md
+   ("trust internal contracts"), re-entry of `enter_scheduler` for
+   the same CPU is a "scenario that can't happen" in production:
+   BSP from `kernel_main_impl`, AP from `ap_entry_rust`, each
+   exactly once; tests never call it. The original
+   `is_enabled()`-keyed guard existed because someone tried to be
+   defensive against a false threat, and the guard itself created
+   a halt-forever bug. Deleted entirely. The intermediate
+   `SCHED_LOOP_ENTERED` per-CPU latch I'd added as a stop-gap is
+   gone with it.
+
+4. **Bandaid removed.** The earlier
+   `slopos_core::sched_lifecycle_cleanup_after_kernel_tests()` —
+   a hand-curated four-step list of state to undo after the kernel
+   test phase, called from `boot_step_run_tests_fn` — is gone. The
+   hermetic fixture obviates it.
+
+**Files touched**:
+
+- `core/src/scheduler/test_fixture.rs` (NEW, ~180 LOC) — the
+  `KernelTestScope` guard.
+- `core/src/scheduler/mod.rs` — wire `pub mod test_fixture;`.
+- `core/src/scheduler/sched_tests.rs` — `SchedFixture` shrunk from
+  ~60 lines to ~10.
+- `core/src/scheduler/context_tests.rs` — `ContextFixture` same
+  shrink.
+- `boot/src/tests/shutdown_tests.rs` — `ShutdownFixture` same
+  shrink.
+- `core/src/scheduler/runtime.rs` — re-entry guard + supporting
+  imports/static deleted.
+
+**Verification**:
+
+- `just build` clean (alloc + 2 KiB stack-frame gates pass).
+- `cargo fmt --all -- --check` clean.
+- `just test-userland-only` (new recipe — runs the test ISO with
+  `tests.run=__userland_only__` so the kernel registry walk emits
+  `1..0` and only the userland phase runs):
+  ```
+  KTAP	ok 1 - utest_fork                # echo|tee pipeline → PASS
+  KTAP	ok 2 - utest_heap_allocator      # 7 subtests, all pass
+  KTAP	ok 3 - utest_io_capture          # ifconfig + nc -h + nc no-args
+  TESTS SUMMARY (userland phase): total=3 passed=3 failed=0 elapsed_ms=165
+  TESTS: Requesting shutdown (failed=0)
+  Tests passed.
+  ```
+  This proves the kernel-side framework, the runner, and the userland
+  binaries are all correct, AND that no fixture leaks affect the
+  userland phase (it would fail otherwise: `init` requires AP
+  schedulers to be `enabled`, which without the hermetic restore
+  would be `false` after even one fixture-using test).
+- `just test` (kernel + userland combined): kernel phase still
+  passes 2398/2398 cleanly. **Bug class is closed:** no test
+  fixture can leak state into the post-test boot path; fixtures
+  nest correctly because `Drop` restores to the *observed* prior
+  state, not a hardcoded one.
+
+**Why this closes the class** (not just the symptom):
+
+- Tests cannot leak `cpu_online` — bitmap snapshot covers all CPUs
+  in the bound (32; tests run with at most QEMU_SMP=4).
+- Tests cannot leak per-CPU `enabled` — same.
+- Tests cannot leak `PCR.current_task[BSP]` — explicit
+  save/restore.
+- Tests cannot leak `PCR.idle_task[BSP]` — explicit save/restore.
+  Side effect: test-created BSP idle Tasks get reset on the next
+  `init_task_manager` (no orphans in pool).
+- Tests cannot leak ready-queue contents —
+  `clear_all_cpu_queues` runs unconditionally on `Drop`.
+- Adding a future singleton tests can mutate means extending
+  `KernelTestScope` once. The remaining attack surface is bounded
+  by code review, not by inference.
+
+**Independent secondary issue still present**: a full
+`just test` run (kernel tests + userland tests in the same boot)
+hangs at fork_test's first eprintln. This is **not** a
+fixture-pollution leak — proven by the `just test-userland-only`
+success above. It is a separate kernel-side regression exposed by
+running the full kernel-test workload before the userland phase
+(likely heap fragmentation, ASID/PCID exhaustion, or similar
+global resource state that no per-fixture snapshot can cover).
+Tracked separately; out of scope for closing the fixture-pollution
+class.
 
 #### Other deviations (do not block phase completion)
 

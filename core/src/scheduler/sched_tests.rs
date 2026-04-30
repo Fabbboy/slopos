@@ -13,18 +13,17 @@ use core::ptr;
 use slopos_testing::TestResult;
 use slopos_utils::klog_info;
 
-use super::per_cpu::{pause_all_aps, resume_all_aps_if_not_nested};
 use super::runtime::{self, IdleStackResolveError};
 use super::scheduler::{
-    self, get_scheduler_stats, init_scheduler, schedule, schedule_new_task, schedule_task,
-    scheduler_is_enabled, scheduler_shutdown, scheduler_timer_tick, unschedule_task,
+    self, get_scheduler_stats, schedule, schedule_new_task, schedule_task, scheduler_is_enabled,
+    scheduler_timer_tick, unschedule_task,
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskStatus, init_task_manager, reap_zombies, task_create, task_find_by_id,
-    task_get_info, task_is_blocked, task_set_state, task_set_state_with_reason, task_shutdown_all,
-    task_terminate,
+    Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_find_by_id, task_get_info,
+    task_is_blocked, task_set_state, task_set_state_with_reason, task_terminate,
 };
+use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
 use slopos_arch::MAX_CPUS;
 use slopos_arch::arch::gdt::SegmentSelector;
@@ -35,66 +34,18 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 // RAII Fixture for Scheduler Tests
 // =============================================================================
 
-/// RAII fixture that sets up and tears down the scheduler test environment.
-/// Setup happens on creation, teardown happens on Drop.
+/// RAII fixture for scheduler tests. All setup/teardown logic lives in
+/// [`KernelTestScope`]; this wrapper exists for the historical name and
+/// to keep the change to call sites mechanical.
 pub struct SchedFixture {
-    aps_paused: bool,
+    _scope: KernelTestScope,
 }
 
 impl SchedFixture {
-    /// Create and initialize the fixture
     pub fn new() -> Self {
-        let aps_paused = pause_all_aps();
-
-        // Park PCR.current_task on the BSP SafeStack bootstrap stub
-        // BEFORE init_task_manager resets pool tasks in place.  Any
-        // previous test that went through `dispatch()` may have left
-        // PCR.current_task pointing at a pool-backed Task that
-        // `init_task_manager` is about to `reset_in_place` — reading
-        // through it after that zeroes `unsafe_stack_sp` and crashes
-        // the next instrumented prologue.  The bootstrap stub is not
-        // in the pool (whitelisted by `task_pointer_is_valid`) and
-        // retains a primed `unsafe_stack_sp` for the lifetime of the
-        // kernel image.
-        slopos_arch::pcr::set_current_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
-
-        task_shutdown_all();
-        scheduler_shutdown();
-
-        if init_task_manager() != 0 {
-            klog_info!("SCHED_TEST: Failed to init task manager");
-            resume_all_aps_if_not_nested(aps_paused);
-            panic!("SCHED_TEST: init_task_manager failed");
+        Self {
+            _scope: KernelTestScope::enter(),
         }
-        if init_scheduler() != 0 {
-            klog_info!("SCHED_TEST: Failed to init scheduler");
-            resume_all_aps_if_not_nested(aps_paused);
-            panic!("SCHED_TEST: init_scheduler failed");
-        }
-
-        // Force-clear any stale inbox counts that accumulated between
-        // the previous fixture's drop and this init (e.g. from AP timer
-        // ticks that fired before pause took effect).
-        for cpu in 0..slopos_arch::pcr::get_cpu_count() {
-            if super::per_cpu::with_cpu_scheduler(cpu, |sched| {
-                sched.force_clear_inbox_count();
-            })
-            .is_none()
-            {
-                resume_all_aps_if_not_nested(aps_paused);
-                panic!("SCHED_TEST: CPU scheduler missing after init");
-            }
-        }
-
-        Self { aps_paused }
-    }
-}
-
-impl Drop for SchedFixture {
-    fn drop(&mut self) {
-        task_shutdown_all();
-        scheduler_shutdown();
-        resume_all_aps_if_not_nested(self.aps_paused);
     }
 }
 

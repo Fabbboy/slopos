@@ -125,6 +125,23 @@ _iso-tests: _fs-image-tests
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline}}"
 
+# Same as `_iso-tests` but adds a `tests.run` glob that matches no kernel
+# test, so the kernel-side harness emits a `1..0` plan and the userland
+# phase (driven by /sbin/init's `SYSCALL_RUN_USERLAND_TESTS`) is the
+# only thing exercised. Useful for isolating userland-test regressions
+# from kernel-test interactions.
+_iso-tests-userland-only: _fs-image-tests
+    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
+    KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
+        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
+            "slopos-testing/qemu-exit kernel/tests"
+    LIMINE_DIR={{limine_dir}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+        scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" \
+            "{{test_cmdline}} tests.run=__userland_only__"
+
 # ── QEMU boot ───────────────────────────────────────────────────────────────
 
 _qemu-boot mode video iso fs_image *extra_env:
@@ -164,6 +181,9 @@ boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_T
 
 [doc("Run interrupt test harness in QEMU")]
 test: _iso-tests (_qemu-boot "test" "0" iso_tests fs_image_tests)
+
+[doc("Skip the kernel-side test phase; run only the Phase 3 userland tests.")]
+test-userland-only: _iso-tests-userland-only (_qemu-boot "test" "0" iso_tests fs_image_tests)
 
 [doc("Run unit tests for abi, gfx, and font crates on the host")]
 test-host:

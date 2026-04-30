@@ -253,13 +253,14 @@ extern "C" fn scheduler_loop_entry(cpu_id: usize, idle_task: *mut Task) -> ! {
 }
 
 pub fn enter_scheduler(cpu_id: usize) -> ! {
-    let already_enabled =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.is_enabled()).unwrap_or(false);
-    if already_enabled {
-        loop {
-            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
-        }
-    }
+    // Called exactly once per CPU at boot (BSP from `kernel_main_impl`,
+    // APs from `ap_entry_rust`). No re-entry guard: per CLAUDE.md
+    // "trust internal contracts" — re-entry is a caller bug to fix at
+    // the call site, not a runtime condition to defend against.
+    // (Historical note: a prior `is_enabled()`-keyed guard caused a
+    // halt-forever bug because the kernel-test fixture's preconditions
+    // tripped the guard; the fixture is now hermetic so the guard's
+    // raison d'être disappeared with it.)
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.enable();
     });

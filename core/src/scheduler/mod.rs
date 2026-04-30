@@ -19,6 +19,8 @@ pub mod switch_context;
 pub mod task;
 pub mod task_lock;
 pub mod task_struct;
+#[cfg(feature = "test-hooks")]
+pub mod test_fixture;
 pub mod test_reports;
 pub mod trap;
 pub mod unsafe_stack;

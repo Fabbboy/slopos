@@ -9,32 +9,23 @@ use slopos_arch::InterruptFrame;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use slopos_utils::klog_info;
 
-use super::scheduler::{
-    init_scheduler, save_task_context_from_interrupt_frame, scheduler_shutdown,
-};
+use super::scheduler::save_task_context_from_interrupt_frame;
 use super::task::{
-    MAX_TASKS, init_task_manager, task_create, task_find_by_id, task_get_info, task_set_state,
-    task_shutdown_all, task_terminate,
+    MAX_TASKS, task_create, task_find_by_id, task_get_info, task_set_state, task_terminate,
 };
 use super::task_struct::TaskContext;
+use super::test_fixture::KernelTestScope;
 use slopos_arch::arch::gdt::SegmentSelector;
 
-struct ContextFixture;
+struct ContextFixture {
+    _scope: KernelTestScope,
+}
 
 impl ContextFixture {
     fn new() -> Self {
-        task_shutdown_all();
-        scheduler_shutdown();
-        let _ = init_task_manager();
-        let _ = init_scheduler();
-        Self
-    }
-}
-
-impl Drop for ContextFixture {
-    fn drop(&mut self) {
-        task_shutdown_all();
-        scheduler_shutdown();
+        Self {
+            _scope: KernelTestScope::enter(),
+        }
     }
 }
 
