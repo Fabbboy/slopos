@@ -77,6 +77,12 @@ SECTIONS
     __stop_test_registry = .;
   } :rodata
 
+  .hermetic_state_registry ALIGN(8) : {
+    __start_hermetic_state_registry = .;
+    KEEP(*(.hermetic_state_registry))
+    __stop_hermetic_state_registry = .;
+  } :rodata
+
   .data ALIGN(4096) : {
     _data_start = .;
     *(.data .data.*)

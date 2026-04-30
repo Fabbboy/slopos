@@ -24,6 +24,19 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsiz
 /// `for_each_cpu_wrap()` pattern in `sched_balance_find_dst_group_cpu()`.
 static FORK_RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Test-hooks accessor: read the current `FORK_RR_COUNTER` value for
+/// the hermetic-state snapshot.
+#[cfg(feature = "test-hooks")]
+pub fn fork_rr_counter_value() -> usize {
+    FORK_RR_COUNTER.load(Ordering::Relaxed)
+}
+
+/// Test-hooks accessor: restore `FORK_RR_COUNTER` from a snapshot.
+#[cfg(feature = "test-hooks")]
+pub fn fork_rr_counter_set(value: usize) {
+    FORK_RR_COUNTER.store(value, Ordering::Relaxed);
+}
+
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
@@ -583,7 +596,10 @@ static CPU_SCHEDULERS: SyncUnsafeCell<[PerCpuScheduler; MAX_CPUS]> = SyncUnsafeC
     [INIT; MAX_CPUS]
 });
 
-static SCHEDULERS_INIT: InitFlag = InitFlag::new();
+/// `init_all_percpu_schedulers` init-once gate. `pub(crate)` so the
+/// `test_hermetic::SchedulersInitFlag` HermeticState impl can
+/// snapshot/restore it.
+pub(crate) static SCHEDULERS_INIT: InitFlag = InitFlag::new();
 
 pub fn init_percpu_scheduler(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {

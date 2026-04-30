@@ -382,6 +382,90 @@ const _: () = {
     assert!(GDT_FLAGS_64BIT == 0x0A);
 };
 
+// =========================================================================
+// IST Slots — typed indices into Tss64.ist[]
+// =========================================================================
+
+/// Named IST (Interrupt Stack Table) slot.
+///
+/// Replaces the previous `u8` index parameter on `gdt_set_ist` /
+/// `idt_set_ist`. Out-of-range values (0, 8+) are non-representable, so
+/// the runtime checks in those functions become compile-time errors.
+///
+/// The layout assignments here mirror `IST_CONFIGS` in
+/// `boot/src/ist_stacks.rs`. Changing one without the other breaks the
+/// IDT/TSS contract.
+///
+/// # Compile-fail examples
+///
+/// ```compile_fail
+/// use slopos_arch::arch::gdt::IstSlot;
+/// let _ = IstSlot::S0;  // does not exist (0 is "no IST")
+/// ```
+///
+/// ```compile_fail
+/// use slopos_arch::arch::gdt::IstSlot;
+/// let _ = IstSlot::S8;  // does not exist (IST has 7 slots)
+/// ```
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IstSlot {
+    /// IST1 — bound to #DF (double fault).
+    DoubleFault = 1,
+    /// IST2 — bound to stack-fault exception.
+    StackFault = 2,
+    /// IST3 — bound to #GP.
+    GeneralProtection = 3,
+    /// IST4 — bound to #PF.
+    PageFault = 4,
+    /// IST5 — bound to keyboard IRQ.
+    KeyboardIrq = 5,
+    /// IST6 — bound to mouse IRQ.
+    MouseIrq = 6,
+    /// IST7 — reserved for future use.
+    Reserved7 = 7,
+}
+
+impl IstSlot {
+    /// Numeric IST index (1..=7) as expected by IDT entries.
+    pub const fn as_index(self) -> u8 {
+        self as u8
+    }
+
+    /// Zero-based offset into `Tss64.ist[]` (0..=6).
+    pub const fn as_tss_offset(self) -> usize {
+        (self as u8 - 1) as usize
+    }
+
+    /// Construct from the runtime `u8` index. Returns `None` for 0
+    /// or 8+ (which `IstSlot` does not represent).
+    pub const fn from_index(idx: u8) -> Option<Self> {
+        match idx {
+            1 => Some(IstSlot::DoubleFault),
+            2 => Some(IstSlot::StackFault),
+            3 => Some(IstSlot::GeneralProtection),
+            4 => Some(IstSlot::PageFault),
+            5 => Some(IstSlot::KeyboardIrq),
+            6 => Some(IstSlot::MouseIrq),
+            7 => Some(IstSlot::Reserved7),
+            _ => None,
+        }
+    }
+
+    /// Diagnostic name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            IstSlot::DoubleFault => "DoubleFault",
+            IstSlot::StackFault => "StackFault",
+            IstSlot::GeneralProtection => "GeneralProtection",
+            IstSlot::PageFault => "PageFault",
+            IstSlot::KeyboardIrq => "KeyboardIrq",
+            IstSlot::MouseIrq => "MouseIrq",
+            IstSlot::Reserved7 => "Reserved7",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +485,14 @@ mod tests {
         assert_eq!(sel.index(), 4);
         assert_eq!(sel.rpl(), 3);
         assert!(!sel.is_ldt());
+    }
+
+    #[test]
+    fn ist_slot_indexing() {
+        assert_eq!(IstSlot::DoubleFault.as_index(), 1);
+        assert_eq!(IstSlot::PageFault.as_index(), 4);
+        assert_eq!(IstSlot::Reserved7.as_index(), 7);
+        assert_eq!(IstSlot::DoubleFault.as_tss_offset(), 0);
+        assert_eq!(IstSlot::Reserved7.as_tss_offset(), 6);
     }
 }

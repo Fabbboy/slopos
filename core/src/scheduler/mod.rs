@@ -21,6 +21,8 @@ pub mod task_lock;
 pub mod task_struct;
 #[cfg(feature = "test-hooks")]
 pub mod test_fixture;
+#[cfg(feature = "test-hooks")]
+pub mod test_hermetic;
 pub mod test_reports;
 pub mod trap;
 pub mod unsafe_stack;

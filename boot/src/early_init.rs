@@ -42,16 +42,23 @@ impl BootInitPhase {
     }
 }
 
+/// Type alias for boot init step functions. Every step receives a
+/// `&mut BootCtx` capability so it can call boot-time-only mutators
+/// (gdt_set_ist, init_scheduler, etc.). Steps that don't touch boot
+/// mutators still take the parameter — uniform signature avoids a
+/// two-tone API and the borrow checker permits the unused param.
+pub type BootInitFn = fn(&mut BootCtx) -> i32;
+
 pub struct BootInitStep {
     name: &'static [u8],
-    func: fn() -> i32,
+    func: BootInitFn,
     flags: u32,
 }
 
 unsafe impl Sync for BootInitStep {}
 
 impl BootInitStep {
-    pub const fn new(label: &'static [u8], func: fn() -> i32, flags: u32) -> Self {
+    pub const fn new(label: &'static [u8], func: BootInitFn, flags: u32) -> Self {
         Self {
             name: label,
             func,
@@ -64,9 +71,19 @@ impl BootInitStep {
     }
 }
 
+/// Register a boot-init step.
+///
+/// All boot init functions take `&mut BootCtx` and return `i32`. Use
+/// the `fallible` form for steps whose `i32` return code is consulted;
+/// the bare form wraps a `fn(&mut BootCtx)` (returning unit) into
+/// `Ok(0)`.
+///
+/// Both forms accept `flags = $expr` for explicit priority/optional
+/// flags, or `optional` shorthand to mark a step as
+/// `BOOT_INIT_FLAG_OPTIONAL` (failures are non-fatal).
 #[macro_export]
 macro_rules! boot_init {
-    // Fallible fn() -> i32, explicit flags
+    // Fallible fn(&mut BootCtx) -> i32, explicit flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, flags = $flags:expr) => {
         #[used]
         #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
@@ -74,7 +91,7 @@ macro_rules! boot_init {
             $crate::early_init::BootInitStep::new($label, $func, $flags);
     };
 
-    // Fallible fn() -> i32, optional shorthand
+    // Fallible fn(&mut BootCtx) -> i32, optional shorthand
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, optional) => {
         $crate::boot_init!(
             $static_name,
@@ -86,16 +103,16 @@ macro_rules! boot_init {
         );
     };
 
-    // Fallible fn() -> i32, no flags
+    // Fallible fn(&mut BootCtx) -> i32, no flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible) => {
         $crate::boot_init!($static_name, $phase, $label, $func, fallible, flags = 0);
     };
 
-    // Infallible fn(), explicit flags
+    // Infallible fn(&mut BootCtx), explicit flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, flags = $flags:expr) => {
         const _: () = {
-            fn wrapper() -> i32 {
-                $func();
+            fn wrapper(ctx: &mut $crate::early_init::BootCtx) -> i32 {
+                $func(ctx);
                 0
             }
             #[used]
@@ -107,7 +124,7 @@ macro_rules! boot_init {
         const $static_name: () = ();
     };
 
-    // Infallible fn(), optional shorthand
+    // Infallible fn(&mut BootCtx), optional shorthand
     ($static_name:ident, $phase:ident, $label:expr, $func:path, optional) => {
         $crate::boot_init!(
             $static_name,
@@ -118,11 +135,15 @@ macro_rules! boot_init {
         );
     };
 
-    // Infallible fn(), no flags (most common)
+    // Infallible fn(&mut BootCtx), no flags (most common)
     ($static_name:ident, $phase:ident, $label:expr, $func:path) => {
         $crate::boot_init!($static_name, $phase, $label, $func, flags = 0);
     };
 }
+
+// Re-export BootCtx so the boot_init! macro expansion can name it via
+// the canonical path `crate::early_init::BootCtx`.
+pub use slopos_hermetic::BootCtx;
 
 pub const fn boot_init_priority(val: u32) -> u32 {
     (val << BOOT_INIT_PRIORITY_SHIFT) & BOOT_INIT_PRIORITY_MASK
@@ -272,11 +293,11 @@ fn boot_init_report_progress(step: &BootInitStep) {
     let _ = splash::splash_report_progress(progress, step.name);
 }
 
-fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
+fn boot_run_step(ctx: &mut BootCtx, phase_name: &[u8], step: &BootInitStep) -> i32 {
     serial::write_line("BOOT: running init step");
     boot_init_report_step(KlogLevel::Debug, b"step\0", Some(step.name));
 
-    let rc = (step.func)();
+    let rc = (step.func)(ctx);
 
     if rc != 0 {
         let optional = (step.flags & BOOT_INIT_FLAG_OPTIONAL) != 0;
@@ -292,7 +313,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     0
 }
 
-pub fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
+pub fn boot_init_run_phase(ctx: &mut BootCtx, phase: BootInitPhase) -> i32 {
     let (start, end) = phase_bounds(phase);
     if start.is_null() || end.is_null() {
         return 0;
@@ -336,18 +357,18 @@ pub fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
         if step_ptr.is_null() {
             continue;
         }
-        boot_run_step(phase_name, unsafe { &*step_ptr });
+        boot_run_step(ctx, phase_name, unsafe { &*step_ptr });
     }
 
     boot_init_report_phase(KlogLevel::Info, b"phase complete -> \0", Some(phase_name));
     0
 }
 
-pub fn boot_init_run_all() -> i32 {
+pub fn boot_init_run_all(ctx: &mut BootCtx) -> i32 {
     boot_init_prepare_progress();
     let mut phase = BootInitPhase::EarlyHw as u8;
     while phase <= BootInitPhase::Optional as u8 {
-        let rc = boot_init_run_phase(unsafe { core::mem::transmute(phase) });
+        let rc = boot_init_run_phase(ctx, unsafe { core::mem::transmute(phase) });
         if rc != 0 {
             return rc;
         }
@@ -394,7 +415,7 @@ pub fn report_kernel_status() {
 
 use slopos_core::sched::enter_scheduler;
 
-fn boot_step_serial_init_fn() {
+fn boot_step_serial_init_fn(_ctx: &mut BootCtx) {
     serial::write_line("BOOT: serial step -> init");
     serial::init();
     serial::write_line("BOOT: serial step -> after serial::init");
@@ -405,12 +426,12 @@ fn boot_step_serial_init_fn() {
     boot_debug(b"Serial console ready on COM1\0");
 }
 
-fn boot_step_boot_banner_fn() {
+fn boot_step_boot_banner_fn(_ctx: &mut BootCtx) {
     boot_info(b"SlopOS Kernel Started!\0");
     boot_info(b"Booting via Limine Protocol...\0");
 }
 
-fn boot_step_limine_protocol_fn() -> i32 {
+fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx) -> i32 {
     boot_debug(b"Initializing Limine protocol interface...\0");
     if limine_protocol::init_limine_protocol() != 0 {
         boot_info(b"ERROR: Limine protocol initialization failed\0");
@@ -439,7 +460,7 @@ fn boot_step_limine_protocol_fn() -> i32 {
     0
 }
 
-fn boot_step_boot_config_fn() {
+fn boot_step_boot_config_fn(_ctx: &mut BootCtx) {
     let cmdline = boot_state().ctx.cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
         || cmdline.contains("boot.debug=1")
@@ -520,9 +541,11 @@ pub fn kernel_main_impl() {
     slopos_drivers::syscall_services_init::init_syscall_services();
 
     serial::write_line("BOOT: entering boot init");
-    if boot_init_run_all() != 0 {
+    let mut boot_ctx = slopos_hermetic::take_for_boot();
+    if boot_init_run_all(&mut boot_ctx) != 0 {
         panic!("Boot initialization failed");
     }
+    slopos_hermetic::return_after_boot(boot_ctx);
     serial::write_line("BOOT: boot init complete");
 
     if klog::is_enabled_level(KlogLevel::Info) {

@@ -1,3 +1,4 @@
+use slopos_hermetic::BootCtx;
 use slopos_utils::klog_info;
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
@@ -12,7 +13,7 @@ use slopos_fs::{
     ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,
 };
 
-fn boot_step_fs_init() -> i32 {
+fn boot_step_fs_init(_ctx: &mut BootCtx) -> i32 {
     slopos_fs::fileio_register_tty_ops(&slopos_drivers::tty_file_ops::TTY_FILE_OPS);
     slopos_fs::fileio_register_socket_ops(&slopos_net::socket_file_ops::SOCKET_FILE_OPS);
 
@@ -60,7 +61,7 @@ fn boot_step_fs_init() -> i32 {
     0
 }
 
-fn boot_step_init_launch() -> i32 {
+fn boot_step_init_launch(_ctx: &mut BootCtx) -> i32 {
     match exec::launch_init() {
         Ok(task_id) => {
             klog_info!("USERLAND: launched /sbin/init as task {}", task_id);
@@ -114,7 +115,7 @@ crate::boot_init!(
     flags = boot_init_priority(58)
 );
 
-fn boot_step_mark_kernel_ready_fn() {
+fn boot_step_mark_kernel_ready_fn(_ctx: &mut BootCtx) {
     boot_mark_initialized();
     klog_info!("Kernel core services initialized.");
 }

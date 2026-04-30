@@ -1,3 +1,4 @@
+use slopos_hermetic::BootCtx;
 use slopos_utils::klog::{self, KlogLevel};
 use slopos_utils::{klog_debug, klog_info};
 
@@ -7,7 +8,7 @@ use slopos_arch::cpu::security::{SupervisorFeatures, enable_supervisor_features}
 use slopos_mm::memory_init::init_memory_system;
 use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 
-fn boot_step_supervisor_features_fn() {
+fn boot_step_supervisor_features_fn(_ctx: &mut BootCtx) {
     let SupervisorFeatures { pge, smep, smap } = enable_supervisor_features();
     klog_info!(
         "CPU: supervisor features enabled (PGE={}, SMEP={}, SMAP={})",
@@ -17,12 +18,12 @@ fn boot_step_supervisor_features_fn() {
     );
 }
 
-fn boot_step_mmu_asid_init_fn() {
+fn boot_step_mmu_asid_init_fn(_ctx: &mut BootCtx) {
     let pcid_live = slopos_mm::mmu::init_bsp();
     klog_debug!("MMU: PCID {}", if pcid_live { "live" } else { "disabled" });
 }
 
-fn boot_step_memory_init() -> i32 {
+fn boot_step_memory_init(_ctx: &mut BootCtx) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
         klog_info!("ERROR: Memory map not available");
@@ -45,7 +46,7 @@ fn boot_step_memory_init() -> i32 {
     0
 }
 
-fn boot_step_memory_verify() {
+fn boot_step_memory_verify(_ctx: &mut BootCtx) {
     let stack_ptr: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) stack_ptr, options(nomem, preserves_flags));

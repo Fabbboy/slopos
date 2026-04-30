@@ -35,3 +35,4 @@ slopos-fs = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-net = { workspace = true }
 slopos-video = { workspace = true }
+slopos-hermetic = { workspace = true }

@@ -21,7 +21,7 @@ pub mod smp;
 pub mod tests;
 pub mod user_fault;
 pub mod safe_stack {
-    pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_init, safe_stack_record_usage};
+    pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_record_usage};
 }
 pub mod shutdown;
 

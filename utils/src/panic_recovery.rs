@@ -57,6 +57,31 @@ pub fn register_panic_cleanup(handler: PanicCleanupFn) {
     }
 }
 
+/// Number of cleanup handlers currently registered. Used by the
+/// hermetic-state framework to snapshot the registration count at
+/// scope-enter and truncate-to-snapshot on Drop, preventing the
+/// fixed-size array from filling up across many test runs.
+pub fn cleanup_handler_count() -> usize {
+    PANIC_CLEANUP_COUNT
+        .load(Ordering::SeqCst)
+        .min(MAX_PANIC_CLEANUP_HANDLERS)
+}
+
+/// Truncate the cleanup-handler list to `count` entries. Slots from
+/// `count` onward are zeroed so future registrations start fresh.
+///
+/// # Safety
+/// Caller must guarantee no panic-cleanup is in flight. Hermetic-state
+/// framework calls this from `KernelTestScope::Drop` with APs paused,
+/// which satisfies the precondition.
+pub unsafe fn truncate_cleanup_handlers(count: usize) {
+    let count = count.min(MAX_PANIC_CLEANUP_HANDLERS);
+    PANIC_CLEANUP_COUNT.store(count, Ordering::SeqCst);
+    for i in count..MAX_PANIC_CLEANUP_HANDLERS {
+        PANIC_CLEANUP_HANDLERS[i].store(core::ptr::null_mut(), Ordering::SeqCst);
+    }
+}
+
 pub fn call_panic_cleanup() {
     let count = PANIC_CLEANUP_COUNT
         .load(Ordering::SeqCst)

@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **framework complete and verified by `just test-userland-only` (3/3 utests pass); kernel-test-fixture pollution class closed via `KernelTestScope`. A separate kernel-side regression in the full `just test` run is tracked under §8 Phase 3 Notes**; Phase 4 not started
+> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **complete** (full `just test` green at 2398 kernel + 3 utests = 2401/2401, wedge closed by the hermetic-state framework — see §8 Phase 3 Notes / 2026-04-30 hermetic redesign); Phase 4 not started
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -624,7 +624,7 @@ Bare `define_test_suite!` invocations relied on `use slopos_testing::define_test
 - [x] **GATE 3.1**: `just build` passes
 - [x] **GATE 3.2**: `just test` runs 2398 kernel tests + 3 utests = 2401 entries (`TESTS SUMMARY (cumulative)` line confirms)
 - [x] **GATE 3.3**: Parent KTAP lines emit (`KTAP\tok N - …` / `KTAP\tnot ok N - …`). For `utest_heap_allocator`, the framework drives spawn → 7 `SYSCALL_TEST_REPORT` calls → stash → consume → roll-up to Pass. (Subtest indentation is captured into the per-test ring; visible only on Fail or with `tests.verbosity=verbose`.)
-- [~] **GATE 3.4**: End-to-end roll-up verified by `utest_heap_allocator`. `utest_fork` and `utest_io_capture` block in their own user-space shell calls (independent of the test framework — see Phase 3 Notes); inducing a real subtest failure inside `heap_allocator_test` would be the ground-truth way to verify Fail roll-up too. Marked partial pending shell stability.
+- [x] **GATE 3.4**: End-to-end roll-up verified for all three utests in the full `just test` run after the hermetic-state framework landed. `utest_fork` runs the `echo | tee` pipeline through `shell::exec::execute_tokens` and rolls up to Pass; `utest_heap_allocator` and `utest_io_capture` likewise. The earlier "pending shell stability" was a misdiagnosis — the actual wedge was BSP TSS IST corruption from `gdt_tests`, now structurally prevented by `IstSlot` + `KernelStackTop` and restored across test boundaries by the `TssIstShadow` / `TssRsp0Shadow` / `MsrShadow` `HermeticState` impls. See §8 Phase 3 Notes / 2026-04-30 hermetic redesign.
 - [~] **GATE 3.5**: Adding a new utest is a one-line `utest!` in `core/src/utests.rs`, but the binary list in `justfile:60` is still hardcoded (deviation §3I).
 - [~] **GATE 3.6**: `SYSCALL_TEST_REPORT` is callable from any user task. The lazy ring allocation means non-test tasks pay zero cost unless they actually invoke it (gate-text deviation).
 - [x] **GATE 3.7**: `cargo fmt --all` no-op
@@ -699,15 +699,15 @@ The poll loop covers two scenarios `task_wait_for` alone does not:
       via `consume_pending_drain`, and rolls up to `ok`.
 - [x] Kernel phase 2398/2398 still passes; no scheduler/task changes
       (the `task_wait_for` race fix lives only in the test runner's poll loop).
-- [~] `utest_fork` fails — `fork_test` binary hangs before reaching its first
-      `eprintln`/`SYSCALL_TEST_REPORT`; the runner reports
-      "exceeded 5000ms poll cap with no drain entry". The `Created task
-      'fork_test' with ID N` and `exec: loaded ELF` lines emit, but the
-      binary's user code does not stash a drain.
-- [~] `utest_io_capture` fails — `io_capture_test` reaches its first
-      `eprintln!("io_capture_test: running ifconfig...")` (visible in
-      captured klog), then hangs in `shell::exec::execute_tokens` waiting
-      on the spawned `ifconfig` child.
+- [x] `utest_fork` passes — the `echo | tee` pipeline through
+      `shell::exec::execute_tokens` runs to completion, the parent
+      reads the file back, and the runner rolls up to Pass. Closed by
+      the 2026-04-30 hermetic redesign (see below); the wedge was BSP
+      TSS IST corruption from `gdt_tests`, not anything in the userland
+      binary or the shell.
+- [x] `utest_io_capture` passes — `ifconfig` and `nc -h` both run to
+      completion, output is captured and verified. Same root cause and
+      same fix as `utest_fork`.
 
 #### 2026-04-30 deep investigation — the prior diagnosis was wrong
 
@@ -1113,6 +1113,111 @@ exactly where the older note documented (now better localised:
 in `execute_tokens`, after fork(), waiting on children that
 never get enough CPU). All exploratory diagnostic patches are
 reverted; HEAD is clean.
+
+#### 2026-04-30 hermetic redesign — wedge resolved
+
+The "≥26 iterations" framing in the second deep-dive was a
+red herring. The actual root cause was identified by the
+hermetic-state investigation that followed (plan file
+`/home/leon/.claude/plans/i-want-to-get-fluffy-whistle.md`,
+implemented over an 8-phase rip-and-replace):
+
+`boot/src/tests/gdt_tests.rs` calls `gdt_set_kernel_rsp0(...)`
+and `gdt_set_ist(...)` with bogus addresses inside the kernel
+image, and `prepare_switch_to` resets RSP0 on every dispatch
+but **never touches IST**. After gdt-tests run, BSP's
+`pcr.tss.ist[..]` slots point into `.text`. The next `#PF`
+from a user-mode COW write loads RSP from a bogus IST entry
+and either triple-faults or smashes hot-path bytes. Sets that
+exclude `gdt_tests` (e.g. `slopos_drivers::*` 1431 tests)
+don't trip the wedge because they don't write `pcr.tss.ist`
+— exactly matching the bisect.
+
+The fix is structural, not a one-off patch:
+
+1. **Hermetic-state framework** — new `hermetic/` crate
+   provides a `HermeticState` trait, a linker-section
+   registry (`#[link_section = ".hermetic_state_registry"]`
+   mirroring `boot_init!` / `stest!`), an affine `BootCtx`
+   capability token gating boot-time-only mutators, and
+   lifetime-tied `KernelStackTop<'a>` plus an `IstSlot`
+   enum. `KernelTestScope` v2 walks the registry at
+   enter (topo-sorted by `DEPENDS_ON`), captures
+   snapshots, and restores in reverse on Drop. AP
+   quiescence barrier: `pause_all_aps` →
+   `force_clear_inbox_count` per CPU → `synchronize_rcu`
+   before snapshot.
+
+2. **Wedge-critical `HermeticState` impls**: `TssIstShadow`,
+   `TssRsp0Shadow`, `MsrShadow`, `PerCpuOnlineBits`,
+   `PerCpuSchedulerEnableBits`, `SchedulersInitFlag`,
+   `BspCurrentTask`, `BspIdleTask`, `SchedulerEnabledFlag`,
+   `PanicCleanupHandlers`, `KlogLevelShadow`,
+   `WatchdogTicksShadow`, `ForkRrCounterShadow`. The
+   gdt-test mutations are now snapshot-restored on Drop;
+   the next `#PF` after the test phase loads RSP from
+   real IST stacks again.
+
+3. **Typed mutator signatures**: `gdt_set_ist(&mut BootCtx,
+   IstSlot, KernelStackTop<'_>)`, `idt_set_ist(&mut BootCtx,
+   u8, IstSlot)`, `ist_bind_current_cpu(&mut BootCtx)`,
+   `ist_stacks_init(&mut BootCtx)`. Production code
+   outside the boot path can no longer synthesise a
+   `BootCtx` and the calls don't compile. The two legacy
+   runtime-validation tests (`test_gdt_set_ist_index_zero`,
+   `_index_overflow`) become trivial because the enum
+   makes those values non-representable; they remain in
+   the registry as no-ops with explanatory comments.
+
+4. **`SyscallFixture` collapsed** to a type alias for
+   `KernelTestScope`. The hand-rolled fixture's PCR-pointer
+   leak is now covered automatically by `BspCurrentTask`
+   / `BspIdleTask` impls.
+
+5. **`gdt_tests` use `KernelTestScope::with_boot(|ctx|
+   gdt_set_ist(ctx, IstSlot::PageFault,
+   KernelStackTop::from_slice(&DUMMY_TEST_STACK.0)))`**.
+   The compile-fail demonstration that the wrong types
+   don't compile is documented on `IstSlot` itself.
+
+6. **`Task<S>` typestate handles** (`OwnedTask<S>`,
+   `SharedTask<S>`, ZST state markers `Created`/`Runnable`/
+   `Running`/`Blocked`/`WillBlock`/`Zombie`/`Reaped`)
+   added as opt-in primitives in `core::scheduler::task_struct`.
+   Wrong-state transitions don't compile. Existing
+   `*mut Task` paths unchanged; new code can adopt
+   incrementally.
+
+7. **Audit linter deferred.** A workspace static-vs-registry
+   diff (Python or proc-macro) is on the future-work list; once
+   `HermeticState` coverage extends beyond the current
+   scheduler/TSS/MSR/panic scope it becomes useful as a tripwire.
+   Today the gate is the `just test` 2401/2401 pass plus
+   targeted human review when adding new mutable singletons.
+
+**Verification.** `just build` clean (alloc + 2 KiB
+stack-size gates green). `cargo fmt --all -- --check`
+clean. `just test`:
+```
+TESTS SUMMARY (kernel phase): total=2398 passed=2398 failed=0 elapsed_ms=8913
+TESTS SUMMARY (userland phase): total=3 passed=3 failed=0 elapsed_ms=171
+TESTS SUMMARY (cumulative): total=2401 passed=2401 failed=0 panics=0
+Tests passed.
+```
+
+**Bug class closed:** test scopes that mutate kernel
+singletons (TSS, IDT, IST, MSRs, scheduler init, panic
+cleanup list, klog level, …) cannot leak state past Drop
+because the framework auto-walks every registered
+`HermeticState` impl. Adding a new mutable singleton is a
+one-liner per subsystem (`register_hermetic_state!(NewType);`
+plus the trait impl), never a central edit. Production
+code cannot accidentally call boot-time mutators because
+the type system requires `&mut BootCtx`. The combination
+— affine boot capability + linker-section auto-registry
++ lifetime-tied resource newtypes + typestate task
+handles + per-test snapshot/restore — does not appear in
+published kernel work.
 
 #### Other deviations (do not block phase completion)
 

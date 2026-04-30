@@ -40,11 +40,11 @@ use slopos_mm::user_ptr::UserPtr;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use slopos_utils::klog_info;
 
-use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown, unblock_task};
+use crate::scheduler::scheduler::unblock_task;
 use crate::scheduler::task;
 use crate::scheduler::task::{
-    init_task_manager, task_clone, task_create, task_find_by_id, task_fork, task_set_state,
-    task_set_state_from_with_reason, task_shutdown_all, task_terminate, task_try_transition_from,
+    task_clone, task_create, task_find_by_id, task_fork, task_set_state,
+    task_set_state_from_with_reason, task_terminate, task_try_transition_from,
 };
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
@@ -59,31 +59,17 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 // Test Helpers
 // =============================================================================
 
-struct SyscallFixture {
-    aps_paused: bool,
-}
+/// Wrapper around the hermetic `KernelTestScope` so existing call sites
+/// (`let _f = SyscallFixture::new();`) keep working without churn.
+/// The previous hand-rolled fixture leaked PCR pointers and per-CPU
+/// `enabled` bits; the hermetic scope's registry walk handles every
+/// such leak through the per-subsystem `HermeticState` impls in
+/// `crate::scheduler::test_hermetic`.
+type SyscallFixture = crate::scheduler::test_fixture::KernelTestScope;
 
-impl SyscallFixture {
-    fn new() -> Self {
-        let aps_paused = crate::scheduler::per_cpu::pause_all_aps();
-        park_bootstrap_on_current_cpu();
-        task_shutdown_all();
-        scheduler_shutdown();
-        let _ = init_task_manager();
-        let _ = init_scheduler();
-        Self { aps_paused }
-    }
-}
-
-impl Drop for SyscallFixture {
-    fn drop(&mut self) {
-        park_bootstrap_on_current_cpu();
-        task_shutdown_all();
-        scheduler_shutdown();
-        crate::scheduler::per_cpu::resume_all_aps_if_not_nested(self.aps_paused);
-    }
-}
-
+/// Park PCR's `current_task` on the BSP bootstrap stub. Used by tests
+/// that mutate the running-task pointer. The hermetic
+/// `BspCurrentTask` impl restores the original value on scope drop.
 fn park_bootstrap_on_current_cpu() {
     slopos_arch::pcr::set_current_task(
         crate::scheduler::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()

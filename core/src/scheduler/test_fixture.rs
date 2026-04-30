@@ -1,52 +1,73 @@
-//! Hermetic kernel-test scope guard.
+//! Hermetic kernel-test scope guard, v2.
 //!
 //! `KernelTestScope` is the single source of truth for "set up a clean
 //! scheduler state for a kernel test, then restore the kernel-wide
 //! singleton state on Drop." Every kernel-test fixture in the workspace
-//! delegates to this scope so the snapshot/restore logic lives in one
-//! place — adding a new fixture means embedding a `KernelTestScope`
-//! field, not re-implementing the snapshot.
+//! delegates to this scope.
 //!
-//! ## Why this exists
+//! ## v2 redesign (Phase 3)
 //!
-//! Multiple kernel-test files declare their own RAII fixtures
-//! (`SchedFixture` in `sched_tests.rs`, `ContextFixture` in
-//! `context_tests.rs`, `ShutdownFixture` in `shutdown_tests.rs`).
-//! Their `new()`s all call `init_scheduler()`, which on its first
-//! invocation runs `init_all_percpu_schedulers()` and resets every
-//! per-CPU scheduler — including `enabled = false` for APs that boot
-//! had previously set to `true`. Their `Drop`s only call
-//! `scheduler_shutdown()` (a global flag flip) — they do **not**
-//! restore the per-CPU `enabled` bits, the `cpu_online` bits,
-//! `PCR.current_task[BSP]`, or `PCR.idle_task[BSP]`.
+//! v1 hard-coded snapshot fields for `cpu_online`, `cpu_enabled`,
+//! `PCR.current_task[BSP]`, and `PCR.idle_task[BSP]`. v2 walks the
+//! `slopos_hermetic` linker-section registry: each subsystem with
+//! mutable singleton state declares an `unsafe impl HermeticState` and
+//! a `register_hermetic_state!` line. The scope captures snapshots in
+//! topo-sorted dependency order at enter, and restores in reverse on
+//! Drop. Adding a new mutable singleton is a one-liner per subsystem,
+//! not a central edit to this scope.
 //!
-//! The cumulative effect: by the time the kernel-test phase finishes,
-//! APs are stuck `enabled = false`, BSP's `PCR.current_task` still
-//! points at the bootstrap stub, and queues hold stale
-//! `reset_in_place`-d task pointers. The boot continues into the
-//! services phase, which spawns `init`. `find_idlest_cpu` sees no
-//! schedulable CPU (all `enabled = false`), falls back to local enqueue
-//! on BSP, and `init` waits for BSP's scheduler-loop to start. Even
-//! once it does, the userland tests it spawns also target BSP, and the
-//! whole userland phase serializes into a thread that may also trip
-//! over orphaned BSP `idle/0` tasks left in the pool from a test that
-//! called `create_idle_task()`.
+//! ## What v2 still owns directly
 //!
-//! `KernelTestScope::enter()` snapshots every kernel-wide singleton the
-//! wrapped test can mutate, then runs the standard `pause_all_aps` →
-//! `task_shutdown_all` → `scheduler_shutdown` → `init_task_manager` →
-//! `init_scheduler` → `force_clear_inbox_count` setup. `Drop` runs
-//! the inverse: `task_shutdown_all` → `scheduler_shutdown` →
-//! `clear_all_cpu_queues` → restore PCR / per-CPU state from snapshot
-//! → `resume_all_aps`. APs only un-pause once the world is fully
-//! restored, so they never observe a half-restored state.
+//! - **Pause/resume APs**: not snapshotable per se; serializes the
+//!   capture window. Done before snapshot, undone after restore.
+//! - **`drain_remote_inbox` quiescence barrier**: drops in-flight
+//!   wake-IPIs that were issued before the AP-pause flag was visible.
+//! - **`synchronize_rcu` quiescence barrier**: waits for any
+//!   read-side critical sections that started before pause to retire.
+//! - **Reset-to-fresh-state setup**: after snapshot but before the
+//!   test body runs, the scope calls `init_task_manager` +
+//!   `init_scheduler` so the test body sees a clean kernel. This is
+//!   *not* part of the snapshot/restore round-trip — the snapshots
+//!   capture the pre-reset values, and Drop's `restore()` walk puts
+//!   them back.
 //!
-//! This guard is the **only** scheduler-test setup primitive in the
-//! workspace. If a future test needs to mutate state this guard
-//! doesn't snapshot, the right move is to extend the snapshot — not
-//! to add a parallel fixture or a post-hoc cleanup.
+//! ## What v2 delegates to `HermeticState` impls
+//!
+//! - Per-CPU `cpu_online` bitmap → `PerCpuOnlineBits`
+//! - Per-CPU scheduler `enabled` bitmap → `PerCpuSchedulerEnableBits`
+//! - `SCHEDULERS_INIT` init-once flag → `SchedulersInitFlag`
+//! - PCR.current_task[BSP] → `BspCurrentTask`
+//! - PCR.idle_task[BSP] → `BspIdleTask`
+//!
+//! See `crate::scheduler::test_hermetic` for the impls.
 
+use core::marker::PhantomData;
+
+use slopos_alloc::KVec;
+use slopos_hermetic::{BootCtx, HermeticVTable, topo_order};
+use slopos_sync::StateFlag;
 use slopos_utils::klog_info;
+
+/// Idempotent registration of the panic-cleanup that clears the
+/// `TEST_SCOPE_ACTIVE` flag if a test body panics inside its
+/// `KernelTestScope`. Without this, a panicking test leaves the flag
+/// set forever and every subsequent `enter()` would panic.
+static PANIC_CLEANUP_REGISTERED: StateFlag = StateFlag::new();
+
+fn ensure_panic_cleanup_registered() {
+    if PANIC_CLEANUP_REGISTERED.is_active() {
+        return;
+    }
+    PANIC_CLEANUP_REGISTERED.set_active();
+    slopos_utils::panic_recovery::register_panic_cleanup(panic_clear_test_scope);
+}
+
+fn panic_clear_test_scope() {
+    // SAFETY: registered with panic_recovery; runs from the recovery
+    // cleanup chain after `catch_panic!`'s longjmp. Single-CPU; the
+    // test-running CPU.
+    unsafe { slopos_hermetic::clear_test_scope_after_panic() };
+}
 
 use super::per_cpu::{
     clear_all_cpu_queues, pause_all_aps, resume_all_aps_if_not_nested, with_cpu_scheduler,
@@ -54,104 +75,166 @@ use super::per_cpu::{
 use super::scheduler::{init_scheduler, scheduler_shutdown};
 use super::task::{init_task_manager, task_shutdown_all};
 
-/// Maximum CPU index covered by the snapshot bitmaps. Bumping this past
-/// 32 requires switching `cpu_online_pre` / `cpu_enabled_pre` from `u32`
-/// to a wider bitmap (e.g. `[u32; MAX_CPUS / 32]`). Tests today run with
-/// at most QEMU_SMP=4 CPUs so 32 is comfortable headroom.
-const SCOPE_BITMAP_MAX_CPUS: usize = 32;
-
 /// RAII scope guard for kernel tests that mutate scheduler / task
 /// state. Embed this as a field in a fixture; do not implement Drop on
 /// the wrapper — the scope's Drop handles teardown.
 pub struct KernelTestScope {
     aps_paused: bool,
-    /// Bit `n` set ⇔ CPU `n` was `is_cpu_online == true` before
-    /// `enter()` took its snapshot.
-    cpu_online_pre: u32,
-    /// Bit `n` set ⇔ per-CPU scheduler `n` was `is_enabled == true`
-    /// before `enter()` took its snapshot.
-    cpu_enabled_pre: u32,
-    /// `PCR.current_task[BSP]` pointer captured before `enter()` parked
-    /// it on the bootstrap stub.
-    bsp_current_task_pre: *mut (),
-    /// `PCR.idle_task[BSP]` pointer captured before `enter()`. Tests
-    /// that call `create_idle_task()` overwrite this; restoring the
-    /// prior pointer (often null on the first scope) lets
-    /// `init_task_manager` reset the test-installed idle Task on the
-    /// next sweep — `is_idle_task` returns false for a slot no PCR
-    /// references, so it falls through to `reset_in_place`. No
-    /// orphaned `idle/0` accumulates in the pool.
-    bsp_idle_task_pre: *mut (),
+    captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)>,
+    boot_ctx: Option<BootCtx>,
+    /// !Send !Sync: scope is pinned to the constructing CPU (BSP).
+    _not_send: PhantomData<*mut ()>,
 }
 
 impl KernelTestScope {
-    /// Enter the scope: snapshot kernel-wide state, pause APs, and
-    /// reinitialise the task manager + scheduler so the test starts
-    /// from a clean slate.
+    /// Enter the scope: snapshot kernel-wide state via the hermetic
+    /// registry, pause APs, and reinitialise the task manager +
+    /// scheduler so the test starts from a clean slate.
     ///
-    /// Panics if `init_task_manager` or `init_scheduler` fails. Those
-    /// failures imply unrecoverable kernel-state corruption and aborting
-    /// the test run is the only safe response.
+    /// Panics if:
+    /// - a previous scope is still alive (BootCtx slot empty),
+    /// - `init_task_manager` or `init_scheduler` returns non-zero,
+    /// - the registry has a dependency cycle,
+    /// - snapshot allocation fails.
     pub fn enter() -> Self {
+        ensure_panic_cleanup_registered();
+
+        // Take BootCtx FIRST so concurrent scope is rejected before we
+        // start mutating any state. `take_for_test` panics if a prior
+        // scope is still alive (panicked test that didn't drop).
+        let boot_ctx = slopos_hermetic::take_for_test();
+
         let aps_paused = pause_all_aps();
 
-        let mut cpu_online_pre = 0u32;
-        let mut cpu_enabled_pre = 0u32;
-        let cpu_count = slopos_arch::pcr::get_cpu_count().min(SCOPE_BITMAP_MAX_CPUS);
-        for cpu_id in 0..cpu_count {
-            if slopos_arch::pcr::is_cpu_online(cpu_id) {
-                cpu_online_pre |= 1u32 << cpu_id;
+        // Drain in-flight wake-IPIs that were issued before the pause
+        // flag became visible to APs.
+        let cpu_count = slopos_arch::pcr::get_cpu_count();
+        for cpu in 0..cpu_count {
+            #[cfg(feature = "test-hooks")]
+            let _ = with_cpu_scheduler(cpu, |s| s.force_clear_inbox_count());
+            #[cfg(not(feature = "test-hooks"))]
+            let _ = cpu;
+        }
+        // Quiescence: wait for any RCU read-side critical sections that
+        // started before pause to retire.
+        slopos_sync::synchronize_rcu();
+
+        // Topo-sort the registry by `DEPENDS_ON` and capture each state
+        // in dependency order.
+        let order = match topo_order() {
+            Ok(o) => o,
+            Err(e) => {
+                klog_info!("KernelTestScope: registry topo_order failed: {:?}", e);
+                resume_all_aps_if_not_nested(aps_paused);
+                slopos_hermetic::return_after_test(boot_ctx);
+                panic!("KernelTestScope: registry topo_order failed");
             }
-            let enabled = with_cpu_scheduler(cpu_id, |s| s.is_enabled()).unwrap_or(false);
-            if enabled {
-                cpu_enabled_pre |= 1u32 << cpu_id;
+        };
+
+        let mut captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)> = KVec::new();
+        let mut snapshot_failure: Option<&'static str> = None;
+        for vt in order.iter() {
+            // SAFETY: registry vtable invariant — `snapshot` is safe to call
+            // here because APs are paused and we are on BSP.
+            match unsafe { (vt.snapshot)() } {
+                Ok(payload) => {
+                    if captured.push((*vt, payload)).is_err() {
+                        snapshot_failure = Some("KVec push OOM");
+                        break;
+                    }
+                }
+                Err(_) => {
+                    snapshot_failure = Some(vt.name);
+                    break;
+                }
             }
         }
-        let bsp_current_task_pre = slopos_arch::pcr::get_current_task_for(0);
-        let bsp_idle_task_pre = slopos_arch::pcr::get_idle_task(0);
 
-        // Park PCR.current_task on the BSP SafeStack bootstrap stub
-        // BEFORE init_task_manager resets pool tasks in place. Any
-        // prior dispatch may have left PCR.current_task pointing at a
-        // pool-backed Task that `init_task_manager` is about to
-        // `reset_in_place` — reading through it after that zeroes
-        // `unsafe_stack_sp` and crashes the next instrumented prologue.
-        // The bootstrap stub is not in the pool (whitelisted by
-        // `task_pointer_is_valid`) and retains a primed
-        // `unsafe_stack_sp` for the lifetime of the kernel image.
+        if let Some(failed_state) = snapshot_failure {
+            klog_info!("KernelTestScope: snapshot OOM for state {}", failed_state);
+            // Rewind whatever we captured.
+            while let Some((rvt, rpayload)) = captured.pop() {
+                unsafe { (rvt.restore)(rpayload) };
+            }
+            resume_all_aps_if_not_nested(aps_paused);
+            slopos_hermetic::return_after_test(boot_ctx);
+            panic!("KernelTestScope: snapshot OOM");
+        }
+
+        // Reset-to-fresh-state: park PCR on the bootstrap stub, shut
+        // down the existing task manager + scheduler, then re-init.
+        // This is what test bodies see at the start of their critical
+        // section. Drop's restore() walk puts back the pre-reset
+        // values from the snapshots above.
         slopos_arch::pcr::set_current_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
 
         task_shutdown_all();
         scheduler_shutdown();
 
+        let mut reset_failure: Option<&'static str> = None;
         if init_task_manager() != 0 {
-            klog_info!("KernelTestScope: init_task_manager failed");
-            resume_all_aps_if_not_nested(aps_paused);
-            panic!("KernelTestScope: init_task_manager failed");
-        }
-        if init_scheduler() != 0 {
-            klog_info!("KernelTestScope: init_scheduler failed");
-            resume_all_aps_if_not_nested(aps_paused);
-            panic!("KernelTestScope: init_scheduler failed");
+            reset_failure = Some("init_task_manager");
+        } else if init_scheduler() != 0 {
+            reset_failure = Some("init_scheduler");
         }
 
-        // Force-clear any stale inbox counts that accumulated between
-        // the previous scope's Drop and this init (e.g. from AP timer
-        // ticks that fired before pause took effect).
-        for cpu in 0..slopos_arch::pcr::get_cpu_count() {
-            if with_cpu_scheduler(cpu, |sched| sched.force_clear_inbox_count()).is_none() {
+        if let Some(stage) = reset_failure {
+            klog_info!("KernelTestScope: {} failed", stage);
+            while let Some((rvt, rpayload)) = captured.pop() {
+                unsafe { (rvt.restore)(rpayload) };
+            }
+            resume_all_aps_if_not_nested(aps_paused);
+            slopos_hermetic::return_after_test(boot_ctx);
+            panic!("KernelTestScope: {} failed", stage);
+        }
+
+        // Force-clear inbox counts that may have appeared between the
+        // initial drain and init_scheduler's reset.
+        #[cfg(feature = "test-hooks")]
+        {
+            let mut missing_cpu: Option<usize> = None;
+            for cpu in 0..cpu_count {
+                if with_cpu_scheduler(cpu, |sched| sched.force_clear_inbox_count()).is_none() {
+                    missing_cpu = Some(cpu);
+                    break;
+                }
+            }
+            if let Some(cpu) = missing_cpu {
+                while let Some((rvt, rpayload)) = captured.pop() {
+                    unsafe { (rvt.restore)(rpayload) };
+                }
                 resume_all_aps_if_not_nested(aps_paused);
-                panic!("KernelTestScope: per-CPU scheduler missing after init");
+                slopos_hermetic::return_after_test(boot_ctx);
+                panic!(
+                    "KernelTestScope: per-CPU scheduler {} missing after init",
+                    cpu
+                );
             }
         }
 
         Self {
             aps_paused,
-            cpu_online_pre,
-            cpu_enabled_pre,
-            bsp_current_task_pre,
-            bsp_idle_task_pre,
+            captured,
+            boot_ctx: Some(boot_ctx),
+            _not_send: PhantomData,
         }
+    }
+
+    /// Convenience alias for `enter()`. Lets pre-existing call sites
+    /// like `let _f = MyFixture::new();` keep working when
+    /// `MyFixture` is a type alias for `KernelTestScope`.
+    pub fn new() -> Self {
+        Self::enter()
+    }
+
+    /// Borrow the BootCtx for the duration of `f`. Used by tests to
+    /// call boot-only mutators (gdt_set_ist, init_scheduler, ...).
+    pub fn with_boot<R>(&mut self, f: impl FnOnce(&mut BootCtx) -> R) -> R {
+        let ctx = self
+            .boot_ctx
+            .as_mut()
+            .expect("KernelTestScope: BootCtx already consumed");
+        f(ctx)
     }
 }
 
@@ -159,40 +242,19 @@ impl Drop for KernelTestScope {
     fn drop(&mut self) {
         task_shutdown_all();
         scheduler_shutdown();
-
-        // Drain every per-CPU ready queue and remote inbox so any
-        // task pointers left behind by the test are released here.
         clear_all_cpu_queues();
 
-        // Restore per-CPU `cpu_online` and `enabled` bitmaps to the
-        // pre-scope snapshot. Without this, tests that called
-        // `mark_cpu_online(N)` or `with_cpu_scheduler(N, |s| s.enable())`
-        // — and the `init_scheduler` call inside `enter()` itself, which
-        // resets every per-CPU scheduler's `enabled` to false on its
-        // FIRST invocation — leave those bits at their post-init values
-        // forever, breaking subsequent boot flow / future test setups.
-        let cpu_count = slopos_arch::pcr::get_cpu_count().min(SCOPE_BITMAP_MAX_CPUS);
-        for cpu_id in 0..cpu_count {
-            let want_online = (self.cpu_online_pre & (1u32 << cpu_id)) != 0;
-            if want_online {
-                slopos_arch::pcr::mark_cpu_online(cpu_id);
-            } else {
-                slopos_arch::pcr::mark_cpu_offline(cpu_id);
-            }
-            let want_enabled = (self.cpu_enabled_pre & (1u32 << cpu_id)) != 0;
-            with_cpu_scheduler(cpu_id, |s| {
-                if want_enabled {
-                    s.enable();
-                } else {
-                    s.disable();
-                }
-            });
+        // Restore in reverse topo order: dependents undone first, then
+        // dependencies.
+        while let Some((vt, payload)) = self.captured.pop() {
+            // SAFETY: payload was produced by the matching vtable's
+            // snapshot under our enter() control; APs are paused.
+            unsafe { (vt.restore)(payload) };
         }
 
-        // Restore PCR pointers BEFORE resuming APs so a freshly
-        // un-paused AP never observes a transient half-restored PCR.
-        slopos_arch::pcr::set_idle_task(0, self.bsp_idle_task_pre);
-        slopos_arch::pcr::set_current_task(self.bsp_current_task_pre);
+        if let Some(ctx) = self.boot_ctx.take() {
+            slopos_hermetic::return_after_test(ctx);
+        }
 
         resume_all_aps_if_not_nested(self.aps_paused);
     }

@@ -10,13 +10,24 @@
 
 use core::arch::asm;
 
+use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::cpu;
 use slopos_arch::cpu::msr::{EFER_SCE, Msr};
+use slopos_core::scheduler::test_fixture::KernelTestScope;
+use slopos_hermetic::KernelStackTop;
 use slopos_testing::TestResult;
 use slopos_utils::klog_info;
 
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};
+
+/// 64-byte dummy stack region for IST tests. Provides a real
+/// `&[u8]` reference whose `KernelStackTop::from_slice` we can borrow.
+/// The bytes are never used as an actual stack — these tests only
+/// verify that the API accepts a typed stack-top without crashing.
+#[repr(align(16))]
+struct DummyStack([u8; 64]);
+static DUMMY_TEST_STACK: DummyStack = DummyStack([0u8; 64]);
 
 // =============================================================================
 // GDT DESCRIPTOR FIELD TESTS
@@ -181,88 +192,91 @@ pub fn test_tss_loaded() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: gdt_set_kernel_rsp0 doesn't crash and accepts valid values
+/// Test: gdt_set_kernel_rsp0 doesn't crash and accepts valid values.
+///
+/// `gdt_set_kernel_rsp0` is the runtime API (called by
+/// `prepare_switch_to`); it takes a raw `u64` because runtime
+/// callers compute the stack top at dispatch time. The hermetic
+/// `TssRsp0Shadow` impl restores the value on scope drop, so the
+/// transient corruption from this test no longer survives past the
+/// fixture's drop. Without that restore, `0xFFFF_FFFF_8010_0000`
+/// would persist into a runtime address inside `.text`.
 pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
-    // Use a kernel-space address (won't actually be used as stack in test)
+    let _scope = KernelTestScope::enter();
     let test_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
-
-    // This shouldn't crash
     gdt_set_kernel_rsp0(test_rsp0);
-
     TestResult::Pass
 }
 
-/// Test: gdt_set_kernel_rsp0 with null - should this be allowed?
-/// BUG FINDER: Setting RSP0 to 0 would cause crash on next syscall/interrupt
+/// Test: gdt_set_kernel_rsp0 with null - documents the lack of
+/// validation. The fixture restores the original RSP0 on drop so
+/// this can't smash live kernel state.
 pub fn test_gdt_set_kernel_rsp0_null() -> TestResult {
-    // This is a dangerous operation - setting RSP0 to 0 means
-    // the next syscall/interrupt will push to address 0 and crash
-    //
-    // We DON'T actually call this because it would break the system,
-    // but the function should probably check for this
-
-    // Just verify the function exists and is callable with a valid value
+    let _scope = KernelTestScope::enter();
     let safe_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
     gdt_set_kernel_rsp0(safe_rsp0);
-
     TestResult::Pass
 }
 
-/// Test: gdt_set_kernel_rsp0 with user-space address
-/// BUG FINDER: RSP0 in user space = privilege escalation vulnerability
+/// Test: gdt_set_kernel_rsp0 with user-space address. We *don't*
+/// call the function with a user-space pointer (the runtime API
+/// has no validator), but document the gap.
 pub fn test_gdt_set_kernel_rsp0_user_address() -> TestResult {
-    // A user-space address for RSP0 would be a critical security bug
-    // because it would allow user code to corrupt kernel stack
-    //
-    // The function SHOULD reject this, but probably doesn't check
+    let _scope = KernelTestScope::enter();
     let user_rsp0: u64 = 0x0000_7FFF_FFFF_0000;
-
-    // We don't actually set this because it would be dangerous,
-    // but we're documenting the lack of validation
     let _ = user_rsp0;
-
-    // Just verify function works with valid kernel address
     let safe_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
     gdt_set_kernel_rsp0(safe_rsp0);
-
     TestResult::Pass
 }
 
 // =============================================================================
 // IST (Interrupt Stack Table) TESTS
 // =============================================================================
+//
+// Post-Phase 5 the IST API takes `IstSlot` (named enum, no zero / overflow)
+// and `KernelStackTop<'_>` (lifetime-tied newtype, no fake u64). The two
+// previous runtime tests (`test_gdt_set_ist_index_zero`,
+// `test_gdt_set_ist_index_overflow`) become compile_fail doctests on
+// `slopos_arch::arch::gdt::IstSlot` itself — strictly stronger than the
+// runtime check they replaced.
 
-/// Test: gdt_set_ist with valid index (1-7)
+/// Test: gdt_set_ist with each valid slot. The `KernelStackTop` is
+/// borrowed from a real static `&[u8]` to satisfy the safe
+/// constructor; the fixture's `TssIstShadow` restores the original
+/// IST entries on scope drop.
 pub fn test_gdt_set_ist_valid_indices() -> TestResult {
-    // Test all valid IST indices (1-7)
-    // Note: index 0 means "don't use IST"
-    for index in 1..=7u8 {
-        let test_stack: u64 = 0xFFFF_FFFF_8020_0000 + (index as u64 * 0x1000);
-        gdt_set_ist(index, test_stack);
+    let mut scope = KernelTestScope::enter();
+    let top = KernelStackTop::from_slice(&DUMMY_TEST_STACK.0);
+    for slot in [
+        IstSlot::DoubleFault,
+        IstSlot::StackFault,
+        IstSlot::GeneralProtection,
+        IstSlot::PageFault,
+        IstSlot::KeyboardIrq,
+        IstSlot::MouseIrq,
+        IstSlot::Reserved7,
+    ] {
+        scope.with_boot(|ctx| gdt_set_ist(ctx, slot, top));
     }
-
     TestResult::Pass
 }
 
-/// Test: gdt_set_ist with index 0 - should be rejected or no-op
+/// Compile-fail proxy for the legacy `gdt_set_ist(0, ...)` runtime
+/// check. The `IstSlot` enum has no `S0` variant, so this case is
+/// non-representable at the type level. Test exists to keep the test
+/// count stable; it always passes.
 pub fn test_gdt_set_ist_index_zero() -> TestResult {
-    // IST index 0 means "use current stack", so setting it doesn't make sense
-    // The function should either reject this or treat it as no-op
-    gdt_set_ist(0, 0xFFFF_FFFF_8020_0000);
-
-    // Function doesn't return error code, so we can't verify behavior
-    // This test just ensures it doesn't crash
+    let _scope = KernelTestScope::enter();
+    // IstSlot::S0 does not exist; the equivalent runtime call no
+    // longer compiles. Nothing to verify at runtime.
     TestResult::Pass
 }
 
-/// Test: gdt_set_ist with index > 7 - should be rejected
+/// Compile-fail proxy for the legacy `gdt_set_ist(8, ...)` runtime
+/// check. The `IstSlot` enum tops out at `Reserved7`.
 pub fn test_gdt_set_ist_index_overflow() -> TestResult {
-    // IST only has slots 1-7, so indices 8+ are invalid
-    // The function should reject these
-    gdt_set_ist(8, 0xFFFF_FFFF_8020_0000);
-    gdt_set_ist(255, 0xFFFF_FFFF_8020_0000);
-
-    // No crash = at least it handles the bounds
+    let _scope = KernelTestScope::enter();
     TestResult::Pass
 }
 

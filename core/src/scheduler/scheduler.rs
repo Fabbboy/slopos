@@ -74,7 +74,11 @@ fn kernel_text_range() -> (u64, u64) {
 }
 
 use core::sync::atomic::AtomicU8;
-static SCHEDULER_ENABLED: AtomicU8 = AtomicU8::new(0);
+/// Global scheduler-enabled flag. `pub(crate)` so the
+/// `test_hermetic::SchedulerEnabledFlag` HermeticState impl can
+/// snapshot/restore it. External code should go through
+/// `set_scheduler_enabled` / `scheduler_is_enabled`.
+pub(crate) static SCHEDULER_ENABLED: AtomicU8 = AtomicU8::new(0);
 static PREEMPTION_ENABLED: AtomicU8 = AtomicU8::new(SCHEDULER_PREEMPTION_DEFAULT);
 
 pub(crate) fn set_scheduler_enabled(enabled: bool) {

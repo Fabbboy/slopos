@@ -70,9 +70,6 @@ use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use slopos_utils::{klog_debug, klog_info};
 
-use crate::gdt::gdt_set_ist;
-use crate::idt::idt_set_ist;
-
 // =============================================================================
 // IST Categories
 // =============================================================================
@@ -439,7 +436,7 @@ fn ensure_cpu_stacks_mapped(cpu_id: usize) {
 /// - Memory subsystem is initialized (page allocator, paging)
 /// - GDT/TSS is initialized
 /// - IDT is initialized (but before interrupts are enabled)
-pub fn ist_stacks_init() {
+pub fn ist_stacks_init(ctx: &mut slopos_hermetic::BootCtx) {
     klog_debug!(
         "IST: Initializing {} dedicated interrupt stacks",
         IST_STACK_COUNT
@@ -454,7 +451,7 @@ pub fn ist_stacks_init() {
     ensure_cpu_stacks_mapped(0);
 
     // Bind IST pointers for the CPU that performed initialization (BSP).
-    ist_bind_current_cpu();
+    ist_bind_current_cpu(ctx);
 
     klog_info!(
         "IST: Initialized {} stacks ({} exceptions, {} IRQs)",
@@ -475,17 +472,31 @@ pub fn ist_stacks_init() {
 /// This must run on every CPU after its per-CPU GDT/TSS is installed. The
 /// stack memory is globally allocated once by `ist_stacks_init`; this routine
 /// only updates CPU-local TSS IST pointers.
-pub fn ist_bind_current_cpu() {
+pub fn ist_bind_current_cpu(ctx: &mut slopos_hermetic::BootCtx) {
     let cpu_id = get_current_cpu();
     ensure_cpu_stacks_mapped(cpu_id);
 
     for (idx, stack) in IST_CONFIGS.iter().enumerate() {
         let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);
+        let Some(slot) = slopos_arch::arch::gdt::IstSlot::from_index(stack.ist_index) else {
+            klog_info!(
+                "IST: invalid ist_index {} for vector {}",
+                stack.ist_index,
+                stack.vector
+            );
+            continue;
+        };
+        // SAFETY: `stack_top` is the high address of a kernel-virt stack
+        // mapped earlier by `ensure_cpu_stacks_mapped`. The borrowed
+        // KernelStackTop's `'static` lifetime is appropriate because the
+        // mapped pages live for the kernel image.
+        let stack_top_typed = unsafe { slopos_hermetic::KernelStackTop::from_raw(stack_top) };
+
         // Register stack top in current CPU TSS.
-        gdt_set_ist(stack.ist_index, stack_top);
+        crate::gdt::gdt_set_ist(ctx, slot, stack_top_typed);
 
         // Keep IDT entry IST selectors synchronized for all CPUs.
-        idt_set_ist(stack.vector, stack.ist_index);
+        crate::idt::idt_set_ist(ctx, stack.vector, slot);
 
         klog_debug!(
             "IST: CPU{} {} [{}] vec={} IST{} @ 0x{:x}-0x{:x}",
@@ -643,12 +654,6 @@ pub fn ist_dump_stats() {
 
 // These functions maintain backward compatibility with code that uses the old
 // safe_stack naming. They simply delegate to the new functions.
-
-/// Legacy alias for `ist_stacks_init`.
-#[inline]
-pub fn safe_stack_init() {
-    ist_stacks_init()
-}
 
 /// Legacy alias for `ist_record_usage`.
 #[inline]

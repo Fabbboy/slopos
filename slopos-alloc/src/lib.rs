@@ -255,6 +255,14 @@ impl<T> KBox<T> {
     {
         Box::leak(b.inner)
     }
+
+    /// Move the boxed value out, freeing the allocation. Equivalent to
+    /// `Box::into_inner`. Used by the hermetic-state framework to take
+    /// ownership of a type-erased snapshot before invoking `restore`.
+    pub fn into_inner(b: Self) -> T {
+        // `Box<T>` supports move-out via `*` in stable Rust.
+        *b.inner
+    }
 }
 
 impl<T: ?Sized> Deref for KBox<T> {

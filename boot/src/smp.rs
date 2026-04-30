@@ -151,10 +151,12 @@ unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
 
     // APs have per-CPU TSS structures; re-bind IST pointers after installing
     // the AP GDT/TSS so exceptions (notably #PF) do not enter with IST=0.
-    ist_stacks::ist_bind_current_cpu();
+    let mut ap_boot_ctx = slopos_hermetic::take_for_ap(cpu_idx);
+    ist_stacks::ist_bind_current_cpu(&mut ap_boot_ctx);
 
     idt_load();
     syscall_msr_init();
+    slopos_hermetic::return_after_ap(cpu_idx, ap_boot_ctx);
 
     // Initialize the per-CPU scheduler and create the idle task BEFORE
     // enabling interrupts.  The previous order (enable_interrupts → init)

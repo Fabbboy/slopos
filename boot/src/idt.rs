@@ -290,18 +290,20 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
         klog_debug!("IDT: Registered override handler for exception {}", vector);
     }
 }
-pub fn idt_set_ist(vector: u8, ist_index: u8) {
+/// Bind an IDT entry to an IST slot. `&mut BootCtx` gates the call so
+/// production code (post-boot) cannot accidentally rebind interrupt
+/// stacks.
+pub fn idt_set_ist(
+    _ctx: &mut slopos_hermetic::BootCtx,
+    vector: u8,
+    slot: slopos_arch::arch::gdt::IstSlot,
+) {
     if vector as usize >= IDT_ENTRIES {
         klog_info!("IDT: Invalid IST assignment for vector {}", vector);
         return;
     }
-    if ist_index > 7 {
-        klog_info!("IDT: Invalid IST index {}", ist_index);
-        return;
-    }
-
     unsafe {
-        (*IDT.get())[vector as usize].ist = ist_index & 0x7;
+        (*IDT.get())[vector as usize].ist = slot.as_index() & 0x7;
     }
 }
 pub fn exception_set_mode(mode: ExceptionMode) {

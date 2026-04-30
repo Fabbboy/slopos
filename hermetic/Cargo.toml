@@ -1,0 +1,21 @@
+[package]
+name = "slopos-hermetic"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = false
+doctest = false
+
+[features]
+default = []
+test-hooks = []
+tests = []
+
+[dependencies]
+slopos-alloc = { workspace = true }
+slopos-arch = { path = "../karch" }
+slopos-sync = { path = "../sync" }
+slopos-utils = { path = "../utils" }
+slopos-service-core = { path = "../service-core" }
+paste = { workspace = true }

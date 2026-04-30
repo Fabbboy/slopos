@@ -2,11 +2,12 @@ use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 
 use slopos_arch::arch::gdt::{
-    GDT_STANDARD_ENTRIES, GdtDescriptor, GdtLayout, SegmentSelector, Tss64,
+    GDT_STANDARD_ENTRIES, GdtDescriptor, GdtLayout, IstSlot, SegmentSelector, Tss64,
 };
 use slopos_arch::cpu;
 use slopos_arch::cpu::msr::{EFER_SCE, Msr};
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
+use slopos_hermetic::KernelStackTop;
 use slopos_utils::klog_debug;
 
 #[repr(C)]
@@ -116,20 +117,41 @@ pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
     }
 }
 
-pub fn gdt_set_ist(index: u8, stack_top: u64) {
+/// Bind an IST slot on the current CPU to a real kernel stack.
+///
+/// `slot` is the typed IST slot enum (1..7); `stack_top` is a borrowed
+/// `KernelStackTop` whose lifetime is tied to the backing allocation.
+/// Both replace earlier `u8` / `u64` parameters whose runtime checks
+/// (zero index, overflow index, fake address) become compile-time
+/// errors.
+///
+/// `&mut BootCtx` gates the call: only boot-time setup paths
+/// (`ist_bind_current_cpu`) and hermetic test scopes hold one.
+pub fn gdt_set_ist(
+    _ctx: &mut slopos_hermetic::BootCtx,
+    slot: IstSlot,
+    stack_top: KernelStackTop<'_>,
+) {
     let cpu_id = get_current_cpu();
-    gdt_set_ist_for_cpu(cpu_id, index, stack_top);
+    gdt_set_ist_for_cpu(_ctx, cpu_id, slot, stack_top);
 }
 
-pub fn gdt_set_ist_for_cpu(cpu_id: usize, index: u8, stack_top: u64) {
-    if cpu_id >= MAX_CPUS || index == 0 || index > 7 {
+pub fn gdt_set_ist_for_cpu(
+    _ctx: &mut slopos_hermetic::BootCtx,
+    cpu_id: usize,
+    slot: IstSlot,
+    stack_top: KernelStackTop<'_>,
+) {
+    if cpu_id >= MAX_CPUS {
         return;
     }
+    let addr = stack_top.as_u64();
+    let offset = slot.as_tss_offset();
     unsafe {
-        (*PER_CPU_TSS.get())[cpu_id].ist[(index - 1) as usize] = stack_top;
+        (*PER_CPU_TSS.get())[cpu_id].ist[offset] = addr;
     }
     if let Some(pcr) = unsafe { slopos_arch::pcr::get_pcr_mut(cpu_id) } {
-        pcr.set_ist(index, stack_top);
+        pcr.set_ist(slot.as_index(), addr);
     }
 }
 

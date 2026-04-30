@@ -40,15 +40,15 @@ pub fn get_scheduler_stats(
     }
 }
 
-pub fn boot_step_task_manager_init() -> i32 {
+pub fn boot_step_task_manager_init(_ctx: &mut slopos_hermetic::BootCtx) -> i32 {
     crate::task::init_task_manager()
 }
 
-pub fn boot_step_scheduler_init() -> i32 {
+pub fn boot_step_scheduler_init(_ctx: &mut slopos_hermetic::BootCtx) -> i32 {
     init_scheduler()
 }
 
-pub fn boot_step_idle_task() -> i32 {
+pub fn boot_step_idle_task(_ctx: &mut slopos_hermetic::BootCtx) -> i32 {
     create_idle_task()
 }
 

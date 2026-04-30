@@ -30,4 +30,5 @@ slopos-mm = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-net = { workspace = true }
 slopos-font = { workspace = true, features = ["kernel"] }
+slopos-hermetic = { workspace = true }
 paste.workspace = true
