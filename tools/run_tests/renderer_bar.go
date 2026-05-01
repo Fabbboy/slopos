@@ -460,6 +460,24 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 
 	r.println(Paint(strings.Repeat("─", 76), ansiDim, r.Colour))
 
+	// On any abort path (timeout / silence / truncation / user interrupt)
+	// surface the parser's klog tail so CI failures aren't a context-free
+	// "TIMED OUT" banner. With summary verbosity (the CI default) klog
+	// is otherwise suppressed entirely, leaving us blind to where the
+	// kernel was when it wedged.
+	if (summary.TimedOut || summary.UserAborted || summary.Truncated) &&
+		len(summary.AbortKlogTail) > 0 {
+		r.println(Paint(
+			fmt.Sprintf("klog tail (last %d non-KTAP lines before abort):",
+				len(summary.AbortKlogTail)),
+			ansiDim, r.Colour,
+		))
+		for _, ln := range summary.AbortKlogTail {
+			r.println(Paint("  "+ln, ansiDim, r.Colour))
+		}
+		r.println("")
+	}
+
 	bailed := false
 	var bailedPhase *PhaseRecord
 	for _, p := range summary.Phases {

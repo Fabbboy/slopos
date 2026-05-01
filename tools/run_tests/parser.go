@@ -115,6 +115,19 @@ func NewKtapParser() *KtapParser {
 	return &KtapParser{}
 }
 
+// KlogTail returns a copy of the rolling window of recent non-KTAP klog
+// lines. Used by the timeout / silence / truncation paths to surface
+// what the kernel was doing right before the wedge — invaluable when
+// the wrapper aborts a run that never reached an orderly footer.
+func (p *KtapParser) KlogTail() []string {
+	if len(p.klogTail) == 0 {
+		return nil
+	}
+	out := make([]string, len(p.klogTail))
+	copy(out, p.klogTail)
+	return out
+}
+
 // Feed consumes one input line and returns zero or more events. Each
 // returned event is fully owned by the caller; the parser keeps no
 // reference to it after the function returns.

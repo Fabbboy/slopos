@@ -204,6 +204,12 @@ func run(rawArgv []string) int {
 	recorder.Summary.UserAborted = driverRes.UserAborted
 	recorder.Summary.TimedOut = driverRes.TimedOut
 	recorder.Summary.SilenceHit = driverRes.SilenceHit
+	// Snapshot the parser's klog ring buffer when the run aborted —
+	// without it, summary-verbosity CI failures show a "TIMED OUT"
+	// banner with no kernel context.
+	if driverRes.TimedOut || driverRes.UserAborted || recorder.Summary.Truncated {
+		recorder.Summary.AbortKlogTail = parser.KlogTail()
+	}
 
 	renderer.Finalize(recorder.Summary)
 

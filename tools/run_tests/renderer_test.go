@@ -20,6 +20,47 @@ func recorderFromLines(lines []string) *RunRecorder {
 	return rec
 }
 
+// Timeout + klog-tail diagnostic: when the run aborts (timeout, silence,
+// truncation) the renderer dumps the parser's recent non-KTAP klog above
+// the abort banner so CI failures aren't context-free.
+func TestRendererTimeoutDumpsKlogTail(t *testing.T) {
+	lines := []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..3",
+		"KTAP\tok 1 - mod::a # time_ms=1",
+		"TESTS: Kernel phase completed successfully",
+		"USERLAND: launched /sbin/init as task 5",
+		"KERNEL: about to wedge",
+	}
+	p := NewKtapParser()
+	rec := NewRecorder()
+	for _, ln := range lines {
+		for _, ev := range p.Feed(ln) {
+			rec.Record(ev)
+		}
+	}
+	rec.Summary.TimedOut = true
+	rec.Summary.SilenceHit = true
+	rec.Summary.AbortKlogTail = p.KlogTail()
+
+	var buf bytes.Buffer
+	r := NewBarRenderer(&buf, "summary", false, 0, false, 100)
+	r.Finalize(rec.Summary)
+	out := buf.String()
+
+	for _, want := range []string{
+		"klog tail",
+		"TESTS: Kernel phase completed successfully",
+		"USERLAND: launched /sbin/init as task 5",
+		"KERNEL: about to wedge",
+		"NO OUTPUT",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // Smoke test: green run renders summary line, no failure block.
 func TestRendererGreenRunSummary(t *testing.T) {
 	lines := []string{

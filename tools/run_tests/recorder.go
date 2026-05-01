@@ -83,7 +83,13 @@ type RunSummary struct {
 	TimedOut          bool
 	SilenceHit        bool
 	QemuStatus        *int
-	phaseByIdx        map[int]*PhaseRecord
+	// AbortKlogTail is the parser's rolling window of recent non-KTAP
+	// klog lines, snapshotted at finalize time when the run aborted
+	// (timeout / silence / truncation). Populated by main; rendered by
+	// the bar renderer above the abort message so CI failures surface
+	// what the kernel was doing right before the wedge.
+	AbortKlogTail []string
+	phaseByIdx    map[int]*PhaseRecord
 }
 
 // WallMs returns the run's wall-clock duration in milliseconds. If the
