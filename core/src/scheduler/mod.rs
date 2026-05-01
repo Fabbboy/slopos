@@ -18,6 +18,7 @@ pub mod switch_asm;
 pub mod switch_context;
 pub mod task;
 pub mod task_lock;
+pub mod task_stack;
 pub mod task_struct;
 #[cfg(feature = "test-hooks")]
 pub mod test_fixture;

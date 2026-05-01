@@ -23,6 +23,8 @@ pub mod paging;
 pub mod paging_defs;
 pub mod pat;
 pub mod process_vm;
+pub mod stack_region;
+pub mod stack_va;
 pub mod symbols;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
