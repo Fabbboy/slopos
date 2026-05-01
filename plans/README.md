@@ -15,7 +15,6 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [NETWORKING_EVOLUTION_PLAN.md](./NETWORKING_EVOLUTION_PLAN.md) | 9-phase roadmap to evolve SlopOS networking from prototype to BSD-socket-compatible TCP/IP stack — ~125 tasks |
 | [NETCAT_PLAN.md](./NETCAT_PLAN.md) | nc (netcat) implementation plan |
 | [PHASE8_UNSAFE_INVARIANT_REGISTRY.md](./PHASE8_UNSAFE_INVARIANT_REGISTRY.md) | Unsafe invariant registry for legacy modernization Phase 8 |
-| [TEST_FRAMEWORK_REDESIGN_PLAN.md](./TEST_FRAMEWORK_REDESIGN_PLAN.md) | 5-phase rewrite of the test harness: per-test KTAP emit, per-test klog capture, glob filter, userland integration, host-side `tools/run_tests/` Go wrapper (Phase 4 prototyped in Python; Phase 5 ported to Go) |
 
 
 ---
