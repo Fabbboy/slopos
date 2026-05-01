@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **complete** (full `just test` green at 2398 kernel + 3 utests = 2401/2401, wedge closed by the hermetic-state framework — see §8 Phase 3 Notes / 2026-04-30 hermetic redesign); Phase 4 **complete** (host-side `scripts/run_tests.py` wrapper — KTAP FSM, dotted progress, per-failure detail, FILTER / --rerun-failed / --verbose / --quiet / --raw / --json modes, count-regression CI guard, self-tests via `just check-tests-host`)
+> **Status**: **All five phases complete.** Phase 0 (rename), Phase 1 (per-test framework with bridge), Phase 2 (big-batch site migration + bridge deletion), Phase 3 (userland integration; wedge closed by the hermetic-state framework — see §8 Phase 3 Notes / 2026-04-30 hermetic redesign), Phase 4 (Python host-side wrapper — KTAP FSM, dotted progress, per-failure detail, FILTER / --rerun-failed / --verbose / --quiet / --raw / --json), Phase 5 (Go port to `tools/run_tests/` with cargo-style bottom-pinned progress bar, single-binary build, process-group lifetime, silence watchdog, klog-tail diagnostic on abort). Full local + CI green at 2398 kernel + 3 utests = 2401/2401.
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -16,10 +16,11 @@
 6. [Phase 1: New Framework With Bridge](#6-phase-1-new-framework-with-bridge)
 7. [Phase 2: Big-Batch Site Migration](#7-phase-2-big-batch-site-migration)
 8. [Phase 3: Userland Integration](#8-phase-3-userland-integration)
-9. [Phase 4: Host-Side Wrapper](#9-phase-4-host-side-wrapper)
-10. [Out of Scope](#10-out-of-scope)
-11. [Reused Infrastructure](#11-reused-infrastructure)
-12. [Verification](#12-verification)
+9. [Phase 4: Host-Side Wrapper (Python prototype)](#9-phase-4-host-side-wrapper-python-prototype)
+10. [Phase 5: Go Port (`tools/run_tests/`)](#10-phase-5-go-port-toolsrun_tests)
+11. [Out of Scope](#11-out-of-scope)
+12. [Reused Infrastructure](#12-reused-infrastructure)
+13. [Verification](#13-verification)
 
 ---
 
@@ -1229,9 +1230,11 @@ published kernel work.
 
 ---
 
-## 9. Phase 4: Host-Side Wrapper
+## 9. Phase 4: Host-Side Wrapper (Python prototype)
 
 > **Goal**: `just test` becomes a tool a developer enjoys using. Failure UX surfaces just the failing test's logs, not 50k lines of klog noise.
+>
+> **Note**: this phase shipped as a stdlib-only Python wrapper at `scripts/run_tests.py`. It was rewritten in Go and moved to `tools/run_tests/` in **Phase 5** (§10); the Python sources have been deleted from the tree. The phase is documented here because its design decisions, KTAP FSM, mode matrix, and JSONL schema all carried 1:1 to the Go port — a reader following the design needs Phase 4 first, then the Phase 5 migration delta on top.
 
 ### 4A. `scripts/run_tests.py`
 
@@ -1333,6 +1336,26 @@ The first end-to-end smoke run after `scripts/run_tests.py` landed surfaced a ke
 - `just check-test-count` → OK 2401 ≥ 2401.
 - `just check-tests-host` → 31/31 unit tests pass (added two leading-garbage tolerance regression tests).
 
+## 10. Phase 5: Go Port (`tools/run_tests/`)
+
+> **Goal**: Replace the stdlib-only Python wrapper with a single static Go binary. Same UX, same JSONL schema, same exit policy — but type-safe, single-binary, fast-to-build, no runtime dependency on `python3 >= 3.10`. Output byte-identical to Python (validated via differential JSONL diff before deletion).
+
+### Phase 5 Gate
+
+- [x] **GATE 5.1**: `go test ./tools/run_tests/...` passes — currently 35 tests in <0.05s (31 ported from Python + 3 leading-garbage rescue regressions + 1 timeout-klog-tail diagnostic).
+- [x] **GATE 5.2**: `just check-tests-host` runs the Go suite (was Python `unittest`).
+- [x] **GATE 5.3**: `just test` runs 2401/2401 green, exit 0; cargo-style bar pinned to bottom of terminal.
+- [x] **GATE 5.4**: `just test FILTER='slopos_mm::*'` filters correctly (≪ baseline, all pass).
+- [x] **GATE 5.5**: Induced failure renders identical `==== FAILURE 1 of N ====` block to the Python version.
+- [x] **GATE 5.6**: `just test-rerun-failed` reads `builddir/last-fail.list` and runs only those.
+- [x] **GATE 5.7**: `just test-verbose` dumps captured klog of every test.
+- [x] **GATE 5.8**: `just test-raw` shows QEMU stdout verbatim.
+- [x] **GATE 5.9**: `just test-json /tmp/events.jsonl` writes one event per line; schema diff against Python output is empty (modulo timing fields). Validated 2,408 events / 2,401 tests.
+- [x] **GATE 5.10**: `just check-test-count` OK 2401 ≥ 2401.
+- [x] **GATE 5.11**: CI green end-to-end with `actions/setup-go@v5` step, on `blacksmith-4vcpu-ubuntu-2404` (TCG, no KVM). Hardened post-merge by the process-group + silence-watchdog fix in commit `d11df3de` and the klog-tail-on-abort diagnostic in `0bdd5270`.
+- [x] **GATE 5.12**: `cargo fmt --all -- --check` clean; `go vet ./tools/run_tests/...` clean; `gofmt -l tools/run_tests/` empty.
+- [x] **GATE 5.13**: `git grep -l 'scripts/run_tests'` outside `plans/` returns only the two intentionally-preserved historical references (`tools/run_tests/main.go` doc-comment + `parser_test.go` doc-comment naming the Python file as the source of test cases).
+
 ### Phase 5 Notes (2026-05-01) — Go port
 
 Phase 4's Python wrapper at `scripts/run_tests.py` was rewritten in Go and moved to `tools/run_tests/` (single Go module, `module run_tests`). The motivation was Python's runtime fragility on a load-bearing tool: typos in dataclass field names / outcome enum values surface only when the relevant branch executes, the `python3 >= 3.10` runtime requirement is one more thing to keep in sync, and we'd just spent multiple sessions chasing wrapper-side bugs (RawRenderer double-emit; parser leading-byte intolerance) that a static type system would have surfaced at compile time.
@@ -1357,9 +1380,30 @@ Phase 4's Python wrapper at `scripts/run_tests.py` was rewritten in Go and moved
 
 **Verification (2026-05-01):** `just test` → 2,401/2,401 green, exit 0, 17.1 s wall. `just check-tests-host` → 34 Go tests pass in 0.01 s. `just check-test-count` → OK 2,401 ≥ 2,401. `cargo fmt --all -- --check` clean. `go vet ./tools/run_tests/...` clean. Phase 5N differential JSONL diff between Python and Go: empty.
 
+#### 2026-05-01 post-merge hardening (CI runner): pgrp lifetime + silence watchdog + klog-tail diagnostic
+
+The first CI run on `blacksmith-4vcpu-ubuntu-2404` (TCG, no KVM) hung the GitHub Actions runner for ~30 minutes. Two compounding wrapper-side bugs surfaced (kernel side completed cleanly):
+
+1. **Orphaned QEMU after timeout.** The driver's cancel path called `cmd.Process.Signal(SIGTERM)` followed by `cmd.Process.Kill()`, which only targets `qemu_run.sh` (a bash script). Bash defers signal traps until the current foreground command returns, so SIGTERM is queued but never executed; SIGKILL then reaps bash but **reparents QEMU to PID 1 with the stdout pipe still open**. `bufio.Scanner.Scan()` blocked indefinitely waiting for an EOF that never arrived.
+2. **Coarse-grained timeout.** The wall-clock guard only fires at 900 s, so an inter-phase wedge (kernel→userland) burned the full 15 minutes before any abort could trigger.
+
+**Fix (commit `d11df3de`):** spawn the child as a process-group leader (`Setpgid: true`) and signal `-pgid` on cancel so SIGTERM/SIGKILL hit the entire tree (bash + QEMU). Add `--silence-secs` (default 120 s, 0 disables) that resets on every QEMU stdout line and trips when the pipe stays silent past the threshold. Trip path is the same as the wall-timeout, but the failure line distinguishes them ("NO OUTPUT — aborted after Xs of QEMU silence" vs. "TIMED OUT"). New `silence_hit` field threaded through `DriverResult`, `RunSummary`, and the JSONL `run_end` event.
+
+**Fix (commit `0bdd5270`):** when the wrapper aborts (timeout / silence / truncation / user interrupt) it now dumps the parser's 64-line non-KTAP rolling window above the abort banner. Without this, summary-verbosity CI failures showed a context-free "TIMED OUT" line — invisible to the operator since `tests.verbosity=summary` is the CI default and the wrapper otherwise suppresses klog. With this in place, the next reproduction surfaces lines like
+
+```
+TESTS: Kernel phase completed successfully
+USERLAND: launched /sbin/init as task 5
+TESTS: Running userland phase (init syscall)
+```
+
+so the wedge stage is identifiable directly from CI artefacts.
+
+**Net result.** CI now runs end-to-end green on `blacksmith-4vcpu-ubuntu-2404`. A future kernel-side timing-related hang (under TCG without KVM) would surface as a 120 s silence-watchdog trip with full klog tail — actionable in seconds instead of opaque after 30 minutes.
+
 ---
 
-## 10. Out of Scope
+## 11. Out of Scope
 
 Explicitly deferred to separate plans:
 
@@ -1376,7 +1420,7 @@ Anything that breaks `slopos-alloc` discipline or the 2 KiB stack-frame gate is 
 
 ---
 
-## 11. Reused Infrastructure
+## 12. Reused Infrastructure
 
 | Component | Location | Reuse Note |
 |---|---|---|
@@ -1391,7 +1435,7 @@ Anything that breaks `slopos-alloc` discipline or the 2 KiB stack-frame gate is 
 
 ---
 
-## 12. Verification
+## 13. Verification
 
 ### Self-tests for the framework (run first)
 

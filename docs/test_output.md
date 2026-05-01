@@ -2,8 +2,8 @@
 
 This document describes the wire format that the SlopOS kernel test harness
 emits over its serial console, plus the JSONL event schema that
-`scripts/run_tests.py` writes when given `--json <path>`. Both are stable
-contracts for tooling.
+`builddir/run_tests` (built from `tools/run_tests/`) writes when given
+`--json <path>`. Both are stable contracts for tooling.
 
 ## 1. Overview
 
@@ -244,7 +244,7 @@ Globs match against `<module_path>::<test_fn>`. Supported wildcards:
 
 ## 10. JSONL event log (`--json <path>`)
 
-`scripts/run_tests.py --json events.jsonl` writes one JSON object per
+`builddir/run_tests --json events.jsonl` writes one JSON object per
 line. Schema (each event has a `t` discriminator):
 
 | `t` | Other fields |
@@ -262,13 +262,13 @@ parser changes.
 
 ## 11. Exit codes
 
-`scripts/run_tests.py` exits:
+`builddir/run_tests` exits:
 
 - `0` — all phases green
 - `1` — any `not ok`, `Bail out!`, timeout, or truncated stream
 - `2` — `qemu_run.sh` returned an unexpected status (kernel didn't
   reach `isa-debug-exit`)
-- `64` — argparse error or missing prerequisite (ISO/fs image)
+- `64` — flag parse error or missing prerequisite (ISO/fs image)
 - `130` — interrupted by SIGINT (does not overwrite
   `builddir/last-fail.list`)
 
