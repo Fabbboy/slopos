@@ -688,6 +688,427 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
 }
 
 // =============================================================================
+// UnsafeStack (SafeStack data-stack) parity tests.
+//
+// These mirror the kstack tests above against the U-region allocator.  They
+// guard the unification refactor: any change that diverges the two regions'
+// behavior must show up here.
+// =============================================================================
+
+pub fn test_ustack_basic_alloc() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+
+    let stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST: UnsafeStack::allocate failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    let base = stack.base().as_u64();
+    let top = stack.top().as_u64();
+
+    if top <= base {
+        klog_info!("SCHED_TEST: ustack top 0x{:x} <= base 0x{:x}", top, base);
+        return TestResult::Fail;
+    }
+    if top - base != TASK_UNSAFE_STACK_SIZE {
+        klog_info!(
+            "SCHED_TEST: ustack size mismatch: top-base=0x{:x} want 0x{:x}",
+            top - base,
+            TASK_UNSAFE_STACK_SIZE
+        );
+        return TestResult::Fail;
+    }
+    if (base & 0xFFF) != 0 {
+        klog_info!("SCHED_TEST: ustack base 0x{:x} not page-aligned", base);
+        return TestResult::Fail;
+    }
+
+    drop(stack);
+    TestResult::Pass
+}
+
+pub fn test_ustack_slot_reuse() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+
+    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST: ustack first alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let top1 = s1.top();
+    drop(s1);
+
+    let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST: ustack second alloc after free failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    if s2.top().as_u64() != top1.as_u64() {
+        klog_info!(
+            "SCHED_TEST: ustack slot not reused: top1=0x{:x} top2=0x{:x}",
+            top1.as_u64(),
+            s2.top().as_u64()
+        );
+        return TestResult::Fail;
+    }
+
+    drop(s2);
+    TestResult::Pass
+}
+
+pub fn test_ustack_rejects_invalid_size() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+
+    if UnsafeStack::allocate(0).is_ok() {
+        klog_info!("SCHED_TEST: ustack zero-size alloc unexpectedly succeeded");
+        return TestResult::Fail;
+    }
+    if UnsafeStack::allocate(4097).is_ok() {
+        klog_info!("SCHED_TEST: ustack unaligned alloc unexpectedly succeeded");
+        return TestResult::Fail;
+    }
+    // Bigger than the slot stride (64 KB minus guard).
+    if UnsafeStack::allocate(64 * 1024).is_ok() {
+        klog_info!("SCHED_TEST: ustack oversized alloc unexpectedly succeeded");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_ustack_pcp_refill() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+    use slopos_mm::ustack_va::{ustack_pcp_flush_current, ustack_pcp_stats};
+
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    ustack_pcp_flush_current();
+
+    let before = ustack_pcp_stats(cpu);
+
+    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[ustack_refill]: first alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    drop(s1);
+
+    let after_first = ustack_pcp_stats(cpu);
+    if after_first.refill_count <= before.refill_count {
+        klog_info!(
+            "SCHED_TEST[ustack_refill]: refill_count did not advance: {} -> {}",
+            before.refill_count,
+            after_first.refill_count
+        );
+        return TestResult::Fail;
+    }
+
+    for i in 0..4 {
+        let s = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+            Ok(s) => s,
+            Err(e) => {
+                klog_info!("SCHED_TEST[ustack_refill]: iter {} failed: {:?}", i, e);
+                return TestResult::Fail;
+            }
+        };
+        drop(s);
+    }
+
+    let after_warm = ustack_pcp_stats(cpu);
+    if after_warm.refill_count != after_first.refill_count {
+        klog_info!(
+            "SCHED_TEST[ustack_refill]: unexpected refill during warm path: {} -> {}",
+            after_first.refill_count,
+            after_warm.refill_count
+        );
+        return TestResult::Fail;
+    }
+
+    if after_warm.alloc_count < before.alloc_count.saturating_add(5) {
+        klog_info!(
+            "SCHED_TEST[ustack_refill]: alloc_count under-advanced: {} -> {}",
+            before.alloc_count,
+            after_warm.alloc_count
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_ustack_pcp_spill_overflow() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+    use slopos_mm::ustack_va::{
+        in_use_count, pcp_capacity, ustack_pcp_flush_current, ustack_pcp_stats,
+    };
+
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    ustack_pcp_flush_current();
+    let baseline_in_use = in_use_count();
+    let before = ustack_pcp_stats(cpu);
+
+    let hold = pcp_capacity() + 1;
+    let mut stacks: [Option<UnsafeStack>; 32] = [const { None }; 32];
+    if hold > stacks.len() {
+        klog_info!("SCHED_TEST[ustack_spill]: capacity {} > fixture cap", hold);
+        return TestResult::Fail;
+    }
+    for i in 0..hold {
+        stacks[i] = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                klog_info!("SCHED_TEST[ustack_spill]: alloc {} failed: {:?}", i, e);
+                return TestResult::Fail;
+            }
+        };
+    }
+    for i in 0..hold {
+        stacks[i] = None;
+    }
+
+    let after = ustack_pcp_stats(cpu);
+    if after.spill_count <= before.spill_count {
+        klog_info!(
+            "SCHED_TEST[ustack_spill]: spill_count did not advance: {} -> {}",
+            before.spill_count,
+            after.spill_count
+        );
+        return TestResult::Fail;
+    }
+
+    let residual_in_use = in_use_count().saturating_sub(baseline_in_use);
+    if residual_in_use != after.count {
+        klog_info!(
+            "SCHED_TEST[ustack_spill]: leak detected: in_use_delta={} cache_count={}",
+            residual_in_use,
+            after.count
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_ustack_pcp_was_backed_preserved() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+    use slopos_mm::ustack_va::ustack_pcp_flush_current;
+
+    ustack_pcp_flush_current();
+
+    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[ustack_backed]: s1 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let top1 = s1.top();
+    drop(s1);
+
+    let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[ustack_backed]: s2 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    if s2.top().as_u64() != top1.as_u64() {
+        klog_info!(
+            "SCHED_TEST[ustack_backed]: PCP did not reuse slot: top1={:#x} top2={:#x}",
+            top1.as_u64(),
+            s2.top().as_u64()
+        );
+        return TestResult::Fail;
+    }
+
+    drop(s2);
+    TestResult::Pass
+}
+
+pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+    use slopos_mm::ustack_va::{in_use_count, ustack_pcp_flush_current};
+
+    ustack_pcp_flush_current();
+    let before = in_use_count();
+
+    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[ustack_xcpu]: s1 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    drop(s1);
+    ustack_pcp_flush_current();
+
+    let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[ustack_xcpu]: s2 failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    drop(s2);
+    ustack_pcp_flush_current();
+
+    let after = in_use_count();
+    if after != before {
+        klog_info!(
+            "SCHED_TEST[ustack_xcpu]: in_use leaked: {} -> {}",
+            before,
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_ustack_pcp_stress_1000() -> TestResult {
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
+    use slopos_mm::ustack_va::{in_use_count, ustack_pcp_flush_current};
+
+    ustack_pcp_flush_current();
+    let before = in_use_count();
+
+    for i in 0..1000 {
+        let s = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+            Ok(s) => s,
+            Err(e) => {
+                klog_info!("SCHED_TEST[ustack_stress]: iteration {} failed: {:?}", i, e);
+                return TestResult::Fail;
+            }
+        };
+        drop(s);
+    }
+
+    ustack_pcp_flush_current();
+    let after = in_use_count();
+    if after != before {
+        klog_info!(
+            "SCHED_TEST[ustack_stress]: in_use leaked: {} -> {}",
+            before,
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Test: kstack and ustack live in disjoint VA regions and have
+/// independent global state.  Three load-bearing invariants the
+/// unification refactor must preserve:
+///
+///   1. The K and U VA windows do not overlap.
+///   2. A K allocation lands inside the K window; same for U.
+///   3. Allocating from one region must NOT change the other region's
+///      `in_use_count`.  (The two regions must be backed by truly
+///      independent allocators.)
+pub fn test_regions_disjoint() -> TestResult {
+    use super::stack::KernelStack;
+    use super::unsafe_stack::UnsafeStack;
+    use slopos_abi::task::{TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE};
+    use slopos_mm::memory_layout_defs::{
+        KSTACK_VA_BASE, KSTACK_VA_END, USTACK_VA_BASE, USTACK_VA_END,
+    };
+
+    // (1) Region windows must not overlap.
+    if KSTACK_VA_END > USTACK_VA_BASE && USTACK_VA_END > KSTACK_VA_BASE {
+        klog_info!(
+            "SCHED_TEST[disjoint]: VA regions overlap: K=[{:#x},{:#x}) U=[{:#x},{:#x})",
+            KSTACK_VA_BASE,
+            KSTACK_VA_END,
+            USTACK_VA_BASE,
+            USTACK_VA_END
+        );
+        return TestResult::Fail;
+    }
+
+    // Snapshot U's count, do K work, confirm U didn't move.
+    let u_before_k_work = slopos_mm::ustack_va::in_use_count();
+    let kstack = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[disjoint]: kstack alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let u_after_k_work = slopos_mm::ustack_va::in_use_count();
+    if u_after_k_work != u_before_k_work {
+        klog_info!(
+            "SCHED_TEST[disjoint]: kstack alloc disturbed U in_use: {} -> {}",
+            u_before_k_work,
+            u_after_k_work
+        );
+        return TestResult::Fail;
+    }
+
+    // Snapshot K's count, do U work, confirm K didn't move.
+    let k_before_u_work = slopos_mm::kstack_va::in_use_count();
+    let ustack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        Ok(s) => s,
+        Err(e) => {
+            klog_info!("SCHED_TEST[disjoint]: ustack alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let k_after_u_work = slopos_mm::kstack_va::in_use_count();
+    if k_after_u_work != k_before_u_work {
+        klog_info!(
+            "SCHED_TEST[disjoint]: ustack alloc disturbed K in_use: {} -> {}",
+            k_before_u_work,
+            k_after_u_work
+        );
+        return TestResult::Fail;
+    }
+
+    // (2) Each handle's VA must land in its own region.
+    let k_base = kstack.base().as_u64();
+    let u_base = ustack.base().as_u64();
+    if !(KSTACK_VA_BASE..KSTACK_VA_END).contains(&k_base) {
+        klog_info!(
+            "SCHED_TEST[disjoint]: kstack base {:#x} not in K region [{:#x},{:#x})",
+            k_base,
+            KSTACK_VA_BASE,
+            KSTACK_VA_END
+        );
+        return TestResult::Fail;
+    }
+    if !(USTACK_VA_BASE..USTACK_VA_END).contains(&u_base) {
+        klog_info!(
+            "SCHED_TEST[disjoint]: ustack base {:#x} not in U region [{:#x},{:#x})",
+            u_base,
+            USTACK_VA_BASE,
+            USTACK_VA_END
+        );
+        return TestResult::Fail;
+    }
+
+    drop(kstack);
+    drop(ustack);
+    TestResult::Pass
+}
+
+// =============================================================================
 // SCHEDULER QUEUE TESTS
 // Test priority queue behavior including edge cases
 // =============================================================================
@@ -2469,6 +2890,18 @@ slopos_testing::stest!(
     name = test_kstack_pcp_smp_throughput_bench,
     suite = sched_core
 );
+slopos_testing::stest!(name = test_ustack_basic_alloc, suite = sched_core);
+slopos_testing::stest!(name = test_ustack_slot_reuse, suite = sched_core);
+slopos_testing::stest!(name = test_ustack_rejects_invalid_size, suite = sched_core);
+slopos_testing::stest!(name = test_ustack_pcp_refill, suite = sched_core);
+slopos_testing::stest!(name = test_ustack_pcp_spill_overflow, suite = sched_core);
+slopos_testing::stest!(
+    name = test_ustack_pcp_was_backed_preserved,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_ustack_pcp_cross_cpu_safety, suite = sched_core);
+slopos_testing::stest!(name = test_ustack_pcp_stress_1000, suite = sched_core);
+slopos_testing::stest!(name = test_regions_disjoint, suite = sched_core);
 slopos_testing::stest!(name = test_schedule_to_empty_queue, suite = sched_core);
 slopos_testing::stest!(name = test_schedule_duplicate_task, suite = sched_core);
 slopos_testing::stest!(name = test_schedule_null_task, suite = sched_core);
