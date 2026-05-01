@@ -87,6 +87,7 @@ func (s *JsonlSink) WriteRunEnd(summary *RunSummary, exitCode int) error {
 		"qemu_status":  qemuStatus,
 		"user_aborted": summary.UserAborted,
 		"timed_out":    summary.TimedOut,
+		"silence_hit":  summary.SilenceHit,
 		"truncated":    summary.Truncated,
 		"phases":       phases,
 	}

@@ -178,6 +178,7 @@ func run(rawArgv []string) int {
 		Iso:            iso,
 		FsImage:        fsImage,
 		WallTimeoutSec: float64(args.TimeoutSecs),
+		SilenceSec:     float64(args.SilenceSecs),
 	}
 	onLine := func(line string) {
 		if rawPassthrough {
@@ -202,6 +203,7 @@ func run(rawArgv []string) int {
 	recorder.Finalize(driverRes.QemuStatus)
 	recorder.Summary.UserAborted = driverRes.UserAborted
 	recorder.Summary.TimedOut = driverRes.TimedOut
+	recorder.Summary.SilenceHit = driverRes.SilenceHit
 
 	renderer.Finalize(recorder.Summary)
 

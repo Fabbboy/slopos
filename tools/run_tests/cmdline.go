@@ -26,6 +26,7 @@ type Args struct {
 	ColorMode   string
 	NoColor     bool
 	TimeoutSecs int
+	SilenceSecs int
 	WarnMs      int
 	Iso         string
 	FsImage     string
@@ -94,6 +95,7 @@ func parseArgs(argv []string) (*Args, error) {
 	a := &Args{
 		ColorMode:   "auto",
 		TimeoutSecs: 900,
+		SilenceSecs: 120,
 		WarnMs:      500,
 	}
 	var filters, skips stringSlice
@@ -107,6 +109,7 @@ func parseArgs(argv []string) (*Args, error) {
 	fs.StringVar(&a.ColorMode, "color", "auto", "Colour mode: auto|always|never.")
 	fs.BoolVar(&a.NoColor, "no-color", false, "Alias for --color=never.")
 	fs.IntVar(&a.TimeoutSecs, "timeout-secs", 900, "Wall-clock guard for the whole run; 0 disables.")
+	fs.IntVar(&a.SilenceSecs, "silence-secs", 120, "Abort if QEMU stdout is silent for this long; 0 disables.")
 	fs.IntVar(&a.WarnMs, "warn-ms", 500, "Mark tests slower than this as OVER_TIME.")
 	fs.StringVar(&a.Iso, "iso", "", "Test ISO path.")
 	fs.StringVar(&a.FsImage, "fs-image", "", "Test fs image path.")

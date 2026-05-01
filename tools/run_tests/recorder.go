@@ -81,6 +81,7 @@ type RunSummary struct {
 	Truncated         bool
 	UserAborted       bool
 	TimedOut          bool
+	SilenceHit        bool
 	QemuStatus        *int
 	phaseByIdx        map[int]*PhaseRecord
 }

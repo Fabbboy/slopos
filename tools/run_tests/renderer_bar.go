@@ -479,10 +479,16 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 		)
 		r.println(Paint(msg, ansiRedBold, r.Colour))
 	case summary.TimedOut:
-		r.println(Paint(
-			fmt.Sprintf("TIMED OUT after %.1fs (%d tests observed)", wallS, total),
-			ansiRedBold, r.Colour,
-		))
+		var msg string
+		if summary.SilenceHit {
+			msg = fmt.Sprintf(
+				"NO OUTPUT — aborted after %.1fs of QEMU silence (%d tests observed)",
+				wallS, total,
+			)
+		} else {
+			msg = fmt.Sprintf("TIMED OUT after %.1fs (%d tests observed)", wallS, total)
+		}
+		r.println(Paint(msg, ansiRedBold, r.Colour))
 	case summary.UserAborted:
 		r.println(Paint(
 			fmt.Sprintf("INTERRUPTED after %.1fs (%d tests observed)", wallS, total),

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -22,13 +23,18 @@ type QemuDriver struct {
 	Iso            string
 	FsImage        string
 	WallTimeoutSec float64
+	// SilenceSec aborts the run when the QEMU stdout pipe stays
+	// completely silent for this many seconds. 0 disables. Catches
+	// inter-phase wedges that would otherwise burn the full WallTimeoutSec.
+	SilenceSec float64
 }
 
 // DriverResult is what `Run` returns to main.
 type DriverResult struct {
 	QemuStatus  *int // exit status from qemu_run.sh; nil if process never finished
 	UserAborted bool // SIGINT received from the user
-	TimedOut    bool // wall-clock guard fired
+	TimedOut    bool // wall-clock guard or silence watchdog fired
+	SilenceHit  bool // silence watchdog (not wall-clock) was the trigger
 }
 
 // Run streams QEMU's stdout line-by-line through `onLine`, enforcing the
@@ -57,7 +63,15 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 		return DriverResult{}, fmt.Errorf("driver: stdout pipe: %w", err)
 	}
 
-	// Wall-clock guard. WhenWallTimeoutSec > 0, set a deadline; otherwise
+	// Place the child in its own process group so we can signal the whole
+	// tree on cancel. Without this, sending SIGTERM/SIGKILL to qemu_run.sh
+	// (a bash script) leaves QEMU orphaned — the kernel reparents it to
+	// PID 1 and it keeps the stdout pipe open forever, blocking our
+	// scanner. (Reproduced on GitHub Actions: a 905s wall-timeout fired
+	// but the wrapper hung indefinitely afterwards.)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Wall-clock guard. When WallTimeoutSec > 0, set a deadline; otherwise
 	// inherit the caller's context. SIGINT fires the parent context.
 	runCtx := ctx
 	var runCancel context.CancelFunc
@@ -71,48 +85,84 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 	if err := cmd.Start(); err != nil {
 		return DriverResult{}, fmt.Errorf("driver: start: %w", err)
 	}
+	pgid := cmd.Process.Pid // matches the child's PID since Setpgid+no Pgid set
 
-	// Single goroutine owns cmd.Wait. Result lands on `waitCh`. Anyone
-	// who wants to know "child has exited" reads from `waitCh` exactly
-	// once; we forward it through `waitDone` to allow multiple consumers.
+	// Single goroutine owns cmd.Wait. Result lands on `waitCh`.
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	// Watcher goroutine: cancels on context (timeout / SIGINT) by sending
-	// SIGTERM, then SIGKILL after a 5-second grace. If the child exits on
-	// its own first, this goroutine no-ops.
+	// Silence watchdog. lastLine is the monotonic time of the last byte
+	// received from QEMU. Watcher goroutine polls it and trips when the
+	// pipe goes dead longer than SilenceSec.
+	var lastLine atomic.Int64
+	lastLine.Store(time.Now().UnixNano())
+	silenceCtx, silenceCancel := context.WithCancel(context.Background())
+	defer silenceCancel()
+	silenceTripped := make(chan struct{}, 1)
+	if d.SilenceSec > 0 {
+		go func() {
+			interval := time.Duration(d.SilenceSec*float64(time.Second)) / 4
+			if interval < time.Second {
+				interval = time.Second
+			}
+			t := time.NewTicker(interval)
+			defer t.Stop()
+			limit := time.Duration(d.SilenceSec * float64(time.Second))
+			for {
+				select {
+				case <-silenceCtx.Done():
+					return
+				case <-t.C:
+					last := time.Unix(0, lastLine.Load())
+					if time.Since(last) >= limit {
+						select {
+						case silenceTripped <- struct{}{}:
+						default:
+						}
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// Watcher goroutine: cancels on context (wall-timeout / SIGINT) or on
+	// silence trip by signaling the entire process group with SIGTERM,
+	// then SIGKILL after a 5-second grace. Killing the pgrp closes QEMU's
+	// stdout, which lets the scanner loop below return.
 	type abortFlags struct {
 		userAborted bool
 		timedOut    bool
+		silenceHit  bool
 	}
 	abortCh := make(chan abortFlags, 1)
 	stopWatcher := make(chan struct{})
 	go func() {
+		af := abortFlags{}
 		select {
 		case <-runCtx.Done():
-			af := abortFlags{}
 			if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 				af.timedOut = true
 			} else {
 				af.userAborted = true
 			}
-			if cmd.Process != nil {
-				_ = cmd.Process.Signal(syscall.SIGTERM)
-			}
-			grace := time.NewTimer(5 * time.Second)
-			defer grace.Stop()
-			select {
-			case <-grace.C:
-				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
-			case <-stopWatcher:
-				// Child exited on its own (or via SIGTERM) before grace.
-			}
-			abortCh <- af
+		case <-silenceTripped:
+			af.timedOut = true
+			af.silenceHit = true
 		case <-stopWatcher:
-			abortCh <- abortFlags{}
+			abortCh <- af
+			return
 		}
+		// Signal the whole process group, not just bash, so QEMU dies too.
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		grace := time.NewTimer(5 * time.Second)
+		defer grace.Stop()
+		select {
+		case <-grace.C:
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		case <-stopWatcher:
+		}
+		abortCh <- af
 	}()
 
 	// Line loop. bufio.Scanner with 1 MiB ceiling — KTAP lines + log
@@ -120,6 +170,7 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
+		lastLine.Store(time.Now().UnixNano())
 		line := scanner.Text()
 		// Belt-and-suspenders: kernel klog occasionally emits a stray
 		// non-UTF-8 byte under load. Replace each with U+FFFD so the
@@ -136,12 +187,14 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 
 	// Wait for child exit, then stop the watcher.
 	waitErr := <-waitCh
+	silenceCancel()
 	close(stopWatcher)
 	af := <-abortCh
 
 	res := DriverResult{
 		UserAborted: af.userAborted,
 		TimedOut:    af.timedOut,
+		SilenceHit:  af.silenceHit,
 	}
 	if waitErr == nil {
 		zero := 0
