@@ -42,11 +42,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_sync::{IrqMutex, PreemptGuard};
+use slopos_sync::{IrqMutex, LOCK_LEVEL_ALLOCATOR, PreemptGuard};
 
 use crate::page_alloc::alloc_page_frame;
 use crate::paging::map_page_4kb;
 use crate::paging_defs::PAGE_SIZE_2MB;
+use crate::paging_defs::PageFlags;
 use crate::stack_region::StackRegion;
 
 // ---------------------------------------------------------------------------
@@ -752,4 +753,200 @@ pub fn pcp_stats<R: StackRegion>(cpu: usize) -> PcpStats {
 #[allow(dead_code)]
 pub const fn pcp_capacity<R: StackRegion>() -> usize {
     R::PCP_CAPACITY
+}
+
+// ===========================================================================
+// Concrete region instantiations.
+//
+// One block per region: tunable constants, the global IrqMutex-protected
+// allocator static, the per-CPU cache static, and the StackRegion impl
+// that wires them up.  The two regions intentionally have separate
+// statics so their locks contend independently — the K and U warm paths
+// stay independent under churn.
+// ===========================================================================
+
+const REGION_PCP_CAPACITY: usize = 16;
+const REGION_PCP_REFILL_BATCH: usize = 8;
+const REGION_PCP_SPILL_BATCH: usize = 8;
+const REGION_PAGE_FLAGS: u64 = PageFlags::KERNEL_RW.bits() | PageFlags::NO_EXECUTE.bits();
+
+// ---------------------------------------------------------------------------
+// KstackRegion — kernel-mode task stacks.
+// ---------------------------------------------------------------------------
+
+mod kstack {
+    use super::*;
+    use crate::memory_layout_defs::{
+        KSTACK_GUARD_SIZE, KSTACK_MAX_SLOTS, KSTACK_STRIDE, KSTACK_VA_BASE, KSTACK_VA_END,
+    };
+    use crate::stack_region::KstackRegion;
+
+    pub(super) const BITMAP_WORDS: usize = KSTACK_MAX_SLOTS.div_ceil(64);
+
+    // Compile-time region-shape sanity.
+    const _: () = {
+        let span = KSTACK_VA_END - KSTACK_VA_BASE;
+        assert!(
+            span % KSTACK_STRIDE == 0,
+            "KSTACK region misaligned to stride"
+        );
+        assert!(
+            (span / KSTACK_STRIDE) as usize == KSTACK_MAX_SLOTS,
+            "KSTACK_MAX_SLOTS mismatched with region size / stride",
+        );
+    };
+
+    pub(super) static GLOBAL: IrqMutex<StackVaAllocator<KstackRegion, BITMAP_WORDS>> =
+        IrqMutex::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
+
+    pub(super) static PCP: PcpArray<KstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
+        const INIT: PerCpuStackCache<KstackRegion, REGION_PCP_CAPACITY> = PerCpuStackCache::new();
+        [INIT; MAX_CPUS]
+    });
+
+    impl StackRegion for KstackRegion {
+        const NAME: &'static str = "kstack";
+        const VA_BASE: u64 = KSTACK_VA_BASE;
+        const VA_END: u64 = KSTACK_VA_END;
+        const STRIDE: u64 = KSTACK_STRIDE;
+        const GUARD_SIZE: u64 = KSTACK_GUARD_SIZE;
+        const MAX_SLOTS: usize = KSTACK_MAX_SLOTS;
+        const BITMAP_WORDS: usize = BITMAP_WORDS;
+        const PCP_CAPACITY: usize = REGION_PCP_CAPACITY;
+        const PCP_REFILL_BATCH: usize = REGION_PCP_REFILL_BATCH;
+        const PCP_SPILL_BATCH: usize = REGION_PCP_SPILL_BATCH;
+        const PAGE_FLAGS: u64 = REGION_PAGE_FLAGS;
+
+        fn _slot_pop() -> Option<SlotEntry> {
+            slot_pop_impl::<KstackRegion, BITMAP_WORDS, REGION_PCP_CAPACITY, REGION_PCP_REFILL_BATCH>(
+                &GLOBAL, &PCP,
+            )
+        }
+
+        fn _slot_push(entry: SlotEntry) {
+            slot_push_impl::<KstackRegion, BITMAP_WORDS, REGION_PCP_CAPACITY, REGION_PCP_SPILL_BATCH>(
+                &GLOBAL, &PCP, entry,
+            );
+        }
+
+        fn _pcp_flush_current() {
+            pcp_flush_current_impl::<
+                KstackRegion,
+                BITMAP_WORDS,
+                REGION_PCP_CAPACITY,
+                REGION_PCP_SPILL_BATCH,
+            >(&GLOBAL, &PCP);
+        }
+
+        fn _pcp_drain_all() {
+            pcp_drain_all_impl::<
+                KstackRegion,
+                BITMAP_WORDS,
+                REGION_PCP_CAPACITY,
+                REGION_PCP_SPILL_BATCH,
+            >(&GLOBAL, &PCP);
+        }
+
+        fn _pcp_stats(cpu: usize) -> PcpStats {
+            PCP.snapshot(cpu)
+        }
+
+        fn _in_use_count() -> u32 {
+            GLOBAL.lock().in_use()
+        }
+
+        fn _init() {
+            init_with_sentinels::<KstackRegion, BITMAP_WORDS>(&GLOBAL);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UstackRegion — SafeStack-sanitiser data stacks.
+// ---------------------------------------------------------------------------
+
+mod ustack {
+    use super::*;
+    use crate::memory_layout_defs::{
+        USTACK_GUARD_SIZE, USTACK_MAX_SLOTS, USTACK_STRIDE, USTACK_VA_BASE, USTACK_VA_END,
+    };
+    use crate::stack_region::UstackRegion;
+
+    pub(super) const BITMAP_WORDS: usize = USTACK_MAX_SLOTS.div_ceil(64);
+
+    const _: () = {
+        let span = USTACK_VA_END - USTACK_VA_BASE;
+        assert!(
+            span % USTACK_STRIDE == 0,
+            "USTACK region misaligned to stride"
+        );
+        assert!(
+            (span / USTACK_STRIDE) as usize == USTACK_MAX_SLOTS,
+            "USTACK_MAX_SLOTS mismatched with region size / stride",
+        );
+    };
+
+    pub(super) static GLOBAL: IrqMutex<StackVaAllocator<UstackRegion, BITMAP_WORDS>> =
+        IrqMutex::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
+
+    pub(super) static PCP: PcpArray<UstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
+        const INIT: PerCpuStackCache<UstackRegion, REGION_PCP_CAPACITY> = PerCpuStackCache::new();
+        [INIT; MAX_CPUS]
+    });
+
+    impl StackRegion for UstackRegion {
+        const NAME: &'static str = "ustack";
+        const VA_BASE: u64 = USTACK_VA_BASE;
+        const VA_END: u64 = USTACK_VA_END;
+        const STRIDE: u64 = USTACK_STRIDE;
+        const GUARD_SIZE: u64 = USTACK_GUARD_SIZE;
+        const MAX_SLOTS: usize = USTACK_MAX_SLOTS;
+        const BITMAP_WORDS: usize = BITMAP_WORDS;
+        const PCP_CAPACITY: usize = REGION_PCP_CAPACITY;
+        const PCP_REFILL_BATCH: usize = REGION_PCP_REFILL_BATCH;
+        const PCP_SPILL_BATCH: usize = REGION_PCP_SPILL_BATCH;
+        const PAGE_FLAGS: u64 = REGION_PAGE_FLAGS;
+
+        fn _slot_pop() -> Option<SlotEntry> {
+            slot_pop_impl::<UstackRegion, BITMAP_WORDS, REGION_PCP_CAPACITY, REGION_PCP_REFILL_BATCH>(
+                &GLOBAL, &PCP,
+            )
+        }
+
+        fn _slot_push(entry: SlotEntry) {
+            slot_push_impl::<UstackRegion, BITMAP_WORDS, REGION_PCP_CAPACITY, REGION_PCP_SPILL_BATCH>(
+                &GLOBAL, &PCP, entry,
+            );
+        }
+
+        fn _pcp_flush_current() {
+            pcp_flush_current_impl::<
+                UstackRegion,
+                BITMAP_WORDS,
+                REGION_PCP_CAPACITY,
+                REGION_PCP_SPILL_BATCH,
+            >(&GLOBAL, &PCP);
+        }
+
+        fn _pcp_drain_all() {
+            pcp_drain_all_impl::<
+                UstackRegion,
+                BITMAP_WORDS,
+                REGION_PCP_CAPACITY,
+                REGION_PCP_SPILL_BATCH,
+            >(&GLOBAL, &PCP);
+        }
+
+        fn _pcp_stats(cpu: usize) -> PcpStats {
+            PCP.snapshot(cpu)
+        }
+
+        fn _in_use_count() -> u32 {
+            GLOBAL.lock().in_use()
+        }
+
+        fn _init() {
+            init_with_sentinels::<UstackRegion, BITMAP_WORDS>(&GLOBAL);
+        }
+    }
 }

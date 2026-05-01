@@ -52,7 +52,7 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_mm::page_alloc::{alloc_page_frames_pcp_batch, free_page_frame};
 use slopos_mm::paging::{map_page_4kb, unmap_page};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
-use slopos_mm::stack_region::StackRegion;
+use slopos_mm::stack_region::{KstackRegion, StackRegion, UstackRegion};
 use slopos_mm::stack_va::{self, StackSlot};
 
 /// Maximum pages that fit in any region's slot (excluding the guard
@@ -63,11 +63,23 @@ use slopos_mm::stack_va::{self, StackSlot};
 /// would overflow this buffer.
 const MAX_STACK_PAGES_PER_SLOT: usize = 16;
 
-/// Allocation failure reasons.  Re-exported from the legacy `stack`
-/// module to keep one canonical error type while Phases 4/5 migrate
-/// `UnsafeStack` and `KernelStack` over.  Phase 6 will move the
-/// canonical definition into this file when `stack.rs` is deleted.
-pub use super::stack::StackAllocError;
+/// Reasons `TaskStack::<R>::allocate` (and its `KernelStack` /
+/// `UnsafeStack` aliases) can fail.  Each variant maps to a recoverable
+/// resource exhaustion or a caller error; the kernel returns it to the
+/// task creator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackAllocError {
+    /// `size` was zero, not a multiple of 4 KB, or larger than
+    /// `R::STRIDE - R::GUARD_SIZE`.
+    InvalidSize,
+    /// No free slot remains in the `R` VA region.
+    OutOfVirtualSpace,
+    /// The page allocator could not satisfy a frame request.
+    OutOfPhysicalFrames,
+    /// `map_page_4kb` returned an error (typically out of memory for
+    /// intermediate page tables).
+    MappingFailed,
+}
 
 /// Owning handle to one mapped task stack in region `R`.
 ///
@@ -220,3 +232,22 @@ impl<R: StackRegion> Drop for TaskStack<R> {
         // spilling to the global if the cache is full).
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-region type aliases.
+//
+// Distinct nominal types — `KernelStack` and `UnsafeStack` carry
+// different `R` parameters, so passing one where the other is expected
+// is a compile error.  Zero runtime cost (the region tag is a ZST).
+// ---------------------------------------------------------------------------
+
+/// Owning handle to a kernel-mode task stack.
+pub type KernelStack = TaskStack<KstackRegion>;
+
+/// Owning handle to a SafeStack-sanitiser data ("unsafe") stack.
+///
+/// Lives alongside the task's [`KernelStack`].  The SafeStack
+/// sanitiser pass moves address-taken locals onto this stack so a
+/// write through a corrupted data pointer cannot reach the
+/// return-address region of the kernel (safe) stack.
+pub type UnsafeStack = TaskStack<UstackRegion>;

@@ -17,9 +17,10 @@ use slopos_core::sched::scheduler_shutdown;
 use slopos_core::task::task_shutdown_all;
 use slopos_drivers::apic;
 use slopos_drivers::hpet;
-use slopos_mm::kstack_va::kstack_pcp_drain_all;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
+use slopos_mm::stack_region::KstackRegion;
+use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
 
 fn serial_flush() {
     let lsr_port = COM1.offset(5);
@@ -89,7 +90,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     }
 
     pcp_drain_all();
-    kstack_pcp_drain_all();
+    stack_pcp_drain_all::<KstackRegion>();
 
     // Terminate all tasks while the scheduler is still enabled so that APs
     // whose current task is destroyed can schedule() to idle normally.

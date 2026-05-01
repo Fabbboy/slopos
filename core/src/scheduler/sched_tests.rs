@@ -288,7 +288,7 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
 /// and is page-aligned.  Verifies the VA region carving + guard-page
 /// layout are correct.
 pub fn test_kstack_basic_alloc() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
 
     let stack = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
@@ -331,7 +331,7 @@ pub fn test_kstack_basic_alloc() -> TestResult {
 /// bitmap rather than reading from (kernel-image-reserved) physical
 /// pages.
 pub fn test_kstack_slot_reuse() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
 
     let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
@@ -367,7 +367,7 @@ pub fn test_kstack_slot_reuse() -> TestResult {
 
 /// Test: invalid sizes are rejected without touching global state.
 pub fn test_kstack_rejects_invalid_size() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
 
     // Zero size.
     if KernelStack::allocate(0).is_ok() {
@@ -396,17 +396,18 @@ pub fn test_kstack_rejects_invalid_size() -> TestResult {
 /// After the first refill, subsequent iterations must not increment
 /// `refill_count`.
 pub fn test_kstack_pcp_refill() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
-    use slopos_mm::kstack_va::{kstack_pcp_flush_current, kstack_pcp_stats};
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::{pcp_flush_current, pcp_stats};
 
     let cpu = slopos_arch::pcr::get_current_cpu();
 
     // Start from a known-clean cache: flush any stale entries back to the
     // global allocator so refill_count readings are meaningful.
-    kstack_pcp_flush_current();
+    pcp_flush_current::<KstackRegion>();
 
-    let before = kstack_pcp_stats(cpu);
+    let before = pcp_stats::<KstackRegion>(cpu);
 
     // First alloc → empty cache → triggers exactly one refill.
     let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
@@ -418,7 +419,7 @@ pub fn test_kstack_pcp_refill() -> TestResult {
     };
     drop(s1);
 
-    let after_first = kstack_pcp_stats(cpu);
+    let after_first = pcp_stats::<KstackRegion>(cpu);
     if after_first.refill_count <= before.refill_count {
         klog_info!(
             "SCHED_TEST[pcp_refill]: refill_count did not advance: {} -> {}",
@@ -441,7 +442,7 @@ pub fn test_kstack_pcp_refill() -> TestResult {
         drop(s);
     }
 
-    let after_warm = kstack_pcp_stats(cpu);
+    let after_warm = pcp_stats::<KstackRegion>(cpu);
     if after_warm.refill_count != after_first.refill_count {
         klog_info!(
             "SCHED_TEST[pcp_refill]: unexpected refill during warm path: {} -> {}",
@@ -466,20 +467,19 @@ pub fn test_kstack_pcp_refill() -> TestResult {
 
 /// Test: driving the cache past `pcp_capacity()` forces a spill.
 pub fn test_kstack_pcp_spill_overflow() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
-    use slopos_mm::kstack_va::{
-        in_use_count, kstack_pcp_flush_current, kstack_pcp_stats, pcp_capacity,
-    };
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::{in_use_count, pcp_capacity, pcp_flush_current, pcp_stats};
 
     let cpu = slopos_arch::pcr::get_current_cpu();
-    kstack_pcp_flush_current();
-    let baseline_in_use = in_use_count();
-    let before = kstack_pcp_stats(cpu);
+    pcp_flush_current::<KstackRegion>();
+    let baseline_in_use = in_use_count::<KstackRegion>();
+    let before = pcp_stats::<KstackRegion>(cpu);
 
     // Hold N + 1 stacks simultaneously so each drop enters a full cache
     // and triggers a spill.  N = capacity.
-    let hold = pcp_capacity() + 1;
+    let hold = pcp_capacity::<KstackRegion>() + 1;
     let mut stacks: [Option<KernelStack>; 32] = [const { None }; 32];
     if hold > stacks.len() {
         klog_info!("SCHED_TEST[pcp_spill]: capacity {} > fixture cap", hold);
@@ -500,7 +500,7 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
         stacks[i] = None;
     }
 
-    let after = kstack_pcp_stats(cpu);
+    let after = pcp_stats::<KstackRegion>(cpu);
     if after.spill_count <= before.spill_count {
         klog_info!(
             "SCHED_TEST[pcp_spill]: spill_count did not advance: {} -> {}",
@@ -514,7 +514,7 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
     // still sitting in the cache).  Since we flushed at the start and
     // every stack has been dropped, any residual in_use must equal the
     // current cache `count` exactly.
-    let residual_in_use = in_use_count().saturating_sub(baseline_in_use);
+    let residual_in_use = in_use_count::<KstackRegion>().saturating_sub(baseline_in_use);
     if residual_in_use != after.count {
         klog_info!(
             "SCHED_TEST[pcp_spill]: leak detected: in_use_delta={} cache_count={}",
@@ -531,11 +531,12 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
 /// alloc/drop/alloc on the same CPU we should see the same VA reused
 /// AND the second alloc must NOT hit the mapping path.
 pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
-    use slopos_mm::kstack_va::kstack_pcp_flush_current;
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::pcp_flush_current;
 
-    kstack_pcp_flush_current();
+    pcp_flush_current::<KstackRegion>();
 
     let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
         Ok(s) => s,
@@ -572,12 +573,13 @@ pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
 /// flush-between), then reallocate.  The global state must stay
 /// consistent — freed slots must be visible to any CPU's refill path.
 pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
-    use slopos_mm::kstack_va::{in_use_count, kstack_pcp_flush_current};
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::{in_use_count, pcp_flush_current};
 
-    kstack_pcp_flush_current();
-    let before = in_use_count();
+    pcp_flush_current::<KstackRegion>();
+    let before = in_use_count::<KstackRegion>();
 
     // Alloc, drop, and immediately flush — forces the slot back into
     // the global pool instead of the PCP.  The next alloc then has to
@@ -590,7 +592,7 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
         }
     };
     drop(s1);
-    kstack_pcp_flush_current();
+    pcp_flush_current::<KstackRegion>();
 
     let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
         Ok(s) => s,
@@ -600,9 +602,9 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
         }
     };
     drop(s2);
-    kstack_pcp_flush_current();
+    pcp_flush_current::<KstackRegion>();
 
-    let after = in_use_count();
+    let after = in_use_count::<KstackRegion>();
     if after != before {
         klog_info!(
             "SCHED_TEST[pcp_xcpu]: in_use leaked: {} -> {}",
@@ -617,12 +619,13 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
 
 /// Test: 1000-iteration stress loop with no leaks.
 pub fn test_kstack_pcp_stress_1000() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
-    use slopos_mm::kstack_va::{in_use_count, kstack_pcp_flush_current};
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::{in_use_count, pcp_flush_current};
 
-    kstack_pcp_flush_current();
-    let before = in_use_count();
+    pcp_flush_current::<KstackRegion>();
+    let before = in_use_count::<KstackRegion>();
 
     for i in 0..1000 {
         let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
@@ -635,8 +638,8 @@ pub fn test_kstack_pcp_stress_1000() -> TestResult {
         drop(s);
     }
 
-    kstack_pcp_flush_current();
-    let after = in_use_count();
+    pcp_flush_current::<KstackRegion>();
+    let after = in_use_count::<KstackRegion>();
     if after != before {
         klog_info!(
             "SCHED_TEST[pcp_stress]: in_use leaked: {} -> {}",
@@ -653,11 +656,12 @@ pub fn test_kstack_pcp_stress_1000() -> TestResult {
 /// loop.  Always passes — the numbers show up in `test_output.log` for
 /// regression tracking.
 pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
-    use super::stack::KernelStack;
+    use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
-    use slopos_mm::kstack_va::kstack_pcp_flush_current;
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::pcp_flush_current;
 
-    kstack_pcp_flush_current();
+    pcp_flush_current::<KstackRegion>();
 
     // Warm up the cache so the timed loop is a pure PCP hit.
     let warmup = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
@@ -696,7 +700,7 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
 // =============================================================================
 
 pub fn test_ustack_basic_alloc() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
 
     let stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
@@ -732,7 +736,7 @@ pub fn test_ustack_basic_alloc() -> TestResult {
 }
 
 pub fn test_ustack_slot_reuse() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
 
     let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
@@ -767,7 +771,7 @@ pub fn test_ustack_slot_reuse() -> TestResult {
 }
 
 pub fn test_ustack_rejects_invalid_size() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
 
     if UnsafeStack::allocate(0).is_ok() {
         klog_info!("SCHED_TEST: ustack zero-size alloc unexpectedly succeeded");
@@ -787,14 +791,15 @@ pub fn test_ustack_rejects_invalid_size() -> TestResult {
 }
 
 pub fn test_ustack_pcp_refill() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
-    use slopos_mm::ustack_va::{ustack_pcp_flush_current, ustack_pcp_stats};
+    use slopos_mm::stack_region::UstackRegion;
+    use slopos_mm::stack_va::{pcp_flush_current, pcp_stats};
 
     let cpu = slopos_arch::pcr::get_current_cpu();
-    ustack_pcp_flush_current();
+    pcp_flush_current::<UstackRegion>();
 
-    let before = ustack_pcp_stats(cpu);
+    let before = pcp_stats::<UstackRegion>(cpu);
 
     let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(s) => s,
@@ -805,7 +810,7 @@ pub fn test_ustack_pcp_refill() -> TestResult {
     };
     drop(s1);
 
-    let after_first = ustack_pcp_stats(cpu);
+    let after_first = pcp_stats::<UstackRegion>(cpu);
     if after_first.refill_count <= before.refill_count {
         klog_info!(
             "SCHED_TEST[ustack_refill]: refill_count did not advance: {} -> {}",
@@ -826,7 +831,7 @@ pub fn test_ustack_pcp_refill() -> TestResult {
         drop(s);
     }
 
-    let after_warm = ustack_pcp_stats(cpu);
+    let after_warm = pcp_stats::<UstackRegion>(cpu);
     if after_warm.refill_count != after_first.refill_count {
         klog_info!(
             "SCHED_TEST[ustack_refill]: unexpected refill during warm path: {} -> {}",
@@ -849,18 +854,17 @@ pub fn test_ustack_pcp_refill() -> TestResult {
 }
 
 pub fn test_ustack_pcp_spill_overflow() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
-    use slopos_mm::ustack_va::{
-        in_use_count, pcp_capacity, ustack_pcp_flush_current, ustack_pcp_stats,
-    };
+    use slopos_mm::stack_region::UstackRegion;
+    use slopos_mm::stack_va::{in_use_count, pcp_capacity, pcp_flush_current, pcp_stats};
 
     let cpu = slopos_arch::pcr::get_current_cpu();
-    ustack_pcp_flush_current();
-    let baseline_in_use = in_use_count();
-    let before = ustack_pcp_stats(cpu);
+    pcp_flush_current::<UstackRegion>();
+    let baseline_in_use = in_use_count::<UstackRegion>();
+    let before = pcp_stats::<UstackRegion>(cpu);
 
-    let hold = pcp_capacity() + 1;
+    let hold = pcp_capacity::<UstackRegion>() + 1;
     let mut stacks: [Option<UnsafeStack>; 32] = [const { None }; 32];
     if hold > stacks.len() {
         klog_info!("SCHED_TEST[ustack_spill]: capacity {} > fixture cap", hold);
@@ -879,7 +883,7 @@ pub fn test_ustack_pcp_spill_overflow() -> TestResult {
         stacks[i] = None;
     }
 
-    let after = ustack_pcp_stats(cpu);
+    let after = pcp_stats::<UstackRegion>(cpu);
     if after.spill_count <= before.spill_count {
         klog_info!(
             "SCHED_TEST[ustack_spill]: spill_count did not advance: {} -> {}",
@@ -889,7 +893,7 @@ pub fn test_ustack_pcp_spill_overflow() -> TestResult {
         return TestResult::Fail;
     }
 
-    let residual_in_use = in_use_count().saturating_sub(baseline_in_use);
+    let residual_in_use = in_use_count::<UstackRegion>().saturating_sub(baseline_in_use);
     if residual_in_use != after.count {
         klog_info!(
             "SCHED_TEST[ustack_spill]: leak detected: in_use_delta={} cache_count={}",
@@ -903,11 +907,12 @@ pub fn test_ustack_pcp_spill_overflow() -> TestResult {
 }
 
 pub fn test_ustack_pcp_was_backed_preserved() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
-    use slopos_mm::ustack_va::ustack_pcp_flush_current;
+    use slopos_mm::stack_region::UstackRegion;
+    use slopos_mm::stack_va::pcp_flush_current;
 
-    ustack_pcp_flush_current();
+    pcp_flush_current::<UstackRegion>();
 
     let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(s) => s,
@@ -941,12 +946,13 @@ pub fn test_ustack_pcp_was_backed_preserved() -> TestResult {
 }
 
 pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
-    use slopos_mm::ustack_va::{in_use_count, ustack_pcp_flush_current};
+    use slopos_mm::stack_region::UstackRegion;
+    use slopos_mm::stack_va::{in_use_count, pcp_flush_current};
 
-    ustack_pcp_flush_current();
-    let before = in_use_count();
+    pcp_flush_current::<UstackRegion>();
+    let before = in_use_count::<UstackRegion>();
 
     let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(s) => s,
@@ -956,7 +962,7 @@ pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
         }
     };
     drop(s1);
-    ustack_pcp_flush_current();
+    pcp_flush_current::<UstackRegion>();
 
     let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(s) => s,
@@ -966,9 +972,9 @@ pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
         }
     };
     drop(s2);
-    ustack_pcp_flush_current();
+    pcp_flush_current::<UstackRegion>();
 
-    let after = in_use_count();
+    let after = in_use_count::<UstackRegion>();
     if after != before {
         klog_info!(
             "SCHED_TEST[ustack_xcpu]: in_use leaked: {} -> {}",
@@ -982,12 +988,13 @@ pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
 }
 
 pub fn test_ustack_pcp_stress_1000() -> TestResult {
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
-    use slopos_mm::ustack_va::{in_use_count, ustack_pcp_flush_current};
+    use slopos_mm::stack_region::UstackRegion;
+    use slopos_mm::stack_va::{in_use_count, pcp_flush_current};
 
-    ustack_pcp_flush_current();
-    let before = in_use_count();
+    pcp_flush_current::<UstackRegion>();
+    let before = in_use_count::<UstackRegion>();
 
     for i in 0..1000 {
         let s = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
@@ -1000,8 +1007,8 @@ pub fn test_ustack_pcp_stress_1000() -> TestResult {
         drop(s);
     }
 
-    ustack_pcp_flush_current();
-    let after = in_use_count();
+    pcp_flush_current::<UstackRegion>();
+    let after = in_use_count::<UstackRegion>();
     if after != before {
         klog_info!(
             "SCHED_TEST[ustack_stress]: in_use leaked: {} -> {}",
@@ -1024,12 +1031,12 @@ pub fn test_ustack_pcp_stress_1000() -> TestResult {
 ///      `in_use_count`.  (The two regions must be backed by truly
 ///      independent allocators.)
 pub fn test_regions_disjoint() -> TestResult {
-    use super::stack::KernelStack;
-    use super::unsafe_stack::UnsafeStack;
+    use super::task_stack::{KernelStack, UnsafeStack};
     use slopos_abi::task::{TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE};
     use slopos_mm::memory_layout_defs::{
         KSTACK_VA_BASE, KSTACK_VA_END, USTACK_VA_BASE, USTACK_VA_END,
     };
+    use slopos_mm::stack_region::{KstackRegion, UstackRegion};
 
     // (1) Region windows must not overlap.
     if KSTACK_VA_END > USTACK_VA_BASE && USTACK_VA_END > KSTACK_VA_BASE {
@@ -1044,7 +1051,7 @@ pub fn test_regions_disjoint() -> TestResult {
     }
 
     // Snapshot U's count, do K work, confirm U didn't move.
-    let u_before_k_work = slopos_mm::ustack_va::in_use_count();
+    let u_before_k_work = slopos_mm::stack_va::in_use_count::<UstackRegion>();
     let kstack = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
         Ok(s) => s,
         Err(e) => {
@@ -1052,7 +1059,7 @@ pub fn test_regions_disjoint() -> TestResult {
             return TestResult::Fail;
         }
     };
-    let u_after_k_work = slopos_mm::ustack_va::in_use_count();
+    let u_after_k_work = slopos_mm::stack_va::in_use_count::<UstackRegion>();
     if u_after_k_work != u_before_k_work {
         klog_info!(
             "SCHED_TEST[disjoint]: kstack alloc disturbed U in_use: {} -> {}",
@@ -1063,7 +1070,7 @@ pub fn test_regions_disjoint() -> TestResult {
     }
 
     // Snapshot K's count, do U work, confirm K didn't move.
-    let k_before_u_work = slopos_mm::kstack_va::in_use_count();
+    let k_before_u_work = slopos_mm::stack_va::in_use_count::<KstackRegion>();
     let ustack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(s) => s,
         Err(e) => {
@@ -1071,7 +1078,7 @@ pub fn test_regions_disjoint() -> TestResult {
             return TestResult::Fail;
         }
     };
-    let k_after_u_work = slopos_mm::kstack_va::in_use_count();
+    let k_after_u_work = slopos_mm::stack_va::in_use_count::<KstackRegion>();
     if k_after_u_work != k_before_u_work {
         klog_info!(
             "SCHED_TEST[disjoint]: ustack alloc disturbed K in_use: {} -> {}",

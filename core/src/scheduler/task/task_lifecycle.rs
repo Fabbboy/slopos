@@ -8,10 +8,9 @@ use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
 use super::super::scheduler;
-use super::super::stack::KernelStack;
 use super::super::switch_asm::task_entry_trampoline;
+use super::super::task_stack::{KernelStack, UnsafeStack};
 use super::super::task_struct::SwitchContext;
-use super::super::unsafe_stack::UnsafeStack;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::{record_task_created, record_task_exit};

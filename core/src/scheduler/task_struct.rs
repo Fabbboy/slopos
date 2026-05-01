@@ -427,7 +427,7 @@ pub struct Task {
     /// remain consistent with it while the task is live.  They exist
     /// because some assembly / syscall paths read them as plain `u64`
     /// rather than going through the handle.
-    pub kernel_stack: Option<crate::scheduler::stack::KernelStack>,
+    pub kernel_stack: Option<crate::scheduler::task_stack::KernelStack>,
     /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
     ///
     /// Lives alongside `kernel_stack` — allocated at task creation,
@@ -439,7 +439,7 @@ pub struct Task {
     /// crate.  Context switch saves/restores `unsafe_stack_sp` to/from
     /// the PCR slot exactly the same way the CPU's regular RSP is
     /// saved/restored to/from `switch_ctx.rsp`.
-    pub unsafe_stack: Option<crate::scheduler::unsafe_stack::UnsafeStack>,
+    pub unsafe_stack: Option<crate::scheduler::task_stack::UnsafeStack>,
     /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
     ///
     /// `None` for non-test tasks (the syscall is never invoked). The first

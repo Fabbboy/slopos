@@ -9,7 +9,6 @@ pub mod elf;
 pub mod error;
 pub mod hhdm;
 pub mod kernel_heap;
-pub mod kstack_va;
 pub mod memfd;
 pub mod memory_init;
 pub mod memory_layout;
@@ -32,7 +31,6 @@ pub mod tlb;
 pub mod user_copy;
 pub mod user_io_buf;
 pub mod user_ptr;
-pub mod ustack_va;
 pub mod vma_region;
 
 use core::alloc::{GlobalAlloc, Layout};
