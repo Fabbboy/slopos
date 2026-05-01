@@ -4,7 +4,7 @@
 Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `video/`, `fs/`, and `userland/`. Each hosts a Rust crate (`Cargo.toml` + `src/`). `link.ld` and the `justfile` drive the canonical `no_std` Rust build flow via cargo + `rust-lld`. Generated artifacts stay in `builddir/`, while `scripts/` contains the build/boot/test automation and `third_party/` caches Limine and OVMF assets.
 
 ## Build, Test, and Development Commands
-Run `git submodule update --init --recursive` after cloning to sync `third_party/limine`. The project uses [`just`](https://github.com/casey/just) as its command runner (install via `cargo install just` or your package manager). The `justfile` drives cargo + `rust-lld` via helper scripts in `scripts/`: `just setup` installs the pinned nightly from `rust-toolchain.toml`, `just build` emits `builddir/kernel.elf`, and `just iso` regenerates `builddir/slop.iso`. For quick launches use `just boot` (interactive) or `just boot-log` (non-interactive, default 15 s timeout). Both boot targets rebuild a secondary image (`builddir/slop-notests.iso`) with `tests=off` on the kernel command line; override with `BOOT_CMDLINE=... just boot` and add `VIDEO=1` for a graphical window. CI and AI agents can call `just test`, which generates `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and fails if the harness reports anything but a clean pass. Run `just --list` to see all available recipes.
+Run `git submodule update --init --recursive` after cloning to sync `third_party/limine`. The project uses [`just`](https://github.com/casey/just) as its command runner (install via `cargo install just` or your package manager). The `justfile` drives cargo + `rust-lld` via helper scripts in `scripts/`: `just setup` installs the pinned nightly from `rust-toolchain.toml` and verifies a Go toolchain (>= 1.22) is on PATH for `tools/run_tests/`, `just build` emits `builddir/kernel.elf`, and `just iso` regenerates `builddir/slop.iso`. For quick launches use `just boot` (interactive) or `just boot-log` (non-interactive, default 15 s timeout). Both boot targets rebuild a secondary image (`builddir/slop-notests.iso`) with `tests=off` on the kernel command line; override with `BOOT_CMDLINE=... just boot` and add `VIDEO=1` for a graphical window. CI and AI agents can call `just test`, which builds the Go-based `builddir/run_tests` binary (from `tools/run_tests/`) and dispatches to it: builds `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, parses the kernel's KTAP-grammar output, and renders a live progress bar + per-failure detail (see `docs/test_output.md`). Exits 0 green / 1 on any failure. Filter via `just test FILTER='glob'`; re-run only failures via `just test-rerun-failed`. Run `just --list` to see all available recipes.
 
 ## Knowledge Index (AI)
 The `knowledge/` directory hosts a local semantic index for querying the codebase. Build it with:
@@ -38,19 +38,34 @@ Build-time gates enforce the discipline (run on every `just build`, also via `ju
 `scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.
 
 ## Testing Guidelines
-There are no unit tests yet; rely on QEMU boot verification and the kernel test harness. Before sending changes, rebuild the ISO and run `just test` (non-interactive, auto-shutdown). For manual inspection use `just boot` (interactive) or `just boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Inspect the output for the roulette banner (`=== KERNEL ROULETTE: Spinning the Wheel of Fate ===`) and any warnings. Note any observed regressions or warnings in your PR description.
+The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over the serial console in a KTAP-grammar format documented in `docs/test_output.md`. The host wrapper at `tools/run_tests/` (Go, builds to `builddir/run_tests`) parses that stream and renders a live progress bar + per-failure detail blocks. Before sending changes, run `just test` (non-interactive, auto-shutdown). For manual inspection use `just boot` (interactive) or `just boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Note any observed regressions or warnings in your PR description.
 
-## Test Harness Configuration
-- Build defaults are baked into the Rust harness: enabled=false, suite=all, verbosity=summary, timeout=0, shutdown=false.
-- Runtime overrides are parsed from the Limine command line: use `tests=on|off`, `tests.suite=...`, `tests.verbosity=quiet|summary|verbose`, and `tests.timeout=<ms>`.
-- Toggle automatic shutdown after the harness with `tests.shutdown=on|off`; when enabled the kernel writes to QEMU’s debug-exit port after printing the summary so the VM terminates without intervention.
-- Boot logs summarize the active configuration before running tests when debug logging is enabled, and the harness reports totals in `test_output.log`.
-- The timeout value is parsed but currently not enforced by the stub harness; keep it at 0 for now.
+### `just test` recipes
+- `just test` — full run; dotted progress, per-failure blocks, summary line. Exits 0 green / 1 on any failure.
+- `just test FILTER='slopos_mm::*'` — run only tests whose `<module>::<name>` matches the glob. Comma-separated globs supported (`'mm::*,core::*'`).
+- `just test-rerun-failed` — re-run only the names in `builddir/last-fail.list` (written automatically after every non-aborted run).
+- `just test-verbose [FILTER='…']` — also dump captured klog of every passing test.
+- `just test-quiet [FILTER='…']` — render only failures + summary; suppresses pass lines on the wire too.
+- `just test-raw` — passthrough QEMU stdout verbatim (KTAP + klog interleaved). Last-resort debugging.
+- `just test-json builddir/events.jsonl` — also write one JSON event per line to PATH (machine-consumable).
+- `just test-userland-only` — skip the kernel phase; run only the userland (`utest!`) phase.
+- `just check-tests-host` — run the Go wrapper's own unit tests via `go test ./tools/run_tests/...` (host-side, no QEMU).
+- `just check-test-count` — count-regression CI guard; fails if total planned tests across phases drops below `TEST_COUNT_BASELINE` (default 2425).
 
-## Test Harness
-- The harness is Rust-based; enable it with `tests=on|off` on the Limine command line (defaults to off).
-- Verbosity accepts `quiet|summary|verbose` to control serial chatter.
-- Enable `tests.shutdown=on` in automation to halt/QEMU-exit once the summary banner is printed—`just test` wires this in automatically (writes 0 to port `0xf4` for pass, 1 for fail).
+### Cmdline knobs
+The kernel parses these from the Limine cmdline (threaded through `scripts/build_iso.sh`'s third positional arg, controlled by the `test_cmdline` justfile constant or the `TEST_CMDLINE=…` env override). For manual `just boot-log` invocations, set `BOOT_CMDLINE='tests=on tests.run=mm::*'` to run a subset.
+
+| Key | Values | Effect |
+|---|---|---|
+| `tests` | `on` / `off` | master enable |
+| `tests.shutdown` | `on` / `off` | write to `isa-debug-exit` after the run |
+| `tests.verbosity` | `quiet` / `summary` / `verbose` | per-test emit policy |
+| `tests.warn_ms` | integer | mark slower tests as `OVER_TIME` |
+| `tests.run` | comma-separated globs | only run matching tests |
+| `tests.skip` | comma-separated globs | skip matching tests |
+
+### Output format and JSONL events
+See `docs/test_output.md` for the wire grammar and the JSONL event schema. The wire format is stable; the JSONL schema is a strict superset suitable for downstream JUnit XML conversion or test-history regression detection.
 
 ## Commit & Pull Request Guidelines
 Git history currently lacks structure; standardize on `<area>: <imperative summary>` (e.g., `mm: tighten buddy free path`) and keep subjects ≤72 chars. Add a body when explaining rationale, boot implications, or follow-ups. For PRs, include: brief motivation, testing artifacts (command + result), references to issues, and screenshots or serial excerpts when altering visible output or boot flow. Flag breaking changes and call out coordination needs with downstream scripts.

@@ -19,8 +19,6 @@ use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
-use crate::serial::serial_putc_com1;
-
 use super::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
 pub(crate) const VCONSOLE_MAX_COLS: usize = 240;
@@ -1655,9 +1653,18 @@ pub fn write(data: &[u8]) {
 
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
-        for &b in data {
-            serial_putc_com1(b);
-        }
+        // No framebuffer (headless boot or test mode under -nographic).
+        // We deliberately do NOT fall back to direct serial writes here:
+        //   * The TTY driver layer (`tty::driver::write_driver_unlocked`)
+        //     already mirrors output to COM1 via `serial::serial_locked_write_bytes`
+        //     when `serial_mirror_enabled()` is true, and that path is
+        //     atomic w.r.t. the klog ticket lock.
+        //   * Falling back here would emit the same bytes a SECOND time
+        //     (duplicating every TTY write on the wire) and would do so
+        //     lock-free (`serial_putc_com1` takes no klog lock), corrupting
+        //     concurrent klog output on the way to the host serial console.
+        // Callers who specifically want serial output without a framebuffer
+        // should toggle `set_serial_mirror(true)` and route via the TTY API.
         return;
     }
 

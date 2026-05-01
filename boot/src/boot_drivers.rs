@@ -322,6 +322,19 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx) -> i32 {
         return 0;
     }
 
+    // Quiesce the vconsole serial mirror for the duration of the test
+    // run. TTY-layer tests (`drivers::tty_tests::*`) write fixture
+    // strings into a TtyIndex(0) fake-TTY whose output backend resolves
+    // to COM1 via the mirror; without this, those bytes appear on the
+    // wire interleaved with the harness's KTAP emit and corrupt the
+    // host parser's view of the stream. Tests assert behaviour via
+    // internal state and `tty::read`-style readback, so silencing the
+    // wire-side mirror does not affect coverage. We never restore: the
+    // remaining boot flow (init launch, userland phase) also benefits
+    // from clean serial output, and the kernel exits via QEMU once the
+    // userland phase reports.
+    slopos_drivers::tty::vconsole::set_serial_mirror(false);
+
     klog_info!("TESTS: Running orchestrated harness");
 
     if klog::is_enabled_level(KlogLevel::Debug) {

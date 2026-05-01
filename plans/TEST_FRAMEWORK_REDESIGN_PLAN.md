@@ -1,6 +1,6 @@
 # SlopOS Test Framework Redesign
 
-> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **complete** (full `just test` green at 2398 kernel + 3 utests = 2401/2401, wedge closed by the hermetic-state framework — see §8 Phase 3 Notes / 2026-04-30 hermetic redesign); Phase 4 not started
+> **Status**: Phase 0 **complete**; Phase 1 **complete**; Phase 2 **complete**; Phase 3 **complete** (full `just test` green at 2398 kernel + 3 utests = 2401/2401, wedge closed by the hermetic-state framework — see §8 Phase 3 Notes / 2026-04-30 hermetic redesign); Phase 4 **complete** (host-side `scripts/run_tests.py` wrapper — KTAP FSM, dotted progress, per-failure detail, FILTER / --rerun-failed / --verbose / --quiet / --raw / --json modes, count-regression CI guard, self-tests via `just check-tests-host`)
 > **Target**: Replace stale `itests`/`interrupt_test*` harness with structured per-test, KTAP-emitting, filterable, userland-aware framework
 > **Scope**: `ktesting/` crate (rewritten), `tests/` crate (folded), 75+ `define_test_suite!` sites (migrated), 3 userland test bins (integrated), `just test` UX (rebuilt)
 
@@ -1235,17 +1235,17 @@ published kernel work.
 
 ### 4A. `scripts/run_tests.py`
 
-- [ ] **4A.1** Create `scripts/run_tests.py` (Python, follows precedent of `scripts/cvss_calc.py`)
-- [ ] **4A.2** Argument parser:
+- [x] **4A.1** Create `scripts/run_tests.py` (Python, follows precedent of `scripts/cvss_calc.py`)
+- [x] **4A.2** Argument parser:
   - `--filter <glob>` (also accepts `FILTER=<glob>` env var for `just test FILTER=...`)
   - `--skip <glob>`
   - `--rerun-failed` → reads `builddir/last-fail.list` and passes its contents as `--filter`
   - `--verbose` → adds `tests.verbosity=verbose` to cmdline
   - `--quiet` → adds `tests.verbosity=quiet`
   - `--raw` → no rendering, dumps QEMU stdout verbatim
-- [ ] **4A.3** Builds kernel + ISO via existing scripts/just recipes (or invokes `_iso-tests`).
-- [ ] **4A.4** Spawns QEMU via `scripts/qemu_run.sh`, captures stdout/stderr.
-- [ ] **4A.5** Streams stdout, parses every line starting with `KTAP\t`:
+- [x] **4A.3** Builds kernel + ISO via existing scripts/just recipes (or invokes `_iso-tests`).
+- [x] **4A.4** Spawns QEMU via `scripts/qemu_run.sh`, captures stdout/stderr.
+- [x] **4A.5** Streams stdout, parses every line starting with `KTAP\t`:
   - `TAP version 14` — record version
   - `1..N` — record plan
   - `ok N - <name> # <suffix>` — record pass; track time_ms, OVER_TIME flag, SKIP reason
@@ -1253,51 +1253,109 @@ published kernel work.
   - `  ok N - <subname>` (indent ≥2 spaces) — nested subtest
   - `Bail out! <reason>` — record bail
   - `# elapsed_ms=…` etc. — record footer
-- [ ] **4A.6** Render to terminal (default mode):
+- [x] **4A.6** Render to terminal (default mode):
   - Streaming dotted progress: `.` pass, `F` fail, `s` skip, `o` over-time, `t` timeout. 80 chars/row.
   - On EOF: print one section per failure (`==== FAIL: <fully-qualified name> ====`, file:line, outcome, time_ms, captured log block).
   - Closing summary: `2393 tests: 2391 passed, 1 failed, 1 skipped, 14.2s`.
-- [ ] **4A.7** Verbose mode: also dump captured log of every test (not just failures).
-- [ ] **4A.8** Quiet mode: print only final summary line + exit code.
-- [ ] **4A.9** Raw mode: passthrough QEMU stdout, no rendering.
-- [ ] **4A.10** Write `builddir/last-fail.list` (one fully-qualified test name per line) iff failures exist; clear it on a green run.
-- [ ] **4A.11** Exit code: 0 on green, 1 on any fail/timeout/bail.
+- [x] **4A.7** Verbose mode: also dump captured log of every test (not just failures).
+- [x] **4A.8** Quiet mode: print only final summary line + exit code.
+- [x] **4A.9** Raw mode: passthrough QEMU stdout, no rendering.
+- [x] **4A.10** Write `builddir/last-fail.list` (one fully-qualified test name per line) iff failures exist; clear it on a green run.
+- [x] **4A.11** Exit code: 0 on green, 1 on any fail/timeout/bail.
 
 ### 4B. justfile integration
 
-- [ ] **4B.1** Replace the `test:` recipe body to invoke `scripts/run_tests.py` with appropriate flags. The existing `_iso-tests` and `_qemu-boot` plumbing stays — `run_tests.py` orchestrates them.
-- [ ] **4B.2** Add justfile recipes:
+- [x] **4B.1** Replace the `test:` recipe body to invoke `scripts/run_tests.py` with appropriate flags. The existing `_iso-tests` and `_qemu-boot` plumbing stays — `run_tests.py` orchestrates them.
+- [x] **4B.2** Add justfile recipes:
   ```
   test FILTER='':                  → run_tests.py --filter "{{FILTER}}"
   test-rerun-failed:               → run_tests.py --rerun-failed
   test-verbose FILTER='':          → run_tests.py --verbose --filter "{{FILTER}}"
   test-raw:                        → run_tests.py --raw
   ```
-- [ ] **4B.3** Confirm `BOOT_CMDLINE=...` env override still threads through.
+- [x] **4B.3** Confirm `BOOT_CMDLINE=...` env override still threads through.
 
 ### 4C. Documentation
 
-- [ ] **4C.1** Create `docs/test_output.md` documenting the KTAP-grammar subset used by SlopOS, self-contained, with no external attribution. Sections: line prefix, header, plan, ok/not ok lines, YAML diagnostic blocks, nested subtests, footer, bail-out.
-- [ ] **4C.2** Update `CLAUDE.md` "Testing Guidelines" section to reference `just test FILTER=...`, `just test-rerun-failed`, `just test-verbose`. Drop stale references to `itests.*`.
-- [ ] **4C.3** Update `plans/README.md` to add this plan to the index.
+- [x] **4C.1** Create `docs/test_output.md` documenting the KTAP-grammar subset used by SlopOS, self-contained, with no external attribution. Sections: line prefix, header, plan, ok/not ok lines, YAML diagnostic blocks, nested subtests, footer, bail-out.
+- [x] **4C.2** Update `CLAUDE.md` "Testing Guidelines" section to reference `just test FILTER=...`, `just test-rerun-failed`, `just test-verbose`. Drop stale references to `itests.*`.
+- [x] **4C.3** Update `plans/README.md` to add this plan to the index.
 
 ### 4D. Count-regression CI guard
 
-- [ ] **4D.1** Create `scripts/check_test_count.sh`: runs `just test --raw`, greps for `KTAP\t1..N`, asserts `N >= 2393`. Exit nonzero if below baseline.
-- [ ] **4D.2** Wire into `just check` (or document as a separate CI step).
+- [x] **4D.1** Create `scripts/check_test_count.sh`: runs `just test --raw`, greps for `KTAP\t1..N`, asserts `N >= 2393`. Exit nonzero if below baseline.
+- [x] **4D.2** Wire into `just check` (or document as a separate CI step).
 
 ### Phase 4 Gate
 
-- [ ] **GATE 4.1**: `just test` shows dotted progress; no klog noise on green run
-- [ ] **GATE 4.2**: `just test FILTER='*sched*'` runs only matching tests
-- [ ] **GATE 4.3**: Induced failure → `==== FAIL ====` block shows test name + file:line + captured log of that test only
-- [ ] **GATE 4.4**: `just test-rerun-failed` after a failure runs only that test
-- [ ] **GATE 4.5**: `just test-verbose` dumps captured log for every test
-- [ ] **GATE 4.6**: `just test-raw` shows QEMU stdout verbatim (KTAP + klog interleaved)
-- [ ] **GATE 4.7**: `builddir/last-fail.list` correctly reflects the last failed run
-- [ ] **GATE 4.8**: Exit code: 0 green, 1 on any fail
-- [ ] **GATE 4.9**: `scripts/check_test_count.sh` passes
-- [ ] **GATE 4.10**: `cargo fmt --all` no-op
+- [x] **GATE 4.1**: `just test` shows dotted progress; no klog noise on green run
+- [x] **GATE 4.2**: `just test FILTER='*sched*'` runs only matching tests
+- [x] **GATE 4.3**: Induced failure → `==== FAIL ====` block shows test name + file:line + captured log of that test only
+- [x] **GATE 4.4**: `just test-rerun-failed` after a failure runs only that test
+- [x] **GATE 4.5**: `just test-verbose` dumps captured log for every test
+- [x] **GATE 4.6**: `just test-raw` shows QEMU stdout verbatim (KTAP + klog interleaved)
+- [x] **GATE 4.7**: `builddir/last-fail.list` correctly reflects the last failed run
+- [x] **GATE 4.8**: Exit code: 0 green, 1 on any fail
+- [x] **GATE 4.9**: `scripts/check_test_count.sh` passes
+- [x] **GATE 4.10**: `cargo fmt --all` no-op
+
+### Phase 4 Notes
+
+#### 2026-05-01 root cause — wrapper double-emit + parser leading-byte intolerance
+
+The first end-to-end smoke run after `scripts/run_tests.py` landed surfaced a kernel plan vs. wire-emit gap: `1..2398` planned but only ~2321 `KTAP\t…ok N…` lines reached the host. Initial diagnosis blamed serial backpressure and added an `--allow-truncation` flag as a workaround. That diagnosis was wrong.
+
+**Two compounding bugs, both wrapper-side:**
+
+1. **`scripts/run_tests.py` `RawRenderer.on_event` re-emitted every `EvNonKtap`** on top of the raw-passthrough write in `main`'s `on_line` callback. Effect: every kernel klog line — boot prose, `TESTS:` banners, even `KTAP\tok N` lines that happened to arrive with leading non-KTAP bytes — appeared **twice** on the wrapper's stdout. The "missing 80 lines" turned out to be 80 *extra* lines of double-emit, not 80 dropped.
+
+2. **The KTAP parser required `KTAP\t` to be at column 0** of the line. TTY-layer regression tests (`drivers::tty_tests::*` — `test_bugfix_tcxonc_*`, `test_canonical_to_noncanonical_*`, `test_inflight_accounting_*`, etc.) call `tty::write` / `tcxonc(TCION/TCIOFF)` which writes fixture bytes directly to the TTY's hardware backend (`SerialConsoleDriver`), bypassing klog. When the harness's next `emit_ok` fires, those fixture bytes appear prefixed:
+   `helloKTAP\tok 994 - test_tcoon_resumes_write # time_ms=0`
+   The parser classified the line as klog noise → no `EvTest` recorded → recorder marked the phase as truncated → exit 1 with the misleading "serial backpressure" message.
+
+**Fix:**
+
+- `scripts/run_tests.py:RawRenderer.on_event` made inert; only `main`'s `on_line` writes to stdout in `--raw` mode.
+- `KtapParser.feed` rescues lines containing `KTAP\t` after leading non-KTAP bytes (only in OUTSIDE state; inside `IN_LOG_LITERAL` the substring is treated as content). Two regression tests cover both paths (`TestKtapParserLeadingGarbageRescue` in `scripts/run_tests_test.py`).
+- `--allow-truncation` flag removed; the truncation guard now only fires for genuine kernel hangs (plan_n > observed when no further KTAP arrives).
+- Truncation message updated from the misleading "serial backpressure" wording to "kernel likely hung mid-phase or panicked silently".
+
+**Kernel-side hardening (good hygiene even though it didn't fix the wrapper bug):**
+
+- `drivers/src/serial.rs` adds `serial_locked_write_bytes(&[u8])` that takes the existing klog ticket lock. TTY drivers route all serial writes through it instead of lock-free `serial_write_batch` / `serial_putc_com1`. Eliminates byte-interleaving with concurrent `klog_info!` output from any CPU.
+- `drivers/src/tty/driver.rs` updated: `SerialConsoleDriver::write_output`, `VConsoleDriver::write_output`, and the `write_driver_unlocked` mirror branch all funnel through `serial_locked_write_bytes`.
+- `drivers/src/tty/vconsole.rs` removes the redundant no-FB direct-to-COM1 fallback that double-wrote when both the fallback and the explicit mirror fired.
+- `boot/src/boot_drivers.rs:boot_step_run_tests_fn` calls `slopos_drivers::tty::vconsole::set_serial_mirror(false)` at test-phase start. Net effect: zero TTY-test fixture bytes reach the wire, so the parser's leading-byte rescue is now a belt-and-suspenders safety net rather than load-bearing.
+
+**Verification (2026-05-01 18:00 local):**
+
+- `just test` → 2401/2401 green, exit 0, 16.8s wall.
+- `just check-test-count` → OK 2401 ≥ 2401.
+- `just check-tests-host` → 31/31 unit tests pass (added two leading-garbage tolerance regression tests).
+
+### Phase 5 Notes (2026-05-01) — Go port
+
+Phase 4's Python wrapper at `scripts/run_tests.py` was rewritten in Go and moved to `tools/run_tests/` (single Go module, `module run_tests`). The motivation was Python's runtime fragility on a load-bearing tool: typos in dataclass field names / outcome enum values surface only when the relevant branch executes, the `python3 >= 3.10` runtime requirement is one more thing to keep in sync, and we'd just spent multiple sessions chasing wrapper-side bugs (RawRenderer double-emit; parser leading-byte intolerance) that a static type system would have surfaced at compile time.
+
+**What changed:**
+- `tools/run_tests/`: 14 Go files, ~1,400 LOC, single `package main`. Architecture maps 1:1 to the Python (`KtapParser` ↔ `KtapParser`, `BarRenderer` ↔ `BarRenderer`, `RunRecorder` ↔ `RunRecorder`, `JsonlSink` ↔ `JsonlSink`, `QemuDriver` ↔ `QemuDriver`).
+- Stdlib + `golang.org/x/term` only (one dep, official sub-stdlib for terminal size and `IsTerminal`). No CLI framework — stdlib `flag` + a 30-line POSIX `--flag value` pre-processor.
+- `context.Context` carries cancellation/timeout (replaced Python's signal-flag passing); `signal.NotifyContext` for graceful SIGINT.
+- Build to single static binary `builddir/run_tests` via `just _build-run-tests`. Build is ~1 s cold, ~50 ms warm.
+- 34 Go unit tests (`go test ./tools/run_tests/...`) cover all 31 Python cases plus 3 new ones for the leading-garbage rescue.
+
+**Validation gate (5N):** ran both wrappers against the same kernel ISO with `--json /tmp/{py,go}_events.jsonl`. Both emit 2,408 events; sequence of `{phase_idx, idx, name, outcome}` per-test events is **byte-identical** modulo timing fields (`time_ms`, `elapsed_ms`, `wall_ms`). Diff was empty → safe to delete the Python wrapper.
+
+**Repo changes:**
+- `tools/run_tests/{main,parser,recorder,renderer_bar,renderer_raw,jsonl,driver,cmdline,colour,ktap_re}.go` + 3 `*_test.go` files + `go.mod`/`go.sum`.
+- `scripts/run_tests.py` and `scripts/run_tests_test.py`: deleted.
+- `scripts/check_test_count.sh`: body updated to invoke `builddir/run_tests --raw --no-color`.
+- `scripts/ensure_go.sh`: new; verifies `go >= 1.22` is on `PATH`.
+- `justfile`: added `_build-run-tests` recipe; switched all `test*` recipes to depend on it and invoke `builddir/run_tests`; `check-tests-host` → `go test`; `setup` runs `ensure_go.sh`.
+- `.github/workflows/ci.yml`: added `actions/setup-go@v5` step before `just setup`.
+- `AGENTS.md` (and via symlink `CLAUDE.md`): wrapper references now say `tools/run_tests/` / `builddir/run_tests`.
+
+**Verification (2026-05-01):** `just test` → 2,401/2,401 green, exit 0, 17.1 s wall. `just check-tests-host` → 34 Go tests pass in 0.01 s. `just check-test-count` → OK 2,401 ≥ 2,401. `cargo fmt --all -- --check` clean. `go vet ./tools/run_tests/...` clean. Phase 5N differential JSONL diff between Python and Go: empty.
 
 ---
 

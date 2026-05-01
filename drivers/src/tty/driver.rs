@@ -17,7 +17,7 @@
 //! safely discarded.
 
 use slopos_abi::syscall::UserTermios;
-use slopos_utils::ports::{COM1, serial_write_batch};
+use slopos_utils::ports::COM1;
 
 use crate::serial;
 use crate::tty::pty;
@@ -249,17 +249,21 @@ pub enum DriverId {
 pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
     match driver {
         DriverId::SerialConsole => {
-            for &b in data {
-                serial::serial_putc_com1(b);
-            }
+            // Klog-lock-coordinated; same rationale as the VConsole mirror
+            // below. Without the lock, TTY 0 writes byte-interleave with
+            // any concurrent klog output and corrupt KTAP wire format
+            // during tests.
+            serial::serial_locked_write_bytes(data);
             data.len()
         }
         DriverId::VConsole => {
             super::vconsole::write(data);
             if super::vconsole::serial_mirror_enabled() {
-                unsafe {
-                    serial_write_batch(COM1, data);
-                }
+                // Atomic w.r.t. concurrent klog output. The previous
+                // `serial_write_batch` path was lock-free and would
+                // byte-interleave with `klog_info!` callers from any CPU,
+                // corrupting the test harness's KTAP wire format.
+                serial::serial_locked_write_bytes(data);
             }
             data.len()
         }
@@ -274,15 +278,16 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
 
 /// Driver backend for COM1 serial console (TTY 0).
 ///
-/// Output goes through `serial_putc_com1`.  Input is polled from the serial
-/// UART's `INPUT_BUFFER` ring via `serial_poll_receive` + buffer drain.
+/// Output goes through `serial::serial_locked_write_bytes`, which takes
+/// the same ticket lock as the klog backend, so TTY 0 writes never
+/// byte-interleave with concurrent `klog_info!` output. Input is polled
+/// from the serial UART's `INPUT_BUFFER` ring via `serial_poll_receive`
+/// + buffer drain.
 pub struct SerialConsoleDriver;
 
 impl TtyDriver for SerialConsoleDriver {
     fn write_output(&self, buf: &[u8]) -> usize {
-        for &b in buf {
-            serial::serial_putc_com1(b);
-        }
+        serial::serial_locked_write_bytes(buf);
         buf.len()
     }
 
@@ -320,9 +325,10 @@ impl TtyDriver for VConsoleDriver {
     fn write_output(&self, buf: &[u8]) -> usize {
         super::vconsole::write(buf);
         if super::vconsole::serial_mirror_enabled() {
-            unsafe {
-                serial_write_batch(COM1, buf);
-            }
+            // See note in `write_driver_unlocked` above — must be
+            // klog-lock-coordinated to avoid byte-interleaving on the
+            // wire.
+            serial::serial_locked_write_bytes(buf);
         }
         buf.len()
     }

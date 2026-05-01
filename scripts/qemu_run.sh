@@ -156,7 +156,15 @@ EXTRA_ARGS=()
 
 case "$MODE" in
     test)
-        DISPLAY_ARGS=(-nographic)
+        # `-nographic` historically combined "no GUI" with implicit
+        # `-serial mon:stdio`. Combined with our explicit `-serial stdio`,
+        # QEMU's chardev layer silently mirrors every UART byte to BOTH
+        # the explicit and the implicit stdio backend — every kernel
+        # klog line shows up TWICE on the host pipe, corrupting the
+        # KTAP wire stream the test harness emits. Use the modern
+        # `-display none` instead so only the explicit `-serial stdio`
+        # backend is wired to COM1.
+        DISPLAY_ARGS=(-display none)
         EXTRA_ARGS=(-device "isa-debug-exit,iobase=0xf4,iosize=0x01" -no-reboot)
         ;;
     interactive|logged)

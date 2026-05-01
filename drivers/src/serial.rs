@@ -54,10 +54,18 @@ pub fn init() {
 /// `IrqMutex` depends on the PCR (Per-CPU Record) via `PreemptGuard`, which
 /// is unavailable during AP boot.  This lock uses only `cli`/`sti` + a ticket
 /// pair (`AtomicU16`), providing FIFO fairness without any PCR dependency.
+///
+/// Every code path that writes to COM1 outside the early-boot fallback —
+/// the klog backend (`serial_klog_backend`) and the vconsole serial mirror
+/// (via `serial_locked_write_bytes`) — must funnel through `with_klog_lock`
+/// so writes do not byte-interleave on the wire.
 static KLOG_NEXT_TICKET: AtomicU16 = AtomicU16::new(0);
 static KLOG_NOW_SERVING: AtomicU16 = AtomicU16::new(0);
 
-fn serial_klog_backend(args: fmt::Arguments<'_>) {
+/// Acquire the COM1 ticket lock with interrupts disabled, run `f` while
+/// holding exclusive access to the UART, then release.
+#[inline]
+fn with_klog_lock<F: FnOnce()>(f: F) {
     let saved_flags = cpu::save_flags_cli();
     // Take a ticket and spin until served (FIFO order, wrapping-safe).
     let my_ticket = KLOG_NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
@@ -73,19 +81,46 @@ fn serial_klog_backend(args: fmt::Arguments<'_>) {
         }
     }
 
-    struct KlogWriter;
-    impl fmt::Write for KlogWriter {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            unsafe { slopos_utils::ports::serial_write_bytes(COM1, s.as_bytes()) };
-            Ok(())
-        }
-    }
-
-    let _ = fmt::write(&mut KlogWriter, args);
-    let _ = KlogWriter.write_str("\n");
+    f();
 
     KLOG_NOW_SERVING.fetch_add(1, Ordering::Release);
     cpu::restore_flags(saved_flags);
+}
+
+fn serial_klog_backend(args: fmt::Arguments<'_>) {
+    with_klog_lock(|| {
+        struct KlogWriter;
+        impl fmt::Write for KlogWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                unsafe { slopos_utils::ports::serial_write_bytes(COM1, s.as_bytes()) };
+                Ok(())
+            }
+        }
+
+        let _ = fmt::write(&mut KlogWriter, args);
+        let _ = KlogWriter.write_str("\n");
+    });
+}
+
+/// Write `bytes` to COM1 atomically with respect to klog output.
+///
+/// Routes through the same ticket lock as `serial_klog_backend`, so a TTY
+/// driver that mirrors its output to serial cannot byte-interleave with
+/// concurrent `klog_info!` invocations from any CPU. Bytes pass through
+/// `serial_write_bytes` which handles the standard `\n -> \r\n`
+/// translation expected by host serial consoles.
+///
+/// This is the **only** sanctioned path for non-klog code to write to COM1
+/// outside the early-boot fallback. Direct `serial_write_batch` /
+/// `serial_putc` calls bypass the lock and can corrupt klog output —
+/// notably the test harness's KTAP wire format.
+pub fn serial_locked_write_bytes(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    with_klog_lock(|| unsafe {
+        slopos_utils::ports::serial_write_bytes(COM1, bytes);
+    });
 }
 
 pub fn init_port(base: u16) -> Result<UartCapabilities, ()> {

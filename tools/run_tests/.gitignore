@@ -1,0 +1,4 @@
+# `go build` without `-o` drops a binary named after the directory here.
+# The justfile recipe always builds to `builddir/run_tests` instead, so
+# any binary in this directory is a stray local invocation.
+/run_tests

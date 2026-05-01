@@ -49,6 +49,10 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
 boot_cmdline     := env("BOOT_CMDLINE", "tests=off")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip"
+# `TEST_CMDLINE=…` env override lets `builddir/run_tests` thread filter
+# / verbosity flags into the ISO at build time. Mirrors `BOOT_CMDLINE` for
+# the non-test path.
+test_cmdline_effective := env("TEST_CMDLINE", test_cmdline)
 
 debug         := env("DEBUG", "0")
 debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
@@ -63,9 +67,10 @@ test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator
 #  Recipes
 # ═════════════════════════════════════════════════════════════════════════════
 
-[doc("Install Rust toolchain and verify workspace")]
+[doc("Install Rust + Go toolchains and verify workspace")]
 setup:
     scripts/ensure_toolchain.sh
+    scripts/ensure_go.sh
     mkdir -p {{build_dir}}
     CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --format-version 1 >/dev/null
 
@@ -123,7 +128,7 @@ _iso-tests: _fs-image-tests
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
-        scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline}}"
+        scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline_effective}}"
 
 # Same as `_iso-tests` but adds a `tests.run` glob that matches no kernel
 # test, so the kernel-side harness emits a `1..0` plan and the userland
@@ -140,7 +145,7 @@ _iso-tests-userland-only: _fs-image-tests
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" \
-            "{{test_cmdline}} tests.run=__userland_only__"
+            "{{test_cmdline_effective}} tests.run=__userland_only__"
 
 # ── QEMU boot ───────────────────────────────────────────────────────────────
 
@@ -179,15 +184,52 @@ boot-headless:
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
 
-[doc("Run interrupt test harness in QEMU")]
-test: _iso-tests (_qemu-boot "test" "0" iso_tests fs_image_tests)
+# Build the Go-based host-side test wrapper. Idempotent: Go's build cache
+# makes warm rebuilds ~50ms. Output is a single static binary that all
+# `test*` recipes below invoke.
+_build-run-tests:
+    mkdir -p {{build_dir}}
+    cd tools/run_tests && go build -o ../../{{build_dir}}/run_tests .
+
+[doc("Run the SlopOS test harness — live progress bar, per-failure detail, FILTER='glob' supported")]
+test FILTER='': _build-run-tests
+    {{build_dir}}/run_tests --filter "{{FILTER}}"
+
+[doc("Re-run only the tests that failed on the previous `just test` invocation.")]
+test-rerun-failed: _build-run-tests
+    {{build_dir}}/run_tests --rerun-failed
+
+[doc("Same as `just test` but dump captured klog of every test (not only failures).")]
+test-verbose FILTER='': _build-run-tests
+    {{build_dir}}/run_tests --verbose --filter "{{FILTER}}"
+
+[doc("Suppress per-test output; render only failures + summary.")]
+test-quiet FILTER='': _build-run-tests
+    {{build_dir}}/run_tests --quiet --filter "{{FILTER}}"
+
+[doc("Passthrough QEMU stdout verbatim — KTAP and klog interleaved. Last-resort debugging.")]
+test-raw: _build-run-tests
+    {{build_dir}}/run_tests --raw
+
+[doc("Append one JSON event per line to PATH (machine-consumable).")]
+test-json PATH: _build-run-tests
+    {{build_dir}}/run_tests --json "{{PATH}}"
 
 [doc("Skip the kernel-side test phase; run only the Phase 3 userland tests.")]
-test-userland-only: _iso-tests-userland-only (_qemu-boot "test" "0" iso_tests fs_image_tests)
+test-userland-only: _iso-tests-userland-only _build-run-tests
+    {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
 [doc("Run unit tests for abi, gfx, and font crates on the host")]
 test-host:
     {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font
+
+[doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
+check-tests-host:
+    cd tools/run_tests && go test ./...
+
+[doc("Count-regression guard: assert `just test` plans at least TEST_COUNT_BASELINE tests")]
+check-test-count: _build-run-tests
+    scripts/check_test_count.sh
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 
