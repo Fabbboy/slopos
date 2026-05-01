@@ -2769,22 +2769,29 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
-    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
-        None => return TestResult::Fail,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
     };
 
-    // Register poll waiter. In the test harness, current_task() may not
-    // match the user task that owns the FD — skip if registration fails.
+    // Make the user task PCR.current_task so file_poll_register_fd's
+    // underlying enqueue_current() registers the FD-owning task. This
+    // mirrors the real syscall_poll path, where the calling task polls
+    // on its own FDs.
+    make_task_current(task_ptr);
+
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
-    if !reg.registered {
-        file_close_fd(pid, srv_fd);
-        file_close_fd(pid, cli_fd);
-        task_terminate(task_id);
-        return TestResult::Skipped;
-    }
+    assert_test!(
+        reg.registered,
+        "register must succeed when current_task owns the FD"
+    );
 
     // Server sends — should wake registered waiter.
     let payload = b"wake";
@@ -2810,6 +2817,7 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
 
     assert_eq_test!(file_close_fd(pid, srv_fd), 0);
     assert_eq_test!(file_close_fd(pid, cli_fd), 0);
+    park_bootstrap_on_current_cpu();
     task_terminate(task_id);
     TestResult::Pass
 }
@@ -3250,16 +3258,19 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
 /// 3. Server writes data → unix_send → RECV_WQS[peer].wake_all() → unblock_task
 /// 4. unblock_task CAS(WillBlock, Running) → current task = Running
 ///
-/// NOTE: prepare_to_wait and enqueue_current operate on the CURRENT task
-/// (the test runner), not a separately created user task. This matches
-/// the real syscall_poll path where the calling task polls on its own FDs.
+/// `prepare_to_wait` and `enqueue_current` operate on PCR.current_task.
+/// The test makes the FD-owning user task current via `make_task_current`
+/// so the polling identity matches the FD owner — exactly the invariant
+/// the real syscall_poll path relies on.
 pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
-    use crate::scheduler::scheduler::{prepare_to_wait, scheduler_get_current_task};
+    use crate::scheduler::scheduler::prepare_to_wait;
 
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
-    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -3269,29 +3280,17 @@ pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
         }
     };
 
-    // The WillBlock wakeup path requires scheduler_get_current_task() to be
-    // valid. In the test harness (pre-scheduler), current_task is null, so
-    // prepare_to_wait/enqueue_current are no-ops. Skip this test.
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        file_close_fd(pid, srv_fd);
-        file_close_fd(pid, cli_fd);
-        task_terminate(task_id);
-        return TestResult::Skipped;
-    }
-
-    let current_id = unsafe { (*current).task_id };
-
-    // Ensure current task is Running so prepare_to_wait can set WillBlock.
-    let current_state = unsafe { (*current).status() };
-    if current_state != TaskStatus::Running {
-        let _ = task_set_state(current_id, TaskStatus::Running);
-    }
+    // Make the FD-owning user task current. dispatch() sets it to Running,
+    // which is the precondition for prepare_to_wait's Running → WillBlock.
+    make_task_current(task_ptr);
 
     // Phase 1: prepare_to_wait → WillBlock
     prepare_to_wait();
-    let state_after_ptw = unsafe { (*current).status() };
-    assert_eq_test!(state_after_ptw, TaskStatus::WillBlock, "STEP1");
+    assert_eq_test!(
+        unsafe { (*task_ptr).status() },
+        TaskStatus::WillBlock,
+        "STEP1: WillBlock"
+    );
 
     // Phase 2: register + check readiness
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
@@ -3299,23 +3298,26 @@ pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents & POLLIN) == 0, "STEP2: no data before write");
 
-    // Phase 3: write data → RECV_WQS[peer].wake_all() → unblock_task
+    // Phase 3: write data → RECV_WQS[peer].wake_all() → unblock_task CAS
     let payload = b"wake-test";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "STEP3: write");
 
-    // Phase 4: verify wakeup
-    let state_after = unsafe { (*current).status() };
+    // Phase 4: verify CAS(WillBlock, Running) ran via the wait queue
+    let state_after = unsafe { (*task_ptr).status() };
     assert_eq_test!(state_after, TaskStatus::Running, "STEP4: must be Running");
 
     let revents_after = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents_after & POLLIN) != 0, "STEP4: POLLIN");
 
-    // Cleanup
+    // Cleanup. finish_wait is a no-op when state is already Running, but
+    // we keep it for symmetry with the prepare_to_wait above and so the
+    // invariant survives if a future change leaves the task in WillBlock.
     slopos_kernel_services::driver_runtime::finish_wait();
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
+    park_bootstrap_on_current_cpu();
     task_terminate(task_id);
     TestResult::Pass
 }
@@ -3364,12 +3366,14 @@ pub fn test_ready_to_willblock_transition() -> TestResult {
 /// called (wake_all found nobody to dequeue).  This proves the race
 /// existed by construction.
 pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
-    use crate::scheduler::scheduler::{prepare_to_wait, scheduler_get_current_task};
+    use crate::scheduler::scheduler::prepare_to_wait;
 
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
-    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -3379,23 +3383,14 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
         }
     };
 
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        file_close_fd(pid, srv_fd);
-        file_close_fd(pid, cli_fd);
-        task_terminate(task_id);
-        return TestResult::Skipped;
-    }
-
-    let current_id = unsafe { (*current).task_id };
-    if unsafe { (*current).status() } != TaskStatus::Running {
-        let _ = task_set_state(current_id, TaskStatus::Running);
-    }
+    // Make the FD-owning user task current — needed for prepare_to_wait
+    // and for enqueue_current to operate on a real, observable task.
+    make_task_current(task_ptr);
 
     // Step 1: prepare_to_wait → WillBlock
     prepare_to_wait();
     assert_eq_test!(
-        unsafe { (*current).status() },
+        unsafe { (*task_ptr).status() },
         TaskStatus::WillBlock,
         "WillBlock"
     );
@@ -3412,20 +3407,23 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     // Step 4: NOW register (too late — wakeup already fired)
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
 
-    // The task should STILL be WillBlock because wake_all found nobody
-    // on the queue and never called unblock_task on our task.
-    let state = unsafe { (*current).status() };
+    // The task must STILL be WillBlock because wake_all found nobody on
+    // the queue and never called unblock_task. This is the lost-wakeup
+    // signature that the register-first ordering exists to prevent.
+    let state = unsafe { (*task_ptr).status() };
     assert_eq_test!(
         state,
         TaskStatus::WillBlock,
         "wakeup lost — still WillBlock"
     );
 
-    // Cleanup
+    // Cleanup. finish_wait transitions WillBlock → Running so the task
+    // is in a clean state before terminate.
     slopos_kernel_services::driver_runtime::finish_wait();
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
+    park_bootstrap_on_current_cpu();
     task_terminate(task_id);
     TestResult::Pass
 }
@@ -3440,12 +3438,14 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
 ///
 /// This is the exact invariant that the fixed poll_fused implements.
 pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
-    use crate::scheduler::scheduler::{prepare_to_wait, scheduler_get_current_task};
+    use crate::scheduler::scheduler::prepare_to_wait;
 
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
-    let pid = unsafe { (*task_find_by_id(task_id)).process_id };
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -3455,23 +3455,15 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
         }
     };
 
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        file_close_fd(pid, srv_fd);
-        file_close_fd(pid, cli_fd);
-        task_terminate(task_id);
-        return TestResult::Skipped;
-    }
-
-    let current_id = unsafe { (*current).task_id };
-    if unsafe { (*current).status() } != TaskStatus::Running {
-        let _ = task_set_state(current_id, TaskStatus::Running);
-    }
+    // Make the FD-owning user task current. Pairs with the gap-test
+    // counterpart so both tests measure the same observable: the state
+    // of the same task, as a function of register/check ordering.
+    make_task_current(task_ptr);
 
     // Step 1: prepare_to_wait → WillBlock
     prepare_to_wait();
     assert_eq_test!(
-        unsafe { (*current).status() },
+        unsafe { (*task_ptr).status() },
         TaskStatus::WillBlock,
         "WillBlock"
     );
@@ -3486,7 +3478,7 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     assert_eq_test!(written as usize, payload.len(), "write");
 
     // Step 4: Wakeup preserved — unblock_task CAS(WillBlock → Running)
-    let state = unsafe { (*current).status() };
+    let state = unsafe { (*task_ptr).status() };
     assert_eq_test!(state, TaskStatus::Running, "wakeup preserved — Running");
 
     // Step 5: Readiness check sees the data
@@ -3498,6 +3490,7 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
+    park_bootstrap_on_current_cpu();
     task_terminate(task_id);
     TestResult::Pass
 }
