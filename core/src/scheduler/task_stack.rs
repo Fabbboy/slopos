@@ -63,23 +63,11 @@ use slopos_mm::stack_va::{self, StackSlot};
 /// would overflow this buffer.
 const MAX_STACK_PAGES_PER_SLOT: usize = 16;
 
-/// Reasons `TaskStack::<R>::allocate` can fail.  Every variant maps
-/// directly to a recoverable resource exhaustion or a caller error;
-/// the kernel handles each by returning the error to the task creator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum StackAllocError {
-    /// `size` was zero, not a multiple of 4 KB, or larger than
-    /// `R::STRIDE - R::GUARD_SIZE`.
-    InvalidSize,
-    /// No free slot remains in the `R` VA region.
-    OutOfVirtualSpace,
-    /// The page allocator could not satisfy a frame request.
-    OutOfPhysicalFrames,
-    /// `map_page_4kb` returned an error (typically out of memory for
-    /// intermediate page tables).
-    MappingFailed,
-}
+/// Allocation failure reasons.  Re-exported from the legacy `stack`
+/// module to keep one canonical error type while Phases 4/5 migrate
+/// `UnsafeStack` and `KernelStack` over.  Phase 6 will move the
+/// canonical definition into this file when `stack.rs` is deleted.
+pub use super::stack::StackAllocError;
 
 /// Owning handle to one mapped task stack in region `R`.
 ///
