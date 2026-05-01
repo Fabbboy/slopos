@@ -84,7 +84,6 @@ pub enum StackAllocError {
 /// Owning handle to one mapped task stack in region `R`.
 ///
 /// Not `Copy`/`Clone` — double-free is impossible by construction.
-#[allow(dead_code)]
 pub struct TaskStack<R: StackRegion> {
     /// RAII handle to the VA slot.  Dropped after the empty `Drop`
     /// body of `TaskStack` so its return-to-cache logic runs at the
@@ -94,7 +93,6 @@ pub struct TaskStack<R: StackRegion> {
     size: u32,
 }
 
-#[allow(dead_code)]
 impl<R: StackRegion> TaskStack<R> {
     /// Compile-time check: `R`'s stride must fit in our worst-case
     /// frames buffer.  Triggered by referencing `_FITS` from `allocate`.

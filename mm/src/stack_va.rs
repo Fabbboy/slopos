@@ -20,11 +20,14 @@
 //!
 //! # Per-region wiring
 //!
-//! Each region's instantiation module owns its own statics and provides
-//! the per-region wiring via the [`StackRegion`] trait's hidden `_*`
-//! methods.  The public free functions in this module ([`alloc_slot`],
-//! [`init`], [`pcp_drain_all`], …) are thin generic wrappers over those
-//! trait methods.
+//! The two concrete regions (`KstackRegion`, `UstackRegion`) live as
+//! private `mod kstack` / `mod ustack` blocks at the bottom of this
+//! file.  Each owns its own statics (one `IrqMutex<StackVaAllocator<…>>`
+//! plus one `PcpArray<…>`) and implements the [`StackRegion`] trait's
+//! hidden `_*` wiring methods that the public top-level helpers
+//! ([`alloc_slot`], [`init`], [`pcp_drain_all`], …) dispatch through.
+//! The two regions' statics are intentionally separate so their locks
+//! contend independently.
 //!
 //! # Safety boundaries
 //!
@@ -163,7 +166,6 @@ impl<R: StackRegion> Drop for StackSlot<R> {
 /// physical frames mapped).  `WORDS` is the number of `u64` words —
 /// must equal `R::BITMAP_WORDS`; a `const _` cross-check inside the
 /// `impl` enforces this at compile time.
-#[allow(dead_code)]
 pub struct StackVaAllocator<R: StackRegion, const WORDS: usize> {
     free_bitmap: [u64; WORDS],
     backed_bitmap: [u64; WORDS],
@@ -173,7 +175,6 @@ pub struct StackVaAllocator<R: StackRegion, const WORDS: usize> {
     _r: PhantomData<fn() -> R>,
 }
 
-#[allow(dead_code)]
 impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
     /// Compile-time consistency check: `WORDS` must match `R::BITMAP_WORDS`.
     /// Referenced inside `new_uninit` so monomorphisation forces the
@@ -327,7 +328,6 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
 /// `PreemptGuard` for CPU pinning; the atomic stat counters are safe
 /// to read from any CPU.
 #[repr(C, align(64))]
-#[allow(dead_code)]
 pub struct PerCpuStackCache<R: StackRegion, const CAP: usize> {
     pub stack_idx: [u32; CAP],
     pub stack_backed: [bool; CAP],
@@ -339,7 +339,6 @@ pub struct PerCpuStackCache<R: StackRegion, const CAP: usize> {
     _r: PhantomData<fn() -> R>,
 }
 
-#[allow(dead_code)]
 impl<R: StackRegion, const CAP: usize> PerCpuStackCache<R, CAP> {
     pub const fn new() -> Self {
         Self {
@@ -360,14 +359,12 @@ impl<R: StackRegion, const CAP: usize> PerCpuStackCache<R, CAP> {
 /// SAFETY: each CPU only mutates its own slot while pinned by
 /// `PreemptGuard`; cross-CPU reads are restricted to the atomic stat
 /// fields.
-#[allow(dead_code)]
 pub struct PcpArray<R: StackRegion, const CAP: usize>(
     UnsafeCell<[PerCpuStackCache<R, CAP>; MAX_CPUS]>,
 );
 
 unsafe impl<R: StackRegion, const CAP: usize> Sync for PcpArray<R, CAP> {}
 
-#[allow(dead_code)]
 impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
     pub const fn new(init: [PerCpuStackCache<R, CAP>; MAX_CPUS]) -> Self {
         Self(UnsafeCell::new(init))
@@ -421,7 +418,6 @@ impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
 ///
 /// # Safety
 /// Caller must hold a `PreemptGuard`.
-#[allow(dead_code)]
 pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const REFILL: usize>(
     global: &IrqMutex<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
@@ -468,7 +464,6 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
 ///
 /// # Safety
 /// Caller must hold a `PreemptGuard`.
-#[allow(dead_code)]
 pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPILL: usize>(
     global: &IrqMutex<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
@@ -520,7 +515,6 @@ pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPI
 
 /// Drain every CPU's cache back to the global allocator.  Shutdown
 /// only — no concurrent PCP activity assumed.
-#[allow(dead_code)]
 pub fn pcp_drain_all_impl<
     R: StackRegion,
     const WORDS: usize,
@@ -559,7 +553,6 @@ pub fn pcp_drain_all_impl<
 /// Drain the current CPU's cache back to the global allocator.  Test
 /// helper used to make global-bitmap state observable without chasing
 /// PCP effects.
-#[allow(dead_code)]
 pub fn pcp_flush_current_impl<
     R: StackRegion,
     const WORDS: usize,
@@ -598,7 +591,6 @@ pub fn pcp_flush_current_impl<
 /// Allocator-side of slot pop: pop from this CPU's cache (refilling
 /// from the global if empty).  Called by the per-region `_slot_pop`
 /// wiring.  Runs under a single `PreemptGuard`.
-#[allow(dead_code)]
 pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const REFILL: usize>(
     global: &IrqMutex<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
@@ -629,7 +621,6 @@ pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const
 /// Allocator-side of slot push: push back to this CPU's cache
 /// (spilling to the global if full).  Called by the per-region
 /// `_slot_push` wiring.  Runs under a single `PreemptGuard`.
-#[allow(dead_code)]
 pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const SPILL: usize>(
     global: &IrqMutex<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
@@ -658,7 +649,6 @@ pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, cons
 ///
 /// Panics if the page allocator runs out of frames or a sentinel
 /// mapping fails — both indicate severe boot-time misconfiguration.
-#[allow(dead_code)]
 pub fn init_with_sentinels<R: StackRegion, const WORDS: usize>(
     global: &IrqMutex<StackVaAllocator<R, WORDS>>,
 ) {
@@ -669,7 +659,6 @@ pub fn init_with_sentinels<R: StackRegion, const WORDS: usize>(
     install_pt_sentinels::<R, WORDS>(global);
 }
 
-#[allow(dead_code)]
 fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
     global: &IrqMutex<StackVaAllocator<R, WORDS>>,
 ) {
@@ -707,14 +696,12 @@ fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
 /// Allocate a free slot from region `R`.  Returns `None` only when the
 /// region is genuinely exhausted.
 #[inline]
-#[allow(dead_code)]
 pub fn alloc_slot<R: StackRegion>() -> Option<StackSlot<R>> {
     R::_slot_pop().map(StackSlot::from_entry)
 }
 
 /// One-shot boot-time initialisation for region `R`.  Idempotent.
 #[inline]
-#[allow(dead_code)]
 pub fn init<R: StackRegion>() {
     R::_init();
 }
@@ -722,35 +709,30 @@ pub fn init<R: StackRegion>() {
 /// Total slots outside the global free pool — the sum of slots held in
 /// any CPU's cache plus slots held by live `StackSlot<R>` handles.
 #[inline]
-#[allow(dead_code)]
 pub fn in_use_count<R: StackRegion>() -> u32 {
     R::_in_use_count()
 }
 
 /// Drain every CPU's cache back to the global pool.  Shutdown only.
 #[inline]
-#[allow(dead_code)]
 pub fn pcp_drain_all<R: StackRegion>() {
     R::_pcp_drain_all();
 }
 
 /// Drain the current CPU's cache.  Test helper.
 #[inline]
-#[allow(dead_code)]
 pub fn pcp_flush_current<R: StackRegion>() {
     R::_pcp_flush_current();
 }
 
 /// Diagnostic snapshot of one CPU's cache state.
 #[inline]
-#[allow(dead_code)]
 pub fn pcp_stats<R: StackRegion>(cpu: usize) -> PcpStats {
     R::_pcp_stats(cpu)
 }
 
 /// Per-CPU cache capacity for region `R`.
 #[inline]
-#[allow(dead_code)]
 pub const fn pcp_capacity<R: StackRegion>() -> usize {
     R::PCP_CAPACITY
 }
