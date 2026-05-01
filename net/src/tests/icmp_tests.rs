@@ -104,24 +104,15 @@ fn test_icmp_ping_gateway_e2e() -> TestResult {
     if let Err(e) = result {
         return fail!("send_echo_request failed: {:?}", e);
     }
-    klog_info!("icmp_test: echo request sent, waiting for reply...");
 
-    for attempt in 0..30u32 {
-        slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
-        if let Some(d) = crate::net_driver_service::net_driver() {
-            (d.virtnet_force_napi_poll)();
-        }
-
-        let found = icmp::ICMP_DEMUX.lock().lookup(identifier);
-        klog_info!(
-            "icmp_test: attempt {} — demux lookup for 0x{:04x} = {:?}",
-            attempt,
-            identifier,
-            found
-        );
+    // No socket is bound for this identifier, so the gateway's reply will hit
+    // the unmatched-reply branch in icmp::handle_rx and be silently dropped.
+    // One sleep+poll round is enough to exercise that path; reply receipt is
+    // covered by test_icmp_socket_sendto_recvfrom_e2e.
+    slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
+    if let Some(d) = crate::net_driver_service::net_driver() {
+        (d.virtnet_force_napi_poll)();
     }
-
-    klog_info!("icmp_test: raw echo test done (reply via NAPI if any)");
 
     pass!()
 }
@@ -312,8 +303,12 @@ fn test_ping_resolved_host_e2e() -> TestResult {
     );
     assert_test!(sent > 0, "sendto failed");
 
-    for _attempt in 0..50u32 {
-        slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
+    // SLIRP does not relay ICMP echo replies for external hosts, so this loop
+    // is effectively a "send didn't crash" check with an early-exit if the
+    // user-mode network ever does start replying. Keep the budget tight: the
+    // bulk-replied gateway path is covered by test_icmp_socket_sendto_recvfrom_e2e.
+    for _attempt in 0..4u32 {
+        slopos_kernel_services::driver_runtime::sleep_current_task_ms(50);
         if let Some(d) = crate::net_driver_service::net_driver() {
             (d.virtnet_force_napi_poll)();
         }
@@ -345,7 +340,7 @@ fn test_ping_resolved_host_e2e() -> TestResult {
 
     let _ = socket::socket_close(sock);
     klog_info!(
-        "icmp_test: no ping reply from {}.{}.{}.{} after 5s (may be SLIRP limitation for external hosts)",
+        "icmp_test: no ping reply from {}.{}.{}.{} (expected: SLIRP does not relay external ICMP)",
         target_ip[0],
         target_ip[1],
         target_ip[2],
