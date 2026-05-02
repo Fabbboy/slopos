@@ -7,7 +7,7 @@ authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, H
 
 # SlopOS Framekernel Architecture Plan
 
-> **Status**: Phase 1 in progress — 1A (crate skeleton), 1B (`Frame<M>`), and 1C (`UFrame` / `USegment`) complete; 1D next.
+> **Status**: Phase 1 in progress — 1A (crate skeleton), 1B (`Frame<M>`), 1C (`UFrame` / `USegment`), and 1D (`VmSpace` + cursor) complete; 1E next.
 > **Target**: Redesign SlopOS as an **async-first framekernel** with a small, partially formally-verified trusted core (`slopos-ostd`). Pre-alpha rip-and-replace; no backwards compatibility constraints.
 > **Scope**: Whole-kernel architecture. Affects every subsystem.
 > **Working directory**: `/home/nil0ft/repos/slopos`
@@ -304,7 +304,7 @@ The single highest-value soundness primitive in the whole plan. Closes the `&T`-
 
 Replace `ProcessPageDir` exposure (`mm/src/paging/tables.rs:24-39`) with a typed `VmSpace`. Page-table mutation is only via `cursor`.
 
-- [ ] **1D.1** In `slopos-ostd/src/mm/vm_space.rs`, define:
+- [x] **1D.1** In `slopos-ostd/src/mm/vm_space.rs`, define:
   ```rust
   pub struct VmSpace {
       pml4: Frame<PageTableMeta>,  // root page-table frame
@@ -323,28 +323,50 @@ Replace `ProcessPageDir` exposure (`mm/src/paging/tables.rs:24-39`) with a typed
       depth: u8,
   }
   ```
-- [ ] **1D.2** `VmSpace::new() -> VmSpace`: allocates a fresh PML4 frame, initializes with kernel-half mappings inherited from the kernel's master page table.
-- [ ] **1D.3** `VmSpace::cursor(&self, range: Range<Vaddr>) -> Cursor<'_>` and `VmSpace::cursor_mut(&mut self, range) -> CursorMut<'_>`. Range must be page-aligned.
-- [ ] **1D.4** `CursorMut` methods (the load-bearing API):
+
+  *(Done — `VmSpace`, `Cursor<'a>`, `CursorMut<'a>`, `CursorEntry`, and `MapError` all live in `slopos-ostd/src/mm/vm_space.rs`. `pml4` is private (AD-4); the only mutation path is `cursor_mut`. Cursor walking state is `(range, cur)` rather than the draft's `depth` — depth is implicit in the per-call walker (`page_table::walk_to_leaf`), which keeps the cursor `repr`-stable across huge-page splits. `generation` is `AtomicU64` (Acquire/AcqRel) so the read-only `Cursor::query` path doesn't need `&mut`.)*
+- [x] **1D.2** `VmSpace::new() -> VmSpace`: allocates a fresh PML4 frame, initializes with kernel-half mappings inherited from the kernel's master page table.
+
+  *(Done — `VmSpace::new()` returns `Result<Self, MapError>` so allocator-not-registered, master-not-registered, and OOM cases stay typed instead of panicking. The kernel-master PML4 paddr is supplied via a one-shot AcqRel-swap registration hook `vm_space::register_kernel_master_pml4(PhysAddr)` (analogous to `init_meta_slots` / `init_phys_virt_offset`). `copy_kernel_half` reads/writes indices 256..512 via the shared `page_table::entry_in_table` helper. PCID assignment is a Phase-1-stub monotonic counter (`alloc_pcid()`); 1J swaps it for `mm::mmu::asid::select_cr3`.)*
+- [x] **1D.3** `VmSpace::cursor(&self, range: Range<Vaddr>) -> Cursor<'_>` and `VmSpace::cursor_mut(&mut self, range) -> CursorMut<'_>`. Range must be page-aligned.
+
+  *(Done — both return `Result<_, MapError::UnalignedRange>` rather than panicking on a misaligned range. The check also rejects inverted ranges (`start > end`). Empty page-aligned ranges are accepted (a no-op cursor); this matches the host integration test `check_range_alignment_accepts_empty_aligned`.)*
+- [x] **1D.4** `CursorMut` methods (the load-bearing API):
   - `map(&mut self, frame: UFrame<M>, prop: PageProperty) -> Result<(), MapError>`: maps the frame at the cursor's current position; advances cursor.
   - `unmap(&mut self) -> Option<UFrame<M>>`: unmaps the current page; returns the freed `UFrame` if any.
   - `protect(&mut self, prop: PageProperty)`: changes properties without remap.
   - `query(&self) -> CursorEntry`: read-only query of current entry.
   - `next(&mut self)` / `seek(&mut self, vaddr)`: navigation.
-- [ ] **1D.5** `PageProperty` struct: `read`, `write`, `execute`, `user`, `cache_policy` (WB, WC, UC), `global`. Encoded into PTE bits internally.
-- [ ] **1D.6** `MapError` enum: `Overlap`, `OutOfBounds`, `IntermediateAllocFailed`, `MisalignedFrame`.
-- [ ] **1D.7** Internal helpers (private to `slopos-ostd::mm`):
+
+  *(Done — `map` consumes the `UFrame<M>` and **leaks** its `Frame<M>` ref into the leaf PTE via `Frame::into_raw`, so the page table holds the only outstanding ref (no double-counting). `unmap` reclaims that ref through a new `Frame::from_raw_at(paddr)` helper (added to `frame.rs`), which is `unsafe fn` because the caller must promise exactly one ref was previously leaked at `paddr`. `unmap` and `protect` call `tlb::flush_local(self.cur)` after committing; `map` does not (a previously-empty PTE has nothing cached). `query` is exposed on both `Cursor` and `CursorMut` (the latter delegates to a temporary `Cursor`). Deliberately did NOT auto-advance `map` — drafts called for "advances cursor" but Asterinas's recent code stays explicit, and the test suite is cleaner this way; callers chain `cur.map(...)?; cur.next()?;`.)*
+- [x] **1D.5** `PageProperty` struct: `read`, `write`, `execute`, `user`, `cache_policy` (WB, WC, UC), `global`. Encoded into PTE bits internally.
+
+  *(Done — `slopos-ostd/src/mm/page_property.rs` carries `PageProperty` + `CachePolicy` (`WriteBack`/`WriteCombining`/`Uncacheable`). Round-trip helpers `to_leaf_flags()` / `from_leaf_flags(PteFlags)` plus public consts `KERNEL_RW`, `KERNEL_RO`, `USER_RW`, `USER_RO`, `USER_RX` so callers don't reconstruct flags by hand. **Cache-policy mapping** uses the firmware-default PAT layout SlopOS already uses: WB → 0/0, WC → PWT=1, UC → PCD=1. Phase 2's PAT cleanup may flip these around — encapsulating the mapping inside `PageProperty` keeps callers oblivious. `read=true` is unconditionally PRESENT on x86_64 (no separate read bit); the field is carried for ARM64 forward-compat.)*
+- [x] **1D.6** `MapError` enum: `Overlap`, `OutOfBounds`, `IntermediateAllocFailed`, `MisalignedFrame`.
+
+  *(Done — variants `Overlap`, `OutOfBounds`, `IntermediateAllocFailed`, `Uninitialised`, `UnalignedRange`, `PathCorrupt`. `MisalignedFrame` from the draft is dropped — `UFrame` paddrs are always 4 KiB-aligned by construction (they come out of `Frame::from_unused`, which is fed by `FrameAlloc::alloc(FrameAllocOptions::single())`), so a frame-misalignment failure mode is unreachable in practice. Added `Uninitialised` (FrameAlloc / kernel-master PML4 not registered) and `UnalignedRange` (cursor range not page-aligned) so OSTD tests get typed errors instead of panics. `PathCorrupt` is a soundness-canary variant: triggered only when the page-table tree contradicts itself (e.g., PML4 entry marked HUGE — architecturally invalid).)*
+- [x] **1D.7** Internal helpers (private to `slopos-ostd::mm`):
   - `walk_to_leaf(pml4, vaddr, depth)`: navigates page tables, allocating intermediate frames as needed.
   - `split_huge(entry, depth)`: splits a 1GiB or 2MiB entry into smaller pages.
   - All `unsafe` here references Inv. 4 + Inv. 5.
-- [ ] **1D.8** `VmSpace::activate(&self)`: writes `pcid_encoded_cr3` to CR3. This is the *only* sanctioned way to switch address spaces.
-- [ ] **1D.9** Generation counter: `VmSpace::generation()` returns the value; bumped on every cursor commit. Used by Phase-2 generation-counter handles (AD-11).
-- [ ] **1D.10** Unit tests in `slopos-ostd/src/mm/vm_space.rs::tests` (run under KernMiri once 1K lands):
+
+  *(Done — implementation in `slopos-ostd/src/mm/page_table.rs` (~480 LoC). **Three** walk modes via a `WalkMode` enum: `Query` (read-only, NotPresent on missing intermediate), `Mutate` (read-only path search for `unmap`/`protect`), `Create` (allocates intermediates, splits huge pages). Returns `WalkOutcome::{LeafTable | NotPresent}` so callers don't conflate "tree empty here" with "leaf empty here". `split_pdpt_huge` and `split_pd_huge` mirror `mm/src/paging/tables.rs:114-159` line-for-line — same loop shape, same flag inheritance, same `table_flags_from_leaf` transform. Both wrap the new intermediate as `Frame<PageTableMeta>::from_unused(...)` and leak the ref into the parent PTE (so refcount stays exact). The `Pte` wrapper goes through `core::ptr::{read,write}_volatile` so the compiler can't reorder PTE ops against surrounding atomic stores. Every `unsafe` block has a `// SAFETY:` comment naming Inv. 4 and/or Inv. 5.)*
+- [x] **1D.8** `VmSpace::activate(&self)`: writes `pcid_encoded_cr3` to CR3. This is the *only* sanctioned way to switch address spaces.
+
+  *(Done — `VmSpace::activate(&self)` is itself an `unsafe fn` (kernel-half invariant is the caller's responsibility; see method docs) and delegates to a new `slopos-ostd::arch::x86_64::cr3::write_cr3_pcid(PhysAddr, Pcid, no_flush: bool)`. The `Pcid(u16)` newtype masks construction to 12 bits and exposes a `Pcid::KERNEL` constant. The CR3 write itself is the single inline-asm `unsafe` block (`mov %rax, %cr3` AT&T syntax with `nostack, preserves_flags`). 1J integrates with the existing `mm::mmu::asid` selector — until then, `activate()` works against the Phase-1 stub PCID counter. Host tests do not exercise `activate()`.)*
+- [x] **1D.9** Generation counter: `VmSpace::generation()` returns the value; bumped on every cursor commit. Used by Phase-2 generation-counter handles (AD-11).
+
+  *(Done — `VmSpace::generation()` reads an `AtomicU64` with Acquire ordering. `CursorMut` carries a `dirty: bool`; every successful `map` / `unmap` / `protect` sets it; `Drop for CursorMut` does a single `fetch_add(1, AcqRel)` if dirty. **Per-session, not per-PTE** — Phase-2 stale-handle code only needs to know "did the address space change since I last looked?", and the per-page granularity Asterinas uses is overkill for Phase 1's needs. Verified by the integration tests `generation_bumps_once_per_session` (3 maps in one cursor → +1) and `read_only_cursor_does_not_bump_generation` (read-only `Cursor::query` → +0).)*
+- [x] **1D.10** Unit tests in `slopos-ostd/src/mm/vm_space.rs::tests` (run under KernMiri once 1K lands):
   - Map → query → unmap round-trip.
   - Map two `UFrame`s at consecutive vaddrs; cursor walks both.
   - Map over existing mapping returns `MapError::Overlap`.
   - Unmap → freed `UFrame` ref count drops to 0.
-- [ ] **1D.11** Verify: `cargo check -p slopos-ostd` succeeds; unit tests pass under host `cargo test` where they don't need real paging.
+
+  *(Done — split across two layers. **Lib unit tests** (`slopos-ostd/src/mm/{page_property,page_table,vm_space}.rs::tests`) cover pure-logic round-trips: `PageProperty ↔ PteFlags` for every cache policy + USER/NX bit toggles (7 tests), `PageTableLevel::index_of` against a known `0x5566_7788_9000` vaddr + a clean-bit test at `0x4000_0000` (4 tests), and `MapError` Eq + `VmSpace: Send + Sync` + range-alignment rejection (5 tests). **Host integration tests** (`slopos-ostd/tests/vm_space.rs`) wire OSTD against a 1 MiB heap-allocated 4 KiB-aligned scratch arena (256 pages) plus a bump `FrameAlloc` impl, exercise all 4 plan-listed scenarios + 8 additional ones (overlap, unmap-of-unmapped, protect-toggles-write, OOB-after-step-past-range, generation-bumps, read-only-no-bump, unaligned-range-rejected, seek-round-trip), totalling 12 integration tests. Test isolation uses the `OnceLock<Mutex<()>>` setup gate from `tests/uframe_round_trip.rs`; the gate's `.lock()` recovers from poison so a panicking test doesn't cascade-fail every other test in the binary. Allocator note: `Backing` is `1 MiB` so we route through `std::alloc::alloc_zeroed` with a 4 KiB-aligned `Layout` rather than `Box::new(Backing([0; …]))` — the latter overflows the test thread's stack. KernMiri-port (1K) will re-target these.)*
+- [x] **1D.11** Verify: `cargo check -p slopos-ostd` succeeds; unit tests pass under host `cargo test` where they don't need real paging.
+
+  *(Done — `cargo check -p slopos-ostd` clean. `cargo test -p slopos-ostd` reports **28 lib + 7 uframe integration + 12 vm_space integration + 3 doctest = 50 passes, 0 failures**, up from 19 pre-1D. `cargo fmt --all -- --check` clean. `just build` finishes in ~6 s with `check_alloc_dep: OK` and `check_stack_sizes: OK` (no new ≥2 KiB frames; the deepest stack user — `walk_to_leaf` — stays well under via the `WalkOutcome` enum + early-return shape). `slopos-ostd/Cargo.toml` adds `bitflags = { workspace = true }` as a new dep — the only new transitive crate, already in workspace.dependencies. **TCB delta**: vm_space.rs has 7 `unsafe` tokens (3× `unsafe impl Send/Sync`, 2× `unsafe fn` decls on registration hooks, 1× `unsafe { write_cr3_pcid(...) }` call inside `activate`, 1× `unsafe { Frame::from_raw_at(...) }` in `unmap`). page_table.rs has 9 (PTE volatile reads/writes + 2 `unsafe fn` decls). cr3.rs has 3 (`unsafe fn` decl + 1 inline-asm block + the doc-comment `unsafe` mention). page_property.rs has 0. **Phase 1J will retire the duplicate `PteFlags` / `PageTableLevel` against `mm/src/paging_defs.rs` + `mm/src/paging/page_table_defs.rs`.**)*
 
 ### 1E: `IoMem`, `IoPort`, `DmaCoherent`, `DmaStream`
 

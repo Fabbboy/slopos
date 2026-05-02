@@ -259,7 +259,7 @@ pub fn reset_meta_slots_for_test() {
 }
 
 #[inline]
-fn meta_slot_for(paddr: Paddr) -> Option<&'static MetaSlot> {
+pub(crate) fn meta_slot_for(paddr: Paddr) -> Option<&'static MetaSlot> {
     let base = META_SLOTS.base.load(Ordering::Acquire);
     if base.is_null() {
         return None;
@@ -418,6 +418,46 @@ impl<M: AnyFrameMeta> Frame<M> {
             ptr,
             _marker: PhantomData,
         }
+    }
+
+    /// Reclaim a previously [`into_raw`]-leaked frame by physical
+    /// address. Used by the [`super::vm_space::CursorMut`] unmap path
+    /// where a single ref was leaked into a PTE; clearing the PTE
+    /// hands ownership back through this function so the slot's ref
+    /// count never goes negative or doubles up.
+    ///
+    /// Returns [`FrameError::OutOfRange`] / [`FrameError::NotInitialised`]
+    /// for unknown paddrs and [`FrameError::StateMismatch`] when the
+    /// slot is `UNUSED`.
+    ///
+    /// [`into_raw`]: Frame::into_raw
+    ///
+    /// # Safety
+    ///
+    /// Caller asserts:
+    ///
+    /// 1. exactly one ref to the slot was previously leaked via
+    ///    `into_raw` and has not been reclaimed since,
+    /// 2. `M` matches the metadata type that produced the leaked
+    ///    `Frame`.
+    pub unsafe fn from_raw_at(paddr: Paddr) -> Result<Self, FrameError> {
+        let slot = meta_slot_for(paddr).ok_or_else(|| {
+            if META_SLOTS.base.load(Ordering::Acquire).is_null() {
+                FrameError::NotInitialised
+            } else {
+                FrameError::OutOfRange
+            }
+        })?;
+        if slot.state.load(Ordering::Acquire) != META_STATE_TYPED {
+            return Err(FrameError::StateMismatch);
+        }
+        // SAFETY: caller's contract above. The slot is `TYPED` and
+        // exactly one ref is outstanding (leaked); the new `Frame`
+        // takes ownership of that ref without bumping the count.
+        Ok(Self {
+            ptr: slot as *const MetaSlot,
+            _marker: PhantomData,
+        })
     }
 }
 

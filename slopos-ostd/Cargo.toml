@@ -13,6 +13,7 @@ workspace = true
 test-helpers = []
 
 [dependencies]
+bitflags = { workspace = true }
 slopos-abi = { workspace = true }
 slopos-alloc = { workspace = true }
 slopos-ostd-derive = { workspace = true }
