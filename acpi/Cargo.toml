@@ -18,4 +18,5 @@ doctest = false
 slopos-abi = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-mm = { workspace = true }
+slopos-ostd = { workspace = true }
 slopos-utils = { workspace = true }

@@ -1,13 +1,13 @@
 ---
 name: SlopOS Framekernel Architecture Plan
 description: Four-phase rip-and-replace plan to redesign SlopOS as an async-first framekernel with a Verus-verified OSTD critical path
-status: not-started
+status: phase-1-in-progress
 authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, Hubris, seL4, CortenMM
 ---
 
 # SlopOS Framekernel Architecture Plan
 
-> **Status**: Not started — design locked, ready for Phase 1.
+> **Status**: Phase 1 in progress — 1A (crate skeleton) complete; 1B next.
 > **Target**: Redesign SlopOS as an **async-first framekernel** with a small, partially formally-verified trusted core (`slopos-ostd`). Pre-alpha rip-and-replace; no backwards compatibility constraints.
 > **Scope**: Whole-kernel architecture. Affects every subsystem.
 > **Working directory**: `/home/nil0ft/repos/slopos`
@@ -167,10 +167,10 @@ The phase is structured into 13 subtask groups (1A–1M). 1A creates the crate; 
 
 Create `slopos-ostd/` with the module tree the rest of Phase 1 will populate.
 
-- [ ] **1A.1** Create directory `slopos-ostd/` with:
-  - `Cargo.toml` declaring `[lib]` `slopos_ostd`, edition 2021, `no_std`.
+- [x] **1A.1** Create directory `slopos-ostd/` with:
+  - `Cargo.toml` declaring `[lib]` `slopos_ostd`, edition 2021, `no_std`. *(Done — uses `edition.workspace = true` (`2024`) to match every other kernel crate; `[lib]` left implicit since the crate name `slopos-ostd` already produces lib name `slopos_ostd`.)*
   - `src/lib.rs` with `#![no_std]`, `#![forbid(unsafe_op_in_unsafe_fn)]`, module declarations matching 1A.2.
-- [ ] **1A.2** Create the module tree (empty stubs are fine; populated 1B–1I):
+- [x] **1A.2** Create the module tree (empty stubs are fine; populated 1B–1I):
   ```
   slopos-ostd/src/
     lib.rs          // re-exports + crate-level doc
@@ -222,9 +222,9 @@ Create `slopos-ostd/` with the module tree the rest of Phase 1 will populate.
         gdt.rs
         tss.rs
   ```
-- [ ] **1A.3** Add `slopos-ostd` to the workspace `Cargo.toml`. Wire it as a dependency of `kernel/`, `boot/`, `mm/`, `core/`, `sync/`, `fs/`, `drivers/`, `net/`, `acpi/`, `karch/` (only crates that need it; userland and slibc do not).
-- [ ] **1A.4** Add a one-line `slopos-ostd/README.md` explaining the crate is the kernel's trusted core; link this plan.
-- [ ] **1A.5** Verify: `cargo check -p slopos-ostd` succeeds with empty modules. `just build` still succeeds (no consumers yet).
+- [x] **1A.3** Add `slopos-ostd` to the workspace `Cargo.toml`. Wire it as a dependency of `kernel/`, `boot/`, `mm/`, `core/`, `sync/`, `fs/`, `drivers/`, `net/`, `acpi/`, `karch/` (only crates that need it; userland and slibc do not).
+- [x] **1A.4** Add a one-line `slopos-ostd/README.md` explaining the crate is the kernel's trusted core; link this plan.
+- [x] **1A.5** Verify: `cargo check -p slopos-ostd` succeeds with empty modules. `just build` still succeeds (no consumers yet).
 
 ### 1B: `Frame<M>` with typed metadata
 

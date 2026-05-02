@@ -24,6 +24,7 @@ members = [
   "windowing",
   "slop-protocol",
   "slopos-alloc",
+  "slopos-ostd",
   "hermetic"
 ]
 resolver = "2"
@@ -58,6 +59,7 @@ slopos-font = { path = "font" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
 slopos-alloc = { path = "slopos-alloc" }
+slopos-ostd = { path = "slopos-ostd" }
   slopos-utils = { path = "utils" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }
