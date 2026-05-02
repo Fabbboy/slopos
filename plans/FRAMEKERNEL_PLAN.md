@@ -7,7 +7,7 @@ authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, H
 
 # SlopOS Framekernel Architecture Plan
 
-> **Status**: Phase 1 in progress — 1A (crate skeleton) complete; 1B next.
+> **Status**: Phase 1 in progress — 1A (crate skeleton) and 1B (`Frame<M>`) complete; 1C next.
 > **Target**: Redesign SlopOS as an **async-first framekernel** with a small, partially formally-verified trusted core (`slopos-ostd`). Pre-alpha rip-and-replace; no backwards compatibility constraints.
 > **Scope**: Whole-kernel architecture. Affects every subsystem.
 > **Working directory**: `/home/nil0ft/repos/slopos`
@@ -230,7 +230,7 @@ Create `slopos-ostd/` with the module tree the rest of Phase 1 will populate.
 
 Replace `mm/src/page_alloc.rs:1283` `OwnedPageFrame` with a generic `Frame<M>` and migrate per-page state into `M`.
 
-- [ ] **1B.1** In `slopos-ostd/src/mm/frame.rs`, define:
+- [x] **1B.1** In `slopos-ostd/src/mm/frame.rs`, define:
   ```rust
   pub unsafe trait AnyFrameMeta: Send + Sync + 'static {
       const SIZE: usize;
@@ -243,18 +243,22 @@ Replace `mm/src/page_alloc.rs:1283` `OwnedPageFrame` with a generic `Frame<M>` a
   }
   // SAFETY: all methods preserve Inv. 1, Inv. 4.
   ```
-  Methods: `from_unused(paddr, M) -> Self`, `from_in_use(paddr) -> Self`, `paddr() -> Paddr`, `reference_count() -> usize`, `borrow() -> &M`, `into_raw() -> *const MetaSlot`, `from_raw(*const MetaSlot) -> Self` (unsafe).
-- [ ] **1B.2** In `slopos-ostd/src/mm/frame.rs`, define `MetaSlot`: a fixed-layout struct with ref count (`AtomicU32`), state tag, type-erased metadata storage (sized for max-`M`). Static array `META_SLOTS: [MetaSlot; N_FRAMES]` allocated at boot from a region reserved by the boot subsystem.
-- [ ] **1B.3** Implement `Drop for Frame<M>`: Acquire-load ref count, if 1 → release, run `M::on_drop`, free the underlying physical frame. Document the Acquire/Release pair against Inv. 9.
-- [ ] **1B.4** Provide a few `M` impls in `slopos-ostd/src/mm/frame.rs`:
+  Methods: `from_unused(paddr, M) -> Self`, `from_in_use(paddr) -> Self`, `paddr() -> Paddr`, `reference_count() -> usize`, `borrow() -> &M`, `into_raw() -> *const MetaSlot`, `from_raw(*const MetaSlot) -> Self` (unsafe). *(Done — `AnyFrameMeta` carries an extra `Sized` bound so the default `SIZE`/`ALIGN` consts can use `size_of::<Self>()`/`align_of::<Self>()`; `Frame<M>` correspondingly drops the `?Sized` from the draft. Constructors return `Result<Self, FrameError>` so `META_SLOTS`-uninitialised / out-of-range / state-mismatch cases stay typed errors instead of panics. `reference_count()` returns `u32` to match the underlying `AtomicU32`.)*
+- [x] **1B.2** In `slopos-ostd/src/mm/frame.rs`, define `MetaSlot`: a fixed-layout struct with ref count (`AtomicU32`), state tag, type-erased metadata storage (sized for max-`M`). Static array `META_SLOTS: [MetaSlot; N_FRAMES]` allocated at boot from a region reserved by the boot subsystem. *(Done — `MetaSlot` is `#[repr(C, align(8))]` with `ref_count` at offset 0 (asserted via `const _`); inline storage is `MaybeUninit<MetaStorage>` where `MetaStorage` is `#[repr(C, align(8))]` so any `M` with `ALIGN ≤ MAX_META_ALIGN` is correctly aligned. A type-erased `MetaVtable` (one per concrete `M` via the `HasVtable` associated-const pattern) carries `drop_in_place` + `on_drop` for the Drop dispatch. `MAX_META_SIZE = 16`, `MAX_META_ALIGN = 8`. `META_SLOTS` is a pointer + length pair guarded by atomic loads, populated by the new `init_meta_slots(slots, len)` boot hook — left uncalled in 1B per 1B.7. Phase 1J wires the array.)*
+- [x] **1B.3** Implement `Drop for Frame<M>`: Acquire-load ref count, if 1 → release, run `M::on_drop`, free the underlying physical frame. Document the Acquire/Release pair against Inv. 9. *(Done — `fetch_sub(1, Release)` followed by an `Acquire` fence on the last-ref path; pairs with `from_in_use`'s `AcqRel` add. On the last ref, `on_drop` and `drop_in_place` dispatch through the slot's `MetaVtable`, then the slot is reset to `UNUSED`. The actual physical-frame return to the buddy allocator is **not** wired in Drop yet — that lands in 1J alongside the registered `FrameAlloc`; until then Drop is unreachable in practice because `META_SLOTS` is uninitialised.)*
+- [x] **1B.4** Provide a few `M` impls in `slopos-ostd/src/mm/frame.rs`:
   - `KernelMeta` — generic kernel-owned page.
   - `PageTableMeta` — for page-table levels (used by 1C).
   - `AnonymousMeta` — for `UFrame` (defined in 1C).
-- [ ] **1B.5** Provide `FrameAllocOptions` (size, zeroing, alignment) + a private trait `FrameAlloc` that the Phase-2 allocator will implement. For Phase 1, ship a stub that delegates to today's `mm/src/page_alloc.rs::alloc_page_frame` via FFI shim.
-- [ ] **1B.6** Unit tests in `slopos-ostd/src/mm/frame.rs::tests` (compile only; runtime tested in 1J):
+
+  *(Done — all three impls land alongside `AnyFrameMeta`; each carries a `const _: () = assert_meta_fits::<M>();` guard so size/align regressions fail at compile time.)*
+- [x] **1B.5** Provide `FrameAllocOptions` (size, zeroing, alignment) + a private trait `FrameAlloc` that the Phase-2 allocator will implement. For Phase 1, ship a stub that delegates to today's `mm/src/page_alloc.rs::alloc_page_frame` via FFI shim. *(Done — `FrameAllocOptions { size_pages, zeroing, align_pages }` (with `single()`/`zeroed()` const builders) and `pub trait FrameAlloc` in `slopos-ostd/src/mm/frame.rs`. The Phase-1 shim `LegacyFrameAllocShim` lives in the new `mm/src/frame_alloc_shim.rs` (defined there to avoid making `slopos-ostd` depend on `slopos-mm`); it asserts `size_pages == 1` / `align_pages == 1` for now (multi-page lands in 1C with `USegment`) and delegates to `alloc_page_frame` / `free_page_frame`. Not registered with OSTD anywhere yet — 1J wires it.)*
+- [x] **1B.6** Unit tests in `slopos-ostd/src/mm/frame.rs::tests` (compile only; runtime tested in 1J):
   - Layout asserts (`MetaSlot` is repr(C) and ref count is at offset 0).
   - `AnyFrameMeta::SIZE` is `≤ MAX_META_SIZE`.
-- [ ] **1B.7** Verify: `cargo check -p slopos-ostd` succeeds. `just build` still succeeds (no consumers; FFI shim keeps old API live).
+
+  *(Done — both checks live as crate-level `const _: () = assert!(...)` blocks (so they fire on every `cargo check`) and are mirrored in `#[cfg(test)] mod tests` for host-side `cargo test` once a host harness exists. Kernel-side runtime tests via `stest!` come with 1J.)*
+- [x] **1B.7** Verify: `cargo check -p slopos-ostd` succeeds. `just build` still succeeds (no consumers; FFI shim keeps old API live). *(Done — `cargo check -p slopos-ostd` and `cargo check -p slopos-mm` both clean; `just build` finishes in ~5 s with `check_alloc_dep: OK` and `check_stack_sizes: OK`. `cargo fmt --all -- --check` clean. `slopos-ostd/Cargo.toml` now declares only `slopos-abi` and `slopos-alloc` — no `slopos-sync` (would be a circular-dep tell), no other accidentally pulled-in crates.)*
 
 ### 1C: `UFrame` + `USegment` (untyped memory)
 

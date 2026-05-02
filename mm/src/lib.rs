@@ -7,6 +7,7 @@ pub mod cow;
 pub mod demand;
 pub mod elf;
 pub mod error;
+pub mod frame_alloc_shim;
 pub mod hhdm;
 pub mod kernel_heap;
 pub mod memfd;

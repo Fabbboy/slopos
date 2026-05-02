@@ -8,4 +8,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-# Phase 1A is scaffolding only. Real dependencies arrive in 1B–1I.
+slopos-abi = { workspace = true }
+slopos-alloc = { workspace = true }
