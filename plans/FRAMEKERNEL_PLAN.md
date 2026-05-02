@@ -7,7 +7,7 @@ authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, H
 
 # SlopOS Framekernel Architecture Plan
 
-> **Status**: Phase 1 in progress — 1A (crate skeleton) and 1B (`Frame<M>`) complete; 1C next.
+> **Status**: Phase 1 in progress — 1A (crate skeleton), 1B (`Frame<M>`), and 1C (`UFrame` / `USegment`) complete; 1D next.
 > **Target**: Redesign SlopOS as an **async-first framekernel** with a small, partially formally-verified trusted core (`slopos-ostd`). Pre-alpha rip-and-replace; no backwards compatibility constraints.
 > **Scope**: Whole-kernel architecture. Affects every subsystem.
 > **Working directory**: `/home/nil0ft/repos/slopos`
@@ -264,7 +264,7 @@ Replace `mm/src/page_alloc.rs:1283` `OwnedPageFrame` with a generic `Frame<M>` a
 
 The single highest-value soundness primitive in the whole plan. Closes the `&T`-over-MMIO/DMA bug class.
 
-- [ ] **1C.1** In `slopos-ostd/src/mm/uframe.rs`, define:
+- [x] **1C.1** In `slopos-ostd/src/mm/uframe.rs`, define:
   ```rust
   pub unsafe trait AnyUFrameMeta: AnyFrameMeta {}
   pub type UFrame<M = AnonymousMeta> = Frame<M> where M: AnyUFrameMeta;
@@ -274,24 +274,31 @@ The single highest-value soundness primitive in the whole plan. Closes the `&T`-
       len_pages: usize,
   }
   ```
-- [ ] **1C.2** Implement byte-copy interface on `UFrame` and `USegment` *only*:
+  *(Done — `UFrame<M>` is a **newtype** around `Frame<M>`, **not** a type alias. The alias would inherit `Frame::borrow() -> &M` (and any future `Frame` helpers), which would let callers pull a Rust reference into untyped memory through the back door — exactly the bug class 1C exists to close. The newtype keeps `into_frame`/`from_frame` `pub(crate)` so the only exit from "untyped" is inside the crate. `AnyUFrameMeta: AnyFrameMeta + Default` (Default added so `from_unused_run` can fan a single payload across each frame in a segment); `AnonymousMeta` is the only impl in 1C; `KernelMeta` and `PageTableMeta` deliberately do NOT implement it because their pages are sensitive kernel memory. `USegment<M>` stores `KVec<Frame<M>>` plus a head paddr / len_pages — `KVec` ownership cleanly drops every per-frame ref on segment Drop.)*
+- [x] **1C.2** Implement byte-copy interface on `UFrame` and `USegment` *only*:
   - `read_bytes(offset, dst: &mut [u8]) -> Result<(), UFrameError>`
   - `write_bytes(offset, src: &[u8]) -> Result<(), UFrameError>`
   - `read_pod<T: Pod>(offset) -> Result<T, UFrameError>` where `Pod` is a marker trait for plain-old-data (defined in 1C.3).
   - `write_pod<T: Pod>(offset, value: T) -> Result<(), UFrameError>`
   - **Forbidden**: `as_slice`, `as_mut_slice`, `Deref<Target=[u8]>`, `DerefMut`. There must be no way to obtain a Rust reference into a `UFrame`. Test for this in 1C.7.
-- [ ] **1C.3** Define `pub unsafe trait Pod: Copy + 'static {}` and implement for primitives (`u8`, `u16`, `u32`, `u64`, `i8`–`i64`, `usize`, `isize`, `[T; N] where T: Pod`, fixed `#[repr(C)]` POD structs via a derive macro added in 1C.4).
-- [ ] **1C.4** Add a `slopos-ostd-derive/` proc-macro crate with `#[derive(Pod)]` that checks the struct is `#[repr(C)]` and all fields are `Pod`. (This is the only proc-macro we need in Phase 1.)
-- [ ] **1C.5** Implement `IoSlice` / `IoSliceMut` on `USegment` for vectored I/O — still byte-copy, no references.
-- [ ] **1C.6** Define `UFrameError` enum: `OutOfBounds`, `Misaligned`, `Truncated`.
-- [ ] **1C.7** Compile-fail test (`tests/ui/uframe_no_ref.rs` using `trybuild`):
+
+  *(Done — implementation in `slopos-ostd/src/mm/uframe.rs`. Range checks via shared `check_range(offset, len, region)` helper; alignment checks via `check_alignment::<T>(paddr, offset)` operating on the **physical**+offset address (not virt — virt is a constant page-aligned offset away). Internal phys-to-virt pointer comes from a new `slopos-ostd::mm::phys` module: `unsafe fn init_phys_virt_offset(u64)` (one-shot, AcqRel `swap` against `u64::MAX` sentinel — same pattern as `init_meta_slots`, no `slopos-sync::InitFlag` because OSTD must not depend on `slopos-sync`) plus `pub(crate) fn phys_to_virt(Paddr) -> *mut u8`. Phase 1J wires `init_phys_virt_offset` from kernel boot; for now host integration tests install it explicitly.)*
+- [x] **1C.3** Define `pub unsafe trait Pod: Copy + 'static {}` and implement for primitives (`u8`, `u16`, `u32`, `u64`, `i8`–`i64`, `usize`, `isize`, `[T; N] where T: Pod`, fixed `#[repr(C)]` POD structs via a derive macro added in 1C.4). *(Done — `slopos-ostd/src/mm/pod.rs`; manual impls for `u8 u16 u32 u64 u128 i8 i16 i32 i64 i128 usize isize ()` and a blanket `[T; N] where T: Pod`. **Deliberately no `bool`** (only 0x00/0x01 valid), no `f32`/`f64` (NaN bit-pattern equivalence), no `char` (UTF-32 validity), no references, no raw pointers — all flagged with explanatory module-level docs so future "obvious additions" are caught at review. Re-exported at crate root as `slopos_ostd::Pod` so the derive expansion can resolve `::slopos_ostd::Pod`.)*
+- [x] **1C.4** Add a `slopos-ostd-derive/` proc-macro crate with `#[derive(Pod)]` that checks the struct is `#[repr(C)]` and all fields are `Pod`. (This is the only proc-macro we need in Phase 1.) *(Done — new `slopos-ostd-derive/` workspace member with `[lib] proc-macro = true`; deps `syn = { version = "2", features = ["full"] }`, `quote`, `proc-macro2` (added to workspace.dependencies). Derive parses `#[repr(...)]` attributes and **requires** `C` or `transparent`; **rejects `packed`** (its misaligned-read invariants conflict with `read_pod` alignment checks); rejects enums + unions. Field-level `T: ::slopos_ostd::Pod` `where`-bounds added so the type-checker enforces field POD-ness. Output uses fully-qualified paths `::slopos_ostd::Pod` to satisfy the workspace's `warnings = "deny"` lint.)*
+- [x] **1C.5** Implement `IoSlice` / `IoSliceMut` on `USegment` for vectored I/O — still byte-copy, no references. *(Done — exposed as `UIoSlice` / `UIoSliceMut` (renamed from the plan's `IoSlice` to avoid confusion with `std::io::IoSlice`); each is a `(paddr, len_bytes)` descriptor — no `&[u8]` ever crosses the boundary. `USegment::io_slices()` / `io_slices_mut()` return single-element arrays since segments are always physically contiguous; the array shape is future-proofing for scatter/gather lists.)*
+- [x] **1C.6** Define `UFrameError` enum: `OutOfBounds`, `Misaligned`, `Truncated`. *(Done — plus a fourth variant `OutOfMemory` returned from `USegment::from_unused_run` when the per-segment `KVec<Frame<M>>` bookkeeping allocation fails. `Truncated` is reserved for 1E vectored-I/O / partial-segment paths and is unused in 1C.)*
+- [x] **1C.7** Compile-fail test (`tests/ui/uframe_no_ref.rs` using `trybuild`):
   - Attempting `&uframe[0..4]` must not compile.
   - Attempting `uframe.deref()` must not compile.
-- [ ] **1C.8** Unit tests in `slopos-ostd/src/mm/uframe.rs::tests`:
+
+  *(Done — implemented as **embedded `compile_fail` doctests on `UFrame`** rather than via `trybuild`. Three blocks lock in the no-Deref / no-Index / no-`as_slice` discipline; they run under `cargo test --doc -p slopos-ostd` and report as `compile fail ... ok`. Switched away from `trybuild` because its `.stderr` snapshot files are brittle across rustc versions and would impose a maintenance tax on the workspace; the compile-fail doctest pattern gives the same guarantee with zero extra dev-deps.)*
+- [x] **1C.8** Unit tests in `slopos-ostd/src/mm/uframe.rs::tests`:
   - Round-trip `read_pod` / `write_pod` for `u64`, `[u8; 16]`, a `#[derive(Pod)]` struct.
   - Out-of-bounds `read_bytes` returns `OutOfBounds`.
   - Misaligned `read_pod::<u64>` returns `Misaligned`.
-- [ ] **1C.9** Verify: `cargo check -p slopos-ostd` succeeds. `trybuild` test passes.
+
+  *(Done — split across two layers. **Pure-logic** unit tests in `slopos-ostd/src/mm/uframe.rs::tests` exercise `check_range` and `check_alignment` (full page, overrun, arithmetic overflow, aligned, misaligned), `UFrameError` `Eq`, and `size_of::<UFrame<AnonymousMeta>>() == size_of::<*const ()>()` (newtype zero-cost). **Round-trip integration tests** in `slopos-ostd/tests/uframe_round_trip.rs` install scratch meta slots + a phys-virt offset pointing into a leaked `#[repr(C, align(4096))] Backing([u8; PAGE_SIZE * N])` buffer, then exercise `u64`/`[u8; 16]`/`#[derive(Pod)]` round-trips, OOB, Misaligned, and a `USegment` test that crosses a 4 KiB physical-page boundary in a single byte-copy. Test isolation: shared `OnceLock<Mutex<()>>` setup gate so global OSTD state is initialised exactly once and tests serialise inside the binary. Required minor support — `MetaSlot::new_unused()` + `reset_meta_slots_for_test()` + `phys::reset_for_test()` gated behind `#[cfg(any(test, feature = "test-helpers"))]`; `slopos-ostd` declares `[features] test-helpers = []` and a `[dev-dependencies]` self-reference enables the feature for `cargo test`.)*
+- [x] **1C.9** Verify: `cargo check -p slopos-ostd` succeeds. `trybuild` test passes. *(Done — `cargo check -p slopos-ostd` and `cargo check -p slopos-ostd-derive` clean. `cargo test -p slopos-ostd` reports **9 lib + 7 integration + 3 doctest = 19 passes, 0 failures**. `cargo fmt --all -- --check` clean. `just build` finishes ~7.6 s with `check_alloc_dep: OK` and `check_stack_sizes: OK` (no stack frame regressions vs. pre-1C). No `slopos-ostd` consumer outside OSTD has been touched — `mm/`, `core/`, `drivers/` still on the legacy paths; Phase 1J does the consumer migration.)*
 
 ### 1D: `VmSpace` + cursor
 

@@ -7,6 +7,18 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes test-only constructors (e.g. `MetaSlot::new_unused`) needed
+# by host-side integration tests that wire OSTD against scratch memory.
+test-helpers = []
+
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-alloc = { workspace = true }
+slopos-ostd-derive = { workspace = true }
+
+[dev-dependencies]
+# Enables the `test-helpers` feature on the lib whenever a `cargo
+# test` run links against this crate, so integration tests can use
+# `MetaSlot::new_unused` etc. without a separate `--features` flag.
+slopos-ostd = { path = ".", features = ["test-helpers"] }

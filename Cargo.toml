@@ -25,6 +25,7 @@ members = [
   "slop-protocol",
   "slopos-alloc",
   "slopos-ostd",
+  "slopos-ostd-derive",
   "hermetic"
 ]
 resolver = "2"
@@ -60,6 +61,7 @@ slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
 slopos-alloc = { path = "slopos-alloc" }
 slopos-ostd = { path = "slopos-ostd" }
+slopos-ostd-derive = { path = "slopos-ostd-derive" }
   slopos-utils = { path = "utils" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }
@@ -74,3 +76,6 @@ slopos-windowing = { path = "windowing" }
 slopos-hermetic = { path = "hermetic" }
 paste = { version = "1.0", default-features = false }
 x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

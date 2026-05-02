@@ -84,6 +84,23 @@ const _: () = assert!(
 // initialised `M` via `borrow()`.
 unsafe impl Sync for MetaSlot {}
 
+impl MetaSlot {
+    /// Construct a fresh, unused metadata slot. Behind a feature
+    /// gate because production callers obtain slots from the
+    /// boot-allocated `META_SLOTS` array — only host integration
+    /// tests need to materialise scratch slots ad-hoc.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn new_unused() -> Self {
+        Self {
+            ref_count: AtomicU32::new(0),
+            state: AtomicU8::new(META_STATE_UNUSED),
+            _pad0: [0; 3],
+            vtable: AtomicPtr::new(core::ptr::null_mut()),
+            storage: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MetaVtable: type-erased dispatch for Drop.
 // ---------------------------------------------------------------------------
@@ -228,6 +245,17 @@ pub unsafe fn init_meta_slots(slots: *mut MetaSlot, len: usize) {
         "slopos_ostd::mm::frame::init_meta_slots called twice"
     );
     META_SLOTS.len.store(len, Ordering::Release);
+}
+
+/// Test-only reset hook. Allows host integration-test binaries to
+/// discard a previous `init_meta_slots` registration so a fresh
+/// scratch array can be installed. Not exposed in production.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_meta_slots_for_test() {
+    META_SLOTS
+        .base
+        .store(core::ptr::null_mut(), Ordering::Release);
+    META_SLOTS.len.store(0, Ordering::Release);
 }
 
 #[inline]
