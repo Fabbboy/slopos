@@ -516,6 +516,24 @@ boot_init!(
     boot_step_boot_config_fn
 );
 
+fn boot_step_init_phys_virt_offset_fn(_ctx: &mut BootCtx) {
+    let hhdm = boot_get_hhdm_offset();
+    // SAFETY: one-shot init; the limine step has already populated
+    // `hhdm_offset`, and this is the canonical wiring point for the
+    // OSTD phys/virt offset.
+    unsafe {
+        slopos_ostd::mm::phys::init_phys_virt_offset(hhdm);
+    }
+}
+
+boot_init!(
+    BOOT_STEP_INIT_PHYS_VIRT_OFFSET,
+    early_hw,
+    b"phys_virt_offset\0",
+    boot_step_init_phys_virt_offset_fn,
+    flags = boot_init_priority(10)
+);
+
 /// Implementation of kernel_main - called from FFI boundary
 pub fn kernel_main_impl() {
     wl_currency::reset();
@@ -526,6 +544,15 @@ pub fn kernel_main_impl() {
         let pcr = slopos_arch::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
         pcr.init_gdt();
         pcr.install();
+    }
+
+    // Tell OSTD which PML4 was loaded by the bootloader. CR3 is a pure
+    // CPU register read; the value persists for the lifetime of the
+    // kernel since this PML4 holds the canonical kernel mappings.
+    // SAFETY: one-shot init.
+    unsafe {
+        let cr3 = slopos_arch::cpu::control_regs::read_cr3();
+        slopos_ostd::mm::vm_space::register_kernel_master_pml4(slopos_abi::addr::PhysAddr(cr3));
     }
 
     idt::idt_init();
@@ -545,6 +572,7 @@ pub fn kernel_main_impl() {
     // is a `'static` ZST so its registration cannot dangle.
     unsafe {
         slopos_kernel_services::ostd_bridge::register_with_ostd();
+        slopos_mm::io_mem_mapper_shim::register_with_ostd();
     }
 
     serial::write_line("BOOT: entering boot init");

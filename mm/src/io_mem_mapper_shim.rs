@@ -61,6 +61,25 @@ pub struct LegacyIoMemMapperShim;
 
 pub static LEGACY_IO_MEM_MAPPER_SHIM: LegacyIoMemMapperShim = LegacyIoMemMapperShim;
 
+static LEGACY_IO_MEM_MAPPER_DYN: &dyn IoMemMapper = &LEGACY_IO_MEM_MAPPER_SHIM;
+
+/// Install [`LEGACY_IO_MEM_MAPPER_SHIM`] as the OSTD `IoMemMapper`.
+///
+/// Lives here (not in `slopos-kernel-services`) because
+/// `slopos-kernel-services` cannot depend on `slopos-mm` —
+/// `slopos-mm` -> `slopos-utils` -> `slopos-kernel-services` would
+/// close a cycle.
+///
+/// # Safety
+///
+/// Caller must ensure this is invoked exactly once at boot, before
+/// any OSTD `IoMem::map` or `IoMem::new` call runs.
+pub unsafe fn register_with_ostd() {
+    unsafe {
+        slopos_ostd::mm::io_mem::register_io_mem_mapper(&LEGACY_IO_MEM_MAPPER_DYN);
+    }
+}
+
 impl IoMemMapper for LegacyIoMemMapperShim {
     fn map(
         &self,
