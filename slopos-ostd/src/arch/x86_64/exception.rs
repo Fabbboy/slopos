@@ -3,7 +3,7 @@
 //! Provides exception names and classification functions that can be used
 //! by both kernel and test code without depending on the boot crate.
 
-use super::idt::{EXCEPTION_DOUBLE_FAULT, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI};
+use crate::irq::idt::{EXCEPTION_DOUBLE_FAULT, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI};
 
 pub fn exception_is_critical(vector: u8) -> bool {
     matches!(

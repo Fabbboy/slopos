@@ -19,10 +19,10 @@
 //! `boot::smp::ap_entry_rust` on each AP, after SSE/XSAVE are brought up
 //! and before any user-visible work runs.
 
-use super::control_regs::{read_cr4, write_cr4, Cr4Flags};
-use super::cpuid::{
-    cpuid, cpuid_count, CPUID_FEAT_EDX_PGE, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT,
-    CPUID_SEXT_EBX_SMAP, CPUID_SEXT_EBX_SMEP,
+use super::control_regs::{Cr4Flags, read_cr4, write_cr4};
+use crate::arch::x86_64::cpuid::{
+    CPUID_FEAT_EDX_PGE, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_SMAP,
+    CPUID_SEXT_EBX_SMEP, cpuid, cpuid_count,
 };
 
 /// Which supervisor-mode features the current CPU advertises.

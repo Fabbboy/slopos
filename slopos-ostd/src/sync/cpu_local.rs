@@ -31,7 +31,7 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 
 use crate::cpu::preempt::PreemptGuard;
-use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
+use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
 
 #[repr(C, align(64))]
 pub struct CacheAligned<T>(pub T);
@@ -155,7 +155,7 @@ macro_rules! cpu_local {
         $vis static $NAME: $crate::sync::cpu_local::CpuLocal<$ty> = {
             const INIT: $crate::sync::cpu_local::CacheAligned<$ty> =
                 $crate::sync::cpu_local::CacheAligned($init);
-            $crate::sync::cpu_local::CpuLocal::new_with([INIT; ::slopos_arch::pcr::MAX_CPUS])
+            $crate::sync::cpu_local::CpuLocal::new_with([INIT; ::slopos_ostd::cpu::x86_64::pcr::MAX_CPUS])
         };
     };
 }

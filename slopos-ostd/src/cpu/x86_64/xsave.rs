@@ -21,9 +21,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use super::control_regs::{read_cr4, write_cr4, xcr0_write, Cr4Flags, Xcr0Flags};
-use super::cpuid::XsaveFeatures;
-use crate::{klog_debug, klog_info};
+use super::control_regs::{Cr4Flags, Xcr0Flags, read_cr4, write_cr4, xcr0_write};
+use crate::arch::x86_64::cpuid::XsaveFeatures;
 
 // ---------------------------------------------------------------------------
 // Global state (set by BSP `init`, read by APs + task creation)
@@ -146,7 +145,7 @@ pub fn init() -> i32 {
     // 3. Re-query CPUID for the actual save-area size *after* XCR0 is set.
     //    CPUID.0Dh.0:EBX reflects the currently-enabled components.
     // ------------------------------------------------------------------
-    let area_size = super::cpuid::xsave_area_size();
+    let area_size = crate::arch::x86_64::cpuid::xsave_area_size();
     XSAVE_AREA_SIZE.store(area_size, Ordering::Release);
 
     // ------------------------------------------------------------------
@@ -155,23 +154,7 @@ pub fn init() -> i32 {
     XSAVEC_AVAILABLE.store(features.xsavec, Ordering::Release);
     XSAVEOPT_AVAILABLE.store(features.xsaveopt, Ordering::Release);
 
-    // ------------------------------------------------------------------
-    // 5. Log.
-    // ------------------------------------------------------------------
-    klog_info!(
-        "XSAVE: enabled, area size {} bytes, features 0x{:x}",
-        area_size,
-        xcr0.bits(),
-    );
-    klog_debug!(
-        "XSAVE: supported XCR0 0x{:x}, max area {} B, XSAVEC={}, XSAVEOPT={}, XSAVES={}",
-        supported,
-        features.area_size_max,
-        features.xsavec,
-        features.xsaveopt,
-        features.xsaves,
-    );
-
+    let _ = (area_size, supported);
     0
 }
 

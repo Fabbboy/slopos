@@ -40,17 +40,12 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use crate::cpu::preempt::PreemptGuard;
-use crate::mm::{KVec, raw_alloc, raw_dealloc};
-use slopos_arch::pcr::{
+use crate::cpu::x86_64::pcr::{
     MAX_CPUS, apic_id_from_cpu_index, get_cpu_count, get_current_cpu, is_cpu_online,
     send_ipi_to_cpu,
 };
-
-/// IPI vector that nudges a holdout CPU to record a quiescent state.
-///
-/// Mirrors `slopos_arch::arch::idt::RCU_QS_IPI_VECTOR`. Defined here so
-/// OSTD doesn't reach into arch's IDT module for a single constant.
-const RCU_QS_IPI_VECTOR: u8 = 0xFB;
+use crate::irq::idt::RCU_QS_IPI_VECTOR;
+use crate::mm::{KVec, raw_alloc, raw_dealloc};
 
 #[repr(C, align(64))]
 struct QsSlot(AtomicU64);
@@ -171,7 +166,7 @@ fn monotonic_ns() -> u64 {
     if ns > 0 {
         return ns;
     }
-    slopos_arch::tsc::rdtsc()
+    crate::arch::x86_64::tsc::rdtsc()
 }
 
 /// Block until every online CPU has passed through at least one

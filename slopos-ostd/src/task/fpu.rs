@@ -4,7 +4,7 @@
 //! task. Its size is the compile-time maximum across current x86-64
 //! XSAVE features (FXSAVE = 512 B, AVX = 832 B, AVX-512 = 2,688 B) so a
 //! single layout serves every CPU; runtime negotiation via
-//! `slopos_arch::cpu::xsave::active_xcr0()` controls which components
+//! `crate::cpu::x86_64::xsave::active_xcr0()` controls which components
 //! the hardware actually touches.
 
 use core::arch::asm;

@@ -12,6 +12,7 @@
 //! the Asterinas framekernel design.
 
 pub mod idt;
+pub mod interrupt_frame;
 pub mod line;
 
 pub use idt::{
@@ -19,6 +20,7 @@ pub use idt::{
     IdtEntry, IrqEntryGuard, IstPreemptHold, handle_corrupt_iret_frame, register_diagnostic_sink,
     vector_uses_ist,
 };
+pub use interrupt_frame::InterruptFrame;
 pub use line::{
     ALLOC_VECTOR_BASE, ALLOC_VECTOR_END, CallbackHandle, IrqAllocator, IrqContext, IrqError,
     IrqLine, dispatch, register_irq_reserved, shutdown,

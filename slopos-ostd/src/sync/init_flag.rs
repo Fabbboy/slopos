@@ -1,12 +1,60 @@
 //! Atomic boolean init/state flags.
 //!
-//! [`InitFlag`] (re-exported from `slopos-arch`) is the canonical
-//! "has this one-shot init run?" gate. [`StateFlag`] is the toggleable
-//! variant used for runtime state like in-progress shutdown.
+//! [`InitFlag`] is the canonical "has this one-shot init run?" gate.
+//! [`StateFlag`] is the toggleable variant used for runtime state like
+//! in-progress shutdown.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-pub use slopos_arch::InitFlag;
+#[repr(transparent)]
+pub struct InitFlag {
+    flag: AtomicBool,
+}
+
+impl InitFlag {
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            flag: AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    pub fn init_once(&self) -> bool {
+        !self.flag.swap(true, Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn claim(&self) -> bool {
+        self.init_once()
+    }
+
+    #[inline]
+    pub fn is_set(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn is_set_relaxed(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn mark_set(&self) {
+        self.flag.store(true, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn reset(&self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+impl Default for InitFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Atomic flag for tracking in-progress operations.
 ///

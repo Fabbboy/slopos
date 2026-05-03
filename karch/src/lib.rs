@@ -1,17 +1,44 @@
+//! `slopos-arch` is a thin re-export shim over `slopos-ostd`.
+//!
+//! The CPU/arch primitives that used to live in this crate were folded
+//! into `slopos-ostd` so that every kernel `unsafe` block lives in one
+//! place. This crate exists only to preserve the historical
+//! `slopos_arch::*` import paths used by ~60 consumer files. New code
+//! should import from `slopos_ostd` directly.
+
 #![no_std]
-#![feature(sync_unsafe_cell)]
-#![allow(unsafe_op_in_unsafe_fn)]
 
-pub mod arch;
-pub mod cpu;
-mod init_flag;
-mod interrupt_frame;
-pub mod pcr;
-pub mod tsc;
+pub mod pcr {
+    pub use slopos_ostd::cpu::x86_64::pcr::*;
+}
 
-pub use init_flag::InitFlag;
-pub use interrupt_frame::InterruptFrame;
-pub use pcr::{
+pub mod cpu {
+    pub use slopos_ostd::arch::x86_64::cpuid::*;
+    pub use slopos_ostd::arch::x86_64::msr::*;
+    pub use slopos_ostd::arch::x86_64::{cpuid, msr};
+    pub use slopos_ostd::cpu::x86_64::*;
+    pub use slopos_ostd::cpu::x86_64::{
+        apic_msr, control_regs, core, interrupts, rdrand, security, sse, stack, tlb, xsave,
+    };
+}
+
+pub mod arch {
+    pub use slopos_ostd::arch::x86_64::gdt::*;
+    pub use slopos_ostd::arch::x86_64::{exception, gdt};
+
+    pub mod idt {
+        pub use slopos_ostd::irq::idt::*;
+    }
+}
+
+pub mod tsc {
+    pub use slopos_ostd::arch::x86_64::tsc::*;
+}
+
+pub use slopos_ostd::irq::interrupt_frame::InterruptFrame;
+pub use slopos_ostd::sync::init_flag::InitFlag;
+
+pub use slopos_ostd::cpu::x86_64::pcr::{
     apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
     get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,
     mark_cpu_online, MAX_CPUS,

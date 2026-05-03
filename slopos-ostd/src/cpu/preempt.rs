@@ -31,8 +31,8 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
-use slopos_arch::cpu::{restore_flags, save_flags_cli};
-use slopos_arch::pcr;
+use crate::cpu::x86_64::pcr;
+use crate::cpu::x86_64::{restore_flags, save_flags_cli};
 
 // ---------------------------------------------------------------------------
 // PreemptBackend trait.
@@ -262,7 +262,7 @@ pub(crate) fn irq_entry_leave_quiet() {
 // These complement [`DisabledPreemptGuard`] by carrying deferred-reschedule
 // callback semantics: when a `PreemptGuard` drop sees the count returning to
 // zero with `reschedule_pending` set, it invokes a registered callback. They
-// run against the kernel's per-CPU PCR storage directly via `slopos_arch::pcr`
+// run against the kernel's per-CPU PCR storage directly via `crate::cpu::x86_64::pcr`
 // rather than through [`PreemptBackend`], because the kernel call sites
 // observe the PCR field directly.
 // ---------------------------------------------------------------------------

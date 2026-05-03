@@ -6,9 +6,9 @@
 
 use core::arch::asm;
 
-use super::cpuid::{
-    cpuid, cpuid_count, CPUID_FEAT_ECX_RDRAND, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT,
-    CPUID_SEXT_EBX_RDSEED,
+use crate::arch::x86_64::cpuid::{
+    CPUID_FEAT_ECX_RDRAND, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_RDSEED,
+    cpuid, cpuid_count,
 };
 
 /// Check if the CPU supports the RDRAND instruction (CPUID.1:ECX bit 30).

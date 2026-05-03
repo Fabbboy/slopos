@@ -20,8 +20,8 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use crate::cpu::preempt::PreemptGuard;
+use crate::cpu::x86_64 as cpu;
 use crate::sync::lock_tracking;
-use slopos_arch::cpu;
 
 /// Ticket-lock mutex that disables interrupts AND preemption while held.
 /// Essential for kernel data accessed from both normal and interrupt contexts.

@@ -25,7 +25,7 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
 
 use crate::cpu::preempt::PreemptGuard;
-use slopos_arch::cpu;
+use crate::cpu::x86_64 as cpu;
 
 /// A sequence lock protecting a small `Copy` value.
 ///

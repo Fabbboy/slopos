@@ -25,7 +25,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
+use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
 
 use super::cpu_local::CacheAligned;
 

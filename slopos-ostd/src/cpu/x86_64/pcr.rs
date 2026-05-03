@@ -19,10 +19,10 @@ use core::cell::SyncUnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use crate::arch::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
-use crate::cpu::msr::Msr;
+use crate::arch::x86_64::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
+use crate::arch::x86_64::msr::Msr;
 
-use crate::InitFlag;
+use crate::sync::init_flag::InitFlag;
 
 // ==================== CONSTANTS ====================
 
@@ -245,8 +245,8 @@ impl ProcessorControlRegion {
         );
 
         let self_addr = self as *mut _ as u64;
-        crate::cpu::write_msr(Msr::GS_BASE, self_addr);
-        crate::cpu::write_msr(Msr::KERNEL_GS_BASE, self_addr);
+        crate::arch::x86_64::msr::write_msr(Msr::GS_BASE, self_addr);
+        crate::arch::x86_64::msr::write_msr(Msr::KERNEL_GS_BASE, self_addr);
 
         mark_gs_base_set();
     }
@@ -560,11 +560,7 @@ pub fn get_pcr(cpu_id: usize) -> Option<&'static ProcessorControlRegion> {
     }
     unsafe {
         let ptr = (*ALL_PCRS.get()).0[cpu_id];
-        if ptr.is_null() {
-            None
-        } else {
-            Some(&*ptr)
-        }
+        if ptr.is_null() { None } else { Some(&*ptr) }
     }
 }
 
@@ -577,11 +573,7 @@ pub unsafe fn get_pcr_mut(cpu_id: usize) -> Option<&'static mut ProcessorControl
         return None;
     }
     let ptr = (*ALL_PCRS.get()).0[cpu_id];
-    if ptr.is_null() {
-        None
-    } else {
-        Some(&mut *ptr)
-    }
+    if ptr.is_null() { None } else { Some(&mut *ptr) }
 }
 
 /// Get the number of initialized PCRs (i.e. CPU count).

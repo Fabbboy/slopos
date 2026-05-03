@@ -9,6 +9,4 @@ test = false
 doctest = false
 
 [dependencies]
-bitflags.workspace = true
-slopos-abi = { path = "../abi" }
-x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }
+slopos-ostd = { path = "../slopos-ostd" }

@@ -1,9 +1,10 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 pub mod apic_msr;
 pub mod control_regs;
 pub mod core;
-pub mod cpuid;
 pub mod interrupts;
-pub mod msr;
+pub mod pcr;
 pub mod rdrand;
 pub mod security;
 pub mod sse;
@@ -14,11 +15,9 @@ pub mod xsave;
 pub use self::core::*;
 pub use apic_msr::*;
 pub use control_regs::*;
-pub use cpuid::*;
 pub use interrupts::*;
-pub use msr::*;
+pub use rdrand::*;
+pub use security::*;
 pub use sse::*;
 pub use stack::*;
 pub use tlb::*;
-// Note: xsave is NOT glob-exported — use `cpu::xsave::*` to avoid name
-// collisions with the cpuid free functions (`xsave_area_size`, etc.).
