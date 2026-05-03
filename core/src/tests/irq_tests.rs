@@ -1,248 +1,285 @@
-//! IRQ dispatch tests - targeting untested edge cases and error paths.
+//! Kernel-side IRQ surface tests.
+//!
+//! Exercises:
+//!   - the residual core::irq book-keeping (route, mask, init, counters)
+//!   - the OSTD IrqAllocator surface that drivers now consume
+//!   - the closure-callback dispatch path
 
-use core::cell::SyncUnsafeCell;
-use core::ffi::{c_char, c_void};
-use core::ptr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use slopos_arch::InterruptFrame;
-use slopos_arch::arch::idt::IRQ_BASE_VECTOR;
+use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext, IrqError, dispatch};
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
-use slopos_utils::klog_info;
 
 use crate::irq::{
-    self, IRQ_LINES, IrqStats, disable_line, enable_line, get_irq_route, get_stats, is_initialized,
-    is_masked, mask_irq_line, register_handler, unmask_irq_line, unregister_handler,
+    IRQ_LINES, disable_line, enable_line, get_irq_route, get_keyboard_event_counter,
+    get_timer_ticks, increment_keyboard_events, increment_timer_ticks, is_initialized, is_masked,
+    mask_irq_line, set_irq_route, unmask_irq_line,
 };
 
-pub fn test_irq_register_invalid_line() -> TestResult {
-    extern "C" fn dummy_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
+// ---------------------------------------------------------------------------
+// Route + mask book-keeping
+// ---------------------------------------------------------------------------
 
-    let result = register_handler(255, Some(dummy_handler), ptr::null_mut(), ptr::null());
+pub fn test_irq_route_set_get_round_trip() -> TestResult {
+    set_irq_route(5, 42);
+    let r = get_irq_route(5).expect("in-range route");
     assert_test!(
-        result != 0,
-        "Accepted registration for invalid IRQ line 255"
+        r.via_ioapic,
+        "via_ioapic should be true after set_irq_route"
     );
-
-    let result2 = register_handler(
-        IRQ_LINES as u8,
-        Some(dummy_handler),
-        ptr::null_mut(),
-        ptr::null(),
-    );
-    assert_test!(
-        result2 != 0,
-        "Accepted registration for IRQ line at boundary"
-    );
-
+    assert_test!(r.gsi == 42, "GSI mismatch");
     TestResult::Pass
 }
 
-pub fn test_irq_register_null_handler() -> TestResult {
-    let result = register_handler(5, None, ptr::null_mut(), ptr::null());
-
-    if result != 0 {
-        klog_info!("IRQ_TEST: Registering None handler failed (may be intentional)");
-    }
-
-    unregister_handler(5);
-    TestResult::Pass
-}
-
-pub fn test_irq_double_register() -> TestResult {
-    extern "C" fn handler1(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
-    extern "C" fn handler2(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
-
-    let r1 = register_handler(
-        6,
-        Some(handler1),
-        ptr::null_mut(),
-        b"handler1\0".as_ptr() as *const c_char,
-    );
-    assert_test!(r1 == 0, "First registration failed");
-
-    let _r2 = register_handler(
-        6,
-        Some(handler2),
-        ptr::null_mut(),
-        b"handler2\0".as_ptr() as *const c_char,
-    );
-
-    unregister_handler(6);
-    TestResult::Pass
-}
-
-pub fn test_irq_unregister_never_registered() -> TestResult {
-    unregister_handler(7);
-    unregister_handler(7);
-    TestResult::Pass
-}
-
-pub fn test_irq_stats_invalid_line() -> TestResult {
-    let mut stats = IrqStats {
-        count: 0xDEAD,
-        last_timestamp: 0xBEEF,
-    };
-
-    let result = get_stats(255, &mut stats);
-    assert_test!(result != 0, "get_stats succeeded for invalid IRQ line 255");
-
-    let result2 = get_stats(IRQ_LINES as u8, &mut stats);
-    assert_test!(result2 != 0, "get_stats succeeded for boundary IRQ line");
-
-    TestResult::Pass
-}
-
-pub fn test_irq_stats_null_output() -> TestResult {
-    let result = get_stats(0, ptr::null_mut());
-    assert_test!(result != 0, "get_stats succeeded with null output");
-    TestResult::Pass
-}
-
-pub fn test_irq_mask_unmask_invalid() -> TestResult {
-    mask_irq_line(255);
-    unmask_irq_line(255);
-    mask_irq_line(IRQ_LINES as u8 + 10);
+pub fn test_irq_route_invalid_line() -> TestResult {
+    let r = get_irq_route(IRQ_LINES as u8);
+    assert_test!(r.is_none(), "Out-of-range get_irq_route should return None");
+    set_irq_route(IRQ_LINES as u8, 99); // must not panic
     TestResult::Pass
 }
 
 pub fn test_irq_is_masked_boundary() -> TestResult {
-    let masked = is_masked(255);
-    assert_test!(masked, "Invalid IRQ line should report as masked");
-    TestResult::Pass
-}
-
-pub fn test_irq_route_invalid() -> TestResult {
-    let route = get_irq_route(255);
-    assert_test!(route.is_none(), "Got route for invalid IRQ line");
-    TestResult::Pass
-}
-
-pub fn test_irq_enable_disable_invalid() -> TestResult {
-    enable_line(255);
-    disable_line(255);
-    enable_line(IRQ_LINES as u8 + 5);
-    disable_line(IRQ_LINES as u8 + 5);
-    TestResult::Pass
-}
-
-pub fn test_irq_initialized_flag() -> TestResult {
-    let initialized = is_initialized();
-    if !initialized {
-        klog_info!("IRQ_TEST: WARNING - IRQ system not initialized when tests run");
-    }
-    TestResult::Pass
-}
-
-pub fn test_irq_rapid_register_unregister() -> TestResult {
-    extern "C" fn rapid_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
-
-    for _ in 0..100 {
-        let _ = register_handler(8, Some(rapid_handler), ptr::null_mut(), ptr::null());
-        unregister_handler(8);
-    }
-    TestResult::Pass
-}
-
-pub fn test_irq_all_lines_mask_state() -> TestResult {
-    for irq in 0..IRQ_LINES as u8 {
-        let _ = is_masked(irq);
-    }
-    TestResult::Pass
-}
-
-pub fn test_irq_stats_valid_line() -> TestResult {
-    let mut stats = IrqStats {
-        count: 0,
-        last_timestamp: 0,
-    };
-
-    let result = get_stats(0, &mut stats);
-    assert_test!(result == 0, "get_stats failed for valid IRQ line 0");
-    TestResult::Pass
-}
-
-pub fn test_irq_context_pointer_preserved() -> TestResult {
-    static CONTEXT_VALUE: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
-    static HANDLER_CALLED: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
-
-    extern "C" fn context_handler(_: u8, _: *mut InterruptFrame, ctx: *mut c_void) {
-        unsafe {
-            *HANDLER_CALLED.get() = true;
-            if !ctx.is_null() {
-                *CONTEXT_VALUE.get() = *(ctx as *const u64);
-            }
-        }
-    }
-
-    let test_value: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
-    let ctx_ptr = &test_value as *const u64 as *mut c_void;
-
-    let result = register_handler(9, Some(context_handler), ctx_ptr, ptr::null());
-    assert_test!(result == 0, "Failed to register context test handler");
-
-    unregister_handler(9);
-    TestResult::Pass
-}
-
-pub fn test_irq_handler_with_long_name() -> TestResult {
-    extern "C" fn long_name_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
-
-    let long_name =
-        b"this_is_a_very_long_handler_name_that_might_cause_issues_if_not_handled_properly\0";
-
-    let _result = register_handler(
-        10,
-        Some(long_name_handler),
-        ptr::null_mut(),
-        long_name.as_ptr() as *const c_char,
+    assert_test!(
+        is_masked(IRQ_LINES as u8),
+        "Out-of-range is_masked must return true (refusal)"
     );
+    assert_test!(
+        is_masked(255),
+        "Vector 255 is way out of range, must report masked"
+    );
+    TestResult::Pass
+}
 
-    unregister_handler(10);
+pub fn test_irq_mask_unmask_no_route() -> TestResult {
+    // Pick an IRQ line that the kernel boot path doesn't program.
+    // (PS/2 init programs lines 1, 4, 12; we pick 7 which is unused.)
+    unmask_irq_line(7);
+    assert_test!(!is_masked(7), "Line should be unmasked");
+    mask_irq_line(7);
+    assert_test!(is_masked(7), "Line should be masked");
+    TestResult::Pass
+}
+
+pub fn test_irq_enable_disable_invalid_line() -> TestResult {
+    enable_line(IRQ_LINES as u8); // must not panic
+    disable_line(IRQ_LINES as u8); // must not panic
+    TestResult::Pass
+}
+
+pub fn test_irq_initialized_flag_true() -> TestResult {
+    assert_test!(is_initialized(), "is_initialized should always return true");
+    TestResult::Pass
+}
+
+// ---------------------------------------------------------------------------
+// Counters
+// ---------------------------------------------------------------------------
+
+pub fn test_irq_timer_ticks_increment() -> TestResult {
+    let before = get_timer_ticks();
+    increment_timer_ticks();
+    increment_timer_ticks();
+    increment_timer_ticks();
+    let after = get_timer_ticks();
+    assert_test!(after >= before + 3, "Timer tick counter must increment");
+    TestResult::Pass
+}
+
+pub fn test_irq_keyboard_events_increment() -> TestResult {
+    let before = get_keyboard_event_counter();
+    increment_keyboard_events();
+    increment_keyboard_events();
+    let after = get_keyboard_event_counter();
+    assert_test!(after >= before + 2, "Keyboard event counter must increment");
     TestResult::Pass
 }
 
 pub fn test_irq_timer_ticks_accessible() -> TestResult {
-    let ticks = irq::get_timer_ticks();
-    let _ = ticks;
+    let _ = get_timer_ticks();
     TestResult::Pass
 }
 
 pub fn test_irq_keyboard_events_accessible() -> TestResult {
-    let events = irq::get_keyboard_event_counter();
-    let _ = events;
+    let _ = get_keyboard_event_counter();
     TestResult::Pass
 }
 
 pub fn test_irq_vector_calculation() -> TestResult {
-    for irq in 0..IRQ_LINES as u8 {
-        let expected_vector = (IRQ_BASE_VECTOR as u32) + (irq as u32);
-        assert_test!(
-            expected_vector <= 255,
-            "IRQ {} would produce invalid vector {}",
-            irq,
-            expected_vector
-        );
-    }
+    assert_test!(
+        IRQ_BASE_VECTOR.wrapping_add(0) == 32,
+        "IRQ0 maps to vector 32"
+    );
+    assert_test!(
+        IRQ_BASE_VECTOR.wrapping_add(1) == 33,
+        "IRQ1 (keyboard) maps to vector 33"
+    );
+    assert_test!(
+        IRQ_BASE_VECTOR.wrapping_add(12) == 44,
+        "IRQ12 (mouse) maps to vector 44"
+    );
+    assert_test!(
+        IRQ_BASE_VECTOR.wrapping_add(15) == 47,
+        "IRQ15 maps to vector 47"
+    );
     TestResult::Pass
 }
 
-slopos_testing::stest!(name = test_irq_register_invalid_line, suite = irq);
-slopos_testing::stest!(name = test_irq_register_null_handler, suite = irq);
-slopos_testing::stest!(name = test_irq_double_register, suite = irq);
-slopos_testing::stest!(name = test_irq_unregister_never_registered, suite = irq);
-slopos_testing::stest!(name = test_irq_stats_invalid_line, suite = irq);
-slopos_testing::stest!(name = test_irq_stats_null_output, suite = irq);
-slopos_testing::stest!(name = test_irq_mask_unmask_invalid, suite = irq);
+// ---------------------------------------------------------------------------
+// OSTD IrqAllocator + reserve_specific (the new driver-facing surface)
+// ---------------------------------------------------------------------------
+
+pub fn test_ostd_alloc_returns_in_range() -> TestResult {
+    let line = IrqAllocator::alloc().expect("alloc");
+    let v = line.vector();
+    assert_test!(v >= 32, "Allocated vector below 32");
+    assert_test!(v < 224, "Allocated vector at or above 224");
+    TestResult::Pass
+}
+
+pub fn test_ostd_alloc_distinct_vectors() -> TestResult {
+    let a = IrqAllocator::alloc().expect("a");
+    let b = IrqAllocator::alloc().expect("b");
+    assert_test!(a.vector() != b.vector(), "Two allocs returned same vector");
+    TestResult::Pass
+}
+
+pub fn test_ostd_alloc_drop_releases() -> TestResult {
+    let v = {
+        let line = IrqAllocator::alloc().expect("alloc");
+        line.vector()
+    };
+    // After drop the bit is freed; we don't assert exact reuse (other
+    // tests run in parallel suite ordering) but the basic Drop path must
+    // not panic.
+    assert_test!(v >= 32, "vector still in range");
+    TestResult::Pass
+}
+
+pub fn test_ostd_reserve_specific_double_claim_refused() -> TestResult {
+    // Pick a vector that's almost certainly free (high MSI range).
+    let v = 200u8;
+    let line = match IrqAllocator::reserve_specific(v) {
+        Ok(l) => l,
+        Err(_) => return TestResult::Pass, // already taken — test inert
+    };
+    let r = IrqAllocator::reserve_specific(v);
+    assert_test!(
+        matches!(r, Err(IrqError::AlreadyRegistered)),
+        "Double reserve_specific must fail with AlreadyRegistered"
+    );
+    drop(line);
+    TestResult::Pass
+}
+
+pub fn test_ostd_reserve_specific_out_of_range() -> TestResult {
+    assert_test!(
+        matches!(IrqAllocator::reserve_specific(31), Err(IrqError::Exhausted)),
+        "vector 31 is below ALLOC_VECTOR_BASE"
+    );
+    assert_test!(
+        matches!(
+            IrqAllocator::reserve_specific(224),
+            Err(IrqError::Exhausted)
+        ),
+        "vector 224 is at ALLOC_VECTOR_END"
+    );
+    TestResult::Pass
+}
+
+// ---------------------------------------------------------------------------
+// OSTD register_callback + dispatch
+// ---------------------------------------------------------------------------
+
+static DISPATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+pub fn test_ostd_register_callback_then_dispatch() -> TestResult {
+    let line = IrqAllocator::alloc().expect("alloc");
+    let v = line.vector();
+    DISPATCH_COUNTER.store(0, Ordering::SeqCst);
+    let handle = line
+        .register_callback(|ctx: &IrqContext<'_>| {
+            assert!(ctx.error_code() == 0xCAFE);
+            DISPATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("register");
+    dispatch(v, 0xCAFE);
+    dispatch(v, 0xCAFE);
+    drop(handle);
+    drop(line);
+    assert_test!(
+        DISPATCH_COUNTER.load(Ordering::SeqCst) == 2,
+        "Callback should have fired twice"
+    );
+    TestResult::Pass
+}
+
+pub fn test_ostd_double_register_callback_errors() -> TestResult {
+    let line = IrqAllocator::alloc().expect("alloc");
+    let _h = line.register_callback(|_| {}).expect("first");
+    let r = line.register_callback(|_| {});
+    assert_test!(
+        matches!(r, Err(IrqError::AlreadyRegistered)),
+        "Second register_callback on same line must fail"
+    );
+    TestResult::Pass
+}
+
+pub fn test_ostd_handle_drop_clears_dispatch() -> TestResult {
+    let line = IrqAllocator::alloc().expect("alloc");
+    let v = line.vector();
+    DISPATCH_COUNTER.store(0, Ordering::SeqCst);
+    {
+        let _h = line
+            .register_callback(|_| {
+                DISPATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("register");
+    } // _h drops here -> clears dispatch slot
+    dispatch(v, 0);
+    assert_test!(
+        DISPATCH_COUNTER.load(Ordering::SeqCst) == 0,
+        "Dispatch slot should have been cleared on handle drop"
+    );
+    TestResult::Pass
+}
+
+pub fn test_ostd_dispatch_to_unregistered_vector_is_noop() -> TestResult {
+    // Pick a vector with no registered callback. Dispatch must be a no-op
+    // (no panic, no UB).
+    dispatch(123, 0);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_irq_route_set_get_round_trip, suite = irq);
+slopos_testing::stest!(name = test_irq_route_invalid_line, suite = irq);
 slopos_testing::stest!(name = test_irq_is_masked_boundary, suite = irq);
-slopos_testing::stest!(name = test_irq_route_invalid, suite = irq);
-slopos_testing::stest!(name = test_irq_enable_disable_invalid, suite = irq);
-slopos_testing::stest!(name = test_irq_initialized_flag, suite = irq);
-slopos_testing::stest!(name = test_irq_rapid_register_unregister, suite = irq);
-slopos_testing::stest!(name = test_irq_all_lines_mask_state, suite = irq);
-slopos_testing::stest!(name = test_irq_stats_valid_line, suite = irq);
-slopos_testing::stest!(name = test_irq_context_pointer_preserved, suite = irq);
-slopos_testing::stest!(name = test_irq_handler_with_long_name, suite = irq);
+slopos_testing::stest!(name = test_irq_mask_unmask_no_route, suite = irq);
+slopos_testing::stest!(name = test_irq_enable_disable_invalid_line, suite = irq);
+slopos_testing::stest!(name = test_irq_initialized_flag_true, suite = irq);
+slopos_testing::stest!(name = test_irq_timer_ticks_increment, suite = irq);
+slopos_testing::stest!(name = test_irq_keyboard_events_increment, suite = irq);
 slopos_testing::stest!(name = test_irq_timer_ticks_accessible, suite = irq);
 slopos_testing::stest!(name = test_irq_keyboard_events_accessible, suite = irq);
 slopos_testing::stest!(name = test_irq_vector_calculation, suite = irq);
+slopos_testing::stest!(name = test_ostd_alloc_returns_in_range, suite = irq);
+slopos_testing::stest!(name = test_ostd_alloc_distinct_vectors, suite = irq);
+slopos_testing::stest!(name = test_ostd_alloc_drop_releases, suite = irq);
+slopos_testing::stest!(
+    name = test_ostd_reserve_specific_double_claim_refused,
+    suite = irq
+);
+slopos_testing::stest!(name = test_ostd_reserve_specific_out_of_range, suite = irq);
+slopos_testing::stest!(
+    name = test_ostd_register_callback_then_dispatch,
+    suite = irq
+);
+slopos_testing::stest!(
+    name = test_ostd_double_register_callback_errors,
+    suite = irq
+);
+slopos_testing::stest!(name = test_ostd_handle_drop_clears_dispatch, suite = irq);
+slopos_testing::stest!(
+    name = test_ostd_dispatch_to_unregistered_vector_is_noop,
+    suite = irq
+);

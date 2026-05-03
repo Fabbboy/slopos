@@ -28,6 +28,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cpu::preempt;
 
+// Inline the OSTD-side IDT entry-point asm stubs. Gated on x86_64 +
+// kernel build (i.e. not host unit tests): the stubs reference Rust
+// symbols `common_exception_handler` / `isr_iret_frame_corrupt` that
+// only exist in the kernel link, plus the `msi_vector_table` rodata
+// array consumed by `install_default_handlers`.
+#[cfg(all(target_arch = "x86_64", not(test)))]
+core::arch::global_asm!(include_str!("asm/handlers.s"), options(att_syntax));
+
 // ---------------------------------------------------------------------------
 // Architectural constants and gate descriptor.
 // ---------------------------------------------------------------------------
@@ -276,6 +284,189 @@ impl IdtBuilder {
 impl Default for IdtBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// install_default_handlers — wire OSTD's asm stubs into the IDT.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(target_arch = "x86_64", not(test)))]
+impl IdtBuilder {
+    /// Install the OSTD-supplied default exception, syscall-trap, IPI,
+    /// LAPIC-timer, IRQ, and MSI gates. The asm stubs live in
+    /// `slopos-ostd/src/irq/asm/handlers.s`. Boot configures IST slots
+    /// (via [`set_ist`]) and loads the IDT (via [`load`]) separately.
+    ///
+    /// All gates use `KERNEL_CODE` (selector 0x08). The syscall trap
+    /// gate is DPL=3 (user-reachable); every other gate is DPL=0.
+    /// Vectors 9 and 15 are reserved (Intel SDM); they remain zeroed.
+    ///
+    /// [`set_ist`]: IdtBuilder::set_ist
+    /// [`load`]: IdtBuilder::load
+    pub fn install_default_handlers(&self) {
+        unsafe extern "C" {
+            // Exception entries (vectors 0..=19, except reserved 9 and 15).
+            fn isr0();
+            fn isr1();
+            fn isr2();
+            fn isr3();
+            fn isr4();
+            fn isr5();
+            fn isr6();
+            fn isr7();
+            fn isr8();
+            fn isr10();
+            fn isr11();
+            fn isr12();
+            fn isr13();
+            fn isr14();
+            fn isr16();
+            fn isr17();
+            fn isr18();
+            fn isr19();
+            // Syscall trap-gate (vector 0x80).
+            fn isr128();
+            // IPI / spurious / timer custom stubs.
+            fn isr_reschedule_ipi();
+            fn isr_rcu_qs_ipi();
+            fn isr_luf_drain_ipi();
+            fn isr_tlb_shootdown();
+            fn isr_shutdown_ipi();
+            fn isr_spurious();
+            fn isr_lapic_timer();
+            // Legacy IRQ stubs (vectors 32..=47).
+            fn irq0();
+            fn irq1();
+            fn irq2();
+            fn irq3();
+            fn irq4();
+            fn irq5();
+            fn irq6();
+            fn irq7();
+            fn irq8();
+            fn irq9();
+            fn irq10();
+            fn irq11();
+            fn irq12();
+            fn irq13();
+            fn irq14();
+            fn irq15();
+            // MSI stub address table.
+            static msi_vector_table: [u64; MSI_VECTOR_COUNT];
+        }
+
+        let cs = crate::arch::x86_64::gdt::SegmentSelector::KERNEL_CODE.0;
+
+        #[inline(always)]
+        fn fp(p: unsafe extern "C" fn()) -> u64 {
+            p as *const () as u64
+        }
+
+        // Architectural exception vectors (0..=19, minus reserved 9 and 15).
+        // BP (3) and OF (4) are trap gates; the rest are interrupt gates.
+        self.set_gate(EXCEPTION_DIVIDE_ERROR, fp(isr0), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_DEBUG, fp(isr1), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_NMI, fp(isr2), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_BREAKPOINT, fp(isr3), cs, IDT_GATE_TRAP);
+        self.set_gate(EXCEPTION_OVERFLOW, fp(isr4), cs, IDT_GATE_TRAP);
+        self.set_gate(EXCEPTION_BOUND_RANGE, fp(isr5), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_INVALID_OPCODE, fp(isr6), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_DEVICE_NOT_AVAIL, fp(isr7), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_DOUBLE_FAULT, fp(isr8), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_INVALID_TSS, fp(isr10), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(
+            EXCEPTION_SEGMENT_NOT_PRES,
+            fp(isr11),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+        self.set_gate(EXCEPTION_STACK_FAULT, fp(isr12), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(
+            EXCEPTION_GENERAL_PROTECTION,
+            fp(isr13),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+        self.set_gate(EXCEPTION_PAGE_FAULT, fp(isr14), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_FPU_ERROR, fp(isr16), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_ALIGNMENT_CHECK, fp(isr17), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(EXCEPTION_MACHINE_CHECK, fp(isr18), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(
+            EXCEPTION_SIMD_FP_EXCEPTION,
+            fp(isr19),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+
+        // Legacy IOAPIC IRQ gates (vectors 32..=47).
+        self.set_gate(32, fp(irq0), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(33, fp(irq1), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(34, fp(irq2), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(35, fp(irq3), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(36, fp(irq4), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(37, fp(irq5), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(38, fp(irq6), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(39, fp(irq7), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(40, fp(irq8), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(41, fp(irq9), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(42, fp(irq10), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(43, fp(irq11), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(44, fp(irq12), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(45, fp(irq13), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(46, fp(irq14), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(47, fp(irq15), cs, IDT_GATE_INTERRUPT);
+
+        // Syscall trap gate (vector 0x80, DPL=3).
+        self.set_gate_priv(SYSCALL_VECTOR, fp(isr128), cs, IDT_GATE_TRAP, 3);
+
+        // IPIs, LAPIC timer, shutdown, spurious.
+        self.set_gate(
+            RESCHEDULE_IPI_VECTOR,
+            fp(isr_reschedule_ipi),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+        self.set_gate(
+            RCU_QS_IPI_VECTOR,
+            fp(isr_rcu_qs_ipi),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+        self.set_gate(
+            LUF_DRAIN_IPI_VECTOR,
+            fp(isr_luf_drain_ipi),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+        self.set_gate(
+            TLB_SHOOTDOWN_VECTOR,
+            fp(isr_tlb_shootdown),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+        self.set_gate(0xFE, fp(isr_shutdown_ipi), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(0xFF, fp(isr_spurious), cs, IDT_GATE_INTERRUPT);
+        self.set_gate(
+            LAPIC_TIMER_VECTOR,
+            fp(isr_lapic_timer),
+            cs,
+            IDT_GATE_INTERRUPT,
+        );
+
+        // MSI vectors (48..224). Skip SYSCALL_VECTOR which sits inside
+        // this range and gets its own DPL=3 trap gate above.
+        // SAFETY: msi_vector_table is a 176-entry rodata array emitted
+        // by handlers.s; the asm guarantees i < MSI_VECTOR_COUNT.
+        unsafe {
+            for i in 0..MSI_VECTOR_COUNT {
+                let vector = MSI_VECTOR_BASE.wrapping_add(i as u8);
+                if vector == SYSCALL_VECTOR {
+                    continue;
+                }
+                self.set_gate(vector, msi_vector_table[i], cs, IDT_GATE_INTERRUPT);
+            }
+        }
     }
 }
 

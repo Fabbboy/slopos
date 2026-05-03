@@ -3,7 +3,6 @@ use core::ffi::{c_char, c_int, c_void};
 use slopos_arch::InterruptFrame;
 
 pub type DriverTaskHandle = *mut c_void;
-pub type DriverIrqHandler = extern "C" fn(u8, *mut InterruptFrame, *mut c_void);
 
 pub const LEGACY_IRQ_TIMER: u8 = 0;
 pub const LEGACY_IRQ_KEYBOARD: u8 = 1;
@@ -45,22 +44,10 @@ slopos_service_core::define_service! {
         irq_init();
         irq_set_route(irq_line: u8, gsi: u32);
         irq_is_masked(irq_line: u8) -> bool;
-        @no_wrapper irq_register_handler(irq_line: u8, handler: Option<DriverIrqHandler>, context: *mut c_void, name: *const c_char) -> i32;
         irq_enable_line(irq_line: u8);
         irq_disable_line(irq_line: u8);
         irq_get_timer_ticks() -> u64;
         irq_increment_timer_ticks();
         irq_increment_keyboard_events();
     }
-}
-
-/// Manual wrapper for the `@no_wrapper` service method.
-#[inline(always)]
-pub fn irq_register_handler(
-    irq_line: u8,
-    handler: Option<DriverIrqHandler>,
-    context: *mut c_void,
-    name: *const c_char,
-) -> i32 {
-    (driver_runtime_services().irq_register_handler)(irq_line, handler, context, name)
 }

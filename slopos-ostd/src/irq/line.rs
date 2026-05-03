@@ -97,19 +97,63 @@ impl AtomicBitmap {
         self.words[w].fetch_and(!mask, Ordering::AcqRel);
     }
 
-    /// Atomically claim the first clear bit in 0..ALLOC_RANGE. Uses
-    /// a CAS retry loop per word; returns the bit index or `None` if
-    /// no clear bits exist.
-    fn alloc(&self) -> Option<usize> {
+    /// Atomically claim a specific bit. Returns `true` if the bit was
+    /// clear and is now set; `false` if the bit was already set.
+    fn try_set(&self, bit: usize) -> bool {
+        if bit >= ALLOC_RANGE {
+            return false;
+        }
+        let w = bit >> 6;
+        let mask = 1u64 << (bit & 63);
+        loop {
+            let cur = self.words[w].load(Ordering::Acquire);
+            if cur & mask != 0 {
+                return false;
+            }
+            if self.words[w]
+                .compare_exchange(cur, cur | mask, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    /// Atomically claim the first clear bit in `start_bit..ALLOC_RANGE`.
+    /// Uses a CAS retry loop per word; returns the bit index or `None`
+    /// if no clear bits exist in the requested range.
+    ///
+    /// `start_bit` lets `IrqAllocator::alloc()` skip the legacy
+    /// IOAPIC-pinned vectors (32..48) so dynamic allocations only
+    /// land in the MSI range (48..224). Vectors below `start_bit`
+    /// remain claimable through `IrqAllocator::reserve_specific`.
+    fn alloc_from(&self, start_bit: usize) -> Option<usize> {
         for (w_idx, word) in self.words.iter().enumerate() {
+            // Mask out bits below `start_bit` so trailing_zeros never
+            // picks one. For words entirely below start_bit, this
+            // makes the inverted value zero so the loop falls through.
+            let word_start = w_idx * 64;
+            let local_skip = if start_bit > word_start {
+                start_bit - word_start
+            } else {
+                0
+            };
+            if local_skip >= 64 {
+                continue;
+            }
+            let skip_mask: u64 = if local_skip == 0 {
+                0
+            } else {
+                (1u64 << local_skip) - 1
+            };
             loop {
                 let cur = word.load(Ordering::Acquire);
-                let inv = !cur;
+                let inv = !(cur | skip_mask);
                 if inv == 0 {
-                    break; // word fully allocated, try next
+                    break; // no clear bits in this word at or after start_bit
                 }
                 let bit_in_word = inv.trailing_zeros() as usize;
-                let bit = w_idx * 64 + bit_in_word;
+                let bit = word_start + bit_in_word;
                 if bit >= ALLOC_RANGE {
                     break;
                 }
@@ -126,6 +170,12 @@ impl AtomicBitmap {
         None
     }
 }
+
+/// Bit index corresponding to vector 48 (MSI_VECTOR_BASE) — the lowest
+/// vector `IrqAllocator::alloc()` is allowed to hand out. Vectors below
+/// this (32..48) are reserved for IOAPIC-pinned legacy IRQs and must be
+/// claimed through `reserve_specific`.
+const MSI_RANGE_FIRST_BIT: usize = 16;
 
 struct AllocState {
     /// Bit set = vector currently held by some `IrqLine` *or* marked
@@ -339,14 +389,47 @@ fn clear_dispatch(vector: u8) {
 pub struct IrqAllocator;
 
 impl IrqAllocator {
-    /// Allocate a free vector from the pool. Returns
-    /// [`IrqError::Exhausted`] if no clear bits remain (after
-    /// excluding any vectors registered as platform-reserved).
+    /// Allocate a free vector from the MSI pool (48..224, excluding
+    /// platform-reserved vectors). Vectors 32..48 are reserved for
+    /// legacy IOAPIC-pinned IRQs and only claimable via
+    /// [`IrqAllocator::reserve_specific`] — virtio MSI/MSI-X programming
+    /// requires vectors in 48+ because the lower range is bound to
+    /// fixed hardware lines (PIT timer, PS/2 keyboard/mouse, COM1, …).
+    ///
+    /// Returns [`IrqError::Exhausted`] if no clear bits remain in the
+    /// MSI range.
     pub fn alloc() -> Result<IrqLine, IrqError> {
-        let idx = ALLOC_STATE.allocated.alloc().ok_or(IrqError::Exhausted)?;
+        let idx = ALLOC_STATE
+            .allocated
+            .alloc_from(MSI_RANGE_FIRST_BIT)
+            .ok_or(IrqError::Exhausted)?;
         Ok(IrqLine {
             vector: ALLOC_VECTOR_BASE + idx as u8,
         })
+    }
+
+    /// Claim a specific vector. Used for hardware-pinned IRQs whose
+    /// IDT slot is fixed by the platform — typically legacy IOAPIC
+    /// IRQs (PS/2 keyboard at 33, mouse at 44, COM1 at 36, …) where
+    /// the IOAPIC redirection-table entry already points at this
+    /// vector, so the dispatch slot must match.
+    ///
+    /// Returns:
+    /// - [`IrqError::Exhausted`] if `vector` is outside the
+    ///   `ALLOC_VECTOR_BASE..ALLOC_VECTOR_END` range.
+    /// - [`IrqError::AlreadyRegistered`] if the bit is already claimed
+    ///   (by a prior `alloc`, a prior `reserve_specific`, *or* by a
+    ///   platform-reserved vector via [`register_irq_reserved`]).
+    /// - `Ok(IrqLine)` on success. The line's `Drop` releases the
+    ///   bitmap bit unless the vector was platform-reserved (in which
+    ///   case the reservation persists, matching `alloc`'s drop path).
+    pub fn reserve_specific(vector: u8) -> Result<IrqLine, IrqError> {
+        let idx = vector_to_idx(vector).ok_or(IrqError::Exhausted)?;
+        if ALLOC_STATE.allocated.try_set(idx) {
+            Ok(IrqLine { vector })
+        } else {
+            Err(IrqError::AlreadyRegistered)
+        }
     }
 }
 
@@ -597,5 +680,71 @@ mod tests {
         assert_eq!(vector_to_idx(223), Some(191));
         assert_eq!(vector_to_idx(224), None);
         assert_eq!(vector_to_idx(0xFF), None);
+    }
+
+    #[test]
+    fn reserve_specific_claims_legacy_irq_vector() {
+        isolate(|| {
+            let line = IrqAllocator::reserve_specific(33).expect("legacy IRQ1");
+            assert_eq!(line.vector(), 33);
+        });
+    }
+
+    #[test]
+    fn reserve_specific_double_claim_refused() {
+        isolate(|| {
+            let _line = IrqAllocator::reserve_specific(44).expect("first claim");
+            let r = IrqAllocator::reserve_specific(44);
+            assert_eq!(r.err(), Some(IrqError::AlreadyRegistered));
+        });
+    }
+
+    #[test]
+    fn reserve_specific_out_of_range_refused() {
+        isolate(|| {
+            assert_eq!(
+                IrqAllocator::reserve_specific(0).err(),
+                Some(IrqError::Exhausted)
+            );
+            assert_eq!(
+                IrqAllocator::reserve_specific(31).err(),
+                Some(IrqError::Exhausted)
+            );
+            assert_eq!(
+                IrqAllocator::reserve_specific(224).err(),
+                Some(IrqError::Exhausted)
+            );
+            assert_eq!(
+                IrqAllocator::reserve_specific(0xFF).err(),
+                Some(IrqError::Exhausted)
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_specific_drop_releases_vector() {
+        isolate(|| {
+            {
+                let _line = IrqAllocator::reserve_specific(36).expect("first");
+            }
+            // Should be claimable again after drop.
+            let line = IrqAllocator::reserve_specific(36).expect("after drop");
+            assert_eq!(line.vector(), 36);
+        });
+    }
+
+    #[test]
+    fn reserve_specific_refuses_platform_reserved_vector() {
+        isolate(|| {
+            // Mark vector 0x80 (SYSCALL_VECTOR) as platform-reserved.
+            // It's the one reserved vector that lives inside the
+            // allocator's 32..224 pool — the IPI/timer/spurious vectors
+            // sit at 0xEC..0xFF, outside the pool entirely, so reserving
+            // them is a no-op in the bitmap.
+            // SAFETY: test-only reservation.
+            unsafe { register_irq_reserved(&[0x80]) };
+            let r = IrqAllocator::reserve_specific(0x80);
+            assert_eq!(r.err(), Some(IrqError::AlreadyRegistered));
+        });
     }
 }

@@ -140,3 +140,61 @@ pub fn write_msr(msr: Msr, value: u64) {
         );
     }
 }
+
+// =============================================================================
+// SYSCALL fast-path MSR install
+// =============================================================================
+
+use crate::arch::x86_64::gdt::SegmentSelector;
+
+/// Build the STAR MSR value from kernel-code and user-data segment
+/// selectors, following the AMD64 SYSRET convention.
+///
+/// Bits 47:32 hold `kernel_code` (used by SYSCALL to load CS).
+/// Bits 63:48 hold `user_data - 8` (used by SYSRET to derive USER_CODE
+/// at `user_data + 8` and USER_DATA at `user_data + 0`).
+///
+/// Lower 32 bits are reserved (zero in long mode).
+pub const fn star_from_selectors(kernel_code: SegmentSelector, user_data: SegmentSelector) -> u64 {
+    ((user_data.bits() as u64 - 8) << 48) | ((kernel_code.bits() as u64) << 32)
+}
+
+/// Program the SYSCALL fast-path MSRs.
+///
+/// Sets `EFER.SCE` (System Call Extensions enable) if not already set,
+/// then writes `STAR`, `LSTAR`, and `SFMASK`. After this returns the
+/// CPU honours the SYSCALL instruction with `lstar` as the target RIP
+/// and `sfmask` as the RFLAGS clear-mask.
+///
+/// # Safety
+///
+/// SAFETY (Inv. 2): repointing `LSTAR` changes the kernel-mode entry
+/// path; the caller must ensure `lstar` references a properly-aligned
+/// kernel-mode trampoline that swaps GS (if user-mode entry is reached
+/// via SYSCALL) and saves the user context. The `STAR` selectors must
+/// match the active GDT layout.
+pub unsafe fn install_syscall_msrs(star: u64, lstar: u64, sfmask: u64) {
+    let efer = read_msr(Msr::EFER);
+    if (efer & EFER_SCE) == 0 {
+        write_msr(Msr::EFER, efer | EFER_SCE);
+    }
+    write_msr(Msr::STAR, star);
+    write_msr(Msr::LSTAR, lstar);
+    write_msr(Msr::SFMASK, sfmask);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn star_layout_matches_amd64_convention() {
+        let star = star_from_selectors(SegmentSelector::KERNEL_CODE, SegmentSelector::USER_DATA);
+        // KERNEL_CODE = 0x08 in bits 47:32
+        assert_eq!((star >> 32) & 0xFFFF, 0x08);
+        // USER_DATA - 8 = 0x13 in bits 63:48
+        assert_eq!((star >> 48) & 0xFFFF, 0x13);
+        // Lower 32 bits unused
+        assert_eq!(star & 0xFFFF_FFFF, 0);
+    }
+}

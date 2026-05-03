@@ -1,15 +1,13 @@
-use core::ffi::c_void;
-
 use crate::ioapic::regs::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
-use slopos_arch::arch::idt::IRQ_BASE_VECTOR;
-use slopos_arch::{InterruptFrame, cpu};
+use slopos_arch::cpu;
 use slopos_kernel_services::driver_runtime::{
-    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE,
-    irq_increment_keyboard_events, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
+    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, irq_enable_line,
+    irq_increment_keyboard_events, irq_init, irq_is_masked, irq_set_route,
 };
+use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext};
 use slopos_utils::klog_info;
 
 use crate::{apic, ioapic, ps2};
@@ -19,13 +17,13 @@ use crate::{apic, ioapic, ps2};
 // (vector LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch —
 // see boot/src/idt.rs.  HPET + LAPIC are mandatory.
 
-extern "C" fn ps2_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
+fn ps2_handle(irq_line: u8) {
     let status = ps2::read_status();
     if status & ps2::STATUS_OUTPUT_FULL == 0 {
         return;
     }
     let data = ps2::read_data_nowait();
-    match _irq {
+    match irq_line {
         LEGACY_IRQ_KEYBOARD => {
             irq_increment_keyboard_events();
             ps2::keyboard::handle_scancode(data);
@@ -42,6 +40,48 @@ extern "C" fn ps2_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut 
             }
         }
     }
+}
+
+/// Reserve the IDT vector for a hardware-pinned legacy IRQ line, register
+/// the PS/2 dispatch closure, leak both handles so the registration
+/// persists for the kernel's lifetime, and unmask the IOAPIC route so
+/// the line actually fires.
+///
+/// `setup_ioapic_routes` programs the IOAPIC RTE with the mask bit set
+/// (matching the default `FLAG_MASKED` state in `core::irq`'s book-keeping).
+/// Without the `irq_enable_line` call below the OSTD callback is wired but
+/// the IOAPIC keeps the line gated, so PS/2 input never reaches us.
+fn register_legacy_irq(irq_line: u8) {
+    let vector = IRQ_BASE_VECTOR.wrapping_add(irq_line);
+    let line = match IrqAllocator::reserve_specific(vector) {
+        Ok(l) => l,
+        Err(e) => {
+            klog_info!("IRQ: reserve_specific(vector={}) failed: {:?}", vector, e);
+            return;
+        }
+    };
+    let handle = match line.register_callback(move |_ctx: &IrqContext<'_>| {
+        ps2_handle(irq_line);
+    }) {
+        Ok(h) => h,
+        Err(e) => {
+            klog_info!(
+                "IRQ: register_callback for vector {} failed: {:?}",
+                vector,
+                e
+            );
+            return;
+        }
+    };
+    // Order matters for the borrow checker: the handle borrows `line`, so we
+    // forget the handle (ending the borrow) before forgetting the line.
+    core::mem::forget(handle);
+    core::mem::forget(line);
+
+    // Now that the OSTD dispatch slot is populated, unmask the IOAPIC RTE
+    // so the line fires.  This mirrors the legacy `register_handler` path
+    // which always called `unmask_irq_line` at the end.
+    irq_enable_line(irq_line);
 }
 
 fn program_ioapic_route(irq_line: u8) {
@@ -128,18 +168,8 @@ pub fn init() {
     ps2::enable_irqs();
 
     // LAPIC timer handler lives in boot/src/idt.rs (per-CPU, not via IOAPIC).
-    let _ = irq_register_handler(
-        LEGACY_IRQ_KEYBOARD,
-        Some(ps2_irq_handler),
-        core::ptr::null_mut(),
-        core::ptr::null(),
-    );
-    let _ = irq_register_handler(
-        LEGACY_IRQ_MOUSE,
-        Some(ps2_irq_handler),
-        core::ptr::null_mut(),
-        core::ptr::null(),
-    );
+    register_legacy_irq(LEGACY_IRQ_KEYBOARD);
+    register_legacy_irq(LEGACY_IRQ_MOUSE);
 
     cpu::enable_interrupts();
 }

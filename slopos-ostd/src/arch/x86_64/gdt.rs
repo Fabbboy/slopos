@@ -353,6 +353,70 @@ impl GdtDescriptor {
 }
 
 // =========================================================================
+// GDT install — issues lgdt + segment reload + ltr
+// =========================================================================
+
+/// Load the given [`GdtLayout`] into GDTR, reload the segment registers
+/// to point at `KERNEL_CODE` / `KERNEL_DATA`, and load the TSS.
+///
+/// # Safety
+///
+/// SAFETY (Inv. 2): the layout must remain valid memory for as long as
+/// the GDT is in use (typically `'static`). Caller is responsible for
+/// ensuring `tss_selector` references a populated TSS descriptor inside
+/// the same layout.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn install(layout: &GdtLayout, tss_selector: SegmentSelector) {
+    let gdtr = GdtDescriptor::from_layout(layout);
+
+    // SAFETY: gdtr lives on the local stack; lgdt reads its 10 bytes
+    // synchronously and the loaded GDT base points back into `layout`,
+    // which the caller guarantees outlives this call. Inv. 2.
+    unsafe {
+        core::arch::asm!(
+            "lgdt [{0}]",
+            in(reg) &gdtr,
+            options(nostack, preserves_flags),
+        );
+    }
+
+    // SAFETY: a far return through KERNEL_CODE reloads CS atomically; the
+    // subsequent data-segment writes are valid because KERNEL_DATA is
+    // populated by `load_standard_entries`. Inv. 2.
+    unsafe {
+        core::arch::asm!(
+            "pushq ${code}",
+            "lea 2f(%rip), %rax",
+            "pushq %rax",
+            "lretq",
+            "2:",
+            "movw ${data}, %ax",
+            "movw %ax, %ds",
+            "movw %ax, %es",
+            "movw %ax, %ss",
+            "movw %ax, %fs",
+            "movw %ax, %gs",
+            code = const SegmentSelector::KERNEL_CODE.bits() as usize,
+            data = const SegmentSelector::KERNEL_DATA.bits() as usize,
+            out("rax") _,
+            options(att_syntax, nostack),
+        );
+    }
+
+    let tss_sel = tss_selector.bits();
+    // SAFETY: ltr reads the TSS descriptor at index `tss_sel >> 3` from
+    // the freshly-loaded GDT; descriptor is populated by
+    // `GdtLayout::load_tss`. Inv. 2.
+    unsafe {
+        core::arch::asm!(
+            "ltr {0:x}",
+            in(reg) tss_sel,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+// =========================================================================
 // Compile-time safety assertions
 // =========================================================================
 

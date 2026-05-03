@@ -12,7 +12,7 @@ use crate::virtio::{
     VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
-        register_irq_handlers, set_driver_ok, setup_interrupts,
+        set_driver_ok, setup_interrupts,
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
@@ -249,15 +249,12 @@ fn do_request(sector: u64, buffer: *mut u8, len: usize, write: bool) -> bool {
     success
 }
 
-/// MSI-X / MSI interrupt handler for virtio-blk.
+/// Per-queue interrupt handler for virtio-blk.
 ///
-/// The device fires this when a used buffer is available.
-/// The handler signals the queue completion event used by [`do_request`].
-extern "C" fn virtio_blk_irq_handler(
-    _vector: u8,
-    _frame: *mut slopos_arch::InterruptFrame,
-    _ctx: *mut core::ffi::c_void,
-) {
+/// Invoked by the OSTD IRQ dispatch layer when the device fires an
+/// MSI-X (per-queue) or MSI (shared) vector. The handler signals the
+/// queue completion event consumed by [`do_request`].
+fn virtio_blk_irq_handler(_queue_idx: u8) {
     BLK_QUEUE_EVENT.signal();
 }
 
@@ -303,12 +300,16 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 
     // --- MSI-X / MSI interrupt setup ---
     // VirtIO modern on q35 always has MSI-X; MSI is the minimum fallback.
-    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 1).unwrap_or_else(|msg| {
-        panic!(
-            "virtio-blk: {}:{}.{} {}",
-            info.bus, info.device, info.function, msg
-        )
-    });
+    // setup_interrupts allocates IDT vectors via OSTD's IrqAllocator, registers
+    // a closure that calls virtio_blk_irq_handler with the queue index, and
+    // programs the device's MSI-X/MSI capability.
+    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 1, virtio_blk_irq_handler)
+        .unwrap_or_else(|msg| {
+            panic!(
+                "virtio-blk: {}:{}.{} {}",
+                info.bus, info.device, info.function, msg
+            )
+        });
     let q0_msix_entry = msix_state
         .as_ref()
         .map_or(VIRTIO_MSI_NO_VECTOR, |s| s.queue_msix_entry(0));
@@ -321,16 +322,6 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
             return -1;
         }
     };
-
-    // Register MSI-X/MSI handlers that signal queue completion events.
-    let device_bdf =
-        ((info.bus as u32) << 16) | ((info.device as u32) << 8) | (info.function as u32);
-    register_irq_handlers(
-        &irq_mode,
-        msix_state.as_ref(),
-        virtio_blk_irq_handler,
-        device_bdf,
-    );
 
     set_driver_ok(&caps);
 

@@ -19,7 +19,7 @@ use core::cell::SyncUnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use crate::arch::x86_64::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
+use crate::arch::x86_64::gdt::{GdtLayout, SegmentSelector, Tss64};
 use crate::arch::x86_64::msr::Msr;
 
 use crate::sync::init_flag::InitFlag;
@@ -211,38 +211,9 @@ impl ProcessorControlRegion {
     /// # Safety
     /// `init_gdt()` must be called first.
     pub unsafe fn install(&mut self) {
-        let gdtr = GdtDescriptor::from_layout(&self.gdt);
-
-        core::arch::asm!(
-            "lgdt [{0}]",
-            in(reg) &gdtr,
-            options(nostack, preserves_flags)
-        );
-
-        core::arch::asm!(
-            "pushq ${code}",
-            "lea 2f(%rip), %rax",
-            "pushq %rax",
-            "lretq",
-            "2:",
-            "movw ${data}, %ax",
-            "movw %ax, %ds",
-            "movw %ax, %es",
-            "movw %ax, %ss",
-            "movw %ax, %fs",
-            "movw %ax, %gs",
-            code = const SegmentSelector::KERNEL_CODE.bits() as usize,
-            data = const SegmentSelector::KERNEL_DATA.bits() as usize,
-            out("rax") _,
-            options(att_syntax, nostack)
-        );
-
-        let tss_sel = SegmentSelector::TSS.bits();
-        core::arch::asm!(
-            "ltr {0:x}",
-            in(reg) tss_sel,
-            options(nostack, preserves_flags)
-        );
+        // SAFETY (Inv. 2): self.gdt is valid for the PCR's lifetime
+        // and the TSS descriptor inside it was populated by init_gdt().
+        crate::arch::x86_64::gdt::install(&self.gdt, SegmentSelector::TSS);
 
         let self_addr = self as *mut _ as u64;
         crate::arch::x86_64::msr::write_msr(Msr::GS_BASE, self_addr);

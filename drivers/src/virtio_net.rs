@@ -15,7 +15,7 @@ use crate::virtio::{
     self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
-        register_irq_handlers, set_driver_ok, setup_interrupts,
+        set_driver_ok, setup_interrupts,
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
@@ -1105,16 +1105,13 @@ extern "C" fn napi_thread_entry(_arg: *mut core::ffi::c_void) {
     }
 }
 
-/// MSI-X / MSI interrupt handler for virtio-net.
+/// Per-queue interrupt handler for virtio-net.
 ///
-/// The `ctx` pointer encodes the queue index (0 = RX, 1 = TX).
-/// The handler signals the matching queue completion event.
-extern "C" fn virtio_net_irq_handler(
-    _vector: u8,
-    _frame: *mut slopos_arch::InterruptFrame,
-    ctx: *mut core::ffi::c_void,
-) {
-    match ctx as usize {
+/// `queue_idx` is 0 for RX, 1 for TX (matching the queue setup order in
+/// `virtio_net_probe`). The handler signals the matching queue
+/// completion event so the NAPI poll loop and DHCP RX loop wake up.
+fn virtio_net_irq_handler(queue_idx: u8) {
+    match queue_idx {
         0 => {
             DHCP_RX_EVENT.signal();
             napi_schedule();
@@ -1257,12 +1254,16 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 
     // --- MSI-X / MSI interrupt setup ---
     // Request 2 vectors: one for RX (queue 0), one for TX (queue 1).
-    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 2).unwrap_or_else(|msg| {
-        panic!(
-            "virtio-net: {}:{}.{} {}",
-            info.bus, info.device, info.function, msg
-        )
-    });
+    // setup_interrupts allocates the IDT vectors via OSTD's IrqAllocator,
+    // registers per-queue closures that call virtio_net_irq_handler, and
+    // programs the device's MSI-X/MSI capability.
+    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 2, virtio_net_irq_handler)
+        .unwrap_or_else(|msg| {
+            panic!(
+                "virtio-net: {}:{}.{} {}",
+                info.bus, info.device, info.function, msg
+            )
+        });
     let rx_msix_entry = msix_state.as_ref().map_or(VIRTIO_MSI_NO_VECTOR, |s| {
         s.queue_msix_entry(VIRTIO_NET_QUEUE_RX)
     });
@@ -1291,16 +1292,6 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         DEVICE_CLAIMED.reset();
         return -1;
     };
-
-    // Register MSI-X/MSI handlers that signal queue completion events.
-    let device_bdf =
-        ((info.bus as u32) << 16) | ((info.device as u32) << 8) | (info.function as u32);
-    register_irq_handlers(
-        &irq_mode,
-        msix_state.as_ref(),
-        virtio_net_irq_handler,
-        device_bdf,
-    );
 
     let negotiated_features = feat_result.driver_features;
     let mac = read_mac(&caps, negotiated_features);

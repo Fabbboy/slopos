@@ -316,7 +316,6 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     irq_init: irq::init,
     irq_set_route: irq::set_irq_route,
     irq_is_masked: irq::is_masked,
-    irq_register_handler: irq::register_handler,
     irq_enable_line: irq::enable_line,
     irq_disable_line: irq::disable_line,
     irq_get_timer_ticks: irq::get_timer_ticks,

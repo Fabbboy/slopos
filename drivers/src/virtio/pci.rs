@@ -187,6 +187,7 @@ pub fn try_setup_msix(
     info: &PciDeviceInfo,
     caps: &VirtioMmioCaps,
     num_queues: u8,
+    handler: fn(queue_idx: u8),
 ) -> Option<VirtioMsixState> {
     let cap_offset = info.msix_cap_offset?;
     let nq = (num_queues as usize).min(MAX_MSIX_QUEUES);
@@ -217,34 +218,52 @@ pub fn try_setup_msix(
         }
     };
 
-    // 3. Allocate IDT vectors and program table entries.
+    // 3. Allocate IDT vectors via OSTD, register the per-queue dispatch
+    //    closure, and program the MSI-X table entries.
+    //
+    //    Lifecycle: the IrqLine + CallbackHandle pair is leaked once registered
+    //    (drivers are bound for the kernel's lifetime — there is no per-device
+    //    teardown path). `mem::forget(handle)` happens before `mem::forget(line)`
+    //    so the borrow checker sees the handle's borrow on `line` end first.
     let apic_id: u8 = 0; // target BSP
     let mut queue_vectors = [0u8; MAX_MSIX_QUEUES];
     for i in 0..nq {
-        let vector = match slopos_core::irq::msi_alloc_vector() {
-            Some(v) => v,
-            None => {
-                // Roll back previously allocated vectors.
-                for v in &queue_vectors[..i] {
-                    if *v != 0 {
-                        slopos_core::irq::msi_free_vector(*v);
-                    }
-                }
+        let line = match slopos_ostd::irq::IrqAllocator::alloc() {
+            Ok(l) => l,
+            Err(_) => {
                 klog_debug!("virtio-msix: vector allocation exhausted at queue {}", i);
+                // Previously-claimed lines for this device leak (intentional —
+                // see "Lifecycle" note above); they remain in OSTD's bitmap and
+                // dispatch table forever, which is correct for failed device
+                // probes since the device cannot be re-probed in the current
+                // SlopOS model.
                 return None;
             }
         };
+        let vector = line.vector();
 
         if let Err(e) = msix::msix_configure(&table, i as u16, vector, apic_id) {
-            slopos_core::irq::msi_free_vector(vector);
-            for v in &queue_vectors[..i] {
-                if *v != 0 {
-                    slopos_core::irq::msi_free_vector(*v);
-                }
-            }
             klog_debug!("virtio-msix: configure entry {} failed: {:?}", i, e);
+            // `line` drops here and releases the bitmap bit (no callback was
+            // registered, so the dispatch slot was never populated).
             return None;
         }
+
+        let queue_idx = i as u8;
+        let h = handler;
+        let handle = match line.register_callback(move |_ctx| {
+            h(queue_idx);
+        }) {
+            Ok(h) => h,
+            Err(_) => {
+                klog_debug!("virtio-msix: register_callback failed at queue {}", i);
+                return None;
+            }
+        };
+        // Order matters: forget handle first (ends the borrow on `line`),
+        // then forget line.
+        core::mem::forget(handle);
+        core::mem::forget(line);
 
         queue_vectors[i] = vector;
     }
@@ -276,16 +295,23 @@ pub fn try_setup_msix(
 
 /// Attempt to set up MSI (non-X) for a VirtIO device.
 ///
-/// Allocates a single IDT vector shared across all queues.  MSI-X should be
-/// preferred when available; this is the fallback.
+/// Allocates a single IDT vector shared across all queues, registers the
+/// dispatch closure (called with `queue_idx = 0` since MSI is shared), and
+/// programs the MSI capability.  MSI-X should be preferred when available;
+/// this is the fallback.
 ///
-/// Returns the allocated vector, or `None` if the device has no MSI capability
-/// or vector allocation fails.
-pub fn try_setup_msi(info: &PciDeviceInfo) -> Option<(MsiCapability, u8)> {
+/// Returns the allocated capability + vector pair, or `None` if the device
+/// has no MSI capability or vector allocation fails.
+pub fn try_setup_msi(
+    info: &PciDeviceInfo,
+    handler: fn(queue_idx: u8),
+) -> Option<(MsiCapability, u8)> {
     let cap_offset = info.msi_cap_offset?;
     let cap = msi::msi_read_capability(info.bus, info.device, info.function, cap_offset);
 
-    let vector = slopos_core::irq::msi_alloc_vector()?;
+    let line = slopos_ostd::irq::IrqAllocator::alloc().ok()?;
+    let vector = line.vector();
+
     if let Err(_e) = msi::msi_configure(
         info.bus,
         info.device,
@@ -294,9 +320,22 @@ pub fn try_setup_msi(info: &PciDeviceInfo) -> Option<(MsiCapability, u8)> {
         vector,
         0, // target BSP
     ) {
-        slopos_core::irq::msi_free_vector(vector);
+        // `line` drops, releasing the bitmap bit.
         return None;
     }
+
+    let h = handler;
+    let handle = match line.register_callback(move |_ctx| {
+        h(0);
+    }) {
+        Ok(h) => h,
+        Err(_) => {
+            klog_debug!("virtio-msi: register_callback failed");
+            return None;
+        }
+    };
+    core::mem::forget(handle);
+    core::mem::forget(line);
 
     klog_info!(
         "virtio-msi: {}:{}.{} enabled, vector 0x{:02x}",
@@ -319,9 +358,10 @@ pub fn setup_interrupts(
     info: &PciDeviceInfo,
     caps: &VirtioMmioCaps,
     num_queues: u8,
+    handler: fn(queue_idx: u8),
 ) -> Result<(InterruptMode, Option<VirtioMsixState>), &'static str> {
     // Prefer MSI-X — per-queue vectors.
-    if let Some(msix_state) = try_setup_msix(info, caps, num_queues) {
+    if let Some(msix_state) = try_setup_msix(info, caps, num_queues, handler) {
         return Ok((
             InterruptMode::Msix {
                 num_queues: msix_state.num_queues,
@@ -331,49 +371,9 @@ pub fn setup_interrupts(
     }
 
     // Fallback: MSI — single shared vector.
-    if let Some((_cap, vector)) = try_setup_msi(info) {
+    if let Some((_cap, vector)) = try_setup_msi(info, handler) {
         return Ok((InterruptMode::Msi { vector }, None));
     }
 
     Err("virtio: device has neither MSI-X nor MSI — cannot configure interrupts")
-}
-
-/// Register MSI-X or MSI interrupt handlers for a VirtIO device.
-///
-/// `handler` is invoked by the IRQ dispatch layer when the device fires an
-/// interrupt.  For MSI-X, a handler is registered for each per-queue vector.
-/// For MSI, a single handler is registered for the shared vector.
-///
-/// `device_bdf` is `(bus << 16) | (dev << 8) | func`.
-pub fn register_irq_handlers(
-    mode: &InterruptMode,
-    msix_state: Option<&VirtioMsixState>,
-    handler: slopos_core::irq::MsiHandler,
-    device_bdf: u32,
-) {
-    match mode {
-        InterruptMode::Msix { num_queues } => {
-            if let Some(state) = msix_state {
-                for i in 0..*num_queues as usize {
-                    let vec = state.queue_vectors[i];
-                    if vec != 0 {
-                        slopos_core::irq::msi_register_handler(
-                            vec,
-                            handler,
-                            i as *mut core::ffi::c_void,
-                            device_bdf,
-                        );
-                    }
-                }
-            }
-        }
-        InterruptMode::Msi { vector } => {
-            slopos_core::irq::msi_register_handler(
-                *vector,
-                handler,
-                core::ptr::null_mut(),
-                device_bdf,
-            );
-        }
-    }
 }

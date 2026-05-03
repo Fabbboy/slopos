@@ -1,11 +1,23 @@
 #![allow(bad_asm_style)]
 
-use core::arch::{asm, global_asm};
+use core::arch::global_asm;
 use core::cell::SyncUnsafeCell;
 use core::ffi::c_void;
 
 use slopos_arch::cpu;
-use slopos_utils::{klog_debug, klog_info};
+// Re-export the OSTD IDT types/constants the legacy `boot::idt::*`
+// surface exposed (consumed by `boot/src/tests/gdt_tests.rs` and similar).
+pub use slopos_ostd::irq::{
+    EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
+    EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
+    EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
+    EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
+    EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
+    EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry, LAPIC_TIMER_VECTOR,
+    LUF_DRAIN_IPI_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
+    TLB_SHOOTDOWN_VECTOR,
+};
+use slopos_utils::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
 
 use crate::exception::*;
 use crate::ist_stacks;
@@ -13,38 +25,30 @@ use crate::user_fault::*;
 
 global_asm!(include_str!("../idt_handlers.s"));
 
-pub use slopos_arch::arch::idt::{
-    EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
-    EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
-    EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
-    EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
-    EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
-    EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    IdtEntry, LAPIC_TIMER_VECTOR, LUF_DRAIN_IPI_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT,
-    RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+// =============================================================================
+// ABI razors — fail the build if a load-bearing field offset drifts.
+// =============================================================================
+
+const _: () = {
+    use core::mem::offset_of;
+    // CPU-pushed portion of the InterruptFrame (must match the asm
+    // unwind in slopos-ostd/src/irq/asm/handlers.s).
+    assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rip) == 136);
+    assert!(offset_of!(slopos_ostd::irq::InterruptFrame, cs) == 144);
+    assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rflags) == 152);
+    assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rsp) == 160);
+    assert!(offset_of!(slopos_ostd::irq::InterruptFrame, ss) == 168);
+    // Per-CPU kernel RSP slot read by syscall_entry as gs:[16].
+    assert!(slopos_ostd::cpu::x86_64::pcr::offsets::KERNEL_RSP == 16);
 };
 
-#[repr(C, packed)]
-struct IdtPtr {
-    limit: u16,
-    base: u64,
-}
+// =============================================================================
+// IDT storage — single OSTD-owned builder.
+// =============================================================================
+
+static BUILDER: IdtBuilder = IdtBuilder::new();
 
 type ExceptionHandler = fn(*mut slopos_arch::InterruptFrame);
-
-static IDT: SyncUnsafeCell<[IdtEntry; IDT_ENTRIES]> = SyncUnsafeCell::new(
-    [IdtEntry {
-        offset_low: 0,
-        selector: 0,
-        ist: 0,
-        type_attr: 0,
-        offset_mid: 0,
-        offset_high: 0,
-        zero: 0,
-    }; IDT_ENTRIES],
-);
-
-static IDT_POINTER: SyncUnsafeCell<IdtPtr> = SyncUnsafeCell::new(IdtPtr { limit: 0, base: 0 });
 
 static PANIC_HANDLERS: SyncUnsafeCell<[ExceptionHandler; 32]> =
     SyncUnsafeCell::new([exception_default_panic; 32]);
@@ -53,21 +57,6 @@ static OVERRIDE_HANDLERS: SyncUnsafeCell<[Option<ExceptionHandler>; 32]> =
 static CURRENT_EXCEPTION_MODE: SyncUnsafeCell<ExceptionMode> =
     SyncUnsafeCell::new(ExceptionMode::Normal);
 
-#[inline(always)]
-fn handler_ptr(f: unsafe extern "C" fn()) -> u64 {
-    f as *const () as u64
-}
-
-#[repr(C, packed)]
-struct Idtr {
-    limit: u16,
-    base: u64,
-}
-
-// Force Rust to recognize Idtr as used (it's used via IDT_POINTER static)
-// Using size_of ensures the type is recognized as used at compile time
-const _: usize = core::mem::size_of::<Idtr>();
-
 #[repr(u8)]
 #[derive(Copy, Clone)]
 pub enum ExceptionMode {
@@ -75,7 +64,6 @@ pub enum ExceptionMode {
     Test = 1,
 }
 
-use slopos_core::irq::irq_dispatch;
 use slopos_core::syscall::syscall_handle;
 use slopos_drivers::apic::send_eoi;
 use slopos_mm::tlb;
@@ -84,188 +72,28 @@ use slopos_core::sched::{
     RescheduleReason, TrapExitSource, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
 
-unsafe extern "C" {
-    fn isr0();
-    fn isr1();
-    fn isr2();
-    fn isr3();
-    fn isr4();
-    fn isr5();
-    fn isr6();
-    fn isr7();
-    fn isr8();
-    fn isr10();
-    fn isr11();
-    fn isr12();
-    fn isr13();
-    fn isr14();
-    fn isr16();
-    fn isr17();
-    fn isr18();
-    fn isr19();
-    fn isr128();
-    fn isr_reschedule_ipi();
-    fn isr_rcu_qs_ipi();
-    fn isr_luf_drain_ipi();
-    fn isr_tlb_shootdown();
-    fn isr_shutdown_ipi();
-    fn isr_spurious();
-    fn isr_lapic_timer();
-
-    fn irq0();
-    fn irq1();
-    fn irq2();
-    fn irq3();
-    fn irq4();
-    fn irq5();
-    fn irq6();
-    fn irq7();
-    fn irq8();
-    fn irq9();
-    fn irq10();
-    fn irq11();
-    fn irq12();
-    fn irq13();
-    fn irq14();
-    fn irq15();
-
-    /// Table of MSI vector stub entry-point addresses (vectors 48–223).
-    /// Generated in `idt_handlers.s`; index i = address of stub for vector (48 + i).
-    static msi_vector_table: [u64; MSI_VECTOR_COUNT];
-}
 pub fn idt_init() {
     klog_debug!("IDT: init start");
-    unsafe {
-        core::ptr::write_bytes(
-            (*IDT.get()).as_mut_ptr() as *mut u8,
-            0,
-            core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>(),
-        );
-        (*IDT_POINTER.get()).limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
-        (*IDT_POINTER.get()).base = (*IDT.get()).as_ptr() as u64;
-    }
-
-    idt_set_gate(0, handler_ptr(isr0), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(1, handler_ptr(isr1), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(2, handler_ptr(isr2), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(3, handler_ptr(isr3), 0x08, IDT_GATE_TRAP);
-    idt_set_gate(4, handler_ptr(isr4), 0x08, IDT_GATE_TRAP);
-    idt_set_gate(5, handler_ptr(isr5), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(6, handler_ptr(isr6), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(7, handler_ptr(isr7), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(8, handler_ptr(isr8), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(10, handler_ptr(isr10), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(11, handler_ptr(isr11), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(12, handler_ptr(isr12), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(13, handler_ptr(isr13), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(14, handler_ptr(isr14), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(16, handler_ptr(isr16), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(17, handler_ptr(isr17), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(18, handler_ptr(isr18), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(19, handler_ptr(isr19), 0x08, IDT_GATE_INTERRUPT);
-
-    idt_set_gate(32, handler_ptr(irq0), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(33, handler_ptr(irq1), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(34, handler_ptr(irq2), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(35, handler_ptr(irq3), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(36, handler_ptr(irq4), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(37, handler_ptr(irq5), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(38, handler_ptr(irq6), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(39, handler_ptr(irq7), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(40, handler_ptr(irq8), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(41, handler_ptr(irq9), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(42, handler_ptr(irq10), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(43, handler_ptr(irq11), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(44, handler_ptr(irq12), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(45, handler_ptr(irq13), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(46, handler_ptr(irq14), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(47, handler_ptr(irq15), 0x08, IDT_GATE_INTERRUPT);
-
-    idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
-
-    idt_set_gate(
-        RESCHEDULE_IPI_VECTOR,
-        handler_ptr(isr_reschedule_ipi),
-        0x08,
-        IDT_GATE_INTERRUPT,
-    );
-    idt_set_gate(
-        RCU_QS_IPI_VECTOR,
-        handler_ptr(isr_rcu_qs_ipi),
-        0x08,
-        IDT_GATE_INTERRUPT,
-    );
-    idt_set_gate(
-        LUF_DRAIN_IPI_VECTOR,
-        handler_ptr(isr_luf_drain_ipi),
-        0x08,
-        IDT_GATE_INTERRUPT,
-    );
-    idt_set_gate(
-        TLB_SHOOTDOWN_VECTOR,
-        handler_ptr(isr_tlb_shootdown),
-        0x08,
-        IDT_GATE_INTERRUPT,
-    );
-    idt_set_gate(
-        0xFE,
-        handler_ptr(isr_shutdown_ipi),
-        0x08,
-        IDT_GATE_INTERRUPT,
-    );
-    idt_set_gate(0xFF, handler_ptr(isr_spurious), 0x08, IDT_GATE_INTERRUPT);
-    idt_set_gate(
-        LAPIC_TIMER_VECTOR,
-        handler_ptr(isr_lapic_timer),
-        0x08,
-        IDT_GATE_INTERRUPT,
-    );
-
-    // MSI interrupt vectors (48–223): install stubs from the assembly-generated table.
-    // Skip vectors that have dedicated handlers (e.g. SYSCALL_VECTOR = 0x80).
-    unsafe {
-        for i in 0..MSI_VECTOR_COUNT {
-            let vector = MSI_VECTOR_BASE.wrapping_add(i as u8);
-            if vector == SYSCALL_VECTOR {
-                continue;
-            }
-            idt_set_gate(vector, msi_vector_table[i], 0x08, IDT_GATE_INTERRUPT);
-        }
-    }
-    klog_debug!(
-        "IDT: Installed {} MSI vector stubs (vectors {}-{})",
-        MSI_VECTOR_COUNT,
-        MSI_VECTOR_BASE,
-        MSI_VECTOR_BASE as usize + MSI_VECTOR_COUNT - 1
-    );
-
+    BUILDER.install_default_handlers();
     initialize_handler_tables();
+    klog_debug!("IDT: install_default_handlers + handler tables ready");
+}
 
-    klog_debug!("IDT: Configured 256 interrupt vectors");
-    let base = unsafe { (*IDT_POINTER.get()).base };
-    let limit = unsafe { (*IDT_POINTER.get()).limit };
-    klog_debug!("IDT: init prepared base=0x{:x} limit=0x{:x}", base, limit);
-}
 pub fn idt_set_gate_priv(vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
-    unsafe {
-        (*IDT.get())[vector as usize].offset_low = (handler & 0xFFFF) as u16;
-        (*IDT.get())[vector as usize].selector = selector;
-        (*IDT.get())[vector as usize].ist = 0;
-        (*IDT.get())[vector as usize].type_attr = typ | 0x80 | ((dpl & 0x3) << 5);
-        (*IDT.get())[vector as usize].offset_mid = ((handler >> 16) & 0xFFFF) as u16;
-        (*IDT.get())[vector as usize].offset_high = (handler >> 32) as u32;
-        (*IDT.get())[vector as usize].zero = 0;
-    }
+    BUILDER.set_gate_priv(vector, handler, selector, typ, dpl);
 }
+
 pub fn idt_set_gate(vector: u8, handler: u64, selector: u16, typ: u8) {
-    idt_set_gate_priv(vector, handler, selector, typ, 0);
+    BUILDER.set_gate(vector, handler, selector, typ);
 }
+
 pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
-    if out_entry.is_null() || vector as usize >= IDT_ENTRIES {
+    if out_entry.is_null() {
         return -1;
     }
+    let entry = BUILDER.get_gate(vector);
     unsafe {
-        *out_entry = (*IDT.get())[vector as usize];
+        *out_entry = entry;
     }
     0
 }
@@ -273,6 +101,7 @@ pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
 pub fn idt_get_gate_opaque(vector: u8, out_entry: *mut c_void) -> i32 {
     idt_get_gate(vector, out_entry as *mut IdtEntry)
 }
+
 pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
     if vector >= 32 {
         klog_info!(
@@ -290,6 +119,7 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
         klog_debug!("IDT: Registered override handler for exception {}", vector);
     }
 }
+
 /// Bind an IDT entry to an IST slot. `&mut BootCtx` gates the call so
 /// production code (post-boot) cannot accidentally rebind interrupt
 /// stacks.
@@ -298,14 +128,9 @@ pub fn idt_set_ist(
     vector: u8,
     slot: slopos_arch::arch::gdt::IstSlot,
 ) {
-    if vector as usize >= IDT_ENTRIES {
-        klog_info!("IDT: Invalid IST assignment for vector {}", vector);
-        return;
-    }
-    unsafe {
-        (*IDT.get())[vector as usize].ist = slot.as_index() & 0x7;
-    }
+    BUILDER.set_ist(vector, slot.as_index() & 0x7);
 }
+
 pub fn exception_set_mode(mode: ExceptionMode) {
     unsafe {
         *CURRENT_EXCEPTION_MODE.get() = mode;
@@ -314,15 +139,18 @@ pub fn exception_set_mode(mode: ExceptionMode) {
         }
     }
 }
+
 pub fn exception_is_critical(vector: u8) -> i32 {
     slopos_arch::arch::exception::exception_is_critical(vector) as i32
 }
+
 pub fn idt_load() {
+    // SAFETY: BUILDER is `static`; gates have been populated by
+    // `idt_init` (called earlier in boot); GDT/TSS describing
+    // KERNEL_CODE has already been loaded by `gdt_init_for_cpu`.
+    // Inv. 2.
     unsafe {
-        (*IDT_POINTER.get()).limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
-        (*IDT_POINTER.get()).base = (*IDT.get()).as_ptr() as u64;
-        let idtr = IDT_POINTER.get() as *const IdtPtr;
-        asm!("lidt [{}]", in(reg) idtr, options(nostack, preserves_flags));
+        BUILDER.load();
     }
 }
 
@@ -541,7 +369,31 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector >= IRQ_BASE_VECTOR {
-        irq_dispatch(frame);
+        // Snapshot the (CS, RIP) pair before the dispatch closure runs so
+        // we can detect a registered handler scribbling through a stale
+        // pointer onto our IRET frame. Mirrors the legacy
+        // `core::irq::irq_dispatch` check both in scope (just CS+RIP, not
+        // the full 5-field IRET payload) and in ordering (the check runs
+        // *before* EOI + scheduler_handoff_on_trap_exit, since handoff
+        // may legitimately context-switch and the IRET frame's RFLAGS /
+        // RSP / SS shape on resume is not byte-identical to the pre-IRQ
+        // snapshot in every user-mode-preemption edge case).
+        let expected_cs = frame_ref.cs;
+        let expected_rip = frame_ref.rip;
+
+        slopos_ostd::irq::dispatch(vector, frame_ref.error_code);
+
+        if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
+            klog_info!(
+                "IRQ: Frame corruption detected on vector {} - aborting",
+                vector
+            );
+            kdiag_dump_interrupt_frame(frame);
+            panic!("IRQ: frame corrupted");
+        }
+
+        send_eoi();
+        scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
         return;
     }
 
@@ -590,6 +442,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
     handler(frame);
 }
+
 fn initialize_handler_tables() {
     unsafe {
         *PANIC_HANDLERS.get() = [exception_default_panic; 32];
@@ -624,17 +477,6 @@ fn initialize_handler_tables() {
     }
 }
 
-/// Attempt to resolve a page fault via CoW or demand paging.
-///
-/// This is the **single authority** for recoverable user-space page fault
-/// resolution.  It is called from `common_exception_handler_impl` before the
-/// exception handler dispatch; a `true` return means the fault was resolved
-/// in-place and execution can resume.
-///
-/// Returns `false` for any non-recoverable case (kernel faults, IST guard
-/// hits, missing task/page-dir, or failed resolution) — the caller must then
-/// fall through to the diagnostic / terminate / panic path in
-/// `exception_page_fault`.
 /// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET
 /// frame.  Logs the corruption for debugging, then panics.
 ///

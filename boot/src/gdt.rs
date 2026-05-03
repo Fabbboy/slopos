@@ -1,13 +1,9 @@
-use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 
-use slopos_arch::arch::gdt::{
-    GDT_STANDARD_ENTRIES, GdtDescriptor, GdtLayout, IstSlot, SegmentSelector, Tss64,
-};
-use slopos_arch::cpu;
-use slopos_arch::cpu::msr::{EFER_SCE, Msr};
+use slopos_arch::arch::gdt::{GDT_STANDARD_ENTRIES, GdtLayout, IstSlot, SegmentSelector, Tss64};
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_hermetic::KernelStackTop;
+use slopos_ostd::arch::x86_64::msr::{Msr, install_syscall_msrs, star_from_selectors, write_msr};
 use slopos_utils::klog_debug;
 
 #[repr(C)]
@@ -35,36 +31,6 @@ unsafe extern "C" {
     static kernel_stack_top: u8;
 }
 
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn load_gdt(descriptor: &GdtDescriptor) {
-    unsafe { asm!("lgdt [{0}]", in(reg) descriptor, options(nostack, preserves_flags)) };
-
-    unsafe {
-        asm!(
-            "pushq ${code}",
-            "lea 2f(%rip), %rax",
-            "pushq %rax",
-            "lretq",
-            "2:",
-            "movw ${data}, %ax",
-            "movw %ax, %ds",
-            "movw %ax, %es",
-            "movw %ax, %ss",
-            "movw %ax, %fs",
-            "movw %ax, %gs",
-            code = const SegmentSelector::KERNEL_CODE.bits() as usize,
-            data = const SegmentSelector::KERNEL_DATA.bits() as usize,
-            out("rax") _,
-            options(att_syntax, nostack)
-        );
-    }
-}
-
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn load_tss() {
-    let selector = SegmentSelector::TSS.bits();
-    unsafe { asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags)) };
-}
 pub fn gdt_init() {
     gdt_init_for_cpu(0);
 }
@@ -90,10 +56,10 @@ pub fn gdt_init_for_cpu(cpu_id: usize) {
             (*PER_CPU_TSS.get())[cpu_id].rsp0 = (&kernel_stack_top as *const u8) as u64;
         }
 
-        let descriptor = GdtDescriptor::from_layout(&(*PER_CPU_GDT.get())[cpu_id]);
-
-        load_gdt(&descriptor);
-        load_tss();
+        slopos_ostd::arch::x86_64::gdt::install(
+            &(*PER_CPU_GDT.get())[cpu_id],
+            SegmentSelector::TSS,
+        );
     }
 
     klog_debug!("GDT: Initialized with TSS loaded for CPU {}", cpu_id);
@@ -162,22 +128,16 @@ unsafe extern "C" {
 pub fn syscall_msr_init() {
     klog_debug!("SYSCALL: Initializing MSRs for fast syscall path");
 
-    let efer = cpu::read_msr(Msr::EFER);
-    if (efer & EFER_SCE) == 0 {
-        cpu::write_msr(Msr::EFER, efer | EFER_SCE);
-        klog_debug!("SYSCALL: Enabled SCE bit in EFER");
-    }
-
-    let star_value: u64 = ((SegmentSelector::USER_DATA.bits() as u64 - 8) << 48)
-        | ((SegmentSelector::KERNEL_CODE.bits() as u64) << 32);
-
+    let star_value = star_from_selectors(SegmentSelector::KERNEL_CODE, SegmentSelector::USER_DATA);
     let lstar_value = syscall_entry as *const () as u64;
-
     let sfmask_value: u64 = 0x0000_0000_0004_7700;
 
-    cpu::write_msr(Msr::STAR, star_value);
-    cpu::write_msr(Msr::LSTAR, lstar_value);
-    cpu::write_msr(Msr::SFMASK, sfmask_value);
+    // SAFETY (Inv. 2): syscall_entry is the LSTAR target; the STAR
+    // selectors match the GDT layout already loaded by
+    // gdt_init_for_cpu / PCR::install.
+    unsafe {
+        install_syscall_msrs(star_value, lstar_value, sfmask_value);
+    }
 
     klog_debug!(
         "SYSCALL: STAR=0x{:016x} LSTAR=0x{:016x} SFMASK=0x{:016x}",
@@ -208,7 +168,7 @@ fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
         if cpu_id == 0 {
             *SYSCALL_CPU_DATA_PTR.get() = cpu_data_ptr;
         }
-        cpu::write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
+        write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
         klog_debug!(
             "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
             cpu_id,
