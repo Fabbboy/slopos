@@ -7,7 +7,7 @@ authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, H
 
 # SlopOS Framekernel Architecture Plan
 
-> **Status**: Phase 1 in progress — 1A (crate skeleton), 1B (`Frame<M>`), 1C (`UFrame` / `USegment`), 1D (`VmSpace` + cursor), 1E (`IoMem` / `IoPort` / `Dma*`), 1F (`IrqLine` / `IdtBuilder` / `DisabledPreemptGuard`), 1G (`UserContext` / `UserMode` / typed user copy), 1H (`KernelHeap` folded into ostd), and 1I (sync primitives + `Task` primitive) complete; 1J next.
+> **Status**: Phase 1 in progress — 1A (crate skeleton), 1B (`Frame<M>`), 1C (`UFrame` / `USegment`), 1D (`VmSpace` + cursor), 1E (`IoMem` / `IoPort` / `Dma*`), 1F (`IrqLine` / `IdtBuilder` / `DisabledPreemptGuard`), 1G (`UserContext` / `UserMode` / typed user copy), 1H (`KernelHeap` folded into ostd), and 1I (sync primitives + `Task` primitive) complete; **1J split into 11 sub-phases (1J-α..1J-λ) — see §5.1J for the breakdown**; 1J-α next.
 > **Target**: Redesign SlopOS as an **async-first framekernel** with a small, partially formally-verified trusted core (`slopos-ostd`). Pre-alpha rip-and-replace; no backwards compatibility constraints.
 > **Scope**: Whole-kernel architecture. Affects every subsystem.
 > **Working directory**: `/home/nil0ft/repos/slopos`
@@ -589,22 +589,207 @@ Move `sync/` into `slopos-ostd::sync`. Define low-level `Task` (NOT async — th
 
 This subtask is the bulk of Phase 1's clock time. Every existing kernel crate is rewritten to consume OSTD instead of its own internals. Behavior must be identical.
 
-- [ ] **1J.1** `karch/`: replace its `lib.rs` with re-exports from `slopos_ostd::cpu::x86_64`. Delete crate-internal CPU HAL files (`arch/`, `cpu/`, `init_flag.rs`, `interrupt_frame.rs`, `pcr.rs`, `tsc.rs`).
-- [ ] **1J.2** `boot/`: replace `boot/src/idt.rs` IDT setup with calls to `slopos_ostd::irq::idt::install`. Replace `boot/src/gdt.rs` with `slopos_ostd::arch::x86_64::gdt`. Delete duplicated entries.
-- [ ] **1J.3** `mm/src/mmio.rs`: replace `MmioRegion` with a type alias `pub type MmioRegion = slopos_ostd::IoMem;`. Eventually delete the alias in Phase 2.
-- [ ] **1J.4** `mm/src/page_alloc.rs`: replace `OwnedPageFrame` with a type alias to `Frame<KernelMeta>`. Internal `unsafe` blocks now reference Inv. 1 + Inv. 4.
-- [ ] **1J.5** `mm/src/process_vm.rs::ProcessVmInner`: hide raw `pml4` pointer. Public field becomes `vm_space: KArc<VmSpace>`. All internal mutation via `vm_space.cursor_mut(..)`.
-- [ ] **1J.6** `mm/src/paging/`: most of this code becomes private to `slopos-ostd::mm::vm_space`. Delete `paging/tables.rs::ProcessPageDir` (replaced by `VmSpace`). Delete `paging/tables.rs::split_pdpt_huge` etc. (now private inside OSTD).
-- [ ] **1J.7** `mm/src/user_copy.rs`: becomes a thin re-export of `slopos_ostd::user::copy`. Delete `raw_usercopy` (now in OSTD). Delete `UserPtr` (re-exported from OSTD).
-- [ ] **1J.8** `core/src/scheduler/switch_asm.rs`: delete; functionality now in `slopos_ostd::task::switch`.
-- [ ] **1J.9** `core/src/scheduler/`: rewrite to consume `slopos_ostd::task::Task`, `slopos_ostd::task::Scheduler` (the trait). At Phase 1 end, the scheduler still has whatever logic it has today — just consuming OSTD primitives.
-- [ ] **1J.10** `core/src/syscall/`: handlers continue to receive raw frames at this phase. Phase 2 redesigns the dispatch. However, `syscall::context::SyscallContext` migrates to taking `&mut UserContext` instead of raw frame pointer.
-- [ ] **1J.11** `core/src/irq.rs`: thin wrapper re-exporting `slopos_ostd::irq` for legacy callers. Delete in Phase 2.
-- [ ] **1J.12** `drivers/`: every driver that uses `MmioRegion` already works (alias in 1J.3). Drivers using `port_in*`/`port_out*` migrate to `IoPort<T>`. Drivers registering IRQs migrate to `IrqLine::register_callback`.
-- [ ] **1J.13** `fs/`, `net/`, `acpi/`: chase compile errors from the renames above. No semantic changes.
-- [ ] **1J.14** Crucially: at the end of 1J, every kernel crate **except `slopos-ostd`** must have *zero* `unsafe` blocks. This will require some compile errors to be fixed by introducing safe OSTD APIs — that's expected. Track them as 1J.14.{a..z} sub-items.
-- [ ] **1J.15** Run `just test`. Test count must equal pre-1J. Any test failure is a 1J defect.
-- [ ] **1J.16** Verify: `rg 'unsafe' --type rust -g '!slopos-ostd/**'` returns zero matches in kernel crates. (Userland excluded.)
+**Scope realism.** The original 1J.1–1J.16 spec encompasses ~2200 LoC of OSTD arch ports, ABI-critical IDT/scheduler asm migrations, and elimination of ~1700 `unsafe` blocks across 8+ kernel crates. That is genuinely multi-week work and cannot land as a single PR without leaving the kernel non-bootable mid-way. **1J is therefore split into 11 strictly-serial sub-phases (1J-α..1J-λ).** Each sub-phase ends with `just build && just test` succeeding (≥ 2410 tests passing) and is independently mergeable.
+
+#### Sub-phase map
+
+| Sub-phase | Theme | Risk | Subtasks closed |
+|---|---|---|---|
+| **1J-α** | Wiring foundation (`register_*` hooks) | Low | partial 1J.13 wiring |
+| **1J-β** | Safe aliases (no consumer changes) | Low | 1J.3, 1J.4 (alias only), 1J.7, 1J.13 |
+| **1J-γ** | Port karch into OSTD + dep inversion | Medium | 1J.1 |
+| **1J-δ** | IDT/GDT migration | High | 1J.2, 1J.11 |
+| **1J-ε** | UserModeBackend + LSTAR | High | enables 1J.10 |
+| **1J-ζ** | Scheduler/Task migration | Critical | 1J.8, 1J.9 |
+| **1J-η** | VmSpace/paging migration | High | 1J.5, 1J.6 |
+| **1J-θ** | SyscallContext refactor | Medium | 1J.10 |
+| **1J-ι** | Driver migration cleanup | Low | 1J.12 |
+| **1J-κ** | Zero-unsafe enforcement | Multi-week, parallel | 1J.14, 1J.16 |
+| **1J-λ** | Phase 1J close + parity gate | Low | 1J.15 |
+
+Strict serial order: α → β → γ → δ → ε → ζ → η → θ → ι → λ. Stage κ runs in parallel (ongoing cleanup) once it's possible to drop unsafe in any given file.
+
+#### 1J-α — Wiring foundation
+
+**Goal.** Install every OSTD `register_*` / `init_*` hook that doesn't depend on a later sub-phase. After this, OSTD primitives are reachable on the hot path; the legacy paths still drive everything. No behavior change.
+
+- [ ] **1J-α.1** New `kernel-services/src/ostd_bridge_tables.rs`: static `MMIO_RANGES: &[PhysRange]`, `PORT_RANGES: &[PortRange]`, `RESERVED_VECTORS: &[u8]` populated from the karch vector constants (SYSCALL=0x80, LAPIC_TIMER=0xEC, LUF_DRAIN=0xFA, RCU_QS=0xFB, RESCHEDULE=0xFC, TLB_SHOOTDOWN=0xFD, shutdown=0xFE, spurious=0xFF).
+- [ ] **1J-α.2** New `kernel-services/src/ostd_backends/preempt.rs`: `PreemptBackend` impl proxying to `slopos_arch::pcr::current_pcr().preempt_count`. Closes Phase 1F TODO #1.
+- [ ] **1J-α.3** New `kernel-services/src/ostd_backends/diagnostic_sink.rs`: `DiagnosticSink::emit` calls a klog facade. Closes Phase 1F TODO #2.
+- [ ] **1J-α.4** New `kernel-services/src/ostd_backends/local_tlb.rs`: `LocalTlbFlush::invlpg` impl (single-instruction asm; the unsafe stays in this crate temporarily — Stage κ retires it).
+- [ ] **1J-α.5** Extend `kernel-services::ostd_bridge::register_with_ostd` to call: `register_io_mem_mapper(&&LEGACY_IO_MEM_MAPPER_SHIM)`, `register_io_mem_registry(&MMIO_RANGES)`, `register_io_port_registry(&PORT_RANGES)`, `register_irq_reserved(&RESERVED_VECTORS)`, `register_diagnostic_sink(&KLOG_SINK)`, `register_preempt_backend(&PCR_PREEMPT)`, `register_local_tlb_flusher(&&LOCAL_TLB)`.
+- [ ] **1J-α.6** New boot init step at end of EarlyHw phase: `init_phys_virt_offset(hhdm)` (Phase 1C TODO).
+- [ ] **1J-α.7** New step after `pcr.install()` in `boot/src/early_init.rs:528`: `register_kernel_master_pml4(cr3_phys)` (Phase 1D TODO).
+
+**Defers** (need later sub-phases): `init_meta_slots` (β), `register_frame_allocator` multi-page (β), `register_user_mode_backend` (ε), `register_task_runtime_backend` (ζ), `register_task_exit_hook` (ζ), `register_iommu_mapper` (Phase 2).
+
+**Verify.** `cargo check --workspace` clean. `just test` ≥ 2410. Boot serial log shows new registrations before "entering boot init". `register_with_ostd` panics on any double-registration.
+
+#### 1J-β — Safe aliases
+
+**Goal.** Replace legacy types with one-line OSTD aliases. Consumer code unchanged.
+
+- [ ] **1J-β.1** **(closes 1J.3)** `mm/src/mmio.rs`: replace body with `pub type MmioRegion = slopos_ostd::IoMem;`. Add extension trait if any method is OSTD-missing.
+- [ ] **1J-β.2** **(closes 1J.7)** `mm/src/user_copy.rs`: replace body with `pub use slopos_ostd::user::copy::*;` and `pub use slopos_ostd::user::ptr::{UserPtr, UserSlice, UserBytes, UserPtrError, UserVirtAddr};`. Delete legacy `raw_usercopy`.
+- [ ] **1J-β.3** `boot/src/exception.rs::exception_page_fault`: add `slopos_ostd::user::copy::is_ostd_usercopy_ip(rip)` parallel branch alongside legacy `is_usercopy_ip`. Closes Phase 1G TODO #1.
+- [ ] **1J-β.4** New `mm/src/kernel_meta.rs`: `KernelMeta` unit struct implementing `slopos_ostd::mm::frame::AnyFrameMeta`. `const _ = assert!(size_of::<KernelMeta>() <= MAX_META_SIZE);`.
+- [ ] **1J-β.5** **(closes 1J.4 — alias only; interior is Stage κ)** `mm/src/page_alloc.rs`: add `pub type OwnedPageFrame = Frame<KernelMeta>;` alongside legacy struct. Forward methods via extension trait.
+- [ ] **1J-β.6** Extend `LegacyFrameAllocShim` (`mm/src/frame_alloc_shim.rs:18-30`) to support `size_pages > 1` via the buddy's existing multi-page path.
+- [ ] **1J-β.7** Add `init_meta_slots` boot step at end of Memory phase. Size = `highest_usable_paddr / PAGE_SIZE`.
+- [ ] **1J-β.8** `slopos-ostd/src/task/task.rs::KernelStack::Drop`: wire to `FrameAlloc::dealloc`. Closes Phase 1I TODO #7.
+- [ ] **1J-β.9** **(closes 1J.13)** `cargo check -p slopos-fs -p slopos-net -p slopos-acpi`; each compile error becomes a one-line `use` rewrite.
+
+**Verify.** `cargo check --workspace` clean. `just test` ≥ 2410.
+
+#### 1J-γ — Port karch into OSTD + dep inversion
+
+**Goal.** **(closes 1J.1)** `karch` becomes a thin re-export shell. The ~2200 LoC of CPU/arch primitives live in `slopos-ostd` where they belong (TCB grows by ~50 unsafe tokens, all carrying SAFETY annotations).
+
+- [ ] **1J-γ.1** Move verbatim into `slopos-ostd/src/cpu/x86_64/`: `karch/src/cpu/{control_regs.rs,xsave.rs,apic_msr.rs,security.rs,rdrand.rs,core.rs,interrupts.rs,sse.rs,stack.rs,tlb.rs}`. Strip the `slopos-utils` klog deps in `xsave.rs:26,161,166` — replace with `DiagnosticSink::emit`.
+- [ ] **1J-γ.2** Move into `slopos-ostd/src/arch/x86_64/`: `karch/src/cpu/cpuid.rs` (314 LoC), `karch/src/cpu/msr.rs` (142 LoC), `karch/src/arch/gdt.rs` (498 LoC), `karch/src/arch/exception.rs` (42 LoC), `karch/src/tsc.rs`.
+- [ ] **1J-γ.3** Merge `karch/src/arch/idt.rs` (180 LoC) constants into `slopos-ostd/src/irq/idt.rs`. Drop the duplicate `IdtEntry` (OSTD's wins).
+- [ ] **1J-γ.4** Move `karch/src/pcr.rs` (~600 LoC) → `slopos-ostd/src/cpu/x86_64/pcr.rs`. Add compile-time razors for asm-coupled offsets (`kernel_rsp == 0x10`, `current_task == 40`, etc.).
+- [ ] **1J-γ.5** Move `karch/src/interrupt_frame.rs` → `slopos-ostd/src/irq/interrupt_frame.rs`.
+- [ ] **1J-γ.6** Verify `karch/src/init_flag.rs` is equivalent to `slopos_ostd::sync::InitFlag`; delete duplicate.
+- [ ] **1J-γ.7** Dep inversion (in `slopos-ostd/`): rewrite all `use slopos_arch::xxx` (in `sync/{cpu_local,spin,rcu,lock_tracking,init_flag,seqlock}.rs`, `cpu/preempt.rs`, `task/fpu.rs`) to `use crate::xxx`. Remove `slopos-arch = { path = "../karch" }` from `slopos-ostd/Cargo.toml`.
+- [ ] **1J-γ.8** Update `karch/Cargo.toml` to depend on `slopos-ostd`. Replace `karch/src/lib.rs` with pure re-exports (preserving the existing public path so the ~40 consumers don't change).
+
+**Risk.** ~40 consumer files use `slopos_arch::xxx`. Re-exports preserve those paths. If any consumer reaches a private path, surface it through OSTD's public API.
+
+**Verify.** `cargo check --workspace` clean. `cargo test -p slopos-ostd` count grows from 185 → ~250. `just test` ≥ 2410.
+
+#### 1J-δ — IDT/GDT migration
+
+**Goal.** **(closes 1J.2, 1J.11)** Replace `boot/src/idt.rs` (766 LoC, 34 unsafe) and `boot/src/gdt.rs` (232 LoC, 10 unsafe) with calls into OSTD's `IdtBuilder` / `gdt::install`. Delete the 42 stubs in `boot/idt_handlers.s`.
+
+- [ ] **1J-δ.1** New `slopos_ostd::arch::x86_64::gdt::install(layout: &mut GdtLayout)`.
+- [ ] **1J-δ.2** New `slopos_ostd::arch::x86_64::msr::install_syscall_msrs(...)`. LSTAR points at legacy `syscall_entry` until Stage ε re-points it.
+- [ ] **1J-δ.3** Replace `boot/src/idt.rs::idt_init` body with `slopos_ostd::irq::idt::IdtBuilder` calls. Each existing handler becomes a registered `IrqLine::register_callback` or platform-reserved vector.
+- [ ] **1J-δ.4** Delete `boot/idt_handlers.s` once OSTD trampoline + per-vector callbacks cover everything.
+- [ ] **1J-δ.5** **(closes 1J.11)** `core/src/irq.rs` (617 LoC) becomes `pub use slopos_ostd::irq::*;`. Drivers using `irq_dispatch_register` migrate to `IrqLine::register_callback`.
+- [ ] **1J-δ.6** ABI razors at the new install site: `assert!(offset_of!(InterruptFrame, {rip,cs,rflags,rsp,ss}) == OSTD_*_OFFSET)`, `assert!(offset_of!(ProcessorControlRegion, kernel_rsp) == 0x10)`.
+
+**Verify.** Boot reaches "ALL SYSTEMS OPERATIONAL!". Spurious-interrupt count zero. Tests at risk: `tests/syscall/*`, `tests/usercopy*`, `tests/page_fault*`, `tests/ipc/*`, `tests/timer/*`.
+
+#### 1J-ε — UserModeBackend + LSTAR
+
+**Goal.** Wire the OSTD user-mode round-trip. Enables Stage θ.
+
+- [ ] **1J-ε.1** New `kernel-services/src/ostd_backends/user_mode.rs`: `UserModeBackend::execute_round_trip` impl. Stashes `*mut UserContext` in a new PCR field.
+- [ ] **1J-ε.2** Add `user_ctx_ptr: AtomicPtr<UserContext>` field to `ProcessorControlRegion` (now in OSTD post-γ). Add offset razor.
+- [ ] **1J-ε.3** Repoint LSTAR from legacy `syscall_entry` (`boot/src/gdt.rs:174`) to `slopos_ostd::user::mode::user_return_trampoline_addr()`. Closes Phase 1G TODO #2/#3.
+- [ ] **1J-ε.4** Wire `register_user_mode_backend(&PCR_USER_MODE)` in `register_with_ostd`. Closes Phase 1G TODO #4.
+
+**Risk.** Any error here = triple-fault on first user-mode entry. Add a smoke test that returns immediately to user-mode and back before signing off.
+
+**Verify.** Single-syscall round trip works. All `tests/syscall/*` pass.
+
+#### 1J-ζ — Scheduler/Task migration
+
+**Goal.** **(closes 1J.8, 1J.9)** Delete `core/src/scheduler/switch_asm.rs` (222 LoC, 9 unsafe) + `core/context_switch.s`. `core/src/scheduler/` consumes `slopos_ostd::task::Task` and `slopos_ostd::task::Scheduler`. **Critical risk** — naked-fn ABI must match exactly.
+
+- [ ] **1J-ζ.1** `core/src/scheduler/task_struct.rs:33,101`: replace legacy `Task` + `SwitchContext` with OSTD types via type aliases.
+- [ ] **1J-ζ.2** Migrate all call sites of `core::scheduler::switch_asm::switch_registers` to `slopos_ostd::task::switch::switch_registers`.
+- [ ] **1J-ζ.3** **(closes 1J.8)** Delete `core/src/scheduler/switch_asm.rs` + `core/context_switch.s`.
+- [ ] **1J-ζ.4** New `kernel-services/src/ostd_backends/task_runtime.rs`: `TaskRuntimeBackend::current_task` returns the PCR `current_task` slot cast to `*const slopos_ostd::task::Task`. Closes Phase 1I TODO #1.
+- [ ] **1J-ζ.5** New `task_exit_trampoline` extern fn wired via `register_task_exit_hook`. Closes Phase 1I TODO #2.
+- [ ] **1J-ζ.6** Compute active XCR0 at boot, store in `static ACTIVE_XCR0: AtomicU64`, plumb to `fpu_xsave`/`fpu_xrstor`. Closes Phase 1I TODO #6.
+- [ ] **1J-ζ.7** ABI razors at the kernel call site: `assert!(offset_of!(TaskContext, rsp) == 48)`, `assert!(offset_of!(TaskContext, rip) == 64)`.
+
+**Verify.** All tasks yield + resume correctly. Tests: `tests/sched/*`, `tests/timer/*`, `tests/ipc/*`, `tests/multitask/*`, `tests/fork/*`.
+
+#### 1J-η — VmSpace/paging migration
+
+**Goal.** **(closes 1J.5, 1J.6)** Replace `mm::process_vm::ProcessVmInner.pml4: *mut PageTable` with `vm_space: KArc<VmSpace>`. Most of `mm/src/paging/` (1915 LoC, 41 unsafe) becomes deletable.
+
+- [ ] **1J-η.1** `mm/src/process_vm.rs:27`: add `vm_space: KArc<VmSpace>`. Dual-write to old + new fields, then flip readers.
+- [ ] **1J-η.2** Migrate the 9 `pml4` sites: L239, L278, L1251, L1270, L1271, L1333, L1363, L1437, L2194-2220 → `vm_space.cursor_mut(...)`.
+- [ ] **1J-η.3** `mm/src/{demand,cow,mmu/kpti}.rs` and `core/src/exec/mod.rs`: accept `&KArc<VmSpace>` instead of `&ProcessPageDir`.
+- [ ] **1J-η.4** **(closes 1J.6)** Delete `mm/src/paging/tables.rs::ProcessPageDir`, `split_pdpt_huge`. Most of `mm/src/paging/{mod,walker,page_table_defs}.rs` becomes deletable.
+- [ ] **1J-η.5** Kernel master pml4 (`KERNEL_PAGE_DIR` static) becomes `KArc<VmSpace>`.
+- [ ] **1J-η.6** PTE-flag compat asserts in `mm/src/paging_defs.rs`.
+
+**Verify.** Tests: `tests/mmap/*`, `tests/fork/*`, `tests/exec/*`, `tests/elf*`.
+
+#### 1J-θ — SyscallContext refactor
+
+**Goal.** **(closes 1J.10)** `core/src/syscall/context.rs:22` migrates from `frame_ptr: *mut InterruptFrame` to `&mut UserContext`. Touches ~100 handlers.
+
+- [ ] **1J-θ.1** Add `SyscallContext::from_user_context(task: *mut Task, ctx: &mut UserContext)` ctor.
+- [ ] **1J-θ.2** Re-implement `ok` / `err` / `ok_i64` / `err_with` / `err_user_ptr` / `args` against `UserContext`.
+- [ ] **1J-θ.3** `core/src/syscall/dispatch.rs:14`: switch to `from_user_context` (LSTAR already at `__ostd_user_return` post-ε).
+- [ ] **1J-θ.4** Sweep ~100 handlers in `core/src/syscall/{core,process,net,signal,...}_handlers.rs` for `.frame_ptr()` usage; convert each to `ctx.user_ctx().regs.rdi` etc.
+- [ ] **1J-θ.5** ABI razor: `assert!(offset_of!(UserRegs, rax) == 0)` etc.
+
+**Verify.** All `tests/syscall/*` pass.
+
+#### 1J-ι — Driver migration cleanup
+
+**Goal.** **(closes 1J.12)** Mostly already done by Stage β aliases — this stage just confirms.
+
+- [ ] **1J-ι.1** Verify `MmioRegion = IoMem` covers 5 driver consumers (hpet, pci, virtio_net, virtio_blk, xe). Add extension methods if needed.
+- [ ] **1J-ι.2** `rg 'port_in|port_out|port_read|port_write' drivers/ core/ fs/ net/ acpi/`. Migrate any survivors to `IoPort<T>`.
+- [ ] **1J-ι.3** 3 driver files (virtio_net, virtio_blk, virtio/pci) migrate IRQ registration to `IrqLine::register_callback`.
+- [ ] **1J-ι.4** Leave `slopos-utils::io::Port` in early-boot panic logger until Phase 2 (Phase 1E note explicitly defers).
+
+**Verify.** `just test` driver tests pass.
+
+#### 1J-κ — Zero-unsafe enforcement
+
+**Goal.** **(closes 1J.14, 1J.16)** Drive `unsafe` outside `slopos-ostd/` to zero. **Multi-week, runs in parallel** as a series of small PRs once Stages α–ι have removed the structural unsafe.
+
+After Stages α–ι, residual unsafe is concentrated in `mm/src/page_alloc.rs` (53), `mm/src/process_vm.rs` (residual after η), and `boot/src/{exception,user_fault,limine_protocol,panic,ist_stacks,smp,shutdown}.rs`. Per-file sub-tasks:
+
+- [ ] **1J-κ.1** `mm/src/page_alloc.rs` interior — wrap behind safe `Frame<KernelMeta>` API; unsafe moves into OSTD.
+- [ ] **1J-κ.2** `mm/src/process_vm.rs` residual — wrap behind safe `VmSpace` cursor.
+- [ ] **1J-κ.3** `boot/src/exception.rs` — migrate inline-asm panic/halt to OSTD `cpu::x86_64::halt()`.
+- [ ] **1J-κ.4** `boot/src/user_fault.rs` — wrap CR3/task ptr access in safe accessors.
+- [ ] **1J-κ.5** `boot/src/limine_protocol.rs` — wrap static-mut in `OnceCell` / `OnceLock`.
+- [ ] **1J-κ.6** `boot/src/panic.rs` — UTF-8 unchecked → checked.
+- [ ] **1J-κ.7** `boot/src/ist_stacks.rs` — IST guard-page walk via safe iterator.
+- [ ] **1J-κ.8** `boot/src/smp.rs` — AP bring-up via OSTD primitive.
+- [ ] **1J-κ.9** `boot/src/shutdown.rs` — port I/O via OSTD `IoPort<T>`.
+- [ ] **1J-κ.10** `core/src/scheduler/safestack_rt.rs` — mop up after Stage ζ.
+- [ ] **1J-κ.11** `core/src/syscall/*` — mop up after Stage θ.
+- [ ] **1J-κ.12** `core/src/exec/mod.rs` — wrap user-mode entry asm via OSTD `UserMode`.
+- [ ] **1J-κ.13** `drivers/` — per-driver, wrap remaining unsafe.
+- [ ] **1J-κ.14** `fs/`, `net/`, `acpi/` — minimal cleanup.
+- [ ] **1J-κ.15** `utils/` — keep until Phase 2 (early-boot panic logger).
+- [ ] **1J-κ.16** Add `#![forbid(unsafe_code)]` to every non-OSTD `lib.rs` (`karch`, `boot`, `kernel-services`, `mm`, `core`, `fs`, `net`, `drivers`, `acpi`, `slopos-utils`). Each forbid causes the build to fail if any unsafe lingers.
+
+**Verify.** `rg 'unsafe' --type rust -g '!slopos-ostd/**' -g '!userland/**' -g '!slibc/**' -g '!slop-protocol/**' -g '!ktesting/**' -g '!*.s'` returns zero.
+
+#### 1J-λ — Phase 1J close + parity
+
+**Goal.** **(closes 1J.15)** Final test parity gate, plan-file marks updated, ready for 1K (KernMiri).
+
+- [ ] **1J-λ.1** `just test` ≥ 2410.
+- [ ] **1J-λ.2** `just check-framekernel` clean.
+- [ ] **1J-λ.3** `just boot-log` reaches "ALL SYSTEMS OPERATIONAL!" without panics.
+- [ ] **1J-λ.4** Manual smoke test: shell, fork, mmap, signals, multi-CPU.
+- [ ] **1J-λ.5** Update this plan: mark all 1J.1–1J.16 boxes checked. Add a "Done — landed in 1J-X" note per subtask.
+- [ ] **1J-λ.6** TCB ratio check: count `\bunsafe\b` tokens in `slopos-ostd/`, divide by total kernel LoC. Target ≤ 1.5%.
+
+#### Original 1J subtask checklist (reference)
+
+These are the original 16 subtasks from the framekernel spec. Each is **closed by** a sub-phase as noted; checking these boxes is the responsibility of Stage λ.
+
+- [ ] **1J.1** `karch/`: replace its `lib.rs` with re-exports from `slopos_ostd::cpu::x86_64`. Delete crate-internal CPU HAL files (`arch/`, `cpu/`, `init_flag.rs`, `interrupt_frame.rs`, `pcr.rs`, `tsc.rs`). *(closed by 1J-γ)*
+- [ ] **1J.2** `boot/`: replace `boot/src/idt.rs` IDT setup with calls to `slopos_ostd::irq::idt::install`. Replace `boot/src/gdt.rs` with `slopos_ostd::arch::x86_64::gdt`. Delete duplicated entries. *(closed by 1J-δ)*
+- [ ] **1J.3** `mm/src/mmio.rs`: replace `MmioRegion` with a type alias `pub type MmioRegion = slopos_ostd::IoMem;`. Eventually delete the alias in Phase 2. *(closed by 1J-β)*
+- [ ] **1J.4** `mm/src/page_alloc.rs`: replace `OwnedPageFrame` with a type alias to `Frame<KernelMeta>`. Internal `unsafe` blocks now reference Inv. 1 + Inv. 4. *(alias in 1J-β; interior in 1J-κ.1)*
+- [ ] **1J.5** `mm/src/process_vm.rs::ProcessVmInner`: hide raw `pml4` pointer. Public field becomes `vm_space: KArc<VmSpace>`. All internal mutation via `vm_space.cursor_mut(..)`. *(closed by 1J-η)*
+- [ ] **1J.6** `mm/src/paging/`: most of this code becomes private to `slopos-ostd::mm::vm_space`. Delete `paging/tables.rs::ProcessPageDir` (replaced by `VmSpace`). Delete `paging/tables.rs::split_pdpt_huge` etc. (now private inside OSTD). *(closed by 1J-η)*
+- [ ] **1J.7** `mm/src/user_copy.rs`: becomes a thin re-export of `slopos_ostd::user::copy`. Delete `raw_usercopy` (now in OSTD). Delete `UserPtr` (re-exported from OSTD). *(closed by 1J-β)*
+- [ ] **1J.8** `core/src/scheduler/switch_asm.rs`: delete; functionality now in `slopos_ostd::task::switch`. *(closed by 1J-ζ)*
+- [ ] **1J.9** `core/src/scheduler/`: rewrite to consume `slopos_ostd::task::Task`, `slopos_ostd::task::Scheduler` (the trait). At Phase 1 end, the scheduler still has whatever logic it has today — just consuming OSTD primitives. *(closed by 1J-ζ)*
+- [ ] **1J.10** `core/src/syscall/`: handlers continue to receive raw frames at this phase. Phase 2 redesigns the dispatch. However, `syscall::context::SyscallContext` migrates to taking `&mut UserContext` instead of raw frame pointer. *(closed by 1J-θ)*
+- [ ] **1J.11** `core/src/irq.rs`: thin wrapper re-exporting `slopos_ostd::irq` for legacy callers. Delete in Phase 2. *(closed by 1J-δ.5)*
+- [ ] **1J.12** `drivers/`: every driver that uses `MmioRegion` already works (alias in 1J.3). Drivers using `port_in*`/`port_out*` migrate to `IoPort<T>`. Drivers registering IRQs migrate to `IrqLine::register_callback`. *(closed by 1J-ι)*
+- [ ] **1J.13** `fs/`, `net/`, `acpi/`: chase compile errors from the renames above. No semantic changes. *(closed by 1J-β.9)*
+- [ ] **1J.14** Crucially: at the end of 1J, every kernel crate **except `slopos-ostd`** must have *zero* `unsafe` blocks. This will require some compile errors to be fixed by introducing safe OSTD APIs — that's expected. Track them as 1J.14.{a..z} sub-items. *(closed by 1J-κ)*
+- [ ] **1J.15** Run `just test`. Test count must equal pre-1J. Any test failure is a 1J defect. *(closed by 1J-λ)*
+- [ ] **1J.16** Verify: `rg 'unsafe' --type rust -g '!slopos-ostd/**'` returns zero matches in kernel crates. (Userland excluded.) *(closed by 1J-κ.16)*
 
 ### 1K: KernMiri port
 
