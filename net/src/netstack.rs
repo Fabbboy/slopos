@@ -4,13 +4,13 @@
 //!
 //! Every registered network device gets an [`IfaceConfig`] describing its IPv4
 //! address, netmask, gateway, and DNS servers.  The [`NetStack`] struct
-//! aggregates all interface configs behind an [`IrqMutex`] and serves as the
+//! aggregates all interface configs behind an [`SpinLock`] and serves as the
 //! single source of truth for "our IP" queries — replacing the ad-hoc
 //! `virtio_net_ipv4_addr()` lookups that were scattered across the stack.
 //!
 //! # Concurrency
 //!
-//! All mutable state is behind an [`IrqMutex`].  Reads and writes are
+//! All mutable state is behind an [`SpinLock`].  Reads and writes are
 //! serialised.  The lock is held only briefly (no blocking I/O under lock).
 //!
 //! # Integration
@@ -24,7 +24,7 @@
 use core::fmt;
 
 use slopos_ostd::KVec;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_debug;
 
 use super::types::{DevIndex, Ipv4Addr};
@@ -114,7 +114,7 @@ impl fmt::Display for IfaceConfig {
 // 3A.2 — NetStack
 // =============================================================================
 
-/// Inner state of the network stack, behind [`IrqMutex`].
+/// Inner state of the network stack, behind [`SpinLock`].
 struct NetStackInner {
     /// Per-interface configurations.  One entry per configured device.
     ifaces: KVec<IfaceConfig>,
@@ -136,10 +136,10 @@ struct NetStackInner {
 /// if NET_STACK.is_our_addr(dst_ip) { /* deliver locally */ }
 /// ```
 pub struct NetStack {
-    inner: IrqMutex<NetStackInner>,
+    inner: SpinLock<NetStackInner>,
 }
 
-// SAFETY: All mutable state behind IrqMutex.
+// SAFETY: All mutable state behind SpinLock.
 unsafe impl Send for NetStack {}
 unsafe impl Sync for NetStack {}
 
@@ -150,7 +150,7 @@ impl NetStack {
     /// Create an empty network stack.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(
+            inner: SpinLock::new(
                 NetStackInner {
                     ifaces: KVec::new(),
                 },

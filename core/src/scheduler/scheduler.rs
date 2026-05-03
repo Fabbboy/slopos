@@ -3,7 +3,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_arch::cpu;
-use slopos_sync::preempt::PreemptGuard;
+use slopos_ostd::sync::PreemptGuard;
 
 use slopos_utils::kdiag_timestamp;
 use slopos_utils::klog_info;
@@ -478,7 +478,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     }
 
     dispatch(cpu_id, idle_task);
-    slopos_sync::rcu_note_qs();
+    slopos_ostd::sync::rcu_note_qs();
 
     unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
@@ -733,7 +733,7 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
     // the per-CPU switch counter in one place.
     dispatch(cpu_id, to_task);
-    slopos_sync::rcu_note_qs();
+    slopos_ostd::sync::rcu_note_qs();
 
     unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
@@ -840,7 +840,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     task_record_context_switch(next_task, idle_task, timestamp);
 
     dispatch(cpu_id, idle_task);
-    slopos_sync::rcu_note_qs();
+    slopos_ostd::sync::rcu_note_qs();
 
     switch_to_kernel_address_space(idle_task);
 
@@ -1145,7 +1145,7 @@ pub fn init_scheduler() -> c_int {
     per_cpu::init_all_percpu_schedulers();
     reset_sleep_queue();
 
-    slopos_sync::preempt::register_reschedule_callback(deferred_reschedule_callback);
+    slopos_ostd::sync::register_reschedule_callback(deferred_reschedule_callback);
 
     slopos_utils::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
 
@@ -1275,12 +1275,12 @@ pub fn scheduler_timer_tick() {
     // Unconditional QS: the timer ISR firing proves this CPU is not
     // inside an RCU read-side critical section (those disable preemption
     // but not interrupts).  Matches Linux rcu_sched_clock_irq().
-    slopos_sync::rcu_note_qs();
+    slopos_ostd::sync::rcu_note_qs();
 
     // Raise the deferred-callback softirq flag on CPU 0 only.
     // rcu_process_callbacks() runs later from the idle loop, not here.
     if cpu_id == 0 {
-        slopos_sync::rcu_raise_softirq();
+        slopos_ostd::sync::rcu_raise_softirq();
     }
 
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);

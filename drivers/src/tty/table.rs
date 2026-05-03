@@ -2,11 +2,11 @@
 //!
 //! # Lock Architecture
 //!
-//! Each TTY slot has its own `IrqMutex`, enabling fully independent
+//! Each TTY slot has its own `SpinLock`, enabling fully independent
 //! operations on different TTYs.  There is no global table lock — each slot
 //! in `TTY_SLOTS` is independently locked.
 //!
-//! This replaces the previous `TTY_TABLE: IrqMutex<[Option<Tty>; MAX_TTYS]>`
+//! This replaces the previous `TTY_TABLE: SpinLock<[Option<Tty>; MAX_TTYS]>`
 //! where a single lock protected **all** 8 TTY slots.  Under the old scheme,
 //! any operation on TTY 0 blocked all operations on TTY 1–7.  A 1 KB serial
 //! write held the global lock for ~86 ms.
@@ -39,9 +39,9 @@ use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
+use slopos_ostd::sync::WaitQueue;
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, PinBox};
-use slopos_sync::WaitQueue;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_utils::{AtomicBitmap, words_for};
 
 // ---------------------------------------------------------------------------
@@ -58,8 +58,8 @@ use slopos_utils::{AtomicBitmap, words_for};
 /// The remaining slots are reserved for future PTY support.
 ///
 /// Access a slot by index: `TTY_SLOTS[idx].lock()`.
-pub static TTY_SLOTS: [IrqMutex<Option<PinBox<Tty>>>; MAX_TTYS] =
-    [const { IrqMutex::new(None, LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
+pub static TTY_SLOTS: [SpinLock<Option<PinBox<Tty>>>; MAX_TTYS] =
+    [const { SpinLock::new(None, LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
 
 /// Per-TTY input wait queues — separate from TTY_SLOTS to avoid lock ordering
 /// issues (read() needs to block on the wait queue while the condition closure
@@ -110,8 +110,8 @@ pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(
 /// in `drain_hw_input_locked` acquires the write lock while the slot lock
 /// is still held — both orderings are safe because no code path ever
 /// acquires the slot lock while holding the write lock.
-pub static TTY_WRITE_LOCKS: [IrqMutex<()>; MAX_TTYS] =
-    [const { IrqMutex::new((), LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
+pub static TTY_WRITE_LOCKS: [SpinLock<()>; MAX_TTYS] =
+    [const { SpinLock::new((), LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
 
 /// Per-TTY generation counter.  Incremented each time a slot transitions
 /// from allocated → free (`*slot = None`).  Used by `PtyPeerHandle` to

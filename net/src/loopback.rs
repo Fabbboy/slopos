@@ -13,11 +13,11 @@
 //!
 //! # Concurrency
 //!
-//! The internal queue is protected by an [`IrqMutex`] since both `tx()` (from
+//! The internal queue is protected by an [`SpinLock`] since both `tx()` (from
 //! any socket context) and `poll_rx()` (from the NAPI loop) access it.
 
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec, KVecDeque};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
 use super::packetbuf::PacketBuf;
@@ -27,7 +27,7 @@ use super::types::{MacAddr, NetError};
 /// Maximum number of packets queued in the loopback device.
 const LOOPBACK_QUEUE_CAPACITY: usize = 256;
 
-/// Inner state of the loopback device, behind [`IrqMutex`].
+/// Inner state of the loopback device, behind [`SpinLock`].
 struct LoopbackInner {
     /// Packets waiting to be "received" by the ingress pipeline.
     queue: KVecDeque<PacketBuf>,
@@ -40,10 +40,10 @@ struct LoopbackInner {
 /// Registered at `DevIndex(0)` during kernel init.  All packets sent to
 /// `127.0.0.0/8` are routed here and immediately available for local delivery.
 pub struct LoopbackDev {
-    inner: IrqMutex<LoopbackInner>,
+    inner: SpinLock<LoopbackInner>,
 }
 
-// SAFETY: All mutable state is behind IrqMutex.
+// SAFETY: All mutable state is behind SpinLock.
 unsafe impl Send for LoopbackDev {}
 unsafe impl Sync for LoopbackDev {}
 
@@ -51,7 +51,7 @@ impl LoopbackDev {
     /// Create a new loopback device with an empty queue.
     pub fn new() -> Self {
         Self {
-            inner: IrqMutex::new(
+            inner: SpinLock::new(
                 LoopbackInner {
                     queue: KVecDeque::with_capacity(64).expect("loopback: alloc"),
                     stats: NetDeviceStats::new(),

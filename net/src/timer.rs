@@ -20,7 +20,7 @@
 //!
 //! # Concurrency
 //!
-//! The wheel's internal state is protected by an [`IrqMutex`].  Expired entries
+//! The wheel's internal state is protected by an [`SpinLock`].  Expired entries
 //! are collected under the lock, then dispatched **outside** the lock.  This
 //! prevents deadlock when dispatch handlers schedule new timers.
 //!
@@ -38,7 +38,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::KVec;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_debug;
 
 /// Number of slots in the timer wheel.
@@ -147,10 +147,10 @@ pub struct FiredTimer {
 }
 
 // =============================================================================
-// TimerWheelInner — state behind the IrqMutex
+// TimerWheelInner — state behind the SpinLock
 // =============================================================================
 
-/// Internal mutable state of the timer wheel, protected by [`IrqMutex`].
+/// Internal mutable state of the timer wheel, protected by [`SpinLock`].
 struct TimerWheelInner {
     /// 256 slots, each containing pending timer entries.
     slots: [KVec<TimerEntry>; NUM_SLOTS],
@@ -188,7 +188,7 @@ struct TimerWheelInner {
 /// }
 /// ```
 pub struct NetTimerWheel {
-    inner: IrqMutex<TimerWheelInner>,
+    inner: SpinLock<TimerWheelInner>,
     /// Monotonically increasing token generator (lock-free).
     ///
     /// Starts at 1; [`TimerToken(0)`](TimerToken::INVALID) is the sentinel
@@ -196,7 +196,7 @@ pub struct NetTimerWheel {
     next_token: AtomicU64,
 }
 
-// SAFETY: All mutable state is behind IrqMutex (ticket lock with IRQ disable)
+// SAFETY: All mutable state is behind SpinLock (ticket lock with IRQ disable)
 // or AtomicU64.  No unsynchronized shared mutation.
 unsafe impl Send for NetTimerWheel {}
 unsafe impl Sync for NetTimerWheel {}
@@ -205,7 +205,7 @@ impl NetTimerWheel {
     /// Create a new, empty timer wheel with `current_tick = 0`.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(
+            inner: SpinLock::new(
                 TimerWheelInner {
                     slots: [const { KVec::new() }; NUM_SLOTS],
                     current_tick: 0,
@@ -342,7 +342,7 @@ impl NetTimerWheel {
             }
         }
 
-        // Lock is released here (drop of IrqMutexGuard).
+        // Lock is released here (drop of SpinLockGuard).
         fired
     }
 

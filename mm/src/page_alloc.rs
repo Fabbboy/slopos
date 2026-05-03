@@ -42,7 +42,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_ALLOCATOR, PreemptGuard};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
 use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
@@ -553,8 +553,8 @@ impl PageAllocator {
     }
 }
 
-static PAGE_ALLOCATOR: IrqMutex<PageAllocator> =
-    IrqMutex::new(PageAllocator::new(), LOCK_LEVEL_ALLOCATOR);
+static PAGE_ALLOCATOR: SpinLock<PageAllocator> =
+    SpinLock::new(PageAllocator::new(), LOCK_LEVEL_ALLOCATOR);
 
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 

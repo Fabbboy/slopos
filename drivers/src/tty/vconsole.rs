@@ -17,7 +17,7 @@ use slopos_ostd::{KBox, KVec};
 
 use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
@@ -1584,9 +1584,9 @@ impl VConsoleState {
     }
 }
 
-static VCONSOLE_STATE: IrqMutex<VConsoleState> =
-    IrqMutex::new(VConsoleState::new(), LOCK_LEVEL_RESOURCE);
-static SCROLLBACK: IrqMutex<Option<KBox<ScrollbackBuf>>> = IrqMutex::new(None, LOCK_LEVEL_RESOURCE);
+static VCONSOLE_STATE: SpinLock<VConsoleState> =
+    SpinLock::new(VConsoleState::new(), LOCK_LEVEL_RESOURCE);
+static SCROLLBACK: SpinLock<Option<KBox<ScrollbackBuf>>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
 
 pub fn register_framebuffer(
     base: *mut u8,
@@ -1618,7 +1618,7 @@ pub fn register_framebuffer(
         state.cols as usize
     };
 
-    // Heap allocation outside the IrqMutex — allocating with interrupts
+    // Heap allocation outside the SpinLock — allocating with interrupts
     // disabled triggers UB checks in the global allocator.
     let scrollback = KBox::try_new(ScrollbackBuf::new(cols)).expect("vconsole: scrollback alloc");
     let shadow = if shadow_size > 0 {

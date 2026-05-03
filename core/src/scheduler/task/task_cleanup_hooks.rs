@@ -1,4 +1,4 @@
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_info;
 
 // =============================================================================
@@ -30,8 +30,8 @@ impl TaskResourceCleanupHooks {
     }
 }
 
-static TASK_RESOURCE_HOOKS: IrqMutex<TaskResourceCleanupHooks> =
-    IrqMutex::new(TaskResourceCleanupHooks::new(), LOCK_LEVEL_REGISTRY);
+static TASK_RESOURCE_HOOKS: SpinLock<TaskResourceCleanupHooks> =
+    SpinLock::new(TaskResourceCleanupHooks::new(), LOCK_LEVEL_REGISTRY);
 
 /// Register a cleanup hook called whenever task-bound resources must be released.
 ///

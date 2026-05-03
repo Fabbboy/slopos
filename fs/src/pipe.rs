@@ -2,7 +2,7 @@
 //!
 //! # Locking
 //!
-//! Each pipe slot has its own [`IrqMutex`], so operations on independent
+//! Each pipe slot has its own [`SpinLock`], so operations on independent
 //! pipes never contend. A separate [`PIPE_ALLOC`] lock protects only the
 //! allocation bitmap (touched on pipe create/destroy only).
 //!
@@ -13,7 +13,9 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
-use slopos_sync::{IrqMutex, IrqMutexGuard, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, WaitQueue};
+use slopos_ostd::sync::{
+    LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard, WaitQueue,
+};
 
 pub(crate) const MAX_PIPES: usize = 64;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
@@ -174,12 +176,12 @@ impl PipeSlot {
 }
 
 // ---------------------------------------------------------------------------
-// Per-pipe locks — each pipe has its own IrqMutex.
+// Per-pipe locks — each pipe has its own SpinLock.
 // ---------------------------------------------------------------------------
 
 /// Per-pipe locks. Each slot is independently locked.
-pub(crate) static PIPE_SLOTS: [IrqMutex<PipeSlot>; MAX_PIPES] =
-    [const { IrqMutex::new(PipeSlot::new(), LOCK_LEVEL_RESOURCE) }; MAX_PIPES];
+pub(crate) static PIPE_SLOTS: [SpinLock<PipeSlot>; MAX_PIPES] =
+    [const { SpinLock::new(PipeSlot::new(), LOCK_LEVEL_RESOURCE) }; MAX_PIPES];
 
 /// Allocation bitmap — only locked during pipe create/destroy.
 struct PipeAllocBitmap {
@@ -194,8 +196,8 @@ impl PipeAllocBitmap {
     }
 }
 
-static PIPE_ALLOC: IrqMutex<PipeAllocBitmap> =
-    IrqMutex::new(PipeAllocBitmap::new(), LOCK_LEVEL_REGISTRY);
+static PIPE_ALLOC: SpinLock<PipeAllocBitmap> =
+    SpinLock::new(PipeAllocBitmap::new(), LOCK_LEVEL_REGISTRY);
 
 /// Allocate a new pipe slot. Returns a [`PipeHandle`] encoding the slot
 /// index and a monotonic generation counter for stale-handle detection.
@@ -225,7 +227,7 @@ pub(crate) fn alloc_slot() -> Option<PipeHandle> {
 ///
 /// This is the primary accessor for pipe operations.
 #[inline]
-pub(crate) fn lock_slot(handle: PipeHandle) -> Option<IrqMutexGuard<'static, PipeSlot>> {
+pub(crate) fn lock_slot(handle: PipeHandle) -> Option<SpinLockGuard<'static, PipeSlot>> {
     let idx = handle.slot();
     if idx >= MAX_PIPES {
         return None;

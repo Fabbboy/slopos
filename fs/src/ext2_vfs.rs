@@ -1,7 +1,7 @@
 use crate::blockdev::{CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_sync::{InitFlag, LOCK_LEVEL_RESOURCE, PreemptMutex};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, PreemptMutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
 

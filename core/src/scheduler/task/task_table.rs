@@ -2,8 +2,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KBox, KVec};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
@@ -21,10 +21,10 @@ pub const TASK_POOL_CAPACITY: usize = 8192;
 // =============================================================================
 
 /// List of terminated tasks waiting for the zombie reaper to reset them
-/// once `refcnt == 0`. Protected by `IrqMutex` for interrupt safety.
+/// once `refcnt == 0`. Protected by `SpinLock` for interrupt safety.
 /// The `KVec` is pre-reserved to `TASK_POOL_CAPACITY` at init time so
 /// pushes never allocate under the lock.
-static ZOMBIE_LIST: IrqMutex<ZombieList> = IrqMutex::new(ZombieList::new(), LOCK_LEVEL_REGISTRY);
+static ZOMBIE_LIST: SpinLock<ZombieList> = SpinLock::new(ZombieList::new(), LOCK_LEVEL_REGISTRY);
 
 /// High-water mark of pool-slot indices that have ever been populated
 /// with a `KBox<Task>`. Monotonically increases; only written in
@@ -66,7 +66,7 @@ struct ZombieList {
 }
 
 // SAFETY: ZombieList contains raw pointers into stable pool slots.
-// All access is serialised through the IrqMutex.
+// All access is serialised through the SpinLock.
 unsafe impl Send for ZombieList {}
 unsafe impl Sync for ZombieList {}
 
@@ -224,7 +224,7 @@ pub(super) struct TaskManagerInner {
 }
 
 // SAFETY: TaskManagerInner contains Tasks (boxed) with raw pointers.
-// Cross-CPU access is serialised through the IrqMutex, with the
+// Cross-CPU access is serialised through the SpinLock, with the
 // documented lock-free read exceptions below.
 unsafe impl Send for TaskManagerInner {}
 
@@ -266,8 +266,8 @@ impl TaskManagerInner {
     }
 }
 
-static TASK_MANAGER: IrqMutex<TaskManagerInner> =
-    IrqMutex::new(TaskManagerInner::new(), LOCK_LEVEL_REGISTRY);
+static TASK_MANAGER: SpinLock<TaskManagerInner> =
+    SpinLock::new(TaskManagerInner::new(), LOCK_LEVEL_REGISTRY);
 
 #[inline]
 pub(super) fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> R {
@@ -320,7 +320,7 @@ fn ensure_pool_allocated() -> bool {
         }
     }
     // Pre-reserve the zombie list so pushes never allocate under its
-    // own IrqMutex.
+    // own SpinLock.
     {
         let mut zombies = ZOMBIE_LIST.lock();
         if zombies.tasks.capacity() < TASK_POOL_CAPACITY

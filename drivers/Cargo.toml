@@ -26,7 +26,6 @@ slopos-core = { workspace = true }
 slopos-font = { workspace = true, features = ["kernel"] }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
-slopos-sync = { workspace = true }
 slopos-utils = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-net = { workspace = true }

@@ -40,7 +40,7 @@ pub fn fork_rr_counter_set(value: usize) {
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
-use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_SCHEDULER};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -210,7 +210,7 @@ const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 pub struct PerCpuScheduler {
     pub cpu_id: usize,
     ready_queues: UnsafeCell<[ReadyQueue; NUM_PRIORITY_LEVELS]>,
-    queue_lock: IrqMutex<()>,
+    queue_lock: SpinLock<()>,
     pub enabled: AtomicBool,
     pub time_slice: u16,
     pub total_switches: AtomicU64,
@@ -234,7 +234,7 @@ impl PerCpuScheduler {
         Self {
             cpu_id: 0,
             ready_queues: UnsafeCell::new([EMPTY_QUEUE; NUM_PRIORITY_LEVELS]),
-            queue_lock: IrqMutex::new((), LOCK_LEVEL_SCHEDULER),
+            queue_lock: SpinLock::new((), LOCK_LEVEL_SCHEDULER),
             enabled: AtomicBool::new(false),
             time_slice: 10,
             total_switches: AtomicU64::new(0),

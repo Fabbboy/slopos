@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::KVec;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::{klog_debug, klog_warn};
 
 use super::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
@@ -80,8 +80,8 @@ pub struct ReassemblyTable {
     groups: [ReassemblyGroup; MAX_REASSEMBLY_GROUPS],
 }
 
-pub static REASSEMBLY_TABLE: IrqMutex<ReassemblyTable> =
-    IrqMutex::new(ReassemblyTable::new(), LOCK_LEVEL_REGISTRY);
+pub static REASSEMBLY_TABLE: SpinLock<ReassemblyTable> =
+    SpinLock::new(ReassemblyTable::new(), LOCK_LEVEL_REGISTRY);
 
 // Size tripwires: catch any future struct bloat that would bring
 // back large kernel-stack frames along the ingress / reassembly path.

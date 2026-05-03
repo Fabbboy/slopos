@@ -27,7 +27,6 @@ slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
-slopos-sync = { workspace = true }
 slopos-utils = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }

@@ -11,7 +11,7 @@
 //! RDRAND (primary), RDSEED (bonus), and TSC (fallback). After seeding,
 //! the CSPRNG auto-rekeys every 1 MB of output.
 
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, OnceLock};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
 
 // =============================================================================
 // ChaCha20 core (RFC 8439)
@@ -163,13 +163,13 @@ impl CsprngState {
 // Global CSPRNG singleton
 // =============================================================================
 
-static CSPRNG: OnceLock<IrqMutex<CsprngState>> = OnceLock::new();
+static CSPRNG: OnceLock<SpinLock<CsprngState>> = OnceLock::new();
 
 /// Initialize the CSPRNG with a 32-byte seed. Called once during boot.
 ///
 /// If called more than once, the second call is a no-op (OnceLock semantics).
 pub fn init_csprng(seed: &[u8; 32]) {
-    CSPRNG.call_once(|| IrqMutex::new(CsprngState::from_seed(seed), LOCK_LEVEL_REGISTRY));
+    CSPRNG.call_once(|| SpinLock::new(CsprngState::from_seed(seed), LOCK_LEVEL_REGISTRY));
 }
 
 /// Fill `buf` with cryptographically secure random bytes.
@@ -180,7 +180,7 @@ pub fn csprng_fill(buf: &mut [u8]) {
     // Ensure the CSPRNG is initialized even if called before the boot step.
     CSPRNG.call_once(|| {
         let seed = emergency_seed();
-        IrqMutex::new(CsprngState::from_seed(&seed), LOCK_LEVEL_REGISTRY)
+        SpinLock::new(CsprngState::from_seed(&seed), LOCK_LEVEL_REGISTRY)
     });
 
     let rng = CSPRNG.get().expect("CSPRNG not initialized");

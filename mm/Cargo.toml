@@ -24,4 +24,3 @@ slopos-arch = { workspace = true }
 slopos-ostd = { workspace = true }
 slopos-testing = { workspace = true }
 slopos-utils = { workspace = true }
-slopos-sync = { workspace = true }

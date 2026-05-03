@@ -5,7 +5,7 @@
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_sync::StateFlag;
+use slopos_ostd::sync::StateFlag;
 use slopos_utils::klog_info;
 
 use crate::config::TestConfig;

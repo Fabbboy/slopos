@@ -25,6 +25,6 @@ slopos-kernel-services = { workspace = true }
 slopos-font = { workspace = true, features = ["kernel"] }
 slopos-gfx = { workspace = true }
 slopos-drivers = { workspace = true }
-slopos-sync = { workspace = true }
 slopos-mm = { workspace = true }
+slopos-ostd = { workspace = true }
 slopos-utils = { workspace = true }

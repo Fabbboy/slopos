@@ -4,8 +4,8 @@ pub mod timer;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_arch::cpu;
-use slopos_sync::InitFlag;
-use slopos_sync::OnceLock;
+use slopos_ostd::sync::InitFlag;
+use slopos_ostd::sync::OnceLock;
 use slopos_utils::{klog_debug, klog_info};
 
 use regs::*;

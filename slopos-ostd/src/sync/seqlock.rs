@@ -22,9 +22,9 @@
 
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
-use core::sync::atomic::{fence, AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
 
-use crate::preempt::PreemptGuard;
+use crate::cpu::preempt::PreemptGuard;
 use slopos_arch::cpu;
 
 /// A sequence lock protecting a small `Copy` value.
@@ -102,13 +102,11 @@ impl<T: Copy> SeqLock<T> {
         let preempt = PreemptGuard::new();
         let saved_flags = cpu::save_flags_cli();
 
-        // Acquire writer spinlock (test-and-set with spin).
         while self
             .writer_lock
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            // Spin until the other writer releases.
             while self.writer_lock.load(Ordering::Relaxed) {
                 spin_loop();
             }
@@ -135,12 +133,15 @@ impl<'a, T: Copy> SeqLockWriteGuard<'a, T> {
     /// Get a mutable reference to the protected data.
     #[inline]
     pub fn get_mut(&mut self) -> &mut T {
+        // SAFETY: we hold writer_lock; no concurrent reader can observe a
+        // consistent snapshot until we drop and the seq counter goes even.
         unsafe { &mut *self.lock.data.get() }
     }
 
     /// Overwrite the protected data entirely.
     #[inline]
     pub fn write(&mut self, value: T) {
+        // SAFETY: see `get_mut`.
         unsafe { *self.lock.data.get() = value };
     }
 }

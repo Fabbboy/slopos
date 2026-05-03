@@ -9,7 +9,7 @@ use slopos_abi::fs::{
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
-use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::driver_runtime::{
@@ -181,7 +181,7 @@ impl FdEntry {
 pub(super) struct FileTableSlot {
     pub(super) process_id: u32,
     pub(super) in_use: bool,
-    pub(super) lock: IrqMutex<()>,
+    pub(super) lock: SpinLock<()>,
     pub(super) descriptors: [FdEntry; FILEIO_MAX_OPEN_FILES],
 }
 
@@ -190,7 +190,7 @@ impl FileTableSlot {
         Self {
             process_id: INVALID_PROCESS_ID,
             in_use,
-            lock: IrqMutex::new((), LOCK_LEVEL_RESOURCE),
+            lock: SpinLock::new((), LOCK_LEVEL_RESOURCE),
             descriptors: [FdEntry::new(); FILEIO_MAX_OPEN_FILES],
         }
     }
@@ -235,26 +235,26 @@ impl FileioState {
 
 unsafe impl Send for FileioState {}
 
-pub(super) static FILEIO_STATE: IrqMutex<FileioState> =
-    IrqMutex::new(FileioState::uninitialized(), LOCK_LEVEL_REGISTRY);
+pub(super) static FILEIO_STATE: SpinLock<FileioState> =
+    SpinLock::new(FileioState::uninitialized(), LOCK_LEVEL_REGISTRY);
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
 // ---------------------------------------------------------------------------
 // Per-process file table access bypass.
 //
 // The global FILEIO_STATE lock serializes ALL file operations. But each
-// FileTableSlot already has its own per-process `lock: IrqMutex<()>`.
+// FileTableSlot already has its own per-process `lock: SpinLock<()>`.
 // For hot-path operations (read, write, close, dup), we bypass the global
 // lock and use only the per-process lock via `unsafe { FILEIO_STATE.as_ptr() }`.
 //
 // This is safe because:
-// 1. Each FileTableSlot.lock is an independent IrqMutex with its own ticket.
+// 1. Each FileTableSlot.lock is an independent SpinLock with its own ticket.
 // 2. The FileTableSlot data (descriptors[]) is only modified under that lock.
 // 3. The global lock is still used for rare operations (table create/destroy,
 //    initialization, registration) where structural changes happen.
 // ---------------------------------------------------------------------------
 
-use slopos_sync::IrqMutexGuard;
+use slopos_ostd::sync::SpinLockGuard;
 
 #[allow(dead_code)]
 /// Snapshot of an FD entry's open file for use outside the lock.
@@ -278,19 +278,19 @@ pub(super) struct FdSnapshot {
 /// - `FileTableSlot.in_use` and `.process_id` are written only under the global
 ///   lock (during table create/destroy), and reads of these fields are naturally
 ///   aligned — no torn reads on x86_64.
-/// - `FileTableSlot.lock` is an independent IrqMutex that provides its own
+/// - `FileTableSlot.lock` is an independent SpinLock that provides its own
 ///   synchronization for the `descriptors[]` array.
 #[allow(dead_code)]
 pub(super) fn lock_process_table(
     pid: u32,
-) -> Option<(IrqMutexGuard<'static, ()>, *mut FileTableSlot)> {
+) -> Option<(SpinLockGuard<'static, ()>, *mut FileTableSlot)> {
     if !FILEIO_INIT.is_set() {
         return None;
     }
 
     // SAFETY: as_ptr() gives us a raw pointer to FileioState. The fields we
     // read (in_use, process_id) are naturally aligned and written atomically
-    // on x86_64. The per-process lock is an independent IrqMutex.
+    // on x86_64. The per-process lock is an independent SpinLock.
     let state = unsafe { &*FILEIO_STATE.as_ptr() };
 
     if pid == INVALID_PROCESS_ID {

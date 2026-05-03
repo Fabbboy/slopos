@@ -1,4 +1,4 @@
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{RingBuffer, klog_debug, klog_info, klog_warn};
 
 use crate::input_event::{has_keyboard_focus, input_route_key_event};
@@ -65,7 +65,7 @@ impl KeyboardState {
     }
 }
 
-static STATE: IrqMutex<KeyboardState> = IrqMutex::new(KeyboardState::new(), LOCK_LEVEL_RESOURCE);
+static STATE: SpinLock<KeyboardState> = SpinLock::new(KeyboardState::new(), LOCK_LEVEL_RESOURCE);
 
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;

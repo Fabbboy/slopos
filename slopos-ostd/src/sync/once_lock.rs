@@ -5,10 +5,6 @@
 //! the initializer; concurrent callers spin until complete; later callers
 //! are no-ops.
 //!
-//! This replaces the external `spin::Once` crate with a kernel-native
-//! implementation that is consistent with the ticket-lock-based locking
-//! strategy used throughout SlopOS.
-//!
 //! [`call_once()`]: OnceLock::call_once
 //! [`get()`]: OnceLock::get
 
@@ -28,22 +24,6 @@ const STATE_COMPLETE: u8 = 2;
 ///
 /// [`call_once()`]: OnceLock::call_once
 /// [`get()`]: OnceLock::get
-///
-/// # Example
-///
-/// ```ignore
-/// use slopos_sync::OnceLock;
-///
-/// static CONFIG: OnceLock<Config> = OnceLock::new();
-///
-/// fn init() {
-///     CONFIG.call_once(|| Config::default());
-/// }
-///
-/// fn use_config() -> &'static Config {
-///     CONFIG.get().expect("CONFIG not initialized")
-/// }
-/// ```
 pub struct OnceLock<T> {
     /// 0 = uninit, 1 = initializer running, 2 = complete.
     state: AtomicU8,
@@ -73,12 +53,10 @@ impl<T> OnceLock<T> {
     /// Subsequent callers are no-ops — the closure is never invoked.
     #[inline]
     pub fn call_once(&self, f: impl FnOnce() -> T) {
-        // Fast path: already initialized.
         if self.state.load(Ordering::Acquire) == STATE_COMPLETE {
             return;
         }
 
-        // Try to claim the initializer role.
         if self
             .state
             .compare_exchange(
@@ -89,14 +67,11 @@ impl<T> OnceLock<T> {
             )
             .is_ok()
         {
-            // We won the race: run the initializer.
             let value = f();
             // SAFETY: we are the sole writer (STATE_RUNNING guarantees exclusivity).
             unsafe { (*self.data.get()).write(value) };
-            // Publish the value to all CPUs.
             self.state.store(STATE_COMPLETE, Ordering::Release);
         } else {
-            // Someone else is initializing — spin until complete.
             while self.state.load(Ordering::Acquire) != STATE_COMPLETE {
                 core::hint::spin_loop();
             }
@@ -119,5 +94,11 @@ impl<T> OnceLock<T> {
     #[inline]
     pub fn is_completed(&self) -> bool {
         self.state.load(Ordering::Acquire) == STATE_COMPLETE
+    }
+}
+
+impl<T> Default for OnceLock<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }

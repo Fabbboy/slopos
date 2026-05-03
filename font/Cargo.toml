@@ -15,11 +15,10 @@ doctest = false
 
 [features]
 default = []
-kernel = ["dep:slopos-sync"]
+kernel = []
 
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-ostd = { workspace = true }
 slopos-gfx = { workspace = true }
-slopos-sync = { workspace = true, optional = true }
 libm = { workspace = true }

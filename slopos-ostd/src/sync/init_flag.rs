@@ -1,3 +1,9 @@
+//! Atomic boolean init/state flags.
+//!
+//! [`InitFlag`] (re-exported from `slopos-arch`) is the canonical
+//! "has this one-shot init run?" gate. [`StateFlag`] is the toggleable
+//! variant used for runtime state like in-progress shutdown.
+
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use slopos_arch::InitFlag;
@@ -28,16 +34,6 @@ impl StateFlag {
     ///
     /// Returns `true` if this call entered the state (was previously inactive).
     /// Returns `false` if already in this state.
-    ///
-    /// Typical usage for shutdown/panic handling:
-    ///
-    /// ```ignore
-    /// if !SHUTDOWN_IN_PROGRESS.enter() {
-    ///     // Already shutting down, just halt
-    ///     halt();
-    /// }
-    /// // ... perform shutdown ...
-    /// ```
     #[inline]
     pub fn enter(&self) -> bool {
         !self.flag.swap(true, Ordering::SeqCst)
@@ -77,14 +73,6 @@ impl StateFlag {
     ///
     /// Returns `true` if the flag was active (and is now inactive).
     /// Returns `false` if the flag was already inactive.
-    ///
-    /// This is useful for one-shot state consumption:
-    ///
-    /// ```ignore
-    /// if HAS_CPU_STATE.take() {
-    ///     // State was set, now cleared - use the associated data
-    /// }
-    /// ```
     #[inline]
     pub fn take(&self) -> bool {
         self.flag.swap(false, Ordering::SeqCst)
@@ -97,6 +85,6 @@ impl Default for StateFlag {
     }
 }
 
-// SAFETY: StateFlag is just an AtomicBool wrapper, which is Send + Sync
+// SAFETY: StateFlag is just an AtomicBool wrapper, which is Send + Sync.
 unsafe impl Send for StateFlag {}
 unsafe impl Sync for StateFlag {}

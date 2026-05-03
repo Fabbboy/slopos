@@ -1,6 +1,6 @@
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, POLLOUT};
-use slopos_sync::WaitQueue;
+use slopos_ostd::sync::WaitQueue;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, pass};
 

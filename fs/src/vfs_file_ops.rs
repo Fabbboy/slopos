@@ -5,7 +5,7 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLIN, POLLOUT};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use crate::vfs::{FileSystem, InodeId};
 
@@ -88,8 +88,8 @@ impl OpenVnodeTable {
     }
 }
 
-static OPEN_VNODES: IrqMutex<OpenVnodeTable> =
-    IrqMutex::new(OpenVnodeTable::new(), LOCK_LEVEL_REGISTRY);
+static OPEN_VNODES: SpinLock<OpenVnodeTable> =
+    SpinLock::new(OpenVnodeTable::new(), LOCK_LEVEL_REGISTRY);
 
 /// Validate a vnode handle against the table, returning the slot index.
 fn validate_vnode(table: &OpenVnodeTable, handle: VnodeHandle) -> Option<usize> {

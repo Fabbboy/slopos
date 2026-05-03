@@ -52,7 +52,7 @@ pub const PIT_BASE_FREQUENCY_HZ: u32 = 1_193_182;
 // klog backend, and the `SerialPort` driver — must funnel through here.
 //
 // The functions are intentionally lock-free: callers are responsible for
-// serialisation (cli/sti, spinlock, IrqMutex, … whatever suits the context).
+// serialisation (cli/sti, spinlock, SpinLock, … whatever suits the context).
 
 /// Write one byte to a UART, polling the Line Status Register until the
 /// transmit holding register is empty.

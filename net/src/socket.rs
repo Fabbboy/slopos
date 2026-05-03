@@ -649,18 +649,24 @@ impl SocketAllocBitmap {
 }
 
 /// Socket allocation bitmap — separate lock from per-socket data.
-pub static SOCKET_ALLOC: slopos_sync::IrqMutex<SocketAllocBitmap> =
-    slopos_sync::IrqMutex::new(SocketAllocBitmap::new(), slopos_sync::LOCK_LEVEL_REGISTRY);
+pub static SOCKET_ALLOC: slopos_ostd::sync::SpinLock<SocketAllocBitmap> =
+    slopos_ostd::sync::SpinLock::new(
+        SocketAllocBitmap::new(),
+        slopos_ostd::sync::LOCK_LEVEL_REGISTRY,
+    );
 
 /// Global slab-based socket table.
-pub static NEW_SOCKET_TABLE: slopos_sync::IrqMutex<SlabSocketTable> =
-    slopos_sync::IrqMutex::new(SlabSocketTable::empty(), slopos_sync::LOCK_LEVEL_REGISTRY);
+pub static NEW_SOCKET_TABLE: slopos_ostd::sync::SpinLock<SlabSocketTable> =
+    slopos_ostd::sync::SpinLock::new(
+        SlabSocketTable::empty(),
+        slopos_ostd::sync::LOCK_LEVEL_REGISTRY,
+    );
 
 /// Ephemeral port allocator.
-pub static EPHEMERAL_PORTS: slopos_sync::IrqMutex<EphemeralPortAllocator> =
-    slopos_sync::IrqMutex::new(
+pub static EPHEMERAL_PORTS: slopos_ostd::sync::SpinLock<EphemeralPortAllocator> =
+    slopos_ostd::sync::SpinLock::new(
         EphemeralPortAllocator::new(),
-        slopos_sync::LOCK_LEVEL_REGISTRY,
+        slopos_ostd::sync::LOCK_LEVEL_REGISTRY,
     );
 
 // =============================================================================
@@ -676,7 +682,7 @@ use slopos_abi::syscall::{
     ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
     ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
-use slopos_sync::WaitQueue;
+use slopos_ostd::sync::WaitQueue;
 
 use crate as net;
 use crate::tcp::{TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};

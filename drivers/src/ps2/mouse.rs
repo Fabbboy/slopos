@@ -1,4 +1,4 @@
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::klog_info;
 
 use crate::input_event::{self, get_timestamp_ms};
@@ -36,7 +36,7 @@ impl MouseState {
     }
 }
 
-static STATE: IrqMutex<MouseState> = IrqMutex::new(MouseState::new(), LOCK_LEVEL_RESOURCE);
+static STATE: SpinLock<MouseState> = SpinLock::new(MouseState::new(), LOCK_LEVEL_RESOURCE);
 
 /// Attempt IntelliMouse (ImPS/2) detection.
 /// Magic sequence: SET_SAMPLE_RATE 200, 100, 80 → GET_ID → expect 3.

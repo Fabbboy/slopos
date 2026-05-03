@@ -4,7 +4,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr;
-use slopos_sync::InitFlag;
+use slopos_ostd::sync::InitFlag;
 
 use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
 use crate::paging::paging_is_user_accessible;

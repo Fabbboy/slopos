@@ -25,7 +25,7 @@ use slopos_ostd::AllocError;
 ///   quiescence — the scope ensures this. Implementers should not pause
 ///   APs themselves.
 /// - The implementer is responsible for whatever locking is needed
-///   (`IrqMutex::lock()` etc.) — locking discipline varies by lock level
+///   (`SpinLock::lock()` etc.) — locking discipline varies by lock level
 ///   so the framework cannot pick one for you.
 pub unsafe trait HermeticState: 'static {
     /// Snapshot value. Must be `Send` because the scope owns it across

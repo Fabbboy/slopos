@@ -539,6 +539,13 @@ pub fn kernel_main_impl() {
     crate::boot_impl::register_boot_services();
     slopos_core::driver_hooks::register_driver_services();
     slopos_drivers::syscall_services_init::init_syscall_services();
+    // Wire OSTD's wait-queue / RCU backends to the kernel-services facades.
+    // Must come after the platform + driver-runtime services are registered.
+    // SAFETY: both required services are now registered above; the bridge
+    // is a `'static` ZST so its registration cannot dangle.
+    unsafe {
+        slopos_kernel_services::ostd_bridge::register_with_ostd();
+    }
 
     serial::write_line("BOOT: entering boot init");
     let mut boot_ctx = slopos_hermetic::take_for_boot();

@@ -3,7 +3,7 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
@@ -74,8 +74,8 @@ impl VirtioBlkState {
 }
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
-static VIRTIO_BLK_STATE: IrqMutex<VirtioBlkState> =
-    IrqMutex::new(VirtioBlkState::new(), LOCK_LEVEL_RESOURCE);
+static VIRTIO_BLK_STATE: SpinLock<VirtioBlkState> =
+    SpinLock::new(VirtioBlkState::new(), LOCK_LEVEL_RESOURCE);
 static BLK_QUEUE_EVENT: CompletionEvent = CompletionEvent::new();
 static BLK_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 

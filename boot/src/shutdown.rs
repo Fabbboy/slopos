@@ -2,7 +2,7 @@ use core::arch::asm;
 use core::ffi::c_char;
 
 use slopos_arch::cpu;
-use slopos_sync::StateFlag;
+use slopos_ostd::sync::StateFlag;
 use slopos_utils::klog_info;
 use slopos_utils::ports::{
     ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND,

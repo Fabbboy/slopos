@@ -407,12 +407,12 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
         frame.cs
     );
 
-    let held = slopos_sync::held_lock_count();
+    let held = slopos_ostd::sync::held_lock_count();
     klog_info!("NMI WATCHDOG: CPU {} holds {} lock(s)", cpu_id, held);
 
     // Force-release all tracked locks so other CPUs can make progress.
     unsafe {
-        slopos_sync::poison_unlock_all_held();
+        slopos_ostd::sync::poison_unlock_all_held();
     }
 
     panic!("NMI WATCHDOG: CPU {} not responding for >500ms", cpu_id);
@@ -425,14 +425,14 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
     // Prevent deferred rescheduling during IST-based exception handlers.
     //
-    // IST stacks are per-vector, per-CPU fixed addresses.  If an IrqMutex guard
+    // IST stacks are per-vector, per-CPU fixed addresses.  If an SpinLock guard
     // drops while preempt_count is 1, the PreemptGuard::drop callback will call
     // the scheduler, context-switching away from the IST stack.  A subsequent
     // exception of the same vector would reuse the same IST stack, overwriting
     // the suspended handler's state → corruption / triple fault.
     //
     // By bumping preempt_count here (and manually decrementing on exit WITHOUT
-    // calling the reschedule callback), we ensure all inner IrqMutex drops see
+    // calling the reschedule callback), we ensure all inner SpinLock drops see
     // preempt_count > 1 and skip the callback.
     //
     // All CPU exceptions (vectors 0-31) use IST stacks in SlopOS.
@@ -463,7 +463,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == RCU_QS_IPI_VECTOR {
-        slopos_sync::rcu_note_qs();
+        slopos_ostd::sync::rcu_note_qs();
         send_eoi();
         return;
     }

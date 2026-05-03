@@ -25,8 +25,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_sync::lock_tracking::LOCK_LEVEL_ALLOCATOR;
-use slopos_sync::spinlock::IrqMutex;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_ALLOCATOR;
+use slopos_ostd::sync::spin::SpinLock;
 use slopos_utils::klog_warn;
 
 use super::cr3::MmContextId;
@@ -184,9 +184,9 @@ static DRAIN_REQUEST: LufDrainRequest = LufDrainRequest::new();
 /// Single-writer serialisation for the shared drain request. Drains
 /// are rare (only fire when a freed frame is being reused AND some CPU
 /// still has queued LUF entries), so the lock is effectively
-/// uncontended. IrqMutex closes interrupts so a nested drain from an
+/// uncontended. SpinLock closes interrupts so a nested drain from an
 /// IRQ handler cannot deadlock on the shared request state.
-static DRAIN_LOCK: IrqMutex<()> = IrqMutex::new((), LOCK_LEVEL_ALLOCATOR);
+static DRAIN_LOCK: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_ALLOCATOR);
 
 /// Broadcast a "drain any entries referencing this phys" request to
 /// every CPU whose bit is set in `cpu_mask`. Blocks until every

@@ -1,7 +1,7 @@
 use super::task_struct::Task;
 use slopos_abi::task::{BlockReason, INVALID_TASK_ID, TaskStatus};
 use slopos_ostd::KArc;
-use slopos_sync::{IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard};
+use slopos_ostd::sync::{IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard};
 
 pub type TaskRef = KArc<TaskLock>;
 pub type TaskLock = IrqRwLock<Task>;

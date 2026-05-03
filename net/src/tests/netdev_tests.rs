@@ -7,8 +7,8 @@
 //! - Additional coverage: features bitflags, registry register/unregister/enumerate,
 //!   handle data-plane ops, registry capacity exhaustion.
 
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
@@ -23,14 +23,14 @@ use crate::types::*;
 
 /// A minimal in-memory network device for testing the registry and handle.
 ///
-/// Uses `IrqMutex` for interior mutability, matching the real-driver pattern.
+/// Uses `SpinLock` for interior mutability, matching the real-driver pattern.
 struct MockNetDevice {
     mac_addr: MacAddr,
     dev_mtu: u16,
     feats: NetDeviceFeatures,
-    stats: IrqMutex<NetDeviceStats>,
-    tx_count: IrqMutex<u64>,
-    is_up: IrqMutex<bool>,
+    stats: SpinLock<NetDeviceStats>,
+    tx_count: SpinLock<u64>,
+    is_up: SpinLock<bool>,
 }
 
 impl MockNetDevice {
@@ -39,9 +39,9 @@ impl MockNetDevice {
             mac_addr: mac,
             dev_mtu: mtu,
             feats: NetDeviceFeatures::empty(),
-            stats: IrqMutex::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
-            tx_count: IrqMutex::new(0, LOCK_LEVEL_RESOURCE),
-            is_up: IrqMutex::new(false, LOCK_LEVEL_RESOURCE),
+            stats: SpinLock::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
+            tx_count: SpinLock::new(0, LOCK_LEVEL_RESOURCE),
+            is_up: SpinLock::new(false, LOCK_LEVEL_RESOURCE),
         }
     }
 
@@ -454,7 +454,7 @@ pub fn test_handle_features() -> TestResult {
 ///
 /// This is a structural test: we hold the registry lock and then call
 /// `handle.tx()`.  If `tx()` tried to acquire the registry lock, it would
-/// deadlock (since `IrqMutex` is non-reentrant).  The test passing proves
+/// deadlock (since `SpinLock` is non-reentrant).  The test passing proves
 /// that `tx()` bypasses the registry lock entirely.
 pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
     ensure_pool_init();
@@ -471,7 +471,7 @@ pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
     let _guard = registry.inner.lock();
 
     // Now TX through the handle.  If DeviceHandle::tx() tried to lock
-    // the registry, this would deadlock because IrqMutex is non-reentrant
+    // the registry, this would deadlock because SpinLock is non-reentrant
     // and we already hold the lock above.
     let pkt = match PacketBuf::alloc() {
         Some(p) => p,

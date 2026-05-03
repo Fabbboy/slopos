@@ -6,7 +6,7 @@
 //! # Two-tier structure
 //!
 //! - **Global allocator** ([`StackVaAllocator<R, WORDS>`], protected by
-//!   `IrqMutex` at `LOCK_LEVEL_ALLOCATOR`) is the source of truth for
+//!   `SpinLock` at `LOCK_LEVEL_ALLOCATOR`) is the source of truth for
 //!   slot state across the whole system.
 //! - **Per-CPU cache** ([`PerCpuStackCache<R, CAP>`], protected by
 //!   `PreemptGuard` only) sits in front of the global and absorbs the
@@ -22,7 +22,7 @@
 //!
 //! The two concrete regions (`KstackRegion`, `UstackRegion`) live as
 //! private `mod kstack` / `mod ustack` blocks at the bottom of this
-//! file.  Each owns its own statics (one `IrqMutex<StackVaAllocator<…>>`
+//! file.  Each owns its own statics (one `SpinLock<StackVaAllocator<…>>`
 //! plus one `PcpArray<…>`) and implements the [`StackRegion`] trait's
 //! hidden `_*` wiring methods that the public top-level helpers
 //! ([`alloc_slot`], [`init`], [`pcp_drain_all`], …) dispatch through.
@@ -45,7 +45,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_ALLOCATOR, PreemptGuard};
+use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
 
 use crate::page_alloc::alloc_page_frame;
 use crate::paging::map_page_4kb;
@@ -419,7 +419,7 @@ impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
 /// # Safety
 /// Caller must hold a `PreemptGuard`.
 pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const REFILL: usize>(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
     cpu: usize,
 ) {
@@ -465,7 +465,7 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
 /// # Safety
 /// Caller must hold a `PreemptGuard`.
 pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPILL: usize>(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
     cpu: usize,
 ) {
@@ -521,7 +521,7 @@ pub fn pcp_drain_all_impl<
     const CAP: usize,
     const SPILL: usize,
 >(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
 ) {
     for cpu in 0..MAX_CPUS {
@@ -559,7 +559,7 @@ pub fn pcp_flush_current_impl<
     const CAP: usize,
     const SPILL: usize,
 >(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
 ) {
     let _no_migrate = PreemptGuard::new();
@@ -592,7 +592,7 @@ pub fn pcp_flush_current_impl<
 /// from the global if empty).  Called by the per-region `_slot_pop`
 /// wiring.  Runs under a single `PreemptGuard`.
 pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const REFILL: usize>(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
 ) -> Option<SlotEntry> {
     let _no_migrate = PreemptGuard::new();
@@ -622,7 +622,7 @@ pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const
 /// (spilling to the global if full).  Called by the per-region
 /// `_slot_push` wiring.  Runs under a single `PreemptGuard`.
 pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const SPILL: usize>(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
     entry: SlotEntry,
 ) {
@@ -650,7 +650,7 @@ pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, cons
 /// Panics if the page allocator runs out of frames or a sentinel
 /// mapping fails — both indicate severe boot-time misconfiguration.
 pub fn init_with_sentinels<R: StackRegion, const WORDS: usize>(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
 ) {
     {
         let mut alloc = global.lock();
@@ -660,7 +660,7 @@ pub fn init_with_sentinels<R: StackRegion, const WORDS: usize>(
 }
 
 fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
-    global: &IrqMutex<StackVaAllocator<R, WORDS>>,
+    global: &SpinLock<StackVaAllocator<R, WORDS>>,
 ) {
     let slots_per_chunk = (PAGE_SIZE_2MB / R::STRIDE) as u32;
     let chunk_count = ((R::VA_END - R::VA_BASE) / PAGE_SIZE_2MB) as u32;
@@ -740,7 +740,7 @@ pub const fn pcp_capacity<R: StackRegion>() -> usize {
 // ===========================================================================
 // Concrete region instantiations.
 //
-// One block per region: tunable constants, the global IrqMutex-protected
+// One block per region: tunable constants, the global SpinLock-protected
 // allocator static, the per-CPU cache static, and the StackRegion impl
 // that wires them up.  The two regions intentionally have separate
 // statics so their locks contend independently — the K and U warm paths
@@ -778,8 +778,8 @@ mod kstack {
         );
     };
 
-    pub(super) static GLOBAL: IrqMutex<StackVaAllocator<KstackRegion, BITMAP_WORDS>> =
-        IrqMutex::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
+    pub(super) static GLOBAL: SpinLock<StackVaAllocator<KstackRegion, BITMAP_WORDS>> =
+        SpinLock::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
 
     pub(super) static PCP: PcpArray<KstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
         const INIT: PerCpuStackCache<KstackRegion, REGION_PCP_CAPACITY> = PerCpuStackCache::new();
@@ -868,8 +868,8 @@ mod ustack {
         );
     };
 
-    pub(super) static GLOBAL: IrqMutex<StackVaAllocator<UstackRegion, BITMAP_WORDS>> =
-        IrqMutex::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
+    pub(super) static GLOBAL: SpinLock<StackVaAllocator<UstackRegion, BITMAP_WORDS>> =
+        SpinLock::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
 
     pub(super) static PCP: PcpArray<UstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
         const INIT: PerCpuStackCache<UstackRegion, REGION_PCP_CAPACITY> = PerCpuStackCache::new();

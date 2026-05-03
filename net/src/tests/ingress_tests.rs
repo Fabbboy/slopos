@@ -4,8 +4,8 @@
 //! - 1.T9:  Ingress pipeline correctly dispatches IPv4 frames
 //! - 1.T10: Ingress pipeline drops malformed / unknown frames
 
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::pass;
 
@@ -21,14 +21,14 @@ use crate::types::*;
 
 /// A minimal in-memory network device for testing the ingress pipeline.
 ///
-/// Uses `IrqMutex` for interior mutability, matching the real-driver pattern.
+/// Uses `SpinLock` for interior mutability, matching the real-driver pattern.
 struct MockNetDevice {
     mac_addr: MacAddr,
     dev_mtu: u16,
     feats: NetDeviceFeatures,
-    stats: IrqMutex<NetDeviceStats>,
-    tx_count: IrqMutex<u64>,
-    is_up: IrqMutex<bool>,
+    stats: SpinLock<NetDeviceStats>,
+    tx_count: SpinLock<u64>,
+    is_up: SpinLock<bool>,
 }
 
 impl MockNetDevice {
@@ -37,9 +37,9 @@ impl MockNetDevice {
             mac_addr: mac,
             dev_mtu: mtu,
             feats: NetDeviceFeatures::empty(),
-            stats: IrqMutex::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
-            tx_count: IrqMutex::new(0, LOCK_LEVEL_RESOURCE),
-            is_up: IrqMutex::new(false, LOCK_LEVEL_RESOURCE),
+            stats: SpinLock::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
+            tx_count: SpinLock::new(0, LOCK_LEVEL_RESOURCE),
+            is_up: SpinLock::new(false, LOCK_LEVEL_RESOURCE),
         }
     }
 }

@@ -413,7 +413,7 @@ pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
 /// mutation of the old one.  Only after successful construction does the
 /// old ldisc get flushed and replaced.
 ///
-/// All ldisc access in SlopOS goes through the per-slot `IrqMutex`, so
+/// All ldisc access in SlopOS goes through the per-slot `SpinLock`, so
 /// there is no risk of concurrent reads observing a half-switched ldisc.
 #[must_use]
 pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {

@@ -578,7 +578,7 @@ fn ext2_tests_init() -> bool {
 // VFS initialisation is performed once on first test invocation; lex sort
 // of test names guarantees `test_ext2_aaa_init` runs before any other
 // `test_ext2_*` / `test_vfs_*` entry in this file.
-static EXT2_VFS_READY: slopos_sync::StateFlag = slopos_sync::StateFlag::new();
+static EXT2_VFS_READY: slopos_ostd::sync::StateFlag = slopos_ostd::sync::StateFlag::new();
 
 fn ensure_ext2_vfs_ready() -> bool {
     if EXT2_VFS_READY.is_active() {

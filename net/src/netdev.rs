@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! - **[`NetDevice`] trait**: Implemented by every network driver (VirtIO-net, loopback, etc.)
-//! - **[`NetDeviceRegistry`]**: `IrqMutex`-protected storage, accessed only on the control plane
+//! - **[`NetDeviceRegistry`]**: `SpinLock`-protected storage, accessed only on the control plane
 //! - **[`DeviceHandle`]**: Stable reference for data-plane TX/RX without the registry lock
 //!
 //! # Concurrency model
@@ -19,14 +19,14 @@
 //! - `poll_rx()` requires no lock (single consumer: NAPI loop).
 //!
 //! All trait methods take `&self`; implementations use interior mutability
-//! (e.g., `IrqMutex`) for their internal state.  This allows concurrent TX and
+//! (e.g., `SpinLock`) for their internal state.  This allows concurrent TX and
 //! RX without aliasing `&mut` references through the raw pointer in `DeviceHandle`.
 
 use core::fmt;
 
 use bitflags::bitflags;
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;
@@ -39,7 +39,7 @@ use super::types::{DevIndex, MacAddr, NetError};
 /// Abstraction for a network device (NIC, loopback, etc.).
 ///
 /// All methods take `&self`; implementations use interior mutability (e.g.,
-/// `IrqMutex`) for their internal state.  This design choice avoids the need
+/// `SpinLock`) for their internal state.  This design choice avoids the need
 /// for `&mut` through raw pointers in [`DeviceHandle`], eliminating a class
 /// of aliasing UB.
 ///
@@ -246,7 +246,7 @@ pub struct DeviceHandle {
     /// Per-device TX serialization.  Multiple sockets may transmit to the same
     /// device concurrently; this lock serializes their `tx()` calls without
     /// touching the global registry lock.
-    tx_lock: IrqMutex<()>,
+    tx_lock: SpinLock<()>,
 }
 
 // SAFETY: DeviceHandle is designed for cross-thread use.  The raw pointer
@@ -347,10 +347,10 @@ const MAX_DEVICES: usize = 8;
 /// - The caller must drain all data-plane activity (NAPI, socket TX) before
 ///   calling `unregister`.
 pub struct NetDeviceRegistry {
-    pub(crate) inner: IrqMutex<RegistryInner>,
+    pub(crate) inner: SpinLock<RegistryInner>,
 }
 
-/// Inner state behind the registry's `IrqMutex`.
+/// Inner state behind the registry's `SpinLock`.
 pub(crate) struct RegistryInner {
     /// Device slots.  `None` = empty slot.
     slots: [Option<KBox<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
@@ -358,7 +358,7 @@ pub(crate) struct RegistryInner {
     count: usize,
 }
 
-// SAFETY: All access is serialized through the `IrqMutex`.
+// SAFETY: All access is serialized through the `SpinLock`.
 unsafe impl Send for NetDeviceRegistry {}
 unsafe impl Sync for NetDeviceRegistry {}
 
@@ -374,7 +374,7 @@ impl NetDeviceRegistry {
     /// No heap allocation occurs until the first [`register`](Self::register) call.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(
+            inner: SpinLock::new(
                 RegistryInner {
                     slots: [const { None }; MAX_DEVICES],
                     count: 0,
@@ -404,7 +404,7 @@ impl NetDeviceRegistry {
                 return Some(DeviceHandle {
                     dev: dev_ptr,
                     index: DevIndex(i),
-                    tx_lock: IrqMutex::new((), LOCK_LEVEL_RESOURCE),
+                    tx_lock: SpinLock::new((), LOCK_LEVEL_RESOURCE),
                 });
             }
         }

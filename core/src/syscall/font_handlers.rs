@@ -6,8 +6,8 @@ use slopos_utils::klog_info;
 
 use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
 
-static FONT_WRITER_LOCK: slopos_sync::IrqMutex<()> =
-    slopos_sync::IrqMutex::new((), slopos_sync::LOCK_LEVEL_RESOURCE);
+static FONT_WRITER_LOCK: slopos_ostd::sync::SpinLock<()> =
+    slopos_ostd::sync::SpinLock::new((), slopos_ostd::sync::LOCK_LEVEL_RESOURCE);
 
 unsafe fn free_atlas_box(ptr: *mut u8) {
     unsafe {
@@ -25,7 +25,7 @@ fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
         let old = slopos_font::atlas::replace_global(new_atlas);
         if !old.is_null() {
             unsafe {
-                slopos_sync::call_rcu(old as *mut u8, free_atlas_box);
+                slopos_ostd::sync::call_rcu(old as *mut u8, free_atlas_box);
             }
         }
     }

@@ -24,7 +24,7 @@
 //!
 //! # Concurrency
 //!
-//! All mutable state is behind an [`IrqMutex`].  Public methods acquire the lock,
+//! All mutable state is behind an [`SpinLock`].  Public methods acquire the lock,
 //! collect any pending I/O actions, release the lock, then return the actions for
 //! the caller to execute.  This prevents lock-ordering issues with:
 //! - `NET_TIMER_WHEEL` (timer schedule/cancel)
@@ -33,7 +33,7 @@
 use core::fmt;
 
 use slopos_ostd::KVec;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_debug;
 
 use super::packetbuf::PacketBuf;
@@ -154,7 +154,7 @@ pub enum NeighborAction {
     None,
 }
 
-/// Inner state of the neighbor cache, behind [`IrqMutex`].
+/// Inner state of the neighbor cache, behind [`SpinLock`].
 struct NeighborCacheInner {
     /// All entries.  Fixed capacity of [`MAX_ENTRIES`].
     entries: KVec<NeighborEntry>,
@@ -166,10 +166,10 @@ struct NeighborCacheInner {
 ///
 /// See [module documentation](self) for architecture and concurrency details.
 pub struct NeighborCache {
-    inner: IrqMutex<NeighborCacheInner>,
+    inner: SpinLock<NeighborCacheInner>,
 }
 
-// SAFETY: All mutable state is behind IrqMutex.
+// SAFETY: All mutable state is behind SpinLock.
 unsafe impl Send for NeighborCache {}
 unsafe impl Sync for NeighborCache {}
 
@@ -180,7 +180,7 @@ impl NeighborCache {
     /// Create an empty neighbor cache.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(
+            inner: SpinLock::new(
                 NeighborCacheInner {
                     entries: KVec::new(),
                     next_entry_id: 1,

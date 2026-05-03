@@ -11,3 +11,4 @@ doctest = false
 slopos-service-core = { path = "../service-core" }
 slopos-arch = { path = "../karch" }
 slopos-abi = { path = "../abi" }
+slopos-ostd = { path = "../slopos-ostd" }

@@ -16,7 +16,7 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::klog_debug;
 
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
@@ -151,8 +151,8 @@ impl MemfdRegistry {
     }
 }
 
-static MEMFD_REGISTRY: IrqMutex<MemfdRegistry> =
-    IrqMutex::new(MemfdRegistry::new(), LOCK_LEVEL_RESOURCE);
+static MEMFD_REGISTRY: SpinLock<MemfdRegistry> =
+    SpinLock::new(MemfdRegistry::new(), LOCK_LEVEL_RESOURCE);
 
 // ---------------------------------------------------------------------------
 // Lock-free hot-path arrays (for fb_flip compositor speed)

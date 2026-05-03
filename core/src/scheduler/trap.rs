@@ -1,7 +1,7 @@
 use slopos_arch::arch::gdt::SegmentSelector;
 use slopos_arch::{InterruptFrame, MAX_CPUS, cpu};
 use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE};
-use slopos_sync::preempt::PreemptGuard;
+use slopos_ostd::sync::PreemptGuard;
 
 use super::scheduler::{
     is_scheduling_active, schedule_from_trap_exit, scheduler_get_current_task, scheduler_timer_tick,

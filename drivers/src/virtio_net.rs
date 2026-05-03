@@ -7,7 +7,7 @@ use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
 };
 use slopos_net as net;
-use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
@@ -150,14 +150,14 @@ impl VirtioNetState {
 }
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
-static VIRTIO_NET_STATE: IrqMutex<VirtioNetState> =
-    IrqMutex::new(VirtioNetState::new(), LOCK_LEVEL_RESOURCE);
+static VIRTIO_NET_STATE: SpinLock<VirtioNetState> =
+    SpinLock::new(VirtioNetState::new(), LOCK_LEVEL_RESOURCE);
 static DHCP_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 static NAPI_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
 static DNS_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Buffer for the most recent DNS response payload (UDP body only).
-static DNS_RX_BUF: IrqMutex<DnsRxBuf> = IrqMutex::new(DnsRxBuf::new(), LOCK_LEVEL_RESOURCE);
+static DNS_RX_BUF: SpinLock<DnsRxBuf> = SpinLock::new(DnsRxBuf::new(), LOCK_LEVEL_RESOURCE);
 
 static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
 

@@ -18,7 +18,7 @@ use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_sync::{InitFlag, StateFlag};
+use slopos_ostd::sync::{InitFlag, StateFlag};
 use slopos_utils::{klog_debug, klog_info};
 
 /// General Capabilities and ID (64-bit RO).

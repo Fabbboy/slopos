@@ -1,4 +1,4 @@
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::framebuffer;
 use crate::graphics::{GraphicsContext, GraphicsResult};
@@ -43,7 +43,7 @@ impl SplashState {
     }
 }
 
-static STATE: IrqMutex<SplashState> = IrqMutex::new(SplashState::new(), LOCK_LEVEL_RESOURCE);
+static STATE: SpinLock<SplashState> = SpinLock::new(SplashState::new(), LOCK_LEVEL_RESOURCE);
 
 struct SplashLayout {
     center_x: i32,

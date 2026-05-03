@@ -12,7 +12,7 @@
 //!
 //! # Concurrency
 //!
-//! All mutable state is behind an [`IrqMutex`].  The lock is held briefly for
+//! All mutable state is behind an [`SpinLock`].  The lock is held briefly for
 //! lookups and modifications.  For a hobby OS with a single-digit route count
 //! this is more than sufficient.
 //!
@@ -28,7 +28,7 @@
 use core::fmt;
 
 use slopos_ostd::KVec;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_debug;
 
 use super::types::{DevIndex, Ipv4Addr};
@@ -119,7 +119,7 @@ impl fmt::Display for RouteEntry {
 // 3B.2 — RouteTable
 // =============================================================================
 
-/// Inner state of the routing table, behind [`IrqMutex`].
+/// Inner state of the routing table, behind [`SpinLock`].
 struct RouteTableInner {
     /// Routes bucketed by prefix length.  Index 0 = /0 (default routes),
     /// index 32 = /32 (host routes).  Within each bucket, routes are sorted
@@ -139,10 +139,10 @@ impl RouteTableInner {
 ///
 /// See [module documentation](self) for architecture details.
 pub struct RouteTable {
-    inner: IrqMutex<RouteTableInner>,
+    inner: SpinLock<RouteTableInner>,
 }
 
-// SAFETY: All mutable state is behind IrqMutex.
+// SAFETY: All mutable state is behind SpinLock.
 unsafe impl Send for RouteTable {}
 unsafe impl Sync for RouteTable {}
 
@@ -153,7 +153,7 @@ impl RouteTable {
     /// Create an empty routing table.
     pub const fn new() -> Self {
         Self {
-            inner: IrqMutex::new(RouteTableInner::new(), LOCK_LEVEL_REGISTRY),
+            inner: SpinLock::new(RouteTableInner::new(), LOCK_LEVEL_REGISTRY),
         }
     }
 

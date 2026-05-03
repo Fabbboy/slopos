@@ -38,7 +38,7 @@
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::buffer::TcpBufferPair;
 use super::pcb::{Pcb, PcbState};
@@ -405,14 +405,14 @@ impl ListenerTable {
 // =============================================================================
 
 /// 16 independently-locked shards for established connections.
-pub static TCP_SHARDS: [IrqMutex<TcpShard>; NUM_SHARDS] = {
-    const SHARD: IrqMutex<TcpShard> = IrqMutex::new(TcpShard::new(), LOCK_LEVEL_RESOURCE);
+pub static TCP_SHARDS: [SpinLock<TcpShard>; NUM_SHARDS] = {
+    const SHARD: SpinLock<TcpShard> = SpinLock::new(TcpShard::new(), LOCK_LEVEL_RESOURCE);
     [SHARD; NUM_SHARDS]
 };
 
 /// Listener table (LISTEN-state PCBs only).
-pub static TCP_LISTENERS: IrqMutex<ListenerTable> =
-    IrqMutex::new(ListenerTable::new(), LOCK_LEVEL_RESOURCE);
+pub static TCP_LISTENERS: SpinLock<ListenerTable> =
+    SpinLock::new(ListenerTable::new(), LOCK_LEVEL_RESOURCE);
 
 /// Global ephemeral port counter (RFC 6335 range 49152–65535).
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);

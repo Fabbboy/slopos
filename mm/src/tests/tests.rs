@@ -775,30 +775,30 @@ pub fn test_ring_buffer_capacity() -> TestResult {
 // IRQMUTEX TESTS - 3 tests
 // ============================================================================
 
-/// Test 1: IrqMutex basic lock/unlock with guard
+/// Test 1: SpinLock basic lock/unlock with guard
 pub fn test_irqmutex_basic() -> TestResult {
-    use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+    use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-    let mutex: IrqMutex<u32> = IrqMutex::new(42, LOCK_LEVEL_RESOURCE);
+    let mutex: SpinLock<u32> = SpinLock::new(42, LOCK_LEVEL_RESOURCE);
 
     {
         let guard = mutex.lock();
-        assert_test!(*guard == 42, "IrqMutex value should be 42");
+        assert_test!(*guard == 42, "SpinLock value should be 42");
     }
 
     {
         let guard = mutex.lock();
-        assert_test!(*guard == 42, "IrqMutex value should still be 42");
+        assert_test!(*guard == 42, "SpinLock value should still be 42");
     }
 
     pass!()
 }
 
-/// Test 2: IrqMutex mutation through guard
+/// Test 2: SpinLock mutation through guard
 pub fn test_irqmutex_mutation() -> TestResult {
-    use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+    use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-    let mutex: IrqMutex<u32> = IrqMutex::new(0, LOCK_LEVEL_RESOURCE);
+    let mutex: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_RESOURCE);
 
     {
         let mut guard = mutex.lock();
@@ -808,18 +808,18 @@ pub fn test_irqmutex_mutation() -> TestResult {
     {
         let guard = mutex.lock();
         if *guard != 100 {
-            return fail!("IrqMutex mutation failed, got {}", *guard);
+            return fail!("SpinLock mutation failed, got {}", *guard);
         }
     }
 
     pass!()
 }
 
-/// Test 3: IrqMutex try_lock
+/// Test 3: SpinLock try_lock
 pub fn test_irqmutex_try_lock() -> TestResult {
-    use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+    use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-    let mutex: IrqMutex<u32> = IrqMutex::new(55, LOCK_LEVEL_RESOURCE);
+    let mutex: SpinLock<u32> = SpinLock::new(55, LOCK_LEVEL_RESOURCE);
 
     {
         let maybe_guard = mutex.try_lock();

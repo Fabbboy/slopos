@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::task::BlockReason;
 use slopos_ostd::KVec;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::scheduler::{
     is_scheduling_active, schedule, schedule_task, scheduler_get_current_task, unschedule_task,
@@ -153,7 +153,7 @@ impl SleepQueue {
     }
 }
 
-static SLEEP_QUEUE: IrqMutex<SleepQueue> = IrqMutex::new(SleepQueue::new(), LOCK_LEVEL_REGISTRY);
+static SLEEP_QUEUE: SpinLock<SleepQueue> = SpinLock::new(SleepQueue::new(), LOCK_LEVEL_REGISTRY);
 
 /// External mirror of `SleepQueue::active_count`, maintained under
 /// the `SLEEP_QUEUE` mutex but readable without it. Lets the
@@ -314,7 +314,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
 /// never arrives, the sleep timer wakes us after `timeout_ms`.
 ///
 /// # Safety contract
-/// Must NOT be called while holding an `IrqMutex` — blocking with a
+/// Must NOT be called while holding an `SpinLock` — blocking with a
 /// mutex held risks deadlock if another task contends the same lock.
 pub fn block_current_task_with_timeout(timeout_ms: u32) {
     if !is_scheduling_active() {

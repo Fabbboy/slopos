@@ -3,7 +3,7 @@ use core::mem;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_ALLOCATOR};
+use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, SpinLock};
 use slopos_utils::{align_down_u64, align_up_usize, klog_debug, klog_info};
 
 use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
@@ -142,7 +142,7 @@ impl KernelHeap {
     }
 }
 
-static KERNEL_HEAP: IrqMutex<KernelHeap> = IrqMutex::new(KernelHeap::new(), LOCK_LEVEL_ALLOCATOR);
+static KERNEL_HEAP: SpinLock<KernelHeap> = SpinLock::new(KernelHeap::new(), LOCK_LEVEL_ALLOCATOR);
 
 // ---------------------------------------------------------------------------
 // Per-CPU object magazine caches — lock-free fast path for kmalloc/kfree.
@@ -154,7 +154,7 @@ static KERNEL_HEAP: IrqMutex<KernelHeap> = IrqMutex::new(KernelHeap::new(), LOCK
 // ---------------------------------------------------------------------------
 
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
-use slopos_sync::{IrqPreemptGuard, PreemptGuard};
+use slopos_ostd::sync::{IrqPreemptGuard, PreemptGuard};
 
 const MAGAZINE_CAPACITY: usize = 32;
 

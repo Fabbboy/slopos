@@ -8,7 +8,7 @@ use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_sync::{InitFlag, IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_info;
 use slopos_utils::string::cstr_to_str;
 
@@ -84,9 +84,9 @@ impl PciDriverRegistry {
 unsafe impl Send for PciDriverRegistry {}
 
 static PCI_INIT: InitFlag = InitFlag::new();
-static ENUM_STATE: IrqMutex<PciEnumState> = IrqMutex::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
-static DRIVER_REGISTRY: IrqMutex<PciDriverRegistry> =
-    IrqMutex::new(PciDriverRegistry::new(), LOCK_LEVEL_REGISTRY);
+static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
+static DRIVER_REGISTRY: SpinLock<PciDriverRegistry> =
+    SpinLock::new(PciDriverRegistry::new(), LOCK_LEVEL_REGISTRY);
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
 // =============================================================================
@@ -102,7 +102,7 @@ const ECAM_FUNCTION_SIZE: u16 = 4096;
 /// Cached MCFG entries and their mapped MMIO regions.
 ///
 /// Populated during [`pci_init`]; read by ECAM config access routines.
-/// Protected by `IrqMutex` for SMP-safe access.
+/// Protected by `SpinLock` for SMP-safe access.
 struct EcamState {
     entries: [McfgEntry; MAX_ECAM_ENTRIES],
     /// Mapped MMIO regions — one per MCFG entry.  `MmioRegion::empty()` if
@@ -126,7 +126,7 @@ impl EcamState {
     }
 }
 
-static ECAM_STATE: IrqMutex<EcamState> = IrqMutex::new(EcamState::new(), LOCK_LEVEL_REGISTRY);
+static ECAM_STATE: SpinLock<EcamState> = SpinLock::new(EcamState::new(), LOCK_LEVEL_REGISTRY);
 
 /// Cached ECAM base address for segment 0 — fast lock-free read path.
 /// Set to 0 if MCFG is absent or segment 0 is not covered.
@@ -140,7 +140,7 @@ static ECAM_ENTRY_COUNT: AtomicU8 = AtomicU8::new(0);
 //
 // The primary segment (segment 0) is the only segment on most systems, including
 // QEMU q35.  We cache its mapped MMIO virtual address, size, and bus range in
-// atomics so that the hot-path ECAM reads avoid the `IrqMutex` entirely.
+// atomics so that the hot-path ECAM reads avoid the `SpinLock` entirely.
 // For rare multi-segment lookups, we fall back to `ECAM_STATE`.
 // -----------------------------------------------------------------------------
 

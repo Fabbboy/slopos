@@ -4,7 +4,7 @@
 //! During early boot (before the serial driver is ready) the backend writes
 //! directly to COM1 via raw port I/O.  Once the serial driver initialises it
 //! registers itself as the backend, and all subsequent output goes through the
-//! driver's `IrqMutex`-protected path — giving us proper locking, FIFO
+//! driver's `SpinLock`-protected path — giving us proper locking, FIFO
 //! awareness, and `\n → \r\n` conversion for free.
 //!
 //! # Backend contract

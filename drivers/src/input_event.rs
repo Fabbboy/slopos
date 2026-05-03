@@ -5,14 +5,14 @@
 //! Focus state (which task receives input) is protected by a [`SeqLock`] —
 //! ISR handlers read it lock-free, the compositor writes it rarely.
 //!
-//! Per-task event queues are individually locked with [`IrqMutex`], so
+//! Per-task event queues are individually locked with [`SpinLock`], so
 //! event delivery to one task never blocks delivery to another.
 //!
-//! Queue slot allocation uses a small global [`IrqMutex`] touched only
+//! Queue slot allocation uses a small global [`SpinLock`] touched only
 //! on task creation/destruction.
 
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock, SpinLock};
 use slopos_utils::RingBuffer;
 
 /// Monotonic millisecond timestamp for input events.
@@ -50,8 +50,8 @@ impl TaskEventQueue {
 }
 
 /// Per-task event queues — each independently locked.
-static TASK_QUEUES: [IrqMutex<TaskEventQueue>; MAX_INPUT_TASKS] =
-    [const { IrqMutex::new(TaskEventQueue::new(), LOCK_LEVEL_RESOURCE) }; MAX_INPUT_TASKS];
+static TASK_QUEUES: [SpinLock<TaskEventQueue>; MAX_INPUT_TASKS] =
+    [const { SpinLock::new(TaskEventQueue::new(), LOCK_LEVEL_RESOURCE) }; MAX_INPUT_TASKS];
 
 // =============================================================================
 // Focus State (SeqLock — lock-free reads from ISR, rare writes by compositor)
@@ -115,8 +115,8 @@ impl QueueAllocState {
     }
 }
 
-static QUEUE_ALLOC: IrqMutex<QueueAllocState> =
-    IrqMutex::new(QueueAllocState::new(), LOCK_LEVEL_REGISTRY);
+static QUEUE_ALLOC: SpinLock<QueueAllocState> =
+    SpinLock::new(QueueAllocState::new(), LOCK_LEVEL_REGISTRY);
 
 /// Lock-free slot allocation bitmap. Bit i = 1 means slot i is occupied.
 /// Avoids holding QUEUE_ALLOC (L2) while locking TASK_QUEUES (L1).
@@ -549,8 +549,8 @@ impl ClipboardState {
     }
 }
 
-static CLIPBOARD: IrqMutex<ClipboardState> =
-    IrqMutex::new(ClipboardState::new(), LOCK_LEVEL_RESOURCE);
+static CLIPBOARD: SpinLock<ClipboardState> =
+    SpinLock::new(ClipboardState::new(), LOCK_LEVEL_RESOURCE);
 
 pub fn clipboard_copy(src: &[u8]) -> usize {
     let mut clip = CLIPBOARD.lock();

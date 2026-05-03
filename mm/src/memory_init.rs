@@ -27,7 +27,7 @@ use slopos_arch::cpu;
 use slopos_arch::cpu::apic_msr::ApicBaseMsr;
 use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_arch::cpu::msr::Msr;
-use slopos_sync::InitFlag;
+use slopos_ostd::sync::InitFlag;
 use slopos_utils::boot_info::LimineMemmapResponse;
 use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
@@ -641,7 +641,7 @@ pub fn init_memory_system(
         crate::global_allocator_use_kernel_heap();
 
         // Kernel-stack and unsafe-stack VA allocators — must come after
-        // paging + heap so each region's `IrqMutex` is usable and paging
+        // paging + heap so each region's `SpinLock` is usable and paging
         // primitives can be called.  Backs all task stacks via the
         // generic `TaskStack<R>` handle in `core::scheduler::task_stack`.
         crate::stack_va::init::<crate::stack_region::KstackRegion>();

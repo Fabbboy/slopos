@@ -490,7 +490,7 @@ mod global_atlas {
     use super::*;
     use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
     use slopos_ostd::KBox;
-    use slopos_sync::RcuReadGuard;
+    use slopos_ostd::sync::RcuReadGuard;
 
     /// Self-owning RCU-protected borrow of the global glyph atlas.
     ///
@@ -528,8 +528,8 @@ mod global_atlas {
     /// the same generation.
     static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-    static FONT_CHANGE_CALLBACK: slopos_sync::IrqMutex<Option<fn()>> =
-        slopos_sync::IrqMutex::new(None, slopos_sync::LOCK_LEVEL_RESOURCE);
+    static FONT_CHANGE_CALLBACK: slopos_ostd::sync::SpinLock<Option<fn()>> =
+        slopos_ostd::sync::SpinLock::new(None, slopos_ostd::sync::LOCK_LEVEL_RESOURCE);
 
     pub fn register_font_change_callback(cb: fn()) {
         *FONT_CHANGE_CALLBACK.lock() = Some(cb);
@@ -627,7 +627,7 @@ mod global_atlas {
     /// guard is alive.  Drop promptly after rendering to minimise the
     /// critical section length.
     pub fn global() -> Option<AtlasGuard> {
-        let rcu = slopos_sync::rcu_read_lock();
+        let rcu = slopos_ostd::sync::rcu_read_lock();
         let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
         if ptr.is_null() {
             None

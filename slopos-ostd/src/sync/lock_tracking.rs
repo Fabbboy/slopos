@@ -1,9 +1,10 @@
 //! Per-CPU held-lock tracking for panic recovery and deadlock prevention.
 //!
-//! Every `IrqMutex` lock/unlock automatically pushes/pops an entry on the
-//! current CPU's held-lock stack.  On panic, [`poison_unlock_all_held`]
-//! iterates the stack and poison-unlocks every lock the panicking CPU held,
-//! eliminating the need for per-subsystem `*_force_unlock()` functions.
+//! Every [`SpinLock`](super::spin::SpinLock) lock/unlock automatically pushes/pops an
+//! entry on the current CPU's held-lock stack.  On panic,
+//! [`poison_unlock_all_held`] iterates the stack and poison-unlocks every
+//! lock the panicking CPU held, eliminating the need for per-subsystem
+//! `*_force_unlock()` functions.
 //!
 //! In debug builds, lock ordering is validated: each lock carries a `level`
 //! and acquiring a lock whose level is ≤ the top-of-stack level panics
@@ -24,9 +25,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_arch::pcr::{get_current_cpu, MAX_CPUS};
+use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 
-use crate::cpu_local::CacheAligned;
+use super::cpu_local::CacheAligned;
 
 /// Maximum number of concurrently held locks per CPU.
 /// Kernel code rarely holds more than 3 locks deep; 8 is generous.
@@ -37,13 +38,6 @@ const MAX_HELD_LOCKS: usize = 8;
 pub const LOCK_LEVEL_UNORDERED: u8 = 0;
 
 /// Lock ordering hierarchy — acquire in ascending order only.
-///
-/// ```text
-/// Level 1: Per-resource     (individual device, pipe, queue, VM, framebuffer)
-/// Level 2: Registry/alloc   (allocation bitmaps, lookup tables, registries)
-/// Level 3: Global allocator (PAGE_ALLOCATOR, KERNEL_HEAP)
-/// Level 4: Scheduler        (per-CPU queue_lock)
-/// ```
 pub const LOCK_LEVEL_RESOURCE: u8 = 1;
 pub const LOCK_LEVEL_REGISTRY: u8 = 2;
 pub const LOCK_LEVEL_ALLOCATOR: u8 = 3;
@@ -95,6 +89,7 @@ impl HeldLockStack {
 /// preemption is disabled. Cross-CPU access never occurs during normal
 /// operation; `poison_unlock_all_held` only touches the panicking CPU's slot.
 struct SyncCell(UnsafeCell<HeldLockStack>);
+// SAFETY: each CPU touches only its own slot under preemption-disabled.
 unsafe impl Sync for SyncCell {}
 
 /// Per-CPU stacks. Indexed by cpu_id, accessed with preemption disabled.
@@ -116,7 +111,7 @@ pub fn enable_lock_tracking() {
 /// Record that the current CPU acquired a lock.
 ///
 /// # Safety
-/// Must be called with preemption disabled (which it is — inside IrqMutex).
+/// Must be called with preemption disabled (which it is — inside SpinLock).
 /// `lock_addr` must point to a live lock. `poison_fn` must be able to
 /// poison-unlock the lock at that address.
 #[inline]
@@ -126,7 +121,9 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
     }
 
     let cpu = get_current_cpu();
-    let stack = &mut *(HELD_STACKS[cpu].0).0.get();
+    // SAFETY: `cpu < MAX_CPUS` by `get_current_cpu` contract; preemption is
+    // disabled so no migration; we're the sole accessor of this slot.
+    let stack = unsafe { &mut *(HELD_STACKS[cpu].0).0.get() };
 
     // Lock ordering check: acquiring a lock at level <= any currently held
     // lock's level indicates a potential deadlock.  Always-on (not debug-only)
@@ -134,7 +131,6 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
     if level != LOCK_LEVEL_UNORDERED && stack.depth > 0 {
         let top = &stack.entries[stack.depth as usize - 1];
         if top.level != LOCK_LEVEL_UNORDERED && level <= top.level {
-            // Write directly to serial to avoid lock recursion in the panic path.
             lock_ordering_violation(level, top.level, lock_addr, top.lock_addr);
         }
     }
@@ -147,8 +143,6 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
         };
         stack.depth += 1;
     }
-    // If overflow, silently ignore — better than panicking in the lock path.
-    // The worst case is that panic recovery misses one lock.
 }
 
 /// Record that the current CPU released a lock.
@@ -163,9 +157,9 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
     }
 
     let cpu = get_current_cpu();
-    let stack = &mut *(HELD_STACKS[cpu].0).0.get();
+    // SAFETY: same as push_lock.
+    let stack = unsafe { &mut *(HELD_STACKS[cpu].0).0.get() };
 
-    // Fast path: the most recent lock is being released (LIFO order).
     if stack.depth > 0 {
         let top_idx = stack.depth as usize - 1;
         if stack.entries[top_idx].lock_addr == lock_addr {
@@ -174,10 +168,8 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
             return;
         }
 
-        // Slow path: out-of-order release. Scan and remove.
         for i in (0..stack.depth as usize).rev() {
             if stack.entries[i].lock_addr == lock_addr {
-                // Shift entries down to fill the gap.
                 for j in i..top_idx {
                     stack.entries[j] = stack.entries[j + 1];
                 }
@@ -187,7 +179,6 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
             }
         }
     }
-    // Entry not found — benign (lock may have been acquired before tracking enabled).
 }
 
 /// Poison-unlock every lock the current CPU holds.
@@ -206,23 +197,23 @@ pub unsafe fn poison_unlock_all_held() {
     }
 
     let cpu = get_current_cpu();
-    let stack = &mut *(HELD_STACKS[cpu].0).0.get();
+    // SAFETY: panic-recovery path, this CPU is the sole accessor.
+    let stack = unsafe { &mut *(HELD_STACKS[cpu].0).0.get() };
 
-    // Release in reverse order (innermost first).
     while stack.depth > 0 {
         stack.depth -= 1;
         let entry = stack.entries[stack.depth as usize];
         if !entry.lock_addr.is_null() {
-            (entry.poison_fn)(entry.lock_addr);
+            // SAFETY: caller certifies addresses still valid (static locks).
+            unsafe {
+                (entry.poison_fn)(entry.lock_addr);
+            }
         }
         stack.entries[stack.depth as usize] = HeldLockEntry::EMPTY;
     }
 }
 
 /// Returns the number of locks currently held by this CPU.
-///
-/// Useful for debug assertions (e.g., "this function must be called with
-/// no locks held").
 #[inline]
 pub fn held_lock_count() -> u32 {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
@@ -238,9 +229,6 @@ pub fn held_lock_count() -> u32 {
 unsafe fn noop_poison(_addr: *const ()) {}
 
 /// Report a lock ordering violation. Panics with diagnostic info.
-///
-/// Separated from the check site to keep the hot path small (no format
-/// machinery inlined into every lock acquisition).
 #[cold]
 #[inline(never)]
 fn lock_ordering_violation(
@@ -251,9 +239,6 @@ fn lock_ordering_violation(
 ) {
     panic!(
         "LOCK ORDERING VIOLATION: acquiring level {} (lock @ {:#x}) while holding level {} (lock @ {:#x})",
-        acquiring_level,
-        acquiring_addr as usize,
-        held_level,
-        held_addr as usize,
+        acquiring_level, acquiring_addr as usize, held_level, held_addr as usize,
     );
 }

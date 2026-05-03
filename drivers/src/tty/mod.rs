@@ -12,7 +12,7 @@
 //! - A `WaitQueue` for tasks blocked on input
 //!
 //! The `TTY_SLOTS` array (in `table.rs`) holds up to `MAX_TTYS` terminal
-//! instances, each with its own `IrqMutex` for fully independent per-TTY
+//! instances, each with its own `SpinLock` for fully independent per-TTY
 //! locking.
 //!
 //! # Public API
@@ -24,7 +24,7 @@
 //!
 //! # Locking Convention
 //!
-//! Methods that operate on a `Tty` while the slot `IrqMutex` is already held
+//! Methods that operate on a `Tty` while the slot `SpinLock` is already held
 //! use the `*_locked()` suffix (e.g. `drain_hw_input_locked`).  This makes the
 //! caller responsible for acquiring the lock and documents the precondition at
 //! the call site.

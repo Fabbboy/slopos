@@ -30,7 +30,7 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
@@ -103,7 +103,7 @@ pub fn validate_peer(handle: &PtyPeerHandle) -> bool {
 /// pair destruction, and validated slave opens.
 ///
 /// **Not** held during data-path operations (read, write, push_input).
-static PTY_ALLOC_LOCK: IrqMutex<()> = IrqMutex::new((), LOCK_LEVEL_REGISTRY);
+static PTY_ALLOC_LOCK: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_REGISTRY);
 
 // ---------------------------------------------------------------------------
 // Pair allocation
@@ -257,7 +257,7 @@ pub fn pty_open_peer(master_idx: TtyIndex) -> Result<TtyIndex, TtyError> {
 /// Throttle is checked once per `BATCH_SIZE` (64 bytes) rather than
 /// per byte.  This is an intentional trade-off:
 ///
-/// - **Per-byte checking** requires acquiring the per-slot `IrqMutex`
+/// - **Per-byte checking** requires acquiring the per-slot `SpinLock`
 ///   on every byte, turning an O(1) cost into O(n) lock/unlock cycles.
 ///   Linux avoids this in `n_tty_receive_buf_common` only because its
 ///   `TTY_THROTTLED` flag lives outside the line discipline lock.

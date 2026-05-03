@@ -8,8 +8,8 @@
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX, TEST_REPORT_RING_CAPACITY};
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{AllocError, Init, KBox, KVec, Zeroable, init_from_closure};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 
 /// One subtest result. `name`/`msg` are length-prefixed byte arrays — the
 /// `*_len` fields hold the populated prefix length; the remainder is zero.
@@ -196,8 +196,8 @@ impl PendingDrainTable {
     }
 }
 
-static PENDING_DRAINS: IrqMutex<PendingDrainTable> =
-    IrqMutex::new(PendingDrainTable::new(), LOCK_LEVEL_REGISTRY);
+static PENDING_DRAINS: SpinLock<PendingDrainTable> =
+    SpinLock::new(PendingDrainTable::new(), LOCK_LEVEL_REGISTRY);
 
 /// Stash a terminated task's exit record + (optional) test-report ring into
 /// the pending-drain cache. Called from `mark_task_terminated` after

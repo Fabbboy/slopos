@@ -99,7 +99,7 @@ pub trait StackRegion: 'static + sealed::Sealed {
     // ---- Per-region wiring (implemented by the instantiation module) -----
     //
     // These methods exist because each region owns its own set of
-    // `static`s (one `IrqMutex<StackVaAllocator<…>>` plus one
+    // `static`s (one `SpinLock<StackVaAllocator<…>>` plus one
     // `PcpArray<…>`).  The generic allocator routes calls through these
     // hidden trait methods to reach the right statics — this is what
     // keeps the two regions' lock contention independent while sharing

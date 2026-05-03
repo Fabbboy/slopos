@@ -3,7 +3,7 @@ use core::ptr;
 use slopos_ostd::KVec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
@@ -90,16 +90,16 @@ impl VmSlotAlloc {
 
 /// Per-process VM locks.  Each slot is independently lockable so that
 /// independent processes never contend on each other's VM operations.
-static PROCESS_VMS: [IrqMutex<ProcessVmInner>; MAX_PROCESSES] = {
-    const INIT: IrqMutex<ProcessVmInner> =
-        IrqMutex::new(ProcessVmInner::new(), LOCK_LEVEL_RESOURCE);
+static PROCESS_VMS: [SpinLock<ProcessVmInner>; MAX_PROCESSES] = {
+    const INIT: SpinLock<ProcessVmInner> =
+        SpinLock::new(ProcessVmInner::new(), LOCK_LEVEL_RESOURCE);
     [INIT; MAX_PROCESSES]
 };
 
 /// Global slot allocator -- only taken for fork/exit/init to find free slots
 /// and update the process count.
-static VM_SLOT_ALLOC: IrqMutex<VmSlotAlloc> =
-    IrqMutex::new(VmSlotAlloc::new(), LOCK_LEVEL_REGISTRY);
+static VM_SLOT_ALLOC: SpinLock<VmSlotAlloc> =
+    SpinLock::new(VmSlotAlloc::new(), LOCK_LEVEL_REGISTRY);
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0
@@ -189,7 +189,7 @@ fn unmap_user_range(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u6
 
 /// Find the slot index for a given process ID using a lock-free scan.
 ///
-/// SAFETY: reads `process_id` through `IrqMutex::as_ptr()`.  The field is a
+/// SAFETY: reads `process_id` through `SpinLock::as_ptr()`.  The field is a
 /// naturally-aligned `u32` that is only written under the per-slot lock, so
 /// the read is tear-free on x86-64.  The caller must lock `PROCESS_VMS[slot]`
 /// before accessing any other field.

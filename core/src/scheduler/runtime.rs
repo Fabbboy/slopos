@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, OnceLock};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
 use slopos_utils::klog_info;
 
 use super::per_cpu;
@@ -45,11 +45,11 @@ impl BottomHalves {
     }
 }
 
-static IDLE_CBS: OnceLock<IrqMutex<IdleCallbacks>> = OnceLock::new();
-static BOTTOM_HALVES: OnceLock<IrqMutex<BottomHalves>> = OnceLock::new();
+static IDLE_CBS: OnceLock<SpinLock<IdleCallbacks>> = OnceLock::new();
+static BOTTOM_HALVES: OnceLock<SpinLock<BottomHalves>> = OnceLock::new();
 
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
-    IDLE_CBS.call_once(|| IrqMutex::new(IdleCallbacks::new(), LOCK_LEVEL_REGISTRY));
+    IDLE_CBS.call_once(|| SpinLock::new(IdleCallbacks::new(), LOCK_LEVEL_REGISTRY));
     let Some(cb) = callback else { return };
     if let Some(mutex) = IDLE_CBS.get() {
         let mut cbs = mutex.lock();
@@ -62,7 +62,7 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
 }
 
 pub fn scheduler_register_bottom_half(callback: fn()) {
-    BOTTOM_HALVES.call_once(|| IrqMutex::new(BottomHalves::new(), LOCK_LEVEL_REGISTRY));
+    BOTTOM_HALVES.call_once(|| SpinLock::new(BottomHalves::new(), LOCK_LEVEL_REGISTRY));
     if let Some(mutex) = BOTTOM_HALVES.get() {
         let mut halves = mutex.lock();
         let idx = halves.count;
@@ -133,9 +133,9 @@ fn unified_idle_loop(_: *mut c_void) {
         // not per-idle-loop-iteration, so the counter stays in lockstep
         // with total_ticks.
         if cpu_id == 0 {
-            slopos_sync::rcu_process_callbacks();
+            slopos_ostd::sync::rcu_process_callbacks();
         }
-        slopos_sync::rcu_note_qs();
+        slopos_ostd::sync::rcu_note_qs();
         unsafe {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
         }
@@ -423,7 +423,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         });
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
-            slopos_sync::rcu_note_qs();
+            slopos_ostd::sync::rcu_note_qs();
             unsafe {
                 core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
             }
@@ -442,7 +442,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
         // idle_time is now incremented per-tick in scheduler_timer_tick(),
         // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.
-        slopos_sync::rcu_note_qs();
+        slopos_ostd::sync::rcu_note_qs();
 
         unsafe {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));

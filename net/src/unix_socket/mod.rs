@@ -36,8 +36,8 @@ mod pair;
 mod slot;
 
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock, WaitQueue};
 use slopos_ostd::{KVec, KVecDeque};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, WaitQueue};
 
 use pair::{InFlightFd, PairSide, PairTable};
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
@@ -63,7 +63,7 @@ struct UnixSocketState {
     pairs: PairTable,
 }
 
-// SAFETY: UnixSocketState is only accessed through the UNIX_STATE IrqMutex.
+// SAFETY: UnixSocketState is only accessed through the UNIX_STATE SpinLock.
 unsafe impl Send for UnixSocketState {}
 
 impl UnixSocketState {
@@ -75,8 +75,8 @@ impl UnixSocketState {
     }
 }
 
-static UNIX_STATE: IrqMutex<UnixSocketState> =
-    IrqMutex::new(UnixSocketState::new(), LOCK_LEVEL_REGISTRY);
+static UNIX_STATE: SpinLock<UnixSocketState> =
+    SpinLock::new(UnixSocketState::new(), LOCK_LEVEL_REGISTRY);
 
 /// Validate a socket handle against the current state, returning the slot
 /// index if the handle is non-Free and the generation matches.

@@ -11,7 +11,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::task::BlockReason;
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::scheduler::{
     block_current_task, finish_wait, prepare_to_wait, scheduler_get_current_task, unblock_task,
@@ -47,7 +47,7 @@ impl FutexWaiter {
 }
 
 // SAFETY: FutexWaiter contains raw pointers managed by the scheduler.
-// Access is synchronized through per-bucket IrqMutex locks.
+// Access is synchronized through per-bucket SpinLock locks.
 unsafe impl Send for FutexWaiter {}
 
 struct FutexBucket {
@@ -64,10 +64,10 @@ impl FutexBucket {
     }
 }
 
-// Wrap each bucket in an IrqMutex for interrupt-safe locking.
-static FUTEX_TABLE: [IrqMutex<FutexBucket>; FUTEX_HASH_BUCKETS] = {
+// Wrap each bucket in an SpinLock for interrupt-safe locking.
+static FUTEX_TABLE: [SpinLock<FutexBucket>; FUTEX_HASH_BUCKETS] = {
     // const-init all buckets
-    const BUCKET: IrqMutex<FutexBucket> = IrqMutex::new(FutexBucket::new(), LOCK_LEVEL_RESOURCE);
+    const BUCKET: SpinLock<FutexBucket> = SpinLock::new(FutexBucket::new(), LOCK_LEVEL_RESOURCE);
     [BUCKET; FUTEX_HASH_BUCKETS]
 };
 

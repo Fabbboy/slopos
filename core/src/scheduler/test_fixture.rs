@@ -45,7 +45,7 @@ use core::marker::PhantomData;
 
 use slopos_hermetic::{BootCtx, HermeticVTable, topo_order};
 use slopos_ostd::KVec;
-use slopos_sync::StateFlag;
+use slopos_ostd::sync::StateFlag;
 use slopos_utils::klog_info;
 
 /// Idempotent registration of the panic-cleanup that clears the
@@ -117,7 +117,7 @@ impl KernelTestScope {
         }
         // Quiescence: wait for any RCU read-side critical sections that
         // started before pause to retire.
-        slopos_sync::synchronize_rcu();
+        slopos_ostd::sync::synchronize_rcu();
 
         // Topo-sort the registry by `DEPENDS_ON` and capture each state
         // in dependency order.

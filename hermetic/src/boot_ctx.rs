@@ -13,7 +13,7 @@
 //!
 //! ## Design — mint, not slot
 //!
-//! Earlier draft used `IrqMutex<Option<BootCtx>>` slots. That breaks the
+//! Earlier draft used `SpinLock<Option<BootCtx>>` slots. That breaks the
 //! nested-scope use case: while boot is running its init steps, boot
 //! owns a `&mut BootCtx`. A test fixture inside `boot_step_run_tests_fn`
 //! tries to `take_for_test` and finds the slot empty (boot has it),

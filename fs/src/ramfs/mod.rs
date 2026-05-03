@@ -1,7 +1,7 @@
 use slopos_ostd::KVec;
 
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 const MAX_INODES: usize = 64;
 const RAMFS_MAX_FILE_SIZE: usize = 16 * 1024 * 1024; // 16 MB per file
@@ -201,13 +201,13 @@ impl RamFsInner {
 }
 
 pub struct RamFs {
-    inner: IrqMutex<RamFsInner>,
+    inner: SpinLock<RamFsInner>,
 }
 
 impl RamFs {
     pub fn new() -> Self {
         Self {
-            inner: IrqMutex::new(RamFsInner::new(), LOCK_LEVEL_RESOURCE),
+            inner: SpinLock::new(RamFsInner::new(), LOCK_LEVEL_RESOURCE),
         }
     }
 
@@ -215,7 +215,7 @@ impl RamFs {
     /// lazily on first access via `ensure_initialized`.
     pub const fn new_const() -> Self {
         Self {
-            inner: IrqMutex::new(
+            inner: SpinLock::new(
                 RamFsInner {
                     inodes: KVec::new(),
                     next_inode: ROOT_INODE + 1,

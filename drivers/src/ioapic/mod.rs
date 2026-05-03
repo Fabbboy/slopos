@@ -5,7 +5,7 @@ pub mod tests;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use slopos_sync::{InitFlag, StateFlag};
+use slopos_ostd::sync::{InitFlag, StateFlag};
 use slopos_utils::{klog_debug, klog_info};
 
 use regs::*;

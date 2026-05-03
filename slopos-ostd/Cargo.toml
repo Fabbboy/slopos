@@ -15,6 +15,7 @@ test-helpers = []
 [dependencies]
 bitflags = { workspace = true }
 slopos-abi = { workspace = true }
+slopos-arch = { path = "../karch" }
 slopos-ostd-derive = { workspace = true }
 
 [dev-dependencies]

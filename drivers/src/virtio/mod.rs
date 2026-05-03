@@ -254,7 +254,7 @@ impl CompletionEvent {
 /// Lightweight edge-triggered event for high-frequency IRQ notification.
 ///
 /// No scheduler interaction in the signal path — keeps the IRQ handler
-/// fast. Safe to wait on while holding an `IrqMutex`.
+/// fast. Safe to wait on while holding an `SpinLock`.
 pub struct IrqEdgeEvent {
     signaled: AtomicBool,
 }

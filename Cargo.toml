@@ -16,7 +16,6 @@ members = [
   "net",
   "service-core",
   "utils",
-  "sync",
   "ktesting",
   "slibc",
   "userland",
@@ -63,7 +62,6 @@ slopos-ostd-derive = { path = "slopos-ostd-derive" }
   slopos-utils = { path = "utils" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }
-slopos-sync = { path = "sync" }
 slopos-mm = { path = "mm" }
 slopos-net = { path = "net" }
 slopos-slibc = { path = "slibc" }

@@ -19,7 +19,7 @@
 //!
 //! A consume-self signature (`fn on_segment(self, ...) -> Pcb`) is the
 //! textbook idiom for standalone state machines, but `Pcb` lives inside
-//! `[Option<Pcb>; MAX_CONNECTIONS]` behind an `IrqMutex`.  Consuming
+//! `[Option<Pcb>; MAX_CONNECTIONS]` behind an `SpinLock`.  Consuming
 //! self would require a `take()`/transform/`put_back` dance at every
 //! transition site inside the state handlers, for zero additional
 //! type-safety.  Both `smoltcp` (`smoltcp::socket::tcp::Socket`) and
@@ -64,7 +64,7 @@ pub struct SocketId(pub u32);
 /// Process control block.  One of these per active TCP connection.
 ///
 /// Stored inside `[Option<Pcb>; MAX_CONNECTIONS]` behind
-/// `IrqMutex<PcbTable>` (see [`crate::tcp::table`]).  State transitions
+/// `SpinLock<PcbTable>` (see [`crate::tcp::table`]).  State transitions
 /// mutate `self.state` in place; the glue layer in `tcp::input`
 /// drains the returned [`Actions`] after the table lock is released.
 #[derive(Debug)]
