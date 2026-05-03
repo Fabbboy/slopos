@@ -23,6 +23,11 @@ fn boot_step_mmu_asid_init_fn(_ctx: &mut BootCtx) {
     klog_debug!("MMU: PCID {}", if pcid_live { "live" } else { "disabled" });
 }
 
+fn boot_step_init_meta_slots_fn(_ctx: &mut BootCtx) {
+    let n_slots = slopos_mm::kernel_meta::install_meta_slots();
+    klog_info!("OSTD: meta_slots installed ({} entries)", n_slots);
+}
+
 fn boot_step_memory_init(_ctx: &mut BootCtx) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -95,4 +100,11 @@ crate::boot_init!(
     b"mmu asid init\0",
     boot_step_mmu_asid_init_fn,
     flags = boot_init_priority(30)
+);
+crate::boot_init!(
+    BOOT_STEP_INIT_META_SLOTS,
+    memory,
+    b"ostd meta_slots\0",
+    boot_step_init_meta_slots_fn,
+    flags = boot_init_priority(40)
 );

@@ -121,18 +121,26 @@ const _: () = assert!(offset_of!(TaskContext, rip) == 64);
 
 /// RAII-owned kernel-mode stack region.
 ///
-/// Models the storage shape but does not yet allocate from the OSTD
-/// frame allocator — kernel-stack provisioning still flows through
-/// `mm::stack_va`. [`KernelStack::from_raw`] adopts an existing stack
-/// region owned by the caller; [`Drop`] is currently a no-op.
+/// Two ownership modes:
+///
+/// - [`KernelStack::from_raw`] adopts an existing region owned by the
+///   caller. The caller retains responsibility for deallocation;
+///   `Drop` is a no-op for this mode.
+/// - [`KernelStack::from_frame_alloc`] records the physical base of a
+///   stack allocated through the registered
+///   [`crate::mm::frame_alloc::FrameAlloc`]; `Drop` returns the frames
+///   to that allocator.
 pub struct KernelStack {
     base: usize,
     size: usize,
+    /// Physical base used to free the stack on drop. `PhysAddr::NULL`
+    /// for the `from_raw` mode (caller retains the storage).
+    paddr: slopos_abi::addr::PhysAddr,
 }
 
 impl KernelStack {
     /// Adopt an existing stack region. The caller retains responsibility
-    /// for deallocation; OSTD does not free the region on drop yet.
+    /// for deallocation; OSTD does not free the region on drop.
     ///
     /// # Safety
     ///
@@ -140,7 +148,30 @@ impl KernelStack {
     /// least `size` bytes. The region must remain valid for the
     /// lifetime of the resulting `KernelStack`.
     pub const unsafe fn from_raw(base: usize, size: usize) -> Self {
-        Self { base, size }
+        Self {
+            base,
+            size,
+            paddr: slopos_abi::addr::PhysAddr::NULL,
+        }
+    }
+
+    /// Adopt a stack region whose backing pages came from the
+    /// registered [`crate::mm::frame_alloc::FrameAlloc`]. `Drop` will
+    /// hand `paddr` (a physically-contiguous run of `size / 4096`
+    /// pages) back to that allocator.
+    ///
+    /// # Safety
+    ///
+    /// `base` must point to the lowest byte of a kernel-virtual
+    /// mapping covering exactly the physical run starting at `paddr`,
+    /// and that run must be unique to this `KernelStack` (no aliasing
+    /// owners).
+    pub const unsafe fn from_frame_alloc(
+        base: usize,
+        size: usize,
+        paddr: slopos_abi::addr::PhysAddr,
+    ) -> Self {
+        Self { base, size, paddr }
     }
 
     /// Lowest address in the stack region.
@@ -159,6 +190,19 @@ impl KernelStack {
     #[inline]
     pub const fn top(&self) -> usize {
         self.base + self.size
+    }
+}
+
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        if self.paddr.is_null() {
+            return;
+        }
+        if let Some(alloc) = crate::mm::frame_alloc::current_frame_allocator() {
+            const PAGE_SIZE: usize = 4096;
+            let pages = self.size / PAGE_SIZE;
+            alloc.dealloc(self.paddr, pages);
+        }
     }
 }
 

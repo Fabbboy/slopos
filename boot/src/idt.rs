@@ -753,6 +753,11 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
             frame_mut.rip = slopos_mm::user_copy::usercopy_fault_ip();
             return true;
         }
+        if slopos_ostd::user::copy::is_ostd_usercopy_ip(frame_ref.rip) {
+            let frame_mut = unsafe { &mut *frame };
+            frame_mut.rip = slopos_ostd::user::copy::ostd_usercopy_fault_ip();
+            return true;
+        }
         return false;
     }
     let task_ptr = resolve_user_fault_task();

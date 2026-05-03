@@ -1354,3 +1354,11 @@ impl core::fmt::Debug for OwnedPageFrame {
             .finish()
     }
 }
+
+/// OSTD-typed handle to a kernel-owned 4 KiB physical frame. Lives
+/// alongside the legacy [`OwnedPageFrame`] and consumes the meta-slot
+/// machinery installed by [`crate::kernel_meta::install_meta_slots`].
+/// Callers that route allocation through the registered
+/// [`slopos_ostd::mm::frame::FrameAlloc`] can wrap the returned `Paddr`
+/// via `Frame::from_unused(paddr, KernelMeta)`.
+pub type KernelFrame = slopos_ostd::mm::frame::Frame<crate::kernel_meta::KernelMeta>;
