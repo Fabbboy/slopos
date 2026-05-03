@@ -220,8 +220,8 @@ impl<'a> FontRenderer<'a> {
                 let edges = outline_to_edges(out, scale, y_offset);
 
                 // Shift edges by x_offset
-                let shifted_edges: slopos_alloc::KVec<outline::Edge> =
-                    slopos_alloc::KVec::from_iter_fallible(edges.iter().map(|e| outline::Edge {
+                let shifted_edges: slopos_ostd::KVec<outline::Edge> =
+                    slopos_ostd::KVec::from_iter_fallible(edges.iter().map(|e| outline::Edge {
                         x0: e.x0 + x_offset,
                         y0: e.y0,
                         x1: e.x1 + x_offset,
@@ -249,7 +249,7 @@ impl<'a> FontRenderer<'a> {
                     bearing_x: 0,
                     bearing_y: 0,
                     advance: scaled_advance,
-                    coverage: slopos_alloc::KVec::new(),
+                    coverage: slopos_ostd::KVec::new(),
                 })
             }
         }
@@ -328,7 +328,7 @@ mod tests {
     ));
 
     struct TestCanvas {
-        data: slopos_alloc::KVec<u8>,
+        data: slopos_ostd::KVec<u8>,
         width: u32,
         height: u32,
     }
@@ -336,7 +336,7 @@ mod tests {
     impl TestCanvas {
         fn new(width: u32, height: u32) -> Self {
             Self {
-                data: slopos_alloc::KVec::<u8>::zeroed((width * height * 4) as usize)
+                data: slopos_ostd::KVec::<u8>::zeroed((width * height * 4) as usize)
                     .expect("test alloc"),
                 width,
                 height,

@@ -487,7 +487,7 @@ pub struct ValidatedSegment {
 // SAFETY: every field is a primitive integer, whose all-zero bit pattern
 // is a valid `u32`/`u64`. No references, pointers, or enums with
 // non-zero discriminants are present.
-unsafe impl slopos_alloc::Zeroable for ValidatedSegment {}
+unsafe impl slopos_ostd::Zeroable for ValidatedSegment {}
 
 impl ValidatedSegment {
     /// All-zero sentinel suitable for filling uninitialised scratch.

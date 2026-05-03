@@ -252,8 +252,8 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     }
     // SAFETY: every field is a primitive integer/struct of integers;
     // the all-zero bit pattern is a valid value.
-    unsafe impl slopos_alloc::Zeroable for PollScratch {}
-    let mut scratch_box = match slopos_alloc::KBox::<PollScratch>::zeroed() {
+    unsafe impl slopos_ostd::Zeroable for PollScratch {}
+    let mut scratch_box = match slopos_ostd::KBox::<PollScratch>::zeroed() {
         Ok(b) => b,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
     };
@@ -395,8 +395,8 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
     }
     // SAFETY: `SelectScratch` is composed entirely of byte/integer arrays;
     // the all-zero bit pattern is a valid value.
-    unsafe impl slopos_alloc::Zeroable for SelectScratch {}
-    let mut scratch_box = match slopos_alloc::KBox::<SelectScratch>::zeroed() {
+    unsafe impl slopos_ostd::Zeroable for SelectScratch {}
+    let mut scratch_box = match slopos_ostd::KBox::<SelectScratch>::zeroed() {
         Ok(b) => b,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM as u64),
     };

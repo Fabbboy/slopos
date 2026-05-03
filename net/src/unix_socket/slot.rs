@@ -38,13 +38,13 @@ pub(super) enum SlotState {
     /// `unix_bind()` succeeded.
     Bound {
         /// Heap-allocated copy of the abstract namespace path bytes.
-        path: slopos_alloc::KVec<u8>,
+        path: slopos_ostd::KVec<u8>,
     },
     /// `unix_listen()` succeeded.  Backlog is a `KVecDeque` so
     /// `accept()`'s pop-front is O(1).
     Listening {
-        path: slopos_alloc::KVec<u8>,
-        backlog: slopos_alloc::KVecDeque<SocketHandle>,
+        path: slopos_ostd::KVec<u8>,
+        backlog: slopos_ostd::KVecDeque<SocketHandle>,
     },
     /// `unix_connect()` (caller side) or accept (peer side) succeeded.
     Connected {

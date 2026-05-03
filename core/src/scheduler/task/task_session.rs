@@ -54,11 +54,11 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
     // frame gate. Scratch capacity is sized to the pool high-water
     // mark so a lightly-loaded system pays for a small allocation.
     let capacity = pool_high_water().max(1);
-    let mut candidates: slopos_alloc::KVec<usize> =
-        match slopos_alloc::KVec::with_capacity(capacity) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+    let mut candidates: slopos_ostd::KVec<usize> = match slopos_ostd::KVec::with_capacity(capacity)
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
     with_task_manager(|mgr| {
         for dependent in mgr.iter_tasks_mut() {
             let dep_ptr = dependent as *mut Task;

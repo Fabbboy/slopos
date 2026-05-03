@@ -149,7 +149,7 @@ impl FileOps for VfsFileOps {
             (fs, slot.inode)
         };
 
-        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
@@ -201,7 +201,7 @@ impl FileOps for VfsFileOps {
             (fs, slot.inode)
         };
 
-        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };

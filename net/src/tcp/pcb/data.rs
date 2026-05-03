@@ -28,7 +28,7 @@
 use core::mem;
 use core::ptr::addr_of_mut;
 
-use slopos_alloc::{AllocError, Init, init_from_closure};
+use slopos_ostd::{AllocError, Init, init_from_closure};
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::buffer::TcpBufferPair;
@@ -119,7 +119,7 @@ impl DataState {
     /// Returns an [`Init`] recipe rather than a `Self` rvalue so the
     /// 3 KiB struct never materialises on the caller's stack — the
     /// closure writes each field directly into the heap slot supplied
-    /// by [`slopos_alloc::KBox::try_init`] / [`slopos_alloc::PinBox::try_init`].
+    /// by [`slopos_ostd::KBox::try_init`] / [`slopos_ostd::PinBox::try_init`].
     ///
     /// Hand-written `init_from_closure` (rather than a macro that
     /// expands into a field-capturing closure) keeps the closure's

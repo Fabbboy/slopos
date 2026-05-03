@@ -25,7 +25,7 @@
 //!   Headers are consumed via [`pull_header`](PacketBuf::pull_header).
 
 use core::fmt;
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use super::pool::{BUF_SIZE, PACKET_POOL, PacketPool};
 use super::types::{Ipv4Addr, NetError};

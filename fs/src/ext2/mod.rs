@@ -453,12 +453,12 @@ impl<'a> Ext2Fs<'a> {
             // inline `[BlockNum::ZERO; 1024]` would put ≈4 KiB on the
             // kernel stack here (dominating this function's frame and
             // leaving little headroom for callees on a 32 KiB task
-            // stack), so route through `slopos_alloc::KVec` instead.
-            let ptrs: slopos_alloc::KVec<BlockNum> = {
+            // stack), so route through `slopos_ostd::KVec` instead.
+            let ptrs: slopos_ostd::KVec<BlockNum> = {
                 let block = self.cache.get(indirect, self.device)?;
                 let data = block.data();
                 let count = self.block_size as usize / 4;
-                let mut ptrs = slopos_alloc::KVec::<BlockNum>::zeroed(1024)
+                let mut ptrs = slopos_ostd::KVec::<BlockNum>::zeroed(1024)
                     .map_err(|_| Ext2Error::OutOfMemory)?;
                 for i in 0..count.min(1024) {
                     let off = i * 4;

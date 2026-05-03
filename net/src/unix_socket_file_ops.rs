@@ -22,7 +22,7 @@ impl FileOps for UnixSocketFileOps {
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
         let h = SocketHandle::from_usize(handle);
-        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
@@ -62,7 +62,7 @@ impl FileOps for UnixSocketFileOps {
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         let h = SocketHandle::from_usize(handle);
-        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };

@@ -1,4 +1,4 @@
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;

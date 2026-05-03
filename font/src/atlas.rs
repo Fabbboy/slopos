@@ -3,7 +3,7 @@
 //! Contains coverage bitmaps for ASCII 32-126 at a fixed cell size.
 //! Each pixel has a coverage value 0-255 for anti-aliased rendering.
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
@@ -489,7 +489,7 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 mod global_atlas {
     use super::*;
     use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-    use slopos_alloc::KBox;
+    use slopos_ostd::KBox;
     use slopos_sync::RcuReadGuard;
 
     /// Self-owning RCU-protected borrow of the global glyph atlas.
@@ -654,8 +654,8 @@ mod tests {
         let cell_w = 8u16;
         let cell_h = 16u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage = slopos_alloc::KVec::<u8>::filled(7u8, 95 * stride).expect("test alloc");
-        let replacement = slopos_alloc::KVec::<u8>::filled(9u8, stride).expect("test alloc");
+        let coverage = slopos_ostd::KVec::<u8>::filled(7u8, 95 * stride).expect("test alloc");
+        let replacement = slopos_ostd::KVec::<u8>::filled(9u8, stride).expect("test alloc");
 
         let atlas = GlyphAtlas::from_raw_coverage(
             cell_w,
@@ -678,8 +678,8 @@ mod tests {
         let cell_w = 8u16;
         let cell_h = 16u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage = slopos_alloc::KVec::<u8>::zeroed(95 * stride - 1).expect("test alloc");
-        let replacement = slopos_alloc::KVec::<u8>::zeroed(stride).expect("test alloc");
+        let coverage = slopos_ostd::KVec::<u8>::zeroed(95 * stride - 1).expect("test alloc");
+        let replacement = slopos_ostd::KVec::<u8>::zeroed(stride).expect("test alloc");
 
         assert!(
             GlyphAtlas::from_raw_coverage(

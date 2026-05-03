@@ -2,7 +2,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_alloc::{KBox, KVec};
+use slopos_ostd::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};

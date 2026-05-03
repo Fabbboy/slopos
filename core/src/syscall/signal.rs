@@ -31,13 +31,13 @@ fn parse_signum(raw: u64) -> Option<u8> {
 /// we end up targeting — sized arrays would force the whole stack
 /// frame over the 2 KiB gate.
 struct TargetSet {
-    ids: slopos_alloc::KVec<u32>,
+    ids: slopos_ostd::KVec<u32>,
 }
 
 impl TargetSet {
     fn new() -> Self {
         Self {
-            ids: slopos_alloc::KVec::new(),
+            ids: slopos_ostd::KVec::new(),
         }
     }
 

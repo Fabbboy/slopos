@@ -7,7 +7,7 @@
 //! never reallocate.  The 16 KiB allocation lives entirely on the heap
 //! — no rvalue ever materialises on a kernel stack frame.
 
-use slopos_alloc::{AllocError, KVecDeque};
+use slopos_ostd::{AllocError, KVecDeque};
 
 /// Per-direction FIFO size (16 KiB).
 pub const UNIX_BUF_SIZE: usize = 16384;

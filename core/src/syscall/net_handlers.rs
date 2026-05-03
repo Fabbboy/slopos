@@ -287,7 +287,7 @@ define_syscall!(syscall_send(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(ERRNO_ENOMEM),
     };
@@ -324,7 +324,7 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(ERRNO_ENOMEM),
     };
@@ -382,7 +382,7 @@ define_syscall!(syscall_sendto(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(ERRNO_ENOMEM),
     };
@@ -427,7 +427,7 @@ define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
     }
 
     let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(ERRNO_ENOMEM),
     };
@@ -615,7 +615,7 @@ define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
 
     // Copy data bytes.
     let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(ERRNO_ENOMEM),
     };
@@ -712,7 +712,7 @@ define_syscall!(syscall_recvmsg(ctx, args) requires(let process_id) {
     let msg: MsgHdr = try_or_err!(ctx, copy_from_user(msg_ptr));
 
     let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = match slopos_alloc::KVec::<u8>::zeroed(4096) {
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(ERRNO_ENOMEM),
     };

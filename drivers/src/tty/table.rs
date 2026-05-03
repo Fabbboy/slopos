@@ -39,7 +39,7 @@ use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
-use slopos_alloc::{AllocError, PinBox};
+use slopos_ostd::{AllocError, PinBox};
 use slopos_sync::WaitQueue;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_utils::{AtomicBitmap, words_for};
@@ -204,7 +204,7 @@ where
 impl Tty {
     /// Create a new TTY with the given index and driver backend.
     ///
-    /// Allocates the TTY on the heap through `slopos-alloc::PinBox` so
+    /// Allocates the TTY on the heap through `slopos-ostd::PinBox` so
     /// the struct never materialises on a caller's stack.  The
     /// line-discipline allocation is the dominant cost (~12 KiB for
     /// `LineDisc`); that routes through `LineDisc::new_pinned`.

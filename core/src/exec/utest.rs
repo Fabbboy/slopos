@@ -12,7 +12,7 @@ use slopos_abi::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason,
     TaskPriority,
 };
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 use slopos_testing::{TestDesc, TestResult, ktap};
 use slopos_utils::{catch_panic, klog_info};
 

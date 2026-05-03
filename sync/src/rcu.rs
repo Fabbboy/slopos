@@ -57,7 +57,7 @@
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use slopos_alloc::{raw_alloc, raw_dealloc};
+use slopos_ostd::{raw_alloc, raw_dealloc};
 
 use crate::preempt::PreemptGuard;
 use slopos_arch::pcr::{
@@ -170,7 +170,7 @@ pub fn synchronize_rcu() {
     // 2 KiB `[u64; MAX_CPUS]` on the stack — stack-safety gate forbids
     // frames that large, and an RCU grace-period that can't allocate
     // 2 KiB of scratch is already on a wedged path.
-    let mut snaps = slopos_alloc::KVec::<u64>::zeroed(n).expect("rcu: snaps alloc");
+    let mut snaps = slopos_ostd::KVec::<u64>::zeroed(n).expect("rcu: snaps alloc");
     for cpu in 0..n {
         snaps[cpu] = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
     }

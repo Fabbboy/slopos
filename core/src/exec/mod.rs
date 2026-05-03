@@ -8,7 +8,7 @@ pub mod utest;
 use core::ffi::c_char;
 use core::ptr;
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};

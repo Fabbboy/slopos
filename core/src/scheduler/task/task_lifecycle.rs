@@ -743,9 +743,9 @@ fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut T
     task.task_id != INVALID_TASK_ID
 }
 
-fn collect_shutdown_task_ids(current: *mut Task) -> slopos_alloc::KVec<u32> {
+fn collect_shutdown_task_ids(current: *mut Task) -> slopos_ostd::KVec<u32> {
     with_task_manager(|mgr| {
-        let mut ids: slopos_alloc::KVec<u32> = slopos_alloc::KVec::new();
+        let mut ids: slopos_ostd::KVec<u32> = slopos_ostd::KVec::new();
         for task in mgr.iter_tasks() {
             let task_ptr = task as *const Task as *mut Task;
             if should_collect_for_shutdown(task, task_ptr, current) {
@@ -756,7 +756,7 @@ fn collect_shutdown_task_ids(current: *mut Task) -> slopos_alloc::KVec<u32> {
     })
 }
 
-fn terminate_task_ids(task_ids: &slopos_alloc::KVec<u32>) -> c_int {
+fn terminate_task_ids(task_ids: &slopos_ostd::KVec<u32>) -> c_int {
     let mut result = 0;
     for task_id in task_ids.iter() {
         if task_terminate(*task_id) != 0 {

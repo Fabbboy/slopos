@@ -23,7 +23,6 @@ members = [
   "video",
   "windowing",
   "slop-protocol",
-  "slopos-alloc",
   "slopos-ostd",
   "slopos-ostd-derive",
   "hermetic"
@@ -59,7 +58,6 @@ slopos-drivers = { path = "drivers" }
 slopos-font = { path = "font" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
-slopos-alloc = { path = "slopos-alloc" }
 slopos-ostd = { path = "slopos-ostd" }
 slopos-ostd-derive = { path = "slopos-ostd-derive" }
   slopos-utils = { path = "utils" }

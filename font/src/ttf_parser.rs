@@ -3,7 +3,7 @@
 //! Parses the subset of TTF tables needed for basic Latin text rendering:
 //! `head`, `maxp`, `cmap`, `hhea`, `hmtx`, `loca`, `glyf`.
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 /// A parsed TrueType font backed by a borrowed byte slice.
 pub struct TtfFont<'a> {

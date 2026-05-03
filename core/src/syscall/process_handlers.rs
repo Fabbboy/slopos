@@ -1,4 +1,4 @@
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::exec;
 use crate::sched::task_wait_for;

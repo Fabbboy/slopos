@@ -5,7 +5,7 @@ pub struct BlockNum(pub u32);
 
 // SAFETY: BlockNum wraps a single u32; all-zero bits encode the
 // `BlockNum::ZERO` sentinel. No invalid bit patterns.
-unsafe impl slopos_alloc::Zeroable for BlockNum {}
+unsafe impl slopos_ostd::Zeroable for BlockNum {}
 
 /// Logical file block number (offset within a file's data).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

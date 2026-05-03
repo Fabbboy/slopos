@@ -8,6 +8,7 @@ pub mod page_property;
 pub mod page_table;
 pub mod phys;
 pub mod pod;
+pub mod slab;
 pub mod tlb;
 pub mod uframe;
 pub mod vm_space;
@@ -16,8 +17,15 @@ pub use dma::{
     DmaCoherent, DmaCoherentMeta, DmaDirection, DmaError, DmaStream, DmaStreamMeta, IommuMapper,
     register_iommu_mapper,
 };
+pub use frame::{FrameAlloc, FrameAllocOptions};
+pub use heap::{
+    AllocError, KArc, KBTreeMap, KBox, KVec, KVecDeque, KernelHeap, PinBox, boxed_zeroed,
+    raw_alloc, raw_dealloc,
+};
+pub use init::{Init, InitClosure, Zeroable, init_from_closure, init_zeroed};
 pub use io_mem::{
     IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
     register_io_mem_mapper, register_io_mem_registry,
 };
 pub use pod::Pod;
+pub use slab::Slab;

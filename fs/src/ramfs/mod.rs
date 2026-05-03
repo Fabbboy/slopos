@@ -1,4 +1,4 @@
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};

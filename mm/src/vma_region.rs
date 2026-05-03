@@ -8,7 +8,7 @@
 //! gaps between existing entries, and `insert` merges compatible adjacent
 //! regions automatically.
 
-use slopos_alloc::{KBTreeMap, KVec};
+use slopos_ostd::{KBTreeMap, KVec};
 
 use crate::memfd::MemfdHandle;
 use crate::paging_defs::PageFlags;

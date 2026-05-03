@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, 
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
-use slopos_alloc::{AllocError, Init, init_from_closure};
+use slopos_ostd::{AllocError, Init, init_from_closure};
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -449,7 +449,7 @@ pub struct Task {
     /// once the task has exited. The handle is contiguous with
     /// `kernel_stack`/`unsafe_stack` so `reset_in_place`'s zero-byte hole
     /// covers all three Option<KBox>-style owned handles in one span.
-    pub test_reports: Option<slopos_alloc::KBox<crate::scheduler::test_reports::TestReportRing>>,
+    pub test_reports: Option<slopos_ostd::KBox<crate::scheduler::test_reports::TestReportRing>>,
     /// Current SafeStack unsafe-stack pointer (data-stack RSP).
     ///
     /// Initialised to `unsafe_stack.as_ref().unwrap().top()` at task
@@ -707,7 +707,7 @@ impl Task {
             let kernel_stack_off = core::mem::offset_of!(Task, kernel_stack);
             let test_reports_off = core::mem::offset_of!(Task, test_reports);
             let test_reports_size = core::mem::size_of::<
-                Option<slopos_alloc::KBox<crate::scheduler::test_reports::TestReportRing>>,
+                Option<slopos_ostd::KBox<crate::scheduler::test_reports::TestReportRing>>,
             >();
             debug_assert!(
                 kernel_stack_off < test_reports_off,

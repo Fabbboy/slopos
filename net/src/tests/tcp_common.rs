@@ -8,7 +8,7 @@
 //! Matchers and macros that take on non-trivial state (like [`SegmentMatcher`])
 //! carry inline documentation.
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::socket;
 use crate::tcp::{

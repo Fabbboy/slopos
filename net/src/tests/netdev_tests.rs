@@ -7,7 +7,7 @@
 //! - Additional coverage: features bitflags, registry register/unregister/enumerate,
 //!   handle data-plane ops, registry capacity exhaustion.
 
-use slopos_alloc::{KBox, KVec};
+use slopos_ostd::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};

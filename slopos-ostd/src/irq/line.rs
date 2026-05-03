@@ -37,7 +37,7 @@ use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use slopos_alloc::KBox;
+use crate::KBox;
 
 // ---------------------------------------------------------------------------
 // Vector range and allocator state.

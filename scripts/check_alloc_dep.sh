@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Fail the build if any kernel crate other than slopos-alloc declares a
+# Fail the build if any kernel crate other than slopos-ostd declares a
 # bare `alloc` dependency in its Cargo.toml.
 #
-# Kernel crates must route heap access through `slopos-alloc`, which is
-# the only kernel crate permitted to depend on `alloc` directly. Userland
-# crates are exempt — they run on larger stacks and the constraint does
-# not apply there.
+# Kernel crates must route heap access through `slopos_ostd::mm::heap`,
+# which is the only kernel module permitted to depend on `alloc`
+# directly. Userland crates are exempt — they run on larger stacks and
+# the constraint does not apply there.
 
 set -euo pipefail
 
@@ -13,8 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Crate names allowed to own an `alloc` dep line. Userland runs on big
-# stacks; slopos-alloc is the sanctioned allocation surface.
-USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|slopos-alloc)$'
+# stacks; slopos-ostd is the sanctioned allocation surface.
+USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|slopos-ostd)$'
 
 bad=0
 while IFS= read -r -d '' manifest; do
@@ -58,7 +58,7 @@ while IFS= read -r -d '' manifest; do
     if [ -n "$match" ]; then
         echo "check_alloc_dep: $manifest declares an 'alloc' dependency:" >&2
         echo "$match" | sed 's/^/    /' >&2
-        echo "  kernel crates must route heap allocation through slopos-alloc instead" >&2
+        echo "  kernel crates must route heap allocation through slopos_ostd::mm::heap instead" >&2
         bad=1
     fi
 done < <(find "$REPO_ROOT" -maxdepth 3 -name Cargo.toml \
@@ -72,7 +72,7 @@ done < <(find "$REPO_ROOT" -maxdepth 3 -name Cargo.toml \
 # ::alloc::` patterns that a Cargo.toml scan would miss. The only kernel
 # file allowed to name `alloc` from source is `kernel/src/main.rs`,
 # which needs `extern crate alloc;` for its `#[global_allocator]` /
-# `#[alloc_error_handler]` declarations. Userland + slopos-alloc itself
+# `#[alloc_error_handler]` declarations. Userland + slopos-ostd itself
 # are exempt per the Cargo-level whitelist above.
 # -----------------------------------------------------------------------
 
@@ -96,7 +96,7 @@ source_offenders="$(
             -not -path './third_party/*' \
             -not -path './target/*'
     fi \
-      | grep -Ev '^(userland|slibc|slop-protocol|ktesting|slopos-alloc)/' \
+      | grep -Ev '^(userland|slibc|slop-protocol|ktesting|slopos-ostd)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       | while IFS= read -r file; do
             awk '
@@ -130,12 +130,12 @@ source_offenders="$(
 if [ -n "$source_offenders" ]; then
     echo "check_alloc_dep: source-level 'alloc' usage detected:" >&2
     echo "$source_offenders" | sed 's/^/    /' >&2
-    echo "  only kernel/src/main.rs may name 'alloc' directly — everything" >&2
-    echo "  else must go through slopos_alloc::*" >&2
+    echo "  only kernel/src/main.rs and slopos-ostd may name 'alloc' directly — everything" >&2
+    echo "  else must go through slopos_ostd::*" >&2
     bad=1
 fi
 
 if [ "$bad" -eq 0 ]; then
-    echo "check_alloc_dep: OK — no kernel crate or source file names 'alloc' directly"
+    echo "check_alloc_dep: OK — no kernel crate or source file outside slopos-ostd names 'alloc' directly"
 fi
 exit "$bad"

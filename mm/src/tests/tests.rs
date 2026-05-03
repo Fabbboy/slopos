@@ -2,7 +2,7 @@ use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::cpu;

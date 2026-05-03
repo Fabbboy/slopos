@@ -11,11 +11,11 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 use slopos_drivers::serial;
-use slopos_mm::KernelAllocator;
+use slopos_ostd::mm::heap::KernelHeap;
 mod ffi;
 
 #[global_allocator]
-static GLOBAL_ALLOCATOR: KernelAllocator = KernelAllocator::new();
+static GLOBAL_ALLOCATOR: KernelHeap = KernelHeap;
 
 // Include the Limine assembly trampoline that sets up stack + serial and jumps into kernel_main.
 global_asm!(include_str!("../../boot/limine_entry.s"));

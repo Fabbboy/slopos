@@ -1,4 +1,4 @@
-use slopos_alloc::{KBTreeMap, KBox, KVec};
+use slopos_ostd::{KBTreeMap, KBox, KVec};
 
 use super::Ext2Error;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;

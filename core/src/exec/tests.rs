@@ -37,8 +37,8 @@ fn read_user_u8(process_id: u32, addr: u64) -> Option<u8> {
 }
 
 /// Read a null-terminated C string from user memory, up to `max_len` bytes.
-fn read_user_cstr(process_id: u32, addr: u64, max_len: usize) -> Option<slopos_alloc::KVec<u8>> {
-    let mut buf = slopos_alloc::KVec::<u8>::new();
+fn read_user_cstr(process_id: u32, addr: u64, max_len: usize) -> Option<slopos_ostd::KVec<u8>> {
+    let mut buf = slopos_ostd::KVec::<u8>::new();
     for i in 0..max_len {
         let byte = read_user_u8(process_id, addr + i as u64)?;
         if byte == 0 {

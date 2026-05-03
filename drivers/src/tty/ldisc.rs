@@ -24,7 +24,7 @@ use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
     UserTermios,
 };
-use slopos_alloc::{AllocError, PinBox, Zeroable};
+use slopos_ostd::{AllocError, PinBox, Zeroable};
 use slopos_utils::ring_buffer::RingBuffer;
 
 use super::driver::{InputEvent, InputStatus};
@@ -494,7 +494,7 @@ impl LineDisc {
     }
 
     /// Allocate a default `LineDisc` directly on the heap via
-    /// `slopos-alloc::PinBox::zeroed`, then overwrite `termios` with
+    /// `slopos-ostd::PinBox::zeroed`, then overwrite `termios` with
     /// the default canonical-mode settings.  The ≈12 KiB struct never
     /// lands on the caller's stack — materialising it there would
     /// consume ~20 KiB per invocation and overflow the 32 KiB kernel
@@ -1804,7 +1804,7 @@ impl RawDisc {
     }
 
     /// Allocate a default `RawDisc` directly on the heap via
-    /// `slopos-alloc::PinBox::zeroed`.  Avoids the ~4 KiB
+    /// `slopos-ostd::PinBox::zeroed`.  Avoids the ~4 KiB
     /// compiler-generated stack temporary that `Self`-returning
     /// constructors produced.  See [`LineDisc::new_pinned`] for the
     /// full rationale.

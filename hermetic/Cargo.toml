@@ -13,7 +13,7 @@ test-hooks = []
 tests = []
 
 [dependencies]
-slopos-alloc = { workspace = true }
+slopos-ostd = { workspace = true }
 slopos-arch = { path = "../karch" }
 slopos-sync = { path = "../sync" }
 slopos-utils = { path = "../utils" }

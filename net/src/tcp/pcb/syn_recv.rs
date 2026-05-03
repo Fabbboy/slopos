@@ -137,7 +137,7 @@ impl SynRecvState {
         // KBox. Allocation failure surfaces as `TcpError::OutOfMemory`
         // up through `Pcb::on_segment` -> `tcp::input`, which maps it
         // to `ERRNO_ENOMEM` at the syscall boundary.
-        let data = slopos_alloc::KBox::try_init(DataState::init_new(
+        let data = slopos_ostd::KBox::try_init(DataState::init_new(
             iss,
             irs,
             snd_una,

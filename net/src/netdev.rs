@@ -25,7 +25,7 @@
 use core::fmt;
 
 use bitflags::bitflags;
-use slopos_alloc::{KBox, KVec};
+use slopos_ostd::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
 
 use super::packetbuf::PacketBuf;

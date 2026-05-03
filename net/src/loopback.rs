@@ -16,7 +16,7 @@
 //! The internal queue is protected by an [`IrqMutex`] since both `tx()` (from
 //! any socket context) and `poll_rx()` (from the NAPI loop) access it.
 
-use slopos_alloc::{KBox, KVec, KVecDeque};
+use slopos_ostd::{KBox, KVec, KVecDeque};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 
 use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};

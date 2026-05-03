@@ -8,7 +8,7 @@
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX, TEST_REPORT_RING_CAPACITY};
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
-use slopos_alloc::{AllocError, Init, KBox, KVec, Zeroable, init_from_closure};
+use slopos_ostd::{AllocError, Init, KBox, KVec, Zeroable, init_from_closure};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 
 /// One subtest result. `name`/`msg` are length-prefixed byte arrays — the
@@ -80,7 +80,7 @@ pub fn alloc_ring() -> Result<KBox<TestReportRing>, AllocError> {
 }
 
 /// In-place initialiser that zero-fills a `TestReportRing` slot.
-/// Mirrors `slopos_alloc::init_zeroed` but plumbs the error type through
+/// Mirrors `slopos_ostd::init_zeroed` but plumbs the error type through
 /// as `AllocError` so it composes with `KBox::try_init`'s `E: From<AllocError>`
 /// bound. Safe because `TestReportRing: Zeroable`.
 fn zeroed_ring_init() -> impl Init<TestReportRing, AllocError> {

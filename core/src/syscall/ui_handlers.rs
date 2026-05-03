@@ -71,11 +71,11 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
     // and `data` (two `u32`s) are all zero-valid primitives.
     #[allow(dead_code)]
     struct InputEventScratch(InputEvent);
-    unsafe impl slopos_alloc::Zeroable for InputEventScratch {}
+    unsafe impl slopos_ostd::Zeroable for InputEventScratch {}
 
     const MAX_BATCH: usize = 64;
     let batch = max_count.min(MAX_BATCH);
-    let mut scratch = match slopos_alloc::KVec::<InputEventScratch>::zeroed(batch) {
+    let mut scratch = match slopos_ostd::KVec::<InputEventScratch>::zeroed(batch) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
     };
@@ -108,7 +108,7 @@ define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {
 
     let copy_len = src_len.min(slopos_abi::CLIPBOARD_MAX_SIZE);
     let user_bytes = try_or_err!(ctx, UserBytes::try_new(src_ptr, copy_len));
-    let mut buf = match slopos_alloc::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
+    let mut buf = match slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
     };
@@ -126,7 +126,7 @@ define_syscall!(syscall_clipboard_paste(ctx, args) requires(let task_id) {
         return ctx.ok(0);
     }
 
-    let mut buf = match slopos_alloc::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
+    let mut buf = match slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
         Ok(v) => v,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
     };

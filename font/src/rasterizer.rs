@@ -6,7 +6,7 @@
 //! stb_truetype, and ab-glyph — boundary pixels get smooth sub-pixel
 //! coverage instead of binary in/out.
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::outline::Edge;
 

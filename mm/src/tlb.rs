@@ -638,7 +638,7 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
     // Allocate the per-CPU target list on the heap: a stack-resident
     // `[usize; MAX_CPUS]` is 2 KiB on its own and pushes this function
     // over the stack-sizes gate.
-    let mut targets = match slopos_alloc::KVec::<usize>::zeroed(MAX_CPUS) {
+    let mut targets = match slopos_ostd::KVec::<usize>::zeroed(MAX_CPUS) {
         Ok(v) => v,
         Err(_) => {
             klog_warn!("tlb: targeted_flush_request alloc failed; falling back to local");

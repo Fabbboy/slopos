@@ -19,7 +19,7 @@
 
 use core::ptr::NonNull;
 
-use slopos_alloc::{AllocError, KBox, KVec};
+use slopos_ostd::{AllocError, KBox, KVec};
 
 use crate::trait_def::HermeticState;
 

@@ -43,8 +43,8 @@
 
 use core::marker::PhantomData;
 
-use slopos_alloc::KVec;
 use slopos_hermetic::{BootCtx, HermeticVTable, topo_order};
+use slopos_ostd::KVec;
 use slopos_sync::StateFlag;
 use slopos_utils::klog_info;
 

@@ -57,8 +57,8 @@ pub enum TcpError {
     OutOfMemory,
 }
 
-impl From<slopos_alloc::AllocError> for TcpError {
-    fn from(_: slopos_alloc::AllocError) -> Self {
+impl From<slopos_ostd::AllocError> for TcpError {
+    fn from(_: slopos_ostd::AllocError) -> Self {
         TcpError::OutOfMemory
     }
 }

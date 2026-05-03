@@ -11,7 +11,7 @@
 //! kernel between tests — exactly the bug class this framework exists
 //! to close. Make the obligation explicit.
 
-use slopos_alloc::AllocError;
+use slopos_ostd::AllocError;
 
 /// A subsystem with mutable global state that must be saved before a
 /// hermetic test enters and restored when the scope drops.

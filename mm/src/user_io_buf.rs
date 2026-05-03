@@ -1,6 +1,6 @@
 use slopos_abi::Errno;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use crate::user_ptr::{UserBytes, UserVirtAddr};

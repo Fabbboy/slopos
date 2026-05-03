@@ -17,7 +17,7 @@
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
-use slopos_alloc::{AllocError, KVec};
+use crate::{AllocError, KVec};
 
 use crate::mm::frame::{
     AnonymousMeta, AnyFrameMeta, Frame, FrameError, Paddr, PageTableMeta as _PageTableMeta,

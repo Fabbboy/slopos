@@ -1,6 +1,6 @@
 use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, SHUT_RD, SO_RCVBUF, SO_REUSEADDR, SOL_SOCKET};
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 

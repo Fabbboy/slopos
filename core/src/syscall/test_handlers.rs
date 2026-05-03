@@ -107,8 +107,8 @@ define_syscall!(syscall_run_userland_tests(ctx, _args) {
         warn_ms: 0,
         shutdown: false,            // shutdown handled below after merge
         stacktrace_demo: false,
-        run_globs: slopos_alloc::KVec::new(),
-        skip_globs: slopos_alloc::KVec::new(),
+        run_globs: slopos_ostd::KVec::new(),
+        skip_globs: slopos_ostd::KVec::new(),
     };
 
     let mut utest_summary = TestRunSummary::default();

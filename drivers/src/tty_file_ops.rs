@@ -54,7 +54,7 @@ impl FileOps for TtyFileOps {
             return Errno::EBADF.as_isize();
         };
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut tmp = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut tmp = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
@@ -82,7 +82,7 @@ impl FileOps for TtyFileOps {
             return Errno::EBADF.as_isize();
         };
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };

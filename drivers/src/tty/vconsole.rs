@@ -13,7 +13,7 @@
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use slopos_alloc::{KBox, KVec};
+use slopos_ostd::{KBox, KVec};
 
 use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};

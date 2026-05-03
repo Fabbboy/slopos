@@ -115,11 +115,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     // the 256 B inline array never lands in this function's stack
     // frame. `KBox::zeroed()` is only invoked in the `if echo_len > 0`
     // arm below — the no-echo hot path stays allocation-free.
-    let mut route: Option<(
-        super::driver::DriverId,
-        slopos_alloc::KBox<[u8; 256]>,
-        usize,
-    )> = None;
+    let mut route: Option<(super::driver::DriverId, slopos_ostd::KBox<[u8; 256]>, usize)> = None;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -157,7 +153,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
         let echo_len = batch.echo.len();
         if echo_len > 0 {
-            if let Ok(mut out) = slopos_alloc::KBox::<[u8; 256]>::zeroed() {
+            if let Ok(mut out) = slopos_ostd::KBox::<[u8; 256]>::zeroed() {
                 out[..echo_len].copy_from_slice(batch.echo.as_slice());
                 route = Some((tty.driver.id(), out, echo_len));
             }

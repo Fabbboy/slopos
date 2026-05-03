@@ -505,7 +505,7 @@ fn close_syn_recv_transition(
     let ts_enabled = s.ts_enabled;
     // Heap-direct: build the new DataState in place inside a fresh
     // KBox, then patch close_phase / snd_nxt through DerefMut.
-    let mut ds = slopos_alloc::KBox::try_init(DataState::init_from_syn_recv(s))?;
+    let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
     ds.close_phase = ClosePhase::FinWait1;
     ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
     let ts = if ts_enabled {
@@ -629,7 +629,7 @@ fn shutdown_write_syn_recv_transition(
     let window = s.rcv_wnd;
     let now_ms = clock::now_ms();
     let ts_enabled = s.ts_enabled;
-    let mut ds = slopos_alloc::KBox::try_init(DataState::init_from_syn_recv(s))?;
+    let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
     ds.close_phase = ClosePhase::FinWait1;
     ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
     let ts = if ts_enabled {

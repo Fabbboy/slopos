@@ -3,7 +3,7 @@
 //! Handles quadratic Bézier curve flattening, scaling from font units to
 //! pixels, and implied on-curve point insertion.
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::ttf_parser::{GlyphOutline, OutlinePoint};
 

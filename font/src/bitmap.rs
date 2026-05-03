@@ -7,7 +7,7 @@
 //! Format: 256 glyphs × 16 rows × 1 byte/row = 4096 bytes.
 //! Each byte represents 8 pixels (MSB = leftmost).
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 pub const BITMAP_FONT_WIDTH: u16 = 8;
 pub const BITMAP_FONT_HEIGHT: u16 = 16;
@@ -102,7 +102,7 @@ mod tests {
         let height = 16u16;
         let glyph_count = 128usize;
         let mut data =
-            slopos_alloc::KVec::<u8>::zeroed(glyph_count * height as usize).expect("test alloc");
+            slopos_ostd::KVec::<u8>::zeroed(glyph_count * height as usize).expect("test alloc");
 
         let glyph0 = 0usize;
         data[glyph0 * 16] = 0b1111_0000;
@@ -132,13 +132,13 @@ mod tests {
 
     #[test]
     fn bitmap_to_coverage_rejects_non_8_width() {
-        let data = slopos_alloc::KVec::<u8>::zeroed(16).expect("test alloc");
+        let data = slopos_ostd::KVec::<u8>::zeroed(16).expect("test alloc");
         assert!(bitmap_to_coverage(&data, 9, 16, 1).is_none());
     }
 
     #[test]
     fn bitmap_to_coverage_rejects_zero_height() {
-        let data = slopos_alloc::KVec::<u8>::zeroed(16).expect("test alloc");
+        let data = slopos_ostd::KVec::<u8>::zeroed(16).expect("test alloc");
         assert!(bitmap_to_coverage(&data, 8, 0, 1).is_none());
     }
 

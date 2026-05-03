@@ -1,7 +1,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 use slopos_utils::{Bitmap, words_for};
 
 use crate::packetbuf::PacketBuf;
@@ -1896,7 +1896,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
 
     // Heap-allocate the per-segment scratch so the 1460 B buffer
     // doesn't pad this function's frame above the stack-sizes gate.
-    let mut tx_payload_box = match slopos_alloc::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
+    let mut tx_payload_box = match slopos_ostd::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
         Ok(b) => b,
         Err(_) => return errno_i32(ERRNO_ENOMEM) as i64,
     };
@@ -2704,7 +2704,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
         None => return errno_i32(ERRNO_ENOTCONN),
     };
 
-    let mut tx_payload_box = match slopos_alloc::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
+    let mut tx_payload_box = match slopos_ostd::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
         Ok(b) => b,
         Err(_) => return errno_i32(ERRNO_ENOMEM),
     };

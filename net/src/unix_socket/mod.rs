@@ -36,7 +36,7 @@ mod pair;
 mod slot;
 
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
-use slopos_alloc::{KVec, KVecDeque};
+use slopos_ostd::{KVec, KVecDeque};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, WaitQueue};
 
 use pair::{InFlightFd, PairSide, PairTable};

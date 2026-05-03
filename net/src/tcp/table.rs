@@ -230,7 +230,7 @@ impl TcpShard {
         self.buffers.get_mut(slot)?.as_mut()
     }
 
-    pub fn alloc_buffer_for(&mut self, slot: usize) -> Result<(), slopos_alloc::AllocError> {
+    pub fn alloc_buffer_for(&mut self, slot: usize) -> Result<(), slopos_ostd::AllocError> {
         debug_assert!(
             self.buffers[slot].is_none(),
             "alloc_buffer_for: slot {} already has a buffer",

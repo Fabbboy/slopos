@@ -24,7 +24,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_alloc::{KVec, KVecDeque};
+use slopos_ostd::{KVec, KVecDeque};
 use slopos_utils::klog_debug;
 
 use crate::tcp::{

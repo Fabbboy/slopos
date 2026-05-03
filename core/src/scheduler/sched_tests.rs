@@ -219,7 +219,7 @@ pub fn test_pool_grow_on_demand() -> TestResult {
     let _fixture = SchedFixture::new();
 
     const TARGET: usize = 512;
-    let mut ids: slopos_alloc::KVec<u32> = match slopos_alloc::KVec::with_capacity(TARGET) {
+    let mut ids: slopos_ostd::KVec<u32> = match slopos_ostd::KVec::with_capacity(TARGET) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };

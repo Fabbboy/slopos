@@ -568,7 +568,7 @@ impl FileOps for LocalTtyOps {
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         // TTY service API uses raw pointers; use a kernel-side staging buffer.
         let buf_len = buf.len();
-        let mut tmp = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut tmp = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return slopos_abi::Errno::ENOMEM.as_isize(),
         };
@@ -588,7 +588,7 @@ impl FileOps for LocalTtyOps {
             Err(e) => return e.as_isize(),
         };
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
-        let mut staging = match slopos_alloc::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
             Err(_) => return slopos_abi::Errno::ENOMEM.as_isize(),
         };

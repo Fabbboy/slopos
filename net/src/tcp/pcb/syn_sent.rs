@@ -142,7 +142,7 @@ impl SynSentState {
             // Heap-direct DataState construction; matches the SynRecv
             // path. Allocation failure surfaces as `TcpError::OutOfMemory`
             // up through `Pcb::on_segment` -> `tcp::input`.
-            let mut data = slopos_alloc::KBox::try_init(DataState::init_new(
+            let mut data = slopos_ostd::KBox::try_init(DataState::init_new(
                 iss,
                 irs,
                 snd_una,

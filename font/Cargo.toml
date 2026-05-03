@@ -19,7 +19,7 @@ kernel = ["dep:slopos-sync"]
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-alloc = { workspace = true }
+slopos-ostd = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-sync = { workspace = true, optional = true }
 libm = { workspace = true }

@@ -40,14 +40,14 @@ KERNEL_DIRS=(
     "$REPO_ROOT/mm/src"
     "$REPO_ROOT/net/src"
     "$REPO_ROOT/sched/src"
-    "$REPO_ROOT/slopos-alloc/src"
+    "$REPO_ROOT/slopos-ostd/src"
     "$REPO_ROOT/sync/src"
     "$REPO_ROOT/utils/src"
     "$REPO_ROOT/video/src"
 )
 
 # Return-type denylist — anything matching is treated as "small/safe":
-#  - The `slopos-alloc` wrapper types (KBox/KVec/KArc/...).
+#  - The `slopos_ostd::mm::heap` wrapper types (KBox/KVec/KArc/...).
 #  - `Result<...>` and `Option<...>` (callers unwrap, the inner type
 #    has its own gate; wrapping itself is small).
 #  - Primitives: bool, i*, u*, usize, isize, f32, f64, char, c_int.
@@ -56,8 +56,8 @@ KERNEL_DIRS=(
 #  - `impl Trait` / `dyn Trait` (not by-value when used as return).
 # Anything matching this regex is treated as a known-small return.
 # Heuristic — adjust as new small newtypes are added. The wrapper
-# types (KBox/KVec/KArc/KVecDeque/KBTreeMap/PinBox) are all the safe
-# containers established by the slopos-alloc migration.
+# types (KBox/KVec/KArc/KVecDeque/KBTreeMap/PinBox) are all safe
+# containers exposed by the kernel allocation surface.
 SAFE_RETURN_RE='^(Result<|Option<|Result$|Option$|.*Result(<|$)|.*Error(<|$)|KBox<|KVec<|KArc<|KVecDeque<|KBTreeMap<|PinBox<|Pin<KBox|Pin<PinBox|Pin<&|bool$|i8$|i16$|i32$|i64$|i128$|isize$|u8$|u16$|u32$|u64$|u128$|usize$|f32$|f64$|char$|c_int$|c_uint$|c_void$|c_char$|str$|\(\)$|!$|Self$|&|\*const|\*mut|\[|impl |dyn |fn\(|core::|alloc::|.*Flags$|.*Kind$|.*Status$|.*Mode$|.*Token$|.*Handle(<|$)|.*Index(<|$)|.*Id(<|$)|.*Addr(<|$)|.*Format$|.*Type$|Color32$|EncodedPixel$|DamageRect$|FusedPollResult$|MemoryRegion$|BootInfo$|TestResult$|MaybeUninit<|NonNull<|HMetrics$|SeqNum$|Port$|MemfdHandle$|VideoBackend$|RstAction$|RegionPurpose$|Protection$|RegionBacking$|DepResult$|HeapStats$|ParseDhcpOptResult$|RouteEntry$|InterruptFrame$|RawWindowHandle$|RawDisplayHandle$|WindowHandle<|DisplayHandle<|SigSet$|SigDefault$|SigInfo$|UserSigaction$|FileKind$|FileType$|FileStat$)'
 
 declare -a OFFENDERS=()

@@ -7,7 +7,7 @@
 //! `1` when one side closes, and dropped to `0` (freeing the pair) when
 //! the second side closes.
 
-use slopos_alloc::{AllocError, KVec};
+use slopos_ostd::{AllocError, KVec};
 
 use super::MAX_UNIX_SOCKETS;
 use super::buffer::UnixFifo;

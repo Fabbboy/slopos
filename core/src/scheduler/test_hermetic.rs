@@ -11,9 +11,9 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_alloc::AllocError;
 use slopos_arch::pcr;
 use slopos_hermetic::{HermeticState, register_hermetic_state};
+use slopos_ostd::AllocError;
 
 use super::per_cpu::{SCHEDULERS_INIT, with_cpu_scheduler};
 

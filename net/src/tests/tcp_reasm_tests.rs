@@ -28,8 +28,8 @@ fn fresh_asm() -> Assembler {
 }
 
 /// Drain the receive buffer into a `KVec`.
-fn drain_to_vec(recv: &mut TcpRecvState) -> slopos_alloc::KVec<u8> {
-    let mut out = slopos_alloc::KVec::<u8>::with_capacity(recv.available()).expect("test alloc");
+fn drain_to_vec(recv: &mut TcpRecvState) -> slopos_ostd::KVec<u8> {
+    let mut out = slopos_ostd::KVec::<u8>::with_capacity(recv.available()).expect("test alloc");
     let mut buf = [0u8; 512];
     loop {
         let n = recv.dequeue(&mut buf);

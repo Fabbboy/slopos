@@ -37,7 +37,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::klog_debug;
 

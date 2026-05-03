@@ -56,7 +56,7 @@ fn make_pcb_in_phase(phase: ClosePhase) -> Pcb {
     }
     Pcb::new(
         tuple,
-        PcbState::Data(slopos_alloc::KBox::try_new(data).expect("alloc")),
+        PcbState::Data(slopos_ostd::KBox::try_new(data).expect("alloc")),
     )
 }
 

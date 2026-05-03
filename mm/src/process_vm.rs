@@ -1,6 +1,6 @@
 use core::ffi::c_int;
 use core::ptr;
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE};
@@ -781,7 +781,7 @@ pub fn process_vm_load_elf_data(
     }
 
     let mut segments_store =
-        slopos_alloc::KVec::<crate::elf::ValidatedSegment>::zeroed(crate::elf::MAX_LOAD_SEGMENTS)
+        slopos_ostd::KVec::<crate::elf::ValidatedSegment>::zeroed(crate::elf::MAX_LOAD_SEGMENTS)
             .map_err(|_| ElfError::NullPointer)?;
     let segment_count = validator.validate_load_segments_into(segments_store.as_mut_slice())?;
 
@@ -844,7 +844,7 @@ fn load_segments_and_tls(
 
     unmap_existing_code_region(page_dir, code_base);
 
-    let mut section_mappings = slopos_alloc::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
+    let mut section_mappings = slopos_ostd::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
         .map_err(|_| ElfError::NullPointer)?;
     let mut mapping_count = 0usize;
     let mut mapped_pages: u32 = 0;

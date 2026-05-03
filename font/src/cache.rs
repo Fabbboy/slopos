@@ -1,6 +1,6 @@
 //! LRU glyph cache for avoiding re-rasterization of frequently used glyphs.
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 
 use crate::rasterizer::RasterizedGlyph;
 

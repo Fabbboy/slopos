@@ -173,7 +173,7 @@ pub enum PcbState {
     /// transition. Constructed via `KBox::try_init` from one of
     /// [`DataState::init_new`] / [`DataState::init_from_syn_recv`] so
     /// the 3 KiB rvalue never lands on a caller's stack.
-    Data(slopos_alloc::KBox<DataState>),
+    Data(slopos_ostd::KBox<DataState>),
     /// Connection fully torn down, waiting out `2 × MSL` before the
     /// slot can be reused (RFC 793 §3.5).
     TimeWait(TimeWaitState),

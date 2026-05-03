@@ -654,8 +654,8 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
     // Allocate both buffers once, reuse across retries. 512 + DNS_MAX_RESPONSE
     // on the stack would push this function past the stack-safety gate.
     let mut query_buf =
-        slopos_alloc::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
-    let mut resp_buf = slopos_alloc::KVec::<u8>::zeroed(DNS_MAX_RESPONSE)
+        slopos_ostd::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
+    let mut resp_buf = slopos_ostd::KVec::<u8>::zeroed(DNS_MAX_RESPONSE)
         .map_err(|_| DnsResolveError::NoDnsServer)?;
 
     for attempt in 0..DNS_MAX_RETRIES {

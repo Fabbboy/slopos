@@ -229,7 +229,7 @@ define_syscall!(syscall_process_list(ctx, args) {
 
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
-    use slopos_alloc::KVec;
+    use slopos_ostd::KVec;
     use crate::task::task_iterate_active;
     // Allocate exactly `max_entries` (caller-requested, bounded by
     // `MAX_TASKS`) — not `MAX_TASKS` unconditionally; scanning 8192

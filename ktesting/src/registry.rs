@@ -7,7 +7,7 @@
 
 use core::cmp::Ordering;
 
-use slopos_alloc::{AllocError, KVec};
+use slopos_ostd::{AllocError, KVec};
 
 use crate::result::TestResult;
 

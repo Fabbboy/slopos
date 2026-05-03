@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 use slopos_utils::{klog_debug, klog_warn};
 
@@ -43,7 +43,7 @@ impl ReassemblyKey {
 /// A single IPv4 fragment.
 ///
 /// `data` is a heap-direct zero-filled `KVec<u8>` routed through
-/// `slopos-alloc`, trimmed to the fragment's actual payload length.
+/// `slopos-ostd`, trimmed to the fragment's actual payload length.
 /// We intentionally do not reserve `MAX_FRAGMENT_DATA` inline —
 /// inlining that buffer would drag every ingress function that
 /// touches a group over the kernel-stack budget.
@@ -68,7 +68,7 @@ struct ReassemblyGroup {
 ///
 /// Fields are `pub(crate)` so the net crate can read them without
 /// indirection; the type itself is reached only through `PinBox` so
-/// the backing data buffer is heap-allocated by `slopos-alloc` rather
+/// the backing data buffer is heap-allocated by `slopos-ostd` rather
 /// than materialised on a caller's stack.
 pub struct ReassembledPacket {
     pub(crate) protocol: u8,
@@ -127,7 +127,7 @@ impl ReassembledPacket {
     /// Allocate a reassembled-packet slot with a zero-filled 24 KiB
     /// backing buffer.  The struct itself is ~32 B so passing it by
     /// value is not a stack hazard; the buffer allocation is routed
-    /// through `slopos-alloc`'s `KVec::zeroed` to keep the 24 KiB out
+    /// through `slopos-ostd`'s `KVec::zeroed` to keep the 24 KiB out
     /// of the caller's frame.
     fn new(protocol: u8, len: u16) -> Option<Self> {
         let data = KVec::<u8>::zeroed(MAX_REASSEMBLED_DATA).ok()?;

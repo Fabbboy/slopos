@@ -1,7 +1,7 @@
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
-use slopos_alloc::{KBox, KVec};
+use slopos_ostd::{KBox, KVec};
 
 use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
@@ -928,7 +928,7 @@ fn wait_for_dhcp_reply(
     // Heap-allocate the receive buffer. An inline
     // `[u8; PACKET_BUFFER_SIZE]` would add ~2 KiB to this function's
     // stack frame, over the stack-safety gate.
-    let mut frame = slopos_alloc::KVec::<u8>::zeroed(PACKET_BUFFER_SIZE).ok()?;
+    let mut frame = slopos_ostd::KVec::<u8>::zeroed(PACKET_BUFFER_SIZE).ok()?;
     for _ in 0..DHCP_RX_MAX_POLLS {
         let len = poll_one_rx_frame(state, Some(frame.as_mut()))?;
         if len > 0

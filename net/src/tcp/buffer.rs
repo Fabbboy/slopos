@@ -16,7 +16,7 @@
 //!
 //! The 32 KiB send and receive ring buffers (`TcpBuffer`) live behind
 //! `KBox<TcpBuffer>` inside [`TcpSendState`] / [`TcpRecvState`] — that is,
-//! through `slopos-alloc`'s kernel-blessed allocation surface.  The
+//! through `slopos-ostd`'s kernel-blessed allocation surface.  The
 //! `KBox<T: Zeroable>::zeroed()` path routes to `alloc_zeroed` with no
 //! stack temporary, so no function along
 //! `alloc_buffer_for` → `TcpBufferPair::new` → `TcpSendState::new` /
@@ -24,7 +24,7 @@
 //! satisfies `Zeroable` through the blanket impl on `RingBuffer<u8, N>`
 //! shipped by `slopos-utils`.
 
-use slopos_alloc::{AllocError, KBox};
+use slopos_ostd::{AllocError, KBox};
 use slopos_utils::RingBuffer;
 
 /// Size of per-connection send/receive ring buffers.
@@ -246,7 +246,7 @@ pub struct TcpBufferPair {
 
 impl TcpBufferPair {
     /// Allocate a fresh buffer pair.  Both ring buffers are zero-filled
-    /// via `slopos-alloc::KBox::zeroed`; the whole chain is heap-direct.
+    /// via `slopos-ostd::KBox::zeroed`; the whole chain is heap-direct.
     pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
         Ok(Self {
             send: TcpSendState::new(cap)?,

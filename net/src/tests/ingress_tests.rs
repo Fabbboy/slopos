@@ -4,7 +4,7 @@
 //! - 1.T9:  Ingress pipeline correctly dispatches IPv4 frames
 //! - 1.T10: Ingress pipeline drops malformed / unknown frames
 
-use slopos_alloc::{KBox, KVec};
+use slopos_ostd::{KBox, KVec};
 use slopos_sync::{IrqMutex, LOCK_LEVEL_RESOURCE};
 use slopos_testing::TestResult;
 use slopos_testing::pass;

@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::task::BlockReason;
-use slopos_alloc::KVec;
+use slopos_ostd::KVec;
 use slopos_sync::{IrqMutex, LOCK_LEVEL_REGISTRY};
 
 use super::scheduler::{
