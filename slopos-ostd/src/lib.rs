@@ -22,3 +22,8 @@ pub mod user;
 /// the `#[derive(Pod)]` expansion can resolve `::slopos_ostd::Pod`.
 pub use mm::Pod;
 pub use slopos_ostd_derive::Pod;
+
+pub use user::{
+    UserBytes, UserContext, UserCopyError, UserMode, UserPtr, UserPtrError, UserRegs, UserSlice,
+    UserVirtAddr,
+};
