@@ -1,0 +1,94 @@
+//! Bridges `slopos_ostd::mm::io_mem::IoMemMapper` to the legacy
+//! kernel-virt allocator + `map_page_4kb` path in [`crate::mmio`].
+//!
+//! Lives in `slopos-mm` (rather than `slopos-ostd`) so `slopos-ostd`
+//! has no dependency on `slopos-mm`. Defined but **not registered**:
+//! the kernel boot path will install it via
+//! `slopos_ostd::mm::register_io_mem_mapper` once OSTD is wired into
+//! boot. Until then, the shim exists so the trait surface is
+//! exercised by something concrete.
+//!
+//! Cache-policy mapping mirrors the firmware-default PAT layout
+//! described in [`crate::pat`]: WriteCombining sets PWT=1 (PA1 = WC),
+//! Uncacheable sets PCD=1 (PA4 = UC), WriteThrough also sets PWT=1
+//! against the unmodified PAT default (PA1 = WT), WriteBack leaves
+//! both bits clear (PA0 = WB).
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_ostd::mm::io_mem::{IoMemCachePolicy, IoMemError, IoMemMapper};
+use slopos_utils::alignment::align_up_u64;
+
+use crate::memory_layout_defs::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE};
+use crate::paging::map_page_4kb;
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+
+static MMIO_NEXT_VIRT: AtomicU64 = AtomicU64::new(MMIO_VIRT_BASE);
+
+fn alloc_virt(size: u64) -> Option<u64> {
+    let aligned_size = align_up_u64(size, PAGE_SIZE_4KB);
+    let mut current = MMIO_NEXT_VIRT.load(Ordering::Relaxed);
+    loop {
+        let new_next = current.checked_add(aligned_size)?;
+        if new_next > MMIO_VIRT_BASE + MMIO_VIRT_SIZE {
+            return None;
+        }
+        match MMIO_NEXT_VIRT.compare_exchange_weak(
+            current,
+            new_next,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn flags_for(policy: IoMemCachePolicy) -> u64 {
+    let base =
+        PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits() | PageFlags::NO_EXECUTE.bits();
+    match policy {
+        IoMemCachePolicy::Uncacheable => base | PageFlags::CACHE_DISABLE.bits(),
+        IoMemCachePolicy::WriteCombining => base | PageFlags::WRITE_THROUGH.bits(),
+        IoMemCachePolicy::WriteThrough => base | PageFlags::WRITE_THROUGH.bits(),
+        IoMemCachePolicy::WriteBack => base,
+    }
+}
+
+pub struct LegacyIoMemMapperShim;
+
+pub static LEGACY_IO_MEM_MAPPER_SHIM: LegacyIoMemMapperShim = LegacyIoMemMapperShim;
+
+impl IoMemMapper for LegacyIoMemMapperShim {
+    fn map(
+        &self,
+        phys: PhysAddr,
+        size: usize,
+        policy: IoMemCachePolicy,
+    ) -> Result<u64, IoMemError> {
+        if phys.is_null() || size == 0 {
+            return Err(IoMemError::MappingFailed);
+        }
+        let aligned_phys = phys.as_u64() & !(PAGE_SIZE_4KB - 1);
+        let offset_in_page = phys.as_u64() - aligned_phys;
+        let total = align_up_u64(offset_in_page + size as u64, PAGE_SIZE_4KB);
+        let num_pages = total / PAGE_SIZE_4KB;
+        let virt_base = alloc_virt(total).ok_or(IoMemError::MappingFailed)?;
+        let flags = flags_for(policy);
+        for i in 0..num_pages {
+            let page_phys = PhysAddr::new(aligned_phys + i * PAGE_SIZE_4KB);
+            let page_virt = VirtAddr::new(virt_base + i * PAGE_SIZE_4KB);
+            if map_page_4kb(page_virt, page_phys, flags) != 0 {
+                return Err(IoMemError::MappingFailed);
+            }
+        }
+        Ok(virt_base + offset_in_page)
+    }
+
+    fn unmap(&self, _virt: u64, _size: usize) {
+        // Mappings are leaked: the legacy kernel-virt allocator at
+        // `MMIO_NEXT_VIRT` is bump-only and has no recycle path.
+    }
+}

@@ -9,6 +9,7 @@ pub mod elf;
 pub mod error;
 pub mod frame_alloc_shim;
 pub mod hhdm;
+pub mod io_mem_mapper_shim;
 pub mod kernel_heap;
 pub mod memfd;
 pub mod memory_init;

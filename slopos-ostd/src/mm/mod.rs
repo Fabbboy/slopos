@@ -12,4 +12,12 @@ pub mod tlb;
 pub mod uframe;
 pub mod vm_space;
 
+pub use dma::{
+    DmaCoherent, DmaCoherentMeta, DmaDirection, DmaError, DmaStream, DmaStreamMeta, IommuMapper,
+    register_iommu_mapper,
+};
+pub use io_mem::{
+    IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
+    register_io_mem_mapper, register_io_mem_registry,
+};
 pub use pod::Pod;

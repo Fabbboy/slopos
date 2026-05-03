@@ -1,1 +1,6 @@
 pub mod port;
+
+pub use port::{
+    IoPort, IoPortError, IoPortRegistry, PortAccessible, PortRange, io_wait,
+    register_io_port_registry,
+};
