@@ -12,7 +12,7 @@
 //!
 //! Fields at offsets 0-24 in `ProcessorControlRegion` are accessed by assembly
 //! code via `gs:[offset]`. DO NOT CHANGE these field positions without updating:
-//! - `boot/idt_handlers.s` (syscall_entry)
+//! - `slopos-ostd/src/user/asm/user_return.s` (`__ostd_user_return`)
 //! - `core/context_switch.s` (context_switch_user)
 
 use core::cell::SyncUnsafeCell;
@@ -23,6 +23,7 @@ use crate::arch::x86_64::gdt::{GdtLayout, SegmentSelector, Tss64};
 use crate::arch::x86_64::msr::Msr;
 
 use crate::sync::init_flag::InitFlag;
+use crate::user::context::UserContext;
 
 // ==================== CONSTANTS ====================
 
@@ -43,7 +44,7 @@ const MAX_STATIC_APS: usize = 16;
 /// GS_BASE points to this structure in kernel mode.
 ///
 /// CRITICAL: Offsets 0-24 are used by assembly — DO NOT CHANGE without updating:
-///   - boot/idt_handlers.s (syscall_entry)
+///   - slopos-ostd/src/user/asm/user_return.s (`__ostd_user_return`)
 ///   - core/context_switch.s (context_switch_user)
 #[repr(C, align(4096))]
 pub struct ProcessorControlRegion {
@@ -121,10 +122,33 @@ pub struct ProcessorControlRegion {
 
     _pad3: [u8; 4], // offset 92-95
 
+    // ==================== USER-MODE ROUND-TRIP SLOTS ====================
+    // Read+written by the `__ostd_user_return` trampoline asm via
+    // `gs:[…]`.  Their offsets are pinned by the const-asserts below.
+    /// Per-CPU active `UserContext` pointer.  Set by
+    /// `PcrUserModeBackend::execute_round_trip` before iretq into user
+    /// mode; consumed by `__ostd_user_return` to write user state back.
+    pub user_ctx_ptr: AtomicPtr<UserContext>, // offset 96
+
+    /// Saved kernel callee-save snapshot used by `__ostd_user_return`
+    /// to unwind back to the caller of `execute_round_trip`.
+    pub kernel_return_ctx: SyncUnsafeCell<KernelReturnContext>, // offset 104
+
+    /// Encoded `ReturnReason` written by `__ostd_user_return` and read
+    /// back by `execute_round_trip` after the trampoline jmps in.
+    pub return_reason: ReturnReasonSlot, // offset 168
+
+    /// Per-CPU scratch slot for the user RAX value during the
+    /// `__ostd_user_return` trampoline.  Spilling RAX onto the kernel
+    /// stack at `kernel_rsp - 8` would collide with the next CPU-pushed
+    /// IRET frame's SS slot at TSS.RSP0; this per-CPU slot is the same
+    /// fix Asterinas / Linux apply to their SYSCALL fast paths.
+    pub user_rax_tmp: SyncUnsafeCell<u64>, // offset 184
+
     // ==================== EMBEDDED GDT ====================
     /// Per-CPU Global Descriptor Table.
     /// Contains kernel/user code/data segments + TSS descriptor.
-    pub gdt: GdtLayout, // offset 96 (8-byte aligned)
+    pub gdt: GdtLayout, // offset 192
 
     // Padding to align TSS to 16 bytes.
     _tss_align: [u8; 8],
@@ -152,7 +176,81 @@ const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, apic_id) == 28);
     assert!(core::mem::offset_of!(ProcessorControlRegion, current_task) == 40);
     assert!(core::mem::offset_of!(ProcessorControlRegion, idle_task) == 48);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, user_ctx_ptr) == 96);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, kernel_return_ctx) == 104);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, return_reason) == 168);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, user_rax_tmp) == 184);
     assert!(core::mem::align_of::<ProcessorControlRegion>() == 4096);
+};
+
+/// Saved kernel callee-save snapshot used by `__ostd_user_return` to
+/// unwind back to the caller of `PcrUserModeBackend::execute_round_trip`.
+///
+/// Layout pinned by the offset razors in
+/// [`offsets::KERNEL_RETURN_CTX`] and the per-field razors below.
+#[repr(C)]
+#[derive(Default)]
+pub struct KernelReturnContext {
+    pub rbx: u64, // offset 0
+    pub rbp: u64, // offset 8
+    pub r12: u64, // offset 16
+    pub r13: u64, // offset 24
+    pub r14: u64, // offset 32
+    pub r15: u64, // offset 40
+    /// RSP value to restore on user→kernel return.  Restored before
+    /// the trampoline `jmp`s back so the caller's `ret` finds an
+    /// intact frame.
+    pub rsp: u64, // offset 48
+    /// RIP to `jmp` to on user→kernel return.  Address of the asm
+    /// label immediately after `iretq` inside `execute_round_trip`.
+    pub rip: u64, // offset 56
+}
+
+const _: () = {
+    assert!(core::mem::offset_of!(KernelReturnContext, rbx) == 0);
+    assert!(core::mem::offset_of!(KernelReturnContext, rbp) == 8);
+    assert!(core::mem::offset_of!(KernelReturnContext, r12) == 16);
+    assert!(core::mem::offset_of!(KernelReturnContext, r13) == 24);
+    assert!(core::mem::offset_of!(KernelReturnContext, r14) == 32);
+    assert!(core::mem::offset_of!(KernelReturnContext, r15) == 40);
+    assert!(core::mem::offset_of!(KernelReturnContext, rsp) == 48);
+    assert!(core::mem::offset_of!(KernelReturnContext, rip) == 56);
+    assert!(core::mem::size_of::<KernelReturnContext>() == 64);
+};
+
+/// Encoded `ReturnReason` slot written by `__ostd_user_return` and read
+/// back by `execute_round_trip` after the trampoline jumps in.  Two
+/// AtomicU64s so the asm can store via `mov %r, %gs:[off]` without
+/// needing a Cell wrapper at the bytes themselves; atomics also let
+/// Rust read the slot back safely.
+#[repr(C)]
+pub struct ReturnReasonSlot {
+    /// Discriminant: 0 = none/uninitialised, 1 = Syscall, 2 = Exception, 3 = Interrupt.
+    pub kind: AtomicU64, // offset 0
+    /// Variant payload.  For Syscall: the syscall number (RAX from
+    /// user).  For Interrupt: the vector number.  For Exception: the
+    /// vector number; auxiliary data lives in future fields.
+    pub payload: AtomicU64, // offset 8
+}
+
+impl ReturnReasonSlot {
+    pub const fn new() -> Self {
+        Self {
+            kind: AtomicU64::new(0),
+            payload: AtomicU64::new(0),
+        }
+    }
+}
+
+pub const RETURN_REASON_KIND_NONE: u64 = 0;
+pub const RETURN_REASON_KIND_SYSCALL: u64 = 1;
+pub const RETURN_REASON_KIND_EXCEPTION: u64 = 2;
+pub const RETURN_REASON_KIND_INTERRUPT: u64 = 3;
+
+const _: () = {
+    assert!(core::mem::offset_of!(ReturnReasonSlot, kind) == 0);
+    assert!(core::mem::offset_of!(ReturnReasonSlot, payload) == 8);
+    assert!(core::mem::size_of::<ReturnReasonSlot>() == 16);
 };
 
 // SAFETY: PCR uses atomics for all mutable fields and is only
@@ -182,6 +280,19 @@ impl ProcessorControlRegion {
             syscall_count: AtomicU64::new(0),
             syscall_pid: AtomicU32::new(u32::MAX),
             _pad3: [0; 4],
+            user_ctx_ptr: AtomicPtr::new(ptr::null_mut()),
+            kernel_return_ctx: SyncUnsafeCell::new(KernelReturnContext {
+                rbx: 0,
+                rbp: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                rsp: 0,
+                rip: 0,
+            }),
+            return_reason: ReturnReasonSlot::new(),
+            user_rax_tmp: SyncUnsafeCell::new(0),
             gdt: GdtLayout::new(),
             _tss_align: [0; 8],
             tss: Tss64::new(),
@@ -254,6 +365,22 @@ pub mod offsets {
     /// Offset of the `idle_task` field (`AtomicPtr<()>`).  Read by
     /// the scheduler's idle-resolve paths.
     pub const IDLE_TASK: usize = 48;
+    /// Offset of the `user_ctx_ptr` field (`AtomicPtr<UserContext>`).
+    /// Read by `__ostd_user_return` to write user state back into the
+    /// active `UserContext`.
+    pub const USER_CTX_PTR: usize = 96;
+    /// Offset of the `kernel_return_ctx` field
+    /// (`SyncUnsafeCell<KernelReturnContext>`).  Written by
+    /// `execute_round_trip` and consumed by `__ostd_user_return`.
+    pub const KERNEL_RETURN_CTX: usize = 104;
+    /// Offset of the `return_reason.kind` `AtomicU64` slot.
+    pub const RETURN_REASON_KIND: usize = 168;
+    /// Offset of the `return_reason.payload` `AtomicU64` slot.
+    pub const RETURN_REASON_PAYLOAD: usize = 176;
+    /// Offset of the `user_rax_tmp` PCR scratch slot used by
+    /// `__ostd_user_return` to spill user RAX without touching the
+    /// kernel stack at `kernel_rsp - 8`.
+    pub const USER_RAX_TMP: usize = 184;
 }
 
 // ==================== STATIC STORAGE ====================

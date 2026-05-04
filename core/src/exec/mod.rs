@@ -162,14 +162,18 @@ pub fn spawn_program_with_attrs(
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
             (*task_info).fs_base = tls_tp;
 
-            // Update the synthetic InterruptFrame on the kernel stack.
-            // init_task_context pushed it at (kernel_stack_top - sizeof(InterruptFrame) - 8)
-            // (the -8 is the ret_from_fork return address slot).
-            let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
-            let frame_addr = (*task_info).kernel_stack_top - frame_size;
-            let frame_ptr = frame_addr as *mut slopos_arch::InterruptFrame;
-            ptr::write_unaligned(ptr::addr_of_mut!((*frame_ptr).rip), entry);
-            ptr::write_unaligned(ptr::addr_of_mut!((*frame_ptr).rsp), stack_ptr);
+            // OSTD user-mode entry: re-seed the task's `UserContext`
+            // with the post-load entry / stack pointers.  The kernel
+            // stack itself stays as `init_task_context` left it (just
+            // a return-address slot pointing at `user_task_first_run`);
+            // the iretq frame is rebuilt from `user_ctx` on every
+            // round-trip by `user_mode_round_trip_asm`.
+            crate::syscall::user_loop::init_user_ctx_for_new_task(
+                &mut (*task_info).user_ctx,
+                entry,
+                stack_ptr,
+                0,
+            );
         }
 
         // Clone the parent's fd table BEFORE scheduling so the child has

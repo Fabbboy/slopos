@@ -15,5 +15,6 @@ pub mod test_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod ui_handlers;
+pub mod user_loop;
 
 pub use dispatch::syscall_handle;

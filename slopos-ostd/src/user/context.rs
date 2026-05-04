@@ -78,6 +78,38 @@ pub struct UserRegs {
     pub _pad: [u16; 3],
 }
 
+impl UserRegs {
+    /// `const fn` zero/default constructor — usable in `const`
+    /// contexts where `Default::default()` cannot be called.
+    pub const fn const_zeroed() -> Self {
+        Self {
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            rsp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0,
+            rflags_user_subset: 0,
+            fs_base: 0,
+            gs_base: 0,
+            cs: 0,
+            ss: 0,
+            _pad: [0; 3],
+        }
+    }
+}
+
 /// Borrowed handle to a task's XSAVE/FXSAVE buffer.
 ///
 /// Opaque to consumers — the only way to produce one is through
@@ -111,7 +143,7 @@ impl FpuStateRef {
         Self { ptr, len }
     }
 
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             ptr: core::ptr::null_mut(),
             len: 0,
@@ -150,6 +182,19 @@ pub struct UserContext {
 }
 
 impl UserContext {
+    /// `const fn` zero/uninitialised constructor.  All-zero regs +
+    /// empty FPU state.  Suitable for slots inside larger structs
+    /// (e.g. `Task::invalid()`) that need to be const-constructible
+    /// before being filled in by an init path.  Production code
+    /// should reach for [`Self::new`] / [`Self::set_regs`] before
+    /// the context is consumed by [`crate::user::mode::UserMode`].
+    pub const fn const_zeroed() -> Self {
+        Self {
+            regs: UserRegs::const_zeroed(),
+            fpu_state: FpuStateRef::empty(),
+        }
+    }
+
     /// Build a fresh `UserContext` with the given GPR snapshot. `cs`
     /// and `ss` are forced to the OSTD user selectors; `rflags` is
     /// passed through [`Self::set_rflags`].
@@ -166,6 +211,23 @@ impl UserContext {
     #[inline]
     pub fn regs(&self) -> &UserRegs {
         &self.regs
+    }
+
+    /// Raw pointer to the embedded `UserRegs`.  Used by the kernel→user
+    /// round-trip asm helper (see
+    /// [`crate::user::mode::user_mode_round_trip_asm`]); ordinary
+    /// callers should reach for [`Self::regs`] / [`Self::set_regs`]
+    /// instead.
+    #[inline]
+    pub fn regs_ptr(&self) -> *const UserRegs {
+        &self.regs as *const UserRegs
+    }
+
+    /// Mutable raw pointer to the embedded `UserRegs`.  Same caveat as
+    /// [`Self::regs_ptr`].
+    #[inline]
+    pub fn regs_mut_ptr(&mut self) -> *mut UserRegs {
+        &mut self.regs as *mut UserRegs
     }
 
     /// Replace the entire register snapshot. `cs` / `ss` from `regs`

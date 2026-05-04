@@ -121,20 +121,23 @@ pub fn gdt_set_ist_for_cpu(
     }
 }
 
-unsafe extern "C" {
-    fn syscall_entry();
-}
-
 pub fn syscall_msr_init() {
     klog_debug!("SYSCALL: Initializing MSRs for fast syscall path");
 
     let star_value = star_from_selectors(SegmentSelector::KERNEL_CODE, SegmentSelector::USER_DATA);
-    let lstar_value = syscall_entry as *const () as u64;
+    let lstar_value = slopos_ostd::user::mode::user_return_trampoline_addr();
     let sfmask_value: u64 = 0x0000_0000_0004_7700;
 
-    // SAFETY (Inv. 2): syscall_entry is the LSTAR target; the STAR
-    // selectors match the GDT layout already loaded by
-    // gdt_init_for_cpu / PCR::install.
+    // SAFETY (Inv. 2): __ostd_user_return is the LSTAR target — see
+    // `slopos_ostd::user::asm::user_return.s`.  The STAR selectors
+    // match the GDT layout already loaded by gdt_init_for_cpu /
+    // PCR::install.  The trampoline expects `pcr.user_ctx_ptr` and
+    // `pcr.kernel_return_ctx` to have been populated by
+    // `PcrUserModeBackend::execute_round_trip` before any user-mode
+    // SYSCALL fires; that wiring is established by
+    // `kernel_services::ostd_bridge::register_with_ostd` and the
+    // per-task entry path through `user_task_first_run` /
+    // `user_task_loop` (see `core::syscall::user_loop`).
     unsafe {
         install_syscall_msrs(star_value, lstar_value, sfmask_value);
     }

@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, 
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
+use slopos_ostd::cpu::x86_64::pcr::KernelReturnContext;
+use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{AllocError, Init, init_from_closure};
 
 pub use slopos_abi::task::{
@@ -516,6 +518,23 @@ pub struct Task {
     pub next_ready: *mut Task,
     pub next_inbox: AtomicPtr<Task>,
     pub refcnt: AtomicU32,
+    /// Per-task user-mode register snapshot consumed by the OSTD
+    /// `UserMode::execute()` round trip via the kernel-side
+    /// `user_task_loop` wrapper.  Initialised when the task is
+    /// created (or forked / cloned), and updated on every syscall
+    /// return in `user_task_loop`.  Unused for kernel-mode tasks.
+    pub user_ctx: UserContext,
+    /// Saved per-task value of `pcr.user_ctx_ptr`.  PCR slots are
+    /// per-CPU; if multiple user tasks are scheduled on the same CPU
+    /// each has its own in-flight user-mode round trip, so the slot
+    /// has to be context-switched manually.  Saved on switch-out from
+    /// this task, restored on switch-in to it.
+    pub saved_user_ctx_ptr: *mut UserContext,
+    /// Saved per-task copy of `pcr.kernel_return_ctx`.  Same reason
+    /// as `saved_user_ctx_ptr`: the PCR slot is per-CPU but the data
+    /// belongs to the user-mode round trip in flight on the running
+    /// task.
+    pub saved_kernel_return_ctx: KernelReturnContext,
 }
 
 impl Task {
@@ -583,6 +602,18 @@ impl Task {
             next_ready: ptr::null_mut(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
+            user_ctx: UserContext::const_zeroed(),
+            saved_user_ctx_ptr: ptr::null_mut(),
+            saved_kernel_return_ctx: KernelReturnContext {
+                rbx: 0,
+                rbp: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                rsp: 0,
+                rip: 0,
+            },
         }
     }
 

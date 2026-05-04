@@ -29,6 +29,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::mm::vm_space::VmSpace;
 use crate::user::context::UserContext;
+#[cfg(all(target_arch = "x86_64", not(test)))]
+use crate::user::context::UserRegs;
 
 /// Why the kernel re-took control from a user-mode thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,40 +191,34 @@ fn current_user_mode_backend() -> &'static dyn UserModeBackend {
 // =============================================================================
 // User-return trampoline.
 //
-// IDT vectors for user→kernel transitions (syscall, exception,
-// external interrupt) route to `__ostd_user_return`. The trampoline:
+// `__ostd_user_return` is the LSTAR target installed by the trusted
+// side.  When the user executes SYSCALL the CPU lands here; the
+// trampoline saves user GPRs into the active `UserContext`
+// (located via the per-CPU PCR slot stashed by
+// `PcrUserModeBackend::execute_round_trip`), encodes a `ReturnReason`,
+// restores the kernel callee-save snapshot the backend left in
+// `pcr.kernel_return_ctx`, and `jmp`s back to the saved return RIP —
+// which lands in `execute_round_trip`'s tail and lets it return
+// normally.
 //
-//   1. swapgs                                — switch to kernel GS.
-//   2. push GPRs into a temporary frame on the kernel stack.
-//   3. fetch the per-CPU UserContext pointer (via the backend's
-//      PCR slot) and copy GPRs into it.
-//   4. xsave64 the FPU state into the UserContext-referenced
-//      buffer.
-//   5. read MSR FS_BASE / KERNEL_GS_BASE back into the
-//      UserContext.
-//   6. compute the ReturnReason from the IDT vector / hardware
-//      exception code / syscall number-in-rax.
-//   7. restore the kernel callee-saved registers from the saved
-//      KernelReturnContext.
-//   8. ret to `UserMode::execute`'s call site.
-//
-// The body is currently a `ud2`-shaped placeholder. A real
-// trampoline requires a per-CPU PCR layout (FsBase / GsBase / kernel
-// RSP / preempt count) that the trusted side installs through the
-// `UserModeBackend`. Routing into the placeholder before that
-// happens fires `#UD` with RIP pointing at this label, surfacing
-// the misconfiguration immediately.
+// The asm body lives in `asm/user_return.s` (AT&T syntax) and is
+// included verbatim here.  Field offsets used by the asm are mirrored
+// from `pcr.rs` and `context.rs` and pinned by the `const _: () =
+// assert!(...)` razors in those files.
 // =============================================================================
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(test)))]
+core::arch::global_asm!(include_str!("asm/user_return.s"), options(att_syntax),);
+
+// On host-side `cargo test -p slopos-ostd` runs we still need the
+// `__ostd_user_return` symbol so `user_return_trampoline_addr()` is
+// callable; provide a `ud2`-equivalent placeholder.  The host build is
+// never reached at runtime in user mode.
+#[cfg(all(target_arch = "x86_64", test))]
 core::arch::global_asm!(
     ".global __ostd_user_return",
     ".global __ostd_user_return_end",
     "__ostd_user_return:",
-    // The trusted side replaces this body with the full save
-    // sequence. The `ud2` here makes accidental routing into the
-    // stub immediately visible as an undefined-opcode exception
-    // with RIP pointing at this label.
     "    ud2",
     "__ostd_user_return_end:",
     "    ret",
@@ -242,6 +238,177 @@ unsafe extern "C" {
 #[cfg(target_arch = "x86_64")]
 pub fn user_return_trampoline_addr() -> u64 {
     __ostd_user_return as *const () as u64
+}
+
+// =============================================================================
+// Kernel→user round-trip asm helper.
+//
+// `user_mode_round_trip_asm` is the entry-side complement to
+// `__ostd_user_return`.  The trusted side calls it after stashing the
+// active `UserContext` pointer in `pcr.user_ctx_ptr`.  The function:
+//
+//   1. Saves the kernel callee-save GPRs into `pcr.kernel_return_ctx`.
+//   2. Pops its own return address off the kernel stack and stashes it
+//      (alongside the post-pop RSP) in `pcr.kernel_return_ctx.{rip,rsp}`
+//      — the kernel stack must not carry any live kernel state across
+//      the iretq, since IRQs from user mode will reuse the region at
+//      `TSS.RSP0` for their own pushes.
+//   3. Pushes a 5-word IRETQ frame derived from the supplied `UserRegs`
+//      (SS / RSP / RFLAGS / CS / RIP — in IRETQ order).
+//   4. Loads every other user GPR from `UserRegs` (RDI restored last).
+//   5. Executes `swapgs; iretq` to land in user mode.
+//
+// On the user→kernel return, `__ostd_user_return` restores the kernel
+// callee-saves from `pcr.kernel_return_ctx`, sets RSP from
+// `kernel_return_ctx.rsp`, and `jmp`s to `kernel_return_ctx.rip` — the
+// caller's post-call instruction.  This function therefore has *no*
+// epilogue: control never returns to its body.  A `ret` at the end
+// would be both dead code and a correctness hazard: it would pop
+// `[saved_rsp]` for the return RIP, but `[saved_rsp]` is on the
+// per-task kernel stack and gets overwritten by any IRQ the CPU takes
+// from user mode while the round trip is in flight (TSS.RSP0 reuses
+// that region for ISR pushes).  The all-PCR design here is what
+// Linux's `entry_SYSCALL_64` and Asterinas's syscall entry both do.
+//
+// SAFETY: the caller (`PcrUserModeBackend::execute_round_trip`) must
+// have stashed the matching `UserContext` pointer in
+// `pcr.user_ctx_ptr` before invocation; without that the trampoline
+// will dereference a stale pointer on the next user→kernel transition.
+// =============================================================================
+
+#[cfg(all(target_arch = "x86_64", not(test)))]
+const SEL_USER_CODE_RPL3: u64 = 0x23;
+#[cfg(all(target_arch = "x86_64", not(test)))]
+const SEL_USER_DATA_RPL3: u64 = 0x1B;
+
+/// Lower-bound the size of `UserRegs` so an offset typo into the
+/// trampoline asm (which indexes off `[rdi + offset_of!(UserRegs, …)]`)
+/// can't slip past the struct's end.  144 covers the GPR file + RIP /
+/// RFLAGS / FS_BASE / GS_BASE / CS / SS — i.e., every offset the
+/// trampoline reads.
+#[cfg(all(target_arch = "x86_64", not(test)))]
+const _: () = assert!(core::mem::size_of::<UserRegs>() >= 144);
+
+#[cfg(all(target_arch = "x86_64", not(test)))]
+#[unsafe(naked)]
+pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRegs) {
+    // RDI = pointer to UserRegs.  We never touch RSI/RDX/RCX/etc.
+    // before they're read into UserRegs because the inline asm reads
+    // them from `[rdi + …]` rather than treating them as live inputs.
+    core::arch::naked_asm!(
+        // ---- Save kernel callee-saves into pcr.kernel_return_ctx. ----
+        "mov gs:[{krc} + {krc_rbx}], rbx",
+        "mov gs:[{krc} + {krc_rbp}], rbp",
+        "mov gs:[{krc} + {krc_r12}], r12",
+        "mov gs:[{krc} + {krc_r13}], r13",
+        "mov gs:[{krc} + {krc_r14}], r14",
+        "mov gs:[{krc} + {krc_r15}], r15",
+
+        // CRITICAL: pop our own return address off the kernel stack and
+        // stash it in `pcr.kernel_return_ctx.rip`, then save the
+        // post-pop RSP into `pcr.kernel_return_ctx.rsp`.  We cannot
+        // leave the return address on the kernel stack across the
+        // iretq: any interrupt that fires from user mode reuses
+        // `TSS.RSP0` (= the per-task kernel stack top) and the ISR's
+        // pushes overwrite this region.  Asterinas and Linux both
+        // park the return address in per-CPU memory for the same
+        // reason — see `entry_SYSCALL_64` in arch/x86/entry/entry_64.S
+        // and `ostd/src/arch/x86/trap/syscall.rs`.
+        "pop rax",
+        "mov gs:[{krc} + {krc_rip}], rax",
+        "mov gs:[{krc} + {krc_rsp}], rsp",
+
+        // ---- Build IRETQ frame on the kernel stack. ----
+        // Order (top-of-stack last): SS, RSP, RFLAGS, CS, RIP.
+        "push {sel_user_data}",
+        "push qword ptr [rdi + {ur_rsp}]",
+        "push qword ptr [rdi + {ur_rflags}]",
+        "push {sel_user_code}",
+        "push qword ptr [rdi + {ur_rip}]",
+
+        // ---- Restore user GPRs.  RDI restored last. ----
+        "mov rax, [rdi + {ur_rax}]",
+        "mov rbx, [rdi + {ur_rbx}]",
+        "mov rcx, [rdi + {ur_rcx}]",
+        "mov rdx, [rdi + {ur_rdx}]",
+        "mov rsi, [rdi + {ur_rsi}]",
+        "mov rbp, [rdi + {ur_rbp}]",
+        "mov r8,  [rdi + {ur_r8}]",
+        "mov r9,  [rdi + {ur_r9}]",
+        "mov r10, [rdi + {ur_r10}]",
+        "mov r11, [rdi + {ur_r11}]",
+        "mov r12, [rdi + {ur_r12}]",
+        "mov r13, [rdi + {ur_r13}]",
+        "mov r14, [rdi + {ur_r14}]",
+        "mov r15, [rdi + {ur_r15}]",
+        "mov rdi, [rdi + {ur_rdi}]",
+
+        // ---- swapgs + iretq into user mode. ----
+        // No `100:` label / `ret` epilogue: __ostd_user_return jumps
+        // directly to the saved return address via `jmp gs:[krc_rip]`,
+        // which is in kernel .text (intact across user-mode interrupt
+        // ISR usage of the kernel stack).
+        "swapgs",
+        "iretq",
+
+        krc = const crate::cpu::x86_64::pcr::offsets::KERNEL_RETURN_CTX,
+        krc_rbx = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rbx),
+        krc_rbp = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rbp),
+        krc_r12 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r12),
+        krc_r13 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r13),
+        krc_r14 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r14),
+        krc_r15 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r15),
+        krc_rsp = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rsp),
+        krc_rip = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rip),
+        sel_user_data = const SEL_USER_DATA_RPL3,
+        sel_user_code = const SEL_USER_CODE_RPL3,
+        ur_rax = const core::mem::offset_of!(UserRegs, rax),
+        ur_rbx = const core::mem::offset_of!(UserRegs, rbx),
+        ur_rcx = const core::mem::offset_of!(UserRegs, rcx),
+        ur_rdx = const core::mem::offset_of!(UserRegs, rdx),
+        ur_rsi = const core::mem::offset_of!(UserRegs, rsi),
+        ur_rdi = const core::mem::offset_of!(UserRegs, rdi),
+        ur_rbp = const core::mem::offset_of!(UserRegs, rbp),
+        ur_rsp = const core::mem::offset_of!(UserRegs, rsp),
+        ur_r8  = const core::mem::offset_of!(UserRegs, r8),
+        ur_r9  = const core::mem::offset_of!(UserRegs, r9),
+        ur_r10 = const core::mem::offset_of!(UserRegs, r10),
+        ur_r11 = const core::mem::offset_of!(UserRegs, r11),
+        ur_r12 = const core::mem::offset_of!(UserRegs, r12),
+        ur_r13 = const core::mem::offset_of!(UserRegs, r13),
+        ur_r14 = const core::mem::offset_of!(UserRegs, r14),
+        ur_r15 = const core::mem::offset_of!(UserRegs, r15),
+        ur_rip = const core::mem::offset_of!(UserRegs, rip),
+        ur_rflags = const core::mem::offset_of!(UserRegs, rflags_user_subset),
+    );
+}
+
+/// Decode the per-CPU return-reason slot the trampoline wrote.  Called
+/// by the user-mode backend after [`user_mode_round_trip_asm`] returns.
+#[cfg(all(target_arch = "x86_64", not(test)))]
+pub fn read_return_reason() -> ReturnReason {
+    use crate::cpu::x86_64::pcr::{
+        RETURN_REASON_KIND_EXCEPTION, RETURN_REASON_KIND_INTERRUPT, RETURN_REASON_KIND_SYSCALL,
+        current_pcr,
+    };
+    // SAFETY: GS_BASE is installed before any user mode is reached;
+    // `current_pcr()` returns a valid `&'static ProcessorControlRegion`.
+    let pcr = unsafe { current_pcr() };
+    let kind = pcr.return_reason.kind.load(Ordering::Acquire);
+    let payload = pcr.return_reason.payload.load(Ordering::Acquire);
+    match kind {
+        RETURN_REASON_KIND_SYSCALL => ReturnReason::Syscall(payload),
+        RETURN_REASON_KIND_INTERRUPT => ReturnReason::Interrupt(payload as u8),
+        RETURN_REASON_KIND_EXCEPTION => ReturnReason::Exception(ExceptionInfo {
+            vector: payload as u8,
+            error_code: 0,
+            fault_addr: 0,
+        }),
+        _ => panic!(
+            "slopos_ostd::user::mode: unknown ReturnReason kind {kind} \
+             — `__ostd_user_return` left an invalid encoding"
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -326,6 +326,37 @@ fn task_is_idle_candidate(task: *mut Task) -> bool {
 /// with interrupts disabled.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
+    // --- Save/restore per-CPU PCR user-mode round-trip slots ---
+    //
+    // `pcr.user_ctx_ptr` and `pcr.kernel_return_ctx` are written by
+    // `slopos_ostd::user::mode::user_mode_round_trip_asm` before iretq
+    // and read by `__ostd_user_return` on the next user→kernel SYSCALL.
+    // The slots are per-CPU but the data they carry belongs to the
+    // user-mode round trip in flight on the *running task*.  When
+    // another task is scheduled in between the iretq and the SYSCALL
+    // back, that task overwrites the PCR slots with its own values; on
+    // resume the original task's trampoline would otherwise jump into
+    // the wrong saved RIP/RSP.  Mirror them onto the per-task `Task`
+    // struct here so each task carries its own copy across switches.
+    unsafe {
+        let pcr = slopos_arch::pcr::current_pcr();
+        if !prev.is_null() {
+            (*prev).saved_user_ctx_ptr = pcr.user_ctx_ptr.load(Ordering::Acquire);
+            core::ptr::copy_nonoverlapping(
+                pcr.kernel_return_ctx.get(),
+                &raw mut (*prev).saved_kernel_return_ctx,
+                1,
+            );
+        }
+        pcr.user_ctx_ptr
+            .store((*next).saved_user_ctx_ptr, Ordering::Release);
+        core::ptr::copy_nonoverlapping(
+            &raw const (*next).saved_kernel_return_ctx,
+            pcr.kernel_return_ctx.get(),
+            1,
+        );
+    }
+
     // --- FPU save (prev) ---
     if !prev.is_null() {
         unsafe {

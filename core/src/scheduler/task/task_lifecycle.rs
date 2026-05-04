@@ -313,33 +313,96 @@ fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch
     }
 }
 
-/// Build the ret_from_fork stack frame on a task's kernel stack.
+/// Bytes reserved at the top of every user task's per-task kernel stack
+/// for handling interrupts/exceptions that arrive from user mode.
 ///
-/// Writes the given `InterruptFrame` at `kernel_stack_top - sizeof(InterruptFrame)`,
-/// pushes the `ret_from_fork` return address 8 bytes below it, and returns a
-/// `SwitchContext` whose RSP points at the return address slot.  When
-/// `switch_registers` executes `ret`, it pops `ret_from_fork`, which then
-/// restores the `InterruptFrame` via `iretq`.
+/// `TSS.RSP0` and `pcr.kernel_rsp` point to `kernel_stack_top`; on a
+/// user→kernel transition the CPU pushes the IRET frame there and the
+/// ISR/handler chain grows downward.  Concurrently, `user_task_loop`
+/// (the OSTD round-trip supervisor) holds a multi-hundred-byte safe-stack
+/// frame *on the same stack*, including a SafeStack-saved unsafe-SP slot
+/// at `[rbp-0xb8]`.
+///
+/// If the supervisor's frame sat at the top of the stack (the historical
+/// `kernel_stack_top - 16` arrangement), every IRQ from user mode would
+/// step onto that frame:
+/// `common_exception_handler_impl` alone allocates 264 bytes of safe
+/// stack, which pulls RSP into the supervisor's [rbp-0xb8] slot.  The
+/// resulting clobber surfaces later as a kernel page fault when the
+/// supervisor reads its now-corrupt unsafe-SP back.
+///
+/// The fix: place the supervisor's RSP at `kernel_stack_top -
+/// SUPERVISOR_RESERVE`.  That gives the CPU `SUPERVISOR_RESERVE` bytes
+/// at the top of the stack to land IRETs, ISR pushes, and the deepest
+/// IRQ-handler call chain (timer → scheduler → context-switch); the
+/// supervisor's own frame plus the syscall-dispatch chain live below
+/// that line and cannot be reached by IRQ-from-user-mode pushes.
+///
+/// 0x2000 (8 KiB) covers the worst observed IRQ chain (CPU IRET + ISR
+/// pushes + `common_exception_handler` + `common_exception_handler_impl`
+/// + scheduler timer-tick / context-switch through `switch_registers`,
+/// totalling ~2 KiB safe-stack frames) with comfortable margin.  The
+/// remaining 24 KiB of the 32 KiB per-task kernel stack covers the
+/// supervisor + every syscall handler's call chain.
+///
+/// Linux solves the same problem by re-arming `TSS.SP0` on every
+/// userspace-exit boundary (`prepare_exit_to_usermode`); Asterinas'
+/// OSTD avoids it by running the supervisor on a per-CPU stack.  Our
+/// per-task-stack model takes the third path: split each task's kernel
+/// stack into supervisor + IRQ regions and place the supervisor at the
+/// bottom.  No scheduler / TSS / per-task-RSP plumbing required.
+const SUPERVISOR_RESERVE: u64 = 0x2000;
+
+const _: () = {
+    // 16-byte alignment: required for SystemV ABI.  After `ret` pops
+    // the synthetic RA from `kernel_stack_top - SUPERVISOR_RESERVE`,
+    // RSP = `kernel_stack_top - SUPERVISOR_RESERVE + 8`; with
+    // `SUPERVISOR_RESERVE` a multiple of 16 this is `mod 16 == 8`,
+    // satisfying "RSP mod 16 == 8 at function entry".
+    assert!(SUPERVISOR_RESERVE % 16 == 0);
+    // Bound: must fit comfortably inside the per-task kernel stack so
+    // both halves remain usable.  Cap at half the stack — a
+    // SUPERVISOR_RESERVE that ate more than half would leave the
+    // supervisor + every syscall-dispatch chain crammed into <16 KiB.
+    assert!(SUPERVISOR_RESERVE < TASK_KERNEL_STACK_SIZE / 2);
+    // Floor: must hold the worst-case IRQ chain (CPU IRET + ISR pushes
+    // + Rust handler frames through the scheduler's context-switch).
+    // 4 KiB is the smallest value that still has comfortable margin.
+    assert!(SUPERVISOR_RESERVE >= 0x1000);
+};
+
+/// Build a user-task entry frame on a task's kernel stack.  The frame
+/// is empty save for a single return-address slot containing
+/// `user_task_first_run`'s address.  When `switch_registers` executes
+/// `ret`, control jumps into `user_task_first_run`, which seeds
+/// `pcr.user_ctx_ptr` and enters the OSTD `UserMode::execute()` round
+/// trip.  The user-mode register state must already have been written
+/// to `task.user_ctx` by the caller (typically via
+/// `crate::syscall::user_loop::init_user_ctx_*`).
+///
+/// The slot lives at `kernel_stack_top - SUPERVISOR_RESERVE` (rather
+/// than at the very top of the stack) so the IRQ-handler chain that
+/// fires on user→kernel transitions, which lands at `TSS.RSP0 =
+/// kernel_stack_top`, has `SUPERVISOR_RESERVE` bytes of headroom before
+/// it could overlap with the supervisor's own frame.  See the
+/// `SUPERVISOR_RESERVE` comment for the full rationale.  Alignment:
+/// after `ret` pops the synthetic address, `RSP = kernel_stack_top -
+/// SUPERVISOR_RESERVE + 8`; with `SUPERVISOR_RESERVE` a multiple of 16
+/// and `kernel_stack_top` page-aligned, that satisfies the SystemV ABI's
+/// "`RSP mod 16 == 8` at function entry" invariant.
 ///
 /// # Safety
-/// Caller must ensure that the region `[kernel_stack_top - sizeof(InterruptFrame) - 8,
-/// kernel_stack_top)` is writable, properly aligned, and not concurrently accessed.
-pub(crate) unsafe fn build_ret_from_fork_frame(
-    kernel_stack_top: u64,
-    iframe: slopos_arch::InterruptFrame,
-) -> SwitchContext {
+/// Caller must ensure that the slot at `kernel_stack_top -
+/// SUPERVISOR_RESERVE` is writable, properly aligned, and not
+/// concurrently accessed.
+pub(crate) unsafe fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
     unsafe extern "C" {
-        fn ret_from_fork();
+        fn user_task_first_run();
     }
-    let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
-    let frame_addr = kernel_stack_top - frame_size;
-    let frame_ptr = frame_addr as *mut slopos_arch::InterruptFrame;
+    let entry = user_task_first_run as *const () as u64;
+    let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
     unsafe {
-        core::ptr::write(frame_ptr, iframe);
-    }
-    let ret_addr_slot = frame_addr - 8;
-    unsafe {
-        core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
+        core::ptr::write(ret_addr_slot as *mut u64, entry);
     }
     SwitchContext {
         rbx: 0,
@@ -350,7 +413,7 @@ pub(crate) unsafe fn build_ret_from_fork_frame(
         rbp: 0,
         rsp: ret_addr_slot,
         rflags: 0x02,
-        rip: ret_from_fork as *const () as u64,
+        rip: entry,
     }
 }
 
@@ -385,36 +448,19 @@ fn init_task_context(task: &mut Task) {
         task.context.es = 0x10;
         task.context.ss = 0x10;
     } else {
+        // OSTD user-mode entry: populate `task.user_ctx` with the
+        // initial register snapshot and set up the kernel stack so
+        // `switch_registers` rets into `user_task_first_run`.  The
+        // first iteration of `user_task_loop` will iretq into user
+        // mode at (entry_point, stack_pointer) with rdi=entry_arg.
+        crate::syscall::user_loop::init_user_ctx_for_new_task(
+            &mut task.user_ctx,
+            task.entry_point,
+            task.stack_pointer,
+            task.entry_arg as u64,
+        );
         // SAFETY: kernel_stack region was just allocated and is writable.
-        task.switch_ctx = unsafe {
-            build_ret_from_fork_frame(
-                task.kernel_stack_top,
-                slopos_arch::InterruptFrame {
-                    r15: 0,
-                    r14: 0,
-                    r13: 0,
-                    r12: 0,
-                    r11: 0,
-                    r10: 0,
-                    r9: 0,
-                    r8: 0,
-                    rbp: 0,
-                    rdi: task.entry_arg as u64,
-                    rsi: 0,
-                    rdx: 0,
-                    rcx: 0,
-                    rbx: 0,
-                    rax: 0,
-                    vector: 0,
-                    error_code: 0,
-                    rip: task.entry_point,
-                    cs: 0x23,
-                    rflags: 0x202,
-                    rsp: task.stack_pointer,
-                    ss: 0x1B,
-                },
-            )
-        };
+        task.switch_ctx = unsafe { build_user_task_entry_frame(task.kernel_stack_top) };
         task.context.rip = task.entry_point;
         task.context.rsp = task.stack_pointer;
         task.context.rflags = 0x202;
@@ -872,13 +918,18 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
         frame
     } else {
         // No syscall frame available — synthesize a valid InterruptFrame
-        // from the cloned task's saved context so ret_from_fork returns
-        // to a valid user-mode state (not a zeroed rip/cs/rsp/ss).
+        // from the cloned task's saved context so the OSTD round-trip
+        // resumes at a valid user-mode state (not a zeroed rip/cs/rsp/ss).
         let ctx = &child.context;
         interrupt_frame_from_context(ctx, ctx.rsp)
     };
+    // OSTD user-mode entry: seed `child.user_ctx` from the parent's
+    // saved syscall frame (force_rax=0 for fork's child return), and
+    // set up the kernel stack so `switch_registers` rets into
+    // `user_task_first_run`.
+    crate::syscall::user_loop::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
     // SAFETY: child kernel stack was just allocated and is writable.
-    child.switch_ctx = unsafe { build_ret_from_fork_frame(child.kernel_stack_top, iframe) };
+    child.switch_ctx = unsafe { build_user_task_entry_frame(child.kernel_stack_top) };
     child.context_from_user = 0;
     child.context.rax = 0;
     if !syscall_frame.is_null() {
@@ -1038,7 +1089,10 @@ pub fn task_clone(
     child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    // Build InterruptFrame on child's kernel stack from inherited context.
+    // OSTD user-mode entry: seed `child.user_ctx` from the inherited
+    // task context (with `force_rax=0` for clone's child return), and
+    // set up the kernel stack so `switch_registers` rets into
+    // `user_task_first_run`.
     {
         let ctx = &child.context;
         let user_rsp = if child_stack != 0 {
@@ -1047,8 +1101,9 @@ pub fn task_clone(
             ctx.rsp
         };
         let iframe = interrupt_frame_from_context(ctx, user_rsp);
+        crate::syscall::user_loop::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
         // SAFETY: child kernel stack was just allocated and is writable.
-        child.switch_ctx = unsafe { build_ret_from_fork_frame(child.kernel_stack_top, iframe) };
+        child.switch_ctx = unsafe { build_user_task_entry_frame(child.kernel_stack_top) };
     }
     child.context_from_user = 0;
     child.context.rax = 0;

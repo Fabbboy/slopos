@@ -28,6 +28,17 @@ fn boot_step_init_meta_slots_fn(_ctx: &mut BootCtx) {
     klog_info!("OSTD: meta_slots installed ({} entries)", n_slots);
 }
 
+fn boot_step_register_frame_alloc_fn(_ctx: &mut BootCtx) {
+    // SAFETY: Memory phase priority 50 — runs after the buddy allocator
+    // is up (BOOT_STEP_MEMORY_INIT, priority 10) and after meta_slots
+    // are installed (priority 40), which is what the OSTD frame
+    // allocator interface needs.  Single registration site.
+    unsafe {
+        slopos_mm::frame_alloc_shim::register_with_ostd();
+    }
+    klog_info!("OSTD: frame_allocator registered (LegacyFrameAllocShim)");
+}
+
 fn boot_step_memory_init(_ctx: &mut BootCtx) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -107,4 +118,11 @@ crate::boot_init!(
     b"ostd meta_slots\0",
     boot_step_init_meta_slots_fn,
     flags = boot_init_priority(40)
+);
+crate::boot_init!(
+    BOOT_STEP_REGISTER_FRAME_ALLOC,
+    memory,
+    b"ostd frame_allocator\0",
+    boot_step_register_frame_alloc_fn,
+    flags = boot_init_priority(50)
 );

@@ -27,7 +27,7 @@
 //!
 //! Every user PML4 maps exactly four kinds of kernel memory:
 //!
-//!   1. **Trampoline code page** (`syscall_entry`, `irq_entry_stub`,
+//!   1. **Trampoline code page** (`__ostd_user_return`, `irq_entry_stub`,
 //!      `nmi_entry_stub`). Read-only, supervisor-only, global. Shared
 //!      across all processes via a single PDPT.
 //!   2. **Per-CPU PCR page**. Needed so `%gs:` reads work during entry
@@ -59,10 +59,10 @@
 //!     `PcidPair` shape (bit 11 user/kernel split) so toggling KPTI on
 //!     is a one-file change.
 //!
-//! The **ring-transition assembly** (`syscall_entry` in
-//! `boot/idt_handlers.s`, all IRQ stubs that can be taken from ring 3,
-//! NMI/#DF/#MC entries) still performs the single CR3 load we've
-//! always used. Wiring them to swap CR3 via the new trampoline is the
+//! The **ring-transition assembly** (`__ostd_user_return` in
+//! `slopos-ostd/src/user/asm/user_return.s`, all IRQ stubs that can be
+//! taken from ring 3, NMI/#DF/#MC entries) still performs the single
+//! CR3 load we've always used. Wiring them to swap CR3 via the new trampoline is the
 //! last step — it needs a deliberate walk through every entry vector
 //! with QEMU under `-d int` to verify no fault path escapes.
 //!
@@ -89,8 +89,8 @@ pub fn kpti_enabled() -> bool {
 /// Enable KPTI system-wide. **Must not be called** until:
 ///   1. The trampoline code page has been built and mapped into every
 ///      user PML4 (`build_trampoline_mapping` below).
-///   2. `boot::idt_handlers::syscall_entry` has been replaced with the
-///      CR3-swap stub in `mmu::trampoline`.
+///   2. `slopos_ostd::user::mode::__ostd_user_return` has been
+///      replaced with the CR3-swap stub in `mmu::trampoline`.
 ///   3. Every IRQ / exception vector reachable from ring 3 points at
 ///      a trampoline variant that performs the CR3 swap.
 ///   4. All IST stacks are mapped in the user PML4.

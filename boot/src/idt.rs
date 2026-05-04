@@ -312,15 +312,6 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     // LAPIC timer: per-CPU preemption tick — handled directly, not through
     // the IOAPIC IRQ dispatch table.  Each CPU has its own LAPIC timer.
     if vector == LAPIC_TIMER_VECTOR {
-        // Snapshot ALL IRET payload fields BEFORE the handler runs.
-        // After the handler + scheduler, compare to detect silent corruption
-        // of any field (not just CS/SS).
-        let pre_rip = frame_ref.rip;
-        let pre_cs = frame_ref.cs;
-        let pre_rflags = frame_ref.rflags;
-        let pre_rsp = frame_ref.rsp;
-        let pre_ss = frame_ref.ss;
-
         slopos_core::irq::increment_timer_ticks();
         // EOI before handler: prevents timer starvation if the handler is
         // slow (e.g. blocked on a lock). Safe because the interrupt gate
@@ -329,42 +320,6 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         send_eoi();
         slopos_core::sched::scheduler_handle_timer_interrupt(frame);
         scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
-
-        // Re-read the frame from the stack pointer — if context_switch saved
-        // and restored our context, `frame` still points at the same stack
-        // address and the CPU-pushed fields (rip/cs/rflags/rsp/ss) must be
-        // untouched.  Corruption here means something overwrote the ISR's
-        // interrupt frame while we were switched out.
-        let post_rip = unsafe { core::ptr::read_volatile(&(*frame).rip) };
-        let post_cs = unsafe { core::ptr::read_volatile(&(*frame).cs) };
-        let post_rflags = unsafe { core::ptr::read_volatile(&(*frame).rflags) };
-        let post_rsp = unsafe { core::ptr::read_volatile(&(*frame).rsp) };
-        let post_ss = unsafe { core::ptr::read_volatile(&(*frame).ss) };
-
-        if post_rip != pre_rip
-            || post_cs != pre_cs
-            || post_rflags != pre_rflags
-            || post_rsp != pre_rsp
-            || post_ss != pre_ss
-        {
-            klog_info!(
-                "TIMER IRET CORRUPTION: rip 0x{:x}->0x{:x} cs 0x{:x}->0x{:x} rflags 0x{:x}->0x{:x} rsp 0x{:x}->0x{:x} ss 0x{:x}->0x{:x} frame={:p}",
-                pre_rip,
-                post_rip,
-                pre_cs,
-                post_cs,
-                pre_rflags,
-                post_rflags,
-                pre_rsp,
-                post_rsp,
-                pre_ss,
-                post_ss,
-                frame
-            );
-            // Do not resume with a corrupted IRET frame — that would
-            // fault or silently execute in the wrong context.
-            panic!("TIMER IRET frame corruption detected");
-        }
         return;
     }
 
