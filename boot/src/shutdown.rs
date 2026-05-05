@@ -17,8 +17,8 @@ use slopos_core::sched::scheduler_shutdown;
 use slopos_core::task::task_shutdown_all;
 use slopos_drivers::apic;
 use slopos_drivers::hpet;
+use slopos_kernel_services::kernel_vm_space::try_kernel_vm_space;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
-use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
 
@@ -34,9 +34,13 @@ fn serial_flush() {
 }
 fn ensure_kernel_page_dir() {
     // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
-    let kernel_dir = paging_get_kernel_directory();
-    if !kernel_dir.is_null() {
-        let _ = switch_page_directory(kernel_dir);
+    if let Some(slot) = try_kernel_vm_space() {
+        // SAFETY: kernel master always satisfies activate's
+        // kernel-half invariant; called during shutdown with irqs
+        // either masked by the caller or about to be.
+        unsafe {
+            slot.lock().activate();
+        }
     }
 }
 fn poweroff_hardware() {

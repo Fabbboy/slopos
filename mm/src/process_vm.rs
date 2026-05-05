@@ -10,7 +10,8 @@ use slopos_utils::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
 use crate::dual_paging::{
-    ostd_map_4kb_user, ostd_mark_range_user_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user,
+    ostd_map_4kb_user, ostd_mark_cow_4kb, ostd_mark_range_user_4kb, ostd_protect_range_4kb,
+    ostd_unmap_4kb_user,
 };
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
@@ -267,6 +268,56 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     };
     // SAFETY: reading a naturally-aligned pointer from a static.
     unsafe { (*PROCESS_VMS[slot].as_ptr()).page_dir }
+}
+
+/// Read the OSTD `VmSpace`'s PML4 paddr for `process_id`. Returns 0
+/// if the slot is unbound or `vm_space` is missing. After
+/// [`VmSpace::activate`] writes CR3, this matches the hardware CR3 —
+/// callers that compare against the live CR3 (user-fault dispatcher,
+/// task-table lookup) must use this rather than the legacy
+/// `(*page_dir).pml4_phys` until the legacy half retires in 1J-η.4.
+pub fn process_vm_get_ostd_pml4_paddr(process_id: u32) -> u64 {
+    let Some(slot) = find_slot_for_pid(process_id) else {
+        return 0;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return 0;
+    }
+    let Some(vm_space) = guard.vm_space.as_ref() else {
+        return 0;
+    };
+    vm_space.pml4_paddr().as_u64()
+}
+
+/// Install `process_id`'s OSTD `VmSpace` as the current CPU's CR3
+/// via [`VmSpace::activate`]. Returns `true` on success, `false` if
+/// the slot is unbound or `vm_space` is missing (caller should fall
+/// back to `kernel_vm_space().lock().activate()`).
+///
+/// The per-process lock is held only across the brief `&VmSpace`
+/// borrow + activate call; activate itself takes `&self`.
+///
+/// # Safety
+///
+/// Caller must uphold [`VmSpace::activate`]'s contract — interrupts
+/// disabled, kernel-half invariant maintained.
+pub unsafe fn process_vm_activate(process_id: u32) -> bool {
+    let Some(slot) = find_slot_for_pid(process_id) else {
+        return false;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return false;
+    }
+    let Some(vm_space) = guard.vm_space.as_ref() else {
+        return false;
+    };
+    // SAFETY: caller's contract.
+    unsafe {
+        vm_space.activate();
+    }
+    true
 }
 
 /// Run `f` under the per-process lock with mutable access to both the
@@ -2518,9 +2569,13 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         }
     };
 
-    // Snapshot parent scalar fields + VMA list under the parent's per-process lock.
-    // ProcessVmInner is no longer Copy (BTreeMap), so we collect what we need
-    // into plain scalars and a Vec.
+    // Snapshot parent scalar fields + VMA list under the parent's per-process lock,
+    // and dual-mark parent's writable user pages as COW in the OSTD VmSpace half.
+    // The legacy ProcessPageDir half's `paging_mark_cow` is deferred to the
+    // child-side walker (`clone_cow_walk_anon_vma`) — that walker still runs
+    // under the child's lock and handles legacy + child mapping in one pass.
+    // Doing parent OSTD COW marks here, before the child lock is taken,
+    // avoids holding two LOCK_LEVEL_RESOURCE locks simultaneously.
     let (
         parent_page_dir,
         parent_code_start,
@@ -2532,7 +2587,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         parent_flags,
         parent_vmas,
     ) = {
-        let guard = PROCESS_VMS[parent_slot].lock();
+        let mut guard = PROCESS_VMS[parent_slot].lock();
         if guard.process_id != parent_id || guard.page_dir.is_null() {
             klog_info!("process_vm_clone_cow: Parent has no page directory");
             return INVALID_PROCESS_ID;
@@ -2540,6 +2595,36 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         let vmas: KVec<(u64, u64, VmaRegion)> =
             KVec::from_iter_fallible(guard.vma_map.iter().map(|(s, e, r)| (s, e, r.clone())))
                 .expect("clone_cow: vmas alloc");
+
+        // Parent OSTD COW dual-mark: walk every anonymous (i.e. forked-as-COW)
+        // VMA's writable user pages and clear WRITABLE + set the slopos COW
+        // software bit in the parent's OSTD PML4. The legacy half stays
+        // WRITABLE here — the child-side walker marks it later when it
+        // also bumps the page's refcount.
+        let parent_pd = guard.page_dir;
+        let parent_vm_space_ref = guard
+            .vm_space
+            .as_mut()
+            .expect("clone_cow: parent vm_space present for live pid");
+        for (vma_start, vma_end, region) in vmas.iter() {
+            if region.is_shared() {
+                continue;
+            }
+            let mut addr = *vma_start;
+            while addr < *vma_end {
+                let vaddr = VirtAddr::new(addr);
+                let phys = virt_to_phys_in_dir(parent_pd, vaddr);
+                if !phys.is_null() {
+                    if let Some(flags) = paging_get_pte_flags(parent_pd, vaddr) {
+                        if flags.contains(PageFlags::USER) && flags.contains(PageFlags::WRITABLE) {
+                            let _ = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr);
+                        }
+                    }
+                }
+                addr += PAGE_SIZE_4KB;
+            }
+        }
+
         (
             guard.page_dir,
             guard.code_start,

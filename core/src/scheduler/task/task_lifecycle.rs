@@ -594,10 +594,11 @@ pub fn task_create(
     if flags & TASK_FLAG_KERNEL_MODE != 0 {
         task_ref.context.cr3 = cpu::read_cr3() & !0xFFF;
     } else {
-        let page_dir = process_vm_get_page_dir(resources.process_id);
-        if !page_dir.is_null() {
-            task_ref.context.cr3 = unsafe { (*page_dir).pml4_phys.as_u64() };
-        }
+        // task.context.cr3 holds the OSTD PML4 paddr — that's what
+        // VmSpace::activate writes to CR3 during context switch, and
+        // the user-fault dispatcher compares it against hardware CR3.
+        task_ref.context.cr3 =
+            slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
     // Transition to Ready only after context + CR3 are fully initialised.
@@ -945,7 +946,7 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
 
     let child_page_dir = process_vm_get_page_dir(child_process_id);
     if !child_page_dir.is_null() {
-        child.context.cr3 = unsafe { (*child_page_dir).pml4_phys.as_u64() };
+        child.context.cr3 = slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
     }
 
     reset_task_runtime_fields(child);
@@ -1126,7 +1127,8 @@ pub fn task_clone(
     if !share_vm {
         let child_page_dir = process_vm_get_page_dir(child_process_id);
         if !child_page_dir.is_null() {
-            child.context.cr3 = unsafe { (*child_page_dir).pml4_phys.as_u64() };
+            child.context.cr3 =
+                slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
         }
     }
 

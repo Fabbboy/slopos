@@ -7,7 +7,7 @@ use slopos_core::sched::{schedule, scheduler_get_current_task};
 use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
 use slopos_core::scheduler::task_struct::Task;
 use slopos_core::task::task_terminate;
-use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
+use slopos_kernel_services::kernel_vm_space::try_kernel_vm_space;
 use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
 
 use crate::panic::set_panic_cpu_state;
@@ -31,10 +31,14 @@ fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
         task_terminate((*task).task_id);
         schedule();
     }
-    // schedule() returned without switching — park safely.
-    let kernel_dir = paging_get_kernel_directory();
-    if !kernel_dir.is_null() {
-        let _ = switch_page_directory(kernel_dir);
+    // schedule() returned without switching — park safely on the
+    // kernel master PML4 so this CPU can keep servicing IPIs.
+    if let Some(slot) = try_kernel_vm_space() {
+        // SAFETY: kernel master PML4 always satisfies activate's
+        // kernel-half invariant; we are post-fault, irqs masked.
+        unsafe {
+            slot.lock().activate();
+        }
     }
     cpu::enable_interrupts();
     cpu::halt_loop();

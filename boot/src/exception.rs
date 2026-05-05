@@ -190,9 +190,8 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         }
 
         // Dump the kernel PML4 physical address for comparison
-        let kernel_dir = slopos_mm::paging::paging_get_kernel_directory();
-        if !kernel_dir.is_null() {
-            let kd_phys = unsafe { (*kernel_dir).pml4_phys.as_u64() };
+        if let Some(slot) = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space() {
+            let kd_phys = slot.lock().pml4_paddr().as_u64();
             klog_info!("Kernel CR3 (expected for kernel tasks): 0x{:x}", kd_phys);
         }
     }
@@ -219,7 +218,7 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
         }
         let dir = process_vm::process_vm_get_page_dir(pid);
         if !dir.is_null() {
-            cr3 = unsafe { (*dir).pml4_phys.as_u64() };
+            cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
             fault_phys = paging::virt_to_phys_process(VirtAddr::new(fault_addr), dir);
             rsp_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rsp), dir);
             rip_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rip), dir);

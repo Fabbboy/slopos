@@ -438,11 +438,19 @@ impl VmSpace {
         if let Some(hook) = current_cursor_unmap_hook() {
             hook.on_activate(self.mm_ctx_handle.load(Ordering::Acquire));
         }
+        // NOFLUSH is only architecturally legal when `CR4.PCIDE` is
+        // enabled; on platforms / hypervisors that don't surface PCID
+        // (slopos's `mm/src/mmu/asid::init_bsp` skipped CR4.PCIDE),
+        // setting it here yields a #GP. Probe the live CR4 once per
+        // activate — cheap, single MOV.
+        let pcide_enabled = (crate::cpu::x86_64::control_regs::read_cr4()
+            & crate::cpu::x86_64::control_regs::Cr4Flags::PCIDE.bits())
+            != 0;
         // SAFETY: `self.pml4` is a live page-table frame whose
         // kernel-half indices 256..512 were copied from the master
         // at construction (and resynced just above); the caller
         // upholds the rest of `write_cr3_pcid`'s contract.
-        unsafe { write_cr3_pcid(self.pml4_paddr(), self.pcid, true) };
+        unsafe { write_cr3_pcid(self.pml4_paddr(), self.pcid, pcide_enabled) };
     }
 
     /// Stash an opaque consumer-defined identifier for this address
