@@ -518,18 +518,31 @@ impl Cursor<'_> {
                     property,
                     level,
                 }),
-                None => Ok(CursorEntry {
-                    vaddr: self.cur,
-                    paddr: None,
-                    property: PageProperty::default(),
-                    level: PageTableLevel::One,
-                }),
+                None => {
+                    // Walk reached the leaf level but the entry is
+                    // empty. The next mapping starts at most one
+                    // leaf-size away — surface that level so
+                    // `entry.level.entry_size()` skips correctly.
+                    let leaf_level = match outcome {
+                        WalkOutcome::LeafTable { leaf_level, .. } => leaf_level,
+                        WalkOutcome::NotPresent { .. } => PageTableLevel::One,
+                    };
+                    Ok(CursorEntry {
+                        vaddr: self.cur,
+                        paddr: None,
+                        property: PageProperty::default(),
+                        level: leaf_level,
+                    })
+                }
             },
-            WalkOutcome::NotPresent => Ok(CursorEntry {
+            WalkOutcome::NotPresent { stopped_at } => Ok(CursorEntry {
                 vaddr: self.cur,
                 paddr: None,
                 property: PageProperty::default(),
-                level: PageTableLevel::One,
+                // The level whose entry was missing — caller advances
+                // by `level.entry_size()` to skip the empty subtree.
+                // E.g. PML4 entry missing ⇒ skip 512 GiB.
+                level: stopped_at,
             }),
         }
     }

@@ -21,6 +21,7 @@ test-hooks = []
 bitflags.workspace = true
 slopos-abi = { workspace = true }
 slopos-arch = { workspace = true }
+slopos-kernel-services = { workspace = true }
 slopos-ostd = { workspace = true }
 slopos-testing = { workspace = true }
 slopos-utils = { workspace = true }

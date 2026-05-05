@@ -273,7 +273,14 @@ pub(crate) enum WalkOutcome {
         leaf_index: usize,
         leaf_level: PageTableLevel,
     },
-    NotPresent,
+    /// Walk halted because an intermediate entry was not present.
+    /// `stopped_at` is the level whose entry was missing — e.g.
+    /// `Four` ⇒ the PML4 entry covering this vaddr is empty (the
+    /// next 512 GiB of address space is unmapped). Consumers (in
+    /// particular [`super::vm_space::Cursor::query`]) use this to
+    /// skip empty subtrees in O(1) instead of advancing one 4 KiB
+    /// page at a time.
+    NotPresent { stopped_at: PageTableLevel },
 }
 
 /// Walk down from `pml4_phys` toward the entry containing `vaddr`,
@@ -306,7 +313,11 @@ pub(crate) fn walk_to_leaf(
     let pml4_e = entry_in_table(pml4_phys, pml4_idx);
     let pdpt_phys = match step_down(pml4_e, PageTableLevel::Four, user_mapping, mode)? {
         StepOutcome::Phys(p) => p,
-        StepOutcome::NotPresent => return Ok(WalkOutcome::NotPresent),
+        StepOutcome::NotPresent => {
+            return Ok(WalkOutcome::NotPresent {
+                stopped_at: PageTableLevel::Four,
+            });
+        }
     };
 
     // Target is 1 GiB (Level::Three): caller wants the PDPT entry as
@@ -336,7 +347,11 @@ pub(crate) fn walk_to_leaf(
     }
     let pd_phys = match step_down(pdpt_e, PageTableLevel::Three, user_mapping, mode)? {
         StepOutcome::Phys(p) => p,
-        StepOutcome::NotPresent => return Ok(WalkOutcome::NotPresent),
+        StepOutcome::NotPresent => {
+            return Ok(WalkOutcome::NotPresent {
+                stopped_at: PageTableLevel::Three,
+            });
+        }
     };
 
     // Target is 2 MiB (Level::Two): caller wants the PD entry as the
@@ -366,7 +381,11 @@ pub(crate) fn walk_to_leaf(
     }
     let pt_phys = match step_down(pd_e, PageTableLevel::Two, user_mapping, mode)? {
         StepOutcome::Phys(p) => p,
-        StepOutcome::NotPresent => return Ok(WalkOutcome::NotPresent),
+        StepOutcome::NotPresent => {
+            return Ok(WalkOutcome::NotPresent {
+                stopped_at: PageTableLevel::Two,
+            });
+        }
     };
 
     // Target is 4 KiB (Level::One): default deepest path.

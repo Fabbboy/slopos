@@ -482,3 +482,27 @@ pub fn mm_region_highest_usable_frame() -> u64 {
     }
     highest
 }
+
+/// Returns the highest frame index seen across **any** memory-map
+/// region (Usable, Reserved, KernelAndModules, Bootloader-Reclaimable,
+/// AcpiReclaimable, AcpiNvs, BadMemory, …). The OSTD `META_SLOTS`
+/// array must cover every paddr the kernel might wrap with `Frame<M>`
+/// — including the kernel image, the bootloader-allocated PML4, and
+/// any framebuffer / ACPI region that gets mapped via cursor. The
+/// "usable" variant above is too narrow for that.
+pub fn mm_region_highest_frame_seen() -> u64 {
+    let store = ensure_storage();
+    let mut highest = 0u64;
+    for i in 0..store.count {
+        let region = unsafe { &*store.regions.add(i as usize) };
+        if region.length == 0 {
+            continue;
+        }
+        let end = region.phys_base.saturating_add(region.length - 1);
+        let frame = end >> 12;
+        if frame > highest {
+            highest = frame;
+        }
+    }
+    highest
+}

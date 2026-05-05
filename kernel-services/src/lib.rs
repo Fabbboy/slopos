@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod driver_runtime;
+pub mod kernel_vm_space;
 pub mod ostd_backends;
 pub mod ostd_bridge;
 pub mod ostd_bridge_tables;

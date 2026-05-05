@@ -39,6 +39,40 @@ fn boot_step_register_frame_alloc_fn(_ctx: &mut BootCtx) {
     klog_info!("OSTD: frame_allocator registered (LegacyFrameAllocShim)");
 }
 
+fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
+    // SAFETY: Memory phase priority 55 — runs after meta_slots
+    // (priority 40) and frame_alloc (priority 50). The kernel master
+    // PML4 paddr was registered with OSTD at early-init time
+    // (`register_kernel_master_pml4(read_cr3())` in early_init.rs);
+    // CR3 has not been swapped since, so the same paddr is still the
+    // live PML4 and is safe to wrap.
+    let cr3 = slopos_arch::cpu::control_regs::read_cr3();
+    let pml4_phys = slopos_abi::addr::PhysAddr::new(cr3 & 0x000F_FFFF_FFFF_F000);
+    unsafe {
+        slopos_kernel_services::kernel_vm_space::install_kernel_vm_space(pml4_phys);
+    }
+
+    // Stamp GLOBAL onto every kernel-half leaf via the OSTD cursor.
+    // This used to live inside `init_paging` (priority 10, legacy
+    // walker); routing through the cursor here exercises the
+    // huge-leaf-aware `protect::<S>` path (Stage 0.4) on every 2 MiB
+    // HHDM entry. CR4.PGE is enabled at priority 1, so the bit is
+    // already meaningful on the leaves we're stamping.
+    slopos_mm::paging::paging_mark_kernel_global();
+
+    // Force the TLB to re-walk and re-tag kernel entries as global.
+    // Intel SDM §4.10.2.4: the CPU may have cached kernel entries
+    // before the GLOBAL bit was set; a CR3 reload drops those
+    // non-global entries. Writing the same PML4 value back is
+    // architecturally defined to invalidate non-global entries.
+    slopos_mm::mmu::write_cr3_value(slopos_mm::mmu::read_cr3_value());
+
+    klog_info!(
+        "OSTD: KERNEL_VM_SPACE installed (pml4_phys=0x{:x}, pcid=0)",
+        pml4_phys.as_u64()
+    );
+}
+
 fn boot_step_memory_init(_ctx: &mut BootCtx) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -125,4 +159,11 @@ crate::boot_init!(
     b"ostd frame_allocator\0",
     boot_step_register_frame_alloc_fn,
     flags = boot_init_priority(50)
+);
+crate::boot_init!(
+    BOOT_STEP_INSTALL_KERNEL_VM_SPACE,
+    memory,
+    b"ostd kernel_vm_space\0",
+    boot_step_install_kernel_vm_space_fn,
+    flags = boot_init_priority(55)
 );

@@ -294,74 +294,71 @@ pub fn paging_bump_kernel_mapping_gen() {
 /// Must be called only after `init_paging` has populated
 /// `KERNEL_PAGE_DIR.pml4`. Safe to call twice; stamping an already-global
 /// leaf is idempotent.
+/// Walk the kernel half (PML4 indices 256..512) via the OSTD cursor
+/// and stamp `GLOBAL` onto every present leaf. Handles 4 KiB / 2 MiB /
+/// 1 GiB leaves uniformly via the cursor's `protect::<S>` API; the
+/// leaf size is queried first and dispatched per-call.
+///
+/// Skips not-present entries; idempotent (re-stamping a global leaf
+/// is architecturally inert).
 pub fn paging_mark_kernel_global() {
-    unsafe {
-        let pml4 = (*KERNEL_PAGE_DIR.get()).pml4;
-        if pml4.is_null() {
-            return;
-        }
-        for pml4_idx in 256..512 {
-            let pml4_entry = (&mut *pml4).entry_mut(pml4_idx);
-            if !pml4_entry.is_present() || pml4_entry.is_huge() {
-                // PML4 entries are never leaves; ignore malformed huge.
-                continue;
-            }
-            let pdpt = phys_to_table(pml4_entry.address());
-            if pdpt.is_null() {
-                continue;
-            }
-            mark_pdpt_global(pdpt);
-        }
-    }
-}
+    use slopos_abi::addr::VirtAddr;
+    use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
+    use slopos_ostd::mm::page_property::PageProperty;
+    use slopos_ostd::mm::page_size::{Size1Gb, Size2Mb, Size4Kb};
+    use slopos_ostd::mm::page_table::PageTableLevel;
 
-unsafe fn mark_pdpt_global(pdpt: *mut PageTable) {
-    unsafe {
-        for i in 0..PAGE_TABLE_ENTRIES {
-            let entry = (&mut *pdpt).entry_mut(i);
-            if !entry.is_present() {
-                continue;
-            }
-            if entry.is_huge() {
-                entry.add_flags(PageFlags::GLOBAL);
-                continue;
-            }
-            let pd = phys_to_table(entry.address());
-            if pd.is_null() {
-                continue;
-            }
-            mark_pd_global(pd);
-        }
-    }
-}
+    // Kernel half spans the upper 128 TiB: PML4 index 256 = vaddr
+    // 0xFFFF_8000_0000_0000 (canonical sign-extend). The address-space
+    // end (index 512) is 0x10000_0000_0000_0000 which doesn't fit a
+    // u64 — we cap one 4 KiB page short at 0xFFFF_FFFF_FFFF_F000 so
+    // the cursor's `Range<VirtAddr>` validation accepts it. The
+    // skipped final page is architecturally unmappable anyway (the
+    // last leaf would land at the canonical-form boundary that no
+    // production kernel maps).
+    const KERNEL_HALF_START: u64 = 0xFFFF_8000_0000_0000;
+    const KERNEL_HALF_END: u64 = 0xFFFF_FFFF_FFFF_F000;
 
-unsafe fn mark_pd_global(pd: *mut PageTable) {
-    unsafe {
-        for i in 0..PAGE_TABLE_ENTRIES {
-            let entry = (&mut *pd).entry_mut(i);
-            if !entry.is_present() {
-                continue;
-            }
-            if entry.is_huge() {
-                entry.add_flags(PageFlags::GLOBAL);
-                continue;
-            }
-            let pt = phys_to_table(entry.address());
-            if pt.is_null() {
-                continue;
-            }
-            mark_pt_global(pt);
-        }
-    }
-}
+    let mut guard = kernel_vm_space().lock();
+    let range = VirtAddr::new(KERNEL_HALF_START)..VirtAddr::new(KERNEL_HALF_END);
+    let mut cur = guard
+        .cursor_mut(range)
+        .expect("kernel_vm_space cursor over kernel half");
 
-unsafe fn mark_pt_global(pt: *mut PageTable) {
-    unsafe {
-        for i in 0..PAGE_TABLE_ENTRIES {
-            let entry = (&mut *pt).entry_mut(i);
-            if entry.is_present() {
-                entry.add_flags(PageFlags::GLOBAL);
-            }
+    loop {
+        let entry = match cur.query() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+
+        if entry.paddr.is_some() {
+            let new_prop = PageProperty {
+                global: true,
+                ..entry.property
+            };
+            // Per-leaf protect using the matching size token. Errors
+            // are non-fatal here — the kernel half is "best effort"
+            // for GLOBAL stamping (the bit is a TLB optimisation,
+            // not a correctness invariant).
+            let res = match entry.level {
+                PageTableLevel::One => cur.protect::<Size4Kb>(new_prop),
+                PageTableLevel::Two => cur.protect::<Size2Mb>(new_prop),
+                PageTableLevel::Three => cur.protect::<Size1Gb>(new_prop),
+                PageTableLevel::Four => Ok(()),
+            };
+            // Ignore SizeMismatch / NotPresent etc. — best-effort.
+            let _ = res;
+        }
+
+        // Advance by the entry-size at the level the walk reported.
+        // For not-present empty subtrees the level reports the
+        // missing intermediate (e.g. PML4 entry empty ⇒ level=Four,
+        // entry_size=512 GiB), so the empty kernel-half regions
+        // (between HHDM and the kernel image) get skipped in O(1)
+        // instead of one 4 KiB page at a time.
+        let advance = entry.level.entry_size();
+        if cur.advance(advance).is_err() {
+            break;
         }
     }
 }
@@ -894,19 +891,16 @@ pub fn init_paging() {
             klog_debug!("Identity mapping not found (may be normal after early boot)");
         }
 
-        // Stamp GLOBAL onto kernel leaf PTEs (upper half). Must be done
-        // before any process page directory copies the kernel half, so
-        // every child address space inherits the global tagging. CR4.PGE
-        // is enabled separately by the boot security step; the bit is
-        // architecturally inert until then.
-        paging_mark_kernel_global();
-
-        // Force the TLB to re-walk and re-tag kernel entries as global.
-        // Intel SDM §4.10.2.4: the CPU may have cached kernel entries
-        // before the G bit was set; a CR3 reload drops those non-global
-        // entries. Writing the same PML4 value back is architecturally
-        // defined to invalidate non-global entries.
-        crate::mmu::write_cr3_value(crate::mmu::read_cr3_value());
+        // GLOBAL stamping moved to BOOT_STEP_INSTALL_KERNEL_VM_SPACE
+        // (priority 55 — see boot/src/boot_memory.rs). At priority 10
+        // META_SLOTS / FrameAlloc / KERNEL_VM_SPACE are not yet
+        // available; the cursor-based stamping needs all three. The
+        // architectural difference is invisible to any callsite —
+        // GLOBAL is a TLB optimisation, not a correctness invariant,
+        // and no CR3 swap (which is when GLOBAL pays off) happens
+        // before priority 55 anyway. The CR3-reload-to-flush below
+        // moves to the same priority-55 step so non-global cached
+        // kernel entries are dropped after the GLOBAL bit lands.
 
         klog_debug!("Paging system initialized successfully");
     }

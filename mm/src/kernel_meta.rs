@@ -19,7 +19,7 @@ use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{MAX_META_ALIGN, MAX_META_SIZE, MetaSlot, init_meta_slots};
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::memory_reservations::mm_region_highest_usable_frame;
+use crate::memory_reservations::mm_region_highest_frame_seen;
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames};
 use crate::paging_defs::PAGE_SIZE_4KB;
 
@@ -42,7 +42,13 @@ const _: () = assert!(
 /// Returns the number of slots installed, or `0` if there is nothing
 /// to install (no usable memory or the buddy returned NULL).
 pub fn install_meta_slots() -> usize {
-    let highest_frame = mm_region_highest_usable_frame();
+    // Cover every frame in the memory map — `Usable` is too narrow
+    // (the kernel PML4 and other bootloader-allocated frames live
+    // in `KernelAndModules` / `BootloaderReclaimable` / `Reserved`
+    // regions). Any of those can become a `Frame<PageTableMeta>`
+    // ref-counted handle later (e.g. `KERNEL_VM_SPACE::wrap_existing`
+    // wraps the kernel master PML4 — its slot must exist).
+    let highest_frame = mm_region_highest_frame_seen();
     if highest_frame == 0 {
         return 0;
     }
