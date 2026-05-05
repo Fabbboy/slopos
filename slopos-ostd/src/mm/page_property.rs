@@ -37,6 +37,13 @@ impl Default for CachePolicy {
 /// `read` is always `true` on x86_64 — a present PTE is implicitly
 /// readable — but the field is carried for forward-compat with ARM64,
 /// which has a separate read bit.
+///
+/// `software` carries the three "available to OS" PTE bits (9..=11)
+/// through cursor `query` / `map` / `protect` round-trips so consumers
+/// can encode kernel-policy state (e.g. copy-on-write markers) in the
+/// page table itself rather than in parallel bookkeeping. Only the
+/// low 3 bits are valid; higher bits are masked off in `to_leaf_flags`.
+/// OSTD assigns no semantics to the field — it is opaque storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageProperty {
     pub read: bool,
@@ -45,6 +52,7 @@ pub struct PageProperty {
     pub user: bool,
     pub cache_policy: CachePolicy,
     pub global: bool,
+    pub software: u8,
 }
 
 impl PageProperty {
@@ -55,6 +63,7 @@ impl PageProperty {
         user: false,
         cache_policy: CachePolicy::WriteBack,
         global: true,
+        software: 0,
     };
 
     pub const KERNEL_RO: Self = Self {
@@ -64,6 +73,7 @@ impl PageProperty {
         user: false,
         cache_policy: CachePolicy::WriteBack,
         global: true,
+        software: 0,
     };
 
     pub const USER_RW: Self = Self {
@@ -73,6 +83,7 @@ impl PageProperty {
         user: true,
         cache_policy: CachePolicy::WriteBack,
         global: false,
+        software: 0,
     };
 
     pub const USER_RO: Self = Self {
@@ -82,6 +93,7 @@ impl PageProperty {
         user: true,
         cache_policy: CachePolicy::WriteBack,
         global: false,
+        software: 0,
     };
 
     pub const USER_RX: Self = Self {
@@ -91,10 +103,12 @@ impl PageProperty {
         user: true,
         cache_policy: CachePolicy::WriteBack,
         global: false,
+        software: 0,
     };
 
     /// Encode as a leaf [`PteFlags`] bit pattern (does **not** include
-    /// the physical address).
+    /// the physical address). The HUGE bit is **not** set here — the
+    /// caller's `CursorMut::map::<S>` ORs it in based on `S::HUGE_BIT`.
     pub fn to_leaf_flags(self) -> PteFlags {
         let mut f = PteFlags::PRESENT;
         if self.write {
@@ -114,11 +128,17 @@ impl PageProperty {
             CachePolicy::WriteCombining => f |= PteFlags::WRITE_THROUGH,
             CachePolicy::Uncacheable => f |= PteFlags::CACHE_DISABLE,
         }
-        f
+        // Mask `software` to its low 3 bits so a stray higher bit
+        // cannot collide with the HUGE flag (bit 7) or the address
+        // mask (bits 12..=51).
+        let sw_bits = ((self.software as u64) & 0x7) << PteFlags::SOFTWARE_BITS_SHIFT;
+        PteFlags::from_bits_truncate(f.bits() | sw_bits)
     }
 
-    /// Decode from the leaf PTE bit pattern. Reads only the
-    /// access/cache bits; the address and HUGE/COW etc. are ignored.
+    /// Decode from the leaf PTE bit pattern. Reads the access/cache
+    /// bits and the AVL software bits (9..=11); the address and the
+    /// HUGE bit are intentionally not surfaced (caller knows the leaf
+    /// size from the cursor's level).
     pub fn from_leaf_flags(flags: PteFlags) -> Self {
         let cache_policy = if flags.contains(PteFlags::CACHE_DISABLE) {
             CachePolicy::Uncacheable
@@ -127,6 +147,8 @@ impl PageProperty {
         } else {
             CachePolicy::WriteBack
         };
+        let software =
+            ((flags.bits() & PteFlags::SOFTWARE_BITS_MASK) >> PteFlags::SOFTWARE_BITS_SHIFT) as u8;
         Self {
             read: flags.contains(PteFlags::PRESENT),
             write: flags.contains(PteFlags::WRITABLE),
@@ -134,6 +156,7 @@ impl PageProperty {
             user: flags.contains(PteFlags::USER),
             cache_policy,
             global: flags.contains(PteFlags::GLOBAL),
+            software,
         }
     }
 }
@@ -226,5 +249,58 @@ mod tests {
             PageProperty::from_leaf_flags(f).cache_policy,
             CachePolicy::Uncacheable
         );
+    }
+
+    #[test]
+    fn software_bits_round_trip_each_value() {
+        for software in 0u8..=7u8 {
+            let p = PageProperty {
+                software,
+                ..PageProperty::USER_RW
+            };
+            let f = p.to_leaf_flags();
+            assert_eq!(
+                f.bits() & PteFlags::SOFTWARE_BITS_MASK,
+                (software as u64) << PteFlags::SOFTWARE_BITS_SHIFT,
+                "software={software}: PTE bits did not match",
+            );
+            assert_eq!(PageProperty::from_leaf_flags(f).software, software);
+        }
+    }
+
+    #[test]
+    fn software_bits_above_three_bits_get_masked() {
+        let p = PageProperty {
+            software: 0xFF,
+            ..PageProperty::USER_RW
+        };
+        let f = p.to_leaf_flags();
+        // Only bits 9..=11 of the PTE may be set by the software field.
+        assert_eq!(
+            f.bits() & PteFlags::SOFTWARE_BITS_MASK,
+            PteFlags::SOFTWARE_BITS_MASK,
+            "software=0xFF should set all three AVL bits"
+        );
+        // Adjacent bits must remain untouched.
+        assert!(!f.contains(PteFlags::HUGE)); // bit 7
+        // No address bits set.
+        assert_eq!(f.bits() & PteFlags::ADDRESS_MASK, 0);
+        // Round-trip preserves the masked value.
+        assert_eq!(PageProperty::from_leaf_flags(f).software, 0x7);
+    }
+
+    #[test]
+    fn software_bits_independent_of_hardware_flags() {
+        let p = PageProperty {
+            software: 0x5,
+            ..PageProperty::USER_RW
+        };
+        let f = p.to_leaf_flags();
+        assert!(f.contains(PteFlags::PRESENT));
+        assert!(f.contains(PteFlags::WRITABLE));
+        assert!(f.contains(PteFlags::USER));
+        assert!(f.contains(PteFlags::NO_EXECUTE));
+        let decoded = PageProperty::from_leaf_flags(f);
+        assert_eq!(decoded, p);
     }
 }

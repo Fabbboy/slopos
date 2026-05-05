@@ -101,6 +101,12 @@ impl PageTableLevel {
 
 bitflags! {
     /// On-disk x86_64 PTE bit pattern.
+    ///
+    /// `AVL_*` cover bits 9..=11 — the architectural "available to OS"
+    /// field. OSTD declares them so [`Pte::flags`]'s `from_bits_truncate`
+    /// preserves them on round-trip, but assigns no semantics; consumers
+    /// (slopos-mm, etc.) attach meaning via
+    /// [`super::page_property::PageProperty::software`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct PteFlags: u64 {
         const PRESENT       = 1 << 0;
@@ -112,6 +118,9 @@ bitflags! {
         const DIRTY         = 1 << 6;
         const HUGE          = 1 << 7;
         const GLOBAL        = 1 << 8;
+        const AVL_9         = 1 << 9;
+        const AVL_10        = 1 << 10;
+        const AVL_11        = 1 << 11;
         const NO_EXECUTE    = 1 << 63;
     }
 }
@@ -120,6 +129,16 @@ impl PteFlags {
     /// Address mask. Bits 12..=51 hold the 4 KiB-aligned physical
     /// frame address; the rest are flag bits.
     pub const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    /// Mask for PTE bits 9..=11 — the AVL ("available to OS") field
+    /// that x86_64 reserves for software use. OSTD does not assign
+    /// semantics to these bits; consumers (slopos-mm) define their
+    /// own meanings (e.g. a copy-on-write marker) and route them
+    /// through [`super::page_property::PageProperty::software`].
+    pub const SOFTWARE_BITS_MASK: u64 = 0x0E00;
+    /// Right-shift amount that moves the AVL bits down to the low
+    /// three bits of a `u8`.
+    pub const SOFTWARE_BITS_SHIFT: u32 = 9;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,14 +276,29 @@ pub(crate) enum WalkOutcome {
     NotPresent,
 }
 
-/// Walk down from `pml4_phys` to the leaf PT containing `vaddr`,
-/// honouring `mode`. See [`WalkMode`] / [`WalkOutcome`].
+/// Walk down from `pml4_phys` toward the entry containing `vaddr`,
+/// honouring `mode`. The walk stops at the table whose entries cover
+/// `target_level`-sized regions (`Three` for 1 GiB, `Two` for 2 MiB,
+/// `One` for 4 KiB). In `Create` mode, intermediates are allocated
+/// down to the table holding `target_level` entries; existing huge
+/// entries that block reaching a deeper target are split. In `Query`
+/// / `Mutate` mode the walk returns whichever leaf is found first
+/// (huge or 4 KiB) without splitting — callers compare
+/// `outcome.leaf_level` against their `S::LEVEL` razor.
+///
+/// See [`WalkMode`] / [`WalkOutcome`].
 pub(crate) fn walk_to_leaf(
     pml4_phys: Paddr,
     vaddr: VirtAddr,
     user_mapping: bool,
     mode: WalkMode,
+    target_level: PageTableLevel,
 ) -> Result<WalkOutcome, WalkError> {
+    debug_assert!(
+        target_level != PageTableLevel::Four,
+        "walk_to_leaf target_level cannot be Four — PML4 entries are never leaves"
+    );
+
     let pml4_idx = PageTableLevel::Four.index_of(vaddr);
     let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
     let pd_idx = PageTableLevel::Two.index_of(vaddr);
@@ -274,6 +308,16 @@ pub(crate) fn walk_to_leaf(
         StepOutcome::Phys(p) => p,
         StepOutcome::NotPresent => return Ok(WalkOutcome::NotPresent),
     };
+
+    // Target is 1 GiB (Level::Three): caller wants the PDPT entry as
+    // the leaf. Stop here — no descent into PD.
+    if target_level == PageTableLevel::Three {
+        return Ok(WalkOutcome::LeafTable {
+            leaf_table_phys: pdpt_phys,
+            leaf_index: pdpt_idx,
+            leaf_level: PageTableLevel::Three,
+        });
+    }
 
     let pdpt_e = entry_in_table(pdpt_phys, pdpt_idx);
     if pdpt_e.is_present() && pdpt_e.is_huge() {
@@ -295,6 +339,16 @@ pub(crate) fn walk_to_leaf(
         StepOutcome::NotPresent => return Ok(WalkOutcome::NotPresent),
     };
 
+    // Target is 2 MiB (Level::Two): caller wants the PD entry as the
+    // leaf. Stop here — no descent into PT.
+    if target_level == PageTableLevel::Two {
+        return Ok(WalkOutcome::LeafTable {
+            leaf_table_phys: pd_phys,
+            leaf_index: pd_idx,
+            leaf_level: PageTableLevel::Two,
+        });
+    }
+
     let pd_e = entry_in_table(pd_phys, pd_idx);
     if pd_e.is_present() && pd_e.is_huge() {
         match mode {
@@ -315,6 +369,7 @@ pub(crate) fn walk_to_leaf(
         StepOutcome::NotPresent => return Ok(WalkOutcome::NotPresent),
     };
 
+    // Target is 4 KiB (Level::One): default deepest path.
     Ok(WalkOutcome::LeafTable {
         leaf_table_phys: pt_phys,
         leaf_index: PageTableLevel::One.index_of(vaddr),
@@ -361,8 +416,14 @@ fn step_down(
     let level = parent_level
         .next_lower()
         .expect("step_down called with leaf parent level");
-    let frame = Frame::<PageTableMeta>::from_unused(new_phys, PageTableMeta { level: level as u8 })
-        .map_err(|_| WalkError::PathCorrupt)?;
+    let frame = Frame::<PageTableMeta>::from_unused(
+        new_phys,
+        PageTableMeta {
+            level: level as u8,
+            static_borrowed: false,
+        },
+    )
+    .map_err(|_| WalkError::PathCorrupt)?;
     // Leak the typed handle into the parent PTE — the page-table
     // frame is now "owned by" the parent slot. Reclaimed on unmap
     // via `reclaim_table_frame`.
@@ -396,6 +457,7 @@ fn split_pdpt_huge(pdpt_entry: Pte) -> Result<(), WalkError> {
         pd_phys,
         PageTableMeta {
             level: PageTableLevel::Two as u8,
+            static_borrowed: false,
         },
     )
     .map_err(|_| WalkError::PathCorrupt)?;
@@ -426,6 +488,7 @@ fn split_pd_huge(pd_entry: Pte) -> Result<(), WalkError> {
         pt_phys,
         PageTableMeta {
             level: PageTableLevel::One as u8,
+            static_borrowed: false,
         },
     )
     .map_err(|_| WalkError::PathCorrupt)?;
@@ -450,21 +513,34 @@ fn table_flags_from_leaf(leaf_flags: PteFlags) -> PteFlags {
 // Reclaim + leaf-property helpers.
 // ---------------------------------------------------------------------------
 
-/// Reclaim a leaked `Frame<PageTableMeta>` referenced by `phys`. Used
-/// during teardown when an intermediate page table becomes empty.
+/// Reclaim a leaked `Frame<_>` referenced by `phys`, regardless of
+/// the meta type that was originally installed. The slot's stored
+/// vtable carries the type-correct Drop dispatch — the `M` parameter
+/// of `Frame::from_raw` is just `PhantomData` and is never read at
+/// Drop time. Used both:
+///
+/// 1. During [`VmSpace::Drop`]'s user-half tree walk, where every
+///    intermediate page-table frame and every leaf user frame must
+///    be returned to the allocator.
+/// 2. By a future garbage-collect-empty-intermediate-tables pass on
+///    a live cursor.
 ///
 /// # Safety
 ///
 /// Caller asserts that exactly one ref to the slot was previously
-/// leaked into the parent PTE via `Frame::into_raw`, the parent PTE
-/// has just been cleared, and the slot's `M` is `PageTableMeta`.
-pub(crate) unsafe fn reclaim_table_frame(phys: Paddr) {
+/// leaked into a PTE via `Frame::into_raw`, that PTE has been (or
+/// will be, atomically with this call) cleared, and no other
+/// reference to the slot is outstanding.
+pub(crate) unsafe fn reclaim_leaked_frame(phys: Paddr) {
     let Some(slot_ptr) = meta_slot_for_paddr_ptr(phys) else {
         return;
     };
     // SAFETY: caller's contract — the slot has one outstanding ref
-    // owned by the (now-cleared) parent PTE, and `M = PageTableMeta`
-    // matches the original `from_unused` call.
+    // owned by the (now-cleared) parent PTE. The `PageTableMeta`
+    // type parameter on `from_raw` is `PhantomData` only — at Drop
+    // time the slot's stored vtable performs the correct
+    // `drop_in_place` and `on_drop` calls for whatever `M` was
+    // originally installed.
     let frame: Frame<PageTableMeta> = unsafe { Frame::from_raw(slot_ptr) };
     drop(frame);
 }
@@ -554,4 +630,50 @@ mod tests {
         let raw = 0x0000_1234_5678_9007u64;
         assert_eq!(raw & PteFlags::ADDRESS_MASK, 0x0000_1234_5678_9000);
     }
+
+    /// Compile-time pin of every architectural PTE bit value. This
+    /// catches accidental drift in OSTD's bitflags definition — for
+    /// example, a refactor that swaps the `WRITABLE` and `USER` bits
+    /// would break boot but the kernel would already be running on
+    /// the wrong values by then. Pinning to hex literals here makes
+    /// the bit-layout commitment explicit at the OSTD level.
+    #[test]
+    fn pte_flags_pinned_to_x86_64_arch() {
+        assert_eq!(PteFlags::PRESENT.bits(), 1u64 << 0);
+        assert_eq!(PteFlags::WRITABLE.bits(), 1u64 << 1);
+        assert_eq!(PteFlags::USER.bits(), 1u64 << 2);
+        assert_eq!(PteFlags::WRITE_THROUGH.bits(), 1u64 << 3);
+        assert_eq!(PteFlags::CACHE_DISABLE.bits(), 1u64 << 4);
+        assert_eq!(PteFlags::ACCESSED.bits(), 1u64 << 5);
+        assert_eq!(PteFlags::DIRTY.bits(), 1u64 << 6);
+        assert_eq!(PteFlags::HUGE.bits(), 1u64 << 7);
+        assert_eq!(PteFlags::GLOBAL.bits(), 1u64 << 8);
+        assert_eq!(PteFlags::AVL_9.bits(), 1u64 << 9);
+        assert_eq!(PteFlags::AVL_10.bits(), 1u64 << 10);
+        assert_eq!(PteFlags::AVL_11.bits(), 1u64 << 11);
+        assert_eq!(PteFlags::NO_EXECUTE.bits(), 1u64 << 63);
+        assert_eq!(PteFlags::ADDRESS_MASK, 0x000F_FFFF_FFFF_F000);
+        assert_eq!(PteFlags::SOFTWARE_BITS_MASK, 0x0E00);
+        assert_eq!(PteFlags::SOFTWARE_BITS_SHIFT, 9);
+    }
 }
+
+// Compile-time razors. These survive even if every external consumer
+// is deleted — they protect OSTD's PTE-bit invariants forever.
+const _: () = {
+    assert!(PteFlags::PRESENT.bits() == 1 << 0);
+    assert!(PteFlags::WRITABLE.bits() == 1 << 1);
+    assert!(PteFlags::USER.bits() == 1 << 2);
+    assert!(PteFlags::WRITE_THROUGH.bits() == 1 << 3);
+    assert!(PteFlags::CACHE_DISABLE.bits() == 1 << 4);
+    assert!(PteFlags::ACCESSED.bits() == 1 << 5);
+    assert!(PteFlags::DIRTY.bits() == 1 << 6);
+    assert!(PteFlags::HUGE.bits() == 1 << 7);
+    assert!(PteFlags::GLOBAL.bits() == 1 << 8);
+    assert!(PteFlags::AVL_9.bits() == 1 << 9);
+    assert!(PteFlags::AVL_10.bits() == 1 << 10);
+    assert!(PteFlags::AVL_11.bits() == 1 << 11);
+    assert!(PteFlags::NO_EXECUTE.bits() == 1u64 << 63);
+    assert!(PteFlags::ADDRESS_MASK == 0x000F_FFFF_FFFF_F000);
+    assert!(PteFlags::SOFTWARE_BITS_MASK == 0x0E00);
+};

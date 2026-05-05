@@ -101,6 +101,39 @@ pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 /// 1GB page size (huge page via PDPTE).
 pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 
+// =============================================================================
+// OSTD compatibility razors (closes plan item 1J-η.6).
+//
+// Phase 1J-η is migrating slopos-mm onto OSTD's `VmSpace` / `PteFlags`.
+// During the migration window every `PageFlags::*` value here must match
+// `slopos_ostd::mm::page_table::PteFlags::*` exactly so cursor `query` /
+// `protect` / `map` round-trip through both sides without flag drift.
+// These compile-time asserts fire at build time if the bitfield ever
+// drifts; they delete with this whole file once Stage 4 finishes
+// retiring the legacy paging surface.
+// =============================================================================
+
+const _: () = {
+    use slopos_ostd::mm::page_table::PteFlags;
+    assert!(PageFlags::PRESENT.bits() == PteFlags::PRESENT.bits());
+    assert!(PageFlags::WRITABLE.bits() == PteFlags::WRITABLE.bits());
+    assert!(PageFlags::USER.bits() == PteFlags::USER.bits());
+    assert!(PageFlags::WRITE_THROUGH.bits() == PteFlags::WRITE_THROUGH.bits());
+    assert!(PageFlags::CACHE_DISABLE.bits() == PteFlags::CACHE_DISABLE.bits());
+    assert!(PageFlags::ACCESSED.bits() == PteFlags::ACCESSED.bits());
+    assert!(PageFlags::DIRTY.bits() == PteFlags::DIRTY.bits());
+    assert!(PageFlags::HUGE.bits() == PteFlags::HUGE.bits());
+    assert!(PageFlags::GLOBAL.bits() == PteFlags::GLOBAL.bits());
+    assert!(PageFlags::NO_EXECUTE.bits() == PteFlags::NO_EXECUTE.bits());
+    assert!(PageFlags::ADDRESS_MASK == PteFlags::ADDRESS_MASK);
+    // The slopos-side `COW` software bit lives at PTE bit 9, inside
+    // OSTD's `SOFTWARE_BITS_MASK` (bits 9..=11). Asserting the bit
+    // value pins the contract: slopos-mm uses bit 9 of `software` for
+    // its COW marker (see `mm::cow::SOFTWARE_COW_BIT`).
+    assert!(PageFlags::COW.bits() == 1 << 9);
+    assert!(PageFlags::COW.bits() & PteFlags::SOFTWARE_BITS_MASK == PageFlags::COW.bits());
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

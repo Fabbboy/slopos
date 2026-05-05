@@ -5,6 +5,7 @@ pub mod heap;
 pub mod init;
 pub mod io_mem;
 pub mod page_property;
+pub mod page_size;
 pub mod page_table;
 pub mod phys;
 pub mod pod;

@@ -186,36 +186,67 @@ pub(crate) const fn assert_meta_fits<M: AnyFrameMeta>() {
 }
 
 /// Generic kernel-owned page (default for code that does not care
-/// about per-page metadata).
+/// about per-page metadata). Returns its physical frame to the
+/// registered [`FrameAlloc`] on `Drop`.
 #[derive(Default)]
 pub struct KernelMeta;
 
-// SAFETY: ZST has no representation invariants; `on_drop` is a nop.
+// SAFETY: ZST has no representation invariants. `on_drop` returns
+// the underlying physical frame to the allocator — required so
+// `Frame<KernelMeta>` does not leak the page on its last Drop.
 unsafe impl AnyFrameMeta for KernelMeta {
-    fn on_drop(&mut self, _paddr: Paddr) {}
+    fn on_drop(&mut self, paddr: Paddr) {
+        return_frame_to_allocator(paddr);
+    }
 }
 const _: () = assert_meta_fits::<KernelMeta>();
 
-/// Page-table frame metadata.
+/// Page-table frame metadata. `level` is the architectural level
+/// (`4` = PML4, `1` = PT). `static_borrowed` is `true` only for the
+/// wrapped boot kernel-master PML4 (constructed via
+/// [`super::vm_space::VmSpace::wrap_existing`]) — that frame's
+/// storage is statically owned by the bootloader, so it must NOT be
+/// returned to the buddy allocator on Drop.
 pub struct PageTableMeta {
     pub level: u8,
+    pub static_borrowed: bool,
 }
 
-// SAFETY: `level` is plain data; `on_drop` is a nop.
+// SAFETY: fields are plain data. `on_drop` returns the page-table
+// frame to the allocator unless the meta declares `static_borrowed`.
 unsafe impl AnyFrameMeta for PageTableMeta {
-    fn on_drop(&mut self, _paddr: Paddr) {}
+    fn on_drop(&mut self, paddr: Paddr) {
+        if !self.static_borrowed {
+            return_frame_to_allocator(paddr);
+        }
+    }
 }
 const _: () = assert_meta_fits::<PageTableMeta>();
 
-/// Untyped anonymous frame metadata.
+/// Untyped anonymous frame metadata. Returns its physical frame to
+/// the registered [`FrameAlloc`] on `Drop`.
 #[derive(Default)]
 pub struct AnonymousMeta;
 
-// SAFETY: ZST has no representation invariants; `on_drop` is a nop.
+// SAFETY: ZST has no representation invariants. `on_drop` returns
+// the underlying physical frame to the allocator — required so
+// `UFrame<AnonymousMeta>` does not leak the page on its last Drop.
 unsafe impl AnyFrameMeta for AnonymousMeta {
-    fn on_drop(&mut self, _paddr: Paddr) {}
+    fn on_drop(&mut self, paddr: Paddr) {
+        return_frame_to_allocator(paddr);
+    }
 }
 const _: () = assert_meta_fits::<AnonymousMeta>();
+
+/// Helper: dealloc `paddr` (one page) via the registered allocator.
+/// No-op when no allocator is registered (test scaffolding can drop
+/// frames before `register_frame_allocator` runs without panicking).
+#[inline]
+fn return_frame_to_allocator(paddr: Paddr) {
+    if let Some(alloc) = crate::mm::frame_alloc::current_frame_allocator() {
+        alloc.dealloc(paddr, 1);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // META_SLOTS array.

@@ -18,6 +18,7 @@ use slopos_ostd::mm::frame::{
 };
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
+use slopos_ostd::mm::page_size::Size4Kb;
 use slopos_ostd::mm::phys::init_phys_virt_offset;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{VmSpace, register_kernel_master_pml4};
@@ -152,7 +153,7 @@ fn copy_from_user_reports_not_user_accessible() {
     {
         let mut cur = space.cursor_mut(v_start..v_end).unwrap();
         // map kernel-only — user bit clear.
-        cur.map(fresh_user_frame(), PageProperty::KERNEL_RW)
+        cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::KERNEL_RW)
             .unwrap();
     }
     let ctx = ctx_with_arg0(user_va);
@@ -170,7 +171,8 @@ fn copy_to_user_reports_not_user_writable() {
     let v_end = VirtAddr::new(user_va + PAGE_SIZE as u64);
     {
         let mut cur = space.cursor_mut(v_start..v_end).unwrap();
-        cur.map(fresh_user_frame(), PageProperty::USER_RO).unwrap();
+        cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RO)
+            .unwrap();
     }
     let ctx = ctx_with_arg0(user_va);
     let p = ctx.user_ptr_arg::<u64>(0).unwrap();
@@ -188,7 +190,8 @@ fn copy_bytes_to_user_validates_against_writable_user_pages() {
     let v_end = VirtAddr::new(user_va + PAGE_SIZE as u64);
     {
         let mut cur = space.cursor_mut(v_start..v_end).unwrap();
-        cur.map(fresh_user_frame(), PageProperty::USER_RO).unwrap();
+        cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RO)
+            .unwrap();
     }
     let mut regs = UserRegs::default();
     regs.rdi = user_va;
@@ -211,7 +214,8 @@ fn copy_validation_spans_two_pages() {
         // Map only the first page; the second page in the cross-page
         // copy below is unmapped, so validation must report it.
         let mut cur = space.cursor_mut(v_start..v_mid).unwrap();
-        cur.map(fresh_user_frame(), PageProperty::USER_RW).unwrap();
+        cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW)
+            .unwrap();
     }
     // Place the slice base 8 bytes before the page boundary; a 16-byte
     // copy then spans both pages.
