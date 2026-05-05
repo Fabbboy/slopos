@@ -269,6 +269,60 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     unsafe { (*PROCESS_VMS[slot].as_ptr()).page_dir }
 }
 
+/// Run `f` under the per-process lock with mutable access to both the
+/// legacy `*mut ProcessPageDir` and the OSTD `KArc<VmSpace>` for
+/// `process_id`. Returns `None` if the slot is unbound or `vm_space`
+/// is missing.
+///
+/// The closure runs while the per-process lock is held — keep the
+/// body fast. Used by the page-fault handlers
+/// (`cow::handle_cow_fault`, `demand::handle_demand_fault`) so the
+/// dual-write window can drive both the legacy paging surface and
+/// the OSTD cursor in lockstep.
+pub fn process_vm_with_dual_paging<R>(
+    process_id: u32,
+    f: impl FnOnce(*mut ProcessPageDir, &mut KArc<VmSpace>) -> R,
+) -> Option<R> {
+    let slot = find_slot_for_pid(process_id)?;
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return None;
+    }
+    let page_dir = guard.page_dir;
+    if page_dir.is_null() {
+        return None;
+    }
+    let vm_space = guard.vm_space.as_mut()?;
+    Some(f(page_dir, vm_space))
+}
+
+/// Like [`process_vm_with_dual_paging`] but also resolves the
+/// covering [`VmaRegion`] for `fault_addr` under the same lock — so
+/// the page-fault handlers can both dual-write and read the region
+/// without dropping and re-acquiring the per-process lock (which
+/// would deadlock recursive callers like the demand-fault path).
+pub fn process_vm_with_dual_paging_and_region<R>(
+    process_id: u32,
+    fault_addr: u64,
+    f: impl FnOnce(*mut ProcessPageDir, &mut KArc<VmSpace>, VmaRegion) -> R,
+) -> Option<R> {
+    let slot = find_slot_for_pid(process_id)?;
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return None;
+    }
+    let page_dir = guard.page_dir;
+    if page_dir.is_null() {
+        return None;
+    }
+    let region = {
+        let (_rs, _re, region_ref) = guard.vma_map.find_containing(fault_addr)?;
+        region_ref.clone()
+    };
+    let vm_space = guard.vm_space.as_mut()?;
+    Some(f(page_dir, vm_space, region))
+}
+
 /// Read the PML4 physical address for a process.  Lock-free for the slot
 /// lookup; takes the per-process lock briefly to read pml4_phys so the
 /// returned u64 cannot become dangling.

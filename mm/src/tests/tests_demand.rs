@@ -1,11 +1,10 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
-use crate::demand::{can_satisfy_fault, handle_demand_fault, is_demand_fault};
-use crate::error::MmError;
+use crate::demand::{can_satisfy_fault, is_demand_fault};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{process_vm_alloc, process_vm_get_region};
-use crate::tests::test_fixtures::{ProcessVmGuard, map_test_page};
+use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaRegion};
 
 /// Helper to construct anonymous lazy user VMA regions for tests.
@@ -39,7 +38,7 @@ pub fn test_demand_fault_present_page() -> TestResult {
     let addr = process_vm_alloc(vm.pid, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
     assert_test!(addr != 0, "process_vm_alloc failed");
 
-    let Some(_phys) = map_test_page(vm.page_dir, addr, PageFlags::USER_RW.bits()) else {
+    let Some(_phys) = vm.map_test_page(addr, PageFlags::USER_RW.bits()) else {
         return fail!("map test page");
     };
 
@@ -152,9 +151,17 @@ pub fn test_demand_permission_allow_write() -> TestResult {
 }
 
 pub fn test_demand_handle_null_page_dir() -> TestResult {
-    match handle_demand_fault(core::ptr::null_mut(), 1, 0x1000, 0x04) {
-        Err(MmError::NullPageDir) => pass!(),
-        Ok(_) => fail!("handle_demand_fault succeeded with null page_dir"),
-        Err(e) => fail!("wrong error for null page_dir: {:?}", e),
+    // After the framekernel migration, `demand::handle_demand_fault`
+    // is reached only via `process_vm::process_vm_with_dual_paging`,
+    // which filters out null `page_dir`. Verify the dispatcher
+    // returns `None` for an unknown PID — the failure path
+    // `try_resolve_user_fault` actually hits.
+    let result = crate::process_vm::process_vm_with_dual_paging(
+        slopos_abi::task::INVALID_PROCESS_ID,
+        |_, _| (),
+    );
+    if result.is_some() {
+        return fail!("process_vm_with_dual_paging returned Some for INVALID_PROCESS_ID");
     }
+    pass!()
 }

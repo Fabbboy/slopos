@@ -2,7 +2,7 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 use slopos_utils::klog_info;
 
-use crate::cow::{handle_cow_fault, is_cow_fault};
+use crate::cow::is_cow_fault;
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{
@@ -11,7 +11,7 @@ use crate::page_alloc::{
 use crate::paging::{paging_is_cow, paging_mark_cow, virt_to_phys_in_dir};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::process_vm_clone_cow;
-use crate::tests::test_fixtures::{ProcessVmGuard, map_test_page};
+use crate::tests::test_fixtures::ProcessVmGuard;
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 pub fn test_cow_read_not_cow_fault() -> TestResult {
@@ -19,7 +19,7 @@ pub fn test_cow_read_not_cow_fault() -> TestResult {
         return fail!("create VM");
     };
 
-    let Some(_phys) = map_test_page(vm.page_dir, 0x2000, PageFlags::USER_RO.bits()) else {
+    let Some(_phys) = vm.map_test_page(0x2000, PageFlags::USER_RO.bits()) else {
         return fail!("map test page");
     };
 
@@ -51,11 +51,18 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
 }
 
 pub fn test_cow_handle_null_pagedir() -> TestResult {
-    match handle_cow_fault(core::ptr::null_mut(), 0x1000) {
-        Err(MmError::NullPageDir) => pass!(),
-        Ok(_) => fail!("handle_cow_fault succeeded with null page_dir"),
-        Err(e) => fail!("wrong error for null page_dir: {:?}", e),
+    // After the framekernel migration, `cow::handle_cow_fault` is only
+    // reachable via `process_vm::process_vm_with_dual_paging`, which
+    // filters out null `page_dir`. The defensive null-check inside
+    // `handle_cow_fault` is exercised by test infra constructing a
+    // process whose page_dir is never wired (impossible via public API)
+    // — so instead verify that the public dispatcher returns `None` for
+    // an unknown PID, the failure path callers actually hit.
+    let result = crate::process_vm::process_vm_with_dual_paging(INVALID_PROCESS_ID, |_, _| ());
+    if result.is_some() {
+        return fail!("process_vm_with_dual_paging returned Some for INVALID_PROCESS_ID");
     }
+    pass!()
 }
 
 pub fn test_cow_handle_not_cow_page() -> TestResult {
@@ -63,11 +70,11 @@ pub fn test_cow_handle_not_cow_page() -> TestResult {
         return fail!("create VM");
     };
 
-    let Some(_phys) = map_test_page(vm.page_dir, 0x3000, PageFlags::USER_RW.bits()) else {
+    let Some(_phys) = vm.map_test_page(0x3000, PageFlags::USER_RW.bits()) else {
         return fail!("map test page");
     };
 
-    match handle_cow_fault(vm.page_dir, 0x3000) {
+    match vm.handle_cow_fault(0x3000) {
         Err(MmError::NotCowPage) => pass!(),
         Ok(_) => fail!("handle_cow_fault succeeded on non-COW page"),
         Err(e) => fail!("wrong error for non-COW page: {:?}", e),
@@ -81,7 +88,7 @@ pub fn test_cow_single_ref_upgrade() -> TestResult {
         return fail!("create VM");
     };
 
-    let Some(phys) = map_test_page(vm.page_dir, 0x4000, PageFlags::USER_RO.bits()) else {
+    let Some(phys) = vm.map_test_page(0x4000, PageFlags::USER_RO.bits()) else {
         return fail!("map test page");
     };
 
@@ -90,7 +97,7 @@ pub fn test_cow_single_ref_upgrade() -> TestResult {
     let ref_before = page_frame_get_ref(phys);
     assert_test!(ref_before == 1, "initial refcount should be 1");
 
-    if let Err(e) = handle_cow_fault(vm.page_dir, 0x4000) {
+    if let Err(e) = vm.handle_cow_fault(0x4000) {
         return fail!("single-ref COW failed: {:?}", e);
     }
 
@@ -119,7 +126,7 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
     };
 
     let test_addr: u64 = 0x5000;
-    let Some(phys) = map_test_page(vm.page_dir, test_addr, PageFlags::USER_RO.bits()) else {
+    let Some(phys) = vm.map_test_page(test_addr, PageFlags::USER_RO.bits()) else {
         return fail!("map test page");
     };
 
@@ -140,7 +147,7 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
         klog_info!("COW_TEST: Expected refcount 3, got {}", ref_before);
     }
 
-    if let Err(e) = handle_cow_fault(vm.page_dir, test_addr) {
+    if let Err(e) = vm.handle_cow_fault(test_addr) {
         return fail!("multi-ref COW failed: {:?}", e);
     }
 
@@ -181,14 +188,14 @@ pub fn test_cow_page_boundary() -> TestResult {
     };
 
     let page_start: u64 = 0x6000;
-    let Some(_phys) = map_test_page(vm.page_dir, page_start, PageFlags::USER_RO.bits()) else {
+    let Some(_phys) = vm.map_test_page(page_start, PageFlags::USER_RO.bits()) else {
         return fail!("map test page");
     };
 
     paging_mark_cow(vm.page_dir, VirtAddr::new(page_start));
 
     let fault_addr = page_start + PAGE_SIZE_4KB - 1;
-    if let Err(e) = handle_cow_fault(vm.page_dir, fault_addr) {
+    if let Err(e) = vm.handle_cow_fault(fault_addr) {
         return fail!("boundary COW failed: {:?}", e);
     }
 
@@ -206,7 +213,7 @@ pub fn test_cow_clone_modify_both() -> TestResult {
     let test_addr = process_vm_alloc(parent.pid, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
-    let Some(phys) = map_test_page(parent.page_dir, test_addr, PageFlags::USER_RW.bits()) else {
+    let Some(phys) = parent.map_test_page(test_addr, PageFlags::USER_RW.bits()) else {
         return fail!("map test page");
     };
 
@@ -222,7 +229,7 @@ pub fn test_cow_clone_modify_both() -> TestResult {
     };
 
     if paging_is_cow(parent.page_dir, VirtAddr::new(test_addr)) {
-        if let Err(e) = handle_cow_fault(parent.page_dir, test_addr) {
+        if let Err(e) = parent.handle_cow_fault(test_addr) {
             return fail!("parent COW resolution failed: {:?}", e);
         }
     }
@@ -233,7 +240,7 @@ pub fn test_cow_clone_modify_both() -> TestResult {
     }
 
     if paging_is_cow(child.page_dir, VirtAddr::new(test_addr)) {
-        if let Err(e) = handle_cow_fault(child.page_dir, test_addr) {
+        if let Err(e) = child.handle_cow_fault(test_addr) {
             return fail!("child COW resolution failed: {:?}", e);
         }
     }
@@ -342,7 +349,7 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
     paging_mark_cow(vm.page_dir, VirtAddr::new(addr1));
     paging_mark_cow(vm.page_dir, VirtAddr::new(addr2));
 
-    if let Err(e) = handle_cow_fault(vm.page_dir, addr1) {
+    if let Err(e) = vm.handle_cow_fault(addr1) {
         return fail!("first page COW failed: {:?}", e);
     }
 
@@ -363,7 +370,7 @@ pub fn test_cow_handle_invalid_address() -> TestResult {
     };
 
     let unmapped: u64 = 0xDEAD_0000;
-    match handle_cow_fault(vm.page_dir, unmapped) {
+    match vm.handle_cow_fault(unmapped) {
         Err(MmError::NotCowPage) | Err(MmError::InvalidAddress) => pass!(),
         Ok(_) => fail!("COW succeeded on unmapped address"),
         Err(e) => {

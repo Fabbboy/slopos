@@ -1254,7 +1254,7 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
 // PROCESS VM AND COW TESTS - Test the dangerous stuff
 // ============================================================================
 
-use crate::cow::{handle_cow_fault, is_cow_fault};
+use crate::cow::is_cow_fault;
 use crate::paging::{map_page_4kb_in_dir, paging_mark_cow, virt_to_phys_in_dir};
 use crate::paging_defs::PageFlags;
 use crate::tests::test_fixtures::ProcessVmGuard;
@@ -1420,7 +1420,7 @@ pub fn test_cow_fault_handling() -> TestResult {
     assert_test!(is_cow, "is_cow_fault returned false for COW page");
 
     // Handle the COW fault
-    match handle_cow_fault(vm.page_dir, test_addr) {
+    match vm.handle_cow_fault(test_addr) {
         Ok(()) => {}
         Err(e) => {
             return fail!("handle_cow_fault failed: {:?}", e);

@@ -27,25 +27,42 @@ pub fn try_resolve_user_fault(
             fault_addr,
             error_code
         );
-        let result = cow::handle_cow_fault(page_dir, fault_addr);
+        let result = process_vm::process_vm_with_dual_paging(process_id, |pd, vs| {
+            cow::handle_cow_fault(pd, vs, fault_addr)
+        });
 
-        if result.is_ok() {
-            klog_debug!(
-                "PF: COW resolved for task {} at cr2=0x{:x}",
-                task_id,
-                fault_addr
-            );
-            return true;
+        match result {
+            Some(Ok(())) => {
+                klog_debug!(
+                    "PF: COW resolved for task {} at cr2=0x{:x}",
+                    task_id,
+                    fault_addr
+                );
+                return true;
+            }
+            Some(Err(_)) | None => {
+                klog_info!(
+                    "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
+                    task_id,
+                    fault_addr
+                );
+            }
         }
-        klog_info!(
-            "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
-            task_id,
-            fault_addr
-        );
     }
 
     if demand::is_demand_fault(error_code, process_id, fault_addr) {
-        if demand::handle_demand_fault(page_dir, process_id, fault_addr, error_code).is_ok() {
+        let result = process_vm::process_vm_with_dual_paging_and_region(
+            process_id,
+            fault_addr,
+            |pd, vs, region| {
+                demand::handle_demand_fault(pd, vs, process_id, fault_addr, error_code, &region)
+            },
+        );
+        if matches!(result, Some(Ok(()))) {
+            // Page-count bookkeeping must happen OUTSIDE the
+            // per-process lock that `process_vm_with_dual_paging_*`
+            // holds (the increment helper takes the same lock).
+            process_vm::process_vm_increment_pages(process_id, 1);
             return true;
         }
     }
