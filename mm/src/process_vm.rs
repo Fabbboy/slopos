@@ -270,6 +270,26 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     unsafe { (*PROCESS_VMS[slot].as_ptr()).page_dir }
 }
 
+/// Translate a user virtual address to its backing physical address
+/// for `process_id`, via the OSTD `VmSpace` cursor. Returns 0 if the
+/// slot is unbound, `vm_space` is missing, or no 4 KiB leaf is mapped
+/// at `va`'s page-aligned address. The returned paddr includes the
+/// page offset of `va` (mirrors legacy `virt_to_phys_in_dir`).
+pub fn process_vm_user_va_to_paddr(process_id: u32, va: u64) -> u64 {
+    let Some(slot) = find_slot_for_pid(process_id) else {
+        return 0;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return 0;
+    }
+    let Some(vm_space) = guard.vm_space.as_ref() else {
+        return 0;
+    };
+    crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
+        .as_u64()
+}
+
 /// Read the OSTD `VmSpace`'s PML4 paddr for `process_id`. Returns 0
 /// if the slot is unbound or `vm_space` is missing. After
 /// [`VmSpace::activate`] writes CR3, this matches the hardware CR3 —

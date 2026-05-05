@@ -10,7 +10,7 @@ use core::ptr;
 
 use slopos_ostd::KVec;
 
-use slopos_abi::addr::VirtAddr;
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
@@ -322,6 +322,7 @@ fn setup_user_stack(
     if page_dir.is_null() {
         return Err(ExecError::NoMem);
     }
+    let _ = page_dir; // legacy non-null sentinel; OSTD reads route through process_id
 
     let argc = argv.map(|a| a.len()).unwrap_or(0);
     let envc = envp.map(|e| e.len()).unwrap_or(0);
@@ -342,8 +343,8 @@ fn setup_user_stack(
             let len = arg.len() + 1;
             sp = sp.wrapping_sub(len as u64);
             sp &= !0x7;
-            write_to_user_stack(page_dir, sp, arg)?;
-            write_byte_to_user_stack(page_dir, sp + arg.len() as u64, 0)?;
+            write_to_user_stack(process_id, sp, arg)?;
+            write_byte_to_user_stack(process_id, sp + arg.len() as u64, 0)?;
             string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
@@ -355,8 +356,8 @@ fn setup_user_stack(
             let len = env.len() + 1;
             sp = sp.wrapping_sub(len as u64);
             sp &= !0x7;
-            write_to_user_stack(page_dir, sp, env)?;
-            write_byte_to_user_stack(page_dir, sp + env.len() as u64, 0)?;
+            write_to_user_stack(process_id, sp, env)?;
+            write_byte_to_user_stack(process_id, sp + env.len() as u64, 0)?;
             string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
@@ -385,49 +386,45 @@ fn setup_user_stack(
     sp = sp.wrapping_sub(aux_size as u64);
     for (idx, (a_type, a_val)) in auxv.iter().enumerate() {
         let slot = sp + (idx as u64) * 16;
-        write_u64_to_user_stack(page_dir, slot, *a_type)?;
-        write_u64_to_user_stack(page_dir, slot + 8, *a_val)?;
+        write_u64_to_user_stack(process_id, slot, *a_type)?;
+        write_u64_to_user_stack(process_id, slot + 8, *a_val)?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(page_dir, sp, 0)?;
+    write_u64_to_user_stack(process_id, sp, 0)?;
 
     for i in (argv_start..string_ptrs.len()).rev() {
         sp = sp.wrapping_sub(8);
-        write_u64_to_user_stack(page_dir, sp, string_ptrs[i])?;
+        write_u64_to_user_stack(process_id, sp, string_ptrs[i])?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(page_dir, sp, 0)?;
+    write_u64_to_user_stack(process_id, sp, 0)?;
 
     for i in (0..argv_start).rev() {
         sp = sp.wrapping_sub(8);
-        write_u64_to_user_stack(page_dir, sp, string_ptrs[i])?;
+        write_u64_to_user_stack(process_id, sp, string_ptrs[i])?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(page_dir, sp, argc as u64)?;
+    write_u64_to_user_stack(process_id, sp, argc as u64)?;
 
     Ok(sp)
 }
 
-fn write_to_user_stack(
-    page_dir: *mut slopos_mm::paging::ProcessPageDir,
-    addr: u64,
-    data: &[u8],
-) -> Result<(), ExecError> {
-    use slopos_mm::paging::virt_to_phys_in_dir;
+fn write_to_user_stack(process_id: u32, addr: u64, data: &[u8]) -> Result<(), ExecError> {
+    use slopos_mm::process_vm::process_vm_user_va_to_paddr;
 
     for (i, &byte) in data.iter().enumerate() {
         let va = addr + i as u64;
         let page_va = va & !(PAGE_SIZE_4KB - 1);
         let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
 
-        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(page_va));
-        if phys.is_null() {
+        let phys = process_vm_user_va_to_paddr(process_id, page_va);
+        if phys == 0 {
             return Err(ExecError::Fault);
         }
-        let virt = phys.to_virt();
+        let virt = PhysAddr::new(phys).to_virt();
         if virt.is_null() {
             return Err(ExecError::Fault);
         }
@@ -438,19 +435,11 @@ fn write_to_user_stack(
     Ok(())
 }
 
-fn write_byte_to_user_stack(
-    page_dir: *mut slopos_mm::paging::ProcessPageDir,
-    addr: u64,
-    byte: u8,
-) -> Result<(), ExecError> {
-    write_to_user_stack(page_dir, addr, &[byte])
+fn write_byte_to_user_stack(process_id: u32, addr: u64, byte: u8) -> Result<(), ExecError> {
+    write_to_user_stack(process_id, addr, &[byte])
 }
 
-fn write_u64_to_user_stack(
-    page_dir: *mut slopos_mm::paging::ProcessPageDir,
-    addr: u64,
-    value: u64,
-) -> Result<(), ExecError> {
+fn write_u64_to_user_stack(process_id: u32, addr: u64, value: u64) -> Result<(), ExecError> {
     let bytes = value.to_le_bytes();
-    write_to_user_stack(page_dir, addr, &bytes)
+    write_to_user_stack(process_id, addr, &bytes)
 }
