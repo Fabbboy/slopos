@@ -99,8 +99,11 @@ use slopos_mm::process_vm::{
 };
 use slopos_mm::tlb;
 
+use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
+use slopos_ostd::task::fpu::{fpu_xrstor, fpu_xsave};
+use slopos_ostd::task::switch::switch_registers;
+
 use super::ffi_boundary::kernel_stack_top;
-use super::switch_asm::{fpu_restore, fpu_save, switch_registers};
 
 fn get_default_time_slice() -> u64 {
     SCHED_DEFAULT_TIME_SLICE as u64
@@ -326,6 +329,11 @@ fn task_is_idle_candidate(task: *mut Task) -> bool {
 /// with interrupts disabled.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
+    // Cache the active XCR0 mask once for the whole switch — the OSTD
+    // `fpu_xsave` / `fpu_xrstor` primitives take it as a parameter
+    // (the static is set at boot by `slopos_ostd::cpu::x86_64::xsave::init`).
+    let xcr0 = active_xcr0();
+
     // --- Save/restore per-CPU PCR user-mode round-trip slots ---
     //
     // `pcr.user_ctx_ptr` and `pcr.kernel_return_ctx` are written by
@@ -359,8 +367,10 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
 
     // --- FPU save (prev) ---
     if !prev.is_null() {
+        // SAFETY: caller serialises (irqs disabled).  Inv. 8 — prev
+        // is currently on this CPU and only this CPU.
         unsafe {
-            fpu_save(&raw mut (*prev).fpu_state);
+            fpu_xsave(&raw mut (*prev).fpu_state, xcr0);
         }
     }
 
@@ -454,8 +464,10 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     }
 
     // --- FPU restore (next) ---
+    // SAFETY: caller serialises (irqs disabled).  Inv. 8 — next is
+    // becoming the running task on this CPU and no other CPU touches it.
     unsafe {
-        fpu_restore(&raw const (*next).fpu_state);
+        fpu_xrstor(&raw const (*next).fpu_state, xcr0);
     }
 }
 
@@ -706,8 +718,9 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             return;
         }
 
-        // Validate switch_ctx.rip — for kernel tasks it must be in .text,
-        // for user tasks ret_from_fork is also in .text.
+        // Validate switch_ctx.rip — must be in kernel .text (the OSTD
+        // task-entry trampoline / user_task_first_run wrapper / a
+        // schedule resume point all live there).
         let rip = (*to_task).switch_ctx.rip;
         let rsp = (*to_task).switch_ctx.rsp;
         let (text_start, text_end) = kernel_text_range();
@@ -1153,6 +1166,26 @@ pub fn scheduler_task_exit_impl() -> ! {
     );
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
+}
+
+// OSTD task-exit hook.  Wraps `scheduler_task_exit_impl()` to expose
+// it as `extern "sysv64" fn() -> !`, the type expected by
+// [`slopos_ostd::task::switch::register_task_exit_hook`].  The OSTD
+// `task_entry_trampoline` calls the registered hook when a kernel
+// task's entry function returns.
+extern "sysv64" fn ostd_task_exit_hook() -> ! {
+    scheduler_task_exit_impl()
+}
+
+/// Install the OSTD task-exit hook.  Must be called once at boot, after
+/// the scheduler is initialised but before any task can return from
+/// its entry function (in practice: before `enter_scheduler`).
+pub fn install_ostd_task_exit_hook() {
+    // SAFETY: `ostd_task_exit_hook` does not return; the OSTD register
+    // hook is one-shot and asserts on double-call.
+    unsafe {
+        slopos_ostd::task::switch::register_task_exit_hook(ostd_task_exit_hook);
     }
 }
 

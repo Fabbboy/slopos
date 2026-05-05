@@ -1,11 +1,12 @@
 # KPTI ring-transition trampolines.
 #
-# These replace the ring-3 → ring-0 and ring-0 → ring-3 paths in
-# `boot/idt_handlers.s` when KPTI is enabled.  They are not yet linked
-# into the IDT / LSTAR targets — see `mm/src/mmu/kpti.rs` for the
-# activation gate.  Once activation lands, `mmu::kpti::enable()` points
-# IA32_LSTAR at `kpti_syscall_entry` and patches each ring-transition
-# vector in the IDT to jump here instead of the pre-KPTI stubs.
+# These replace the ring-3 → ring-0 and ring-0 → ring-3 paths owned by
+# `slopos-ostd::user::mode` when KPTI is enabled.  They are not yet
+# linked into the IDT / LSTAR targets — see `mm/src/mmu/kpti.rs` for
+# the activation gate.  Once activation lands, `mmu::kpti::enable()`
+# points IA32_LSTAR at `kpti_syscall_entry` and patches each
+# ring-transition vector in the IDT to jump here instead of the
+# pre-KPTI stubs.
 #
 # Per-CPU slot offsets (into the PCR):
 #   0x00  self_ref

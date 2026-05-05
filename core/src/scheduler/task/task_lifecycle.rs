@@ -7,10 +7,12 @@ use slopos_utils::kdiag_timestamp;
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
+use slopos_ostd::task::switch::task_entry_trampoline;
+
 use super::super::scheduler;
-use super::super::switch_asm::task_entry_trampoline;
 use super::super::task_stack::{KernelStack, UnsafeStack};
 use super::super::task_struct::SwitchContext;
+use super::super::task_struct::fpu_reset_in_place;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::{record_task_created, record_task_exit};
@@ -19,7 +21,7 @@ use super::task_table::{
     reserve_task_slot, task_find_by_id, with_task_manager,
 };
 use super::{
-    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
     TaskContext, TaskEntry, TaskExitReason, TaskExitRecord, TaskFaultReason, TaskPriority,
     TaskStatus,
@@ -423,7 +425,7 @@ fn init_task_context(task: &mut Task) {
     // caller-provided `&mut Task`. Writing into it does not alias with
     // any other reference because we hold the unique `&mut`.
     unsafe {
-        FpuState::reset_in_place(&raw mut task.fpu_state);
+        fpu_reset_in_place(&raw mut task.fpu_state);
     }
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {

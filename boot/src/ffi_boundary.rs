@@ -4,7 +4,7 @@
 //! FFI Boundary Layer
 //!
 //! This module contains ONLY functions that require `extern "C"` linkage because they are:
-//! 1. Called from assembly code (limine_entry.s, idt_handlers.s)
+//! 1. Called from assembly code (limine_entry.s)
 //!
 //! All other Rust-to-Rust calls should use regular Rust functions without extern "C".
 

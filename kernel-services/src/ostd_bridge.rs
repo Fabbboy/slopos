@@ -20,12 +20,14 @@ use slopos_ostd::sync::rcu::{register_rcu_backend, RcuBackend};
 use slopos_ostd::sync::wait_queue::{
     register_wait_queue_backend, WaitQueueBackend, WaitTaskHandle,
 };
+use slopos_ostd::task::register_task_runtime_backend;
 use slopos_ostd::user::mode::register_user_mode_backend;
 
 use crate::driver_runtime;
 use crate::ostd_backends::diagnostic_sink::CONSOLE_SINK;
 use crate::ostd_backends::local_tlb::LOCAL_TLB_DYN;
 use crate::ostd_backends::preempt::PCR_PREEMPT;
+use crate::ostd_backends::task_runtime::PCR_TASK_RUNTIME;
 use crate::ostd_backends::user_mode::PCR_USER_MODE;
 use crate::ostd_bridge_tables::{MMIO_RANGES, PORT_RANGES, RESERVED_VECTORS};
 use crate::platform;
@@ -119,9 +121,10 @@ pub unsafe fn register_with_ostd() {
         register_preempt_backend(&PCR_PREEMPT);
         register_local_tlb_flusher(&LOCAL_TLB_DYN);
         register_user_mode_backend(&PCR_USER_MODE);
+        register_task_runtime_backend(&PCR_TASK_RUNTIME);
     }
 
     platform::console_puts(
-        b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode tables\n",
+        b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode/task_runtime tables\n",
     );
 }

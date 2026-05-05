@@ -574,6 +574,7 @@ pub fn kernel_main_impl() {
         slopos_kernel_services::ostd_bridge::register_with_ostd();
         slopos_mm::io_mem_mapper_shim::register_with_ostd();
     }
+    slopos_core::sched::install_ostd_task_exit_hook();
 
     serial::write_line("BOOT: entering boot init");
     let mut boot_ctx = slopos_hermetic::take_for_boot();

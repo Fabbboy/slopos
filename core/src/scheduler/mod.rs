@@ -12,7 +12,6 @@ pub mod safestack_rt;
 pub mod sched_tests;
 pub mod scheduler;
 pub mod sleep;
-pub mod switch_asm;
 pub mod task;
 pub mod task_lock;
 pub mod task_stack;

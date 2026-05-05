@@ -1,10 +1,9 @@
 //! Low-level context switching using Rust naked functions.
 //!
-//! Same ABI and byte-identical asm bodies as
-//! `core::scheduler::switch_asm` so the OSTD and kernel paths can
-//! coexist while consumers migrate. Uses `offset_of!` for compile-time
-//! field offsets, so renames in [`super::task::TaskContext`] surface
-//! as build errors rather than silent corruption.
+//! Sole context-switch implementation in the kernel.  Uses
+//! `offset_of!` for compile-time field offsets, so renames in
+//! [`super::task::TaskContext`] surface as build errors rather than
+//! silent corruption.
 //!
 //! # Task exit hook
 //!

@@ -96,53 +96,12 @@ impl TaskContext {
 // SwitchContext — callee-saved registers for software context switch
 // =============================================================================
 
-/// Layout must match the assembly in `context_switch.s` and `switch_asm.rs`.
-/// Compile-time assertions below verify every offset.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SwitchContext {
-    pub rbx: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rbp: u64,
-    pub rsp: u64,
-    pub rflags: u64,
-    pub rip: u64,
-}
-
-impl SwitchContext {
-    pub const fn zero() -> Self {
-        Self {
-            rbx: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rbp: 0,
-            rsp: 0,
-            rflags: 0x202,
-            rip: 0,
-        }
-    }
-
-    pub const fn new_for_task(entry_point: u64, arg: u64, stack_top: u64, trampoline: u64) -> Self {
-        Self {
-            rbx: 0,
-            r12: entry_point,
-            r13: arg,
-            r14: 0,
-            r15: 0,
-            rbp: 0,
-            rsp: stack_top - 8,
-            rflags: 0x202,
-            rip: trampoline,
-        }
-    }
-}
-
-const _: () = assert!(core::mem::size_of::<SwitchContext>() == 72);
+/// Callee-saved snapshot consumed by the OSTD context-switch primitives in
+/// [`slopos_ostd::task::switch`].  Layout (and the matching naked-asm
+/// offsets) are defined by [`slopos_ostd::task::TaskContext`]; aliased
+/// here so that kernel call sites continue to spell the type as
+/// `SwitchContext`.
+pub type SwitchContext = slopos_ostd::task::TaskContext;
 
 pub const SWITCH_CTX_OFF_RBX: usize = 0;
 pub const SWITCH_CTX_OFF_R12: usize = 8;
@@ -154,154 +113,58 @@ pub const SWITCH_CTX_OFF_RSP: usize = 48;
 pub const SWITCH_CTX_OFF_RFLAGS: usize = 56;
 pub const SWITCH_CTX_OFF_RIP: usize = 64;
 
-const _: () = {
-    assert!(offset_of!(SwitchContext, rbx) == SWITCH_CTX_OFF_RBX);
-    assert!(offset_of!(SwitchContext, r12) == SWITCH_CTX_OFF_R12);
-    assert!(offset_of!(SwitchContext, r13) == SWITCH_CTX_OFF_R13);
-    assert!(offset_of!(SwitchContext, r14) == SWITCH_CTX_OFF_R14);
-    assert!(offset_of!(SwitchContext, r15) == SWITCH_CTX_OFF_R15);
-    assert!(offset_of!(SwitchContext, rbp) == SWITCH_CTX_OFF_RBP);
-    assert!(offset_of!(SwitchContext, rsp) == SWITCH_CTX_OFF_RSP);
-    assert!(offset_of!(SwitchContext, rflags) == SWITCH_CTX_OFF_RFLAGS);
-    assert!(offset_of!(SwitchContext, rip) == SWITCH_CTX_OFF_RIP);
-};
+// ABI razors — the field offsets are already pinned inside OSTD at
+// `slopos-ostd/src/task/task.rs`; these duplicates fail the build at
+// the kernel boundary if the alias ever drifts off the asm contract.
+const _: () = assert!(core::mem::size_of::<SwitchContext>() == 72);
+const _: () = assert!(offset_of!(SwitchContext, rsp) == SWITCH_CTX_OFF_RSP);
+const _: () = assert!(offset_of!(SwitchContext, rip) == SWITCH_CTX_OFF_RIP);
+const _: () = assert!(offset_of!(SwitchContext, rsp) == 48);
+const _: () = assert!(offset_of!(SwitchContext, rip) == 64);
 
 // =============================================================================
 // FpuState — XSAVE/FXSAVE area for x87/SSE/AVX state (64-byte aligned)
 // =============================================================================
+//
+// Canonical type lives in `slopos_ostd::task::fpu`; aliased here so the
+// kernel `Task` field type matches what `slopos_ostd::task::fpu::fpu_xsave`
+// / `fpu_xrstor` consume.  The associated constants (`FPU_STATE_SIZE`,
+// `FXSAVE_AREA_SIZE`, `MXCSR_DEFAULT`) re-export from the same OSTD module.
 
-/// Maximum XSAVE area size we support (compile-time upper bound).
+pub use slopos_ostd::task::fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, MXCSR_DEFAULT};
+
+/// FPU/SIMD state save area — 64-byte aligned XSAVE/FXSAVE buffer.
 ///
-/// Covers all current Intel/AMD XSAVE components:
-/// - FXSAVE (x87 + SSE):    512 bytes
-/// - XSAVE  (+ AVX):        832 bytes
-/// - XSAVE  (+ AVX-512):  2,688 bytes
-///
-/// Tasks always allocate this much; the hardware only touches
-/// `xsave::area_size()` bytes at runtime.  The waste-per-task is at
-/// most ~2 KiB — acceptable for a fixed task table.
-pub const FPU_STATE_SIZE: usize = 2688;
-
-/// Legacy FXSAVE area size (512 B).  Used as the fallback when XSAVE
-/// is not available.
-pub const FXSAVE_AREA_SIZE: usize = 512;
-
-pub const MXCSR_DEFAULT: u32 = 0x1F80;
+/// Aliased from [`slopos_ostd::task::fpu::FpuState`].  Definition lives in
+/// OSTD because the same byte layout is consumed by
+/// [`slopos_ostd::task::fpu::fpu_xsave`] / [`fpu_xrstor`] and by the
+/// scheduler's `prepare_switch_to`.
+pub type FpuState = slopos_ostd::task::fpu::FpuState;
 
 /// x87 FPU Control Word offset within both FXSAVE and XSAVE legacy region.
 const LEGACY_FCW_OFFSET: usize = 0;
 /// MXCSR offset within both FXSAVE and XSAVE legacy region.
 const LEGACY_MXCSR_OFFSET: usize = 24;
 
-// --- XSAVE header layout (bytes 512–575) ---
-
-/// Offset of the XSAVE header within the save area.
-const XSAVE_HEADER_OFFSET: usize = 512;
-/// XSTATE_BV — bitmask of state components that contain valid data.
-const XSTATE_BV_OFFSET: usize = XSAVE_HEADER_OFFSET;
-/// XCOMP_BV — bitmask for compacted format (XSAVEC).  Bit 63 = compaction mode.
-const XCOMP_BV_OFFSET: usize = XSAVE_HEADER_OFFSET + 8;
-
-/// FPU/SIMD state save area.
+/// Initialise an [`FpuState`] directly at `ptr` without materialising the
+/// 2.6 KiB rvalue on the caller's stack.  Equivalent to writing the result
+/// of [`FpuState::new`] but with no temp.
 ///
-/// Sized to `FPU_STATE_SIZE` (compile-time maximum for XSAVE with AVX-512)
-/// and aligned to 64 bytes as required by the `XSAVE`/`XRSTOR` instructions.
-/// When the CPU only supports FXSAVE, only the first 512 bytes are used.
-///
-/// The layout is intentionally a plain byte array so it can back both the
-/// 512-byte FXSAVE region and the variable-length XSAVE region without
-/// requiring separate types.
-#[repr(C, align(64))]
-#[derive(Clone, Copy)]
-pub struct FpuState {
-    pub data: [u8; FPU_STATE_SIZE],
-}
-
-impl FpuState {
-    /// All-zeroes save area.
-    pub const fn zero() -> Self {
-        Self {
-            data: [0u8; FPU_STATE_SIZE],
-        }
-    }
-
-    /// Default FPU state with x87/SSE exceptions masked and XSAVE header zeroed.
-    ///
-    /// Initialises the legacy region (bytes 0–511):
-    ///   - FCW = 0x037F (all x87 exceptions masked)
-    ///   - MXCSR = 0x1F80 (all SSE exceptions masked)
-    ///
-    /// The XSAVE header (bytes 512–575) is left zeroed:
-    ///   - `XSTATE_BV = 0` → all state components at initial values
-    ///   - `XCOMP_BV = 0` → standard (non-compacted) format
-    ///
-    /// This is correct for both FXSAVE and XSAVE: the hardware interprets
-    /// `XSTATE_BV = 0` as "use processor-reset defaults for every component"
-    /// during `XRSTOR`.
-    pub const fn new() -> Self {
-        let mut state = Self::zero();
-        // Legacy region: FCW and MXCSR defaults (same for FXSAVE and XSAVE).
-        state.data[LEGACY_FCW_OFFSET] = 0x7F;
-        state.data[LEGACY_FCW_OFFSET + 1] = 0x03;
-        state.data[LEGACY_MXCSR_OFFSET] = 0x80;
-        state.data[LEGACY_MXCSR_OFFSET + 1] = 0x1F;
-        // XSAVE header: XSTATE_BV = 0, XCOMP_BV = 0 (already zero from zero()).
-        // Explicit documentation — no-ops but make the invariant visible.
-        state.data[XSTATE_BV_OFFSET] = 0;
-        state.data[XCOMP_BV_OFFSET] = 0;
-        state
-    }
-
-    /// Initialise an `FpuState` directly at `ptr` without materialising the
-    /// 2.6 KiB rvalue on the caller's stack. Equivalent to writing the
-    /// result of [`Self::new`] but with no temp.
-    ///
-    /// The assembly in `context_switch.s` relies on `FpuState` living
-    /// inline at `FPU_STATE_OFFSET` from the `TaskContext` field, so the
-    /// in-place factory is the right shape — `KBox<FpuState>` would force
-    /// asm changes for no extra stack-safety win once the rvalue is gone.
-    ///
-    /// # Safety
-    /// `ptr` must be a valid, properly-aligned, writable pointer to an
-    /// `FpuState`-sized region (≥ `FPU_STATE_SIZE` bytes, 64-byte
-    /// aligned). The caller must ensure no other reference to that region
-    /// is live for the duration of this call.
-    pub unsafe fn reset_in_place(ptr: *mut Self) {
-        // SAFETY: ptr is a valid FpuState by caller contract.
-        unsafe {
-            let bytes = ptr as *mut u8;
-            core::ptr::write_bytes(bytes, 0u8, FPU_STATE_SIZE);
-            // Legacy FCW = 0x037F, MXCSR = 0x1F80.
-            *bytes.add(LEGACY_FCW_OFFSET) = 0x7F;
-            *bytes.add(LEGACY_FCW_OFFSET + 1) = 0x03;
-            *bytes.add(LEGACY_MXCSR_OFFSET) = 0x80;
-            *bytes.add(LEGACY_MXCSR_OFFSET + 1) = 0x1F;
-        }
-    }
-
-    #[inline]
-    pub fn as_ptr(&self) -> *const u8 {
-        self.data.as_ptr()
-    }
-
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.data.as_mut_ptr()
-    }
-
-    /// Returns the number of bytes the hardware will actually touch during
-    /// `XSAVE`/`XRSTOR` (or `FXSAVE`/`FXRSTOR` on fallback).
-    ///
-    /// Always ≤ `FPU_STATE_SIZE`.
-    #[inline]
-    pub fn active_area_size() -> usize {
-        slopos_arch::cpu::xsave::area_size()
-    }
-}
-
-impl Default for FpuState {
-    fn default() -> Self {
-        Self::new()
+/// # Safety
+/// `ptr` must be a valid, properly-aligned, writable pointer to an
+/// `FpuState`-sized region (≥ `FPU_STATE_SIZE` bytes, 64-byte aligned).
+/// The caller must ensure no other reference to that region is live for
+/// the duration of this call.
+pub unsafe fn fpu_reset_in_place(ptr: *mut FpuState) {
+    // SAFETY: ptr is a valid FpuState by caller contract.
+    unsafe {
+        let bytes = ptr as *mut u8;
+        core::ptr::write_bytes(bytes, 0u8, FPU_STATE_SIZE);
+        // Legacy FCW = 0x037F, MXCSR = 0x1F80.
+        *bytes.add(LEGACY_FCW_OFFSET) = 0x7F;
+        *bytes.add(LEGACY_FCW_OFFSET + 1) = 0x03;
+        *bytes.add(LEGACY_MXCSR_OFFSET) = 0x80;
+        *bytes.add(LEGACY_MXCSR_OFFSET + 1) = 0x1F;
     }
 }
 
@@ -363,15 +226,14 @@ impl SignalAction {
 // Task — the kernel task control block
 // =============================================================================
 
-// Verify assembly FPU_STATE_OFFSET matches the actual field distance.
-// Assembly in context_switch.s uses `.equ FPU_STATE_OFFSET, <value>`.
-// Changing FpuState alignment from 16 to 64 may alter the padding and thus this offset.
-// We use a helper const to make the actual value available for debugging.
-pub const FPU_STATE_OFFSET: usize = {
-    // This value MUST match `offset_of!(Task, fpu_state) - offset_of!(Task, context)`.
-    // The assembly in context_switch.s uses `.equ FPU_STATE_OFFSET, <hex>`.
-    0xD0
-};
+// Layout sanity check: `fpu_state` sits 0xD0 (208) bytes after `context`
+// inside `Task`.  No asm reads this offset directly today (OSTD's
+// `fpu_xsave` / `fpu_xrstor` take a pointer to `FpuState` straight from
+// the kernel scheduler), but pinning it keeps a regression bell on
+// reordering of the head fields where adding a field between `context`
+// and `fpu_state` would silently change the FPU buffer's stride from
+// the start of the Task struct.
+pub const FPU_STATE_OFFSET: usize = 0xD0;
 const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
 
 /// Offset of `Task.unsafe_stack_sp` — consumed by the naked
@@ -661,8 +523,8 @@ impl Task {
                 addr_of_mut!((*slot).waiting_on).write(AtomicU32::new(INVALID_TASK_ID));
 
                 // FPU state: FCW = 0x037F, MXCSR = 0x1F80, XSAVE header
-                // zeroed — handled by FpuState's own in-place initialiser.
-                FpuState::reset_in_place(addr_of_mut!((*slot).fpu_state));
+                // zeroed — handled by the in-place initialiser.
+                fpu_reset_in_place(addr_of_mut!((*slot).fpu_state));
 
                 // Kernel stack: no handle yet.
                 addr_of_mut!((*slot).kernel_stack).write(None);

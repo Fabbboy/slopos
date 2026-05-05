@@ -1,6 +1,5 @@
 #![allow(bad_asm_style)]
 
-use core::arch::global_asm;
 use core::cell::SyncUnsafeCell;
 use core::ffi::c_void;
 
@@ -23,8 +22,6 @@ use crate::exception::*;
 use crate::ist_stacks;
 use crate::user_fault::*;
 
-global_asm!(include_str!("../idt_handlers.s"));
-
 // =============================================================================
 // ABI razors — fail the build if a load-bearing field offset drifts.
 // =============================================================================
@@ -38,7 +35,8 @@ const _: () = {
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rflags) == 152);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rsp) == 160);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, ss) == 168);
-    // Per-CPU kernel RSP slot read by syscall_entry as gs:[16].
+    // Per-CPU kernel RSP slot read by the OSTD `__ostd_user_return`
+    // trampoline as `gs:[16]`.
     assert!(slopos_ostd::cpu::x86_64::pcr::offsets::KERNEL_RSP == 16);
 };
 
