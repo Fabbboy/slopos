@@ -422,7 +422,8 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     // concern; consumers see only the activate call.
     //
     // `_ = cpu_id;` — `mmu::select_cr3` plumbing is unreachable from
-    // this hot path; the per-CPU ASID pool retires in 1J-η.4.
+    // this hot path; the per-CPU ASID pool retires when the legacy
+    // paging surface deletes.
     let _ = cpu_id;
     let next_pid = unsafe { (*next).process_id };
     if next_pid != INVALID_PROCESS_ID {

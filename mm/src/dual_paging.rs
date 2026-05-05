@@ -16,7 +16,7 @@
 //! [`free_page_frame`](crate::page_alloc::free_page_frame).
 //!
 //! All public helpers here delete with the rest of the legacy paging
-//! surface in `1J-η.4`; the only OSTD-side calls survive.
+//! surface; the only OSTD-side calls survive.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
@@ -125,10 +125,9 @@ pub fn ostd_map_4kb_user(
 }
 
 /// Unmap a 4 KiB user page from `vm_space` at `va`. The returned
-/// `UFrame` is the static-borrowed wrapper installed by
-/// [`ostd_map_4kb_user`] and is dropped immediately — its `Drop` is
-/// a no-op so the underlying physical page remains owned by legacy
-/// `mm/src/paging` until that half retires in `1J-η.4`.
+/// `UFrame` is dropped immediately — its `Drop` decrements the
+/// META_SLOTS ref-count and, when it hits zero, returns the page to
+/// the registered [`FrameAlloc`].
 ///
 /// Returns `Ok(true)` if a leaf was present and unmapped, `Ok(false)`
 /// if the leaf was already absent, or an error from the cursor.

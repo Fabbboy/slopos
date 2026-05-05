@@ -307,7 +307,7 @@ pub fn process_vm_user_va_is_user_accessible(process_id: u32, va: u64) -> bool {
 /// [`VmSpace::activate`] writes CR3, this matches the hardware CR3 —
 /// callers that compare against the live CR3 (user-fault dispatcher,
 /// task-table lookup) must use this rather than the legacy
-/// `(*page_dir).pml4_phys` until the legacy half retires in 1J-η.4.
+/// `(*page_dir).pml4_phys` until the legacy half retires.
 pub fn process_vm_get_ostd_pml4_paddr(process_id: u32) -> u64 {
     let Some(slot) = find_slot_for_pid(process_id) else {
         return 0;
@@ -2514,11 +2514,12 @@ fn clone_cow_walk_shared_vma(
 }
 
 /// Per-VMA inner walk for anonymous regions in `process_vm_clone_cow`.
-/// Marks the parent legacy half as COW (parent OSTD half is updated in
-/// the pre-reader-flip sweep — see η.4 plan), bumps the page's
-/// ref-count, and maps the child page table (legacy + OSTD halves) with
-/// `WRITABLE` cleared and the COW marker set. Returns the number of
-/// pages walked, or `Err(())` on first failure.
+/// Marks the parent legacy half as COW (parent OSTD half is updated
+/// inline in the snapshot phase under the parent lock; see
+/// `process_vm_clone_cow`), bumps the page's ref-count, and maps the
+/// child page table (legacy + OSTD halves) with `WRITABLE` cleared
+/// and the COW marker set. Returns the number of pages walked, or
+/// `Err(())` on first failure.
 #[inline(never)]
 fn clone_cow_walk_anon_vma(
     parent_page_dir: *mut ProcessPageDir,
@@ -2794,10 +2795,11 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
             child.vma_map.insert(vma_start, vma_end, child_region);
 
-            // Pull a mutable handle to the child's OSTD VmSpace once per
-            // VMA. The child slot lock above is the sole owner of the
-            // KArc, so KArc::get_mut succeeds. Parent-side OSTD mark_cow
-            // is deferred to the pre-reader-flip sweep — see η.4 plan.
+            // Pull a mutable handle to the child's OSTD VmSpace once
+            // per VMA. The child slot lock above is the sole owner of
+            // the KArc, so KArc::get_mut succeeds. Parent-side OSTD
+            // mark_cow ran inline under the parent lock in the
+            // snapshot phase above.
             let child_vm_space_for_vma = child
                 .vm_space
                 .as_mut()
