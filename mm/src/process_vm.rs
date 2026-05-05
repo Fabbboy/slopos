@@ -374,23 +374,12 @@ pub fn process_vm_with_dual_paging_and_region<R>(
     Some(f(page_dir, vm_space, region))
 }
 
-/// Read the PML4 physical address for a process.  Lock-free for the slot
-/// lookup; takes the per-process lock briefly to read pml4_phys so the
-/// returned u64 cannot become dangling.
+/// Read the PML4 physical address for a process — the value
+/// [`VmSpace::activate`] writes to CR3 during scheduler context-switch.
+/// Returns `0` if the slot is unbound or the OSTD `vm_space` is missing
+/// (callers treat 0 as "no VM"; the scheduler refuses to dispatch).
 pub fn process_vm_get_cr3_phys(process_id: u32) -> u64 {
-    let slot = match find_slot_for_pid(process_id) {
-        Some(s) => s,
-        None => return 0,
-    };
-    let guard = PROCESS_VMS[slot].lock();
-    if guard.process_id != process_id {
-        return 0;
-    }
-    let page_dir = guard.page_dir;
-    if page_dir.is_null() {
-        return 0;
-    }
-    unsafe { (*page_dir).pml4_phys.as_u64() }
+    process_vm_get_ostd_pml4_paddr(process_id)
 }
 
 /// Look up the stable 64-bit `MmContextId` associated with this process.
@@ -421,17 +410,22 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
     }
 
     for i in 0..MAX_PROCESSES {
-        // SAFETY: lock-free read of naturally-aligned fields.
-        let (pid, page_dir) = unsafe {
-            let p = &*PROCESS_VMS[i].as_ptr();
-            (p.process_id, p.page_dir)
-        };
-        if pid == INVALID_PROCESS_ID || page_dir.is_null() {
+        // SAFETY: lock-free read of the process_id field. Validating
+        // the OSTD `vm_space` requires a brief lock acquisition because
+        // the `Option<KArc<VmSpace>>` is mutated under the per-process
+        // SpinLock.
+        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+        if pid == INVALID_PROCESS_ID {
             continue;
         }
-        let matches = unsafe { (*page_dir).pml4_phys.as_u64() == cr3_phys };
-        if matches {
-            return pid;
+        let guard = PROCESS_VMS[i].lock();
+        if guard.process_id != pid {
+            continue;
+        }
+        if let Some(vm_space) = guard.vm_space.as_ref() {
+            if vm_space.pml4_paddr().as_u64() == cr3_phys {
+                return pid;
+            }
         }
     }
 
