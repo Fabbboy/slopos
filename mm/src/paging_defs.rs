@@ -102,15 +102,15 @@ pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 
 // =============================================================================
-// OSTD compatibility razors (closes plan item 1J-η.6).
+// OSTD compatibility razors.
 //
-// Phase 1J-η is migrating slopos-mm onto OSTD's `VmSpace` / `PteFlags`.
-// During the migration window every `PageFlags::*` value here must match
+// While slopos-mm migrates onto OSTD's `VmSpace` / `PteFlags`, every
+// `PageFlags::*` value here must match
 // `slopos_ostd::mm::page_table::PteFlags::*` exactly so cursor `query` /
 // `protect` / `map` round-trip through both sides without flag drift.
 // These compile-time asserts fire at build time if the bitfield ever
-// drifts; they delete with this whole file once Stage 4 finishes
-// retiring the legacy paging surface.
+// drifts; they delete with this whole file once the legacy paging
+// surface is fully retired.
 // =============================================================================
 
 const _: () = {

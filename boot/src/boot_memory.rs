@@ -55,9 +55,9 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
     // Stamp GLOBAL onto every kernel-half leaf via the OSTD cursor.
     // This used to live inside `init_paging` (priority 10, legacy
     // walker); routing through the cursor here exercises the
-    // huge-leaf-aware `protect::<S>` path (Stage 0.4) on every 2 MiB
-    // HHDM entry. CR4.PGE is enabled at priority 1, so the bit is
-    // already meaningful on the leaves we're stamping.
+    // huge-leaf-aware `protect::<S>` path on every 2 MiB HHDM entry.
+    // CR4.PGE is enabled at priority 1, so the bit is already
+    // meaningful on the leaves we're stamping.
     slopos_mm::paging::paging_mark_kernel_global();
 
     // Force the TLB to re-walk and re-tag kernel entries as global.

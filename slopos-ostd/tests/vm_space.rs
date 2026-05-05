@@ -367,7 +367,7 @@ fn map_seek_returns_to_same_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 0 additions: huge-page cursor ops, wrap_existing, kernel-half resync,
+// Huge-page cursor ops, wrap_existing, kernel-half resync,
 // drop walker, and the cursor-unmap hook.
 // ---------------------------------------------------------------------------
 
