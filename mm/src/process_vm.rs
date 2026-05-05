@@ -1242,23 +1242,19 @@ fn setup_tls_block(
             return Err(ElfError::InvalidSegmentOffset);
         }
         let src = &elf_data[offset as usize..src_end as usize];
-        write_user_bytes(page_dir, tls_base, src)?;
+        write_user_bytes(vm_space, tls_base, src)?;
     }
 
     if tls_memsz > tls_filesz {
-        zero_user_bytes(page_dir, tls_base + tls_filesz, tls_memsz - tls_filesz)?;
+        zero_user_bytes(vm_space, tls_base + tls_filesz, tls_memsz - tls_filesz)?;
     }
 
     let tp = tls_base + tls_size_aligned;
-    write_user_u64(page_dir, tp, tp)?;
+    write_user_u64(vm_space, tp, tp)?;
     Ok((tp, tls_pages))
 }
 
-fn write_user_bytes(
-    page_dir: *mut ProcessPageDir,
-    dst_addr: u64,
-    data: &[u8],
-) -> Result<(), ElfError> {
+fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Result<(), ElfError> {
     let mut written = 0usize;
     while written < data.len() {
         let va = dst_addr
@@ -1268,7 +1264,7 @@ fn write_user_bytes(
         let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
         let chunk = core::cmp::min(data.len() - written, PAGE_SIZE_4KB as usize - page_off);
 
-        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(page_va));
+        let phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
         if phys.is_null() {
             return Err(ElfError::NullPointer);
         }
@@ -1289,11 +1285,7 @@ fn write_user_bytes(
     Ok(())
 }
 
-fn zero_user_bytes(
-    page_dir: *mut ProcessPageDir,
-    start_addr: u64,
-    len: u64,
-) -> Result<(), ElfError> {
+fn zero_user_bytes(vm_space: &KArc<VmSpace>, start_addr: u64, len: u64) -> Result<(), ElfError> {
     let mut zeroed = 0u64;
     while zeroed < len {
         let va = start_addr
@@ -1304,7 +1296,7 @@ fn zero_user_bytes(
         let page_remaining = PAGE_SIZE_4KB - page_off as u64;
         let chunk = core::cmp::min(len - zeroed, page_remaining) as usize;
 
-        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(page_va));
+        let phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
         if phys.is_null() {
             return Err(ElfError::NullPointer);
         }
@@ -1321,12 +1313,8 @@ fn zero_user_bytes(
     Ok(())
 }
 
-fn write_user_u64(
-    page_dir: *mut ProcessPageDir,
-    dst_addr: u64,
-    value: u64,
-) -> Result<(), ElfError> {
-    write_user_bytes(page_dir, dst_addr, &value.to_le_bytes())
+fn write_user_u64(vm_space: &KArc<VmSpace>, dst_addr: u64, value: u64) -> Result<(), ElfError> {
+    write_user_bytes(vm_space, dst_addr, &value.to_le_bytes())
 }
 
 fn load_segment_pages(
@@ -1350,7 +1338,11 @@ fn load_segment_pages(
     let mut pages_mapped = 0u32;
 
     while dst < page_end {
-        let existing_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(dst));
+        // After dual-write retirement in map_user_range, the legacy
+        // ProcessPageDir is empty for fresh processes. Use the OSTD
+        // cursor to detect existing mappings (e.g. overlapping ELF
+        // segments).
+        let existing_phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
         let phys = if !existing_phys.is_null() {
             if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
                 let _ = paging_mark_range_user(
