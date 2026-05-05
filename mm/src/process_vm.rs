@@ -173,8 +173,6 @@ fn map_user_range(
         }
         if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(current), phys, map_flags) {
             klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
-            // Roll back the legacy half we just installed and any
-            // earlier successful pairs.
             let leaked = unmap_page_in_dir(page_dir, VirtAddr::new(current));
             if !leaked.is_null() {
                 free_page_frame(leaked);
@@ -204,9 +202,6 @@ fn rollback_range(
 ) {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
-        // OSTD half first — its leaf-ref drop is a no-op (static
-        // borrowed), so this just clears the PTE and fires the LUF
-        // hook. Legacy half then frees the underlying paddr.
         let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(current));
         let phys = unmap_page_in_dir(page_dir, VirtAddr::new(current));
         if !phys.is_null() {
@@ -288,6 +283,23 @@ pub fn process_vm_user_va_to_paddr(process_id: u32, va: u64) -> u64 {
     };
     crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
         .as_u64()
+}
+
+/// Read-side check: is `va` mapped AND user-accessible in
+/// `process_id`'s OSTD VmSpace? Mirrors legacy
+/// `paging_is_user_accessible` — kernel-half pages return `false`.
+pub fn process_vm_user_va_is_user_accessible(process_id: u32, va: u64) -> bool {
+    let Some(slot) = find_slot_for_pid(process_id) else {
+        return false;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return false;
+    }
+    let Some(vm_space) = guard.vm_space.as_ref() else {
+        return false;
+    };
+    crate::dual_paging::ostd_is_user_accessible_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
 }
 
 /// Read the OSTD `VmSpace`'s PML4 paddr for `process_id`. Returns 0

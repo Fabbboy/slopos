@@ -1,12 +1,10 @@
 //! exec() ELF loader tests - targeting untested code paths likely to have bugs.
 
-use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
-use slopos_mm::paging::virt_to_phys_in_dir;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm;
 use slopos_testing::TestResult;
@@ -17,22 +15,20 @@ use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 const MINIMAL_ELF_SIZE: usize = 64;
 
 fn read_user_u64(process_id: u32, addr: u64) -> Option<u64> {
-    let page_dir = process_vm::process_vm_get_page_dir(process_id);
-    if page_dir.is_null() {
+    let phys_raw = process_vm::process_vm_user_va_to_paddr(process_id, addr);
+    if phys_raw == 0 {
         return None;
     }
-    let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(addr));
-    let virt = phys.to_virt_checked()?;
+    let virt = slopos_abi::addr::PhysAddr::new(phys_raw).to_virt_checked()?;
     Some(unsafe { core::ptr::read_unaligned(virt.as_ptr::<u64>()) })
 }
 
 fn read_user_u8(process_id: u32, addr: u64) -> Option<u8> {
-    let page_dir = process_vm::process_vm_get_page_dir(process_id);
-    if page_dir.is_null() {
+    let phys_raw = process_vm::process_vm_user_va_to_paddr(process_id, addr);
+    if phys_raw == 0 {
         return None;
     }
-    let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(addr));
-    let virt = phys.to_virt_checked()?;
+    let virt = slopos_abi::addr::PhysAddr::new(phys_raw).to_virt_checked()?;
     Some(unsafe { core::ptr::read(virt.as_ptr::<u8>()) })
 }
 

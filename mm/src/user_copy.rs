@@ -1,14 +1,10 @@
 use core::arch::global_asm;
-use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr;
 use slopos_ostd::sync::InitFlag;
 
 use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
-use crate::paging::paging_is_user_accessible;
-use crate::process_vm::process_vm_get_page_dir;
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
 
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
@@ -102,29 +98,22 @@ pub fn set_test_process_id(pid: u32) {
     }
 }
 
-fn current_process_dir() -> *mut crate::paging::ProcessPageDir {
-    let pid = current_process_id();
-    if pid == slopos_abi::task::INVALID_PROCESS_ID {
-        return ptr::null_mut();
-    }
-    process_vm_get_page_dir(pid)
-}
-
-fn validate_user_pages(
-    user_addr: UserVirtAddr,
-    len: usize,
-    dir: *mut crate::paging::ProcessPageDir,
-) -> Result<(), UserPtrError> {
+fn validate_user_pages(user_addr: UserVirtAddr, len: usize) -> Result<(), UserPtrError> {
     if len == 0 {
         return Ok(());
     }
-    if dir.is_null() {
+
+    let pid = current_process_id();
+    if pid == slopos_abi::task::INVALID_PROCESS_ID {
         return Err(UserPtrError::NotMapped);
     }
 
     if !KERNEL_GUARD_CHECKED.is_set() {
+        // Probe a known kernel-half VA — must NOT be user-accessible.
+        // After the probe sets the latch, this skips on every
+        // subsequent call.
         let kernel_probe = KERNEL_HEAP_VBASE;
-        if paging_is_user_accessible(dir, VirtAddr::new(kernel_probe)) != 0 {
+        if crate::process_vm::process_vm_user_va_is_user_accessible(pid, kernel_probe) {
             return Err(UserPtrError::NotMapped);
         }
         KERNEL_GUARD_CHECKED.mark_set();
@@ -144,7 +133,7 @@ fn validate_user_pages(
     let mut page = start & !(page_size - 1);
 
     while page < end {
-        if paging_is_user_accessible(dir, VirtAddr(page)) == 0 {
+        if !crate::process_vm::process_vm_user_va_is_user_accessible(pid, page) {
             return Err(UserPtrError::NotMapped);
         }
         page = match page.checked_add(page_size) {
@@ -177,8 +166,7 @@ unsafe fn do_usercopy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), Us
 /// validation and the copy, the assembly usercopy function faults and
 /// the page fault handler returns an error instead of panicking.
 pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
-    let dir = current_process_dir();
-    validate_user_pages(src.addr(), core::mem::size_of::<T>(), dir)?;
+    validate_user_pages(src.addr(), core::mem::size_of::<T>())?;
     unsafe {
         let mut val = core::mem::MaybeUninit::<T>::uninit();
         do_usercopy(
@@ -192,8 +180,7 @@ pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
 
 /// Copy a `T` from kernel space into user space.
 pub fn copy_to_user<T: Copy>(dst: UserPtr<T>, value: &T) -> Result<(), UserPtrError> {
-    let dir = current_process_dir();
-    validate_user_pages(dst.addr(), core::mem::size_of::<T>(), dir)?;
+    validate_user_pages(dst.addr(), core::mem::size_of::<T>())?;
     unsafe {
         do_usercopy(
             dst.as_mut_ptr() as *mut u8,
@@ -210,8 +197,7 @@ pub fn copy_bytes_from_user(src: UserBytes, dst: &mut [u8]) -> Result<usize, Use
         return Ok(0);
     }
 
-    let dir = current_process_dir();
-    validate_user_pages(src.base(), copy_len, dir)?;
+    validate_user_pages(src.base(), copy_len)?;
 
     unsafe {
         do_usercopy(dst.as_mut_ptr(), src.base().as_ptr(), copy_len)?;
@@ -226,8 +212,7 @@ pub fn copy_bytes_to_user(dst: UserBytes, src: &[u8]) -> Result<usize, UserPtrEr
         return Ok(0);
     }
 
-    let dir = current_process_dir();
-    validate_user_pages(dst.base(), copy_len, dir)?;
+    validate_user_pages(dst.base(), copy_len)?;
 
     unsafe {
         do_usercopy(dst.base().as_mut_ptr(), src.as_ptr(), copy_len)?;

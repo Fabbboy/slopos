@@ -32,7 +32,6 @@ use slopos_abi::syscall::{
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_arch::InterruptFrame;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
-use slopos_mm::paging::map_page_4kb_in_dir;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
@@ -126,19 +125,24 @@ fn pts_path_for(number: u32) -> Option<[u8; 11]> {
 }
 
 fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
-    let page_dir = slopos_mm::process_vm::process_vm_get_page_dir(pid);
-    if page_dir.is_null() {
+    if slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(pid) == 0 {
         return None;
     }
-    if slopos_mm::paging::switch_page_directory(page_dir) != 0 {
+    // SAFETY: test scaffolding — irqs are masked by the caller's
+    // test harness, kernel-half invariant always holds for an OSTD
+    // VmSpace built via `VmSpace::new`.
+    if !unsafe { slopos_mm::process_vm::process_vm_activate(pid) } {
         return None;
     }
     set_test_process_id(pid);
     let out = f();
     set_test_process_id(slopos_abi::task::INVALID_PROCESS_ID);
-    let kernel_dir = slopos_mm::paging::paging_get_kernel_directory();
-    if !kernel_dir.is_null() {
-        let _ = slopos_mm::paging::switch_page_directory(kernel_dir);
+    // SAFETY: same as above; kernel master always satisfies activate's
+    // invariant.
+    unsafe {
+        slopos_kernel_services::kernel_vm_space::kernel_vm_space()
+            .lock()
+            .activate();
     }
     Some(out)
 }
@@ -167,23 +171,21 @@ fn map_user_rw_page(pid: u32) -> Option<u64> {
         return None;
     }
 
-    let page_dir = slopos_mm::process_vm::process_vm_get_page_dir(pid);
-    if page_dir.is_null() {
-        return None;
-    }
-
     let phys: PhysAddr = alloc_page_frame(ALLOC_FLAG_ZERO);
     if phys.is_null() {
         return None;
     }
 
-    if map_page_4kb_in_dir(
-        page_dir,
-        slopos_abi::addr::VirtAddr::new(base),
-        phys,
-        PageFlags::USER_RW.bits(),
-    ) != 0
-    {
+    let mapped = slopos_mm::process_vm::process_vm_with_dual_paging(pid, |_pd, vs| {
+        slopos_mm::dual_paging::ostd_map_4kb_user(
+            vs,
+            slopos_abi::addr::VirtAddr::new(base),
+            phys,
+            PageFlags::USER_RW.bits(),
+        )
+        .is_ok()
+    });
+    if !matches!(mapped, Some(true)) {
         return None;
     }
 

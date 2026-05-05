@@ -145,39 +145,21 @@ fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameErro
 pub struct UFrame<M: AnyUFrameMeta = AnonymousMeta>(Frame<M>);
 
 impl UFrame<AnonymousMeta> {
-    /// Wrap a frame whose underlying physical page is owned by an
-    /// external subsystem — i.e. some other allocator path holds the
-    /// real ref-count. The wrapper's `Drop` will NOT return the page
-    /// to the registered [`FrameAlloc`]; the META_SLOTS slot still
-    /// transitions UNUSED → TYPED → UNUSED across construct + drop,
-    /// but the buddy is left untouched on the way down.
+    /// Wrap a freshly-allocated 4 KiB user paddr that this `UFrame`
+    /// will own through META_SLOTS. The first call for a paddr does
+    /// `from_unused` (slot UNUSED → TYPED, ref count = 1). Subsequent
+    /// calls for the same paddr (e.g. fork(2)'s child mapping the
+    /// parent's pages) fall through to `from_in_use`, bumping the
+    /// existing slot's ref count.
     ///
-    /// If the META_SLOTS entry for `paddr` is already TYPED (e.g. a
-    /// fork(2) is mapping a page into the child that the parent
-    /// already wrapped), the existing slot's ref-count is bumped via
-    /// [`Frame::from_in_use`] instead — both wrappers share the same
-    /// `static_borrowed = true` policy. Each wrapper's leaked PTE ref
-    /// must be reclaimed via `CursorMut::unmap` when the corresponding
-    /// mapping is torn down.
-    ///
-    /// Used by the framekernel dual-write window: while
-    /// `mm/src/paging` retains ownership of user-half page allocations,
-    /// the OSTD half drives `CursorMut::map` / `unmap` over the same
-    /// paddrs without double-freeing on teardown.
-    pub fn wrap_static(paddr: Paddr) -> Result<Self, FrameError> {
-        match Frame::<AnonymousMeta>::from_unused(
-            paddr,
-            AnonymousMeta {
-                static_borrowed: true,
-            },
-        ) {
+    /// `Drop` of the LAST wrapper for a paddr returns the page to the
+    /// registered [`FrameAlloc`] — exactly the legacy
+    /// `free_page_frame` semantics, but driven by META_SLOTS rather
+    /// than the legacy refcount table.
+    pub fn wrap_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+        match Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default()) {
             Ok(frame) => Ok(Self(frame)),
-            Err(FrameError::StateMismatch) => {
-                // Slot already TYPED — another wrap_static call (parent
-                // process during fork, sibling thread, etc.) installed
-                // the meta. Bump the existing slot's ref count.
-                Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?))
-            }
+            Err(FrameError::StateMismatch) => Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?)),
             Err(e) => Err(e),
         }
     }

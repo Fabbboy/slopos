@@ -116,7 +116,7 @@ pub fn ostd_map_4kb_user(
     flags: u64,
 ) -> Result<(), MapError> {
     let prop = page_flags_to_property(flags);
-    let frame = UFrame::<AnonymousMeta>::wrap_static(Paddr::new(pa.as_u64()))
+    let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
         .map_err(|_| MapError::PathCorrupt)?;
     let vs = vm_space_get_mut(vm_space);
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
@@ -280,6 +280,26 @@ pub fn ostd_get_pte_flags_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> Option<
         return None;
     }
     Some(property_to_page_flags(cur.property))
+}
+
+/// Read-side query: is the 4 KiB leaf at `va` mapped AND
+/// user-accessible? Mirrors `paging_is_user_accessible`'s semantics —
+/// kernel-half pages (USER bit clear) return `false` even though
+/// they're mapped.
+pub fn ostd_is_user_accessible_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> bool {
+    let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
+    let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let cursor = match vm_space.cursor(range) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let cur = match cursor.query() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    cur.paddr.is_some()
+        && cur.level == slopos_ostd::mm::page_table::PageTableLevel::One
+        && cur.property.user
 }
 
 /// Read-side query: return the physical address backing the 4 KiB
