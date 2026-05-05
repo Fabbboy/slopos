@@ -73,6 +73,22 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
     );
 }
 
+fn boot_step_register_luf_hook_fn(_ctx: &mut BootCtx) {
+    // Memory phase priority 56 — runs after KERNEL_VM_SPACE is installed
+    // (priority 55) and before any per-process VmSpace cursor mutation
+    // can occur (those happen via `create_process_vm`, which is far
+    // post-boot). Installing the hook now means every subsequent
+    // `CursorMut::unmap` over a USER-flagged leaf and every
+    // `VmSpace::activate` routes into slopos-mm's LUF.
+    //
+    // SAFETY: one-shot install; OSTD's `register_cursor_unmap_hook`
+    // asserts on double-call.
+    unsafe {
+        slopos_mm::mmu::luf_hook::register_with_ostd();
+    }
+    klog_info!("OSTD: cursor_unmap_hook registered (LufHook)");
+}
+
 fn boot_step_memory_init(_ctx: &mut BootCtx) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -166,4 +182,11 @@ crate::boot_init!(
     b"ostd kernel_vm_space\0",
     boot_step_install_kernel_vm_space_fn,
     flags = boot_init_priority(55)
+);
+crate::boot_init!(
+    BOOT_STEP_REGISTER_LUF_HOOK,
+    memory,
+    b"ostd cursor_unmap_hook\0",
+    boot_step_register_luf_hook_fn,
+    flags = boot_init_priority(56)
 );

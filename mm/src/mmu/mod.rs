@@ -16,6 +16,7 @@ pub mod cr3;
 pub mod errata;
 pub mod kpti;
 pub mod luf;
+pub mod luf_hook;
 pub mod mapping;
 pub mod rar;
 pub mod shootdown;
