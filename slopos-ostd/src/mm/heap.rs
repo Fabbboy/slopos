@@ -687,6 +687,26 @@ impl<T> KArc<T> {
     }
 }
 
+impl<T: ?Sized> KArc<T> {
+    /// Returns a mutable reference to the inner value, iff this is
+    /// the only `KArc` pointing at it. Mirrors [`alloc::sync::Arc::get_mut`].
+    ///
+    /// Returns `None` when the strong or weak ref-count exceeds one,
+    /// because handing out `&mut T` while another clone exists would
+    /// alias the inner value.
+    #[inline]
+    pub fn get_mut(this: &mut Self) -> Option<&mut T> {
+        Arc::get_mut(&mut this.inner)
+    }
+
+    /// Strong reference count. Useful for invariant assertions in
+    /// callers that rely on sole ownership for `get_mut` to succeed.
+    #[inline]
+    pub fn strong_count(this: &Self) -> usize {
+        Arc::strong_count(&this.inner)
+    }
+}
+
 impl<T: ?Sized> Clone for KArc<T> {
     fn clone(&self) -> Self {
         Self {

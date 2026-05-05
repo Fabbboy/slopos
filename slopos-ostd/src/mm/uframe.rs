@@ -144,6 +144,45 @@ fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameErro
 /// ```
 pub struct UFrame<M: AnyUFrameMeta = AnonymousMeta>(Frame<M>);
 
+impl UFrame<AnonymousMeta> {
+    /// Wrap a frame whose underlying physical page is owned by an
+    /// external subsystem — i.e. some other allocator path holds the
+    /// real ref-count. The wrapper's `Drop` will NOT return the page
+    /// to the registered [`FrameAlloc`]; the META_SLOTS slot still
+    /// transitions UNUSED → TYPED → UNUSED across construct + drop,
+    /// but the buddy is left untouched on the way down.
+    ///
+    /// If the META_SLOTS entry for `paddr` is already TYPED (e.g. a
+    /// fork(2) is mapping a page into the child that the parent
+    /// already wrapped), the existing slot's ref-count is bumped via
+    /// [`Frame::from_in_use`] instead — both wrappers share the same
+    /// `static_borrowed = true` policy. Each wrapper's leaked PTE ref
+    /// must be reclaimed via `CursorMut::unmap` when the corresponding
+    /// mapping is torn down.
+    ///
+    /// Used by the framekernel dual-write window: while
+    /// `mm/src/paging` retains ownership of user-half page allocations,
+    /// the OSTD half drives `CursorMut::map` / `unmap` over the same
+    /// paddrs without double-freeing on teardown.
+    pub fn wrap_static(paddr: Paddr) -> Result<Self, FrameError> {
+        match Frame::<AnonymousMeta>::from_unused(
+            paddr,
+            AnonymousMeta {
+                static_borrowed: true,
+            },
+        ) {
+            Ok(frame) => Ok(Self(frame)),
+            Err(FrameError::StateMismatch) => {
+                // Slot already TYPED — another wrap_static call (parent
+                // process during fork, sibling thread, etc.) installed
+                // the meta. Bump the existing slot's ref count.
+                Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
 impl<M: AnyUFrameMeta> UFrame<M> {
     /// Wrap a freshly-allocated, currently-unused physical frame and
     /// install `meta` into its slot. Mirrors

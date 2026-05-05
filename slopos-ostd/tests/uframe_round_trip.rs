@@ -52,20 +52,21 @@ fn setup() -> MutexGuard<'static, ()> {
 #[test]
 fn round_trip_u64_pod() {
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta::default()).unwrap();
     f.write_pod::<u64>(8, 0xdead_beef_cafe_babe).unwrap();
     let v = f.read_pod::<u64>(8).unwrap();
     assert_eq!(v, 0xdead_beef_cafe_babe);
     drop(f);
     // Reset the slot for re-use by other tests addressing the same
     // paddr (each from_unused requires UNUSED → TYPED transition).
-    let _ = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta).unwrap();
+    let _ = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta::default()).unwrap();
 }
 
 #[test]
 fn round_trip_array_pod() {
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x1000), AnonymousMeta).unwrap();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x1000), AnonymousMeta::default()).unwrap();
     let val: [u8; 16] = *b"abcdefghijklmnop";
     f.write_pod(0, val).unwrap();
     assert_eq!(f.read_pod::<[u8; 16]>(0).unwrap(), val);
@@ -74,7 +75,8 @@ fn round_trip_array_pod() {
 #[test]
 fn round_trip_bytes() {
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x2000), AnonymousMeta).unwrap();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x2000), AnonymousMeta::default()).unwrap();
     let src: [u8; 64] = core::array::from_fn(|i| i as u8);
     f.write_bytes(100, &src).unwrap();
     let mut dst = [0u8; 64];
@@ -85,7 +87,8 @@ fn round_trip_bytes() {
 #[test]
 fn out_of_bounds_returns_err() {
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x3000), AnonymousMeta).unwrap();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x3000), AnonymousMeta::default()).unwrap();
     let mut buf = [0u8; 16];
     assert_eq!(f.read_bytes(4090, &mut buf), Err(UFrameError::OutOfBounds));
     assert_eq!(
@@ -97,7 +100,8 @@ fn out_of_bounds_returns_err() {
 #[test]
 fn misaligned_pod_returns_err() {
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x4000), AnonymousMeta).unwrap();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x4000), AnonymousMeta::default()).unwrap();
     assert_eq!(f.read_pod::<u64>(1).unwrap_err(), UFrameError::Misaligned);
     assert_eq!(
         f.write_pod::<u32>(2, 0).unwrap_err(),
@@ -116,7 +120,8 @@ fn round_trip_derive_pod() {
     }
 
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x5000), AnonymousMeta).unwrap();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x5000), AnonymousMeta::default()).unwrap();
     let h = Header {
         magic: 0xfeed_face,
         version: 7,

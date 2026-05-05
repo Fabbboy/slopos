@@ -9,6 +9,9 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
+use crate::dual_paging::{
+    ostd_map_4kb_user, ostd_mark_range_user_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user,
+};
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
@@ -127,6 +130,7 @@ fn vma_range_valid(start: u64, end: u64) -> bool {
 
 fn map_user_range(
     page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
     start_addr: u64,
     end_addr: u64,
     map_flags: u64,
@@ -151,7 +155,7 @@ fn map_user_range(
         let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if phys.is_null() {
             klog_info!("map_user_range: Physical allocation failed");
-            rollback_range(page_dir, current, start_addr, &mut mapped);
+            rollback_range(page_dir, vm_space, current, start_addr, &mut mapped);
             if !pages_mapped_out.is_null() {
                 unsafe { *pages_mapped_out = 0 };
             }
@@ -160,7 +164,21 @@ fn map_user_range(
         if map_page_4kb_in_dir(page_dir, VirtAddr::new(current), phys, map_flags) != 0 {
             klog_info!("map_user_range: Virtual mapping failed");
             free_page_frame(phys);
-            rollback_range(page_dir, current, start_addr, &mut mapped);
+            rollback_range(page_dir, vm_space, current, start_addr, &mut mapped);
+            if !pages_mapped_out.is_null() {
+                unsafe { *pages_mapped_out = 0 };
+            }
+            return -1;
+        }
+        if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(current), phys, map_flags) {
+            klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
+            // Roll back the legacy half we just installed and any
+            // earlier successful pairs.
+            let leaked = unmap_page_in_dir(page_dir, VirtAddr::new(current));
+            if !leaked.is_null() {
+                free_page_frame(leaked);
+            }
+            rollback_range(page_dir, vm_space, current, start_addr, &mut mapped);
             if !pages_mapped_out.is_null() {
                 unsafe { *pages_mapped_out = 0 };
             }
@@ -178,12 +196,17 @@ fn map_user_range(
 
 fn rollback_range(
     page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
     mut current: u64,
     start_addr: u64,
     mapped: &mut u32,
 ) {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
+        // OSTD half first — its leaf-ref drop is a no-op (static
+        // borrowed), so this just clears the PTE and fires the LUF
+        // hook. Legacy half then frees the underlying paddr.
+        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(current));
         let phys = unmap_page_in_dir(page_dir, VirtAddr::new(current));
         if !phys.is_null() {
             free_page_frame(phys);
@@ -193,12 +216,18 @@ fn rollback_range(
     let _ = start_addr;
 }
 
-fn unmap_user_range(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u64) {
+fn unmap_user_range(
+    page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
+    start_addr: u64,
+    end_addr: u64,
+) {
     if end_addr <= start_addr || page_dir.is_null() {
         return;
     }
     let mut addr = start_addr;
     while addr < end_addr {
+        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr));
         let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
         if !phys.is_null() {
             free_page_frame(phys);
@@ -352,14 +381,20 @@ fn prot_to_region(prot: u64) -> VmaRegion {
     }
 }
 
-fn unmap_and_free_range_inner(inner: &ProcessVmInner, start: u64, end: u64) -> u32 {
+fn unmap_and_free_range_inner(inner: &mut ProcessVmInner, start: u64, end: u64) -> u32 {
     if inner.page_dir.is_null() || !vma_range_valid(start, end) {
         return 0;
     }
+    let page_dir = inner.page_dir;
+    let vm_space = inner
+        .vm_space
+        .as_mut()
+        .expect("unmap_and_free_range_inner: vm_space present for live process");
     let mut freed = 0u32;
     let mut addr = start;
     while addr < end {
-        let phys = unmap_page_in_dir(inner.page_dir, VirtAddr::new(addr));
+        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr));
+        let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
         if !phys.is_null() {
             free_page_frame(phys);
             freed += 1;
@@ -442,13 +477,19 @@ fn unmap_range_teardown(tearing: &mut crate::paging::MmTeardownGuard, start: u64
 }
 
 /// Unmap and free pages in a range using a raw page_dir pointer.
-fn unmap_and_free_range_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64) -> u32 {
+fn unmap_and_free_range_dir(
+    page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
+    start: u64,
+    end: u64,
+) -> u32 {
     if page_dir.is_null() || !vma_range_valid(start, end) {
         return 0;
     }
     let mut freed = 0u32;
     let mut addr = start;
     while addr < end {
+        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr));
         let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
         if !phys.is_null() {
             free_page_frame(phys);
@@ -462,13 +503,19 @@ fn unmap_and_free_range_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64)
 /// Unmap pages from a page directory WITHOUT freeing the physical frames.
 /// Used for shared memfd mappings where pages belong to the MemfdObject.
 /// Returns the number of pages unmapped (for total_pages accounting).
-fn unmap_range_nofree_dir(page_dir: *mut ProcessPageDir, start: u64, end: u64) -> u32 {
+fn unmap_range_nofree_dir(
+    page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
+    start: u64,
+    end: u64,
+) -> u32 {
     if page_dir.is_null() || !vma_range_valid(start, end) {
         return 0;
     }
     let mut unmapped = 0u32;
     let mut addr = start;
     while addr < end {
+        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr));
         let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
         if !phys.is_null() {
             // Do NOT free the physical page — it belongs to the memfd.
@@ -848,21 +895,24 @@ fn load_segments_and_tls(
         None => (0, 0, 0, 0, None),
     };
 
-    let page_dir = {
-        let guard = PROCESS_VMS[slot].lock();
-        if guard.process_id != process_id {
-            return Err(ElfError::NullPointer);
-        }
-        let pd = guard.page_dir;
-        if pd.is_null() {
-            return Err(ElfError::NullPointer);
-        }
-        pd
-    };
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return Err(ElfError::NullPointer);
+    }
+    let page_dir = guard.page_dir;
+    if page_dir.is_null() {
+        return Err(ElfError::NullPointer);
+    }
 
     let (min_vaddr, needs_reloc) = calculate_load_offset(segments, code_base);
 
-    unmap_existing_code_region(page_dir, code_base);
+    {
+        let vm_space_ref = guard
+            .vm_space
+            .as_mut()
+            .expect("load_segments_and_tls: vm_space present for live pid");
+        unmap_existing_code_region(page_dir, vm_space_ref, code_base);
+    }
 
     let mut section_mappings = slopos_ostd::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
         .map_err(|_| ElfError::NullPointer)?;
@@ -887,12 +937,30 @@ fn load_segments_and_tls(
             mapping_count += 1;
         }
 
-        let pages = load_segment_pages(page_dir, data, segment, user_start, user_end)?;
+        let vm_space_ref = guard
+            .vm_space
+            .as_mut()
+            .expect("load_segments_and_tls: vm_space present per segment");
+        let pages =
+            load_segment_pages(page_dir, vm_space_ref, data, segment, user_start, user_end)?;
         mapped_pages = mapped_pages.saturating_add(pages);
     }
 
-    let (tls_tp, tls_pages) =
-        setup_tls_block(page_dir, data, tls_offset, tls_filesz, tls_memsz, tls_align)?;
+    let (tls_tp, tls_pages) = {
+        let vm_space_ref = guard
+            .vm_space
+            .as_mut()
+            .expect("load_segments_and_tls: vm_space present for tls");
+        setup_tls_block(
+            page_dir,
+            vm_space_ref,
+            data,
+            tls_offset,
+            tls_filesz,
+            tls_memsz,
+            tls_align,
+        )?
+    };
     mapped_pages = mapped_pages.saturating_add(tls_pages);
 
     if needs_reloc {
@@ -907,10 +975,8 @@ fn load_segments_and_tls(
     let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);
     let phdr_user_addr = compute_phdr_user_addr(header, segments, min_vaddr, code_base);
 
-    {
-        let mut guard = PROCESS_VMS[slot].lock();
-        guard.total_pages = guard.total_pages.saturating_add(mapped_pages);
-    }
+    guard.total_pages = guard.total_pages.saturating_add(mapped_pages);
+    drop(guard);
 
     Ok(crate::elf::ElfExecInfo {
         entry: user_entry,
@@ -970,16 +1036,21 @@ pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u6
     }
 }
 
-fn unmap_existing_code_region(page_dir: *mut ProcessPageDir, code_base: u64) {
+fn unmap_existing_code_region(
+    page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
+    code_base: u64,
+) {
     // Unmap exactly the code region [code_start, data_start).  The old
     // implementation used wrong arithmetic that extended 1 MB below and
     // above the actual region, potentially unmapping unrelated pages.
     let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
-    unmap_user_range(page_dir, code_base, data_start);
+    unmap_user_range(page_dir, vm_space, code_base, data_start);
 }
 
 fn setup_tls_block(
     page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
     elf_data: &[u8],
     tls_offset: Option<u64>,
     tls_filesz: u64,
@@ -1016,11 +1087,12 @@ fn setup_tls_block(
         .checked_add(total_size_aligned)
         .ok_or(ElfError::SegmentSizeOverflow)?;
 
-    unmap_user_range(page_dir, tls_base, tls_end);
+    unmap_user_range(page_dir, vm_space, tls_base, tls_end);
 
     let mut tls_pages = 0u32;
     if map_user_range(
         page_dir,
+        vm_space,
         tls_base,
         tls_end,
         PageFlags::USER_RW.bits(),
@@ -1128,6 +1200,7 @@ fn write_user_u64(
 
 fn load_segment_pages(
     page_dir: *mut ProcessPageDir,
+    vm_space: &mut KArc<VmSpace>,
     data: &[u8],
     segment: &ValidatedSegment,
     user_start: u64,
@@ -1155,6 +1228,12 @@ fn load_segment_pages(
                     VirtAddr::new(dst + PAGE_SIZE_4KB),
                     1,
                 );
+                let _ = ostd_mark_range_user_4kb(
+                    vm_space,
+                    VirtAddr::new(dst),
+                    VirtAddr::new(dst + PAGE_SIZE_4KB),
+                    true,
+                );
             }
             existing_phys
         } else {
@@ -1164,6 +1243,14 @@ fn load_segment_pages(
             }
             if map_page_4kb_in_dir(page_dir, VirtAddr::new(dst), new_phys, map_flags) != 0 {
                 free_page_frame(new_phys);
+                return Err(ElfError::NullPointer);
+            }
+            if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(dst), new_phys, map_flags) {
+                klog_info!("load_segment_pages: OSTD map failed: {:?}", err);
+                let leaked = unmap_page_in_dir(page_dir, VirtAddr::new(dst));
+                if !leaked.is_null() {
+                    free_page_frame(leaked);
+                }
                 return Err(ElfError::NullPointer);
             }
             pages_mapped += 1;
@@ -1409,11 +1496,20 @@ pub fn create_process_vm() -> u32 {
         }
         .to_page_flags();
         let mut stack_pages: u32 = 0;
+        let stack_start = proc.stack_start;
+        let stack_end = proc.stack_end;
+        let stack_flags_bits = stack_page_flags.bits();
+        let page_dir_for_map = proc.page_dir;
+        let vm_space_for_map = proc
+            .vm_space
+            .as_mut()
+            .expect("create_process_vm: vm_space allocated alongside page_dir before stack map");
         if map_user_range(
-            proc.page_dir,
-            proc.stack_start,
-            proc.stack_end,
-            stack_page_flags.bits(),
+            page_dir_for_map,
+            vm_space_for_map,
+            stack_start,
+            stack_end,
+            stack_flags_bits,
             &mut stack_pages,
         ) != 0
         {
@@ -1424,6 +1520,7 @@ pub fn create_process_vm() -> u32 {
                 kfree(page_dir_ptr as *mut _);
             }
             proc.page_dir = ptr::null_mut();
+            proc.vm_space = None;
             proc.process_id = INVALID_PROCESS_ID;
             VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
@@ -1432,8 +1529,14 @@ pub fn create_process_vm() -> u32 {
 
         // Map a single zero page to tolerate benign null accesses in early userland.
         let mut null_pages: u32 = 0;
+        let page_dir_for_null = proc.page_dir;
+        let vm_space_for_null = proc
+            .vm_space
+            .as_mut()
+            .expect("create_process_vm: vm_space still present after stack map");
         if map_user_range(
-            proc.page_dir,
+            page_dir_for_null,
+            vm_space_for_null,
             0,
             PAGE_SIZE_4KB,
             PageFlags::USER_RW.bits(),
@@ -1597,7 +1700,7 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
         return -1;
     }
 
-    let freed = unmap_and_free_range_inner(&proc, start, end);
+    let freed = unmap_and_free_range_inner(&mut *proc, start, end);
 
     proc.vma_map
         .remove_range(start, end, |_overlap_start, _overlap_end, _region| {
@@ -1696,20 +1799,23 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
         Some(s) => s,
         None => return -1,
     };
-    let guard = PROCESS_VMS[slot].lock();
+    let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process_id {
         return -1;
     }
     let page_dir = guard.page_dir;
     let stack_start = guard.stack_start;
     let stack_end = guard.stack_end;
-    drop(guard);
 
     if page_dir.is_null() || stack_end <= stack_start {
         return -1;
     }
 
-    unmap_user_range(page_dir, stack_start, stack_end);
+    let vm_space_ref = guard
+        .vm_space
+        .as_mut()
+        .expect("process_vm_reset_stack: vm_space present for live pid");
+    unmap_user_range(page_dir, vm_space_ref, stack_start, stack_end);
 
     let stack_page_flags = VmaRegion {
         protection: Protection::RW,
@@ -1721,8 +1827,13 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
     }
     .to_page_flags();
     let mut pages: u32 = 0;
+    let vm_space_ref = guard
+        .vm_space
+        .as_mut()
+        .expect("process_vm_reset_stack: vm_space still present after unmap");
     if map_user_range(
         page_dir,
+        vm_space_ref,
         stack_start,
         stack_end,
         stack_page_flags.bits(),
@@ -1777,8 +1888,14 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         }
 
         let mut pages_mapped: u32 = 0;
+        let page_dir_for_brk = proc.page_dir;
+        let vm_space_for_brk = proc
+            .vm_space
+            .as_mut()
+            .expect("process_vm_brk: vm_space present for live pid");
         if map_user_range(
-            proc.page_dir,
+            page_dir_for_brk,
+            vm_space_for_brk,
             start_addr,
             end_addr,
             heap_map_flags,
@@ -1795,7 +1912,7 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         let start_addr = aligned_brk;
         let end_addr = proc.heap_end;
 
-        let freed = unmap_and_free_range_inner(&proc, start_addr, end_addr);
+        let freed = unmap_and_free_range_inner(&mut *proc, start_addr, end_addr);
         proc.vma_map
             .remove_range(start_addr, end_addr, |_, _, _| {});
 
@@ -1967,18 +2084,34 @@ fn process_vm_mmap_inner(
         let end_addr = addr_hint + size;
         let inner = &mut *proc;
         let page_dir = inner.page_dir;
+        let mut vm_space_taken = inner
+            .vm_space
+            .take()
+            .expect("process_vm_mmap MAP_FIXED: vm_space present for live pid");
 
         // Remove all overlapping VMAs in the fixed range.
         inner
             .vma_map
             .remove_range(addr_hint, end_addr, |overlap_start, overlap_end, region| {
                 let freed = if region.is_shared() {
-                    unmap_range_nofree_dir(page_dir, overlap_start, overlap_end)
+                    unmap_range_nofree_dir(
+                        page_dir,
+                        &mut vm_space_taken,
+                        overlap_start,
+                        overlap_end,
+                    )
                 } else {
-                    unmap_and_free_range_dir(page_dir, overlap_start, overlap_end)
+                    unmap_and_free_range_dir(
+                        page_dir,
+                        &mut vm_space_taken,
+                        overlap_start,
+                        overlap_end,
+                    )
                 };
                 inner.total_pages = inner.total_pages.saturating_sub(freed);
             });
+
+        inner.vm_space = Some(vm_space_taken);
 
         addr_hint
     } else {
@@ -2013,6 +2146,10 @@ fn process_vm_mmap_inner(
 
         let inner = &mut *proc;
         let page_dir = inner.page_dir;
+        let vm_space_for_shared = inner
+            .vm_space
+            .as_mut()
+            .expect("process_vm_mmap shared: vm_space present for live pid");
         let page_count = (size / PAGE_SIZE_4KB) as u32;
 
         // Determine PTE flags from protection
@@ -2029,6 +2166,22 @@ fn process_vm_mmap_inner(
                 // Rollback on failure
                 for j in 0..i {
                     let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
+                    let _ = ostd_unmap_4kb_user(vm_space_for_shared, VirtAddr::new(rv));
+                    unmap_page_in_dir(page_dir, VirtAddr::new(rv));
+                }
+                return 0;
+            }
+            if let Err(err) =
+                ostd_map_4kb_user(vm_space_for_shared, VirtAddr::new(vaddr), paddr, pte_flags)
+            {
+                klog_info!("process_vm_mmap shared: OSTD cursor map failed: {:?}", err);
+                let leaked = unmap_page_in_dir(page_dir, VirtAddr::new(vaddr));
+                if !leaked.is_null() {
+                    // Shared frames belong to the memfd — do not free.
+                }
+                for j in 0..i {
+                    let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
+                    let _ = ostd_unmap_4kb_user(vm_space_for_shared, VirtAddr::new(rv));
                     unmap_page_in_dir(page_dir, VirtAddr::new(rv));
                 }
                 return 0;
@@ -2098,6 +2251,11 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
         }
     }
 
+    let mut vm_space_taken = inner
+        .vm_space
+        .take()
+        .expect("process_vm_munmap: vm_space present for live pid");
+
     // Remove range, unmapping pages and handling shared memfd bookkeeping.
     let mut total_freed = 0u32;
     inner
@@ -2105,16 +2263,18 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
         .remove_range(addr, end, |overlap_start, overlap_end, region| {
             let freed = if region.is_shared() {
                 // Shared: unmap PTEs but do NOT free physical pages
-                unmap_range_nofree_dir(page_dir, overlap_start, overlap_end)
+                unmap_range_nofree_dir(page_dir, &mut vm_space_taken, overlap_start, overlap_end)
             } else {
                 // Anonymous: unmap and free as before
-                unmap_and_free_range_dir(page_dir, overlap_start, overlap_end)
+                unmap_and_free_range_dir(page_dir, &mut vm_space_taken, overlap_start, overlap_end)
             };
             total_freed += freed;
             if region.is_shared() && !region.memfd_handle().is_none() {
                 crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
             }
         });
+
+    inner.vm_space = Some(vm_space_taken);
     inner.total_pages = inner.total_pages.saturating_sub(total_freed);
 
     0
@@ -2181,7 +2341,114 @@ pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -
         new_page_flags,
     );
 
+    if let Some(vm_space) = proc.vm_space.as_mut() {
+        let _ = ostd_protect_range_4kb(
+            vm_space,
+            VirtAddr::new(addr),
+            VirtAddr::new(end),
+            new_page_flags,
+        );
+    }
+
     0
+}
+
+/// Per-VMA inner walk for shared (memfd) regions in `process_vm_clone_cow`.
+/// Maps the parent's existing physical pages directly into the child's
+/// page tables (legacy + OSTD halves), inheriting the parent's
+/// permissions verbatim. No COW marker, no ref count bump (memfd owns
+/// the pages). Returns the number of pages mapped, or `Err(())` on the
+/// first failure.
+#[inline(never)]
+fn clone_cow_walk_shared_vma(
+    parent_page_dir: *mut ProcessPageDir,
+    child_page_dir: *mut ProcessPageDir,
+    child_vm_space: &mut KArc<VmSpace>,
+    vma_start: u64,
+    vma_end: u64,
+) -> Result<u32, ()> {
+    let mut cow_pages: u32 = 0;
+    let mut addr = vma_start;
+    while addr < vma_end {
+        let vaddr = VirtAddr::new(addr);
+        let phys = virt_to_phys_in_dir(parent_page_dir, vaddr);
+        if !phys.is_null() {
+            if let Some(flags) = paging_get_pte_flags(parent_page_dir, vaddr) {
+                if map_page_4kb_in_dir(child_page_dir, vaddr, phys, flags.bits()) != 0 {
+                    return Err(());
+                }
+                if let Err(err) = ostd_map_4kb_user(child_vm_space, vaddr, phys, flags.bits()) {
+                    klog_info!("clone_cow shared: OSTD child map failed: {:?}", err);
+                    let _ = unmap_page_in_dir(child_page_dir, vaddr);
+                    return Err(());
+                }
+                cow_pages += 1;
+            }
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    Ok(cow_pages)
+}
+
+/// Per-VMA inner walk for anonymous regions in `process_vm_clone_cow`.
+/// Marks the parent legacy half as COW (parent OSTD half is updated in
+/// the pre-reader-flip sweep — see η.4 plan), bumps the page's
+/// ref-count, and maps the child page table (legacy + OSTD halves) with
+/// `WRITABLE` cleared and the COW marker set. Returns the number of
+/// pages walked, or `Err(())` on first failure.
+#[inline(never)]
+fn clone_cow_walk_anon_vma(
+    parent_page_dir: *mut ProcessPageDir,
+    child_page_dir: *mut ProcessPageDir,
+    child_vm_space: &mut KArc<VmSpace>,
+    vma_start: u64,
+    vma_end: u64,
+) -> Result<u32, ()> {
+    let mut cow_pages: u32 = 0;
+    let mut addr = vma_start;
+    while addr < vma_end {
+        let vaddr = VirtAddr::new(addr);
+        let phys = virt_to_phys_in_dir(parent_page_dir, vaddr);
+
+        if !phys.is_null() {
+            if let Some(flags) = paging_get_pte_flags(parent_page_dir, vaddr) {
+                if !flags.contains(PageFlags::USER) {
+                    addr += PAGE_SIZE_4KB;
+                    continue;
+                }
+
+                if flags.contains(PageFlags::WRITABLE) {
+                    paging_mark_cow(parent_page_dir, vaddr);
+                }
+
+                page_frame_inc_ref(phys);
+
+                let child_flags = (flags.bits() & !PageFlags::WRITABLE.bits())
+                    | PageFlags::COW.bits()
+                    | PageFlags::USER.bits()
+                    | PageFlags::PRESENT.bits();
+
+                if map_page_4kb_in_dir(child_page_dir, vaddr, phys, child_flags) != 0 {
+                    klog_info!("process_vm_clone_cow: Failed to map page {:#x}", addr);
+                    free_page_frame(phys);
+                    return Err(());
+                }
+                if let Err(err) = ostd_map_4kb_user(child_vm_space, vaddr, phys, child_flags) {
+                    klog_info!("clone_cow anon: OSTD child map failed: {:?}", err);
+                    let leaked = unmap_page_in_dir(child_page_dir, vaddr);
+                    if !leaked.is_null() {
+                        free_page_frame(leaked);
+                    }
+                    return Err(());
+                }
+
+                cow_pages += 1;
+            }
+        }
+
+        addr += PAGE_SIZE_4KB;
+    }
+    Ok(cow_pages)
 }
 
 /// Clone address space with COW for fork(). Returns child PID or INVALID_PROCESS_ID.
@@ -2370,70 +2637,46 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
             child.vma_map.insert(vma_start, vma_end, child_region);
 
-            if is_shared_vma {
-                // Shared memfd: map same physical pages directly, no COW
-                let mut addr = vma_start;
-                while addr < vma_end {
-                    let vaddr = VirtAddr::new(addr);
-                    let phys = virt_to_phys_in_dir(parent_page_dir, vaddr);
-                    if !phys.is_null() {
-                        let flags_opt = paging_get_pte_flags(parent_page_dir, vaddr);
-                        if let Some(flags) = flags_opt {
-                            // Map with same permissions -- no COW, no ref_count
-                            // (pages belong to the memfd, not to processes)
-                            if map_page_4kb_in_dir(child_page_dir, vaddr, phys, flags.bits()) != 0 {
-                                clone_failed = true;
-                                break;
-                            }
-                            cow_pages += 1;
-                        }
-                    }
-                    addr += PAGE_SIZE_4KB;
+            // Pull a mutable handle to the child's OSTD VmSpace once per
+            // VMA. The child slot lock above is the sole owner of the
+            // KArc, so KArc::get_mut succeeds. Parent-side OSTD mark_cow
+            // is deferred to the pre-reader-flip sweep — see η.4 plan.
+            let child_vm_space_for_vma = child
+                .vm_space
+                .as_mut()
+                .expect("clone_cow: child vm_space populated above");
+
+            let walked = if is_shared_vma {
+                clone_cow_walk_shared_vma(
+                    parent_page_dir,
+                    child_page_dir,
+                    child_vm_space_for_vma,
+                    vma_start,
+                    vma_end,
+                )
+            } else {
+                clone_cow_walk_anon_vma(
+                    parent_page_dir,
+                    child_page_dir,
+                    child_vm_space_for_vma,
+                    vma_start,
+                    vma_end,
+                )
+            };
+
+            match walked {
+                Ok(n) => cow_pages += n,
+                Err(()) => {
+                    clone_failed = true;
                 }
+            }
+
+            if is_shared_vma && !clone_failed {
                 // Increment memfd map_count for the child's mapping
                 let memfd_handle = parent_region.memfd_handle();
                 if !memfd_handle.is_none() {
                     crate::memfd::memfd_inc_mapcount(memfd_handle.as_usize());
                 }
-                continue;
-            }
-
-            let mut addr = vma_start;
-            while addr < vma_end {
-                let vaddr = VirtAddr::new(addr);
-                let phys = virt_to_phys_in_dir(parent_page_dir, vaddr);
-
-                if !phys.is_null() {
-                    let flags_opt = paging_get_pte_flags(parent_page_dir, vaddr);
-                    if let Some(flags) = flags_opt {
-                        if !flags.contains(PageFlags::USER) {
-                            addr += PAGE_SIZE_4KB;
-                            continue;
-                        }
-
-                        if flags.contains(PageFlags::WRITABLE) {
-                            paging_mark_cow(parent_page_dir, vaddr);
-                        }
-
-                        page_frame_inc_ref(phys);
-
-                        let child_flags = (flags.bits() & !PageFlags::WRITABLE.bits())
-                            | PageFlags::COW.bits()
-                            | PageFlags::USER.bits()
-                            | PageFlags::PRESENT.bits();
-
-                        if map_page_4kb_in_dir(child_page_dir, vaddr, phys, child_flags) != 0 {
-                            klog_info!("process_vm_clone_cow: Failed to map page {:#x}", addr);
-                            free_page_frame(phys);
-                            clone_failed = true;
-                            break;
-                        }
-
-                        cow_pages += 1;
-                    }
-                }
-
-                addr += PAGE_SIZE_4KB;
             }
 
             if clone_failed {

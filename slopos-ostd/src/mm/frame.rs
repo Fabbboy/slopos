@@ -223,17 +223,28 @@ unsafe impl AnyFrameMeta for PageTableMeta {
 }
 const _: () = assert_meta_fits::<PageTableMeta>();
 
-/// Untyped anonymous frame metadata. Returns its physical frame to
-/// the registered [`FrameAlloc`] on `Drop`.
+/// Untyped anonymous frame metadata. By default returns its physical
+/// frame to the registered [`FrameAlloc`] on `Drop`. The
+/// `static_borrowed` flag mirrors [`PageTableMeta::static_borrowed`]
+/// for the case where another subsystem owns the underlying frame
+/// (e.g. the legacy `mm/src/paging` allocator during the framekernel
+/// dual-write window) and OSTD's leaf-mapped reference must not
+/// dealloc on Drop.
 #[derive(Default)]
-pub struct AnonymousMeta;
+pub struct AnonymousMeta {
+    pub static_borrowed: bool,
+}
 
-// SAFETY: ZST has no representation invariants. `on_drop` returns
-// the underlying physical frame to the allocator — required so
-// `UFrame<AnonymousMeta>` does not leak the page on its last Drop.
+// SAFETY: plain data; no representation invariants. `on_drop`
+// returns the underlying physical frame to the allocator unless
+// `static_borrowed` is set — required so `UFrame<AnonymousMeta>`
+// does not leak the page on its last Drop in the default case, and
+// does not dealloc twice when the consumer is the page's true owner.
 unsafe impl AnyFrameMeta for AnonymousMeta {
     fn on_drop(&mut self, paddr: Paddr) {
-        return_frame_to_allocator(paddr);
+        if !self.static_borrowed {
+            return_frame_to_allocator(paddr);
+        }
     }
 }
 const _: () = assert_meta_fits::<AnonymousMeta>();

@@ -90,7 +90,7 @@ fn fresh_user_frame() -> UFrame<AnonymousMeta> {
     let paddr = BUMP_ALLOC
         .alloc(FrameAllocOptions::single().zeroed())
         .expect("test arena exhausted");
-    UFrame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta).unwrap()
+    UFrame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default()).unwrap()
 }
 
 fn ctx_with_arg0(arg0: u64) -> UserContext {

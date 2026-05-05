@@ -126,7 +126,7 @@ fn fresh_user_frame() -> UFrame<AnonymousMeta> {
     let paddr = BUMP_ALLOC
         .alloc(FrameAllocOptions::single().zeroed())
         .expect("test arena exhausted");
-    UFrame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta).unwrap()
+    UFrame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default()).unwrap()
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn map_then_unmap_returns_uframe() {
 
     // After drop, the slot transitions to UNUSED — proven by being
     // able to re-install at the same paddr.
-    let _ = UFrame::<AnonymousMeta>::from_unused(frame_paddr, AnonymousMeta).unwrap();
+    let _ = UFrame::<AnonymousMeta>::from_unused(frame_paddr, AnonymousMeta::default()).unwrap();
 }
 
 #[test]
@@ -380,7 +380,8 @@ fn map_2mb_round_trip_via_cursor() {
     let vaddr_end = VirtAddr::new(0x0000_0002_0040_0000);
 
     let huge_paddr = alloc_2mb_aligned_paddr();
-    let huge_uframe = UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta).unwrap();
+    let huge_uframe =
+        UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta::default()).unwrap();
 
     {
         let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
@@ -406,7 +407,8 @@ fn map_2mb_unaligned_cursor_rejected() {
     let vaddr_end = VirtAddr::new(0x0000_0002_0060_1000);
 
     let huge_paddr = alloc_2mb_aligned_paddr();
-    let huge_uframe = UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta).unwrap();
+    let huge_uframe =
+        UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta::default()).unwrap();
 
     let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
     let err = cur.map::<Size2Mb, _>(huge_uframe, PageProperty::USER_RW);
@@ -422,7 +424,8 @@ fn unmap_size_mismatch_returns_err() {
 
     // Install a 2 MiB leaf, then try to 4 KiB unmap it — must error.
     let huge_paddr = alloc_2mb_aligned_paddr();
-    let huge_uframe = UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta).unwrap();
+    let huge_uframe =
+        UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta::default()).unwrap();
     {
         let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
         cur.map::<Size2Mb, _>(huge_uframe, PageProperty::USER_RW)
@@ -442,7 +445,8 @@ fn protect_2mb_leaf_rewrites_flags() {
     let vaddr_end = VirtAddr::new(0x0000_0002_0120_0000);
 
     let huge_paddr = alloc_2mb_aligned_paddr();
-    let huge_uframe = UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta).unwrap();
+    let huge_uframe =
+        UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta::default()).unwrap();
     {
         let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
         cur.map::<Size2Mb, _>(huge_uframe, PageProperty::USER_RW)
