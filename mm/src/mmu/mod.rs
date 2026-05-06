@@ -24,8 +24,5 @@ pub mod shootdown;
 pub use mapping::{KernelMapping, unmap_kernel_page_free};
 pub use rar::{IntelRar, ShootdownBackend, SoftwareIpi, backend as shootdown_backend};
 
-pub use asid::{
-    DYN_ASIDS_PER_CPU, flush_pcid, forget_context_local, init_ap, init_bsp, invpcid_available,
-    pcid_enabled, select_cr3,
-};
-pub use cr3::{Cr3Value, MmContextId, Pcid, alloc_mm_context_id, read_cr3_value, write_cr3_value};
+pub use asid::{init_ap, init_bsp};
+pub use cr3::{MmContextId, Pcid, alloc_mm_context_id, read_cr3_value};

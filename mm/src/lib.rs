@@ -12,6 +12,7 @@ pub mod frame_alloc_shim;
 pub mod hhdm;
 pub mod io_mem_mapper_shim;
 pub mod kernel_heap;
+pub mod kernel_mappings;
 pub mod kernel_meta;
 pub mod memfd;
 pub mod memory_init;

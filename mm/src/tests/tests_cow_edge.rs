@@ -3,16 +3,16 @@ use slopos_testing::{assert_test, fail, pass};
 use slopos_utils::klog_info;
 
 use crate::cow::is_cow_fault;
+use crate::dual_paging::ostd_map_4kb_user;
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
-use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_get_ref, page_frame_inc_ref,
-};
-use crate::paging::{paging_is_cow, paging_mark_cow, virt_to_phys_in_dir};
+use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
-use crate::process_vm::process_vm_clone_cow;
+use crate::process_vm::{process_vm_clone_cow, process_vm_with_dual_paging};
 use crate::tests::test_fixtures::ProcessVmGuard;
+use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
+use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr, reference_count_at};
 
 pub fn test_cow_read_not_cow_fault() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
@@ -23,13 +23,13 @@ pub fn test_cow_read_not_cow_fault() -> TestResult {
         return fail!("map test page");
     };
 
-    paging_mark_cow(vm.page_dir, slopos_abi::addr::VirtAddr::new(0x2000));
+    vm.mark_cow(0x2000);
 
     let error_code_read: u64 = 0x05;
-    assert_test!(
-        !is_cow_fault(error_code_read, vm.page_dir, 0x2000),
-        "is_cow_fault returned true for read access"
-    );
+    let cow_fault =
+        process_vm_with_dual_paging(vm.pid, |_pd, vs| is_cow_fault(error_code_read, vs, 0x2000))
+            .unwrap_or(false);
+    assert_test!(!cow_fault, "is_cow_fault returned true for read access");
 
     pass!()
 }
@@ -42,8 +42,12 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
     let unmapped_addr: u64 = 0x5000_0000;
     let error_code: u64 = 0x02;
 
+    let cow_fault = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+        is_cow_fault(error_code, vs, unmapped_addr)
+    })
+    .unwrap_or(false);
     assert_test!(
-        !is_cow_fault(error_code, vm.page_dir, unmapped_addr),
+        !cow_fault,
         "is_cow_fault returned true for not-present page"
     );
 
@@ -51,13 +55,8 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
 }
 
 pub fn test_cow_handle_null_pagedir() -> TestResult {
-    // After the framekernel migration, `cow::handle_cow_fault` is only
-    // reachable via `process_vm::process_vm_with_dual_paging`, which
-    // filters out null `page_dir`. The defensive null-check inside
-    // `handle_cow_fault` is exercised by test infra constructing a
-    // process whose page_dir is never wired (impossible via public API)
-    // — so instead verify that the public dispatcher returns `None` for
-    // an unknown PID, the failure path callers actually hit.
+    // Public dispatcher returns `None` for an unknown PID — that's the
+    // failure path callers actually hit post-framekernel.
     let result = crate::process_vm::process_vm_with_dual_paging(INVALID_PROCESS_ID, |_, _| ());
     if result.is_some() {
         return fail!("process_vm_with_dual_paging returned Some for INVALID_PROCESS_ID");
@@ -82,8 +81,6 @@ pub fn test_cow_handle_not_cow_page() -> TestResult {
 }
 
 pub fn test_cow_single_ref_upgrade() -> TestResult {
-    use slopos_abi::addr::VirtAddr;
-
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
@@ -92,16 +89,16 @@ pub fn test_cow_single_ref_upgrade() -> TestResult {
         return fail!("map test page");
     };
 
-    paging_mark_cow(vm.page_dir, VirtAddr::new(0x4000));
+    vm.mark_cow(0x4000);
 
-    let ref_before = page_frame_get_ref(phys);
-    assert_test!(ref_before == 1, "initial refcount should be 1");
+    let ref_before = reference_count_at(Paddr::new(phys.as_u64()));
+    assert_test!(ref_before == 1, "initial META_SLOTS refcount should be 1");
 
     if let Err(e) = vm.handle_cow_fault(0x4000) {
         return fail!("single-ref COW failed: {:?}", e);
     }
 
-    let phys_after = virt_to_phys_in_dir(vm.page_dir, VirtAddr::new(0x4000));
+    let phys_after = vm.virt_to_phys(0x4000);
     if phys_after != phys {
         klog_info!(
             "COW_TEST: Single-ref COW copied page unnecessarily! {:#x} -> {:#x}",
@@ -110,17 +107,12 @@ pub fn test_cow_single_ref_upgrade() -> TestResult {
         );
     }
 
-    assert_test!(
-        !paging_is_cow(vm.page_dir, VirtAddr::new(0x4000)),
-        "page still marked COW after resolution"
-    );
+    assert_test!(!vm.is_cow(0x4000), "page still marked COW after resolution");
 
     pass!()
 }
 
 pub fn test_cow_multi_ref_copy() -> TestResult {
-    use slopos_abi::addr::VirtAddr;
-
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
@@ -137,21 +129,28 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
         }
     }
 
-    paging_mark_cow(vm.page_dir, VirtAddr::new(test_addr));
+    vm.mark_cow(test_addr);
 
-    page_frame_inc_ref(phys);
-    page_frame_inc_ref(phys);
+    // Bump META_SLOTS refcount directly via OSTD's `Frame::from_in_use`
+    // — equivalent to two extra processes mapping the same paddr.
+    // Hold the extra refs in a scope so they drop together below.
+    let extra1 = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
+        .expect("from_in_use 1 for COW multi-ref test");
+    let extra2 = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
+        .expect("from_in_use 2 for COW multi-ref test");
 
-    let ref_before = page_frame_get_ref(phys);
-    if ref_before != 3 {
-        klog_info!("COW_TEST: Expected refcount 3, got {}", ref_before);
+    let ref_before = reference_count_at(Paddr::new(phys.as_u64()));
+    if ref_before < 3 {
+        klog_info!("COW_TEST: Expected refcount >=3, got {}", ref_before);
     }
 
     if let Err(e) = vm.handle_cow_fault(test_addr) {
+        drop(extra1);
+        drop(extra2);
         return fail!("multi-ref COW failed: {:?}", e);
     }
 
-    let phys_after = virt_to_phys_in_dir(vm.page_dir, VirtAddr::new(test_addr));
+    let phys_after = vm.virt_to_phys(test_addr);
     assert_test!(phys_after != phys, "multi-ref COW didn't copy page");
 
     if let Some(virt) = phys_after.to_virt_checked() {
@@ -170,19 +169,16 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
         }
     }
 
-    let ref_after = page_frame_get_ref(phys);
+    let ref_after = reference_count_at(Paddr::new(phys.as_u64()));
     assert_test!(ref_after < ref_before, "old page refcount didn't decrement");
 
-    for _ in 0..ref_after {
-        free_page_frame(phys);
-    }
+    drop(extra1);
+    drop(extra2);
 
     pass!()
 }
 
 pub fn test_cow_page_boundary() -> TestResult {
-    use slopos_abi::addr::VirtAddr;
-
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
@@ -192,7 +188,7 @@ pub fn test_cow_page_boundary() -> TestResult {
         return fail!("map test page");
     };
 
-    paging_mark_cow(vm.page_dir, VirtAddr::new(page_start));
+    vm.mark_cow(page_start);
 
     let fault_addr = page_start + PAGE_SIZE_4KB - 1;
     if let Err(e) = vm.handle_cow_fault(fault_addr) {
@@ -204,7 +200,6 @@ pub fn test_cow_page_boundary() -> TestResult {
 
 pub fn test_cow_clone_modify_both() -> TestResult {
     use crate::process_vm::process_vm_alloc;
-    use slopos_abi::addr::VirtAddr;
 
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
@@ -228,24 +223,24 @@ pub fn test_cow_clone_modify_both() -> TestResult {
         return fail!("COW clone failed");
     };
 
-    if paging_is_cow(parent.page_dir, VirtAddr::new(test_addr)) {
+    if parent.is_cow(test_addr) {
         if let Err(e) = parent.handle_cow_fault(test_addr) {
             return fail!("parent COW resolution failed: {:?}", e);
         }
     }
 
-    let parent_phys = virt_to_phys_in_dir(parent.page_dir, VirtAddr::new(test_addr));
+    let parent_phys = parent.virt_to_phys(test_addr);
     if let Some(virt) = parent_phys.to_virt_checked() {
         unsafe { *virt.as_mut_ptr::<u8>() = 0xBB };
     }
 
-    if paging_is_cow(child.page_dir, VirtAddr::new(test_addr)) {
+    if child.is_cow(test_addr) {
         if let Err(e) = child.handle_cow_fault(test_addr) {
             return fail!("child COW resolution failed: {:?}", e);
         }
     }
 
-    let child_phys = virt_to_phys_in_dir(child.page_dir, VirtAddr::new(test_addr));
+    let child_phys = child.virt_to_phys(test_addr);
     if let Some(virt) = child_phys.to_virt_checked() {
         unsafe { *virt.as_mut_ptr::<u8>() = 0xCC };
     }
@@ -293,8 +288,6 @@ pub fn test_cow_multiple_clones() -> TestResult {
 }
 
 pub fn test_cow_no_collateral_damage() -> TestResult {
-    use slopos_abi::addr::VirtAddr;
-
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
@@ -322,38 +315,30 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
         unsafe { core::ptr::write_bytes(v2.as_mut_ptr::<u8>(), 0x22, PAGE_SIZE_4KB as usize) };
     }
 
-    use crate::paging::map_page_4kb_in_dir;
-
-    if map_page_4kb_in_dir(
-        vm.page_dir,
-        VirtAddr::new(addr1),
-        phys1,
-        PageFlags::USER_RO.bits(),
-    ) != 0
-    {
+    let map_addr1 = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+        ostd_map_4kb_user(vs, VirtAddr::new(addr1), phys1, PageFlags::USER_RO.bits())
+    });
+    if !matches!(map_addr1, Some(Ok(()))) {
         free_page_frame(phys1);
         free_page_frame(phys2);
         return fail!("map page 1");
     }
-    if map_page_4kb_in_dir(
-        vm.page_dir,
-        VirtAddr::new(addr2),
-        phys2,
-        PageFlags::USER_RO.bits(),
-    ) != 0
-    {
+    let map_addr2 = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+        ostd_map_4kb_user(vs, VirtAddr::new(addr2), phys2, PageFlags::USER_RO.bits())
+    });
+    if !matches!(map_addr2, Some(Ok(()))) {
         free_page_frame(phys2);
         return fail!("map page 2");
     }
 
-    paging_mark_cow(vm.page_dir, VirtAddr::new(addr1));
-    paging_mark_cow(vm.page_dir, VirtAddr::new(addr2));
+    vm.mark_cow(addr1);
+    vm.mark_cow(addr2);
 
     if let Err(e) = vm.handle_cow_fault(addr1) {
         return fail!("first page COW failed: {:?}", e);
     }
 
-    let phys2_after = virt_to_phys_in_dir(vm.page_dir, VirtAddr::new(addr2));
+    let phys2_after = vm.virt_to_phys(addr2);
     assert_test!(phys2_after == phys2, "second page physical address changed");
 
     if let Some(v2) = phys2_after.to_virt_checked() {

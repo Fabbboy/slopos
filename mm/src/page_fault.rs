@@ -14,12 +14,16 @@ pub fn try_resolve_user_fault(
         return false;
     }
 
-    let page_dir = process_vm::process_vm_get_page_dir(process_id);
-    if page_dir.is_null() || (page_dir as u64) < 0xffff_8000_0000_0000 {
-        return false;
-    }
+    // Quick path: probe COW status WITHOUT taking the per-process lock
+    // for write — the read-only `&KArc<VmSpace>` deref + cursor query
+    // does the job. If the address isn't COW we fall through to the
+    // demand-fault check.
+    let is_cow = process_vm::process_vm_with_dual_paging(process_id, |_pd, vs| {
+        cow::is_cow_fault(error_code, vs, fault_addr)
+    })
+    .unwrap_or(false);
 
-    if cow::is_cow_fault(error_code, page_dir, fault_addr) {
+    if is_cow {
         klog_debug!(
             "PF: COW fault task {} (pid {}) at cr2=0x{:x} err=0x{:x}",
             task_id,
@@ -27,8 +31,8 @@ pub fn try_resolve_user_fault(
             fault_addr,
             error_code
         );
-        let result = process_vm::process_vm_with_dual_paging(process_id, |pd, vs| {
-            cow::handle_cow_fault(pd, vs, fault_addr)
+        let result = process_vm::process_vm_with_dual_paging(process_id, |_pd, vs| {
+            cow::handle_cow_fault(vs, fault_addr)
         });
 
         match result {
@@ -54,8 +58,8 @@ pub fn try_resolve_user_fault(
         let result = process_vm::process_vm_with_dual_paging_and_region(
             process_id,
             fault_addr,
-            |pd, vs, region| {
-                demand::handle_demand_fault(pd, vs, process_id, fault_addr, error_code, &region)
+            |_pd, vs, region| {
+                demand::handle_demand_fault(vs, process_id, fault_addr, error_code, &region)
             },
         );
         if matches!(result, Some(Ok(()))) {

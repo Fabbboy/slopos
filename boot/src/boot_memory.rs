@@ -63,9 +63,15 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
     // Force the TLB to re-walk and re-tag kernel entries as global.
     // Intel SDM §4.10.2.4: the CPU may have cached kernel entries
     // before the GLOBAL bit was set; a CR3 reload drops those
-    // non-global entries. Writing the same PML4 value back is
-    // architecturally defined to invalidate non-global entries.
-    slopos_mm::mmu::write_cr3_value(slopos_mm::mmu::read_cr3_value());
+    // non-global entries. `VmSpace::activate` writes CR3 and is the
+    // sanctioned post-framekernel CR3 entry point.
+    // SAFETY: irqs are off in this boot step; KERNEL_VM_SPACE was
+    // installed two lines above; kernel-half invariant holds.
+    unsafe {
+        slopos_kernel_services::kernel_vm_space::kernel_vm_space()
+            .lock()
+            .activate();
+    }
 
     klog_info!(
         "OSTD: KERNEL_VM_SPACE installed (pml4_phys=0x{:x}, pcid=0)",

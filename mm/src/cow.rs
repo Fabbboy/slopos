@@ -2,67 +2,58 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
+use slopos_ostd::mm::frame::{Paddr, reference_count_at};
 use slopos_ostd::mm::vm_space::VmSpace;
 
-use crate::dual_paging::{ostd_map_4kb_user, ostd_resolve_cow_4kb, ostd_unmap_4kb_user};
+use crate::dual_paging::{
+    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_resolve_cow_4kb, ostd_unmap_4kb_user,
+    ostd_virt_to_phys_4kb,
+};
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_get_ref};
-use crate::paging::{
-    ProcessPageDir, map_page_4kb_in_dir, paging_is_cow, paging_resolve_cow, virt_to_phys_in_dir,
-};
+use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 
-pub fn handle_cow_fault(
-    page_dir: *mut ProcessPageDir,
-    vm_space: &mut KArc<VmSpace>,
-    fault_addr: u64,
-) -> Result<(), MmError> {
-    if page_dir.is_null() {
-        return Err(MmError::NullPageDir);
-    }
-
+pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result<(), MmError> {
     let vaddr = VirtAddr::new(fault_addr);
     let aligned_vaddr = VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1));
 
-    if !paging_is_cow(page_dir, vaddr) {
-        return Err(MmError::NotCowPage);
-    }
+    let flags = match ostd_get_pte_flags_4kb(vm_space, vaddr) {
+        Some(f) if f.contains(PageFlags::COW) => f,
+        _ => return Err(MmError::NotCowPage),
+    };
+    let _ = flags;
 
-    let old_phys = virt_to_phys_in_dir(page_dir, aligned_vaddr);
+    let old_phys = ostd_virt_to_phys_4kb(vm_space, aligned_vaddr);
     if old_phys.is_null() {
         return Err(MmError::InvalidAddress);
     }
 
-    let ref_count = page_frame_get_ref(old_phys);
+    let ref_count = reference_count_at(Paddr::new(old_phys.as_u64() & !(PAGE_SIZE_4KB - 1)));
 
     if ref_count <= 1 {
-        return resolve_single_ref(page_dir, vm_space, aligned_vaddr);
+        return resolve_single_ref(vm_space, aligned_vaddr);
     }
 
-    resolve_multi_ref(page_dir, vm_space, aligned_vaddr, old_phys)
+    resolve_multi_ref(vm_space, aligned_vaddr, old_phys)
 }
 
 fn resolve_single_ref(
-    page_dir: *mut ProcessPageDir,
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
 ) -> Result<(), MmError> {
-    // Sole owner: just flip PTE flags in-place (remove COW, add WRITABLE).
-    // Do NOT use map_page_4kb_in_dir here — it would free the page we're remapping.
-    if paging_resolve_cow(page_dir, aligned_vaddr) != 0 {
+    // Sole owner: just flip PTE flags in-place (clear COW software bit,
+    // set WRITABLE). `ostd_resolve_cow_4kb` does that atomically through
+    // the cursor's `protect::<Size4Kb>` and never disturbs the backing
+    // frame.
+    if !ostd_resolve_cow_4kb(vm_space, aligned_vaddr).map_err(|_| MmError::MappingFailed)? {
         return Err(MmError::MappingFailed);
     }
-    // Dual-write: mirror the resolve into the OSTD VmSpace's parallel
-    // PTE. ostd_resolve_cow_4kb is best-effort during the dual-write
-    // window — the legacy half is the load-bearing CR3 source.
-    let _ = ostd_resolve_cow_4kb(vm_space, aligned_vaddr);
     Ok(())
 }
 
 fn resolve_multi_ref(
-    page_dir: *mut ProcessPageDir,
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
@@ -90,20 +81,15 @@ fn resolve_multi_ref(
 
     let new_flags = PageFlags::USER_RW;
 
-    // map_page_4kb_in_dir replaces the old PTE and frees old_phys (decrementing
-    // its refcount). Do NOT call free_page_frame(old_phys) again — that would
-    // double-decrement, freeing a page the other process still maps.
-    if map_page_4kb_in_dir(page_dir, aligned_vaddr, new_phys, new_flags.bits()) != 0 {
-        free_page_frame(new_phys);
-        return Err(MmError::MappingFailed);
-    }
-
-    // Dual-write: replace the OSTD PTE too. Unmap first (the previous
-    // wrap_static UFrame's static_borrowed=true Drop is a no-op so the
-    // buddy-side accounting is unaffected) then re-map the fresh page.
+    // Drop the old mapping (decrements META_SLOTS for `old_phys`; if
+    // this was the last reference the OSTD allocator path frees it,
+    // otherwise other processes still hold their own mappings) and
+    // install the freshly-allocated copy.
     let _ = ostd_unmap_4kb_user(vm_space, aligned_vaddr);
     if let Err(err) = ostd_map_4kb_user(vm_space, aligned_vaddr, new_phys, new_flags.bits()) {
         slopos_utils::klog_info!("cow::resolve_multi_ref: OSTD remap failed: {:?}", err);
+        free_page_frame(new_phys);
+        return Err(MmError::MappingFailed);
     }
 
     tlb::flush_page(aligned_vaddr);
@@ -111,7 +97,7 @@ fn resolve_multi_ref(
     Ok(())
 }
 
-pub fn is_cow_fault(error_code: u64, page_dir: *mut ProcessPageDir, fault_addr: u64) -> bool {
+pub fn is_cow_fault(error_code: u64, vm_space: &KArc<VmSpace>, fault_addr: u64) -> bool {
     let is_write = (error_code & 0x02) != 0;
     let is_present = (error_code & 0x01) != 0;
 
@@ -119,5 +105,6 @@ pub fn is_cow_fault(error_code: u64, page_dir: *mut ProcessPageDir, fault_addr: 
         return false;
     }
 
-    paging_is_cow(page_dir, VirtAddr::new(fault_addr))
+    ostd_get_pte_flags_4kb(vm_space, VirtAddr::new(fault_addr))
+        .map_or(false, |f| f.contains(PageFlags::COW))
 }

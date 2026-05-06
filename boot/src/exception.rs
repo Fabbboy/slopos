@@ -1,11 +1,11 @@
 use core::ffi::c_char;
 
-use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::task::TaskFaultReason;
 use slopos_arch::InterruptFrame;
 use slopos_arch::cpu;
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::{paging, process_vm};
+use slopos_mm::process_vm;
 use slopos_utils::string::cstr_to_str;
 use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
 
@@ -216,12 +216,11 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
             ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rip));
             ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rsp));
         }
-        let dir = process_vm::process_vm_get_page_dir(pid);
-        if !dir.is_null() {
-            cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
-            fault_phys = paging::virt_to_phys_process(VirtAddr::new(fault_addr), dir);
-            rsp_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rsp), dir);
-            rip_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rip), dir);
+        cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
+        if cr3 != 0 {
+            fault_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, fault_addr));
+            rsp_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rsp));
+            rip_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rip));
         }
     }
 

@@ -17,9 +17,7 @@ use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
     get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
 };
-use crate::paging::{
-    paging_get_kernel_directory, paging_is_cow, paging_is_user_accessible, virt_to_phys,
-};
+use crate::paging::virt_to_phys;
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::get_process_vm_stats;
 
@@ -612,34 +610,61 @@ pub fn test_paging_virt_to_phys() -> TestResult {
     pass!()
 }
 
-/// Test 2: Kernel directory retrieval
+/// Test 2: Kernel directory retrieval — `KERNEL_VM_SPACE` singleton
+/// is wrapping the live kernel-master PML4 by the time tests run.
 pub fn test_paging_get_kernel_dir() -> TestResult {
-    let kernel_dir = paging_get_kernel_directory();
-    assert_not_null!(kernel_dir, "kernel directory");
+    let installed = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space().is_some();
+    assert_test!(installed, "kernel_vm_space not installed");
     pass!()
 }
 
-/// Test 3: User accessible check on kernel page (should fail)
+/// Test 3: User accessible check on kernel page (should fail).
+/// The OSTD cursor's `query` over a kernel-half VA returns a
+/// `PageProperty` with `user == false`, so the kernel-mappings
+/// helper reports `false` for any kernel-half VA.
 pub fn test_paging_user_accessible_kernel() -> TestResult {
-    let kernel_dir = paging_get_kernel_directory();
-    assert_not_null!(kernel_dir, "kernel directory");
+    use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
+    use slopos_ostd::mm::page_property::PageProperty;
 
     let kernel_addr = VirtAddr::new(test_paging_user_accessible_kernel as *const () as u64);
-    let is_user = paging_is_user_accessible(kernel_dir, kernel_addr);
+    let aligned = VirtAddr::new(kernel_addr.as_u64() & !((PAGE_SIZE_4KB) - 1));
+    let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let guard = kernel_vm_space().lock();
+    let cur = match guard.cursor(range) {
+        Ok(c) => c,
+        Err(_) => return fail!("cursor over kernel half"),
+    };
+    let entry = match cur.query() {
+        Ok(e) => e,
+        Err(_) => return fail!("cursor query over kernel-half code"),
+    };
+    let prop: PageProperty = entry.property;
     assert_test!(
-        is_user == 0,
+        !prop.user,
         "kernel code incorrectly marked as user accessible"
     );
     pass!()
 }
 
-/// Test 4: COW flag on kernel page (should not be set)
+/// Test 4: COW flag on kernel page (should not be set). The OSTD
+/// `software` field is the AVL-bits container; bit 0 is the slopos
+/// COW marker.
 pub fn test_paging_cow_kernel() -> TestResult {
-    let kernel_dir = paging_get_kernel_directory();
-    assert_not_null!(kernel_dir, "kernel directory");
+    use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
 
     let kernel_addr = VirtAddr::new(test_paging_cow_kernel as *const () as u64);
-    let is_cow = paging_is_cow(kernel_dir, kernel_addr);
+    let aligned = VirtAddr::new(kernel_addr.as_u64() & !((PAGE_SIZE_4KB) - 1));
+    let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let guard = kernel_vm_space().lock();
+    let cur = match guard.cursor(range) {
+        Ok(c) => c,
+        Err(_) => return fail!("cursor over kernel half"),
+    };
+    let entry = match cur.query() {
+        Ok(e) => e,
+        Err(_) => return fail!("cursor query over kernel-half code"),
+    };
+    let is_cow = (entry.property.software & 0b001) != 0;
     assert_test!(!is_cow, "kernel code incorrectly marked as COW");
     pass!()
 }
@@ -1255,8 +1280,9 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
 // ============================================================================
 
 use crate::cow::is_cow_fault;
-use crate::paging::{map_page_4kb_in_dir, paging_mark_cow, virt_to_phys_in_dir};
+use crate::dual_paging::ostd_map_4kb_user;
 use crate::paging_defs::PageFlags;
+use crate::process_vm::process_vm_with_dual_paging;
 use crate::tests::test_fixtures::ProcessVmGuard;
 
 pub fn test_process_vm_create_destroy_memory() -> TestResult {
@@ -1264,8 +1290,8 @@ pub fn test_process_vm_create_destroy_memory() -> TestResult {
         return fail!("create VM");
     };
 
-    // The process should have a stack mapped - try to access it via kernel
-    let null_page_phys = virt_to_phys_in_dir(vm.page_dir, VirtAddr::new(0));
+    // The process should have a stack mapped - probe the null page.
+    let null_page_phys = vm.virt_to_phys(0);
     if null_page_phys.is_null() {
         klog_info!("PROCESS_TEST: Null page not mapped (expected for user process)");
     }
@@ -1283,7 +1309,7 @@ pub fn test_process_vm_alloc_and_access() -> TestResult {
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
     // The allocation is LAZY - pages aren't mapped until accessed
-    let phys = virt_to_phys_in_dir(vm.page_dir, VirtAddr::new(user_addr));
+    let phys = vm.virt_to_phys(user_addr);
     if !phys.is_null() {
         if let Some(virt) = phys.to_virt_checked() {
             let ptr = virt.as_mut_ptr::<u8>();
@@ -1339,13 +1365,15 @@ pub fn test_cow_page_isolation() -> TestResult {
     let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
-    if map_page_4kb_in_dir(
-        parent.page_dir,
-        VirtAddr::new(test_addr),
-        phys,
-        PageFlags::USER_RW.bits(),
-    ) != 0
-    {
+    let map_result = process_vm_with_dual_paging(parent.pid, |_pd, vs| {
+        ostd_map_4kb_user(
+            vs,
+            VirtAddr::new(test_addr),
+            phys,
+            PageFlags::USER_RW.bits(),
+        )
+    });
+    if !matches!(map_result, Some(Ok(()))) {
         free_page_frame(phys);
         return fail!("map page in parent");
     }
@@ -1364,8 +1392,8 @@ pub fn test_cow_page_isolation() -> TestResult {
     };
 
     // Both should point to the same physical page initially (COW sharing)
-    let parent_phys = virt_to_phys_in_dir(parent.page_dir, VirtAddr::new(test_addr));
-    let child_phys = virt_to_phys_in_dir(child.page_dir, VirtAddr::new(test_addr));
+    let parent_phys = parent.virt_to_phys(test_addr);
+    let child_phys = child.virt_to_phys(test_addr);
 
     if parent_phys.is_null() || child_phys.is_null() {
         return fail!(
@@ -1400,23 +1428,27 @@ pub fn test_cow_fault_handling() -> TestResult {
     let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
-    if map_page_4kb_in_dir(
-        vm.page_dir,
-        VirtAddr::new(test_addr),
-        phys,
-        PageFlags::USER_RO.bits(),
-    ) != 0
-    {
+    let map_result = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+        ostd_map_4kb_user(
+            vs,
+            VirtAddr::new(test_addr),
+            phys,
+            PageFlags::USER_RO.bits(),
+        )
+    });
+    if !matches!(map_result, Some(Ok(()))) {
         free_page_frame(phys);
         return fail!("map page as RO");
     }
 
     // Mark as COW
-    paging_mark_cow(vm.page_dir, VirtAddr::new(test_addr));
+    vm.mark_cow(test_addr);
 
     // Simulate a write fault - error code for write to present page = 0x03
     let error_code = 0x03u64;
-    let is_cow = is_cow_fault(error_code, vm.page_dir, test_addr);
+    let is_cow =
+        process_vm_with_dual_paging(vm.pid, |_pd, vs| is_cow_fault(error_code, vs, test_addr))
+            .unwrap_or(false);
     assert_test!(is_cow, "is_cow_fault returned false for COW page");
 
     // Handle the COW fault
@@ -1428,7 +1460,7 @@ pub fn test_cow_fault_handling() -> TestResult {
     }
 
     // After COW resolution, page should be writable
-    let new_phys = virt_to_phys_in_dir(vm.page_dir, VirtAddr::new(test_addr));
+    let new_phys = vm.virt_to_phys(test_addr);
     assert_test!(!new_phys.is_null(), "page unmapped after COW resolution");
 
     if let Some(virt) = new_phys.to_virt_checked() {
