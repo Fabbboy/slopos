@@ -1,192 +1,63 @@
-use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU64, Ordering};
+//! `MmioRegion` — kernel-side alias for `slopos_ostd::mm::io_mem::IoMem`.
+//!
+//! All call sites go through OSTD's gated `IoMemRegistry`. The
+//! [`MmioRegionExt`] trait carries the legacy `map` / `map_page` /
+//! `map_1mb` constructors so existing driver code keeps compiling
+//! without changing call shape — under the hood, each `map(...)`
+//! registers the requested phys range with OSTD's dynamic-range
+//! secondary registry and then asks `IoMemRegistry::reserve` for the
+//! mapping. The single MMIO virt allocator now lives in
+//! [`crate::io_mem_mapper_shim`].
 
-use crate::paging_defs::PageFlags;
-use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_utils::alignment::align_up_u64;
+use slopos_abi::addr::PhysAddr;
+use slopos_ostd::mm::io_mem::{
+    IoMem, IoMemCachePolicy, IoMemRegistry, PhysRange, register_io_mem_range,
+};
 
-use crate::memory_layout_defs::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE};
-use crate::paging::map_page_4kb;
 use crate::paging_defs::PAGE_SIZE_4KB;
 
-static MMIO_NEXT_VIRT: AtomicU64 = AtomicU64::new(MMIO_VIRT_BASE);
+pub type MmioRegion = IoMem;
 
-fn mmio_alloc_virt(size: u64) -> Option<u64> {
-    let aligned_size = align_up_u64(size, PAGE_SIZE_4KB);
-    let mut current = MMIO_NEXT_VIRT.load(Ordering::Relaxed);
+/// Legacy constructor surface for [`MmioRegion`]. `IoMem` itself is
+/// only buildable through `IoMemRegistry::reserve` (or the const
+/// [`MmioRegion::empty`] placeholder); this trait re-introduces the
+/// `MmioRegion::map(phys, size)` shape that ~14 driver call-sites
+/// already use.
+pub trait MmioRegionExt: Sized {
+    /// Allocate a kernel virtual window for `[phys, phys + size)`,
+    /// install Uncacheable page-table entries, and return the
+    /// resulting [`MmioRegion`]. Returns `None` for null phys, zero
+    /// size, address-space overflow, or registry / mapper failure.
+    fn map(phys: PhysAddr, size: usize) -> Option<Self>;
 
-    loop {
-        let new_next = current.checked_add(aligned_size)?;
-        if new_next > MMIO_VIRT_BASE + MMIO_VIRT_SIZE {
-            return None;
-        }
+    /// `map(phys, PAGE_SIZE_4KB)`.
+    fn map_page(phys: PhysAddr) -> Option<Self>;
 
-        match MMIO_NEXT_VIRT.compare_exchange_weak(
-            current,
-            new_next,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return Some(current),
-            Err(actual) => current = actual,
-        }
-    }
+    /// `map(phys, 1 MiB)`.
+    fn map_1mb(phys: PhysAddr) -> Option<Self>;
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct MmioRegion {
-    virt_base: u64,
-    phys_base: u64,
-    size: usize,
-}
-
-impl MmioRegion {
-    #[inline]
-    pub const fn empty() -> Self {
-        Self {
-            virt_base: 0,
-            phys_base: 0,
-            size: 0,
-        }
-    }
-
-    pub fn map(phys: PhysAddr, size: usize) -> Option<Self> {
+impl MmioRegionExt for MmioRegion {
+    fn map(phys: PhysAddr, size: usize) -> Option<Self> {
         if phys.is_null() || size == 0 {
             return None;
         }
-
-        let end_phys = phys.as_u64().checked_add(size as u64)?;
-        if end_phys > PhysAddr::MAX.as_u64() {
+        if phys.as_u64().checked_add(size as u64)? > PhysAddr::MAX.as_u64() {
             return None;
         }
-
-        let aligned_phys = phys.as_u64() & !(PAGE_SIZE_4KB - 1);
-        let offset_in_page = phys.as_u64() - aligned_phys;
-        let total_size = align_up_u64(offset_in_page + size as u64, PAGE_SIZE_4KB);
-        let num_pages = total_size / PAGE_SIZE_4KB;
-
-        let virt_base = mmio_alloc_virt(total_size)?;
-
-        let mmio_flags = PageFlags::MMIO.bits();
-
-        for i in 0..num_pages {
-            let page_phys = PhysAddr::new(aligned_phys + i * PAGE_SIZE_4KB);
-            let page_virt = VirtAddr::new(virt_base + i * PAGE_SIZE_4KB);
-
-            if map_page_4kb(page_virt, page_phys, mmio_flags) != 0 {
-                return None;
-            }
-        }
-
-        Some(Self {
-            virt_base: virt_base + offset_in_page,
-            phys_base: phys.as_u64(),
-            size,
+        register_io_mem_range(PhysRange {
+            base: phys,
+            len: size,
         })
+        .ok()?;
+        IoMemRegistry::reserve(phys, size, IoMemCachePolicy::Uncacheable).ok()
     }
 
-    pub fn map_page(phys: PhysAddr) -> Option<Self> {
+    fn map_page(phys: PhysAddr) -> Option<Self> {
         Self::map(phys, PAGE_SIZE_4KB as usize)
     }
 
-    pub fn map_1mb(phys: PhysAddr) -> Option<Self> {
+    fn map_1mb(phys: PhysAddr) -> Option<Self> {
         Self::map(phys, 1024 * 1024)
     }
-
-    #[inline]
-    pub fn read<T: Copy>(&self, offset: usize) -> T {
-        let size = core::mem::size_of::<T>();
-        let end = offset.checked_add(size).expect("offset overflow");
-
-        debug_assert!(
-            end <= self.size,
-            "MMIO read out of bounds: offset={}, size={}, region_size={}",
-            offset,
-            size,
-            self.size
-        );
-
-        debug_assert!(
-            offset % size == 0,
-            "MMIO read misaligned: offset={}, align={}",
-            offset,
-            size
-        );
-
-        let ptr = (self.virt_base + offset as u64) as *const T;
-        unsafe { read_volatile(ptr) }
-    }
-
-    #[inline]
-    pub fn write<T: Copy>(&self, offset: usize, value: T) {
-        let size = core::mem::size_of::<T>();
-        let end = offset.checked_add(size).expect("offset overflow");
-
-        debug_assert!(
-            end <= self.size,
-            "MMIO write out of bounds: offset={}, size={}, region_size={}",
-            offset,
-            size,
-            self.size
-        );
-
-        debug_assert!(
-            offset % size == 0,
-            "MMIO write misaligned: offset={}, align={}",
-            offset,
-            size
-        );
-
-        let ptr = (self.virt_base + offset as u64) as *mut T;
-        unsafe { write_volatile(ptr, value) }
-    }
-
-    #[inline]
-    pub fn virt_base(&self) -> u64 {
-        self.virt_base
-    }
-
-    #[inline]
-    pub fn phys_base(&self) -> PhysAddr {
-        PhysAddr::new(self.phys_base)
-    }
-
-    #[inline]
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    #[inline]
-    pub fn is_mapped(&self) -> bool {
-        self.size != 0
-    }
-
-    #[inline]
-    pub fn is_valid_offset(&self, offset: usize, access_size: usize) -> bool {
-        offset
-            .checked_add(access_size)
-            .is_some_and(|end| end <= self.size)
-    }
-
-    pub fn sub_region(&self, offset: usize, size: usize) -> Option<MmioRegion> {
-        let end = offset.checked_add(size)?;
-        if end > self.size {
-            return None;
-        }
-        Some(MmioRegion {
-            virt_base: self.virt_base + offset as u64,
-            phys_base: self.phys_base + offset as u64,
-            size,
-        })
-    }
 }
-
-impl Default for MmioRegion {
-    #[inline]
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-unsafe impl Send for MmioRegion {}

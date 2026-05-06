@@ -41,7 +41,7 @@ use crate::msi_common;
 use crate::pci::{PciDeviceInfo, pci_config_read16, pci_config_read32, pci_config_write16};
 use crate::pci_defs::PCI_MAX_BARS;
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::mmio::MmioRegion;
+use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_utils::klog_info;
 
 // =============================================================================
@@ -146,7 +146,7 @@ impl MsixCapability {
 ///
 /// The table is read/written via MMIO — not through PCI configuration space.
 /// Each entry is 16 bytes: `{ addr_lo, addr_hi, data, vector_control }`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MsixTable {
     /// Mapped MSI-X table region.
     table: MmioRegion,

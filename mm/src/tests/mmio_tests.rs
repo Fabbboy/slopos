@@ -2,7 +2,7 @@ use slopos_abi::addr::PhysAddr;
 use slopos_testing::TestResult;
 use slopos_utils::klog_info;
 
-use crate::mmio::MmioRegion;
+use crate::mmio::{MmioRegion, MmioRegionExt};
 
 pub fn test_mmio_empty_region_state() -> TestResult {
     let region = MmioRegion::empty();

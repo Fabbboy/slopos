@@ -1610,5 +1610,5 @@ pub fn dns_rx_read(out: &mut [u8]) -> usize {
 /// device was not probed or MSI-X was not configured (i.e. MSI fallback).
 #[cfg(feature = "test-hooks")]
 pub fn virtio_net_msix_state() -> Option<VirtioMsixState> {
-    VIRTIO_NET_STATE.lock().msix_state
+    VIRTIO_NET_STATE.lock().msix_state.clone()
 }

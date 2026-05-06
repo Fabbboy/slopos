@@ -2,9 +2,14 @@
 //! `register_*` hooks: reserved IRQ vectors, legacy I/O port ranges,
 //! and architecturally-fixed MMIO ranges.
 //!
-//! Runtime-discovered MMIO regions (HPET, IOAPIC, PCI ECAM, framebuffer)
-//! are intentionally absent here; those will be inserted by a richer
-//! late-registration path in a later sub-phase.
+//! Runtime-discovered MMIO regions (HPET, IOAPIC, PCI ECAM, device
+//! BARs, framebuffer) are intentionally absent here. They are added
+//! to OSTD's heap-free dynamic-range secondary registry at the moment
+//! a driver tries to map them: `slopos_mm::mmio::MmioRegionExt::map`
+//! calls `slopos_ostd::mm::io_mem::register_io_mem_range` before
+//! `IoMemRegistry::reserve`, so the static slice below only needs to
+//! cover ranges whose phys addresses are already known at boot
+//! (currently just the LAPIC).
 
 use slopos_abi::addr::PhysAddr;
 use slopos_arch::arch::idt::{

@@ -2,7 +2,7 @@
 
 use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::mmio::MmioRegion;
+use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
@@ -18,7 +18,7 @@ mod regs;
 
 const PCI_VENDOR_INTEL: u16 = 0x8086;
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 struct XeDevice {
     present: bool,
@@ -208,7 +208,7 @@ pub fn xe_framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<Framebuff
 
     let (mmio, ggtt_addr) = {
         let mut dev = XE_DEVICE.lock();
-        let mmio = dev.mmio;
+        let mmio = dev.mmio.clone();
 
         if !dev.ggtt_ready {
             let Some(ggtt) = ggtt::xe_ggtt_init(&mmio) else {
@@ -265,7 +265,12 @@ pub fn xe_framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<Framebuff
 pub fn xe_flush() -> i32 {
     let (present, ready, mmio, ggtt_addr) = {
         let dev = XE_DEVICE.lock();
-        (dev.present, dev.fb.ready, dev.mmio, dev.fb.ggtt_addr)
+        (
+            dev.present,
+            dev.fb.ready,
+            dev.mmio.clone(),
+            dev.fb.ggtt_addr,
+        )
     };
     if !present || !ready {
         return -1;

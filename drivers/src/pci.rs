@@ -7,7 +7,7 @@ use slopos_acpi::mcfg::{Mcfg, McfgEntry};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
-use slopos_mm::mmio::MmioRegion;
+use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_info;
 use slopos_utils::string::cstr_to_str;
@@ -17,7 +17,7 @@ pub use crate::pci_defs::*;
 const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone)]
 pub struct PciGpuInfo {
     pub present: c_int,
     pub device: PciDeviceInfo,
@@ -35,6 +35,12 @@ impl PciGpuInfo {
             mmio_region: MmioRegion::empty(),
             mmio_size: 0,
         }
+    }
+}
+
+impl Default for PciGpuInfo {
+    fn default() -> Self {
+        Self::zeroed()
     }
 }
 
@@ -120,7 +126,7 @@ impl EcamState {
                 bus_start: 0,
                 bus_end: 0,
             }; MAX_ECAM_ENTRIES],
-            regions: [MmioRegion::empty(); MAX_ECAM_ENTRIES],
+            regions: [const { MmioRegion::empty() }; MAX_ECAM_ENTRIES],
             count: 0,
         }
     }
@@ -956,18 +962,19 @@ fn pci_discover_mcfg() {
                     region_size / (1024 * 1024),
                 )
             });
+            let region_virt = region.virt_base();
 
             klog_info!(
                 "PCI: ECAM segment {} mapped at virt 0x{:x} ({}MB)",
                 entry.segment,
-                region.virt_base(),
+                region_virt,
                 region_size / (1024 * 1024),
             );
             state.regions[i] = region;
 
             // Cache the primary segment (segment 0) for lock-free access.
             if entry.segment == 0 && !primary_mapped {
-                ECAM_PRIMARY_VIRT.store(region.virt_base(), Ordering::Release);
+                ECAM_PRIMARY_VIRT.store(region_virt, Ordering::Release);
                 ECAM_PRIMARY_SIZE.store(region_size as u64, Ordering::Release);
                 ECAM_PRIMARY_BUS_START.store(entry.bus_start, Ordering::Release);
                 ECAM_PRIMARY_BUS_END.store(entry.bus_end, Ordering::Release);
@@ -1046,7 +1053,7 @@ pub fn pci_ecam_find_entry(segment: u16, bus: u8) -> Option<McfgEntry> {
 pub fn pci_ecam_mapped_region(index: usize) -> Option<MmioRegion> {
     let state = ECAM_STATE.lock();
     if index < state.count as usize {
-        let region = state.regions[index];
+        let region = state.regions[index].clone();
         if region.is_mapped() {
             return Some(region);
         }
@@ -1110,7 +1117,7 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
 }
 
 pub fn pci_get_primary_gpu() -> PciGpuInfo {
-    ENUM_STATE.lock().primary_gpu
+    ENUM_STATE.lock().primary_gpu.clone()
 }
 
 pub fn pci_register_driver(driver: &'static PciDriver) -> c_int {

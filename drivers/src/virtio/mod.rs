@@ -108,7 +108,7 @@ pub const COMMON_CFG_QUEUE_USED: usize = 0x30;
 // =============================================================================
 
 /// Parsed VirtIO PCI capabilities - MMIO regions for device interaction
-#[derive(Clone, Copy, Default)]
+#[derive(Clone)]
 pub struct VirtioMmioCaps {
     /// Common configuration region
     pub common_cfg: MmioRegion,
@@ -330,7 +330,7 @@ pub enum InterruptMode {
 /// virtqueue, and the overall enable state.  Callers must keep this alive
 /// for the lifetime of the device because it owns the MMIO mappings and
 /// the vector allocations.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct VirtioMsixState {
     /// Parsed MSI-X capability from PCI config space.
     pub cap: crate::msix::MsixCapability,

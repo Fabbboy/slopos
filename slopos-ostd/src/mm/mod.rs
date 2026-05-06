@@ -26,7 +26,7 @@ pub use heap::{
 pub use init::{Init, InitClosure, Zeroable, init_from_closure, init_zeroed};
 pub use io_mem::{
     IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
-    register_io_mem_mapper, register_io_mem_registry,
+    register_io_mem_mapper, register_io_mem_range, register_io_mem_registry,
 };
 pub use pod::Pod;
 pub use slab::Slab;

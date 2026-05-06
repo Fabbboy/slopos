@@ -5,7 +5,7 @@ use slopos_utils::alignment::align_up_u64;
 
 use super::regs;
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct XeGgtt {
     pub table: MmioRegion,
     pub entries: u32,

@@ -465,5 +465,5 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
 /// device was not probed or MSI-X was not configured (i.e. MSI fallback).
 #[cfg(feature = "test-hooks")]
 pub fn virtio_blk_msix_state() -> Option<VirtioMsixState> {
-    VIRTIO_BLK_STATE.lock().msix_state
+    VIRTIO_BLK_STATE.lock().msix_state.clone()
 }

@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::io_mem::{
     self, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
-    register_io_mem_mapper, register_io_mem_registry,
+    register_io_mem_mapper, register_io_mem_range, register_io_mem_registry,
 };
 
 const N_PAGES: usize = 16;
@@ -228,6 +228,41 @@ fn sub_region_rejects_overrun() {
     .expect("reserve");
     assert!(m.sub_region(0x800, 0x900).is_none());
     assert!(m.sub_region(0, PAGE_SIZE + 1).is_none());
+}
+
+#[test]
+fn dynamic_range_register_then_reserve() {
+    let _g = setup();
+    // Pick a phys range outside the static slice (the static covers
+    // REGION_BASE..REGION_BASE + REGION_SIZE, i.e. 0xfee0_0000..
+    // 0xfee1_0000). 0xfee2_0000 is comfortably outside.
+    let dyn_base = PhysAddr::new(REGION_BASE + (REGION_SIZE as u64) * 2);
+    register_io_mem_range(PhysRange {
+        base: dyn_base,
+        len: PAGE_SIZE,
+    })
+    .expect("register_io_mem_range");
+    // Reserve a sub-range — fake mapper happily produces a virt
+    // address (we don't dereference; just check reserve succeeds and
+    // returns the right metadata).
+    let m = IoMemRegistry::reserve(dyn_base, PAGE_SIZE, IoMemCachePolicy::Uncacheable)
+        .expect("reserve");
+    assert_eq!(m.size(), PAGE_SIZE);
+    assert_eq!(m.phys_base().as_u64(), dyn_base.as_u64());
+}
+
+#[test]
+fn dynamic_range_outside_static_and_dynamic_rejected() {
+    let _g = setup();
+    // 0xff00_0000 is outside both the static slice and any range the
+    // companion `dynamic_range_register_then_reserve` test registers,
+    // so the order in which the two tests run doesn't matter.
+    let r = IoMemRegistry::reserve(
+        PhysAddr::new(0xff00_0000),
+        PAGE_SIZE,
+        IoMemCachePolicy::Uncacheable,
+    );
+    assert_eq!(r.unwrap_err(), IoMemError::NotReserved);
 }
 
 #[test]

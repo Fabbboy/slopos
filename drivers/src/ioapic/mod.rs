@@ -14,11 +14,11 @@ use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMod
 use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
-use slopos_mm::mmio::MmioRegion;
+use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 
 const IOAPIC_REGION_SIZE: usize = 0x20;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct IoapicController {
     id: u8,
     gsi_base: u32,
@@ -42,7 +42,7 @@ impl IoapicController {
 
     #[inline]
     fn read_reg(&self, reg: u8) -> u32 {
-        let region = match self.mmio {
+        let region = match &self.mmio {
             Some(region) => region,
             None => return 0,
         };
@@ -52,7 +52,7 @@ impl IoapicController {
 
     #[inline]
     fn write_reg(&self, reg: u8, value: u32) {
-        let region = match self.mmio {
+        let region = match &self.mmio {
             Some(region) => region,
             None => return,
         };
@@ -85,7 +85,7 @@ unsafe impl Sync for IoapicTable {}
 impl IoapicTable {
     const fn new() -> Self {
         Self(UnsafeCell::new(
-            [IoapicController::new(); IOAPIC_MAX_CONTROLLERS],
+            [const { IoapicController::new() }; IOAPIC_MAX_CONTROLLERS],
         ))
     }
 

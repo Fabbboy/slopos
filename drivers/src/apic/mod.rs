@@ -13,7 +13,7 @@ use slopos_abi::addr::PhysAddr;
 use slopos_arch::cpu::apic_msr::ApicBaseMsr;
 use slopos_arch::cpu::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_arch::cpu::msr::Msr;
-use slopos_mm::mmio::MmioRegion;
+use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 
 const APIC_REGION_SIZE: usize = PAGE_SIZE_4KB_USIZE;

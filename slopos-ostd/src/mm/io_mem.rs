@@ -7,13 +7,26 @@
 //!
 //! # Construction
 //!
-//! `IoMem` cannot be built outside this module: every constructor is
-//! crate-private. The single sanctioned entry point is
-//! [`IoMemRegistry::reserve`], which checks containment against a
-//! `&'static [PhysRange]` of insensitive ranges (Inv. 7) and delegates
-//! the actual virt-allocation + page-table mapping to a registered
-//! [`IoMemMapper`]. Both registrations are one-shot, mirroring the
-//! pattern in [`crate::mm::frame_alloc`] and [`crate::mm::phys`].
+//! `IoMem` is built through one of two sanctioned paths:
+//!
+//! 1. [`IoMemRegistry::reserve`] — the gated path. Checks containment
+//!    against a `&'static [PhysRange]` of architecturally-fixed
+//!    insensitive ranges (Inv. 7), plus the heap-free secondary
+//!    [dynamic registry](register_io_mem_range) for ranges discovered
+//!    at boot (HPET / IOAPIC / PCI ECAM / device BARs / framebuffer),
+//!    and delegates virt-allocation + page-table mapping to a
+//!    registered [`IoMemMapper`]. The mapper and static-range
+//!    registrations are one-shot, mirroring the pattern in
+//!    [`crate::mm::frame_alloc`] and [`crate::mm::phys`]. The dynamic
+//!    registry is append-only single-writer; in SlopOS this is
+//!    automatic because driver init runs serially on the BSP.
+//!
+//! 2. [`IoMem::empty`] — a const placeholder constructor producing a
+//!    zero-sized handle (`virt_base = 0`, `phys_base = NULL`,
+//!    `size = 0`). Reads / writes against an empty handle OOB-panic;
+//!    the placeholder exists so callers can park an `IoMem` in a
+//!    `const fn` constructor or a `[T; N]` array slot before the real
+//!    region is reserved.
 //!
 //! # Cache policy
 //!
@@ -30,6 +43,7 @@
 //! is a Phase-2 concern and ships when the kernel virtual allocator
 //! grows recyclable ranges.
 
+use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -215,8 +229,109 @@ fn current_io_mem_registry() -> Option<&'static [PhysRange]> {
     Some(unsafe { core::slice::from_raw_parts(base, len) })
 }
 
-/// Test-only reset hook. Clears both the mapper and the registry so
-/// host integration tests can install a fresh wiring per binary.
+// ---------------------------------------------------------------------------
+// Dynamic-range secondary registry.
+//
+// The static slice registered above carries architecturally-fixed
+// MMIO (the LAPIC at 0xFEE0_0000 on x86_64). HPET, IOAPIC, PCI ECAM,
+// device BARs, and the framebuffer have firmware-discovered phys
+// addresses that aren't known until boot is well underway — far too
+// late to compose into a `&'static [PhysRange]` for the one-shot
+// hook above.
+//
+// This append-only fixed-size table backs [`register_io_mem_range`].
+// It is single-writer-multi-reader: the writer (`register_…_range`)
+// stores the new entry first and publishes the count via a release
+// store; readers (`IoMemRegistry::reserve`) acquire-load the count
+// and then read up to that many `PhysRange` slots. PhysRange is
+// `Copy`, so torn reads are impossible — each slot is written before
+// the count increment that makes it visible.
+//
+// **Single-writer precondition.** Two CPUs concurrently calling
+// `register_io_mem_range` would race on slot allocation. SlopOS boot
+// runs all driver init serially on the BSP before SMP fully settles,
+// so the contract is satisfied automatically. Late callers (post-boot
+// hot-plug) would have to serialise externally.
+// ---------------------------------------------------------------------------
+
+const MAX_DYNAMIC_RANGES: usize = 64;
+
+#[repr(transparent)]
+struct DynamicSlot(UnsafeCell<PhysRange>);
+
+// SAFETY: writer is single-threaded by API contract; readers only
+// touch slots whose count has been published (release-acquire fence).
+unsafe impl Sync for DynamicSlot {}
+
+const EMPTY_SLOT: DynamicSlot = DynamicSlot(UnsafeCell::new(PhysRange {
+    base: PhysAddr::NULL,
+    len: 0,
+}));
+
+static DYNAMIC_RANGES: [DynamicSlot; MAX_DYNAMIC_RANGES] =
+    [const { EMPTY_SLOT }; MAX_DYNAMIC_RANGES];
+static DYNAMIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Append a runtime-discovered insensitive range to the dynamic
+/// secondary registry. Used by drivers that map MMIO from
+/// firmware-discovered phys addresses (HPET, IOAPIC, PCI ECAM,
+/// device BARs, framebuffer): the kernel-side
+/// `slopos_mm::mmio::MmioRegionExt::map` calls this implicitly before
+/// reaching [`IoMemRegistry::reserve`] so drivers don't need to know
+/// the registry exists.
+///
+/// Append-only: there is no deregistration path (matches the static
+/// registry's "no hot-plug" stance). Idempotent at the caller's
+/// discretion — re-registering the same range is harmless because
+/// `reserve` only checks containment, not exact match.
+///
+/// Returns:
+/// - `Err(OutOfBounds)` for a zero-length range.
+/// - `Err(MappingFailed)` once the table is full
+///   (`MAX_DYNAMIC_RANGES = 64` ranges; raise the constant if a
+///   platform genuinely needs more).
+///
+/// # Single-writer precondition
+///
+/// Callers must serialise with respect to one another. SlopOS driver
+/// init satisfies this automatically (all calls run on the BSP during
+/// the boot phase priority sequence). Concurrent callers would race
+/// on slot allocation and one of the writes would be lost.
+pub fn register_io_mem_range(range: PhysRange) -> Result<(), IoMemError> {
+    if range.len == 0 {
+        return Err(IoMemError::OutOfBounds);
+    }
+    let slot = DYNAMIC_COUNT.load(Ordering::Relaxed);
+    if slot >= MAX_DYNAMIC_RANGES {
+        return Err(IoMemError::MappingFailed);
+    }
+    // SAFETY: single-writer contract — only this CPU may touch
+    // `DYNAMIC_RANGES[slot]` until the release-store of `slot + 1`
+    // below makes the entry visible to readers.
+    unsafe {
+        *DYNAMIC_RANGES[slot].0.get() = range;
+    }
+    DYNAMIC_COUNT.store(slot + 1, Ordering::Release);
+    Ok(())
+}
+
+fn dynamic_ranges_view() -> &'static [PhysRange] {
+    let count = DYNAMIC_COUNT.load(Ordering::Acquire);
+    if count == 0 {
+        return &[];
+    }
+    // SAFETY: `DynamicSlot` is `#[repr(transparent)]` over
+    // `UnsafeCell<PhysRange>`; `UnsafeCell<T>` is in turn
+    // `repr(transparent)` over `T`, so the array layout is identical
+    // to `[PhysRange; N]`. The release-acquire pair guarantees the
+    // first `count` slots have valid `PhysRange` writes; `PhysRange`
+    // is `Copy` so concurrent readers cannot tear the read.
+    unsafe { core::slice::from_raw_parts(DYNAMIC_RANGES.as_ptr() as *const PhysRange, count) }
+}
+
+/// Test-only reset hook. Clears the mapper, both registries, and the
+/// dynamic-range table so host integration tests can install a fresh
+/// wiring per binary.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     IO_MEM_MAPPER
@@ -226,6 +341,7 @@ pub fn reset_for_test() {
         .base
         .store(core::ptr::null_mut(), Ordering::Release);
     IO_MEM_REGISTRY.len.store(0, Ordering::Release);
+    DYNAMIC_COUNT.store(0, Ordering::Release);
 }
 
 /// Insensitive-range gate over [`IoMem`] construction. Stateless;
@@ -253,7 +369,12 @@ impl IoMemRegistry {
         }
         let ranges = current_io_mem_registry().ok_or(IoMemError::Uninitialised)?;
         let mapper = current_io_mem_mapper().ok_or(IoMemError::Uninitialised)?;
-        if !ranges.iter().any(|r| r.contains_range(phys, size)) {
+        let in_static = ranges.iter().any(|r| r.contains_range(phys, size));
+        let contained = in_static
+            || dynamic_ranges_view()
+                .iter()
+                .any(|r| r.contains_range(phys, size));
+        if !contained {
             return Err(IoMemError::NotReserved);
         }
         let virt_base = mapper.map(phys, size, policy)?;
@@ -335,16 +456,52 @@ impl Clone for IoMem {
 }
 
 impl IoMem {
+    /// Const placeholder constructor. Returns a zero-sized handle
+    /// (`virt_base = 0`, `phys_base = NULL`, `size = 0`) suitable for
+    /// `static`/`const fn` initialisers and `[T; N]` array slots that
+    /// will be overwritten with a real reservation later. Reads /
+    /// writes against the result OOB-panic; `is_mapped()` returns
+    /// `false`. See module docs for the two sanctioned construction
+    /// paths.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            virt_base: 0,
+            phys_base: PhysAddr::NULL,
+            size: 0,
+            _not_send_pinned: PhantomData,
+        }
+    }
+
     /// Physical base address of the region.
     #[inline]
     pub fn phys_base(&self) -> PhysAddr {
         self.phys_base
     }
 
+    /// Kernel virtual base address the mapper installed for this
+    /// region. Mostly useful for legacy MMIO call-sites that store the
+    /// address in an `AtomicU64` for lock-free hot-path reads;
+    /// dereferencing via raw pointer is `unsafe` and bypasses the
+    /// `read` / `write` bounds + alignment checks. Prefer the volatile
+    /// accessors for normal driver code.
+    #[inline]
+    pub fn virt_base(&self) -> u64 {
+        self.virt_base
+    }
+
     /// Region size in bytes.
     #[inline]
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// True for handles produced by [`IoMemRegistry::reserve`]; false
+    /// for handles produced by [`Self::empty`] or any other zero-sized
+    /// placeholder.
+    #[inline]
+    pub fn is_mapped(&self) -> bool {
+        self.size != 0
     }
 
     /// True if `offset + access_size` lies within the region.
