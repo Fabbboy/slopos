@@ -250,6 +250,28 @@ pub fn process_vm_user_va_to_paddr(process_id: u32, va: u64) -> u64 {
         .as_u64()
 }
 
+/// Look up `process_id`'s OSTD `VmSpace` and return a cloned
+/// [`KArc<VmSpace>`] handle. Returns `None` if the slot is unbound
+/// or the OSTD `vm_space` is not yet attached.
+///
+/// Used by `slopos_mm::user_copy::*` to bridge the legacy
+/// PCR-implicit syscall ABI (no explicit `&VmSpace` argument) onto
+/// OSTD's explicit-`&VmSpace` `copy_*_user` primitives. Holding a
+/// `KArc` clone (rather than borrowing through the per-slot lock)
+/// means the user-copy walk and the `__ostd_raw_usercopy` call can
+/// run with the per-slot lock released, avoiding lock-order issues
+/// with the page-fault recovery path.
+pub fn process_vm_get_vm_space(
+    process_id: u32,
+) -> Option<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmSpace>> {
+    let slot = find_slot_for_pid(process_id)?;
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return None;
+    }
+    guard.vm_space.as_ref().cloned()
+}
+
 /// Read-side check: is `va` mapped AND user-accessible in
 /// `process_id`'s OSTD VmSpace? Mirrors legacy
 /// `paging_is_user_accessible` — kernel-half pages return `false`.

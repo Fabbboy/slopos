@@ -2,17 +2,26 @@
 //!
 //! [`UserPtr<T>`], [`UserSlice<T>`], and the underlying
 //! [`UserVirtAddr`] are the only typed handles that may carry a
-//! user-supplied address into kernel code. Construction is
-//! `pub(crate)`: the only public path to obtain one is via
-//! [`crate::user::context::UserContext::user_ptr_arg`] (and its
-//! slice/bytes companions). This is what enforces Inv. 5
-//! (user-supplied addresses cannot reach kernel memory) at the type
-//! level — no kernel crate can manufacture a `UserPtr` that points
-//! into the higher half.
-//!
+//! user-supplied address into kernel code. The validating constructor
 //! [`UserVirtAddr::try_new`] checks: non-null, canonical x86_64,
 //! within `[USER_SPACE_START_VA, USER_SPACE_END_VA)`, and
-//! `addr + len` does not overflow.
+//! `addr + len` does not overflow — a kernel-half address is rejected
+//! at construction so a `UserPtr<T>` value can never point into the
+//! higher half (Inv. 5).
+//!
+//! Two public construction paths exist:
+//!
+//!   1. [`crate::user::context::UserContext::user_ptr_arg`] /
+//!      [`crate::user::context::UserContext::user_slice_arg`] /
+//!      [`crate::user::context::UserContext::user_bytes_arg`] —
+//!      the canonical syscall-entry surface that takes a register
+//!      index and validates the value the user loaded.
+//!   2. [`UserPtr::try_new`] / [`UserSlice::try_new`] /
+//!      [`UserVirtAddr::try_new`] — the same validating logic, used
+//!      by kernel callers that derive a secondary user pointer from
+//!      an already-validated one (e.g. advancing through an array,
+//!      or stepping from `rsp` into a signal frame). The
+//!      kernel-half-rejection guarantee is identical.
 
 use core::marker::PhantomData;
 
@@ -41,7 +50,7 @@ pub enum UserPtrError {
 pub struct UserVirtAddr(VirtAddr);
 
 impl UserVirtAddr {
-    pub(crate) fn try_new(addr: u64, len: usize) -> Result<Self, UserPtrError> {
+    pub fn try_new(addr: u64, len: usize) -> Result<Self, UserPtrError> {
         if addr == 0 {
             return Err(UserPtrError::Null);
         }
@@ -82,7 +91,7 @@ pub struct UserPtr<T> {
 }
 
 impl<T> UserPtr<T> {
-    pub(crate) fn try_new(addr: u64) -> Result<Self, UserPtrError> {
+    pub fn try_new(addr: u64) -> Result<Self, UserPtrError> {
         let validated = UserVirtAddr::try_new(addr, core::mem::size_of::<T>())?;
         Ok(Self {
             addr: validated,
@@ -119,7 +128,7 @@ pub struct UserSlice<T> {
 }
 
 impl<T> UserSlice<T> {
-    pub(crate) fn try_new(addr: u64, count: usize) -> Result<Self, UserPtrError> {
+    pub fn try_new(addr: u64, count: usize) -> Result<Self, UserPtrError> {
         let byte_len = count
             .checked_mul(core::mem::size_of::<T>())
             .ok_or(UserPtrError::Overflow)?;

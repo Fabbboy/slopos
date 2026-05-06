@@ -78,6 +78,20 @@ pub struct UserRegs {
     pub _pad: [u16; 3],
 }
 
+// SAFETY (Inv. 2): `UserRegs` is consumed by `__ostd_user_return`'s
+// inline asm at fixed byte offsets. These compile-time asserts pin the
+// layout so a future field reorder fails to build rather than silently
+// scrambling user state on the next user-mode round trip.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(UserRegs, rax) == 0);
+    assert!(offset_of!(UserRegs, rip) == 16 * 8);
+    assert!(offset_of!(UserRegs, rflags_user_subset) == 17 * 8);
+    assert!(offset_of!(UserRegs, fs_base) == 18 * 8);
+    assert!(offset_of!(UserRegs, gs_base) == 19 * 8);
+    assert!(offset_of!(UserRegs, cs) == 20 * 8);
+};
+
 impl UserRegs {
     /// `const fn` zero/default constructor — usable in `const`
     /// contexts where `Default::default()` cannot be called.
@@ -230,6 +244,24 @@ impl UserContext {
         &mut self.regs as *mut UserRegs
     }
 
+    /// Direct mutable view of the embedded GPR snapshot.
+    ///
+    /// **Mask discipline is on the caller**: writes to
+    /// `rflags_user_subset` through this reference bypass
+    /// [`Self::set_rflags`]'s sensitive-bit filter, and writes to
+    /// `cs` / `ss` bypass the user-selector reapplication that
+    /// [`Self::new`] / [`Self::set_regs`] guarantee.  Prefer
+    /// [`Self::set_regs`] for any path that is (or could be) driven by
+    /// user-supplied register values; reach for this only when the
+    /// caller is OSTD-internal kernel state-management (e.g. seeding a
+    /// fresh context from a known-good kernel-supplied snapshot, or
+    /// kernel-mode test scaffolding constructing inputs to a syscall
+    /// handler).
+    #[inline]
+    pub fn regs_mut(&mut self) -> &mut UserRegs {
+        &mut self.regs
+    }
+
     /// Replace the entire register snapshot. `cs` / `ss` from `regs`
     /// are ignored — the OSTD selectors are re-applied. `rflags` is
     /// re-masked through [`Self::set_rflags`] so a caller cannot
@@ -257,6 +289,11 @@ impl UserContext {
     #[inline]
     pub fn set_rip(&mut self, rip: u64) {
         self.regs.rip = rip;
+    }
+
+    #[inline]
+    pub fn set_rax(&mut self, rax: u64) {
+        self.regs.rax = rax;
     }
 
     #[inline]

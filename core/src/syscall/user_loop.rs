@@ -4,8 +4,10 @@
 //! [`user_task_first_run`] is the function the scheduler dispatches
 //! into for any new (or forked / cloned) user task; it then calls
 //! [`user_task_loop`], which loops on `UserMode::execute()` and
-//! dispatches each user→kernel return through the existing syscall
-//! handler via the [`InterruptFrame`] adapter helpers below.
+//! dispatches each user→kernel return straight into
+//! [`crate::syscall::dispatch::syscall_handle`] with a
+//! `*mut UserContext` carrier — handlers take the OSTD context
+//! directly, no synthetic-frame adapter required.
 //!
 //! The address-space passed to `UserMode::new` is a single global
 //! placeholder: CR3 is still controlled by the legacy paging code
@@ -39,6 +41,11 @@ use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::sync::once_lock::OnceLock;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::user::mode::{ReturnReason, UserMode};
+
+// The legacy `slopos_arch::InterruptFrame` import remains for
+// `init_user_ctx_from_parent_frame`, which is still consumed by
+// `task_clone`'s legacy-frame synthesis path. The syscall-dispatch
+// flow no longer touches `InterruptFrame`.
 
 use crate::scheduler::scheduler::scheduler_get_current_task;
 use crate::scheduler::task_struct::Task;
@@ -96,13 +103,10 @@ fn user_task_loop(task: *mut Task) -> ! {
 
         match reason {
             ReturnReason::Syscall(_n) => {
-                // Build a synthetic InterruptFrame from the user
-                // context so the existing `*mut InterruptFrame`-based
-                // syscall handlers keep working.  Apply the handler's
-                // changes back to the UserContext after dispatch.
-                let mut frame = interrupt_frame_from_user_ctx(unsafe { &*ctx_ptr });
-                crate::syscall::dispatch::syscall_handle(&mut frame);
-                apply_frame_to_user_ctx(&frame, unsafe { &mut *ctx_ptr });
+                // Hand the per-task UserContext straight to the syscall
+                // dispatcher; the handler signature now takes
+                // `*mut UserContext`, no adapter required.
+                crate::syscall::dispatch::syscall_handle(ctx_ptr);
             }
             ReturnReason::Exception(info) => {
                 // Only the SYSCALL path is currently routed through
@@ -127,68 +131,6 @@ fn user_task_loop(task: *mut Task) -> ! {
             }
         }
     }
-}
-
-/// Build an `InterruptFrame` matching what the legacy `syscall_entry`
-/// asm would have left on the kernel stack on SYSCALL entry, derived
-/// from a `UserContext`.  Used to feed the existing syscall handlers
-/// without rewriting their `*mut InterruptFrame` ABI.
-pub(crate) fn interrupt_frame_from_user_ctx(ctx: &UserContext) -> InterruptFrame {
-    let regs = ctx.regs();
-    InterruptFrame {
-        r15: regs.r15,
-        r14: regs.r14,
-        r13: regs.r13,
-        r12: regs.r12,
-        r11: regs.r11,
-        r10: regs.r10,
-        r9: regs.r9,
-        r8: regs.r8,
-        rbp: regs.rbp,
-        rdi: regs.rdi,
-        rsi: regs.rsi,
-        rdx: regs.rdx,
-        rcx: regs.rcx,
-        rbx: regs.rbx,
-        rax: regs.rax,
-        // Vector 128 = SYSCALL trap.  Matches what `syscall_entry` set.
-        vector: 128,
-        error_code: 0,
-        rip: regs.rip,
-        cs: regs.cs as u64,
-        rflags: regs.rflags_user_subset,
-        rsp: regs.rsp,
-        ss: regs.ss as u64,
-    }
-}
-
-/// Copy GPR / RIP / RSP / RFLAGS changes the syscall handler made on
-/// the synthetic frame back into the `UserContext` so the next
-/// `UserMode::execute()` iretq sees them.  Goes through
-/// `UserContext::set_regs` so the RFLAGS sensitive-bit mask still
-/// applies.
-pub(crate) fn apply_frame_to_user_ctx(frame: &InterruptFrame, ctx: &mut UserContext) {
-    let mut regs = *ctx.regs();
-    regs.r15 = frame.r15;
-    regs.r14 = frame.r14;
-    regs.r13 = frame.r13;
-    regs.r12 = frame.r12;
-    regs.r11 = frame.r11;
-    regs.r10 = frame.r10;
-    regs.r9 = frame.r9;
-    regs.r8 = frame.r8;
-    regs.rbp = frame.rbp;
-    regs.rdi = frame.rdi;
-    regs.rsi = frame.rsi;
-    regs.rdx = frame.rdx;
-    regs.rcx = frame.rcx;
-    regs.rbx = frame.rbx;
-    regs.rax = frame.rax;
-    regs.rip = frame.rip;
-    regs.rsp = frame.rsp;
-    regs.rflags_user_subset = frame.rflags;
-    // `set_regs` re-applies the user-CS/SS/RFLAGS-mask invariants.
-    ctx.set_regs(regs);
 }
 
 /// Seed a freshly-created user task's [`UserContext`] from

@@ -5,7 +5,7 @@ use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
 use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
-use slopos_arch::InterruptFrame;
+use slopos_ostd::user::context::UserContext;
 use slopos_utils::klog_debug;
 
 use crate::sched::{
@@ -25,9 +25,12 @@ use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
 
-pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_yield(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
     let _ = ctx.ok(0);
     yield_();
@@ -61,13 +64,13 @@ define_syscall!(syscall_clock_gettime(ctx, args) {
     ctx.ok(0)
 });
 
-pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_halt(_task: *mut Task, _ctx_ptr: *mut UserContext) -> SyscallDisposition {
     platform::kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallDisposition::Ok
 }
 
-pub fn syscall_reboot(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_reboot(_task: *mut Task, _ctx_ptr: *mut UserContext) -> SyscallDisposition {
     platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallDisposition::Ok
@@ -91,8 +94,12 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
     }
 });
 
-pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let ctx = SyscallContext::new(task, frame);
+pub fn syscall_exit(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    let ctx = if ctx_ptr.is_null() {
+        None
+    } else {
+        SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr })
+    };
     let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
     if let Some(ref c) = ctx {

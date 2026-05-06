@@ -14,9 +14,10 @@ use slopos_abi::syscall::*;
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
 
-use slopos_arch::{InterruptFrame, cpu};
+use slopos_arch::cpu;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::user::context::UserContext;
 
 use crate::task::task_get_exit_record;
 
@@ -201,9 +202,12 @@ define_syscall!(syscall_terminate_task(ctx, args) requires(compositor) {
     ctx.ok(0)
 });
 
-pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let process_id = match ctx.require_process_id() {
@@ -320,23 +324,28 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
                     (*task).fs_base = tls_tp;
                     slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
                 }
-                (*frame).rip = entry_point;
-                (*frame).rsp = stack_ptr;
-                (*frame).rax = 0;
-                (*frame).rdi = 0;
-                (*frame).rsi = 0;
-                (*frame).rdx = 0;
-                (*frame).rcx = 0;
-                (*frame).r8 = 0;
-                (*frame).r9 = 0;
-                (*frame).r10 = 0;
-                (*frame).r11 = 0;
+                // Build the new user-mode entry register snapshot in one
+                // shot, then commit through `set_regs` so CS/SS/RFLAGS
+                // sandbox bits are reapplied for the freshly-execed image.
+                let mut regs = *(*ctx_ptr).regs();
+                regs.rip = entry_point;
+                regs.rsp = stack_ptr;
+                regs.rax = 0;
+                regs.rdi = 0;
+                regs.rsi = 0;
+                regs.rdx = 0;
+                regs.rcx = 0;
+                regs.r8 = 0;
+                regs.r9 = 0;
+                regs.r10 = 0;
+                regs.r11 = 0;
+                (*ctx_ptr).set_regs(regs);
             }
             SyscallDisposition::Ok
         }
         Err(e) => {
             unsafe {
-                (*frame).rax = e as i32 as u64;
+                (*ctx_ptr).set_rax(e as i32 as u64);
             }
             SyscallDisposition::Ok
         }
@@ -541,9 +550,12 @@ define_syscall!(syscall_getcwd(ctx, args) {
     ctx.ok(needed as u64)
 });
 
-pub fn syscall_arch_prctl(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_arch_prctl(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let args = ctx.args();
@@ -574,21 +586,27 @@ pub fn syscall_arch_prctl(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     }
 }
 
-pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_fork(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
-    let child_id = task_fork(task, frame as *const InterruptFrame);
+    let child_id = task_fork(task, ctx_ptr as *const UserContext);
     ctx.from_bool_value(
         child_id != slopos_abi::task::INVALID_TASK_ID,
         child_id as u64,
     )
 }
 
-pub fn syscall_clone(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_clone(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let args = ctx.args();
@@ -607,13 +625,16 @@ pub fn syscall_clone(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisp
         tls,
     ) {
         Ok(child_id) => ctx.ok(child_id as u64),
-        Err(errno) => syscall_return_err(frame, errno),
+        Err(errno) => syscall_return_err(ctx_ptr, errno),
     }
 }
 
-pub fn syscall_futex(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_futex(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let args = ctx.args();

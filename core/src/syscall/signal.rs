@@ -7,9 +7,9 @@ use slopos_abi::signal::{
 };
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_ESRCH};
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
-use slopos_arch::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::user::context::UserContext;
 
 use crate::sched::{schedule, unblock_task};
 use crate::scheduler::task::{task_find_by_id, task_iterate_active, task_terminate};
@@ -142,9 +142,12 @@ fn action_to_user(action: &SignalAction) -> UserSigaction {
     }
 }
 
-pub fn syscall_rt_sigaction(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_rt_sigaction(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let args = ctx.args();
@@ -197,9 +200,12 @@ pub fn syscall_rt_sigaction(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
     ctx.ok(0)
 }
 
-pub fn syscall_rt_sigprocmask(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_rt_sigprocmask(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let args = ctx.args();
@@ -245,9 +251,12 @@ pub fn syscall_rt_sigprocmask(task: *mut Task, frame: *mut InterruptFrame) -> Sy
     ctx.ok(0)
 }
 
-pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let args = ctx.args();
@@ -352,9 +361,12 @@ fn read_signal_frame(rsp: u64) -> Option<SignalFrame> {
     copy_from_user(ptr).ok()
 }
 
-pub fn syscall_rt_sigreturn(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, ERRNO_EINVAL);
+pub fn syscall_rt_sigreturn(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
+    if ctx_ptr.is_null() {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    }
+    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
     let task_ref = match ctx.task_mut() {
@@ -364,7 +376,7 @@ pub fn syscall_rt_sigreturn(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
 
     // After the handler's `ret` pops the restorer address, RSP points
     // directly at the SignalFrame.  Read it from there.
-    let rsp = unsafe { (*frame).rsp };
+    let rsp = ctx.user_ctx().rsp();
     let sigframe = match read_signal_frame(rsp) {
         Some(sf) => sf,
         None => return ctx.err_with(ERRNO_EFAULT),
@@ -372,32 +384,36 @@ pub fn syscall_rt_sigreturn(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
 
     task_ref.signal_blocked = sigframe.saved_mask & !SIG_UNCATCHABLE;
 
-    unsafe {
-        (*frame).rax = sigframe.rax;
-        (*frame).rbx = sigframe.rbx;
-        (*frame).rcx = sigframe.rcx;
-        (*frame).rdx = sigframe.rdx;
-        (*frame).rsi = sigframe.rsi;
-        (*frame).rdi = sigframe.rdi;
-        (*frame).rbp = sigframe.rbp;
-        (*frame).rsp = sigframe.rsp;
-        (*frame).r8 = sigframe.r8;
-        (*frame).r9 = sigframe.r9;
-        (*frame).r10 = sigframe.r10;
-        (*frame).r11 = sigframe.r11;
-        (*frame).r12 = sigframe.r12;
-        (*frame).r13 = sigframe.r13;
-        (*frame).r14 = sigframe.r14;
-        (*frame).r15 = sigframe.r15;
-        (*frame).rip = sigframe.rip;
-        (*frame).rflags = sigframe.rflags;
-    }
+    // Rebuild the user GPR snapshot from the SignalFrame and commit it
+    // through `set_regs`, which re-applies the user-CS/SS selectors and
+    // RFLAGS sensitive-bit mask — user code cannot escape the sandbox
+    // by crafting a sigframe with IOPL/AC/NT/VM/IF=0 set.
+    let mut regs = *ctx.user_ctx().regs();
+    regs.rax = sigframe.rax;
+    regs.rbx = sigframe.rbx;
+    regs.rcx = sigframe.rcx;
+    regs.rdx = sigframe.rdx;
+    regs.rsi = sigframe.rsi;
+    regs.rdi = sigframe.rdi;
+    regs.rbp = sigframe.rbp;
+    regs.rsp = sigframe.rsp;
+    regs.r8 = sigframe.r8;
+    regs.r9 = sigframe.r9;
+    regs.r10 = sigframe.r10;
+    regs.r11 = sigframe.r11;
+    regs.r12 = sigframe.r12;
+    regs.r13 = sigframe.r13;
+    regs.r14 = sigframe.r14;
+    regs.r15 = sigframe.r15;
+    regs.rip = sigframe.rip;
+    regs.rflags_user_subset = sigframe.rflags;
+    ctx.user_ctx_mut().set_regs(regs);
 
     ctx.ok(0)
 }
 
-pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
-    if task.is_null() || frame.is_null() {
+pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
+    if task.is_null() || ctx_ptr.is_null() {
         return;
     }
 
@@ -441,6 +457,10 @@ pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
             return;
         }
 
+        // Snapshot of pre-delivery user registers — same struct that
+        // `rt_sigreturn` will rebuild the user state from later.
+        let regs_snapshot = *(*ctx_ptr).regs();
+
         // Linux convention: push the restorer address as a separate word
         // on the stack BEFORE the SignalFrame.  When the handler does
         // `ret`, it pops the restorer into RIP and RSP advances to point
@@ -450,7 +470,7 @@ pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
         //   [frame_addr + 0]  = restorer address   (popped by `ret`)
         //   [frame_addr + 8]  = SignalFrame { signum, rax, … }
         let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
-        let frame_addr = (*frame).rsp.wrapping_sub(total_size) & !0xF;
+        let frame_addr = regs_snapshot.rsp.wrapping_sub(total_size) & !0xF;
 
         // Write restorer as a separate u64 at frame_addr.
         let restorer_ptr = match UserPtr::<u64>::try_new(frame_addr) {
@@ -471,24 +491,24 @@ pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
         let saved_mask = (*task).signal_blocked;
         let sigframe = SignalFrame {
             signum: signum as u64,
-            rax: (*frame).rax,
-            rbx: (*frame).rbx,
-            rcx: (*frame).rcx,
-            rdx: (*frame).rdx,
-            rsi: (*frame).rsi,
-            rdi: (*frame).rdi,
-            rbp: (*frame).rbp,
-            rsp: (*frame).rsp,
-            r8: (*frame).r8,
-            r9: (*frame).r9,
-            r10: (*frame).r10,
-            r11: (*frame).r11,
-            r12: (*frame).r12,
-            r13: (*frame).r13,
-            r14: (*frame).r14,
-            r15: (*frame).r15,
-            rip: (*frame).rip,
-            rflags: (*frame).rflags,
+            rax: regs_snapshot.rax,
+            rbx: regs_snapshot.rbx,
+            rcx: regs_snapshot.rcx,
+            rdx: regs_snapshot.rdx,
+            rsi: regs_snapshot.rsi,
+            rdi: regs_snapshot.rdi,
+            rbp: regs_snapshot.rbp,
+            rsp: regs_snapshot.rsp,
+            r8: regs_snapshot.r8,
+            r9: regs_snapshot.r9,
+            r10: regs_snapshot.r10,
+            r11: regs_snapshot.r11,
+            r12: regs_snapshot.r12,
+            r13: regs_snapshot.r13,
+            r14: regs_snapshot.r14,
+            r15: regs_snapshot.r15,
+            rip: regs_snapshot.rip,
+            rflags: regs_snapshot.rflags_user_subset,
             saved_mask,
         };
 
@@ -502,10 +522,16 @@ pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
         }
         (*task).signal_blocked = blocked & !SIG_UNCATCHABLE;
 
-        (*frame).rsp = frame_addr;
-        (*frame).rip = action.handler;
-        (*frame).rdi = signum as u64;
-        (*frame).rsi = 0;
-        (*frame).rdx = 0;
+        // Install the handler's entry state on the user context: redirect
+        // RIP/RSP into the handler with `signum` in RDI, RSI/RDX zeroed.
+        // `set_regs` reapplies CS/SS/RFLAGS-mask so a malicious caller
+        // cannot smuggle in a forged user-RFLAGS via `regs_snapshot`.
+        let mut regs = regs_snapshot;
+        regs.rsp = frame_addr;
+        regs.rip = action.handler;
+        regs.rdi = signum as u64;
+        regs.rsi = 0;
+        regs.rdx = 0;
+        (*ctx_ptr).set_regs(regs);
     }
 }

@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int};
 
 use crate::scheduler::task_struct::Task;
-use slopos_arch::InterruptFrame;
+use slopos_ostd::user::context::UserContext;
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtrError};
@@ -16,7 +16,7 @@ pub enum SyscallDisposition {
     NoReturn = 1,
 }
 
-pub type SyscallHandler = fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
+pub type SyscallHandler = fn(*mut Task, *mut UserContext) -> SyscallDisposition;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -27,22 +27,22 @@ pub struct SyscallEntry {
 
 unsafe impl Sync for SyscallEntry {}
 
-pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> SyscallDisposition {
-    if frame.is_null() {
+pub fn syscall_return_ok(ctx: *mut UserContext, value: u64) -> SyscallDisposition {
+    if ctx.is_null() {
         return SyscallDisposition::Ok;
     }
     unsafe {
-        (*frame).rax = value;
+        (*ctx).set_rax(value);
     }
     SyscallDisposition::Ok
 }
 
-pub fn syscall_return_err(frame: *mut InterruptFrame, err_value: u64) -> SyscallDisposition {
-    if frame.is_null() {
+pub fn syscall_return_err(ctx: *mut UserContext, err_value: u64) -> SyscallDisposition {
+    if ctx.is_null() {
         return SyscallDisposition::Ok;
     }
     unsafe {
-        (*frame).rax = err_value;
+        (*ctx).set_rax(err_value);
     }
     SyscallDisposition::Ok
 }

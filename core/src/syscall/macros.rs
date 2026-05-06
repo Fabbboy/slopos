@@ -33,12 +33,21 @@ macro_rules! define_syscall {
     (@impl $name:ident, $ctx:ident, $args:ident, [$($req:tt)*], $body:block) => {
         pub fn $name(
             task: *mut $crate::scheduler::task_struct::Task,
-            frame: *mut slopos_arch::InterruptFrame,
+            user_ctx_ptr: *mut slopos_ostd::user::context::UserContext,
         ) -> $crate::syscall::common::SyscallDisposition {
-            #[allow(unused_variables)]
-            let Some($ctx) = $crate::syscall::context::SyscallContext::new(task, frame) else {
+            if user_ctx_ptr.is_null() {
                 return $crate::syscall::common::syscall_return_err(
-                    frame,
+                    user_ctx_ptr,
+                    slopos_abi::Errno::EINVAL.as_u64(),
+                );
+            }
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall::context::SyscallContext::from_user_context(
+                task,
+                unsafe { &mut *user_ctx_ptr },
+            ) else {
+                return $crate::syscall::common::syscall_return_err(
+                    user_ctx_ptr,
                     slopos_abi::Errno::EINVAL.as_u64(),
                 );
             };

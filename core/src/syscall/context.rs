@@ -4,7 +4,7 @@ use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_SYSTEM,
 };
-use slopos_arch::InterruptFrame;
+use slopos_ostd::user::context::UserContext;
 use slopos_utils::wl_currency::{self, WL_DELTA};
 
 #[derive(Clone, Copy)]
@@ -19,31 +19,25 @@ pub struct SyscallArgs {
 
 pub struct SyscallContext {
     task_ptr: *mut Task,
-    frame_ptr: *mut InterruptFrame,
+    user_ctx_ptr: *mut UserContext,
     args: SyscallArgs,
 }
 
 impl SyscallContext {
-    pub fn new(task: *mut Task, frame: *mut InterruptFrame) -> Option<Self> {
-        if frame.is_null() {
-            return None;
-        }
-
-        let args = unsafe {
-            let f = &*frame;
-            SyscallArgs {
-                arg0: f.rdi,
-                arg1: f.rsi,
-                arg2: f.rdx,
-                arg3: f.r10,
-                arg4: f.r8,
-                arg5: f.r9,
-            }
+    pub fn from_user_context(task: *mut Task, ctx: &mut UserContext) -> Option<Self> {
+        let regs = ctx.regs();
+        let args = SyscallArgs {
+            arg0: regs.rdi,
+            arg1: regs.rsi,
+            arg2: regs.rdx,
+            arg3: regs.r10,
+            arg4: regs.r8,
+            arg5: regs.r9,
         };
 
         Some(Self {
             task_ptr: task,
-            frame_ptr: frame,
+            user_ctx_ptr: ctx as *mut UserContext,
             args,
         })
     }
@@ -114,8 +108,22 @@ impl SyscallContext {
     }
 
     #[inline]
-    pub fn frame_ptr(&self) -> *mut InterruptFrame {
-        self.frame_ptr
+    pub fn user_ctx_ptr(&self) -> *mut UserContext {
+        self.user_ctx_ptr
+    }
+
+    #[inline]
+    pub fn user_ctx(&self) -> &UserContext {
+        unsafe { &*self.user_ctx_ptr }
+    }
+
+    /// Mutable view of the per-task user-mode register snapshot the
+    /// syscall handler is operating on. Returned reference's lifetime
+    /// is the borrow of `self`; callers must not retain it across a
+    /// reentrant `&mut UserContext` reborrow (e.g. nested handler dispatch).
+    #[inline]
+    pub fn user_ctx_mut(&self) -> &mut UserContext {
+        unsafe { &mut *self.user_ctx_ptr }
     }
 
     #[inline]
@@ -135,7 +143,7 @@ impl SyscallContext {
     #[inline]
     pub fn ok(&self, value: u64) -> SyscallDisposition {
         wl_currency::adjust_balance(WL_DELTA);
-        syscall_return_ok(self.frame_ptr, value)
+        syscall_return_ok(self.user_ctx_ptr, value)
     }
 
     #[inline]
@@ -151,7 +159,7 @@ impl SyscallContext {
     #[inline]
     pub fn err_with(&self, errno: u64) -> SyscallDisposition {
         wl_currency::adjust_balance(-WL_DELTA);
-        syscall_return_err(self.frame_ptr, errno)
+        syscall_return_err(self.user_ctx_ptr, errno)
     }
 
     #[inline]

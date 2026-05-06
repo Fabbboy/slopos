@@ -1,89 +1,35 @@
-use core::arch::global_asm;
+//! User-copy primitives — thin shim over [`slopos_ostd::user::copy`].
+//!
+//! All the byte-copy logic (`rep movsb` between
+//! `__ostd_usercopy_start..__ostd_usercopy_end`, SMAP STAC/CLAC,
+//! page-fault recovery) lives in OSTD. This module adapts the legacy
+//! PCR-implicit signature
+//! (`copy_from_user(ptr) -> Result<T, UserPtrError>`) onto OSTD's
+//! explicit-`&VmSpace` API by:
+//!
+//!   1. Reading `pcr.syscall_pid` to identify the running user
+//!      process.
+//!   2. Acquiring a [`KArc<VmSpace>`] clone via
+//!      [`crate::process_vm::process_vm_get_vm_space`] (the per-slot
+//!      lock is dropped before the copy runs).
+//!   3. Delegating to OSTD's `copy_*_user`.
+//!   4. Mapping OSTD's [`slopos_ostd::user::copy::UserCopyError`]
+//!      back onto the legacy [`UserPtrError`] enum (preserves the
+//!      kernel callers' single-error-type contract; see
+//!      `mm/src/user_ptr.rs`).
+//!
+//! The page-fault recovery branch in `boot/src/idt.rs` queries OSTD's
+//! `is_ostd_usercopy_ip` directly. No SMAP-STAC asm lives in
+//! `slopos_mm` anymore.
+
 use core::sync::atomic::Ordering;
 
 use slopos_arch::pcr;
 use slopos_ostd::sync::InitFlag;
 
-use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
-use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
+use crate::user_ptr::{UserBytes, UserPtr, UserPtrError};
 
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
-
-// =============================================================================
-// Assembly usercopy — Redox-style fault-recoverable byte copy
-//
-// The `raw_usercopy` function uses `rep movsb` between two labeled symbols.
-// If a page fault occurs while RIP is within `__usercopy_start..__usercopy_end`,
-// the page fault handler in `boot/src/idt.rs` redirects execution to
-// `__usercopy_fault` which returns the remaining byte count (nonzero = error).
-//
-// This makes copy_from_user / copy_to_user safe against concurrent munmap
-// on SMP — the kernel never panics on a user-space address fault.
-// =============================================================================
-
-global_asm!(
-    // fn raw_usercopy(dst: *mut u8 [rdi], src: *const u8 [rsi], len: usize [rdx]) -> usize
-    // Returns 0 on success, >0 (remaining bytes) on fault.
-    //
-    // SMAP: `stac` opens the user-page access window; `clac` closes it on
-    // every exit path (success + fault-recovery). Hardware clears AC on
-    // exception entry, so nested kernel code running between the fault and
-    // IRETQ sees SMAP enforced normally; IRETQ restores AC from the saved
-    // RFLAGS, so we resume inside the stac window.
-    ".global raw_usercopy",
-    ".global __usercopy_start",
-    ".global __usercopy_end",
-    ".global __usercopy_fault",
-    "raw_usercopy:",
-    "   mov rcx, rdx", // len → rcx for rep prefix
-    "   stac",
-    "__usercopy_start:",
-    "   rep movsb", // copy [rsi] → [rdi], rcx bytes
-    "__usercopy_end:",
-    "   clac",
-    "   xor eax, eax", // return 0 = success
-    "   ret",
-    "__usercopy_fault:",
-    "   clac",
-    "   mov rax, rcx", // return remaining byte count
-    "   ret",
-);
-
-unsafe extern "C" {
-    /// Byte-copy with fault recovery.  Returns 0 on success, or the
-    /// number of remaining (un-copied) bytes if a page fault occurred.
-    fn raw_usercopy(dst: *mut u8, src: *const u8, len: usize) -> usize;
-
-    /// Start of the faultable instruction region.
-    fn __usercopy_start();
-    /// End of the faultable instruction region.
-    fn __usercopy_end();
-    /// Fault recovery entry point — jumped to by the page fault handler.
-    fn __usercopy_fault();
-}
-
-/// Returns `true` if `rip` falls within the faultable usercopy region.
-///
-/// Called by the page fault handler (`boot/src/idt.rs`) for kernel-mode
-/// faults.  If this returns `true`, the handler should redirect RIP to
-/// `usercopy_fault_ip()` instead of panicking.
-#[inline]
-pub fn is_usercopy_ip(rip: u64) -> bool {
-    let start = __usercopy_start as *const () as u64;
-    let end = __usercopy_end as *const () as u64;
-    rip >= start && rip < end
-}
-
-/// The RIP value the page fault handler should set to recover from a
-/// fault during usercopy.
-#[inline]
-pub fn usercopy_fault_ip() -> u64 {
-    __usercopy_fault as *const () as u64
-}
-
-// =============================================================================
-// Rust wrappers
-// =============================================================================
 
 #[inline]
 fn current_process_id() -> u32 {
@@ -98,96 +44,65 @@ pub fn set_test_process_id(pid: u32) {
     }
 }
 
-fn validate_user_pages(user_addr: UserVirtAddr, len: usize) -> Result<(), UserPtrError> {
-    if len == 0 {
+/// One-shot probe (latched after the first run) confirming the
+/// kernel-half cannot be reached through the user-VA validator —
+/// catches a misconfigured page-table whose user/kernel boundary is
+/// shifted, before we hand any fault-recovering copy a kernel
+/// address. Identical to the legacy probe, retained here because the
+/// shim still wraps the OSTD copy with kernel-side process-VM glue.
+fn check_kernel_guard(pid: u32) -> Result<(), UserPtrError> {
+    if KERNEL_GUARD_CHECKED.is_set() {
         return Ok(());
     }
+    let kernel_probe = crate::memory_layout_defs::KERNEL_HEAP_VBASE;
+    if crate::process_vm::process_vm_user_va_is_user_accessible(pid, kernel_probe) {
+        return Err(UserPtrError::NotMapped);
+    }
+    KERNEL_GUARD_CHECKED.mark_set();
+    Ok(())
+}
 
+#[inline]
+fn current_vm_space() -> Result<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmSpace>, UserPtrError>
+{
     let pid = current_process_id();
     if pid == slopos_abi::task::INVALID_PROCESS_ID {
         return Err(UserPtrError::NotMapped);
     }
-
-    if !KERNEL_GUARD_CHECKED.is_set() {
-        // Probe a known kernel-half VA — must NOT be user-accessible.
-        // After the probe sets the latch, this skips on every
-        // subsequent call.
-        let kernel_probe = KERNEL_HEAP_VBASE;
-        if crate::process_vm::process_vm_user_va_is_user_accessible(pid, kernel_probe) {
-            return Err(UserPtrError::NotMapped);
-        }
-        KERNEL_GUARD_CHECKED.mark_set();
-    }
-
-    let start = user_addr.as_u64();
-
-    let end = start
-        .checked_add(len as u64)
-        .ok_or(UserPtrError::Overflow)?;
-
-    if end > crate::memory_layout_defs::USER_SPACE_END_VA {
-        return Err(UserPtrError::OutOfUserRange);
-    }
-
-    let page_size = crate::paging_defs::PAGE_SIZE_4KB;
-    let mut page = start & !(page_size - 1);
-
-    while page < end {
-        if !crate::process_vm::process_vm_user_va_is_user_accessible(pid, page) {
-            return Err(UserPtrError::NotMapped);
-        }
-        page = match page.checked_add(page_size) {
-            Some(next) => next,
-            None => break,
-        };
-    }
-
-    Ok(())
+    check_kernel_guard(pid)?;
+    crate::process_vm::process_vm_get_vm_space(pid).ok_or(UserPtrError::NotMapped)
 }
 
-/// Perform a fault-recoverable copy via the assembly usercopy function.
+/// Copy a `T: Copy` from user space into kernel space.
 ///
-/// Returns `Ok(())` on success, `Err(Fault)` if the copy faulted.
-/// The page-validation step is an optimistic fast path — the assembly
-/// function handles the actual fault if validation is stale.
-#[inline]
-unsafe fn do_usercopy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), UserPtrError> {
-    let remaining = unsafe { raw_usercopy(dst, src, len) };
-    if remaining == 0 {
-        Ok(())
-    } else {
-        Err(UserPtrError::CopyFailed)
-    }
-}
-
-/// Copy a `T` from user space into kernel space.
+/// Pages are walked through the per-process [`VmSpace`] and confirmed
+/// present + user-readable; the actual transfer is fault-recoverable
+/// via OSTD's `__ostd_raw_usercopy` asm (a concurrent `munmap` on
+/// another CPU surfaces as `UserPtrError::CopyFailed`, never a
+/// kernel panic).
 ///
-/// Safe against concurrent munmap: if the pages are unmapped between
-/// validation and the copy, the assembly usercopy function faults and
-/// the page fault handler returns an error instead of panicking.
+/// `T: Copy` (rather than OSTD's stricter `T: Pod`) is preserved for
+/// caller-API parity. The shim performs a byte-level copy; callers are
+/// responsible for ensuring `T`'s representation tolerates arbitrary
+/// byte patterns.
 pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
-    validate_user_pages(src.addr(), core::mem::size_of::<T>())?;
-    unsafe {
-        let mut val = core::mem::MaybeUninit::<T>::uninit();
-        do_usercopy(
-            val.as_mut_ptr() as *mut u8,
-            src.as_ptr() as *const u8,
-            core::mem::size_of::<T>(),
-        )?;
-        Ok(val.assume_init())
-    }
+    let space = current_vm_space()?;
+    let mut val = core::mem::MaybeUninit::<T>::uninit();
+    let dst_bytes = unsafe {
+        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
+    };
+    slopos_ostd::user::copy::copy_bytes_from_user(&space, src.addr(), dst_bytes)?;
+    Ok(unsafe { val.assume_init() })
 }
 
-/// Copy a `T` from kernel space into user space.
+/// Copy a `T: Copy` from kernel space into user space.
 pub fn copy_to_user<T: Copy>(dst: UserPtr<T>, value: &T) -> Result<(), UserPtrError> {
-    validate_user_pages(dst.addr(), core::mem::size_of::<T>())?;
-    unsafe {
-        do_usercopy(
-            dst.as_mut_ptr() as *mut u8,
-            value as *const T as *const u8,
-            core::mem::size_of::<T>(),
-        )
-    }
+    let space = current_vm_space()?;
+    let src_bytes = unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    slopos_ostd::user::copy::copy_bytes_to_user(&space, dst.addr(), src_bytes)?;
+    Ok(())
 }
 
 /// Copy raw bytes from user space.
@@ -196,12 +111,8 @@ pub fn copy_bytes_from_user(src: UserBytes, dst: &mut [u8]) -> Result<usize, Use
     if copy_len == 0 {
         return Ok(0);
     }
-
-    validate_user_pages(src.base(), copy_len)?;
-
-    unsafe {
-        do_usercopy(dst.as_mut_ptr(), src.base().as_ptr(), copy_len)?;
-    }
+    let space = current_vm_space()?;
+    slopos_ostd::user::copy::copy_bytes_from_user(&space, src.base(), &mut dst[..copy_len])?;
     Ok(copy_len)
 }
 
@@ -211,11 +122,7 @@ pub fn copy_bytes_to_user(dst: UserBytes, src: &[u8]) -> Result<usize, UserPtrEr
     if copy_len == 0 {
         return Ok(0);
     }
-
-    validate_user_pages(dst.base(), copy_len)?;
-
-    unsafe {
-        do_usercopy(dst.base().as_mut_ptr(), src.as_ptr(), copy_len)?;
-    }
+    let space = current_vm_space()?;
+    slopos_ostd::user::copy::copy_bytes_to_user(&space, dst.base(), &src[..copy_len])?;
     Ok(copy_len)
 }

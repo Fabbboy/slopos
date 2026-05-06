@@ -841,7 +841,10 @@ pub fn task_shutdown_all() -> c_int {
     result
 }
 
-pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::InterruptFrame) -> u32 {
+pub fn task_fork(
+    parent_task: *mut Task,
+    parent_user_ctx: *const slopos_ostd::user::context::UserContext,
+) -> u32 {
     if parent_task.is_null() {
         klog_info!("task_fork: null parent task");
         return INVALID_TASK_ID;
@@ -913,36 +916,27 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    // Build the child's InterruptFrame: copy from syscall_frame if
-    // available, otherwise synthesize from the cloned task context.
-    let iframe = if !syscall_frame.is_null() {
-        let mut frame = unsafe { core::ptr::read(syscall_frame) };
-        frame.rax = 0; // child returns 0 from fork
-        frame
-    } else {
-        // No syscall frame available — synthesize a valid InterruptFrame
-        // from the cloned task's saved context so the OSTD round-trip
-        // resumes at a valid user-mode state (not a zeroed rip/cs/rsp/ss).
-        let ctx = &child.context;
-        interrupt_frame_from_context(ctx, ctx.rsp)
-    };
     // OSTD user-mode entry: seed `child.user_ctx` from the parent's
-    // saved syscall frame (force_rax=0 for fork's child return), and
-    // set up the kernel stack so `switch_registers` rets into
-    // `user_task_first_run`.
-    crate::syscall::user_loop::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
+    // syscall-time UserContext (when supplied) with rax forced to 0
+    // for fork's child return, and set up the kernel stack so
+    // `switch_registers` rets into `user_task_first_run`.
+    if !parent_user_ctx.is_null() {
+        let parent_ctx = unsafe { &*parent_user_ctx };
+        let mut regs = *parent_ctx.regs();
+        regs.rax = 0;
+        child.user_ctx.set_regs(regs);
+    } else {
+        // No parent UserContext available — `clone_from_raw` already
+        // copied the parent's `user_ctx` into the child; force rax to
+        // 0 through `set_regs` so CS/SS/RFLAGS-mask invariants hold.
+        let mut regs = *child.user_ctx.regs();
+        regs.rax = 0;
+        child.user_ctx.set_regs(regs);
+    }
     // SAFETY: child kernel stack was just allocated and is writable.
     child.switch_ctx = unsafe { build_user_task_entry_frame(child.kernel_stack_top) };
     child.context_from_user = 0;
     child.context.rax = 0;
-    if !syscall_frame.is_null() {
-        let sf = unsafe { &*syscall_frame };
-        child.context.rip = sf.rip;
-        child.context.rsp = sf.rsp;
-        child.context.rflags = sf.rflags;
-        child.context.cs = if (sf.cs & 0x3) == 0x3 { sf.cs } else { 0x23 };
-        child.context.ss = if (sf.ss & 0x3) == 0x3 { sf.ss } else { 0x1B };
-    }
 
     let child_page_dir = process_vm_get_page_dir(child_process_id);
     if !child_page_dir.is_null() {
