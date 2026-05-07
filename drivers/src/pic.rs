@@ -1,16 +1,16 @@
-use slopos_utils::io::Port;
+use slopos_ostd::io::port::IoPortRegistry;
 
-const PIC1_COMMAND: Port<u8> = Port::new(0x20);
-const PIC1_DATA: Port<u8> = Port::new(0x21);
-const PIC2_COMMAND: Port<u8> = Port::new(0xA0);
-const PIC2_DATA: Port<u8> = Port::new(0xA1);
 const PIC_EOI: u8 = 0x20;
 
 pub fn pic_quiesce_disable() {
+    let pic1_cmd = IoPortRegistry::reserve::<u8>(0x20).expect("PIC1 command port");
+    let pic1_data = IoPortRegistry::reserve::<u8>(0x21).expect("PIC1 data port");
+    let pic2_cmd = IoPortRegistry::reserve::<u8>(0xA0).expect("PIC2 command port");
+    let pic2_data = IoPortRegistry::reserve::<u8>(0xA1).expect("PIC2 data port");
     unsafe {
-        PIC1_DATA.write(0xFF);
-        PIC2_DATA.write(0xFF);
-        PIC1_COMMAND.write(PIC_EOI);
-        PIC2_COMMAND.write(PIC_EOI);
+        pic1_data.write(0xFF);
+        pic2_data.write(0xFF);
+        pic1_cmd.write(PIC_EOI);
+        pic2_cmd.write(PIC_EOI);
     }
 }
