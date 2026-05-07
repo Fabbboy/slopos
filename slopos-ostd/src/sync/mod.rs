@@ -16,6 +16,8 @@ pub mod intrusive;
 pub mod lock_tracking;
 pub mod mutex;
 pub mod once_lock;
+pub mod raw_link;
+pub mod raw_table;
 pub mod rcu;
 pub mod seqlock;
 pub mod spin;
@@ -30,6 +32,8 @@ pub use lock_tracking::{
 };
 pub use mutex::{Mutex, MutexGuard};
 pub use once_lock::OnceLock;
+pub use raw_link::{ByteChain, RawLink};
+pub use raw_table::RawTable;
 pub use rcu::{
     RcuBackend, RcuReadGuard, call_rcu, rcu_note_qs, rcu_process_callbacks, rcu_raise_softirq,
     rcu_read_lock, register_rcu_backend, synchronize_rcu,

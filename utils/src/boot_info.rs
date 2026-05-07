@@ -18,6 +18,51 @@ pub struct LimineMemmapResponse {
 unsafe impl Send for LimineMemmapResponse {}
 unsafe impl Sync for LimineMemmapResponse {}
 
+/// Iterate the entries of a Limine memmap response. The single `unsafe`
+/// reborrow of the response pointer + the per-entry deref live here, so
+/// kernel-side callers stay fully safe.
+///
+/// Returns an empty iterator if `memmap` is null or its entries array
+/// is empty. The bootloader publishes the response at a stable virtual
+/// address valid for the lifetime of the kernel.
+#[inline]
+pub fn limine_memmap_iter(
+    memmap: *const LimineMemmapResponse,
+) -> impl Iterator<Item = LimineMemmapEntry> {
+    // SAFETY: `memmap` either is null (handled below) or points at the
+    // bootloader-published, lifetime-stable response struct. The inner
+    // `entries` array is `[*const LimineMemmapEntry; entry_count]` of
+    // similarly stable lifetime; each entry pointer is either null or
+    // points at a `LimineMemmapEntry` we own a Copy of.
+    let parts: Option<(usize, *const *const LimineMemmapEntry)> = unsafe {
+        if memmap.is_null() {
+            None
+        } else {
+            let response = &*memmap;
+            if response.entry_count == 0 || response.entries.is_null() {
+                None
+            } else {
+                let count = response.entry_count.min(u32::MAX as u64) as usize;
+                Some((count, response.entries))
+            }
+        }
+    };
+    let (count, entries_ptr) = parts.unwrap_or((0, core::ptr::null()));
+    (0..count).filter_map(move |i| {
+        // SAFETY: `i < count` and `entries_ptr` is non-null per the
+        // Some() branch above; bootloader guarantees the slot's
+        // lifetime.
+        unsafe {
+            let entry_ptr = *entries_ptr.add(i);
+            if entry_ptr.is_null() {
+                None
+            } else {
+                Some(*entry_ptr)
+            }
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
 pub enum MemoryRegionKind {

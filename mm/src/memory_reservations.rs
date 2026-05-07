@@ -1,7 +1,7 @@
-use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};
-use core::ptr;
 
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::util::cstr::cstr_from_kernel_ptr;
 use slopos_utils::{align_down_u64, align_up_u64, klog_info};
 
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
@@ -54,94 +54,65 @@ impl MmRegion {
         }
     }
 }
-struct RegionStore {
-    regions: *mut MmRegion,
-    capacity: u32,
+
+struct RegionStoreInner {
+    regions: [MmRegion; MM_REGION_STATIC_CAP],
     count: u32,
     overflows: u32,
-    configured: bool,
 }
 
-unsafe impl Send for RegionStore {}
-unsafe impl Sync for RegionStore {}
-
-static STATIC_REGION_STORE: SyncUnsafeCell<[MmRegion; MM_REGION_STATIC_CAP]> =
-    SyncUnsafeCell::new([MmRegion::zeroed(); MM_REGION_STATIC_CAP]);
-static REGION_STORE: SyncUnsafeCell<RegionStore> = SyncUnsafeCell::new(RegionStore {
-    regions: ptr::null_mut(),
-    capacity: MM_REGION_STATIC_CAP as u32,
-    count: 0,
-    overflows: 0,
-    configured: false,
-});
-
-fn ensure_storage() -> &'static mut RegionStore {
-    unsafe {
-        let store = &mut *REGION_STORE.get();
-        if store.regions.is_null() || store.capacity == 0 {
-            // Lazily initialize to point at static storage on first access.
-            store.regions = STATIC_REGION_STORE.get() as *mut MmRegion;
-            store.capacity = MM_REGION_STATIC_CAP as u32;
-        }
-        store
+impl RegionStoreInner {
+    const fn capacity(&self) -> u32 {
+        MM_REGION_STATIC_CAP as u32
     }
 }
 
-fn clear_region(region: &mut MmRegion) {
-    *region = MmRegion::zeroed();
+static REGION_STORE: SpinLock<RegionStoreInner> = SpinLock::new(
+    RegionStoreInner {
+        regions: [MmRegion::zeroed(); MM_REGION_STATIC_CAP],
+        count: 0,
+        overflows: 0,
+    },
+    LOCK_LEVEL_RESOURCE,
+);
+
+fn with_store<R>(f: impl FnOnce(&mut RegionStoreInner) -> R) -> R {
+    let mut guard = REGION_STORE.lock();
+    f(&mut guard)
 }
 
-fn clear_store() {
-    let store = ensure_storage();
-    unsafe {
-        for i in 0..store.capacity as usize {
-            clear_region(&mut *store.regions.add(i));
-        }
+fn clear_store_inner(store: &mut RegionStoreInner) {
+    for slot in store.regions.iter_mut() {
+        *slot = MmRegion::zeroed();
     }
     store.count = 0;
     store.overflows = 0;
 }
 
 fn copy_label(dest: &mut [u8; 32], src: *const c_char) {
-    if src.is_null() {
+    let Some(bytes) = cstr_from_kernel_ptr(src) else {
         dest[0] = 0;
         return;
-    }
-
-    let mut i = 0;
-    unsafe {
-        while i < 31 {
-            let ch = *src.add(i) as u8;
-            if ch == 0 {
-                break;
-            }
-            dest[i] = ch;
-            i += 1;
-        }
-    }
-    dest[i] = 0;
+    };
+    let take = bytes.len().min(31);
+    dest[..take].copy_from_slice(&bytes[..take]);
+    dest[take] = 0;
 }
 
-fn insert_slot(index: u32) -> Result<(), ()> {
-    let store = ensure_storage();
-    if store.count >= store.capacity {
+fn insert_slot(store: &mut RegionStoreInner, index: u32) -> Result<(), ()> {
+    if store.count >= store.capacity() {
         store.overflows = store.overflows.saturating_add(1);
         return Err(());
     }
 
-    let idx = index.min(store.count);
-    if store.count > 0 && idx < store.count {
-        unsafe {
-            let dst = store.regions.add((idx + 1) as usize);
-            let src = store.regions.add(idx as usize);
-            let move_elems = (store.count - idx) as usize;
-            ptr::copy(src, dst, move_elems);
-        }
+    let cap = store.count as usize;
+    let idx = (index as usize).min(cap);
+    if cap > 0 && idx < cap {
+        // shift `[idx, count)` one slot to the right.
+        store.regions.copy_within(idx..cap, idx + 1);
     }
     store.count += 1;
-    unsafe {
-        clear_region(&mut *store.regions.add(idx as usize));
-    }
+    store.regions[idx] = MmRegion::zeroed();
     Ok(())
 }
 
@@ -156,52 +127,60 @@ fn regions_equivalent(a: &MmRegion, b: &MmRegion) -> bool {
     }
 }
 
-fn try_merge_with_neighbors(index: u32) {
-    let store = ensure_storage();
-    if store.count == 0 || index >= store.count {
+fn try_merge_with_neighbors(store: &mut RegionStoreInner, index: u32) {
+    let count = store.count;
+    if count == 0 || index >= count {
         return;
     }
+    let i = index as usize;
 
-    // Merge with previous
+    // Merge with previous.
     if index > 0 {
-        let curr = unsafe { &mut *store.regions.add(index as usize) };
-        let prev = unsafe { &mut *store.regions.add((index - 1) as usize) };
-        let prev_end = prev.phys_base + prev.length;
-        if prev_end == curr.phys_base && regions_equivalent(prev, curr) {
-            prev.length = prev.length.wrapping_add(curr.length);
-            unsafe {
-                let src = store.regions.add(index as usize + 1);
-                let dst = store.regions.add(index as usize);
-                let move_elems = (store.count - index - 1) as usize;
-                ptr::copy(src, dst, move_elems);
+        let prev_end = store.regions[i - 1].phys_base + store.regions[i - 1].length;
+        let merge = prev_end == store.regions[i].phys_base && {
+            let prev = store.regions[i - 1];
+            let curr = store.regions[i];
+            regions_equivalent(&prev, &curr)
+        };
+        if merge {
+            store.regions[i - 1].length = store.regions[i - 1]
+                .length
+                .wrapping_add(store.regions[i].length);
+            let cap = store.count as usize;
+            if i + 1 < cap {
+                store.regions.copy_within(i + 1..cap, i);
             }
             store.count -= 1;
         }
     }
 
-    // Merge with next
-    if index + 1 < store.count {
-        let curr = unsafe { &mut *store.regions.add(index as usize) };
-        let next = unsafe { &mut *store.regions.add(index as usize + 1) };
-        let curr_end = curr.phys_base + curr.length;
-        if curr_end == next.phys_base && regions_equivalent(curr, next) {
-            curr.length = curr.length.wrapping_add(next.length);
-            unsafe {
-                let src = store.regions.add(index as usize + 2);
-                let dst = store.regions.add(index as usize + 1);
-                let move_elems = (store.count - index - 2) as usize;
-                ptr::copy(src, dst, move_elems);
+    // Merge with next (re-read count after possible previous merge).
+    let count = store.count;
+    if (index + 1) < count {
+        let i = index as usize;
+        let curr_end = store.regions[i].phys_base + store.regions[i].length;
+        let merge = curr_end == store.regions[i + 1].phys_base && {
+            let curr = store.regions[i];
+            let next = store.regions[i + 1];
+            regions_equivalent(&curr, &next)
+        };
+        if merge {
+            store.regions[i].length = store.regions[i]
+                .length
+                .wrapping_add(store.regions[i + 1].length);
+            let cap = store.count as usize;
+            if i + 2 < cap {
+                store.regions.copy_within(i + 2..cap, i + 1);
             }
             store.count -= 1;
         }
     }
 }
 
-fn find_region_index(phys_base: u64) -> u32 {
-    let store = ensure_storage();
-    let mut idx = 0;
+fn find_region_index(store: &RegionStoreInner, phys_base: u64) -> u32 {
+    let mut idx = 0u32;
     while idx < store.count {
-        let region = unsafe { &*store.regions.add(idx as usize) };
+        let region = &store.regions[idx as usize];
         if region.phys_base + region.length > phys_base {
             break;
         }
@@ -210,23 +189,24 @@ fn find_region_index(phys_base: u64) -> u32 {
     idx
 }
 
-fn split_region(index: u32, split_base: u64) -> Result<(), ()> {
-    let store = ensure_storage();
+fn split_region(store: &mut RegionStoreInner, index: u32, split_base: u64) -> Result<(), ()> {
     if index >= store.count {
         return Err(());
     }
-    let region = unsafe { &mut *store.regions.add(index as usize) };
+    let i = index as usize;
+    let region = store.regions[i];
     let region_end = region.phys_base + region.length;
     if split_base <= region.phys_base || split_base >= region_end {
         return Ok(());
     }
 
-    insert_slot(index + 1)?;
-    let right = unsafe { &mut *store.regions.add(index as usize + 1) };
-    *right = *region;
+    insert_slot(store, index + 1)?;
+    let i = index as usize;
+    let mut right = region;
     right.phys_base = split_base;
     right.length = region_end - split_base;
-    region.length = split_base - region.phys_base;
+    store.regions[i + 1] = right;
+    store.regions[i].length = split_base - store.regions[i].phys_base;
     Ok(())
 }
 
@@ -262,77 +242,61 @@ fn overlay_region(
         return -1;
     }
 
-    let mut cursor = aligned_base;
-    while cursor < aligned_end {
-        let idx = find_region_index(cursor);
-        let store = ensure_storage();
+    with_store(|store| {
+        let mut cursor = aligned_base;
+        while cursor < aligned_end {
+            let idx = find_region_index(store, cursor);
 
-        let region_exists = idx < store.count;
-        if !region_exists || unsafe { (*store.regions.add(idx as usize)).phys_base > cursor } {
-            if insert_slot(idx).is_err() {
+            let region_exists = idx < store.count;
+            let needs_insert = !region_exists || store.regions[idx as usize].phys_base > cursor;
+            if needs_insert {
+                if insert_slot(store, idx).is_err() {
+                    return -1;
+                }
+                let i = idx as usize;
+                let region = &mut store.regions[i];
+                region.phys_base = cursor;
+                region.length = aligned_end - cursor;
+                region.kind = kind;
+                region.type_ = type_;
+                region.flags = flags;
+                copy_label(&mut region.label, label);
+                try_merge_with_neighbors(store, idx);
+                break;
+            }
+
+            if split_region(store, idx, cursor).is_err() {
                 return -1;
             }
-            let region = unsafe { &mut *store.regions.add(idx as usize) };
-            region.phys_base = cursor;
-            region.length = aligned_end - cursor;
+            let i = idx as usize;
+            let region_end = store.regions[i].phys_base + store.regions[i].length;
+            let apply_end = if aligned_end < region_end {
+                aligned_end
+            } else {
+                region_end
+            };
+            if split_region(store, idx, apply_end).is_err() {
+                return -1;
+            }
+
+            let i = idx as usize;
+            let region = &mut store.regions[i];
             region.kind = kind;
             region.type_ = type_;
             region.flags = flags;
             copy_label(&mut region.label, label);
-            try_merge_with_neighbors(idx);
-            break;
+            try_merge_with_neighbors(store, idx);
+
+            cursor = apply_end;
         }
-
-        if split_region(idx, cursor).is_err() {
-            return -1;
-        }
-        let region = unsafe { &mut *store.regions.add(idx as usize) };
-        let region_end = region.phys_base + region.length;
-
-        let apply_end = if aligned_end < region_end {
-            aligned_end
-        } else {
-            region_end
-        };
-        if split_region(idx, apply_end).is_err() {
-            return -1;
-        }
-
-        let region = unsafe { &mut *store.regions.add(idx as usize) };
-        region.kind = kind;
-        region.type_ = type_;
-        region.flags = flags;
-        copy_label(&mut region.label, label);
-        try_merge_with_neighbors(idx);
-
-        cursor = apply_end;
-    }
-
-    0
+        0
+    })
 }
-pub fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
-    if buffer.is_null() || capacity == 0 {
-        panic!("MM: invalid region storage configuration");
-    }
-    unsafe {
-        let store = &mut *REGION_STORE.get();
-        store.regions = buffer;
-        store.capacity = capacity;
-        store.configured = true;
-    }
-    clear_store();
-}
+
 pub fn mm_region_map_reset() {
-    unsafe {
-        let store = &mut *REGION_STORE.get();
-        if !store.configured {
-            store.regions = STATIC_REGION_STORE.get() as *mut MmRegion;
-            store.capacity = MM_REGION_STATIC_CAP as u32;
-            store.configured = true;
-        }
-    }
-    clear_store();
+    with_store(clear_store_inner);
 }
+
 pub fn mm_region_add_usable(phys_base: u64, length: u64, label: *const c_char) -> c_int {
     if length == 0 {
         return -1;
@@ -346,6 +310,7 @@ pub fn mm_region_add_usable(phys_base: u64, length: u64, label: *const c_char) -
         label,
     )
 }
+
 pub fn mm_region_reserve(
     phys_base: u64,
     length: u64,
@@ -365,71 +330,79 @@ pub fn mm_region_reserve(
         label,
     )
 }
+
 pub fn mm_region_count() -> u32 {
-    ensure_storage().count
-}
-pub fn mm_region_get(index: u32) -> *const MmRegion {
-    let store = ensure_storage();
-    if index >= store.count {
-        return ptr::null();
-    }
-    unsafe { store.regions.add(index as usize) }
-}
-pub fn mm_reservations_count() -> u32 {
-    let store = ensure_storage();
-    let mut count = 0;
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if matches!(region.kind, MmRegionKind::Reserved) && region.length > 0 {
-            count += 1;
-        }
-    }
-    count
-}
-pub fn mm_reservations_capacity() -> u32 {
-    ensure_storage().capacity
-}
-pub fn mm_reservations_overflow_count() -> u32 {
-    ensure_storage().overflows
-}
-pub fn mm_reservations_get(index: u32) -> *const MmRegion {
-    let store = ensure_storage();
-    let mut seen = 0;
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
-            continue;
-        }
-        if seen == index {
-            return region as *const MmRegion;
-        }
-        seen += 1;
-    }
-    ptr::null()
-}
-pub fn mm_reservations_find(phys_addr: u64) -> *const MmRegion {
-    let store = ensure_storage();
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
-            continue;
-        }
-        let end = region.phys_base + region.length;
-        if phys_addr >= region.phys_base && phys_addr < end {
-            return region as *const MmRegion;
-        }
-    }
-    ptr::null()
+    with_store(|store| store.count)
 }
 
-pub fn mm_reservations_find_option(phys_addr: u64) -> Option<&'static MmRegion> {
-    let ptr = mm_reservations_find(phys_addr);
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &*ptr })
-    }
+pub fn mm_region_get(index: u32) -> Option<MmRegion> {
+    with_store(|store| {
+        if index >= store.count {
+            None
+        } else {
+            Some(store.regions[index as usize])
+        }
+    })
 }
+
+pub fn mm_reservations_count() -> u32 {
+    with_store(|store| {
+        let mut count = 0;
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if matches!(region.kind, MmRegionKind::Reserved) && region.length > 0 {
+                count += 1;
+            }
+        }
+        count
+    })
+}
+
+pub fn mm_reservations_capacity() -> u32 {
+    with_store(|store| store.capacity())
+}
+
+pub fn mm_reservations_overflow_count() -> u32 {
+    with_store(|store| store.overflows)
+}
+
+pub fn mm_reservations_get(index: u32) -> Option<MmRegion> {
+    with_store(|store| {
+        let mut seen = 0;
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
+                continue;
+            }
+            if seen == index {
+                return Some(*region);
+            }
+            seen += 1;
+        }
+        None
+    })
+}
+
+pub fn mm_reservations_find(phys_addr: u64) -> Option<MmRegion> {
+    with_store(|store| {
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
+                continue;
+            }
+            let end = region.phys_base + region.length;
+            if phys_addr >= region.phys_base && phys_addr < end {
+                return Some(*region);
+            }
+        }
+        None
+    })
+}
+
+pub fn mm_reservations_find_option(phys_addr: u64) -> Option<MmRegion> {
+    mm_reservations_find(phys_addr)
+}
+
 pub fn mm_reservation_type_name(type_: MmReservationType) -> &'static str {
     match type_ {
         MmReservationType::AllocatorMetadata => "allocator metadata",
@@ -440,69 +413,76 @@ pub fn mm_reservation_type_name(type_: MmReservationType) -> &'static str {
         MmReservationType::FirmwareOther => "firmware",
     }
 }
+
 pub fn mm_reservations_total_bytes(required_flags: u32) -> u64 {
-    let store = ensure_storage();
-    let mut total = 0u64;
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
-            continue;
-        }
-        if required_flags != 0 && (region.flags & required_flags) != required_flags {
-            continue;
-        }
-        total = total.wrapping_add(region.length);
-    }
-    total
-}
-pub fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
-    let store = ensure_storage();
-    let mut total = 0u64;
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if region.kind == kind {
+    with_store(|store| {
+        let mut total = 0u64;
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
+                continue;
+            }
+            if required_flags != 0 && (region.flags & required_flags) != required_flags {
+                continue;
+            }
             total = total.wrapping_add(region.length);
         }
-    }
-    total
-}
-pub fn mm_region_highest_usable_frame() -> u64 {
-    let store = ensure_storage();
-    let mut highest = 0u64;
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if !matches!(region.kind, MmRegionKind::Usable) || region.length == 0 {
-            continue;
-        }
-        let end = region.phys_base + region.length - 1;
-        let frame = end >> 12;
-        if frame > highest {
-            highest = frame;
-        }
-    }
-    highest
+        total
+    })
 }
 
-/// Returns the highest frame index seen across **any** memory-map
-/// region (Usable, Reserved, KernelAndModules, Bootloader-Reclaimable,
-/// AcpiReclaimable, AcpiNvs, BadMemory, …). The OSTD `META_SLOTS`
-/// array must cover every paddr the kernel might wrap with `Frame<M>`
-/// — including the kernel image, the bootloader-allocated PML4, and
-/// any framebuffer / ACPI region that gets mapped via cursor. The
-/// "usable" variant above is too narrow for that.
+pub fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
+    with_store(|store| {
+        let mut total = 0u64;
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if region.kind == kind {
+                total = total.wrapping_add(region.length);
+            }
+        }
+        total
+    })
+}
+
+pub fn mm_region_highest_usable_frame() -> u64 {
+    with_store(|store| {
+        let mut highest = 0u64;
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if !matches!(region.kind, MmRegionKind::Usable) || region.length == 0 {
+                continue;
+            }
+            let end = region.phys_base + region.length - 1;
+            let frame = end >> 12;
+            if frame > highest {
+                highest = frame;
+            }
+        }
+        highest
+    })
+}
+
+/// Returns the highest frame index seen across **any** memory-map region
+/// (Usable, Reserved, KernelAndModules, Bootloader-Reclaimable,
+/// AcpiReclaimable, AcpiNvs, BadMemory, …). The OSTD `META_SLOTS` array
+/// must cover every paddr the kernel might wrap with `Frame<M>` —
+/// including the kernel image, the bootloader-allocated PML4, and any
+/// framebuffer / ACPI region that gets mapped via cursor. The "usable"
+/// variant above is too narrow for that.
 pub fn mm_region_highest_frame_seen() -> u64 {
-    let store = ensure_storage();
-    let mut highest = 0u64;
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if region.length == 0 {
-            continue;
+    with_store(|store| {
+        let mut highest = 0u64;
+        for i in 0..store.count as usize {
+            let region = &store.regions[i];
+            if region.length == 0 {
+                continue;
+            }
+            let end = region.phys_base.saturating_add(region.length - 1);
+            let frame = end >> 12;
+            if frame > highest {
+                highest = frame;
+            }
         }
-        let end = region.phys_base.saturating_add(region.length - 1);
-        let frame = end >> 12;
-        if frame > highest {
-            highest = frame;
-        }
-    }
-    highest
+        highest
+    })
 }

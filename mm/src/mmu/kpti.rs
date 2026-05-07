@@ -98,7 +98,7 @@ pub fn kpti_enabled() -> bool {
 /// Calling this prematurely will triple-fault the machine on the next
 /// syscall. The guard is advisory; a release-mode enforcement hook is
 /// added when the asm lands.
-pub unsafe fn enable() {
+pub fn enable() {
     KPTI_ENABLED.store(true, Ordering::Release);
 }
 

@@ -96,6 +96,87 @@ impl<T> CpuLocal<T> {
         // SAFETY: caller certifies cpu_id is in range and no concurrent mutation.
         unsafe { &(*self.data.get()).get_unchecked(cpu_id).0 }
     }
+
+    /// Mutable slot access for shutdown-only / single-threaded callers.
+    ///
+    /// # Safety
+    /// `cpu_id` must be < `MAX_CPUS`, and the caller must guarantee that no
+    /// other thread is simultaneously borrowing slot `cpu_id` (typical use:
+    /// shutdown drain, where SMP has already been quiesced).
+    #[inline]
+    pub unsafe fn get_for_cpu_mut(&self, cpu_id: usize) -> &mut T {
+        debug_assert!(cpu_id < MAX_CPUS);
+        // SAFETY: caller certifies cpu_id is in range and exclusive.
+        unsafe { &mut (*self.data.get()).get_unchecked_mut(cpu_id).0 }
+    }
+
+    /// Visit every CPU's slot exactly once with mutable access.
+    ///
+    /// # Safety
+    /// SMP must be quiesced — typically called only from `boot/shutdown.rs`'s
+    /// drain pass, after the kernel has stopped scheduling and IPIs have
+    /// been disabled. The closure receives one `&mut T` per CPU index in
+    /// `[0, MAX_CPUS)`.
+    pub unsafe fn for_each_mut(&self, mut f: impl FnMut(usize, &mut T)) {
+        for cpu in 0..MAX_CPUS {
+            // SAFETY: caller certifies SMP is quiesced.
+            let slot = unsafe { self.get_for_cpu_mut(cpu) };
+            f(cpu, slot);
+        }
+    }
+
+    /// Safe wrapper around [`Self::for_each_mut`] for **single-threaded
+    /// drain windows**: pre-SMP boot init and post-shutdown drain. The
+    /// caller's contract is identical to `for_each_mut`'s — SMP must be
+    /// either not yet active (early boot) or cooperatively quiesced
+    /// (shutdown drain). The single internal `unsafe` reborrow is the
+    /// only one in this code path.
+    ///
+    /// Use from per-CPU drain helpers (kernel heap, page allocator,
+    /// stack-VA allocator) so the consumer side can stay safe.
+    pub fn for_each_mut_at_shutdown(&self, f: impl FnMut(usize, &mut T)) {
+        // SAFETY: caller guarantees the call site is single-threaded
+        // (early boot or quiesced shutdown); the contract of
+        // `for_each_mut` is satisfied.
+        unsafe { self.for_each_mut(f) };
+    }
+
+    /// Mutable slot access for a caller that already holds a `PreemptGuard`.
+    /// `cpu` must equal the current CPU — debug-asserted at entry.
+    ///
+    /// Use this from amortised hot paths that pin once via `PreemptGuard::new()`
+    /// and then dispatch through the same cache multiple times. Cheaper than
+    /// `get_mut()` because no per-call guard is created.
+    #[inline]
+    pub fn get_pinned_mut(&self, cpu: usize) -> &mut T {
+        debug_assert!(
+            PreemptGuard::is_active(),
+            "CpuLocal::get_pinned_mut requires a held PreemptGuard"
+        );
+        debug_assert!(cpu < MAX_CPUS);
+        debug_assert_eq!(
+            cpu,
+            get_current_cpu(),
+            "CpuLocal::get_pinned_mut: cpu argument must match current CPU"
+        );
+        // SAFETY: PreemptGuard pins this thread to `cpu`; no other thread
+        // can hold a borrow of the same slot at the same time.
+        unsafe { &mut (*self.data.get()).get_unchecked_mut(cpu).0 }
+    }
+
+    /// Read-only slot access for any CPU. Suitable for cross-CPU diagnostic
+    /// snapshots — `T` is responsible for its own atomicity (e.g. atomic
+    /// counters on the cache stats; benign races on plain integer fields).
+    #[inline]
+    pub fn snapshot_for_cpu(&self, cpu: usize) -> Option<&T> {
+        if cpu >= MAX_CPUS {
+            return None;
+        }
+        // SAFETY: read-only borrow; the caller is responsible for tolerating
+        // benign races on non-atomic fields. No mutation is possible through
+        // this reference.
+        Some(unsafe { &(*self.data.get()).get_unchecked(cpu).0 })
+    }
 }
 
 pub struct CpuPinned<'a, T> {

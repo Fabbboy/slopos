@@ -49,6 +49,28 @@ pub struct ProcessPageDir {
     pub mm_ctx_id: crate::mmu::MmContextId,
 }
 
+impl ProcessPageDir {
+    /// Build a fresh per-process page-directory descriptor with default
+    /// fields. The caller writes the result into a freshly `kmalloc`'d
+    /// slot via `core::ptr::write`.
+    pub fn new(
+        pml4: *mut PageTable,
+        pml4_phys: PhysAddr,
+        process_id: u32,
+        mm_ctx_id: crate::mmu::MmContextId,
+    ) -> Self {
+        Self {
+            pml4,
+            pml4_phys,
+            ref_count: 1,
+            process_id,
+            next: ptr::null_mut(),
+            kernel_mapping_gen: 0,
+            mm_ctx_id,
+        }
+    }
+}
+
 unsafe impl Send for ProcessPageDir {}
 unsafe impl Sync for ProcessPageDir {}
 

@@ -29,18 +29,22 @@ pub const MAX_TASKS: usize = 8192;
 pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 
-/// SafeStack-sanitizer unsafe (data) stack size — 8 KiB.
+/// SafeStack-sanitizer unsafe (data) stack size — 16 KiB.
 ///
 /// LLVM's SafeStack pass moves address-taken locals and dynamic allocas
-/// onto this stack at every instrumented function prologue.  Kernel
-/// functions rarely have more than a few hundred bytes of such
-/// unsafe-qualified storage at a time, so 8 KiB is ample (vs. the
-/// 32 KiB safe kernel stack, which has to hold the full call-frame
-/// chain plus the SYSCALL/IST transition frames).  Keeping this small
-/// matters: every live task owns one, and at peak 8192 concurrent
-/// tasks an 8 KiB USTACK slot costs 64 MiB of RAM vs. 256 MiB if we
-/// sized it identically to the safe stack.
-pub const TASK_UNSAFE_STACK_SIZE: u64 = 0x2000; // 8 KiB
+/// onto this stack at every instrumented function prologue. The 1J-κ
+/// "zero unsafe" refactors push more kernel-side primitives behind
+/// `&mut`-passing safe helpers (`with_mut`, `for_each`, `frame_for_phys`,
+/// `hhdm_*_bytes`, …); LLVM lowers each `&mut local` to an address-take
+/// and the local migrates to the unsafe stack. Cumulative depth on
+/// long syscall paths (fork → COW → exec → load_segment_pages → …)
+/// approaches the prior 8 KiB ceiling on slow TCG/CI hosts where dev
+/// builds can't inline these helpers — the watchdog catches it as a
+/// kernel-mode write past the mapped region. 16 KiB matches Linux's
+/// x86_64 `THREAD_SIZE` and gives 2× headroom; the 8192-task ceiling
+/// costs 128 MiB at peak (vs. 64 MiB at 8 KiB, vs. 256 MiB if we
+/// sized identically to the safe kernel stack).
+pub const TASK_UNSAFE_STACK_SIZE: u64 = 0x4000; // 16 KiB
 
 pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;

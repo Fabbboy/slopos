@@ -37,12 +37,12 @@
 //! - **Batch operations**: Refill/drain multiple pages at once to amortize lock cost
 
 use core::ffi::{c_int, c_void};
-use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
+use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
 use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
@@ -128,55 +128,42 @@ impl PerCpuPageCache {
     }
 }
 
-/// Wrapper providing Sync for the per-CPU caches.
-///
-/// SAFETY: Each CPU only accesses its own slot with preemption disabled.
-/// Cross-CPU access is limited to reading atomic stat counters.
-struct PcpArray(core::cell::UnsafeCell<[PerCpuPageCache; MAX_CPUS]>);
-unsafe impl Sync for PcpArray {}
-
-static PER_CPU_CACHES: PcpArray = {
-    const INIT: PerCpuPageCache = PerCpuPageCache::new();
-    PcpArray(core::cell::UnsafeCell::new([INIT; MAX_CPUS]))
+static PER_CPU_CACHES: CpuLocal<PerCpuPageCache> = {
+    const INIT: CacheAligned<PerCpuPageCache> = CacheAligned(PerCpuPageCache::new());
+    CpuLocal::new_with([INIT; MAX_CPUS])
 };
 
 static PCP_INIT: InitFlag = InitFlag::new();
 
-// Global frame descriptor pointer — set once during init, read lock-free
-// by the PCP alloc fast path to update individual frame descriptors without
-// taking the global PAGE_ALLOCATOR lock.
-static FRAMES_PTR: core::sync::atomic::AtomicPtr<PageFrame> =
-    core::sync::atomic::AtomicPtr::new(ptr::null_mut());
-static FRAMES_TOTAL: AtomicU32 = AtomicU32::new(0);
+// Global frame descriptor table — installed once at boot, read lock-free
+// by the PCP alloc fast path to update individual descriptors without
+// taking the global PAGE_ALLOCATOR lock. The single boot-time install
+// publishes both the base pointer and the length atomically.
+static FRAME_TABLE: RawTable<PageFrame> = RawTable::empty();
 
-/// Access a frame descriptor by number using the global pointer.
+/// Access a frame descriptor by number. Runs `f` against an exclusive
+/// borrow of the descriptor; returns `None` if the frame number is out
+/// of range or the table has not been installed.
 ///
-/// # Safety
-/// `frame_num` must be < FRAMES_TOTAL and the caller must logically own the
-/// frame (e.g., it's in the caller's PCP or allocated to the caller).
+/// **Caller's contract:** the frame must logically belong to the caller
+/// (e.g. it lives in the caller's PCP cache or was allocated to it). The
+/// `RawTable::with_mut` primitive provides the safe surface; callers
+/// that already hold the buddy allocator's lock or a `PreemptGuard`
+/// satisfy the exclusivity requirement.
 #[inline]
-unsafe fn frame_desc_raw(frame_num: u32) -> Option<&'static mut PageFrame> {
-    let ptr = FRAMES_PTR.load(Ordering::Relaxed);
-    if ptr.is_null() || frame_num >= FRAMES_TOTAL.load(Ordering::Relaxed) {
-        return None;
-    }
-    Some(unsafe { &mut *ptr.add(frame_num as usize) })
+fn frame_desc_with<R>(frame_num: u32, f: impl FnOnce(&mut PageFrame) -> R) -> Option<R> {
+    FRAME_TABLE.with_mut(frame_num as usize, f)
 }
 
-/// Get a reference to the current CPU's page cache.
-///
-/// # Safety
-/// Caller must hold a PreemptGuard (ensures CPU pinning).
+/// Get a reference to the current CPU's page cache. Caller must already
+/// hold a `PreemptGuard` so `cpu` stays pinned for the borrow.
 #[inline]
-unsafe fn pcp_cache(cpu: usize) -> &'static mut PerCpuPageCache {
-    debug_assert!(PreemptGuard::is_active(), "pcp_cache requires PreemptGuard");
-    debug_assert!(cpu < MAX_CPUS);
-    unsafe { &mut (*PER_CPU_CACHES.0.get())[cpu] }
+fn pcp_cache(cpu: usize) -> &'static mut PerCpuPageCache {
+    PER_CPU_CACHES.get_pinned_mut(cpu)
 }
 
 #[derive(Default)]
 struct PageAllocator {
-    frames: *mut PageFrame,
     total_frames: u32,
     max_supported_frames: u32,
     free_frames: u32,
@@ -185,12 +172,9 @@ struct PageAllocator {
     max_order: u32,
 }
 
-unsafe impl Send for PageAllocator {}
-
 impl PageAllocator {
     const fn new() -> Self {
         Self {
-            frames: ptr::null_mut(),
             total_frames: 0,
             max_supported_frames: 0,
             free_frames: 0,
@@ -212,15 +196,18 @@ impl PageAllocator {
         frame_num < self.total_frames
     }
 
-    unsafe fn frame_desc_mut(&self, frame_num: u32) -> Option<&'static mut PageFrame> {
-        if !self.is_valid_frame(frame_num) || self.frames.is_null() {
+    /// Borrow descriptor `frame_num`'s mutable handle. Safe because the
+    /// caller already holds `&mut self` via the PAGE_ALLOCATOR lock guard
+    /// (the lock excludes any other `&mut` into the table).
+    fn frame_desc_mut(&mut self, frame_num: u32) -> Option<&mut PageFrame> {
+        if !self.is_valid_frame(frame_num) {
             return None;
         }
-        Some(unsafe { &mut *self.frames.add(frame_num as usize) })
+        FRAME_TABLE.get_mut(frame_num as usize)
     }
 
-    fn frame_region_id(&self, frame_num: u32) -> u16 {
-        unsafe { self.frame_desc_mut(frame_num) }
+    fn frame_region_id(&mut self, frame_num: u32) -> u16 {
+        self.frame_desc_mut(frame_num)
             .map(|f| f.region_id)
             .unwrap_or(INVALID_REGION_ID)
     }
@@ -262,8 +249,9 @@ impl PageAllocator {
     }
 
     fn free_list_push(&mut self, order: u32, frame_num: u32) {
-        if let Some(frame) = unsafe { self.frame_desc_mut(frame_num) } {
-            frame.next_free = self.free_lists[order as usize];
+        let head = self.free_lists[order as usize];
+        if let Some(frame) = self.frame_desc_mut(frame_num) {
+            frame.next_free = head;
             frame.order = order as u16;
             frame.state = PAGE_FRAME_FREE;
             frame.flags = 0;
@@ -273,27 +261,28 @@ impl PageAllocator {
     }
 
     fn free_list_detach(&mut self, order: u32, target_frame: u32) -> bool {
-        let head_ptr = self.free_lists.as_mut_ptr().wrapping_add(order as usize);
         let mut prev = INVALID_PAGE_FRAME;
-        let mut current = unsafe { *head_ptr };
+        let mut current = self.free_lists[order as usize];
 
         while current != INVALID_PAGE_FRAME {
             if current == target_frame {
-                let next = unsafe { self.frame_desc_mut(current) }
+                let next = self
+                    .frame_desc_mut(current)
                     .map(|f| f.next_free)
                     .unwrap_or(INVALID_PAGE_FRAME);
                 if prev == INVALID_PAGE_FRAME {
-                    unsafe { *head_ptr = next };
-                } else if let Some(prev_desc) = unsafe { self.frame_desc_mut(prev) } {
+                    self.free_lists[order as usize] = next;
+                } else if let Some(prev_desc) = self.frame_desc_mut(prev) {
                     prev_desc.next_free = next;
                 }
-                if let Some(curr_desc) = unsafe { self.frame_desc_mut(current) } {
+                if let Some(curr_desc) = self.frame_desc_mut(current) {
                     curr_desc.next_free = INVALID_PAGE_FRAME;
                 }
                 return true;
             }
             prev = current;
-            current = unsafe { self.frame_desc_mut(current) }
+            current = self
+                .frame_desc_mut(current)
                 .map(|f| f.next_free)
                 .unwrap_or(INVALID_PAGE_FRAME);
         }
@@ -311,21 +300,21 @@ impl PageAllocator {
     }
 
     fn free_list_take_matching(&mut self, order: u32, flags: u32) -> u32 {
-        let head_ptr = self.free_lists.as_mut_ptr().wrapping_add(order as usize);
         let mut prev = INVALID_PAGE_FRAME;
-        let mut current = unsafe { *head_ptr };
+        let mut current = self.free_lists[order as usize];
 
         while current != INVALID_PAGE_FRAME {
             if self.block_meets_flags(current, order, flags) {
-                let next = unsafe { self.frame_desc_mut(current) }
+                let next = self
+                    .frame_desc_mut(current)
                     .map(|f| f.next_free)
                     .unwrap_or(INVALID_PAGE_FRAME);
                 if prev == INVALID_PAGE_FRAME {
-                    unsafe { *head_ptr = next };
-                } else if let Some(prev_desc) = unsafe { self.frame_desc_mut(prev) } {
+                    self.free_lists[order as usize] = next;
+                } else if let Some(prev_desc) = self.frame_desc_mut(prev) {
                     prev_desc.next_free = next;
                 }
-                if let Some(curr_desc) = unsafe { self.frame_desc_mut(current) } {
+                if let Some(curr_desc) = self.frame_desc_mut(current) {
                     curr_desc.next_free = INVALID_PAGE_FRAME;
                 }
 
@@ -337,7 +326,8 @@ impl PageAllocator {
             }
 
             prev = current;
-            current = unsafe { self.frame_desc_mut(current) }
+            current = self
+                .frame_desc_mut(current)
                 .map(|f| f.next_free)
                 .unwrap_or(INVALID_PAGE_FRAME);
         }
@@ -356,7 +346,7 @@ impl PageAllocator {
 
         while curr_order < self.max_order {
             let buddy = curr_frame ^ Self::order_block_pages(curr_order);
-            let buddy_desc = unsafe { self.frame_desc_mut(buddy) };
+            let buddy_desc = self.frame_desc_mut(buddy);
 
             let can_merge = buddy_desc
                 .map(|b| {
@@ -397,7 +387,7 @@ impl PageAllocator {
                 self.free_frames += Self::order_block_pages(current_order);
             }
 
-            if let Some(desc) = unsafe { self.frame_desc_mut(block) } {
+            if let Some(desc) = self.frame_desc_mut(block) {
                 desc.ref_count = 1;
                 desc.flags = flags as u8;
                 desc.order = order as u16;
@@ -417,7 +407,7 @@ impl PageAllocator {
             if frame_num == INVALID_PAGE_FRAME {
                 break;
             }
-            if let Some(desc) = unsafe { self.frame_desc_mut(frame_num) } {
+            if let Some(desc) = self.frame_desc_mut(frame_num) {
                 desc.state = PAGE_FRAME_PCP;
             }
             *slot = frame_num;
@@ -431,7 +421,7 @@ impl PageAllocator {
             if frame_num == INVALID_PAGE_FRAME {
                 continue;
             }
-            if let Some(desc) = unsafe { self.frame_desc_mut(frame_num) } {
+            if let Some(desc) = self.frame_desc_mut(frame_num) {
                 if desc.state == PAGE_FRAME_PCP {
                     desc.ref_count = 0;
                     desc.flags = 0;
@@ -472,11 +462,9 @@ impl PageAllocator {
 
             let res_count = mm_reservations_count();
             for idx in 0..res_count {
-                let res_ptr = mm_reservations_get(idx);
-                if res_ptr.is_null() {
+                let Some(res) = mm_reservations_get(idx) else {
                     continue;
-                }
-                let res = unsafe { &*res_ptr };
+                };
                 if res.flags & MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS == 0 {
                     continue;
                 }
@@ -542,7 +530,7 @@ impl PageAllocator {
 
             let block_pages = Self::order_block_pages(order);
             for i in 0..block_pages {
-                if let Some(f) = unsafe { self.frame_desc_mut(frame + i) } {
+                if let Some(f) = self.frame_desc_mut(frame + i) {
                     f.region_id = seeded_id;
                 }
             }
@@ -583,8 +571,7 @@ fn pcp_try_alloc(cpu: usize) -> u32 {
         return INVALID_PAGE_FRAME;
     }
 
-    // SAFETY: PreemptGuard held, cpu pinned.
-    let cache = unsafe { pcp_cache(cpu) };
+    let cache = pcp_cache(cpu);
 
     if cache.count == 0 {
         return INVALID_PAGE_FRAME;
@@ -596,14 +583,14 @@ fn pcp_try_alloc(cpu: usize) -> u32 {
     cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
     cache.alloc_count.fetch_add(1, Ordering::Relaxed);
 
-    // Update the frame descriptor to mark it allocated.
-    // SAFETY: This frame was in our PCP (state = PAGE_FRAME_PCP, ref_count = 0).
-    // No other CPU or code path references it, so this is safe without the lock.
-    if let Some(desc) = unsafe { frame_desc_raw(frame_num) } {
+    // Update the frame descriptor to mark it allocated. The frame was in
+    // our PCP (state = PAGE_FRAME_PCP, ref_count = 0), so no other CPU or
+    // code path references it.
+    frame_desc_with(frame_num, |desc| {
         desc.state = PAGE_FRAME_ALLOCATED;
         desc.ref_count = 1;
         desc.next_free = INVALID_PAGE_FRAME;
-    }
+    });
 
     frame_num
 }
@@ -626,8 +613,7 @@ fn pcp_refill(cpu: usize, flags: u32) {
         return;
     }
 
-    // SAFETY: PreemptGuard held.
-    let cache = unsafe { pcp_cache(cpu) };
+    let cache = pcp_cache(cpu);
 
     // Skip refill if cache is reasonably full.
     if cache.count >= PCP_LOW_WATERMARK {
@@ -651,7 +637,7 @@ fn pcp_refill(cpu: usize, flags: u32) {
     // before the lock is released.
     for i in 0..allocated {
         let frame_num = batch[i];
-        if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
+        if let Some(desc) = alloc.frame_desc_mut(frame_num) {
             desc.state = PAGE_FRAME_PCP;
             desc.ref_count = 0;
             desc.next_free = INVALID_PAGE_FRAME;
@@ -674,9 +660,7 @@ fn pcp_refill(cpu: usize, flags: u32) {
 /// Must only be called during system shutdown when no concurrent PCP
 /// operations or per-CPU allocations are in progress.
 pub fn pcp_drain_all() {
-    for cpu in 0..MAX_CPUS {
-        // SAFETY: Called during shutdown — no concurrent PCP access.
-        let cache = unsafe { &mut (*PER_CPU_CACHES.0.get())[cpu] };
+    PER_CPU_CACHES.for_each_mut_at_shutdown(|_cpu, cache| {
         let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
 
         loop {
@@ -703,7 +687,7 @@ pub fn pcp_drain_all() {
                 break;
             }
         }
-    }
+    });
 }
 
 pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
@@ -711,22 +695,32 @@ pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
         panic!("init_page_allocator: Invalid parameters");
     }
 
+    // Install the boot-allocated frame descriptor table once. Safe via
+    // `RawTable::install`: the slice carries the bootloader-published
+    // backing store with `'static` lifetime; the install hook publishes
+    // base + length atomically so concurrent readers see either fully
+    // empty or fully populated state.
+    if !FRAME_TABLE.is_installed() {
+        let frames_ptr = frame_array as *mut PageFrame;
+        // SAFETY: the caller (memory_init) has just allocated and
+        // mapped `max_frames` PageFrame slots starting at `frame_array`
+        // with `'static` lifetime; we hold the only reference and
+        // publish ownership exactly once via `RawTable::install`.
+        let slice: &'static mut [PageFrame] =
+            unsafe { core::slice::from_raw_parts_mut(frames_ptr, max_frames as usize) };
+        FRAME_TABLE.install(slice);
+    }
+
     let mut alloc = PAGE_ALLOCATOR.lock();
-    let frames_ptr = frame_array as *mut PageFrame;
-    alloc.frames = frames_ptr;
     alloc.total_frames = max_frames;
     alloc.max_supported_frames = max_frames;
-
-    // Publish for lock-free PCP access.
-    FRAMES_PTR.store(frames_ptr, Ordering::Release);
-    FRAMES_TOTAL.store(max_frames, Ordering::Release);
     alloc.free_frames = 0;
     alloc.allocated_frames = 0;
     alloc.max_order = PageAllocator::derive_max_order(max_frames);
     alloc.free_lists_reset();
 
     for i in 0..max_frames {
-        if let Some(frame) = unsafe { alloc.frame_desc_mut(i) } {
+        if let Some(frame) = alloc.frame_desc_mut(i) {
             frame.ref_count = 0;
             frame.state = PAGE_FRAME_RESERVED;
             frame.flags = 0;
@@ -753,10 +747,8 @@ pub fn finalize_page_allocator() -> c_int {
 
     let region_count = mm_region_count();
     for i in 0..region_count {
-        let region = mm_region_get(i);
-        if !region.is_null() {
-            let region_ref = unsafe { &*region };
-            alloc.seed_region_from_map(region_ref, i as u16);
+        if let Some(region) = mm_region_get(i) {
+            alloc.seed_region_from_map(&region, i as u16);
         }
     }
 
@@ -968,7 +960,7 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
         return -1;
     }
 
-    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+    let Some(frame) = alloc.frame_desc_mut(frame_num) else {
         return -1;
     };
     if !PageAllocator::frame_state_is_allocated(frame.state) {
@@ -988,11 +980,10 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
     let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && PCP_INIT.is_set();
 
     if is_pcp_candidate {
-        // SAFETY: PreemptGuard held.
-        let cache = unsafe { pcp_cache(cpu) };
+        let cache = pcp_cache(cpu);
         if cache.count < PCP_HIGH_WATERMARK {
             // Mark the frame as PCP while holding the lock for consistency.
-            if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
+            if let Some(desc) = alloc.frame_desc_mut(frame_num) {
                 desc.state = PAGE_FRAME_PCP;
                 desc.ref_count = 0;
                 desc.next_free = INVALID_PAGE_FRAME;
@@ -1023,7 +1014,7 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
     }
 
     // Fallback: return directly to buddy allocator.
-    if let Some(frame) = unsafe { alloc.frame_desc_mut(frame_num) } {
+    if let Some(frame) = alloc.frame_desc_mut(frame_num) {
         let pages = PageAllocator::order_block_pages(order);
         frame.ref_count = 0;
         frame.flags = 0;
@@ -1050,23 +1041,14 @@ pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut
     // include them in the free count for accurate statistics.
     let mut pcp_count = 0u32;
     for cpu in 0..MAX_CPUS {
-        // SAFETY: Reading another CPU's cache count is a benign race —
-        // the value is advisory for stats.
-        let cache = unsafe { &(*PER_CPU_CACHES.0.get())[cpu] };
-        pcp_count = pcp_count.saturating_add(cache.count);
+        if let Some(cache) = PER_CPU_CACHES.snapshot_for_cpu(cpu) {
+            pcp_count = pcp_count.saturating_add(cache.count);
+        }
     }
 
-    unsafe {
-        if !total.is_null() {
-            *total = alloc.total_frames;
-        }
-        if !free.is_null() {
-            *free = alloc.free_frames.saturating_add(pcp_count);
-        }
-        if !allocated.is_null() {
-            *allocated = alloc.allocated_frames.saturating_sub(pcp_count);
-        }
-    }
+    write_optional_u32(total, alloc.total_frames);
+    write_optional_u32(free, alloc.free_frames.saturating_add(pcp_count));
+    write_optional_u32(allocated, alloc.allocated_frames.saturating_sub(pcp_count));
 }
 
 pub fn get_pcp_stats(cpu: usize, count: *mut u32, allocs: *mut u32, frees: *mut u32) {
@@ -1074,19 +1056,24 @@ pub fn get_pcp_stats(cpu: usize, count: *mut u32, allocs: *mut u32, frees: *mut 
         return;
     }
 
-    // SAFETY: Reading another CPU's cache stats — benign race for advisory data.
-    let cache = unsafe { &(*PER_CPU_CACHES.0.get())[cpu] };
-    unsafe {
-        if !count.is_null() {
-            *count = cache.count;
-        }
-        if !allocs.is_null() {
-            *allocs = cache.alloc_count.load(Ordering::Relaxed);
-        }
-        if !frees.is_null() {
-            *frees = cache.free_count.load(Ordering::Relaxed);
-        }
+    let Some(cache) = PER_CPU_CACHES.snapshot_for_cpu(cpu) else {
+        return;
+    };
+    write_optional_u32(count, cache.count);
+    write_optional_u32(allocs, cache.alloc_count.load(Ordering::Relaxed));
+    write_optional_u32(frees, cache.free_count.load(Ordering::Relaxed));
+}
+
+/// Write `value` through `out` if non-null. Used for `*mut u32` C-ABI
+/// shim outputs.
+#[inline]
+fn write_optional_u32(out: *mut u32, value: u32) {
+    if out.is_null() {
+        return;
     }
+    // SAFETY: out is non-null per the check above; caller-supplied
+    // C-ABI output slot.
+    unsafe { *out = value };
 }
 
 pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
@@ -1096,24 +1083,24 @@ pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
 }
 
 pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
-    let alloc = PAGE_ALLOCATOR.lock();
+    let mut alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     if !alloc.is_valid_frame(frame_num) {
         return 0;
     }
-    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+    let Some(frame) = alloc.frame_desc_mut(frame_num) else {
         return 0;
     };
     PageAllocator::frame_state_is_allocated(frame.state) as c_int
 }
 
 pub fn page_frame_inc_ref(phys_addr: PhysAddr) -> c_int {
-    let alloc = PAGE_ALLOCATOR.lock();
+    let mut alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     if !alloc.is_valid_frame(frame_num) {
         return -1;
     }
-    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+    let Some(frame) = alloc.frame_desc_mut(frame_num) else {
         return -1;
     };
     if !PageAllocator::frame_state_is_allocated(frame.state) {
@@ -1124,12 +1111,12 @@ pub fn page_frame_inc_ref(phys_addr: PhysAddr) -> c_int {
 }
 
 pub fn page_frame_get_ref(phys_addr: PhysAddr) -> u32 {
-    let alloc = PAGE_ALLOCATOR.lock();
+    let mut alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     if !alloc.is_valid_frame(frame_num) {
         return 0;
     }
-    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+    let Some(frame) = alloc.frame_desc_mut(frame_num) else {
         return 0;
     };
     frame.ref_count
@@ -1137,17 +1124,28 @@ pub fn page_frame_get_ref(phys_addr: PhysAddr) -> u32 {
 
 pub fn page_allocator_paint_all(value: u8) {
     let alloc = PAGE_ALLOCATOR.lock();
-    if alloc.frames.is_null() {
+    if !FRAME_TABLE.is_installed() {
         return;
     }
 
     for frame_num in 0..alloc.total_frames {
         let phys_addr = alloc.frame_to_phys(frame_num);
         if let Some(virt_addr) = phys_addr.to_virt_checked() {
-            unsafe {
-                ptr::write_bytes(virt_addr.as_mut_ptr::<u8>(), value, PAGE_SIZE_4KB as usize);
-            }
+            paint_page_at_virt(virt_addr.as_mut_ptr::<u8>(), value);
         }
+    }
+}
+
+#[inline]
+fn paint_page_at_virt(ptr: *mut u8, value: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: caller has resolved `ptr` from a valid `PhysAddr` whose
+    // HHDM mapping is live; the page is exclusively owned for the
+    // duration of the write.
+    unsafe {
+        core::slice::from_raw_parts_mut(ptr, PAGE_SIZE_4KB as usize).fill(value);
     }
 }
 
@@ -1158,24 +1156,24 @@ fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
 
     match phys_addr.to_virt_checked() {
         Some(virt) => {
-            unsafe {
-                ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE_4KB as usize);
-            }
+            paint_page_at_virt(virt.as_mut_ptr::<u8>(), 0);
             0
         }
         None => -1,
     }
 }
 
-pub unsafe fn page_allocator_force_unlock() {
-    PAGE_ALLOCATOR.force_unlock();
+pub fn page_allocator_force_unlock() {
+    // SAFETY: invoked from `mm_panic_cleanup` only.
+    unsafe { PAGE_ALLOCATOR.force_unlock() };
 }
 
 /// Force-unlock the page allocator AND mark it as poisoned.
 /// Called from panic recovery to signal that allocator state may be
 /// inconsistent. Check `page_allocator_is_poisoned()` before trusting state.
-pub unsafe fn page_allocator_poison_unlock() {
-    PAGE_ALLOCATOR.poison_unlock();
+pub fn page_allocator_poison_unlock() {
+    // SAFETY: invoked from `mm_panic_cleanup` only.
+    unsafe { PAGE_ALLOCATOR.poison_unlock() };
 }
 
 /// Returns true if the page allocator was force-unlocked during panic recovery.

@@ -1,5 +1,3 @@
-use core::ptr;
-
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::{Paddr, reference_count_at};
@@ -14,6 +12,22 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
+
+/// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
+/// must be live HHDM-mapped virtual addresses pointing at distinct pages.
+#[inline]
+fn copy_full_page(src: VirtAddr, dst: VirtAddr) {
+    // SAFETY: caller has resolved both `src` and `dst` from valid 4 KiB
+    // physical mappings; the pages are non-aliasing because COW always
+    // allocates a fresh `new_phys` distinct from the read-only `old_phys`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src.as_ptr::<u8>(),
+            dst.as_mut_ptr::<u8>(),
+            PAGE_SIZE_4KB as usize,
+        );
+    }
+}
 
 pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result<(), MmError> {
     let vaddr = VirtAddr::new(fault_addr);
@@ -71,13 +85,7 @@ fn resolve_multi_ref(
         return Err(MmError::InvalidAddress);
     }
 
-    unsafe {
-        ptr::copy_nonoverlapping(
-            old_virt.as_ptr::<u8>(),
-            new_virt.as_mut_ptr::<u8>(),
-            PAGE_SIZE_4KB as usize,
-        );
-    }
+    copy_full_page(old_virt, new_virt);
 
     let new_flags = PageFlags::USER_RW;
 

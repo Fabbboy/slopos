@@ -1,9 +1,10 @@
 use core::ffi::{c_int, c_void};
 use core::mem;
-use core::ptr;
+use core::ptr::{self, NonNull};
 
 use slopos_abi::addr::VirtAddr;
-use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, SpinLock};
+use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
+use slopos_ostd::sync::{ByteChain, LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
 use slopos_utils::{align_down_u64, align_up_usize, klog_debug, klog_info};
 
 use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
@@ -77,8 +78,49 @@ struct SlabHeader {
     object_size: u32,
     total_count: u16,
     free_count: u16,
-    next: *mut SlabHeader,
-    free_list: *mut u8,
+    next: RawLink<SlabHeader>,
+    free_list: ByteChain,
+}
+
+impl SlabHeader {
+    /// Byte offset where the object array starts inside a slab page.
+    #[inline]
+    fn object_start_offset() -> usize {
+        align_up_usize(mem::size_of::<SlabHeader>(), 16)
+    }
+
+    /// Pointer to object `idx` inside a slab page whose header lives at
+    /// `slab_base`. Returns `None` if the object would extend past the
+    /// page. Caller owns the slab page exclusively (slab pages are not
+    /// shared across allocators).
+    #[inline]
+    fn object_at(slab_base: NonNull<u8>, idx: usize, object_size: usize) -> Option<NonNull<u8>> {
+        let start = Self::object_start_offset();
+        let off = start.checked_add(idx.checked_mul(object_size)?)?;
+        if off.checked_add(object_size)? > PAGE_SIZE_4KB as usize {
+            return None;
+        }
+        // SAFETY: bounds-checked above; the slab page is exclusively
+        // owned by the lock holder for the duration of this call.
+        let raw = unsafe { slab_base.as_ptr().add(off) };
+        NonNull::new(raw)
+    }
+
+    /// Mutable byte view of object `obj`'s body region (the bytes after
+    /// the inline link slot). Caller owns the slab page exclusively.
+    #[inline]
+    fn body_slice_mut<'a>(obj: NonNull<u8>, object_size: usize) -> Option<&'a mut [u8]> {
+        let link_bytes = mem::size_of::<*mut u8>();
+        if object_size <= link_bytes {
+            return None;
+        }
+        let body_len = object_size - link_bytes;
+        // SAFETY: caller owns the slab page; `obj + link_bytes` lies
+        // strictly inside the object's allocation slot.
+        let body =
+            unsafe { core::slice::from_raw_parts_mut(obj.as_ptr().add(link_bytes), body_len) };
+        Some(body)
+    }
 }
 
 #[repr(C)]
@@ -87,20 +129,51 @@ struct LargeAllocHeader {
     pages: u32,
     size: u32,
     reserved: u32,
-    next: *mut LargeAllocHeader,
+    next: RawLink<LargeAllocHeader>,
 }
 
-#[derive(Clone, Copy)]
+impl LargeAllocHeader {
+    /// Byte offset of the user-visible body within a large-alloc region.
+    #[inline]
+    fn body_offset() -> usize {
+        align_up_usize(mem::size_of::<LargeAllocHeader>(), 16)
+    }
+
+    /// Body pointer for a header `header`. Caller owns the underlying
+    /// region.
+    #[inline]
+    fn body_ptr(header: NonNull<LargeAllocHeader>) -> NonNull<u8> {
+        // SAFETY: header was produced by `map_heap_pages`, so the
+        // following bytes belong to the same large-alloc region.
+        let raw = unsafe { (header.as_ptr() as *mut u8).add(Self::body_offset()) };
+        // The body offset is always > 0 and `raw` is derived from a
+        // non-null pointer, so the result is non-null.
+        NonNull::new(raw).expect("large-alloc body pointer must be non-null")
+    }
+
+    /// Mutable byte view spanning `len` bytes starting at the body of a
+    /// large-alloc header. Caller owns the region for the lifetime of the
+    /// returned slice.
+    #[inline]
+    fn body_view_mut<'a>(header: NonNull<LargeAllocHeader>, len: usize) -> &'a mut [u8] {
+        let body = Self::body_ptr(header);
+        // SAFETY: caller owns the large-alloc region; `body + len` is
+        // within bounds whenever the caller passed a `len` derived from
+        // the header's `pages` count.
+        unsafe { core::slice::from_raw_parts_mut(body.as_ptr(), len) }
+    }
+}
+
 struct SlabCache {
     object_size: usize,
-    slabs: *mut SlabHeader,
+    slabs: RawLink<SlabHeader>,
 }
 
 impl SlabCache {
     const fn empty() -> Self {
         Self {
             object_size: 0,
-            slabs: ptr::null_mut(),
+            slabs: RawLink::null(),
         }
     }
 }
@@ -110,13 +183,11 @@ struct KernelHeap {
     end_addr: u64,
     current_break: u64,
     caches: [SlabCache; NUM_SIZE_CLASSES],
-    large_free_list: *mut LargeAllocHeader,
+    large_free_list: RawLink<LargeAllocHeader>,
     stats: HeapStats,
     initialized: bool,
     diagnostics_enabled: bool,
 }
-
-unsafe impl Send for KernelHeap {}
 
 impl KernelHeap {
     const fn new() -> Self {
@@ -124,8 +195,8 @@ impl KernelHeap {
             start_addr: 0,
             end_addr: 0,
             current_break: 0,
-            caches: [SlabCache::empty(); NUM_SIZE_CLASSES],
-            large_free_list: ptr::null_mut(),
+            caches: [const { SlabCache::empty() }; NUM_SIZE_CLASSES],
+            large_free_list: RawLink::null(),
             stats: HeapStats {
                 total_size: 0,
                 allocated_size: 0,
@@ -154,20 +225,46 @@ static KERNEL_HEAP: SpinLock<KernelHeap> = SpinLock::new(KernelHeap::new(), LOCK
 // ---------------------------------------------------------------------------
 
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
-use slopos_ostd::sync::{IrqPreemptGuard, PreemptGuard};
+use slopos_ostd::sync::IrqPreemptGuard;
 
 const MAGAZINE_CAPACITY: usize = 32;
 
+/// One slot inside a magazine. `repr(transparent)` over `usize` so the
+/// layout is identical to a raw pointer slot, but `usize` is naturally
+/// `Send + Sync`, sparing the magazine its own marker.
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+struct ObjSlot(usize);
+
+impl ObjSlot {
+    const NULL: Self = Self(0);
+
+    #[inline]
+    fn from_ptr(p: *mut c_void) -> Self {
+        Self(p as usize)
+    }
+
+    #[inline]
+    fn as_ptr(self) -> *mut c_void {
+        self.0 as *mut c_void
+    }
+
+    #[inline]
+    fn is_null(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// Per-size-class magazine: a small stack of pre-allocated object pointers.
 struct Magazine {
-    objects: [*mut c_void; MAGAZINE_CAPACITY],
+    objects: [ObjSlot; MAGAZINE_CAPACITY],
     count: u32,
 }
 
 impl Magazine {
     const fn new() -> Self {
         Self {
-            objects: [ptr::null_mut(); MAGAZINE_CAPACITY],
+            objects: [ObjSlot::NULL; MAGAZINE_CAPACITY],
             count: 0,
         }
     }
@@ -178,9 +275,9 @@ impl Magazine {
             return ptr::null_mut();
         }
         self.count -= 1;
-        let ptr = self.objects[self.count as usize];
-        self.objects[self.count as usize] = ptr::null_mut();
-        ptr
+        let slot = self.objects[self.count as usize];
+        self.objects[self.count as usize] = ObjSlot::NULL;
+        slot.as_ptr()
     }
 
     #[inline]
@@ -188,7 +285,7 @@ impl Magazine {
         if (self.count as usize) >= MAGAZINE_CAPACITY {
             return false;
         }
-        self.objects[self.count as usize] = ptr;
+        self.objects[self.count as usize] = ObjSlot::from_ptr(ptr);
         self.count += 1;
         true
     }
@@ -207,12 +304,9 @@ impl PerCpuHeapCache {
     }
 }
 
-struct HeapCacheArray(core::cell::UnsafeCell<[PerCpuHeapCache; MAX_CPUS]>);
-unsafe impl Sync for HeapCacheArray {}
-
-static HEAP_CACHES: HeapCacheArray = {
-    const INIT: PerCpuHeapCache = PerCpuHeapCache::new();
-    HeapCacheArray(core::cell::UnsafeCell::new([INIT; MAX_CPUS]))
+static HEAP_CACHES: CpuLocal<PerCpuHeapCache> = {
+    const INIT: CacheAligned<PerCpuHeapCache> = CacheAligned(PerCpuHeapCache::new());
+    CpuLocal::new_with([INIT; MAX_CPUS])
 };
 
 static HEAP_CACHES_ENABLED: core::sync::atomic::AtomicBool =
@@ -239,13 +333,12 @@ pub fn drain_all_heap_caches() {
     if !HEAP_CACHES_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    for cpu in 0..MAX_CPUS {
-        let cache = unsafe { &mut (*HEAP_CACHES.0.get())[cpu] };
+    HEAP_CACHES.for_each_mut_at_shutdown(|_cpu, cache| {
         for mag in cache.magazines.iter_mut() {
             mag.count = 0;
-            mag.objects = [ptr::null_mut(); MAGAZINE_CAPACITY];
+            mag.objects = [ObjSlot::NULL; MAGAZINE_CAPACITY];
         }
-    }
+    });
     MAG_CACHED_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
     MAG_ALLOC_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
     MAG_FREE_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -261,12 +354,11 @@ pub fn enable_heap_caches() {
     HEAP_CACHES_ENABLED.store(true, core::sync::atomic::Ordering::Release);
 }
 
-/// Get the current CPU's heap cache.
+/// Get the current CPU's heap cache. Caller must already hold a
+/// `PreemptGuard` so `cpu` stays pinned for the borrow.
 #[inline]
-unsafe fn heap_cache(cpu: usize) -> &'static mut PerCpuHeapCache {
-    debug_assert!(PreemptGuard::is_active());
-    debug_assert!(cpu < MAX_CPUS);
-    unsafe { &mut (*HEAP_CACHES.0.get())[cpu] }
+fn heap_cache(cpu: usize) -> &'static mut PerCpuHeapCache {
+    HEAP_CACHES.get_pinned_mut(cpu)
 }
 
 /// Refill a magazine from the global slab. Takes KERNEL_HEAP lock once.
@@ -284,7 +376,7 @@ fn magazine_refill(mag: &mut Magazine, class_idx: usize) {
         if ptr.is_null() {
             break;
         }
-        mag.objects[mag.count as usize] = ptr;
+        mag.objects[mag.count as usize] = ObjSlot::from_ptr(ptr);
         mag.count += 1;
         MAG_CACHED_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
@@ -305,30 +397,68 @@ fn magazine_drain(mag: &mut Magazine, _class_idx: usize) {
             break;
         }
         mag.count -= 1;
-        let ptr = mag.objects[mag.count as usize];
-        mag.objects[mag.count as usize] = ptr::null_mut();
-        if !ptr.is_null() {
-            let _ = slab_free(&mut heap, ptr);
+        let slot = mag.objects[mag.count as usize];
+        mag.objects[mag.count as usize] = ObjSlot::NULL;
+        if !slot.is_null() {
+            let _ = slab_free(&mut heap, slot.as_ptr());
             MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
 fn slab_object_start() -> usize {
-    align_up_usize(mem::size_of::<SlabHeader>(), 16)
+    SlabHeader::object_start_offset()
 }
 
-unsafe fn slab_poison_object_body(obj: *mut u8, object_size: usize) {
-    let link_bytes = mem::size_of::<*mut u8>();
-    if object_size > link_bytes {
-        unsafe {
-            ptr::write_bytes(
-                obj.add(link_bytes),
-                SLAB_POISON_FREED,
-                object_size.saturating_sub(link_bytes),
-            );
-        }
+fn slab_poison_object_body(obj: NonNull<u8>, object_size: usize) {
+    if let Some(body) = SlabHeader::body_slice_mut(obj, object_size) {
+        body.fill(SLAB_POISON_FREED);
     }
+}
+
+/// Read the leading two `u32`s (magic + object_size) of a candidate slab
+/// page. Caller must have already verified `base_va` lies inside the
+/// heap address range (HEAP_START..HEAP_END).
+#[inline]
+fn slab_magic_and_size_at(base_va: u64) -> (u32, u32) {
+    // SAFETY: caller's bounds check guarantees `base_va` lies in the heap
+    // mapping; the leading 8 bytes of any in-range slab page are either
+    // (SLAB_MAGIC, object_size) for active slabs or (LARGE_MAGIC|0, _)
+    // for large-alloc headers — both representations are valid `u32`.
+    unsafe {
+        let p = base_va as *const u32;
+        (*p, *p.add(1))
+    }
+}
+
+/// Read just the leading `u32` magic of a candidate heap region.
+#[inline]
+fn heap_magic_at(base_va: u64) -> u32 {
+    // SAFETY: caller has checked `base_va` lies inside the heap mapping.
+    unsafe { *(base_va as *const u32) }
+}
+
+/// Zero `len` bytes starting at `ptr`. Caller must own the buffer
+/// exclusively (typically because they just allocated it).
+#[inline]
+fn zero_user_buffer(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    // SAFETY: caller-owned buffer of `len` bytes.
+    unsafe {
+        core::slice::from_raw_parts_mut(ptr, len).fill(0);
+    }
+}
+
+/// Write a `HeapStats` snapshot to a C-ABI output slot if non-null.
+#[inline]
+fn write_optional_heap_stats(out: *mut HeapStats, value: HeapStats) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: out is non-null per the check above; caller-owned slot.
+    unsafe { *out = value };
 }
 
 fn size_class_index(size: usize) -> Option<usize> {
@@ -394,182 +524,185 @@ fn rollback_mapping(start: u64, mapped_pages: u32) {
     }
 }
 
-fn slab_build_free_list(base: *mut u8, object_size: usize, total_count: usize) -> *mut u8 {
-    let mut head: *mut u8 = ptr::null_mut();
-    let mut current: *mut u8 = ptr::null_mut();
-
-    for i in 0..total_count {
-        let obj = unsafe { base.add(i * object_size) };
-        if head.is_null() {
-            head = obj;
-            current = obj;
-        } else {
-            unsafe { *(current as *mut *mut u8) = obj };
-            current = obj;
+/// Build a `ByteChain` linking `total_count` objects starting at the given
+/// `slab_base` page. Pushes in reverse so popping yields ascending indices,
+/// matching the legacy in-order layout. Optionally poisons each object body
+/// when `SLAB_DEBUG` is enabled.
+fn slab_build_free_list(
+    slab_base: NonNull<u8>,
+    object_size: usize,
+    total_count: usize,
+) -> ByteChain {
+    let chain = ByteChain::new();
+    for i in (0..total_count).rev() {
+        if let Some(obj) = SlabHeader::object_at(slab_base, i, object_size) {
+            chain.push_front(obj);
         }
     }
-
-    if !current.is_null() {
-        unsafe { *(current as *mut *mut u8) = ptr::null_mut() };
-    }
-
     if SLAB_DEBUG {
         for i in 0..total_count {
-            let obj = unsafe { base.add(i * object_size) };
-            unsafe { slab_poison_object_body(obj, object_size) };
+            if let Some(obj) = SlabHeader::object_at(slab_base, i, object_size) {
+                slab_poison_object_body(obj, object_size);
+            }
         }
     }
-
-    head
+    chain
 }
 
-fn slab_create(heap: &mut KernelHeap, object_size: usize) -> *mut SlabHeader {
+fn slab_create(heap: &mut KernelHeap, object_size: usize) -> Option<NonNull<SlabHeader>> {
     let start = slab_object_start();
     if start >= PAGE_SIZE_4KB as usize {
-        return ptr::null_mut();
+        return None;
     }
 
     let available = PAGE_SIZE_4KB as usize - start;
     let total_count = available / object_size;
     if total_count == 0 {
-        return ptr::null_mut();
+        return None;
     }
 
-    let slab_addr = match map_heap_pages(heap, 1) {
-        Some(addr) => addr,
-        None => return ptr::null_mut(),
-    };
+    let slab_addr = map_heap_pages(heap, 1)?;
+    let slab_base = NonNull::new(slab_addr as *mut u8)?;
+    let free_list = slab_build_free_list(slab_base, object_size, total_count);
 
-    let header = slab_addr as *mut SlabHeader;
-    let data_base = unsafe { (slab_addr as *mut u8).add(start) };
-    let free_list = slab_build_free_list(data_base, object_size, total_count);
-
-    if SLAB_DEBUG {
-        for i in 0..total_count {
-            let obj = unsafe { data_base.add(i * object_size) };
-            unsafe { slab_poison_object_body(obj, object_size) };
-        }
-    }
-
-    unsafe {
-        (*header).magic = SLAB_MAGIC;
-        (*header).object_size = object_size as u32;
-        (*header).total_count = total_count as u16;
-        (*header).free_count = total_count as u16;
-        (*header).next = ptr::null_mut();
-        (*header).free_list = free_list;
-    }
+    let header_nn = slab_base.cast::<SlabHeader>();
+    RawLink::<SlabHeader>::with_mut_at(Some(header_nn), |h| {
+        h.magic = SLAB_MAGIC;
+        h.object_size = object_size as u32;
+        h.total_count = total_count as u16;
+        h.free_count = total_count as u16;
+        // `next` is null per the just-mapped zero-initialised page;
+        // `free_list` is overwritten with the freshly built chain.
+        h.next = RawLink::null();
+        h.free_list = free_list;
+    });
 
     heap.stats.total_blocks = heap.stats.total_blocks.saturating_add(total_count as u32);
     heap.stats.free_blocks = heap.stats.free_blocks.saturating_add(total_count as u32);
 
-    header
+    Some(header_nn)
+}
+
+/// Outcome of one slab visit during `slab_alloc_from_cache`.
+enum SlabVisit {
+    /// Allocated `obj` from this slab; record the object size for stats.
+    Allocated { obj: NonNull<u8>, object_size: u32 },
+    /// Slab said it had a free object but its free-list head was empty.
+    /// Indicates metadata corruption; abort the search.
+    HeadlessFree,
+    /// This slab has no free objects; advance to the next.
+    Skip,
 }
 
 fn slab_alloc_from_cache(heap: &mut KernelHeap, idx: usize) -> *mut c_void {
-    let cache_ptr = &mut heap.caches[idx] as *mut SlabCache;
-    unsafe {
-        let mut slab = (*cache_ptr).slabs;
-        while !slab.is_null() {
-            if (*slab).free_count > 0 {
-                let obj = (*slab).free_list;
-                if obj.is_null() {
-                    return ptr::null_mut();
-                }
-                let next = *(obj as *mut *mut u8);
-                let slab_start = slab as usize;
-                let slab_end = slab_start + PAGE_SIZE_4KB as usize;
-                if !next.is_null() {
-                    let next_addr = next as usize;
-                    if next_addr < slab_start || next_addr >= slab_end {
-                        klog_info!(
-                            "slab_alloc: corrupt next ptr 0x{:x} in obj 0x{:x}, slab [0x{:x}..0x{:x}], obj_size={}",
-                            next_addr,
-                            obj as usize,
-                            slab_start,
-                            slab_end,
-                            (*slab).object_size
-                        );
-                        // Sever the corrupt chain — lose some objects but stay alive.
-                        (*slab).free_list = ptr::null_mut();
-                        (*slab).free_count = 0;
-                        return obj as *mut c_void;
-                    }
-                }
-
-                if SLAB_DEBUG {
-                    let _ = (SLAB_REDZONE_HEAD, SLAB_REDZONE_TAIL);
-                    let object_size = (*slab).object_size as usize;
-                    let body_offset = mem::size_of::<*mut u8>();
-                    if object_size > body_offset {
-                        let body_len = object_size - body_offset;
-                        let body = obj.add(body_offset);
-                        let mut corrupt_off: Option<usize> = None;
-                        let mut corrupt_byte: u8 = 0;
-
-                        for off in 0..body_len {
-                            let actual = *body.add(off);
-                            if actual != SLAB_POISON_FREED {
-                                corrupt_off = Some(off);
-                                corrupt_byte = actual;
-                                break;
-                            }
-                        }
-
-                        if corrupt_off.is_some() {
-                            klog_info!(
-                                "slab_alloc: POISON CHECK FAILED at 0x{:x}, expected 0x{:02X} found 0x{:02X}, obj_size={}",
-                                obj as usize,
-                                SLAB_POISON_FREED,
-                                corrupt_byte,
-                                object_size
-                            );
-                            klog_info!(
-                                "slab_alloc: first16={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                                *obj.add(0),
-                                *obj.add(1),
-                                *obj.add(2),
-                                *obj.add(3),
-                                *obj.add(4),
-                                *obj.add(5),
-                                *obj.add(6),
-                                *obj.add(7),
-                                *obj.add(8),
-                                *obj.add(9),
-                                *obj.add(10),
-                                *obj.add(11),
-                                *obj.add(12),
-                                *obj.add(13),
-                                *obj.add(14),
-                                *obj.add(15)
-                            );
-                        }
-                    }
-                }
-
-                (*slab).free_list = next;
-                (*slab).free_count = (*slab).free_count.saturating_sub(1);
-                heap.stats.record_slab_alloc((*slab).object_size as u64);
-
-                return obj as *mut c_void;
+    let mut current = heap.caches[idx].slabs.load();
+    while let Some(slab_nn) = current {
+        let slab_start = slab_nn.as_ptr() as usize;
+        let slab_end = slab_start + PAGE_SIZE_4KB as usize;
+        // Operate on the slab through the safe RawLink reborrow.
+        let visit = RawLink::<SlabHeader>::with_mut_at(Some(slab_nn), |slab| {
+            if slab.free_count == 0 {
+                return SlabVisit::Skip;
             }
-            slab = (*slab).next;
-        }
+            let Some(obj) = slab.free_list.pop_front() else {
+                return SlabVisit::HeadlessFree;
+            };
+            // After pop_front, the chain head advanced to the previous
+            // object's embedded next-pointer. Validate it lies within
+            // this slab's page; sever and continue if it escaped.
+            if let Some(next) = slab.free_list.head() {
+                let next_addr = next.as_ptr() as usize;
+                if next_addr < slab_start || next_addr >= slab_end {
+                    klog_info!(
+                        "slab_alloc: corrupt next ptr 0x{:x} in obj 0x{:x}, slab [0x{:x}..0x{:x}], obj_size={}",
+                        next_addr,
+                        obj.as_ptr() as usize,
+                        slab_start,
+                        slab_end,
+                        slab.object_size
+                    );
+                    slab.free_list.set_head(None);
+                    slab.free_count = 0;
+                    return SlabVisit::Allocated {
+                        obj,
+                        object_size: slab.object_size,
+                    };
+                }
+            }
 
-        let object_size = (*cache_ptr).object_size;
-        let new_slab = slab_create(heap, object_size);
-        if new_slab.is_null() {
-            return ptr::null_mut();
+            if SLAB_DEBUG {
+                let _ = (SLAB_REDZONE_HEAD, SLAB_REDZONE_TAIL);
+                let object_size = slab.object_size as usize;
+                if let Some(body) = SlabHeader::body_slice_mut(obj, object_size) {
+                    let mut corrupt_off: Option<usize> = None;
+                    let mut corrupt_byte: u8 = 0;
+                    for (off, &b) in body.iter().enumerate() {
+                        if b != SLAB_POISON_FREED {
+                            corrupt_off = Some(off);
+                            corrupt_byte = b;
+                            break;
+                        }
+                    }
+                    if corrupt_off.is_some() {
+                        klog_info!(
+                            "slab_alloc: POISON CHECK FAILED at 0x{:x}, expected 0x{:02X} found 0x{:02X}, obj_size={}",
+                            obj.as_ptr() as usize,
+                            SLAB_POISON_FREED,
+                            corrupt_byte,
+                            object_size
+                        );
+                        let preview_len = body.len().min(16);
+                        let preview = &body[..preview_len];
+                        klog_info!("slab_alloc: body_first{}={:02x?}", preview_len, preview);
+                    }
+                }
+            }
+
+            slab.free_count = slab.free_count.saturating_sub(1);
+            SlabVisit::Allocated {
+                obj,
+                object_size: slab.object_size,
+            }
+        });
+
+        match visit {
+            Some(SlabVisit::Allocated { obj, object_size }) => {
+                heap.stats.record_slab_alloc(object_size as u64);
+                return obj.as_ptr() as *mut c_void;
+            }
+            Some(SlabVisit::HeadlessFree) => return ptr::null_mut(),
+            Some(SlabVisit::Skip) | None => {
+                // Step to the next slab in this cache's list.
+                current =
+                    RawLink::<SlabHeader>::with_mut_at(Some(slab_nn), |s| s.next.load()).flatten();
+            }
         }
-        (*new_slab).next = (*cache_ptr).slabs;
-        (*cache_ptr).slabs = new_slab;
     }
+
+    // No slab has free space — create a new one and prepend it.
+    let object_size = heap.caches[idx].object_size;
+    let new_slab = match slab_create(heap, object_size) {
+        Some(s) => s,
+        None => return ptr::null_mut(),
+    };
+    let prev_head = heap.caches[idx].slabs.load();
+    RawLink::<SlabHeader>::with_mut_at(Some(new_slab), |s| s.next.store(prev_head));
+    heap.caches[idx].slabs.store(Some(new_slab));
 
     slab_alloc_from_cache(heap, idx)
 }
 
+/// Read-only snapshot of a `LargeAllocHeader` taken under exclusive
+/// access. Returned by `with_large_header_*` helpers so callers can
+/// chain control flow without holding a reborrowed `&mut`.
+#[derive(Clone, Copy)]
+struct LargeHeaderSnapshot {
+    pages: u32,
+    next: Option<NonNull<LargeAllocHeader>>,
+}
+
 fn alloc_large(heap: &mut KernelHeap, size: usize) -> *mut c_void {
-    let header_size = align_up_usize(mem::size_of::<LargeAllocHeader>(), 16);
+    let header_size = LargeAllocHeader::body_offset();
     let total = size.saturating_add(header_size);
     let pages = align_up_usize(total, PAGE_SIZE_4KB as usize) / PAGE_SIZE_4KB as usize;
 
@@ -577,96 +710,122 @@ fn alloc_large(heap: &mut KernelHeap, size: usize) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    let mut prev: *mut LargeAllocHeader = ptr::null_mut();
-    let mut current = heap.large_free_list;
-    while !current.is_null() {
-        unsafe {
-            if (*current).pages as usize >= pages {
-                if prev.is_null() {
-                    heap.large_free_list = (*current).next;
-                } else {
-                    (*prev).next = (*current).next;
-                }
-                let base = current as u64;
+    // Free-list first-fit walk: find a header whose `pages >= pages`.
+    let mut prev: Option<NonNull<LargeAllocHeader>> = None;
+    let mut current = heap.large_free_list.load();
+    while let Some(curr_nn) = current {
+        let snap =
+            RawLink::<LargeAllocHeader>::with_mut_at(Some(curr_nn), |h| LargeHeaderSnapshot {
+                pages: h.pages,
+                next: h.next.load(),
+            });
+        let snap = match snap {
+            Some(s) => s,
+            None => break,
+        };
 
-                if SLAB_DEBUG {
-                    let body = (base as *mut u8).add(header_size);
-                    let check_len = size
-                        .min(((*current).pages as usize) * PAGE_SIZE_4KB as usize - header_size);
-                    let mut corrupt_off: Option<usize> = None;
-                    let mut corrupt_byte: u8 = 0;
-                    for off in 0..check_len.min(64) {
-                        let actual = *body.add(off);
-                        if actual != SLAB_POISON_FREED {
-                            corrupt_off = Some(off);
-                            corrupt_byte = actual;
-                            break;
-                        }
-                    }
-                    if let Some(off) = corrupt_off {
-                        klog_info!(
-                            "alloc_large: POISON CHECK FAILED at 0x{:x}+{}, expected 0x{:02X} found 0x{:02X}, size={}, pages={}",
-                            base,
-                            off,
-                            SLAB_POISON_FREED,
-                            corrupt_byte,
-                            size,
-                            (*current).pages
-                        );
-                    }
+        if snap.pages as usize >= pages {
+            // Detach `curr` from the free list.
+            match prev {
+                None => heap.large_free_list.store(snap.next),
+                Some(p) => {
+                    RawLink::<LargeAllocHeader>::with_mut_at(Some(p), |h| h.next.store(snap.next));
                 }
-
-                (*current).magic = LARGE_MAGIC;
-                (*current).size = size as u32;
-                (*current).next = ptr::null_mut();
-                heap.stats.record_large_alloc(size as u64);
-                return (base as *mut u8).add(header_size) as *mut c_void;
             }
-            prev = current;
-            current = (*current).next;
+
+            if SLAB_DEBUG {
+                let total_bytes = (snap.pages as usize) * PAGE_SIZE_4KB as usize - header_size;
+                let check_len = size.min(total_bytes).min(64);
+                let body_view = LargeAllocHeader::body_view_mut(curr_nn, check_len);
+                let mut corrupt_off: Option<usize> = None;
+                let mut corrupt_byte: u8 = 0;
+                for (off, &b) in body_view.iter().enumerate() {
+                    if b != SLAB_POISON_FREED {
+                        corrupt_off = Some(off);
+                        corrupt_byte = b;
+                        break;
+                    }
+                }
+                if let Some(off) = corrupt_off {
+                    klog_info!(
+                        "alloc_large: POISON CHECK FAILED at 0x{:x}+{}, expected 0x{:02X} found 0x{:02X}, size={}, pages={}",
+                        curr_nn.as_ptr() as u64,
+                        off,
+                        SLAB_POISON_FREED,
+                        corrupt_byte,
+                        size,
+                        snap.pages
+                    );
+                }
+            }
+
+            RawLink::<LargeAllocHeader>::with_mut_at(Some(curr_nn), |h| {
+                h.magic = LARGE_MAGIC;
+                h.size = size as u32;
+                h.next = RawLink::null();
+            });
+            heap.stats.record_large_alloc(size as u64);
+            return LargeAllocHeader::body_ptr(curr_nn).as_ptr() as *mut c_void;
         }
+
+        prev = Some(curr_nn);
+        current = snap.next;
     }
 
+    // No reusable header — allocate a fresh region.
     let base = match map_heap_pages(heap, pages as u32) {
         Some(addr) => addr,
         None => return ptr::null_mut(),
     };
-
-    let header = base as *mut LargeAllocHeader;
-    unsafe {
-        (*header).magic = LARGE_MAGIC;
-        (*header).pages = pages as u32;
-        (*header).size = size as u32;
-        (*header).reserved = 0;
-        (*header).next = ptr::null_mut();
-    }
+    let header_nn = match NonNull::new(base as *mut LargeAllocHeader) {
+        Some(p) => p,
+        None => return ptr::null_mut(),
+    };
+    RawLink::<LargeAllocHeader>::with_mut_at(Some(header_nn), |h| {
+        h.magic = LARGE_MAGIC;
+        h.pages = pages as u32;
+        h.size = size as u32;
+        h.reserved = 0;
+        h.next = RawLink::null();
+    });
 
     heap.stats.total_blocks = heap.stats.total_blocks.saturating_add(1);
     heap.stats.record_large_alloc(size as u64);
 
-    unsafe { (base as *mut u8).add(header_size) as *mut c_void }
+    LargeAllocHeader::body_ptr(header_nn).as_ptr() as *mut c_void
 }
 
 fn free_large(heap: &mut KernelHeap, base: u64) -> c_int {
-    let header = base as *mut LargeAllocHeader;
-    unsafe {
-        if (*header).magic != LARGE_MAGIC {
-            return -1;
-        }
-        let size = (*header).size as u64;
-        (*header).magic = LARGE_FREE_MAGIC;
-        (*header).next = heap.large_free_list;
-        heap.large_free_list = header;
-        heap.stats.record_large_free(size);
+    let header_nn = match NonNull::new(base as *mut LargeAllocHeader) {
+        Some(p) => p,
+        None => return -1,
+    };
 
-        if SLAB_DEBUG {
-            let hdr_sz = align_up_usize(mem::size_of::<LargeAllocHeader>(), 16);
-            let total_bytes = ((*header).pages as usize) * PAGE_SIZE_4KB as usize;
-            if total_bytes > hdr_sz {
-                let body = (base as *mut u8).add(hdr_sz);
-                let body_len = total_bytes - hdr_sz;
-                ptr::write_bytes(body, SLAB_POISON_FREED, body_len);
-            }
+    let mut size_freed: u64 = 0;
+    let mut total_pages: u32 = 0;
+    let prev_head = heap.large_free_list.load();
+    let updated = RawLink::<LargeAllocHeader>::with_mut_at(Some(header_nn), |h| {
+        if h.magic != LARGE_MAGIC {
+            return false;
+        }
+        size_freed = h.size as u64;
+        total_pages = h.pages;
+        h.magic = LARGE_FREE_MAGIC;
+        h.next.store(prev_head);
+        true
+    });
+    if !matches!(updated, Some(true)) {
+        return -1;
+    }
+    heap.large_free_list.store(Some(header_nn));
+    heap.stats.record_large_free(size_freed);
+
+    if SLAB_DEBUG {
+        let hdr_sz = LargeAllocHeader::body_offset();
+        let total_bytes = (total_pages as usize) * PAGE_SIZE_4KB as usize;
+        if total_bytes > hdr_sz {
+            let body_len = total_bytes - hdr_sz;
+            LargeAllocHeader::body_view_mut(header_nn, body_len).fill(SLAB_POISON_FREED);
         }
     }
 
@@ -674,23 +833,29 @@ fn free_large(heap: &mut KernelHeap, base: u64) -> c_int {
 }
 
 fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
-    let base = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB) as *mut SlabHeader;
-    if base.is_null() {
-        return -1;
-    }
+    let base_addr = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB);
+    let base_nn = match NonNull::new(base_addr as *mut SlabHeader) {
+        Some(p) => p,
+        None => return -1,
+    };
+    let obj_nn = match NonNull::new(ptr_in as *mut u8) {
+        Some(p) => p,
+        None => return -1,
+    };
 
-    unsafe {
-        if (*base).magic != SLAB_MAGIC {
+    let slab_start = base_nn.as_ptr() as usize;
+    let slab_end = slab_start + PAGE_SIZE_4KB as usize;
+    let ptr_addr = ptr_in as usize;
+    let mut object_size_for_stats: u32 = 0;
+
+    let outcome = RawLink::<SlabHeader>::with_mut_at(Some(base_nn), |slab| -> c_int {
+        if slab.magic != SLAB_MAGIC {
             return -1;
         }
 
-        let object_size = (*base).object_size as usize;
-        let start = slab_object_start();
-        let object_base = (base as usize).saturating_add(start);
-        let object_end = (base as usize).saturating_add(PAGE_SIZE_4KB as usize);
-        let ptr_addr = ptr_in as usize;
-
-        if ptr_addr < object_base || ptr_addr >= object_end {
+        let object_size = slab.object_size as usize;
+        let object_base = slab_start.saturating_add(slab_object_start());
+        if ptr_addr < object_base || ptr_addr >= slab_end {
             return -1;
         }
 
@@ -699,14 +864,11 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
             return -1;
         }
 
-        let slab_start = base as usize;
-        let slab_end = slab_start + PAGE_SIZE_4KB as usize;
-        let mut current = (*base).free_list;
-        while !current.is_null() {
-            let cur_addr = current as usize;
+        // Walk the existing free chain to detect double-free / corruption.
+        let mut current = slab.free_list.head();
+        while let Some(curr) = current {
+            let cur_addr = curr.as_ptr() as usize;
             if cur_addr < slab_start || cur_addr >= slab_end {
-                // Free-list pointer escaped the slab page — metadata is corrupt.
-                // Break the walk to avoid dereferencing into unmapped memory.
                 klog_info!(
                     "slab_free: corrupt free-list ptr 0x{:x} outside slab [0x{:x}..0x{:x}], obj_size={}",
                     cur_addr,
@@ -719,22 +881,29 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
             if cur_addr == ptr_addr {
                 return -1;
             }
-            current = *(current as *mut *mut u8);
+            current = ByteChain::read_next(curr);
         }
 
-        *(ptr_in as *mut *mut u8) = (*base).free_list;
-        (*base).free_list = ptr_in as *mut u8;
-        (*base).free_count = (*base).free_count.saturating_add(1);
+        slab.free_list.push_front(obj_nn);
+        slab.free_count = slab.free_count.saturating_add(1);
+        object_size_for_stats = slab.object_size;
 
         if SLAB_DEBUG {
             let _ = (SLAB_REDZONE_HEAD, SLAB_REDZONE_TAIL);
-            slab_poison_object_body(ptr_in as *mut u8, object_size);
+            slab_poison_object_body(obj_nn, object_size);
         }
 
-        heap.stats.record_slab_free((*base).object_size as u64);
-    }
+        0
+    });
 
-    0
+    match outcome {
+        Some(0) => {
+            heap.stats.record_slab_free(object_size_for_stats as u64);
+            0
+        }
+        Some(rc) => rc,
+        None => -1,
+    }
 }
 
 pub fn kmalloc(size: usize) -> *mut c_void {
@@ -752,8 +921,7 @@ pub fn kmalloc(size: usize) -> *mut c_void {
         {
             let _pin = IrqPreemptGuard::new();
             let cpu = get_current_cpu();
-            // SAFETY: PreemptGuard held → CPU pinned.
-            let cache = unsafe { heap_cache(cpu) };
+            let cache = heap_cache(cpu);
             let mag = &mut cache.magazines[class_idx];
 
             // Fast path: pop from magazine. No lock, no atomic.
@@ -793,9 +961,7 @@ pub fn kzalloc(size: usize) -> *mut c_void {
     if ptr_out.is_null() {
         return ptr::null_mut();
     }
-    unsafe {
-        ptr::write_bytes(ptr_out, 0, size);
-    }
+    zero_user_buffer(ptr_out as *mut u8, size);
     ptr_out
 }
 
@@ -814,13 +980,13 @@ pub fn kfree(ptr_in: *mut c_void) {
         // Only access the slab header if the pointer is within the heap range
         // and the heap lock isn't already held (avoids recursive locking in drain).
         if base >= heap_start && base < heap_end && !KERNEL_HEAP.is_locked() {
-            let magic = unsafe { *(base as *const u32) };
+            let (magic, raw_size) = slab_magic_and_size_at(base);
             if magic == SLAB_MAGIC {
-                let object_size = unsafe { *((base as *const u32).add(1)) } as usize;
+                let object_size = raw_size as usize;
                 if let Some(class_idx) = size_class_index(object_size) {
                     let _pin = IrqPreemptGuard::new();
                     let cpu = get_current_cpu();
-                    let cache = unsafe { heap_cache(cpu) };
+                    let cache = heap_cache(cpu);
                     let mag = &mut cache.magazines[class_idx];
                     if mag.push(ptr_in) {
                         MAG_CACHED_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -864,7 +1030,7 @@ pub fn kfree(ptr_in: *mut c_void) {
         return;
     }
 
-    let magic_at_base = unsafe { *(base as *const u32) };
+    let magic_at_base = heap_magic_at(base);
     klog_info!(
         "kfree: no owner for ptr 0x{:x} base 0x{:x} magic=0x{:08x} (slab_rc={} large_rc={})",
         ptr_in as u64,
@@ -890,14 +1056,12 @@ pub fn init_kernel_heap() -> c_int {
     heap.current_break = heap.start_addr;
 
     for (idx, size) in SIZE_CLASSES.iter().enumerate() {
-        heap.caches[idx] = SlabCache {
-            object_size: *size,
-            slabs: ptr::null_mut(),
-        };
+        heap.caches[idx].object_size = *size;
+        heap.caches[idx].slabs.store(None);
     }
 
     heap.stats = HeapStats::default();
-    heap.large_free_list = ptr::null_mut();
+    heap.large_free_list.store(None);
 
     // ============================================================================
     // SOFT REBOOT COHERENCY FIX - DO NOT REMOVE
@@ -940,18 +1104,14 @@ pub fn init_kernel_heap() -> c_int {
 
 pub fn get_heap_stats(stats: *mut HeapStats) {
     let heap = KERNEL_HEAP.lock();
-    if !stats.is_null() {
-        unsafe {
-            let mut s = heap.stats;
-            // Magazine-served allocs/frees don't touch slab stats. Add them
-            // so callers see accurate totals.
-            let mag_allocs = MAG_ALLOC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-            let mag_frees = MAG_FREE_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-            s.allocation_count = s.allocation_count.saturating_add(mag_allocs);
-            s.free_count = s.free_count.saturating_add(mag_frees);
-            *stats = s;
-        }
-    }
+    let mut s = heap.stats;
+    // Magazine-served allocs/frees don't touch slab stats. Add them so
+    // callers see accurate totals.
+    let mag_allocs = MAG_ALLOC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    let mag_frees = MAG_FREE_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    s.allocation_count = s.allocation_count.saturating_add(mag_allocs);
+    s.free_count = s.free_count.saturating_add(mag_frees);
+    write_optional_heap_stats(stats, s);
 }
 
 pub fn kernel_heap_enable_diagnostics(enable: c_int) {
@@ -980,13 +1140,15 @@ pub fn print_heap_stats() {
 
         let mut total = 0u32;
         let mut free = 0u32;
-        let mut slab = cache.slabs;
-        unsafe {
-            while !slab.is_null() {
-                total += (*slab).total_count as u32;
-                free += (*slab).free_count as u32;
-                slab = (*slab).next;
-            }
+        let mut current = cache.slabs.load();
+        while let Some(slab_nn) = current {
+            let next = RawLink::<SlabHeader>::with_mut_at(Some(slab_nn), |s| {
+                total += s.total_count as u32;
+                free += s.free_count as u32;
+                s.next.load()
+            })
+            .flatten();
+            current = next;
         }
 
         if total > 0 {
@@ -1000,15 +1162,22 @@ pub fn print_heap_stats() {
     }
 }
 
-pub unsafe fn kernel_heap_force_unlock() {
-    KERNEL_HEAP.force_unlock();
+/// Wrapped force-unlock for panic recovery. Calls into OSTD's
+/// `SpinLock::force_unlock` whose contract is "panic-recovery only";
+/// we expose a safe surface because `mm_panic_cleanup` is the sole
+/// caller and it runs from the panic-recovery hook by construction.
+pub fn kernel_heap_force_unlock() {
+    // SAFETY: invoked from `mm_panic_cleanup` only — the panic-recovery
+    // contract on `SpinLock::force_unlock` is satisfied.
+    unsafe { KERNEL_HEAP.force_unlock() };
 }
 
 /// Force-unlock the kernel heap AND mark it as poisoned.
 /// Called from panic recovery to signal that heap metadata may be
 /// inconsistent. Check `kernel_heap_is_poisoned()` before trusting state.
-pub unsafe fn kernel_heap_poison_unlock() {
-    KERNEL_HEAP.poison_unlock();
+pub fn kernel_heap_poison_unlock() {
+    // SAFETY: invoked from `mm_panic_cleanup` only.
+    unsafe { KERNEL_HEAP.poison_unlock() };
 }
 
 /// Returns true if the kernel heap was force-unlocked during panic recovery.

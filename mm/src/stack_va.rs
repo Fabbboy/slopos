@@ -32,19 +32,18 @@
 //! # Safety boundaries
 //!
 //! The VA allocator itself is 100% safe Rust: it manipulates bitmap
-//! words and slot indices and never dereferences a stack pointer.  The
+//! words and slot indices and never dereferences a stack pointer. The
 //! page-table sentinel install touches `mm::paging::map_page_4kb`,
-//! which is a safe wrapper.  The per-CPU cache uses `UnsafeCell` and
-//! relies on `PreemptGuard` CPU pinning for its single `unsafe`
-//! dereference per access.
+//! which is a safe wrapper. The per-CPU cache delegates to OSTD's
+//! `CpuLocal::get_pinned_mut`, which is itself a safe surface gated by
+//! `PreemptGuard` CPU pinning.
 
-use core::cell::UnsafeCell;
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
 
 use crate::page_alloc::alloc_page_frame;
@@ -256,12 +255,12 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
 
     /// Claim up to `out.len()` free slots under a single lock acquisition.
     /// Returns the number of `SlotEntry`s written to the front of `out`.
-    pub fn alloc_batch(&mut self, out: &mut [MaybeUninit<SlotEntry>]) -> usize {
+    pub fn alloc_one_into_slice(&mut self, out: &mut [SlotEntry]) -> usize {
         let mut filled = 0;
         while filled < out.len() {
             match self.alloc_one() {
                 Some(entry) => {
-                    out[filled].write(entry);
+                    out[filled] = entry;
                     filled += 1;
                 }
                 None => break,
@@ -354,44 +353,34 @@ impl<R: StackRegion, const CAP: usize> PerCpuStackCache<R, CAP> {
     }
 }
 
-/// Sync wrapper around a `[PerCpuStackCache<R, CAP>; MAX_CPUS]`.
-///
-/// SAFETY: each CPU only mutates its own slot while pinned by
-/// `PreemptGuard`; cross-CPU reads are restricted to the atomic stat
-/// fields.
-pub struct PcpArray<R: StackRegion, const CAP: usize>(
-    UnsafeCell<[PerCpuStackCache<R, CAP>; MAX_CPUS]>,
-);
-
-unsafe impl<R: StackRegion, const CAP: usize> Sync for PcpArray<R, CAP> {}
+/// Per-CPU cache storage for the stack-VA allocator. A thin re-export of
+/// `slopos_ostd::sync::cpu_local::CpuLocal<PerCpuStackCache<R, CAP>>` plus
+/// a typed `PcpStats` snapshot helper.
+pub struct PcpArray<R: StackRegion, const CAP: usize> {
+    inner: CpuLocal<PerCpuStackCache<R, CAP>>,
+}
 
 impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
-    pub const fn new(init: [PerCpuStackCache<R, CAP>; MAX_CPUS]) -> Self {
-        Self(UnsafeCell::new(init))
-    }
-
-    /// # Safety
-    /// Caller must hold a `PreemptGuard` so `cpu` (== current CPU) stays
-    /// stable for the lifetime of the returned reference.
-    #[inline]
-    pub unsafe fn cache(&self, cpu: usize) -> &mut PerCpuStackCache<R, CAP> {
-        debug_assert!(
-            PreemptGuard::is_active(),
-            "stack_va PcpArray::cache requires PreemptGuard"
-        );
-        debug_assert!(cpu < MAX_CPUS);
-        unsafe { &mut (*self.0.get())[cpu] }
-    }
-
-    /// Read another CPU's cache for diagnostics.  Benign data race on
-    /// non-atomic fields; the atomics give a consistent snapshot of the
-    /// counters.
-    pub fn snapshot(&self, cpu: usize) -> PcpStats {
-        if cpu >= MAX_CPUS {
-            return PcpStats::default();
+    pub const fn new(init: [CacheAligned<PerCpuStackCache<R, CAP>>; MAX_CPUS]) -> Self {
+        Self {
+            inner: CpuLocal::new_with(init),
         }
-        // SAFETY: read-only access for diagnostics.  count is a benign race.
-        let cache = unsafe { &(*self.0.get())[cpu] };
+    }
+
+    /// Mutable slot access for a caller already holding a `PreemptGuard`.
+    /// `cpu` must equal the current CPU.
+    #[inline]
+    pub fn cache(&self, cpu: usize) -> &mut PerCpuStackCache<R, CAP> {
+        self.inner.get_pinned_mut(cpu)
+    }
+
+    /// Read another CPU's cache for diagnostics. Benign data race on
+    /// non-atomic fields; the atomic stat counters give a consistent
+    /// per-counter snapshot.
+    pub fn snapshot(&self, cpu: usize) -> PcpStats {
+        let Some(cache) = self.inner.snapshot_for_cpu(cpu) else {
+            return PcpStats::default();
+        };
         PcpStats {
             count: cache.count,
             alloc_count: cache.alloc_count.load(Ordering::Relaxed),
@@ -401,11 +390,12 @@ impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
         }
     }
 
-    /// # Safety
-    /// Shutdown only — no concurrent PCP activity assumed.
-    pub unsafe fn cache_unchecked(&self, cpu: usize) -> &mut PerCpuStackCache<R, CAP> {
-        debug_assert!(cpu < MAX_CPUS);
-        unsafe { &mut (*self.0.get())[cpu] }
+    /// Borrow the underlying `CpuLocal` for shutdown-only drain helpers.
+    /// All mutating accessors on the returned reference carry their own
+    /// safety contracts from OSTD; this borrow itself is non-mutating.
+    #[inline]
+    pub fn cpu_local(&self) -> &CpuLocal<PerCpuStackCache<R, CAP>> {
+        &self.inner
     }
 }
 
@@ -428,8 +418,7 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
         "stack_va::pcp_refill requires PreemptGuard"
     );
     debug_assert!(REFILL <= CAP);
-    // SAFETY: PreemptGuard pins us to `cpu`.
-    let cache = unsafe { pcp.cache(cpu) };
+    let cache = pcp.cache(cpu);
     if cache.count as usize >= REFILL {
         return;
     }
@@ -440,15 +429,19 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
         return;
     }
 
-    let mut batch: [MaybeUninit<SlotEntry>; REFILL] = [const { MaybeUninit::uninit() }; REFILL];
+    // SlotEntry is Copy + has a sentinel default; pre-populate the batch so
+    // alloc_batch's writes overwrite known-good slots and we can iterate by
+    // value — avoids the MaybeUninit reborrow path entirely.
+    let mut batch: [SlotEntry; REFILL] = [SlotEntry {
+        idx: u32::MAX,
+        backed: false,
+    }; REFILL];
     let got = {
         let mut alloc = global.lock();
-        alloc.alloc_batch(&mut batch[..want])
+        alloc.alloc_one_into_slice(&mut batch[..want])
     };
 
-    for entry_slot in batch.iter().take(got) {
-        // SAFETY: alloc_batch wrote exactly `got` entries.
-        let entry = unsafe { entry_slot.assume_init() };
+    for entry in batch.iter().take(got).copied() {
         let c = cache.count as usize;
         cache.stack_idx[c] = entry.idx;
         cache.stack_backed[c] = entry.backed;
@@ -474,8 +467,7 @@ pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPI
         "stack_va::pcp_spill requires PreemptGuard"
     );
     debug_assert!(SPILL < CAP);
-    // SAFETY: PreemptGuard pins us.
-    let cache = unsafe { pcp.cache(cpu) };
+    let cache = pcp.cache(cpu);
     let want = SPILL.min(cache.count as usize);
     if want == 0 {
         return;
@@ -524,9 +516,7 @@ pub fn pcp_drain_all_impl<
     global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
 ) {
-    for cpu in 0..MAX_CPUS {
-        // SAFETY: shutdown-only — no concurrent access.
-        let cache = unsafe { pcp.cache_unchecked(cpu) };
+    pcp.cpu_local().for_each_mut_at_shutdown(|_cpu, cache| {
         while cache.count > 0 {
             let n = cache.count as usize;
             let take = SPILL.min(n);
@@ -547,7 +537,7 @@ pub fn pcp_drain_all_impl<
             let mut alloc = global.lock();
             alloc.release_batch(&batch[..take]);
         }
-    }
+    });
 }
 
 /// Drain the current CPU's cache back to the global allocator.  Test
@@ -564,8 +554,7 @@ pub fn pcp_flush_current_impl<
 ) {
     let _no_migrate = PreemptGuard::new();
     let cpu = slopos_arch::pcr::get_current_cpu();
-    // SAFETY: PreemptGuard pins us.
-    let cache = unsafe { pcp.cache(cpu) };
+    let cache = pcp.cache(cpu);
     while cache.count > 0 {
         let n = cache.count as usize;
         let take = SPILL.min(n);
@@ -597,8 +586,7 @@ pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const
 ) -> Option<SlotEntry> {
     let _no_migrate = PreemptGuard::new();
     let cpu = slopos_arch::pcr::get_current_cpu();
-    // SAFETY: PreemptGuard pins us.
-    let cache = unsafe { pcp.cache(cpu) };
+    let cache = pcp.cache(cpu);
 
     if cache.count == 0 {
         pcp_refill::<R, WORDS, CAP, REFILL>(global, pcp, cpu);
@@ -628,8 +616,7 @@ pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, cons
 ) {
     let _no_migrate = PreemptGuard::new();
     let cpu = slopos_arch::pcr::get_current_cpu();
-    // SAFETY: PreemptGuard pins us.
-    let cache = unsafe { pcp.cache(cpu) };
+    let cache = pcp.cache(cpu);
 
     if cache.count as usize >= CAP {
         pcp_spill::<R, WORDS, CAP, SPILL>(global, pcp, cpu);
@@ -782,7 +769,8 @@ mod kstack {
         SpinLock::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
 
     pub(super) static PCP: PcpArray<KstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
-        const INIT: PerCpuStackCache<KstackRegion, REGION_PCP_CAPACITY> = PerCpuStackCache::new();
+        const INIT: CacheAligned<PerCpuStackCache<KstackRegion, REGION_PCP_CAPACITY>> =
+            CacheAligned(PerCpuStackCache::new());
         [INIT; MAX_CPUS]
     });
 
@@ -872,7 +860,8 @@ mod ustack {
         SpinLock::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
 
     pub(super) static PCP: PcpArray<UstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
-        const INIT: PerCpuStackCache<UstackRegion, REGION_PCP_CAPACITY> = PerCpuStackCache::new();
+        const INIT: CacheAligned<PerCpuStackCache<UstackRegion, REGION_PCP_CAPACITY>> =
+            CacheAligned(PerCpuStackCache::new());
         [INIT; MAX_CPUS]
     });
 

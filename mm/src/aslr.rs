@@ -3,7 +3,7 @@
 //! Randomizes stack (1MB range) and heap (16MB range) to mitigate exploitation.
 //! Uses TSC-seeded LFSR64 RNG.
 
-use core::cell::SyncUnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::memory_layout_defs::ProcessMemoryLayout;
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -32,6 +32,26 @@ impl AslrConfig {
             enabled: false,
         }
     }
+
+    /// Pack into a `u32` for storage in a single atomic slot.
+    ///
+    /// Layout: bits 0..8 = stack_entropy_bits, 8..16 = heap_entropy_bits,
+    /// 16 = enabled flag, 17..32 = reserved (must be zero).
+    #[inline(always)]
+    const fn pack(self) -> u32 {
+        (self.stack_entropy_bits as u32)
+            | ((self.heap_entropy_bits as u32) << 8)
+            | ((self.enabled as u32) << 16)
+    }
+
+    #[inline(always)]
+    const fn unpack(packed: u32) -> Self {
+        Self {
+            stack_entropy_bits: (packed & 0xFF) as u8,
+            heap_entropy_bits: ((packed >> 8) & 0xFF) as u8,
+            enabled: (packed & ENABLED_BIT) != 0,
+        }
+    }
 }
 
 impl Default for AslrConfig {
@@ -40,20 +60,31 @@ impl Default for AslrConfig {
     }
 }
 
-static ASLR_CONFIG: SyncUnsafeCell<AslrConfig> = SyncUnsafeCell::new(AslrConfig::default_config());
+const ENABLED_BIT: u32 = 1 << 16;
 
+/// All ASLR knobs packed into a single `AtomicU32` so `get_config` issues
+/// exactly one atomic load — matching the single-load characteristic of
+/// the legacy `SyncUnsafeCell<AslrConfig>` and avoiding three chained
+/// non-inlined `Atomic::load` calls in dev builds (each reserving its
+/// own stack frame).
+static ASLR_CONFIG: AtomicU32 = AtomicU32::new(AslrConfig::default_config().pack());
+
+#[inline(always)]
 pub fn get_config() -> AslrConfig {
-    unsafe { *ASLR_CONFIG.get() }
+    AslrConfig::unpack(ASLR_CONFIG.load(Ordering::Relaxed))
 }
 
 pub fn set_enabled(enabled: bool) {
-    unsafe {
-        (*ASLR_CONFIG.get()).enabled = enabled;
+    if enabled {
+        ASLR_CONFIG.fetch_or(ENABLED_BIT, Ordering::Relaxed);
+    } else {
+        ASLR_CONFIG.fetch_and(!ENABLED_BIT, Ordering::Relaxed);
     }
 }
 
+#[inline(always)]
 pub fn is_enabled() -> bool {
-    unsafe { (*ASLR_CONFIG.get()).enabled }
+    (ASLR_CONFIG.load(Ordering::Relaxed) & ENABLED_BIT) != 0
 }
 
 fn get_random() -> u64 {

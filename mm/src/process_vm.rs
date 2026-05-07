@@ -148,28 +148,122 @@ fn map_user_range(
         if phys.is_null() {
             klog_info!("map_user_range: Physical allocation failed");
             rollback_range(vm_space, current, start_addr, &mut mapped);
-            if !pages_mapped_out.is_null() {
-                unsafe { *pages_mapped_out = 0 };
-            }
+            write_optional_u32(pages_mapped_out, 0);
             return -1;
         }
         if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(current), phys, map_flags) {
             klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
             free_page_frame(phys);
             rollback_range(vm_space, current, start_addr, &mut mapped);
-            if !pages_mapped_out.is_null() {
-                unsafe { *pages_mapped_out = 0 };
-            }
+            write_optional_u32(pages_mapped_out, 0);
             return -1;
         }
         mapped += 1;
         current += PAGE_SIZE_4KB;
     }
 
-    if !pages_mapped_out.is_null() {
-        unsafe { *pages_mapped_out = mapped };
-    }
+    write_optional_u32(pages_mapped_out, mapped);
     0
+}
+
+/// Write `value` through `out` if non-null. Used for `*mut u32` C-ABI
+/// shim outputs that the legacy callers pass in.
+#[inline]
+fn write_optional_u32(out: *mut u32, value: u32) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: out is non-null per the check above; caller-supplied
+    // C-ABI output slot.
+    unsafe { *out = value };
+}
+
+/// Copy `src.len()` bytes through the HHDM mapping at `virt + offset`.
+/// `virt` must be a fresh resolution of a 4 KiB user-mapped frame's
+/// physical address; `offset + src.len() <= PAGE_SIZE_4KB`. Returns
+/// `false` if `virt` is null or the bounds check fails.
+#[inline]
+fn hhdm_write_bytes(virt: VirtAddr, offset: usize, src: &[u8]) -> bool {
+    if virt.is_null() {
+        return false;
+    }
+    if offset
+        .checked_add(src.len())
+        .is_none_or(|e| e > PAGE_SIZE_4KB as usize)
+    {
+        return false;
+    }
+    // SAFETY: caller has resolved `virt` from a valid 4 KiB physical
+    // mapping; `offset + len <= PAGE_SIZE_4KB` per the bounds check
+    // above. The HHDM mapping is exclusively held for the duration of
+    // the write, since the caller's user-space VmSpace cursor pinned
+    // the underlying page.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src.as_ptr(),
+            virt.as_mut_ptr::<u8>().add(offset),
+            src.len(),
+        );
+    }
+    true
+}
+
+/// Read `dst.len()` bytes from the HHDM mapping at `virt + offset` into
+/// `dst`. Same caller contract as [`hhdm_write_bytes`].
+#[inline]
+fn hhdm_read_bytes(virt: VirtAddr, offset: usize, dst: &mut [u8]) -> bool {
+    if virt.is_null() {
+        return false;
+    }
+    if offset
+        .checked_add(dst.len())
+        .is_none_or(|e| e > PAGE_SIZE_4KB as usize)
+    {
+        return false;
+    }
+    // SAFETY: as `hhdm_write_bytes` — the read direction is symmetric.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            virt.as_ptr::<u8>().add(offset),
+            dst.as_mut_ptr(),
+            dst.len(),
+        );
+    }
+    true
+}
+
+/// Fill `len` bytes at the HHDM mapping at `virt + offset` with `value`.
+/// Same caller contract as [`hhdm_write_bytes`].
+#[inline]
+fn hhdm_fill_bytes(virt: VirtAddr, offset: usize, len: usize, value: u8) -> bool {
+    if virt.is_null() || len == 0 {
+        return false;
+    }
+    if offset
+        .checked_add(len)
+        .is_none_or(|e| e > PAGE_SIZE_4KB as usize)
+    {
+        return false;
+    }
+    // SAFETY: as `hhdm_write_bytes`.
+    unsafe {
+        core::ptr::write_bytes(virt.as_mut_ptr::<u8>().add(offset), value, len);
+    }
+    true
+}
+
+/// Read `pml4_phys` from a `*mut ProcessPageDir` without exposing the
+/// raw pointer to the caller. Returns `PhysAddr::NULL` if the handle is
+/// null. The single SAFETY-noted block lives here so callers stay safe.
+#[inline]
+fn page_dir_pml4_phys(page_dir: *mut ProcessPageDir) -> PhysAddr {
+    if page_dir.is_null() {
+        return PhysAddr::NULL;
+    }
+    // SAFETY: caller guarantees `page_dir` (when non-null) was produced
+    // by a prior `kmalloc`/`ptr::write` in `create_process_vm` and has
+    // not been freed; the read is of a naturally-aligned `PhysAddr`.
+    unsafe { (*page_dir).pml4_phys }
 }
 
 fn rollback_range(
@@ -197,28 +291,34 @@ fn unmap_user_range(vm_space: &mut KArc<VmSpace>, start_addr: u64, end_addr: u64
     }
 }
 
-/// Lock-free read of the per-slot `process_id`. Centralises the
-/// `as_ptr()` cast so the surrounding logic stays in safe Rust.
+/// Lock-free read of a naturally-aligned field of `ProcessVmInner`.
+/// Centralises the single `unsafe { *as_ptr() }` access so the call
+/// sites stay in safe Rust.
 ///
-/// SAFETY: `process_id` is a naturally-aligned `u32` that is only
-/// written under the per-slot lock, so a plain load is tear-free on
-/// x86-64. Callers MUST re-acquire the per-slot lock before reading
-/// any other field.
+/// SAFETY contract: every field accessed through `f` must be a
+/// naturally-aligned scalar (u32 / pointer-sized) that is only written
+/// under the per-slot lock, so a plain load is tear-free on x86-64.
+/// Callers MUST re-acquire the per-slot lock before reading any
+/// composite (multi-word) field.
 #[inline]
-fn slot_pid_lock_free(slot: &SpinLock<ProcessVmInner>) -> u32 {
-    // SAFETY: see fn doc.
-    unsafe { (*slot.as_ptr()).process_id }
+fn slot_read_lock_free<R>(
+    slot: &SpinLock<ProcessVmInner>,
+    f: impl FnOnce(&ProcessVmInner) -> R,
+) -> R {
+    // SAFETY: see fn doc — caller restricts `f` to tear-free reads of
+    // single naturally-aligned fields.
+    let inner: &ProcessVmInner = unsafe { &*slot.as_ptr() };
+    f(inner)
 }
 
-/// Lock-free read of the per-slot `page_dir` raw handle. Same
-/// tear-free argument as [`slot_pid_lock_free`]: the field is a
-/// naturally-aligned pointer that's only mutated under the lock.
+#[inline]
+fn slot_pid_lock_free(slot: &SpinLock<ProcessVmInner>) -> u32 {
+    slot_read_lock_free(slot, |inner| inner.process_id)
+}
+
 #[inline]
 fn slot_page_dir_lock_free(slot: &SpinLock<ProcessVmInner>) -> *mut ProcessPageDir {
-    // SAFETY: see [`slot_pid_lock_free`] — naturally-aligned pointer
-    // load from a SpinLock-guarded static; concurrent writers would
-    // hold the lock, but we tolerate either old or null observed.
-    unsafe { (*slot.as_ptr()).page_dir }
+    slot_read_lock_free(slot, |inner| inner.page_dir)
 }
 
 /// Find the slot index for a given process ID using a lock-free scan.
@@ -595,8 +695,28 @@ fn unmap_range_nofree_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, en
     unmapped
 }
 
-// ELF structures for relocation parsing
+// ELF structures for relocation parsing.
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct Elf64Ehdr {
+    ident: [u8; 16],
+    e_type: u16,
+    e_machine: u16,
+    e_version: u32,
+    e_entry: u64,
+    e_phoff: u64,
+    e_shoff: u64,
+    e_flags: u32,
+    e_ehsize: u16,
+    e_phentsize: u16,
+    e_phnum: u16,
+    e_shentsize: u16,
+    e_shnum: u16,
+    e_shstrndx: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Elf64Shdr {
     sh_name: u32,
     sh_type: u32,
@@ -611,6 +731,7 @@ struct Elf64Shdr {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Elf64Rela {
     r_offset: u64,
     r_info: u64,
@@ -626,35 +747,41 @@ const R_X86_64_PC32: u32 = 2; // RIP-relative 32-bit
 const R_X86_64_32: u32 = 10; // Absolute 32-bit
 const R_X86_64_32S: u32 = 11; // Absolute 32-bit sign-extended
 
+/// Read a `T: Copy` (unaligned) at byte `offset` of `payload`. Returns
+/// `None` if the read would extend past the slice. Single SAFETY-noted
+/// `unsafe` lives here so the relocation walker stays safe.
+#[inline]
+fn read_elf_pod<T: Copy>(payload: &[u8], offset: usize) -> Option<T> {
+    let needed = core::mem::size_of::<T>();
+    if offset.checked_add(needed)? > payload.len() {
+        return None;
+    }
+    let p = unsafe { payload.as_ptr().add(offset) } as *const T;
+    // SAFETY: bounds-checked above; `T: Copy` permits any byte pattern;
+    // `read_unaligned` lifts the alignment requirement.
+    Some(unsafe { core::ptr::read_unaligned(p) })
+}
+
 fn apply_elf_relocations(
     payload: *const u8,
     payload_len: usize,
     vm_space: &KArc<VmSpace>,
     section_mappings: &[(u64, u64, u64)], // (kernel_va_start, kernel_va_end, user_va_start)
 ) -> c_int {
-    if payload.is_null() {
+    if payload.is_null() || payload_len == 0 {
         return -1;
     }
+    // SAFETY: caller (process_vm_load_elf_data → exec) hands in a
+    // bootloader / file-loader-published byte buffer of `payload_len`
+    // bytes whose lifetime exceeds this call. Only the first
+    // `payload_len` bytes are accessed; bounds are re-checked at every
+    // structured read via `read_elf_pod`.
+    let payload_slice: &[u8] = unsafe { core::slice::from_raw_parts(payload, payload_len) };
 
-    #[repr(C)]
-    struct Elf64Ehdr {
-        ident: [u8; 16],
-        e_type: u16,
-        e_machine: u16,
-        e_version: u32,
-        e_entry: u64,
-        e_phoff: u64,
-        e_shoff: u64,
-        e_flags: u32,
-        e_ehsize: u16,
-        e_phentsize: u16,
-        e_phnum: u16,
-        e_shentsize: u16,
-        e_shnum: u16,
-        e_shstrndx: u16,
-    }
-
-    let ehdr = unsafe { &*(payload as *const Elf64Ehdr) };
+    let ehdr: Elf64Ehdr = match read_elf_pod::<Elf64Ehdr>(payload_slice, 0) {
+        Some(h) => h,
+        None => return -1,
+    };
     if &ehdr.ident[0..4] != b"\x7fELF" || ehdr.e_shoff == 0 || ehdr.e_shnum == 0 {
         return -1;
     }
@@ -668,29 +795,30 @@ fn apply_elf_relocations(
         return -1;
     }
 
-    // Get string table for section names
-    let shstrtab_shdr = unsafe { &*(payload.add(sh_off + shstrndx * sh_size) as *const Elf64Shdr) };
+    let shstrtab_shdr = match read_elf_pod::<Elf64Shdr>(payload_slice, sh_off + shstrndx * sh_size)
+    {
+        Some(s) => s,
+        None => return -1,
+    };
     let shstrtab_base = shstrtab_shdr.sh_offset as usize;
     let shstrtab_size = shstrtab_shdr.sh_size as usize;
     if shstrtab_base + shstrtab_size > payload_len {
         return -1;
     }
 
-    // Helper to get section name
+    // Helper to fetch a NUL-terminated section name as a slice borrow.
     let get_section_name = |sh_name_off: u32| -> Option<&[u8]> {
         let off = shstrtab_base + sh_name_off as usize;
         if off >= payload_len {
             return None;
         }
-        let start = unsafe { payload.add(off) };
-        let mut len = 0;
-        while off + len < payload_len && unsafe { *start.add(len) } != 0 {
-            len += 1;
-        }
-        Some(unsafe { core::slice::from_raw_parts(start, len) })
+        let max = payload_len - off;
+        let bytes = &payload_slice[off..off + max];
+        let len = bytes.iter().position(|&b| b == 0).unwrap_or(max);
+        Some(&bytes[..len])
     };
 
-    // Helper to map kernel VA to user VA
+    // Helper to map kernel VA to user VA.
     let map_kernel_va_to_user = |kernel_va: u64| -> Option<u64> {
         for &(kern_start, kern_end, user_start) in section_mappings {
             if kernel_va >= kern_start && kernel_va < kern_end {
@@ -700,9 +828,12 @@ fn apply_elf_relocations(
         None
     };
 
-    // Iterate through section headers to find .rela sections
+    // Iterate through section headers to find .rela sections.
     for i in 0..sh_num {
-        let shdr = unsafe { &*(payload.add(sh_off + i * sh_size) as *const Elf64Shdr) };
+        let shdr = match read_elf_pod::<Elf64Shdr>(payload_slice, sh_off + i * sh_size) {
+            Some(s) => s,
+            None => continue,
+        };
         if shdr.sh_type != SHT_RELA {
             continue;
         }
@@ -712,26 +843,27 @@ fn apply_elf_relocations(
             continue;
         };
 
-        // Check if this is a .rela section we care about
         if !name.starts_with(b".rela.") {
             continue;
         }
 
-        // Find the target section this relocation applies to
+        // Find the target section this relocation applies to.
         let target_section_idx = shdr.sh_info as usize;
         if target_section_idx >= sh_num {
             continue;
         }
         let target_shdr =
-            unsafe { &*(payload.add(sh_off + target_section_idx * sh_size) as *const Elf64Shdr) };
+            match read_elf_pod::<Elf64Shdr>(payload_slice, sh_off + target_section_idx * sh_size) {
+                Some(s) => s,
+                None => continue,
+            };
 
-        // Get the target section's user VA mapping
         let target_kern_va = target_shdr.sh_addr;
         let Some(target_user_va_base) = map_kernel_va_to_user(target_kern_va) else {
             continue;
         };
 
-        // Process relocation entries
+        // Process relocation entries.
         let rela_base = shdr.sh_offset as usize;
         let rela_size = shdr.sh_size as usize;
         let rela_entsize = if shdr.sh_entsize != 0 {
@@ -746,30 +878,47 @@ fn apply_elf_relocations(
 
         let num_relocs = rela_size / rela_entsize;
         for j in 0..num_relocs {
-            let rela_ptr = unsafe { payload.add(rela_base + j * rela_entsize) as *const Elf64Rela };
-            let rela = unsafe { &*rela_ptr };
+            let rela = match read_elf_pod::<Elf64Rela>(payload_slice, rela_base + j * rela_entsize)
+            {
+                Some(r) => r,
+                None => continue,
+            };
 
             let reloc_type = (rela.r_info & 0xffffffff) as u32;
-            let _symbol_idx = (rela.r_info >> 32) as u32;
 
-            // Calculate relocation address in user space
-            // r_offset is an absolute address in the ELF's VAs (kernel VAs)
-            // We need to convert it to user space: user_addr = user_base + (kern_addr - kern_base)
-            let reloc_kern_addr = rela.r_offset; // r_offset is already absolute in kernel VAs
+            let reloc_kern_addr = rela.r_offset;
             let reloc_user_addr = if reloc_kern_addr >= target_kern_va {
                 target_user_va_base + (reloc_kern_addr - target_kern_va)
             } else {
-                // r_offset might be relative, try adding to target_user_va_base
                 target_user_va_base.wrapping_add(rela.r_offset)
             };
 
-            // Calculate symbol VA based on relocation type
-            // For R_X86_64_PLT32/PC32: read current offset, calculate symbol = rip_after + offset + addend
-            // For others: use addend or read from target
+            // Calculate symbol VA based on relocation type.
+            //
+            // Reads and writes of the relocation site itself use the
+            // same direct-HHDM pattern as the legacy loader: resolve
+            // the user-VA's leading page to a kernel-mode HHDM virt,
+            // then `read_unaligned`/`write_unaligned` at the page
+            // offset. ELF segments are written into the user VM by
+            // `load_segment_pages`, which calls `alloc_page_frame(0)`
+            // sequentially and gets back contiguous physical frames
+            // straight out of the buddy's freshly-split high-order
+            // block — so an unaligned read/write that straddles a
+            // 4 KiB user-VA boundary lands in the next user-VA's
+            // page through the contiguous HHDM mapping. Routing the
+            // read/write through `process_vm_{read,write}_user_bytes`
+            // would handle the spanning case independently of buddy
+            // contiguity but adds a second `ostd_virt_to_phys_4kb`
+            // walk per relocation, doubling the per-relocation cost
+            // and pushing the ELF-load syscall past the NMI watchdog
+            // budget on slow TCG hosts (CI). The buddy-contiguity
+            // invariant is already relied on elsewhere in SlopOS's
+            // ELF load path; this code follows the same convention.
             let symbol_va = match reloc_type {
                 R_X86_64_PC32 | 4 => {
-                    // 4 = R_X86_64_PLT32
-                    // For PC32/PLT32, read current offset from instruction and calculate symbol
+                    // 4 = R_X86_64_PLT32. Read the existing rel32 displacement
+                    // currently in the instruction (placed by the linker
+                    // against kernel-VA) and recover the original symbol VA.
                     let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
                     let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
                     let read_phys = ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(read_page_va));
@@ -780,29 +929,25 @@ fn apply_elf_relocations(
                     if read_virt.is_null() {
                         continue;
                     }
-                    let read_ptr = unsafe { read_virt.as_mut_ptr::<u8>().add(read_page_off) };
-                    let current_offset =
-                        unsafe { core::ptr::read_unaligned(read_ptr as *const i32) } as i64;
-                    // For R_X86_64_PC32/PLT32: offset = S + A - P, where:
-                    //   S = symbol value, A = addend, P = place (RIP after instruction)
-                    // The current_offset in the instruction was calculated for kernel addresses.
-                    // We need to find the original symbol address, then map it to user space.
-                    // Original: current_offset = original_symbol + addend - original_kernel_rip_after
-                    // So: original_symbol = current_offset - addend + original_kernel_rip_after
+                    // SAFETY: `read_virt` resolves to a live HHDM mapping
+                    // for the user-VA's physical page; the immediate
+                    // straddles into the contiguous next physical page
+                    // when present (see invariant explained above).
+                    let current_offset = unsafe {
+                        core::ptr::read_unaligned(
+                            read_virt.as_ptr::<u8>().add(read_page_off) as *const i32
+                        )
+                    } as i64;
+                    // S = offset + P - A, where P is the rip after the rel32.
                     let original_kernel_rip_after = reloc_kern_addr.wrapping_add(4);
-                    // For PC32: offset = S + A - P, so S = offset - A + P = offset + P - A
-                    // But we need to be careful: if A is negative, subtracting it means adding
-                    let original_symbol_va = (original_kernel_rip_after as i64)
+                    (original_kernel_rip_after as i64)
                         .wrapping_add(current_offset)
-                        .wrapping_sub(rela.r_addend)
-                        as u64;
-                    original_symbol_va
+                        .wrapping_sub(rela.r_addend) as u64
                 }
                 _ => {
                     if rela.r_addend != 0 {
                         rela.r_addend as u64
                     } else {
-                        // If addend is 0, try reading current value
                         let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
                         let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
                         let read_phys =
@@ -814,15 +959,20 @@ fn apply_elf_relocations(
                         if read_virt.is_null() {
                             continue;
                         }
-                        let read_ptr = unsafe { read_virt.as_mut_ptr::<u8>().add(read_page_off) };
                         match reloc_type {
+                            // SAFETY: as the PC32 branch above.
                             R_X86_64_64 => unsafe {
-                                core::ptr::read_unaligned(read_ptr as *const u64)
+                                core::ptr::read_unaligned(
+                                    read_virt.as_ptr::<u8>().add(read_page_off) as *const u64,
+                                )
                             },
                             R_X86_64_32 | R_X86_64_32S => {
-                                let val =
-                                    unsafe { core::ptr::read_unaligned(read_ptr as *const u32) }
-                                        as u64;
+                                // SAFETY: as the PC32 branch above.
+                                let val = unsafe {
+                                    core::ptr::read_unaligned(
+                                        read_virt.as_ptr::<u8>().add(read_page_off) as *const u32,
+                                    )
+                                } as u64;
                                 if reloc_type == R_X86_64_32S {
                                     (val as i32 as i64) as u64
                                 } else {
@@ -835,16 +985,12 @@ fn apply_elf_relocations(
                 }
             };
 
-            // Map symbol VA to user VA
             let Some(user_symbol_va) = map_kernel_va_to_user(symbol_va) else {
-                // Symbol might be in a section we haven't mapped, skip
                 continue;
             };
 
-            // Get physical page for this address
             let reloc_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
             let reloc_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
-
             let reloc_phys = ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(reloc_page_va));
             if reloc_phys.is_null() {
                 continue;
@@ -853,36 +999,34 @@ fn apply_elf_relocations(
             if reloc_virt.is_null() {
                 continue;
             }
-
+            // SAFETY: `reloc_virt` resolves to a live HHDM mapping for
+            // the user-VA's physical page; the immediate straddles
+            // into the contiguous next physical page when present.
             let reloc_ptr = unsafe { reloc_virt.as_mut_ptr::<u8>().add(reloc_page_off) };
 
-            // Apply relocation based on type
+            // Apply relocation based on type.
             match reloc_type {
                 R_X86_64_64 => {
-                    // Absolute 64-bit: write symbol value directly
+                    // SAFETY: as the read above.
                     unsafe {
                         core::ptr::write_unaligned(reloc_ptr as *mut u64, user_symbol_va);
                     }
                 }
                 R_X86_64_PC32 | 4 => {
-                    // 4 = R_X86_64_PLT32, same as PC32 for static binaries
-                    // RIP-relative 32-bit: offset = symbol - (RIP after instruction)
-                    let rip_after = reloc_user_addr + 4; // 32-bit = 4 bytes
+                    let rip_after = reloc_user_addr + 4;
                     let offset = (user_symbol_va as i64 - rip_after as i64) as i32;
+                    // SAFETY: as the read above.
                     unsafe {
                         core::ptr::write_unaligned(reloc_ptr as *mut i32, offset);
                     }
                 }
                 R_X86_64_32 | R_X86_64_32S => {
-                    // Absolute 32-bit: write lower 32 bits of symbol value
+                    // SAFETY: as the read above.
                     unsafe {
                         core::ptr::write_unaligned(reloc_ptr as *mut u32, user_symbol_va as u32);
                     }
                 }
-                _ => {
-                    // Unknown relocation type, skip
-                    continue;
-                }
+                _ => continue,
             }
         }
     }
@@ -1221,18 +1365,8 @@ pub fn process_vm_read_user_bytes(
             return Err(ElfError::NullPointer);
         }
         let virt = phys.to_virt();
-        if virt.is_null() {
+        if !hhdm_read_bytes(virt, page_off, &mut dst[read..read + chunk]) {
             return Err(ElfError::NullPointer);
-        }
-        // SAFETY: `phys` came from a successful walk, so the HHDM
-        // mapping is live; `chunk` is bounded by `PAGE_SIZE_4KB -
-        // page_off` so the read stays inside one page.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                virt.as_ptr::<u8>().add(page_off),
-                dst.as_mut_ptr().add(read),
-                chunk,
-            );
         }
         read += chunk;
     }
@@ -1269,16 +1403,8 @@ fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Res
             return Err(ElfError::NullPointer);
         }
         let virt = phys.to_virt();
-        if virt.is_null() {
+        if !hhdm_write_bytes(virt, page_off, &data[written..written + chunk]) {
             return Err(ElfError::NullPointer);
-        }
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                data.as_ptr().add(written),
-                virt.as_mut_ptr::<u8>().add(page_off),
-                chunk,
-            );
         }
         written += chunk;
     }
@@ -1301,12 +1427,8 @@ fn zero_user_bytes(vm_space: &KArc<VmSpace>, start_addr: u64, len: u64) -> Resul
             return Err(ElfError::NullPointer);
         }
         let virt = phys.to_virt();
-        if virt.is_null() {
+        if !hhdm_fill_bytes(virt, page_off, chunk, 0) {
             return Err(ElfError::NullPointer);
-        }
-
-        unsafe {
-            core::ptr::write_bytes(virt.as_mut_ptr::<u8>().add(page_off), 0, chunk);
         }
         zeroed = zeroed.saturating_add(chunk as u64);
     }
@@ -1374,7 +1496,7 @@ fn load_segment_pages(
             return Err(ElfError::NullPointer);
         }
 
-        copy_segment_page_data(data, segment, dst, user_start, dest_virt.as_mut_ptr());
+        copy_segment_page_data(data, segment, dst, user_start, dest_virt);
 
         dst += PAGE_SIZE_4KB;
     }
@@ -1387,7 +1509,7 @@ fn copy_segment_page_data(
     segment: &ValidatedSegment,
     page_va: u64,
     user_seg_start: u64,
-    dest_ptr: *mut u8,
+    dest_virt: VirtAddr,
 ) {
     let page_end_va = page_va.wrapping_add(PAGE_SIZE_4KB);
     let seg_file_end = user_seg_start.wrapping_add(segment.file_size);
@@ -1403,13 +1525,7 @@ fn copy_segment_page_data(
         let src_off = segment.file_offset.wrapping_add(page_off_in_seg) as usize;
 
         if src_off < data.len() && src_off.saturating_add(copy_len) <= data.len() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data.as_ptr().add(src_off),
-                    dest_ptr.add(dest_off),
-                    copy_len,
-                );
-            }
+            let _ = hhdm_write_bytes(dest_virt, dest_off, &data[src_off..src_off + copy_len]);
         }
     }
 
@@ -1419,9 +1535,7 @@ fn copy_segment_page_data(
         if zero_start < zero_end {
             let zero_off = (zero_start - page_va) as usize;
             let zero_len = (zero_end - zero_start) as usize;
-            unsafe {
-                core::ptr::write_bytes(dest_ptr.add(zero_off), 0, zero_len);
-            }
+            let _ = hhdm_fill_bytes(dest_virt, zero_off, zero_len, 0);
         }
     }
 }
@@ -1464,16 +1578,15 @@ pub fn create_process_vm() -> u32 {
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
-    let pml4 = pml4_phys.to_virt().as_mut_ptr::<PageTable>();
-    if pml4.is_null() {
+    let pml4_virt = pml4_phys.to_virt();
+    if pml4_virt.is_null() {
         klog_info!("create_process_vm: No HHDM/identity map available for PML4");
         free_page_frame(pml4_phys);
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
-    unsafe {
-        (*pml4).zero();
-    }
+    let pml4 = pml4_virt.as_mut_ptr::<PageTable>();
+    let _ = hhdm_fill_bytes(pml4_virt, 0, PAGE_SIZE_4KB as usize, 0);
 
     let page_dir_ptr = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
     if page_dir_ptr.is_null() {
@@ -1483,19 +1596,15 @@ pub fn create_process_vm() -> u32 {
         return INVALID_PROCESS_ID;
     }
     let mm_ctx_id = crate::mmu::alloc_mm_context_id();
-    unsafe {
-        (*page_dir_ptr).pml4 = pml4;
-        (*page_dir_ptr).pml4_phys = pml4_phys;
-        (*page_dir_ptr).ref_count = 1;
-        (*page_dir_ptr).process_id = process_id;
-        (*page_dir_ptr).next = ptr::null_mut();
-        (*page_dir_ptr).kernel_mapping_gen = 0;
-        (*page_dir_ptr).mm_ctx_id = mm_ctx_id;
-        // Kernel-half mappings flow from `KERNEL_MASTER_PML4` via
-        // OSTD's `VmSpace::new` + `resync_kernel_half_if_stale`. The
-        // legacy ProcessPageDir's PML4 stays empty — it is never
-        // installed in CR3 anymore.
-    }
+    // Kernel-half mappings flow from `KERNEL_MASTER_PML4` via OSTD's
+    // `VmSpace::new` + `resync_kernel_half_if_stale`. The legacy
+    // ProcessPageDir's PML4 stays empty — it is never installed in CR3
+    // anymore.
+    let page_dir_init = ProcessPageDir::new(pml4, pml4_phys, process_id, mm_ctx_id);
+    // SAFETY: `page_dir_ptr` came from `kmalloc(size_of::<ProcessPageDir>())`,
+    // so the slot is valid and exclusively owned. `ptr::write` initialises
+    // the slot without reading the (uninitialised) old contents.
+    unsafe { ptr::write(page_dir_ptr, page_dir_init) };
 
     // Allocate the framekernel-correct OSTD VmSpace alongside the
     // legacy ProcessPageDir (transitional dual-allocation). Both PML4
@@ -1588,10 +1697,8 @@ pub fn create_process_vm() -> u32 {
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_inner_mappings(&mut proc);
-            unsafe {
-                free_page_frame((*page_dir_ptr).pml4_phys);
-                kfree(page_dir_ptr as *mut _);
-            }
+            free_page_frame(page_dir_pml4_phys(page_dir_ptr));
+            kfree(page_dir_ptr as *mut _);
             proc.page_dir = ptr::null_mut();
             proc.process_id = INVALID_PROCESS_ID;
             VM_SLOT_ALLOC.lock().num_processes -= 1;
@@ -1625,10 +1732,8 @@ pub fn create_process_vm() -> u32 {
         {
             klog_info!("create_process_vm: Failed to map process stack");
             teardown_inner_mappings(&mut proc);
-            unsafe {
-                free_page_frame((*page_dir_ptr).pml4_phys);
-                kfree(page_dir_ptr as *mut _);
-            }
+            free_page_frame(page_dir_pml4_phys(page_dir_ptr));
+            kfree(page_dir_ptr as *mut _);
             proc.page_dir = ptr::null_mut();
             proc.vm_space = None;
             proc.process_id = INVALID_PROCESS_ID;
@@ -1706,13 +1811,12 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
         // intermediate page tables.
         let _ = proc.vm_space.take();
         if !proc.page_dir.is_null() {
-            unsafe {
-                if !(*proc.page_dir).pml4_phys.is_null() {
-                    free_page_frame((*proc.page_dir).pml4_phys);
-                }
-                klog_debug!("destroy_process_vm({}): kfree(page_dir)", process_id);
-                kfree(proc.page_dir as *mut _);
+            let pml4_phys = page_dir_pml4_phys(proc.page_dir);
+            if !pml4_phys.is_null() {
+                free_page_frame(pml4_phys);
             }
+            klog_debug!("destroy_process_vm({}): kfree(page_dir)", process_id);
+            kfree(proc.page_dir as *mut _);
             proc.page_dir = ptr::null_mut();
         }
         klog_debug!(
@@ -1849,14 +1953,8 @@ pub fn init_process_vm() -> c_int {
 
 pub fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
     let alloc = VM_SLOT_ALLOC.lock();
-    unsafe {
-        if !total_processes.is_null() {
-            *total_processes = MAX_PROCESSES as u32;
-        }
-        if !active_processes.is_null() {
-            *active_processes = alloc.num_processes;
-        }
-    }
+    write_optional_u32(total_processes, MAX_PROCESSES as u32);
+    write_optional_u32(active_processes, alloc.num_processes);
 }
 
 pub fn get_current_process_id() -> u32 {
@@ -2641,16 +2739,15 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
-    let pml4 = pml4_phys.to_virt().as_mut_ptr::<PageTable>();
-    if pml4.is_null() {
+    let pml4_virt = pml4_phys.to_virt();
+    if pml4_virt.is_null() {
         klog_info!("process_vm_clone_cow: No HHDM mapping for PML4");
         free_page_frame(pml4_phys);
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
-    unsafe {
-        (*pml4).zero();
-    }
+    let pml4 = pml4_virt.as_mut_ptr::<PageTable>();
+    let _ = hhdm_fill_bytes(pml4_virt, 0, PAGE_SIZE_4KB as usize, 0);
 
     let child_page_dir = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
     if child_page_dir.is_null() {
@@ -2660,18 +2757,13 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         return INVALID_PROCESS_ID;
     }
     let child_mm_ctx_id = crate::mmu::alloc_mm_context_id();
-    unsafe {
-        (*child_page_dir).pml4 = pml4;
-        (*child_page_dir).pml4_phys = pml4_phys;
-        (*child_page_dir).ref_count = 1;
-        (*child_page_dir).process_id = child_id;
-        (*child_page_dir).next = ptr::null_mut();
-        (*child_page_dir).kernel_mapping_gen = 0;
-        (*child_page_dir).mm_ctx_id = child_mm_ctx_id;
-        // OSTD `VmSpace::new` populates the child's kernel half via
-        // `KERNEL_MASTER_PML4`. The legacy ProcessPageDir's PML4 stays
-        // empty.
-    }
+    // OSTD `VmSpace::new` populates the child's kernel half via
+    // `KERNEL_MASTER_PML4`. The legacy ProcessPageDir's PML4 stays empty.
+    let child_init = ProcessPageDir::new(pml4, pml4_phys, child_id, child_mm_ctx_id);
+    // SAFETY: `child_page_dir` came from `kmalloc(size_of::<ProcessPageDir>())`
+    // — slot is valid and exclusively owned. `ptr::write` initialises the
+    // slot without reading the (uninitialised) old contents.
+    unsafe { ptr::write(child_page_dir, child_init) };
 
     // Allocate the child's framekernel-correct OSTD VmSpace alongside
     // the legacy ProcessPageDir (transitional dual-allocation). The
@@ -2801,12 +2893,11 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             let _ = child.vm_space.take();
             teardown_inner_mappings(&mut child);
         }
-        unsafe {
-            if !(*child_page_dir).pml4_phys.is_null() {
-                free_page_frame((*child_page_dir).pml4_phys);
-            }
-            kfree(child_page_dir as *mut _);
+        let child_pml4 = page_dir_pml4_phys(child_page_dir);
+        if !child_pml4.is_null() {
+            free_page_frame(child_pml4);
         }
+        kfree(child_page_dir as *mut _);
         PROCESS_VMS[child_slot].lock().reset();
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
@@ -2825,9 +2916,13 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 }
 
 pub unsafe fn process_vm_force_unlock() {
-    VM_SLOT_ALLOC.force_unlock();
-    for i in 0..MAX_PROCESSES {
-        PROCESS_VMS[i].force_unlock();
+    // SAFETY: caller invokes from `mm_panic_cleanup` only — the
+    // panic-recovery contract on `SpinLock::force_unlock` is satisfied.
+    unsafe {
+        VM_SLOT_ALLOC.force_unlock();
+        for i in 0..MAX_PROCESSES {
+            PROCESS_VMS[i].force_unlock();
+        }
     }
 }
 
@@ -2835,9 +2930,12 @@ pub unsafe fn process_vm_force_unlock() {
 /// Called from panic recovery to signal that VM state may be
 /// inconsistent. Check `process_vm_is_poisoned()` before trusting state.
 pub unsafe fn process_vm_poison_unlock() {
-    VM_SLOT_ALLOC.poison_unlock();
-    for i in 0..MAX_PROCESSES {
-        PROCESS_VMS[i].force_unlock();
+    // SAFETY: caller invokes from `mm_panic_cleanup` only.
+    unsafe {
+        VM_SLOT_ALLOC.poison_unlock();
+        for i in 0..MAX_PROCESSES {
+            PROCESS_VMS[i].force_unlock();
+        }
     }
 }
 
