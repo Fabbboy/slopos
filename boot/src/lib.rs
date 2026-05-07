@@ -16,14 +16,11 @@ pub mod idt;
 pub mod ist_stacks;
 pub mod limine_protocol;
 pub mod panic;
+pub mod shutdown;
 pub mod smp;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod user_fault;
-pub mod safe_stack {
-    pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_record_usage};
-}
-pub mod shutdown;
 
 pub use early_init::{
     boot_get_cmdline, boot_get_hhdm_offset, boot_get_memmap, boot_init_run_all,

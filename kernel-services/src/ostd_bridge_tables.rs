@@ -56,6 +56,20 @@ pub static PORT_RANGES: &[PortRange] = &[
         start: 0x3F8,
         end: 0x400,
     },
+    // ACPI PM1A_CNT (16-bit). Standard ACPI shutdown register at 0x604;
+    // Bochs/Qemu fallback at 0xB004; VirtualBox quirk at 0x4004.
+    PortRange {
+        start: 0x604,
+        end: 0x606,
+    },
+    PortRange {
+        start: 0xB004,
+        end: 0xB006,
+    },
+    PortRange {
+        start: 0x4004,
+        end: 0x4006,
+    },
 ];
 
 pub static RESERVED_VECTORS: &[u8] = &[

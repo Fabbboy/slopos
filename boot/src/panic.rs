@@ -237,8 +237,7 @@ impl MessageBuffer {
     }
 
     fn as_str(&self) -> &str {
-        // SAFETY: we only write valid UTF-8 through the Write impl
-        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
 }
 
@@ -290,7 +289,6 @@ impl HexBuffer {
             }
         }
 
-        // SAFETY: we only write ASCII bytes
-        unsafe { core::str::from_utf8_unchecked(&self.buf[..pos]) }
+        core::str::from_utf8(&self.buf[..pos]).unwrap_or("")
     }
 }

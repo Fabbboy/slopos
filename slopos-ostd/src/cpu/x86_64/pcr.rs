@@ -585,6 +585,43 @@ pub unsafe fn init_ap_pcr(cpu_id: usize, apic_id: u32) -> *mut ProcessorControlR
     pcr
 }
 
+/// Safe wrapper around an Application-Processor PCR pointer returned by
+/// [`init_ap_pcr`]. Encapsulates the `init_gdt` + `install` sequence so
+/// AP-bringup callers don't need to dereference the raw pointer.
+pub struct ApPcrHandle {
+    ptr: *mut ProcessorControlRegion,
+}
+
+unsafe impl Send for ApPcrHandle {}
+
+impl ApPcrHandle {
+    /// Allocate and prime the AP's PCR slot. The returned handle must
+    /// then have [`Self::init_gdt_and_install`] called on it before any
+    /// instrumented Rust runs that observes `gs:[…]`.
+    ///
+    /// Internally calls [`init_ap_pcr`], which is `unsafe` because it
+    /// must run exactly once per AP. Only AP-bringup code should call
+    /// `ApPcrHandle::init`; callers must ensure single-call semantics.
+    pub fn init(cpu_id: usize, apic_id: u32) -> Self {
+        // SAFETY: AP-bringup code calls this exactly once per cpu_id;
+        // see init_ap_pcr's safety contract.
+        let ptr = unsafe { init_ap_pcr(cpu_id, apic_id) };
+        Self { ptr }
+    }
+
+    /// Load this AP's GDT, populate its TSS descriptor, then install
+    /// GS_BASE / KERNEL_GS_BASE.
+    pub fn init_gdt_and_install(self) {
+        // SAFETY: self.ptr was returned by init_ap_pcr above; the
+        // referenced PCR lives in BSS and has not been observed by any
+        // other CPU yet (single-writer pre-online phase).
+        unsafe {
+            (*self.ptr).init_gdt();
+            (*self.ptr).install();
+        }
+    }
+}
+
 pub fn mark_gs_base_set() {
     GS_BASE_SET.init_once();
 }

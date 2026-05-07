@@ -50,8 +50,7 @@
 //!
 //! Stacks are spaced 64 KB apart in virtual address space.
 
-use core::ffi::{CStr, c_char};
-use core::ptr;
+use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::VirtAddr;
@@ -60,14 +59,14 @@ use slopos_arch::arch::idt::{
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
 };
 use slopos_arch::{MAX_CPUS, get_current_cpu};
-use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_mm::kernel_meta::KernelMeta;
 use slopos_mm::memory_layout_defs::{
     EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
     EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE,
 };
-use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use slopos_ostd::mm::frame::Frame;
 use slopos_utils::{klog_debug, klog_info};
 
 // =============================================================================
@@ -360,23 +359,16 @@ fn find_index_by_address(addr: u64) -> Option<(usize, usize)> {
 fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack_base + page * PAGE_SIZE_4KB;
-        let phys_addr = alloc_page_frame(0);
-        if phys_addr.is_null() {
+        // Allocate a zero-initialised kernel frame; the IST stack is mapped
+        // for the kernel image's lifetime, so we deliberately leak the
+        // `Frame` handle via `into_phys` and let the page stay outstanding.
+        let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
             panic!(
-                "ist_stacks_init: Failed to allocate page for {} stack",
+                "ist_stacks_init: Failed to allocate zeroed page for {} stack",
                 stack.name_str()
-            );
-        }
-        let Some(virt) = phys_addr.to_virt_checked() else {
-            panic!(
-                "ist_stacks_init: HHDM unavailable for {} stack page",
-                stack.name_str()
-            );
-        };
-        // Zero-initialize the stack page
-        unsafe {
-            ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE_4KB as usize);
-        }
+            )
+        });
+        let phys_addr = frame.into_phys();
         if map_page_4kb(
             VirtAddr::new(virt_addr),
             phys_addr,
@@ -486,11 +478,11 @@ pub fn ist_bind_current_cpu(ctx: &mut slopos_hermetic::BootCtx) {
             );
             continue;
         };
-        // SAFETY: `stack_top` is the high address of a kernel-virt stack
-        // mapped earlier by `ensure_cpu_stacks_mapped`. The borrowed
-        // KernelStackTop's `'static` lifetime is appropriate because the
-        // mapped pages live for the kernel image.
-        let stack_top_typed = unsafe { slopos_hermetic::KernelStackTop::from_raw(stack_top) };
+        // `stack_top` is the high address of a kernel-virt stack mapped
+        // earlier by `ensure_cpu_stacks_mapped`. The KernelStackTop's
+        // `'static` lifetime is appropriate because the mapped pages live
+        // for the kernel image.
+        let stack_top_typed = slopos_hermetic::KernelStackTop::from_kernel_va(stack_top);
 
         // Register stack top in current CPU TSS.
         crate::gdt::gdt_set_ist(ctx, slot, stack_top_typed);
@@ -564,28 +556,21 @@ pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
 ///
 /// # Arguments
 /// * `fault_addr` - The address that caused the page fault (from CR2)
-/// * `stack_name` - Output: pointer to receive the stack name (if guard hit)
 ///
 /// # Returns
-/// * `1` if the fault address is in an IST guard page (stack overflow detected)
-/// * `0` if the fault address is not in any IST guard page
-pub fn ist_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
-    if let Some((cpu_id, idx)) = find_index_by_address(fault_addr) {
-        let stack = &IST_CONFIGS[idx];
-        let (guard_start, guard_end, _stack_base, _stack_top) = stack_bounds_for_cpu(cpu_id, idx);
+/// * `Some(name)` — guard page hit; the slice is the matching stack's
+///   NUL-terminated static name (e.g. `b"Page Fault\0"`).
+/// * `None` — the fault address is not in any IST guard page.
+pub fn ist_guard_fault(fault_addr: u64) -> Option<&'static [u8]> {
+    let (cpu_id, idx) = find_index_by_address(fault_addr)?;
+    let stack = &IST_CONFIGS[idx];
+    let (guard_start, guard_end, _stack_base, _stack_top) = stack_bounds_for_cpu(cpu_id, idx);
 
-        // Check if the address is specifically in the guard page region
-        if fault_addr >= guard_start && fault_addr < guard_end {
-            // This is a guard page hit - stack overflow detected!
-            if !stack_name.is_null() {
-                unsafe {
-                    *stack_name = stack.name.as_ptr() as *const c_char;
-                }
-            }
-            return 1;
-        }
+    if fault_addr >= guard_start && fault_addr < guard_end {
+        Some(stack.name)
+    } else {
+        None
     }
-    0
 }
 
 pub fn ist_is_on_ist_stack(rsp: u64) -> bool {
@@ -646,23 +631,4 @@ pub fn ist_dump_stats() {
         );
     }
     klog_info!("============================");
-}
-
-// =============================================================================
-// Legacy API Compatibility
-// =============================================================================
-
-// These functions maintain backward compatibility with code that uses the old
-// safe_stack naming. They simply delegate to the new functions.
-
-/// Legacy alias for `ist_record_usage`.
-#[inline]
-pub fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
-    ist_record_usage(vector, frame_ptr)
-}
-
-/// Legacy alias for `ist_guard_fault`.
-#[inline]
-pub fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
-    ist_guard_fault(fault_addr, stack_name)
 }

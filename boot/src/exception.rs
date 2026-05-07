@@ -1,5 +1,3 @@
-use core::ffi::c_char;
-
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::task::TaskFaultReason;
 use slopos_arch::InterruptFrame;
@@ -10,7 +8,6 @@ use slopos_core::scheduler::task::{
 };
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::process_vm;
-use slopos_utils::string::cstr_to_str_lossy;
 use slopos_utils::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
 
 use crate::ist_stacks;
@@ -92,12 +89,9 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         panic!("page fault with null frame");
     };
 
-    let mut stack_name: *const c_char = core::ptr::null();
-    if ist_stacks::ist_guard_fault(fault_addr, &mut stack_name) != 0 {
+    if let Some(stack_name) = ist_stacks::ist_guard_fault(fault_addr) {
         klog_info!("FATAL: IST stack overflow detected via guard page");
-        if !stack_name.is_null() {
-            klog_info!("Stack: {}", cstr_to_str_lossy(stack_name));
-        }
+        klog_info!("Stack: {}", slopos_utils::string::bytes_as_str(stack_name));
         klog_info!("Fault address: 0x{:x}", fault_addr);
         kdiag_dump_interrupt_frame(frame);
         panic_with_frame("IST stack overflow", frame);

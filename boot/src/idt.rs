@@ -586,7 +586,7 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let fault_addr = cpu::read_cr2();
     let frame_ref = unsafe { &*frame };
 
-    if ist_stacks::ist_guard_fault(fault_addr, core::ptr::null_mut()) != 0 {
+    if ist_stacks::ist_guard_fault(fault_addr).is_some() {
         return false;
     }
 

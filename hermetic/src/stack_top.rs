@@ -53,6 +53,20 @@ impl<'a> KernelStackTop<'a> {
         }
     }
 
+    /// Construct from a kernel-virt address that the caller has already
+    /// established refers to a mapped, kernel-image-lifetime stack region
+    /// (e.g. an IST slot mapped at boot, or a per-CPU kthread stack
+    /// allocated for the lifetime of the kernel).
+    ///
+    /// Performs the same kernel-virt + 16-byte-alignment debug-asserts as
+    /// `from_raw`, but exposes a safe call site for boot code that has
+    /// computed the address from an already-mapped region. The `'static`
+    /// lifetime is appropriate because the backing region is expected to
+    /// outlive the kernel image.
+    pub fn from_kernel_va(addr: u64) -> KernelStackTop<'static> {
+        unsafe { KernelStackTop::<'static>::from_raw(addr) }
+    }
+
     /// Construct from a borrowed kernel-virt slice. Returns the
     /// 16-byte-aligned top of the slice; the lifetime of the returned
     /// `KernelStackTop` borrows from the slice.

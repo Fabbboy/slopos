@@ -143,11 +143,7 @@ unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
 
     tlb::notify_cpu_online_id(cpu_idx);
 
-    unsafe {
-        let ap_pcr = pcr::init_ap_pcr(cpu_idx, apic_id);
-        (*ap_pcr).init_gdt();
-        (*ap_pcr).install();
-    }
+    pcr::ApPcrHandle::init(cpu_idx, apic_id).init_gdt_and_install();
 
     // APs have per-CPU TSS structures; re-bind IST pointers after installing
     // the AP GDT/TSS so exceptions (notably #PF) do not enter with IST=0.
@@ -228,9 +224,11 @@ pub fn smp_init() {
     // on the very first instrumented call.  Limited to MAX_STATIC_APS
     // — if the platform reports more APs we only start the first N.
     const MAX_STATIC_APS: usize = safestack_rt::MAX_STATIC_APS;
+    safestack_rt::init_bootstrap_tasks();
+    let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
+    // SAFETY: init_ap_pcr_lookup must run exactly once before any AP
+    // boots; smp_init is the single caller and runs on the BSP only.
     unsafe {
-        safestack_rt::init_bootstrap_tasks();
-        let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
         pcr::init_ap_pcr_lookup(&ap_task_ptrs);
     }
 

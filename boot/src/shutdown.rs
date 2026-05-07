@@ -2,11 +2,9 @@ use core::arch::asm;
 use core::ffi::c_char;
 
 use slopos_arch::cpu;
+use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::sync::StateFlag;
 use slopos_utils::klog_info;
-use slopos_utils::ports::{
-    ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND,
-};
 use slopos_utils::string::cstr_to_str;
 
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
@@ -23,7 +21,7 @@ use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
 
 fn serial_flush() {
-    let lsr_port = COM1.offset(5);
+    let lsr_port = IoPortRegistry::reserve::<u8>(0x3F8 + 5).expect("COM1 LSR port");
     for _ in 0..1024 {
         let lsr = unsafe { lsr_port.read() };
         if (lsr & 0x40) != 0 {
@@ -44,10 +42,13 @@ fn ensure_kernel_page_dir() {
     }
 }
 fn poweroff_hardware() {
+    let acpi = IoPortRegistry::reserve::<u16>(0x604).expect("ACPI PM1A_CNT port");
+    let acpi_bochs = IoPortRegistry::reserve::<u16>(0xB004).expect("Bochs ACPI PM1A_CNT port");
+    let acpi_vbox = IoPortRegistry::reserve::<u16>(0x4004).expect("VBox ACPI PM1A_CNT port");
     unsafe {
-        ACPI_PM1A_CNT.write(0x2000);
-        ACPI_PM1A_CNT_BOCHS.write(0x2000);
-        ACPI_PM1A_CNT_VBOX.write(0x3400);
+        acpi.write(0x2000);
+        acpi_bochs.write(0x2000);
+        acpi_vbox.write(0x3400);
     }
 }
 pub fn kernel_quiesce_interrupts() {
@@ -141,7 +142,8 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
     klog_info!("Rebooting via keyboard controller...");
 
     hpet::delay_ms(50);
-    unsafe { PS2_COMMAND.write(0xFE) };
+    let ps2_cmd = IoPortRegistry::reserve::<u8>(0x64).expect("PS/2 command port");
+    unsafe { ps2_cmd.write(0xFE) };
 
     klog_info!("Keyboard reset failed, attempting triple fault...");
 

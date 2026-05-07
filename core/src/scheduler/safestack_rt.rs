@@ -60,6 +60,7 @@ use core::cell::SyncUnsafeCell;
 
 use slopos_arch::pcr::offsets as pcr_offsets;
 
+use super::task::task_set_unsafe_stack_sp;
 use super::task_struct::{TASK_UNSAFE_STACK_SP_OFFSET, Task};
 
 /// Maximum number of statically-allocated AP bootstrap stubs.
@@ -154,6 +155,17 @@ impl BootstrapTaskArrayCell {
     pub fn get(&self) -> *mut [Task; MAX_STATIC_APS] {
         self.0.get()
     }
+
+    /// Pointer to the `i`-th element of the bootstrap-task array.
+    /// Computed via pointer arithmetic without dereferencing; the
+    /// returned pointer is the same address `&raw mut (*self.get())[i]`
+    /// would produce, but the cast is centralised here.
+    #[inline]
+    pub fn ptr_at(&self, i: usize) -> *mut Task {
+        debug_assert!(i < MAX_STATIC_APS);
+        let base: *mut Task = self.0.get().cast();
+        base.wrapping_add(i)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -197,12 +209,14 @@ pub extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
 // ---------------------------------------------------------------------------
 
 /// Compute the top of the BSP bootstrap unsafe stack.
+///
+/// The end-of-buffer is a one-past-the-end pointer used only for
+/// stack-top arithmetic; it is never dereferenced as the top itself,
+/// so `wrapping_add` (a safe `const fn`) suffices.
 #[inline]
 pub fn bsp_bootstrap_unsafe_sp() -> *mut u8 {
     let base = BOOTSTRAP_UNSAFE_STACK.get() as *mut u8;
-    // SAFETY: end-of-buffer is a one-past-the-end pointer used only
-    // for stack-top arithmetic; never dereferenced as the top itself.
-    let top = unsafe { base.add(BOOTSTRAP_UNSAFE_STACK_SIZE) };
+    let top = base.wrapping_add(BOOTSTRAP_UNSAFE_STACK_SIZE);
     // Align down to 16 bytes for x86-64 System V stack alignment.
     ((top as usize) & !0xF) as *mut u8
 }
@@ -215,33 +229,22 @@ pub fn ap_bootstrap_unsafe_sp(i: usize) -> *mut u8 {
     debug_assert!(i < MAX_STATIC_APS);
     let base = APS_BOOTSTRAP_UNSAFE_STACKS.get() as *mut u8;
     let top_off = (i + 1) * BOOTSTRAP_UNSAFE_STACK_SIZE;
-    // SAFETY: `top_off` lies inside the BSS-allocated 2D array;
-    // we only use the pointer as a stack-top, never dereference it.
-    let top = unsafe { base.add(top_off) };
+    let top = base.wrapping_add(top_off);
     ((top as usize) & !0xF) as *mut u8
 }
 
 /// Seed every bootstrap Task stub with a valid `unsafe_stack_sp`.
 /// Safe to call once on the BSP before any AP is started.
 ///
-/// # Safety
-/// Single-writer pre-SMP phase; must run exactly once.
-pub unsafe fn init_bootstrap_tasks() {
-    // BSP
+/// Pre-SMP single-writer phase: must run exactly once before any AP
+/// trampoline reads `current_task->unsafe_stack_sp`.
+pub fn init_bootstrap_tasks() {
     let bsp_task = BSP_BOOTSTRAP_TASK.get();
-    // SAFETY: pre-SMP, exclusive writer; target is a valid Task in BSS.
-    unsafe {
-        (*bsp_task).unsafe_stack_sp = bsp_bootstrap_unsafe_sp() as u64;
-    }
+    task_set_unsafe_stack_sp(bsp_task, bsp_bootstrap_unsafe_sp() as u64);
 
-    // APs
-    let ap_tasks = AP_BOOTSTRAP_TASKS.get();
     for i in 0..MAX_STATIC_APS {
-        // SAFETY: pre-SMP, exclusive writer; `i` is bounded by the array length.
-        let ap_task = unsafe { &raw mut (*ap_tasks)[i] };
-        unsafe {
-            (*ap_task).unsafe_stack_sp = ap_bootstrap_unsafe_sp(i) as u64;
-        }
+        let ap_task = AP_BOOTSTRAP_TASKS.ptr_at(i);
+        task_set_unsafe_stack_sp(ap_task, ap_bootstrap_unsafe_sp(i) as u64);
     }
 }
 
@@ -277,18 +280,13 @@ pub fn is_bootstrap_task_ptr(ptr: *const Task) -> bool {
 /// bootstrap stub for AP slot `i + 1` (0-based index into the
 /// returned slice).
 ///
-/// # Safety
-/// Caller must not race with `init_bootstrap_tasks`; the returned
+/// Caller must not race with [`init_bootstrap_tasks`]; the returned
 /// pointers are valid for the lifetime of the kernel image (BSS
 /// globals never move).
-pub unsafe fn ap_bootstrap_task_ptrs() -> [*mut (); MAX_STATIC_APS] {
-    unsafe {
-        let mut out = [core::ptr::null_mut::<()>(); MAX_STATIC_APS];
-        let ap_tasks = AP_BOOTSTRAP_TASKS.get();
-        for i in 0..MAX_STATIC_APS {
-            let p = &raw mut (*ap_tasks)[i];
-            out[i] = p as *mut ();
-        }
-        out
+pub fn ap_bootstrap_task_ptrs() -> [*mut (); MAX_STATIC_APS] {
+    let mut out = [core::ptr::null_mut::<()>(); MAX_STATIC_APS];
+    for i in 0..MAX_STATIC_APS {
+        out[i] = AP_BOOTSTRAP_TASKS.ptr_at(i) as *mut ();
     }
+    out
 }

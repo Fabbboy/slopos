@@ -133,6 +133,22 @@ pub fn task_name_bytes<'a>(task: *const Task) -> Option<&'a [u8]> {
     Some(unsafe { &(*task).name })
 }
 
+/// Stamp `task->unsafe_stack_sp` with `sp`. Used by the safestack
+/// bootstrap-stub seeding path during pre-SMP init, where the writer is
+/// the only observer of the field. No-op on a null pointer.
+#[inline]
+pub fn task_set_unsafe_stack_sp(task: *mut Task, sp: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated `task`; field is a naturally-aligned
+    // u64 inside the Task struct. Pre-SMP single-writer access precludes
+    // races on this field.
+    unsafe {
+        (*task).unsafe_stack_sp = sp;
+    }
+}
+
 /// Record a user-mode-fault exit on `task`: sets `exit_reason`,
 /// `fault_reason`, and `exit_code`, then returns the task's id so the
 /// caller can drive `task_terminate(tid)`.
