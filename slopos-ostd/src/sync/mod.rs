@@ -12,6 +12,7 @@
 
 pub mod cpu_local;
 pub mod init_flag;
+pub mod intrusive;
 pub mod lock_tracking;
 pub mod mutex;
 pub mod once_lock;
@@ -22,6 +23,7 @@ pub mod wait_queue;
 
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
+pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};
 pub use lock_tracking::{
     LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LOCK_LEVEL_SCHEDULER,
     LOCK_LEVEL_UNORDERED, enable_lock_tracking, held_lock_count, poison_unlock_all_held,

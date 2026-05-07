@@ -10,12 +10,16 @@
 
 extern crate alloc;
 
+pub mod acpi;
 pub mod arch;
 pub mod boot;
 pub mod cpu;
+pub mod dev;
+pub mod dma;
 pub mod io;
 pub mod irq;
 pub mod mm;
+pub mod pci;
 pub mod sync;
 pub mod task;
 pub mod user;

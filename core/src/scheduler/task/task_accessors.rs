@@ -16,6 +16,7 @@
 //! through their existing diagnostics.
 
 use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskStatus};
+use slopos_ostd::task::fpu::FpuState;
 use slopos_ostd::user::context::UserContext;
 
 use super::Task;
@@ -294,4 +295,127 @@ pub fn task_record_user_fault_exit(task: *mut Task, reason: TaskFaultReason) -> 
         (*task).exit_code = 1;
         Some((*task).task_id)
     }
+}
+
+// Scheduler-hot-path accessors. Each absorbs one
+// `unsafe { (*task).<field> }` per-field access pattern formerly
+// scattered across `core/src/scheduler/{scheduler,per_cpu,task/*}.rs`.
+
+/// Read `task->time_slice`.
+#[inline]
+pub fn task_time_slice(task: *const Task) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    Some(unsafe { (*task).time_slice })
+}
+
+/// Stamp `task->time_slice`.
+#[inline]
+pub fn task_set_time_slice(task: *mut Task, slice: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    unsafe {
+        (*task).time_slice = slice;
+    }
+}
+
+/// Read `task->time_slice_remaining`.
+#[inline]
+pub fn task_time_slice_remaining(task: *const Task) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    Some(unsafe { (*task).time_slice_remaining })
+}
+
+/// Stamp `task->time_slice_remaining`.
+#[inline]
+pub fn task_set_time_slice_remaining(task: *mut Task, remaining: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    unsafe {
+        (*task).time_slice_remaining = remaining;
+    }
+}
+
+/// Read `task->next_ready` — the intrusive-list link used by
+/// `ReadyQueue` and `ZombieList`.
+#[inline]
+pub fn task_next_ready(task: *const Task) -> Option<*mut Task> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is a naturally-aligned
+    // raw pointer. The list-mutation discipline is upheld by the
+    // owning queue (see `core/src/scheduler/per_cpu.rs`).
+    Some(unsafe { (*task).next_ready })
+}
+
+/// Stamp `task->next_ready`. Used by the queue-mutation paths in
+/// `ReadyQueue::{enqueue,dequeue,remove}` and `ZombieList::push`.
+#[inline]
+pub fn task_set_next_ready(task: *mut Task, next: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is a raw pointer; ordering
+    // is enforced by the caller's preempt-guarded mutation.
+    unsafe {
+        (*task).next_ready = next;
+    }
+}
+
+/// Bump `task->refcnt`. Returns the post-increment count, mirroring
+/// `Task::inc_ref`. Returns `None` for null pointers.
+#[inline]
+pub fn task_inc_ref(task: *mut Task) -> Option<u32> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `inc_ref` takes `&self` and
+    // performs the atomic add internally.
+    Some(unsafe { (*task).inc_ref() })
+}
+
+/// Decrement `task->refcnt`. Returns `Some(true)` if the count
+/// dropped to zero (caller is the last reference), mirroring
+/// `Task::dec_ref`. Returns `None` for null pointers.
+#[inline]
+pub fn task_dec_ref(task: *mut Task) -> Option<bool> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `dec_ref` takes `&self` and
+    // performs the atomic sub internally.
+    Some(unsafe { (*task).dec_ref() })
+}
+
+/// Read `task->refcnt`.
+#[inline]
+pub fn task_ref_count(task: *const Task) -> Option<u32> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `ref_count` takes `&self` and
+    // performs an atomic load internally.
+    Some(unsafe { (*task).ref_count() })
+}
+
+/// Reborrow `task->fpu_state` as `&mut FpuState`. The returned
+/// borrow's lifetime is bounded by the caller's borrow of `task`.
+#[inline]
+pub fn task_fpu_state_mut<'a>(task: *mut Task) -> Option<&'a mut FpuState> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `fpu_state` is an in-Task field
+    // whose pin-stability matches the rest of the Task struct.
+    Some(unsafe { &mut (*task).fpu_state })
 }
