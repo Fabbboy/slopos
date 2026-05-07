@@ -27,6 +27,7 @@ pub use atomic_bitmap::AtomicBitmap;
 pub use bitmap::words_for;
 pub use bitmap::Bitmap;
 pub use kdiag::kdiag_dump_interrupt_frame;
+pub use kdiag::kdiag_stack_word_at;
 pub use kdiag::{kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
     klog_force_restore_default, klog_get_level, klog_init, klog_is_enabled, klog_register_backend,

@@ -505,6 +505,68 @@ impl<M: AnyFrameMeta> Frame<M> {
     }
 }
 
+/// Convenience surface for `Frame<KernelMeta>` — the untyped kernel
+/// page handle. Centralises HHDM translation and allocator round-trip
+/// here so non-OSTD callers get a fully safe API and the residual
+/// unsafe stays in OSTD.
+impl Frame<KernelMeta> {
+    /// Allocate a single kernel page through the registered
+    /// [`FrameAlloc`] and wrap it. Returns `None` if no allocator is
+    /// registered or the allocator returns nothing.
+    pub fn alloc(opts: FrameAllocOptions) -> Option<Self> {
+        let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
+        let paddr = alloc.alloc(opts)?;
+        match Self::from_unused(paddr, KernelMeta) {
+            Ok(frame) => Some(frame),
+            Err(_) => {
+                alloc.dealloc(paddr, opts.size_pages.max(1));
+                None
+            }
+        }
+    }
+
+    /// Convenience: zeroed single-page allocation.
+    pub fn alloc_zeroed() -> Option<Self> {
+        Self::alloc(FrameAllocOptions::single().zeroed())
+    }
+
+    /// Physical address as a raw `u64`.
+    #[inline]
+    pub fn phys_u64(&self) -> u64 {
+        self.paddr().as_u64()
+    }
+
+    /// Kernel HHDM virtual address pointing at this frame's contents.
+    /// Requires [`crate::mm::phys::init_phys_virt_offset`] to have run.
+    #[inline]
+    pub fn virt_addr_u64(&self) -> u64 {
+        crate::mm::phys::phys_to_virt(self.paddr()) as u64
+    }
+
+    /// Typed mutable pointer into this frame via the kernel HHDM.
+    #[inline]
+    pub fn as_mut_ptr<T>(&self) -> *mut T {
+        crate::mm::phys::phys_to_virt(self.paddr()) as *mut T
+    }
+
+    /// Typed const pointer into this frame via the kernel HHDM.
+    #[inline]
+    pub fn as_ptr<T>(&self) -> *const T {
+        crate::mm::phys::phys_to_virt(self.paddr()) as *const T
+    }
+
+    /// Consume the handle and return the physical address without
+    /// dropping the underlying ref. The slot stays `TYPED` with one
+    /// outstanding ref; the caller is responsible for either re-wrapping
+    /// it via [`Frame::from_raw_at`] or releasing the page another way.
+    #[inline]
+    pub fn into_phys(self) -> Paddr {
+        let paddr = self.paddr();
+        let _slot = self.into_raw();
+        paddr
+    }
+}
+
 impl<M: AnyFrameMeta> Drop for Frame<M> {
     fn drop(&mut self) {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as

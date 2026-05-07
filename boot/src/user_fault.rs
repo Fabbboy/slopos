@@ -1,13 +1,16 @@
 use core::ffi::CStr;
 
-use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{INVALID_TASK_ID, TaskFaultReason};
 use slopos_arch::InterruptFrame;
 use slopos_arch::cpu;
 use slopos_core::sched::{schedule, scheduler_get_current_task};
-use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
+use slopos_core::scheduler::task::{
+    task_context_cr3, task_entry_point, task_find_by_cr3, task_flags, task_id_of, task_name_bytes,
+    task_pointer_is_valid, task_process_id, task_record_user_fault_exit,
+};
 use slopos_core::scheduler::task_struct::Task;
 use slopos_core::task::task_terminate;
-use slopos_kernel_services::kernel_vm_space::try_kernel_vm_space;
+use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
 use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
 
 use crate::panic::set_panic_cpu_state;
@@ -24,22 +27,13 @@ use crate::panic::set_panic_cpu_state;
 /// The caller must be handling a user-mode exception (CS RPL == 3).
 /// This function never returns.
 fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
-    unsafe {
-        (*task).exit_reason = TaskExitReason::UserFault;
-        (*task).fault_reason = reason;
-        (*task).exit_code = 1;
-        task_terminate((*task).task_id);
+    if let Some(tid) = task_record_user_fault_exit(task, reason) {
+        task_terminate(tid);
         schedule();
     }
     // schedule() returned without switching — park safely on the
     // kernel master PML4 so this CPU can keep servicing IPIs.
-    if let Some(slot) = try_kernel_vm_space() {
-        // SAFETY: kernel master PML4 always satisfies activate's
-        // kernel-half invariant; we are post-fault, irqs masked.
-        unsafe {
-            slot.lock().activate();
-        }
-    }
+    let _ = activate_post_user_fault();
     cpu::enable_interrupts();
     cpu::halt_loop();
 }
@@ -49,7 +43,7 @@ pub(crate) fn in_user(frame: &InterruptFrame) -> bool {
 }
 
 pub(crate) fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
-    unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }
+    CStr::from_bytes_until_nul(bytes).expect("cstr_from_bytes input must be NUL-terminated")
 }
 
 #[inline]
@@ -58,8 +52,7 @@ pub(crate) fn resolve_user_fault_task() -> *mut Task {
     let mut task = scheduler_get_current_task() as *mut Task;
 
     if !task.is_null() && task_pointer_is_valid(task as *const Task) {
-        let task_cr3 =
-            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.cr3)) } & !0xFFF;
+        let task_cr3 = task_context_cr3(task as *const Task).unwrap_or(0) & !0xFFF;
         if task_cr3 == hw_cr3 {
             return task;
         }
@@ -95,28 +88,23 @@ pub(crate) fn terminate_user_task(
         return;
     }
 
-    let tid = if task.is_null() {
-        INVALID_TASK_ID
-    } else {
-        unsafe { (*task).task_id }
-    };
+    let tid = task_id_of(task as *const Task).unwrap_or(INVALID_TASK_ID);
     let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
     let cr2 = cpu::read_cr2();
     let (rip, rsp, vec, err) = (frame.rip, frame.rsp, frame.vector, frame.error_code);
-    let (entry_point, proc_id, flags, name_str) = if task.is_null() {
-        (0, 0, 0, "<no task>")
-    } else {
-        let name_raw = unsafe { &(*task).name };
-        let len = name_raw
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_raw.len());
-        let name = core::str::from_utf8(&name_raw[..len]).unwrap_or("<invalid utf-8>");
-        let ep = unsafe { (*task).entry_point };
-        let pid = unsafe { (*task).process_id };
-        let fl = unsafe { (*task).flags };
-        (ep, pid, fl, name)
+    let name_str = match task_name_bytes(task as *const Task) {
+        Some(name_raw) => {
+            let len = name_raw
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(name_raw.len());
+            core::str::from_utf8(&name_raw[..len]).unwrap_or("<invalid utf-8>")
+        }
+        None => "<no task>",
     };
+    let entry_point = task_entry_point(task as *const Task).unwrap_or(0);
+    let proc_id = task_process_id(task as *const Task).unwrap_or(0);
+    let flags = task_flags(task as *const Task).unwrap_or(0);
     klog_info!(
         "Terminating user task {} ('{}'): {} | vec={} err=0x{:x} cr2=0x{:x} rip=0x{:x} rsp=0x{:x} entry=0x{:x} pid={} flags=0x{:x}",
         tid,
@@ -139,7 +127,8 @@ pub(crate) fn terminate_user_task(
 }
 
 pub(crate) fn panic_with_frame(message: &str, frame: *mut InterruptFrame) {
-    let frame_ref = unsafe { &*frame };
-    set_panic_cpu_state(frame_ref.rip, frame_ref.rsp);
+    if let Some(frame_ref) = InterruptFrame::from_ptr(frame) {
+        set_panic_cpu_state(frame_ref.rip, frame_ref.rsp);
+    }
     panic!("{}", message);
 }

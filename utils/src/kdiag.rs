@@ -286,6 +286,25 @@ pub fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame) {
         crate::klog_info!("=== END STACK TRACE ===");
     }
 }
+/// Read a single stack word at `rsp + idx * 8`, validating that the
+/// address falls within `[stack_lo, stack_hi)` first. Returns `None`
+/// if the address would be out of bounds.
+///
+/// Used by the supervisor-fault stack-dump path in `boot/`. Centralises
+/// the unaligned-read unsafe in this diagnostic crate so callers stay
+/// in safe Rust.
+pub fn kdiag_stack_word_at(rsp: u64, idx: isize, stack_lo: usize, stack_hi: usize) -> Option<u64> {
+    let base = rsp as *const u64;
+    // SAFETY: pointer arithmetic only — no deref yet.
+    let addr = unsafe { base.offset(idx) };
+    let addr_val = addr as usize;
+    if addr_val < stack_lo || addr_val + 8 > stack_hi {
+        return None;
+    }
+    // SAFETY: bounds-checked above against the caller's stack window.
+    Some(unsafe { core::ptr::read_unaligned(addr) })
+}
+
 pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
     if data.is_null() || length == 0 {
         return;

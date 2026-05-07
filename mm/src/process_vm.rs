@@ -197,20 +197,37 @@ fn unmap_user_range(vm_space: &mut KArc<VmSpace>, start_addr: u64, end_addr: u64
     }
 }
 
-/// Find the slot index for a given process ID using a lock-free scan.
+/// Lock-free read of the per-slot `process_id`. Centralises the
+/// `as_ptr()` cast so the surrounding logic stays in safe Rust.
 ///
-/// SAFETY: reads `process_id` through `SpinLock::as_ptr()`.  The field is a
-/// naturally-aligned `u32` that is only written under the per-slot lock, so
-/// the read is tear-free on x86-64.  The caller must lock `PROCESS_VMS[slot]`
-/// before accessing any other field.
+/// SAFETY: `process_id` is a naturally-aligned `u32` that is only
+/// written under the per-slot lock, so a plain load is tear-free on
+/// x86-64. Callers MUST re-acquire the per-slot lock before reading
+/// any other field.
+#[inline]
+fn slot_pid_lock_free(slot: &SpinLock<ProcessVmInner>) -> u32 {
+    // SAFETY: see fn doc.
+    unsafe { (*slot.as_ptr()).process_id }
+}
+
+/// Lock-free read of the per-slot `page_dir` raw handle. Same
+/// tear-free argument as [`slot_pid_lock_free`]: the field is a
+/// naturally-aligned pointer that's only mutated under the lock.
+#[inline]
+fn slot_page_dir_lock_free(slot: &SpinLock<ProcessVmInner>) -> *mut ProcessPageDir {
+    // SAFETY: see [`slot_pid_lock_free`] — naturally-aligned pointer
+    // load from a SpinLock-guarded static; concurrent writers would
+    // hold the lock, but we tolerate either old or null observed.
+    unsafe { (*slot.as_ptr()).page_dir }
+}
+
+/// Find the slot index for a given process ID using a lock-free scan.
 fn find_slot_for_pid(process_id: u32) -> Option<usize> {
     if process_id == INVALID_PROCESS_ID {
         return None;
     }
     for i in 0..MAX_PROCESSES {
-        // SAFETY: reading a naturally-aligned u32 from a static; see doc above.
-        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
-        if pid == process_id {
+        if slot_pid_lock_free(&PROCESS_VMS[i]) == process_id {
             return Some(i);
         }
     }
@@ -226,8 +243,7 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
         Some(s) => s,
         None => return ptr::null_mut(),
     };
-    // SAFETY: reading a naturally-aligned pointer from a static.
-    unsafe { (*PROCESS_VMS[slot].as_ptr()).page_dir }
+    slot_page_dir_lock_free(&PROCESS_VMS[slot])
 }
 
 /// Translate a user virtual address to its backing physical address
@@ -415,11 +431,10 @@ pub fn process_vm_get_mm_ctx_id(process_id: u32) -> crate::mmu::MmContextId {
     if guard.process_id != process_id {
         return crate::mmu::MmContextId::INVALID;
     }
-    let page_dir = guard.page_dir;
-    if page_dir.is_null() {
+    let Some(vm_space) = guard.vm_space.as_ref() else {
         return crate::mmu::MmContextId::INVALID;
-    }
-    unsafe { (*page_dir).mm_ctx_id }
+    };
+    crate::mmu::MmContextId::from_raw(vm_space.mm_ctx_handle())
 }
 
 pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
@@ -433,7 +448,7 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
         // the OSTD `vm_space` requires a brief lock acquisition because
         // the `Option<KArc<VmSpace>>` is mutated under the per-process
         // SpinLock.
-        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+        let pid = slot_pid_lock_free(&PROCESS_VMS[i]);
         if pid == INVALID_PROCESS_ID {
             continue;
         }
@@ -1353,7 +1368,7 @@ pub fn create_process_vm() -> u32 {
         let mut found_slot = None;
         for i in 0..MAX_PROCESSES {
             // SAFETY: lock-free read of naturally-aligned u32 to find free slot.
-            let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+            let pid = slot_pid_lock_free(&PROCESS_VMS[i]);
             if pid == INVALID_PROCESS_ID {
                 found_slot = Some(i);
                 break;
@@ -1397,6 +1412,7 @@ pub fn create_process_vm() -> u32 {
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
+    let mm_ctx_id = crate::mmu::alloc_mm_context_id();
     unsafe {
         (*page_dir_ptr).pml4 = pml4;
         (*page_dir_ptr).pml4_phys = pml4_phys;
@@ -1404,7 +1420,7 @@ pub fn create_process_vm() -> u32 {
         (*page_dir_ptr).process_id = process_id;
         (*page_dir_ptr).next = ptr::null_mut();
         (*page_dir_ptr).kernel_mapping_gen = 0;
-        (*page_dir_ptr).mm_ctx_id = crate::mmu::alloc_mm_context_id();
+        (*page_dir_ptr).mm_ctx_id = mm_ctx_id;
         // Kernel-half mappings flow from `KERNEL_MASTER_PML4` via
         // OSTD's `VmSpace::new` + `resync_kernel_half_if_stale`. The
         // legacy ProcessPageDir's PML4 stays empty — it is never
@@ -1437,8 +1453,7 @@ pub fn create_process_vm() -> u32 {
     // (registered, but currently unwired) `CursorUnmapHook` /
     // `on_activate` callbacks can route LUF policy. The legacy
     // ProcessPageDir already carries its own copy.
-    let mm_ctx_handle = unsafe { (*page_dir_ptr).mm_ctx_id.raw() };
-    vm_space.set_mm_ctx_handle(mm_ctx_handle);
+    vm_space.set_mm_ctx_handle(mm_ctx_id.raw());
     let vm_space_arc = match KArc::try_new(vm_space) {
         Ok(a) => a,
         Err(_) => {
@@ -1743,7 +1758,7 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
 pub fn init_process_vm() -> c_int {
     for i in 0..MAX_PROCESSES {
         // SAFETY: lock-free read of naturally-aligned u32 sentinel.
-        let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+        let pid = slot_pid_lock_free(&PROCESS_VMS[i]);
         if pid != INVALID_PROCESS_ID {
             destroy_process_vm(pid);
         }
@@ -2530,7 +2545,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         }
         let mut found_slot = None;
         for i in 0..MAX_PROCESSES {
-            let pid = unsafe { (*PROCESS_VMS[i].as_ptr()).process_id };
+            let pid = slot_pid_lock_free(&PROCESS_VMS[i]);
             if pid == INVALID_PROCESS_ID {
                 found_slot = Some(i);
                 break;
@@ -2574,6 +2589,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
+    let child_mm_ctx_id = crate::mmu::alloc_mm_context_id();
     unsafe {
         (*child_page_dir).pml4 = pml4;
         (*child_page_dir).pml4_phys = pml4_phys;
@@ -2581,7 +2597,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         (*child_page_dir).process_id = child_id;
         (*child_page_dir).next = ptr::null_mut();
         (*child_page_dir).kernel_mapping_gen = 0;
-        (*child_page_dir).mm_ctx_id = crate::mmu::alloc_mm_context_id();
+        (*child_page_dir).mm_ctx_id = child_mm_ctx_id;
         // OSTD `VmSpace::new` populates the child's kernel half via
         // `KERNEL_MASTER_PML4`. The legacy ProcessPageDir's PML4 stays
         // empty.
@@ -2605,8 +2621,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             return INVALID_PROCESS_ID;
         }
     };
-    let child_mm_ctx_handle = unsafe { (*child_page_dir).mm_ctx_id.raw() };
-    child_vm_space.set_mm_ctx_handle(child_mm_ctx_handle);
+    child_vm_space.set_mm_ctx_handle(child_mm_ctx_id.raw());
     let child_vm_space_arc = match KArc::try_new(child_vm_space) {
         Ok(a) => a,
         Err(_) => {

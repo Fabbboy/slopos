@@ -84,3 +84,24 @@ pub fn kernel_vm_space() -> &'static SpinLock<VmSpace> {
 pub fn try_kernel_vm_space() -> Option<&'static SpinLock<VmSpace>> {
     KERNEL_VM_SPACE.get()
 }
+
+/// Park the current CPU on the kernel master VM after a fatal user
+/// fault. Wraps [`VmSpace::activate`] in the post-fault context where
+/// the kernel-half invariant is trivially satisfied (we're switching
+/// onto the master itself), so the safety contract is upheld locally
+/// and the unsafe block stays inside this crate.
+///
+/// Returns `true` if the kernel VM was installed and CR3 was switched;
+/// `false` when [`install_kernel_vm_space`] has not yet run (pre-init
+/// fault — the caller falls back to halting on whatever PML4 is
+/// already loaded).
+pub fn activate_post_user_fault() -> bool {
+    let Some(slot) = try_kernel_vm_space() else {
+        return false;
+    };
+    // SAFETY: post-fault, irqs masked at the IDT trampoline; the
+    // kernel master always satisfies `activate`'s kernel-half
+    // contract because the user-half indices are unused on it.
+    unsafe { slot.lock().activate() };
+    true
+}

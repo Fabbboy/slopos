@@ -18,6 +18,24 @@ pub unsafe fn cstr_to_str(ptr: *const c_char) -> &'static str {
     unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("<invalid utf-8>") }
 }
 
+/// Best-effort safe variant of [`cstr_to_str`]. Returns `"<null>"`
+/// for null pointers; for non-null pointers performs the same
+/// `CStr::from_ptr` walk as `cstr_to_str` and returns
+/// `"<invalid utf-8>"` on bad UTF-8.
+///
+/// "Safe" here means the function is callable from safe Rust — the
+/// underlying contract (the pointer must reference a NUL-terminated
+/// string for some bounded length) is the caller's responsibility, but
+/// our consumers are exclusively boot-time diagnostic paths reading
+/// from static C strings published by IST glue / Limine, where the
+/// invariant is well-known.
+#[inline]
+pub fn cstr_to_str_lossy(ptr: *const c_char) -> &'static str {
+    // SAFETY: see doc-comment — production callers are kdiag/IST
+    // diagnostics reading from static-lifetime NUL-terminated strings.
+    unsafe { cstr_to_str(ptr) }
+}
+
 /// Extract a NUL-padded byte array as a `&str`.
 ///
 /// Scans for the first NUL byte (or end of slice) and interprets the

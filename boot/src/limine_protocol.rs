@@ -1,5 +1,5 @@
 use core::{
-    cell::{SyncUnsafeCell, UnsafeCell},
+    cell::SyncUnsafeCell,
     ffi::{c_char, c_void},
     ptr,
 };
@@ -13,6 +13,7 @@ use limine::{
 };
 
 use slopos_abi::DisplayInfo;
+use slopos_ostd::sync::OnceLock;
 use slopos_utils::{klog_debug, klog_info};
 
 pub use slopos_utils::boot_info::{
@@ -158,18 +159,22 @@ impl SystemInfo {
     }
 }
 
-struct SystemInfoCell(UnsafeCell<SystemInfo>);
+// SAFETY justification for sending SystemInfo across threads: every
+// field is plain data; the `cmdline_ptr: *const c_char` points into
+// the bootloader-published kernel cmdline string which is mapped
+// read-only for the kernel's lifetime, and the `framebuffer:
+// Option<BootFramebuffer>` carries a `*mut u8` pointer at a stable
+// MMIO address. Both pointers are read-only or device-side and never
+// aliased mutably from kernel code.
+unsafe impl Sync for SystemInfo {}
+unsafe impl Send for SystemInfo {}
 
-unsafe impl Sync for SystemInfoCell {}
-
-static SYSTEM_INFO: SystemInfoCell = SystemInfoCell(UnsafeCell::new(SystemInfo::new()));
-
-fn sysinfo_mut() -> &'static mut SystemInfo {
-    unsafe { &mut *SYSTEM_INFO.0.get() }
-}
+static SYSTEM_INFO: OnceLock<SystemInfo> = OnceLock::new();
 
 fn sysinfo() -> &'static SystemInfo {
-    unsafe { &*SYSTEM_INFO.0.get() }
+    SYSTEM_INFO
+        .get()
+        .expect("init_limine_protocol must run before sysinfo")
 }
 
 pub fn ensure_base_revision() {
@@ -182,13 +187,8 @@ pub fn mp_response() -> Option<&'static MpResponse> {
     MP_REQUEST.response()
 }
 
-pub fn init_limine_protocol() -> i32 {
-    if !BASE_REVISION.is_supported() {
-        klog_info!("ERROR: Limine base revision not supported!");
-        return -1;
-    }
-
-    let info = sysinfo_mut();
+fn build_system_info() -> SystemInfo {
+    let mut info = SystemInfo::new();
 
     if let Some(resp) = BOOTLOADER_INFO_REQUEST.response() {
         let name = resp.name();
@@ -288,6 +288,16 @@ pub fn init_limine_protocol() -> i32 {
         info.flags.framebuffer_available = false;
     }
 
+    info
+}
+
+pub fn init_limine_protocol() -> i32 {
+    if !BASE_REVISION.is_supported() {
+        klog_info!("ERROR: Limine base revision not supported!");
+        return -1;
+    }
+
+    SYSTEM_INFO.call_once(build_system_info);
     0
 }
 
@@ -432,27 +442,38 @@ pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
         .map(|e| limine_entry_to_region(e))
 }
 
-static LEGACY_MEMMAP_ENTRIES: SyncUnsafeCell<[LimineMemmapEntry; 256]> = SyncUnsafeCell::new(
-    [LimineMemmapEntry {
+/// Single backing cell for the C-ABI legacy memmap shim. Kept as a
+/// [`SyncUnsafeCell`] (rather than a `OnceLock`) because the three
+/// fields are self-referential — `ptrs[i]` points into `entries[i]`
+/// and `response.entries` points into `ptrs.0` — so the storage must
+/// be initialised in place at its final static address. A single
+/// [`AtomicBool`] gates one-shot initialisation; the previous
+/// three-static layout collapses into this one.
+struct LegacyMemmap {
+    entries: [LimineMemmapEntry; 256],
+    ptrs: SyncMemmapPtrArray,
+    response: LimineMemmapResponse,
+}
+
+#[repr(transparent)]
+struct SyncMemmapPtrArray([*const LimineMemmapEntry; 256]);
+// SAFETY: the inner pointers reference `LEGACY_MEMMAP.entries[i]` —
+// statically-allocated and never moved.
+unsafe impl Sync for SyncMemmapPtrArray {}
+
+static LEGACY_MEMMAP: SyncUnsafeCell<LegacyMemmap> = SyncUnsafeCell::new(LegacyMemmap {
+    entries: [LimineMemmapEntry {
         base: 0,
         length: 0,
         typ: 0,
     }; 256],
-);
-
-#[repr(transparent)]
-struct SyncMemmapPtrArray([*const LimineMemmapEntry; 256]);
-unsafe impl Sync for SyncMemmapPtrArray {}
-
-static LEGACY_MEMMAP_PTRS: SyncUnsafeCell<SyncMemmapPtrArray> =
-    SyncUnsafeCell::new(SyncMemmapPtrArray([ptr::null(); 256]));
-
-static LEGACY_MEMMAP_RESPONSE: SyncUnsafeCell<LimineMemmapResponse> =
-    SyncUnsafeCell::new(LimineMemmapResponse {
+    ptrs: SyncMemmapPtrArray([ptr::null(); 256]),
+    response: LimineMemmapResponse {
         revision: 0,
         entry_count: 0,
         entries: ptr::null(),
-    });
+    },
+});
 
 static LEGACY_MEMMAP_INIT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -471,26 +492,32 @@ fn init_legacy_memmap() {
     let entries = memmap.entries();
     let count = entries.len().min(256);
 
+    // SAFETY: AtomicBool::swap(true, SeqCst) gates this branch to a
+    // single thread for the kernel's lifetime; no concurrent reader
+    // can observe the cell as initialised until we publish via the
+    // store on the early-return path. The pointer self-references
+    // are computed at the cell's final `'static` address.
     unsafe {
-        let entries_ptr = LEGACY_MEMMAP_ENTRIES.get();
-        let ptrs_ptr = LEGACY_MEMMAP_PTRS.get();
-        let response_ptr = LEGACY_MEMMAP_RESPONSE.get();
+        let cell = &mut *LEGACY_MEMMAP.get();
 
         for (i, entry) in entries.iter().take(count).enumerate() {
-            (*entries_ptr)[i] = LimineMemmapEntry {
+            cell.entries[i] = LimineMemmapEntry {
                 base: entry.base,
                 length: entry.length,
                 typ: entry_type_to_u64(entry.type_),
             };
-            (*ptrs_ptr).0[i] = &(*entries_ptr)[i];
+            cell.ptrs.0[i] = &cell.entries[i];
         }
 
-        (*response_ptr).entry_count = count as u64;
-        (*response_ptr).entries = (*ptrs_ptr).0.as_ptr();
+        cell.response.entry_count = count as u64;
+        cell.response.entries = cell.ptrs.0.as_ptr();
     }
 }
 
 pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     init_legacy_memmap();
-    LEGACY_MEMMAP_RESPONSE.get() as *const LimineMemmapResponse
+    // SAFETY: post-init, the response struct is read-only for the
+    // kernel's lifetime; returning a `*const` to the static cell is
+    // sound for the boot consumer's downstream `*const` reads.
+    unsafe { &(*LEGACY_MEMMAP.get()).response as *const LimineMemmapResponse }
 }

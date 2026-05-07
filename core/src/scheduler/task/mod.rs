@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 
+mod task_accessors;
 mod task_cleanup_hooks;
 mod task_lifecycle;
 mod task_session;
@@ -17,6 +18,7 @@ pub use slopos_abi::task::{
 };
 pub use slopos_arch::arch::idt::IdtEntry;
 
+pub use task_accessors::*;
 pub use task_cleanup_hooks::*;
 pub use task_lifecycle::*;
 pub use task_session::*;

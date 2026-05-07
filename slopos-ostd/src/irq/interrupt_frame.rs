@@ -23,3 +23,37 @@ pub struct InterruptFrame {
     pub rsp: u64,
     pub ss: u64,
 }
+
+impl InterruptFrame {
+    /// Borrow an [`InterruptFrame`] from a pointer published by the
+    /// IDT entry trampoline. Returns `None` for null; otherwise wraps
+    /// the raw deref so callers stay in safe Rust.
+    ///
+    /// The lifetime of the returned reference is bounded by the
+    /// caller's frame — typically the duration of an exception
+    /// handler invocation, where the trampoline guarantees the frame
+    /// remains valid until the handler returns.
+    #[inline]
+    pub fn from_ptr<'a>(ptr: *const InterruptFrame) -> Option<&'a InterruptFrame> {
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: caller's IDT trampoline keeps the frame alive
+            // for the duration of the handler; non-null was just
+            // checked.
+            Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Mutable variant of [`InterruptFrame::from_ptr`].
+    #[inline]
+    pub fn from_ptr_mut<'a>(ptr: *mut InterruptFrame) -> Option<&'a mut InterruptFrame> {
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: as `from_ptr` — unique handler invocation
+            // implies no aliased &mut.
+            Some(unsafe { &mut *ptr })
+        }
+    }
+}
