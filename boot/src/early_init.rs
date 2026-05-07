@@ -1,11 +1,12 @@
 use core::{
-    cell::UnsafeCell,
     ffi::{CStr, c_char},
     ptr,
 };
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_drivers::serial;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::spin::SpinLock;
 use slopos_utils::klog::{self, KlogLevel};
 use slopos_utils::wl_currency;
 use slopos_utils::{klog_debug, klog_info, klog_set_level};
@@ -165,30 +166,21 @@ impl BootRuntimeContext {
     }
 }
 
-struct BootState {
-    initialized: bool,
-    ctx: BootRuntimeContext,
-}
+// SAFETY: `memmap: *const LimineMemmapResponse` points into a static
+// `SyncUnsafeCell` published by `limine_protocol::limine_get_memmap_response`,
+// whose contents are immutable for the kernel's lifetime (Inv. 8). The
+// other fields are plain `Copy` data. Boot steps run sequentially on
+// the BSP, so any imagined "send across threads" is purely about
+// satisfying `SpinLock<BootRuntimeContext>: Sync` — no real handoff
+// happens at runtime.
+unsafe impl Send for BootRuntimeContext {}
 
-struct BootStateCell(UnsafeCell<BootState>);
-
-unsafe impl Sync for BootStateCell {}
-
-static BOOT_STATE: BootStateCell = BootStateCell(UnsafeCell::new(BootState {
-    initialized: false,
-    ctx: BootRuntimeContext::new(),
-}));
+static BOOT_RUNTIME: SpinLock<BootRuntimeContext> =
+    SpinLock::new(BootRuntimeContext::new(), LOCK_LEVEL_RESOURCE);
+static BOOT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 static BOOT_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 static BOOT_DONE_STEPS: AtomicUsize = AtomicUsize::new(0);
-
-fn boot_state() -> &'static BootState {
-    unsafe { &*BOOT_STATE.0.get() }
-}
-
-fn boot_state_mut() -> &'static mut BootState {
-    unsafe { &mut *BOOT_STATE.0.get() }
-}
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
     CStr::from_bytes_with_nul(bytes)
@@ -240,37 +232,42 @@ use crate::ffi_boundary::{
     __stop_boot_init_services,
 };
 
-fn phase_bounds(phase: BootInitPhase) -> (*const BootInitStep, *const BootInitStep) {
-    match phase {
-        BootInitPhase::EarlyHw => (unsafe { &__start_boot_init_early_hw }, unsafe {
-            &__stop_boot_init_early_hw
-        }),
-        BootInitPhase::Memory => (unsafe { &__start_boot_init_memory }, unsafe {
-            &__stop_boot_init_memory
-        }),
-        BootInitPhase::Drivers => (unsafe { &__start_boot_init_drivers }, unsafe {
-            &__stop_boot_init_drivers
-        }),
-        BootInitPhase::Services => (unsafe { &__start_boot_init_services }, unsafe {
-            &__stop_boot_init_services
-        }),
-        BootInitPhase::Optional => (unsafe { &__start_boot_init_optional }, unsafe {
-            &__stop_boot_init_optional
-        }),
+/// Borrow the contiguous `[BootInitStep]` array the linker places between
+/// the `__start_boot_init_<phase>` and `__stop_boot_init_<phase>` symbols.
+fn phase_steps(phase: BootInitPhase) -> &'static [BootInitStep] {
+    // SAFETY: the linker guarantees that for each phase there is exactly
+    // one contiguous array of `BootInitStep` values bracketed by the
+    // `__start_*` / `__stop_*` symbols (link.ld + the `boot_init!` macro
+    // place every registration into `.boot_init_<phase>`). Taking the
+    // address of an `extern static` and computing its byte distance is
+    // sound; the resulting slice covers exactly the registered steps and
+    // never aliases other writable memory.
+    unsafe {
+        let (start, stop): (*const BootInitStep, *const BootInitStep) = match phase {
+            BootInitPhase::EarlyHw => (&__start_boot_init_early_hw, &__stop_boot_init_early_hw),
+            BootInitPhase::Memory => (&__start_boot_init_memory, &__stop_boot_init_memory),
+            BootInitPhase::Drivers => (&__start_boot_init_drivers, &__stop_boot_init_drivers),
+            BootInitPhase::Services => (&__start_boot_init_services, &__stop_boot_init_services),
+            BootInitPhase::Optional => (&__start_boot_init_optional, &__stop_boot_init_optional),
+        };
+        let len = stop.offset_from(start).max(0) as usize;
+        core::slice::from_raw_parts(start, len)
     }
 }
 
 fn boot_init_count_phase(phase: BootInitPhase) -> usize {
-    let (start, stop) = phase_bounds(phase);
-    let mut count = 0usize;
-    let mut ptr = start;
-    while ptr < stop {
-        count += 1;
-        unsafe {
-            ptr = ptr.add(1);
-        }
+    phase_steps(phase).len()
+}
+
+fn phase_from_u8(p: u8) -> Option<BootInitPhase> {
+    match p {
+        0 => Some(BootInitPhase::EarlyHw),
+        1 => Some(BootInitPhase::Memory),
+        2 => Some(BootInitPhase::Drivers),
+        3 => Some(BootInitPhase::Services),
+        4 => Some(BootInitPhase::Optional),
+        _ => None,
     }
-    count
 }
 
 fn boot_init_prepare_progress() {
@@ -314,8 +311,8 @@ fn boot_run_step(ctx: &mut BootCtx, phase_name: &[u8], step: &BootInitStep) -> i
 }
 
 pub fn boot_init_run_phase(ctx: &mut BootCtx, phase: BootInitPhase) -> i32 {
-    let (start, end) = phase_bounds(phase);
-    if start.is_null() || end.is_null() {
+    let steps = phase_steps(phase);
+    if steps.is_empty() {
         return 0;
     }
 
@@ -326,38 +323,35 @@ pub fn boot_init_run_phase(ctx: &mut BootCtx, phase: BootInitPhase) -> i32 {
     serial::write_str("BOOT: phase ");
     serial::write_line(bytes_to_str(phase_name));
 
-    let mut ordered: [*const BootInitStep; BOOT_INIT_MAX_STEPS] =
-        [ptr::null(); BOOT_INIT_MAX_STEPS];
+    let mut ordered: [Option<&'static BootInitStep>; BOOT_INIT_MAX_STEPS] =
+        [None; BOOT_INIT_MAX_STEPS];
     let mut ordered_count = 0usize;
 
-    let mut cursor = start;
-    while cursor < end {
+    for step in steps {
         if ordered_count >= BOOT_INIT_MAX_STEPS {
             panic!("Boot init: too many steps for phase");
         }
 
-        let prio = unsafe { (*cursor).priority() };
+        let prio = step.priority();
         let mut idx = ordered_count;
         while idx > 0 {
-            let prev = unsafe { (*ordered[idx - 1]).priority() };
+            let prev = ordered[idx - 1]
+                .expect("ordered slot populated before this index")
+                .priority();
             if prio >= prev {
                 break;
             }
             ordered[idx] = ordered[idx - 1];
             idx -= 1;
         }
-        ordered[idx] = cursor;
+        ordered[idx] = Some(step);
         ordered_count += 1;
-
-        cursor = unsafe { cursor.add(1) };
     }
 
-    for i in 0..ordered_count {
-        let step_ptr = ordered[i];
-        if step_ptr.is_null() {
-            continue;
+    for slot in ordered.iter().take(ordered_count) {
+        if let Some(step) = slot {
+            boot_run_step(ctx, phase_name, step);
         }
-        boot_run_step(ctx, phase_name, unsafe { &*step_ptr });
     }
 
     boot_init_report_phase(KlogLevel::Info, b"phase complete -> \0", Some(phase_name));
@@ -366,47 +360,54 @@ pub fn boot_init_run_phase(ctx: &mut BootCtx, phase: BootInitPhase) -> i32 {
 
 pub fn boot_init_run_all(ctx: &mut BootCtx) -> i32 {
     boot_init_prepare_progress();
-    let mut phase = BootInitPhase::EarlyHw as u8;
-    while phase <= BootInitPhase::Optional as u8 {
-        let rc = boot_init_run_phase(ctx, unsafe { core::mem::transmute(phase) });
+    let mut phase_idx = BootInitPhase::EarlyHw as u8;
+    while phase_idx <= BootInitPhase::Optional as u8 {
+        let Some(phase) = phase_from_u8(phase_idx) else {
+            break;
+        };
+        let rc = boot_init_run_phase(ctx, phase);
         if rc != 0 {
             return rc;
         }
-        phase += 1;
+        phase_idx += 1;
     }
     0
 }
 
 pub fn boot_get_memmap() -> *const limine_protocol::LimineMemmapResponse {
-    boot_state().ctx.memmap
+    BOOT_RUNTIME.lock().memmap
 }
 
 pub fn boot_get_hhdm_offset() -> u64 {
-    boot_state().ctx.hhdm_offset
+    BOOT_RUNTIME.lock().hhdm_offset
 }
 
 pub fn boot_get_cmdline() -> *const c_char {
-    boot_state()
-        .ctx
+    BOOT_RUNTIME
+        .lock()
         .cmdline
         .map(|s| s.as_ptr() as *const c_char)
         .unwrap_or(ptr::null())
 }
 
 pub fn boot_mark_initialized() {
-    boot_state_mut().initialized = true;
+    BOOT_INITIALIZED.store(true, Ordering::Release);
 }
 
 pub fn is_kernel_initialized() -> i32 {
-    boot_state().initialized as i32
+    BOOT_INITIALIZED.load(Ordering::Acquire) as i32
 }
 
 pub fn get_initialization_progress() -> i32 {
-    if boot_state().initialized { 100 } else { 50 }
+    if BOOT_INITIALIZED.load(Ordering::Acquire) {
+        100
+    } else {
+        50
+    }
 }
 
 pub fn report_kernel_status() {
-    if boot_state().initialized {
+    if BOOT_INITIALIZED.load(Ordering::Acquire) {
         boot_info(b"SlopOS: Kernel status - INITIALIZED\0");
     } else {
         boot_info(b"SlopOS: Kernel status - INITIALIZING\0");
@@ -451,17 +452,17 @@ fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx) -> i32 {
     }
 
     {
-        let state = boot_state_mut();
-        state.ctx.memmap = memmap;
-        state.ctx.hhdm_offset = limine_protocol::get_hhdm_offset();
-        state.ctx.cmdline = limine_protocol::kernel_cmdline_str();
+        let mut state = BOOT_RUNTIME.lock();
+        state.memmap = memmap;
+        state.hhdm_offset = limine_protocol::get_hhdm_offset();
+        state.cmdline = limine_protocol::kernel_cmdline_str();
     }
 
     0
 }
 
 fn boot_step_boot_config_fn(_ctx: &mut BootCtx) {
-    let cmdline = boot_state().ctx.cmdline.unwrap_or_default();
+    let cmdline = BOOT_RUNTIME.lock().cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
         || cmdline.contains("boot.debug=1")
         || cmdline.contains("boot.debug=true")
@@ -552,7 +553,9 @@ pub fn kernel_main_impl() {
     // SAFETY: one-shot init.
     unsafe {
         let cr3 = slopos_arch::cpu::control_regs::read_cr3();
-        slopos_ostd::mm::vm_space::register_kernel_master_pml4(slopos_abi::addr::PhysAddr(cr3));
+        slopos_ostd::mm::vm_space::register_kernel_master_pml4(slopos_abi::addr::PhysAddr::new(
+            cr3,
+        ));
     }
 
     idt::idt_init();

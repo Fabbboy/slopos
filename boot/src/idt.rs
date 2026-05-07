@@ -1,9 +1,10 @@
 #![allow(bad_asm_style)]
 
-use core::cell::SyncUnsafeCell;
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_arch::cpu;
+use slopos_core::task::{task_has_flag, task_id_of, task_kernel_stack_bounds, task_process_id};
 // Re-export the OSTD IDT types/constants the legacy `boot::idt::*`
 // surface exposed (consumed by `boot/src/tests/gdt_tests.rs` and similar).
 pub use slopos_ostd::irq::{
@@ -48,18 +49,87 @@ static BUILDER: IdtBuilder = IdtBuilder::new();
 
 type ExceptionHandler = fn(*mut slopos_arch::InterruptFrame);
 
-static PANIC_HANDLERS: SyncUnsafeCell<[ExceptionHandler; 32]> =
-    SyncUnsafeCell::new([exception_default_panic; 32]);
-static OVERRIDE_HANDLERS: SyncUnsafeCell<[Option<ExceptionHandler>; 32]> =
-    SyncUnsafeCell::new([None; 32]);
-static CURRENT_EXCEPTION_MODE: SyncUnsafeCell<ExceptionMode> =
-    SyncUnsafeCell::new(ExceptionMode::Normal);
+static CURRENT_EXCEPTION_MODE: AtomicU8 = AtomicU8::new(ExceptionMode::Normal as u8);
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
 pub enum ExceptionMode {
     Normal = 0,
     Test = 1,
+}
+
+impl ExceptionMode {
+    fn load() -> Self {
+        match CURRENT_EXCEPTION_MODE.load(Ordering::Acquire) {
+            x if x == ExceptionMode::Test as u8 => ExceptionMode::Test,
+            _ => ExceptionMode::Normal,
+        }
+    }
+
+    fn store(self) {
+        CURRENT_EXCEPTION_MODE.store(self as u8, Ordering::Release);
+    }
+}
+
+/// Per-vector handler tables.
+///
+/// Both the panic table and the override table are stored as
+/// `[AtomicPtr<()>; 32]`, with null encoding "no handler installed". The
+/// fn-ptr ↔ `*mut ()` round-trip lives once inside `decode`. Per-slot
+/// stores avoid copying the 256-byte fn-pointer array as a single value,
+/// which is what the kernel's stack-frame budget would otherwise reject.
+mod handler_tables {
+    use super::ExceptionHandler;
+    use core::sync::atomic::{AtomicPtr, Ordering};
+
+    const NULL_SLOT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+    static PANIC: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
+    static OVERRIDE: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
+
+    fn encode(h: Option<ExceptionHandler>) -> *mut () {
+        match h {
+            Some(f) => f as *mut (),
+            None => core::ptr::null_mut(),
+        }
+    }
+
+    fn decode(raw: *mut ()) -> Option<ExceptionHandler> {
+        if raw.is_null() {
+            None
+        } else {
+            // SAFETY: every value stored here is either null (handled
+            // above) or a value cast from `ExceptionHandler` in `encode`.
+            // `fn` pointers and `*mut ()` are layout-compatible on
+            // x86_64, so the round-trip preserves the original fn ptr.
+            Some(unsafe { core::mem::transmute::<*mut (), ExceptionHandler>(raw) })
+        }
+    }
+
+    pub fn install_panic(vector: u8, handler: ExceptionHandler) {
+        PANIC[vector as usize].store(encode(Some(handler)), Ordering::Release);
+    }
+
+    pub fn panic_for(vector: u8) -> Option<ExceptionHandler> {
+        decode(PANIC[vector as usize].load(Ordering::Acquire))
+    }
+
+    pub fn install_override(vector: u8, handler: Option<ExceptionHandler>) {
+        OVERRIDE[vector as usize].store(encode(handler), Ordering::Release);
+    }
+
+    pub fn override_for(vector: u8) -> Option<ExceptionHandler> {
+        decode(OVERRIDE[vector as usize].load(Ordering::Acquire))
+    }
+
+    pub fn clear_overrides() {
+        for slot in OVERRIDE.iter() {
+            slot.store(core::ptr::null_mut(), Ordering::Release);
+        }
+    }
+}
+
+fn panic_handler_for(vector: u8) -> ExceptionHandler {
+    handler_tables::panic_for(vector).unwrap_or(exception_default_panic)
 }
 
 use slopos_core::syscall::syscall_handle;
@@ -90,8 +160,12 @@ pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
         return -1;
     }
     let entry = BUILDER.get_gate(vector);
+    // SAFETY: out_entry is non-null per the guard above; the caller's
+    // C-ABI contract is that it points at a writable `IdtEntry`. This
+    // is the FFI boundary write — Rust cannot encode the caller's
+    // promise about the pointee's validity.
     unsafe {
-        *out_entry = entry;
+        core::ptr::write(out_entry, entry);
     }
     0
 }
@@ -112,10 +186,8 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
         klog_info!("IDT: Refusing to override critical exception {}", vector);
         return;
     }
-    unsafe {
-        (*OVERRIDE_HANDLERS.get())[vector as usize] = Some(handler);
-        klog_debug!("IDT: Registered override handler for exception {}", vector);
-    }
+    handler_tables::install_override(vector, Some(handler));
+    klog_debug!("IDT: Registered override handler for exception {}", vector);
 }
 
 /// Bind an IDT entry to an IST slot. `&mut BootCtx` gates the call so
@@ -130,11 +202,9 @@ pub fn idt_set_ist(
 }
 
 pub fn exception_set_mode(mode: ExceptionMode) {
-    unsafe {
-        *CURRENT_EXCEPTION_MODE.get() = mode;
-        if let ExceptionMode::Normal = mode {
-            *OVERRIDE_HANDLERS.get() = [None; 32];
-        }
+    mode.store();
+    if let ExceptionMode::Normal = mode {
+        handler_tables::clear_overrides();
     }
 }
 
@@ -246,7 +316,8 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
 
 /// Implementation of common_exception_handler - called from FFI boundary
 pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
-    let frame_ref = unsafe { &mut *frame };
+    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(frame)
+        .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
 
     // Prevent deferred rescheduling during IST-based exception handlers.
@@ -283,51 +354,48 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         // discipline that `set_regs` enforces on the modern syscall
         // entry.
         use slopos_ostd::user::context::{FpuStateRef, UserContext, UserRegs};
-        let regs = unsafe { &*frame };
         let mut user_regs = UserRegs::default();
-        user_regs.r15 = regs.r15;
-        user_regs.r14 = regs.r14;
-        user_regs.r13 = regs.r13;
-        user_regs.r12 = regs.r12;
-        user_regs.r11 = regs.r11;
-        user_regs.r10 = regs.r10;
-        user_regs.r9 = regs.r9;
-        user_regs.r8 = regs.r8;
-        user_regs.rbp = regs.rbp;
-        user_regs.rdi = regs.rdi;
-        user_regs.rsi = regs.rsi;
-        user_regs.rdx = regs.rdx;
-        user_regs.rcx = regs.rcx;
-        user_regs.rbx = regs.rbx;
-        user_regs.rax = regs.rax;
-        user_regs.rip = regs.rip;
-        user_regs.rsp = regs.rsp;
-        user_regs.rflags_user_subset = regs.rflags;
+        user_regs.r15 = frame_ref.r15;
+        user_regs.r14 = frame_ref.r14;
+        user_regs.r13 = frame_ref.r13;
+        user_regs.r12 = frame_ref.r12;
+        user_regs.r11 = frame_ref.r11;
+        user_regs.r10 = frame_ref.r10;
+        user_regs.r9 = frame_ref.r9;
+        user_regs.r8 = frame_ref.r8;
+        user_regs.rbp = frame_ref.rbp;
+        user_regs.rdi = frame_ref.rdi;
+        user_regs.rsi = frame_ref.rsi;
+        user_regs.rdx = frame_ref.rdx;
+        user_regs.rcx = frame_ref.rcx;
+        user_regs.rbx = frame_ref.rbx;
+        user_regs.rax = frame_ref.rax;
+        user_regs.rip = frame_ref.rip;
+        user_regs.rsp = frame_ref.rsp;
+        user_regs.rflags_user_subset = frame_ref.rflags;
         let mut user_ctx = UserContext::new(user_regs, FpuStateRef::empty());
         syscall_handle(&mut user_ctx as *mut UserContext);
         // Apply the handler's mutations back onto the IRET frame so the
         // CPU sees the new register state on `iretq`.
         let new_regs = user_ctx.regs();
-        unsafe {
-            (*frame).r15 = new_regs.r15;
-            (*frame).r14 = new_regs.r14;
-            (*frame).r13 = new_regs.r13;
-            (*frame).r12 = new_regs.r12;
-            (*frame).r11 = new_regs.r11;
-            (*frame).r10 = new_regs.r10;
-            (*frame).r9 = new_regs.r9;
-            (*frame).r8 = new_regs.r8;
-            (*frame).rbp = new_regs.rbp;
-            (*frame).rdi = new_regs.rdi;
-            (*frame).rsi = new_regs.rsi;
-            (*frame).rdx = new_regs.rdx;
-            (*frame).rcx = new_regs.rcx;
-            (*frame).rbx = new_regs.rbx;
-            (*frame).rax = new_regs.rax;
-            (*frame).rip = new_regs.rip;
-            (*frame).rsp = new_regs.rsp;
-            (*frame).rflags = new_regs.rflags_user_subset;
-        }
+        frame_ref.r15 = new_regs.r15;
+        frame_ref.r14 = new_regs.r14;
+        frame_ref.r13 = new_regs.r13;
+        frame_ref.r12 = new_regs.r12;
+        frame_ref.r11 = new_regs.r11;
+        frame_ref.r10 = new_regs.r10;
+        frame_ref.r9 = new_regs.r9;
+        frame_ref.r8 = new_regs.r8;
+        frame_ref.rbp = new_regs.rbp;
+        frame_ref.rdi = new_regs.rdi;
+        frame_ref.rsi = new_regs.rsi;
+        frame_ref.rdx = new_regs.rdx;
+        frame_ref.rcx = new_regs.rcx;
+        frame_ref.rbx = new_regs.rbx;
+        frame_ref.rax = new_regs.rax;
+        frame_ref.rip = new_regs.rip;
+        frame_ref.rsp = new_regs.rsp;
+        frame_ref.rflags = new_regs.rflags_user_subset;
         return;
     }
 
@@ -427,21 +495,15 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     let critical = is_critical_exception_internal(vector);
-    unsafe {
-        if critical || !matches!(*CURRENT_EXCEPTION_MODE.get(), ExceptionMode::Test) {
-            let name = slopos_arch::arch::exception::get_exception_name(vector);
-            klog_info!("EXCEPTION: Vector {} ({})", vector, name);
-        }
+    let mode = ExceptionMode::load();
+    if critical || !matches!(mode, ExceptionMode::Test) {
+        let name = slopos_arch::arch::exception::get_exception_name(vector);
+        klog_info!("EXCEPTION: Vector {} ({})", vector, name);
     }
 
-    let mut handler = unsafe { (*PANIC_HANDLERS.get())[vector as usize] };
-    if !critical
-        && matches!(
-            unsafe { *CURRENT_EXCEPTION_MODE.get() },
-            ExceptionMode::Test
-        )
-    {
-        if let Some(override_handler) = unsafe { (*OVERRIDE_HANDLERS.get())[vector as usize] } {
+    let mut handler = panic_handler_for(vector);
+    if !critical && matches!(mode, ExceptionMode::Test) {
+        if let Some(override_handler) = handler_tables::override_for(vector) {
             handler = override_handler;
         }
     }
@@ -450,37 +512,36 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 }
 
 fn initialize_handler_tables() {
-    unsafe {
-        *PANIC_HANDLERS.get() = [exception_default_panic; 32];
-        *OVERRIDE_HANDLERS.get() = [None; 32];
-
-        // Fatal: log name, dump frame, panic.
-        (*PANIC_HANDLERS.get())[EXCEPTION_DIVIDE_ERROR as usize] = exception_fatal;
-        // NMI (vector 2) is handled directly in common_exception_handler_impl
-        // by the watchdog handler -- no table entry needed.
-        (*PANIC_HANDLERS.get())[EXCEPTION_DOUBLE_FAULT as usize] = exception_fatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_INVALID_TSS as usize] = exception_fatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_SEGMENT_NOT_PRES as usize] = exception_fatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_STACK_FAULT as usize] = exception_fatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_MACHINE_CHECK as usize] = exception_fatal;
-
-        // Non-fatal: log name, dump frame, resume.
-        (*PANIC_HANDLERS.get())[EXCEPTION_DEBUG as usize] = exception_nonfatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_BREAKPOINT as usize] = exception_nonfatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_OVERFLOW as usize] = exception_nonfatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_BOUND_RANGE as usize] = exception_nonfatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_FPU_ERROR as usize] = exception_nonfatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_ALIGNMENT_CHECK as usize] = exception_nonfatal;
-        (*PANIC_HANDLERS.get())[EXCEPTION_SIMD_FP_EXCEPTION as usize] = exception_nonfatal;
-
-        // Specialized: user-mode check before fatal/nonfatal fallback.
-        (*PANIC_HANDLERS.get())[EXCEPTION_INVALID_OPCODE as usize] = exception_invalid_opcode;
-        (*PANIC_HANDLERS.get())[EXCEPTION_DEVICE_NOT_AVAIL as usize] =
-            exception_device_not_available;
-        (*PANIC_HANDLERS.get())[EXCEPTION_GENERAL_PROTECTION as usize] =
-            exception_general_protection;
-        (*PANIC_HANDLERS.get())[EXCEPTION_PAGE_FAULT as usize] = exception_page_fault;
+    // Default fallback for the entire vector range.
+    for vector in 0u8..32 {
+        handler_tables::install_panic(vector, exception_default_panic);
     }
+    handler_tables::clear_overrides();
+
+    // Fatal: log name, dump frame, panic.
+    handler_tables::install_panic(EXCEPTION_DIVIDE_ERROR, exception_fatal);
+    // NMI (vector 2) is handled directly in common_exception_handler_impl
+    // by the watchdog handler -- no table entry needed.
+    handler_tables::install_panic(EXCEPTION_DOUBLE_FAULT, exception_fatal);
+    handler_tables::install_panic(EXCEPTION_INVALID_TSS, exception_fatal);
+    handler_tables::install_panic(EXCEPTION_SEGMENT_NOT_PRES, exception_fatal);
+    handler_tables::install_panic(EXCEPTION_STACK_FAULT, exception_fatal);
+    handler_tables::install_panic(EXCEPTION_MACHINE_CHECK, exception_fatal);
+
+    // Non-fatal: log name, dump frame, resume.
+    handler_tables::install_panic(EXCEPTION_DEBUG, exception_nonfatal);
+    handler_tables::install_panic(EXCEPTION_BREAKPOINT, exception_nonfatal);
+    handler_tables::install_panic(EXCEPTION_OVERFLOW, exception_nonfatal);
+    handler_tables::install_panic(EXCEPTION_BOUND_RANGE, exception_nonfatal);
+    handler_tables::install_panic(EXCEPTION_FPU_ERROR, exception_nonfatal);
+    handler_tables::install_panic(EXCEPTION_ALIGNMENT_CHECK, exception_nonfatal);
+    handler_tables::install_panic(EXCEPTION_SIMD_FP_EXCEPTION, exception_nonfatal);
+
+    // Specialized: user-mode check before fatal/nonfatal fallback.
+    handler_tables::install_panic(EXCEPTION_INVALID_OPCODE, exception_invalid_opcode);
+    handler_tables::install_panic(EXCEPTION_DEVICE_NOT_AVAIL, exception_device_not_available);
+    handler_tables::install_panic(EXCEPTION_GENERAL_PROTECTION, exception_general_protection);
+    handler_tables::install_panic(EXCEPTION_PAGE_FAULT, exception_page_fault);
 }
 
 /// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET
@@ -526,17 +587,9 @@ pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     let task_ptr = slopos_core::sched::scheduler_get_current_task();
 
     klog_info!("=== IRET FRAME VICINITY DUMP ===");
-    let (dump_lo, dump_hi) = {
-        if !task_ptr.is_null() {
-            let base = unsafe { (*task_ptr).kernel_stack_base } as usize;
-            let top = unsafe { (*task_ptr).kernel_stack_top } as usize;
-            if base != 0 && top > base {
-                (base, top)
-            } else {
-                let mid = iret_frame as usize;
-                (mid.saturating_sub(128), mid.saturating_add(128))
-            }
-        } else {
+    let (dump_lo, dump_hi) = match task_kernel_stack_bounds(task_ptr) {
+        Some((base, top)) if base != 0 && top > base => (base as usize, top as usize),
+        _ => {
             let mid = iret_frame as usize;
             (mid.saturating_sub(128), mid.saturating_add(128))
         }
@@ -569,10 +622,10 @@ pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     klog_info!("=== END DUMP ===");
 
     if !task_ptr.is_null() {
-        let is_user = unsafe { (*task_ptr).flags } & slopos_abi::task::TASK_FLAG_USER_MODE != 0;
+        let is_user = task_has_flag(task_ptr, slopos_abi::task::TASK_FLAG_USER_MODE);
         klog_info!(
             "  Current task: id={} user={}",
-            unsafe { (*task_ptr).task_id },
+            task_id_of(task_ptr).unwrap_or(0),
             is_user,
         );
     }
@@ -584,7 +637,8 @@ pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
 
 fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let fault_addr = cpu::read_cr2();
-    let frame_ref = unsafe { &*frame };
+    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(frame)
+        .expect("try_handle_page_fault: null frame ptr");
 
     if ist_stacks::ist_guard_fault(fault_addr).is_some() {
         return false;
@@ -599,8 +653,7 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     // is no parallel `slopos_mm` asm shim anymore.
     if !in_user(frame_ref) {
         if slopos_ostd::user::copy::is_ostd_usercopy_ip(frame_ref.rip) {
-            let frame_mut = unsafe { &mut *frame };
-            frame_mut.rip = slopos_ostd::user::copy::ostd_usercopy_fault_ip();
+            frame_ref.rip = slopos_ostd::user::copy::ostd_usercopy_fault_ip();
             return true;
         }
         return false;
@@ -609,8 +662,8 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     if task_ptr.is_null() {
         return false;
     }
-    let pid = unsafe { (*task_ptr).process_id };
-    let tid = unsafe { (*task_ptr).task_id };
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let tid = task_id_of(task_ptr).unwrap_or(0);
 
     slopos_mm::page_fault::try_resolve_user_fault(fault_addr, frame_ref.error_code, pid, tid)
 }

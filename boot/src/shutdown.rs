@@ -5,7 +5,7 @@ use slopos_arch::cpu;
 use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::sync::StateFlag;
 use slopos_utils::klog_info;
-use slopos_utils::string::cstr_to_str;
+use slopos_utils::string::cstr_to_str_lossy;
 
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
@@ -15,7 +15,7 @@ use slopos_core::sched::scheduler_shutdown;
 use slopos_core::task::task_shutdown_all;
 use slopos_drivers::apic;
 use slopos_drivers::hpet;
-use slopos_kernel_services::kernel_vm_space::try_kernel_vm_space;
+use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
@@ -32,14 +32,7 @@ fn serial_flush() {
 }
 fn ensure_kernel_page_dir() {
     // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
-    if let Some(slot) = try_kernel_vm_space() {
-        // SAFETY: kernel master always satisfies activate's
-        // kernel-half invariant; called during shutdown with irqs
-        // either masked by the caller or about to be.
-        unsafe {
-            slot.lock().activate();
-        }
-    }
+    activate_post_user_fault();
 }
 fn poweroff_hardware() {
     let acpi = IoPortRegistry::reserve::<u16>(0x604).expect("ACPI PM1A_CNT port");
@@ -91,7 +84,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
 
     klog_info!("=== Kernel Shutdown Requested ===");
     if !reason.is_null() {
-        klog_info!("Reason: {}", unsafe { cstr_to_str(reason) });
+        klog_info!("Reason: {}", cstr_to_str_lossy(reason));
     }
 
     pcp_drain_all();
@@ -133,7 +126,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     klog_info!("=== Kernel Reboot Requested ===");
     if !reason.is_null() {
-        klog_info!("Reason: {}", unsafe { cstr_to_str(reason) });
+        klog_info!("Reason: {}", cstr_to_str_lossy(reason));
     }
 
     kernel_quiesce_interrupts();

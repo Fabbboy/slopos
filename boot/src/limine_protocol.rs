@@ -1,3 +1,34 @@
+//! Limine bootloader handoff layer.
+//!
+//! # Surviving `unsafe` sites — file-level SAFETY
+//!
+//! All remaining `unsafe` in this file falls into one of three irreducible
+//! classes:
+//!
+//! 1. **`unsafe impl Send + Sync` markers over bootloader-published pointers.**
+//!    `SystemInfo` carries `cmdline_ptr: *const c_char` and a framebuffer
+//!    `*mut u8`. Both point at memory the bootloader installs and Limine
+//!    promises is mapped read-only (cmdline) or device-side (framebuffer)
+//!    for the kernel's lifetime — Inv. 8. Rust cannot encode that promise,
+//!    so the contract is asserted via `unsafe impl`. `SyncMemmapPtrArray`
+//!    has the same shape: it stores `*const LimineMemmapEntry` values that
+//!    point into our own static `LEGACY_MEMMAP` cell, which never moves.
+//!
+//! 2. **The legacy `LimineMemmapResponse` C-ABI shim.** `init_legacy_memmap`
+//!    builds a self-referential structure (`LimineMemmapResponse` whose
+//!    `entries: *const LimineMemmapEntry` points into a sibling field of
+//!    the same `SyncUnsafeCell`). Retiring the `SyncUnsafeCell` would
+//!    require flipping the consumer contract from `*const` to `&[…]` —
+//!    downstream `mm/` and `boot/` callers read through the `*const`
+//!    pointer and the shape is part of the published handoff. Init is
+//!    gated on a `swap(true, SeqCst)` so the cell is written exactly
+//!    once, then exposed as a `*const` for life.
+//!
+//! 3. **`#[unsafe(link_section = "…")]` attributes.** These are Edition 2024
+//!    syntactic markers — they tell the linker where to place the Limine
+//!    request statics, and the `unsafe` keyword is required by the attribute
+//!    grammar. They are not runtime unsafe.
+
 use core::{
     cell::SyncUnsafeCell,
     ffi::{c_char, c_void},
@@ -159,13 +190,16 @@ impl SystemInfo {
     }
 }
 
-// SAFETY justification for sending SystemInfo across threads: every
-// field is plain data; the `cmdline_ptr: *const c_char` points into
-// the bootloader-published kernel cmdline string which is mapped
-// read-only for the kernel's lifetime, and the `framebuffer:
+// SAFETY (Inv. 8): every field of `SystemInfo` is plain data with one
+// exception each for Send and Sync. The `cmdline_ptr: *const c_char`
+// points into the bootloader-published kernel cmdline string which
+// Limine maps read-only for the kernel's lifetime; the `framebuffer:
 // Option<BootFramebuffer>` carries a `*mut u8` pointer at a stable
-// MMIO address. Both pointers are read-only or device-side and never
-// aliased mutably from kernel code.
+// device-side MMIO address. Both pointers are read-only or device-side
+// and never aliased mutably from kernel code, so concurrent reads are
+// safe and ownership transfer is meaningful. Retiring this `unsafe
+// impl` would require a wrapper newtype with manual Send/Sync — same
+// `unsafe impl` count, no soundness improvement.
 unsafe impl Sync for SystemInfo {}
 unsafe impl Send for SystemInfo {}
 
@@ -457,8 +491,13 @@ struct LegacyMemmap {
 
 #[repr(transparent)]
 struct SyncMemmapPtrArray([*const LimineMemmapEntry; 256]);
-// SAFETY: the inner pointers reference `LEGACY_MEMMAP.entries[i]` —
-// statically-allocated and never moved.
+// SAFETY (Inv. 8): the inner pointers self-reference `LEGACY_MEMMAP.entries[i]`,
+// which lives in a `'static` `SyncUnsafeCell` and is written exactly once
+// (gated by `LEGACY_MEMMAP_INIT.swap(true, SeqCst)` in `init_legacy_memmap`).
+// The cell never moves and the entries it brackets never move, so the
+// stored pointers stay valid for the kernel's lifetime. Retiring this
+// `unsafe impl` would require flipping the `LimineMemmapResponse`
+// consumer contract from `*const` to `&[…]`, which is a separate scope.
 unsafe impl Sync for SyncMemmapPtrArray {}
 
 static LEGACY_MEMMAP: SyncUnsafeCell<LegacyMemmap> = SyncUnsafeCell::new(LegacyMemmap {
@@ -492,11 +531,14 @@ fn init_legacy_memmap() {
     let entries = memmap.entries();
     let count = entries.len().min(256);
 
-    // SAFETY: AtomicBool::swap(true, SeqCst) gates this branch to a
-    // single thread for the kernel's lifetime; no concurrent reader
-    // can observe the cell as initialised until we publish via the
-    // store on the early-return path. The pointer self-references
-    // are computed at the cell's final `'static` address.
+    // SAFETY (Inv. 8): `LEGACY_MEMMAP_INIT.swap(true, SeqCst)` above
+    // gates this branch to a single thread for the kernel's lifetime;
+    // every other path returns early. The cell is `'static`, so the
+    // self-referential `cell.ptrs.0[i] = &cell.entries[i]` writes
+    // produce pointers that stay valid until the kernel exits. The
+    // `LimineMemmapResponse` C-ABI consumer contract requires this
+    // self-referential layout — retiring the `SyncUnsafeCell` would
+    // require flipping the consumer to `&[LimineMemmapEntry]`.
     unsafe {
         let cell = &mut *LEGACY_MEMMAP.get();
 
@@ -516,8 +558,12 @@ fn init_legacy_memmap() {
 
 pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     init_legacy_memmap();
-    // SAFETY: post-init, the response struct is read-only for the
-    // kernel's lifetime; returning a `*const` to the static cell is
-    // sound for the boot consumer's downstream `*const` reads.
+    // SAFETY (Inv. 8): post-init the response struct is read-only for
+    // the kernel's lifetime; returning a `*const` to the static cell
+    // is sound for the boot consumer's downstream `*const` reads. The
+    // `*const`-only return type is the published C-ABI contract;
+    // returning `&'static LimineMemmapResponse` would let consumers
+    // observe stale `entries` should the cell ever be re-init'd, which
+    // the `LEGACY_MEMMAP_INIT.swap` gate intentionally forbids.
     unsafe { &(*LEGACY_MEMMAP.get()).response as *const LimineMemmapResponse }
 }
