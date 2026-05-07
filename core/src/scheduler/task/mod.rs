@@ -27,7 +27,15 @@ pub use task_stats::*;
 pub use task_table::*;
 
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
-pub type TaskEntry = fn(*mut c_void);
+
+/// Kernel-task entry-point function pointer.
+///
+/// Always `extern "C"` so caller side (driver-spawned kernel
+/// threads, idle tasks, exec'd user-mode round-trippers) can hand a
+/// bare `extern "C" fn(*mut c_void)` straight to the scheduler
+/// without a transmute. Mirrors the `extern "sysv64" fn() -> !`
+/// pattern used by the OSTD task-exit hook.
+pub type TaskEntry = extern "C" fn(*mut c_void);
 
 /// Build a [`TaskEntry`] from a kernel-half virtual address.
 ///

@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
 use slopos_ostd::cpu::x86_64::pcr::KernelReturnContext;
+use slopos_ostd::sync::intrusive::{Link, Linked};
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{AllocError, Init, init_from_closure};
 
@@ -377,7 +378,18 @@ pub struct Task {
     /// woken task is never dispatched on a second CPU before the first
     /// CPU finishes saving its context — the Linux `p->on_cpu` pattern.
     pub on_cpu: AtomicBool,
-    pub next_ready: *mut Task,
+    /// Intrusive-list link slot used by `ReadyQueue` (per-CPU run
+    /// queues, `core/src/scheduler/per_cpu.rs`) and `ZombieList`
+    /// (deferred reaper, `core/src/scheduler/task/task_table.rs`).
+    /// A Task is only ever in one of those at a time — terminate
+    /// removes from the ready queue before adding to the zombie
+    /// list — so a single shared `Link<Task>` field suffices.
+    /// Layout-compatible with the previous `*mut Task` (both are
+    /// pointer-sized on x86_64); the all-zero bit pattern matches
+    /// the unlinked state, so `Task::init_invalid`'s `write_bytes`
+    /// zero-fill produces a valid empty link without an explicit
+    /// initialiser.
+    pub next_ready: Link<Task>,
     pub next_inbox: AtomicPtr<Task>,
     pub refcnt: AtomicU32,
     /// Per-task user-mode register snapshot consumed by the OSTD
@@ -461,7 +473,7 @@ impl Task {
             signal_actions: [SignalAction::default(); NSIG],
             switch_ctx: SwitchContext::zero(),
             on_cpu: AtomicBool::new(false),
-            next_ready: ptr::null_mut(),
+            next_ready: Link::new(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
             user_ctx: UserContext::const_zeroed(),
@@ -792,7 +804,11 @@ impl Task {
         // Child keeps its own pool position.
         self.slot_index = preserved_slot_index;
         // Reset scheduler linkage and refcount — the copy is a fresh entity.
-        self.next_ready = ptr::null_mut();
+        // `next_ready` was bytewise-copied from the parent's link slot;
+        // calling `Link::reset` issues an atomic store on that storage,
+        // which is well-formed even on bytewise-copied AtomicPtr storage
+        // (no padding / tagging on x86_64).
+        self.next_ready.reset();
         self.next_inbox = AtomicPtr::new(ptr::null_mut());
         self.refcnt = AtomicU32::new(0);
         // Child inherits signal actions and blocked mask but starts with no pending signals.
@@ -820,6 +836,18 @@ impl Task {
     #[inline]
     pub fn ref_count(&self) -> u32 {
         self.refcnt.load(Ordering::Acquire)
+    }
+}
+
+// SAFETY: `next_ready` is an in-Task `Link<Task>` field at a stable
+// offset; the Task struct itself never moves while a Task is linked
+// into a list (pool slots are pinned for kernel lifetime). The
+// scheduler's `terminate → unschedule_task → defer_task_cleanup`
+// ordering guarantees a Task is never simultaneously in `ReadyQueue`
+// and `ZombieList`, so the single shared link slot is unambiguous.
+unsafe impl Linked for Task {
+    fn link(&self) -> &Link<Self> {
+        &self.next_ready
     }
 }
 

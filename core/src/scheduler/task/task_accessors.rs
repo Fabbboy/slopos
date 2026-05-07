@@ -15,7 +15,8 @@
 //! All helpers return `Option<T>`; the caller threads the `None` case
 //! through their existing diagnostics.
 
-use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskStatus};
+use slopos_abi::syscall::TtyIndex;
+use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus};
 use slopos_ostd::task::fpu::FpuState;
 use slopos_ostd::user::context::UserContext;
 
@@ -352,10 +353,10 @@ pub fn task_next_ready(task: *const Task) -> Option<*mut Task> {
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; field is a naturally-aligned
-    // raw pointer. The list-mutation discipline is upheld by the
-    // owning queue (see `core/src/scheduler/per_cpu.rs`).
-    Some(unsafe { (*task).next_ready })
+    // SAFETY: caller pre-validated; the link slot's atomic load is
+    // internally synchronised, the owning queue's lock orders this
+    // with concurrent push/pop operations.
+    Some(unsafe { (*task).next_ready.load() })
 }
 
 /// Stamp `task->next_ready`. Used by the queue-mutation paths in
@@ -365,10 +366,11 @@ pub fn task_set_next_ready(task: *mut Task, next: *mut Task) {
     if task.is_null() {
         return;
     }
-    // SAFETY: caller pre-validated; field is a raw pointer; ordering
-    // is enforced by the caller's preempt-guarded mutation.
+    // SAFETY: caller pre-validated; the link slot's atomic store is
+    // internally synchronised; ordering with concurrent readers is
+    // upheld by the owning queue's lock.
     unsafe {
-        (*task).next_ready = next;
+        (*task).next_ready.store(next);
     }
 }
 
@@ -418,4 +420,248 @@ pub fn task_fpu_state_mut<'a>(task: *mut Task) -> Option<&'a mut FpuState> {
     // SAFETY: caller pre-validated; `fpu_state` is an in-Task field
     // whose pin-stability matches the rest of the Task struct.
     Some(unsafe { &mut (*task).fpu_state })
+}
+
+/// Read `task->priority`. The field is a copy-`Copy` enum stored as
+/// a `u8` discriminant inside a one-byte slot; reading it through
+/// the pointer is naturally aligned and atomic on x86_64.
+#[inline]
+pub fn task_priority(task: *const Task) -> Option<TaskPriority> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is a naturally-aligned u8.
+    Some(unsafe { (*task).priority })
+}
+
+/// Stamp `task->last_cpu`. The field is updated by the scheduler
+/// when a task is enqueued onto a particular CPU's run queue or
+/// remote-wake inbox.
+#[inline]
+pub fn task_set_last_cpu(task: *mut Task, cpu_id: u8) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is a single byte; the
+    // owning queue's lock orders this against the dispatcher read.
+    unsafe {
+        (*task).last_cpu = cpu_id;
+    }
+}
+
+/// Read the task's atomic status (`Ready`, `Running`, `Blocked`, …).
+#[inline]
+pub fn task_status(task: *const Task) -> Option<TaskStatus> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `status` is a `&self` method
+    // that performs an atomic load internally.
+    Some(unsafe { (*task).status() })
+}
+
+/// Read `task->sid` (session id).
+#[inline]
+pub fn task_sid(task: *const Task) -> Option<u32> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is a naturally-aligned u32.
+    Some(unsafe { (*task).sid })
+}
+
+/// Read `task->controlling_tty`.
+#[inline]
+pub fn task_controlling_tty(task: *const Task) -> Option<TtyIndex> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; the field is `Option<TtyIndex>`,
+    // both variants are 1-byte / 2-byte naturally-aligned scalars.
+    unsafe { (*task).controlling_tty }
+}
+
+/// Stamp `task->controlling_tty`. Used by the session-leader
+/// disposition path when a TTY is hung up.
+#[inline]
+pub fn task_set_controlling_tty(task: *mut Task, tty: Option<TtyIndex>) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; field write is naturally aligned.
+    unsafe {
+        (*task).controlling_tty = tty;
+    }
+    true
+}
+
+/// Read `task->kernel_stack_top` directly. The full
+/// `task_kernel_stack_bounds` accessor returns `(base, top)`; the
+/// dispatcher hot path only needs `top` for TSS RSP0 programming.
+#[inline]
+pub fn task_kernel_stack_top(task: *const Task) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    Some(unsafe { (*task).kernel_stack_top })
+}
+
+/// Read `task->flags`. (`task_flags` already exists as `u16`; this
+/// helper exposes a typed bit-test the scheduler uses.)
+#[inline]
+pub fn task_has_flag(task: *const Task, flag: u16) -> bool {
+    task_flags(task).is_some_and(|f| (f & flag) != 0)
+}
+
+/// Read `task->fs_base`.
+#[inline]
+pub fn task_fs_base(task: *const Task) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    Some(unsafe { (*task).fs_base })
+}
+
+/// Read `task->name[..]` and probe whether the first 5 bytes
+/// match the kernel-internal `idle/<digit>` or `idle\0`/`idle_`
+/// prefix used to identify per-CPU idle tasks. Encapsulates the
+/// hot-path byte-poke from `scheduler.rs::task_name_looks_idle`.
+#[inline]
+pub fn task_name_looks_idle(task: *const Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; `name` is an in-Task fixed array.
+    let name = unsafe { &(*task).name };
+    if name[0] != b'i' || name[1] != b'd' || name[2] != b'l' || name[3] != b'e' {
+        return false;
+    }
+    match name[4] {
+        0 | b'_' => true,
+        b'/' => name[5].is_ascii_digit(),
+        _ => false,
+    }
+}
+
+/// Stamp `task->cpu_affinity` and `task->last_cpu` from a single
+/// boot-time idle-task install. Wraps two field writes to keep the
+/// caller's site free of `unsafe`.
+#[inline]
+pub fn task_install_idle_affinity(task: *mut Task, mask: u32, last_cpu: u8) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; both fields are scalars.
+    unsafe {
+        (*task).cpu_affinity = mask;
+        (*task).last_cpu = last_cpu;
+    }
+}
+
+/// Read `task->task_id` and increment its refcount in one shot.
+/// Returns the (post-inc) refcount, or `None` if `task` is null.
+#[inline]
+pub fn task_inc_ref_with_id(task: *mut Task) -> Option<(u32, u32)> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; both ops are atomic / scalar.
+    let id = unsafe { (*task).task_id };
+    let count = unsafe { (*task).inc_ref() };
+    Some((id, count))
+}
+
+/// Atomic CAS on `task->waiting_on`: succeeds only if the current
+/// value equals `expected`, in which case the field is overwritten
+/// with `desired`. Returns `Some(true)` on success, `Some(false)` on
+/// race loss, `None` if `task` is null.
+#[inline]
+pub fn task_waiting_on_cas(task: *mut Task, expected: u32, desired: u32) -> Option<bool> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `waiting_on` is `AtomicU32`.
+    let result = unsafe {
+        (*task).waiting_on.compare_exchange(
+            expected,
+            desired,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+    };
+    Some(result.is_ok())
+}
+
+/// Stamp `task->waiting_on` unconditionally with `task_id`.
+#[inline]
+pub fn task_set_waiting_on(task: *mut Task, task_id: u32) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `waiting_on` is `AtomicU32`.
+    unsafe {
+        (*task)
+            .waiting_on
+            .store(task_id, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Spin-wait until the task's `on_cpu` flag goes false. Used by
+/// `schedule_task` to avoid dispatching a task that another CPU is
+/// still finishing its outgoing context switch on.
+#[inline]
+pub fn task_wait_off_cpu(task: *const Task) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `on_cpu` is `AtomicBool`.
+    unsafe {
+        while (*task).on_cpu.load(core::sync::atomic::Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Set `task->on_cpu = on`. The dispatcher uses `true` before
+/// switching in, then clears to `false` after the outgoing context
+/// save completes.
+#[inline]
+pub fn task_set_on_cpu(task: *mut Task, on: bool) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `on_cpu` is `AtomicBool`.
+    unsafe {
+        (*task)
+            .on_cpu
+            .store(on, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Read `task->test_reports.is_some()`.
+#[inline]
+pub fn task_has_test_reports(task: *const Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; `Option<KBox<..>>` is one
+    // pointer-sized slot, the niche-optimised None matches null.
+    unsafe { (*task).test_reports.is_some() }
+}
+
+/// Take ownership of `task->test_reports`, leaving the slot as
+/// `None`. Caller-required invariant: invoke after the task has
+/// exited so no further `SYSCALL_TEST_REPORT` push races the take.
+#[inline]
+pub fn task_take_test_reports(
+    task: *mut Task,
+) -> Option<slopos_ostd::KBox<crate::scheduler::test_reports::TestReportRing>> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `Option::take` is a single
+    // word swap on the in-Task field.
+    unsafe { (*task).test_reports.take() }
 }

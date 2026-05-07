@@ -24,7 +24,7 @@ use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
     TaskContext, TaskEntry, TaskExitReason, TaskExitRecord, TaskFaultReason, TaskPriority,
-    TaskStatus,
+    TaskStatus, task_borrow_mut, task_id_of, task_name_bytes, task_status,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
@@ -233,7 +233,7 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.fate_value = 0;
     task.fate_pending = 0;
     task.on_cpu.store(false, Ordering::Release);
-    task.next_ready = ptr::null_mut();
+    task.next_ready.reset();
     task.next_inbox.store(ptr::null_mut(), Ordering::Release);
     task.refcnt.store(0, Ordering::Release);
 }
@@ -248,20 +248,18 @@ fn cleanup_task_process_resources(
     resolved_id: u32,
     mode: TaskProcessCleanupMode,
 ) {
-    unsafe {
-        run_task_resource_cleanup_hooks(resolved_id);
+    run_task_resource_cleanup_hooks(resolved_id);
 
-        if (*task_ptr).process_id == INVALID_PROCESS_ID {
-            return;
-        }
+    let process_id = super::task_accessors::task_process_id(task_ptr).unwrap_or(INVALID_PROCESS_ID);
+    if process_id == INVALID_PROCESS_ID {
+        return;
+    }
 
-        let process_id = (*task_ptr).process_id;
-        let task_id = (*task_ptr).task_id;
-        if !process_has_other_live_tasks(process_id, task_id) {
-            fileio_destroy_table_for_process(process_id);
-            if matches!(mode, TaskProcessCleanupMode::DropVm) {
-                destroy_process_vm(process_id);
-            }
+    let task_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
+    if !process_has_other_live_tasks(process_id, task_id) {
+        fileio_destroy_table_for_process(process_id);
+        if matches!(mode, TaskProcessCleanupMode::DropVm) {
+            destroy_process_vm(process_id);
         }
     }
 }
@@ -629,20 +627,17 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return -1;
     }
 
-    if task_ptr.is_null() || unsafe { (*task_ptr).status() } == TaskStatus::Invalid {
+    if task_ptr.is_null() || task_status(task_ptr) == Some(TaskStatus::Invalid) {
         klog_info!("task_terminate: Task not found");
         return -1;
     }
 
-    if unsafe { (*task_ptr).status() } == TaskStatus::Terminated {
+    if task_status(task_ptr) == Some(TaskStatus::Terminated) {
         return 0;
     }
 
-    klog_info!(
-        "Terminating task '{}' (ID {})",
-        bytes_as_str(&unsafe { &*task_ptr }.name),
-        resolved_id
-    );
+    let name_str = task_name_bytes(task_ptr).map(bytes_as_str).unwrap_or("");
+    klog_info!("Terminating task '{}' (ID {})", name_str, resolved_id);
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
     mark_task_terminated(task_ptr, resolved_id);
@@ -669,7 +664,7 @@ fn resolve_termination_target(task_id: u32) -> (*mut Task, u32) {
         if current.is_null() {
             (ptr::null_mut(), INVALID_TASK_ID)
         } else {
-            (current, unsafe { (*current).task_id })
+            (current, task_id_of(current).unwrap_or(INVALID_TASK_ID))
         }
     } else {
         (task_find_by_id(task_id), task_id)
@@ -679,77 +674,78 @@ fn resolve_termination_target(task_id: u32) -> (*mut Task, u32) {
 fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     let now = kdiag_timestamp();
     let mut should_hangup = None;
-    unsafe {
-        if (*task_ptr).last_run_timestamp != 0 && now >= (*task_ptr).last_run_timestamp {
-            (*task_ptr).total_runtime += now - (*task_ptr).last_run_timestamp;
-        }
-        (*task_ptr).last_run_timestamp = 0;
-        if (*task_ptr).exit_reason == TaskExitReason::None {
-            (*task_ptr).exit_reason = TaskExitReason::Kernel;
-        }
-        record_task_exit(
-            task_ptr,
-            (*task_ptr).exit_reason,
-            (*task_ptr).fault_reason,
-            (*task_ptr).exit_code,
+
+    let Some(task) = task_borrow_mut(task_ptr) else {
+        return;
+    };
+
+    if task.last_run_timestamp != 0 && now >= task.last_run_timestamp {
+        task.total_runtime += now - task.last_run_timestamp;
+    }
+    task.last_run_timestamp = 0;
+    if task.exit_reason == TaskExitReason::None {
+        task.exit_reason = TaskExitReason::Kernel;
+    }
+    record_task_exit(
+        task_ptr,
+        task.exit_reason,
+        task.fault_reason,
+        task.exit_code,
+    );
+
+    // Stash a slot-lifecycle-independent copy of the exit record + the
+    // per-task test-report ring (if any) into the pending-drain cache.
+    // The userland-test runner reads it from there, so its drain is
+    // robust to subsequent slot reuse / reset_in_place that would
+    // clobber the original `Task` and `mgr.exit_records[idx]`.
+    //
+    // Restricted to tasks that had test_reports populated: non-test
+    // tasks (the vast majority) skip the cache entirely, paying zero
+    // cost.
+    if task.test_reports.is_some() {
+        let exit_record = TaskExitRecord {
+            task_id: resolved_id,
+            exit_reason: task.exit_reason,
+            fault_reason: task.fault_reason,
+            exit_code: task.exit_code,
+        };
+        let reports = task.test_reports.take();
+        crate::scheduler::test_reports::stash_pending_drain(
+            resolved_id,
+            crate::scheduler::test_reports::PendingDrain {
+                exit_record,
+                reports,
+            },
         );
+    }
 
-        // Stash a slot-lifecycle-independent copy of the exit record + the
-        // per-task test-report ring (if any) into the pending-drain cache.
-        // The userland-test runner reads it from there, so its drain is
-        // robust to subsequent slot reuse / reset_in_place that would
-        // clobber the original `Task` and `mgr.exit_records[idx]`.
-        //
-        // Restricted to tasks that had test_reports populated: non-test
-        // tasks (the vast majority) skip the cache entirely, paying zero
-        // cost.
-        if (*task_ptr).test_reports.is_some() {
-            let exit_record = TaskExitRecord {
-                task_id: resolved_id,
-                exit_reason: (*task_ptr).exit_reason,
-                fault_reason: (*task_ptr).fault_reason,
-                exit_code: (*task_ptr).exit_code,
-            };
-            let reports = (*task_ptr).test_reports.take();
-            crate::scheduler::test_reports::stash_pending_drain(
-                resolved_id,
-                crate::scheduler::test_reports::PendingDrain {
-                    exit_record,
-                    reports,
-                },
-            );
+    task.set_status(TaskStatus::Terminated);
+    scheduler::cancel_sleep(resolved_id);
+    task.fate_token = 0;
+    task.fate_value = 0;
+    task.fate_pending = 0;
+    task.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
+
+    super::super::futex::futex_remove_task(task_ptr);
+
+    let clear_tid = task.clear_child_tid;
+    if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
+        if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {
+            let _ = copy_to_user(clear_ptr, &0u32);
         }
+        let _ = super::super::futex::futex_wake_one(clear_tid);
+        task.clear_child_tid = 0;
+    }
 
-        (*task_ptr).set_status(TaskStatus::Terminated);
-        scheduler::cancel_sleep(resolved_id);
-        (*task_ptr).fate_token = 0;
-        (*task_ptr).fate_value = 0;
-        (*task_ptr).fate_pending = 0;
-        (*task_ptr)
-            .waiting_on
-            .store(INVALID_TASK_ID, Ordering::Release);
+    notify_parent_of_child_exit(task_ptr);
 
-        super::super::futex::futex_remove_task(task_ptr);
-
-        let clear_tid = (*task_ptr).clear_child_tid;
-        if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
-            if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {
-                let _ = copy_to_user(clear_ptr, &0u32);
-            }
-            let _ = super::super::futex::futex_wake_one(clear_tid);
-            (*task_ptr).clear_child_tid = 0;
-        }
-
-        notify_parent_of_child_exit(task_ptr);
-
-        if (*task_ptr).sid != 0
-            && (*task_ptr).task_id != INVALID_TASK_ID
-            && (*task_ptr).sid == (*task_ptr).task_id
-            && (*task_ptr).controlling_tty.is_some()
-        {
-            should_hangup = (*task_ptr).controlling_tty;
-            (*task_ptr).controlling_tty = None;
-        }
+    if task.sid != 0
+        && task.task_id != INVALID_TASK_ID
+        && task.sid == task.task_id
+        && task.controlling_tty.is_some()
+    {
+        should_hangup = task.controlling_tty;
+        task.controlling_tty = None;
     }
 
     scheduler::unschedule_task(task_ptr);
@@ -765,16 +761,14 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
     cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
 
-    unsafe {
-        if (*task_ptr).ref_count() > 0 {
-            defer_task_cleanup(task_ptr);
-        } else {
-            // Free stacks but keep the task struct in Terminated state so
-            // task_find_by_id still resolves the ID.  This makes repeated
-            // task_terminate() calls idempotent.  reserve_task_slot() will
-            // reclaim the slot when a new task needs it.
-            free_task_stacks(task_ptr);
-        }
+    if super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0 {
+        defer_task_cleanup(task_ptr);
+    } else {
+        // Free stacks but keep the task struct in Terminated state so
+        // task_find_by_id still resolves the ID.  This makes repeated
+        // task_terminate() calls idempotent.  reserve_task_slot() will
+        // reclaim the slot when a new task needs it.
+        free_task_stacks(task_ptr);
     }
 }
 

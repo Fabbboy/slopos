@@ -10,12 +10,15 @@
 //! from handing out `&mut` to a `static` array element from multiple CPUs.
 //!
 //! - Atomic fields: direct load/store (lock-free).
-//! - `ready_queues`: wrapped in `UnsafeCell`, guarded by `queue_lock`.
+//! - `ready_queues`: backed by `IntrusiveLinkedList<Task>` per priority
+//!   level; the list itself uses interior atomics, but operations are
+//!   serialised by `queue_lock` since the linked-list primitive is not
+//!   lock-free across operations.
 //! - `return_context`: wrapped in `UnsafeCell`, only written during
 //!   single-threaded init and read by the owning CPU.
 
-use core::cell::{SyncUnsafeCell, UnsafeCell};
-use core::ptr;
+use core::cell::SyncUnsafeCell;
+use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Round-robin counter for fork/spawn CPU placement.  Rotates the starting
@@ -37,170 +40,104 @@ pub fn fork_rr_counter_set(value: usize) {
     FORK_RR_COUNTER.store(value, Ordering::Relaxed);
 }
 
+use super::task::{task_dec_ref, task_inc_ref, task_priority, task_set_last_cpu, task_status};
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
+use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
-#[derive(Default)]
+/// Per-priority FIFO of ready tasks.
+///
+/// Wraps `slopos_ostd::sync::intrusive::IntrusiveLinkedList<Task>` so
+/// the linked-list bookkeeping lives in OSTD rather than here. Callers
+/// are responsible for incrementing the task's refcount on enqueue and
+/// decrementing on dequeue / remove / drain.
 struct ReadyQueue {
-    head: *mut Task,
-    tail: *mut Task,
-    count: AtomicU32,
+    list: IntrusiveLinkedList<Task>,
 }
-
-unsafe impl Send for ReadyQueue {}
-unsafe impl Sync for ReadyQueue {}
 
 impl ReadyQueue {
     const fn new() -> Self {
         Self {
-            head: ptr::null_mut(),
-            tail: ptr::null_mut(),
-            count: AtomicU32::new(0),
+            list: IntrusiveLinkedList::new(),
         }
     }
 
-    fn init(&mut self) {
-        self.head = ptr::null_mut();
-        self.tail = ptr::null_mut();
-        self.count.store(0, Ordering::Relaxed);
-    }
-
-    fn clear_with_ref_release(&mut self) {
-        let mut cursor = self.head;
-        while !cursor.is_null() {
-            let next = unsafe { (*cursor).next_ready };
-            unsafe {
-                (*cursor).next_ready = ptr::null_mut();
-                (*cursor).dec_ref();
-            }
-            cursor = next;
+    /// Drop every linked task, decrementing each one's refcount as we
+    /// pop. Used during scheduler shutdown / per-CPU reinitialisation.
+    fn clear_with_ref_release(&self) {
+        while let Some(node) = self.list.pop() {
+            let _ = task_dec_ref(node.as_ptr());
         }
-        self.init();
     }
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
-        self.count.load(Ordering::Relaxed) == 0
+        self.list.is_empty()
     }
 
     fn len(&self) -> u32 {
-        self.count.load(Ordering::Relaxed)
+        self.list.len() as u32
     }
 
+    #[allow(dead_code)]
     fn contains(&self, task: *mut Task) -> bool {
-        let mut cursor = self.head;
-        while !cursor.is_null() {
-            if cursor == task {
-                return true;
-            }
-            cursor = unsafe { (*cursor).next_ready };
-        }
-        false
+        self.list.iter().any(|n| n.as_ptr() == task)
     }
 
-    fn enqueue(&mut self, task: *mut Task) -> i32 {
-        if task.is_null() {
+    fn enqueue(&self, task: *mut Task) -> i32 {
+        let Some(node) = NonNull::new(task) else {
             return -1;
-        }
-        if self.contains(task) {
+        };
+        // Legacy ReadyQueue tolerated a re-push by no-op; mirror that
+        // here. `IntrusiveLinkedList::push` rejects an already-linked
+        // node with `AlreadyLinked`, which we treat as "already queued
+        // somewhere — leave it alone" for parity.
+        if self.list.push(node).is_err() {
             return 0;
         }
-        unsafe { (*task).next_ready = ptr::null_mut() };
-        if self.head.is_null() {
-            self.head = task;
-            self.tail = task;
-        } else {
-            unsafe { (*self.tail).next_ready = task };
-            self.tail = task;
-        }
-        self.count.fetch_add(1, Ordering::Relaxed);
-        unsafe {
-            (*task).inc_ref();
-        }
+        let _ = task_inc_ref(task);
         0
     }
 
-    fn dequeue(&mut self) -> *mut Task {
-        if self.is_empty() {
-            return ptr::null_mut();
-        }
-        let task = self.head;
-        unsafe {
-            self.head = (*task).next_ready;
-            if self.head.is_null() {
-                self.tail = ptr::null_mut();
+    fn dequeue(&self) -> *mut Task {
+        match self.list.pop() {
+            Some(node) => {
+                let raw = node.as_ptr();
+                let _ = task_dec_ref(raw);
+                raw
             }
-            (*task).next_ready = ptr::null_mut();
+            None => ptr::null_mut(),
         }
-        self.count.fetch_sub(1, Ordering::Relaxed);
-        unsafe {
-            (*task).dec_ref();
-        }
-        task
     }
 
-    fn remove(&mut self, task: *mut Task) -> i32 {
-        if task.is_null() || self.is_empty() {
+    fn remove(&self, task: *mut Task) -> i32 {
+        let Some(node) = NonNull::new(task) else {
+            return -1;
+        };
+        if self.list.remove(node).is_err() {
             return -1;
         }
-        let mut prev: *mut Task = ptr::null_mut();
-        let mut cursor = self.head;
-        while !cursor.is_null() {
-            if cursor == task {
-                if !prev.is_null() {
-                    unsafe { (*prev).next_ready = (*cursor).next_ready };
-                } else {
-                    self.head = unsafe { (*cursor).next_ready };
-                }
-                if self.tail == cursor {
-                    self.tail = prev;
-                }
-                unsafe { (*cursor).next_ready = ptr::null_mut() };
-                self.count.fetch_sub(1, Ordering::Relaxed);
-                unsafe {
-                    (*cursor).dec_ref();
-                }
-                return 0;
-            }
-            prev = cursor;
-            cursor = unsafe { (*cursor).next_ready };
-        }
-        -1
+        let _ = task_dec_ref(task);
+        0
     }
 
-    fn steal_from_tail(&mut self) -> Option<*mut Task> {
-        if self.count.load(Ordering::Relaxed) <= 1 {
+    fn steal_from_tail(&self) -> Option<*mut Task> {
+        if self.list.len() <= 1 {
             return None;
         }
-
-        let mut prev: *mut Task = ptr::null_mut();
-        let mut cursor = self.head;
-
-        while !cursor.is_null() {
-            let next = unsafe { (*cursor).next_ready };
-            if next.is_null() {
-                break;
-            }
-            prev = cursor;
-            cursor = next;
-        }
-
-        if cursor.is_null() || prev.is_null() {
+        // Snapshot iterator: walk to the last node, then remove it.
+        let last = self.list.iter().last()?;
+        if self.list.remove(last).is_err() {
             return None;
         }
-
-        unsafe { (*prev).next_ready = ptr::null_mut() };
-        self.tail = prev;
-        self.count.fetch_sub(1, Ordering::Relaxed);
-        unsafe {
-            (*cursor).dec_ref();
-        }
-
-        Some(cursor)
+        let raw = last.as_ptr();
+        let _ = task_dec_ref(raw);
+        Some(raw)
     }
 }
 
@@ -208,11 +145,16 @@ const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 
 #[repr(C, align(64))]
 pub struct PerCpuScheduler {
-    pub cpu_id: usize,
-    ready_queues: UnsafeCell<[ReadyQueue; NUM_PRIORITY_LEVELS]>,
+    /// Owning CPU id. Written once during `init`, read everywhere via
+    /// the `cpu_id` accessor; backed by `AtomicUsize` so the read path
+    /// stays in safe Rust without an `UnsafeCell` carve-out.
+    cpu_id_atom: AtomicUsize,
+    ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
     queue_lock: SpinLock<()>,
     pub enabled: AtomicBool,
-    pub time_slice: u16,
+    /// Default time slice in ticks. Same `init`-once / read-everywhere
+    /// pattern as `cpu_id_atom`.
+    time_slice_atom: AtomicU32,
     pub total_switches: AtomicU64,
     pub total_preemptions: AtomicU64,
     pub total_ticks: AtomicU64,
@@ -220,23 +162,27 @@ pub struct PerCpuScheduler {
     pub total_yields: AtomicU64,
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
-    pub return_context: UnsafeCell<SwitchContext>,
+    pub return_context: SyncUnsafeCell<SwitchContext>,
     executing_task: AtomicBool,
     remote_inbox_head: AtomicPtr<Task>,
     inbox_count: AtomicU32,
 }
 
+// SAFETY: cross-CPU access to mutable fields is mediated by
+// `queue_lock` (ready queues + remote_inbox lock-free CAS protocol)
+// and the `enabled / initialized` atomics; per-CPU init writes
+// `return_context` once in single-threaded boot stage.
 unsafe impl Send for PerCpuScheduler {}
 unsafe impl Sync for PerCpuScheduler {}
 
 impl PerCpuScheduler {
     pub const fn new() -> Self {
         Self {
-            cpu_id: 0,
-            ready_queues: UnsafeCell::new([EMPTY_QUEUE; NUM_PRIORITY_LEVELS]),
+            cpu_id_atom: AtomicUsize::new(0),
+            ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
             queue_lock: SpinLock::new((), LOCK_LEVEL_SCHEDULER),
             enabled: AtomicBool::new(false),
-            time_slice: 10,
+            time_slice_atom: AtomicU32::new(10),
             total_switches: AtomicU64::new(0),
             total_preemptions: AtomicU64::new(0),
             total_ticks: AtomicU64::new(0),
@@ -244,11 +190,25 @@ impl PerCpuScheduler {
             total_yields: AtomicU64::new(0),
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
-            return_context: UnsafeCell::new(SwitchContext::zero()),
+            return_context: SyncUnsafeCell::new(SwitchContext::zero()),
             executing_task: AtomicBool::new(false),
             remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
             inbox_count: AtomicU32::new(0),
         }
+    }
+
+    /// Owning CPU id, set once during `init`.
+    #[inline]
+    pub fn cpu_id(&self) -> usize {
+        self.cpu_id_atom.load(Ordering::Relaxed)
+    }
+
+    /// Default time slice in ticks; rarely read on hot paths but kept
+    /// available so callers can derive per-CPU defaults.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn time_slice(&self) -> u16 {
+        self.time_slice_atom.load(Ordering::Relaxed) as u16
     }
 
     pub fn set_executing_task(&self, executing: bool) {
@@ -259,19 +219,15 @@ impl PerCpuScheduler {
         self.executing_task.load(Ordering::SeqCst)
     }
 
-    /// # Safety
-    /// Must be called exactly once per CPU during single-threaded init.
-    pub unsafe fn init(&self, cpu_id: usize) {
-        // SAFETY: called during single-threaded init before any concurrent access.
-        // cpu_id and time_slice are plain fields written only here; use raw pointer.
-        unsafe {
-            let ptr = self as *const Self as *mut Self;
-            (*ptr).cpu_id = cpu_id;
-            (*ptr).time_slice = 10;
-            let queues = &mut *self.ready_queues.get();
-            for queue in queues.iter_mut() {
-                queue.clear_with_ref_release();
-            }
+    /// Initialise this CPU's scheduler. Idempotent re-init across
+    /// test fixtures uses the same path; the only ordering contract
+    /// is that callers run this on the owning CPU during scheduler
+    /// bring-up before any task is enqueued onto it.
+    pub fn init(&self, cpu_id: usize) {
+        self.cpu_id_atom.store(cpu_id, Ordering::Relaxed);
+        self.time_slice_atom.store(10, Ordering::Relaxed);
+        for queue in &self.ready_queues {
+            queue.clear_with_ref_release();
         }
         self.enabled.store(false, Ordering::Relaxed);
         self.total_switches.store(0, Ordering::Relaxed);
@@ -301,17 +257,15 @@ impl PerCpuScheduler {
             );
             return -1;
         }
-        let priority = unsafe { (*task).priority as usize };
-        let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+        let Some(priority) = task_priority(task) else {
+            return -1;
+        };
+        let idx = (priority as usize).min(NUM_PRIORITY_LEVELS - 1);
 
-        unsafe {
-            (*task).last_cpu = self.cpu_id as u8;
-        }
+        task_set_last_cpu(task, self.cpu_id() as u8);
 
         let _guard = self.queue_lock.lock();
-        // SAFETY: queue_lock held, exclusive access to ready_queues
-        let queues = unsafe { &mut *self.ready_queues.get() };
-        queues[idx].enqueue(task)
+        self.ready_queues[idx].enqueue(task)
     }
 
     pub fn dequeue_highest_priority(&self) -> *mut Task {
@@ -324,9 +278,7 @@ impl PerCpuScheduler {
             return ptr::null_mut();
         }
         let _guard = self.queue_lock.lock();
-        // SAFETY: queue_lock held, exclusive access to ready_queues
-        let queues = unsafe { &mut *self.ready_queues.get() };
-        for queue in queues.iter_mut() {
+        for queue in &self.ready_queues {
             let task = queue.dequeue();
             if !task.is_null() {
                 return task;
@@ -339,27 +291,24 @@ impl PerCpuScheduler {
         if task.is_null() {
             return -1;
         }
-        let priority = unsafe { (*task).priority as usize };
-        let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+        let Some(priority) = task_priority(task) else {
+            return -1;
+        };
+        let idx = (priority as usize).min(NUM_PRIORITY_LEVELS - 1);
         let _guard = self.queue_lock.lock();
-        // SAFETY: queue_lock held, exclusive access to ready_queues
-        let queues = unsafe { &mut *self.ready_queues.get() };
-        queues[idx].remove(task)
+        self.ready_queues[idx].remove(task)
     }
 
     pub fn total_ready_count(&self) -> u32 {
         let _guard = self.queue_lock.lock();
-        // SAFETY: queue_lock held, read-only access to ready_queues
-        let queues = unsafe { &*self.ready_queues.get() };
-        queues.iter().map(|q| q.len()).sum()
+        self.ready_queues.iter().map(|q| q.len()).sum()
     }
 
     /// Returns the effective load on this CPU: queued tasks plus one if a
     /// non-idle task is currently running.  Lock-free and approximate.
     /// Mirrors Linux's `rq->nr_running` which includes the running task.
     pub fn effective_load(&self) -> u32 {
-        let queues = unsafe { &*self.ready_queues.get() };
-        let queued: u32 = queues.iter().map(|q| q.len()).sum();
+        let queued: u32 = self.ready_queues.iter().map(|q| q.len()).sum();
         let inbox = self.inbox_count.load(Ordering::Relaxed);
         // push_remote_wake() links into remote_inbox_head BEFORE
         // incrementing inbox_count, so treat a non-null head as at
@@ -369,8 +318,9 @@ impl PerCpuScheduler {
         } else {
             inbox
         };
-        let current = slopos_arch::pcr::get_current_task_for(self.cpu_id) as *mut Task;
-        let idle = slopos_arch::pcr::get_idle_task(self.cpu_id) as *mut Task;
+        let cpu_id = self.cpu_id();
+        let current = slopos_arch::pcr::get_current_task_for(cpu_id) as *mut Task;
+        let idle = slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task;
         let running_real = !current.is_null()
             && !crate::scheduler::safestack_rt::is_bootstrap_task_ptr(current)
             && current != idle;
@@ -392,9 +342,7 @@ impl PerCpuScheduler {
 
     pub fn steal_task(&self) -> Option<*mut Task> {
         let _guard = self.queue_lock.lock();
-        // SAFETY: queue_lock held, exclusive access to ready_queues
-        let queues = unsafe { &mut *self.ready_queues.get() };
-        for queue in queues.iter_mut().rev() {
+        for queue in self.ready_queues.iter().rev() {
             if let Some(task) = queue.steal_from_tail() {
                 return Some(task);
             }
@@ -443,26 +391,28 @@ impl PerCpuScheduler {
     /// This is a lock-free MPSC (multi-producer single-consumer) push.
     /// Can be called from ANY CPU safely.
     pub fn push_remote_wake(&self, task: *mut Task) {
-        if task.is_null() {
+        let Some(node) = NonNull::new(task) else {
             return;
-        }
+        };
 
         // Acquire inbox ownership before publishing task into the lock-free list.
         // This prevents a drain from observing the task and dropping the reference
         // before the producer has incremented refcnt.
-        unsafe {
-            (*task).last_cpu = self.cpu_id as u8;
-            (*task).inc_ref();
-        }
+        task_set_last_cpu(task, self.cpu_id() as u8);
+        let _ = task_inc_ref(task);
 
         // Lock-free push using CAS loop (Treiber stack pattern)
         loop {
             // Load current head
             let old_head = self.remote_inbox_head.load(Ordering::Acquire);
 
-            // Point our next to current head
+            // Point our next to current head — the `next_inbox` atomic
+            // is `&self`-mutable so the borrow stays safe.
+            // SAFETY: `node` is a non-null `*mut Task`; the underlying
+            // Task is pool-pinned, the AtomicPtr is internally
+            // synchronised.
             unsafe {
-                (*task).next_inbox.store(old_head, Ordering::Relaxed);
+                node.as_ref().next_inbox.store(old_head, Ordering::Relaxed);
             }
 
             // Try to become new head
@@ -501,7 +451,11 @@ impl PerCpuScheduler {
 
         let mut reversed: *mut Task = ptr::null_mut();
         while !current.is_null() {
+            // SAFETY: `current` was just observed via the inbox-head
+            // CAS; it points at a pool-pinned Task whose `next_inbox`
+            // atomic remains valid for this drain.
             let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
+            // SAFETY: as above; same access window.
             unsafe {
                 (*current).next_inbox.store(reversed, Ordering::Relaxed);
             }
@@ -512,32 +466,28 @@ impl PerCpuScheduler {
 
         current = reversed;
         while !current.is_null() {
+            // SAFETY: `current` is a pool-pinned Task pointer.
             let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
 
+            // SAFETY: as above; clear the inbox link before re-queue.
             unsafe {
                 (*current)
                     .next_inbox
                     .store(ptr::null_mut(), Ordering::Release);
             }
 
-            let should_enqueue = unsafe { (*current).status() == TaskStatus::Ready };
+            let should_enqueue = task_status(current) == Some(TaskStatus::Ready);
             if should_enqueue {
-                unsafe {
-                    (*current).last_cpu = self.cpu_id as u8;
-                }
-                let priority = unsafe { (*current).priority as usize };
+                task_set_last_cpu(current, self.cpu_id() as u8);
+                let priority = task_priority(current).map(|p| p as usize).unwrap_or(0);
                 let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
 
                 let _guard = self.queue_lock.lock();
-                // SAFETY: queue_lock held
-                let queues = unsafe { &mut *self.ready_queues.get() };
-                queues[idx].enqueue(current);
+                self.ready_queues[idx].enqueue(current);
                 drop(_guard);
             }
 
-            unsafe {
-                (*current).dec_ref();
-            }
+            let _ = task_dec_ref(current);
 
             current = next;
         }
@@ -551,13 +501,15 @@ impl PerCpuScheduler {
             .swap(ptr::null_mut(), Ordering::AcqRel);
         let mut drained = 0u32;
         while !cursor.is_null() {
+            // SAFETY: `cursor` is a pool-pinned Task pointer.
             let next = unsafe { (*cursor).next_inbox.load(Ordering::Acquire) };
+            // SAFETY: as above; clear the inbox link.
             unsafe {
                 (*cursor)
                     .next_inbox
                     .store(ptr::null_mut(), Ordering::Release);
-                (*cursor).dec_ref();
             }
+            let _ = task_dec_ref(cursor);
             cursor = next;
             drained = drained.saturating_add(1);
         }
@@ -596,18 +548,38 @@ static CPU_SCHEDULERS: SyncUnsafeCell<[PerCpuScheduler; MAX_CPUS]> = SyncUnsafeC
     [INIT; MAX_CPUS]
 });
 
+/// Bounds-checked accessor over the per-CPU scheduler array.
+///
+/// Centralises the single `unsafe { &*CPU_SCHEDULERS.get() }` deref
+/// — every caller that previously poked the `SyncUnsafeCell`
+/// directly now goes through this wrapper. The returned `&'static`
+/// borrow is sound because:
+///
+/// - the storage is a `'static` array; addresses do not move,
+/// - bounds are checked here before the deref,
+/// - all interior mutation lives behind `AtomicXxx` /
+///   `IntrusiveLinkedList` / `queue_lock`, never via `&mut self`.
+#[inline]
+fn cpu_scheduler(cpu_id: usize) -> Option<&'static PerCpuScheduler> {
+    if cpu_id >= MAX_CPUS {
+        return None;
+    }
+    // SAFETY: bounds checked; the SyncUnsafeCell is a `'static`
+    // array and we only hand out a shared borrow.
+    let arr = unsafe { &*CPU_SCHEDULERS.get() };
+    Some(&arr[cpu_id])
+}
+
 /// `init_all_percpu_schedulers` init-once gate. `pub(crate)` so the
 /// `test_hermetic::SchedulersInitFlag` HermeticState impl can
 /// snapshot/restore it.
 pub(crate) static SCHEDULERS_INIT: InitFlag = InitFlag::new();
 
 pub fn init_percpu_scheduler(cpu_id: usize) {
-    if cpu_id >= MAX_CPUS {
+    let Some(sched) = cpu_scheduler(cpu_id) else {
         return;
-    }
-    unsafe {
-        (*CPU_SCHEDULERS.get())[cpu_id].init(cpu_id);
-    }
+    };
+    sched.init(cpu_id);
     klog_debug!("SCHED: Per-CPU scheduler initialized for CPU {}", cpu_id);
 }
 
@@ -617,32 +589,26 @@ pub fn init_all_percpu_schedulers() {
     }
 
     for cpu_id in 0..MAX_CPUS {
-        unsafe {
-            (*CPU_SCHEDULERS.get())[cpu_id].init(cpu_id);
+        if let Some(sched) = cpu_scheduler(cpu_id) {
+            sched.init(cpu_id);
         }
     }
 }
 
 pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {
-    if cpu_id >= MAX_CPUS {
-        return false;
-    }
-    unsafe { (*CPU_SCHEDULERS.get())[cpu_id].is_initialized() }
+    cpu_scheduler(cpu_id)
+        .map(|s| s.is_initialized())
+        .unwrap_or(false)
 }
 
 pub fn with_local_scheduler<R>(f: impl FnOnce(&PerCpuScheduler) -> R) -> R {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    // SAFETY: cpu_id < MAX_CPUS guaranteed by get_current_cpu; shared ref only
-    let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
+    let sched = cpu_scheduler(cpu_id).expect("get_current_cpu() returned an out-of-range CPU id");
     f(sched)
 }
 
 pub fn with_cpu_scheduler<R>(cpu_id: usize, f: impl FnOnce(&PerCpuScheduler) -> R) -> Option<R> {
-    if cpu_id >= MAX_CPUS {
-        return None;
-    }
-    // SAFETY: bounds checked; shared ref only — interior mutability handles mutation
-    let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
+    let sched = cpu_scheduler(cpu_id)?;
     if !sched.is_initialized() {
         return None;
     }
@@ -654,10 +620,8 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
         return -1;
     }
 
-    unsafe {
-        if (*task).status() != TaskStatus::Ready {
-            return -1;
-        }
+    if task_status(task) != Some(TaskStatus::Ready) {
+        return -1;
     }
 
     with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)).unwrap_or(-1)
@@ -964,12 +928,9 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
 /// Get the return context for an AP to use when no tasks are available.
 /// This is stored in the per-CPU scheduler and initialized during AP startup.
 pub fn get_ap_return_context(cpu_id: usize) -> *mut SwitchContext {
-    if cpu_id >= MAX_CPUS {
-        return ptr::null_mut();
-    }
-    // SAFETY: return_context is only written during single-threaded init
-    // and read by the owning CPU
-    unsafe { (*CPU_SCHEDULERS.get())[cpu_id].return_context.get() }
+    cpu_scheduler(cpu_id)
+        .map(|sched| sched.return_context.get())
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Check if the given task is the idle task for any CPU
@@ -1069,12 +1030,11 @@ pub fn clear_cpu_queues(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-    // SAFETY: bounds checked; interior mutability via queue_lock + UnsafeCell
-    let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
+    let Some(sched) = cpu_scheduler(cpu_id) else {
+        return;
+    };
     let _guard = sched.queue_lock.lock();
-    // SAFETY: queue_lock held
-    let queues = unsafe { &mut *sched.ready_queues.get() };
-    for queue in queues.iter_mut() {
+    for queue in &sched.ready_queues {
         queue.clear_with_ref_release();
     }
     drop(_guard);

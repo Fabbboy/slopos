@@ -200,3 +200,37 @@ fn pop_then_push_clears_link_so_node_can_be_reused() {
         .collect();
     assert_eq!(v, [2, 1]);
 }
+
+#[test]
+fn link_load_returns_null_when_unlinked() {
+    let n = Node::new(42);
+    assert!(n.link.load().is_null());
+    assert!(!n.link.has_next());
+}
+
+#[test]
+fn link_store_round_trip() {
+    let a = Node::new(1);
+    let b = Node::new(2);
+    a.link.store(Box::as_ref(&b) as *const _ as *mut Node);
+    assert!(a.link.has_next());
+    assert_eq!(a.link.load(), Box::as_ref(&b) as *const _ as *mut Node);
+    a.link.reset();
+    assert!(a.link.load().is_null());
+    assert!(!a.link.has_next());
+}
+
+#[test]
+fn link_load_observes_push_state() {
+    let list = IntrusiveLinkedList::<Node>::new();
+    let a = Node::new(1);
+    let b = Node::new(2);
+    list.push(nn(&a)).unwrap();
+    list.push(nn(&b)).unwrap();
+    // After push, a's link points at b; b is the tail (null).
+    assert_eq!(a.link.load(), Box::as_ref(&b) as *const _ as *mut Node);
+    assert!(b.link.load().is_null());
+    // pop(a) clears a's link slot.
+    list.pop().unwrap();
+    assert!(a.link.load().is_null());
+}

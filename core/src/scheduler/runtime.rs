@@ -92,12 +92,11 @@ pub fn scheduler_run_bottom_halves() {
 
 pub fn spawn_kernel_task_from_driver(
     name: *const c_char,
-    entry: extern "C" fn(*mut c_void),
+    entry: TaskEntry,
     arg: *mut c_void,
     priority: u8,
 ) -> u32 {
-    let entry_fn: TaskEntry = unsafe { core::mem::transmute(entry as *const ()) };
-    let task_id = task_create(name, entry_fn, arg, priority, TASK_FLAG_KERNEL_MODE);
+    let task_id = task_create(name, entry, arg, priority, TASK_FLAG_KERNEL_MODE);
     if task_id == INVALID_TASK_ID {
         return task_id;
     }
@@ -111,7 +110,7 @@ pub fn spawn_kernel_task_from_driver(
     task_id
 }
 
-fn unified_idle_loop(_: *mut c_void) {
+extern "C" fn unified_idle_loop(_: *mut c_void) {
     loop {
         let mut any_work = false;
         if let Some(mutex) = IDLE_CBS.get() {
@@ -182,15 +181,13 @@ fn idle_task_name(cpu: usize) -> [u8; super::task::TASK_NAME_MAX_LEN] {
 
 pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     let name = idle_task_name(cpu_id);
-    let idle_task_id = unsafe {
-        crate::task::task_create(
-            name.as_ptr() as *const i8,
-            core::mem::transmute(unified_idle_loop as *const ()),
-            ptr::null_mut(),
-            TaskPriority::Idle.as_u8(),
-            TASK_FLAG_KERNEL_MODE,
-        )
-    };
+    let idle_task_id = crate::task::task_create(
+        name.as_ptr() as *const i8,
+        unified_idle_loop,
+        ptr::null_mut(),
+        TaskPriority::Idle.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
     if idle_task_id == INVALID_TASK_ID {
         return -1;
     }
@@ -199,10 +196,11 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
         return -1;
     }
 
-    unsafe {
-        (*idle_task).cpu_affinity = per_cpu::affinity_mask_for_cpu(cpu_id);
-        (*idle_task).last_cpu = cpu_id as u8;
-    }
+    super::task::task_install_idle_affinity(
+        idle_task,
+        per_cpu::affinity_mask_for_cpu(cpu_id),
+        cpu_id as u8,
+    );
 
     super::scheduler::install_idle_task(cpu_id, idle_task);
 
@@ -223,7 +221,7 @@ pub(crate) fn resolve_idle_stack_for_cpu(
         return Err(IdleStackResolveError::MissingIdleTask);
     }
 
-    let stack_top = unsafe { (*idle_task).kernel_stack_top };
+    let stack_top = super::task::task_kernel_stack_top(idle_task).unwrap_or(0);
     if stack_top == 0 {
         return Err(IdleStackResolveError::MissingKernelStack);
     }

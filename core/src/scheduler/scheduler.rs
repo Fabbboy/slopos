@@ -44,10 +44,14 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_get_info, task_is_blocked,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
+    task_fs_base, task_get_info, task_has_flag, task_id_of, task_inc_ref, task_is_blocked,
     task_is_invalid, task_is_ready, task_is_running, task_is_terminated, task_is_will_block,
-    task_pointer_is_valid, task_record_context_switch, task_record_yield, task_set_state,
-    task_try_transition_from,
+    task_kernel_stack_top, task_name_looks_idle, task_pgid, task_pointer_is_valid, task_priority,
+    task_process_id, task_record_context_switch, task_record_yield, task_set_controlling_tty,
+    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
+    task_set_time_slice_remaining, task_set_waiting_on, task_sid, task_status, task_time_slice,
+    task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu, task_waiting_on_cas,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -112,17 +116,12 @@ fn reset_task_quantum(task: *mut Task) {
     if task.is_null() {
         return;
     }
-    let slice = unsafe {
-        if (*task).time_slice != 0 {
-            (*task).time_slice
-        } else {
-            get_default_time_slice()
-        }
+    let slice = match task_time_slice(task) {
+        Some(0) | None => get_default_time_slice(),
+        Some(s) => s,
     };
-    unsafe {
-        (*task).time_slice = slice;
-        (*task).time_slice_remaining = slice;
-    }
+    task_set_time_slice(task, slice);
+    task_set_time_slice_remaining(task, slice);
 }
 
 #[inline]
@@ -156,9 +155,7 @@ fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
         // PCR is the source of truth for SafeStack readers.
         if !current.is_null() {
             slopos_arch::pcr::set_current_task(current as *mut ());
-            unsafe {
-                (*current).set_status(TaskStatus::Running);
-            }
+            task_set_status(current, TaskStatus::Running);
         }
     }
 
@@ -201,7 +198,11 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
 
     // Keep PCR.syscall_pid in sync so copy_from_user always resolves
     // the correct process page directory, even after preemption.
-    let pid = unsafe { (*task).process_id };
+    let pid = task_process_id(task).unwrap_or(INVALID_PROCESS_ID);
+    // SAFETY: `current_pcr` is `unsafe fn` because the per-CPU PCR
+    // pointer is only valid on the current CPU; `dispatch` runs with
+    // interrupts disabled on the target CPU per the function's
+    // preconditions, so the PCR is stable for this read+store window.
     unsafe {
         slopos_arch::pcr::current_pcr()
             .syscall_pid
@@ -213,17 +214,15 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     });
 
     // Lifecycle state transition — (Ready|Running) → Running.
-    unsafe {
-        let current_status = (*task).status();
-        if current_status != TaskStatus::Ready && current_status != TaskStatus::Running {
-            klog_info!(
-                "dispatch: unexpected state {} for task {}",
-                current_status.as_u8() as u32,
-                (*task).task_id
-            );
-        }
-        (*task).set_status(TaskStatus::Running);
+    let current_status = task_status(task);
+    if current_status != Some(TaskStatus::Ready) && current_status != Some(TaskStatus::Running) {
+        klog_info!(
+            "dispatch: unexpected state {} for task {}",
+            current_status.map(|s| s.as_u8()).unwrap_or(0xFF) as u32,
+            task_id_of(task).unwrap_or(INVALID_TASK_ID)
+        );
     }
+    task_set_status(task, TaskStatus::Running);
 }
 
 /// Install `task` as `cpu_id`'s idle task.  Writes `PCR.idle_task` —
@@ -244,18 +243,17 @@ fn requeue_running_task(cpu_id: usize, current: *mut Task) {
         return;
     }
 
-    unsafe {
-        // Requeue if Running OR WillBlock.  A WillBlock task is still
-        // executing its pre-block critical section (condition check,
-        // wait-queue enqueue).  If preempted here it must go back to
-        // the Ready queue so it can finish and call block_current_task.
-        if (task_is_running(current) || task_is_will_block(current))
-            && task_set_state((*current).task_id, TaskStatus::Ready) == 0
-        {
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.enqueue_local(current);
-            });
-        }
+    // Requeue if Running OR WillBlock.  A WillBlock task is still
+    // executing its pre-block critical section (condition check,
+    // wait-queue enqueue).  If preempted here it must go back to
+    // the Ready queue so it can finish and call block_current_task.
+    let id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
+    if (task_is_running(current) || task_is_will_block(current))
+        && task_set_state(id, TaskStatus::Ready) == 0
+    {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.enqueue_local(current);
+        });
     }
 }
 
@@ -270,40 +268,19 @@ fn switch_to_kernel_address_space(_task: *mut Task) {
 }
 
 #[inline]
-fn task_name_looks_idle(task: *mut Task) -> bool {
-    if task.is_null() {
-        return false;
-    }
-
-    unsafe {
-        let name = &(*task).name;
-        if name[0] != b'i' || name[1] != b'd' || name[2] != b'l' || name[3] != b'e' {
-            return false;
-        }
-        match name[4] {
-            0 | b'_' => true,
-            b'/' => name[5].is_ascii_digit(),
-            _ => false,
-        }
-    }
-}
-
-#[inline]
 fn task_is_idle_candidate(task: *mut Task) -> bool {
     if task.is_null() || !task_pointer_is_valid(task) {
         return false;
     }
 
-    unsafe {
-        if (*task).task_id == INVALID_TASK_ID {
-            return false;
-        }
-        if (*task).priority != TaskPriority::Idle {
-            return false;
-        }
-        if ((*task).flags & TASK_FLAG_KERNEL_MODE) == 0 {
-            return false;
-        }
+    if task_id_of(task) == Some(INVALID_TASK_ID) {
+        return false;
+    }
+    if task_priority(task) != Some(TaskPriority::Idle) {
+        return false;
+    }
+    if !task_has_flag(task, TASK_FLAG_KERNEL_MODE) {
+        return false;
     }
 
     task_name_looks_idle(task)
@@ -355,28 +332,19 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     }
 
     // --- FPU save (prev) ---
-    if !prev.is_null() {
+    if let Some(prev_fpu) = task_fpu_state_mut(prev) {
         // SAFETY: caller serialises (irqs disabled).  Inv. 8 — prev
         // is currently on this CPU and only this CPU.
         unsafe {
-            fpu_xsave(&raw mut (*prev).fpu_state, xcr0);
+            fpu_xsave(prev_fpu as *mut _, xcr0);
         }
     }
 
     // --- TLB / address-space switch ---
-    let is_user_mode = unsafe { (*next).flags & TASK_FLAG_USER_MODE != 0 };
-    let old_pid = if !prev.is_null() {
-        unsafe { (*prev).process_id }
-    } else {
-        INVALID_PROCESS_ID
-    };
+    let is_user_mode = task_has_flag(next, TASK_FLAG_USER_MODE);
+    let old_pid = task_process_id(prev).unwrap_or(INVALID_PROCESS_ID);
     let new_pid = if is_user_mode {
-        let pid = unsafe { (*next).process_id };
-        if pid != INVALID_PROCESS_ID {
-            pid
-        } else {
-            INVALID_PROCESS_ID
-        }
+        task_process_id(next).unwrap_or(INVALID_PROCESS_ID)
     } else {
         INVALID_PROCESS_ID
     };
@@ -388,24 +356,23 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     }
 
     // --- FS_BASE ---
-    if is_user_mode {
-        let fs = unsafe { (*next).fs_base };
-        if fs == 0 || slopos_abi::addr::VirtAddr::is_canonical(fs) {
-            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
+    let fs = if is_user_mode {
+        let raw = task_fs_base(next).unwrap_or(0);
+        if raw == 0 || slopos_abi::addr::VirtAddr::is_canonical(raw) {
+            raw
         } else {
-            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, 0);
+            0
         }
     } else {
-        slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, 0);
-    }
+        0
+    };
+    slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
 
     // --- TSS RSP0 ---
     let kernel_rsp = if is_user_mode {
-        let kst = unsafe { (*next).kernel_stack_top };
-        if kst != 0 {
-            kst
-        } else {
-            kernel_stack_top() as u64
+        match task_kernel_stack_top(next) {
+            Some(kst) if kst != 0 => kst,
+            _ => kernel_stack_top() as u64,
         }
     } else {
         kernel_stack_top() as u64
@@ -425,7 +392,7 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     // this hot path; the per-CPU ASID pool retires when the legacy
     // paging surface deletes.
     let _ = cpu_id;
-    let next_pid = unsafe { (*next).process_id };
+    let next_pid = task_process_id(next).unwrap_or(INVALID_PROCESS_ID);
     if next_pid != INVALID_PROCESS_ID {
         process_vm_sync_kernel_mappings(next_pid);
         // SAFETY: irqs disabled by caller (`prepare_switch_to`'s
@@ -445,8 +412,9 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     // --- FPU restore (next) ---
     // SAFETY: caller serialises (irqs disabled).  Inv. 8 — next is
     // becoming the running task on this CPU and no other CPU touches it.
+    let next_fpu = task_fpu_state_mut(next).expect("next must be non-null");
     unsafe {
-        fpu_xrstor(&raw const (*next).fpu_state, xcr0);
+        fpu_xrstor(next_fpu as *const _, xcr0);
     }
 }
 
@@ -456,52 +424,59 @@ fn ensure_idle_switch_ctx_valid(idle_task: *mut Task) -> bool {
     if idle_task.is_null() {
         return false;
     }
-    unsafe {
-        let rip = (*idle_task).switch_ctx.rip;
-        let rsp = (*idle_task).switch_ctx.rsp;
+    // SAFETY: caller pre-checked non-null; switch_ctx is an in-Task
+    // field, naturally aligned u64 reads on x86_64 are atomic.
+    let (rip, rsp) = unsafe {
+        let ctx = &raw const (*idle_task).switch_ctx;
+        (
+            core::ptr::read_unaligned(&raw const (*ctx).rip),
+            core::ptr::read_unaligned(&raw const (*ctx).rsp),
+        )
+    };
 
-        let (text_start, text_end) = kernel_text_range();
-        let rip_ok = rip >= text_start && rip < text_end;
-        let rsp_ok = rsp >= USER_SPACE_TOP;
+    let (text_start, text_end) = kernel_text_range();
+    let rip_ok = rip >= text_start && rip < text_end;
+    let rsp_ok = rsp >= USER_SPACE_TOP;
 
-        if rip_ok && rsp_ok {
-            return true;
-        }
-
-        klog_info!(
-            "SCHED: CPU {} idle task {} has corrupt switch_ctx: rip=0x{:x} (ok={}) rsp=0x{:x} (ok={}) — refusing switch",
-            slopos_arch::pcr::get_current_cpu(),
-            (*idle_task).task_id,
-            rip,
-            rip_ok,
-            rsp,
-            rsp_ok,
-        );
-        false
+    if rip_ok && rsp_ok {
+        return true;
     }
+
+    klog_info!(
+        "SCHED: CPU {} idle task {} has corrupt switch_ctx: rip=0x{:x} (ok={}) rsp=0x{:x} (ok={}) — refusing switch",
+        slopos_arch::pcr::get_current_cpu(),
+        task_id_of(idle_task).unwrap_or(INVALID_TASK_ID),
+        rip,
+        rip_ok,
+        rsp,
+        rsp_ok,
+    );
+    false
 }
 
 fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mut Task) {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(current, idle_task, timestamp);
 
-    unsafe {
-        // Validate the idle context BEFORE publishing it as current_task.
-        // Otherwise, other CPUs could observe current_task pointing at an
-        // unusable idle context if validation fails.
-        if !ensure_idle_switch_ctx_valid(idle_task) {
-            klog_info!(
-                "SCHED: CPU {} cannot recover idle switch_ctx for task {}",
-                cpu_id,
-                (*idle_task).task_id
-            );
-            return;
-        }
+    // Validate the idle context BEFORE publishing it as current_task.
+    // Otherwise, other CPUs could observe current_task pointing at an
+    // unusable idle context if validation fails.
+    if !ensure_idle_switch_ctx_valid(idle_task) {
+        klog_info!(
+            "SCHED: CPU {} cannot recover idle switch_ctx for task {}",
+            cpu_id,
+            task_id_of(idle_task).unwrap_or(INVALID_TASK_ID)
+        );
+        return;
     }
 
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
+    // SAFETY: caller serialises (irqs disabled).  prepare_switch_to
+    // and switch_registers both operate on the now-installed dispatch
+    // target; the next-task switch_ctx pointer's stability is upheld
+    // by `task_pointer_is_valid` checks earlier in the call chain.
     unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
         prepare_switch_to(cpu_id, current, idle_task);
@@ -521,17 +496,16 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
 
 #[inline]
 fn task_has_no_preempt_flag(task: *mut Task) -> bool {
-    !task.is_null() && (unsafe { (*task).flags } & TASK_FLAG_NO_PREEMPT != 0)
+    task_has_flag(task, TASK_FLAG_NO_PREEMPT)
 }
 
 #[inline]
 fn consume_time_slice(current: *mut Task) -> bool {
-    unsafe {
-        if (*current).time_slice_remaining > 0 {
-            (*current).time_slice_remaining -= 1;
-        }
-        (*current).time_slice_remaining > 0
+    let remaining = task_time_slice_remaining(current).unwrap_or(0);
+    if remaining > 0 {
+        task_set_time_slice_remaining(current, remaining - 1);
     }
+    task_time_slice_remaining(current).unwrap_or(0) > 0
 }
 
 #[inline]
@@ -547,11 +521,7 @@ fn mark_preempt_if_ready(cpu_id: usize) {
 /// on CPU B while CPU A is still saving its registers → corruption.
 #[inline]
 fn wait_task_off_cpu(task: *mut Task) {
-    unsafe {
-        while (*task).on_cpu.load(Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-    }
+    task_wait_off_cpu(task);
 }
 
 pub fn schedule_task(task: *mut Task) -> c_int {
@@ -564,7 +534,7 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 
     wait_task_off_cpu(task);
 
-    if unsafe { (*task).time_slice_remaining } == 0 {
+    if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
     }
 
@@ -618,7 +588,7 @@ pub fn schedule_new_task(task: *mut Task) -> c_int {
     // New tasks have on_cpu=false from init, but be defensive.
     wait_task_off_cpu(task);
 
-    if unsafe { (*task).time_slice_remaining } == 0 {
+    if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
     }
 
@@ -682,63 +652,71 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         return;
     }
 
-    unsafe {
-        let pid = (*to_task).process_id;
-        let pid_ok = pid == INVALID_PROCESS_ID
-            || (pid as usize) < slopos_mm::memory_layout_defs::MAX_PROCESSES;
+    let pid = task_process_id(to_task).unwrap_or(INVALID_PROCESS_ID);
+    let pid_ok =
+        pid == INVALID_PROCESS_ID || (pid as usize) < slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
-        if !pid_ok {
-            klog_info!(
-                "SCHED: refusing to dispatch task {} with invalid pid {}",
-                (*to_task).task_id,
-                pid
-            );
-            let _ = crate::task::task_terminate((*to_task).task_id);
-            return;
-        }
+    let to_id = task_id_of(to_task).unwrap_or(INVALID_TASK_ID);
 
-        // Validate switch_ctx.rip — must be in kernel .text (the OSTD
-        // task-entry trampoline / user_task_first_run wrapper / a
-        // schedule resume point all live there).
-        let rip = (*to_task).switch_ctx.rip;
-        let rsp = (*to_task).switch_ctx.rsp;
-        let (text_start, text_end) = kernel_text_range();
-        if rip < text_start || rip >= text_end {
-            klog_info!(
-                "SCHED: refusing to dispatch task {} with switch_ctx.rip=0x{:x} outside .text (0x{:x}..0x{:x})",
-                (*to_task).task_id,
-                rip,
-                text_start,
-                text_end,
-            );
-            let _ = crate::task::task_terminate((*to_task).task_id);
-            return;
-        }
-        // RSP must be in kernel space (above USER_SPACE_TOP)
-        if rsp < USER_SPACE_TOP {
-            klog_info!(
-                "SCHED: refusing to dispatch task {} with switch_ctx.rsp=0x{:x} below kernel space",
-                (*to_task).task_id,
-                rsp,
-            );
-            let _ = crate::task::task_terminate((*to_task).task_id);
-            return;
-        }
+    if !pid_ok {
+        klog_info!(
+            "SCHED: refusing to dispatch task {} with invalid pid {}",
+            to_id,
+            pid
+        );
+        let _ = crate::task::task_terminate(to_id);
+        return;
+    }
 
-        // Validate CR3 for tasks with a process VM.  cr3_phys == 0 means
-        // the process VM was destroyed or never created — switching into
-        // that address space would fault immediately.
-        if pid != INVALID_PROCESS_ID {
-            let cr3_phys = process_vm_get_cr3_phys(pid);
-            if cr3_phys == 0 {
-                klog_info!(
-                    "SCHED: refusing to dispatch task {} (pid {}) with cr3_phys=0",
-                    (*to_task).task_id,
-                    pid,
-                );
-                let _ = crate::task::task_terminate((*to_task).task_id);
-                return;
-            }
+    // Validate switch_ctx.rip — must be in kernel .text (the OSTD
+    // task-entry trampoline / user_task_first_run wrapper / a
+    // schedule resume point all live there).
+    // SAFETY: `to_task` is non-null and was just validated through
+    // `task_pointer_is_valid`. The switch_ctx is an in-Task field;
+    // its u64 word reads are atomic on x86_64.
+    let (rip, rsp) = unsafe {
+        let ctx = &raw const (*to_task).switch_ctx;
+        (
+            core::ptr::read_unaligned(&raw const (*ctx).rip),
+            core::ptr::read_unaligned(&raw const (*ctx).rsp),
+        )
+    };
+    let (text_start, text_end) = kernel_text_range();
+    if rip < text_start || rip >= text_end {
+        klog_info!(
+            "SCHED: refusing to dispatch task {} with switch_ctx.rip=0x{:x} outside .text (0x{:x}..0x{:x})",
+            to_id,
+            rip,
+            text_start,
+            text_end,
+        );
+        let _ = crate::task::task_terminate(to_id);
+        return;
+    }
+    // RSP must be in kernel space (above USER_SPACE_TOP)
+    if rsp < USER_SPACE_TOP {
+        klog_info!(
+            "SCHED: refusing to dispatch task {} with switch_ctx.rsp=0x{:x} below kernel space",
+            to_id,
+            rsp,
+        );
+        let _ = crate::task::task_terminate(to_id);
+        return;
+    }
+
+    // Validate CR3 for tasks with a process VM.  cr3_phys == 0 means
+    // the process VM was destroyed or never created — switching into
+    // that address space would fault immediately.
+    if pid != INVALID_PROCESS_ID {
+        let cr3_phys = process_vm_get_cr3_phys(pid);
+        if cr3_phys == 0 {
+            klog_info!(
+                "SCHED: refusing to dispatch task {} (pid {}) with cr3_phys=0",
+                to_id,
+                pid,
+            );
+            let _ = crate::task::task_terminate(to_id);
+            return;
         }
     }
 
@@ -748,9 +726,7 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // Mark task as physically on this CPU.  schedule_task() spin-waits on
     // this flag before allowing the task to be dispatched elsewhere, preventing
     // the "wake-before-switch-complete" race (Linux p->on_cpu pattern).
-    unsafe {
-        (*to_task).on_cpu.store(true, Ordering::Release);
-    }
+    task_set_on_cpu(to_task, true);
 
     // Single source-of-truth install: writes PCR.current_task
     // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
@@ -758,6 +734,9 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     dispatch(cpu_id, to_task);
     slopos_ostd::sync::rcu_note_qs();
 
+    // SAFETY: caller serialises (irqs disabled). prepare_switch_to
+    // and switch_registers operate on the freshly-validated
+    // switch_ctx whose addresses are stable for this CPU.
     unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
         prepare_switch_to(cpu_id, from_task, to_task);
@@ -825,6 +804,9 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // Guard: if the task is still physically on another CPU (context switch
     // in progress), put it back and skip.  Matches the schedule_task() spin,
     // but here we re-enqueue instead of spinning (idle loop must not block).
+    // SAFETY: `next_task` is non-null and was just validated through
+    // `task_pointer_is_valid`; the `on_cpu` AtomicBool is internally
+    // synchronised.
     if unsafe { (*next_task).on_cpu.load(Ordering::Acquire) } {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             let _ = sched.enqueue_local(next_task);
@@ -835,7 +817,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     // Single-winner dispatch claim: only one CPU may run a READY task.
     // If another CPU already claimed it (or state changed), drop this dequeue.
-    let next_task_id = unsafe { (*next_task).task_id };
+    let next_task_id = task_id_of(next_task).unwrap_or(INVALID_TASK_ID);
     if task_set_state(next_task_id, TaskStatus::Running) != 0 {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
@@ -847,17 +829,13 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // Without this, refcnt is 0 after dequeue and a concurrent
     // task_terminate() on another CPU can kfree() the kernel stack
     // while we are still executing on it — a use-after-free.
-    unsafe {
-        (*next_task).inc_ref();
-    }
+    let _ = task_inc_ref(next_task);
 
     execute_task(cpu_id, idle_task, next_task);
 
     // Context switch OUT is complete — the task's registers are fully saved.
     // Clear on_cpu so schedule_task() on other CPUs can dispatch this task.
-    unsafe {
-        (*next_task).on_cpu.store(false, Ordering::Release);
-    }
+    task_set_on_cpu(next_task, false);
 
     let timestamp = kdiag_timestamp();
     task_record_context_switch(next_task, idle_task, timestamp);
@@ -871,24 +849,20 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // critical section (WillBlock).  Blocked/Terminated tasks are NOT
     // re-enqueued — they'll be woken by their respective event paths.
     // This runs AFTER on_cpu=false and context save, so no SMP race.
-    unsafe {
-        if !task_is_terminated(next_task)
-            && (task_is_running(next_task) || task_is_will_block(next_task))
-            && task_set_state((*next_task).task_id, TaskStatus::Ready) == 0
-        {
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                let _ = sched.enqueue_local(next_task);
-            });
-        }
+    if !task_is_terminated(next_task)
+        && (task_is_running(next_task) || task_is_will_block(next_task))
+        && task_set_state(next_task_id, TaskStatus::Ready) == 0
+    {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            let _ = sched.enqueue_local(next_task);
+        });
     }
 
     // Release the dispatch reference.  If the task was re-enqueued above,
     // the queue holds its own reference so the refcnt stays > 0.  If the
     // task was terminated/blocked, this may drop refcnt to 0, allowing the
     // zombie reaper to safely reclaim its resources on the next pass.
-    unsafe {
-        (*next_task).dec_ref();
-    }
+    let _ = super::task::task_dec_ref(next_task);
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_executing_task(false);
@@ -961,7 +935,7 @@ pub fn prepare_to_wait() {
     if task_is_blocked(current) || task_is_will_block(current) {
         return;
     }
-    let task_id = unsafe { (*current).task_id };
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
     let _ = task_set_state(task_id, TaskStatus::WillBlock);
 }
 
@@ -973,7 +947,7 @@ pub fn finish_wait() {
     if !task_is_will_block(current) {
         return;
     }
-    let task_id = unsafe { (*current).task_id };
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
     let _ = task_set_state(task_id, TaskStatus::Running);
 }
 
@@ -983,7 +957,7 @@ pub fn block_current_task() {
         return;
     }
 
-    let task_id = unsafe { (*current).task_id };
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
 
     // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
     // If a concurrent unblock_task already set Running, the CAS fails and
@@ -1000,28 +974,20 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     if current.is_null() {
         return -1;
     }
-    if task_id == INVALID_TASK_ID || unsafe { (*current).task_id } == task_id {
+    if task_id == INVALID_TASK_ID || task_id_of(current) == Some(task_id) {
         return -1;
     }
 
     let mut target: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut target) != 0 || target.is_null() {
-        unsafe {
-            (*current)
-                .waiting_on
-                .store(INVALID_TASK_ID, Ordering::Release)
-        };
+        task_set_waiting_on(current, INVALID_TASK_ID);
         return 0;
     }
-    unsafe { (*current).waiting_on.store(task_id, Ordering::Release) };
+    task_set_waiting_on(current, task_id);
     prepare_to_wait();
     block_current_task();
     finish_wait();
-    unsafe {
-        (*current)
-            .waiting_on
-            .store(INVALID_TASK_ID, Ordering::Release)
-    };
+    task_set_waiting_on(current, INVALID_TASK_ID);
     0
 }
 
@@ -1030,7 +996,7 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    let task_id = unsafe { (*task).task_id };
+    let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
 
     // Try WillBlock -> Running (task declared intent to block but hasn't yet).
     if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
@@ -1067,47 +1033,37 @@ pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
 
     // CAS: Atomically clear waiting_on only if it matches completed_id
     // Only ONE caller can succeed this CAS - the "winner"
-    let result = unsafe {
-        (*task).waiting_on.compare_exchange(
-            completed_id,      // expected: waiting on the completed task
-            INVALID_TASK_ID,   // desired: no longer waiting
-            Ordering::AcqRel,  // success: acquire prior writes, release our write
-            Ordering::Acquire, // failure: just acquire to see current value
-        )
-    };
+    let won = task_waiting_on_cas(task, completed_id, INVALID_TASK_ID).unwrap_or(false);
 
-    match result {
-        Ok(_) => {
-            // We won the CAS race. Now wake the task using the same safe
-            // transitions as unblock_task() to avoid the WillBlock race.
-            let task_id = unsafe { (*task).task_id };
+    if won {
+        // We won the CAS race. Now wake the task using the same safe
+        // transitions as unblock_task() to avoid the WillBlock race.
+        let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
 
-            // WillBlock -> Running: task declared intent but hasn't blocked yet.
-            // Cancel any pending sleep; no schedule_task (task is still running).
-            if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
-                super::sleep::cancel_sleep(task_id);
-                return true;
-            }
-
-            // Blocked -> Ready: task is fully blocked, wake it.
-            if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-                super::sleep::cancel_sleep(task_id);
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                schedule_task(task);
-                return true;
-            }
-
-            // Task is in some other state (Running, Ready, Terminated).
-            if task_is_terminated(task) || task_is_invalid(task) {
-                return false;
-            }
-            true
+        // WillBlock -> Running: task declared intent but hasn't blocked yet.
+        // Cancel any pending sleep; no schedule_task (task is still running).
+        if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
+            super::sleep::cancel_sleep(task_id);
+            return true;
         }
-        Err(_current) => {
-            // Lost race OR task is waiting on different ID
-            // Either way, not our responsibility to wake
-            false
+
+        // Blocked -> Ready: task is fully blocked, wake it.
+        if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+            super::sleep::cancel_sleep(task_id);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            schedule_task(task);
+            return true;
         }
+
+        // Task is in some other state (Running, Ready, Terminated).
+        if task_is_terminated(task) || task_is_invalid(task) {
+            return false;
+        }
+        true
+    } else {
+        // Lost race OR task is waiting on different ID
+        // Either way, not our responsibility to wake
+        false
     }
 }
 
@@ -1196,14 +1152,16 @@ pub fn init_scheduler() -> c_int {
 }
 
 fn sched_panic_cleanup() {
-    // SAFETY: Called from the panic recovery path after longjmp. The lock
-    // may have been held when the panic occurred and the guard was lost.
-    // We poison-unlock to mark the data as potentially inconsistent; the
-    // scheduler reinit path checks is_poisoned() before accepting operations.
-    unsafe {
-        scheduler_force_unlock();
-        crate::task::task_manager_poison_unlock();
-    }
+    // Called from the panic recovery path after longjmp. The
+    // task-manager lock may have been held when the panic occurred
+    // and the guard was lost. We poison-unlock to mark the data as
+    // potentially inconsistent; the scheduler reinit path checks
+    // `is_poisoned()` before accepting operations.
+    scheduler_force_unlock();
+    // SAFETY: panic-recovery path; the caller's longjmp invalidated
+    // the lock guard, so a `poison_unlock` is the only legal way to
+    // reset state without panicking again.
+    unsafe { crate::task::task_manager_poison_unlock() };
 }
 
 pub fn scheduler_is_enabled() -> c_int {
@@ -1243,49 +1201,26 @@ pub fn scheduler_get_idle_task_for(cpu_id: usize) -> *mut Task {
 }
 
 pub fn current_task_id() -> u32 {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return 0;
-    }
-    unsafe { (*task).task_id }
+    task_id_of(scheduler_get_current_task()).unwrap_or(0)
 }
 
 pub fn current_task_pgid() -> u32 {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return 0;
-    }
-    unsafe { (*task).pgid }
+    task_pgid(scheduler_get_current_task()).unwrap_or(0)
 }
 
 /// Get the current task's session ID (SID).
 ///
 /// Returns 0 if there is no current task or the scheduler is not yet active.
 pub fn current_task_sid() -> u32 {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return 0;
-    }
-    unsafe { (*task).sid }
+    task_sid(scheduler_get_current_task()).unwrap_or(0)
 }
 
 pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return None;
-    }
-    unsafe { (*task).controlling_tty }
+    task_controlling_tty(scheduler_get_current_task())
 }
 
 pub fn set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
-        return false;
-    }
-    unsafe {
-        (*task).controlling_tty = tty;
-    }
-    true
+    task_set_controlling_tty(scheduler_get_current_task(), tty)
 }
 
 pub fn clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize {
@@ -1387,6 +1322,11 @@ pub fn scheduler_timer_tick() {
     scheduler_request_reschedule(RescheduleReason::TimerTick);
 }
 
-pub unsafe fn scheduler_force_unlock() {
+/// No-op: the scheduler no longer holds a global mutex. Per-CPU
+/// schedulers serialise via per-CPU `queue_lock` SpinLocks and
+/// lock-free atomics; nothing global to release here. Kept as a
+/// `pub fn` symbol for the panic-recovery path that historically
+/// called it.
+pub fn scheduler_force_unlock() {
     // No global scheduler mutex to unlock - per-CPU schedulers use lockless atomics
 }

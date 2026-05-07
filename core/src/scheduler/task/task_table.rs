@@ -1,13 +1,15 @@
 use core::ffi::{c_int, c_void};
-use core::ptr;
+use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KBox, KVec};
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
 use super::super::scheduler;
+use super::task_accessors::{task_id_of, task_ref_count};
 use super::{INVALID_PROCESS_ID, INVALID_TASK_ID, Task, TaskExitRecord, TaskIterateCb, TaskStatus};
 
 /// Concurrent task capacity, matching the kernel-stack VA region cap in
@@ -61,29 +63,61 @@ fn bump_pool_high_water(new_idx: usize) {
     }
 }
 
+/// Deferred-reaper queue holding terminated tasks until their
+/// refcount drops to zero.
+///
+/// Backed by `IntrusiveLinkedList<Task>` which threads the list
+/// through the Task's own `next_ready` `Link<Task>` slot. Only
+/// terminated tasks live here, and only after `unschedule_task`
+/// removed them from every CPU's ready queue, so the link slot is
+/// clean at push time and there is never a Task in both lists.
+///
+/// Allocation-free: `IntrusiveLinkedList::push` only updates the
+/// in-Task link slot; no heap touched while the spin-lock is held.
 struct ZombieList {
-    tasks: KVec<*mut Task>,
+    list: IntrusiveLinkedList<Task>,
 }
 
-// SAFETY: ZombieList contains raw pointers into stable pool slots.
-// All access is serialised through the SpinLock.
+// SAFETY: ZombieList wraps an `IntrusiveLinkedList<Task>`; the list
+// itself is `Send + Sync` only when `Task: Send`, and Task is *not*
+// auto-Send (raw pointers). The actual cross-CPU access is mediated
+// by `ZOMBIE_LIST.lock()` (a SpinLock); these markers assert that
+// the lock provides the required serialisation.
 unsafe impl Send for ZombieList {}
 unsafe impl Sync for ZombieList {}
 
 impl ZombieList {
     const fn new() -> Self {
-        Self { tasks: KVec::new() }
+        Self {
+            list: IntrusiveLinkedList::new(),
+        }
     }
 
-    /// Best-effort push. If the KVec's pre-reserved capacity has been
-    /// exhausted (pathological: every slot is a refcount-held zombie)
-    /// and `try_reserve` fails, we log and drop the zombie on the
-    /// floor; the slot remains `Terminated` and will be reclaimed by a
-    /// future `reserve_task_slot` tier-2 scan once `refcnt` reaches 0.
-    fn push(&mut self, task: *mut Task) {
-        if self.tasks.push(task).is_err() {
+    /// Best-effort push. If the task's link slot is unexpectedly
+    /// non-null (would indicate a residual ReadyQueue membership),
+    /// the underlying `push` returns `AlreadyLinked` and we log
+    /// rather than corrupt either list. The slot stays `Terminated`
+    /// and will be reclaimed by a `reserve_task_slot` tier-2 scan
+    /// once `refcnt == 0`, matching the legacy floor-drop semantics.
+    fn push(&self, task: *mut Task) {
+        let Some(node) = NonNull::new(task) else {
+            return;
+        };
+        if self.list.push(node).is_err() {
             klog_info!("zombie_list: push failed, leaving task in Terminated state");
         }
+    }
+
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = NonNull<Task>> + '_ {
+        self.list.iter()
+    }
+
+    fn remove(&self, node: NonNull<Task>) -> bool {
+        self.list.remove(node).is_ok()
     }
 }
 
@@ -95,6 +129,8 @@ pub(super) fn defer_task_cleanup(task: *mut Task) {
     }
     ZOMBIE_LIST.lock().push(task);
 }
+
+const ZOMBIE_REAP_BATCH: usize = 16;
 
 /// Free a task's kernel-mode stack without invalidating the task struct.
 ///
@@ -159,31 +195,44 @@ pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
 /// steady state between allocations without leaking anything (kstacks
 /// are released at termination via `free_task_stacks`, not at reset).
 pub fn reap_zombies() {
-    let mut list = ZOMBIE_LIST.lock();
-    let original_count = list.tasks.len();
-    if original_count == 0 {
+    let list = ZOMBIE_LIST.lock();
+    if list.len() == 0 {
         return;
     }
-    let mut write_idx = 0usize;
-    for read_idx in 0..original_count {
-        let task = list.tasks[read_idx];
-        if task.is_null() {
-            continue;
+
+    // Two-pass: snapshot reapable nodes, then remove them. Walking
+    // `iter()` and removing in one pass would race the iterator's
+    // cursor (the freshly-removed node's `next` slot is cleared, so
+    // the iterator loses its successor). The on-stack scratch buffer
+    // is fixed-size (`ZOMBIE_REAP_BATCH`) so the spinlock is held
+    // for an O(handful) window per call — exactly the bound the
+    // function's hot-path comment promises.
+    let mut to_reap: [Option<NonNull<Task>>; ZOMBIE_REAP_BATCH] = [None; ZOMBIE_REAP_BATCH];
+    let mut count = 0usize;
+    for node in list.iter() {
+        if count >= ZOMBIE_REAP_BATCH {
+            break;
         }
-        let ref_count = unsafe { (*task).ref_count() };
-        if ref_count == 0 {
-            unsafe {
-                klog_debug!("reap_zombies: resetting zombie task {}", (*task).task_id);
-            }
-            free_task_memory_and_invalidate(task);
-        } else {
-            if write_idx != read_idx {
-                list.tasks[write_idx] = task;
-            }
-            write_idx += 1;
+        let raw = node.as_ptr();
+        if task_ref_count(raw) == Some(0) {
+            to_reap[count] = Some(node);
+            count += 1;
         }
     }
-    list.tasks.truncate(write_idx);
+
+    for slot in &to_reap[..count] {
+        let Some(node) = *slot else {
+            continue;
+        };
+        if !list.remove(node) {
+            continue;
+        }
+        let raw = node.as_ptr();
+        if let Some(id) = task_id_of(raw) {
+            klog_debug!("reap_zombies: resetting zombie task {}", id);
+        }
+        free_task_memory_and_invalidate(raw);
+    }
 }
 
 // =============================================================================
@@ -319,16 +368,9 @@ fn ensure_pool_allocated() -> bool {
             return false;
         }
     }
-    // Pre-reserve the zombie list so pushes never allocate under its
-    // own SpinLock.
-    {
-        let mut zombies = ZOMBIE_LIST.lock();
-        if zombies.tasks.capacity() < TASK_POOL_CAPACITY
-            && zombies.tasks.try_reserve_exact(TASK_POOL_CAPACITY).is_err()
-        {
-            return false;
-        }
-    }
+    // ZombieList no longer needs a heap pre-reservation: pushes go
+    // through `IntrusiveLinkedList::push`, which only mutates the
+    // in-Task link slot and never allocates.
     // Install under the manager lock. Double-check emptiness in case
     // another CPU raced us to init (single-CPU at this boot stage in
     // practice, but stay race-safe).
@@ -664,13 +706,13 @@ pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
         return -1;
     }
     let task = task_find_by_id(task_id);
-    unsafe {
-        if task.is_null() || (*task).status() == TaskStatus::Invalid {
-            *task_info = ptr::null_mut();
-            return -1;
-        }
-        *task_info = task;
+    if task.is_null() || super::task_accessors::task_status(task) == Some(TaskStatus::Invalid) {
+        // SAFETY: caller-supplied out-pointer; pre-null-checked above.
+        unsafe { *task_info = ptr::null_mut() };
+        return -1;
     }
+    // SAFETY: caller-supplied out-pointer; pre-null-checked above.
+    unsafe { *task_info = task };
     0
 }
 
@@ -691,11 +733,7 @@ pub fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRecord) -> c_
 
 pub fn task_get_current_id() -> u32 {
     let current = scheduler::scheduler_get_current_task();
-    if current.is_null() {
-        0
-    } else {
-        unsafe { (*current).task_id }
-    }
+    task_id_of(current).unwrap_or(0)
 }
 
 pub fn task_get_current() -> *mut Task {
@@ -784,12 +822,7 @@ pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::scheduler::test_repo
     if task.is_null() {
         return KVec::new();
     }
-    // SAFETY: `task_find_by_id` returns a stable pointer into the lock-free
-    // task pool; the slot does not transition `Some → None` while the
-    // caller holds responsibility for the post-exit window. The child has
-    // already terminated (caller invariant), so no syscall thread is
-    // concurrently pushing into the ring on its behalf.
-    let mut ring = match unsafe { (*task).test_reports.take() } {
+    let mut ring = match super::task_accessors::task_take_test_reports(task) {
         Some(r) => r,
         None => return KVec::new(),
     };

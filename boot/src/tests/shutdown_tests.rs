@@ -35,7 +35,7 @@ impl ShutdownFixture {
     }
 }
 
-fn dummy_task_fn(_arg: *mut c_void) {}
+extern "C" fn dummy_task_fn(_arg: *mut c_void) {}
 
 fn create_n_tasks(n: usize) -> usize {
     let mut created = 0;

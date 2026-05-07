@@ -42,6 +42,36 @@ impl<T> Link<T> {
     pub fn has_next(&self) -> bool {
         !self.next.load(Ordering::Acquire).is_null()
     }
+
+    /// Acquire-load the next-pointer slot.
+    ///
+    /// Used by consumers (kernel scheduler accessors) that need to
+    /// read the link slot without going through the list-mutation
+    /// API (e.g. when a Task's link-slot value is queried for
+    /// debugging or invariant checks).  The relaxed-vs-Acquire
+    /// distinction matches the legacy raw-pointer protocol that the
+    /// scheduler queue lock already serialises in practice.
+    #[inline]
+    pub fn load(&self) -> *mut T {
+        self.next.load(Ordering::Acquire)
+    }
+
+    /// Release-store the next-pointer slot.
+    ///
+    /// Counterpart to [`Self::load`]; used by consumers that need
+    /// to clear the slot outside the regular push/pop/remove flow
+    /// (e.g. `Task::clone_from_raw` after a bytewise parent → child
+    /// copy that bitwise-duplicated the parent's link slot).
+    #[inline]
+    pub fn store(&self, next: *mut T) {
+        self.next.store(next, Ordering::Release);
+    }
+
+    /// Convenience: store a null pointer.
+    #[inline]
+    pub fn reset(&self) {
+        self.store(core::ptr::null_mut());
+    }
 }
 
 impl<T> Default for Link<T> {
