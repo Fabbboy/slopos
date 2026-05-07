@@ -3,6 +3,7 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
@@ -30,6 +31,7 @@ const SECTOR_SIZE: u64 = 512;
 const REQUEST_TIMEOUT_MS: u32 = 5000;
 
 #[repr(C)]
+#[derive(Clone, Copy, slopos_ostd::Pod)]
 struct VirtioBlkReqHeader {
     type_: u32,
     reserved: u32,
@@ -37,7 +39,6 @@ struct VirtioBlkReqHeader {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
 struct VirtioBlkDevice {
     queue: Virtqueue,
     capacity_sectors: u64,
@@ -116,10 +117,9 @@ impl RequestBuffers {
 }
 
 fn virtio_blk_match(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> bool {
-    if info.is_null() {
+    let Some(info) = PciDeviceInfo::from_ptr(info) else {
         return false;
-    }
-    let info = unsafe { &*info };
+    };
     if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
     }
@@ -135,7 +135,7 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     lo | (hi << 32)
 }
 
-fn do_request(sector: u64, buffer: *mut u8, len: usize, write: bool) -> bool {
+fn do_request(sector: u64, buffer: &mut [u8], write: bool) -> bool {
     let _request_guard = RequestGuard::acquire(&BLK_REQUEST_IN_FLIGHT);
 
     {
@@ -150,31 +150,33 @@ fn do_request(sector: u64, buffer: *mut u8, len: usize, write: bool) -> bool {
         None => return false,
     };
 
-    let req_virt = buffers.req_page.as_mut_ptr::<u8>();
     let req_phys = buffers.req_page.phys_u64();
-    let header = req_virt as *mut VirtioBlkReqHeader;
     let status_offset = size_of::<VirtioBlkReqHeader>();
-    let status_ptr = unsafe { req_virt.add(status_offset) };
     let status_phys = req_phys + status_offset as u64;
-
-    let bounce_virt = buffers.bounce_page.as_mut_ptr::<u8>();
     let bounce_phys = buffers.bounce_page.phys_u64();
+    let len = buffer.len();
 
-    if write {
-        unsafe {
-            ptr::copy_nonoverlapping(buffer, bounce_virt, len);
-        }
+    if write && !buffers.bounce_page.write_slice(0, buffer) {
+        return false;
     }
 
-    unsafe {
-        (*header).type_ = if write {
+    let header = VirtioBlkReqHeader {
+        type_: if write {
             VIRTIO_BLK_T_OUT
         } else {
             VIRTIO_BLK_T_IN
-        };
-        (*header).reserved = 0;
-        (*header).sector = sector;
-        *status_ptr = 0xFF;
+        },
+        reserved: 0,
+        sector,
+    };
+    if !buffers.req_page.write_at::<VirtioBlkReqHeader>(0, &header) {
+        return false;
+    }
+    if !buffers
+        .req_page
+        .write_volatile_at::<u8>(status_offset, 0xFF)
+    {
+        return false;
     }
 
     {
@@ -237,13 +239,14 @@ fn do_request(sector: u64, buffer: *mut u8, len: usize, write: bool) -> bool {
         }
     }
 
-    let status = unsafe { *status_ptr };
+    let status = buffers
+        .req_page
+        .read_volatile_at::<u8>(status_offset)
+        .unwrap_or(0xFF);
     let success = status == VIRTIO_BLK_S_OK;
 
-    if success && !write {
-        unsafe {
-            ptr::copy_nonoverlapping(bounce_virt, buffer, len);
-        }
+    if success && !write && !buffers.bounce_page.read_slice(0, buffer) {
+        return false;
     }
 
     success
@@ -264,7 +267,10 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         return -1;
     }
 
-    let info = unsafe { &*info };
+    let Some(info) = PciDeviceInfo::from_ptr(info) else {
+        DEVICE_CLAIMED.reset();
+        return -1;
+    };
     klog_info!(
         "virtio-blk: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -389,7 +395,7 @@ pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
     let mut buf_pos = 0usize;
     for i in 0..sectors_needed {
         let sector = start_sector + i as u64;
-        let ok = do_request(sector, sector_buf.as_mut_ptr(), 512, false);
+        let ok = do_request(sector, &mut sector_buf, false);
         if !ok {
             return false;
         }
@@ -433,7 +439,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
         let copy_len = dst_end - dst_start;
 
         if dst_start != 0 || dst_end != 512 {
-            let ok = do_request(sector, sector_buf.as_mut_ptr(), 512, false);
+            let ok = do_request(sector, &mut sector_buf, false);
             if !ok {
                 return false;
             }
@@ -441,7 +447,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
 
         sector_buf[dst_start..dst_end].copy_from_slice(&buffer[buf_pos..buf_pos + copy_len]);
 
-        let ok = do_request(sector, sector_buf.as_mut_ptr(), 512, true);
+        let ok = do_request(sector, &mut sector_buf, true);
         if !ok {
             return false;
         }

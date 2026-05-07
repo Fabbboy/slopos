@@ -2,10 +2,7 @@ pub(crate) mod regs;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-use slopos_ostd::sync::{InitFlag, StateFlag};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, SpinLock, StateFlag};
 use slopos_utils::{klog_debug, klog_info};
 
 use regs::*;
@@ -78,40 +75,37 @@ impl IoapicIso {
     }
 }
 
-struct IoapicTable(UnsafeCell<[IoapicController; IOAPIC_MAX_CONTROLLERS]>);
-
-unsafe impl Sync for IoapicTable {}
+struct IoapicTable {
+    controllers: [IoapicController; IOAPIC_MAX_CONTROLLERS],
+    count: usize,
+}
 
 impl IoapicTable {
     const fn new() -> Self {
-        Self(UnsafeCell::new(
-            [const { IoapicController::new() }; IOAPIC_MAX_CONTROLLERS],
-        ))
-    }
-
-    fn ptr(&self) -> *mut IoapicController {
-        self.0.get() as *mut IoapicController
+        Self {
+            controllers: [const { IoapicController::new() }; IOAPIC_MAX_CONTROLLERS],
+            count: 0,
+        }
     }
 }
 
-struct IoapicIsoTable(UnsafeCell<[IoapicIso; IOAPIC_MAX_ISO_ENTRIES]>);
-
-unsafe impl Sync for IoapicIsoTable {}
+struct IoapicIsoTable {
+    entries: [IoapicIso; IOAPIC_MAX_ISO_ENTRIES],
+    count: usize,
+}
 
 impl IoapicIsoTable {
     const fn new() -> Self {
-        Self(UnsafeCell::new([IoapicIso::new(); IOAPIC_MAX_ISO_ENTRIES]))
-    }
-
-    fn ptr(&self) -> *mut IoapicIso {
-        self.0.get() as *mut IoapicIso
+        Self {
+            entries: [IoapicIso::new(); IOAPIC_MAX_ISO_ENTRIES],
+            count: 0,
+        }
     }
 }
 
-static IOAPIC_TABLE: IoapicTable = IoapicTable::new();
-static ISO_TABLE: IoapicIsoTable = IoapicIsoTable::new();
-static IOAPIC_COUNT: AtomicUsize = AtomicUsize::new(0);
-static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
+static IOAPIC_TABLE: SpinLock<IoapicTable> = SpinLock::new(IoapicTable::new(), LOCK_LEVEL_REGISTRY);
+static ISO_TABLE: SpinLock<IoapicIsoTable> =
+    SpinLock::new(IoapicIsoTable::new(), LOCK_LEVEL_REGISTRY);
 static IOAPIC_READY: InitFlag = InitFlag::new();
 static IOAPIC_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 
@@ -123,20 +117,16 @@ fn map_ioapic_mmio(phys: u64) -> Option<MmioRegion> {
     MmioRegion::map(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
 }
 
-fn ioapic_find_controller(gsi: u32) -> Option<*mut IoapicController> {
-    unsafe {
-        let base_ptr = IOAPIC_TABLE.ptr();
-        let count = IOAPIC_COUNT.load(Ordering::Relaxed);
-        for i in 0..count {
-            let ctrl = &*base_ptr.add(i);
+fn ioapic_find_controller(gsi: u32) -> Option<IoapicController> {
+    let table = IOAPIC_TABLE.lock();
+    table.controllers[..table.count]
+        .iter()
+        .find(|ctrl| {
             let start = ctrl.gsi_base;
             let end = ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1);
-            if gsi >= start && gsi <= end {
-                return Some(base_ptr.add(i));
-            }
-        }
-        None
-    }
+            gsi >= start && gsi <= end
+        })
+        .cloned()
 }
 
 #[inline]
@@ -183,27 +173,20 @@ fn redir_flags_from_override(ov: &InterruptOverride) -> u32 {
     polarity | trigger
 }
 
-fn find_iso(irq: u8) -> Option<&'static IoapicIso> {
-    unsafe {
-        let count = ISO_COUNT.load(Ordering::Relaxed);
-        let base_ptr = ISO_TABLE.ptr();
-        for i in 0..count {
-            let iso = &*base_ptr.add(i);
-            if iso.irq_source == irq {
-                return Some(iso);
-            }
-        }
-    }
-    None
+fn find_iso(irq: u8) -> Option<IoapicIso> {
+    let table = ISO_TABLE.lock();
+    table.entries[..table.count]
+        .iter()
+        .find(|iso| iso.irq_source == irq)
+        .copied()
 }
 
 fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
-    let Some(ctrl_ptr) = ioapic_find_controller(gsi) else {
+    let Some(ctrl) = ioapic_find_controller(gsi) else {
         klog_info!("IOAPIC: No controller for requested GSI");
         return -1;
     };
 
-    let ctrl = unsafe { &*ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
         klog_info!("IOAPIC: Pin out of range for mask request");
@@ -223,40 +206,49 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
 }
 
 fn populate_from_madt(madt: &Madt) {
-    IOAPIC_COUNT.store(0, Ordering::Relaxed);
-    ISO_COUNT.store(0, Ordering::Relaxed);
+    let mut table = IOAPIC_TABLE.lock();
+    let mut iso_table = ISO_TABLE.lock();
+    table.count = 0;
+    iso_table.count = 0;
 
     for entry in madt.entries() {
         match entry {
-            MadtEntry::Ioapic(info) => unsafe {
-                let idx = IOAPIC_COUNT.load(Ordering::Relaxed);
+            MadtEntry::Ioapic(info) => {
+                let idx = table.count;
                 if idx >= IOAPIC_MAX_CONTROLLERS {
                     klog_info!("IOAPIC: Too many controllers, ignoring extra entries");
                     continue;
                 }
-                let ctrl = &mut *IOAPIC_TABLE.ptr().add(idx);
-                IOAPIC_COUNT.store(idx + 1, Ordering::Relaxed);
-                ctrl.id = info.id;
-                ctrl.gsi_base = info.gsi_base;
-                ctrl.phys_addr = info.address as u64;
-                ctrl.mmio = map_ioapic_mmio(ctrl.phys_addr);
+                let mmio = map_ioapic_mmio(info.address as u64);
+                let mut ctrl = IoapicController {
+                    id: info.id,
+                    gsi_base: info.gsi_base,
+                    gsi_count: 0,
+                    version: 0,
+                    phys_addr: info.address as u64,
+                    mmio,
+                };
                 ctrl.version = ctrl.read_reg(IOAPIC_REG_VER);
                 ctrl.gsi_count = ((ctrl.version >> 16) & 0xFF) + 1;
-                ioapic_log_controller(ctrl);
-            },
-            MadtEntry::InterruptOverride(ov) => unsafe {
-                let idx = ISO_COUNT.load(Ordering::Relaxed);
+                ioapic_log_controller(&ctrl);
+                table.controllers[idx] = ctrl;
+                table.count = idx + 1;
+            }
+            MadtEntry::InterruptOverride(ov) => {
+                let idx = iso_table.count;
                 if idx >= IOAPIC_MAX_ISO_ENTRIES {
                     klog_info!("IOAPIC: Too many source overrides, ignoring extras");
                     continue;
                 }
-                let iso = &mut *ISO_TABLE.ptr().add(idx);
-                ISO_COUNT.store(idx + 1, Ordering::Relaxed);
-                iso.irq_source = ov.irq_source;
-                iso.gsi = ov.gsi;
-                iso.redir_flags = redir_flags_from_override(&ov);
-                ioapic_log_iso(iso);
-            },
+                let iso = IoapicIso {
+                    irq_source: ov.irq_source,
+                    gsi: ov.gsi,
+                    redir_flags: redir_flags_from_override(&ov),
+                };
+                ioapic_log_iso(&iso);
+                iso_table.entries[idx] = iso;
+                iso_table.count = idx + 1;
+            }
             MadtEntry::Unknown { .. } => {}
         }
     }
@@ -301,7 +293,7 @@ pub fn init() -> i32 {
 
     populate_from_madt(&madt);
 
-    let count = IOAPIC_COUNT.load(Ordering::Relaxed);
+    let count = IOAPIC_TABLE.lock().count;
     if count == 0 {
         klog_info!("IOAPIC: No controllers discovered");
         return init_fail();
@@ -319,12 +311,11 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
         return -1;
     }
 
-    let Some(ctrl_ptr) = ioapic_find_controller(gsi) else {
+    let Some(ctrl) = ioapic_find_controller(gsi) else {
         klog_info!("IOAPIC: No IOAPIC handles requested GSI");
         return -1;
     };
 
-    let ctrl = unsafe { &*ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
         klog_info!("IOAPIC: Calculated pin outside controller range");
@@ -375,7 +366,7 @@ pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -
     if let Some(iso) = find_iso(legacy_irq) {
         gsi = iso.gsi;
         flags = iso.redir_flags;
-        ioapic_log_iso(iso);
+        ioapic_log_iso(&iso);
     }
 
     *out_gsi = gsi;

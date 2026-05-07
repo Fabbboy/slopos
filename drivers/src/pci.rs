@@ -1,6 +1,6 @@
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use core::ptr;
-use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
 use slopos_acpi::mcfg::{Mcfg, McfgEntry};
@@ -8,9 +8,12 @@ use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::dev::FromRawPtr;
+use slopos_ostd::pci::{Bdf, EcamConfigSpace};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
+use slopos_ostd::{KVec, Pod};
 use slopos_utils::klog_info;
-use slopos_utils::string::cstr_to_str;
+use slopos_utils::string::cstr_to_str_lossy;
 
 pub use crate::pci_defs::*;
 
@@ -99,69 +102,49 @@ static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 // MCFG / ECAM State
 // =============================================================================
 
-/// Maximum number of ECAM segments we cache from the MCFG table.
-const MAX_ECAM_ENTRIES: usize = 16;
-
-/// PCIe extended configuration space size per function (4 KiB).
-const ECAM_FUNCTION_SIZE: u16 = 4096;
-
-/// Cached MCFG entries and their mapped MMIO regions.
-///
-/// Populated during [`pci_init`]; read by ECAM config access routines.
-/// Protected by `SpinLock` for SMP-safe access.
-struct EcamState {
-    entries: [McfgEntry; MAX_ECAM_ENTRIES],
-    /// Mapped MMIO regions — one per MCFG entry.  `MmioRegion::empty()` if
-    /// the mapping failed or has not been attempted.
-    regions: [MmioRegion; MAX_ECAM_ENTRIES],
-    count: u8,
+/// Cached ECAM segments. Built once during `pci_discover_mcfg()`; read via the
+/// public `pci_ecam_*` accessors.  The primary segment (segment 0) is laid
+/// out first so the hot path skips an array search.
+struct EcamRegistry {
+    primary: EcamConfigSpace,
+    primary_entry: McfgEntry,
+    extras: KVec<EcamConfigSpace>,
+    extra_entries: KVec<McfgEntry>,
 }
 
-impl EcamState {
-    const fn new() -> Self {
-        Self {
-            entries: [McfgEntry {
-                base_phys: 0,
-                segment: 0,
-                bus_start: 0,
-                bus_end: 0,
-            }; MAX_ECAM_ENTRIES],
-            regions: [const { MmioRegion::empty() }; MAX_ECAM_ENTRIES],
-            count: 0,
+impl EcamRegistry {
+    fn find(&self, bdf: Bdf) -> Option<&EcamConfigSpace> {
+        if self.primary.contains(bdf) {
+            return Some(&self.primary);
+        }
+        self.extras.iter().find(|cs| cs.contains(bdf))
+    }
+
+    fn entry_count(&self) -> usize {
+        1 + self.extras.len()
+    }
+
+    fn entry(&self, idx: usize) -> Option<McfgEntry> {
+        if idx == 0 {
+            Some(self.primary_entry)
+        } else {
+            self.extra_entries.get(idx - 1).copied()
+        }
+    }
+
+    fn config_space(&self, idx: usize) -> Option<&EcamConfigSpace> {
+        if idx == 0 {
+            Some(&self.primary)
+        } else {
+            self.extras.get(idx - 1)
         }
     }
 }
 
-static ECAM_STATE: SpinLock<EcamState> = SpinLock::new(EcamState::new(), LOCK_LEVEL_REGISTRY);
+static ECAM: OnceLock<EcamRegistry> = OnceLock::new();
 
-/// Cached ECAM base address for segment 0 — fast lock-free read path.
-/// Set to 0 if MCFG is absent or segment 0 is not covered.
-static ECAM_BASE: AtomicU64 = AtomicU64::new(0);
-
-/// Number of ECAM entries discovered (lock-free read for quick availability check).
-static ECAM_ENTRY_COUNT: AtomicU8 = AtomicU8::new(0);
-
-// -----------------------------------------------------------------------------
-// Lock-free primary ECAM cache
-//
-// The primary segment (segment 0) is the only segment on most systems, including
-// QEMU q35.  We cache its mapped MMIO virtual address, size, and bus range in
-// atomics so that the hot-path ECAM reads avoid the `SpinLock` entirely.
-// For rare multi-segment lookups, we fall back to `ECAM_STATE`.
-// -----------------------------------------------------------------------------
-
-/// Virtual base address of the primary ECAM MMIO mapping (segment 0).
-/// Zero means ECAM MMIO is not mapped.
-static ECAM_PRIMARY_VIRT: AtomicU64 = AtomicU64::new(0);
-
-/// Size in bytes of the primary ECAM MMIO mapping.
-static ECAM_PRIMARY_SIZE: AtomicU64 = AtomicU64::new(0);
-
-/// First bus number covered by the primary ECAM entry.
-static ECAM_PRIMARY_BUS_START: AtomicU8 = AtomicU8::new(0);
-
-/// Last bus number covered by the primary ECAM entry (inclusive).
-static ECAM_PRIMARY_BUS_END: AtomicU8 = AtomicU8::new(0);
+/// PCIe extended configuration space size per function (4 KiB).
+const ECAM_FUNCTION_SIZE: u16 = 4096;
 
 // =============================================================================
 // PCI Configuration Access
@@ -172,77 +155,40 @@ static ECAM_PRIMARY_BUS_END: AtomicU8 = AtomicU8::new(0);
 // requirement — pci_init() panics if MCFG is absent or mapping fails.
 // =============================================================================
 
-fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
-    unsafe { cstr_to_str(ptr as *const c_char) }
+fn cstr_or_placeholder(s: *const u8) -> &'static str {
+    cstr_to_str_lossy(s as *const core::ffi::c_char)
 }
 
 // =============================================================================
 // ECAM MMIO Implementation
 // =============================================================================
 
-/// Compute the virtual address for an ECAM config-space register access.
-///
-/// Uses the lock-free primary segment cache for segment 0 (the common case on
-/// single-segment systems like QEMU q35).  For buses outside the primary
-/// segment, falls back to a mutex-protected lookup across all cached entries.
-///
-/// Returns `None` if:
-/// - ECAM MMIO is not mapped
-/// - The bus/device/function is out of range for all cached segments
-/// - The `offset + access_size` would exceed the 4096-byte function space
-/// - The computed address falls outside the mapped MMIO region
-fn ecam_virt_addr(bus: u8, device: u8, function: u8, offset: u16, access_size: u16) -> Option<u64> {
-    if device >= 32 || function >= 8 {
-        return None;
-    }
-    // Validate offset + access_size within the 4096-byte function space.
+/// Resolve `(bus, device, function)` to a typed [`Bdf`] and locate the
+/// `EcamConfigSpace` covering that bus.
+fn ecam_for(bus: u8, device: u8, function: u8) -> Option<(&'static EcamConfigSpace, Bdf)> {
+    let bdf = Bdf::new(bus, device, function)?;
+    let space = ECAM.get()?.find(bdf)?;
+    Some((space, bdf))
+}
+
+fn validate_offset(offset: u16, access_size: u16) -> Option<()> {
     if offset.checked_add(access_size)? > ECAM_FUNCTION_SIZE {
-        return None;
+        None
+    } else {
+        Some(())
     }
+}
 
-    // Fast path: primary segment (lock-free).
-    let virt = ECAM_PRIMARY_VIRT.load(Ordering::Acquire);
-    if virt != 0 {
-        let bus_start = ECAM_PRIMARY_BUS_START.load(Ordering::Acquire);
-        let bus_end = ECAM_PRIMARY_BUS_END.load(Ordering::Acquire);
-        let size = ECAM_PRIMARY_SIZE.load(Ordering::Acquire);
+fn ecam_read<T: Pod>(bus: u8, device: u8, function: u8, offset: u16) -> Option<T> {
+    validate_offset(offset, core::mem::size_of::<T>() as u16)?;
+    let (space, bdf) = ecam_for(bus, device, function)?;
+    space.read::<T>(bdf, offset)
+}
 
-        if bus >= bus_start && bus <= bus_end {
-            let relative_bus = (bus - bus_start) as u64;
-            let bdf_offset =
-                (relative_bus << 20) | ((device as u64) << 15) | ((function as u64) << 12);
-            let total = bdf_offset + offset as u64;
-
-            if total + access_size as u64 <= size {
-                return Some(virt + total);
-            }
-            // Falls outside mapped region — should not happen with correct bus range.
-            return None;
-        }
-    }
-
-    // Slow path: multi-segment lookup via mutex.
-    let state = ECAM_STATE.lock();
-    for i in 0..state.count as usize {
-        let entry = &state.entries[i];
-        if entry.base_phys == 0 || bus < entry.bus_start || bus > entry.bus_end {
-            continue;
-        }
-        let region = &state.regions[i];
-        if !region.is_mapped() {
-            continue;
-        }
-
-        let relative_bus = (bus - entry.bus_start) as u64;
-        let bdf_offset = (relative_bus << 20) | ((device as u64) << 15) | ((function as u64) << 12);
-        let total = bdf_offset + offset as u64;
-
-        if region.is_valid_offset(total as usize, access_size as usize) {
-            return Some(region.virt_base() + total);
-        }
-    }
-
-    None
+fn ecam_write<T: Pod>(bus: u8, device: u8, function: u8, offset: u16, value: T) -> Option<()> {
+    validate_offset(offset, core::mem::size_of::<T>() as u16)?;
+    let (space, bdf) = ecam_for(bus, device, function)?;
+    space.write::<T>(bdf, offset, value)
 }
 
 /// Read a 32-bit value from PCI configuration space via ECAM MMIO.
@@ -254,11 +200,7 @@ pub fn pci_ecam_read32(bus: u8, device: u8, function: u8, offset: u16) -> Option
     if offset & 0x3 != 0 {
         return None;
     }
-    let addr = ecam_virt_addr(bus, device, function, offset, 4)?;
-    // SAFETY: `addr` points into a mapped MMIO region with correct caching
-    // attributes (UC via `PageFlags::MMIO`).  The bounds were validated by
-    // `ecam_virt_addr`.
-    Some(unsafe { core::ptr::read_volatile(addr as *const u32) })
+    ecam_read::<u32>(bus, device, function, offset)
 }
 
 /// Read a 16-bit value from PCI configuration space via ECAM MMIO.
@@ -266,14 +208,12 @@ pub fn pci_ecam_read16(bus: u8, device: u8, function: u8, offset: u16) -> Option
     if offset & 0x1 != 0 {
         return None;
     }
-    let addr = ecam_virt_addr(bus, device, function, offset, 2)?;
-    Some(unsafe { core::ptr::read_volatile(addr as *const u16) })
+    ecam_read::<u16>(bus, device, function, offset)
 }
 
 /// Read an 8-bit value from PCI configuration space via ECAM MMIO.
 pub fn pci_ecam_read8(bus: u8, device: u8, function: u8, offset: u16) -> Option<u8> {
-    let addr = ecam_virt_addr(bus, device, function, offset, 1)?;
-    Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
+    ecam_read::<u8>(bus, device, function, offset)
 }
 
 /// Write a 32-bit value to PCI configuration space via ECAM MMIO.
@@ -284,10 +224,7 @@ pub fn pci_ecam_write32(bus: u8, device: u8, function: u8, offset: u16, value: u
     if offset & 0x3 != 0 {
         return None;
     }
-    let addr = ecam_virt_addr(bus, device, function, offset, 4)?;
-    // SAFETY: same as `pci_ecam_read32` — validated MMIO address.
-    unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
-    Some(())
+    ecam_write::<u32>(bus, device, function, offset, value)
 }
 
 /// Write a 16-bit value to PCI configuration space via ECAM MMIO.
@@ -295,16 +232,12 @@ pub fn pci_ecam_write16(bus: u8, device: u8, function: u8, offset: u16, value: u
     if offset & 0x1 != 0 {
         return None;
     }
-    let addr = ecam_virt_addr(bus, device, function, offset, 2)?;
-    unsafe { core::ptr::write_volatile(addr as *mut u16, value) };
-    Some(())
+    ecam_write::<u16>(bus, device, function, offset, value)
 }
 
 /// Write an 8-bit value to PCI configuration space via ECAM MMIO.
 pub fn pci_ecam_write8(bus: u8, device: u8, function: u8, offset: u16, value: u8) -> Option<()> {
-    let addr = ecam_virt_addr(bus, device, function, offset, 1)?;
-    unsafe { core::ptr::write_volatile(addr as *mut u8, value) };
-    Some(())
+    ecam_write::<u8>(bus, device, function, offset, value)
 }
 
 // =============================================================================
@@ -936,67 +869,68 @@ fn pci_discover_mcfg() {
         panic!("PCI: MCFG table present but empty — at least one ECAM entry required");
     }
 
-    let mut primary_mapped = false;
-    {
-        let mut state = ECAM_STATE.lock();
-        let capped = count.min(MAX_ECAM_ENTRIES);
-        for (i, entry) in mcfg.entries().iter().enumerate().take(capped) {
-            state.entries[i] = *entry;
+    let mut primary_pair: Option<(EcamConfigSpace, McfgEntry)> = None;
+    let mut extras: KVec<EcamConfigSpace> = KVec::new();
+    let mut extra_entries: KVec<McfgEntry> = KVec::new();
 
-            let region_size = entry.region_size() as usize;
-            klog_info!(
-                "PCI: ECAM segment {} buses {}..{} at phys 0x{:x} ({}MB)",
+    for entry in mcfg.entries() {
+        let entry = *entry;
+        let region_size = entry.region_size() as usize;
+        klog_info!(
+            "PCI: ECAM segment {} buses {}..{} at phys 0x{:x} ({}MB)",
+            entry.segment,
+            entry.bus_start,
+            entry.bus_end,
+            entry.base_phys,
+            region_size / (1024 * 1024),
+        );
+
+        let phys = PhysAddr::new(entry.base_phys);
+        let region = MmioRegion::map(phys, region_size).unwrap_or_else(|| {
+            panic!(
+                "PCI: ECAM segment {} MMIO mapping failed ({}MB) — cannot continue",
                 entry.segment,
-                entry.bus_start,
-                entry.bus_end,
-                entry.base_phys,
                 region_size / (1024 * 1024),
-            );
+            )
+        });
+        let region_virt = region.virt_base();
 
-            // Map the ECAM MMIO region into virtual memory.
-            let phys = PhysAddr::new(entry.base_phys);
-            let region = MmioRegion::map(phys, region_size).unwrap_or_else(|| {
+        klog_info!(
+            "PCI: ECAM segment {} mapped at virt 0x{:x} ({}MB)",
+            entry.segment,
+            region_virt,
+            region_size / (1024 * 1024),
+        );
+
+        let space =
+            EcamConfigSpace::new(region, entry.bus_start, entry.bus_end).unwrap_or_else(|| {
                 panic!(
-                    "PCI: ECAM segment {} MMIO mapping failed ({}MB) — cannot continue",
+                    "PCI: ECAM segment {} bus range invalid for region size",
                     entry.segment,
-                    region_size / (1024 * 1024),
                 )
             });
-            let region_virt = region.virt_base();
 
-            klog_info!(
-                "PCI: ECAM segment {} mapped at virt 0x{:x} ({}MB)",
-                entry.segment,
-                region_virt,
-                region_size / (1024 * 1024),
-            );
-            state.regions[i] = region;
-
-            // Cache the primary segment (segment 0) for lock-free access.
-            if entry.segment == 0 && !primary_mapped {
-                ECAM_PRIMARY_VIRT.store(region_virt, Ordering::Release);
-                ECAM_PRIMARY_SIZE.store(region_size as u64, Ordering::Release);
-                ECAM_PRIMARY_BUS_START.store(entry.bus_start, Ordering::Release);
-                ECAM_PRIMARY_BUS_END.store(entry.bus_end, Ordering::Release);
-                primary_mapped = true;
-            }
+        if entry.segment == 0 && primary_pair.is_none() {
+            primary_pair = Some((space, entry));
+        } else {
+            extras.push(space).expect("PCI: ECAM extras alloc");
+            extra_entries.push(entry).expect("PCI: ECAM extras alloc");
         }
-        state.count = capped as u8;
     }
 
-    // Cache primary segment base for fast lock-free access.
-    if let Some(primary) = mcfg.primary_entry() {
-        ECAM_BASE.store(primary.base_phys, Ordering::Release);
-    }
-    ECAM_ENTRY_COUNT.store(count.min(MAX_ECAM_ENTRIES) as u8, Ordering::Release);
+    let (primary, primary_entry) =
+        primary_pair.unwrap_or_else(|| panic!("PCI: No primary ECAM segment (segment 0) mapped"));
 
-    if !primary_mapped {
-        panic!("PCI: No primary ECAM segment (segment 0) mapped — cannot enumerate PCI");
-    }
+    ECAM.call_once(|| EcamRegistry {
+        primary,
+        primary_entry,
+        extras,
+        extra_entries,
+    });
 
     klog_info!(
         "PCI: ECAM MMIO active — config access via memory-mapped PCIe (4096B per function), {} entry(s) cached",
-        count.min(MAX_ECAM_ENTRIES),
+        count,
     );
 }
 
@@ -1009,7 +943,7 @@ fn pci_discover_mcfg() {
 /// Returns `true` after [`pci_init`] has successfully mapped ECAM MMIO.
 #[inline]
 pub fn pci_ecam_available() -> bool {
-    ECAM_ENTRY_COUNT.load(Ordering::Acquire) > 0
+    ECAM.get().is_some()
 }
 
 /// Return the physical base address of the primary ECAM region (segment 0).
@@ -1017,48 +951,44 @@ pub fn pci_ecam_available() -> bool {
 /// Returns `0` if MCFG was not found or does not cover segment 0.
 #[inline]
 pub fn pci_ecam_base() -> u64 {
-    ECAM_BASE.load(Ordering::Acquire)
+    ECAM.get().map(|r| r.primary_entry.base_phys).unwrap_or(0)
 }
 
 /// Return the number of cached ECAM entries.
 #[inline]
 pub fn pci_ecam_entry_count() -> u8 {
-    ECAM_ENTRY_COUNT.load(Ordering::Acquire)
+    ECAM.get().map(|r| r.entry_count() as u8).unwrap_or(0)
 }
 
 /// Retrieve a specific ECAM entry by index.
 pub fn pci_ecam_entry(index: usize) -> Option<McfgEntry> {
-    let state = ECAM_STATE.lock();
-    if index < state.count as usize {
-        Some(state.entries[index])
-    } else {
-        None
-    }
+    ECAM.get()?.entry(index)
 }
 
 /// Find the ECAM entry that covers a given segment and bus.
 pub fn pci_ecam_find_entry(segment: u16, bus: u8) -> Option<McfgEntry> {
-    let state = ECAM_STATE.lock();
-    state.entries[..state.count as usize]
-        .iter()
-        .find(|e| {
-            e.segment == segment && bus >= e.bus_start && bus <= e.bus_end && e.base_phys != 0
-        })
-        .copied()
+    let registry = ECAM.get()?;
+    let mut idx = 0;
+    while let Some(entry) = registry.entry(idx) {
+        if entry.segment == segment
+            && bus >= entry.bus_start
+            && bus <= entry.bus_end
+            && entry.base_phys != 0
+        {
+            return Some(entry);
+        }
+        idx += 1;
+    }
+    None
 }
 
 /// Retrieve the mapped MMIO region for a given ECAM entry index.
 ///
 /// Returns `None` if the index is out of range or the region was not mapped.
 pub fn pci_ecam_mapped_region(index: usize) -> Option<MmioRegion> {
-    let state = ECAM_STATE.lock();
-    if index < state.count as usize {
-        let region = state.regions[index].clone();
-        if region.is_mapped() {
-            return Some(region);
-        }
-    }
-    None
+    ECAM.get()?
+        .config_space(index)
+        .map(|cs| cs.region().clone())
 }
 
 /// Return the virtual base address of the primary ECAM MMIO mapping.
@@ -1066,7 +996,9 @@ pub fn pci_ecam_mapped_region(index: usize) -> Option<MmioRegion> {
 /// Returns `0` if the primary segment was not mapped.
 #[inline]
 pub fn pci_ecam_primary_virt() -> u64 {
-    ECAM_PRIMARY_VIRT.load(Ordering::Acquire)
+    ECAM.get()
+        .map(|r| r.primary.region().virt_base())
+        .unwrap_or(0)
 }
 
 // =============================================================================
@@ -1138,8 +1070,9 @@ pub fn pci_probe_drivers() {
     let state = ENUM_STATE.lock();
 
     for drv_idx in 0..registry.count {
-        // SAFETY: pci_register_driver only accepts 'static PciDriver references
-        let drv = unsafe { &*registry.drivers[drv_idx] };
+        let Some(drv) = PciDriver::from_ptr(registry.drivers[drv_idx]) else {
+            continue;
+        };
         for dev_idx in 0..state.device_count {
             let dev = &state.devices[dev_idx];
             if let Some(mf) = drv.match_fn {

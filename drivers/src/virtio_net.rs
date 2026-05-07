@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::{KBox, KVec};
 
 use slopos_abi::net::{
@@ -76,7 +77,7 @@ const NAPI_BUDGET: u32 = 64;
 static DHCP_XID_COUNTER: AtomicU32 = AtomicU32::new(0x534c_4f50);
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, slopos_ostd::Pod)]
 struct VirtioNetHdrV1 {
     flags: u8,
     gso_type: u8,
@@ -88,7 +89,6 @@ struct VirtioNetHdrV1 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
 struct VirtioNetDevice {
     rx_queue: Virtqueue,
     tx_queue: Virtqueue,
@@ -162,12 +162,7 @@ static DNS_RX_BUF: SpinLock<DnsRxBuf> = SpinLock::new(DnsRxBuf::new(), LOCK_LEVE
 static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
 
 pub fn get_device_handle() -> Option<&'static DeviceHandle> {
-    let ptr = DEVICE_HANDLE_PTR.load(Ordering::Acquire);
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &*ptr })
-    }
+    DeviceHandle::from_ptr(DEVICE_HANDLE_PTR.load(Ordering::Acquire))
 }
 
 fn set_device_handle(handle: DeviceHandle) {
@@ -209,12 +204,8 @@ impl NetDevice for VirtioNetDev {
             return Err(NetError::NoBufferSpace);
         };
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                payload.as_ptr(),
-                tx_page.as_mut_ptr::<u8>().add(hdr_len),
-                payload.len(),
-            );
+        if !tx_page.write_slice(hdr_len, payload) {
+            return Err(NetError::NoBufferSpace);
         }
 
         if submit_tx(&mut state, tx_page, (hdr_len + payload.len()) as u32) {
@@ -244,11 +235,10 @@ impl NetDevice for VirtioNetDev {
             let hdr_len = size_of::<VirtioNetHdrV1>();
             if (used.len as usize) > hdr_len {
                 let payload_len = (used.len as usize) - hdr_len;
-                let frame = unsafe {
-                    core::slice::from_raw_parts(page.as_mut_ptr::<u8>().add(hdr_len), payload_len)
-                };
-                if let Some(pkt) = PacketBuf::from_raw_copy(frame) {
-                    let _ = packets.push(pkt);
+                if let Some(frame) = page.slice_at(hdr_len, payload_len) {
+                    if let Some(pkt) = PacketBuf::from_raw_copy(frame) {
+                        let _ = packets.push(pkt);
+                    }
                 }
             }
 
@@ -331,11 +321,9 @@ pub fn sniff_packet_for_members(frame: &[u8]) {
 // =============================================================================
 
 fn virtio_net_match(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> bool {
-    if info.is_null() {
+    let Some(info) = PciDeviceInfo::from_ptr(info) else {
         return false;
-    }
-
-    let info = unsafe { &*info };
+    };
     if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
     }
@@ -506,9 +494,7 @@ fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -
 /// Returns `(page, buffer_start)` where `buffer_start` points just past the header.
 fn alloc_tx_page() -> Option<OwnedPageFrame> {
     let page = OwnedPageFrame::alloc_zeroed()?;
-    unsafe {
-        *(page.as_mut_ptr::<VirtioNetHdrV1>()) = VirtioNetHdrV1::default();
-    }
+    page.write_at::<VirtioNetHdrV1>(0, &VirtioNetHdrV1::default());
     Some(page)
 }
 
@@ -521,7 +507,7 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
         return false;
     }
 
-    let Some(tx_page) = alloc_tx_page() else {
+    let Some(mut tx_page) = alloc_tx_page() else {
         return false;
     };
 
@@ -533,9 +519,10 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
         return false;
     }
 
-    unsafe {
-        let frame =
-            core::slice::from_raw_parts_mut(tx_page.as_mut_ptr::<u8>().add(hdr_len), frame_len);
+    {
+        let Some(frame) = tx_page.slice_at_mut(hdr_len, frame_len) else {
+            return false;
+        };
 
         // Ethernet header
         frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::MacAddr::BROADCAST.0);
@@ -703,10 +690,9 @@ fn virtnet_poll(state: &mut VirtioNetState, budget: u32) -> usize {
         let hdr_len = size_of::<VirtioNetHdrV1>();
         if (used.len as usize) > hdr_len {
             let payload_len = (used.len as usize) - hdr_len;
-            let frame = unsafe {
-                core::slice::from_raw_parts(page.as_mut_ptr::<u8>().add(hdr_len), payload_len)
-            };
-            dispatch_rx_frame(state, frame);
+            if let Some(frame) = page.slice_at(hdr_len, payload_len) {
+                dispatch_rx_frame(state, frame);
+            }
         }
 
         processed += 1;
@@ -749,7 +735,6 @@ fn poll_one_rx_frame_timeout(
     timeout_ms: u32,
 ) -> Option<usize> {
     let rx_page = OwnedPageFrame::alloc_zeroed()?;
-    let rx_virt = rx_page.as_mut_ptr::<u8>();
     let rx_phys = rx_page.phys_u64();
 
     state.device.rx_queue.write_desc(
@@ -783,7 +768,7 @@ fn poll_one_rx_frame_timeout(
     }
 
     let payload_len = (used.len as usize) - hdr_len;
-    let frame = unsafe { core::slice::from_raw_parts(rx_virt.add(hdr_len), payload_len) };
+    let frame = rx_page.slice_at(hdr_len, payload_len)?;
     sniff_frame_for_members(state, frame);
 
     if let Some(dst) = out_payload {
@@ -807,7 +792,7 @@ fn transmit_udp_packet_locked(
         return false;
     }
 
-    let Some(tx_page) = alloc_tx_page() else {
+    let Some(mut tx_page) = alloc_tx_page() else {
         return false;
     };
 
@@ -818,9 +803,10 @@ fn transmit_udp_packet_locked(
         return false;
     }
 
-    unsafe {
-        let frame =
-            core::slice::from_raw_parts_mut(tx_page.as_mut_ptr::<u8>().add(hdr_len), frame_len);
+    {
+        let Some(frame) = tx_page.slice_at_mut(hdr_len, frame_len) else {
+            return false;
+        };
 
         frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::MacAddr::BROADCAST.0);
         frame[net::ETH_ADDR_LEN..net::ETH_ADDR_LEN * 2].copy_from_slice(&state.device.mac);
@@ -1207,7 +1193,10 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         return -1;
     }
 
-    let info = unsafe { &*info };
+    let Some(info) = PciDeviceInfo::from_ptr(info) else {
+        DEVICE_CLAIMED.reset();
+        return -1;
+    };
     klog_info!(
         "virtio-net: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -1394,8 +1383,8 @@ pub fn virtio_net_link_up() -> bool {
     link_is_up(&state)
 }
 
-pub fn virtio_net_scan_members(out: *mut UserNetMember, max: usize, active_probe: bool) -> usize {
-    if out.is_null() || max == 0 {
+pub fn virtio_net_scan_members(out: &mut [UserNetMember], active_probe: bool) -> usize {
+    if out.is_empty() {
         return 0;
     }
 
@@ -1444,10 +1433,8 @@ pub fn virtio_net_scan_members(out: *mut UserNetMember, max: usize, active_probe
         }
     }
 
-    let copy_count = max.min(state.member_count);
-    unsafe {
-        core::ptr::copy_nonoverlapping(state.members.as_ptr(), out, copy_count);
-    }
+    let copy_count = out.len().min(state.member_count);
+    out[..copy_count].copy_from_slice(&state.members[..copy_count]);
     copy_count
 }
 
@@ -1524,12 +1511,8 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
         return false;
     };
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            packet.as_ptr(),
-            tx_page.as_mut_ptr::<u8>().add(hdr_len),
-            packet.len(),
-        );
+    if !tx_page.write_slice(hdr_len, packet) {
+        return false;
     }
 
     submit_tx(&mut state, tx_page, (hdr_len + packet.len()) as u32)

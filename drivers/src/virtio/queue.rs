@@ -1,9 +1,11 @@
-use core::ptr;
+use core::mem::size_of;
 
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use slopos_mm::page_alloc::OwnedPageFrame;
+use slopos_ostd::Pod;
+use slopos_ostd::dma::VirtqueueRegion;
+use slopos_ostd::mm::frame::{Frame, KernelMeta};
 
 use super::{
     COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
@@ -14,7 +16,7 @@ use super::{
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Pod)]
 pub struct VirtqDesc {
     pub addr: u64,
     pub len: u32,
@@ -23,24 +25,36 @@ pub struct VirtqDesc {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Pod)]
 pub struct VirtqUsedElem {
     pub id: u32,
     pub len: u32,
 }
 
-// VirtqAvail and VirtqUsed have variable-size ring arrays.
-// We define accessor functions instead of fixed-size structs.
+// Avail ring layout (split virtqueue, packed):
+//   u16 flags                       — offset 0
+//   u16 idx                         — offset 2
+//   u16 ring[size]                  — offset 4
+//   u16 used_event (if EVENT_IDX)   — offset 4 + 2*size
+const AVAIL_IDX_OFFSET: usize = 2;
+const AVAIL_RING_OFFSET: usize = 4;
 
-#[repr(C)]
+// Used ring layout (split virtqueue, packed):
+//   u16 flags                       — offset 0
+//   u16 idx                         — offset 2
+//   VirtqUsedElem ring[size]        — offset 4
+//   u16 avail_event (if EVENT_IDX)  — offset 4 + 8*size
+const USED_IDX_OFFSET: usize = 2;
+const USED_RING_OFFSET: usize = 4;
+
 pub struct Virtqueue {
     pub size: u16,
     pub desc_phys: PhysAddr,
     pub avail_phys: PhysAddr,
     pub used_phys: PhysAddr,
-    desc_virt: *mut VirtqDesc,
-    avail_virt: *mut u8,
-    used_virt: *mut u8,
+    desc_ring: Option<VirtqueueRegion<VirtqDesc>>,
+    avail_frame: Option<Frame<KernelMeta>>,
+    used_frame: Option<Frame<KernelMeta>>,
     pub notify_off: u16,
     pub last_used_idx: u16,
     pub ready: bool,
@@ -52,30 +66,6 @@ impl Default for Virtqueue {
     }
 }
 
-impl Clone for Virtqueue {
-    fn clone(&self) -> Self {
-        Self {
-            size: self.size,
-            desc_phys: self.desc_phys,
-            avail_phys: self.avail_phys,
-            used_phys: self.used_phys,
-            desc_virt: self.desc_virt,
-            avail_virt: self.avail_virt,
-            used_virt: self.used_virt,
-            notify_off: self.notify_off,
-            last_used_idx: self.last_used_idx,
-            ready: self.ready,
-        }
-    }
-}
-
-impl Copy for Virtqueue {}
-
-// Virtqueue contains raw pointers to page-frame-allocated memory that persists
-// for the device lifetime. The memory is kernel-owned and accessible from any
-// CPU context, making it safe to transfer ownership between threads.
-unsafe impl Send for Virtqueue {}
-
 impl Virtqueue {
     pub const fn new() -> Self {
         Self {
@@ -83,9 +73,9 @@ impl Virtqueue {
             desc_phys: PhysAddr::NULL,
             avail_phys: PhysAddr::NULL,
             used_phys: PhysAddr::NULL,
-            desc_virt: ptr::null_mut(),
-            avail_virt: ptr::null_mut(),
-            used_virt: ptr::null_mut(),
+            desc_ring: None,
+            avail_frame: None,
+            used_frame: None,
             notify_off: 0,
             last_used_idx: 0,
             ready: false,
@@ -96,58 +86,55 @@ impl Virtqueue {
         self.ready
     }
 
-    fn avail_idx_ptr(&self) -> *mut u16 {
-        unsafe { (self.avail_virt as *mut u16).add(1) }
-    }
-
-    fn avail_ring_ptr(&self, idx: u16) -> *mut u16 {
-        unsafe { (self.avail_virt as *mut u16).add(2 + (idx % self.size) as usize) }
-    }
-
-    fn used_idx_ptr(&self) -> *const u16 {
-        unsafe { (self.used_virt as *const u16).add(1) }
-    }
-
-    fn used_ring_elem_ptr(&self, idx: u16) -> *const VirtqUsedElem {
-        let ring_base = unsafe { self.used_virt.add(4) };
-        unsafe { (ring_base as *const VirtqUsedElem).add((idx % self.size) as usize) }
-    }
-
     pub fn read_used_idx(&self) -> u16 {
-        unsafe { ptr::read_volatile(self.used_idx_ptr()) }
+        self.used_frame
+            .as_ref()
+            .and_then(|f| f.read_volatile_at::<u16>(USED_IDX_OFFSET))
+            .unwrap_or(0)
     }
 
-    pub fn write_desc(&self, idx: u16, desc: VirtqDesc) {
-        if !self.desc_virt.is_null() && idx < self.size {
-            unsafe {
-                ptr::write_volatile(self.desc_virt.add(idx as usize), desc);
-            }
+    pub fn write_desc(&mut self, idx: u16, desc: VirtqDesc) {
+        if idx >= self.size {
+            return;
+        }
+        if let Some(ring) = self.desc_ring.as_mut() {
+            ring.write_desc_volatile(idx as usize, desc);
         }
     }
 
     pub fn submit(&mut self, head: u16) {
-        if !self.ready {
+        if !self.ready || self.size == 0 {
             return;
         }
-
-        unsafe {
-            let avail_idx = ptr::read_volatile(self.avail_idx_ptr());
-            ptr::write_volatile(self.avail_ring_ptr(avail_idx), head);
-            virtio_wmb();
-            ptr::write_volatile(self.avail_idx_ptr(), avail_idx.wrapping_add(1));
-        }
+        let Some(avail) = self.avail_frame.as_ref() else {
+            return;
+        };
+        let Some(avail_idx) = avail.read_volatile_at::<u16>(AVAIL_IDX_OFFSET) else {
+            return;
+        };
+        let ring_off =
+            AVAIL_RING_OFFSET + (avail_idx as usize % self.size as usize) * size_of::<u16>();
+        avail.write_volatile_at::<u16>(ring_off, head);
+        virtio_wmb();
+        avail.write_volatile_at::<u16>(AVAIL_IDX_OFFSET, avail_idx.wrapping_add(1));
     }
 
     /// Try to pop one entry from the used ring without waiting.
     /// Returns `None` if no new entries are available.
     pub fn try_pop_used(&mut self) -> Option<VirtqUsedElem> {
+        if self.size == 0 {
+            return None;
+        }
         virtio_rmb();
         let used_idx = self.read_used_idx();
         if used_idx == self.last_used_idx {
             return None;
         }
 
-        let elem = unsafe { ptr::read_volatile(self.used_ring_elem_ptr(self.last_used_idx)) };
+        let used = self.used_frame.as_ref()?;
+        let elem_off = USED_RING_OFFSET
+            + (self.last_used_idx as usize % self.size as usize) * size_of::<VirtqUsedElem>();
+        let elem = used.read_volatile_at::<VirtqUsedElem>(elem_off)?;
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
         Some(elem)
     }
@@ -194,40 +181,26 @@ pub fn setup_queue(
     let size = device_max_size.min(max_size);
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_SIZE, size);
 
-    let desc_page = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let avail_page = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let used_page = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let desc_frame = OwnedPageFrame::alloc_zeroed()?;
+    let avail_frame = OwnedPageFrame::alloc_zeroed()?;
+    let used_frame = OwnedPageFrame::alloc_zeroed()?;
 
-    if desc_page.is_null() || avail_page.is_null() || used_page.is_null() {
-        if !desc_page.is_null() {
-            free_page_frame(desc_page);
-        }
-        if !avail_page.is_null() {
-            free_page_frame(avail_page);
-        }
-        if !used_page.is_null() {
-            free_page_frame(used_page);
-        }
-        return None;
-    }
+    let desc_phys = PhysAddr::new(desc_frame.phys_u64());
+    let avail_phys = PhysAddr::new(avail_frame.phys_u64());
+    let used_phys = PhysAddr::new(used_frame.phys_u64());
 
-    let desc_virt = desc_page.to_virt().as_mut_ptr::<VirtqDesc>();
-    let avail_virt = avail_page.to_virt().as_mut_ptr::<u8>();
-    let used_virt = used_page.to_virt().as_mut_ptr::<u8>();
+    let desc_ring = VirtqueueRegion::<VirtqDesc>::new(desc_frame, size as usize)?;
 
-    common_cfg.write::<u64>(COMMON_CFG_QUEUE_DESC, desc_page.as_u64());
-    common_cfg.write::<u64>(COMMON_CFG_QUEUE_AVAIL, avail_page.as_u64());
-    common_cfg.write::<u64>(COMMON_CFG_QUEUE_USED, used_page.as_u64());
+    common_cfg.write::<u64>(COMMON_CFG_QUEUE_DESC, desc_phys.as_u64());
+    common_cfg.write::<u64>(COMMON_CFG_QUEUE_AVAIL, avail_phys.as_u64());
+    common_cfg.write::<u64>(COMMON_CFG_QUEUE_USED, used_phys.as_u64());
 
     // Write MSI-X vector BEFORE enabling the queue (VirtIO spec §4.1.4.3.2).
     if msix_vector != VIRTIO_MSI_NO_VECTOR {
         common_cfg.write::<u16>(COMMON_CFG_QUEUE_MSIX_VECTOR, msix_vector);
         let readback = common_cfg.read::<u16>(COMMON_CFG_QUEUE_MSIX_VECTOR);
         if readback == VIRTIO_MSI_NO_VECTOR {
-            // Device rejected the vector — clean up and fail.
-            free_page_frame(desc_page);
-            free_page_frame(avail_page);
-            free_page_frame(used_page);
+            // Device rejected the vector — drop frames and fail.
             return None;
         }
     }
@@ -238,12 +211,12 @@ pub fn setup_queue(
 
     Some(Virtqueue {
         size,
-        desc_phys: desc_page,
-        avail_phys: avail_page,
-        used_phys: used_page,
-        desc_virt,
-        avail_virt,
-        used_virt,
+        desc_phys,
+        avail_phys,
+        used_phys,
+        desc_ring: Some(desc_ring),
+        avail_frame: Some(avail_frame),
+        used_frame: Some(used_frame),
         notify_off,
         last_used_idx: 0,
         ready: true,

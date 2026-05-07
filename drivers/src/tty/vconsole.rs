@@ -256,18 +256,17 @@ fn color256_to_rgb(idx: u8) -> u32 {
 
 #[derive(Clone, Copy)]
 pub(crate) struct VConsoleFbInfo {
-    pub(crate) base: *mut u8,
+    /// Kernel virtual address of the framebuffer's first byte. Stored as
+    /// an integer (rather than `*mut u8`) so the type is `Send`/`Sync`
+    /// without an unsafe marker; access goes through `fb_blit` /
+    /// `fb_put_pixel` file-local helpers that consolidate the bounds-
+    /// checked MMIO writes.
+    pub(crate) base: u64,
     pub(crate) pitch: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) bytes_per_pixel: u8,
 }
-
-// SAFETY: The framebuffer base address is a physical memory mapping that
-// remains valid and stable for the entire lifetime of the kernel.  It is
-// only written to via `put_pixel` which performs bounds-checked writes.
-// The address does not alias any Rust-managed allocation.
-unsafe impl Send for VConsoleFbInfo {}
 
 // ---------------------------------------------------------------------------
 // Scrollback ring buffer (heap-allocated, owned via Box)
@@ -1496,19 +1495,17 @@ impl VConsoleState {
             let byte_count = y_end.saturating_sub(y_start).saturating_mul(pitch);
 
             if byte_offset + byte_count <= shadow.len() {
-                unsafe {
-                    let src = shadow.as_ptr().add(byte_offset);
-                    let dst = fb.base.add(byte_offset);
-                    ptr::copy_nonoverlapping(src, dst, byte_count);
-                }
+                fb_blit(
+                    fb.base,
+                    byte_offset,
+                    &shadow[byte_offset..byte_offset + byte_count],
+                );
             }
         }
 
         self.dirty_rows = 0;
         #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::x86_64::_mm_sfence();
-        }
+        slopos_ostd::arch::x86_64::mem_fence::sfence();
     }
 
     pub(crate) fn recalculate_dimensions(&mut self) {
@@ -1557,29 +1554,55 @@ impl VConsoleState {
             .saturating_mul(fb.pitch as usize)
             .saturating_add(x.saturating_mul(bpp));
 
-        // SAFETY: bounds checked above (x < width, y < height) and offset
-        // derived from pitch guarantees we stay within the framebuffer.
-        unsafe {
-            let p = fb.base.add(offset);
-            match fb.bytes_per_pixel {
-                4 => {
-                    let bgra = color & 0x00FF_FFFF;
-                    ptr::write_unaligned(p as *mut u32, bgra);
-                }
-                3 => {
-                    ptr::write(p, (color & 0xFF) as u8);
-                    ptr::write(p.add(1), ((color >> 8) & 0xFF) as u8);
-                    ptr::write(p.add(2), ((color >> 16) & 0xFF) as u8);
-                }
-                2 => {
-                    let r = ((color >> 16) & 0xFF) as u16;
-                    let g = ((color >> 8) & 0xFF) as u16;
-                    let b = (color & 0xFF) as u16;
-                    let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-                    ptr::write_unaligned(p as *mut u16, rgb565);
-                }
-                _ => {}
+        fb_put_pixel(fb.base, offset, fb.bytes_per_pixel, color);
+    }
+}
+
+/// Copy `src.len()` bytes from `src` into the framebuffer mapping at
+/// `base + byte_offset`. Caller must ensure `byte_offset + src.len()` is
+/// inside the framebuffer (the caller in `flush_dirty_rows` validates
+/// against the shadow buffer's length, which mirrors framebuffer dims).
+#[inline]
+fn fb_blit(base: u64, byte_offset: usize, src: &[u8]) {
+    // SAFETY: framebuffer is a kernel-static MMIO region published by
+    // the bootloader and registered through `register_framebuffer`. The
+    // caller pre-checks `byte_offset + src.len() <= shadow_size`, where
+    // `shadow_size = pitch * height` matches the framebuffer extent.
+    // The kernel never frees this mapping for the duration of boot.
+    unsafe {
+        let dst = (base as *mut u8).add(byte_offset);
+        ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+    }
+}
+
+/// Write a single pixel at `base + offset` using the given pixel format.
+/// `offset` is the byte offset already computed from `(x, y, pitch, bpp)`
+/// and bounds-checked by the caller (`put_pixel`'s width/height gate).
+#[inline]
+fn fb_put_pixel(base: u64, offset: usize, bytes_per_pixel: u8, color: u32) {
+    // SAFETY: `put_pixel` gates on `x < width && y < height` and computes
+    // `offset = y*pitch + x*bpp`, which stays within `pitch * height`.
+    // The framebuffer mapping outlives the kernel.
+    unsafe {
+        let p = (base as *mut u8).add(offset);
+        match bytes_per_pixel {
+            4 => {
+                let bgra = color & 0x00FF_FFFF;
+                ptr::write_unaligned(p as *mut u32, bgra);
             }
+            3 => {
+                ptr::write(p, (color & 0xFF) as u8);
+                ptr::write(p.add(1), ((color >> 8) & 0xFF) as u8);
+                ptr::write(p.add(2), ((color >> 16) & 0xFF) as u8);
+            }
+            2 => {
+                let r = ((color >> 16) & 0xFF) as u16;
+                let g = ((color >> 8) & 0xFF) as u16;
+                let b = (color & 0xFF) as u16;
+                let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                ptr::write_unaligned(p as *mut u16, rgb565);
+            }
+            _ => {}
         }
     }
 }
@@ -1605,7 +1628,7 @@ pub fn register_framebuffer(
     let cols = {
         let mut state = VCONSOLE_STATE.lock();
         state.fb = Some(VConsoleFbInfo {
-            base,
+            base: base as u64,
             pitch,
             width,
             height,

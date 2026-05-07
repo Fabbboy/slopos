@@ -1,3 +1,20 @@
+//! Early-boot serial driver.
+//!
+//! # Carve-out: file-wide `unsafe`
+//!
+//! This file is the kernel's panic-time / early-boot serial diagnostic
+//! source of truth. It funnels through `slopos_utils::ports::serial_*`
+//! and `slopos_utils::io::Port` — the lock-free port-I/O primitives
+//! that must run before allocators, before GDT/IDT, and during panic
+//! recovery. The `slopos-utils` crate is intentionally outside the
+//! kernel's `forbid(unsafe_code)` perimeter so the panic logger can
+//! keep its single-source-of-truth port writes; this driver inherits
+//! that exclusion. Every `unsafe` here is either a direct port-I/O
+//! `read()` / `write()` or a delegating call to a `slopos_utils::ports`
+//! helper that is itself part of the panic-logger TCB.
+
+#![allow(unsafe_code)]
+
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_arch::cpu;

@@ -28,7 +28,7 @@ pub fn test_virtio_net_scan_discovers_network_members() -> TestResult {
     let mut count = 0usize;
 
     for _ in 0..6 {
-        count = virtio_net::virtio_net_scan_members(members.as_mut_ptr(), members.len(), true);
+        count = virtio_net::virtio_net_scan_members(&mut members, true);
         if count > 0 {
             break;
         }

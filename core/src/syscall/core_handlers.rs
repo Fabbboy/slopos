@@ -197,7 +197,7 @@ define_syscall!(syscall_net_scan(ctx, args) {
 
     let mut scratch = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
     let discovered =
-        slopos_net::netinfo::net_scan_members(scratch.as_mut_ptr(), max_members, args.arg2 != 0)
+        slopos_net::netinfo::net_scan_members(&mut scratch[..max_members], args.arg2 != 0)
             .min(max_members)
             .min(USER_NET_MAX_MEMBERS);
 

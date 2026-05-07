@@ -18,8 +18,8 @@ pub fn net_get_info(out: &mut UserNetInfo) -> bool {
     }
 }
 
-pub fn net_scan_members(out: *mut UserNetMember, max: usize, active_probe: bool) -> usize {
+pub fn net_scan_members(out: &mut [UserNetMember], active_probe: bool) -> usize {
     net_driver_service::net_driver()
-        .map(|d| (d.scan_members)(out, max, active_probe))
+        .map(|d| (d.scan_members)(out, active_probe))
         .unwrap_or(0)
 }

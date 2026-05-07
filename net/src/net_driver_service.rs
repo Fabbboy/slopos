@@ -15,7 +15,7 @@ slopos_service_core::define_service! {
         @no_wrapper virtio_net_is_ready() -> bool;
         @no_wrapper virtio_net_transmit(packet: &[u8]) -> bool;
         @no_wrapper virtnet_force_napi_poll();
-        @no_wrapper scan_members(out: *mut UserNetMember, max: usize, active_probe: bool) -> usize;
+        @no_wrapper scan_members(out: &mut [UserNetMember], active_probe: bool) -> usize;
         @no_wrapper is_ready() -> bool;
         @no_wrapper get_info(out: &mut UserNetInfo);
     }
