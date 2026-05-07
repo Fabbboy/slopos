@@ -10,26 +10,29 @@ use core::ptr;
 
 use slopos_ostd::KVec;
 
-use slopos_abi::addr::PhysAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
+    TaskStatus,
 };
 use slopos_fs::fileio::{fileio_clone_table_for_process, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
-use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
-    process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
-    process_vm_reset_stack,
+    process_vm_get_page_dir, process_vm_get_stack_top, process_vm_get_vm_space,
+    process_vm_load_elf_data, process_vm_reset_stack, process_vm_write_user_bytes,
 };
 use slopos_utils::klog_info;
 
 use crate::sched::schedule_new_task;
-use crate::scheduler::task_struct::Task;
-use crate::task::{TaskEntry, task_create, task_find_by_id, task_get_info, task_terminate};
+use crate::scheduler::task::{
+    TaskEntry, task_borrow, task_borrow_mut, task_entry_from_kernel_va, task_process_id,
+    task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_set_status,
+    task_user_ctx_mut,
+};
+use crate::task::{task_create, task_find_by_id, task_get_info, task_terminate};
 use slopos_abi::task::INVALID_TASK_ID;
 
 pub const EXEC_MAX_PATH: usize = 256;
@@ -111,8 +114,7 @@ pub fn spawn_program_with_attrs(
 
         flags |= TASK_FLAG_USER_MODE;
         let task_name = task_name_from_path(normalized_path)?;
-        let user_code_entry: TaskEntry =
-            unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
+        let user_code_entry: TaskEntry = task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
 
         let task_id = task_create(
             task_name.as_ptr() as *const c_char,
@@ -126,7 +128,7 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::NoMem);
         }
 
-        let mut task_info: *mut Task = ptr::null_mut();
+        let mut task_info: *mut crate::scheduler::task_struct::Task = ptr::null_mut();
         if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
             task_terminate(task_id);
             return Err(ExecError::Fault);
@@ -138,7 +140,7 @@ pub fn spawn_program_with_attrs(
         // This is the Linux TASK_NEW pattern: the task is invisible to
         // the scheduler until fully initialized.
 
-        let process_id = unsafe { (*task_info).process_id };
+        let process_id = task_process_id(task_info).unwrap_or(INVALID_PROCESS_ID);
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
         let mut tls_tp = 0u64;
@@ -156,24 +158,18 @@ pub fn spawn_program_with_attrs(
             return Err(err);
         }
 
-        unsafe {
-            (*task_info).entry_point = entry;
-            ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
-            ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
-            (*task_info).fs_base = tls_tp;
+        task_set_entry_point(task_info, entry);
+        task_set_context_rip_rsp(task_info, entry, stack_ptr);
+        task_set_fs_base(task_info, tls_tp);
 
-            // OSTD user-mode entry: re-seed the task's `UserContext`
-            // with the post-load entry / stack pointers.  The kernel
-            // stack itself stays as `init_task_context` left it (just
-            // a return-address slot pointing at `user_task_first_run`);
-            // the iretq frame is rebuilt from `user_ctx` on every
-            // round-trip by `user_mode_round_trip_asm`.
-            crate::syscall::user_loop::init_user_ctx_for_new_task(
-                &mut (*task_info).user_ctx,
-                entry,
-                stack_ptr,
-                0,
-            );
+        // OSTD user-mode entry: re-seed the task's `UserContext`
+        // with the post-load entry / stack pointers.  The kernel
+        // stack itself stays as `init_task_context` left it (just
+        // a return-address slot pointing at `user_task_first_run`);
+        // the iretq frame is rebuilt from `user_ctx` on every
+        // round-trip by `user_mode_round_trip_asm`.
+        if let Some(uc) = task_user_ctx_mut(task_info) {
+            crate::syscall::user_loop::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
         }
 
         // Clone the parent's fd table BEFORE scheduling so the child has
@@ -193,16 +189,18 @@ pub fn spawn_program_with_attrs(
         if parent_task_id != INVALID_TASK_ID {
             let parent_ptr = task_find_by_id(parent_task_id);
             if !parent_ptr.is_null() {
-                let parent = unsafe { &*parent_ptr };
-                let child = unsafe { &mut *task_info };
-                if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
-                    child.pgid = task_id;
-                } else {
-                    child.pgid = parent.pgid;
+                if let (Some(parent), Some(child)) =
+                    (task_borrow(parent_ptr), task_borrow_mut(task_info))
+                {
+                    if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
+                        child.pgid = task_id;
+                    } else {
+                        child.pgid = parent.pgid;
+                    }
+                    child.sid = parent.sid;
+                    child.controlling_tty = parent.controlling_tty;
+                    child.parent_task_id = parent_task_id;
                 }
-                child.sid = parent.sid;
-                child.controlling_tty = parent.controlling_tty;
-                child.parent_task_id = parent_task_id;
             }
         }
 
@@ -213,7 +211,7 @@ pub fn spawn_program_with_attrs(
         // eventually runs this task.  This is the Linux TASK_NEW →
         // TASK_RUNNING pattern: task_create leaves the task Blocked,
         // and we make it schedulable only here.
-        unsafe { (*task_info).set_status(slopos_abi::task::TaskStatus::Ready) };
+        task_set_status(task_info, TaskStatus::Ready);
 
         if schedule_new_task(task_info) != 0 {
             task_terminate(task_id);
@@ -413,26 +411,8 @@ fn setup_user_stack(
 }
 
 fn write_to_user_stack(process_id: u32, addr: u64, data: &[u8]) -> Result<(), ExecError> {
-    use slopos_mm::process_vm::process_vm_user_va_to_paddr;
-
-    for (i, &byte) in data.iter().enumerate() {
-        let va = addr + i as u64;
-        let page_va = va & !(PAGE_SIZE_4KB - 1);
-        let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
-
-        let phys = process_vm_user_va_to_paddr(process_id, page_va);
-        if phys == 0 {
-            return Err(ExecError::Fault);
-        }
-        let virt = PhysAddr::new(phys).to_virt();
-        if virt.is_null() {
-            return Err(ExecError::Fault);
-        }
-        unsafe {
-            *virt.as_mut_ptr::<u8>().add(page_off) = byte;
-        }
-    }
-    Ok(())
+    let vm_space = process_vm_get_vm_space(process_id).ok_or(ExecError::Fault)?;
+    process_vm_write_user_bytes(&vm_space, addr, data).map_err(|_| ExecError::Fault)
 }
 
 fn write_byte_to_user_stack(process_id: u32, addr: u64, byte: u8) -> Result<(), ExecError> {

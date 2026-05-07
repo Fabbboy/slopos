@@ -5,44 +5,39 @@ use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_utils::klog_info;
 
 use crate::sched::scheduler_get_current_task;
-use crate::syscall::handlers::syscall_lookup;
-
+use crate::scheduler::task::{task_borrow, task_flags};
 use crate::scheduler::task_struct::Task;
+use crate::syscall::common::{SyscallEntry, SyscallHandler};
+use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::user::context::UserContext;
 
 pub fn syscall_handle(ctx_ptr: *mut UserContext) {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return;
-    }
+    };
 
-    let sysno = unsafe { (*ctx_ptr).regs().rax };
+    let sysno = user_ctx.regs().rax;
 
     let task = scheduler_get_current_task() as *mut Task;
-    if task.is_null() {
+    let Some(flags) = task_flags(task) else {
         return;
-    }
-    unsafe {
-        if ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
-            return;
-        }
+    };
+    if (flags & TASK_FLAG_USER_MODE) == 0 {
+        return;
     }
 
     // Clobber rax with a safe negative sentinel so that a handler
     // that forgets to write a return value does not leak stale register
     // contents to userland.
-    unsafe {
-        (*ctx_ptr).set_rax(slopos_abi::syscall::ERRNO_EINVAL as u64);
-    }
+    user_ctx.set_rax(slopos_abi::syscall::ERRNO_EINVAL as u64);
 
     let entry = syscall_lookup(sysno);
     if entry.is_null() {
         klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
-        unsafe {
-            (*ctx_ptr).set_rax(slopos_abi::syscall::ENOSYS_RETURN);
-        }
+        user_ctx.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
     } else {
-        let handler = unsafe { (*entry).handler };
+        let handler = read_entry_handler(entry);
         if let Some(func) = handler {
             func(task, ctx_ptr);
 
@@ -64,8 +59,10 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
             debug_assert_erestartsys_not_leaked(ctx_ptr);
         } else {
             // Reserved table slot with no handler — return ENOSYS.
-            unsafe {
-                (*ctx_ptr).set_rax(slopos_abi::syscall::ENOSYS_RETURN);
+            // Re-fetch the user context borrow (the func() call above
+            // consumed the previous mutable reborrow).
+            if let Some(uc) = UserContext::from_ptr_mut(ctx_ptr) {
+                uc.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
             }
         }
     }
@@ -74,6 +71,21 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
     // a handler ran.  Linux checks TIF_SIGPENDING unconditionally on
     // return to userspace.
     crate::syscall::signal::deliver_pending_signal(task, ctx_ptr);
+}
+
+/// Read `entry.handler` from the syscall table.
+///
+/// The pointer is pre-validated by `syscall_lookup` (returns null on
+/// out-of-range / unhandled). The dereference reads a single function
+/// pointer slot from kernel-readonly memory.
+#[inline]
+fn read_entry_handler(entry: *const SyscallEntry) -> Option<SyscallHandler> {
+    if entry.is_null() {
+        return None;
+    }
+    // SAFETY: pre-validated by syscall_lookup; entry points into the
+    // statically-allocated SYSCALL_TABLE in kernel rodata.
+    unsafe { (*entry).handler }
 }
 
 // ---------------------------------------------------------------------------
@@ -134,32 +146,32 @@ const SYSCALL_INSN_SIZE: u64 = 2;
 /// 3. **Safety net**: `debug_assert_erestartsys_not_leaked` catches any
 ///    leaked `ERESTARTSYS` value as a last resort.
 fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
-    let result = unsafe { (*ctx_ptr).regs().rax };
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return;
+    };
+    let result = user_ctx.regs().rax;
     if result != ERRNO_ERESTARTSYS {
         return;
     }
 
-    // --- Minimal unsafe region: read raw signal state into safe locals ---
-    let (pending, blocked, handler, flags) = unsafe {
-        let pending = (*task).signal_pending.load(Ordering::Acquire);
-        let blocked = (*task).signal_blocked;
-        let deliverable = pending & !blocked;
-
-        if deliverable == 0 {
-            (pending, blocked, 0u64, 0u64)
-        } else {
-            // Inspect the signal that deliver_pending_signal will pick (the
-            // lowest-numbered deliverable signal, matching its trailing_zeros
-            // selection).
-            let signum = (deliverable.trailing_zeros() + 1) as u8;
-            let idx = (signum as usize).wrapping_sub(1);
-            let action = (*task).signal_actions[idx];
-            (pending, blocked, action.handler, action.flags)
-        }
+    // --- Read raw signal state into safe locals via task_borrow. ---
+    let Some(task_ref) = task_borrow(task) else {
+        return;
     };
-
-    // --- Safe policy decision using copied locals ---
+    let pending = task_ref.signal_pending.load(Ordering::Acquire);
+    let blocked = task_ref.signal_blocked;
     let deliverable = pending & !blocked;
+    let (handler, flags) = if deliverable == 0 {
+        (0u64, 0u64)
+    } else {
+        // Inspect the signal that deliver_pending_signal will pick (the
+        // lowest-numbered deliverable signal, matching its trailing_zeros
+        // selection).
+        let signum = (deliverable.trailing_zeros() + 1) as u8;
+        let idx = (signum as usize).wrapping_sub(1);
+        let action = task_ref.signal_actions[idx];
+        (action.handler, action.flags)
+    };
 
     let should_restart = if deliverable == 0 {
         // No deliverable signals — restart the syscall immediately.
@@ -184,15 +196,13 @@ fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
 
     // --- Write decision back through `set_regs` so the user-CS/SS/RFLAGS
     // mask discipline is reapplied even though we only mutate rip/rax. ---
-    unsafe {
-        if should_restart {
-            let mut regs = *(*ctx_ptr).regs();
-            regs.rip = regs.rip.wrapping_sub(SYSCALL_INSN_SIZE);
-            regs.rax = sysno;
-            (*ctx_ptr).set_regs(regs);
-        } else {
-            (*ctx_ptr).set_rax((-4i64) as u64);
-        }
+    if should_restart {
+        let mut regs = *user_ctx.regs();
+        regs.rip = regs.rip.wrapping_sub(SYSCALL_INSN_SIZE);
+        regs.rax = sysno;
+        user_ctx.set_regs(regs);
+    } else {
+        user_ctx.set_rax((-4i64) as u64);
     }
 }
 
@@ -200,13 +210,14 @@ fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
 /// In debug builds, this panics.  In release builds, it silently converts
 /// to EINTR as a last resort.
 fn debug_assert_erestartsys_not_leaked(ctx_ptr: *mut UserContext) {
-    let rax = unsafe { (*ctx_ptr).regs().rax };
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return;
+    };
+    let rax = user_ctx.regs().rax;
     if rax == ERRNO_ERESTARTSYS {
         // This should never happen — handle_erestartsys should have
         // already converted or restarted.  Convert to EINTR as a
         // safety net.
-        unsafe {
-            (*ctx_ptr).set_rax((-4i64) as u64);
-        }
+        user_ctx.set_rax((-4i64) as u64);
     }
 }

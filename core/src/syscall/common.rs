@@ -28,21 +28,15 @@ pub struct SyscallEntry {
 unsafe impl Sync for SyscallEntry {}
 
 pub fn syscall_return_ok(ctx: *mut UserContext, value: u64) -> SyscallDisposition {
-    if ctx.is_null() {
-        return SyscallDisposition::Ok;
-    }
-    unsafe {
-        (*ctx).set_rax(value);
+    if let Some(uc) = UserContext::from_ptr_mut(ctx) {
+        uc.set_rax(value);
     }
     SyscallDisposition::Ok
 }
 
 pub fn syscall_return_err(ctx: *mut UserContext, err_value: u64) -> SyscallDisposition {
-    if ctx.is_null() {
-        return SyscallDisposition::Ok;
-    }
-    unsafe {
-        (*ctx).set_rax(err_value);
+    if let Some(uc) = UserContext::from_ptr_mut(ctx) {
+        uc.set_rax(err_value);
     }
     SyscallDisposition::Ok
 }
@@ -67,6 +61,8 @@ pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPt
 }
 
 pub fn syscall_copy_user_str_to_cstr(dst: &mut [i8], user_src: u64) -> c_int {
+    // SAFETY: `i8` and `u8` share layout; the slice metadata stays
+    // identical. The reborrow is bounded by the local `dst_u8` borrow.
     let dst_u8 = unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
     match syscall_copy_user_str(dst_u8, user_src) {
         Ok(()) => 0,

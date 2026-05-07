@@ -26,10 +26,10 @@ use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
 
 pub fn syscall_yield(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
     let _ = ctx.ok(0);
@@ -95,10 +95,9 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
 });
 
 pub fn syscall_exit(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let ctx = if ctx_ptr.is_null() {
-        None
-    } else {
-        SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr })
+    let ctx = match UserContext::from_ptr_mut(ctx_ptr) {
+        Some(uc) => SyscallContext::from_user_context(task, uc),
+        None => None,
     };
     let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
@@ -254,12 +253,20 @@ define_syscall!(syscall_process_list(ctx, args) {
     }
 
     fn collect_task(task_ptr: *mut crate::scheduler::task_struct::Task, ctx_ptr: *mut c_void) {
-        let iter_ctx = unsafe { &mut *(ctx_ptr as *mut IterCtx) };
+        // SAFETY: collect_task is only invoked through `iterate_tasks`,
+        // which passes back the same `*mut IterCtx` the caller stashed
+        // a moment ago.
+        let mut cb = unsafe { slopos_ostd::util::callback_ctx::CallbackCtx::<IterCtx>::from_raw(ctx_ptr) };
+        let Some(iter_ctx) = cb.try_borrow() else {
+            return;
+        };
         if iter_ctx.count >= iter_ctx.max {
             return;
         }
 
-        let task = unsafe { &*task_ptr };
+        let Some(task) = crate::scheduler::task::task_borrow(task_ptr) else {
+            return;
+        };
         if task.task_id == INVALID_TASK_ID {
             return;
         }

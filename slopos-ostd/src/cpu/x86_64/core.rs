@@ -25,3 +25,18 @@ pub fn halt_loop() -> ! {
         hlt();
     }
 }
+
+/// Atomic `sti; hlt` pair. The IF-shadow rule guarantees no IRQ window
+/// between the `sti` and the `hlt`, so a pending interrupt that
+/// arrived during a `cli` region is delivered exactly when the CPU is
+/// already in HLT state. Used by HPET-driven busy-wait loops in
+/// drivers (`drivers/src/virtio/mod.rs::pause_for_irq`).
+#[inline(always)]
+pub fn sti_hlt_atomic() {
+    // SAFETY: `sti; hlt` is a single architectural sequence; the IF
+    // shadow keeps interrupts inhibited until the HLT completes its
+    // halt transition.
+    unsafe {
+        asm!("sti", "hlt", options(nomem, nostack));
+    }
+}

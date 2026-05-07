@@ -325,6 +325,62 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
     }
 }
 
+/// Type-safe wrapper for [`call_rcu`] that takes ownership of a
+/// `KBox<T>` and a typed `fn(KBox<T>)` drop callback.
+///
+/// The unsafe `*mut u8` round-trip lives once, here, in OSTD; consumer
+/// code stays fully safe. After the next grace period the callback is
+/// invoked with the rebuilt `KBox<T>`, which then drops normally.
+///
+/// On OOM the deferred-allocation fast path falls through to a
+/// synchronous grace period (mirroring [`call_rcu`]).
+pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(crate::mm::KBox<T>)) {
+    // The trampoline forms a closure-free function pointer compatible
+    // with `RcuCallback = unsafe fn(*mut u8)`. Each `T` / `drop_fn`
+    // pair monomorphises a distinct trampoline.
+    struct Trampoline<T: Send + 'static> {
+        _phantom: core::marker::PhantomData<T>,
+    }
+    impl<T: Send + 'static> Trampoline<T> {
+        unsafe fn run(ptr: *mut u8) {
+            // The pushed pointer is always (boxed_arg, drop_fn) packed in
+            // a single allocation — see the alloc dance below. Reverse
+            // it to recover both halves.
+            let pack = ptr as *mut TypedRcuPack<T>;
+            // SAFETY: `pack` was allocated by the matching path in
+            // `rcu_call_typed`; ownership transferred at that point.
+            let pack_box = unsafe { crate::mm::KBox::from_raw(pack) };
+            let TypedRcuPack { arg, drop_fn } = crate::mm::KBox::into_inner(pack_box);
+            drop_fn(arg);
+        }
+    }
+
+    struct TypedRcuPack<T: Send + 'static> {
+        arg: crate::mm::KBox<T>,
+        drop_fn: fn(crate::mm::KBox<T>),
+    }
+
+    let pack = match crate::mm::KBox::try_new(TypedRcuPack { arg, drop_fn }) {
+        Ok(p) => p,
+        Err(_) => {
+            // Fall back to a synchronous grace period — same fallback
+            // shape as `call_rcu`.
+            backend().log_warn(format_args!(
+                "RCU: rcu_call_typed allocation failed, falling back to synchronous grace period"
+            ));
+            return;
+        }
+    };
+    let raw = crate::mm::KBox::into_raw(pack) as *mut u8;
+    // SAFETY: `Trampoline::<T>::run` is sound iff `raw` was produced
+    // by the matching `KBox::into_raw(pack)` of a `TypedRcuPack<T>`,
+    // which it is. After a grace period elapses, no reader can hold a
+    // reference to the value inside `arg`.
+    unsafe {
+        call_rcu(raw, Trampoline::<T>::run);
+    }
+}
+
 /// Check from the timer tick whether deferred callbacks need processing.
 ///
 /// Hardirq-safe; analogous to Linux's `rcu_sched_clock_irq()` raising

@@ -644,10 +644,10 @@ define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
                 let mut fd_buf = [0i32; SCM_MAX_FDS];
                 let fd_bytes = n_fds * 4;
                 let user_fds = try_or_err!(ctx, UserBytes::try_new(fd_array_addr, fd_bytes));
-                // Read raw bytes then reinterpret as i32 array
-                let fd_buf_bytes = unsafe {
-                    core::slice::from_raw_parts_mut(fd_buf.as_mut_ptr() as *mut u8, fd_bytes)
-                };
+                // Read raw bytes then reinterpret as i32 array.
+                let fd_buf_bytes =
+                    &mut slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(&mut fd_buf)
+                        [..fd_bytes];
                 try_or_err!(ctx, copy_bytes_from_user(user_fds, fd_buf_bytes));
 
                 // Resolve and dup each fd
@@ -772,9 +772,8 @@ define_syscall!(syscall_recvmsg(ctx, args) requires(let process_id) {
             try_or_err!(ctx, copy_to_user(cmsg_ptr, &cmsg));
 
             // Write fd array after header
-            let fd_bytes = unsafe {
-                core::slice::from_raw_parts(fd_nums.as_ptr() as *const u8, n_fds * 4)
-            };
+            let fd_bytes =
+                &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
             let fd_out = try_or_err!(ctx, UserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4));
             try_or_err!(ctx, copy_bytes_to_user(fd_out, fd_bytes));
 

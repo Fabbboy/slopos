@@ -1,8 +1,8 @@
 use core::mem;
-use core::ptr::read_unaligned;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::{self, PhysAddrHhdm};
+use slopos_ostd::util::packed_view::read_packed;
 use slopos_utils::klog_info;
 
 #[repr(C, packed)]
@@ -32,13 +32,14 @@ pub struct SdtHeader {
 }
 
 fn checksum(data: *const u8, length: usize) -> u8 {
-    let mut sum: u8 = 0;
-    for i in 0..length {
-        unsafe {
-            sum = sum.wrapping_add(*data.add(i));
-        }
+    if data.is_null() || length == 0 {
+        return 0;
     }
-    sum
+    // SAFETY: caller ensures `[data, data + length)` is a contiguous,
+    // mapped byte range representing an ACPI table; this byte slice is
+    // borrowed only for the duration of the `iter().fold(...)` below.
+    let bytes = unsafe { core::slice::from_raw_parts(data, length) };
+    bytes.iter().fold(0u8, |acc, &b| acc.wrapping_add(b))
 }
 
 fn validate_rsdp(rsdp: *const Rsdp) -> bool {
@@ -92,12 +93,22 @@ fn scan_sdt(sdt: *const SdtHeader, entry_size: usize, signature: &[u8; 4]) -> *c
     let entry_count = payload_bytes / entry_size;
     let entries = (sdt as *const u8).wrapping_add(mem::size_of::<SdtHeader>());
 
+    // Borrow the SDT entry payload as a single byte slice and walk it
+    // with `read_packed`. The unsafe `from_raw_parts` lives once at
+    // the boundary where we go from raw `*const SdtHeader` (with a
+    // length-validated `hdr.length`) to a safe slice.
+    //
+    // SAFETY: `hdr.length` was just validated against the SDT header
+    // size; `entries` is the byte at `sdt + size_of::<SdtHeader>()`,
+    // which the same allocation covers.
+    let payload = unsafe { core::slice::from_raw_parts(entries, payload_bytes) };
+
     for i in 0..entry_count {
-        let entry_ptr = unsafe { entries.add(i * entry_size) };
+        let off = i * entry_size;
         let phys = if entry_size == 8 {
-            unsafe { read_unaligned(entry_ptr as *const u64) }
+            read_packed::<u64>(payload, off).unwrap_or(0)
         } else {
-            unsafe { read_unaligned(entry_ptr as *const u32) as u64 }
+            read_packed::<u32>(payload, off).unwrap_or(0) as u64
         };
 
         let candidate = map_phys_table(phys);

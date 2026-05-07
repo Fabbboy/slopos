@@ -88,15 +88,16 @@ pub extern "C" fn user_task_first_run() -> ! {
 fn user_task_loop(task: *mut Task) -> ! {
     let space = placeholder_vm_space();
     loop {
-        // SAFETY: `task` is the currently running task; nothing else
-        // mutates `task->user_ctx` while it is the running task.
-        let ctx_ptr: *mut UserContext = unsafe { core::ptr::addr_of_mut!((*task).user_ctx) };
+        // `task` is the currently running task; nothing else mutates
+        // `task->user_ctx` while it is the running task. The
+        // `task_user_ctx_mut` accessor null-checks `task` once and
+        // hands back a `&mut UserContext` whose lifetime is the loop
+        // iteration scope.
+        let ctx_ref = crate::scheduler::task::task_user_ctx_mut(task)
+            .expect("user_task_loop: scheduler dispatched null task");
+        let ctx_ptr: *mut UserContext = ctx_ref as *mut UserContext;
 
         let reason = {
-            // SAFETY: ctx_ptr lives as long as `task` does (its
-            // `UserContext` is an owned field), which outlives this
-            // single iteration of the loop.
-            let ctx_ref: &mut UserContext = unsafe { &mut *ctx_ptr };
             let user_mode = UserMode::new(ctx_ref, space);
             user_mode.execute()
         };

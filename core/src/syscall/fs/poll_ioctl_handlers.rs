@@ -668,7 +668,9 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             if task_ptr.is_null() {
                 return ctx.err();
             }
-            let task = unsafe { &*task_ptr };
+            let Some(task) = crate::scheduler::task::task_borrow(task_ptr) else {
+                return ctx.err();
+            };
             match task.controlling_tty {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return ctx.err(), // ENOTTY
@@ -707,7 +709,9 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 return ctx.err();
             }
 
-            let task = unsafe { &mut *task_ptr };
+            let Some(task) = crate::scheduler::task::task_borrow_mut(task_ptr) else {
+                return ctx.err();
+            };
             if task.sid == 0 || task.sid != task.task_id {
                 return ctx.err();
             }
@@ -737,7 +741,9 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             if task_ptr.is_null() {
                 return ctx.err();
             }
-            let task = unsafe { &*task_ptr };
+            let Some(task) = crate::scheduler::task::task_borrow(task_ptr) else {
+                return ctx.err();
+            };
             match task.controlling_tty {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return ctx.err(), // ENOTTY
@@ -757,7 +763,9 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 return ctx.err();
             }
 
-            let task = unsafe { &mut *task_ptr };
+            let Some(task) = crate::scheduler::task::task_borrow_mut(task_ptr) else {
+                return ctx.err();
+            };
             match task.controlling_tty {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return ctx.err(), // ENOTTY — not our controlling terminal

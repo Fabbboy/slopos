@@ -183,22 +183,22 @@ fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
     let allow_hlt = slopos_arch::pcr::get_current_cpu() == 0;
 
     loop {
-        unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+        slopos_ostd::cpu::x86_64::interrupts::disable_interrupts();
 
         if condition() {
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
             return true;
         }
 
         if hpet::read_counter().wrapping_sub(start) >= ticks_needed {
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
             return false;
         }
 
         if allow_hlt {
-            unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
+            slopos_ostd::cpu::x86_64::core::sti_hlt_atomic();
         } else {
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
             core::hint::spin_loop();
         }
     }

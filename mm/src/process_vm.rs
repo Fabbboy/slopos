@@ -1184,6 +1184,76 @@ fn setup_tls_block(
     Ok((tp, tls_pages))
 }
 
+/// Read a `u8` from the user-VA space identified by `vm_space`.
+/// Returns `None` if the page is unmapped.
+pub fn process_vm_read_user_u8(vm_space: &KArc<VmSpace>, addr: u64) -> Option<u8> {
+    let mut buf = [0u8; 1];
+    process_vm_read_user_bytes(vm_space, addr, &mut buf).ok()?;
+    Some(buf[0])
+}
+
+/// Read a `u64` (little-endian) from the user-VA space.  Returns
+/// `None` if any byte of the range is unmapped.
+pub fn process_vm_read_user_u64(vm_space: &KArc<VmSpace>, addr: u64) -> Option<u64> {
+    let mut buf = [0u8; 8];
+    process_vm_read_user_bytes(vm_space, addr, &mut buf).ok()?;
+    Some(u64::from_le_bytes(buf))
+}
+
+/// Generic user-VA read: copies `dst.len()` bytes starting at `addr`
+/// from the address space identified by `vm_space` into `dst`.
+pub fn process_vm_read_user_bytes(
+    vm_space: &KArc<VmSpace>,
+    addr: u64,
+    dst: &mut [u8],
+) -> Result<(), ElfError> {
+    let mut read = 0usize;
+    while read < dst.len() {
+        let va = addr
+            .checked_add(read as u64)
+            .ok_or(ElfError::SegmentSizeOverflow)?;
+        let page_va = va & !(PAGE_SIZE_4KB - 1);
+        let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
+        let chunk = core::cmp::min(dst.len() - read, PAGE_SIZE_4KB as usize - page_off);
+
+        let phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
+        if phys.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+        let virt = phys.to_virt();
+        if virt.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+        // SAFETY: `phys` came from a successful walk, so the HHDM
+        // mapping is live; `chunk` is bounded by `PAGE_SIZE_4KB -
+        // page_off` so the read stays inside one page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                virt.as_ptr::<u8>().add(page_off),
+                dst.as_mut_ptr().add(read),
+                chunk,
+            );
+        }
+        read += chunk;
+    }
+    Ok(())
+}
+
+/// Write `data` into the user address space identified by `vm_space`,
+/// translating each `dst_addr + offset` through the `VmSpace` and
+/// writing through the HHDM mapping.
+///
+/// `Err(ElfError::NullPointer)` if any user page in the range is not
+/// mapped. Used by ELF load + the kernel-side `write_to_user_stack`
+/// helper consumed from `core/src/exec/mod.rs`.
+pub fn process_vm_write_user_bytes(
+    vm_space: &KArc<VmSpace>,
+    dst_addr: u64,
+    data: &[u8],
+) -> Result<(), ElfError> {
+    write_user_bytes(vm_space, dst_addr, data)
+}
+
 fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Result<(), ElfError> {
     let mut written = 0usize;
     while written < data.len() {

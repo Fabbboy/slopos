@@ -609,6 +609,30 @@ impl IoMem {
         Ok(())
     }
 
+    /// Borrow the region's first `size_of::<T>()` bytes as `&T`.
+    /// Returns `None` if `T` doesn't fit or the region's `virt_base`
+    /// is not aligned for `T`.
+    ///
+    /// Used by drivers that hold an `IoMem` covering a single typed
+    /// hardware register set (e.g. IOAPIC's `IoapicRegisterSet`).
+    /// `T: Pod` ensures any byte pattern is valid for `T`; the
+    /// returned reference is volatile-safe to use *only* through
+    /// `read_volatile` / `write_volatile` — for general access prefer
+    /// `read::<T>(0)` / `write::<T>(0, …)`.
+    #[inline]
+    pub fn as_struct_ref<'a, T: Pod>(&'a self) -> Option<&'a T> {
+        let size = size_of::<T>();
+        if size > self.size {
+            return None;
+        }
+        if self.virt_base as usize % align_of::<T>() != 0 {
+            return None;
+        }
+        // SAFETY: bounds and alignment proven; the IoMem registry-tracked
+        // mapping outlives `&self` and `T: Pod` accepts any byte pattern.
+        Some(unsafe { &*(self.virt_base as *const T) })
+    }
+
     /// Carve a sub-region out of this region. The returned handle
     /// shares the parent's mapping; `phys_base` is offset by `offset`
     /// and `size` shrinks accordingly. Returns `None` on overrun.

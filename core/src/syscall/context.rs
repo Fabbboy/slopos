@@ -1,3 +1,6 @@
+use crate::scheduler::task::{
+    task_borrow_mut, task_flags as task_flags_of, task_id_of, task_process_id,
+};
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
@@ -49,28 +52,20 @@ impl SyscallContext {
 
     #[inline]
     pub fn task_id(&self) -> Option<u32> {
-        if self.task_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { (*self.task_ptr).task_id })
-        }
+        task_id_of(self.task_ptr)
     }
 
     #[inline]
     pub fn process_id(&self) -> Option<u32> {
-        if self.task_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { (*self.task_ptr).process_id })
-        }
+        task_process_id(self.task_ptr)
     }
 
     #[inline]
     pub fn has_flag(&self, flag: u16) -> bool {
-        if self.task_ptr.is_null() {
-            return false;
+        match task_flags_of(self.task_ptr) {
+            Some(f) => f & flag != 0,
+            None => false,
         }
-        unsafe { (*self.task_ptr).flags & flag != 0 }
     }
 
     #[inline]
@@ -114,7 +109,7 @@ impl SyscallContext {
 
     #[inline]
     pub fn user_ctx(&self) -> &UserContext {
-        unsafe { &*self.user_ctx_ptr }
+        UserContext::from_ptr(self.user_ctx_ptr).expect("syscall: user_ctx_ptr null")
     }
 
     /// Mutable view of the per-task user-mode register snapshot the
@@ -123,7 +118,7 @@ impl SyscallContext {
     /// reentrant `&mut UserContext` reborrow (e.g. nested handler dispatch).
     #[inline]
     pub fn user_ctx_mut(&self) -> &mut UserContext {
-        unsafe { &mut *self.user_ctx_ptr }
+        UserContext::from_ptr_mut(self.user_ctx_ptr).expect("syscall: user_ctx_ptr null")
     }
 
     #[inline]
@@ -133,11 +128,7 @@ impl SyscallContext {
 
     #[inline]
     pub fn task_mut(&self) -> Option<&mut Task> {
-        if self.task_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { &mut *self.task_ptr })
-        }
+        task_borrow_mut(self.task_ptr)
     }
 
     #[inline]

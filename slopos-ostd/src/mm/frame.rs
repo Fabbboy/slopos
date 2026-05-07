@@ -565,6 +565,136 @@ impl Frame<KernelMeta> {
         let _slot = self.into_raw();
         paddr
     }
+
+    /// Read a `T: Pod` at byte offset `offset` inside this frame.
+    /// Returns `None` if `offset + size_of::<T>()` would exceed
+    /// `PAGE_SIZE_4KB`.
+    pub fn read_at<T: crate::mm::Pod>(&self, offset: usize) -> Option<T> {
+        let needed = core::mem::size_of::<T>();
+        if offset.checked_add(needed)? > crate::mm::page_table::PAGE_SIZE_4KB as usize {
+            return None;
+        }
+        let p = (self.virt_addr_u64() as usize + offset) as *const T;
+        // SAFETY: HHDM mapping covers the frame; offset bounds-checked;
+        // `T: Pod` makes any byte pattern a valid `T`. `read_unaligned`
+        // lifts the alignment requirement.
+        Some(unsafe { core::ptr::read_unaligned(p) })
+    }
+
+    /// Read a `T: Pod` via a *volatile* load — for device-visible ring
+    /// buffer slots that the hardware updates concurrently.
+    pub fn read_volatile_at<T: crate::mm::Pod>(&self, offset: usize) -> Option<T> {
+        let needed = core::mem::size_of::<T>();
+        if offset.checked_add(needed)? > crate::mm::page_table::PAGE_SIZE_4KB as usize {
+            return None;
+        }
+        let p = (self.virt_addr_u64() as usize + offset) as *const T;
+        // SAFETY: see `read_at`. Volatile semantics are required when
+        // the hardware can mutate the slot under us.
+        Some(unsafe { core::ptr::read_volatile(p) })
+    }
+
+    /// Write `value` at byte offset `offset`. Returns `false` if the
+    /// write would extend past the frame.
+    pub fn write_at<T: crate::mm::Pod>(&self, offset: usize, value: &T) -> bool {
+        let needed = core::mem::size_of::<T>();
+        if offset
+            .checked_add(needed)
+            .map(|e| e > crate::mm::page_table::PAGE_SIZE_4KB as usize)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        let p = (self.virt_addr_u64() as usize + offset) as *mut T;
+        // SAFETY: bounds-checked; `T: Pod` so the write of any byte
+        // pattern is valid.
+        unsafe {
+            core::ptr::write_unaligned(p, *value);
+        }
+        true
+    }
+
+    /// Volatile sibling of [`Self::write_at`].
+    pub fn write_volatile_at<T: crate::mm::Pod>(&self, offset: usize, value: T) -> bool {
+        let needed = core::mem::size_of::<T>();
+        if offset
+            .checked_add(needed)
+            .map(|e| e > crate::mm::page_table::PAGE_SIZE_4KB as usize)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        let p = (self.virt_addr_u64() as usize + offset) as *mut T;
+        // SAFETY: see `write_at`. Volatile is required for ring slots
+        // visible to a hardware consumer.
+        unsafe {
+            core::ptr::write_volatile(p, value);
+        }
+        true
+    }
+
+    /// Copy `src` into the frame starting at `offset`. Returns `false`
+    /// if the slice would not fit.
+    pub fn write_slice(&self, offset: usize, src: &[u8]) -> bool {
+        if offset
+            .checked_add(src.len())
+            .map(|e| e > crate::mm::page_table::PAGE_SIZE_4KB as usize)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        let dst = (self.virt_addr_u64() as usize + offset) as *mut u8;
+        // SAFETY: bounds-checked above; `src` and the HHDM destination
+        // do not alias because `src` lives in kernel-stack / heap and
+        // the HHDM is a fresh mapping.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        }
+        true
+    }
+
+    /// Copy `dst.len()` bytes starting at `offset` out of the frame.
+    /// Returns `false` if the slice would not fit.
+    pub fn read_slice(&self, offset: usize, dst: &mut [u8]) -> bool {
+        if offset
+            .checked_add(dst.len())
+            .map(|e| e > crate::mm::page_table::PAGE_SIZE_4KB as usize)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        let src = (self.virt_addr_u64() as usize + offset) as *const u8;
+        // SAFETY: bounds-checked above; the byte slice destination
+        // is unique for the call's duration.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
+        }
+        true
+    }
+
+    /// Borrow a byte view into the frame at `offset` for `len` bytes.
+    /// The borrow's lifetime is the caller's borrow of `self`. Returns
+    /// `None` if out-of-bounds.
+    pub fn slice_at(&self, offset: usize, len: usize) -> Option<&[u8]> {
+        if offset.checked_add(len)? > crate::mm::page_table::PAGE_SIZE_4KB as usize {
+            return None;
+        }
+        let p = (self.virt_addr_u64() as usize + offset) as *const u8;
+        // SAFETY: bounds-checked; the HHDM mapping outlives `&self`
+        // and no other path can mutate this byte range without going
+        // through one of the safe `Frame` methods.
+        Some(unsafe { core::slice::from_raw_parts(p, len) })
+    }
+
+    /// Mutable sibling of [`Self::slice_at`].
+    pub fn slice_at_mut(&mut self, offset: usize, len: usize) -> Option<&mut [u8]> {
+        if offset.checked_add(len)? > crate::mm::page_table::PAGE_SIZE_4KB as usize {
+            return None;
+        }
+        let p = (self.virt_addr_u64() as usize + offset) as *mut u8;
+        // SAFETY: `&mut self` makes this borrow unique.
+        Some(unsafe { core::slice::from_raw_parts_mut(p, len) })
+    }
 }
 
 impl<M: AnyFrameMeta> Drop for Frame<M> {

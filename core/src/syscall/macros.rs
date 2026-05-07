@@ -35,16 +35,16 @@ macro_rules! define_syscall {
             task: *mut $crate::scheduler::task_struct::Task,
             user_ctx_ptr: *mut slopos_ostd::user::context::UserContext,
         ) -> $crate::syscall::common::SyscallDisposition {
-            if user_ctx_ptr.is_null() {
+            let Some(user_ctx) = slopos_ostd::user::context::UserContext::from_ptr_mut(user_ctx_ptr) else {
                 return $crate::syscall::common::syscall_return_err(
                     user_ctx_ptr,
                     slopos_abi::Errno::EINVAL.as_u64(),
                 );
-            }
+            };
             #[allow(unused_variables)]
             let Some($ctx) = $crate::syscall::context::SyscallContext::from_user_context(
                 task,
-                unsafe { &mut *user_ctx_ptr },
+                user_ctx,
             ) else {
                 return $crate::syscall::common::syscall_return_err(
                     user_ctx_ptr,

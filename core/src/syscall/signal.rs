@@ -12,7 +12,9 @@ use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::user::context::UserContext;
 
 use crate::sched::{schedule, unblock_task};
-use crate::scheduler::task::{task_find_by_id, task_iterate_active, task_terminate};
+use crate::scheduler::task::{
+    task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_terminate,
+};
 use crate::scheduler::task_struct::{SignalAction, Task};
 use crate::syscall::common::{SyscallDisposition, syscall_return_err};
 use crate::syscall::context::SyscallContext;
@@ -76,30 +78,56 @@ struct AllCollectContext {
 }
 
 fn collect_group_member(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
+    // SAFETY: `context` originates from `collect_targets_for_group`'s
+    // typed `&mut GroupCollectContext` cast a few frames up; null was
+    // pre-checked.
+    let mut cb = unsafe {
+        slopos_ostd::util::callback_ctx::CallbackCtx::<GroupCollectContext>::from_raw(context)
+    };
+    let Some(ctx) = cb.try_borrow() else {
+        return;
+    };
+
+    let Some(pgid) = task_pgid(task) else {
+        return;
+    };
+    if pgid != ctx.pgid {
         return;
     }
 
-    let ctx = unsafe { &mut *(context as *mut GroupCollectContext) };
-    if unsafe { (*task).pgid } != ctx.pgid {
+    let Some(tid) = task_id_of(task) else {
         return;
+    };
+    // SAFETY: `ctx.targets` holds a `*mut TargetSet` whose backing
+    // `&mut TargetSet` is owned by the caller frame in
+    // `collect_targets_for_group`; null was implicitly cleared by the
+    // outer `&mut ctx as *mut _` cast.
+    unsafe {
+        (&mut *ctx.targets).push(tid);
     }
-
-    unsafe { (&mut *ctx.targets).push((*task).task_id) };
 }
 
 fn collect_all_members(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
+    // SAFETY: `context` is the typed `&mut AllCollectContext` cast
+    // from `collect_targets_for_all` a few frames up.
+    let mut cb = unsafe {
+        slopos_ostd::util::callback_ctx::CallbackCtx::<AllCollectContext>::from_raw(context)
+    };
+    let Some(ctx) = cb.try_borrow() else {
         return;
-    }
+    };
 
-    let ctx = unsafe { &mut *(context as *mut AllCollectContext) };
-    let task_id = unsafe { (*task).task_id };
+    let Some(task_id) = task_id_of(task) else {
+        return;
+    };
     if task_id == INVALID_TASK_ID || task_id == ctx.exclude_task_id {
         return;
     }
 
-    unsafe { (&mut *ctx.targets).push(task_id) };
+    // SAFETY: same reasoning as collect_group_member.
+    unsafe {
+        (&mut *ctx.targets).push(task_id);
+    }
 }
 
 fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
@@ -146,7 +174,10 @@ pub fn syscall_rt_sigaction(task: *mut Task, ctx_ptr: *mut UserContext) -> Sysca
     if ctx_ptr.is_null() {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -204,7 +235,10 @@ pub fn syscall_rt_sigprocmask(task: *mut Task, ctx_ptr: *mut UserContext) -> Sys
     if ctx_ptr.is_null() {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -255,7 +289,10 @@ pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
     if ctx_ptr.is_null() {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -283,7 +320,7 @@ pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
         if caller.is_null() {
             return ctx.err_with(ERRNO_ESRCH);
         }
-        let caller_pgid = unsafe { (*caller).pgid };
+        let caller_pgid = task_pgid(caller).unwrap_or(INVALID_TASK_ID);
         if caller_pgid == INVALID_TASK_ID {
             return ctx.err_with(ERRNO_ESRCH);
         }
@@ -335,6 +372,9 @@ pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
             continue;
         }
 
+        // SAFETY: `target` was just located via `task_find_by_id` and
+        // null-checked above; `signal_pending` is an AtomicU64 inside
+        // the per-task struct.
         unsafe {
             (*target)
                 .signal_pending
@@ -365,7 +405,10 @@ pub fn syscall_rt_sigreturn(task: *mut Task, ctx_ptr: *mut UserContext) -> Sysca
     if ctx_ptr.is_null() {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -413,125 +456,126 @@ pub fn syscall_rt_sigreturn(task: *mut Task, ctx_ptr: *mut UserContext) -> Sysca
 }
 
 pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
-    if task.is_null() || ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return;
+    };
+    let Some(task_ref) = crate::scheduler::task::task_borrow_mut(task) else {
+        return;
+    };
+
+    if (task_ref.flags & TASK_FLAG_USER_MODE) == 0 {
         return;
     }
 
-    unsafe {
-        if ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
-            return;
-        }
+    let pending = task_ref.signal_pending.load(Ordering::Acquire);
+    let deliverable = pending & !task_ref.signal_blocked;
+    if deliverable == 0 {
+        return;
+    }
 
-        let pending = (*task).signal_pending.load(Ordering::Acquire);
-        let deliverable = pending & !(*task).signal_blocked;
-        if deliverable == 0 {
-            return;
-        }
+    let signum = (deliverable.trailing_zeros() + 1) as u8;
+    let bit = sig_bit(signum);
+    task_ref.signal_pending.fetch_and(!bit, Ordering::AcqRel);
 
-        let signum = (deliverable.trailing_zeros() + 1) as u8;
-        let bit = sig_bit(signum);
-        (*task).signal_pending.fetch_and(!bit, Ordering::AcqRel);
+    let action = task_ref.signal_actions[(signum - 1) as usize];
+    if action.handler == SIG_IGN {
+        return;
+    }
 
-        let action = (*task).signal_actions[(signum - 1) as usize];
-        if action.handler == SIG_IGN {
-            return;
-        }
-
-        if action.handler == SIG_DFL {
-            match sig_default_action(signum) {
-                SigDefault::Ignore | SigDefault::Stop | SigDefault::Continue => return,
-                SigDefault::Terminate => {
-                    let task_id = (*task).task_id;
-                    (*task).exit_reason = TaskExitReason::Normal;
-                    (*task).fault_reason = TaskFaultReason::None;
-                    (*task).exit_code = 128 + signum as u32;
-                    if task_terminate(task_id) == 0 {
-                        schedule();
-                    }
-                    return;
+    if action.handler == SIG_DFL {
+        match sig_default_action(signum) {
+            SigDefault::Ignore | SigDefault::Stop | SigDefault::Continue => return,
+            SigDefault::Terminate => {
+                let task_id = task_ref.task_id;
+                task_ref.exit_reason = TaskExitReason::Normal;
+                task_ref.fault_reason = TaskFaultReason::None;
+                task_ref.exit_code = 128 + signum as u32;
+                if task_terminate(task_id) == 0 {
+                    schedule();
                 }
+                return;
             }
         }
-
-        if action.restorer == 0 {
-            return;
-        }
-
-        // Snapshot of pre-delivery user registers — same struct that
-        // `rt_sigreturn` will rebuild the user state from later.
-        let regs_snapshot = *(*ctx_ptr).regs();
-
-        // Linux convention: push the restorer address as a separate word
-        // on the stack BEFORE the SignalFrame.  When the handler does
-        // `ret`, it pops the restorer into RIP and RSP advances to point
-        // at the SignalFrame, which rt_sigreturn reads directly.
-        //
-        // Stack layout (low address → high address):
-        //   [frame_addr + 0]  = restorer address   (popped by `ret`)
-        //   [frame_addr + 8]  = SignalFrame { signum, rax, … }
-        let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
-        let frame_addr = regs_snapshot.rsp.wrapping_sub(total_size) & !0xF;
-
-        // Write restorer as a separate u64 at frame_addr.
-        let restorer_ptr = match UserPtr::<u64>::try_new(frame_addr) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        if copy_to_user(restorer_ptr, &action.restorer).is_err() {
-            return;
-        }
-
-        // Write SignalFrame at frame_addr + 8.
-        let sigframe_addr = frame_addr.wrapping_add(8);
-        let sigframe_ptr = match UserPtr::<SignalFrame>::try_new(sigframe_addr) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        let saved_mask = (*task).signal_blocked;
-        let sigframe = SignalFrame {
-            signum: signum as u64,
-            rax: regs_snapshot.rax,
-            rbx: regs_snapshot.rbx,
-            rcx: regs_snapshot.rcx,
-            rdx: regs_snapshot.rdx,
-            rsi: regs_snapshot.rsi,
-            rdi: regs_snapshot.rdi,
-            rbp: regs_snapshot.rbp,
-            rsp: regs_snapshot.rsp,
-            r8: regs_snapshot.r8,
-            r9: regs_snapshot.r9,
-            r10: regs_snapshot.r10,
-            r11: regs_snapshot.r11,
-            r12: regs_snapshot.r12,
-            r13: regs_snapshot.r13,
-            r14: regs_snapshot.r14,
-            r15: regs_snapshot.r15,
-            rip: regs_snapshot.rip,
-            rflags: regs_snapshot.rflags_user_subset,
-            saved_mask,
-        };
-
-        if copy_to_user(sigframe_ptr, &sigframe).is_err() {
-            return;
-        }
-
-        let mut blocked = saved_mask | action.mask;
-        if (action.flags & SA_NODEFER) == 0 {
-            blocked |= bit;
-        }
-        (*task).signal_blocked = blocked & !SIG_UNCATCHABLE;
-
-        // Install the handler's entry state on the user context: redirect
-        // RIP/RSP into the handler with `signum` in RDI, RSI/RDX zeroed.
-        // `set_regs` reapplies CS/SS/RFLAGS-mask so a malicious caller
-        // cannot smuggle in a forged user-RFLAGS via `regs_snapshot`.
-        let mut regs = regs_snapshot;
-        regs.rsp = frame_addr;
-        regs.rip = action.handler;
-        regs.rdi = signum as u64;
-        regs.rsi = 0;
-        regs.rdx = 0;
-        (*ctx_ptr).set_regs(regs);
     }
+
+    if action.restorer == 0 {
+        return;
+    }
+
+    // Snapshot of pre-delivery user registers — same struct that
+    // `rt_sigreturn` will rebuild the user state from later.
+    let regs_snapshot = *user_ctx.regs();
+
+    // Linux convention: push the restorer address as a separate word
+    // on the stack BEFORE the SignalFrame.  When the handler does
+    // `ret`, it pops the restorer into RIP and RSP advances to point
+    // at the SignalFrame, which rt_sigreturn reads directly.
+    //
+    // Stack layout (low address → high address):
+    //   [frame_addr + 0]  = restorer address   (popped by `ret`)
+    //   [frame_addr + 8]  = SignalFrame { signum, rax, … }
+    let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
+    let frame_addr = regs_snapshot.rsp.wrapping_sub(total_size) & !0xF;
+
+    // Write restorer as a separate u64 at frame_addr.
+    let restorer_ptr = match UserPtr::<u64>::try_new(frame_addr) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if copy_to_user(restorer_ptr, &action.restorer).is_err() {
+        return;
+    }
+
+    // Write SignalFrame at frame_addr + 8.
+    let sigframe_addr = frame_addr.wrapping_add(8);
+    let sigframe_ptr = match UserPtr::<SignalFrame>::try_new(sigframe_addr) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let saved_mask = task_ref.signal_blocked;
+    let sigframe = SignalFrame {
+        signum: signum as u64,
+        rax: regs_snapshot.rax,
+        rbx: regs_snapshot.rbx,
+        rcx: regs_snapshot.rcx,
+        rdx: regs_snapshot.rdx,
+        rsi: regs_snapshot.rsi,
+        rdi: regs_snapshot.rdi,
+        rbp: regs_snapshot.rbp,
+        rsp: regs_snapshot.rsp,
+        r8: regs_snapshot.r8,
+        r9: regs_snapshot.r9,
+        r10: regs_snapshot.r10,
+        r11: regs_snapshot.r11,
+        r12: regs_snapshot.r12,
+        r13: regs_snapshot.r13,
+        r14: regs_snapshot.r14,
+        r15: regs_snapshot.r15,
+        rip: regs_snapshot.rip,
+        rflags: regs_snapshot.rflags_user_subset,
+        saved_mask,
+    };
+
+    if copy_to_user(sigframe_ptr, &sigframe).is_err() {
+        return;
+    }
+
+    let mut blocked = saved_mask | action.mask;
+    if (action.flags & SA_NODEFER) == 0 {
+        blocked |= bit;
+    }
+    task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
+
+    // Install the handler's entry state on the user context: redirect
+    // RIP/RSP into the handler with `signum` in RDI, RSI/RDX zeroed.
+    // `set_regs` reapplies CS/SS/RFLAGS-mask so a malicious caller
+    // cannot smuggle in a forged user-RFLAGS via `regs_snapshot`.
+    let mut regs = regs_snapshot;
+    regs.rsp = frame_addr;
+    regs.rip = action.handler;
+    regs.rdi = signum as u64;
+    regs.rsi = 0;
+    regs.rdx = 0;
+    user_ctx.set_regs(regs);
 }

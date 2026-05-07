@@ -89,13 +89,11 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     // `inherit_fds_from = INVALID_PROCESS_ID` — which leaves it with no
     // stdin/stdout/stderr and would prevent `notify_parent_of_child_exit`
     // from delivering SIGCHLD anywhere meaningful.
-    let (parent_pid, parent_tid) = unsafe {
+    let (parent_pid, parent_tid) = {
         let cur = scheduler_get_current_task();
-        if cur.is_null() {
-            (INVALID_PROCESS_ID, INVALID_TASK_ID)
-        } else {
-            ((*cur).process_id, (*cur).task_id)
-        }
+        let pid = crate::scheduler::task::task_process_id(cur).unwrap_or(INVALID_PROCESS_ID);
+        let tid = crate::scheduler::task::task_id_of(cur).unwrap_or(INVALID_TASK_ID);
+        (pid, tid)
     };
 
     let pid = match spawn_program_with_attrs(

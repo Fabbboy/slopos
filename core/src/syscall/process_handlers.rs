@@ -2,7 +2,10 @@ use slopos_ostd::KVec;
 
 use crate::exec;
 use crate::sched::task_wait_for;
-use crate::scheduler::task::{task_find_by_id, task_fork, task_terminate};
+use crate::scheduler::task::{
+    task_borrow, task_borrow_mut, task_cpu_affinity, task_find_by_id, task_fork, task_id_of,
+    task_pgid, task_set_cpu_affinity, task_set_fs_base, task_terminate,
+};
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
     SyscallDisposition, syscall_bounded_from_user, syscall_copy_to_user_bounded,
@@ -203,10 +206,10 @@ define_syscall!(syscall_terminate_task(ctx, args) requires(compositor) {
 });
 
 pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -316,18 +319,18 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
             // Point of no return: old image is gone.  Tear down task-bound
             // resources (compositor surface, shm buffers, input queues, …)
             // so the new program can register fresh ones.
-            let task_id = unsafe { (*task).task_id };
+            let task_id = task_id_of(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
             crate::scheduler::task::task_cleanup_for_exec(task_id);
 
-            unsafe {
-                if tls_tp != 0 {
-                    (*task).fs_base = tls_tp;
-                    slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
-                }
-                // Build the new user-mode entry register snapshot in one
-                // shot, then commit through `set_regs` so CS/SS/RFLAGS
-                // sandbox bits are reapplied for the freshly-execed image.
-                let mut regs = *(*ctx_ptr).regs();
+            if tls_tp != 0 {
+                task_set_fs_base(task, tls_tp);
+                slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
+            }
+            // Build the new user-mode entry register snapshot in one
+            // shot, then commit through `set_regs` so CS/SS/RFLAGS
+            // sandbox bits are reapplied for the freshly-execed image.
+            if let Some(uc) = UserContext::from_ptr_mut(ctx_ptr) {
+                let mut regs = *uc.regs();
                 regs.rip = entry_point;
                 regs.rsp = stack_ptr;
                 regs.rax = 0;
@@ -339,13 +342,13 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
                 regs.r9 = 0;
                 regs.r10 = 0;
                 regs.r11 = 0;
-                (*ctx_ptr).set_regs(regs);
+                uc.set_regs(regs);
             }
             SyscallDisposition::Ok
         }
         Err(e) => {
-            unsafe {
-                (*ctx_ptr).set_rax(e as i32 as u64);
+            if let Some(uc) = UserContext::from_ptr_mut(ctx_ptr) {
+                uc.set_rax(e as i32 as u64);
             }
             SyscallDisposition::Ok
         }
@@ -372,7 +375,7 @@ define_syscall!(syscall_set_cpu_affinity(ctx, args) requires(let task_id) {
         return ctx.err();
     }
 
-    unsafe { (*task_ptr).cpu_affinity = new_affinity; }
+    task_set_cpu_affinity(task_ptr, new_affinity);
     ctx.ok(0)
 });
 
@@ -385,7 +388,7 @@ define_syscall!(syscall_get_cpu_affinity(ctx, args) requires(let task_id) {
         return ctx.err();
     }
 
-    ctx.ok(unsafe { (*task_ptr).cpu_affinity } as u64)
+    ctx.ok(task_cpu_affinity(task_ptr).unwrap_or(0) as u64)
 });
 
 define_syscall!(syscall_getpid(ctx, args) requires(let task_id) {
@@ -406,7 +409,7 @@ define_syscall!(syscall_getpgid(ctx, args) requires(let task_id) {
     if task_ptr.is_null() {
         return ctx.err();
     }
-    ctx.ok(unsafe { (*task_ptr).pgid } as u64)
+    ctx.ok(task_pgid(task_ptr).unwrap_or(0) as u64)
 });
 
 define_syscall!(syscall_setpgid(ctx, args) requires(let task_id) {
@@ -421,12 +424,19 @@ define_syscall!(syscall_setpgid(ctx, args) requires(let task_id) {
         return ctx.err();
     }
 
-    let caller = unsafe { &*caller_ptr };
-    let target = unsafe { &mut *target_ptr };
+    let Some(caller) = task_borrow(caller_ptr) else {
+        return ctx.err();
+    };
+    let caller_sid = caller.sid;
+    let caller_parent = caller.task_id; // for `target.parent_task_id != task_id` check below
+    let _ = caller_parent;
+    let Some(target) = task_borrow_mut(target_ptr) else {
+        return ctx.err();
+    };
     if resolved_pid != task_id && target.parent_task_id != task_id {
         return ctx.err();
     }
-    if target.sid != caller.sid {
+    if target.sid != caller_sid {
         return ctx.err();
     }
 
@@ -435,8 +445,10 @@ define_syscall!(syscall_setpgid(ctx, args) requires(let task_id) {
         if leader_ptr.is_null() {
             return ctx.err();
         }
-        let leader = unsafe { &*leader_ptr };
-        if leader.sid != caller.sid {
+        let Some(leader) = task_borrow(leader_ptr) else {
+            return ctx.err();
+        };
+        if leader.sid != caller_sid {
             return ctx.err();
         }
     }
@@ -451,7 +463,9 @@ define_syscall!(syscall_setsid(ctx, args) requires(let task_id) {
     if task_ptr.is_null() {
         return ctx.err();
     }
-    let task = unsafe { &mut *task_ptr };
+    let Some(task) = task_borrow_mut(task_ptr) else {
+        return ctx.err();
+    };
     // POSIX: EPERM if the process is already a process group leader
     // or already a session leader.
     if task.pgid == task.task_id || task.sid == task.task_id {
@@ -551,10 +565,10 @@ define_syscall!(syscall_getcwd(ctx, args) {
 });
 
 pub fn syscall_arch_prctl(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -587,10 +601,10 @@ pub fn syscall_arch_prctl(task: *mut Task, ctx_ptr: *mut UserContext) -> Syscall
 }
 
 pub fn syscall_fork(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -602,10 +616,10 @@ pub fn syscall_fork(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
 }
 
 pub fn syscall_clone(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -630,10 +644,10 @@ pub fn syscall_clone(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispo
 }
 
 pub fn syscall_futex(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(ctx) = SyscallContext::from_user_context(task, unsafe { &mut *ctx_ptr }) else {
+    };
+    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
         return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
     };
 
@@ -670,7 +684,9 @@ define_syscall!(syscall_vhangup(ctx, args) requires(let task_id) {
     if task_ptr.is_null() {
         return ctx.err();
     }
-    let task = unsafe { &*task_ptr };
+    let Some(task) = task_borrow(task_ptr) else {
+        return ctx.err();
+    };
     // POSIX: caller must have a controlling terminal.
     let ctty = match task.controlling_tty {
         Some(idx) => idx,

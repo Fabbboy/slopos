@@ -15,7 +15,8 @@
 //! All helpers return `Option<T>`; the caller threads the `None` case
 //! through their existing diagnostics.
 
-use slopos_abi::task::{TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskStatus};
+use slopos_ostd::user::context::UserContext;
 
 use super::Task;
 use super::task_pointer_is_valid;
@@ -147,6 +148,129 @@ pub fn task_set_unsafe_stack_sp(task: *mut Task, sp: u64) {
     unsafe {
         (*task).unsafe_stack_sp = sp;
     }
+}
+
+/// Stamp `task->entry_point` with `entry`. Used by the exec path
+/// when re-targeting an existing task at a freshly-loaded ELF entry.
+#[inline]
+pub fn task_set_entry_point(task: *mut Task, entry: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    unsafe {
+        (*task).entry_point = entry;
+    }
+}
+
+/// Stamp `task->fs_base` with `fs_base` (TLS thread pointer).
+#[inline]
+pub fn task_set_fs_base(task: *mut Task, fs_base: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u64.
+    unsafe {
+        (*task).fs_base = fs_base;
+    }
+}
+
+/// Drive `task->set_status(...)`. The atomic-state setter lives on
+/// `Task` itself; this helper centralises the unsafe deref.
+#[inline]
+pub fn task_set_status(task: *mut Task, status: TaskStatus) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `set_status` is `&self` so the
+    // field write is internally atomic.
+    unsafe {
+        (*task).set_status(status);
+    }
+}
+
+/// Stamp `task->context.{rip,rsp}` with the unaligned-write pattern
+/// the exec path requires. Used by ELF load to seed the user-mode
+/// entry RIP/RSP before activation.
+#[inline]
+pub fn task_set_context_rip_rsp(task: *mut Task, rip: u64, rsp: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `context` is in-Task; both fields
+    // are u64. `write_unaligned` lifts the alignment requirement to
+    // match the legacy exec path's discipline.
+    unsafe {
+        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*task).context.rip), rip);
+        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*task).context.rsp), rsp);
+    }
+}
+
+/// Reborrow `task->user_ctx` as `&mut UserContext`. The returned
+/// borrow's lifetime is bounded by the caller's borrow of `task`.
+#[inline]
+pub fn task_user_ctx_mut<'a>(task: *mut Task) -> Option<&'a mut UserContext> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `user_ctx` is an in-Task field
+    // whose pin-stability matches the rest of the Task struct.
+    Some(unsafe { &mut (*task).user_ctx })
+}
+
+/// Read `task->cpu_affinity`.
+#[inline]
+pub fn task_cpu_affinity(task: *const Task) -> Option<u32> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u32.
+    Some(unsafe { (*task).cpu_affinity })
+}
+
+/// Stamp `task->cpu_affinity`.
+#[inline]
+pub fn task_set_cpu_affinity(task: *mut Task, mask: u32) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u32.
+    unsafe {
+        (*task).cpu_affinity = mask;
+    }
+}
+
+/// Read `task->pgid` (process-group id).
+#[inline]
+pub fn task_pgid(task: *const Task) -> Option<u32> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; field is naturally-aligned u32.
+    Some(unsafe { (*task).pgid })
+}
+
+/// Reborrow `*const Task` as `&Task`. Used by callers that need a
+/// few field reads but not the named getter helpers above.
+#[inline]
+pub fn task_borrow<'a>(task: *const Task) -> Option<&'a Task> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; the borrow's lifetime is bounded
+    // by the caller's frame.
+    Some(unsafe { &*task })
+}
+
+/// Reborrow `*mut Task` as `&mut Task`. Mirrors [`task_borrow`].
+#[inline]
+pub fn task_borrow_mut<'a>(task: *mut Task) -> Option<&'a mut Task> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; the borrow's lifetime is bounded
+    // by the caller's frame.
+    Some(unsafe { &mut *task })
 }
 
 /// Record a user-mode-fault exit on `task`: sets `exit_reason`,

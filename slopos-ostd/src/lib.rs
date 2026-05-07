@@ -19,6 +19,7 @@ pub mod mm;
 pub mod sync;
 pub mod task;
 pub mod user;
+pub mod util;
 
 /// Plain-old-data marker trait. Re-exported at the crate root so
 /// the `#[derive(Pod)]` expansion can resolve `::slopos_ostd::Pod`.

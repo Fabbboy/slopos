@@ -28,3 +28,21 @@ pub use task_table::*;
 
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = fn(*mut c_void);
+
+/// Build a [`TaskEntry`] from a kernel-half virtual address.
+///
+/// Used by the exec path to convert `PROCESS_CODE_START_VA` (a usize
+/// constant) into the function-pointer shape the scheduler expects.
+/// The transmute is sound because `TaskEntry` and `usize` have the
+/// same size + layout on x86_64; the value is a kernel-mapped
+/// instruction-pointer that the user-mode round-trip will jump to.
+///
+/// SAFETY (caller, weakly): `addr` must point at a valid user/kernel
+/// instruction sequence reachable on next dispatch. All current
+/// callers pass a kernel-defined constant.
+#[inline]
+pub fn task_entry_from_kernel_va(addr: u64) -> TaskEntry {
+    // SAFETY: see doc comment; transmuting between two same-sized
+    // function-pointer-equivalent types.
+    unsafe { core::mem::transmute(addr as usize) }
+}

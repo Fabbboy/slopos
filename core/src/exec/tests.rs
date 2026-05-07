@@ -3,7 +3,6 @@
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
-use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm;
@@ -15,21 +14,13 @@ use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 const MINIMAL_ELF_SIZE: usize = 64;
 
 fn read_user_u64(process_id: u32, addr: u64) -> Option<u64> {
-    let phys_raw = process_vm::process_vm_user_va_to_paddr(process_id, addr);
-    if phys_raw == 0 {
-        return None;
-    }
-    let virt = slopos_abi::addr::PhysAddr::new(phys_raw).to_virt_checked()?;
-    Some(unsafe { core::ptr::read_unaligned(virt.as_ptr::<u64>()) })
+    let vm_space = process_vm::process_vm_get_vm_space(process_id)?;
+    process_vm::process_vm_read_user_u64(&vm_space, addr)
 }
 
 fn read_user_u8(process_id: u32, addr: u64) -> Option<u8> {
-    let phys_raw = process_vm::process_vm_user_va_to_paddr(process_id, addr);
-    if phys_raw == 0 {
-        return None;
-    }
-    let virt = slopos_abi::addr::PhysAddr::new(phys_raw).to_virt_checked()?;
-    Some(unsafe { core::ptr::read(virt.as_ptr::<u8>()) })
+    let vm_space = process_vm::process_vm_get_vm_space(process_id)?;
+    process_vm::process_vm_read_user_u8(&vm_space, addr)
 }
 
 /// Read a null-terminated C string from user memory, up to `max_len` bytes.
