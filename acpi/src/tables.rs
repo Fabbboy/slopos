@@ -1,3 +1,18 @@
+//! ACPI table lookup over the OSTD `Rsdp` / `AcpiTable` primitives.
+//!
+//! `slopos_ostd::acpi` provides the validated `Rsdp::validate` /
+//! `AcpiTable::from_bytes` primitives over byte slices. This module
+//! is the kernel-side consumer: it takes the bootloader-published
+//! RSDP physical address, slices the HHDM-mapped ACPI region, and
+//! returns checksum-validated `AcpiTable<'static>` views over each
+//! discovered table.
+//!
+//! All HHDM byte-borrows funnel through the single
+//! [`acpi_region_bytes`] boundary helper — the lone surviving
+//! TCB carve-out in fs/+acpi/.
+
+#![allow(unsafe_code)]
+
 use core::mem;
 
 use slopos_abi::addr::PhysAddr;
@@ -5,184 +20,135 @@ use slopos_mm::hhdm::{self, PhysAddrHhdm};
 use slopos_ostd::util::packed_view::read_packed;
 use slopos_utils::klog_info;
 
-#[repr(C, packed)]
-pub struct Rsdp {
-    pub signature: [u8; 8],
-    pub checksum: u8,
-    pub oem_id: [u8; 6],
-    pub revision: u8,
-    pub rsdt_address: u32,
-    pub length: u32,
-    pub xsdt_address: u64,
-    pub extended_checksum: u8,
-    pub reserved: [u8; 3],
-}
+pub use slopos_ostd::acpi::{AcpiTable, RSDP_SIGNATURE, RSDP_V1_SIZE, Rsdp, SdtHeader};
 
-#[repr(C, packed)]
-pub struct SdtHeader {
-    pub signature: [u8; 4],
-    pub length: u32,
-    pub revision: u8,
-    pub checksum: u8,
-    pub oem_id: [u8; 6],
-    pub oem_table_id: [u8; 8],
-    pub oem_revision: u32,
-    pub creator_id: u32,
-    pub creator_revision: u32,
-}
-
-fn checksum(data: *const u8, length: usize) -> u8 {
-    if data.is_null() || length == 0 {
-        return 0;
+/// Borrow `len` bytes of the HHDM-mapped ACPI region starting at the
+/// given physical address. Returns `None` if HHDM is unavailable or
+/// the address translates to a null pointer.
+///
+/// # Safety
+///
+/// The bootloader publishes ACPI tables in firmware-reserved memory
+/// that the kernel keeps mapped for its lifetime. Callers must pass
+/// either:
+/// - a fixed length (`RSDP_V1_SIZE`, `size_of::<Rsdp>()`,
+///   `size_of::<SdtHeader>()`) for a probe read, or
+/// - a length that has been validated against the table's
+///   spec-declared size (`hdr.length` post-checksum) for a full read.
+///
+/// Mapped, kernel-lifetime, read-only — soundness invariants 7 + 8.
+fn acpi_region_bytes(phys: u64, len: usize) -> Option<&'static [u8]> {
+    if !hhdm::is_available() || phys == 0 || len == 0 {
+        return None;
     }
-    // SAFETY: caller ensures `[data, data + length)` is a contiguous,
-    // mapped byte range representing an ACPI table; this byte slice is
-    // borrowed only for the duration of the `iter().fold(...)` below.
-    let bytes = unsafe { core::slice::from_raw_parts(data, length) };
-    bytes.iter().fold(0u8, |acc, &b| acc.wrapping_add(b))
-}
-
-fn validate_rsdp(rsdp: *const Rsdp) -> bool {
-    if rsdp.is_null() {
-        return false;
+    let virt = PhysAddr::new(phys).try_to_virt()?;
+    let ptr = virt.as_ptr::<u8>();
+    if ptr.is_null() {
+        return None;
     }
-    let rsdp_ref = unsafe { &*rsdp };
-    if checksum(rsdp as *const u8, 20) != 0 {
-        return false;
-    }
-    if rsdp_ref.revision >= 2 && rsdp_ref.length as usize >= mem::size_of::<Rsdp>() {
-        if checksum(rsdp as *const u8, rsdp_ref.length as usize) != 0 {
-            return false;
-        }
-    }
-    true
-}
-
-fn validate_table(header: *const SdtHeader) -> bool {
-    if header.is_null() {
-        return false;
-    }
-    let hdr = unsafe { &*header };
-    if hdr.length < mem::size_of::<SdtHeader>() as u32 {
-        return false;
-    }
-    checksum(header as *const u8, hdr.length as usize) == 0
-}
-
-fn map_phys_table(phys_addr: u64) -> *const SdtHeader {
-    if phys_addr == 0 {
-        return core::ptr::null();
-    }
-    PhysAddr::new(phys_addr)
-        .try_to_virt()
-        .map(|v| v.as_ptr())
-        .unwrap_or(core::ptr::null())
-}
-
-fn scan_sdt(sdt: *const SdtHeader, entry_size: usize, signature: &[u8; 4]) -> *const SdtHeader {
-    if sdt.is_null() {
-        return core::ptr::null();
-    }
-
-    let hdr = unsafe { &*sdt };
-    if hdr.length < mem::size_of::<SdtHeader>() as u32 {
-        return core::ptr::null();
-    }
-
-    let payload_bytes = hdr.length as usize - mem::size_of::<SdtHeader>();
-    let entry_count = payload_bytes / entry_size;
-    let entries = (sdt as *const u8).wrapping_add(mem::size_of::<SdtHeader>());
-
-    // Borrow the SDT entry payload as a single byte slice and walk it
-    // with `read_packed`. The unsafe `from_raw_parts` lives once at
-    // the boundary where we go from raw `*const SdtHeader` (with a
-    // length-validated `hdr.length`) to a safe slice.
-    //
-    // SAFETY: `hdr.length` was just validated against the SDT header
-    // size; `entries` is the byte at `sdt + size_of::<SdtHeader>()`,
-    // which the same allocation covers.
-    let payload = unsafe { core::slice::from_raw_parts(entries, payload_bytes) };
-
-    for i in 0..entry_count {
-        let off = i * entry_size;
-        let phys = if entry_size == 8 {
-            read_packed::<u64>(payload, off).unwrap_or(0)
-        } else {
-            read_packed::<u32>(payload, off).unwrap_or(0) as u64
-        };
-
-        let candidate = map_phys_table(phys);
-        if candidate.is_null() {
-            continue;
-        }
-        let candidate_ref = unsafe { &*candidate };
-        if candidate_ref.signature != *signature {
-            continue;
-        }
-        if !validate_table(candidate) {
-            klog_info!("ACPI: Found table with invalid checksum, skipping");
-            continue;
-        }
-        return candidate;
-    }
-    core::ptr::null()
+    // SAFETY: bootloader-published, HHDM-mapped, kernel-lifetime
+    // backing. Length is either a spec-fixed probe size or a
+    // checksum-validated `hdr.length` — both fit in the published
+    // ACPI region.
+    Some(unsafe { core::slice::from_raw_parts(ptr, len) })
 }
 
 /// Validated handle to the ACPI table hierarchy rooted at an RSDP.
-///
-/// This is the entry point for all ACPI table access. Created via
-/// [`AcpiTables::from_rsdp`], which validates the RSDP checksum and
-/// verifies HHDM availability before returning.
 pub struct AcpiTables {
-    rsdp: *const Rsdp,
+    rsdt_phys: u32,
+    xsdt_phys: u64,
+    revision: u8,
 }
 
 impl AcpiTables {
-    /// Validate an RSDP pointer and return a handle for table lookups.
-    ///
-    /// Returns `None` if:
-    /// - HHDM is not available (physical-to-virtual translation impossible)
-    /// - `rsdp` is null
-    /// - RSDP checksum validation fails
-    pub fn from_rsdp(rsdp: *const Rsdp) -> Option<Self> {
+    /// Probe the RSDP at the given physical address, validate the
+    /// checksum, and return a handle for table lookups.
+    pub fn from_phys(rsdp_phys: u64) -> Option<Self> {
         if !hhdm::is_available() {
             klog_info!("ACPI: HHDM unavailable, cannot parse tables");
             return None;
         }
-        if !validate_rsdp(rsdp) {
-            klog_info!("ACPI: RSDP checksum failed");
+        // Probe the v1 prefix to check the signature and read the
+        // revision byte.
+        let probe = acpi_region_bytes(rsdp_phys, RSDP_V1_SIZE)?;
+        if probe.len() < RSDP_V1_SIZE {
             return None;
         }
-        Some(Self { rsdp })
+        let revision = probe[15];
+        let rsdp = if revision >= 2 {
+            // V2: re-borrow the full structure for the v2 checksum.
+            let full = acpi_region_bytes(rsdp_phys, mem::size_of::<Rsdp>())?;
+            Rsdp::validate(full)?
+        } else {
+            Rsdp::validate(probe)?
+        };
+
+        Some(Self {
+            rsdt_phys: rsdp.rsdt_address,
+            xsdt_phys: rsdp.xsdt_address,
+            revision: rsdp.revision,
+        })
     }
 
     /// Find an ACPI table by its 4-byte ASCII signature.
     ///
-    /// Searches XSDT first (64-bit entries), falls back to RSDT (32-bit entries).
-    /// Returns a pointer to the validated `SdtHeader`, or null if not found.
-    pub fn find_table(&self, signature: &[u8; 4]) -> *const SdtHeader {
-        let rsdp_ref = unsafe { &*self.rsdp };
-
-        if rsdp_ref.revision >= 2 && rsdp_ref.xsdt_address != 0 {
-            let xsdt = map_phys_table(rsdp_ref.xsdt_address);
-            if !xsdt.is_null() && validate_table(xsdt) {
-                let hit = scan_sdt(xsdt, mem::size_of::<u64>(), signature);
-                if !hit.is_null() {
-                    return hit;
-                }
+    /// Searches XSDT first (64-bit entries) when the RSDP is v2+;
+    /// falls back to RSDT (32-bit entries) otherwise.
+    pub fn find_table(&self, signature: &[u8; 4]) -> Option<AcpiTable<'static>> {
+        if self.revision >= 2 && self.xsdt_phys != 0 {
+            if let Some(hit) = self.scan_root(self.xsdt_phys, mem::size_of::<u64>(), signature) {
+                return Some(hit);
             }
         }
-
-        if rsdp_ref.rsdt_address != 0 {
-            let rsdt = map_phys_table(rsdp_ref.rsdt_address as u64);
-            if !rsdt.is_null() && validate_table(rsdt) {
-                let hit = scan_sdt(rsdt, mem::size_of::<u32>(), signature);
-                if !hit.is_null() {
-                    return hit;
-                }
-            }
+        if self.rsdt_phys != 0 {
+            return self.scan_root(self.rsdt_phys as u64, mem::size_of::<u32>(), signature);
         }
-
-        core::ptr::null()
+        None
     }
+
+    /// Walk an XSDT/RSDT root table, looking for `signature` among
+    /// its entries.
+    fn scan_root(
+        &self,
+        root_phys: u64,
+        entry_size: usize,
+        signature: &[u8; 4],
+    ) -> Option<AcpiTable<'static>> {
+        let root = load_table(root_phys)?;
+        let payload = root.payload();
+        let entry_count = payload.len() / entry_size;
+        for i in 0..entry_count {
+            let off = i * entry_size;
+            let phys = if entry_size == 8 {
+                read_packed::<u64>(payload, off)?
+            } else {
+                read_packed::<u32>(payload, off)? as u64
+            };
+            let Some(candidate) = load_table(phys) else {
+                continue;
+            };
+            if &candidate.signature() == signature {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+}
+
+/// Load a checksum-validated table at a physical address.
+///
+/// Probes the SDT header to read its declared length, then re-borrows
+/// the full table and validates via [`AcpiTable::from_bytes`].
+fn load_table(phys: u64) -> Option<AcpiTable<'static>> {
+    let header_size = mem::size_of::<SdtHeader>();
+    let header_bytes = acpi_region_bytes(phys, header_size)?;
+    if header_bytes.len() < header_size {
+        return None;
+    }
+    let length = read_packed::<u32>(header_bytes, 4)? as usize;
+    if length < header_size {
+        return None;
+    }
+    let full = acpi_region_bytes(phys, length)?;
+    AcpiTable::from_bytes(full)
 }

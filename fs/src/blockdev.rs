@@ -1,6 +1,4 @@
-use core::ptr;
-
-use slopos_mm::kernel_heap::{kfree, kmalloc};
+use slopos_ostd::KVec;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BlockDeviceError {
@@ -15,49 +13,33 @@ pub trait BlockDevice {
 }
 
 pub struct MemoryBlockDevice {
-    base: *mut u8,
-    len: usize,
-    owns_allocation: bool,
+    buffer: slopos_ostd::sync::SpinLock<KVec<u8>>,
 }
 
-unsafe impl Send for MemoryBlockDevice {}
-
 impl MemoryBlockDevice {
-    pub fn new(base: *mut u8, len: usize) -> Self {
-        Self {
-            base,
-            len,
-            owns_allocation: false,
-        }
-    }
-
     pub fn allocate(len: usize) -> Option<Self> {
-        let ptr = kmalloc(len);
-        if ptr.is_null() {
-            return None;
-        }
-        unsafe {
-            ptr::write_bytes(ptr, 0, len);
+        let mut buffer = KVec::with_capacity(len).ok()?;
+        for _ in 0..len {
+            buffer.push(0).ok()?;
         }
         Some(Self {
-            base: ptr as *mut u8,
-            len,
-            owns_allocation: true,
+            buffer: slopos_ostd::sync::SpinLock::new(
+                buffer,
+                slopos_ostd::sync::LOCK_LEVEL_RESOURCE,
+            ),
         })
     }
 
-    pub fn as_mut_ptr(&self) -> *mut u8 {
-        self.base
+    /// Return a mutable view of the backing buffer for in-place
+    /// fixture construction (e.g. test images). Production paths
+    /// should use [`BlockDevice::write_at`].
+    pub fn with_buffer_mut<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> R {
+        let mut guard = self.buffer.lock();
+        f(guard.as_mut_slice())
     }
-}
 
-impl Drop for MemoryBlockDevice {
-    fn drop(&mut self) {
-        if self.owns_allocation && !self.base.is_null() {
-            kfree(self.base as *mut _);
-            self.base = ptr::null_mut();
-            self.len = 0;
-        }
+    pub fn capacity_inner(&self) -> usize {
+        self.buffer.lock().len()
     }
 }
 
@@ -66,22 +48,15 @@ impl BlockDevice for MemoryBlockDevice {
         if buffer.is_empty() {
             return Ok(());
         }
+        let guard = self.buffer.lock();
         let Some(end) = offset.checked_add(buffer.len() as u64) else {
             return Err(BlockDeviceError::OutOfBounds);
         };
-        if end > self.len as u64 {
+        if end > guard.len() as u64 {
             return Err(BlockDeviceError::OutOfBounds);
         }
-        if self.base.is_null() {
-            return Err(BlockDeviceError::InvalidBuffer);
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(
-                self.base.add(offset as usize),
-                buffer.as_mut_ptr(),
-                buffer.len(),
-            );
-        }
+        let start = offset as usize;
+        buffer.copy_from_slice(&guard[start..start + buffer.len()]);
         Ok(())
     }
 
@@ -89,30 +64,20 @@ impl BlockDevice for MemoryBlockDevice {
         if buffer.is_empty() {
             return Ok(());
         }
+        let mut guard = self.buffer.lock();
         let Some(end) = offset.checked_add(buffer.len() as u64) else {
             return Err(BlockDeviceError::OutOfBounds);
         };
-        if end > self.len as u64 {
+        if end > guard.len() as u64 {
             return Err(BlockDeviceError::OutOfBounds);
         }
-        if self.base.is_null() {
-            return Err(BlockDeviceError::InvalidBuffer);
-        }
-        // Safety: MemoryBlockDevice owns the allocation and callers serialise access
-        // via the ext2 global mutex. The raw pointer write is equivalent to the read
-        // path but in the opposite direction.
-        unsafe {
-            ptr::copy_nonoverlapping(
-                buffer.as_ptr(),
-                self.base.add(offset as usize),
-                buffer.len(),
-            );
-        }
+        let start = offset as usize;
+        guard[start..start + buffer.len()].copy_from_slice(buffer);
         Ok(())
     }
 
     fn capacity(&self) -> u64 {
-        self.len as u64
+        self.buffer.lock().len() as u64
     }
 }
 

@@ -160,9 +160,6 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
     }
 }
 
-unsafe impl Send for StaticExt2Vfs {}
-unsafe impl Sync for StaticExt2Vfs {}
-
 pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
 
 pub fn ext2_vfs_init_with_callbacks(

@@ -1,44 +1,34 @@
-use core::mem;
+//! MADT (Multiple APIC Description Table) entry iteration over the
+//! OSTD `AcpiTable<'a>` slice primitive.
 
+use slopos_ostd::util::packed_view::read_packed;
 use slopos_utils::klog_info;
 
-use crate::tables::{AcpiTables, SdtHeader};
+use crate::tables::{AcpiTable, AcpiTables};
 
 const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 const MADT_ENTRY_IOAPIC: u8 = 1;
 const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
 
-#[repr(C, packed)]
-struct RawMadt {
-    header: SdtHeader,
-    lapic_address: u32,
-    flags: u32,
-    entries: [u8; 0],
-}
+/// Offset of the first variable-length entry within the MADT payload
+/// (after `lapic_address: u32` + `flags: u32`).
+const MADT_ENTRIES_OFFSET: usize = 8;
 
-#[repr(C, packed)]
-struct RawEntryHeader {
-    entry_type: u8,
-    length: u8,
-}
+/// Per-entry header: `entry_type: u8`, `length: u8`.
+const ENTRY_HEADER_SIZE: usize = 2;
 
-#[repr(C, packed)]
-struct RawIoapicEntry {
-    header: RawEntryHeader,
-    ioapic_id: u8,
-    reserved: u8,
-    ioapic_address: u32,
-    gsi_base: u32,
-}
+/// Layout of the MADT type-1 IOAPIC entry (12 bytes total).
+const IOAPIC_ENTRY_LEN: usize = 12;
+const IOAPIC_OFF_ID: usize = 2;
+const IOAPIC_OFF_ADDRESS: usize = 4;
+const IOAPIC_OFF_GSI_BASE: usize = 8;
 
-#[repr(C, packed)]
-struct RawIsoEntry {
-    header: RawEntryHeader,
-    bus_source: u8,
-    irq_source: u8,
-    gsi: u32,
-    flags: u16,
-}
+/// Layout of the MADT type-2 Interrupt Source Override entry (10 bytes total).
+const ISO_ENTRY_LEN: usize = 10;
+const ISO_OFF_BUS_SOURCE: usize = 2;
+const ISO_OFF_IRQ_SOURCE: usize = 3;
+const ISO_OFF_GSI: usize = 4;
+const ISO_OFF_FLAGS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct IoapicInfo {
@@ -126,88 +116,69 @@ pub enum MadtEntry {
 
 /// Parsed handle to the MADT, supporting iteration over its entries.
 pub struct Madt {
-    base: *const u8,
-    total_length: usize,
+    table: AcpiTable<'static>,
 }
 
 impl Madt {
     pub fn from_tables(tables: &AcpiTables) -> Option<Self> {
-        let header = tables.find_table(MADT_SIGNATURE);
-        if header.is_null() {
+        let Some(table) = tables.find_table(MADT_SIGNATURE) else {
             klog_info!("ACPI: MADT not found");
             return None;
-        }
-        let length = unsafe { (*header).length } as usize;
-        if length < mem::size_of::<RawMadt>() {
+        };
+        if table.payload().len() < MADT_ENTRIES_OFFSET {
             klog_info!("ACPI: MADT too short");
             return None;
         }
-        Some(Self {
-            base: header as *const u8,
-            total_length: length,
-        })
+        Some(Self { table })
     }
 
     pub fn entries(&self) -> MadtEntries<'_> {
-        let entries_offset = mem::size_of::<RawMadt>();
         MadtEntries {
-            _madt: self,
-            ptr: unsafe { self.base.add(entries_offset) },
-            end: unsafe { self.base.add(self.total_length) },
+            payload: self.table.payload(),
+            cursor: MADT_ENTRIES_OFFSET,
         }
     }
 }
 
 pub struct MadtEntries<'a> {
-    _madt: &'a Madt,
-    ptr: *const u8,
-    end: *const u8,
+    payload: &'a [u8],
+    cursor: usize,
 }
 
 impl<'a> Iterator for MadtEntries<'a> {
     type Item = MadtEntry;
 
     fn next(&mut self) -> Option<MadtEntry> {
-        loop {
-            let header_end = unsafe { self.ptr.add(mem::size_of::<RawEntryHeader>()) };
-            if header_end > self.end {
-                return None;
-            }
-
-            let hdr = unsafe { &*(self.ptr as *const RawEntryHeader) };
-            if hdr.length == 0 {
-                return None;
-            }
-            let entry_end = unsafe { self.ptr.add(hdr.length as usize) };
-            if entry_end > self.end {
-                return None;
-            }
-
-            let entry = match hdr.entry_type {
-                MADT_ENTRY_IOAPIC if hdr.length as usize >= mem::size_of::<RawIoapicEntry>() => {
-                    let raw = unsafe { &*(self.ptr as *const RawIoapicEntry) };
-                    MadtEntry::Ioapic(IoapicInfo {
-                        id: raw.ioapic_id,
-                        address: raw.ioapic_address,
-                        gsi_base: raw.gsi_base,
-                    })
-                }
-                MADT_ENTRY_INTERRUPT_OVERRIDE
-                    if hdr.length as usize >= mem::size_of::<RawIsoEntry>() =>
-                {
-                    let raw = unsafe { &*(self.ptr as *const RawIsoEntry) };
-                    MadtEntry::InterruptOverride(InterruptOverride {
-                        bus_source: raw.bus_source,
-                        irq_source: raw.irq_source,
-                        gsi: raw.gsi,
-                        flags: raw.flags,
-                    })
-                }
-                t => MadtEntry::Unknown { entry_type: t },
-            };
-
-            self.ptr = entry_end;
-            return Some(entry);
+        let len = self.payload.len();
+        if self.cursor + ENTRY_HEADER_SIZE > len {
+            return None;
         }
+        let entry_type = read_packed::<u8>(self.payload, self.cursor)?;
+        let entry_length = read_packed::<u8>(self.payload, self.cursor + 1)? as usize;
+        if entry_length == 0 || self.cursor + entry_length > len {
+            return None;
+        }
+        let base = self.cursor;
+        self.cursor += entry_length;
+
+        let entry = match entry_type {
+            MADT_ENTRY_IOAPIC if entry_length >= IOAPIC_ENTRY_LEN => {
+                MadtEntry::Ioapic(IoapicInfo {
+                    id: read_packed::<u8>(self.payload, base + IOAPIC_OFF_ID)?,
+                    address: read_packed::<u32>(self.payload, base + IOAPIC_OFF_ADDRESS)?,
+                    gsi_base: read_packed::<u32>(self.payload, base + IOAPIC_OFF_GSI_BASE)?,
+                })
+            }
+            MADT_ENTRY_INTERRUPT_OVERRIDE if entry_length >= ISO_ENTRY_LEN => {
+                MadtEntry::InterruptOverride(InterruptOverride {
+                    bus_source: read_packed::<u8>(self.payload, base + ISO_OFF_BUS_SOURCE)?,
+                    irq_source: read_packed::<u8>(self.payload, base + ISO_OFF_IRQ_SOURCE)?,
+                    gsi: read_packed::<u32>(self.payload, base + ISO_OFF_GSI)?,
+                    flags: read_packed::<u16>(self.payload, base + ISO_OFF_FLAGS)?,
+                })
+            }
+            t => MadtEntry::Unknown { entry_type: t },
+        };
+        Some(entry)
     }
 }

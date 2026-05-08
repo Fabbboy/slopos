@@ -20,6 +20,10 @@ fn get_rsdp_address_fn() -> *const c_void {
     limine_protocol::get_rsdp_address()
 }
 
+fn get_rsdp_phys_fn() -> u64 {
+    limine_protocol::get_rsdp_phys_address()
+}
+
 fn is_kernel_initialized_fn() -> bool {
     early_init::is_kernel_initialized() != 0
 }
@@ -49,6 +53,7 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     kernel_reboot: kernel_reboot_fn,
     is_rsdp_available: is_rsdp_available_fn,
     get_rsdp_address: get_rsdp_address_fn,
+    get_rsdp_phys: get_rsdp_phys_fn,
     is_kernel_initialized: is_kernel_initialized_fn,
     idt_get_gate: idt_get_gate_fn,
     irq_send_eoi: || apic::send_eoi(),

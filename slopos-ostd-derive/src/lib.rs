@@ -1,13 +1,16 @@
 //! Derive macros for `slopos-ostd`.
 //!
-//! Currently exports a single `#[derive(Pod)]` for the
-//! `slopos_ostd::Pod` trait. The derive enforces three rules:
+//! Exports `#[derive(Pod)]` and `#[derive(Zeroable)]` for the
+//! `slopos_ostd::Pod` and `slopos_ostd::Zeroable` traits. Each derive
+//! enforces three rules:
 //!  1. The type must carry `#[repr(C)]` or `#[repr(transparent)]`.
 //!  2. `#[repr(packed)]` is rejected (alignment invariants conflict
-//!     with `read_pod` / `write_pod` alignment checks).
+//!     with `read_pod` / `write_pod` alignment checks; for `Zeroable`,
+//!     hand-write the `unsafe impl` instead).
 //!  3. Enums are rejected; only structs (named, tuple, unit) are
 //!     accepted. Each field type acquires a `T: ::slopos_ostd::Pod`
-//!     `where`-bound so the type-checker enforces field POD-ness.
+//!     (or `Zeroable`) `where`-bound so the type-checker enforces
+//!     field-level conformance.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -20,33 +23,65 @@ use syn::{
 #[proc_macro_derive(Pod)]
 pub fn derive_pod(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    match expand_pod(&input) {
+    match expand_marker(&input, MarkerKind::Pod) {
         Ok(ts) => ts.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_pod(input: &DeriveInput) -> syn::Result<TokenStream2> {
-    check_repr(input)?;
+#[proc_macro_derive(Zeroable)]
+pub fn derive_zeroable(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_marker(&input, MarkerKind::Zeroable) {
+        Ok(ts) => ts.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MarkerKind {
+    Pod,
+    Zeroable,
+}
+
+impl MarkerKind {
+    fn name(self) -> &'static str {
+        match self {
+            MarkerKind::Pod => "Pod",
+            MarkerKind::Zeroable => "Zeroable",
+        }
+    }
+
+    fn trait_path(self) -> TokenStream2 {
+        match self {
+            MarkerKind::Pod => quote! { ::slopos_ostd::Pod },
+            MarkerKind::Zeroable => quote! { ::slopos_ostd::Zeroable },
+        }
+    }
+}
+
+fn expand_marker(input: &DeriveInput, kind: MarkerKind) -> syn::Result<TokenStream2> {
+    check_repr(input, kind)?;
 
     let fields = match &input.data {
         Data::Struct(s) => collect_field_types(&s.fields),
         Data::Enum(e) => {
             return Err(syn::Error::new(
                 e.enum_token.span(),
-                "Pod cannot be derived for enums",
+                format!("{} cannot be derived for enums", kind.name()),
             ));
         }
         Data::Union(u) => {
             return Err(syn::Error::new(
                 u.union_token.span(),
-                "Pod cannot be derived for unions",
+                format!("{} cannot be derived for unions", kind.name()),
             ));
         }
     };
 
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let trait_path = kind.trait_path();
 
     let mut predicates: Vec<TokenStream2> = Vec::new();
     if let Some(wc) = where_clause {
@@ -55,7 +90,7 @@ fn expand_pod(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
     for ty in &fields {
-        predicates.push(quote! { #ty: ::slopos_ostd::Pod });
+        predicates.push(quote! { #ty: #trait_path });
     }
 
     let where_tokens = if predicates.is_empty() {
@@ -66,8 +101,8 @@ fn expand_pod(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         // SAFETY: derive enforces #[repr(C)] / #[repr(transparent)],
-        // forbids #[repr(packed)], and adds field-level Pod bounds.
-        unsafe impl #impl_generics ::slopos_ostd::Pod for #name #ty_generics #where_tokens {}
+        // forbids #[repr(packed)], and adds field-level marker bounds.
+        unsafe impl #impl_generics #trait_path for #name #ty_generics #where_tokens {}
     })
 }
 
@@ -79,7 +114,7 @@ fn collect_field_types(fields: &Fields) -> Vec<syn::Type> {
     }
 }
 
-fn check_repr(input: &DeriveInput) -> syn::Result<()> {
+fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
     let mut saw_c_or_transparent = false;
     let mut saw_packed = false;
     let mut packed_span = input.ident.span();
@@ -103,13 +138,19 @@ fn check_repr(input: &DeriveInput) -> syn::Result<()> {
     if saw_packed {
         return Err(syn::Error::new(
             packed_span,
-            "Pod cannot be derived for #[repr(packed)] types: misaligned reads conflict with read_pod alignment checks",
+            format!(
+                "{} cannot be derived for #[repr(packed)] types; hand-write the unsafe impl",
+                kind.name()
+            ),
         ));
     }
     if !saw_c_or_transparent {
         return Err(syn::Error::new(
             input.ident.span(),
-            "Pod requires #[repr(C)] or #[repr(transparent)] on the type",
+            format!(
+                "{} requires #[repr(C)] or #[repr(transparent)] on the type",
+                kind.name()
+            ),
         ));
     }
     Ok(())

@@ -1,5 +1,4 @@
-use core::ffi::{c_int, c_void};
-use core::mem;
+use core::ffi::c_int;
 
 use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
@@ -10,15 +9,28 @@ use slopos_fs::fileio::{
     file_stat_path, file_unlink_path, file_write_fd,
 };
 
-use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_ostd::KVec;
+use slopos_ostd::util::byte_view::pod_slice_as_bytes;
+
+/// Convert a NUL-terminated `[i8; N]` kernel buffer to a `&[u8]` covering
+/// just the path bytes (everything before the first NUL).
+///
+/// `syscall_copy_user_str_to_cstr` produces such buffers; the conversion
+/// uses the OSTD `pod_slice_as_bytes` helper so no syscall-layer code
+/// needs to write `unsafe`.
+fn cstr_buf_to_bytes(buf: &[i8]) -> &[u8] {
+    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let bytes = pod_slice_as_bytes(buf);
+    &bytes[..nul]
+}
 
 define_syscall!(syscall_fs_open(ctx, args) requires(let pid: process_id) {
     let mut path = [0i8; USER_PATH_MAX];
     check_result!(ctx, syscall_copy_user_str_to_cstr(&mut path, args.arg0));
-    let fd = file_open_for_process(pid, path.as_ptr(), args.arg1_u32());
+    let fd = file_open_for_process(pid, cstr_buf_to_bytes(&path), args.arg1_u32());
     ctx.from_rc_value(fd as i64)
 });
 
@@ -67,7 +79,7 @@ define_syscall!(syscall_fs_stat(ctx, args) {
     check_result!(ctx, syscall_copy_user_str_to_cstr(&mut path, args.arg0));
 
     let mut stat = UserFsStat { type_: 0, size: 0 };
-    check_result!(ctx, file_stat_path(path.as_ptr(), &mut stat.type_, &mut stat.size));
+    check_result!(ctx, file_stat_path(cstr_buf_to_bytes(&path), &mut stat.type_, &mut stat.size));
 
     let stat_ptr = try_or_err!(ctx, UserPtr::<UserFsStat>::try_new(args.arg1));
     try_or_err!(ctx, copy_to_user(stat_ptr, &stat));
@@ -77,13 +89,13 @@ define_syscall!(syscall_fs_stat(ctx, args) {
 define_syscall!(syscall_fs_mkdir(ctx, args) {
     let mut path = [0i8; USER_PATH_MAX];
     check_result!(ctx, syscall_copy_user_str_to_cstr(&mut path, args.arg0));
-    ctx.from_zero_success(file_mkdir_path(path.as_ptr()))
+    ctx.from_zero_success(file_mkdir_path(cstr_buf_to_bytes(&path)))
 });
 
 define_syscall!(syscall_fs_unlink(ctx, args) {
     let mut path = [0i8; USER_PATH_MAX];
     check_result!(ctx, syscall_copy_user_str_to_cstr(&mut path, args.arg0));
-    ctx.from_zero_success(file_unlink_path(path.as_ptr()))
+    ctx.from_zero_success(file_unlink_path(cstr_buf_to_bytes(&path)))
 });
 
 define_syscall!(syscall_fs_list(ctx, args) {
@@ -99,51 +111,50 @@ define_syscall!(syscall_fs_list(ctx, args) {
         return ctx.err();
     }
 
-    let tmp_size = mem::size_of::<UserFsEntry>() * cap as usize;
-    let tmp_ptr = kmalloc(tmp_size) as *mut UserFsEntry;
-    require_nonnull!(ctx, tmp_ptr);
-    unsafe {
-        core::ptr::write_bytes(tmp_ptr as *mut u8, 0, tmp_size);
+    let cap_usize = cap as usize;
+    let zero_entry = UserFsEntry::default();
+    let mut tmp = match KVec::<UserFsEntry>::with_capacity(cap_usize) {
+        Ok(v) => v,
+        Err(_) => return ctx.err(),
+    };
+    for _ in 0..cap_usize {
+        if tmp.push(zero_entry).is_err() {
+            return ctx.err();
+        }
     }
 
     let mut count: u32 = 0;
-    let rc = file_list_path(path.as_ptr(), tmp_ptr, cap, &mut count);
+    let rc = file_list_path(cstr_buf_to_bytes(&path), tmp.as_mut_slice(), &mut count);
     if rc != 0 {
-        kfree(tmp_ptr as *mut c_void);
         return ctx.err();
     }
 
     list_hdr.count = count;
 
+    let entries_bytes_len = (count as usize) * core::mem::size_of::<UserFsEntry>();
+    // SAFETY: `tmp` is a kernel-owned KVec<UserFsEntry>; the slice covers
+    // the first `count` initialised entries in contiguous heap memory.
+    // UserFsEntry is `#[repr(C)] Copy` over Pod fields — every byte
+    // pattern is a valid representation, so the &[u8] view is sound.
     let entries_bytes = unsafe {
-        core::slice::from_raw_parts(
-            tmp_ptr as *const u8,
-            mem::size_of::<UserFsEntry>() * count as usize,
-        )
+        core::slice::from_raw_parts(tmp.as_ptr() as *const u8, entries_bytes_len)
     };
     let entries_user = match UserBytes::try_new(list_hdr.entries as u64, entries_bytes.len()) {
         Ok(b) => b,
-        Err(_) => {
-            kfree(tmp_ptr as *mut c_void);
-            return ctx.err();
-        }
+        Err(_) => return ctx.err(),
     };
 
     let rc_entries = copy_bytes_to_user(entries_user, entries_bytes);
     let rc_hdr = if rc_entries.is_ok() {
         let hdr_ptr = match UserPtr::<UserFsList>::try_new(args.arg1) {
             Ok(p) => p,
-            Err(_) => {
-                kfree(tmp_ptr as *mut c_void);
-                return ctx.err();
-            }
+            Err(_) => return ctx.err(),
         };
         copy_to_user(hdr_ptr, &list_hdr)
     } else {
         rc_entries.map(|_| ())
     };
 
-    kfree(tmp_ptr as *mut c_void);
     ctx.from_result(rc_hdr)
 });
 

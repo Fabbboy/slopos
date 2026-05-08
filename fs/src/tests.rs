@@ -1,5 +1,3 @@
-use core::ptr;
-
 use slopos_abi::fs::UserFsEntry;
 use slopos_testing::TestResult;
 use slopos_utils::klog_info;
@@ -233,115 +231,108 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
     let size_bytes = (spec.blocks as usize).saturating_mul(block_size as usize);
     let device = MemoryBlockDevice::allocate(size_bytes)?;
 
-    unsafe {
-        ptr::write_bytes(device.as_mut_ptr(), 0, size_bytes);
-    }
+    device.with_buffer_mut(|buf| {
+        let sb_offset = 1024usize;
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
 
-    let sb_offset = 1024usize;
-    let sb = unsafe { core::slice::from_raw_parts_mut(device.as_mut_ptr().add(sb_offset), 1024) };
+        sb[0..4].copy_from_slice(&spec.inodes.to_le_bytes());
+        sb[4..8].copy_from_slice(&spec.blocks.to_le_bytes());
+        sb[12..16].copy_from_slice(&8u32.to_le_bytes());
+        sb[16..20].copy_from_slice(&8u32.to_le_bytes());
+        sb[20..24].copy_from_slice(&1u32.to_le_bytes());
+        sb[24..28].copy_from_slice(&0u32.to_le_bytes());
+        sb[32..36].copy_from_slice(&blocks_per_group.to_le_bytes());
+        sb[40..44].copy_from_slice(&inodes_per_group.to_le_bytes());
+        sb[56..58].copy_from_slice(&0xEF53u16.to_le_bytes());
+        sb[76..80].copy_from_slice(&1u32.to_le_bytes());
+        sb[84..88].copy_from_slice(&11u32.to_le_bytes());
+        sb[88..90].copy_from_slice(&inode_size.to_le_bytes());
 
-    sb[0..4].copy_from_slice(&spec.inodes.to_le_bytes());
-    sb[4..8].copy_from_slice(&spec.blocks.to_le_bytes());
-    sb[12..16].copy_from_slice(&8u32.to_le_bytes());
-    sb[16..20].copy_from_slice(&8u32.to_le_bytes());
-    sb[20..24].copy_from_slice(&1u32.to_le_bytes());
-    sb[24..28].copy_from_slice(&0u32.to_le_bytes());
-    sb[32..36].copy_from_slice(&blocks_per_group.to_le_bytes());
-    sb[40..44].copy_from_slice(&inodes_per_group.to_le_bytes());
-    sb[56..58].copy_from_slice(&0xEF53u16.to_le_bytes());
-    sb[76..80].copy_from_slice(&1u32.to_le_bytes());
-    sb[84..88].copy_from_slice(&11u32.to_le_bytes());
-    sb[88..90].copy_from_slice(&inode_size.to_le_bytes());
+        let desc_offset = 2 * block_size as usize;
+        let desc = &mut buf[desc_offset..desc_offset + 32];
 
-    let desc_offset = 2 * block_size as usize;
-    let desc = unsafe { core::slice::from_raw_parts_mut(device.as_mut_ptr().add(desc_offset), 32) };
+        desc[0..4].copy_from_slice(&3u32.to_le_bytes());
+        desc[4..8].copy_from_slice(&4u32.to_le_bytes());
+        desc[8..12].copy_from_slice(&5u32.to_le_bytes());
+        desc[12..14].copy_from_slice(&8u16.to_le_bytes());
+        desc[14..16].copy_from_slice(&8u16.to_le_bytes());
+        desc[16..18].copy_from_slice(&1u16.to_le_bytes());
 
-    desc[0..4].copy_from_slice(&3u32.to_le_bytes());
-    desc[4..8].copy_from_slice(&4u32.to_le_bytes());
-    desc[8..12].copy_from_slice(&5u32.to_le_bytes());
-    desc[12..14].copy_from_slice(&8u16.to_le_bytes());
-    desc[14..16].copy_from_slice(&8u16.to_le_bytes());
-    desc[16..18].copy_from_slice(&1u16.to_le_bytes());
+        let inode_table_offset = 5 * block_size as usize;
+        let inode_table = &mut buf[inode_table_offset..inode_table_offset + 1024];
 
-    let inode_table_offset = 5 * block_size as usize;
-    let inode_table = unsafe {
-        core::slice::from_raw_parts_mut(device.as_mut_ptr().add(inode_table_offset), 1024)
-    };
+        let root_inode_offset = 128;
+        inode_table[root_inode_offset..root_inode_offset + 2]
+            .copy_from_slice(&0x4000u16.to_le_bytes());
+        inode_table[root_inode_offset + 4..root_inode_offset + 8]
+            .copy_from_slice(&block_size.to_le_bytes());
+        inode_table[root_inode_offset + 28..root_inode_offset + 32]
+            .copy_from_slice(&2u32.to_le_bytes());
+        inode_table[root_inode_offset + 40..root_inode_offset + 44]
+            .copy_from_slice(&6u32.to_le_bytes());
 
-    let root_inode_offset = 128;
-    inode_table[root_inode_offset..root_inode_offset + 2].copy_from_slice(&0x4000u16.to_le_bytes());
-    inode_table[root_inode_offset + 4..root_inode_offset + 8]
-        .copy_from_slice(&block_size.to_le_bytes());
-    inode_table[root_inode_offset + 28..root_inode_offset + 32]
-        .copy_from_slice(&2u32.to_le_bytes());
-    inode_table[root_inode_offset + 40..root_inode_offset + 44]
-        .copy_from_slice(&6u32.to_le_bytes());
+        let file_inode_number = 3u32;
+        if let (Some(name), Some(data)) = (spec.file_name, spec.file_data) {
+            let file_inode_offset = root_inode_offset + inode_size as usize;
+            inode_table[file_inode_offset..file_inode_offset + 2]
+                .copy_from_slice(&0x8000u16.to_le_bytes());
+            inode_table[file_inode_offset + 4..file_inode_offset + 8]
+                .copy_from_slice(&(data.len() as u32).to_le_bytes());
+            inode_table[file_inode_offset + 28..file_inode_offset + 32]
+                .copy_from_slice(&1u32.to_le_bytes());
+            inode_table[file_inode_offset + 40..file_inode_offset + 44]
+                .copy_from_slice(&spec.file_block.to_le_bytes());
 
-    let file_inode_number = 3u32;
-    if let (Some(name), Some(data)) = (spec.file_name, spec.file_data) {
-        let file_inode_offset = root_inode_offset + inode_size as usize;
-        inode_table[file_inode_offset..file_inode_offset + 2]
-            .copy_from_slice(&0x8000u16.to_le_bytes());
-        inode_table[file_inode_offset + 4..file_inode_offset + 8]
-            .copy_from_slice(&(data.len() as u32).to_le_bytes());
-        inode_table[file_inode_offset + 28..file_inode_offset + 32]
-            .copy_from_slice(&1u32.to_le_bytes());
-        inode_table[file_inode_offset + 40..file_inode_offset + 44]
-            .copy_from_slice(&spec.file_block.to_le_bytes());
+            if spec.file_block < spec.blocks {
+                let data_offset = spec.file_block as usize * block_size as usize;
+                let data_block = &mut buf[data_offset..data_offset + 1024];
+                data_block[..data.len()].copy_from_slice(data);
+            }
 
-        if spec.file_block < spec.blocks {
-            let data_offset = spec.file_block as usize * block_size as usize;
-            let data_block = unsafe {
-                core::slice::from_raw_parts_mut(device.as_mut_ptr().add(data_offset), 1024)
-            };
-            data_block[..data.len()].copy_from_slice(data);
+            let dir_offset = 6 * block_size as usize;
+            let dir_block = &mut buf[dir_offset..dir_offset + 1024];
+
+            let mut write_dir_entry =
+                |offset: usize, inode: u32, rec_len: u16, name: &[u8], file_type: u8| {
+                    dir_block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+                    dir_block[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
+                    dir_block[offset + 6] = name.len() as u8;
+                    dir_block[offset + 7] = file_type;
+                    let name_end = offset + 8 + name.len();
+                    dir_block[offset + 8..name_end].copy_from_slice(name);
+                    for b in dir_block[name_end..offset + rec_len as usize].iter_mut() {
+                        *b = 0;
+                    }
+                };
+
+            let used = 24 + ((8 + name.len() + 3) & !3);
+            let rec_len = (block_size as usize - used) as u16;
+            write_dir_entry(0, 2, 12, b".", 2);
+            write_dir_entry(12, 2, 12, b"..", 2);
+            write_dir_entry(24, file_inode_number, (used - 24) as u16, name, 1);
+            write_dir_entry(used, 0, rec_len, b"", 0);
+        } else {
+            let dir_offset = 6 * block_size as usize;
+            let dir_block = &mut buf[dir_offset..dir_offset + 1024];
+
+            let mut write_dir_entry =
+                |offset: usize, inode: u32, rec_len: u16, name: &[u8], file_type: u8| {
+                    dir_block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+                    dir_block[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
+                    dir_block[offset + 6] = name.len() as u8;
+                    dir_block[offset + 7] = file_type;
+                    let name_end = offset + 8 + name.len();
+                    dir_block[offset + 8..name_end].copy_from_slice(name);
+                    for b in dir_block[name_end..offset + rec_len as usize].iter_mut() {
+                        *b = 0;
+                    }
+                };
+
+            write_dir_entry(0, 2, 12, b".", 2);
+            write_dir_entry(12, 2, 12, b"..", 2);
+            write_dir_entry(24, 0, (block_size - 24) as u16, b"", 0);
         }
-
-        let dir_offset = 6 * block_size as usize;
-        let dir_block =
-            unsafe { core::slice::from_raw_parts_mut(device.as_mut_ptr().add(dir_offset), 1024) };
-
-        let mut write_dir_entry =
-            |offset: usize, inode: u32, rec_len: u16, name: &[u8], file_type: u8| {
-                dir_block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
-                dir_block[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
-                dir_block[offset + 6] = name.len() as u8;
-                dir_block[offset + 7] = file_type;
-                let name_end = offset + 8 + name.len();
-                dir_block[offset + 8..name_end].copy_from_slice(name);
-                for b in dir_block[name_end..offset + rec_len as usize].iter_mut() {
-                    *b = 0;
-                }
-            };
-
-        let used = 24 + ((8 + name.len() + 3) & !3);
-        let rec_len = (block_size as usize - used) as u16;
-        write_dir_entry(0, 2, 12, b".", 2);
-        write_dir_entry(12, 2, 12, b"..", 2);
-        write_dir_entry(24, file_inode_number, (used - 24) as u16, name, 1);
-        write_dir_entry(used, 0, rec_len, b"", 0);
-    } else {
-        let dir_offset = 6 * block_size as usize;
-        let dir_block =
-            unsafe { core::slice::from_raw_parts_mut(device.as_mut_ptr().add(dir_offset), 1024) };
-
-        let mut write_dir_entry =
-            |offset: usize, inode: u32, rec_len: u16, name: &[u8], file_type: u8| {
-                dir_block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
-                dir_block[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
-                dir_block[offset + 6] = name.len() as u8;
-                dir_block[offset + 7] = file_type;
-                let name_end = offset + 8 + name.len();
-                dir_block[offset + 8..name_end].copy_from_slice(name);
-                for b in dir_block[name_end..offset + rec_len as usize].iter_mut() {
-                    *b = 0;
-                }
-            };
-
-        write_dir_entry(0, 2, 12, b".", 2);
-        write_dir_entry(12, 2, 12, b"..", 2);
-        write_dir_entry(24, 0, (block_size - 24) as u16, b"", 0);
-    }
+    });
 
     Some(device)
 }
@@ -361,11 +352,11 @@ pub fn test_ext2_invalid_superblock_magic() -> TestResult {
         return TestResult::Pass;
     };
     let sb_offset = 1024usize;
-    unsafe {
-        let sb = core::slice::from_raw_parts_mut(device.as_mut_ptr().add(sb_offset), 1024);
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
         sb[56] = 0;
         sb[57] = 0;
-    }
+    });
 
     let result = Ext2Fs::init_internal(&device);
     match result {
@@ -379,10 +370,10 @@ pub fn test_ext2_unsupported_block_size() -> TestResult {
         return TestResult::Pass;
     };
     let sb_offset = 1024usize;
-    unsafe {
-        let sb = core::slice::from_raw_parts_mut(device.as_mut_ptr().add(sb_offset), 1024);
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
         sb[24..28].copy_from_slice(&8u32.to_le_bytes());
-    }
+    });
 
     let result = Ext2Fs::init_internal(&device);
     match result {
@@ -396,11 +387,11 @@ pub fn test_ext2_directory_format_error() -> TestResult {
         return TestResult::Pass;
     };
     let dir_offset = 6 * 1024usize;
-    unsafe {
-        let dir_block = core::slice::from_raw_parts_mut(device.as_mut_ptr().add(dir_offset), 1024);
+    device.with_buffer_mut(|buf| {
+        let dir_block = &mut buf[dir_offset..dir_offset + 1024];
         dir_block[4] = 0;
         dir_block[5] = 0;
-    }
+    });
 
     let mut fs = match Ext2Fs::init_internal(&device) {
         Ok(fs) => fs,

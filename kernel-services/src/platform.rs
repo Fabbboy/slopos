@@ -21,6 +21,7 @@ slopos_service_core::define_service! {
 
         is_rsdp_available() -> bool;
         get_rsdp_address() -> *const c_void;
+        get_rsdp_phys() -> u64;
 
         is_kernel_initialized() -> bool;
         idt_get_gate(vector: u8, entry: *mut c_void) -> c_int;

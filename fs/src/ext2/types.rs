@@ -1,11 +1,18 @@
 /// Physical block number on the block device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    slopos_ostd::Pod,
+    slopos_ostd::Zeroable,
+)]
 #[repr(transparent)]
 pub struct BlockNum(pub u32);
-
-// SAFETY: BlockNum wraps a single u32; all-zero bits encode the
-// `BlockNum::ZERO` sentinel. No invalid bit patterns.
-unsafe impl slopos_ostd::Zeroable for BlockNum {}
 
 /// Logical file block number (offset within a file's data).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

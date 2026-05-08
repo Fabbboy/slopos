@@ -1,80 +1,38 @@
 //! HPET (High Precision Event Timer) ACPI table parsing.
 //!
 //! Discovers the HPET base address and timer block capabilities from the
-//! ACPI `"HPET"` table (IA-PC HPET Specification §3.2.4). The driver in
-//! [`slopos_drivers::hpet`] consumes this information to map and initialize
-//! the HPET MMIO registers.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use slopos_acpi::hpet::Hpet;
-//! use slopos_acpi::tables::AcpiTables;
-//!
-//! let tables = AcpiTables::from_rsdp(rsdp_ptr)?;
-//! let hpet = Hpet::from_tables(&tables)?;
-//! let info = hpet.info();
-//! // info.base_phys is the MMIO base address for the HPET register block
-//! ```
+//! ACPI `"HPET"` table (IA-PC HPET Specification §3.2.4).
 
-use core::mem;
-
+use slopos_ostd::util::packed_view::read_packed;
 use slopos_utils::klog_info;
 
-use crate::tables::{AcpiTables, SdtHeader};
+use crate::tables::AcpiTables;
 
 const HPET_SIGNATURE: &[u8; 4] = b"HPET";
 
-// =============================================================================
-// Raw ACPI structures (packed, matches hardware layout)
-// =============================================================================
-
-/// ACPI Generic Address Structure (GAS).
+/// Layout of the HPET payload (post-SDT-header), 20 bytes total.
 ///
-/// Describes a register location — either memory-mapped or port I/O.
-/// For HPET, only memory space (`address_space_id == 0`) is valid.
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct AcpiGas {
-    address_space_id: u8,
-    register_bit_width: u8,
-    register_bit_offset: u8,
-    access_size: u8,
-    address: u64,
-}
-
-/// Raw ACPI HPET table layout (IA-PC HPET Specification §3.2.4).
+/// All offsets are relative to the start of `AcpiTable::payload()`:
 ///
-/// Total size: 56 bytes (36-byte SDT header + 20 bytes HPET-specific).
-#[repr(C, packed)]
-struct RawHpetTable {
-    header: SdtHeader,
-    /// Event Timer Block ID:
-    ///   Bits [31:16] = PCI Vendor ID
-    ///   Bit  [15]    = Legacy Replacement IRQ Routing Capable
-    ///   Bit  [13]    = COUNT_SIZE_CAP (1 = 64-bit counter)
-    ///   Bits [12:8]  = Number of comparators minus 1
-    ///   Bits [7:0]   = Hardware Revision ID
-    event_timer_block_id: u32,
-    /// Base address of the HPET register block (GAS).
-    base_address: AcpiGas,
-    /// HPET sequence number (0 for the first HPET).
-    hpet_number: u8,
-    /// Minimum clock tick in periodic mode.
-    minimum_tick: u16,
-    /// Page protection and OEM attributes.
-    page_protection: u8,
-}
+/// | offset | field                   | size |
+/// |--------|-------------------------|------|
+/// |    0   | event_timer_block_id    | 4    |
+/// |    4   | gas.address_space_id    | 1    |
+/// |    5   | gas.register_bit_width  | 1    |
+/// |    6   | gas.register_bit_offset | 1    |
+/// |    7   | gas.access_size         | 1    |
+/// |    8   | gas.address             | 8    |
+/// |   16   | hpet_number             | 1    |
+/// |   17   | minimum_tick            | 2    |
+/// |   19   | page_protection         | 1    |
+const HPET_PAYLOAD_LEN: usize = 20;
 
-// =============================================================================
-// Parsed HPET information
-// =============================================================================
+const HPET_OFF_BLOCK_ID: usize = 0;
+const HPET_OFF_GAS_ADDRESS_SPACE: usize = 4;
+const HPET_OFF_GAS_ADDRESS: usize = 8;
+const HPET_OFF_HPET_NUMBER: usize = 16;
+const HPET_OFF_MIN_TICK: usize = 17;
 
-/// Parsed HPET information extracted from the ACPI table.
-///
-/// The actual counter tick period (`period_fs`) is not in the ACPI table —
-/// it lives in the HPET MMIO capability register and is read by the driver
-/// during initialization.
 #[derive(Clone, Copy, Debug)]
 pub struct HpetInfo {
     /// Physical base address of the HPET MMIO register block.
@@ -96,27 +54,18 @@ pub struct Hpet {
 
 impl Hpet {
     /// Look up the `"HPET"` table in the ACPI hierarchy and parse it.
-    ///
-    /// Returns `None` if the table is absent, too short, or contains
-    /// an invalid address space (only MMIO / memory space 0 is supported).
     pub fn from_tables(tables: &AcpiTables) -> Option<Self> {
-        let header = tables.find_table(HPET_SIGNATURE);
-        if header.is_null() {
+        let Some(table) = tables.find_table(HPET_SIGNATURE) else {
             klog_info!("ACPI: HPET table not found");
             return None;
-        }
-
-        let length = unsafe { (*header).length } as usize;
-        if length < mem::size_of::<RawHpetTable>() {
-            klog_info!("ACPI: HPET table too short ({} bytes)", length);
+        };
+        let payload = table.payload();
+        if payload.len() < HPET_PAYLOAD_LEN {
+            klog_info!("ACPI: HPET table too short ({} bytes)", payload.len());
             return None;
         }
 
-        let raw = unsafe { &*(header as *const RawHpetTable) };
-
-        // The base address must reside in memory space (address_space_id == 0).
-        // I/O port space is not supported for HPET.
-        let addr_space = raw.base_address.address_space_id;
+        let addr_space = read_packed::<u8>(payload, HPET_OFF_GAS_ADDRESS_SPACE)?;
         if addr_space != 0 {
             klog_info!(
                 "ACPI: HPET base address in unsupported space ({}), expected memory (0)",
@@ -125,17 +74,17 @@ impl Hpet {
             return None;
         }
 
-        let base_phys = raw.base_address.address;
+        let base_phys = read_packed::<u64>(payload, HPET_OFF_GAS_ADDRESS)?;
         if base_phys == 0 {
             klog_info!("ACPI: HPET base address is zero");
             return None;
         }
 
-        let block_id = raw.event_timer_block_id;
+        let block_id = read_packed::<u32>(payload, HPET_OFF_BLOCK_ID)?;
         let num_comparators = (((block_id >> 8) & 0x1F) as u8).wrapping_add(1);
         let counter_64bit = (block_id >> 13) & 1 != 0;
-        let minimum_tick = raw.minimum_tick;
-        let hpet_number = raw.hpet_number;
+        let hpet_number = read_packed::<u8>(payload, HPET_OFF_HPET_NUMBER)?;
+        let minimum_tick = read_packed::<u16>(payload, HPET_OFF_MIN_TICK)?;
 
         Some(Self {
             info: HpetInfo {

@@ -26,9 +26,10 @@ pub mod user;
 pub mod util;
 
 /// Plain-old-data marker trait. Re-exported at the crate root so
-/// the `#[derive(Pod)]` expansion can resolve `::slopos_ostd::Pod`.
+/// the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions can
+/// resolve `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`.
 pub use mm::Pod;
-pub use slopos_ostd_derive::Pod;
+pub use slopos_ostd_derive::{Pod, Zeroable};
 
 pub use mm::{
     AllocError, FrameAlloc, FrameAllocOptions, Init, InitClosure, KArc, KBTreeMap, KBox, KVec,

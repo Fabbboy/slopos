@@ -424,7 +424,19 @@ pub fn is_rsdp_available() -> i32 {
 }
 
 pub fn get_rsdp_phys_address() -> u64 {
-    sysinfo().rsdp_phys_addr
+    let info = sysinfo();
+    if !info.flags.rsdp_available || info.rsdp_phys_addr == 0 {
+        return 0;
+    }
+    // Limine v11 (base revision 6) returns the RSDP address as an HHDM
+    // virtual pointer; older revisions returned a physical address.
+    // Normalise to physical regardless.
+    let addr = info.rsdp_phys_addr;
+    if info.flags.hhdm_available && addr >= info.hhdm_offset {
+        addr - info.hhdm_offset
+    } else {
+        addr
+    }
 }
 
 pub fn get_rsdp_address() -> *const c_void {

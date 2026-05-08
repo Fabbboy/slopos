@@ -1,5 +1,5 @@
-use core::ffi::{c_char, c_int};
-use core::slice;
+use core::ffi::c_int;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::KernelErrno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -9,7 +9,9 @@ use slopos_abi::fs::{
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{
+    InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard,
+};
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::driver_runtime::{
@@ -19,17 +21,10 @@ use slopos_kernel_services::driver_runtime::{
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
-use crate::MAX_PATH_LEN;
-
 pub(super) const FILEIO_MAX_OPEN_FILES: usize = 32;
 pub(super) const FILEIO_MAX_OPEN_FILE_ENTRIES: usize = 256;
 
 /// Internal open-mode flags for `OpenFileEntry`.
-///
-/// These are a DISTINCT type from POSIX `O_*` flags (`u32`).  Passing raw
-/// POSIX flags where `OpenMode` is expected is a compile error — preventing
-/// the class of bugs where `O_RDONLY` (0) is silently misinterpreted as
-/// "no permissions" because `FILE_OPEN_READ` was 1.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub(crate) struct OpenMode(u32);
@@ -53,8 +48,6 @@ impl OpenMode {
         self.0
     }
 
-    /// Merge pass-through POSIX bits (O_NONBLOCK, O_NOCTTY, etc.) that
-    /// live in the upper bits and don't collide with the internal flags.
     pub const fn with_raw(self, raw: u32) -> Self {
         Self(self.0 | raw)
     }
@@ -86,7 +79,6 @@ impl core::ops::BitAnd for OpenMode {
     }
 }
 
-/// Convert POSIX `O_*` flags to internal `OpenMode`.
 pub(crate) fn posix_to_open_mode(posix: u32) -> OpenMode {
     let mut m = OpenMode::EMPTY;
     match posix & O_ACCMODE {
@@ -101,11 +93,9 @@ pub(crate) fn posix_to_open_mode(posix: u32) -> OpenMode {
     if posix & O_APPEND != 0 {
         m |= OpenMode::APPEND;
     }
-    // Pass through remaining POSIX bits (O_NONBLOCK, O_NOCTTY, etc.)
     m.with_raw(posix & !(O_ACCMODE | O_CREAT | O_APPEND))
 }
 
-/// Convert internal `OpenMode` status flags back to POSIX `O_*` bits (for `F_GETFL`).
 pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
     let mut posix = match (
         mode.contains(OpenMode::READ),
@@ -118,7 +108,6 @@ pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
     if mode.contains(OpenMode::APPEND) {
         posix |= O_APPEND;
     }
-    // O_NONBLOCK and O_NOCTTY are stored at their POSIX positions via with_raw().
     posix |= mode.bits() & (O_NONBLOCK as u32 | O_NOCTTY as u32);
     posix
 }
@@ -178,25 +167,45 @@ impl FdEntry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-process slot layout.
+//
+// Each `FileTableSlot` lives in a top-level static array. Its `process_id`
+// is an `AtomicU32` outside the lock, supporting lock-free scans via
+// `slot_for_pid`. The mutable per-slot state — `in_use` plus the
+// `descriptors` array — is wrapped in a `SpinLock<FileTableSlotInner>` at
+// `LOCK_LEVEL_REGISTRY`.
+//
+// Lock order: per-process `slot.inner` (REGISTRY=2) is acquired first;
+// the shared `OPEN_FILES_STATE` (RESOURCE=1) is acquired second. Holders
+// of two different per-process locks must snapshot one and release before
+// taking the other (used by fork in fdtable.rs).
+// ---------------------------------------------------------------------------
+
 pub(super) struct FileTableSlot {
-    pub(super) process_id: u32,
+    pub(super) process_id: AtomicU32,
+    pub(super) inner: SpinLock<FileTableSlotInner>,
+}
+
+pub(super) struct FileTableSlotInner {
     pub(super) in_use: bool,
-    pub(super) lock: SpinLock<()>,
     pub(super) descriptors: [FdEntry; FILEIO_MAX_OPEN_FILES],
 }
 
 impl FileTableSlot {
-    const fn new(in_use: bool) -> Self {
+    pub(super) const fn new(in_use: bool) -> Self {
         Self {
-            process_id: INVALID_PROCESS_ID,
-            in_use,
-            lock: SpinLock::new((), LOCK_LEVEL_RESOURCE),
-            descriptors: [FdEntry::new(); FILEIO_MAX_OPEN_FILES],
+            process_id: AtomicU32::new(INVALID_PROCESS_ID),
+            inner: SpinLock::new(
+                FileTableSlotInner {
+                    in_use,
+                    descriptors: [FdEntry::new(); FILEIO_MAX_OPEN_FILES],
+                },
+                LOCK_LEVEL_REGISTRY,
+            ),
         }
     }
 }
-
-unsafe impl Send for FileTableSlot {}
 
 #[derive(Clone, Copy)]
 pub(super) struct ExternalOpsState {
@@ -213,51 +222,123 @@ impl ExternalOpsState {
     }
 }
 
-pub(super) struct FileioState {
+pub(super) struct OpenFilesState {
     pub(super) initialized: bool,
-    pub(super) kernel: FileTableSlot,
-    pub(super) processes: [FileTableSlot; MAX_PROCESSES],
     pub(super) open_files: [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
     pub(super) external_ops: ExternalOpsState,
 }
 
-impl FileioState {
+impl OpenFilesState {
     const fn uninitialized() -> Self {
         Self {
             initialized: false,
-            kernel: FileTableSlot::new(true),
-            processes: [const { FileTableSlot::new(false) }; MAX_PROCESSES],
             open_files: [const { OpenFileEntry::new() }; FILEIO_MAX_OPEN_FILE_ENTRIES],
             external_ops: ExternalOpsState::new(),
         }
     }
 }
 
-unsafe impl Send for FileioState {}
-
-pub(super) static FILEIO_STATE: SpinLock<FileioState> =
-    SpinLock::new(FileioState::uninitialized(), LOCK_LEVEL_REGISTRY);
+pub(super) static KERNEL_TABLE: FileTableSlot = FileTableSlot::new(true);
+pub(super) static PROCESS_TABLES: [FileTableSlot; MAX_PROCESSES] =
+    [const { FileTableSlot::new(false) }; MAX_PROCESSES];
+pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> =
+    SpinLock::new(OpenFilesState::uninitialized(), LOCK_LEVEL_RESOURCE);
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
-// ---------------------------------------------------------------------------
-// Per-process file table access bypass.
-//
-// The global FILEIO_STATE lock serializes ALL file operations. But each
-// FileTableSlot already has its own per-process `lock: SpinLock<()>`.
-// For hot-path operations (read, write, close, dup), we bypass the global
-// lock and use only the per-process lock via `unsafe { FILEIO_STATE.as_ptr() }`.
-//
-// This is safe because:
-// 1. Each FileTableSlot.lock is an independent SpinLock with its own ticket.
-// 2. The FileTableSlot data (descriptors[]) is only modified under that lock.
-// 3. The global lock is still used for rare operations (table create/destroy,
-//    initialization, registration) where structural changes happen.
-// ---------------------------------------------------------------------------
+/// Lock-free scan: return the slot whose `process_id` matches `pid`.
+///
+/// `INVALID_PROCESS_ID` (the kernel pid) maps to [`KERNEL_TABLE`].
+pub(super) fn slot_for_pid(pid: u32) -> Option<&'static FileTableSlot> {
+    if pid == INVALID_PROCESS_ID {
+        return Some(&KERNEL_TABLE);
+    }
+    for slot in PROCESS_TABLES.iter() {
+        if slot.process_id.load(Ordering::Acquire) == pid {
+            return Some(slot);
+        }
+    }
+    None
+}
 
-use slopos_ostd::sync::SpinLockGuard;
+/// Lazy-initialise the open-files registry and run `f` with it locked.
+pub(super) fn with_open_files<R>(f: impl FnOnce(&mut OpenFilesState) -> R) -> R {
+    let mut guard = OPEN_FILES_STATE.lock();
+    if !guard.initialized {
+        FILEIO_INIT.init_once();
+        for entry in guard.open_files.iter_mut() {
+            *entry = OpenFileEntry::new();
+        }
+        guard.initialized = true;
+    }
+    f(&mut *guard)
+}
 
-#[allow(dead_code)]
-/// Snapshot of an FD entry's open file for use outside the lock.
+/// Lock the per-process slot for `pid` and run `f` with mutable access
+/// to its descriptor table. Returns `None` if no slot owns `pid` or if
+/// the slot was claimed but is not yet `in_use`.
+pub(super) fn with_pid_slot<R>(
+    pid: u32,
+    f: impl FnOnce(&mut FileTableSlotInner) -> R,
+) -> Option<R> {
+    let slot = slot_for_pid(pid)?;
+    let mut guard = slot.inner.lock();
+    if !guard.in_use {
+        return None;
+    }
+    Some(f(&mut *guard))
+}
+
+/// Acquire the per-process slot lock and return the guard. Used by hot
+/// paths that snapshot a single FD then drop the lock before further
+/// work.
+pub(super) fn lock_pid_slot(pid: u32) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
+    let slot = slot_for_pid(pid)?;
+    let guard = slot.inner.lock();
+    if !guard.in_use {
+        return None;
+    }
+    Some(guard)
+}
+
+/// Find or claim the per-process slot for `pid`, returning its lock
+/// guard already held. Used by `file_open_for_process` and pipe-create
+/// where the caller may need to lazily allocate a table.
+///
+/// Falls back to the kernel table only when no free slot is available.
+pub(super) fn pick_pid_slot_locked(pid: u32) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
+    if pid == INVALID_PROCESS_ID {
+        return Some(KERNEL_TABLE.inner.lock());
+    }
+    if let Some(slot) = slot_for_pid(pid) {
+        let guard = slot.inner.lock();
+        if guard.in_use {
+            return Some(guard);
+        }
+    }
+    for slot in PROCESS_TABLES.iter() {
+        if slot
+            .process_id
+            .compare_exchange(INVALID_PROCESS_ID, pid, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let mut guard = slot.inner.lock();
+            guard.in_use = true;
+            for entry in guard.descriptors.iter_mut() {
+                *entry = FdEntry::new();
+            }
+            return Some(guard);
+        }
+    }
+    Some(KERNEL_TABLE.inner.lock())
+}
+
+pub(super) fn reset_fd_entry(entry: &mut FdEntry) {
+    *entry = FdEntry::new();
+}
+
+/// Snapshot of a file descriptor's open-file state. Captured under
+/// the per-process slot lock and the open-files lock, then used after
+/// both are released so I/O proceeds without holding any lock.
 #[derive(Clone, Copy)]
 pub(super) struct FdSnapshot {
     pub(super) ops: Option<&'static dyn FileOps>,
@@ -267,237 +348,52 @@ pub(super) struct FdSnapshot {
     pub(super) open_file_idx: u16,
 }
 
-/// Find a process's file table slot by PID and lock it WITHOUT the global lock.
-///
-/// Returns a guard on the per-process lock + a pointer to the FileTableSlot.
-/// The caller can access `descriptors[]` through the slot pointer while holding
-/// the guard.
-///
-/// # Safety
-/// Uses `FILEIO_STATE.as_ptr()` for lock-free data access. Safe because:
-/// - `FileTableSlot.in_use` and `.process_id` are written only under the global
-///   lock (during table create/destroy), and reads of these fields are naturally
-///   aligned — no torn reads on x86_64.
-/// - `FileTableSlot.lock` is an independent SpinLock that provides its own
-///   synchronization for the `descriptors[]` array.
-#[allow(dead_code)]
-pub(super) fn lock_process_table(
-    pid: u32,
-) -> Option<(SpinLockGuard<'static, ()>, *mut FileTableSlot)> {
-    if !FILEIO_INIT.is_set() {
-        return None;
-    }
-
-    // SAFETY: as_ptr() gives us a raw pointer to FileioState. The fields we
-    // read (in_use, process_id) are naturally aligned and written atomically
-    // on x86_64. The per-process lock is an independent SpinLock.
-    let state = unsafe { &*FILEIO_STATE.as_ptr() };
-
-    if pid == INVALID_PROCESS_ID {
-        let table = &state.kernel as *const FileTableSlot as *mut FileTableSlot;
-        // SAFETY: table is a valid static pointer; lock() is always safe.
-        let guard = unsafe { &(*table).lock }.lock();
-        return Some((guard, table));
-    }
-
-    for slot in state.processes.iter() {
-        if slot.in_use && slot.process_id == pid {
-            let table = slot as *const FileTableSlot as *mut FileTableSlot;
-            let guard = unsafe { &(*table).lock }.lock();
-            return Some((guard, table));
-        }
-    }
-
-    None
-}
-
-/// Get a reference to the open files array without the global lock.
-///
-/// # Safety
-/// The caller must ensure no structural changes to the open files array are
-/// happening concurrently (no file open/close on the same entry). For read-only
-/// snapshots of immutable fields (ops, handle, kind), this is safe.
-#[allow(dead_code)]
-pub(super) unsafe fn open_files_ptr() -> &'static [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES] {
-    unsafe { &(*FILEIO_STATE.as_ptr()).open_files }
-}
-
-#[allow(dead_code)]
-pub(super) unsafe fn open_files_mut_ptr()
--> &'static mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES] {
-    unsafe { &mut (*(FILEIO_STATE.as_ptr() as *mut FileioState)).open_files }
-}
-
-#[allow(dead_code)]
-pub(super) fn snapshot_fd(table: *mut FileTableSlot, fd: c_int) -> Option<FdSnapshot> {
+pub(super) fn snapshot_fd(inner: &FileTableSlotInner, fd: c_int) -> Option<FdSnapshot> {
     if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
         return None;
     }
-    let table_ref = unsafe { &*table };
-    let entry = &table_ref.descriptors[fd as usize];
+    let entry = &inner.descriptors[fd as usize];
     if !entry.valid {
         return None;
     }
-    let open_files = unsafe { open_files_ptr() };
-    let ofe = &open_files[entry.open_file_idx as usize];
-    if !ofe.valid {
-        return None;
-    }
-    Some(FdSnapshot {
-        ops: ofe.ops,
-        handle: ofe.handle,
-        position: ofe.position,
-        status_flags: ofe.status_flags,
-        open_file_idx: entry.open_file_idx,
+    let ofi = entry.open_file_idx;
+    with_open_files(|state| {
+        let ofe = &state.open_files[ofi as usize];
+        if !ofe.valid {
+            return None;
+        }
+        Some(FdSnapshot {
+            ops: ofe.ops,
+            handle: ofe.handle,
+            position: ofe.position,
+            status_flags: ofe.status_flags,
+            open_file_idx: ofi,
+        })
     })
 }
 
-#[allow(dead_code)]
-pub(super) fn external_ops_fast() -> ExternalOpsState {
-    unsafe { (*FILEIO_STATE.as_ptr()).external_ops }
-}
-
-pub fn fileio_register_tty_ops(ops: &'static dyn FileOps) {
-    let mut guard = FILEIO_STATE.lock();
-    guard.external_ops.tty_ops = Some(ops);
-}
-
-pub fn fileio_register_socket_ops(ops: &'static dyn FileOps) {
-    let mut guard = FILEIO_STATE.lock();
-    guard.external_ops.socket_ops = Some(ops);
-}
-
-pub(super) fn with_state<R>(f: impl FnOnce(&mut FileioState) -> R) -> R {
-    let mut guard = FILEIO_STATE.lock();
-    f(&mut *guard)
-}
-
-pub(super) fn with_tables<R>(
-    f: impl FnOnce(
-        &mut FileTableSlot,
-        &mut [FileTableSlot; MAX_PROCESSES],
-        &mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
-        &mut ExternalOpsState,
-    ) -> R,
-) -> R {
-    with_state(|state| {
-        ensure_initialized(state);
-        let kernel = &mut state.kernel;
-        let processes = &mut state.processes;
-        let open_files = &mut state.open_files;
-        let external_ops = &mut state.external_ops;
-        f(kernel, processes, open_files, external_ops)
-    })
-}
-
-pub(super) fn reset_fd_entry(entry: &mut FdEntry) {
-    *entry = FdEntry::new();
-}
-
-pub(super) fn reset_table(table: &mut FileTableSlot) {
-    for entry in table.descriptors.iter_mut() {
-        reset_fd_entry(entry);
-    }
-}
-
-pub(super) fn find_free_table(
-    processes: &mut [FileTableSlot; MAX_PROCESSES],
-) -> Option<&mut FileTableSlot> {
-    for slot in processes.iter_mut() {
-        if !slot.in_use {
-            return Some(slot);
-        }
-    }
-    None
-}
-
-pub(super) fn table_for_pid<'a>(
-    kernel: &'a mut FileTableSlot,
-    processes: &'a mut [FileTableSlot; MAX_PROCESSES],
-    pid: u32,
-) -> Option<&'a mut FileTableSlot> {
-    if pid == INVALID_PROCESS_ID {
-        return Some(kernel);
-    }
-    for slot in processes.iter_mut() {
-        if slot.in_use && slot.process_id == pid {
-            return Some(slot);
-        }
-    }
-    None
-}
-
-pub(super) fn get_fd_entry(table: &mut FileTableSlot, fd: c_int) -> Option<&mut FdEntry> {
+pub(super) fn get_fd_entry(inner: &mut FileTableSlotInner, fd: c_int) -> Option<&mut FdEntry> {
     if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
         return None;
     }
-    let entry = &mut table.descriptors[fd as usize];
+    let entry = &mut inner.descriptors[fd as usize];
     if !entry.valid {
         return None;
     }
     Some(entry)
 }
 
-pub(super) fn find_free_slot(table: &FileTableSlot) -> Option<usize> {
-    find_free_slot_from(table, 0)
+pub(super) fn find_free_slot(inner: &FileTableSlotInner) -> Option<usize> {
+    find_free_slot_from(inner, 0)
 }
 
-pub(super) fn find_free_slot_from(table: &FileTableSlot, min_fd: usize) -> Option<usize> {
+pub(super) fn find_free_slot_from(inner: &FileTableSlotInner, min_fd: usize) -> Option<usize> {
     for idx in min_fd..FILEIO_MAX_OPEN_FILES {
-        if !table.descriptors[idx].valid {
+        if !inner.descriptors[idx].valid {
             return Some(idx);
         }
     }
     None
-}
-
-pub(super) fn ensure_initialized(state: &mut FileioState) {
-    if !FILEIO_INIT.init_once() {
-        return;
-    }
-
-    state.kernel = FileTableSlot::new(true);
-    for slot in state.processes.iter_mut() {
-        *slot = FileTableSlot::new(false);
-    }
-    for open in state.open_files.iter_mut() {
-        *open = OpenFileEntry::new();
-    }
-
-    reset_table(&mut state.kernel);
-    for slot in state.processes.iter_mut() {
-        reset_table(slot);
-        slot.process_id = INVALID_PROCESS_ID;
-        slot.in_use = false;
-    }
-
-    state.initialized = true;
-}
-
-pub(super) unsafe fn cstr_len(ptr_in: *const c_char) -> usize {
-    if ptr_in.is_null() {
-        return 0;
-    }
-    let mut len = 0usize;
-    unsafe {
-        while *ptr_in.add(len) != 0 {
-            len += 1;
-        }
-    }
-    len
-}
-
-pub(super) unsafe fn path_bytes<'a>(path: *const c_char) -> Option<&'a [u8]> {
-    if path.is_null() {
-        return None;
-    }
-    unsafe {
-        let len = cstr_len(path);
-        Some(slice::from_raw_parts(
-            path as *const u8,
-            len.min(MAX_PATH_LEN),
-        ))
-    }
 }
 
 pub(super) fn parse_pts_path(path: &[u8]) -> Option<TtyIndex> {
@@ -542,11 +438,18 @@ pub(super) fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u3
     }
 }
 
+pub fn fileio_register_tty_ops(ops: &'static dyn FileOps) {
+    with_open_files(|state| state.external_ops.tty_ops = Some(ops));
+}
+
+pub fn fileio_register_socket_ops(ops: &'static dyn FileOps) {
+    with_open_files(|state| state.external_ops.socket_ops = Some(ops));
+}
+
 struct LocalTtyOps;
 
 static LOCAL_TTY_OPS: LocalTtyOps = LocalTtyOps;
 
-/// Convert a `handle: usize` to a [`TtyIndex`], returning `EBADF` if out of range.
 fn local_tty_index(handle: usize) -> Result<TtyIndex, slopos_abi::Errno> {
     if handle > u8::MAX as usize {
         Err(slopos_abi::Errno::EBADF)
@@ -566,7 +469,6 @@ impl FileOps for LocalTtyOps {
             Err(e) => return e.as_isize(),
         };
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
-        // TTY service API uses raw pointers; use a kernel-side staging buffer.
         let buf_len = buf.len();
         let mut tmp = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
             Ok(v) => v,
@@ -653,7 +555,6 @@ impl FileOps for LocalTtyOps {
                 };
             }
         };
-        // Register FIRST, then check readiness (Linux pattern).
         let registered = tty::poll_enqueue(tty_idx);
         let revents = tty::poll_events(tty_idx, events);
         slopos_abi::file_ops::FusedPollResult {

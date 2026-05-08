@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::hpet::Hpet;
-use slopos_acpi::tables::{AcpiTables, Rsdp};
+use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
@@ -153,8 +153,7 @@ fn init_inner() -> i32 {
         return -1;
     }
 
-    let rsdp = platform::get_rsdp_address() as *const Rsdp;
-    let Some(tables) = AcpiTables::from_rsdp(rsdp) else {
+    let Some(tables) = AcpiTables::from_phys(platform::get_rsdp_phys()) else {
         klog_info!("HPET: ACPI tables validation failed");
         return -1;
     };

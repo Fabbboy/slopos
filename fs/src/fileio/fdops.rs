@@ -1,3 +1,5 @@
+use core::ffi::c_int;
+
 use super::open_file_table::{
     alloc_open_file_entry, get_open_file_mut, incref_open_file, release_open_file,
 };
@@ -19,28 +21,9 @@ use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags};
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
 
-fn pick_table_ptr(
-    kernel: &mut FileTableSlot,
-    processes: &mut [FileTableSlot; MAX_PROCESSES],
-    process_id: u32,
-) -> Option<*mut FileTableSlot> {
-    let kernel_ptr = kernel as *mut FileTableSlot;
-    let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
-        t as *mut FileTableSlot
-    } else if let Some(t) = find_free_table(processes) {
-        t as *mut FileTableSlot
-    } else {
-        kernel_ptr
-    };
-    let table = unsafe { &mut *table_ptr };
-    if !table.in_use {
-        table.in_use = true;
-        table.process_id = process_id;
-        reset_table(table);
-    }
-    Some(table_ptr)
-}
-
+/// Install an FD entry in `process_id`'s table. Allocates an
+/// `OpenFileEntry`, picks a free FD slot, and (if the file is a TTY) may
+/// acquire a controlling terminal afterwards.
 fn install_fd_entry(
     process_id: u32,
     ops: &'static dyn FileOps,
@@ -48,17 +31,13 @@ fn install_fd_entry(
     mut flags: OpenMode,
     call_tty_policy: Option<TtyIndex>,
 ) -> c_int {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table_ptr) = pick_table_ptr(kernel, processes, process_id) else {
-            return Errno::ESRCH.raw();
-        };
-        let table = unsafe { &mut *table_ptr };
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
+    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+        return Errno::ESRCH.raw();
+    };
 
-        let Some(slot_idx) = find_free_slot(table) else {
-            drop(guard);
-            ops.release(handle);
-            return Errno::EMFILE.raw();
+    let result = with_open_files(|state| {
+        let Some(slot_idx) = find_free_slot(&inner) else {
+            return Err(Errno::EMFILE);
         };
 
         let mut position = 0u64;
@@ -66,57 +45,59 @@ fn install_fd_entry(
             if let Some(size) = ops.size(handle) {
                 position = size;
             } else {
-                drop(guard);
-                ops.release(handle);
-                return Errno::ENXIO.raw();
+                return Err(Errno::ENXIO);
             }
         }
 
-        let Some(open_file_idx) = alloc_open_file_entry(open_files, ops, handle, flags, position)
+        let Some(open_file_idx) =
+            alloc_open_file_entry(&mut state.open_files, ops, handle, flags, position)
         else {
-            drop(guard);
-            ops.release(handle);
-            return Errno::ENFILE.raw() as _;
+            return Err(Errno::ENFILE);
         };
 
         if ops.kind() == FileKind::Socket {
             let mode_bits = flags & (OpenMode::READ | OpenMode::WRITE);
             flags = mode_bits;
-            if let Some(open_file) = get_open_file_mut(open_files, open_file_idx) {
+            if let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_idx) {
                 open_file.status_flags = flags;
                 let _ = ops.set_status_flags(handle, flags.bits());
             }
         }
 
-        table.descriptors[slot_idx] = FdEntry {
+        inner.descriptors[slot_idx] = FdEntry {
             open_file_idx,
             cloexec: (flags.bits() & O_CLOEXEC as u32) != 0,
             valid: true,
         };
+        Ok(slot_idx as c_int)
+    });
 
-        drop(guard);
+    drop(inner);
 
-        if let Some(tty_idx) = call_tty_policy {
-            maybe_acquire_controlling_tty_on_open(tty_idx, flags.bits());
+    match result {
+        Ok(fd) => {
+            if let Some(tty_idx) = call_tty_policy {
+                maybe_acquire_controlling_tty_on_open(tty_idx, flags.bits());
+            }
+            fd
         }
-
-        slot_idx as c_int
-    })
+        Err(e) => {
+            ops.release(handle);
+            e.raw()
+        }
+    }
 }
 
 fn current_tty_ops() -> &'static dyn FileOps {
-    with_tables(|_, _, _, external_ops| effective_tty_ops(external_ops))
+    with_open_files(|state| effective_tty_ops(&state.external_ops))
 }
 
 fn current_socket_ops() -> Option<&'static dyn FileOps> {
-    with_tables(|_, _, _, external_ops| external_socket_ops(external_ops))
+    with_open_files(|state| external_socket_ops(&state.external_ops))
 }
 
-pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: u32) -> c_int {
+pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> c_int {
     let flags = posix_to_open_mode(posix_flags);
-    if path.is_null() {
-        return Errno::EFAULT.raw() as _;
-    }
     if !flags.intersects(OpenMode::READ | OpenMode::WRITE) {
         return Errno::EINVAL.raw() as _;
     }
@@ -124,12 +105,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
         return Errno::EINVAL.raw() as _;
     }
 
-    let path_bytes = match unsafe { path_bytes(path) } {
-        Some(p) => p,
-        None => return Errno::EINVAL.raw() as _,
-    };
-
-    if path_bytes == b"/dev/tty" {
+    if path == b"/dev/tty" {
         let tty_idx = match current_task_controlling_tty() {
             Some(idx) => idx,
             None => return Errno::ENXIO.raw(),
@@ -141,7 +117,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
         return install_fd_entry(process_id, tty_ops, tty_idx.0 as usize, flags, None);
     }
 
-    if path_bytes == b"/dev/ptmx" {
+    if path == b"/dev/ptmx" {
         let master_idx = match tty::alloc_pty() {
             Ok(idx) => idx,
             Err(_) => return Errno::ENOMEM.raw() as _,
@@ -159,7 +135,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
         );
     }
 
-    if let Some(slave_idx) = parse_pts_path(path_bytes) {
+    if let Some(slave_idx) = parse_pts_path(path) {
         if tty::open_pty_slave(slave_idx).is_err() {
             return Errno::EBUSY.raw() as _;
         }
@@ -183,20 +159,31 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
         truncate,
         writable,
     };
-    let vfs_handle = match vfs_open_handle_flags(path_bytes, open_flags) {
+    let vfs_handle = match vfs_open_handle_flags(path, open_flags) {
         Ok(h) => h,
         Err(e) => return e.raw() as _,
     };
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
 }
 
+trait OpenFileEntryGuard {
+    fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool;
+}
+
+impl OpenFileEntryGuard for OpenFileEntry {
+    fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool {
+        self.valid
+            && self.ops.map(core::ptr::from_ref) == Some(core::ptr::from_ref(ops))
+            && self.handle == handle
+    }
+}
+
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
-    // Per-process lock fast path — no global FILEIO_STATE lock.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
         };
-        match snapshot_fd(table, fd) {
+        match snapshot_fd(&inner, fd) {
             Some(s) if s.status_flags.contains(OpenMode::READ) => s,
             _ => return Errno::EBADF.raw() as _,
         }
@@ -214,9 +201,8 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
     let used_offset = if seekable { snap.position } else { 0 };
     let rc = ops.read(snap.handle, buf, used_offset, snap.status_flags.bits());
     if rc > 0 && seekable {
-        // Update position — take global lock briefly for open_files mutation.
-        with_tables(|_, _, open_files, _| {
-            if let Some(open_file) = get_open_file_mut(open_files, snap.open_file_idx)
+        with_open_files(|state| {
+            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file_idx)
                 && open_file.seekable_position_matches(ops, snap.handle)
             {
                 open_file.position = open_file.position.saturating_add(rc as u64);
@@ -227,12 +213,11 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
-    // Per-process lock fast path — no global FILEIO_STATE lock.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
         };
-        match snapshot_fd(table, fd) {
+        match snapshot_fd(&inner, fd) {
             Some(s) if s.status_flags.contains(OpenMode::WRITE) => s,
             _ => return Errno::EBADF.raw() as _,
         }
@@ -250,8 +235,8 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
     let used_offset = if seekable { snap.position } else { 0 };
     let rc = ops.write(snap.handle, buf, used_offset, snap.status_flags.bits());
     if rc > 0 && seekable {
-        with_tables(|_, _, open_files, _| {
-            if let Some(open_file) = get_open_file_mut(open_files, snap.open_file_idx)
+        with_open_files(|state| {
+            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file_idx)
                 && open_file.seekable_position_matches(ops, snap.handle)
             {
                 open_file.position = open_file.position.saturating_add(rc as u64);
@@ -261,46 +246,29 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
     rc
 }
 
-trait OpenFileEntryGuard {
-    fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool;
-}
-
-impl OpenFileEntryGuard for OpenFileEntry {
-    fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool {
-        self.valid
-            && self.ops.map(core::ptr::from_ref) == Some(core::ptr::from_ref(ops))
-            && self.handle == handle
-    }
-}
-
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return Errno::ESRCH.raw() as _;
-        };
-        if !table.in_use {
+    let result = with_pid_slot(process_id, |inner| {
+        let Some(fd_entry) = get_fd_entry(inner, fd) else {
             return Errno::EBADF.raw() as _;
+        };
+        let ofi = fd_entry.open_file_idx;
+        with_open_files(|state| {
+            release_open_file(&mut state.open_files, ofi);
+        });
+        if let Some(entry) = get_fd_entry(inner, fd) {
+            reset_fd_entry(entry);
         }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
-            drop(guard);
-            return Errno::EBADF.raw() as _;
-        };
-        release_open_file(open_files, fd_entry.open_file_idx);
-        reset_fd_entry(fd_entry);
-        drop(guard);
         0
-    })
+    });
+    result.unwrap_or(Errno::ESRCH.raw() as _)
 }
 
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
-    // Per-process lock fast path — snapshot the FD without the global lock.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::ESRCH.raw() as i64;
         };
-        match snapshot_fd(table, fd) {
+        match snapshot_fd(&inner, fd) {
             Some(s) => s,
             None => return Errno::EBADF.raw() as i64,
         }
@@ -328,9 +296,8 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
         return Errno::EINVAL.raw() as i64;
     }
 
-    // Write back the new position — brief global lock for open_files mutation.
-    with_tables(|_, _, open_files, _| {
-        if let Some(open_file) = get_open_file_mut(open_files, snap.open_file_idx)
+    with_open_files(|state| {
+        if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file_idx)
             && open_file.seekable_position_matches(ops, snap.handle)
         {
             open_file.position = new_pos as u64;
@@ -340,12 +307,11 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
 }
 
 pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
-    // Per-process lock fast path — pure read, no global lock needed.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return usize::MAX;
         };
-        match snapshot_fd(table, fd) {
+        match snapshot_fd(&inner, fd) {
             Some(s) => s,
             None => return usize::MAX,
         }
@@ -356,45 +322,24 @@ pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-pub fn file_exists_path(path: *const c_char) -> c_int {
-    if path.is_null() {
-        return 0;
-    }
-    let path_bytes = match unsafe { path_bytes(path) } {
-        Some(p) => p,
-        None => return 0,
-    };
-    let rc = vfs_stat(path_bytes);
+pub fn file_exists_path(path: &[u8]) -> c_int {
+    let rc = vfs_stat(path);
     if let Ok((kind, _)) = rc {
         return if kind == FS_TYPE_FILE { 1 } else { 0 };
     }
     0
 }
 
-pub fn file_unlink_path(path: *const c_char) -> c_int {
-    if path.is_null() {
-        return Errno::EFAULT.raw() as _;
-    }
-    let path_bytes = match unsafe { path_bytes(path) } {
-        Some(p) => p,
-        None => return Errno::EINVAL.raw() as _,
-    };
-    if vfs_unlink(path_bytes).is_ok() {
+pub fn file_unlink_path(path: &[u8]) -> c_int {
+    if vfs_unlink(path).is_ok() {
         0
     } else {
         Errno::ENOENT.raw() as _
     }
 }
 
-pub fn file_mkdir_path(path: *const c_char) -> c_int {
-    if path.is_null() {
-        return Errno::EFAULT.raw() as _;
-    }
-    let path_bytes = match unsafe { path_bytes(path) } {
-        Some(p) => p,
-        None => return Errno::EINVAL.raw() as _,
-    };
-    match vfs_mkdir(path_bytes) {
+pub fn file_mkdir_path(path: &[u8]) -> c_int {
+    match vfs_mkdir(path) {
         Ok(()) => 0,
         Err(crate::vfs::VfsError::AlreadyExists) => Errno::EEXIST.raw() as _,
         Err(crate::vfs::VfsError::NotFound) => Errno::ENOENT.raw() as _,
@@ -406,15 +351,8 @@ pub fn file_mkdir_path(path: *const c_char) -> c_int {
     }
 }
 
-pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32) -> c_int {
-    if path.is_null() {
-        return Errno::EFAULT.raw() as _;
-    }
-    let path_bytes = match unsafe { path_bytes(path) } {
-        Some(p) => p,
-        None => return Errno::EINVAL.raw() as _,
-    };
-    if let Ok((kind, size)) = vfs_stat(path_bytes) {
+pub fn file_stat_path(path: &[u8], out_type: &mut u8, out_size: &mut u32) -> c_int {
+    if let Ok((kind, size)) = vfs_stat(path) {
         *out_type = kind;
         *out_size = size;
         return 0;
@@ -422,22 +360,11 @@ pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32
     Errno::ENOENT.raw() as _
 }
 
-pub fn file_list_path(
-    path: *const c_char,
-    entries: *mut UserFsEntry,
-    max: u32,
-    out_count: &mut u32,
-) -> c_int {
-    if path.is_null() || entries.is_null() || max == 0 {
+pub fn file_list_path(path: &[u8], entries: &mut [UserFsEntry], out_count: &mut u32) -> c_int {
+    if entries.is_empty() {
         return Errno::EINVAL.raw() as _;
     }
-    let path_bytes = match unsafe { path_bytes(path) } {
-        Some(p) => p,
-        None => return Errno::EINVAL.raw() as _,
-    };
-    let cap = max as usize;
-    let out_slice = unsafe { slice::from_raw_parts_mut(entries, cap) };
-    match vfs_list(path_bytes, out_slice) {
+    match vfs_list(path, entries) {
         Ok(count) => {
             *out_count = count as u32;
             0
@@ -447,12 +374,11 @@ pub fn file_list_path(
 }
 
 pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
-    // Per-process lock fast path — pure read, no global lock needed.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return false;
         };
-        match snapshot_fd(table, fd) {
+        match snapshot_fd(&inner, fd) {
             Some(s) => s,
             None => return false,
         }
@@ -461,12 +387,11 @@ pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
 }
 
 pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
-    // Per-process lock fast path — pure read, no global lock needed.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return None;
         };
-        snapshot_fd(table, fd)?
+        snapshot_fd(&inner, fd)?
     };
     let ops = snap.ops?;
     if ops.kind() == FileKind::Tty {
@@ -477,10 +402,6 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
 }
 
 /// Open a file descriptor for a TTY device.
-///
-/// TTY devices are inherently bidirectional, so READ and WRITE are always
-/// granted.  `posix_flags` is honoured for `O_CLOEXEC`, `O_NOCTTY`, and
-/// `O_NONBLOCK`; pass `0` when no special flags are needed.
 pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, posix_flags: u32) -> c_int {
     let tty_ops = current_tty_ops();
     let base = OpenMode::READ | OpenMode::WRITE;
@@ -510,97 +431,95 @@ pub fn file_pipe_create(
         None => return Errno::ENOMEM.raw() as _,
     };
 
-    let rc = with_tables(|kernel, processes, open_files, _| {
-        let Some(table_ptr) = pick_table_ptr(kernel, processes, process_id) else {
-            return Errno::ESRCH.raw() as _;
-        };
+    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+        pipe::free_slot(pipe_handle);
+        return Errno::ESRCH.raw() as _;
+    };
 
-        let table = unsafe { &mut *table_ptr };
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
+    let nonblock = (flags & O_NONBLOCK as u32) != 0;
+    let cloexec = (flags & O_CLOEXEC as u32) != 0;
+    let read_flags = if nonblock {
+        OpenMode::READ.with_raw(O_NONBLOCK as u32)
+    } else {
+        OpenMode::READ
+    };
+    let write_flags = if nonblock {
+        OpenMode::WRITE.with_raw(O_NONBLOCK as u32)
+    } else {
+        OpenMode::WRITE
+    };
 
-        let Some(read_idx) = find_free_slot(table) else {
-            drop(guard);
-            return Errno::EMFILE.raw() as _;
+    let result = with_open_files(|state| {
+        let Some(read_idx) = find_free_slot(&inner) else {
+            return Err(Errno::EMFILE);
         };
-        table.descriptors[read_idx].valid = true;
+        inner.descriptors[read_idx].valid = true;
 
-        let Some(write_idx) = find_free_slot(table) else {
-            reset_fd_entry(&mut table.descriptors[read_idx]);
-            drop(guard);
-            return Errno::EMFILE.raw() as _;
-        };
-
-        let nonblock = (flags & O_NONBLOCK as u32) != 0;
-        let cloexec = (flags & O_CLOEXEC as u32) != 0;
-        let read_flags = if nonblock {
-            OpenMode::READ.with_raw(O_NONBLOCK as u32)
-        } else {
-            OpenMode::READ
-        };
-        let write_flags = if nonblock {
-            OpenMode::WRITE.with_raw(O_NONBLOCK as u32)
-        } else {
-            OpenMode::WRITE
+        let Some(write_idx) = find_free_slot(&inner) else {
+            reset_fd_entry(&mut inner.descriptors[read_idx]);
+            return Err(Errno::EMFILE);
         };
 
         let Some(read_open_idx) = alloc_open_file_entry(
-            open_files,
+            &mut state.open_files,
             &PIPE_READ_OPS,
             pipe_handle.as_usize(),
             read_flags,
             0,
         ) else {
-            reset_fd_entry(&mut table.descriptors[read_idx]);
-            drop(guard);
-            return Errno::ENFILE.raw() as _;
+            reset_fd_entry(&mut inner.descriptors[read_idx]);
+            return Err(Errno::ENFILE);
         };
         let Some(write_open_idx) = alloc_open_file_entry(
-            open_files,
+            &mut state.open_files,
             &PIPE_WRITE_OPS,
             pipe_handle.as_usize(),
             write_flags,
             0,
         ) else {
-            release_open_file(open_files, read_open_idx);
-            reset_fd_entry(&mut table.descriptors[read_idx]);
-            drop(guard);
-            return Errno::ENFILE.raw() as _;
+            release_open_file(&mut state.open_files, read_open_idx);
+            reset_fd_entry(&mut inner.descriptors[read_idx]);
+            return Err(Errno::ENFILE);
         };
 
         {
             let Some(mut slot) = pipe::lock_slot(pipe_handle) else {
-                release_open_file(open_files, read_open_idx);
-                release_open_file(open_files, write_open_idx);
-                reset_fd_entry(&mut table.descriptors[read_idx]);
-                drop(guard);
-                return Errno::ENOMEM.raw() as _;
+                release_open_file(&mut state.open_files, read_open_idx);
+                release_open_file(&mut state.open_files, write_open_idx);
+                reset_fd_entry(&mut inner.descriptors[read_idx]);
+                return Err(Errno::ENOMEM);
             };
             slot.readers = 1;
             slot.writers = 1;
         }
 
-        table.descriptors[read_idx] = FdEntry {
+        inner.descriptors[read_idx] = FdEntry {
             open_file_idx: read_open_idx,
             cloexec,
             valid: true,
         };
-        table.descriptors[write_idx] = FdEntry {
+        inner.descriptors[write_idx] = FdEntry {
             open_file_idx: write_open_idx,
             cloexec,
             valid: true,
         };
 
-        *out_read_fd = read_idx as c_int;
-        *out_write_fd = write_idx as c_int;
-        drop(guard);
-        0
+        Ok((read_idx as c_int, write_idx as c_int))
     });
 
-    if rc != 0 {
-        pipe::free_slot(pipe_handle);
-    }
+    drop(inner);
 
-    rc
+    match result {
+        Ok((r, w)) => {
+            *out_read_fd = r;
+            *out_write_fd = w;
+            0
+        }
+        Err(e) => {
+            pipe::free_slot(pipe_handle);
+            e.raw() as _
+        }
+    }
 }
 
 pub fn file_dup_fd(process_id: u32, old_fd: c_int) -> c_int {
@@ -608,40 +527,31 @@ pub fn file_dup_fd(process_id: u32, old_fd: c_int) -> c_int {
 }
 
 fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return Errno::ESRCH.raw() as _;
-        };
-        if !table.in_use {
+    with_pid_slot(process_id, |inner| {
+        let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
-        }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        };
+        let src_open_idx = src.open_file_idx;
 
-        let Some(src) = (unsafe { get_fd_entry(&mut *table_ptr, old_fd) }) else {
-            drop(guard);
-            return Errno::EBADF.raw() as _;
-        };
-        if !incref_open_file(open_files, src.open_file_idx) {
-            drop(guard);
+        let increfed =
+            with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
+        if !increfed {
             return Errno::EBADF.raw() as _;
         }
 
-        let table = unsafe { &mut *table_ptr };
-        let Some(new_idx) = find_free_slot_from(table, min_fd) else {
-            release_open_file(open_files, src.open_file_idx);
-            drop(guard);
+        let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
+            with_open_files(|state| release_open_file(&mut state.open_files, src_open_idx));
             return Errno::EMFILE.raw() as _;
         };
 
-        table.descriptors[new_idx] = FdEntry {
-            open_file_idx: src.open_file_idx,
+        inner.descriptors[new_idx] = FdEntry {
+            open_file_idx: src_open_idx,
             cloexec: false,
             valid: true,
         };
-        drop(guard);
         new_idx as c_int
     })
+    .unwrap_or(Errno::ESRCH.raw() as _)
 }
 
 pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
@@ -649,11 +559,10 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
         return Errno::EBADF.raw() as _;
     }
     if old_fd == new_fd {
-        // Per-process lock fast path — pure validity check, no global lock.
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::ESRCH.raw() as _;
         };
-        let valid = snapshot_fd(table, old_fd).is_some();
+        let valid = snapshot_fd(&inner, old_fd).is_some();
         return if valid {
             new_fd
         } else {
@@ -661,37 +570,29 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
         };
     }
 
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return Errno::ESRCH.raw() as _;
-        };
-        if !table.in_use {
-            return Errno::EBADF.raw() as _;
-        }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-
-        let Some(src) = (unsafe { get_fd_entry(&mut *table_ptr, old_fd) }) else {
-            drop(guard);
+    with_pid_slot(process_id, |inner| {
+        let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        if !incref_open_file(open_files, src.open_file_idx) {
-            drop(guard);
+        let src_open_idx = src.open_file_idx;
+        let increfed =
+            with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
+        if !increfed {
             return Errno::EBADF.raw() as _;
         }
 
-        let table = unsafe { &mut *table_ptr };
-        if table.descriptors[new_fd as usize].valid {
-            release_open_file(open_files, table.descriptors[new_fd as usize].open_file_idx);
+        if inner.descriptors[new_fd as usize].valid {
+            let old_open_idx = inner.descriptors[new_fd as usize].open_file_idx;
+            with_open_files(|state| release_open_file(&mut state.open_files, old_open_idx));
         }
-        table.descriptors[new_fd as usize] = FdEntry {
-            open_file_idx: src.open_file_idx,
+        inner.descriptors[new_fd as usize] = FdEntry {
+            open_file_idx: src_open_idx,
             cloexec: false,
             valid: true,
         };
-        drop(guard);
         new_fd
     })
+    .unwrap_or(Errno::ESRCH.raw() as _)
 }
 
 pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -> c_int {
@@ -702,67 +603,55 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
         return Errno::EBADF.raw() as _;
     }
 
-    with_tables(|kernel, processes, open_files, _| {
-        let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return Errno::ESRCH.raw() as _;
-        };
-        if !table.in_use {
-            return Errno::EBADF.raw() as _;
-        }
-        let table_ptr: *mut FileTableSlot = table;
-        let guard = unsafe { (&(*table_ptr).lock).lock() };
-
-        let Some(src) = (unsafe { get_fd_entry(&mut *table_ptr, old_fd) }) else {
-            drop(guard);
+    with_pid_slot(process_id, |inner| {
+        let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        if !incref_open_file(open_files, src.open_file_idx) {
-            drop(guard);
+        let src_open_idx = src.open_file_idx;
+        let increfed =
+            with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
+        if !increfed {
             return Errno::EBADF.raw() as _;
         }
 
-        let table = unsafe { &mut *table_ptr };
-        if table.descriptors[new_fd as usize].valid {
-            release_open_file(open_files, table.descriptors[new_fd as usize].open_file_idx);
+        if inner.descriptors[new_fd as usize].valid {
+            let old_open_idx = inner.descriptors[new_fd as usize].open_file_idx;
+            with_open_files(|state| release_open_file(&mut state.open_files, old_open_idx));
         }
-        table.descriptors[new_fd as usize] = FdEntry {
-            open_file_idx: src.open_file_idx,
+        inner.descriptors[new_fd as usize] = FdEntry {
+            open_file_idx: src_open_idx,
             cloexec: (flags & FD_CLOEXEC as u32) != 0,
             valid: true,
         };
-        drop(guard);
         new_fd
     })
+    .unwrap_or(Errno::ESRCH.raw() as _)
 }
 
 pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
     match cmd {
         F_DUPFD => file_dup_fd_min(process_id, fd, arg as usize) as i64,
         F_GETFD => {
-            // Per-process lock fast path — read cloexec directly from FD entry.
-            let Some((_guard, table)) = lock_process_table(process_id) else {
+            let Some(inner) = lock_pid_slot(process_id) else {
                 return Errno::ESRCH.raw() as i64;
             };
-            let table_ref = unsafe { &*table };
             if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
                 return Errno::EBADF.raw() as i64;
             }
-            let entry = &table_ref.descriptors[fd as usize];
+            let entry = &inner.descriptors[fd as usize];
             if !entry.valid {
                 return Errno::EBADF.raw() as i64;
             }
             if entry.cloexec { FD_CLOEXEC as i64 } else { 0 }
         }
         F_SETFD => {
-            // Per-process lock fast path — mutates only the FD entry (no open_files).
-            let Some((_guard, table)) = lock_process_table(process_id) else {
+            let Some(mut inner) = lock_pid_slot(process_id) else {
                 return Errno::ESRCH.raw() as i64;
             };
-            let table_ref = unsafe { &mut *table };
             if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
                 return Errno::EBADF.raw() as i64;
             }
-            let entry = &mut table_ref.descriptors[fd as usize];
+            let entry = &mut inner.descriptors[fd as usize];
             if !entry.valid {
                 return Errno::EBADF.raw() as i64;
             }
@@ -770,53 +659,46 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             0
         }
         F_GETFL => {
-            // Per-process lock fast path — read status flags from snapshot.
             let snap = {
-                let Some((_guard, table)) = lock_process_table(process_id) else {
+                let Some(inner) = lock_pid_slot(process_id) else {
                     return Errno::ESRCH.raw() as i64;
                 };
-                match snapshot_fd(table, fd) {
+                match snapshot_fd(&inner, fd) {
                     Some(s) => s,
                     None => return Errno::EBADF.raw() as i64,
                 }
             };
             openmode_to_posix_bits(snap.status_flags) as i64
         }
-        F_SETFL => with_tables(|kernel, processes, open_files, _| {
-            let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return Errno::ESRCH.raw() as i64;
-            };
-            if !table.in_use {
-                return Errno::EBADF.raw() as i64;
-            }
-            let table_ptr: *mut FileTableSlot = table;
-            let guard = unsafe { (&(*table_ptr).lock).lock() };
-            let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
-                drop(guard);
+        F_SETFL => with_pid_slot(process_id, |inner| {
+            let Some(fd_entry) = get_fd_entry(inner, fd) else {
                 return Errno::EBADF.raw() as i64;
             };
-            let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
-                drop(guard);
-                return Errno::EBADF.raw() as i64;
-            };
-            let posix_arg = arg as u32;
-            let mode_bits = open_file.status_flags & (OpenMode::READ | OpenMode::WRITE);
-            let mut next_flags = mode_bits;
-            if posix_arg & O_APPEND != 0 {
-                next_flags |= OpenMode::APPEND;
-            }
-            let mut raw = open_file.status_flags.bits() & (O_NOCTTY as u32);
-            if posix_arg & O_NONBLOCK as u32 != 0 {
-                raw |= O_NONBLOCK as u32;
-            }
-            let next_flags = next_flags.with_raw(raw);
-            open_file.status_flags = next_flags;
-            if let Some(ops) = open_file.ops {
-                let _ = ops.set_status_flags(open_file.handle, openmode_to_posix_bits(next_flags));
-            }
-            drop(guard);
-            0
-        }),
+            let ofi = fd_entry.open_file_idx;
+            with_open_files(|state| {
+                let Some(open_file) = get_open_file_mut(&mut state.open_files, ofi) else {
+                    return Errno::EBADF.raw() as i64;
+                };
+                let posix_arg = arg as u32;
+                let mode_bits = open_file.status_flags & (OpenMode::READ | OpenMode::WRITE);
+                let mut next_flags = mode_bits;
+                if posix_arg & slopos_abi::fs::O_APPEND != 0 {
+                    next_flags |= OpenMode::APPEND;
+                }
+                let mut raw = open_file.status_flags.bits() & (O_NOCTTY as u32);
+                if posix_arg & O_NONBLOCK as u32 != 0 {
+                    raw |= O_NONBLOCK as u32;
+                }
+                let next_flags = next_flags.with_raw(raw);
+                open_file.status_flags = next_flags;
+                if let Some(ops) = open_file.ops {
+                    let _ =
+                        ops.set_status_flags(open_file.handle, openmode_to_posix_bits(next_flags));
+                }
+                0
+            })
+        })
+        .unwrap_or(Errno::ESRCH.raw() as i64),
         _ => Errno::EINVAL.raw() as i64,
     }
 }
@@ -826,12 +708,11 @@ pub fn file_fstat_fd(
     fd: c_int,
     out_stat: &mut slopos_abi::fs::UserFsStat,
 ) -> c_int {
-    // Per-process lock fast path — pure read, no global lock needed.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
+        let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::ESRCH.raw() as _;
         };
-        match snapshot_fd(table, fd) {
+        match snapshot_fd(&inner, fd) {
             Some(s) => s,
             None => return Errno::EBADF.raw() as _,
         }
@@ -856,9 +737,6 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
 }
 
 /// Open an FD using caller-supplied FileOps and handle.
-///
-/// Used by AF_UNIX sockets (and potentially other subsystems) that have
-/// their own FileOps implementation distinct from the registered socket ops.
 pub fn fileio_open_fd_with_ops(process_id: u32, ops: &'static dyn FileOps, handle: usize) -> i32 {
     install_fd_entry(
         process_id,
@@ -870,26 +748,21 @@ pub fn fileio_open_fd_with_ops(process_id: u32, ops: &'static dyn FileOps, handl
 }
 
 pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind, usize)> {
-    // Per-process lock fast path — pure read, no global lock needed.
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
-            return None;
-        };
-        snapshot_fd(table, fd)?
+        let inner = lock_pid_slot(process_id)?;
+        snapshot_fd(&inner, fd)?
     };
     Some((snap.ops?.kind(), snap.handle))
 }
 
-/// Get the handle AND FileOps for an open fd (needed for SCM_RIGHTS fd passing).
+/// Get the handle AND FileOps for an open fd.
 pub fn fileio_get_handle_and_ops(
     process_id: u32,
     fd: i32,
 ) -> Option<(usize, &'static dyn FileOps)> {
     let snap = {
-        let Some((_guard, table)) = lock_process_table(process_id) else {
-            return None;
-        };
-        snapshot_fd(table, fd)?
+        let inner = lock_pid_slot(process_id)?;
+        snapshot_fd(&inner, fd)?
     };
     Some((snap.handle, snap.ops?))
 }

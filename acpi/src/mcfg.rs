@@ -1,83 +1,32 @@
 //! MCFG (PCI Express Memory-Mapped Configuration Space) ACPI table parsing.
 //!
 //! Discovers PCIe ECAM base addresses and bus ranges from the ACPI `"MCFG"`
-//! table (PCI Firmware Specification §4.1.2).  The PCI driver in
+//! table (PCI Firmware Specification §4.1.2). The PCI driver in
 //! [`slopos_drivers::pci`] consumes this information to enable MMIO-based
 //! configuration space access (4 KiB per function, replacing legacy port I/O).
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use slopos_acpi::mcfg::Mcfg;
-//! use slopos_acpi::tables::AcpiTables;
-//!
-//! let tables = AcpiTables::from_rsdp(rsdp_ptr)?;
-//! let mcfg = Mcfg::from_tables(&tables)?;
-//! for entry in mcfg.entries() {
-//!     // entry.base_phys is the ECAM MMIO base for this segment/bus range
-//! }
-//! ```
 
-use core::mem;
-
+use slopos_ostd::util::packed_view::read_packed;
 use slopos_utils::klog_info;
 
-use crate::tables::{AcpiTables, SdtHeader};
+use crate::tables::AcpiTables;
 
 const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
 
-/// Size of the reserved field between the SDT header and the first entry.
+/// Size of the reserved field at the start of the MCFG payload (after
+/// the SDT header).
 const MCFG_RESERVED_SIZE: usize = 8;
 
-// =============================================================================
-// Raw ACPI structures (packed, matches hardware layout)
-// =============================================================================
-
-/// Raw ACPI MCFG table layout (PCI Firmware Specification §4.1.2).
-///
-/// Total header size: 36-byte SDT header + 8 bytes reserved = 44 bytes.
-/// Followed by a variable-length array of 16-byte allocation entries.
-#[repr(C, packed)]
-struct RawMcfgTable {
-    header: SdtHeader,
-    /// Reserved — must be zero per spec.
-    _reserved: [u8; MCFG_RESERVED_SIZE],
-    // Followed by: RawMcfgEntry[]
-}
-
-/// Raw MCFG configuration space base address allocation entry (16 bytes).
-///
-/// Each entry describes one PCI segment group's ECAM region.
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct RawMcfgEntry {
-    /// Physical base address of the ECAM region for this segment/bus range.
-    base_address: u64,
-    /// PCI segment group number.
-    segment_group: u16,
-    /// Start PCI bus number decoded by this entry.
-    start_bus: u8,
-    /// End PCI bus number decoded by this entry (inclusive).
-    end_bus: u8,
-    /// Reserved — must be zero.
-    _reserved: u32,
-}
-
-// =============================================================================
-// Parsed MCFG information
-// =============================================================================
+/// Layout of an MCFG configuration space allocation entry (16 bytes).
+const MCFG_ENTRY_LEN: usize = 16;
+const MCFG_OFF_BASE: usize = 0;
+const MCFG_OFF_SEGMENT: usize = 8;
+const MCFG_OFF_BUS_START: usize = 10;
+const MCFG_OFF_BUS_END: usize = 11;
 
 /// Maximum number of MCFG entries we track.
-///
-/// Most systems have exactly 1 entry (segment 0, buses 0–255).  16 is generous
-/// enough to cover multi-segment servers while keeping stack allocation bounded.
 const MAX_MCFG_ENTRIES: usize = 16;
 
 /// A single parsed ECAM configuration space allocation entry.
-///
-/// Describes the MMIO region for one PCI segment group's bus range.
-/// The ECAM address for a specific function is:
-///   `base_phys + ((bus - bus_start) << 20) | (device << 15) | (function << 12) | reg_offset`
 #[derive(Clone, Copy, Debug)]
 pub struct McfgEntry {
     /// Physical base address of the ECAM MMIO region.
@@ -92,9 +41,6 @@ pub struct McfgEntry {
 
 impl McfgEntry {
     /// Compute the total MMIO region size in bytes for this entry.
-    ///
-    /// Each bus has 32 devices × 8 functions × 4 KiB = 1 MiB.
-    /// Total = (bus_end - bus_start + 1) × 256 × 4096 bytes.
     pub fn region_size(&self) -> u64 {
         let bus_count = (self.bus_end as u64) - (self.bus_start as u64) + 1;
         // 256 functions per bus (32 devices × 8 functions) × 4096 bytes each
@@ -102,8 +48,6 @@ impl McfgEntry {
     }
 
     /// Compute the ECAM MMIO offset for a given BDF within this entry.
-    ///
-    /// Returns `None` if the bus is outside this entry's range.
     pub fn ecam_offset(&self, bus: u8, device: u8, function: u8) -> Option<u64> {
         if bus < self.bus_start || bus > self.bus_end {
             return None;
@@ -121,13 +65,6 @@ pub struct Mcfg {
     entries: [McfgEntry; MAX_MCFG_ENTRIES],
     count: usize,
 }
-
-// ---------------------------------------------------------------------------
-// Out-of-line log helpers so `Mcfg::from_tables` doesn't carry the
-// cumulative `format_args!` scratch of five distinct call sites in one
-// stack frame — the kernel-wide stack-safety gate forbids frames over
-// the current threshold, and this function is close to it.
-// ---------------------------------------------------------------------------
 
 #[inline(never)]
 fn log_mcfg_missing() {
@@ -170,30 +107,20 @@ fn log_mcfg_bad_bus_range(i: usize, bus_start: u8, bus_end: u8) {
 
 impl Mcfg {
     /// Look up the `"MCFG"` table in the ACPI hierarchy and parse it.
-    ///
-    /// Returns `None` if the table is absent or too short.  An empty table
-    /// (header present but zero entries) returns `Some` with `count() == 0`.
     pub fn from_tables(tables: &AcpiTables) -> Option<Self> {
-        let header = tables.find_table(MCFG_SIGNATURE);
-        if header.is_null() {
+        let Some(table) = tables.find_table(MCFG_SIGNATURE) else {
             log_mcfg_missing();
             return None;
-        }
-
-        let length = unsafe { (*header).length } as usize;
-        let min_size = mem::size_of::<RawMcfgTable>();
-        if length < min_size {
-            log_mcfg_too_short(length, min_size);
+        };
+        let payload = table.payload();
+        if payload.len() < MCFG_RESERVED_SIZE {
+            log_mcfg_too_short(payload.len(), MCFG_RESERVED_SIZE);
             return None;
         }
 
-        // Compute number of allocation entries after the fixed header.
-        let entry_bytes = length - min_size;
-        let entry_size = mem::size_of::<RawMcfgEntry>();
-        let entry_count = entry_bytes / entry_size;
+        let entry_bytes = payload.len() - MCFG_RESERVED_SIZE;
+        let entry_count = entry_bytes / MCFG_ENTRY_LEN;
 
-        // Shared zero-filled entries array for both empty-table and
-        // populated-table paths — previously materialised twice.
         let zero_entry = McfgEntry {
             base_phys: 0,
             segment: 0,
@@ -212,16 +139,14 @@ impl Mcfg {
             log_mcfg_capped(entry_count, MAX_MCFG_ENTRIES);
         }
 
-        let entries_base = (header as *const u8).wrapping_add(min_size) as *const RawMcfgEntry;
-
+        let mut written = 0usize;
         for i in 0..capped {
-            let raw = unsafe { &*entries_base.add(i) };
-            let base = raw.base_address;
-            let segment = raw.segment_group;
-            let bus_start = raw.start_bus;
-            let bus_end = raw.end_bus;
+            let off = MCFG_RESERVED_SIZE + i * MCFG_ENTRY_LEN;
+            let base = read_packed::<u64>(payload, off + MCFG_OFF_BASE)?;
+            let segment = read_packed::<u16>(payload, off + MCFG_OFF_SEGMENT)?;
+            let bus_start = read_packed::<u8>(payload, off + MCFG_OFF_BUS_START)?;
+            let bus_end = read_packed::<u8>(payload, off + MCFG_OFF_BUS_END)?;
 
-            // Sanity: base address must be non-zero and bus range valid.
             if base == 0 {
                 log_mcfg_entry_zero(i);
                 continue;
@@ -231,17 +156,18 @@ impl Mcfg {
                 continue;
             }
 
-            entries[i] = McfgEntry {
+            entries[written] = McfgEntry {
                 base_phys: base,
                 segment,
                 bus_start,
                 bus_end,
             };
+            written += 1;
         }
 
         Some(Self {
             entries,
-            count: capped,
+            count: written,
         })
     }
 
@@ -264,8 +190,6 @@ impl Mcfg {
     }
 
     /// Find the ECAM entry for segment 0 (the primary/only segment on most systems).
-    ///
-    /// This is a convenience for the common single-segment case.
     pub fn primary_entry(&self) -> Option<&McfgEntry> {
         self.entries()
             .iter()

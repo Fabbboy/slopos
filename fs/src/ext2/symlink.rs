@@ -34,14 +34,12 @@ pub fn create_symlink_inode(
     };
 
     if target.len() <= FAST_SYMLINK_MAX {
-        // Fast symlink: store target directly in inode.block[] (60 bytes)
-        let raw = target;
-        let block_bytes: &mut [u8; 60] = unsafe {
-            // Safety: inode.block is [BlockNum; 15] = [u32; 15] = 60 bytes
-            // BlockNum is #[repr(transparent)] over u32
-            &mut *(&mut inode.block as *mut [BlockNum; 15] as *mut [u8; 60])
-        };
-        block_bytes[..raw.len()].copy_from_slice(raw);
+        // Fast symlink: store target directly in inode.block[] (60 bytes
+        // = 15 × u32). `BlockNum: Pod` lets us reinterpret the array as
+        // bytes via the OSTD byte_view helper.
+        let block_bytes =
+            slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(&mut inode.block[..]);
+        block_bytes[..target.len()].copy_from_slice(target);
         // blocks stays 0 for fast symlinks
     } else {
         // Slow symlink: allocate a data block and store target there
@@ -73,9 +71,9 @@ pub fn read_symlink(
     let copy_len = core::cmp::min(target_len, buf.len());
 
     if inode.is_fast_symlink() {
-        // Read from inode.block[] reinterpreted as bytes
-        let block_bytes: &[u8; 60] =
-            unsafe { &*(&inode.block as *const [BlockNum; 15] as *const [u8; 60]) };
+        // Read from inode.block[] reinterpreted as bytes via the OSTD
+        // Pod byte view (15 × u32 → 60 bytes).
+        let block_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes(&inode.block[..]);
         buf[..copy_len].copy_from_slice(&block_bytes[..copy_len]);
     } else {
         // Read from data block

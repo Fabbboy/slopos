@@ -571,13 +571,8 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
     );
 
     let pid = unsafe { (*task_ptr).process_id };
-    let path = b"/dev/tty\0";
     make_task_current(task_ptr);
-    let fd = file_open_for_process(
-        pid,
-        path.as_ptr() as *const c_char,
-        O_RDONLY | O_NOCTTY as u32,
-    );
+    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY | O_NOCTTY as u32);
     park_bootstrap_on_current_cpu();
     assert_test!(fd >= 0, "open(/dev/tty, O_NOCTTY) failed");
 
@@ -722,7 +717,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
 
     let pid = unsafe { (*task_ptr).process_id };
     make_task_current(task_ptr);
-    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
+    let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N) failed");
@@ -773,11 +768,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
 
     let pid = unsafe { (*task_ptr).process_id };
     make_task_current(task_ptr);
-    let fd = file_open_for_process(
-        pid,
-        path.as_ptr() as *const c_char,
-        O_RDONLY | O_NOCTTY as u32,
-    );
+    let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N, O_NOCTTY) failed");
@@ -2271,9 +2262,8 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
     );
 
     let pid = unsafe { (*task_ptr).process_id };
-    let path = b"/dev/tty\0";
     make_task_current(task_ptr);
-    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
+    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
@@ -2311,9 +2301,8 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
 
     // Now open /dev/tty — should succeed.
     let pid = unsafe { (*task_ptr).process_id };
-    let path = b"/dev/tty\0";
     make_task_current(task_ptr);
-    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
+    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/tty) with ctty should succeed");
@@ -2369,9 +2358,8 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
 
     // Now child tries to open /dev/tty — should fail with ENXIO.
     let child_pid = unsafe { (*child_ptr).process_id };
-    let path = b"/dev/tty\0";
     make_task_current(child_ptr);
-    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
+    let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
@@ -2421,9 +2409,8 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
 
     // Child opens /dev/tty — should succeed (inherits parent's ctty).
     let child_pid = unsafe { (*child_ptr).process_id };
-    let path = b"/dev/tty\0";
     make_task_current(child_ptr);
-    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
+    let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "child open(/dev/tty) should succeed");

@@ -206,6 +206,3 @@ impl FileSystem for DevFs {
         Ok(())
     }
 }
-
-unsafe impl Send for DevFs {}
-unsafe impl Sync for DevFs {}

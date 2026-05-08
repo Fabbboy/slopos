@@ -531,6 +531,3 @@ impl FileSystem for RamFs {
         Ok(())
     }
 }
-
-unsafe impl Send for RamFs {}
-unsafe impl Sync for RamFs {}

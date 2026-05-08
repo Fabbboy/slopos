@@ -8,7 +8,7 @@ use slopos_utils::{klog_debug, klog_info};
 use regs::*;
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMode};
-use slopos_acpi::tables::{AcpiTables, Rsdp};
+use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
@@ -280,8 +280,7 @@ pub fn init() -> i32 {
         return init_fail();
     }
 
-    let rsdp = platform::get_rsdp_address() as *const Rsdp;
-    let Some(tables) = AcpiTables::from_rsdp(rsdp) else {
+    let Some(tables) = AcpiTables::from_phys(platform::get_rsdp_phys()) else {
         klog_info!("IOAPIC: ACPI tables validation failed");
         return init_fail();
     };
