@@ -6,6 +6,5 @@ pub mod exception;
 pub mod gdt;
 pub mod mem_fence;
 pub mod msr;
-pub mod naked;
 pub mod tsc;
 pub mod tss;

@@ -55,7 +55,10 @@
 //!    writing the real idle task's `unsafe_stack_sp`.  The bootstrap
 //!    stub is never used again.
 
+use core::arch::naked_asm;
 use core::cell::SyncUnsafeCell;
+
+use slopos_arch::pcr::offsets as pcr_offsets;
 
 use super::task::task_set_unsafe_stack_sp;
 use super::task_struct::{TASK_UNSAFE_STACK_SP_OFFSET, Task};
@@ -177,12 +180,29 @@ pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::
 // ---------------------------------------------------------------------------
 // LLVM SafeStack callback
 // ---------------------------------------------------------------------------
-//
-// `__safestack_pointer_address` (the naked trampoline LLVM's instrumented
-// prologues call) lives in `slopos_ostd::arch::x86_64::naked`.  The kernel
-// publishes the SP-slot offset via [`BOOTSTRAP_TASK_UNSAFE_SP_OFFSET`]
-// above, which the OSTD-side asm reads at runtime through
-// `[rip + sym BOOTSTRAP_TASK_UNSAFE_SP_OFFSET]`.
+
+/// LLVM calls this on every instrumented function's prologue under
+/// `-safestack-use-pointer-address`.  Returns
+/// `&current_task->unsafe_stack_sp` — a heap-stable address inside
+/// the running task's heap allocation that survives CPU migration by
+/// construction.
+///
+/// Naked to avoid self-recursion: a non-naked fn compiled with the
+/// sanitizer enabled would itself emit a prologue that calls
+/// `__safestack_pointer_address` before returning.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
+    naked_asm!(
+        // rax = current_task (AtomicPtr<()> load on x86-64 is a plain mov).
+        "mov rax, gs:[{off_current_task}]",
+        // rax = &current_task->unsafe_stack_sp
+        "add rax, {off_sp}",
+        "ret",
+        off_current_task = const pcr_offsets::CURRENT_TASK,
+        off_sp = const TASK_UNSAFE_STACK_SP_OFFSET,
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Bootstrap seeding helpers
@@ -217,14 +237,8 @@ pub fn ap_bootstrap_unsafe_sp(i: usize) -> *mut u8 {
 /// Safe to call once on the BSP before any AP is started.
 ///
 /// Pre-SMP single-writer phase: must run exactly once before any AP
-/// trampoline reads `current_task->unsafe_stack_sp`.  Also pulls the
-/// OSTD-side `__safestack_pointer_address` symbol into the link so LTO
-/// keeps it resident — instrumented prologues only reach it through
-/// LLVM-emitted direct calls, which the linker would otherwise prune
-/// without a Rust-side reference.
+/// trampoline reads `current_task->unsafe_stack_sp`.
 pub fn init_bootstrap_tasks() {
-    slopos_ostd::arch::x86_64::naked::install_safestack_runtime();
-
     let bsp_task = BSP_BOOTSTRAP_TASK.get();
     task_set_unsafe_stack_sp(bsp_task, bsp_bootstrap_unsafe_sp() as u64);
 
