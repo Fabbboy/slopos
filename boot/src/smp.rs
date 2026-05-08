@@ -1,13 +1,13 @@
-use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use limine::mp::{MP_FLAG_X2APIC, MpInfo};
+use limine::mp::{MP_FLAG_X2APIC, MpGotoFunction, MpInfo};
 
 use slopos_arch::{cpu, is_cpu_online, pcr};
 use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_core::scheduler::safestack_rt;
 use slopos_drivers::apic;
 use slopos_mm::tlb;
+use slopos_ostd::arch::x86_64::naked::{ApPayload, install_ap_trampoline};
 use slopos_utils::klog_info;
 
 use crate::gdt::syscall_msr_init;
@@ -18,67 +18,16 @@ use crate::limine_protocol;
 const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
 const MAX_CPUS: usize = 256;
 
-/// Naked AP entry trampoline — installs GS_BASE before any instrumented
-/// Rust code runs on this AP.
-///
-/// Limine's MP boot flow jumps each AP directly to this function with
-/// `rdi` pointing at the `Cpu` / `MpInfo` struct whose `extra` field
-/// (offset 24) we set to the 1-based AP slot in [`smp_init`].  The
-/// BSP pre-populated [`pcr::AP_PCR_PTRS`]`[slot - 1]` and primed
-/// `AP_PCRS[slot - 1]`'s `self_ref` + `unsafe_sp` before triggering
-/// the bootstrap, so all this trampoline has to do is:
-///
-///   1. Load the PCR pointer from `AP_PCR_PTRS[slot - 1]`.
-///   2. WRMSR IA32_GS_BASE with that pointer.
-///   3. Jump to [`ap_entry_rust`], preserving `rdi` (the MpInfo ptr).
-///
-/// Naked because the first instruction of any non-naked fn compiled
-/// with `-Zsanitizer=safestack` fetches `gs:[0]` — which would read
-/// garbage on an AP with GS_BASE still at 0.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ap_entry(_cpu_info: &MpInfo) -> ! {
-    naked_asm!(
-        // rdi = &MpInfo, preserved across this trampoline.
-        //
-        // Read slot from MpInfo.extra @ offset 24 (1-based).  This
-        // is the index the BSP assigned in `smp_init` below; each
-        // AP's PCR, bootstrap Task, and bootstrap unsafe stack are
-        // all indexed by `slot - 1` on the Rust side.  All we do here
-        // is install GS_BASE — the Rust `init_bootstrap_tasks` call
-        // already stamped this AP's bootstrap Task's
-        // `unsafe_stack_sp` field, and `init_ap_pcr_lookup` already
-        // stamped this AP's PCR `self_ref` + `current_task`.
-        "mov rax, [rdi + {extra_offset}]",
-        "dec rax",                              // zero-based slot index
-        // rax = AP_PCR_PTRS[rax]
-        "lea rcx, [rip + {ap_pcr_ptrs}]",
-        "mov rax, [rcx + rax*8]",               // rax = &AP_PCRS[slot-1]
-        // WRMSR IA32_GS_BASE = rax
-        "mov rdx, rax",
-        "shr rdx, 32",
-        // eax already holds low 32 of rax
-        "mov ecx, {ia32_gs_base}",              // IA32_GS_BASE MSR number
-        "wrmsr",
-        // Tail-call into the real Rust AP entry.  It is compiled with
-        // -Zsanitizer=safestack and its prologue will now see a valid
-        // `gs:[CURRENT_TASK]` (→ AP's bootstrap Task with primed
-        // unsafe_stack_sp).
-        "jmp {ap_entry_rust}",
-        extra_offset = const 24,
-        ia32_gs_base = const 0xC000_0101_u32,
-        ap_pcr_ptrs = sym pcr::AP_PCR_PTRS,
-        ap_entry_rust = sym ap_entry_rust,
-    )
+// AP entry trampoline lives in `slopos_ostd::arch::x86_64::naked::ap_entry`.
+// Limine's `MpGotoFunction` is `unsafe extern "C" fn(&MpInfo) -> !`; the
+// OSTD trampoline's parameter is type-erased to `*const ()` to keep the
+// limine dependency out of OSTD.  The two signatures share x86-64 SysV
+// ABI (single pointer-sized arg in `rdi`), so transmuting the function
+// pointer at the bootstrap call site is layout-safe.
+fn ap_entry_goto() -> MpGotoFunction {
+    let f: unsafe extern "C" fn(*const ()) -> ! = slopos_ostd::arch::x86_64::naked::ap_entry;
+    unsafe { core::mem::transmute::<unsafe extern "C" fn(*const ()) -> !, MpGotoFunction>(f) }
 }
-
-// The asm trampoline's `mov rax, [rdi + 24]` loads MpInfo.extra_argument.
-// Limine 0.6's MpInfo layout documents this offset as fixed (processor_id
-// u32 + lapic_id u32 + _resvd0 u64 + goto_addr AtomicPtr<()> = 24 bytes).
-// The field is `pub(crate)` so a `const { offset_of!(...) }` probe can't
-// see it; pinning the Cargo.lock to 0.6.3 and the explicit 24 here is the
-// compile-time contract.  A mismatched limine bump would show up as an
-// immediate triple-fault on AP bringup.
 
 /// Per-CPU completion signals.  The BSP passes each AP its index into this
 /// array via `MpInfo::bootstrap(ap_entry, slot)`.  The AP stores
@@ -90,7 +39,9 @@ static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
     [ZERO; MAX_CPUS]
 };
 
-unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
+unsafe extern "C" fn ap_entry_rust(cpu_info: *const ()) -> ! {
+    let cpu_info: &MpInfo = unsafe { &*(cpu_info as *const MpInfo) };
+
     cpu::disable_interrupts();
 
     cpu::enable_sse();
@@ -218,13 +169,19 @@ pub fn smp_init() {
         );
     }
 
-    // Seed each AP PCR's self_ref + current_task so the naked
-    // `ap_entry` trampoline can install GS_BASE and have
-    // `__safestack_pointer_address` find a valid bootstrap Task
-    // on the very first instrumented call.  Limited to MAX_STATIC_APS
-    // — if the platform reports more APs we only start the first N.
+    // Seed each AP PCR's self_ref + current_task so the OSTD-side
+    // `ap_entry` naked trampoline can install GS_BASE and have
+    // `__safestack_pointer_address` find a valid bootstrap Task on the
+    // very first instrumented call.  Stamping the AP entry callback
+    // before any AP is started is mandatory — the trampoline tail-jumps
+    // through the slot, and a null read here means a triple fault on
+    // first AP wakeup.  Limited to MAX_STATIC_APS — if the platform
+    // reports more APs we only start the first N.
     const MAX_STATIC_APS: usize = safestack_rt::MAX_STATIC_APS;
     safestack_rt::init_bootstrap_tasks();
+    install_ap_trampoline(ApPayload {
+        entry_rust: ap_entry_rust,
+    });
     let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
     // SAFETY: init_ap_pcr_lookup must run exactly once before any AP
     // boots; smp_init is the single caller and runs on the BSP only.
@@ -250,7 +207,7 @@ pub fn smp_init() {
         }
 
         AP_SIGNALS[i].store(0, Ordering::Release);
-        cpu.bootstrap(ap_entry, ap_slot);
+        cpu.bootstrap(ap_entry_goto(), ap_slot);
         ap_count += 1;
     }
 

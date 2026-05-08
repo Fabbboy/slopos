@@ -116,9 +116,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
 fn halt() -> ! {
     poweroff_hardware();
 
-    loop {
-        unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
-    }
+    slopos_ostd::cpu::x86_64::core::halt_loop();
 }
 pub fn kernel_reboot(reason: *const c_char) -> ! {
     ensure_kernel_page_dir();
