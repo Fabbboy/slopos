@@ -95,23 +95,6 @@ impl<T> OnceLock<T> {
     pub fn is_completed(&self) -> bool {
         self.state.load(Ordering::Acquire) == STATE_COMPLETE
     }
-
-    /// Spin-wait until the value is initialized, then return a reference.
-    ///
-    /// Used at boot rendezvous points where one CPU produces a value
-    /// (via [`call_once`](Self::call_once)) and another spin-waits for
-    /// it before proceeding. The wait is an unbounded spin with
-    /// `PAUSE` hints — it must only be used in pre-scheduler contexts
-    /// where parking the task is impossible.
-    #[inline]
-    pub fn wait(&self) -> &T {
-        while self.state.load(Ordering::Acquire) != STATE_COMPLETE {
-            core::hint::spin_loop();
-        }
-        // SAFETY: state == COMPLETE guarantees the value was fully written
-        // with Release ordering before our Acquire load above.
-        unsafe { (*self.data.get()).assume_init_ref() }
-    }
 }
 
 impl<T> Default for OnceLock<T> {
