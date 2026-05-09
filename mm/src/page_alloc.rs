@@ -52,12 +52,24 @@ use crate::memory_reservations::{
 };
 use crate::paging_defs::PAGE_SIZE_4KB;
 
+/// **Deprecated, kept for source compatibility.** Pages are zeroed by
+/// default; passing this flag is a redundant no-op. Callers that
+/// explicitly want uninitialised pages must opt out via
+/// [`ALLOC_FLAG_NO_INIT`].
 pub const ALLOC_FLAG_ZERO: u32 = 0x01;
 pub const ALLOC_FLAG_DMA: u32 = 0x02;
 pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;
 pub const ALLOC_FLAG_ORDER_MASK: u32 = 0x1F << ALLOC_FLAG_ORDER_SHIFT;
 pub const ALLOC_FLAG_NO_PCP: u32 = 0x80;
+/// Opt out of the default page-zeroing on alloc. Use only on hot
+/// paths where the caller writes the entire page contents before any
+/// reader can observe them; otherwise leave unset and let the
+/// allocator scrub. Wild-jump RIPs of the form `0xdfdedddcdbdad9d8`
+/// are the canonical symptom of forgetting this — they are
+/// `(i & 0xFF) as u8`-pattern bytes from a previous owner that the
+/// kernel's `ret` decoded as a return address.
+pub const ALLOC_FLAG_NO_INIT: u32 = 0x100;
 
 const PAGE_FRAME_FREE: u8 = 0x00;
 const PAGE_FRAME_ALLOCATED: u8 = 0x01;
@@ -827,7 +839,16 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
             alloc.frame_to_phys(frame_num)
         };
 
-        if flags & ALLOC_FLAG_ZERO != 0 {
+        // Zero by default. Callers that explicitly know the entire
+        // page contents will be overwritten before any reader observes
+        // them can opt out via `ALLOC_FLAG_NO_INIT`. Forgetting to opt
+        // *in* here was the bug class behind `0xdfdedddcdbdad9d8`-shape
+        // wild RIPs: a freed page kept its `(i & 0xFF) as u8` test
+        // pattern, was reused as kernel/user stack-or-control memory,
+        // and a subsequent `ret` decoded those bytes as a function
+        // address. Make scrub the default and force the unsafe path
+        // to be explicit.
+        if flags & ALLOC_FLAG_NO_INIT == 0 {
             let span_pages = if use_pcp {
                 1
             } else {
@@ -941,6 +962,22 @@ pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
         let alloc = PAGE_ALLOCATOR.lock();
         for i in 0..filled {
             out[i] = alloc.frame_to_phys(frames[i]);
+        }
+        drop(alloc);
+        // Zero each frame for the same reason `alloc_page_frames` does:
+        // pages are zero by default. `alloc_page_frames_pcp_batch` does
+        // not currently expose a `NO_INIT` opt-out — its sole caller
+        // (`KernelStack::new`) already overwrites the entire stack via
+        // `zero_stack_pages`, so the redundant scrub is acceptable for
+        // now. Refactor to a flagged variant if a perf-critical caller
+        // appears.
+        for i in 0..filled {
+            if zero_physical_page(out[i]) != 0 {
+                klog_info!(
+                    "alloc_page_frames_pcp_batch: zero_physical_page failed at 0x{:x}",
+                    out[i].as_u64()
+                );
+            }
         }
     }
     filled
