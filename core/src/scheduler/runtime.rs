@@ -273,8 +273,9 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         Err(IdleStackResolveError::MissingIdleTask) => {
             klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
             slopos_mm::tlb::notify_cpu_offline();
-            slopos_arch::cpu::disable_interrupts();
-            slopos_ostd::cpu::x86_64::core::halt_loop();
+            loop {
+                unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+            }
         }
         Err(IdleStackResolveError::MissingKernelStack) => {
             klog_info!(
@@ -282,8 +283,9 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
                 cpu_id
             );
             slopos_mm::tlb::notify_cpu_offline();
-            slopos_arch::cpu::disable_interrupts();
-            slopos_ostd::cpu::x86_64::core::halt_loop();
+            loop {
+                unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+            }
         }
     };
 
