@@ -15,6 +15,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
+use slopos_ostd::sync::KernelSync;
+
 /// Size of each packet buffer slot in bytes.
 ///
 /// Covers maximum Ethernet frame (1518) plus headroom (128) with room to spare.
@@ -38,18 +40,15 @@ const FREELIST_EMPTY: u16 = u16::MAX;
 /// Lives in BSS (zero-initialized, 512 KiB).  Interior mutability via
 /// `UnsafeCell` is sound because the pool's allocation discipline guarantees
 /// that each slot is owned by at most one [`PacketBuf`](super::packetbuf::PacketBuf)
-/// at any time.
+/// at any time. `KernelSync` wraps the `UnsafeCell` to give the surrounding
+/// struct an auto-derived `Sync` impl.
 #[repr(C, align(64))]
 struct PoolStorage {
-    slots: UnsafeCell<[[u8; BUF_SIZE]; POOL_SIZE]>,
+    slots: KernelSync<UnsafeCell<[[u8; BUF_SIZE]; POOL_SIZE]>>,
 }
 
-// SAFETY: Slot access is serialized by the pool ownership model.
-// A slot is accessed exclusively by its owning PacketBuf (move-only, no Clone).
-unsafe impl Sync for PoolStorage {}
-
 static POOL_STORAGE: PoolStorage = PoolStorage {
-    slots: UnsafeCell::new([[0u8; BUF_SIZE]; POOL_SIZE]),
+    slots: KernelSync::new(UnsafeCell::new([[0u8; BUF_SIZE]; POOL_SIZE])),
 };
 
 // =============================================================================
@@ -76,8 +75,6 @@ pub struct PacketPool {
 }
 
 // SAFETY: All fields use atomic types — no unsynchronized shared mutation.
-unsafe impl Send for PacketPool {}
-unsafe impl Sync for PacketPool {}
 
 /// The global packet pool singleton.
 ///
@@ -194,6 +191,6 @@ impl PacketPool {
         debug_assert!((slot as usize) < POOL_SIZE);
         // SAFETY: UnsafeCell grants interior mutability.  Pointer arithmetic
         // is in-bounds because slot < POOL_SIZE and each slot is BUF_SIZE bytes.
-        unsafe { (POOL_STORAGE.slots.get() as *mut u8).add(slot as usize * BUF_SIZE) }
+        unsafe { (POOL_STORAGE.slots.get().get() as *mut u8).add(slot as usize * BUF_SIZE) }
     }
 }

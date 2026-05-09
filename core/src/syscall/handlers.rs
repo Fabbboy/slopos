@@ -52,12 +52,14 @@ macro_rules! syscall_table {
     (size: $size:expr; $( [$num:expr] => $handler:expr, $name:literal; )*) => {{
         let mut table: [SyscallEntry; $size] = [SyscallEntry {
             handler: None,
-            name: core::ptr::null(),
+            name: ::slopos_ostd::sync::KernelSync::new(core::ptr::null()),
         }; $size];
         $(
             table[$num as usize] = SyscallEntry {
                 handler: Some($handler),
-                name: concat!($name, "\0").as_ptr() as *const c_char,
+                name: ::slopos_ostd::sync::KernelSync::new(
+                    concat!($name, "\0").as_ptr() as *const c_char,
+                ),
             };
         )*
         table

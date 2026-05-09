@@ -93,13 +93,15 @@ impl PerCpuAsids {
     }
 }
 
-// SAFETY: per-CPU, interrupts-off single-writer discipline. Cross-CPU
-// reads touch only the `AtomicU64` counters above.
-struct PerCpuAsidsCell(UnsafeCell<PerCpuAsids>);
-unsafe impl Sync for PerCpuAsidsCell {}
+/// `KernelSync` wraps the `UnsafeCell` so the surrounding cell auto-derives
+/// `Sync`; per-CPU interrupts-off single-writer discipline gates real
+/// access. Cross-CPU reads touch only the `AtomicU64` counters above.
+struct PerCpuAsidsCell(slopos_ostd::sync::KernelSync<UnsafeCell<PerCpuAsids>>);
 
 static PER_CPU: [PerCpuAsidsCell; MAX_CPUS] = {
-    const INIT: PerCpuAsidsCell = PerCpuAsidsCell(UnsafeCell::new(PerCpuAsids::new()));
+    const INIT: PerCpuAsidsCell = PerCpuAsidsCell(slopos_ostd::sync::KernelSync::new(
+        UnsafeCell::new(PerCpuAsids::new()),
+    ));
     [INIT; MAX_CPUS]
 };
 
@@ -264,7 +266,7 @@ pub fn select_cr3(
 
     if !pcid_enabled() {
         unsafe {
-            (*PER_CPU[cpu_id].0.get())
+            (*PER_CPU[cpu_id].0.get().get())
                 .legacy
                 .fetch_add(1, Ordering::Relaxed);
         }
@@ -277,7 +279,7 @@ pub fn select_cr3(
     }
 
     // SAFETY: per-CPU, IRQs off, single writer on the current core.
-    let state = unsafe { &mut *PER_CPU[cpu_id].0.get() };
+    let state = unsafe { &mut *PER_CPU[cpu_id].0.get().get() };
 
     // Fast path: slot currently loaded still valid.
     if (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU {
@@ -339,7 +341,7 @@ pub fn forget_context_local(cpu_id: usize, ctx_id: MmContextId) {
     if cpu_id >= MAX_CPUS || !pcid_enabled() {
         return;
     }
-    let state = unsafe { &mut *PER_CPU[cpu_id].0.get() };
+    let state = unsafe { &mut *PER_CPU[cpu_id].0.get().get() };
     for (i, slot) in state.slots.iter_mut().enumerate() {
         if slot.ctx_id == ctx_id.raw() {
             flush_pcid(i as u16 + 1);
