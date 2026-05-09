@@ -44,15 +44,14 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_find_by_id,
-    task_fpu_state_mut, task_fs_base, task_get_info, task_has_flag, task_id_of, task_inc_ref,
-    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
-    task_is_will_block, task_kernel_stack_top, task_name_looks_idle, task_pgid,
-    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
-    task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
-    task_set_time_slice, task_set_time_slice_remaining, task_set_waiting_on, task_sid, task_status,
-    task_time_slice, task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu,
-    task_waiting_on_cas,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
+    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_blocked, task_is_invalid,
+    task_is_ready, task_is_running, task_is_terminated, task_is_will_block, task_kernel_stack_top,
+    task_name_looks_idle, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
+    task_record_context_switch, task_record_yield, task_set_controlling_tty, task_set_on_cpu,
+    task_set_state, task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid,
+    task_status, task_time_slice, task_time_slice_remaining, task_try_transition_from,
+    task_wait_off_cpu, task_waiting_on_cas,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -1012,44 +1011,27 @@ fn block_current_task_irq_disabled(
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return -1;
+    // Compile-time-checked wait sequence via the typestate state
+    // machine. The protocol's order (prepare → publish → check →
+    // block) is enforced by Rust ownership: each transition consumes
+    // its predecessor by-value. A future caller that skips a step
+    // does not compile against the API.
+    let prepared = match super::wait_typestate::prepare_to_wait_for() {
+        Some(p) => p,
+        None => return -1,
+    };
+    match prepared.publish(task_id) {
+        Ok(published) => {
+            slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|irq| published.block(irq))
+        }
+        Err(prep) => {
+            // Target gone or self-wait — cancel the prepared state
+            // and report success (waitpid semantics: target is
+            // already terminated/invalid, no waiting needed).
+            prep.cancel();
+            0
+        }
     }
-    if task_id == INVALID_TASK_ID || task_id_of(current) == Some(task_id) {
-        return -1;
-    }
-
-    let mut target: *mut Task = ptr::null_mut();
-    if task_get_info(task_id, &mut target) != 0 || target.is_null() {
-        task_set_waiting_on(current, INVALID_TASK_ID);
-        return 0;
-    }
-    // Order matters: prepare_to_wait sets state to WillBlock first so
-    // any wake fired by the target's exit path between here and
-    // block_current_task transitions the state and makes the CAS to
-    // Blocked fail (preserving the wake). Then publish waiting_on so
-    // release_task_dependents sees us as a wait candidate, and re-check
-    // the target's status by ID — if it terminated (or its slot was
-    // reset and reused) before our publication, there will be no future
-    // wake, so abort the block.
-    prepare_to_wait();
-    task_set_waiting_on(current, task_id);
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    let target_now = task_find_by_id(task_id);
-    if target_now.is_null()
-        || target_now != target
-        || task_is_terminated(target_now)
-        || task_is_invalid(target_now)
-    {
-        finish_wait();
-        task_set_waiting_on(current, INVALID_TASK_ID);
-        return 0;
-    }
-    block_current_task();
-    finish_wait();
-    task_set_waiting_on(current, INVALID_TASK_ID);
-    0
 }
 
 pub fn unblock_task(task: *mut Task) -> c_int {

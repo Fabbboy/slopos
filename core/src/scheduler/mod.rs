@@ -22,4 +22,5 @@ pub mod test_fixture;
 pub mod test_hermetic;
 pub mod test_reports;
 pub mod trap;
+pub mod wait_typestate;
 pub mod work_steal;
