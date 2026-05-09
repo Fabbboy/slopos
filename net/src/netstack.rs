@@ -140,6 +140,8 @@ pub struct NetStack {
 }
 
 // SAFETY: All mutable state behind SpinLock.
+unsafe impl Send for NetStack {}
+unsafe impl Sync for NetStack {}
 
 /// The global network stack instance.
 pub static NET_STACK: NetStack = NetStack::new();

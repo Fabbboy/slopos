@@ -55,13 +55,6 @@ pub struct PciDriver {
     pub context: *mut core::ffi::c_void,
 }
 
-// SAFETY: `PciDriver` records a `'static` driver descriptor whose
-// `name` and `context` fields point at driver-private storage that
-// outlives every reader. Drivers register and unregister
-// single-threaded through `pci_register_driver` / `pci_unregister_driver`,
-// gated by the `DRIVER_REGISTRY` SpinLock; cross-CPU reads only see
-// post-registration state. Retiring requires moving driver descriptors
-// onto OSTD-owned `&'static PciDriver` references (later κ phase).
 unsafe impl Sync for PciDriver {}
 
 struct PciEnumState {
@@ -87,11 +80,6 @@ struct PciDriverRegistry {
     count: usize,
 }
 
-// SAFETY: stores raw `*const PciDriver` pointing at `'static` driver
-// descriptors; cross-CPU mutation is gated by the surrounding
-// SpinLock. Same retirement contract as `unsafe impl Sync for PciDriver`.
-unsafe impl Send for PciDriverRegistry {}
-
 impl PciDriverRegistry {
     const fn new() -> Self {
         Self {
@@ -102,6 +90,7 @@ impl PciDriverRegistry {
 }
 
 // SAFETY: PciDriverRegistry only stores pointers to 'static PciDrivers
+unsafe impl Send for PciDriverRegistry {}
 
 static PCI_INIT: InitFlag = InitFlag::new();
 static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);

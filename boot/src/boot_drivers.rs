@@ -142,7 +142,7 @@ fn boot_step_timer_setup_fn(_ctx: &mut BootCtx) {
         return;
     }
     let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
-        address: *bf.address,
+        address: bf.address,
         info: bf.info,
     });
     video::init(fb, backend);
@@ -295,7 +295,7 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx) {
         if backend == video::VideoBackend::Xe {
             let boot_fb = limine_protocol::boot_info().framebuffer;
             let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
-                address: *bf.address,
+                address: bf.address,
                 info: bf.info,
             });
             let xe_fb = xe::xe_framebuffer_init(fb);

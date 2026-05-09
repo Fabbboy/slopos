@@ -5,7 +5,6 @@ use core::{
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_drivers::serial;
-use slopos_ostd::sync::KernelSync;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::spin::SpinLock;
 use slopos_utils::klog::{self, KlogLevel};
@@ -56,6 +55,8 @@ pub struct BootInitStep {
     func: BootInitFn,
     flags: u32,
 }
+
+unsafe impl Sync for BootInitStep {}
 
 impl BootInitStep {
     pub const fn new(label: &'static [u8], func: BootInitFn, flags: u32) -> Self {
@@ -150,12 +151,7 @@ pub const fn boot_init_priority(val: u32) -> u32 {
 }
 
 struct BootRuntimeContext {
-    /// Bootloader memmap pointer; lives in a `'static` `SyncUnsafeCell`
-    /// published by `limine_protocol::limine_get_memmap_response` whose
-    /// contents are immutable for the kernel's lifetime. Wrapped in
-    /// `KernelSync` so the surrounding `SpinLock<BootRuntimeContext>:
-    /// Sync` is satisfied without a hand-written `unsafe impl Send`.
-    memmap: KernelSync<*const limine_protocol::LimineMemmapResponse>,
+    memmap: *const limine_protocol::LimineMemmapResponse,
     hhdm_offset: u64,
     cmdline: Option<&'static str>,
 }
@@ -163,12 +159,21 @@ struct BootRuntimeContext {
 impl BootRuntimeContext {
     const fn new() -> Self {
         Self {
-            memmap: KernelSync::new(ptr::null()),
+            memmap: ptr::null(),
             hhdm_offset: 0,
             cmdline: None,
         }
     }
 }
+
+// SAFETY: `memmap: *const LimineMemmapResponse` points into a static
+// `SyncUnsafeCell` published by `limine_protocol::limine_get_memmap_response`,
+// whose contents are immutable for the kernel's lifetime (Inv. 8). The
+// other fields are plain `Copy` data. Boot steps run sequentially on
+// the BSP, so any imagined "send across threads" is purely about
+// satisfying `SpinLock<BootRuntimeContext>: Sync` — no real handoff
+// happens at runtime.
+unsafe impl Send for BootRuntimeContext {}
 
 static BOOT_RUNTIME: SpinLock<BootRuntimeContext> =
     SpinLock::new(BootRuntimeContext::new(), LOCK_LEVEL_RESOURCE);
@@ -370,7 +375,7 @@ pub fn boot_init_run_all(ctx: &mut BootCtx) -> i32 {
 }
 
 pub fn boot_get_memmap() -> *const limine_protocol::LimineMemmapResponse {
-    *BOOT_RUNTIME.lock().memmap
+    BOOT_RUNTIME.lock().memmap
 }
 
 pub fn boot_get_hhdm_offset() -> u64 {
@@ -448,7 +453,7 @@ fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx) -> i32 {
 
     {
         let mut state = BOOT_RUNTIME.lock();
-        state.memmap = KernelSync::new(memmap);
+        state.memmap = memmap;
         state.hhdm_offset = limine_protocol::get_hhdm_offset();
         state.cmdline = limine_protocol::kernel_cmdline_str();
     }

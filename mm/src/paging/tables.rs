@@ -40,18 +40,11 @@ static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
 /// installed in CR3 (the OSTD `VmSpace` is the load-bearing half).
 #[repr(C)]
 pub struct ProcessPageDir {
-    /// `KernelSync` wraps the raw pointer so the surrounding struct
-    /// auto-derives `Send + Sync`; PML4 ownership is single-process
-    /// and access is gated by the per-process `SpinLock` in
-    /// `process_vm.rs`.
-    pub pml4: slopos_ostd::sync::KernelSync<*mut PageTable>,
+    pub pml4: *mut PageTable,
     pub pml4_phys: PhysAddr,
     pub ref_count: u32,
     pub process_id: u32,
-    /// `KernelSync`-wrapped intrusive next-pointer. The lookup walk in
-    /// `kernel_page_dir_walk` runs single-writer pre-SMP for now;
-    /// post-SMP migrations use the OSTD `VmSpace` instead.
-    pub next: slopos_ostd::sync::KernelSync<*mut ProcessPageDir>,
+    pub next: *mut ProcessPageDir,
     pub kernel_mapping_gen: u64,
     pub mm_ctx_id: crate::mmu::MmContextId,
 }
@@ -67,23 +60,26 @@ impl ProcessPageDir {
         mm_ctx_id: crate::mmu::MmContextId,
     ) -> Self {
         Self {
-            pml4: slopos_ostd::sync::KernelSync::new(pml4),
+            pml4,
             pml4_phys,
             ref_count: 1,
             process_id,
-            next: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
+            next: ptr::null_mut(),
             kernel_mapping_gen: 0,
             mm_ctx_id,
         }
     }
 }
 
+unsafe impl Send for ProcessPageDir {}
+unsafe impl Sync for ProcessPageDir {}
+
 static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(ProcessPageDir {
-    pml4: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
+    pml4: ptr::null_mut(),
     pml4_phys: PhysAddr::NULL,
     ref_count: 1,
     process_id: 0,
-    next: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
+    next: ptr::null_mut(),
     kernel_mapping_gen: 0,
     mm_ctx_id: crate::mmu::MmContextId::INVALID,
 });
@@ -220,7 +216,7 @@ fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysA
         return PhysAddr::NULL;
     }
     unsafe {
-        let pml4 = *(*page_dir).pml4;
+        let pml4 = (*page_dir).pml4;
         if pml4.is_null() {
             return PhysAddr::NULL;
         }
@@ -256,7 +252,7 @@ fn map_page_in_directory(
     let inter_flags = intermediate_flags(user_mapping);
 
     unsafe {
-        let pml4 = *(*page_dir).pml4;
+        let pml4 = (*page_dir).pml4;
         if pml4.is_null() {
             return -1;
         }
@@ -382,7 +378,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         return PhysAddr::NULL;
     }
     unsafe {
-        let pml4 = *(*page_dir).pml4;
+        let pml4 = (*page_dir).pml4;
         if pml4.is_null() {
             return PhysAddr::NULL;
         }
@@ -487,7 +483,7 @@ pub fn init_paging() {
         if pml4_ptr.is_null() {
             panic!("Failed to translate kernel PML4 physical address");
         }
-        (*KERNEL_PAGE_DIR.get()).pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
+        (*KERNEL_PAGE_DIR.get()).pml4 = pml4_ptr;
 
         let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
         if kernel_phys.is_null() {
@@ -531,7 +527,7 @@ pub fn get_page_size(vaddr: VirtAddr) -> u64 {
         if (*page_dir).pml4.is_null() {
             return 0;
         }
-        let pml4 = *(*page_dir).pml4;
+        let pml4 = (*page_dir).pml4;
         let walker = PageTableWalker::new();
         match walker.walk(&*pml4, vaddr) {
             Ok(result) => result.page_size,

@@ -1,7 +1,6 @@
 use core::ffi::{c_char, c_int};
 
 use crate::scheduler::task_struct::Task;
-use slopos_ostd::sync::KernelSync;
 use slopos_ostd::user::context::UserContext;
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
@@ -23,12 +22,10 @@ pub type SyscallHandler = fn(*mut Task, *mut UserContext) -> SyscallDisposition;
 #[derive(Copy, Clone)]
 pub struct SyscallEntry {
     pub handler: Option<SyscallHandler>,
-    /// Diagnostic label for the syscall (NUL-terminated static string).
-    /// `KernelSync` because raw pointers are `!Send + !Sync` by default;
-    /// the wrapped value is a `'static` text-segment pointer, never
-    /// mutated after table construction.
-    pub name: KernelSync<*const c_char>,
+    pub name: *const c_char,
 }
+
+unsafe impl Sync for SyscallEntry {}
 
 pub fn syscall_return_ok(ctx: *mut UserContext, value: u64) -> SyscallDisposition {
     if let Some(uc) = UserContext::from_ptr_mut(ctx) {

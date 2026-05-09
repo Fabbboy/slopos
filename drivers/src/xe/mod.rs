@@ -77,6 +77,7 @@ impl XeFramebuffer {
 }
 
 // Safety: Access to this state is synchronized through `XE_DEVICE` SpinLock.
+unsafe impl Send for XeFramebuffer {}
 
 static XE_DEVICE: SpinLock<XeDevice> = SpinLock::new(XeDevice::empty(), LOCK_LEVEL_RESOURCE);
 static XE_PROBED: InitFlag = InitFlag::new();
