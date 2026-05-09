@@ -143,8 +143,6 @@ pub struct RouteTable {
 }
 
 // SAFETY: All mutable state is behind SpinLock.
-unsafe impl Send for RouteTable {}
-unsafe impl Sync for RouteTable {}
 
 /// The global routing table.
 pub static ROUTE_TABLE: RouteTable = RouteTable::new();

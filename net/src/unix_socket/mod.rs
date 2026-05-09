@@ -64,7 +64,6 @@ struct UnixSocketState {
 }
 
 // SAFETY: UnixSocketState is only accessed through the UNIX_STATE SpinLock.
-unsafe impl Send for UnixSocketState {}
 
 impl UnixSocketState {
     const fn new() -> Self {

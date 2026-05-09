@@ -32,7 +32,7 @@ pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 /// SafeStack-sanitizer unsafe (data) stack size — 16 KiB.
 ///
 /// LLVM's SafeStack pass moves address-taken locals and dynamic allocas
-/// onto this stack at every instrumented function prologue. The 1J-κ
+/// onto this stack at every instrumented function prologue. The
 /// "zero unsafe" refactors push more kernel-side primitives behind
 /// `&mut`-passing safe helpers (`with_mut`, `for_each`, `frame_for_phys`,
 /// `hhdm_*_bytes`, …); LLVM lowers each `&mut local` to an address-take

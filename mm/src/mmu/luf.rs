@@ -103,13 +103,15 @@ impl PerCpuLuf {
     }
 }
 
-struct PerCpuLufCell(UnsafeCell<PerCpuLuf>);
-// SAFETY: single-writer-per-CPU via the owning CPU; cross-CPU reads
-// only touch the `AtomicU64` counters.
-unsafe impl Sync for PerCpuLufCell {}
+/// `KernelSync` wraps the `UnsafeCell` so the surrounding cell auto-derives
+/// `Sync`; single-writer-per-CPU via the owning CPU gates real access,
+/// and cross-CPU reads only touch the `AtomicU64` counters.
+struct PerCpuLufCell(slopos_ostd::sync::KernelSync<UnsafeCell<PerCpuLuf>>);
 
 static PER_CPU_LUF: [PerCpuLufCell; MAX_CPUS] = {
-    const INIT: PerCpuLufCell = PerCpuLufCell(UnsafeCell::new(PerCpuLuf::new()));
+    const INIT: PerCpuLufCell = PerCpuLufCell(slopos_ostd::sync::KernelSync::new(UnsafeCell::new(
+        PerCpuLuf::new(),
+    )));
     [INIT; MAX_CPUS]
 };
 
@@ -307,7 +309,7 @@ fn state_for(cpu: usize) -> Option<&'static mut PerCpuLuf> {
     }
     // SAFETY: per-CPU single-writer discipline; caller must hold off
     // preemption / IRQs on the owning CPU before calling.
-    Some(unsafe { &mut *PER_CPU_LUF[cpu].0.get() })
+    Some(unsafe { &mut *PER_CPU_LUF[cpu].0.get().get() })
 }
 
 fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
@@ -501,7 +503,7 @@ fn state_for_readonly(cpu: usize) -> Option<&'static PerCpuLuf> {
     if cpu >= MAX_CPUS {
         return None;
     }
-    Some(unsafe { &*PER_CPU_LUF[cpu].0.get() })
+    Some(unsafe { &*PER_CPU_LUF[cpu].0.get().get() })
 }
 
 // =============================================================================
