@@ -1258,6 +1258,7 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
                 let expected = ((page as u8).wrapping_mul(17)).wrapping_add((i & 0xFF) as u8);
                 let actual = unsafe { ptr.add(i).read_volatile() };
                 if actual != expected {
+                    scrub_pages(phys, 4);
                     free_page_frame(phys);
                     return fail!(
                         "multipage corruption page={} offset={}: expected {:#x}, got {:#x}",
@@ -1271,8 +1272,29 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
         }
     }
 
+    scrub_pages(phys, 4);
     free_page_frame(phys);
     pass!()
+}
+
+/// Zero `npages` 4 KiB pages starting at `phys` before returning them
+/// to the page allocator. Tests in this module fill pages with
+/// recognizable byte patterns to verify allocator integrity; without
+/// scrubbing on free, those patterns leak into the buddy free list and
+/// surface in unrelated kernel allocations later in the run (e.g.
+/// scheduler task slots, user-mode stack pages). Concrete failure mode
+/// observed: `i & 0xFF` byte fill in this test produced stale bytes
+/// `0xd8 0xd9 ... 0xdf` at offset `0xd8` in reused pages, which then
+/// became a poison user RIP `0xdfdedddcdbdad9d8` in subsequent userland
+/// tests under TCG.
+fn scrub_pages(phys: PhysAddr, npages: u64) {
+    for page in 0..npages {
+        let page_phys = PhysAddr::new(phys.as_u64() + page * 4096);
+        if let Some(virt) = page_phys.to_virt_checked() {
+            let ptr = virt.as_mut_ptr::<u8>();
+            unsafe { core::ptr::write_bytes(ptr, 0, 4096) };
+        }
+    }
 }
 
 // ============================================================================
