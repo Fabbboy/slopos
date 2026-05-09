@@ -1096,6 +1096,7 @@ pub fn test_heap_boundary_write() -> TestResult {
             let expected = (i & 0xFF) as u8;
             let actual = unsafe { byte_ptr.add(i).read_volatile() };
             if actual != expected {
+                scrub_chunk(ptr, size);
                 kfree(ptr);
                 return fail!(
                     "heap corruption at size={} offset={}: expected {:#x}, got {:#x}",
@@ -1107,6 +1108,7 @@ pub fn test_heap_boundary_write() -> TestResult {
             }
         }
 
+        scrub_chunk(ptr, size);
         kfree(ptr);
     }
 
@@ -1188,6 +1190,7 @@ pub fn test_heap_large_block_integrity() -> TestResult {
         let expected = ((i * 17) & 0xFF) as u8;
         let actual = unsafe { byte_ptr.add(i).read_volatile() };
         if actual != expected {
+            scrub_chunk(ptr, size);
             kfree(ptr);
             return fail!(
                 "large block corruption at offset {}: expected {:#x}, got {:#x}",
@@ -1198,6 +1201,7 @@ pub fn test_heap_large_block_integrity() -> TestResult {
         }
     }
 
+    scrub_chunk(ptr, size);
     kfree(ptr);
     pass!()
 }
@@ -1295,6 +1299,19 @@ fn scrub_pages(phys: PhysAddr, npages: u64) {
             unsafe { core::ptr::write_bytes(ptr, 0, 4096) };
         }
     }
+}
+
+/// Zero `len` bytes at `ptr` before returning the chunk to the kernel
+/// heap. Same rationale as [`scrub_pages`]: tests fill chunks with
+/// recognizable byte patterns then `kfree`; the kernel slab does not
+/// zero on free, so without scrubbing the patterns leak into
+/// subsequent kmalloc consumers (task-struct slots, user-context save
+/// areas, etc.) and surface as memory corruption in unrelated tests.
+fn scrub_chunk(ptr: *mut core::ffi::c_void, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { core::ptr::write_bytes(ptr as *mut u8, 0, len) };
 }
 
 // ============================================================================
