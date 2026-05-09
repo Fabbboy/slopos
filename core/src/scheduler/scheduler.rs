@@ -984,14 +984,21 @@ pub fn block_current_task() {
 
     let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
 
+    // Disable IRQs through the state-CAS-then-yield window so the
+    // timer ISR cannot fire and self-wake this task before it has
+    // yielded. Mirrors `sleep_current_task_ms` / `block_current_task_with_timeout`.
+    let irq_flags = cpu::save_flags_cli();
+
     // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
     // If a concurrent unblock_task already set Running, the CAS fails and
     // we return immediately — the wakeup is preserved.
     if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked) != 0 {
+        cpu::restore_flags(irq_flags);
         return;
     }
     unschedule_task(current);
     schedule();
+    cpu::restore_flags(irq_flags);
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {
