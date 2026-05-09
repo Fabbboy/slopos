@@ -984,21 +984,31 @@ pub fn block_current_task() {
 
     let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
 
-    // Disable IRQs through the state-CAS-then-yield window so the
-    // timer ISR cannot fire and self-wake this task before it has
-    // yielded. Mirrors `sleep_current_task_ms` / `block_current_task_with_timeout`.
-    let irq_flags = cpu::save_flags_cli();
+    // Disable IRQs through the state-CAS-then-yield window via the
+    // `IrqDisabled<'cli>` capability. The wrapped closure is the only
+    // place the unsafe primitive `block_current_task_irq_disabled` can
+    // be called — the capability lifetime makes the cli scope a
+    // compile-time requirement, not a discipline-by-comment.
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|irq| {
+        block_current_task_irq_disabled(current, task_id, irq);
+    });
+}
 
-    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
-    // If a concurrent unblock_task already set Running, the CAS fails and
-    // we return immediately — the wakeup is preserved.
+/// Unsafe primitive: assumes the caller has already disabled
+/// interrupts (witnessed by the `IrqDisabled<'cli>` token). Performs
+/// the WillBlock→Blocked CAS, removes the task from runqueues, and
+/// yields. Public callers must go through [`block_current_task`] (or
+/// the timeout-aware variants) which materialise the token.
+fn block_current_task_irq_disabled(
+    current: *mut Task,
+    task_id: u32,
+    _irq: &slopos_ostd::cpu::x86_64::interrupts::IrqDisabled<'_>,
+) {
     if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked) != 0 {
-        cpu::restore_flags(irq_flags);
         return;
     }
     unschedule_task(current);
     schedule();
-    cpu::restore_flags(irq_flags);
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {

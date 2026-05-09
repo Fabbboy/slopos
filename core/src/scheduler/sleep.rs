@@ -14,7 +14,6 @@ use super::task::{
     task_set_state_with_reason,
 };
 use slopos_kernel_services::platform;
-use slopos_ostd::cpu::x86_64::interrupts as cpu;
 
 #[derive(Copy, Clone)]
 struct SleepEntry {
@@ -281,37 +280,33 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
 
-    // Disable IRQs through the state-CAS-then-yield window so the
-    // timer ISR cannot fire and self-wake this task before it has
-    // yielded. The wake path's `schedule_task(self)` would otherwise
-    // race with the in-progress block sequence (the run-from-idle
-    // tail's `Ready` re-enqueue closes this on KVM, but TCG's coarser
-    // timing makes the window wide enough to expose other races).
-    let irq_flags = cpu::save_flags_cli();
-    {
-        let mut queue = SLEEP_QUEUE.lock();
-        if !queue.upsert(task_id, wake_tick) {
-            cpu::restore_flags(irq_flags);
-            return -1;
-        }
-        // Only block from Running state. WillBlock-aware callers must use
-        // block_current_task_with_timeout instead.
-        if task_set_state_from_with_reason(
-            task_id,
-            TaskStatus::Running,
-            TaskStatus::Blocked,
-            BlockReason::Sleep,
-        ) != 0
+    // Disable IRQs through the state-CAS-then-yield window via the
+    // `IrqDisabled<'cli>` capability. See `block_current_task` for the
+    // bug-class motivating the cli scope as a typestate, not a
+    // hand-written `cpu::save_flags_cli()` pair.
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
         {
-            queue.remove(task_id);
-            cpu::restore_flags(irq_flags);
-            return -1;
+            let mut queue = SLEEP_QUEUE.lock();
+            if !queue.upsert(task_id, wake_tick) {
+                return -1;
+            }
+            // Only block from Running state. WillBlock-aware callers must
+            // use block_current_task_with_timeout instead.
+            if task_set_state_from_with_reason(
+                task_id,
+                TaskStatus::Running,
+                TaskStatus::Blocked,
+                BlockReason::Sleep,
+            ) != 0
+            {
+                queue.remove(task_id);
+                return -1;
+            }
+            unschedule_task(current);
         }
-        unschedule_task(current);
-    }
-    schedule();
-    cpu::restore_flags(irq_flags);
-    0
+        schedule();
+        0
+    })
 }
 
 /// Block the current task with a timeout.
@@ -359,26 +354,28 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
     }
 
     // See `sleep_current_task_ms` for the IRQ-off rationale.
-    let irq_flags = cpu::save_flags_cli();
-
-    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
-    // If a concurrent unblock_task set Running between the fast-path check
-    // and here, the CAS fails — the wakeup is preserved.
-    if task_set_state_from_with_reason(
-        task_id,
-        TaskStatus::WillBlock,
-        TaskStatus::Blocked,
-        BlockReason::Sleep,
-    ) != 0
-    {
-        cpu::restore_flags(irq_flags);
+    let cancelled = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
+        // Atomic CAS(WillBlock, Blocked): only blocks if still in
+        // WillBlock. If a concurrent unblock_task set Running between
+        // the fast-path check and here, the CAS fails — the wakeup is
+        // preserved.
+        if task_set_state_from_with_reason(
+            task_id,
+            TaskStatus::WillBlock,
+            TaskStatus::Blocked,
+            BlockReason::Sleep,
+        ) != 0
+        {
+            return true;
+        }
+        unschedule_task(current);
+        schedule();
+        false
+    });
+    if cancelled {
         cancel_sleep(task_id);
         return;
     }
-
-    unschedule_task(current);
-    schedule();
-    cpu::restore_flags(irq_flags);
     cancel_sleep(task_id);
 }
 
