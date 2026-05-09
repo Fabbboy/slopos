@@ -163,7 +163,20 @@ impl FileOps for PipeReadOps {
             if need_block {
                 prepare_to_wait();
                 pipe::reader_wq(h).enqueue_current();
-                block_current_task();
+
+                // Re-check after enqueue to close the lost-wakeup race:
+                // the writer may have closed (or written) between our
+                // initial check (with slot lock dropped) and our
+                // enqueue, and a wake_all fired in that window finds
+                // an empty queue. Without this re-check we'd sleep
+                // forever despite the wake having already happened.
+                let still_block = match pipe::lock_slot(h) {
+                    Some(slot) => slot.len == 0 && slot.writers > 0,
+                    None => false,
+                };
+                if still_block {
+                    block_current_task();
+                }
                 finish_wait();
                 pipe::reader_wq(h).remove_current();
                 continue;
@@ -274,7 +287,13 @@ impl FileOps for PipeWriteOps {
                 if scheduler_is_enabled() != 0 {
                     prepare_to_wait();
                     pipe::writer_wq(h).enqueue_current();
-                    block_current_task();
+                    let still_block = match pipe::lock_slot(h) {
+                        Some(slot) => slot.readers > 0 && slot.len >= pipe::PIPE_BUFFER_SIZE,
+                        None => false,
+                    };
+                    if still_block {
+                        block_current_task();
+                    }
                     finish_wait();
                     pipe::writer_wq(h).remove_current();
                     continue;
@@ -340,7 +359,13 @@ impl FileOps for PipeWriteOps {
             if need_block {
                 prepare_to_wait();
                 pipe::writer_wq(h).enqueue_current();
-                block_current_task();
+                let still_block = match pipe::lock_slot(h) {
+                    Some(slot) => slot.readers > 0 && slot.len >= pipe::PIPE_BUFFER_SIZE,
+                    None => false,
+                };
+                if still_block {
+                    block_current_task();
+                }
                 finish_wait();
                 pipe::writer_wq(h).remove_current();
                 continue;

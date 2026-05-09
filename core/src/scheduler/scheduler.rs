@@ -44,14 +44,15 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
-    task_fs_base, task_get_info, task_has_flag, task_id_of, task_inc_ref, task_is_blocked,
-    task_is_invalid, task_is_ready, task_is_running, task_is_terminated, task_is_will_block,
-    task_kernel_stack_top, task_name_looks_idle, task_pgid, task_pointer_is_valid, task_priority,
-    task_process_id, task_record_context_switch, task_record_yield, task_set_controlling_tty,
-    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
-    task_set_time_slice_remaining, task_set_waiting_on, task_sid, task_status, task_time_slice,
-    task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu, task_waiting_on_cas,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_find_by_id,
+    task_fpu_state_mut, task_fs_base, task_get_info, task_has_flag, task_id_of, task_inc_ref,
+    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
+    task_is_will_block, task_kernel_stack_top, task_name_looks_idle, task_pgid,
+    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
+    task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
+    task_set_time_slice, task_set_time_slice_remaining, task_set_waiting_on, task_sid, task_status,
+    task_time_slice, task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu,
+    task_waiting_on_cas,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -532,7 +533,16 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    wait_task_off_cpu(task);
+    // Note: we do NOT wait for `task->on_cpu` to clear here. The
+    // dispatcher (`run_ready_task_from_idle` at the
+    // `(*next_task).on_cpu.load(...)` check) re-enqueues any task
+    // it dequeues whose `on_cpu` is still true, so a task that is
+    // mid-context-switch on another CPU is naturally deferred rather
+    // than dispatched twice. Spinning here would break the timer-ISR
+    // wake path: if `task` is the currently-executing task on this
+    // CPU, its `on_cpu` will not clear until we yield — but we are
+    // calling this from the timer ISR's wake_due_sleepers and cannot
+    // yield until the ISR returns.
 
     if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
@@ -845,17 +855,32 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     switch_to_kernel_address_space(idle_task);
 
-    // Re-enqueue the task if it was preempted (Running) or in a pre-block
-    // critical section (WillBlock).  Blocked/Terminated tasks are NOT
-    // re-enqueued — they'll be woken by their respective event paths.
+    // Re-enqueue the task if it was preempted (Running), in a pre-block
+    // critical section (WillBlock), or already woken (Ready) before its
+    // block sequence yielded.  The Ready case covers the self-wakeup
+    // window: a wake_*_task(self) call from the timer ISR transitions
+    // state Blocked→Ready and tries `schedule_task(self)`, which routes
+    // through `enqueue_local` on this CPU; the in-progress block path
+    // then `unschedule_task`s the entry, leaving the task Ready but in
+    // no runqueue. Re-enqueueing here keeps it schedulable across the
+    // yield. Blocked/Terminated tasks are NOT re-enqueued — they'll be
+    // woken by their respective event paths.
     // This runs AFTER on_cpu=false and context save, so no SMP race.
-    if !task_is_terminated(next_task)
-        && (task_is_running(next_task) || task_is_will_block(next_task))
-        && task_set_state(next_task_id, TaskStatus::Ready) == 0
-    {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            let _ = sched.enqueue_local(next_task);
-        });
+    if !task_is_terminated(next_task) {
+        let already_ready = task_is_ready(next_task);
+        let needs_ready_transition = task_is_running(next_task) || task_is_will_block(next_task);
+        let should_enqueue = if already_ready {
+            true
+        } else if needs_ready_transition {
+            task_set_state(next_task_id, TaskStatus::Ready) == 0
+        } else {
+            false
+        };
+        if should_enqueue {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                let _ = sched.enqueue_local(next_task);
+            });
+        }
     }
 
     // Release the dispatch reference.  If the task was re-enqueued above,
@@ -983,8 +1008,27 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         task_set_waiting_on(current, INVALID_TASK_ID);
         return 0;
     }
-    task_set_waiting_on(current, task_id);
+    // Order matters: prepare_to_wait sets state to WillBlock first so
+    // any wake fired by the target's exit path between here and
+    // block_current_task transitions the state and makes the CAS to
+    // Blocked fail (preserving the wake). Then publish waiting_on so
+    // release_task_dependents sees us as a wait candidate, and re-check
+    // the target's status by ID — if it terminated (or its slot was
+    // reset and reused) before our publication, there will be no future
+    // wake, so abort the block.
     prepare_to_wait();
+    task_set_waiting_on(current, task_id);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    let target_now = task_find_by_id(task_id);
+    if target_now.is_null()
+        || target_now != target
+        || task_is_terminated(target_now)
+        || task_is_invalid(target_now)
+    {
+        finish_wait();
+        task_set_waiting_on(current, INVALID_TASK_ID);
+        return 0;
+    }
     block_current_task();
     finish_wait();
     task_set_waiting_on(current, INVALID_TASK_ID);

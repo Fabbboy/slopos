@@ -296,15 +296,39 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
 
     // Use serial logging directly to avoid lock recursion.
     klog_info!(
-        "NMI WATCHDOG: CPU {} locked up! RIP={:#x} RSP={:#x} CS={:#x}",
+        "NMI WATCHDOG: CPU {} locked up! RIP={:#x} RSP={:#x} CS={:#x} RBP={:#x}",
         cpu_id,
         frame.rip,
         frame.rsp,
-        frame.cs
+        frame.cs,
+        frame.rbp
     );
 
     let held = slopos_ostd::sync::held_lock_count();
     klog_info!("NMI WATCHDOG: CPU {} holds {} lock(s)", cpu_id, held);
+
+    // Walk the saved-frame chain via %rbp. Each frame: [saved_rbp][return_addr][...].
+    // Stop on null/non-canonical pointer or after 16 frames.
+    {
+        let mut rbp = frame.rbp;
+        klog_info!("NMI WATCHDOG: CPU {} backtrace:", cpu_id);
+        klog_info!("  [0] {:#x}", frame.rip);
+        for depth in 1..=16u32 {
+            if rbp == 0 || (rbp >> 47) != 0x1FFFF {
+                break;
+            }
+            let saved_rbp_ptr = rbp as *const u64;
+            let ret_addr_ptr = (rbp as *const u64).wrapping_add(1);
+            // SAFETY: best-effort diag read; we are about to panic anyway.
+            let next_rbp = unsafe { core::ptr::read_volatile(saved_rbp_ptr) };
+            let ret_addr = unsafe { core::ptr::read_volatile(ret_addr_ptr) };
+            klog_info!("  [{}] {:#x}", depth, ret_addr);
+            if next_rbp <= rbp {
+                break;
+            }
+            rbp = next_rbp;
+        }
+    }
 
     // Force-release all tracked locks so other CPUs can make progress.
     unsafe {

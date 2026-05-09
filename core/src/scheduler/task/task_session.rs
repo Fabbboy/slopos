@@ -6,7 +6,7 @@ use slopos_abi::syscall::TtyIndex;
 use slopos_utils::klog_info;
 
 use super::super::scheduler;
-use super::task_state::task_is_blocked;
+use super::task_state::{task_is_blocked, task_is_will_block};
 use super::task_table::{pool_high_water, task_find_by_id, task_iterate_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
 
@@ -62,7 +62,13 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
     with_task_manager(|mgr| {
         for dependent in mgr.iter_tasks_mut() {
             let dep_ptr = dependent as *mut Task;
-            if !task_is_blocked(dep_ptr) {
+            // Include both Blocked and WillBlock — the latter covers the
+            // tiny race window between `task_set_waiting_on()` and the
+            // `WillBlock→Blocked` CAS in `block_current_task`. Without
+            // this, a wake fired in that window finds the waiter "not
+            // blocked yet" and skips it; the waiter then completes its
+            // CAS to Blocked and sleeps forever.
+            if !task_is_blocked(dep_ptr) && !task_is_will_block(dep_ptr) {
                 continue;
             }
             if dependent.waiting_on.load(Ordering::Acquire) != completed_task_id {
