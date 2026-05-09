@@ -170,6 +170,8 @@ pub struct NeighborCache {
 }
 
 // SAFETY: All mutable state is behind SpinLock.
+unsafe impl Send for NeighborCache {}
+unsafe impl Sync for NeighborCache {}
 
 /// The global neighbor cache.
 pub static NEIGHBOR_CACHE: NeighborCache = NeighborCache::new();

@@ -44,7 +44,7 @@ use limine::{
 };
 
 use slopos_abi::DisplayInfo;
-use slopos_ostd::sync::{KernelSync, OnceLock};
+use slopos_ostd::sync::OnceLock;
 use slopos_utils::{klog_debug, klog_info};
 
 pub use slopos_utils::boot_info::{
@@ -167,11 +167,7 @@ struct SystemInfo {
     rsdp_virt_addr: u64,
     memmap_entry_count: u64,
     cmdline: Option<&'static str>,
-    /// Raw NUL-terminated cmdline pointer published by the bootloader.
-    /// `KernelSync` wraps the raw pointer so the surrounding `SystemInfo`
-    /// auto-derives `Send + Sync`; the cmdline buffer is read-only for
-    /// the kernel's lifetime.
-    cmdline_ptr: KernelSync<*const c_char>,
+    cmdline_ptr: *const c_char,
     flags: SystemFlags,
 }
 
@@ -188,17 +184,24 @@ impl SystemInfo {
             rsdp_virt_addr: 0,
             memmap_entry_count: 0,
             cmdline: None,
-            cmdline_ptr: KernelSync::new(ptr::null()),
+            cmdline_ptr: ptr::null(),
             flags: SystemFlags::new(),
         }
     }
 }
 
-// `SystemInfo` auto-derives `Send + Sync`: the two previously-
-// problematic raw-pointer fields (`cmdline_ptr`,
-// `framebuffer.address`) live behind `KernelSync<T>` wrappers, so
-// the surrounding struct's auto-derived markers cover the contract
-// without a hand-written `unsafe impl`.
+// SAFETY (Inv. 8): every field of `SystemInfo` is plain data with one
+// exception each for Send and Sync. The `cmdline_ptr: *const c_char`
+// points into the bootloader-published kernel cmdline string which
+// Limine maps read-only for the kernel's lifetime; the `framebuffer:
+// Option<BootFramebuffer>` carries a `*mut u8` pointer at a stable
+// device-side MMIO address. Both pointers are read-only or device-side
+// and never aliased mutably from kernel code, so concurrent reads are
+// safe and ownership transfer is meaningful. Retiring this `unsafe
+// impl` would require a wrapper newtype with manual Send/Sync — same
+// `unsafe impl` count, no soundness improvement.
+unsafe impl Sync for SystemInfo {}
+unsafe impl Send for SystemInfo {}
 
 static SYSTEM_INFO: OnceLock<SystemInfo> = OnceLock::new();
 
@@ -260,7 +263,7 @@ fn build_system_info() -> SystemInfo {
         let kernel_file = kf_resp.executable_file();
         let cmdline_str = kernel_file.cmdline();
         if !cmdline_str.is_empty() {
-            info.cmdline_ptr = KernelSync::new(cmdline_str.as_ptr() as *const c_char);
+            info.cmdline_ptr = cmdline_str.as_ptr() as *const c_char;
             info.cmdline = Some(cmdline_str);
             info.flags.kernel_cmdline_available = true;
 
@@ -355,7 +358,7 @@ pub fn get_framebuffer_info(
     if let Some(boot_fb) = info.framebuffer {
         unsafe {
             if !addr.is_null() {
-                *addr = *boot_fb.address as u64;
+                *addr = boot_fb.address as u64;
             }
             if !width.is_null() {
                 *width = boot_fb.info.width;
@@ -409,7 +412,7 @@ pub fn get_kernel_virt_base() -> u64 {
 }
 
 pub fn get_kernel_cmdline() -> *const c_char {
-    *sysinfo().cmdline_ptr
+    sysinfo().cmdline_ptr
 }
 
 pub fn kernel_cmdline_str() -> Option<&'static str> {
@@ -498,14 +501,16 @@ struct LegacyMemmap {
     response: LimineMemmapResponse,
 }
 
-/// Wrapper for the legacy memmap pointer array. The inner array's
-/// pointers self-reference `LEGACY_MEMMAP.entries[i]`, which lives in
-/// a `'static` `SyncUnsafeCell` and is written exactly once (gated by
-/// `LEGACY_MEMMAP_INIT.swap(true, SeqCst)` in `init_legacy_memmap`).
-/// `KernelSync` provides the `Sync` impl for the surrounding cell;
-/// the underlying memory is stable for the kernel's lifetime.
 #[repr(transparent)]
-struct SyncMemmapPtrArray(KernelSync<[*const LimineMemmapEntry; 256]>);
+struct SyncMemmapPtrArray([*const LimineMemmapEntry; 256]);
+// SAFETY (Inv. 8): the inner pointers self-reference `LEGACY_MEMMAP.entries[i]`,
+// which lives in a `'static` `SyncUnsafeCell` and is written exactly once
+// (gated by `LEGACY_MEMMAP_INIT.swap(true, SeqCst)` in `init_legacy_memmap`).
+// The cell never moves and the entries it brackets never move, so the
+// stored pointers stay valid for the kernel's lifetime. Retiring this
+// `unsafe impl` would require flipping the `LimineMemmapResponse`
+// consumer contract from `*const` to `&[…]`, which is a separate scope.
+unsafe impl Sync for SyncMemmapPtrArray {}
 
 static LEGACY_MEMMAP: SyncUnsafeCell<LegacyMemmap> = SyncUnsafeCell::new(LegacyMemmap {
     entries: [LimineMemmapEntry {
@@ -513,11 +518,11 @@ static LEGACY_MEMMAP: SyncUnsafeCell<LegacyMemmap> = SyncUnsafeCell::new(LegacyM
         length: 0,
         typ: 0,
     }; 256],
-    ptrs: SyncMemmapPtrArray(KernelSync::new([ptr::null(); 256])),
+    ptrs: SyncMemmapPtrArray([ptr::null(); 256]),
     response: LimineMemmapResponse {
         revision: 0,
         entry_count: 0,
-        entries: KernelSync::new(ptr::null()),
+        entries: ptr::null(),
     },
 });
 
@@ -555,11 +560,11 @@ fn init_legacy_memmap() {
                 length: entry.length,
                 typ: entry_type_to_u64(entry.type_),
             };
-            (*cell.ptrs.0)[i] = &cell.entries[i];
+            cell.ptrs.0[i] = &cell.entries[i];
         }
 
         cell.response.entry_count = count as u64;
-        cell.response.entries = KernelSync::new(cell.ptrs.0.as_ptr());
+        cell.response.entries = cell.ptrs.0.as_ptr();
     }
 }
 

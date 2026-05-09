@@ -219,6 +219,8 @@ impl Drop for KernelMapping {
 // `KernelMapping` is a plain owned handle — not `Send`/`Sync` implicit
 // would already be fine (no interior-mutable fields), but we spell it
 // out so reviewers don't have to track it down.
+unsafe impl Send for KernelMapping {}
+unsafe impl Sync for KernelMapping {}
 
 /// Legacy `map_page_4kb` + manual free routine kept for tests that need
 /// to verify a mapping is torn down explicitly. Prefer `KernelMapping`
