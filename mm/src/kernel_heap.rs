@@ -917,7 +917,10 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
 /// retained `(i & 0xFF) as u8`-pattern bytes from a kernel test, was
 /// reused as control-flow data, and decoded as a return address.
 pub fn kmalloc(size: usize) -> *mut c_void {
-    let ptr_out = kmalloc_uninit(size);
+    // SAFETY: we immediately scrub the returned region to `size`
+    // bytes below, satisfying `kmalloc_uninit`'s "caller post-
+    // conditions the contents" contract.
+    let ptr_out = unsafe { kmalloc_uninit(size) };
     if ptr_out.is_null() {
         return ptr::null_mut();
     }
@@ -931,7 +934,15 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 /// Same as [`kmalloc`] but does **not** zero the returned memory.
 /// Use only on hot paths where the caller will overwrite the entire
 /// region before any reader observes it.
-pub fn kmalloc_uninit(size: usize) -> *mut c_void {
+///
+/// # Safety
+///
+/// The caller must guarantee that every byte of the returned region
+/// up to `size` is overwritten before any reader observes it. The
+/// region may hold the previous owner's bytes — `(i & 0xFF)`-pattern
+/// data, secrets, or stale function pointers. Misuse is the bug
+/// class behind `0xdfdedddcdbdad9d8`-shape wild RIPs.
+pub unsafe fn kmalloc_uninit(size: usize) -> *mut c_void {
     if size == 0 || size > MAX_ALLOC_SIZE {
         return ptr::null_mut();
     }

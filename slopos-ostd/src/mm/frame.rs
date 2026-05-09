@@ -698,6 +698,57 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
         paddr
     }
 
+    /// Consume the handle, **release** the underlying [`MetaSlot`] to
+    /// `UNUSED` (drops the inline metadata in place, resets refcount
+    /// to zero), and return the raw physical address. The page is
+    /// **not** returned to the buddy allocator — the caller takes
+    /// ownership of the raw `Paddr` and is responsible for freeing
+    /// it via `free_page_frame` or transferring ownership to a
+    /// non-`Frame` consumer.
+    ///
+    /// Bridge for legacy raw-`PhysAddr` call sites that have not yet
+    /// migrated to holding a `Frame<KernelMeta>` directly. The
+    /// allocation goes through the typestate (zero-by-default,
+    /// `unsafe { alloc_uninit }` audit point) but the resulting page
+    /// is handed off as a raw paddr so existing free paths continue
+    /// to work unchanged.
+    ///
+    /// # Safety
+    ///
+    /// After this call, no other `Frame` handle exists for the
+    /// returned `Paddr` and no [`MetaSlot`] reservation tracks it.
+    /// The caller becomes solely responsible for eventual deallocation
+    /// (typically via `slopos_mm::page_alloc::free_page_frame`). A
+    /// missed free leaks the page; a double-free corrupts the buddy
+    /// allocator.
+    pub unsafe fn into_phys_release(self) -> Paddr {
+        let paddr = self.paddr();
+        // SAFETY: `self` is the sole owner of the slot's ref-count
+        // (typestate is move-only on `Frame`). The slot is `TYPED`
+        // for `self`'s lifetime. We:
+        //   1. Drop the inline `M` payload via the vtable's
+        //      `drop_in_place`.
+        //   2. Skip `on_drop` so the page is NOT returned to the
+        //      allocator; the caller takes ownership.
+        //   3. Reset `state` to `UNUSED` and `vtable` to null so a
+        //      future `from_unused` for this paddr succeeds.
+        //   4. Reset `ref_count` to 0 — `from_unused` writes 1 on
+        //      install, so leaving any non-zero residual would
+        //      desync the slot.
+        unsafe {
+            let slot = &*self.ptr;
+            let vt = slot.vtable.load(Ordering::Acquire);
+            let storage = slot.storage.get() as *mut u8;
+            ((*vt).drop_in_place)(storage);
+            slot.vtable.store(core::ptr::null_mut(), Ordering::Release);
+            slot.state.store(META_STATE_UNUSED, Ordering::Release);
+            slot.ref_count.store(0, Ordering::Release);
+        }
+        // Skip Drop entirely — we just hand-released the slot above.
+        core::mem::forget(self);
+        paddr
+    }
+
     /// Read a `T: Pod` at byte offset `offset` inside this frame.
     /// Returns `None` if `offset + size_of::<T>()` would exceed
     /// `PAGE_SIZE_4KB`.

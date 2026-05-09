@@ -57,14 +57,13 @@ pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;
 pub const ALLOC_FLAG_ORDER_MASK: u32 = 0x1F << ALLOC_FLAG_ORDER_SHIFT;
 pub const ALLOC_FLAG_NO_PCP: u32 = 0x80;
-/// Opt out of the default page-zeroing on alloc. Use only on hot
-/// paths where the caller writes the entire page contents before any
-/// reader can observe them; otherwise leave unset and let the
-/// allocator scrub. Wild-jump RIPs of the form `0xdfdedddcdbdad9d8`
-/// are the canonical symptom of forgetting this — they are
-/// `(i & 0xFF) as u8`-pattern bytes from a previous owner that the
-/// kernel's `ret` decoded as a return address.
-pub const ALLOC_FLAG_NO_INIT: u32 = 0x100;
+/// Internal opt-out used only by the `FrameAlloc` shim to convey
+/// `Frame<_, Uninit>` allocation requests to the buddy. New direct
+/// callers MUST go through the typestate path
+/// (`unsafe { Frame::<KernelMeta>::alloc_uninit(opts) }`) which
+/// makes the audit point explicit; the raw flag is not part of the
+/// supported public surface.
+pub(crate) const ALLOC_FLAG_NO_INIT: u32 = 0x100;
 
 const PAGE_FRAME_FREE: u8 = 0x00;
 const PAGE_FRAME_ALLOCATED: u8 = 0x01;
