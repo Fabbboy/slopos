@@ -906,7 +906,32 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
     }
 }
 
+/// Allocate `size` bytes of kernel heap memory, zeroed.
+///
+/// **Pages are zeroed by default.** Mirrors the page allocator's
+/// `ALLOC_FLAG_NO_INIT` opt-out: callers that genuinely will overwrite
+/// the entire region before any reader observes it can use
+/// [`kmalloc_uninit`] for the perf savings, but the default is now
+/// "no stale data leaks." This eliminates the bug class behind
+/// `0xdfdedddcdbdad9d8`-shape wild RIPs — a freed slab chunk that
+/// retained `(i & 0xFF) as u8`-pattern bytes from a kernel test, was
+/// reused as control-flow data, and decoded as a return address.
 pub fn kmalloc(size: usize) -> *mut c_void {
+    let ptr_out = kmalloc_uninit(size);
+    if ptr_out.is_null() {
+        return ptr::null_mut();
+    }
+    // Zero exactly the requested size (rounded to 16-byte slab quantum
+    // upstream). Slab objects' tail padding past `size` is never read
+    // by the caller, so we don't need to scrub the whole rounded chunk.
+    zero_user_buffer(ptr_out as *mut u8, size);
+    ptr_out
+}
+
+/// Same as [`kmalloc`] but does **not** zero the returned memory.
+/// Use only on hot paths where the caller will overwrite the entire
+/// region before any reader observes it.
+pub fn kmalloc_uninit(size: usize) -> *mut c_void {
     if size == 0 || size > MAX_ALLOC_SIZE {
         return ptr::null_mut();
     }
@@ -956,13 +981,10 @@ pub fn kmalloc(size: usize) -> *mut c_void {
     }
 }
 
+/// **Deprecated, kept for source compatibility.** [`kmalloc`] now
+/// zeroes by default; this is just a transparent alias.
 pub fn kzalloc(size: usize) -> *mut c_void {
-    let ptr_out = kmalloc(size);
-    if ptr_out.is_null() {
-        return ptr::null_mut();
-    }
-    zero_user_buffer(ptr_out as *mut u8, size);
-    ptr_out
+    kmalloc(size)
 }
 
 pub fn kfree(ptr_in: *mut c_void) {
