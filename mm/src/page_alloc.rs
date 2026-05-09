@@ -874,6 +874,47 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
     }
 }
 
+/// Typestate-checked multi-page kernel allocation. Routes through
+/// [`slopos_ostd::mm::frame::Frame<KernelMeta, Zeroed>::alloc`] with
+/// `size_pages = count`, releases the leading `MetaSlot` to `UNUSED`,
+/// and returns the raw paddr so legacy `free_page_frame` callers
+/// continue to work unchanged. See [`alloc_kernel_page`].
+pub fn alloc_kernel_pages(count: u32) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
+    if count == 0 {
+        return PhysAddr::NULL;
+    }
+    let opts = FrameAllocOptions {
+        size_pages: count as usize,
+        ..FrameAllocOptions::single()
+    };
+    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
+        // SAFETY: see `alloc_kernel_page`.
+        unsafe { f.into_phys_release() }
+    })
+}
+
+/// Typestate-checked single-page kernel allocation. Routes through
+/// [`slopos_ostd::mm::frame::Frame<KernelMeta, Zeroed>::alloc`] so
+/// the page is guaranteed zeroed (the typestate refuses any other
+/// state without an explicit `unsafe` opt-out) and then releases the
+/// `MetaSlot` to `UNUSED` before returning the raw paddr.
+///
+/// Migration target for legacy `alloc_page_frame(0)` call sites:
+/// the alloc goes through the typestate gate, the resulting `PhysAddr`
+/// stays compatible with today's `free_page_frame` free path. New
+/// code should hold a `Frame<KernelMeta>` directly instead of routing
+/// through this bridge.
+pub fn alloc_kernel_page() -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
+    Frame::<KernelMeta>::alloc(FrameAllocOptions::single()).map_or(PhysAddr::NULL, |f| {
+        // SAFETY: we immediately surrender the typed Frame to the
+        // legacy raw-paddr free path; the caller of this wrapper
+        // owns the dealloc obligation via `free_page_frame`.
+        unsafe { f.into_phys_release() }
+    })
+}
+
 pub fn alloc_page_frame(flags: u32) -> PhysAddr {
     let phys = alloc_page_frames(1, flags);
     // LUF reuse-drain hook: if the frame we're about to hand out is

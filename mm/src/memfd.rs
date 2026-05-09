@@ -19,7 +19,7 @@ use slopos_abi::pixel::PixelFormat;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::klog_debug;
 
-use crate::page_alloc::{alloc_page_frames, free_page_frame};
+use crate::page_alloc::{alloc_kernel_pages, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;
 
 // ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
     let aligned_size = (size + PAGE_SIZE_4KB as usize - 1) & !(PAGE_SIZE_4KB as usize - 1);
     let page_count = (aligned_size / PAGE_SIZE_4KB as usize) as u32;
 
-    let phys = alloc_page_frames(page_count, 0);
+    let phys = alloc_kernel_pages(page_count);
     if phys.is_null() {
         return -12; // ENOMEM
     }

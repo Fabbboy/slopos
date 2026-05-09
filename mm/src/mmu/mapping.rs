@@ -26,7 +26,7 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use crate::page_alloc::{alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
@@ -89,7 +89,7 @@ impl KernelMapping {
 
         for i in 0..page_count {
             let page_virt = VirtAddr::new(virt_base.as_u64() + i as u64 * PAGE_SIZE_4KB);
-            let phys = alloc_page_frame(0);
+            let phys = alloc_kernel_page();
             if phys.is_null() {
                 // Rollback already-mapped prefix so we don't leak.
                 for j in 0..i {

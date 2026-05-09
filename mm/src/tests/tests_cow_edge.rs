@@ -6,7 +6,7 @@ use crate::cow::is_cow_fault;
 use crate::dual_paging::ostd_map_4kb_user;
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
-use crate::page_alloc::{alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{process_vm_clone_cow, process_vm_with_dual_paging};
 use crate::tests::test_fixtures::ProcessVmGuard;
@@ -295,8 +295,8 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
     let addr1: u64 = 0x7000;
     let addr2: u64 = 0x8000;
 
-    let phys1 = alloc_page_frame(0);
-    let phys2 = alloc_page_frame(0);
+    let phys1 = alloc_kernel_page();
+    let phys2 = alloc_kernel_page();
 
     if phys1.is_null() || phys2.is_null() {
         if !phys1.is_null() {

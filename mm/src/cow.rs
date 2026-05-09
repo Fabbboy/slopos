@@ -9,7 +9,7 @@ use crate::dual_paging::{
 };
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
-use crate::page_alloc::{alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 
@@ -72,7 +72,7 @@ fn resolve_multi_ref(
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
 ) -> Result<(), MmError> {
-    let new_phys = alloc_page_frame(0);
+    let new_phys = alloc_kernel_page();
     if new_phys.is_null() {
         return Err(MmError::NoMemory);
     }

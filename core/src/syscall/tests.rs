@@ -175,7 +175,7 @@ fn map_user_rw_page(pid: u32) -> Option<u64> {
         return None;
     }
 
-    let phys: PhysAddr = alloc_page_frame(0);
+    let phys: PhysAddr = alloc_kernel_page();
     if phys.is_null() {
         return None;
     }
@@ -1122,7 +1122,9 @@ pub fn test_fork_memory_pressure() -> TestResult {
     }
 
     use slopos_abi::addr::PhysAddr;
-    use slopos_mm::page_alloc::{ALLOC_FLAG_NO_PCP, alloc_page_frame, free_page_frame};
+    use slopos_mm::page_alloc::{
+        ALLOC_FLAG_NO_PCP, alloc_kernel_page, alloc_page_frame, free_page_frame,
+    };
 
     let mut stress_pages: [PhysAddr; 128] = [PhysAddr::NULL; 128];
     let mut stress_count = 0usize;

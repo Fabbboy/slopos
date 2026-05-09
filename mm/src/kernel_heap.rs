@@ -8,7 +8,7 @@ use slopos_ostd::sync::{ByteChain, LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
 use slopos_utils::{align_down_u64, align_up_usize, klog_debug, klog_info};
 
 use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
-use crate::page_alloc::{alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
@@ -484,7 +484,7 @@ fn map_heap_pages(heap: &mut KernelHeap, pages: u32) -> Option<u64> {
     let mut mapped_pages = 0u32;
 
     for i in 0..pages {
-        let phys_page = alloc_page_frame(0);
+        let phys_page = alloc_kernel_page();
         if phys_page.is_null() {
             rollback_mapping(start, mapped_pages);
             return None;

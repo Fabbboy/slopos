@@ -18,7 +18,7 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PROCESS_TLS_BASE_VA};
-use crate::page_alloc::{alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging::{PageTable, ProcessPageDir};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
@@ -146,7 +146,7 @@ fn map_user_range(
     let mut mapped: u32 = 0;
 
     while current < end_addr {
-        let phys = alloc_page_frame(0);
+        let phys = alloc_kernel_page();
         if phys.is_null() {
             klog_info!("map_user_range: Physical allocation failed");
             rollback_range(vm_space, current, start_addr, &mut mapped);
@@ -902,7 +902,7 @@ fn apply_elf_relocations(
             // the user-VA's leading page to a kernel-mode HHDM virt,
             // then `read_unaligned`/`write_unaligned` at the page
             // offset. ELF segments are written into the user VM by
-            // `load_segment_pages`, which calls `alloc_page_frame(0)`
+            // `load_segment_pages`, which calls `alloc_kernel_page()`
             // sequentially and gets back contiguous physical frames
             // straight out of the buddy's freshly-split high-order
             // block — so an unaligned read/write that straddles a
@@ -1477,7 +1477,7 @@ fn load_segment_pages(
             }
             existing_phys
         } else {
-            let new_phys = alloc_page_frame(0);
+            let new_phys = alloc_kernel_page();
             if new_phys.is_null() {
                 return Err(ElfError::NullPointer);
             }
@@ -1574,7 +1574,7 @@ pub fn create_process_vm() -> u32 {
     };
 
     // Phase 2: allocate physical resources (no locks held).
-    let pml4_phys = alloc_page_frame(0);
+    let pml4_phys = alloc_kernel_page();
     if pml4_phys.is_null() {
         klog_info!("create_process_vm: Failed to allocate PML4");
         VM_SLOT_ALLOC.lock().num_processes -= 1;
@@ -2735,7 +2735,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     };
 
     // Phase 2: allocate physical resources (no locks held).
-    let pml4_phys = alloc_page_frame(0);
+    let pml4_phys = alloc_kernel_page();
     if pml4_phys.is_null() {
         klog_info!("process_vm_clone_cow: Failed to allocate PML4");
         VM_SLOT_ALLOC.lock().num_processes -= 1;
