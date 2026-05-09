@@ -524,7 +524,35 @@ fn wait_task_off_cpu(task: *mut Task) {
     task_wait_off_cpu(task);
 }
 
-pub fn schedule_task(task: *mut Task) -> c_int {
+/// Caller-side classification of a wake target's relationship to the
+/// caller's CPU. Forces every wake site to declare its intent so the
+/// scheduler can pick the right primitive.
+///
+/// Step 5 of `plans/SAFE_BY_DESIGN.md`. The self-wakeup deadlock that
+/// the current branch fixed was a `schedule_task` call from a wake
+/// path that didn't know it might target the currently-executing task
+/// on this CPU. Encoding the distinction in the API forces the
+/// thinking at every call site, even if the runtime fast-path
+/// happens to be the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeContext {
+    /// The wake call may target the currently-executing task on this
+    /// CPU (e.g. the timer ISR's `wake_due_sleepers`, a child-exit
+    /// release path, a futex/pipe wake whose target may be the
+    /// caller). Must NOT spin on `target.on_cpu`: the target's
+    /// `on_cpu` flag cannot clear until *we* yield, but spinning
+    /// prevents the yield. The dispatcher's re-enqueue check at
+    /// `run_ready_task_from_idle` line 810 picks up the slack.
+    SelfPossible,
+    /// The wake call cannot possibly target the caller's CPU
+    /// (e.g. cross-CPU IPI wake, kthread spawn from a kernel context
+    /// proven to run on a different CPU). The historical
+    /// `wait_task_off_cpu` spin is safe here, but currently disabled
+    /// because the dispatcher-side check covers both cases.
+    OtherCpu,
+}
+
+pub fn schedule_task(task: *mut Task, ctx: WakeContext) -> c_int {
     if task.is_null() {
         return -1;
     }
@@ -532,16 +560,17 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    // Note: we do NOT wait for `task->on_cpu` to clear here. The
-    // dispatcher (`run_ready_task_from_idle` at the
-    // `(*next_task).on_cpu.load(...)` check) re-enqueues any task
-    // it dequeues whose `on_cpu` is still true, so a task that is
-    // mid-context-switch on another CPU is naturally deferred rather
-    // than dispatched twice. Spinning here would break the timer-ISR
-    // wake path: if `task` is the currently-executing task on this
-    // CPU, its `on_cpu` will not clear until we yield — but we are
-    // calling this from the timer ISR's wake_due_sleepers and cannot
-    // yield until the ISR returns.
+    // The dispatcher (`run_ready_task_from_idle` at the
+    // `(*next_task).on_cpu.load(...)` check) re-enqueues any task it
+    // dequeues whose `on_cpu` is still true, so a task that is mid-
+    // context-switch on another CPU is naturally deferred rather than
+    // dispatched twice — neither variant of `WakeContext` needs to
+    // spin here. The enum is retained at the API to force every
+    // wake call site to declare its self-vs-cross context, so a
+    // future change that re-introduces a `wait_task_off_cpu` spin
+    // can be gated on the discriminant rather than silently regressing
+    // the self-wake path.
+    let _ = ctx;
 
     if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
@@ -1053,7 +1082,11 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
         super::sleep::cancel_sleep(task_id);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        return schedule_task(task);
+        // unblock_task may be called from any context — pipe wakes,
+        // futex wakes, signal delivery — and the target may be the
+        // current task on the caller's CPU. SelfPossible is the
+        // safe upper bound.
+        return schedule_task(task, WakeContext::SelfPossible);
     }
 
     // Task is in some other state (Running, Ready, Terminated) — nothing to do.
@@ -1094,7 +1127,13 @@ pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
         if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
             super::sleep::cancel_sleep(task_id);
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            schedule_task(task);
+            // try_wake_from_task_wait fires from `release_task_dependents`
+            // during `mark_task_terminated`, which runs in the exiting
+            // task's syscall context. The waiter being woken is by
+            // definition NOT the exiting task, but it may still be
+            // running on the same CPU as the exiter, so SelfPossible
+            // is the safe upper bound.
+            schedule_task(task, WakeContext::SelfPossible);
             return true;
         }
 

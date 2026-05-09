@@ -210,7 +210,10 @@ fn wake_sleeping_task(task_id: u32) {
     }
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    let _ = schedule_task(task);
+    // Self-wake possible: this fires from the timer ISR's
+    // `wake_due_sleepers`, which can target the currently-executing
+    // task on this CPU.
+    let _ = schedule_task(task, super::scheduler::WakeContext::SelfPossible);
 }
 
 /// Wake every sleeper whose deadline has passed.
