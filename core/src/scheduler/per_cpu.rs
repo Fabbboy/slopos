@@ -171,7 +171,10 @@ pub struct PerCpuScheduler {
 // SAFETY: cross-CPU access to mutable fields is mediated by
 // `queue_lock` (ready queues + remote_inbox lock-free CAS protocol)
 // and the `enabled / initialized` atomics; per-CPU init writes
-// `return_context` once in single-threaded boot stage.
+// `return_context` once in single-threaded boot stage. `Task` carries
+// `*mut c_void` / `*mut UserContext` fields that block auto-derive;
+// retiring this `unsafe impl` requires moving `Task` itself behind
+// `KernelSync`-wrapped fields (separate planning track).
 unsafe impl Send for PerCpuScheduler {}
 unsafe impl Sync for PerCpuScheduler {}
 

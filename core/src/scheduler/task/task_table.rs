@@ -82,7 +82,9 @@ struct ZombieList {
 // itself is `Send + Sync` only when `Task: Send`, and Task is *not*
 // auto-Send (raw pointers). The actual cross-CPU access is mediated
 // by `ZOMBIE_LIST.lock()` (a SpinLock); these markers assert that
-// the lock provides the required serialisation.
+// the lock provides the required serialisation. Retiring the markers
+// requires `Task`'s raw-pointer fields being moved behind
+// `KernelSync<T>` (separate planning track).
 unsafe impl Send for ZombieList {}
 unsafe impl Sync for ZombieList {}
 
@@ -274,8 +276,11 @@ pub(super) struct TaskManagerInner {
 
 // SAFETY: TaskManagerInner contains Tasks (boxed) with raw pointers.
 // Cross-CPU access is serialised through the SpinLock, with the
-// documented lock-free read exceptions below.
+// documented lock-free read exceptions below. Retiring this `unsafe
+// impl` requires `Task`'s raw-pointer fields being moved behind
+// `KernelSync<T>` (separate planning track).
 unsafe impl Send for TaskManagerInner {}
+unsafe impl Sync for TaskManagerInner {}
 
 impl TaskManagerInner {
     const fn new() -> Self {

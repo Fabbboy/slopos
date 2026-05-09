@@ -46,8 +46,11 @@ impl FutexWaiter {
     }
 }
 
-// SAFETY: FutexWaiter contains raw pointers managed by the scheduler.
-// Access is synchronized through per-bucket SpinLock locks.
+// SAFETY: `FutexWaiter` contains a `*mut Task` whose ownership is
+// managed by the scheduler; per-bucket `SpinLock` serialises every
+// access. Retiring this `unsafe impl` requires `Task` itself to be
+// `Send`, which depends on `Task`'s raw-pointer fields being moved
+// behind `KernelSync<T>` (separate planning track).
 unsafe impl Send for FutexWaiter {}
 
 struct FutexBucket {

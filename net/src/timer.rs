@@ -198,8 +198,6 @@ pub struct NetTimerWheel {
 
 // SAFETY: All mutable state is behind SpinLock (ticket lock with IRQ disable)
 // or AtomicU64.  No unsynchronized shared mutation.
-unsafe impl Send for NetTimerWheel {}
-unsafe impl Sync for NetTimerWheel {}
 
 impl NetTimerWheel {
     /// Create a new, empty timer wheel with `current_tick = 0`.

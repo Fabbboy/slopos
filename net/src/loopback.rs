@@ -44,8 +44,6 @@ pub struct LoopbackDev {
 }
 
 // SAFETY: All mutable state is behind SpinLock.
-unsafe impl Send for LoopbackDev {}
-unsafe impl Sync for LoopbackDev {}
 
 impl LoopbackDev {
     /// Create a new loopback device with an empty queue.

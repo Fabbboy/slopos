@@ -254,8 +254,6 @@ pub struct DeviceHandle {
 // managed by the registry.  TX is serialized by `tx_lock`; RX is
 // single-consumer (NAPI loop).  Read-only accessors (mac, mtu, stats,
 // features) are inherently safe via the `Sync` bound on `NetDevice`.
-unsafe impl Send for DeviceHandle {}
-unsafe impl Sync for DeviceHandle {}
 
 impl DeviceHandle {
     /// Transmit a packet through this device.
@@ -359,8 +357,6 @@ pub(crate) struct RegistryInner {
 }
 
 // SAFETY: All access is serialized through the `SpinLock`.
-unsafe impl Send for NetDeviceRegistry {}
-unsafe impl Sync for NetDeviceRegistry {}
 
 /// The global network device registry.
 ///

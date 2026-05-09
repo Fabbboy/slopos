@@ -1077,9 +1077,7 @@ pub fn scheduler_task_exit_impl() -> ! {
         klog_info!("scheduler_task_exit: No current task on CPU {}", cpu_id);
         // No current task - just schedule, which will switch to idle
         schedule();
-        loop {
-            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
-        }
+        slopos_ostd::cpu::x86_64::core::halt_loop();
     }
 
     let timestamp = kdiag_timestamp();
@@ -1099,9 +1097,7 @@ pub fn scheduler_task_exit_impl() -> ! {
         "scheduler_task_exit: Schedule returned unexpectedly on CPU {}",
         cpu_id
     );
-    loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
-    }
+    slopos_ostd::cpu::x86_64::core::halt_loop();
 }
 
 // OSTD task-exit hook.  Wraps `scheduler_task_exit_impl()` to expose
