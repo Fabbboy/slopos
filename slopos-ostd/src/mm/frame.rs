@@ -316,17 +316,60 @@ pub(crate) fn meta_slot_for(paddr: Paddr) -> Option<&'static MetaSlot> {
 /// new `Frame<M>` for the same physical page). Dropping the last
 /// `Frame<M>` runs `M::on_drop`, drops the inline `M`, and returns
 /// the underlying physical frame to the registered allocator.
-pub struct Frame<M: AnyFrameMeta> {
+pub struct Frame<M: AnyFrameMeta, S: init_state::InitState = init_state::Zeroed> {
     ptr: *const MetaSlot,
-    _marker: PhantomData<M>,
+    _marker: PhantomData<(M, S)>,
 }
 
-// SAFETY: `Frame<M>` is a thin wrapper over a pointer into the static
-// `META_SLOTS` array; sharing/sending across threads is sound because
-// `M: Send + Sync` (transitively required by `AnyFrameMeta`) and
-// ref-count manipulation is atomic.
-unsafe impl<M: AnyFrameMeta> Send for Frame<M> {}
-unsafe impl<M: AnyFrameMeta> Sync for Frame<M> {}
+// SAFETY: `Frame<M, S>` is a thin wrapper over a pointer into the
+// static `META_SLOTS` array; sharing/sending across threads is sound
+// because `M: Send + Sync` (transitively required by `AnyFrameMeta`)
+// and ref-count manipulation is atomic. `S` is a zero-size phantom
+// state and contributes no runtime data.
+unsafe impl<M: AnyFrameMeta, S: init_state::InitState> Send for Frame<M, S> {}
+unsafe impl<M: AnyFrameMeta, S: init_state::InitState> Sync for Frame<M, S> {}
+
+/// Typed initialisation-state markers for [`Frame<M, S>`].
+///
+/// The two states encode whether the kernel has proven the frame's
+/// 4 KiB region currently reads as all-zero:
+///
+/// - [`Zeroed`] — every byte was either freshly allocated through a
+///   zero-on-alloc path or scrubbed via [`Frame::scrub`]. Safe to use
+///   anywhere. The default state for [`Frame::alloc`] etc.
+/// - [`Uninit`] — the frame was acquired through an explicit
+///   `unsafe { ... }` opt-out path and may still hold the previous
+///   owner's bytes. Cannot be passed to APIs that require zeroed
+///   memory (kernel stacks, page tables, task slots) until promoted
+///   via [`Frame::scrub`] or [`Frame::assume_zeroed`].
+///
+/// Bug history motivating the typestate: a kernel test wrote
+/// `(i & 0xFF) as u8` at offset `i` to a page, freed it without
+/// scrubbing; the buddy returned the dirty page; a subsequent `ret`
+/// decoded `0xd8..0xdf` at offsets `0xd8..0xdf` as a return address;
+/// the CPU jumped to `0xdfdedddcdbdad9d8`. With the typestate,
+/// constructing a `Frame<_, Zeroed>` from a non-zero region requires
+/// `unsafe { Frame::assume_zeroed }` — an explicit audit point.
+pub mod init_state {
+    /// The frame's 4 KiB region currently reads as all-zero.
+    #[derive(Debug)]
+    pub enum Zeroed {}
+    /// The frame may hold the previous owner's bytes.
+    #[derive(Debug)]
+    pub enum Uninit {}
+
+    /// Sealed marker trait — only [`Zeroed`] and [`Uninit`] are
+    /// allowed as the `S` type parameter on [`super::Frame`].
+    pub trait InitState: sealed::Sealed + 'static {}
+    impl InitState for Zeroed {}
+    impl InitState for Uninit {}
+
+    mod sealed {
+        pub trait Sealed {}
+        impl Sealed for super::Zeroed {}
+        impl Sealed for super::Uninit {}
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -339,7 +382,7 @@ pub enum FrameError {
     StateMismatch,
 }
 
-impl<M: AnyFrameMeta> Frame<M> {
+impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// Wrap a freshly-allocated, currently-unused physical frame and
     /// install `meta` into its slot.
     ///
@@ -433,7 +476,7 @@ pub fn reference_count_at(paddr: Paddr) -> u32 {
     slot.ref_count.load(Ordering::Acquire)
 }
 
-impl<M: AnyFrameMeta> Frame<M> {
+impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     pub fn borrow(&self) -> &M {
         // SAFETY: the slot is `TYPED` for the lifetime of `self`
         // (ref_count ≥ 1 guarantees no Drop has fired); `storage`
@@ -509,12 +552,17 @@ impl<M: AnyFrameMeta> Frame<M> {
 /// page handle. Centralises HHDM translation and allocator round-trip
 /// here so non-OSTD callers get a fully safe API and the residual
 /// unsafe stays in OSTD.
-impl Frame<KernelMeta> {
-    /// Allocate a single kernel page through the registered
-    /// [`FrameAlloc`] and wrap it. Returns `None` if no allocator is
-    /// registered or the allocator returns nothing.
+impl Frame<KernelMeta, init_state::Zeroed> {
+    /// Allocate a single kernel page, zeroed. The default — and the
+    /// only safe path. The page allocator's `init_on_alloc=1`-style
+    /// zero-by-default contract guarantees the returned region reads
+    /// as all-zero, matching the [`init_state::Zeroed`] state tag.
     pub fn alloc(opts: FrameAllocOptions) -> Option<Self> {
         let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
+        // Always request zeroing, regardless of `opts.zeroing`. The
+        // type tag is the source of truth; runtime opts cannot weaken
+        // the contract.
+        let opts = opts.zeroed();
         let paddr = alloc.alloc(opts)?;
         match Self::from_unused(paddr, KernelMeta) {
             Ok(frame) => Some(frame),
@@ -527,9 +575,93 @@ impl Frame<KernelMeta> {
 
     /// Convenience: zeroed single-page allocation.
     pub fn alloc_zeroed() -> Option<Self> {
-        Self::alloc(FrameAllocOptions::single().zeroed())
+        Self::alloc(FrameAllocOptions::single())
+    }
+}
+
+impl Frame<KernelMeta, init_state::Uninit> {
+    /// Hot-path opt-out: allocate a page **without** scrubbing.
+    ///
+    /// Returns a [`Frame<KernelMeta, Uninit>`]; the caller cannot pass
+    /// it anywhere that expects [`init_state::Zeroed`] until promoting
+    /// it via [`Frame::scrub`] (writes 4 KiB of zeros) or
+    /// [`Frame::assume_zeroed`] (caller-asserts the bytes are
+    /// already zero, e.g. for fresh BSS-mapped pages).
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that they will overwrite the entire
+    /// 4 KiB region before any reader observes it, *or* that the
+    /// allocator gave them a page whose contents are sourced from a
+    /// trusted producer. Wild-jump RIPs of the form
+    /// `0xdfdedddcdbdad9d8` are the canonical symptom of getting this
+    /// wrong — they are `(i & 0xFF) as u8`-pattern bytes from a
+    /// previous owner that the kernel's `ret` decoded as a return
+    /// address.
+    pub unsafe fn alloc_uninit(opts: FrameAllocOptions) -> Option<Self> {
+        let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
+        // Explicitly disable zeroing — caller has accepted the
+        // burden of post-conditioning the page contents.
+        let opts = FrameAllocOptions {
+            zeroing: false,
+            ..opts
+        };
+        let paddr = alloc.alloc(opts)?;
+        match Self::from_unused(paddr, KernelMeta) {
+            Ok(frame) => Some(frame),
+            Err(_) => {
+                alloc.dealloc(paddr, opts.size_pages.max(1));
+                None
+            }
+        }
+    }
+}
+
+impl<M: AnyFrameMeta> Frame<M, init_state::Uninit> {
+    /// Scrub the frame's 4 KiB region and promote the typestate
+    /// to [`init_state::Zeroed`]. Always-safe; performs the actual
+    /// memset.
+    pub fn scrub(self) -> Frame<M, init_state::Zeroed> {
+        // SAFETY: HHDM mapping covers every alloc-able physical
+        // frame; the caller-visible `self` proves we have exclusive
+        // access (Frame is move-only on the typestate axis).
+        unsafe {
+            let virt = crate::mm::phys::phys_to_virt(self.paddr());
+            core::ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE);
+        }
+        // SAFETY: bytes are now all-zero, satisfying the
+        // `Zeroed` invariant.
+        unsafe { self.assume_zeroed() }
     }
 
+    /// Assert that the frame's contents are already all-zero and
+    /// promote the typestate without performing a memset.
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee that every byte of the 4 KiB region
+    /// reads as zero. Misuse re-introduces the
+    /// `0xdfdedddcdbdad9d8`-class bug the typestate exists to
+    /// prevent.
+    pub unsafe fn assume_zeroed(self) -> Frame<M, init_state::Zeroed> {
+        let ptr = self.ptr;
+        // Bypass Drop on `self` by leaking its handle into the new
+        // typestate-tagged value; the underlying refcount is
+        // unchanged.
+        core::mem::forget(self);
+        Frame {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+// State-agnostic methods on `Frame<KernelMeta, S>`. The KernelMeta
+// API surface (HHDM-backed reads/writes, raw conversions) doesn't
+// care whether the frame's bytes are zero or not — only allocation
+// and the [`Frame::scrub`]/[`Frame::assume_zeroed`] state-promotion
+// helpers do.
+impl<S: init_state::InitState> Frame<KernelMeta, S> {
     /// Physical address as a raw `u64`.
     #[inline]
     pub fn phys_u64(&self) -> u64 {
@@ -697,7 +829,7 @@ impl Frame<KernelMeta> {
     }
 }
 
-impl<M: AnyFrameMeta> Drop for Frame<M> {
+impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
     fn drop(&mut self) {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as
         // `ref_count > 0`, which is true while this `Frame` is alive.
