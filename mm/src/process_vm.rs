@@ -18,7 +18,7 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PROCESS_TLS_BASE_VA};
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{PageTable, ProcessPageDir};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
@@ -146,7 +146,7 @@ fn map_user_range(
     let mut mapped: u32 = 0;
 
     while current < end_addr {
-        let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+        let phys = alloc_page_frame(0);
         if phys.is_null() {
             klog_info!("map_user_range: Physical allocation failed");
             rollback_range(vm_space, current, start_addr, &mut mapped);
@@ -1477,7 +1477,7 @@ fn load_segment_pages(
             }
             existing_phys
         } else {
-            let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+            let new_phys = alloc_page_frame(0);
             if new_phys.is_null() {
                 return Err(ElfError::NullPointer);
             }
@@ -2735,7 +2735,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     };
 
     // Phase 2: allocate physical resources (no locks held).
-    let pml4_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let pml4_phys = alloc_page_frame(0);
     if pml4_phys.is_null() {
         klog_info!("process_vm_clone_cow: Failed to allocate PML4");
         VM_SLOT_ALLOC.lock().num_processes -= 1;

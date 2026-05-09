@@ -4,7 +4,7 @@ use crate::cow::handle_cow_fault;
 use crate::demand::handle_demand_fault;
 use crate::dual_paging::{ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb};
 use crate::error::MmError;
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging_defs::PageFlags;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_clone_cow,
@@ -62,7 +62,7 @@ impl ProcessVmGuard {
     /// VmSpace. Returns the physical address that backs the new
     /// mapping, or `None` on allocation / cursor failure.
     pub fn map_test_page(&self, vaddr: u64, flags: u64) -> Option<PhysAddr> {
-        let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+        let phys = alloc_page_frame(0);
         if phys.is_null() {
             return None;
         }

@@ -30,7 +30,7 @@ use slopos_abi::syscall::{
     SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
+use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
@@ -175,7 +175,7 @@ fn map_user_rw_page(pid: u32) -> Option<u64> {
         return None;
     }
 
-    let phys: PhysAddr = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys: PhysAddr = alloc_page_frame(0);
     if phys.is_null() {
         return None;
     }

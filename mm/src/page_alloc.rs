@@ -52,11 +52,6 @@ use crate::memory_reservations::{
 };
 use crate::paging_defs::PAGE_SIZE_4KB;
 
-/// **Deprecated, kept for source compatibility.** Pages are zeroed by
-/// default; passing this flag is a redundant no-op. Callers that
-/// explicitly want uninitialised pages must opt out via
-/// [`ALLOC_FLAG_NO_INIT`].
-pub const ALLOC_FLAG_ZERO: u32 = 0x01;
 pub const ALLOC_FLAG_DMA: u32 = 0x02;
 pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;

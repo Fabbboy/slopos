@@ -9,7 +9,7 @@ use slopos_ostd::mm::vm_space::VmSpace;
 
 use crate::dual_paging::{ostd_map_4kb_user, ostd_virt_to_phys_4kb};
 use crate::error::MmError;
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
@@ -70,7 +70,7 @@ pub fn handle_demand_fault(
         return Ok(());
     }
 
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_page_frame(0);
     if phys.is_null() {
         return Err(MmError::NoMemory);
     }

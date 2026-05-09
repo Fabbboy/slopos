@@ -9,8 +9,8 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::memory_init::get_memory_statistics;
 use crate::page_alloc::{
-    ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames,
-    free_page_frame, get_page_allocator_stats,
+    ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP, alloc_page_frame, alloc_page_frames, free_page_frame,
+    get_page_allocator_stats,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
@@ -288,7 +288,7 @@ pub fn test_zero_flag_under_pressure() -> TestResult {
     let mut count = 0usize;
 
     for _ in 0..32 {
-        let phys = alloc_page_frame(ALLOC_FLAG_ZERO | ALLOC_FLAG_NO_PCP);
+        let phys = alloc_page_frame(ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
             break;
         }

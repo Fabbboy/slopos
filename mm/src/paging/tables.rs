@@ -23,7 +23,7 @@ use slopos_utils::{klog_debug, klog_info};
 use super::walker::PageTableWalker;
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free};
+use crate::page_alloc::{alloc_page_frame, free_page_frame, page_frame_can_free};
 use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 
 use crate::tlb;
@@ -93,7 +93,7 @@ fn table_empty(table: &PageTable) -> bool {
 }
 
 fn alloc_page_table() -> Option<(PhysAddr, *mut PageTable)> {
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_page_frame(0);
     if phys.is_null() {
         return None;
     }
