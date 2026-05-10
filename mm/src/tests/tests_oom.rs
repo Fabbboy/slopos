@@ -9,12 +9,12 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::memory_init::get_memory_statistics;
 use crate::page_alloc::{
-    alloc_kernel_page_with, alloc_kernel_pages_with, free_page_frame, get_page_allocator_stats,
+    __alloc_page_frame_raw, __alloc_page_frames_raw, ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP,
+    free_page_frame, get_page_allocator_stats,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_ostd::mm::frame::FrameAllocOptions;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
     let mut total = 0u32;
@@ -31,7 +31,7 @@ pub fn test_page_alloc_until_oom() -> TestResult {
 
     let max_alloc = (free_before as usize).min(512);
     for i in 0..max_alloc {
-        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+        let phys = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
             klog_info!("OOM_TEST: OOM after {} allocations (expected)", i);
             break;
@@ -68,7 +68,7 @@ pub fn test_page_alloc_fragmentation_oom() -> TestResult {
 
     let mut pages: [PhysAddr; 16] = [PhysAddr::NULL; 16];
     for i in 0..16 {
-        pages[i] = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+        pages[i] = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
         if pages[i].is_null() {
             for j in 0..i {
                 free_page_frame(pages[j]);
@@ -82,7 +82,7 @@ pub fn test_page_alloc_fragmentation_oom() -> TestResult {
         pages[i] = PhysAddr::NULL;
     }
 
-    let large = alloc_kernel_pages_with(16, FrameAllocOptions::single().with_no_pcp());
+    let large = __alloc_page_frames_raw(16, ALLOC_FLAG_NO_PCP);
 
     if !large.is_null() {
         free_page_frame(large);
@@ -101,7 +101,7 @@ pub fn test_dma_allocation_exhaustion() -> TestResult {
     let mut count = 0usize;
 
     for _ in 0..64 {
-        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp().with_dma());
+        let phys = __alloc_page_frame_raw(ALLOC_FLAG_DMA | ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
             break;
         }
@@ -259,7 +259,7 @@ pub fn test_heap_expansion_under_pressure() -> TestResult {
     let mut page_count = 0usize;
 
     for _ in 0..64 {
-        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+        let phys = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
             break;
         }
@@ -288,7 +288,7 @@ pub fn test_zero_flag_under_pressure() -> TestResult {
     let mut count = 0usize;
 
     for _ in 0..32 {
-        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+        let phys = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
             break;
         }
@@ -372,7 +372,7 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
         let mut allocated = 0usize;
 
         for i in 0..PAGES_PER_CYCLE {
-            pages[i] = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+            pages[i] = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
             if pages[i].is_null() {
                 for j in 0..i {
                     free_page_frame(pages[j]);
@@ -401,7 +401,7 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
 pub fn test_multiorder_alloc_failure() -> TestResult {
     for order in 0..10u32 {
         let count = 1u32 << order;
-        let phys = alloc_kernel_pages_with(count, FrameAllocOptions::single().with_no_pcp());
+        let phys = __alloc_page_frames_raw(count, ALLOC_FLAG_NO_PCP);
 
         if phys.is_null() {
             klog_info!(
@@ -451,7 +451,7 @@ pub fn test_process_heap_expansion_oom() -> TestResult {
 pub fn test_refcount_during_oom() -> TestResult {
     use crate::page_alloc::{page_frame_get_ref, page_frame_inc_ref};
 
-    let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+    let phys = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
     if phys.is_null() {
         return pass!();
     }

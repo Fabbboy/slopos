@@ -57,6 +57,14 @@ pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;
 pub const ALLOC_FLAG_ORDER_MASK: u32 = 0x1F << ALLOC_FLAG_ORDER_SHIFT;
 pub const ALLOC_FLAG_NO_PCP: u32 = 0x80;
+/// Internal opt-out used only by the `FrameAlloc` shim to convey
+/// `Frame<_, Uninit>` allocation requests to the buddy. New direct
+/// callers MUST go through the typestate path
+/// (`unsafe { Frame::<KernelMeta>::alloc_uninit(opts) }`) which
+/// makes the audit point explicit; the raw flag is not part of the
+/// supported public surface.
+pub(crate) const ALLOC_FLAG_NO_INIT: u32 = 0x100;
+
 const PAGE_FRAME_FREE: u8 = 0x00;
 const PAGE_FRAME_ALLOCATED: u8 = 0x01;
 const PAGE_FRAME_RESERVED: u8 = 0x02;
@@ -841,15 +849,16 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
             alloc.frame_to_phys(frame_num)
         };
 
-        // Always zero. The bug class behind `0xdfdedddcdbdad9d8`-shape
-        // wild RIPs was a freed page that kept its `(i & 0xFF) as u8`
-        // test pattern, was reused as kernel/user stack-or-control
-        // memory, and a subsequent `ret` decoded those bytes as a
-        // function address. The buddy unconditionally scrubs; the
-        // typestate `Frame<_, Uninit>` is a type-level audit point
-        // (caller still has to scrub before promoting to `Zeroed`)
-        // but no longer represents a runtime perf escape.
-        {
+        // Zero by default. Callers that explicitly know the entire
+        // page contents will be overwritten before any reader observes
+        // them can opt out via `ALLOC_FLAG_NO_INIT`. Forgetting to opt
+        // *in* here was the bug class behind `0xdfdedddcdbdad9d8`-shape
+        // wild RIPs: a freed page kept its `(i & 0xFF) as u8` test
+        // pattern, was reused as kernel/user stack-or-control memory,
+        // and a subsequent `ret` decoded those bytes as a function
+        // address. Make scrub the default and force the unsafe path
+        // to be explicit.
+        if flags & ALLOC_FLAG_NO_INIT == 0 {
             let span_pages = if use_pcp {
                 1
             } else {
@@ -879,40 +888,6 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
 
         return phys_addr;
     }
-}
-
-/// Typestate-checked single-page kernel allocation with caller-supplied
-/// [`FrameAllocOptions`]. Lets the caller toggle policy bits
-/// (`no_pcp`, `dma`) without dropping back to the raw `__*_raw` API.
-/// Returns the raw `PhysAddr` for handoff to legacy free paths;
-/// internals match [`alloc_kernel_page`].
-pub fn alloc_kernel_page_with(opts: slopos_ostd::mm::frame::FrameAllocOptions) -> PhysAddr {
-    use slopos_ostd::mm::frame::{Frame, KernelMeta};
-    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
-        // SAFETY: see `alloc_kernel_page`.
-        unsafe { f.into_phys_release() }
-    })
-}
-
-/// Typestate-checked multi-page kernel allocation with caller-supplied
-/// [`FrameAllocOptions`]. The `count` argument overrides
-/// `opts.size_pages`. See [`alloc_kernel_page_with`].
-pub fn alloc_kernel_pages_with(
-    count: u32,
-    opts: slopos_ostd::mm::frame::FrameAllocOptions,
-) -> PhysAddr {
-    use slopos_ostd::mm::frame::{Frame, KernelMeta};
-    if count == 0 {
-        return PhysAddr::NULL;
-    }
-    let opts = slopos_ostd::mm::frame::FrameAllocOptions {
-        size_pages: count as usize,
-        ..opts
-    };
-    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
-        // SAFETY: see `alloc_kernel_page`.
-        unsafe { f.into_phys_release() }
-    })
 }
 
 /// Typestate-checked multi-page kernel allocation. Routes through
