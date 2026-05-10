@@ -214,13 +214,33 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     });
 
     // Lifecycle state transition — (Ready|Running) → Running.
+    //
+    // After Phase 1 (durable exit_info + per-task waiters WaitQueue),
+    // a task entering `dispatch` MUST be Ready or Running. Anything
+    // else is an invariant violation: a Blocked or WillBlock task in
+    // a runqueue means a wake path enqueued without first transitioning
+    // to Ready, or a state transition raced the dispatcher. Either is
+    // a bug we want surfaced loudly in debug, not silently coerced.
     let current_status = task_status(task);
-    if current_status != Some(TaskStatus::Ready) && current_status != Some(TaskStatus::Running) {
-        klog_info!(
-            "dispatch: unexpected state {} for task {}",
-            current_status.map(|s| s.as_u8()).unwrap_or(0xFF) as u32,
-            task_id_of(task).unwrap_or(INVALID_TASK_ID)
-        );
+    debug_assert!(
+        matches!(
+            current_status,
+            Some(TaskStatus::Ready) | Some(TaskStatus::Running)
+        ),
+        "dispatch: invariant broken — task {} in unexpected state {:?}",
+        task_id_of(task).unwrap_or(INVALID_TASK_ID),
+        current_status,
+    );
+    if !matches!(
+        current_status,
+        Some(TaskStatus::Ready) | Some(TaskStatus::Running)
+    ) {
+        // Production fallback: skip dispatch and let the caller pick
+        // a different task. The pre-Phase-1 code logged + coerced to
+        // Running, which produced the `0xdfdedddcdbdad9d8`-shape page
+        // faults in CI (a WillBlock task forced into Running runs with
+        // a corrupted user-mode RIP). Skipping is the safe move.
+        return;
     }
     task_set_status(task, TaskStatus::Running);
 }
@@ -235,26 +255,6 @@ pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
         "install_idle_task() must receive a non-null task"
     );
     slopos_arch::pcr::set_idle_task(cpu_id, task as *mut ());
-}
-
-#[allow(dead_code)]
-fn requeue_running_task(cpu_id: usize, current: *mut Task) {
-    if current.is_null() {
-        return;
-    }
-
-    // Requeue if Running OR WillBlock.  A WillBlock task is still
-    // executing its pre-block critical section (condition check,
-    // wait-queue enqueue).  If preempted here it must go back to
-    // the Ready queue so it can finish and call block_current_task.
-    let id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    if (task_is_running(current) || task_is_will_block(current))
-        && task_set_state(id, TaskStatus::Ready) == 0
-    {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.enqueue_local(current);
-        });
-    }
 }
 
 fn switch_to_kernel_address_space(_task: *mut Task) {
@@ -883,20 +883,26 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     switch_to_kernel_address_space(idle_task);
 
-    // Re-enqueue the task if it was preempted (Running), in a pre-block
-    // critical section (WillBlock), or already woken (Ready) before its
-    // block sequence yielded.  The Ready case covers the self-wakeup
-    // window: a wake_*_task(self) call from the timer ISR transitions
-    // state Blocked→Ready and tries `schedule_task(self)`, which routes
-    // through `enqueue_local` on this CPU; the in-progress block path
-    // then `unschedule_task`s the entry, leaving the task Ready but in
-    // no runqueue. Re-enqueueing here keeps it schedulable across the
-    // yield. Blocked/Terminated tasks are NOT re-enqueued — they'll be
+    // Re-enqueue the task if it was preempted (Running) or already
+    // woken (Ready) before its yield completed. The Ready case covers
+    // the self-wakeup window: a wake from the timer ISR transitions
+    // state Blocked→Ready and routes through `enqueue_local` on this
+    // CPU; the in-progress block path then `unschedule_task`s the
+    // entry, leaving the task Ready but in no runqueue. Re-enqueueing
+    // here keeps it schedulable across the yield.
+    //
+    // The Phase-1 race fix removed the WillBlock-here case entirely:
+    // task_wait_for now goes through WaitQueue::wait_event, which
+    // performs the Running→Blocked transition under the queue's
+    // SpinLock; nothing leaves a task WillBlock between dispatch and
+    // preempt. Phase 5 deletes the WillBlock state itself.
+    //
+    // Blocked/Terminated tasks are NOT re-enqueued — they'll be
     // woken by their respective event paths.
     // This runs AFTER on_cpu=false and context save, so no SMP race.
     if !task_is_terminated(next_task) {
         let already_ready = task_is_ready(next_task);
-        let needs_ready_transition = task_is_running(next_task) || task_is_will_block(next_task);
+        let needs_ready_transition = task_is_running(next_task);
         let should_enqueue = if already_ready {
             true
         } else if needs_ready_transition {
