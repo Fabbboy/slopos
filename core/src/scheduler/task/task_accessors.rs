@@ -573,20 +573,6 @@ pub fn task_inc_ref_with_id(task: *mut Task) -> Option<(u32, u32)> {
     Some((id, count))
 }
 
-/// Stamp `task->waiting_on` unconditionally with `task_id`.
-#[inline]
-pub fn task_set_waiting_on(task: *mut Task, task_id: u32) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; `waiting_on` is `AtomicU32`.
-    unsafe {
-        (*task)
-            .waiting_on
-            .store(task_id, core::sync::atomic::Ordering::Release);
-    }
-}
-
 /// Spin-wait until the task's `on_cpu` flag goes false. Used by
 /// `schedule_task` to avoid dispatching a task that another CPU is
 /// still finishing its outgoing context switch on.

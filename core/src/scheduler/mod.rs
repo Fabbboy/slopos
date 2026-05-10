@@ -16,6 +16,7 @@ pub mod sleep;
 pub mod task;
 pub mod task_lock;
 pub mod task_stack;
+pub mod task_state;
 pub mod task_struct;
 #[cfg(feature = "test-hooks")]
 pub mod test_fixture;
@@ -23,7 +24,6 @@ pub mod test_fixture;
 pub mod test_hermetic;
 pub mod test_reports;
 pub mod trap;
-pub mod wait_typestate;
 pub mod work_steal;
 
 pub use exit_info::ExitInfo;

@@ -45,13 +45,12 @@ use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
-    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_blocked, task_is_invalid,
-    task_is_ready, task_is_running, task_is_terminated, task_is_will_block, task_kernel_stack_top,
-    task_name_looks_idle, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
-    task_record_context_switch, task_record_yield, task_set_controlling_tty, task_set_on_cpu,
-    task_set_state, task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid,
-    task_status, task_time_slice, task_time_slice_remaining, task_try_transition_from,
-    task_wait_off_cpu,
+    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_invalid, task_is_ready,
+    task_is_running, task_is_terminated, task_kernel_stack_top, task_name_looks_idle, task_pgid,
+    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
+    task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
+    task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_time_slice,
+    task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -217,9 +216,9 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     //
     // After Phase 1 (durable exit_info + per-task waiters WaitQueue),
     // a task entering `dispatch` MUST be Ready or Running. Anything
-    // else is an invariant violation: a Blocked or WillBlock task in
-    // a runqueue means a wake path enqueued without first transitioning
-    // to Ready, or a state transition raced the dispatcher. Either is
+    // else is an invariant violation: a Blocked task in a runqueue
+    // means a wake path enqueued without first transitioning to
+    // Ready, or a state transition raced the dispatcher. Either is
     // a bug we want surfaced loudly in debug, not silently coerced.
     let current_status = task_status(task);
     debug_assert!(
@@ -238,8 +237,9 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
         // Production fallback: skip dispatch and let the caller pick
         // a different task. The pre-Phase-1 code logged + coerced to
         // Running, which produced the `0xdfdedddcdbdad9d8`-shape page
-        // faults in CI (a WillBlock task forced into Running runs with
-        // a corrupted user-mode RIP). Skipping is the safe move.
+        // faults in CI (a wait-protocol-half-state task forced into
+        // Running runs with a corrupted user-mode RIP). Skipping is
+        // the safe move.
         return;
     }
     task_set_status(task, TaskStatus::Running);
@@ -891,11 +891,11 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // entry, leaving the task Ready but in no runqueue. Re-enqueueing
     // here keeps it schedulable across the yield.
     //
-    // The Phase-1 race fix removed the WillBlock-here case entirely:
-    // task_wait_for now goes through WaitQueue::wait_event, which
-    // performs the Running→Blocked transition under the queue's
-    // SpinLock; nothing leaves a task WillBlock between dispatch and
-    // preempt. Phase 5 deletes the WillBlock state itself.
+    // task_wait_for goes through WaitQueue::wait_event, which
+    // performs the Running→Blocked transition while the queue is
+    // already holding our wait node — by the time `schedule()`
+    // dispatches a peer, our state is committed Blocked and the
+    // peer's `wake_one` will find us on the queue.
     //
     // Blocked/Terminated tasks are NOT re-enqueued — they'll be
     // woken by their respective event paths.
@@ -986,30 +986,6 @@ pub fn yield_() {
     r#yield();
 }
 
-pub fn prepare_to_wait() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return;
-    }
-    if task_is_blocked(current) || task_is_will_block(current) {
-        return;
-    }
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    let _ = task_set_state(task_id, TaskStatus::WillBlock);
-}
-
-pub fn finish_wait() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return;
-    }
-    if !task_is_will_block(current) {
-        return;
-    }
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    let _ = task_set_state(task_id, TaskStatus::Running);
-}
-
 pub fn block_current_task() {
     let current = scheduler_get_current_task();
     if current.is_null() {
@@ -1028,17 +1004,80 @@ pub fn block_current_task() {
     });
 }
 
+/// CAS the current task's status from `Running` to `Blocked` without
+/// yielding. Returns `true` on CAS success.
+///
+/// Used by the wait-queue protocol from inside the queue's SpinLock
+/// so a `wake_*` taking the same lock necessarily observes either
+/// (a) the queue empty (we haven't pushed yet), or (b) the task in
+/// the queue and `Blocked` — never `Running`-and-on-queue. The
+/// matching yield happens after the lock is dropped via
+/// [`yield_blocked_task`].
+pub fn mark_current_blocked() -> bool {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return false;
+    }
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
+    if task_id == INVALID_TASK_ID {
+        return false;
+    }
+    task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked) == 0
+}
+
+/// Yield a task already CAS-flipped to `Blocked` by
+/// [`mark_current_blocked`]. Must be called outside any SpinLock —
+/// `schedule()` is not reentrant-safe under our locks.
+pub fn yield_blocked_task() {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        unschedule_task(current);
+        schedule();
+    });
+}
+
+/// Yield a task already CAS-flipped to `Blocked` and arm a
+/// millisecond-resolution timeout. The sleep-queue entry will fire
+/// `unblock_task` (CAS `Blocked → Ready`) when the deadline passes;
+/// if a peer `wake_*` arrives first, that path's
+/// `cancel_sleep` removes the entry to keep the timer from firing
+/// spuriously against the (now-`Ready`) task.
+pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
+    if task_id == INVALID_TASK_ID {
+        return;
+    }
+    super::sleep::arm_blocked_timeout(task_id, timeout_ms);
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        unschedule_task(current);
+        schedule();
+    });
+    super::sleep::cancel_sleep(task_id);
+}
+
 /// Unsafe primitive: assumes the caller has already disabled
 /// interrupts (witnessed by the `IrqDisabled<'cli>` token). Performs
-/// the WillBlock→Blocked CAS, removes the task from runqueues, and
+/// the Running→Blocked CAS, removes the task from runqueues, and
 /// yields. Public callers must go through [`block_current_task`] (or
 /// the timeout-aware variants) which materialise the token.
+///
+/// The CAS source is `Running` (not `WillBlock` as in pre-Phase-5):
+/// the wait-queue protocol now serialises wake against block via the
+/// queue's own SpinLock — a wake that arrived first transitioned the
+/// task to `Ready`, so the CAS fails and we don't yield.
 fn block_current_task_irq_disabled(
     current: *mut Task,
     task_id: u32,
     _irq: &slopos_ostd::cpu::x86_64::interrupts::IrqDisabled<'_>,
 ) {
-    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked) != 0 {
+    if task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked) != 0 {
         return;
     }
     unschedule_task(current);
@@ -1090,15 +1129,10 @@ pub fn unblock_task(task: *mut Task) -> c_int {
 
     let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
 
-    // Try WillBlock -> Running (task declared intent to block but hasn't yet).
-    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
-        // Cancel any pending sleep-queue entry so it doesn't fire later
-        // and spuriously transition the (now-Running) task.
-        super::sleep::cancel_sleep(task_id);
-        return 0;
-    }
-
-    // Try Blocked -> Ready (task is fully blocked, wake it).
+    // Phase 5 collapsed the WillBlock state; the only blockable
+    // intermediate is `Blocked` itself. Wake-side just transitions
+    // Blocked → Ready; the caller's wait-queue lock-pair guarantees
+    // that the waiter committed to Blocked before we observed it.
     if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
         super::sleep::cancel_sleep(task_id);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -1110,6 +1144,8 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     }
 
     // Task is in some other state (Running, Ready, Terminated) — nothing to do.
+    // A Running waker that races a Blocked→Ready CAS sees Running
+    // here; that's a benign no-op — the waiter never actually slept.
     if task_is_terminated(task) || task_is_invalid(task) {
         return -1;
     }

@@ -226,7 +226,6 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.creation_time = kdiag_timestamp();
     task.yield_count = 0;
     task.last_run_timestamp = 0;
-    task.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
     task.exit_reason = TaskExitReason::None;
     task.fault_reason = TaskFaultReason::None;
     task.exit_code = 0;
@@ -725,7 +724,6 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     task.fate_token = 0;
     task.fate_value = 0;
     task.fate_pending = 0;
-    task.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
 
     super::super::futex::futex_remove_task(task_ptr);
 

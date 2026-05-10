@@ -79,7 +79,7 @@ use core::marker::PhantomData;
 /// a future block path that forgets `cli` will not compile.
 ///
 /// Bug history motivating this capability: the timer ISR firing
-/// between the WillBlock→Blocked CAS and the `schedule()` yield
+/// between the Running→Blocked CAS and the `schedule()` yield
 /// could hand a wake to the still-currently-executing task on the
 /// same CPU, racing with the in-progress block sequence. The
 /// `cli`-around-the-window fix is correct but discipline-by-comment;

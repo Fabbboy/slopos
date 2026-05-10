@@ -20,9 +20,10 @@
 //!     friends via `KBox<WaitNode>`. Whichever side dequeues the node
 //!     (the wake side or [`WaitQueue::remove_current`]) reclaims the
 //!     `KBox` and drops it.
-//! - Uses scheduler wait-gating (`prepare_to_wait` / `finish_wait`) with
-//!   `block_current_task()` / `unblock_task()` from the registered
-//!   backend.
+//! - Calls `block_current_task()` (Running→Blocked CAS + yield) and
+//!   `unblock_task()` (Blocked→Ready CAS) on the registered backend.
+//!   Wakeup-loss is prevented by serialising the block and the wake
+//!   through the queue's own SpinLock — see the contract block below.
 //!
 //! # Wait/wake correctness contract (AUDIT 2C)
 //!
@@ -44,9 +45,13 @@
 //!   pre-enqueue check could have observed.
 //!
 //! This is the same contract Linux relies on for `wq_head->lock` in
-//! `prepare_to_wait_event` / `wake_up`. Subsystems that depend on this
-//! property (and therefore do **not** need their own fences before
-//! `wake_*`):
+//! `prepare_to_wait_event` / `wake_up` — the equivalent of Linux's
+//! `prepare_to_wait_event` is, here, the act of pushing the
+//! [`WaitNode`] under [`SpinLock`](super::spin::SpinLock) inside
+//! [`wait_event`](WaitQueue::wait_event)'s loop body before the
+//! backend's `block_current_task` call. Subsystems that depend on
+//! this property (and therefore do **not** need their own fences
+//! before `wake_*`):
 //!
 //! - Pipes (`fs/src/pipe.rs`, `fs/src/pipe_file_ops.rs`) — `READER_WQS`
 //!   / `WRITER_WQS`, woken on buffer-fill / drain / EOF.
@@ -107,20 +112,42 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// null if there is no current task.
     fn current_task_handle(&self) -> WaitTaskHandle;
 
-    /// Mark the current task as preparing to wait. Counterpart to
-    /// [`finish_wait`](Self::finish_wait); together they close the
-    /// "miss the wakeup" race window.
-    fn prepare_to_wait(&self);
-
-    /// Cancel an outstanding `prepare_to_wait` without sleeping.
-    fn finish_wait(&self);
-
     /// Block the current task until something calls
     /// [`unblock_task`](Self::unblock_task) on its handle.
+    ///
+    /// Performs a `Running → Blocked` CAS internally and yields. If
+    /// a concurrent `unblock_task` already CAS'd the task off
+    /// `Running` (e.g. `Blocked → Ready` from a wake that arrived
+    /// between the caller's pre-block check and this call), the CAS
+    /// is a no-op and this returns immediately — the wait-queue
+    /// caller's loop re-checks the condition and observes the
+    /// pending wake.
     fn block_current_task(&self);
 
-    /// Block the current task with a millisecond-resolution timeout.
-    fn block_current_task_with_timeout(&self, timeout_ms: u32);
+    /// Mark the *current* task `Blocked` immediately, without yielding.
+    /// Returns `true` if the CAS `Running → Blocked` succeeded; `false`
+    /// if the task wasn't `Running` (e.g. a wake already won the race).
+    ///
+    /// Used by the wait-queue protocol to commit the block under the
+    /// queue's SpinLock so a producer's `wake_one` observed after this
+    /// call necessarily sees `Blocked` and CAS-flips us to `Ready`.
+    /// The actual yield happens after the lock is released, via
+    /// [`yield_blocked_task`](Self::yield_blocked_task).
+    fn mark_current_blocked(&self) -> bool;
+
+    /// Yield a task that has already been CAS-flipped to `Blocked`
+    /// by [`mark_current_blocked`](Self::mark_current_blocked).
+    /// Removes the task from runqueues and calls `schedule()`. Must
+    /// be called *outside* any SpinLock — `schedule()` is not
+    /// reentrant-safe under our locks.
+    fn yield_blocked_task(&self);
+
+    /// Variant of [`yield_blocked_task`] that also arms a
+    /// millisecond-resolution timeout. The sleep-queue entry will
+    /// CAS `Blocked → Ready` when the deadline fires; if a
+    /// `wake_*` arrives first, the racing `cancel_sleep` removes
+    /// the entry. Must be called outside any SpinLock.
+    fn yield_blocked_task_with_timeout(&self, timeout_ms: u32);
 
     /// Wake a previously-blocked task. Returns 0 on success or a
     /// negative errno-shaped value on failure.
@@ -149,10 +176,12 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     fn current_task_handle(&self) -> WaitTaskHandle {
         NULL_HANDLE
     }
-    fn prepare_to_wait(&self) {}
-    fn finish_wait(&self) {}
     fn block_current_task(&self) {}
-    fn block_current_task_with_timeout(&self, _timeout_ms: u32) {}
+    fn mark_current_blocked(&self) -> bool {
+        false
+    }
+    fn yield_blocked_task(&self) {}
+    fn yield_blocked_task_with_timeout(&self, _timeout_ms: u32) {}
     unsafe fn unblock_task(&self, _task: WaitTaskHandle) -> i32 {
         0
     }
@@ -251,6 +280,26 @@ impl WaitQueue {
     // ---------------------------------------------------------------
 
     /// Block the current task until `condition()` returns `true`.
+    ///
+    /// Race-close protocol (post-Phase-5, no `WillBlock` intermediate):
+    ///
+    /// 1. Pre-check condition outside any lock (fast path).
+    /// 2. Take the queue's SpinLock.
+    /// 3. Re-check condition under the lock — drop & return if true.
+    /// 4. Push our node onto the list (lock-held).
+    /// 5. CAS `Running → Blocked` under the same lock (lock-held).
+    /// 6. Drop the lock.
+    /// 7. Yield (no-op CAS schedule()) — the lock-released, status-
+    ///    Blocked task sleeps until a producer's `wake_*` flips it
+    ///    `Blocked → Ready`.
+    ///
+    /// Why the CAS belongs under the lock: a producer that takes the
+    /// queue lock between (4) and (5) and pops our node would see
+    /// us still `Running` and call `unblock_task` whose `Blocked →
+    /// Ready` CAS would fail — lost wakeup. By doing the
+    /// `Running → Blocked` CAS under the same lock, we guarantee
+    /// that any `wake_*` that observes our node also observes us as
+    /// `Blocked` and successfully CAS-flips us to `Ready`.
     pub fn wait_event<F: Fn() -> bool>(&self, condition: F) -> bool {
         let bk = backend();
         let node = core::pin::pin!(WaitNode::new());
@@ -272,29 +321,22 @@ impl WaitQueue {
                 return false;
             }
 
-            bk.prepare_to_wait();
-
-            // Race-close: re-check condition under the queue lock and,
-            // if still false, link our node so a wake observed before
-            // we yield is delivered to us.
-            {
+            let blocked = {
                 let inner = self.inner.lock();
                 if condition() {
                     drop(inner);
-                    bk.finish_wait();
                     self.unlink_if_linked(node.as_ref());
                     return true;
                 }
-                // Make sure we're not double-linked (loop iteration
-                // after a spurious wake): unlink first if we're still
-                // on the list, then re-link.
                 self.unlink_locked(node.as_ref(), &inner);
                 node.as_ref().set_task(task);
                 Self::push_node(&inner, node.as_ref());
-            }
+                bk.mark_current_blocked()
+            };
 
-            bk.block_current_task();
-            bk.finish_wait();
+            if blocked {
+                bk.yield_blocked_task();
+            }
 
             // Loop back: re-test condition. If `wake_one` popped us,
             // the node is no longer linked; otherwise we'll unlink
@@ -303,7 +345,8 @@ impl WaitQueue {
     }
 
     /// Block the current task exactly once, without checking any
-    /// condition.
+    /// condition. See [`wait_event`](Self::wait_event) for the
+    /// lock-held push + CAS protocol that prevents lost wakeups.
     pub fn wait_once(&self) -> bool {
         let bk = backend();
         if !bk.is_runtime_initialised() {
@@ -318,15 +361,15 @@ impl WaitQueue {
         let node = core::pin::pin!(WaitNode::new());
         node.as_ref().set_task(task);
 
-        bk.prepare_to_wait();
-
-        {
+        let blocked = {
             let inner = self.inner.lock();
             Self::push_node(&inner, node.as_ref());
-        }
+            bk.mark_current_blocked()
+        };
 
-        bk.block_current_task();
-        bk.finish_wait();
+        if blocked {
+            bk.yield_blocked_task();
+        }
 
         self.unlink_if_linked(node.as_ref());
         true
@@ -336,6 +379,14 @@ impl WaitQueue {
     /// `timeout_ms` milliseconds elapse. Returns `true` iff the
     /// condition was observed true; `false` on timeout or runtime
     /// not initialised.
+    ///
+    /// Uses the same lock-held push + `Running → Blocked` CAS
+    /// protocol as [`wait_event`](Self::wait_event). The timeout is
+    /// implemented by `yield_blocked_task_with_timeout` arming a
+    /// sleep-queue entry that fires `unblock_task` after the
+    /// deadline; if a peer `wake_*` arrives first, that path's
+    /// `cancel_sleep` removes the entry to keep the timer from
+    /// firing spuriously against the (now-`Ready`) task.
     pub fn wait_event_timeout<F: Fn() -> bool>(&self, condition: F, timeout_ms: u64) -> bool {
         let bk = backend();
         if condition() {
@@ -362,27 +413,23 @@ impl WaitQueue {
                 break false;
             }
 
-            bk.prepare_to_wait();
+            let remaining = deadline_ms.saturating_sub(now);
+            let sleep_ms = remaining.min(500) as u32;
 
-            {
+            let blocked = {
                 let inner = self.inner.lock();
                 if condition() {
                     drop(inner);
-                    bk.finish_wait();
                     break true;
                 }
                 self.unlink_locked(node.as_ref(), &inner);
                 Self::push_node(&inner, node.as_ref());
-            }
+                bk.mark_current_blocked()
+            };
 
-            let remaining = deadline_ms.saturating_sub(bk.get_time_ms());
-            if remaining == 0 {
-                bk.finish_wait();
-                break false;
+            if blocked {
+                bk.yield_blocked_task_with_timeout(sleep_ms);
             }
-            let sleep_ms = remaining.min(500) as u32;
-            bk.block_current_task_with_timeout(sleep_ms);
-            bk.finish_wait();
         };
 
         // Always unlink before returning so the stack-pinned node

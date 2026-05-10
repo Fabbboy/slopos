@@ -2908,11 +2908,15 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
 // =============================================================================
 // Poll/Wakeup Race Condition Tests
 // =============================================================================
-// WillBlock State Machine Tests
+// Wait/wake state machine tests — Phase 5 collapsed `WillBlock` into
+// the wait queue's lock-held `Running → Blocked` CAS. The tests below
+// exercise the post-Phase-5 protocol directly.
 // =============================================================================
 
-/// sleep_current_task_ms uses CAS(Running, Blocked). From WillBlock state
-/// (prepare_to_wait was called but no wakeup yet), this CAS must fail.
+/// `sleep_current_task_ms`'s `CAS(Running, Blocked)` must fail when the
+/// task isn't `Running`. This is the post-Phase-5 invariant: a wait
+/// path that already CAS'd the task to `Blocked` (under a wait queue's
+/// SpinLock) must reject a concurrent sleep-blocking attempt.
 pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2921,11 +2925,18 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // Set up: WillBlock (simulating prepare_to_wait without wakeup yet)
+    // Set up: task is `Blocked` (the wait queue's lock-held CAS already ran).
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+    let blocked_cas = task_set_state_from_with_reason(
+        task_id,
+        TaskStatus::Running,
+        TaskStatus::Blocked,
+        BlockReason::IoWait,
+    );
+    assert_eq_test!(blocked_cas, 0);
 
-    // CAS(Running, Blocked) must fail because state is WillBlock, not Running.
+    // A racing sleep_current_task_ms call would now try CAS(Running, Blocked).
+    // It must fail — the task is no longer Running.
     let result = task_set_state_from_with_reason(
         task_id,
         TaskStatus::Running,
@@ -2934,29 +2945,23 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     );
 
     let state = unsafe { (*task_ptr).status() };
-    assert_test!(
-        state != TaskStatus::Blocked,
-        "sleep CAS should not block from WillBlock state"
-    );
+    assert_eq_test!(state, TaskStatus::Blocked, "state stays Blocked");
     assert_test!(
         result != 0,
-        "CAS(Running, Blocked) should fail from WillBlock"
+        "CAS(Running, Blocked) should fail when task is already Blocked"
     );
 
-    if state == TaskStatus::Blocked {
-        let _ = task_set_state(task_id, TaskStatus::Running);
-    }
+    let _ = task_set_state(task_id, TaskStatus::Ready);
     task_terminate(task_id);
     TestResult::Pass
 }
 
-/// After WillBlock->Running (wakeup), CAS(WillBlock, Blocked) must fail.
-///
-/// Simulates the interleaving where a wakeup arrives between
-/// prepare_to_wait and the blocking CAS:
-///   1. WillBlock (prepare_to_wait)
-///   2. Running (wakeup)
-///   3. CAS(WillBlock, Blocked) must fail (state is Running)
+/// After a wake transitions the task `Blocked → Ready`, a stale
+/// blocker that retries `CAS(Running, Blocked)` must fail. Models the
+/// post-Phase-5 race: a wait-queue waiter committed to `Blocked` under
+/// the queue lock; the producer's `wake_one` CAS-flipped the waiter to
+/// `Ready`; a buggy retry path that looked up the task and tried to
+/// re-block it would fail because the state is no longer `Running`.
 pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2965,39 +2970,29 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // prepare_to_wait
+    // 1. Task is Running.
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+    // 2. Wait-queue protocol commits Blocked under the queue lock.
+    let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
+    assert_eq_test!(cas_block, 0);
+    // 3. Producer wakes the task: Blocked → Ready.
+    let cas_wake = task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready);
+    assert_eq_test!(cas_wake, 0);
 
-    // Wakeup arrives
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-
-    // CAS(WillBlock, Blocked) must fail because state is Running.
-    let result = task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked);
-
+    // 4. A stale "block again" CAS source `Running` must fail.
+    let result = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     let state = unsafe { (*task_ptr).status() };
-    assert_test!(
-        state != TaskStatus::Blocked,
-        "CAS(WillBlock, Blocked) must not succeed when state is Running"
-    );
-    assert_eq_test!(
-        state,
-        TaskStatus::Running,
-        "task should still be Running after failed block CAS"
-    );
-    assert_test!(
-        result != 0,
-        "CAS(WillBlock, Blocked) should fail from Running"
-    );
+    assert_eq_test!(state, TaskStatus::Ready, "state should still be Ready");
+    assert_test!(result != 0, "CAS(Running, Blocked) should fail from Ready");
 
     task_terminate(task_id);
     TestResult::Pass
 }
 
-/// WillBlock must be set BEFORE enqueueing on a wait queue.
-///
-/// Verifies that unblock_task sees WillBlock and transitions to Running
-/// when the correct ordering (prepare_to_wait -> enqueue -> wakeup) is used.
+/// Models the wait-queue protocol: under the queue's SpinLock, a
+/// waiter CAS-flips Running → Blocked. A racing producer that takes
+/// the same lock observes the committed Blocked state and CAS-flips it
+/// to Ready via `unblock_task`. Both transitions must succeed.
 pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3006,29 +3001,33 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // Set task to Running (starting state for pipe read path)
+    // 1. Task starts Running (precondition for wait-queue's lock-held CAS).
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
 
-    // prepare_to_wait -> WillBlock
-    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
+    // 2. Wait-queue protocol: under the queue lock, push node + CAS.
+    let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
+    assert_eq_test!(cas_block, 0);
 
-    // Wakeup arrives — unblock_task sees WillBlock -> Running.
+    // 3. Producer wakeup: unblock_task CAS(Blocked → Ready).
     let result = unblock_task(task_ptr);
-    assert_eq_test!(result, 0, "unblock_task should succeed from WillBlock");
+    assert_eq_test!(result, 0, "unblock_task should succeed from Blocked");
 
     let state = unsafe { (*task_ptr).status() };
     assert_eq_test!(
         state,
-        TaskStatus::Running,
-        "wakeup must be preserved: state should be Running"
+        TaskStatus::Ready,
+        "wakeup transitions Blocked → Ready"
     );
 
     task_terminate(task_id);
     TestResult::Pass
 }
 
-/// WillBlock set before wakeup preserves the wakeup signal.
-/// Positive counterpart to test_wq_wrong_order_wakeup_lost.
+/// Positive counterpart to `test_wq_wrong_order_wakeup_lost`: an
+/// `unblock_task` against a task that is still `Running` (the
+/// producer's `wake_one` ran before the consumer entered the queue
+/// lock) is a benign no-op — the consumer's subsequent re-check inside
+/// the lock observes the producer's update and skips the block.
 pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3037,27 +3036,25 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // CORRECT ORDER: set WillBlock first, then wakeup arrives.
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
 
-    // Wakeup: unblock_task sees WillBlock -> transitions to Running.
+    // unblock_task on a Running task is a no-op — there's nothing to
+    // unblock, but the call must not corrupt the state.
     let result = unblock_task(task_ptr);
-    assert_eq_test!(result, 0, "unblock_task should succeed");
+    assert_eq_test!(result, 0, "unblock_task on Running task is a no-op");
 
     let state = unsafe { (*task_ptr).status() };
-    assert_eq_test!(
-        state,
-        TaskStatus::Running,
-        "wakeup should be preserved with correct ordering"
-    );
+    assert_eq_test!(state, TaskStatus::Running, "state stays Running");
 
     task_terminate(task_id);
     TestResult::Pass
 }
 
-/// try_transition_from(WillBlock, Blocked) rejects a task in Running state
-/// and succeeds from WillBlock state.
+/// `try_transition_from(Running, Blocked)` rejects a task in Ready state
+/// and succeeds from Running state. The wait-queue protocol relies on
+/// this asymmetry to detect a wake that already won the race (Ready)
+/// and skip the CAS that would otherwise put the (now-runnable) task
+/// to sleep.
 pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3066,28 +3063,24 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // Set up: WillBlock -> Running (wakeup)
+    // Set up: task is Ready (a wake has already transitioned us off Running).
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
 
-    // CAS(WillBlock, Blocked) must fail when state is Running
-    let result = task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked);
+    // CAS(Running, Blocked) must fail when state is Ready.
+    let result = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     assert_test!(
         result != 0,
-        "try_transition_from(WillBlock, Blocked) should fail when state is Running"
+        "try_transition_from(Running, Blocked) should fail from Ready"
     );
 
-    // The task should still be Running
-    let state = unsafe { (*task_ptr).status() };
-    assert_eq_test!(state, TaskStatus::Running, "state should still be Running");
-
-    // Verify the CAS succeeds from the correct state
-    assert_eq_test!(task_set_state(task_id, TaskStatus::WillBlock), 0);
-    let result2 = task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked);
-    assert_test!(
-        result2 == 0,
-        "try_transition_from(WillBlock, Blocked) should succeed when state IS WillBlock"
+    // Move to Running and verify CAS succeeds from there.
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    let result2 = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
+    assert_eq_test!(
+        result2,
+        0,
+        "try_transition_from(Running, Blocked) succeeds from Running"
     );
     let state2 = unsafe { (*task_ptr).status() };
     assert_eq_test!(state2, TaskStatus::Blocked, "state should be Blocked");
@@ -3096,10 +3089,114 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     TestResult::Pass
 }
 
+/// Exercises [`TaskState`]'s fused (status, reason, epoch) atomic
+/// directly. Covers:
+/// - Successful `try_transition` flips status+reason and advances
+///   the epoch in one CAS.
+/// - `try_transition` from the wrong expected state fails and returns
+///   the current view.
+/// - `bump_epoch` advances the epoch while preserving status/reason.
+/// - `force_set` round-trips through `snapshot` for every defined
+///   `(TaskStatus, BlockReason)` pair, covering the bit-field maxima
+///   on both axes.
+/// - 16 consecutive `bump_epoch` calls advance the epoch by 16 (mod
+///   2^32), exercising the wrapping arithmetic that backs the wrap
+///   from `u32::MAX` to `0`.
+pub fn test_task_state_fused_cas() -> TestResult {
+    use crate::scheduler::task_state::TaskState;
+
+    let s = TaskState::invalid();
+    s.force_set(TaskStatus::Running, BlockReason::None);
+    let before = s.snapshot();
+    assert_eq_test!(before.status, TaskStatus::Running);
+    assert_eq_test!(before.reason, BlockReason::None);
+
+    // Successful transition: status + reason flip in one CAS.
+    let r = s.try_transition(
+        TaskStatus::Running,
+        TaskStatus::Blocked,
+        BlockReason::FutexWait,
+    );
+    let after = match r {
+        Ok(view) => view,
+        Err(_) => return TestResult::Fail,
+    };
+    assert_eq_test!(after.status, TaskStatus::Blocked);
+    assert_eq_test!(after.reason, BlockReason::FutexWait);
+    assert_test!(after.epoch != before.epoch, "epoch must advance");
+
+    // CAS from wrong expected fails and returns the current view.
+    let err = s
+        .try_transition(TaskStatus::Running, TaskStatus::Ready, BlockReason::None)
+        .expect_err("wrong-expected CAS must fail");
+    assert_eq_test!(err.status, TaskStatus::Blocked, "view returned on Err");
+
+    // bump_epoch preserves status + reason while advancing the epoch.
+    let pre_bump = s.snapshot();
+    s.bump_epoch();
+    let post_bump = s.snapshot();
+    assert_eq_test!(post_bump.status, pre_bump.status, "bump preserves status");
+    assert_eq_test!(post_bump.reason, pre_bump.reason, "bump preserves reason");
+    assert_test!(post_bump.epoch != pre_bump.epoch, "bump advances epoch");
+
+    // Pack/unpack roundtrip across every defined (status, reason)
+    // pair, including the highest-numbered variant on each axis
+    // (TaskStatus::Terminated = 4, BlockReason::FutexWait = 8).
+    let statuses = [
+        TaskStatus::Invalid,
+        TaskStatus::Ready,
+        TaskStatus::Running,
+        TaskStatus::Blocked,
+        TaskStatus::Terminated,
+    ];
+    let reasons = [
+        BlockReason::None,
+        BlockReason::Sleep,
+        BlockReason::IoWait,
+        BlockReason::MutexWait,
+        BlockReason::KeyboardWait,
+        BlockReason::IpcWait,
+        BlockReason::Generic,
+        BlockReason::FutexWait,
+    ];
+    for st in statuses {
+        for rn in reasons {
+            s.force_set(st, rn);
+            let v = s.snapshot();
+            assert_eq_test!(v.status, st, "status roundtrip");
+            assert_eq_test!(v.reason, rn, "reason roundtrip");
+        }
+    }
+
+    // 16 consecutive bumps advance the epoch by exactly 16 (mod 2^32).
+    // The wrap from u32::MAX → 0 uses the same `wrapping_add(1)` as
+    // every other increment, so demonstrating mod-2^32 arithmetic
+    // here transitively validates the wrap without needing 2^32
+    // iterations.
+    s.force_set(TaskStatus::Ready, BlockReason::None);
+    let e0 = s.snapshot().epoch;
+    for _ in 0..16 {
+        s.bump_epoch();
+    }
+    let e1 = s.snapshot().epoch;
+    assert_eq_test!(
+        e1.wrapping_sub(e0),
+        16,
+        "16 bumps must advance epoch by 16 (mod 2^32)"
+    );
+    assert_eq_test!(
+        s.snapshot().status,
+        TaskStatus::Ready,
+        "status preserved across bumps"
+    );
+
+    TestResult::Pass
+}
+
 /// E2E: call syscall_poll on a unix socket, write data, verify poll returns.
 ///
-/// This exercises the full kernel poll path: prepare_to_wait, WQ registration,
-/// readiness check, block_current_task_with_timeout, wakeup via unix_send.
+/// Exercises the full kernel poll path: WQ registration, readiness
+/// check, block_current_task_with_timeout, and wakeup via unix_send.
 /// Runs in two variants:
 ///   1. Data already buffered before poll — poll must return immediately.
 ///   2. No data, short timeout — poll must return 0 (timeout) within margin.
@@ -3339,21 +3436,19 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     TestResult::Pass
 }
 
-/// WillBlock wakeup through unix socket write.
+/// Wakeup through a unix socket write reaches the wait queue and
+/// CAS-flips the registered task `Blocked → Ready`.
 ///
-/// Exercises the exact wakeup path that syscall_poll relies on:
-/// 1. prepare_to_wait → current task = WillBlock
-/// 2. Register current task on client socket's RECV_WQS
-/// 3. Server writes data → unix_send → RECV_WQS[peer].wake_all() → unblock_task
-/// 4. unblock_task CAS(WillBlock, Running) → current task = Running
-///
-/// `prepare_to_wait` and `enqueue_current` operate on PCR.current_task.
-/// The test makes the FD-owning user task current via `make_task_current`
-/// so the polling identity matches the FD owner — exactly the invariant
-/// the real syscall_poll path relies on.
-pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
-    use crate::scheduler::scheduler::prepare_to_wait;
-
+/// Exercises the post-Phase-5 wait protocol end-to-end:
+/// 1. Task starts Running.
+/// 2. Caller registers on the unix socket's recv wait queue.
+/// 3. Caller commits to Blocked under the wait queue's SpinLock
+///    (modelled here by an explicit CAS — the real wait_event closes
+///    the same window).
+/// 4. Producer writes data; the producer's unix_send invokes
+///    `wake_all` on RECV_WQS, which CAS-flips the registered task to
+///    Ready via `unblock_task`.
+pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
@@ -3369,40 +3464,35 @@ pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
         }
     };
 
-    // Make the FD-owning user task current. dispatch() sets it to Running,
-    // which is the precondition for prepare_to_wait's Running → WillBlock.
+    // Make the FD-owning user task current.  dispatch() sets it
+    // Running, which is the precondition for the wait-queue
+    // protocol's Running → Blocked CAS.
     make_task_current(task_ptr);
 
-    // Phase 1: prepare_to_wait → WillBlock
-    prepare_to_wait();
-    assert_eq_test!(
-        unsafe { (*task_ptr).status() },
-        TaskStatus::WillBlock,
-        "STEP1: WillBlock"
-    );
-
-    // Phase 2: register + check readiness
+    // Step 1: register on the recv WQ FIRST (Linux sock_poll_wait order).
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
-    assert_test!(reg.registered, "STEP2: register");
+    assert_test!(reg.registered, "STEP1: register");
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
-    assert_test!((revents & POLLIN) == 0, "STEP2: no data before write");
+    assert_test!((revents & POLLIN) == 0, "STEP1: no data before write");
 
-    // Phase 3: write data → RECV_WQS[peer].wake_all() → unblock_task CAS
+    // Step 2: commit Blocked under the wait queue's SpinLock (modelled
+    // here by an explicit CAS — wait_event's lock-held push + CAS
+    // closes the same race window).
+    let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
+    assert_eq_test!(cas_block, 0, "STEP2: Running → Blocked");
+
+    // Step 3: producer writes data → wake_all → unblock_task CAS.
     let payload = b"wake-test";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "STEP3: write");
 
-    // Phase 4: verify CAS(WillBlock, Running) ran via the wait queue
+    // Step 4: the registered task must now be Ready.
     let state_after = unsafe { (*task_ptr).status() };
-    assert_eq_test!(state_after, TaskStatus::Running, "STEP4: must be Running");
+    assert_eq_test!(state_after, TaskStatus::Ready, "STEP4: Blocked → Ready");
 
     let revents_after = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents_after & POLLIN) != 0, "STEP4: POLLIN");
 
-    // Cleanup. finish_wait is a no-op when state is already Running, but
-    // we keep it for symmetry with the prepare_to_wait above and so the
-    // invariant survives if a future change leaves the task in WillBlock.
-    slopos_kernel_services::driver_runtime::finish_wait();
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
@@ -3411,52 +3501,18 @@ pub fn test_unix_send_wakes_willblock_poll_waiter() -> TestResult {
     TestResult::Pass
 }
 
-/// Verifies that Ready → WillBlock is a valid transition.
-///
-/// When a task is preempted by the scheduler (Running → Ready) and then
-/// resumes in the poll loop, prepare_to_wait must be able to set WillBlock
-/// from Ready. Without this transition, prepare_to_wait silently fails
-/// and the poll handler busy-loops until timeout.
-pub fn test_ready_to_willblock_transition() -> TestResult {
-    let _fixture = SyscallFixture::new();
-    let task_id = create_test_user_task();
-    assert_test!(task_id != INVALID_TASK_ID, "create task");
-    let task_ptr = task_find_by_id(task_id);
-    assert_not_null!(task_ptr, "task ptr");
-
-    // Set task to Ready (simulating scheduler preemption).
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
-
-    // Ready → WillBlock must succeed.
-    assert_eq_test!(
-        task_set_state(task_id, TaskStatus::WillBlock),
-        0,
-        "Ready -> WillBlock must be a valid transition"
-    );
-    let state = unsafe { (*task_ptr).status() };
-    assert_eq_test!(state, TaskStatus::WillBlock, "should be WillBlock");
-
-    // Also verify WillBlock → Running (wakeup) still works from this path.
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
-
-    task_terminate(task_id);
-    TestResult::Pass
-}
-
 /// Demonstrates the check-first-register-second race (the OLD broken pattern).
 ///
-/// Manually simulates the sequence that unix_poll_fused used to execute:
-/// 1. Check readiness (empty) — under UNIX_STATE lock
-/// 2. Data arrives + wake_all fires — nobody on the queue yet
-/// 3. Register on the queue — too late, wakeup already fired
+/// Manually simulates the sequence that `unix_poll_fused` used to execute:
+/// 1. Check readiness (empty).
+/// 2. Data arrives + `wake_all` fires — nobody on the queue yet.
+/// 3. Register on the queue — too late, wakeup already fired.
 ///
-/// The task should still be WillBlock because unblock_task was never
-/// called (wake_all found nobody to dequeue).  This proves the race
-/// existed by construction.
+/// The committed-Blocked task stays `Blocked` because `wake_all` found
+/// no waiters on the queue. This is the lost-wakeup signature that
+/// the register-first ordering (post-Phase-5 wait_event) exists to
+/// prevent.
 pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
-    use crate::scheduler::scheduler::prepare_to_wait;
-
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
@@ -3472,43 +3528,33 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
         }
     };
 
-    // Make the FD-owning user task current — needed for prepare_to_wait
-    // and for enqueue_current to operate on a real, observable task.
+    // Task identity matters: enqueue_current operates on PCR.current_task.
     make_task_current(task_ptr);
 
-    // Step 1: prepare_to_wait → WillBlock
-    prepare_to_wait();
-    assert_eq_test!(
-        unsafe { (*task_ptr).status() },
-        TaskStatus::WillBlock,
-        "WillBlock"
-    );
+    // Step 1: commit Blocked WITHOUT first registering on the queue
+    // (the buggy pre-fix ordering).
+    let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
+    assert_eq_test!(cas_block, 0, "STEP1: Running → Blocked");
 
-    // Step 2: Check readiness WITHOUT registering (old broken order)
+    // Step 2: check readiness without registering.
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents & POLLIN) == 0, "no data yet");
 
-    // Step 3: Data arrives — wake_all fires with nobody on the queue!
+    // Step 3: data arrives — wake_all fires with nobody on the queue!
     let payload = b"race-demo";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "write");
 
-    // Step 4: NOW register (too late — wakeup already fired)
+    // Step 4: NOW register (too late — wake already fired against an
+    // empty queue, no `unblock_task` ran).
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
 
-    // The task must STILL be WillBlock because wake_all found nobody on
-    // the queue and never called unblock_task. This is the lost-wakeup
-    // signature that the register-first ordering exists to prevent.
+    // Task must STILL be Blocked — the lost-wakeup signature.
     let state = unsafe { (*task_ptr).status() };
-    assert_eq_test!(
-        state,
-        TaskStatus::WillBlock,
-        "wakeup lost — still WillBlock"
-    );
+    assert_eq_test!(state, TaskStatus::Blocked, "wakeup lost — still Blocked");
 
-    // Cleanup. finish_wait transitions WillBlock → Running so the task
-    // is in a clean state before terminate.
-    slopos_kernel_services::driver_runtime::finish_wait();
+    // Cleanup: undo the manual Blocked transition before terminate.
+    let _ = task_set_state(task_id, TaskStatus::Ready);
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
@@ -3519,16 +3565,14 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
 
 /// Proves the register-first-then-check order preserves wakeups.
 ///
-/// Simulates the FIXED pattern (Linux sock_poll_wait order):
-/// 1. Register on the queue FIRST
-/// 2. Data arrives + wake_all fires — finds the task on the queue
-/// 3. unblock_task CAS(WillBlock → Running) — wakeup preserved
-/// 4. Check readiness — sees data
-///
-/// This is the exact invariant that the fixed poll_fused implements.
+/// Simulates the FIXED pattern (Linux sock_poll_wait order, post-
+/// Phase-5 wait_event):
+/// 1. Register on the queue FIRST.
+/// 2. Commit Blocked under the wait queue's SpinLock.
+/// 3. Data arrives + wake_all fires — finds the task on the queue
+///    and CAS-flips Blocked → Ready.
+/// 4. Caller's loop re-checks the condition and observes the data.
 pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
-    use crate::scheduler::scheduler::prepare_to_wait;
-
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
@@ -3544,38 +3588,30 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
         }
     };
 
-    // Make the FD-owning user task current. Pairs with the gap-test
-    // counterpart so both tests measure the same observable: the state
-    // of the same task, as a function of register/check ordering.
     make_task_current(task_ptr);
 
-    // Step 1: prepare_to_wait → WillBlock
-    prepare_to_wait();
-    assert_eq_test!(
-        unsafe { (*task_ptr).status() },
-        TaskStatus::WillBlock,
-        "WillBlock"
-    );
-
-    // Step 2: Register FIRST (the Linux pattern)
+    // Step 1: register FIRST.
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
     assert_test!(reg.registered, "register");
 
-    // Step 3: Data arrives — wake_all finds us on the queue!
+    // Step 2: commit Blocked under the queue lock (modelled here as a
+    // direct CAS).
+    let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
+    assert_eq_test!(cas_block, 0, "Running → Blocked");
+
+    // Step 3: data arrives — wake_all finds us on the queue.
     let payload = b"race-fix";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "write");
 
-    // Step 4: Wakeup preserved — unblock_task CAS(WillBlock → Running)
+    // Step 4: wakeup preserved — Blocked → Ready.
     let state = unsafe { (*task_ptr).status() };
-    assert_eq_test!(state, TaskStatus::Running, "wakeup preserved — Running");
+    assert_eq_test!(state, TaskStatus::Ready, "wakeup preserved — Ready");
 
-    // Step 5: Readiness check sees the data
+    // Step 5: readiness check sees the data.
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents & POLLIN) != 0, "POLLIN");
 
-    // Cleanup
-    slopos_kernel_services::driver_runtime::finish_wait();
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
     file_close_fd(pid, cli_fd);
@@ -3604,6 +3640,7 @@ slopos_testing::stest!(
     name = test_try_transition_from_rejects_wrong_state,
     suite = poll_wakeup_race
 );
+slopos_testing::stest!(name = test_task_state_fused_cas, suite = poll_wakeup_race);
 slopos_testing::stest!(
     name = test_unix_socket_poll_syscall_e2e,
     suite = poll_wakeup_race
@@ -3613,11 +3650,7 @@ slopos_testing::stest!(
     suite = poll_wakeup_race
 );
 slopos_testing::stest!(
-    name = test_unix_send_wakes_willblock_poll_waiter,
-    suite = poll_wakeup_race
-);
-slopos_testing::stest!(
-    name = test_ready_to_willblock_transition,
+    name = test_unix_send_wakes_blocked_poll_waiter,
     suite = poll_wakeup_race
 );
 slopos_testing::stest!(

@@ -2,9 +2,7 @@ use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP};
-use slopos_kernel_services::driver_runtime::{
-    block_current_task, finish_wait, prepare_to_wait, scheduler_is_enabled,
-};
+use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 
 use crate::pipe;
 use crate::pipe::PipeHandle;
@@ -104,32 +102,29 @@ impl FileOps for PipeReadOps {
         let mut remaining = buf.len();
 
         loop {
-            let mut need_block = false;
-            let mut consumed = 0usize;
-            let no_writers;
-            {
-                let Some(mut slot) = pipe::lock_slot(h) else {
-                    return if total > 0 {
-                        total as isize
-                    } else {
-                        Errno::EBADF.as_isize()
-                    };
+            // Snapshot under the slot lock: try to consume data and
+            // observe writer count.
+            let (consumed, no_writers, slot_gone) = {
+                match pipe::lock_slot(h) {
+                    Some(mut slot) => {
+                        let consumed = if remaining > 0 && slot.len > 0 {
+                            let chunk = remaining.min(local.len());
+                            slot.read_into(&mut local[..chunk])
+                        } else {
+                            0
+                        };
+                        (consumed, slot.writers == 0, false)
+                    }
+                    None => (0, true, true),
+                }
+            };
+
+            if slot_gone {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    Errno::EBADF.as_isize()
                 };
-
-                if remaining > 0 && slot.len > 0 {
-                    let chunk = remaining.min(local.len());
-                    consumed = slot.read_into(&mut local[..chunk]);
-                }
-
-                no_writers = slot.writers == 0;
-                if consumed == 0
-                    && total == 0
-                    && !no_writers
-                    && !is_nonblock
-                    && scheduler_is_enabled() != 0
-                {
-                    need_block = true;
-                }
             }
 
             if consumed > 0 {
@@ -159,29 +154,23 @@ impl FileOps for PipeReadOps {
             if is_nonblock {
                 return Errno::EAGAIN.as_isize();
             }
-
-            if need_block {
-                prepare_to_wait();
-                pipe::reader_wq(h).enqueue_current();
-
-                // Re-check after enqueue to close the lost-wakeup race:
-                // the writer may have closed (or written) between our
-                // initial check (with slot lock dropped) and our
-                // enqueue, and a wake_all fired in that window finds
-                // an empty queue. Without this re-check we'd sleep
-                // forever despite the wake having already happened.
-                let still_block = match pipe::lock_slot(h) {
-                    Some(slot) => slot.len == 0 && slot.writers > 0,
-                    None => false,
-                };
-                if still_block {
-                    block_current_task();
-                }
-                finish_wait();
-                pipe::reader_wq(h).remove_current();
-                continue;
+            if scheduler_is_enabled() == 0 {
+                return Errno::EAGAIN.as_isize();
             }
-            return Errno::EAGAIN.as_isize();
+
+            // Block via wait_event so the queue's SpinLock pairs with
+            // the producer's wake_one and the Running→Blocked CAS
+            // happens under the same lock the wake side acquires —
+            // closing the lost-wakeup window without any consumer-side
+            // ad-hoc state CAS. The closure re-checks data/EOF under
+            // the slot lock so the wake-up condition is observed
+            // atomically with respect to the producer's slot store.
+            pipe::reader_wq(h).wait_event(|| match pipe::lock_slot(h) {
+                Some(slot) => slot.len > 0 || slot.writers == 0,
+                // Slot evaporated under us — fall out of the wait so
+                // the next iteration's lock_slot returns EBADF.
+                None => true,
+            });
         }
     }
 
@@ -251,54 +240,53 @@ impl FileOps for PipeWriteOps {
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
 
+        // The wait condition is "buffer has room OR peer is gone": we
+        // can make forward progress in either case (push more bytes,
+        // or report EPIPE). Used by both the pre-stage block (buffer
+        // full) and the post-stage block (buffer filled mid-write).
+        let drain_or_close = || match pipe::lock_slot(h) {
+            Some(slot) => slot.len < pipe::PIPE_BUFFER_SIZE || slot.readers == 0,
+            None => true,
+        };
+
         loop {
-            let mut need_block = false;
-            let can_write;
-            {
-                let Some(slot) = pipe::lock_slot(h) else {
-                    return if total > 0 {
-                        total as isize
-                    } else {
-                        Errno::EBADF.as_isize()
-                    };
+            // Snapshot under the slot lock.
+            let (can_write, no_readers, slot_gone) = match pipe::lock_slot(h) {
+                Some(slot) => (slot.len < pipe::PIPE_BUFFER_SIZE, slot.readers == 0, false),
+                None => (false, true, true),
+            };
+
+            if slot_gone {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    Errno::EBADF.as_isize()
                 };
-
-                if slot.readers == 0 {
-                    return if total > 0 {
-                        total as isize
-                    } else {
-                        Errno::EPIPE.as_isize()
-                    };
-                }
-
-                can_write = slot.len < pipe::PIPE_BUFFER_SIZE;
+            }
+            if no_readers {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    Errno::EPIPE.as_isize()
+                };
             }
 
             if !can_write {
                 if total >= buf_len {
                     return total as isize;
                 }
-                if is_nonblock && total > 0 {
-                    return total as isize;
-                }
                 if is_nonblock {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EAGAIN.as_isize()
+                    };
+                }
+                if scheduler_is_enabled() == 0 {
                     return Errno::EAGAIN.as_isize();
                 }
-                if scheduler_is_enabled() != 0 {
-                    prepare_to_wait();
-                    pipe::writer_wq(h).enqueue_current();
-                    let still_block = match pipe::lock_slot(h) {
-                        Some(slot) => slot.readers > 0 && slot.len >= pipe::PIPE_BUFFER_SIZE,
-                        None => false,
-                    };
-                    if still_block {
-                        block_current_task();
-                    }
-                    finish_wait();
-                    pipe::writer_wq(h).remove_current();
-                    continue;
-                }
-                return Errno::EAGAIN.as_isize();
+                pipe::writer_wq(h).wait_event(drain_or_close);
+                continue;
             }
 
             if total >= buf_len {
@@ -319,6 +307,12 @@ impl FileOps for PipeWriteOps {
                 return total as isize;
             }
 
+            // Push the staged bytes under the slot lock and wake one
+            // reader if anything was buffered. The slot lock pairs
+            // with the reader's wait_event closure (which also takes
+            // the slot lock) — the reader's condition observation
+            // happens-before its WQ-lock acquire, and the WQ lock-pair
+            // gives the cross-CPU visibility for the writer's update.
             {
                 let Some(mut slot) = pipe::lock_slot(h) else {
                     return if total > 0 {
@@ -346,31 +340,19 @@ impl FileOps for PipeWriteOps {
             if total >= buf_len {
                 return total as isize;
             }
-            if is_nonblock && total > 0 {
-                return total as isize;
-            }
             if is_nonblock {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    Errno::EAGAIN.as_isize()
+                };
+            }
+            if scheduler_is_enabled() == 0 {
                 return Errno::EAGAIN.as_isize();
             }
-            if scheduler_is_enabled() != 0 {
-                need_block = true;
-            }
-
-            if need_block {
-                prepare_to_wait();
-                pipe::writer_wq(h).enqueue_current();
-                let still_block = match pipe::lock_slot(h) {
-                    Some(slot) => slot.readers > 0 && slot.len >= pipe::PIPE_BUFFER_SIZE,
-                    None => false,
-                };
-                if still_block {
-                    block_current_task();
-                }
-                finish_wait();
-                pipe::writer_wq(h).remove_current();
-                continue;
-            }
-            return Errno::EAGAIN.as_isize();
+            // Buffer drained partially but the whole staged batch
+            // didn't fit — wait for room and resume the loop.
+            pipe::writer_wq(h).wait_event(drain_or_close);
         }
     }
 

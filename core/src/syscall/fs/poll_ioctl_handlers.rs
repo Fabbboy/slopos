@@ -290,15 +290,13 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         run_bottom_halves();
 
         // Pre-copy all poll FDs from userspace before registering waiters
-        // so a user-copy failure cannot leak prepare_to_wait / fused refs.
+        // so a user-copy failure cannot leak fused refs.
         for idx in 0..nfds {
             let user_ptr = try_or_err!(ctx, UserPtr::<UserPollFd>::try_new(
                 base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
             ));
             poll_fds[idx] = try_or_err!(ctx, copy_from_user(user_ptr));
         }
-
-        slopos_kernel_services::driver_runtime::prepare_to_wait();
 
         // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready_count = 0u64;
@@ -325,7 +323,6 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         // ── Cleanup + writeback helpers ────────────────────────────
         macro_rules! cleanup {
             () => {
-                slopos_kernel_services::driver_runtime::finish_wait();
                 for &ofi in &registered_ofis[..reg_count] {
                     file_poll_unfused_by_idx(ofi);
                 }
@@ -534,8 +531,6 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         write_out[..bytes_len].fill(0);
         except_out[..bytes_len].fill(0);
 
-        slopos_kernel_services::driver_runtime::prepare_to_wait();
-
         // ── SINGLE PASS: fused register + readiness check ──────────
         let mut ready = 0u64;
         // Store open_file_idx for cleanup instead of FD numbers to avoid
@@ -587,7 +582,6 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
 
         macro_rules! cleanup {
             () => {
-                slopos_kernel_services::driver_runtime::finish_wait();
                 for &ofi in &registered_ofis[..reg_count] {
                     file_poll_unfused_by_idx(ofi);
                 }

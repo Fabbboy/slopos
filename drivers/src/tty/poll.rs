@@ -179,10 +179,22 @@ pub fn poll_sleep_on(slots: &[u8]) {
         return;
     }
 
-    // Set WillBlock before enqueuing so wakeups are not lost.
-    slopos_kernel_services::driver_runtime::prepare_to_wait();
-
-    // Enqueue the current task on each slot's poll waiter.
+    // Enqueue the current task on each slot's poll waiter. The
+    // queue's SpinLock pairs with the producer's `wake_all` to
+    // serialise the enqueue against any racing wake (Linux's
+    // wq_head->lock pattern).
+    //
+    // CORRECTNESS NOTE: this multi-queue path keeps the legacy
+    // "enqueue then block" sequence with a 100 ms bounded timeout.
+    // A wake that fires between the last enqueue and the timeout
+    // CAS sees us still `Running`, so its `unblock_task` Blocked→
+    // Ready CAS fails and the wake's only durable effect is the
+    // node-pop. Worst case we wait out the full 100 ms; the timer
+    // bounds latency. Fixing this to zero latency would require
+    // either a shared serialisation lock that pairs with every
+    // wake across all registered slots, or restructuring this
+    // path around `wait_event_timeout` on a single queue — both
+    // out of scope for the harmonic-cascade Phase 5 cleanup.
     let mut registered = 0usize;
     for &slot in slots {
         let s = slot as usize;
@@ -193,13 +205,11 @@ pub fn poll_sleep_on(slots: &[u8]) {
 
     if registered == 0 {
         // Could not enqueue on any queue — fall back to brief delay.
-        slopos_kernel_services::driver_runtime::finish_wait();
         slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
 
     slopos_kernel_services::driver_runtime::block_current_task_with_timeout(100);
-    slopos_kernel_services::driver_runtime::finish_wait();
 
     // Clean up: remove ourselves from all registered queues.
     for &slot in slots {

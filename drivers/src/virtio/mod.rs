@@ -211,8 +211,9 @@ fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
 /// Completion event for synchronous I/O waits (single-waiter).
 ///
 /// Uses HPET-based cli/sti/hlt polling. Scheduler-backed blocking
-/// is deferred to a future iteration — the WillBlock state machine
-/// is in place but the CompletionEvent↔scheduler integration has an
+/// is deferred to a future iteration — the wait-protocol redesign
+/// (Phase 5: Running→Blocked CAS under the wait-queue lock) is in
+/// place, but the CompletionEvent↔scheduler integration has an
 /// unresolved CAS race after task_wait_for wakeups.
 pub struct CompletionEvent {
     signaled: AtomicBool,
