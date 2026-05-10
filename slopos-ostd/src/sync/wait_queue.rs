@@ -1,5 +1,9 @@
 //! Wait queue primitive for blocking/waking kernel tasks.
 //!
+//! See `docs/scheduler/wait_protocol.md` for the full wait/wake/block
+//! protocol — the lock-pair full-barrier proof, the cookbook for adding
+//! a new wait subsystem, and the migration outlook to async.
+//!
 //! Provides an unbounded intrusive linked list of [`WaitNode`]s; each
 //! waiter contributes its own node and the list links them together
 //! without per-queue capacity limits. The queue talks to the kernel's

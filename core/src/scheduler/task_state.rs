@@ -1,5 +1,10 @@
 //! Fused task lifecycle state.
 //!
+//! See `docs/scheduler/wait_protocol.md` for the full wait/wake/block
+//! protocol — this fused word is the third harmonic-cascade primitive
+//! that makes the two-atomic observation race structurally
+//! unrepresentable.
+//!
 //! `TaskState(AtomicU64)` packs the [`TaskStatus`], [`BlockReason`],
 //! and a 32-bit ABA epoch into a single 64-bit atomic. Replaces the
 //! pre-Phase-5 split of `state_atomic: AtomicU8` + `block_reason:
