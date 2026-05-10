@@ -23,6 +23,7 @@ pub mod raw_table;
 pub mod rcu;
 pub mod seqlock;
 pub mod spin;
+pub mod wait_node;
 pub mod wait_queue;
 
 pub use atomic_cell::AtomicCell;
@@ -47,6 +48,7 @@ pub use spin::{
     IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard, PreemptMutex, PreemptMutexGuard,
 };
 pub use spin::{SpinLock, SpinLockGuard};
+pub use wait_node::WaitNode;
 pub use wait_queue::{WaitQueue, WaitQueueBackend, WaitTaskHandle, register_wait_queue_backend};
 
 // PCR-backed preempt guards re-exported here so the sync surface
