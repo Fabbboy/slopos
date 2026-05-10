@@ -57,11 +57,14 @@ pub struct PciDriver {
 
 // SAFETY: `PciDriver` records a `'static` driver descriptor whose
 // `name` and `context` fields point at driver-private storage that
-// outlives every reader. Drivers register and unregister
-// single-threaded through `pci_register_driver` / `pci_unregister_driver`,
-// gated by the `DRIVER_REGISTRY` SpinLock; cross-CPU reads only see
-// post-registration state. Retiring requires moving driver descriptors
-// onto OSTD-owned `&'static PciDriver` references (later κ phase).
+// outlives every reader. Drivers register single-threaded through
+// `pci_register_driver`, gated by the `DRIVER_REGISTRY` SpinLock;
+// cross-CPU reads only see post-registration state. There is **no**
+// unregister API today — driver descriptors live for the kernel's
+// lifetime. (TODO κ phase: introduce typed `&'static PciDriver`
+// handles + a matching `pci_unregister_driver` so descriptors can be
+// retired cleanly; until then, a missed-unregister is a non-issue
+// because nothing unregisters.)
 unsafe impl Sync for PciDriver {}
 
 struct PciEnumState {

@@ -28,8 +28,9 @@ use crate::sync::OnceLock;
 
 /// Kernel-supplied late-entry callback for AP bringup. Must be
 /// registered via [`register_ap_late_entry`] **before** any AP is
-/// fired by `limine::mp::Cpu::bootstrap`. Receives the AP's 0-based
-/// `cpu_idx` (decoded from `MpInfo.extra - 1`).
+/// fired by `limine::mp::Cpu::bootstrap`. Receives the AP's 1-based
+/// `cpu_idx` (decoded directly from `MpInfo.extra`, which the BSP
+/// populates with the AP slot index when calling `cpu.bootstrap(...)`).
 pub static AP_LATE_ENTRY: OnceLock<fn(usize) -> !> = OnceLock::new();
 
 /// Register the kernel-supplied AP late-entry callback. Single-writer:
@@ -45,8 +46,10 @@ pub fn register_ap_late_entry(entry: fn(usize) -> !) {
 const MP_INFO_EXTRA_OFFSET: usize = 24;
 
 /// AP early entry — executes after [`ap_entry`] has installed
-/// `IA32_GS_BASE`. Disables interrupts, decodes the AP's 0-based
-/// `cpu_idx`, and tail-calls the kernel-registered late entry.
+/// `IA32_GS_BASE`. Disables interrupts, decodes the AP's 1-based
+/// `cpu_idx` (matching the slot index the BSP threaded through
+/// `cpu.bootstrap(..., ap_slot)`), and tail-calls the kernel-registered
+/// late entry.
 ///
 /// Takes `cpu_info` as `*const ()` to avoid a `limine` dep in OSTD;
 /// the trampoline asm passes the same `rdi` value the bootloader
@@ -58,14 +61,19 @@ const MP_INFO_EXTRA_OFFSET: usize = 24;
 ///
 /// Caller must be a freshly-bootstrapped AP whose GS_BASE has just
 /// been installed by the asm trampoline. `cpu_info` must be the
-/// `MpInfo*` the bootloader handed to the trampoline. The
-/// late-entry callback must already be registered (panics
-/// otherwise via `OnceLock::wait`'s spin).
+/// `MpInfo*` the bootloader handed to the trampoline. The late-entry
+/// callback must already be registered: [`OnceLock::wait`] is a
+/// blocking spin loop, so if [`register_ap_late_entry`] has not been
+/// called by the BSP before the AP is bootstrapped this call will
+/// **wedge the AP indefinitely** (unbounded busy-spin), not panic.
 pub(crate) unsafe extern "C" fn ap_early_entry(cpu_info: *const ()) -> ! {
     interrupts::disable_interrupts();
 
-    // Decode 1-based slot from `MpInfo.extra @ +24`, normalise to
-    // 0-based.
+    // Decode the 1-based slot from `MpInfo.extra @ +24`. The BSP wrote
+    // `ap_slot` (1-based — the count of non-BSP CPUs encountered so far,
+    // starting from 1) into this field via `cpu.bootstrap(..., ap_slot)`,
+    // and the kernel late entry consumes the value as-is, so no `- 1`
+    // conversion happens anywhere along the path.
     // SAFETY: trampoline passed us the bootloader-published MpInfo
     // pointer; the field at +24 is `AtomicU64` (8 bytes), readable
     // for as long as the bootloader keeps the response struct alive

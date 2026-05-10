@@ -185,9 +185,15 @@ pub fn smp_init() {
         pcr::init_ap_pcr_lookup(&ap_task_ptrs);
     }
 
+    // AP_SIGNALS is indexed uniformly by `ap_slot` (the 1-based
+    // non-BSP-CPU counter that we also thread through
+    // `cpu.bootstrap(..., ap_slot)`). The AP-side write at
+    // `boot/src/smp.rs:116` uses `cpu_idx = ap_slot`; this BSP-side
+    // zero/wait must match. Using the limine `enumerate` index here
+    // would mis-align whenever the BSP isn't `cpus[0]`.
     let mut ap_count = 0usize;
     let mut ap_slot = 0u64;
-    for (i, cpu) in cpus.iter().enumerate() {
+    for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {
             continue;
         }
@@ -202,7 +208,7 @@ pub fn smp_init() {
             break;
         }
 
-        AP_SIGNALS[i].store(0, Ordering::Release);
+        AP_SIGNALS[ap_slot as usize].store(0, Ordering::Release);
         cpu.bootstrap(ap_entry_goto(), ap_slot);
         ap_count += 1;
     }
@@ -214,18 +220,26 @@ pub fn smp_init() {
 
     let mut started_count = 0usize;
 
-    for (i, cpu) in cpus.iter().enumerate() {
+    // Re-walk under the same ap_slot mapping the spawn loop above used,
+    // so the wait reads the same AP_SIGNALS slot the AP wrote to.
+    let mut ap_slot = 0u64;
+    for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {
             continue;
         }
+        ap_slot += 1;
+        if (ap_slot as usize) > MAX_STATIC_APS {
+            break;
+        }
 
         let mut spins = 2_000_000u32;
-        while AP_SIGNALS[i].load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0 {
+        while AP_SIGNALS[ap_slot as usize].load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0
+        {
             cpu::pause();
             spins -= 1;
         }
 
-        if AP_SIGNALS[i].load(Ordering::Acquire) == AP_STARTED_MAGIC {
+        if AP_SIGNALS[ap_slot as usize].load(Ordering::Acquire) == AP_STARTED_MAGIC {
             klog_info!("MP: CPU 0x{:x} reported online", cpu.lapic_id);
             started_count += 1;
         } else {

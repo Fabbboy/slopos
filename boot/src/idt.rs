@@ -308,20 +308,47 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     klog_info!("NMI WATCHDOG: CPU {} holds {} lock(s)", cpu_id, held);
 
     // Walk the saved-frame chain via %rbp. Each frame: [saved_rbp][return_addr][...].
-    // Stop on null/non-canonical pointer or after 16 frames.
+    // Stop on null/non-canonical/misaligned pointer or after 16 frames.
+    //
+    // We're in NMI watchdog context — a fault on the read_volatile here
+    // would nest a #PF under an NMI panic and risk a triple-fault. Defend
+    // by validating each rbp before the read:
+    //   - canonical kernel half  (high 17 bits all 1)
+    //   - 8-byte aligned         (frame pointer ABI requirement)
+    //   - room for two u64 reads (rbp + 16 must remain canonical)
+    // This isn't a tight bounds check (we can't cheaply prove rbp lies
+    // inside the interrupted task's kernel stack from NMI context, where
+    // we're on an IST stack), but it eliminates the obvious fault classes
+    // — null, user-half, unaligned, and end-of-canonical-space wrap-around.
     {
         let mut rbp = frame.rbp;
         klog_info!("NMI WATCHDOG: CPU {} backtrace:", cpu_id);
         klog_info!("  [0] {:#x}", frame.rip);
         for depth in 1..=16u32 {
-            if rbp == 0 || (rbp >> 47) != 0x1FFFF {
+            if rbp == 0
+                || (rbp >> 47) != 0x1FFFF
+                || (rbp & 7) != 0
+                || rbp
+                    .checked_add(16)
+                    .map_or(true, |end| (end >> 47) != 0x1FFFF)
+            {
                 break;
             }
             let saved_rbp_ptr = rbp as *const u64;
             let ret_addr_ptr = (rbp as *const u64).wrapping_add(1);
-            // SAFETY: best-effort diag read; we are about to panic anyway.
-            let next_rbp = unsafe { core::ptr::read_volatile(saved_rbp_ptr) };
-            let ret_addr = unsafe { core::ptr::read_volatile(ret_addr_ptr) };
+            // SAFETY: best-effort diag read in NMI context. The four
+            // checks above guarantee the address is canonical-kernel,
+            // aligned, and that both u64 reads stay in the canonical
+            // half. A read into an unmapped kernel page would still
+            // fault, but that is a strictly smaller risk than the
+            // pre-validation version which could fault on null /
+            // misaligned / non-canonical addresses too.
+            let (next_rbp, ret_addr) = unsafe {
+                (
+                    core::ptr::read_volatile(saved_rbp_ptr),
+                    core::ptr::read_volatile(ret_addr_ptr),
+                )
+            };
             klog_info!("  [{}] {:#x}", depth, ret_addr);
             if next_rbp <= rbp {
                 break;

@@ -732,17 +732,28 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
     ///
     /// # Safety
     ///
-    /// After this call, no other `Frame` handle exists for the
-    /// returned `Paddr` and no [`MetaSlot`] reservation tracks it.
+    /// **Caller's invariant**: no other `Frame` handle exists for the
+    /// returned `Paddr` at the moment of this call. The typestate alone
+    /// is *not* sufficient to guarantee this — [`Frame::from_in_use`]
+    /// can produce additional handles aliasing the same slot via a
+    /// conditional ref-count CAS. Callers must therefore preserve the
+    /// "sole owner" property by other means (e.g. by holding the only
+    /// reference returned from `Frame::alloc` and never publishing the
+    /// `Paddr` to a `from_in_use` consumer).
+    ///
+    /// After this call, no [`MetaSlot`] reservation tracks the page.
     /// The caller becomes solely responsible for eventual deallocation
     /// (typically via `slopos_mm::page_alloc::free_page_frame`). A
     /// missed free leaks the page; a double-free corrupts the buddy
     /// allocator.
     pub unsafe fn into_phys_release(self) -> Paddr {
         let paddr = self.paddr();
-        // SAFETY: `self` is the sole owner of the slot's ref-count
-        // (typestate is move-only on `Frame`). The slot is `TYPED`
-        // for `self`'s lifetime. We:
+        // SAFETY: caller has asserted (above invariant) that `self`
+        // is the sole `Frame` handle for the slot, so its ref_count
+        // must equal 1. The debug_assert traps test-time misuse —
+        // e.g. a `from_in_use`-aliased handle reaching this path —
+        // before we zero the ref_count and desync the slot. The slot
+        // is `TYPED` for `self`'s lifetime. Steps:
         //   1. Drop the inline `M` payload via the vtable's
         //      `drop_in_place`.
         //   2. Skip `on_drop` so the page is NOT returned to the
@@ -754,6 +765,12 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
         //      desync the slot.
         unsafe {
             let slot = &*self.ptr;
+            debug_assert_eq!(
+                slot.ref_count.load(Ordering::Acquire),
+                1,
+                "into_phys_release: ref_count != 1; aliased handle exists \
+                 (typestate alone does not guarantee uniqueness — see SAFETY note)"
+            );
             let vt = slot.vtable.load(Ordering::Acquire);
             let storage = slot.storage.get() as *mut u8;
             ((*vt).drop_in_place)(storage);
