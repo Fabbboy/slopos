@@ -26,7 +26,7 @@ use slopos_arch::cpu;
 use slopos_arch::cpu::apic_msr::ApicBaseMsr;
 use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_arch::cpu::msr::Msr;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_utils::boot_info::{LimineMemmapResponse, limine_memmap_iter};
 use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
@@ -89,6 +89,18 @@ struct FramebufferReservation {
 
 static FRAMEBUFFER_RESERVATION: SpinLock<Option<FramebufferReservation>> =
     SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+
+/// Plumbing for the pre-typestate / post-typestate boot-step split. The
+/// pre step receives `memmap` and `hhdm_offset` from Limine; the post
+/// step needs them again for `map_acpi_regions`. Stored as a raw
+/// integer so the pointer is `Send + Sync`-clean for static storage —
+/// reconstructed via `as *const _` in the post step.
+struct MemoryInitCtx {
+    memmap_ptr: usize,
+    hhdm_offset: u64,
+}
+
+static MEMORY_INIT_CTX: OnceLock<MemoryInitCtx> = OnceLock::new();
 
 fn framebuffer_reservation() -> Option<FramebufferReservation> {
     *FRAMEBUFFER_RESERVATION.lock()
@@ -500,7 +512,21 @@ fn display_memory_summary() {
     klog_info!("HHDM Offset:           0x{:x}", stats.hhdm_offset);
     klog_info!("=====================================================");
 }
-pub fn init_memory_system(
+/// Pre-typestate half of memory init. Runs at memory-phase
+/// priority 2 — before `META_SLOTS` is installed and before the
+/// OSTD `FrameAlloc` shim is registered.
+///
+/// On success: HHDM is live, the memmap is parsed into the region
+/// store, the buddy allocator is up, the kernel-master PML4 is
+/// re-published into `KERNEL_PAGE_DIR`, and PAT is programmed. The
+/// `memmap` and `hhdm_offset` arguments are stashed in
+/// `MEMORY_INIT_CTX` so the post-typestate half can reach them
+/// without re-plumbing through the boot-step API.
+///
+/// After this returns, `META_SLOTS` install and `register_with_ostd`
+/// run (priorities 5 and 6) so the typestate `Frame::<KernelMeta>`
+/// alloc path is live before any caller in the post step touches it.
+pub fn init_memory_system_pre_typestate(
     memmap: *const LimineMemmapResponse,
     hhdm_offset: u64,
     hhdm_available: bool,
@@ -566,6 +592,28 @@ pub fn init_memory_system(
 
     init_paging();
     crate::pat::pat_init();
+
+    MEMORY_INIT_CTX.call_once(|| MemoryInitCtx {
+        memmap_ptr: memmap as usize,
+        hhdm_offset,
+    });
+
+    0
+}
+
+/// Post-typestate half of memory init. Runs at memory-phase
+/// priority 10 — after `META_SLOTS` is installed (priority 5) and
+/// the OSTD `FrameAlloc` shim is registered (priority 6).
+///
+/// On entry the buddy allocator and the typestate `Frame<_>` API are
+/// both live, so every page allocation made here goes through
+/// `Frame::<KernelMeta>::alloc` rather than the raw bootstrap path.
+pub fn init_memory_system_post_typestate() -> c_int {
+    let ctx = MEMORY_INIT_CTX
+        .get()
+        .expect("init_memory_system_post_typestate before init_memory_system_pre_typestate");
+    let memmap = ctx.memmap_ptr as *const LimineMemmapResponse;
+    let hhdm_offset = ctx.hhdm_offset;
 
     // Map ACPI reclaimable regions into HHDM so drivers can parse ACPI tables
     // This is required for Limine revision 3 which no longer maps these regions

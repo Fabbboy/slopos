@@ -46,7 +46,7 @@ use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
 
-use crate::page_alloc::alloc_page_frame;
+use crate::page_alloc::alloc_kernel_page;
 use crate::paging::map_page_4kb;
 use crate::paging_defs::PAGE_SIZE_2MB;
 use crate::paging_defs::PageFlags;
@@ -657,10 +657,7 @@ fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
         let sentinel_slot = chunk * slots_per_chunk;
         global.lock().reserve_sentinel(sentinel_slot);
 
-        // Bootstrap: stack-VA region init runs early in memory phase,
-        // before the OSTD `Frame` allocator is registered (priority 50).
-        // Use the raw buddy path; pages are zero-by-default.
-        let pa = alloc_page_frame(0);
+        let pa = alloc_kernel_page();
         if pa.is_null() {
             panic!(
                 "stack_va::{}::init: out of frames for sentinel (chunk {})",

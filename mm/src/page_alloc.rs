@@ -771,7 +771,23 @@ pub fn finalize_page_allocator() -> c_int {
     0
 }
 
-pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
+/// Raw multi-page buddy allocator entry point — bootstrap escape and
+/// policy-flag opt-out (NO_PCP / DMA). Not part of the supported public
+/// surface: every new caller should reach for the typestate
+/// `Frame::<KernelMeta>::alloc` (single page) or `alloc_kernel_pages`
+/// (multi-page legacy bridge) instead. The only legitimate consumers
+/// of this function in tree are:
+///
+/// 1. `kernel_meta::install_meta_slots` — bootstrapping `META_SLOTS`
+///    itself; the typestate path physically cannot work yet.
+/// 2. `frame_alloc_shim::LegacyFrameAllocShim::alloc` — the typestate
+///    backend (the typestate calls into here, not the other way round).
+/// 3. Callers that need `ALLOC_FLAG_NO_PCP` or `ALLOC_FLAG_DMA` (test
+///    suites + the xe driver's MMIO buffer + memfd's multi-page user
+///    backing). These will migrate to a future `FrameAllocOptions`
+///    policy axis; until then they remain on the raw escape.
+#[doc(hidden)]
+pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
     if count == 0 {
         return PhysAddr::NULL;
     }
@@ -824,7 +840,7 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
         };
 
         if frame_num == INVALID_PAGE_FRAME {
-            klog_info!("alloc_page_frames: No suitable block available");
+            klog_info!("__alloc_page_frames_raw: No suitable block available");
             return PhysAddr::NULL;
         }
 
@@ -853,7 +869,7 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
                 let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
                 if zero_physical_page(page_phys) != 0 {
                     klog_info!(
-                        "alloc_page_frames: Failed to zero page at phys 0x{:x}",
+                        "__alloc_page_frames_raw: Failed to zero page at phys 0x{:x}",
                         page_phys.as_u64()
                     );
                     ok = false;
@@ -915,8 +931,12 @@ pub fn alloc_kernel_page() -> PhysAddr {
     })
 }
 
-pub fn alloc_page_frame(flags: u32) -> PhysAddr {
-    let phys = alloc_page_frames(1, flags);
+/// Raw single-page buddy allocator entry point. See
+/// [`__alloc_page_frames_raw`] for the audit-point rationale; same
+/// rules apply.
+#[doc(hidden)]
+pub fn __alloc_page_frame_raw(flags: u32) -> PhysAddr {
+    let phys = __alloc_page_frames_raw(1, flags);
     // LUF reuse-drain hook: if the frame we're about to hand out is
     // still referenced by a deferred TLB flush on this CPU, drain the
     // queue before the new owner installs its own mapping. Missing
@@ -950,7 +970,7 @@ pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
         // we don't silently short-return for pathological requests.
         let mut filled = 0usize;
         for slot in out.iter_mut() {
-            let pa = alloc_page_frame(0);
+            let pa = __alloc_page_frame_raw(0);
             if pa.is_null() {
                 break;
             }

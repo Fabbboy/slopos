@@ -10,7 +10,9 @@
 use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 
-use crate::page_alloc::{ALLOC_FLAG_NO_INIT, alloc_page_frame, alloc_page_frames, free_page_frame};
+use crate::page_alloc::{
+    __alloc_page_frame_raw, __alloc_page_frames_raw, ALLOC_FLAG_NO_INIT, free_page_frame,
+};
 
 pub struct LegacyFrameAllocShim;
 
@@ -33,10 +35,10 @@ impl FrameAlloc for LegacyFrameAllocShim {
         // the perf savings the typestate exists to enable.
         let flags = if opts.zeroing { 0 } else { ALLOC_FLAG_NO_INIT };
         let phys = if opts.size_pages <= 1 {
-            alloc_page_frame(flags)
+            __alloc_page_frame_raw(flags)
         } else {
             let count = u32::try_from(opts.size_pages).ok()?;
-            alloc_page_frames(count, flags)
+            __alloc_page_frames_raw(count, flags)
         };
         if phys.is_null() { None } else { Some(phys) }
     }

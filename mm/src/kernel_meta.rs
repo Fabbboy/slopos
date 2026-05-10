@@ -20,7 +20,7 @@ use slopos_ostd::mm::frame::{MAX_META_ALIGN, MAX_META_SIZE, MetaSlot, init_meta_
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::mm_region_highest_frame_seen;
-use crate::page_alloc::alloc_page_frames;
+use crate::page_alloc::__alloc_page_frames_raw;
 use crate::paging_defs::PAGE_SIZE_4KB;
 
 pub use slopos_ostd::mm::frame::KernelMeta;
@@ -64,14 +64,16 @@ pub fn install_meta_slots() -> usize {
         _ => return 0,
     };
 
-    // Bootstrap: this function is META_SLOTS itself. The typestate
-    // `Frame::<KernelMeta>::alloc` requires META_SLOTS to be installed
-    // *and* the OSTD frame allocator to be registered — neither is
-    // true yet. Use the raw buddy path; pages are zero-by-default.
-    let phys = alloc_page_frames(count, 0);
+    // Bootstrap escape: `install_meta_slots` *is* the function that
+    // installs META_SLOTS, so the typestate `Frame::<KernelMeta>::alloc`
+    // path physically cannot work yet (`from_unused` walks META_SLOTS
+    // and returns `NotInitialised`). This is the sole legitimate
+    // zero-flag caller of `__alloc_page_frames_raw` in tree — every
+    // other kernel page allocation goes through the typestate.
+    let phys = __alloc_page_frames_raw(count, 0);
     if phys.is_null() {
         panic!(
-            "install_meta_slots: alloc_page_frames({} pages, ZERO) returned NULL",
+            "install_meta_slots: __alloc_page_frames_raw({} pages, ZERO) returned NULL",
             count
         );
     }
@@ -79,7 +81,7 @@ pub fn install_meta_slots() -> usize {
     let virt = PhysAddr::new(phys.as_u64()).to_virt();
     let slots = virt.as_u64() as *mut MetaSlot;
 
-    // SAFETY: `alloc_page_frames(.., ZERO)` returned `pages * 4 KiB` of
+    // SAFETY: `__alloc_page_frames_raw(.., ZERO)` returned `pages * 4 KiB` of
     // zero-initialised, page-aligned, exclusively-owned physical memory;
     // `to_virt` translated through the kernel HHDM into a kernel-mode
     // virtual address that is unique to us, so the `MetaSlot` slice
