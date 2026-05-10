@@ -30,7 +30,7 @@ use slopos_abi::syscall::{
     SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
-use slopos_mm::page_alloc::alloc_page_frame;
+use slopos_mm::page_alloc::alloc_kernel_page;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
@@ -1122,9 +1122,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
     }
 
     use slopos_abi::addr::PhysAddr;
-    use slopos_mm::page_alloc::{
-        ALLOC_FLAG_NO_PCP, alloc_kernel_page, alloc_page_frame, free_page_frame,
-    };
+    use slopos_mm::page_alloc::{ALLOC_FLAG_NO_PCP, alloc_page_frame, free_page_frame};
 
     let mut stress_pages: [PhysAddr; 128] = [PhysAddr::NULL; 128];
     let mut stress_count = 0usize;

@@ -20,7 +20,7 @@ use slopos_ostd::mm::frame::{MAX_META_ALIGN, MAX_META_SIZE, MetaSlot, init_meta_
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::mm_region_highest_frame_seen;
-use crate::page_alloc::alloc_kernel_pages;
+use crate::page_alloc::alloc_page_frames;
 use crate::paging_defs::PAGE_SIZE_4KB;
 
 pub use slopos_ostd::mm::frame::KernelMeta;
@@ -64,7 +64,11 @@ pub fn install_meta_slots() -> usize {
         _ => return 0,
     };
 
-    let phys = alloc_kernel_pages(count);
+    // Bootstrap: this function is META_SLOTS itself. The typestate
+    // `Frame::<KernelMeta>::alloc` requires META_SLOTS to be installed
+    // *and* the OSTD frame allocator to be registered — neither is
+    // true yet. Use the raw buddy path; pages are zero-by-default.
+    let phys = alloc_page_frames(count, 0);
     if phys.is_null() {
         panic!(
             "install_meta_slots: alloc_page_frames({} pages, ZERO) returned NULL",
