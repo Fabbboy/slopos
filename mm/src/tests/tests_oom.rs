@@ -1,6 +1,7 @@
 use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 use slopos_utils::klog_info;
@@ -26,7 +27,11 @@ pub fn test_page_alloc_until_oom() -> TestResult {
         return pass!();
     }
 
-    let mut allocated: [PhysAddr; 1024] = [PhysAddr::NULL; 1024];
+    // PhysAddr is repr(transparent) over u64; all-zero == PhysAddr::NULL.
+    let mut allocated: KBox<[PhysAddr; 1024]> = unsafe {
+        let raw = KBox::<[u64; 1024]>::zeroed().expect("alloc");
+        KBox::from_raw(KBox::into_raw(raw) as *mut [PhysAddr; 1024])
+    };
     let mut count = 0usize;
 
     let max_alloc = (free_before as usize).min(512);
@@ -201,7 +206,7 @@ pub fn test_heap_alloc_one_gib() -> TestResult {
         return pass!();
     }
 
-    let mut ptrs: [*mut core::ffi::c_void; TARGET_BLOCKS] = [ptr::null_mut(); TARGET_BLOCKS];
+    let mut ptrs: KBox<[*mut core::ffi::c_void; TARGET_BLOCKS]> = KBox::zeroed().expect("alloc");
 
     for i in 0..TARGET_BLOCKS {
         let p = kmalloc(ONE_MIB);

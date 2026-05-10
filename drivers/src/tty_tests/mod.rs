@@ -37,7 +37,7 @@ use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 use crate::tty::pty::PtyPeerHandle;
 
 pub(crate) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
-    let mut state = slopos_ostd::KBox::try_new(VConsoleState::new()).expect("test alloc");
+    let mut state = slopos_ostd::KBox::try_init(VConsoleState::init_default()).expect("test alloc");
     state.rows = 25;
     state.cols = 80;
     state.cursor_attrs = CursorAttributes {

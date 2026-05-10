@@ -30,11 +30,12 @@ use slopos_abi::syscall::{
     SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
-use slopos_mm::page_alloc::alloc_kernel_page;
+use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::KBox;
 use slopos_ostd::user::context::UserContext;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use slopos_utils::klog_info;
@@ -190,6 +191,9 @@ fn map_user_rw_page(pid: u32) -> Option<u64> {
         .is_ok()
     });
     if !matches!(mapped, Some(true)) {
+        // Map failed — release the physical page we allocated above
+        // so this helper doesn't leak frames on the error path.
+        free_page_frame(phys);
         return None;
     }
 
@@ -1497,13 +1501,13 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "failed to write new sigaction"
     );
 
-    let mut action_frame = zero_frame();
+    let mut action_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     action_frame.regs_mut().rdi = SIGUSR1 as u64;
     action_frame.regs_mut().rsi = new_action_addr;
     action_frame.regs_mut().rdx = old_action_addr;
     action_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigaction(task_ptr, &mut action_frame as *mut UserContext)
+        syscall_rt_sigaction(task_ptr, &mut *action_frame as *mut UserContext)
     });
     assert_eq_test!(action_frame.regs().rax, 0, "rt_sigaction failed");
 
@@ -1524,21 +1528,21 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     let original_rsp = stack_top.wrapping_sub(0x200);
     let original_rip = 0x5000_1234;
 
-    let mut kill_frame = zero_frame();
+    let mut kill_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     kill_frame.regs_mut().rdi = task_id as u64;
     kill_frame.regs_mut().rsi = SIGUSR1 as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_kill(task_ptr, &mut kill_frame as *mut UserContext)
+        syscall_kill(task_ptr, &mut *kill_frame as *mut UserContext)
     });
     assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGUSR1) failed");
 
-    let mut user_frame = zero_frame();
+    let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     user_frame.regs_mut().rip = original_rip;
     user_frame.regs_mut().rsp = original_rsp;
     user_frame.regs_mut().rax = 0xAA55;
     user_frame.regs_mut().rbx = 0xBB66;
     let _ = with_user_process_context(pid, || {
-        deliver_pending_signal(task_ptr, &mut user_frame as *mut UserContext)
+        deliver_pending_signal(task_ptr, &mut *user_frame as *mut UserContext)
     });
 
     assert_eq_test!(
@@ -1590,7 +1594,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     // so it now points at the SignalFrame — matching the real flow.
     user_frame.regs_mut().rsp = user_frame.regs().rsp.wrapping_add(8);
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigreturn(task_ptr, &mut user_frame as *mut UserContext)
+        syscall_rt_sigreturn(task_ptr, &mut *user_frame as *mut UserContext)
     });
     assert_eq_test!(
         user_frame.regs().rip,
@@ -2068,8 +2072,8 @@ pub fn test_pipe_buffer_full() -> TestResult {
 
     // Also verify reading from an empty non-blocking pipe returns EAGAIN.
     // First drain the buffer.
-    let mut drain = [0u8; 4096];
-    let drained = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut drain));
+    let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
+    let drained = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut *drain));
     assert_eq_test!(drained as usize, 4096, "drain read wrong count");
 
     // Pipe is now empty with writers still open: non-blocking read should return EAGAIN.

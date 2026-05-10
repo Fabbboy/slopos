@@ -35,9 +35,12 @@
 //! loop and the idle wakeup callback to ensure timers fire both during active
 //! networking and during idle periods.
 
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::KVec;
+use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::init::{Init, init_from_closure};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_utils::klog_debug;
 
@@ -211,6 +214,42 @@ impl NetTimerWheel {
                 LOCK_LEVEL_REGISTRY,
             ),
             next_token: AtomicU64::new(1),
+        }
+    }
+
+    /// In-place [`Init`] recipe equivalent to [`Self::new`] for runtime
+    /// heap allocation. Used via
+    /// `KBox::try_init(NetTimerWheel::init())` — every callsite that
+    /// previously did `let wheel = NetTimerWheel::new();` would have
+    /// dragged the 18 KiB slot array onto the caller's stack frame
+    /// before the move into the `KBox`. The closure here writes the
+    /// 256 empty `KVec`s directly into the heap slot.
+    pub fn init() -> impl Init<Self, AllocError> {
+        // Inner-state initialiser: writes each of the 256 slots and
+        // the `current_tick` field directly into the heap slot.
+        // SAFETY: `init_from_closure` requires the closure write a
+        // valid `TimerWheelInner` into `slot`. We populate every field.
+        let inner_init = unsafe {
+            init_from_closure(|slot: *mut TimerWheelInner| -> Result<(), AllocError> {
+                let slots_ptr = addr_of_mut!((*slot).slots) as *mut KVec<TimerEntry>;
+                for i in 0..NUM_SLOTS {
+                    slots_ptr.add(i).write(KVec::new());
+                }
+                addr_of_mut!((*slot).current_tick).write(0);
+                Ok(())
+            })
+        };
+        // Outer initialiser: thread `inner_init` through `SpinLock::init_with`
+        // and write the `next_token` AtomicU64.
+        // SAFETY: every field of `Self` is initialised before `Ok(())`.
+        unsafe {
+            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
+                let inner_ptr = addr_of_mut!((*slot).inner) as *mut SpinLock<TimerWheelInner>;
+                SpinLock::<TimerWheelInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
+                    .__init(inner_ptr)?;
+                addr_of_mut!((*slot).next_token).write(AtomicU64::new(1));
+                Ok(())
+            })
         }
     }
 

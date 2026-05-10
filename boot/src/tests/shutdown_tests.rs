@@ -423,6 +423,12 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
         let mut page_addrs: [u64; 4] = [0; 4];
         for i in 0..4 {
             let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
+            assert_test!(
+                phys.as_u64() != 0,
+                "cycle {} alloc {} returned PhysAddr::NULL (OOM)",
+                cycle,
+                i
+            );
             page_addrs[i] = phys.as_u64();
         }
 

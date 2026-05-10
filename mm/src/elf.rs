@@ -626,14 +626,22 @@ impl<'a> ElfValidator<'a> {
         Ok(count)
     }
 
-    /// Test-only wrapper that keeps the stack-allocated return-by-value
-    /// shape. Production code must use [`validate_load_segments_into`].
+    /// Test-only wrapper that returns a heap-allocated segment array.
+    /// Production code must use [`validate_load_segments_into`].
+    ///
+    /// The fixed-size 16-segment array is heap-allocated via
+    /// `KBox::zeroed` so the test caller's stack frame stays under the
+    /// per-function limit.
     #[cfg(feature = "test-hooks")]
     pub fn validate_load_segments(
         &self,
-    ) -> ElfResult<([ValidatedSegment; MAX_LOAD_SEGMENTS], usize)> {
-        let mut segments = [ValidatedSegment::ZERO; MAX_LOAD_SEGMENTS];
-        let count = self.validate_load_segments_into(&mut segments)?;
+    ) -> ElfResult<(
+        slopos_ostd::KBox<[ValidatedSegment; MAX_LOAD_SEGMENTS]>,
+        usize,
+    )> {
+        let mut segments: slopos_ostd::KBox<[ValidatedSegment; MAX_LOAD_SEGMENTS]> =
+            slopos_ostd::KBox::zeroed().expect("test alloc");
+        let count = self.validate_load_segments_into(&mut *segments)?;
         Ok((segments, count))
     }
 

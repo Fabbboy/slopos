@@ -436,13 +436,30 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// [`FrameError::StateMismatch`].
     pub fn from_in_use(paddr: Paddr) -> Result<Self, FrameError> {
         let slot = meta_slot_for(paddr).ok_or(FrameError::OutOfRange)?;
+        // Advisory pre-checks: reject early if the slot is clearly
+        // not what the caller expects. The authoritative gate is the
+        // CAS-loop below — it is the only way to make
+        // "state is TYPED with our M, AND ref_count > 0" observable
+        // atomically.
         if slot.state.load(Ordering::Acquire) != META_STATE_TYPED {
             return Err(FrameError::StateMismatch);
         }
-        // Acquire-fetch — pairs with the Release on the last-ref
-        // decrement in `Drop`.
-        let prev = slot.ref_count.fetch_add(1, Ordering::AcqRel);
-        debug_assert!(prev > 0, "from_in_use on a slot with ref_count == 0");
+        let expected_vt = vtable_for::<M>() as *const _ as *mut MetaVtable;
+        if slot.vtable.load(Ordering::Acquire) != expected_vt {
+            return Err(FrameError::StateMismatch);
+        }
+        // Conditional increment — succeed only if ref_count > 0. This
+        // closes the resurrect-during-teardown race: `Drop` decrements
+        // ref_count to 0 (frame.rs:890) BEFORE storing META_STATE_UNUSED
+        // (frame.rs:905). A plain `fetch_add(1)` would bump 0→1 in that
+        // window and revive a slot whose `on_drop`/`drop_in_place` is
+        // already running, leaving the slot with the wrong vtable or a
+        // half-destroyed `M`. The CAS-loop refuses to bump from 0.
+        slot.ref_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
+                if prev == 0 { None } else { Some(prev + 1) }
+            })
+            .map_err(|_| FrameError::StateMismatch)?;
         Ok(Self {
             ptr: slot,
             _marker: PhantomData,

@@ -471,7 +471,7 @@ pub fn test_canonical_input_over_1024() -> TestResult {
     tty::push_input(idx, b'\n');
 
     // Read it back. Should get all 2000 + newline.
-    let mut buf = [0u8; 4096];
+    let mut buf: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let mut total = 0usize;
     loop {
         match tty::read(idx, &mut buf[total..], true) {
@@ -505,7 +505,7 @@ pub fn test_large_paste_canonical() -> TestResult {
     tty::push_input(idx, b'\n');
 
     // Read back.
-    let mut buf = [0u8; 4096];
+    let mut buf: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let mut total = 0usize;
     loop {
         match tty::read(idx, &mut buf[total..], true) {

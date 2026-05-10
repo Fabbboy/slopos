@@ -170,8 +170,12 @@ pub fn test_loopback_queue_capacity() -> TestResult {
 // =============================================================================
 
 pub fn test_configure_populates_route_table() -> TestResult {
-    let ns = NetStack::new();
-    let rt = RouteTable::new();
+    // Heap-allocate so neither the 33-bucket RouteTable nor the
+    // SpinLock-wrapped NetStack materialise on the test fn's stack.
+    let ns: slopos_ostd::KBox<NetStack> =
+        slopos_ostd::KBox::try_new(NetStack::new()).expect("alloc");
+    let rt: slopos_ostd::KBox<RouteTable> =
+        slopos_ostd::KBox::try_init(RouteTable::init()).expect("alloc");
 
     // We can't easily test the global ROUTE_TABLE integration without side effects,
     // so we verify the NetStack::configure() logic by checking what the global

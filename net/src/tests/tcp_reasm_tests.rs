@@ -9,6 +9,7 @@
 //! write_at_offset wrap-around, capacity limits, sequence-space wrap,
 //! recv-buffer-full, and a commutativity fuzz.
 
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -238,10 +239,10 @@ pub fn test_reasm_write_at_offset_wrap() -> TestResult {
 
     // Fill the buffer almost completely, then consume to move tail forward.
     // This positions head near the end of the backing array.
-    let fill = [0u8; 32000];
-    recv.enqueue(&fill, 0);
-    let mut discard = [0u8; 32000];
-    recv.dequeue(&mut discard);
+    let fill: KBox<[u8; 32000]> = KBox::zeroed().expect("alloc");
+    recv.enqueue(&*fill, 0);
+    let mut discard: KBox<[u8; 32000]> = KBox::zeroed().expect("alloc");
+    recv.dequeue(&mut *discard);
     // Now: tail≈32000, head≈32000, count=0, free=32768.
 
     // Write at offset 700 (wraps past end of backing array).
@@ -250,8 +251,9 @@ pub fn test_reasm_write_at_offset_wrap() -> TestResult {
     assert_eq_test!(wrote, 100, "wrote 100 bytes wrapping around");
 
     // Fill the gap so we can read the OOO data.
-    let gap = [0xAAu8; 700];
-    recv.enqueue(&gap, 0);
+    let mut gap: KBox<[u8; 700]> = KBox::zeroed().expect("alloc");
+    gap.iter_mut().for_each(|b| *b = 0xAA);
+    recv.enqueue(&*gap, 0);
     recv.buf.advance_head(100);
 
     let out = drain_to_vec(&mut recv);
@@ -272,8 +274,8 @@ pub fn test_reasm_write_at_offset_capacity() -> TestResult {
     let mut recv = fresh_recv();
 
     // Fill buffer to leave only 100 bytes free.
-    let fill = [0u8; 32668]; // 32768 - 100
-    recv.enqueue(&fill, 0);
+    let fill: KBox<[u8; 32668]> = KBox::zeroed().expect("alloc"); // 32768 - 100
+    recv.enqueue(&*fill, 0);
 
     // Offset 100 → exactly at the boundary, no room for data.
     let wrote = recv.buf.write_at_offset(100, b"x");
@@ -318,8 +320,8 @@ pub fn test_reasm_drain_respects_capacity() -> TestResult {
     let mut recv = fresh_recv();
 
     // Fill recv buffer to leave only 50 bytes free.
-    let fill = [0u8; 32718]; // 32768 - 50
-    recv.enqueue(&fill, 0);
+    let fill: KBox<[u8; 32718]> = KBox::zeroed().expect("alloc"); // 32768 - 50
+    recv.enqueue(&*fill, 0);
 
     let rcv_nxt: u32 = fill.len() as u32;
 

@@ -18,7 +18,11 @@
 //! programmer error caught by `debug_assert!` inside [`Actions::push_segment`]
 //! / [`Actions::push_timer`].
 
+use core::ptr::addr_of_mut;
+
 use bitflags::bitflags;
+use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::init::{Init, init_from_closure};
 
 use crate::timer::{TimerKind, TimerToken};
 
@@ -78,6 +82,41 @@ impl Actions {
             conn_id: None,
             accepted: None,
             release: false,
+        }
+    }
+
+    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
+    /// `KBox::try_init(Actions::init_default())` so a caller that
+    /// wants a heap-resident, reusable `Actions` slot does not have
+    /// to materialise the ~400 B `Self::new()` rvalue on its own
+    /// stack frame first. The hand-written field-by-field init keeps
+    /// the closure's frame inside the 2 KiB stack-size gate.
+    ///
+    /// `AllocError` is the carrier required by `KBox::try_init`'s
+    /// `E: From<AllocError>` bound — the closure itself never errors.
+    pub fn init_default() -> impl Init<Self, AllocError> {
+        // SAFETY: writes every field of `Self` exactly once into
+        // `slot` before returning `Ok(())`. The `[Option<_>; N]`
+        // initialisers also use `addr_of_mut!` element-by-element so
+        // no by-value array literal materialises in this closure.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                let segs_ptr = addr_of_mut!((*slot).segments) as *mut Option<TcpOutSegment>;
+                for i in 0..MAX_SEGMENTS {
+                    segs_ptr.add(i).write(None);
+                }
+                addr_of_mut!((*slot).segments_len).write(0);
+                let ops_ptr = addr_of_mut!((*slot).timer_ops) as *mut Option<TimerOp>;
+                for i in 0..MAX_TIMER_OPS {
+                    ops_ptr.add(i).write(None);
+                }
+                addr_of_mut!((*slot).timer_ops_len).write(0);
+                addr_of_mut!((*slot).notify).write(SocketNotify::empty());
+                addr_of_mut!((*slot).conn_id).write(None);
+                addr_of_mut!((*slot).accepted).write(None);
+                addr_of_mut!((*slot).release).write(false);
+                Ok(())
+            })
         }
     }
 
