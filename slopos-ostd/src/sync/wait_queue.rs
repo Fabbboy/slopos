@@ -12,6 +12,45 @@
 //! - Protected by [`SpinLock`](super::spin::SpinLock) for interrupt-safe access
 //! - Uses scheduler wait-gating (`prepare_to_wait`/`finish_wait`) with
 //!   `block_current_task()` / `unblock_task()` from the registered backend
+//!
+//! # Wait/wake correctness contract (AUDIT 2C)
+//!
+//! Producers do **NOT** need to issue explicit memory fences between the
+//! condition update (e.g. a data store, `exit_info.try_set`, a pipe-buffer
+//! fill/drain, a socket `rx_ready` flag flip) and the call to
+//! [`WaitQueue::wake_one`] / [`WaitQueue::wake_all`]. The internal
+//! [`SpinLock`](super::spin::SpinLock) supplies the bidirectional full
+//! barrier required by the wait/wake protocol:
+//!
+//! - The producer's release-on-unlock when `wake_*` drops the lock pairs
+//!   with the consumer's acquire-on-lock when [`wait_event`](WaitQueue::wait_event)
+//!   re-runs the condition closure under the same lock. Any stores made
+//!   before `wake_*` (and before any prior unlock of an unrelated lock the
+//!   producer also held) are visible to the closure.
+//! - Symmetrically, the consumer's enqueue under the lock pairs with the
+//!   producer's lock acquire in `wake_*`, so a producer that observes
+//!   "no waiters" did so AFTER any condition update the consumer's
+//!   pre-enqueue check could have observed.
+//!
+//! This is the same contract Linux relies on for `wq_head->lock` in
+//! `prepare_to_wait_event` / `wake_up`. Subsystems that depend on this
+//! property (and therefore do **not** need their own fences before
+//! `wake_*`):
+//!
+//! - Pipes (`fs/src/pipe.rs`, `fs/src/pipe_file_ops.rs`) — `READER_WQS`
+//!   / `WRITER_WQS`, woken on buffer-fill / drain / EOF.
+//! - TTY (`drivers/src/tty.rs` and friends) — line-discipline read/write
+//!   wait queues woken on input echo / drain.
+//! - Sockets (`net/src/socket.rs`, `net/src/socket_file_ops.rs`,
+//!   `net/src/unix_socket_file_ops.rs`) — accept / recv / send queues.
+//! - Futex (`core/src/scheduler/futex.rs`) — bucket-locked, same pattern.
+//! - Per-task `waiters` (`core/src/scheduler/task_struct.rs::Task::waiters`)
+//!   — woken from `mark_task_terminated` after `exit_info.try_set`.
+//!
+//! Adding a fresh subsystem? You inherit this contract for free as long
+//! as your producer goes condition-update -> `wake_*` and your consumer
+//! uses `wait_event(|| condition_holds())`. Don't add a `compiler_fence`
+//! or `atomic::fence` "just in case"; it is dead code.
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;

@@ -189,6 +189,28 @@ fn ms_to_sleep_ticks(ms: u32) -> u64 {
     ticks.max(1)
 }
 
+// AUDIT 2A: sleep wait/wake protocol — race-free without harmonic-cascade.
+//
+// Sleep differs from `task_wait_for` and other multi-observer wait queues:
+// there is exactly ONE wake event (the deadline) and exactly ONE observer
+// (the sleeper). There is no `(status, waiting_on)` pair to observe in
+// the wrong order — the status atomic is the single ground truth.
+//
+// Correctness comes from the CAS chain on `Task::status`:
+//   * `block_current_task_with_timeout` arms the deadline, then
+//     CAS(WillBlock -> Blocked). A racing `unblock_task` on the same task
+//     either (a) wins the CAS first, leaving status=Running so our CAS
+//     fails and we cancel the sleep entry, or (b) loses, finds Blocked,
+//     and CAS(Blocked -> Ready) wakes us.
+//   * `sleep_current_task_ms` (no WillBlock state involved) does
+//     CAS(Running -> Blocked) under IRQ-off, paired with `wake_sleeping_task`'s
+//     CAS-via-`task_set_state_with_reason` from Blocked -> Ready.
+//
+// Both directions serialise through atomic state CAS — there is no
+// two-atomic observation problem and therefore no need for the
+// harmonic-cascade redesign here. Phase 5 will collapse the WillBlock
+// intermediate state (eager Running -> Blocked) once it's deleted
+// elsewhere; until then this section is unchanged.
 fn wake_sleeping_task(task_id: u32) {
     if task_id == INVALID_TASK_ID {
         return;

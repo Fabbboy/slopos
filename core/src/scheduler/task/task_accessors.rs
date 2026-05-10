@@ -573,27 +573,6 @@ pub fn task_inc_ref_with_id(task: *mut Task) -> Option<(u32, u32)> {
     Some((id, count))
 }
 
-/// Atomic CAS on `task->waiting_on`: succeeds only if the current
-/// value equals `expected`, in which case the field is overwritten
-/// with `desired`. Returns `Some(true)` on success, `Some(false)` on
-/// race loss, `None` if `task` is null.
-#[inline]
-pub fn task_waiting_on_cas(task: *mut Task, expected: u32, desired: u32) -> Option<bool> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `waiting_on` is `AtomicU32`.
-    let result = unsafe {
-        (*task).waiting_on.compare_exchange(
-            expected,
-            desired,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
-        )
-    };
-    Some(result.is_ok())
-}
-
 /// Stamp `task->waiting_on` unconditionally with `task_id`.
 #[inline]
 pub fn task_set_waiting_on(task: *mut Task, task_id: u32) {

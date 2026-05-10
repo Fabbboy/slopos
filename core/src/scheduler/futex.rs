@@ -80,6 +80,19 @@ fn futex_hash(addr: u64) -> usize {
     (h as usize) & (FUTEX_HASH_BUCKETS - 1)
 }
 
+// AUDIT 2B: futex wait/wake protocol — bucket SpinLock IS the barrier.
+//
+// The per-bucket `SpinLock<FutexBucket>` (FUTEX_TABLE: 64 buckets) covers
+// the entire publish-and-condition-check window: under the same lock we
+// (a) read `*uaddr`, (b) compare against `expected`, and (c) enqueue the
+// waiter. FUTEX_WAKE takes the same bucket lock to dequeue. The lock-pair
+// gives a bidirectional full barrier identical to Linux's `wq_head->lock`
+// pattern in `wake_q_add` / `prepare_to_wait_event`.
+//
+// The `prepare_to_wait` / `finish_wait` calls below are vestigial: the
+// bucket lock-pair already provides what they were meant to provide. They
+// are scheduled for deletion in Phase 5 along with the WillBlock state.
+// No diff today.
 /// FUTEX_WAIT: atomically check that `*uaddr == expected` and block the
 /// calling task on the futex queue keyed by `uaddr`.
 ///

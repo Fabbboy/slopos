@@ -2142,6 +2142,34 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     TestResult::Pass
 }
 
+/// Phase 7 cleanup placeholder: poll spurious-wake hygiene across multiple FDs.
+///
+/// When poll(2) registers on N WaitQueues (N polled FDs) and one of them
+/// fires `wake_one`, the waiter is dequeued from the firing WQ but remains
+/// enqueued on the other (N-1) WQs until the poll handler's cleanup loop
+/// runs after the wakeup. A producer firing on one of those queues in the
+/// narrow window between wakeup and cleanup is a SPURIOUS wake of an
+/// already-Running task — benign for correctness, untidy for resource
+/// hygiene. See AUDIT 2D in `core/src/syscall/fs/poll_ioctl_handlers.rs`.
+///
+/// This test is a placeholder. `slopos_testing::stest!` does not honour
+/// `#[ignore]` (it's a custom registry, not the standard `#[test]`
+/// framework), so we skip via runtime by returning `TestResult::Skipped`
+/// immediately — the harness records the test as Skipped without
+/// attempting the (currently unimplemented) multi-WQ verification.
+/// Phase 7's poll cleanup must replace the body with the real assertion
+/// that one wake drains the waiter from ALL polled queues.
+pub fn test_poll_multi_wq_wake_clears_others() -> TestResult {
+    // Intended body (Phase 7):
+    //   - Open two pipes (r1/w1, r2/w2) in one process.
+    //   - poll() on [r1, r2] for POLLIN with a long timeout.
+    //   - From a peer, write to w1 to trigger r1's WQ wake_one.
+    //   - After poll returns, assert reader_wq(r1).waiter_count() == 0
+    //     AND reader_wq(r2).waiter_count() == 0. Today r2's WQ may still
+    //     hold the stale handle until the cleanup pass runs.
+    TestResult::Skipped
+}
+
 /// Regression test for the stale-argv spawn bug (compositor spawn failure).
 ///
 /// Before the fix, `spawn_path_with_attrs()` used `syscall4` which left r8/r9
@@ -2507,6 +2535,10 @@ slopos_testing::stest!(name = test_pipe_partial_read, suite = syscall_valid);
 slopos_testing::stest!(name = test_pipe_buffer_full, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_exit_current_task_releases_pipe_refs,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_poll_multi_wq_wake_clears_others,
     suite = syscall_valid
 );
 slopos_testing::stest!(

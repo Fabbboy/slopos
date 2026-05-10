@@ -51,7 +51,7 @@ use super::task::{
     task_record_context_switch, task_record_yield, task_set_controlling_tty, task_set_on_cpu,
     task_set_state, task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid,
     task_status, task_time_slice, task_time_slice_remaining, task_try_transition_from,
-    task_wait_off_cpu, task_waiting_on_cas,
+    task_wait_off_cpu,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -1108,59 +1108,6 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return -1;
     }
     0
-}
-
-/// Attempt to wake a task that was waiting on `completed_id`.
-/// Returns true if THIS caller won the wake race and should handle the task.
-/// Returns false if another caller already woke it or task wasn't waiting on this ID.
-///
-/// This is the key primitive for lock-free task termination - uses CAS to ensure
-/// exactly one waker succeeds per waiting task.
-pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
-    if task.is_null() || completed_id == INVALID_TASK_ID {
-        return false;
-    }
-
-    // CAS: Atomically clear waiting_on only if it matches completed_id
-    // Only ONE caller can succeed this CAS - the "winner"
-    let won = task_waiting_on_cas(task, completed_id, INVALID_TASK_ID).unwrap_or(false);
-
-    if won {
-        // We won the CAS race. Now wake the task using the same safe
-        // transitions as unblock_task() to avoid the WillBlock race.
-        let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
-
-        // WillBlock -> Running: task declared intent but hasn't blocked yet.
-        // Cancel any pending sleep; no schedule_task (task is still running).
-        if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
-            super::sleep::cancel_sleep(task_id);
-            return true;
-        }
-
-        // Blocked -> Ready: task is fully blocked, wake it.
-        if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-            super::sleep::cancel_sleep(task_id);
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            // try_wake_from_task_wait fires from `release_task_dependents`
-            // during `mark_task_terminated`, which runs in the exiting
-            // task's syscall context. The waiter being woken is by
-            // definition NOT the exiting task, but it may still be
-            // running on the same CPU as the exiter, so SelfPossible
-            // is the safe upper bound.
-            schedule_task(task, WakeContext::SelfPossible);
-            return true;
-        }
-
-        // Task is in some other state (Running, Ready, Terminated).
-        if task_is_terminated(task) || task_is_invalid(task) {
-            return false;
-        }
-        true
-    } else {
-        // Lost race OR task is waiting on different ID
-        // Either way, not our responsibility to wake
-        false
-    }
 }
 
 /// Unified task exit for all CPUs.

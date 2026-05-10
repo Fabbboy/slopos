@@ -229,6 +229,30 @@ fn poll_to_select_mask(
     (read_ready, write_ready, except_ready)
 }
 
+// AUDIT 2D: poll/select wait/wake — fan-in correct, hygiene to fix later.
+//
+// poll/select fan into multiple WaitQueues (one per polled FD: pipe
+// reader/writer WQ, TTY WQ, socket WQ, ...) and back via a shared timeout.
+// Each per-FD WQ correctly notifies on its own readiness event under the
+// SpinLock-pair contract documented in `slopos_ostd::sync::wait_queue`,
+// so the fan-in IS race-free with respect to LOST wakes — a producer
+// flipping readiness then calling `wake_*` will always wake an enqueued
+// poller.
+//
+// KNOWN ISSUE (Phase 7 cleanup target, not a correctness blocker):
+// when one FD becomes ready and `wake_one` dequeues this task from that
+// FD's WQ, the task is still enqueued on the OTHER polled FDs' WQs until
+// the loop body falls through to `cleanup!()`. The fast path here
+// (`block_current_task_with_timeout` returns -> `cleanup!()` runs ->
+// `file_poll_unfused_by_idx` -> `poll_unwait` -> `WaitQueue::remove_current`)
+// drains them, but a producer firing `wake_one` on one of those queues
+// in the narrow window between wakeup and cleanup is a SPURIOUS wake of
+// an already-Running task — benign, not a lost-wake.
+//
+// The structural fix (Linux's `poll_wait` registers a poll_table entry
+// with a remove-on-wake hook so a wake on ANY queue eagerly drains the
+// others) belongs to Phase 7's poll cleanup. Tracked by the regression
+// test `test_poll_multi_wq_wake_clears_others`, currently `Skipped`.
 define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let nfds = args.arg1_usize();
     let timeout_ms = args.arg2 as i64;
