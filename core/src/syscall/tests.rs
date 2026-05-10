@@ -1122,13 +1122,14 @@ pub fn test_fork_memory_pressure() -> TestResult {
     }
 
     use slopos_abi::addr::PhysAddr;
-    use slopos_mm::page_alloc::{__alloc_page_frame_raw, ALLOC_FLAG_NO_PCP, free_page_frame};
+    use slopos_mm::page_alloc::{alloc_kernel_page_with, free_page_frame};
+    use slopos_ostd::mm::frame::FrameAllocOptions;
 
     let mut stress_pages: [PhysAddr; 128] = [PhysAddr::NULL; 128];
     let mut stress_count = 0usize;
 
     for _ in 0..128 {
-        let phys = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
+        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
         if phys.is_null() {
             break;
         }

@@ -11,7 +11,8 @@ use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 
 use crate::page_alloc::{
-    __alloc_page_frame_raw, __alloc_page_frames_raw, ALLOC_FLAG_NO_INIT, free_page_frame,
+    __alloc_page_frame_raw, __alloc_page_frames_raw, ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP,
+    free_page_frame,
 };
 
 pub struct LegacyFrameAllocShim;
@@ -29,11 +30,17 @@ impl FrameAlloc for LegacyFrameAllocShim {
             opts.align_pages, 1,
             "LegacyFrameAllocShim only supports align_pages == 1"
         );
-        // `opts.zeroing == false` ⇒ caller is on the typestate
-        // `Frame<_, Uninit>` path and has accepted the "I will overwrite
-        // every byte" obligation; tell the buddy to skip its scrub for
-        // the perf savings the typestate exists to enable.
-        let flags = if opts.zeroing { 0 } else { ALLOC_FLAG_NO_INIT };
+        // The buddy unconditionally scrubs; `opts.zeroing` is now a
+        // type-level audit signal (the typestate `Frame<_, Uninit>`
+        // path is the documented opt-out for "I will overwrite every
+        // byte before reading") rather than a runtime perf escape.
+        let mut flags = 0u32;
+        if opts.no_pcp {
+            flags |= ALLOC_FLAG_NO_PCP;
+        }
+        if opts.dma {
+            flags |= ALLOC_FLAG_DMA;
+        }
         let phys = if opts.size_pages <= 1 {
             __alloc_page_frame_raw(flags)
         } else {

@@ -749,7 +749,8 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     scheduler::unschedule_task(task_ptr);
 
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    // Phase 1's exit_info.try_set + WaitQueue SpinLock superseded the
+    // SeqCst fence here (was: defensive belt-and-braces).
 
     // Publish exit_info BEFORE the wake fanout. Order is load-bearing:
     // try_set is Release; the WaitQueue's SpinLock inside wake_all is

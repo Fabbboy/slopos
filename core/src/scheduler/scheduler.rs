@@ -50,7 +50,7 @@ use super::task::{
     task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
     task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
     task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_time_slice,
-    task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu,
+    task_time_slice_remaining, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -515,62 +515,13 @@ fn mark_preempt_if_ready(cpu_id: usize) {
     }
 }
 
-/// Spin until the previous CPU finishes its outgoing context switch for
-/// this task.  Matches Linux's `smp_cond_load_acquire(&p->on_cpu, !VAL)`
-/// in `try_to_wake_up()`.  Without this, a woken task can be dispatched
-/// on CPU B while CPU A is still saving its registers → corruption.
-#[inline]
-fn wait_task_off_cpu(task: *mut Task) {
-    task_wait_off_cpu(task);
-}
-
-/// Caller-side classification of a wake target's relationship to the
-/// caller's CPU. Forces every wake site to declare its intent so the
-/// scheduler can pick the right primitive.
-///
-/// Step 5 of `plans/SAFE_BY_DESIGN.md`. The self-wakeup deadlock that
-/// the current branch fixed was a `schedule_task` call from a wake
-/// path that didn't know it might target the currently-executing task
-/// on this CPU. Encoding the distinction in the API forces the
-/// thinking at every call site, even if the runtime fast-path
-/// happens to be the same.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WakeContext {
-    /// The wake call may target the currently-executing task on this
-    /// CPU (e.g. the timer ISR's `wake_due_sleepers`, a child-exit
-    /// release path, a futex/pipe wake whose target may be the
-    /// caller). Must NOT spin on `target.on_cpu`: the target's
-    /// `on_cpu` flag cannot clear until *we* yield, but spinning
-    /// prevents the yield. The dispatcher's re-enqueue check at
-    /// `run_ready_task_from_idle` line 810 picks up the slack.
-    SelfPossible,
-    /// The wake call cannot possibly target the caller's CPU
-    /// (e.g. cross-CPU IPI wake, kthread spawn from a kernel context
-    /// proven to run on a different CPU). The historical
-    /// `wait_task_off_cpu` spin is safe here, but currently disabled
-    /// because the dispatcher-side check covers both cases.
-    OtherCpu,
-}
-
-pub fn schedule_task(task: *mut Task, ctx: WakeContext) -> c_int {
+pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
     if !task_is_ready(task) {
         return -1;
     }
-
-    // The dispatcher (`run_ready_task_from_idle` at the
-    // `(*next_task).on_cpu.load(...)` check) re-enqueues any task it
-    // dequeues whose `on_cpu` is still true, so a task that is mid-
-    // context-switch on another CPU is naturally deferred rather than
-    // dispatched twice — neither variant of `WakeContext` needs to
-    // spin here. The enum is retained at the API to force every
-    // wake call site to declare its self-vs-cross context, so a
-    // future change that re-introduces a `wait_task_off_cpu` spin
-    // can be gated on the discriminant rather than silently regressing
-    // the self-wake path.
-    let _ = ctx;
 
     if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
@@ -622,9 +573,6 @@ pub fn schedule_new_task(task: *mut Task) -> c_int {
     if !task_is_ready(task) {
         return -1;
     }
-
-    // New tasks have on_cpu=false from init, but be defensive.
-    wait_task_off_cpu(task);
 
     if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
@@ -761,9 +709,13 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(from_task, to_task, timestamp);
 
-    // Mark task as physically on this CPU.  schedule_task() spin-waits on
-    // this flag before allowing the task to be dispatched elsewhere, preventing
-    // the "wake-before-switch-complete" race (Linux p->on_cpu pattern).
+    // Mark task as physically on this CPU. The dispatcher's re-enqueue
+    // check at run_ready_task_from_idle (below) reads this flag before
+    // dispatching a task — if it's still on_cpu on another CPU, the
+    // task is requeued rather than dispatched twice. (Linux's
+    // p->on_cpu pattern; pre-Phase-6 schedule_task also spin-waited
+    // on this flag, but that spin was made redundant by Phase 1's
+    // lock-pair barrier and removed.)
     task_set_on_cpu(to_task, true);
 
     // Single source-of-truth install: writes PCR.current_task
@@ -840,8 +792,9 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     }
 
     // Guard: if the task is still physically on another CPU (context switch
-    // in progress), put it back and skip.  Matches the schedule_task() spin,
-    // but here we re-enqueue instead of spinning (idle loop must not block).
+    // in progress), put it back and skip. Re-enqueue rather than spin —
+    // the idle loop must not block, and Phase 6 removed the schedule_task
+    // spin in favour of this check + the WaitQueue lock-pair barrier.
     // SAFETY: `next_task` is non-null and was just validated through
     // `task_pointer_is_valid`; the `on_cpu` AtomicBool is internally
     // synchronised.
@@ -1136,11 +1089,7 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
         super::sleep::cancel_sleep(task_id);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        // unblock_task may be called from any context — pipe wakes,
-        // futex wakes, signal delivery — and the target may be the
-        // current task on the caller's CPU. SelfPossible is the
-        // safe upper bound.
-        return schedule_task(task, WakeContext::SelfPossible);
+        return schedule_task(task);
     }
 
     // Task is in some other state (Running, Ready, Terminated) — nothing to do.

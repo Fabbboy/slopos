@@ -1153,7 +1153,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
     }
 
     // Schedule to empty queue
-    if schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible) != 0 {
+    if schedule_task(task_ptr) != 0 {
         klog_info!("SCHED_TEST: Failed to schedule task to empty queue");
         return TestResult::Fail;
     }
@@ -1195,7 +1195,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     task_get_info(task_id, &mut task_ptr);
 
     // Schedule once
-    schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible);
+    schedule_task(task_ptr);
 
     let mut ready_before = 0u32;
     get_scheduler_stats(
@@ -1206,7 +1206,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     );
 
     // Schedule again - should be idempotent
-    schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible);
+    schedule_task(task_ptr);
 
     let mut ready_after = 0u32;
     get_scheduler_stats(
@@ -1233,7 +1233,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
 pub fn test_schedule_null_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let result = schedule_task(ptr::null_mut(), super::scheduler::WakeContext::SelfPossible);
+    let result = schedule_task(ptr::null_mut());
 
     if result == 0 {
         klog_info!("SCHED_TEST: BUG - Scheduling null task succeeded!");
@@ -1315,9 +1315,9 @@ pub fn test_priority_ordering() -> TestResult {
     task_get_info(normal_id, &mut normal_ptr);
     task_get_info(high_id, &mut high_ptr);
 
-    schedule_task(low_ptr, super::scheduler::WakeContext::SelfPossible);
-    schedule_task(normal_ptr, super::scheduler::WakeContext::SelfPossible);
-    schedule_task(high_ptr, super::scheduler::WakeContext::SelfPossible);
+    schedule_task(low_ptr);
+    schedule_task(normal_ptr);
+    schedule_task(high_ptr);
 
     TestResult::Pass
 }
@@ -1353,8 +1353,8 @@ pub fn test_idle_priority_last() -> TestResult {
     task_get_info(normal_id, &mut normal_ptr);
 
     // Schedule idle first, then normal
-    schedule_task(idle_ptr, super::scheduler::WakeContext::SelfPossible);
-    schedule_task(normal_ptr, super::scheduler::WakeContext::SelfPossible);
+    schedule_task(idle_ptr);
+    schedule_task(normal_ptr);
 
     // The scheduler should pick normal before idle due to priority
     // We can't directly verify this without running, but we verify no crash
@@ -1389,7 +1389,7 @@ pub fn test_timer_tick_decrements_slice() -> TestResult {
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     task_get_info(task_id, &mut task_ptr);
-    schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible);
+    schedule_task(task_ptr);
 
     TestResult::Pass
 }
@@ -1629,7 +1629,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
         (*task_ptr).last_cpu = cpu_id as u8;
     }
 
-    if schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible) != 0 {
+    if schedule_task(task_ptr) != 0 {
         klog_info!(
             "SCHED_TEST: Failed to schedule task before scheduler enable on CPU {}",
             cpu_id
@@ -1800,7 +1800,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
         if *id != INVALID_TASK_ID {
             let mut ptr: *mut Task = ptr::null_mut();
             if task_get_info(*id, &mut ptr) == 0 && !ptr.is_null() {
-                schedule_task(ptr, super::scheduler::WakeContext::SelfPossible);
+                schedule_task(ptr);
             }
         }
     }
@@ -1849,7 +1849,7 @@ pub fn test_interleaved_operations() -> TestResult {
         let mut ptr1: *mut Task = ptr::null_mut();
         task_get_info(id1, &mut ptr1);
         if !ptr1.is_null() {
-            schedule_task(ptr1, super::scheduler::WakeContext::SelfPossible);
+            schedule_task(ptr1);
         }
 
         // Terminate first before scheduling second
@@ -1859,7 +1859,7 @@ pub fn test_interleaved_operations() -> TestResult {
         let mut ptr2: *mut Task = ptr::null_mut();
         task_get_info(id2, &mut ptr2);
         if !ptr2.is_null() {
-            schedule_task(ptr2, super::scheduler::WakeContext::SelfPossible);
+            schedule_task(ptr2);
         }
 
         // Terminate second
@@ -2184,7 +2184,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         (*task_ptr).last_cpu = current_cpu as u8;
     }
 
-    let result = schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible);
+    let result = schedule_task(task_ptr);
     if result != 0 {
         klog_info!("SCHED_TEST: Cross-CPU schedule_task failed");
         return TestResult::Fail;
@@ -2319,7 +2319,7 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
             if task_ptr.is_null() {
                 return TestResult::Fail;
             }
-            let _ = schedule_task(task_ptr, super::scheduler::WakeContext::SelfPossible);
+            let _ = schedule_task(task_ptr);
         }
         scheduler_timer_tick();
         schedule();
@@ -2867,7 +2867,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             (*tp).cpu_affinity = super::per_cpu::affinity_mask_for_cpu(cpu_id);
             (*tp).last_cpu = cpu_id as u8;
         }
-        if schedule_task(tp, super::scheduler::WakeContext::SelfPossible) != 0 {
+        if schedule_task(tp) != 0 {
             return TestResult::Fail;
         }
     }

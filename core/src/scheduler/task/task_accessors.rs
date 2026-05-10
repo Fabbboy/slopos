@@ -573,34 +573,6 @@ pub fn task_inc_ref_with_id(task: *mut Task) -> Option<(u32, u32)> {
     Some((id, count))
 }
 
-/// Spin-wait until the task's `on_cpu` flag goes false. Used by
-/// `schedule_task` to avoid dispatching a task that another CPU is
-/// still finishing its outgoing context switch on.
-///
-/// Self-wakeup short-circuit: if `task` is the currently-executing
-/// task on this CPU, its `on_cpu` flag will not clear until we yield
-/// — but we cannot yield while spinning here (the caller is the
-/// timer ISR's wake_due_sleepers). Skip the wait; the caller's
-/// `enqueue_local` ensures the task is back in a runqueue, and the
-/// idle-resume path's re-enqueue check (now extended to cover the
-/// `Ready` state) keeps the task schedulable across the yield.
-#[inline]
-pub fn task_wait_off_cpu(task: *const Task) {
-    if task.is_null() {
-        return;
-    }
-    let cur = crate::scheduler::scheduler::scheduler_get_current_task();
-    if !cur.is_null() && cur as *const Task == task {
-        return;
-    }
-    // SAFETY: caller pre-validated; `on_cpu` is `AtomicBool`.
-    unsafe {
-        while (*task).on_cpu.load(core::sync::atomic::Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-    }
-}
-
 /// Set `task->on_cpu = on`. The dispatcher uses `true` before
 /// switching in, then clears to `false` after the outgoing context
 /// save completes.
