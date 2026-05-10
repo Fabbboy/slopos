@@ -59,7 +59,7 @@ and a phase-2 cleanup).
 |   | &nbsp;&nbsp;&nbsp;b. Route plain `alloc_page_frame(0)` callers through typestate                      | ✅ landed  | `bfd4bd53`   |
 |   | &nbsp;&nbsp;&nbsp;c. Frame `into_phys_release` interop bridge + `kmalloc_uninit` first hardened       | ✅ landed  | `05103eb2`   |
 |   | &nbsp;&nbsp;&nbsp;d. Boot reorder so the typestate covers the bootstrap window (Phase 6 follow-up)    | ✅ landed  | `bcacfe3a`   |
-|   | &nbsp;&nbsp;&nbsp;e. Delete `ALLOC_FLAG_NO_INIT`, delete `kmalloc_uninit`, add `no_pcp`/`dma` options | ✅ landed  | `15df1fb4`   |
+|   | &nbsp;&nbsp;&nbsp;e. Delete `ALLOC_FLAG_NO_INIT`, delete `kmalloc_uninit`, add `no_pcp`/`dma` options | ⚠️ reverted | `15df1fb4` reverted in `7e67288f` — see "Reverted: phase 2 cleanup" below |
 |   | &nbsp;&nbsp;&nbsp;f. Hold `Frame<KernelMeta, Zeroed>` end-to-end (data structures store `Frame<_>`)   | ❌ not yet | architectural follow-up |
 | 3 | `IrqDisabled<'cli>` capability for block paths                                                        | ✅ landed  | `af5e4db5`   |
 | 4 | `PreparedWait` / `PublishedWait` state machine (migrated `task_wait_for`)                             | ⚠️ partial | `a800b9b5`   |
@@ -78,6 +78,73 @@ After Phase 2f, the only `__alloc_page_frame*_raw` consumers in tree
 will still be `install_meta_slots` (META_SLOTS bootstrap, fundamental
 chicken-egg) and `LegacyFrameAllocShim::alloc` (typestate's own
 backend) — which is the steady state.
+
+## Reverted: phase 2 cleanup
+
+`15df1fb4` (Phase 2 ABC — delete `kmalloc_uninit`, delete
+`ALLOC_FLAG_NO_INIT`, add `FrameAllocOptions::{no_pcp,dma}` + migrate
+21 raw callers) was reverted in `7e67288f` after a bisect-confirmed
+KVM regression.
+
+### Bisect numbers (KVM, `just test`)
+
+| State                                 | Pass rate         |
+|---------------------------------------|-------------------|
+| HEAD with `15df1fb4` applied          | 7 / 10 (≈30% flake) |
+| `bcacfe3a` (revert's parent state)    | 19 / 20 (≈5% flake) |
+| `bcacfe3a` + `A.patch` only (kmalloc) | 9 / 10 (n=10, indistinguishable from baseline) |
+
+### What the bisect actually showed
+
+The race is **pre-existing** — even without the Phase 2 cleanup, KVM
+flakes ~5% on the same `fork_test` hang. Phase 2 cleanup did not
+introduce a new race; it amplified an existing latent one from 5% to
+30%, presumably by perturbing timing (candidates: the `kmalloc`
+inlining changing codegen layout, or the added `META_SLOTS`
+round-trip on the migrated callers shifting alloc latency).
+
+The revert returns the branch to the prior-stable flake rate, **it
+does not fix the underlying race.** That race remains an outstanding
+risk and the actual hard fix is what the plan needs next.
+
+### Failure mode
+
+Userland test runner hangs in `task_wait_for(child_pid)` after
+`fork_test` has already printed `pipeline repro PASS` and is exiting.
+This is the same wake-vs-block lost-wake pattern this branch was
+created to fix; earlier commits closed the obvious windows but a
+narrow one survives. CI's TCG environment surfaces a different
+manifestation (`dispatch: unexpected state 3 for task 4` followed by
+a `0xdfdedddcdbdad9d8`-shape user-mode page fault) of what is
+plausibly the same root cause — TCG's slower scheduling widens the
+race window further.
+
+### What's left
+
+- **Root-cause the residual race** (the actual phase-2-cleanup
+  prerequisite). Hypothesis space:
+  - A missing fence in the `PreparedWait`/`PublishedWait` typestate
+    around publish/check.
+  - An ordering issue between `mark_task_terminated`'s SeqCst fence
+    and `release_task_dependents`' iteration of waiter snapshots.
+  - An ABA on `META_SLOTS` state under contention (relevant only if
+    Phase 2 ABC's added round-trip is what amplifies it — the 5%
+    baseline rules this out as the *primary* cause but it may still
+    be a contributor).
+  - An interaction between the dispatcher's "unexpected state 3"
+    fallthrough and an in-flight `block_current_task` whose `cli`
+    scope races a remote-CPU wake.
+- **Fix it permanently.** The fix should hold even with timing
+  perturbations like Phase 2 ABC re-applied — that's the
+  acceptance criterion.
+- **Re-land the Phase 2 cleanup.** Per-component patches are saved
+  at `/tmp/A.patch`, `/tmp/page_alloc_BC.patch`,
+  `/tmp/shim_BC.patch`, `/tmp/ostd_C.patch`,
+  `/tmp/migration_C.patch` for the next attempt.
+
+The five type-level safety primitives the plan was built around are
+**all** still in place — Phase 2 cleanup was flag-and-helper API
+tidying, not part of the type-system enforcement.
 
 ## Scope
 
