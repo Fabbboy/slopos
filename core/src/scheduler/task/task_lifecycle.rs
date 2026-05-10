@@ -9,6 +9,7 @@ use slopos_utils::{klog_debug, klog_info};
 
 use slopos_ostd::task::switch::task_entry_trampoline;
 
+use super::super::exit_info::ExitInfo;
 use super::super::scheduler;
 use super::super::task_stack::{KernelStack, UnsafeStack};
 use super::super::task_struct::SwitchContext;
@@ -751,6 +752,26 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     scheduler::unschedule_task(task_ptr);
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    // Publish exit_info BEFORE the wake fanout. Order is load-bearing:
+    // try_set is Release; the WaitQueue's SpinLock inside wake_all is
+    // a full barrier that pairs with `is_set`'s Acquire load on the
+    // waiter side. A waiter that registered after fanout but before
+    // try_set would deadlock if we reversed these — by publishing
+    // first, late waiters see is_set() == true on their first re-check.
+    //
+    // try_set returns Err on a re-entry (e.g. fault path also calling
+    // task_terminate(self)); discard via `_` — the operation is
+    // idempotent.
+    let info = ExitInfo {
+        exit_code: task.exit_code as i32,
+        exit_reason: task.exit_reason,
+        fault_reason: task.fault_reason,
+        signal: 0,
+        exit_time_ms: now,
+    };
+    let _ = task.exit_info.try_set(info);
+
     release_task_dependents(resolved_id);
 
     if let Some(tty_idx) = should_hangup {

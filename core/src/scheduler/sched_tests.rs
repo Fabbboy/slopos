@@ -16,12 +16,13 @@ use slopos_utils::klog_info;
 use super::runtime::{self, IdleStackResolveError};
 use super::scheduler::{
     self, get_scheduler_stats, schedule, schedule_new_task, schedule_task, scheduler_is_enabled,
-    scheduler_timer_tick, unschedule_task,
+    scheduler_timer_tick, task_wait_for, unschedule_task,
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_find_by_id, task_get_info,
-    task_is_blocked, task_set_state, task_set_state_with_reason, task_terminate,
+    task_is_blocked, task_is_terminated, task_set_state, task_set_state_with_reason,
+    task_terminate,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -2397,6 +2398,295 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
 }
 
 // =============================================================================
+// REGRESSION: task_wait_for race-window robustness (harmonic-cascade Phase 1H)
+//
+// These tests verify that the new wait/wake protocol — durable per-task
+// `exit_info` cell published before the `waiters` queue's `wake_all`
+// fanout — closes the lost-wakeup race that the legacy two-atomic
+// `(status, waiting_on)` pair admitted. The buggy version deadlocked on
+// child-exit at ~5% on KVM and much higher on TCG.
+//
+// In the test fixture APs are paused, so the runner cannot reproduce
+// the multi-CPU race window directly. What it *can* exercise is the
+// fast-path that Phase 1's design relies on for late waiters: any
+// `task_wait_for` call that arrives after `mark_task_terminated`'s
+// publish must observe the durable `exit_info` (or the Terminated
+// status) on its first condition check and return immediately, no
+// matter how many such calls land on the same target. A regression
+// that re-introduces the lost-wake bug would either deadlock here (the
+// runner's test thread blocks forever) or fail the post-conditions on
+// `exit_info` / `task_is_terminated`.
+// =============================================================================
+
+/// 1000-iteration stress: child kthread is created and immediately
+/// terminated; parent (this runner) calls `task_wait_for(child_id)`
+/// against the freshly-terminated slot. Each iteration must return
+/// promptly via the fast path — no blocking, no deadlock.
+///
+/// What this catches if regressed:
+/// - `mark_task_terminated` failing to publish `exit_info` before
+///   `release_task_dependents` (Phase 1G regression) → late waiter
+///   would not see `is_set()` true and could fall through to the
+///   blocking path, deadlocking the runner.
+/// - `task_wait_for`'s condition closure forgetting the
+///   `task_is_terminated(target)` fallback (Phase 1E regression) →
+///   same outcome if the publish path ever skipped `try_set`.
+/// - `release_task_dependents` no longer doing `waiters.wake_all()`
+///   (Phase 1F regression) → caught only on the multi-waiter
+///   variant below; the 1000-iter case is dominated by the durable
+///   exit_info fast path.
+pub fn test_task_wait_exit_race_1000() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    for i in 0..1000 {
+        let child_id = task_create(
+            b"WaitRace\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if child_id == INVALID_TASK_ID {
+            klog_info!(
+                "SCHED_TEST: task_create failed at iteration {} (pool exhausted?)",
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        let child_ptr = task_find_by_id(child_id);
+        if child_ptr.is_null() {
+            klog_info!("SCHED_TEST: task_find_by_id null at iteration {}", i);
+            return TestResult::Fail;
+        }
+
+        // Terminate the child synchronously. mark_task_terminated runs
+        // inline: publishes exit_info via try_set, then wake_all on
+        // the (still-empty) waiters queue.
+        let rc = task_terminate(child_id);
+        if rc != 0 {
+            klog_info!(
+                "SCHED_TEST: task_terminate returned {} at iteration {}",
+                rc,
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        // Post-conditions for the publish step.
+        if !task_is_terminated(child_ptr) {
+            klog_info!(
+                "SCHED_TEST: child not Terminated after task_terminate at iter {}",
+                i
+            );
+            return TestResult::Fail;
+        }
+        if !unsafe { (*child_ptr).exit_info.is_set() } {
+            klog_info!(
+                "SCHED_TEST: exit_info not published after task_terminate at iter {}",
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        // The wait must complete via the fast path — if it returns at
+        // all the runner is not deadlocked, which is the property we
+        // care about.
+        let wait_rc = task_wait_for(child_id);
+        if wait_rc != 0 {
+            klog_info!(
+                "SCHED_TEST: task_wait_for returned {} at iter {} (expected 0)",
+                wait_rc,
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        // Reap on every iteration so the pool does not fill with
+        // zombies; reap_zombies is bounded and idempotent.
+        reap_zombies();
+    }
+
+    TestResult::Pass
+}
+
+/// Same shape as `test_task_wait_exit_race_1000` but the child slot is
+/// driven through Ready→Running→Ready transitions before terminate, so
+/// the "did some work" code path of `mark_task_terminated` (which
+/// updates `total_runtime` based on `last_run_timestamp`) is exercised
+/// alongside the publish/fanout sequence. This shifts the publish
+/// timing relative to the runner's wait, so a regression that only
+/// reliably misses the wake when the child has run is still caught.
+pub fn test_task_wait_exit_race_with_work() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    for i in 0..500 {
+        let child_id = task_create(
+            b"WaitRaceWork\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if child_id == INVALID_TASK_ID {
+            klog_info!(
+                "SCHED_TEST: task_create failed at iteration {} (pool exhausted?)",
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        let child_ptr = task_find_by_id(child_id);
+        if child_ptr.is_null() {
+            klog_info!("SCHED_TEST: task_find_by_id null at iter {}", i);
+            return TestResult::Fail;
+        }
+
+        // Simulate "child did some work": Ready -> Running, advance a
+        // synthetic last_run_timestamp, then back to Ready so terminate
+        // observes a non-zero runtime delta in mark_task_terminated.
+        // The state set must respect the FSM (Ready -> Running is
+        // valid).
+        if task_set_state(child_id, TaskStatus::Running) != 0 {
+            klog_info!("SCHED_TEST: failed Running transition at iter {}", i);
+            return TestResult::Fail;
+        }
+        unsafe {
+            (*child_ptr).last_run_timestamp = 1;
+        }
+        // Spin a few iterations to advance any kdiag timestamp source
+        // and shift the relative ordering of publish vs. observe.
+        for _ in 0..16 {
+            core::hint::spin_loop();
+        }
+        if task_set_state(child_id, TaskStatus::Ready) != 0 {
+            klog_info!("SCHED_TEST: failed Ready transition at iter {}", i);
+            return TestResult::Fail;
+        }
+
+        let rc = task_terminate(child_id);
+        if rc != 0 {
+            klog_info!("SCHED_TEST: task_terminate returned {} at iter {}", rc, i);
+            return TestResult::Fail;
+        }
+
+        if !task_is_terminated(child_ptr) {
+            klog_info!(
+                "SCHED_TEST: child not Terminated after terminate at iter {}",
+                i
+            );
+            return TestResult::Fail;
+        }
+        if !unsafe { (*child_ptr).exit_info.is_set() } {
+            klog_info!(
+                "SCHED_TEST: exit_info not published after terminate at iter {}",
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        let wait_rc = task_wait_for(child_id);
+        if wait_rc != 0 {
+            klog_info!(
+                "SCHED_TEST: task_wait_for returned {} at iter {} (expected 0)",
+                wait_rc,
+                i
+            );
+            return TestResult::Fail;
+        }
+
+        reap_zombies();
+    }
+
+    TestResult::Pass
+}
+
+/// Multi-waiter fanout: durable `exit_info` must satisfy any number of
+/// late waiters that arrive after the wake fanout has already fired
+/// against an (possibly empty) `waiters` queue. Each subsequent
+/// `task_wait_for` for the same terminated child must hit the
+/// fast-path return without blocking, no matter how many siblings
+/// have already done the same.
+///
+/// What this catches if regressed:
+/// - `release_task_dependents` failing to invoke
+///   `child.waiters.wake_all()` (Phase 1F regression) is partially
+///   caught here: while the test cannot enqueue real foreign waiters
+///   under the paused-AP fixture, it does verify the symmetric
+///   guarantee — that durable exit_info plus the Terminated status
+///   make repeated independent waits all return 0.
+/// - `exit_info` not surviving the wake fanout (e.g. a future
+///   refactor that `take`s instead of `try_get`s) — the 4th waiter
+///   would observe `is_set()` false.
+pub fn test_task_wait_multi_waiter() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let child_id = task_create(
+        b"MultiWaiter\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if child_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let child_ptr = task_find_by_id(child_id);
+    if child_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    // Pre-condition: waiters queue is empty before terminate.
+    if unsafe { (*child_ptr).waiters.has_waiters() } {
+        klog_info!("SCHED_TEST: child waiters queue non-empty before terminate");
+        return TestResult::Fail;
+    }
+
+    if task_terminate(child_id) != 0 {
+        klog_info!("SCHED_TEST: task_terminate failed");
+        return TestResult::Fail;
+    }
+
+    // After terminate: status Terminated and exit_info published.
+    if !task_is_terminated(child_ptr) {
+        klog_info!("SCHED_TEST: child not Terminated after terminate");
+        return TestResult::Fail;
+    }
+    if !unsafe { (*child_ptr).exit_info.is_set() } {
+        klog_info!("SCHED_TEST: exit_info not set after terminate");
+        return TestResult::Fail;
+    }
+
+    // 4 simulated sibling parents each independently observe the
+    // durable exit_info via the fast-path return.
+    for waiter in 0..4 {
+        let rc = task_wait_for(child_id);
+        if rc != 0 {
+            klog_info!(
+                "SCHED_TEST: waiter {} task_wait_for returned {} (expected 0)",
+                waiter,
+                rc
+            );
+            return TestResult::Fail;
+        }
+        // exit_info must remain set across multiple observations
+        // (try_get is non-consuming; only `take` consumes — and the
+        // wait path never takes).
+        if !unsafe { (*child_ptr).exit_info.is_set() } {
+            klog_info!(
+                "SCHED_TEST: exit_info became unset after waiter {} returned",
+                waiter
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    reap_zombies();
+    TestResult::Pass
+}
+
+// =============================================================================
 // REGRESSION: Tick accounting & load-aware CPU selection
 // =============================================================================
 
@@ -2961,6 +3251,12 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_sleep_wake_race_regression, suite = sched_core);
+slopos_testing::stest!(name = test_task_wait_exit_race_1000, suite = sched_core);
+slopos_testing::stest!(
+    name = test_task_wait_exit_race_with_work,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_task_wait_multi_waiter, suite = sched_core);
 slopos_testing::stest!(
     name = test_timer_tick_always_increments_ticks,
     suite = sched_core

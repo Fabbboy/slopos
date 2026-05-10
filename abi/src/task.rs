@@ -233,7 +233,7 @@ pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 
 /// Reason for task termination.
 #[repr(u16)]
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskExitReason {
     #[default]
     None = 0,
@@ -244,7 +244,7 @@ pub enum TaskExitReason {
 
 /// Specific fault that caused task termination.
 #[repr(u16)]
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskFaultReason {
     #[default]
     None = 0,

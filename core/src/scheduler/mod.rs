@@ -1,5 +1,6 @@
 #[cfg(feature = "test-hooks")]
 pub mod context_tests;
+pub mod exit_info;
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod futex;
@@ -24,3 +25,5 @@ pub mod test_reports;
 pub mod trap;
 pub mod wait_typestate;
 pub mod work_steal;
+
+pub use exit_info::ExitInfo;

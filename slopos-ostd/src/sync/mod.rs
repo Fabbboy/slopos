@@ -10,6 +10,7 @@
 //! [`rcu::RcuBackend`]) — OSTD does not depend on `slopos-kernel-services`
 //! or `slopos-utils`. The kernel installs production backends at boot.
 
+pub mod atomic_cell;
 pub mod cpu_local;
 pub mod init_flag;
 pub mod intrusive;
@@ -24,6 +25,7 @@ pub mod seqlock;
 pub mod spin;
 pub mod wait_queue;
 
+pub use atomic_cell::AtomicCell;
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
 pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};

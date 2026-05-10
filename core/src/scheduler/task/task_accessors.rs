@@ -677,3 +677,29 @@ pub fn task_take_test_reports(
     // word swap on the in-Task field.
     unsafe { (*task).test_reports.take() }
 }
+
+/// RAII increment of `task->refcnt`. `new` bumps the count; `Drop`
+/// decrements. Used by callers that hold a `*mut Task` across a
+/// scheduler yield (e.g. `task_wait_for`) so the pool slot cannot be
+/// reset by the zombie reaper while the borrow is live — `reap_zombies`
+/// requires `task_ref_count(raw) == Some(0)` before recycling.
+pub struct TaskRefGuard {
+    task: *mut Task,
+}
+
+impl TaskRefGuard {
+    pub fn new(task: *mut Task) -> Self {
+        if !task.is_null() {
+            let _ = task_inc_ref(task);
+        }
+        Self { task }
+    }
+}
+
+impl Drop for TaskRefGuard {
+    fn drop(&mut self) {
+        if !self.task.is_null() {
+            let _ = task_dec_ref(self.task);
+        }
+    }
+}

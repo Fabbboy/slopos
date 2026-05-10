@@ -1040,27 +1040,41 @@ fn block_current_task_irq_disabled(
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {
-    // Compile-time-checked wait sequence via the typestate state
-    // machine. The protocol's order (prepare → publish → check →
-    // block) is enforced by Rust ownership: each transition consumes
-    // its predecessor by-value. A future caller that skips a step
-    // does not compile against the API.
-    let prepared = match super::wait_typestate::prepare_to_wait_for() {
-        Some(p) => p,
-        None => return -1,
-    };
-    match prepared.publish(task_id) {
-        Ok(published) => {
-            slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|irq| published.block(irq))
-        }
-        Err(prep) => {
-            // Target gone or self-wait — cancel the prepared state
-            // and report success (waitpid semantics: target is
-            // already terminated/invalid, no waiting needed).
-            prep.cancel();
-            0
-        }
+    use crate::scheduler::exit_info::ExitInfo;
+    use slopos_ostd::sync::{AtomicCell, WaitQueue};
+
+    if task_id == INVALID_TASK_ID {
+        return -1;
     }
+
+    let mut target: *mut Task = ptr::null_mut();
+    if super::task::task_get_info(task_id, &mut target) != 0 || target.is_null() {
+        // Already gone — waitpid semantics treat this as success.
+        return 0;
+    }
+
+    let current = scheduler_get_current_task();
+    if !current.is_null() && task_id_of(current) == Some(task_id) {
+        return -1; // self-wait rejected
+    }
+
+    let _ref_guard = super::task::TaskRefGuard::new(target);
+
+    // SAFETY: TaskRefGuard keeps `target`'s slot alive across the
+    // potential yield. The waiters queue and exit_info cell are
+    // valid for the duration of `_ref_guard`. Memory ordering: the
+    // producer's `try_set` is Release; `is_set` (Acquire, evaluated
+    // under the WaitQueue's SpinLock) is the matching consumer. The
+    // SpinLock pair on both sides supplies the bidirectional full
+    // barrier.
+    let waiters: &WaitQueue = unsafe { &(*target).waiters };
+    let exit_cell: &AtomicCell<ExitInfo> = unsafe { &(*target).exit_info };
+
+    // The `task_is_terminated` fallback covers the case where the
+    // target's status flips to Terminated via a path that has not
+    // (yet) published exit_info — defensive, but cheap.
+    let _ = waiters.wait_event(|| exit_cell.is_set() || task_is_terminated(target));
+    0
 }
 
 pub fn unblock_task(task: *mut Task) -> c_int {

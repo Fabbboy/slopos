@@ -13,9 +13,13 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
 use slopos_ostd::cpu::x86_64::pcr::KernelReturnContext;
+use slopos_ostd::sync::AtomicCell;
+use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::intrusive::{Link, Linked};
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{AllocError, Init, init_from_closure};
+
+use crate::scheduler::exit_info::ExitInfo;
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -409,6 +413,19 @@ pub struct Task {
     /// belongs to the user-mode round trip in flight on the running
     /// task.
     pub saved_kernel_return_ctx: KernelReturnContext,
+    /// Tasks waiting for THIS task to exit. Drained by
+    /// `release_task_dependents` (which calls `wake_all`) after
+    /// `exit_info` is published in `mark_task_terminated`. The
+    /// queue's internal SpinLock provides the bidirectional full
+    /// barrier the wait/wake protocol needs, so the publish→wake
+    /// pair cannot be observed out of order.
+    pub waiters: WaitQueue,
+    /// Durable per-task exit value. `Some(_)` after
+    /// `mark_task_terminated` publishes; cleared only by
+    /// `reset_in_place` on slot recycling. Late waiters that race
+    /// past the `wake_all` see this on their next condition
+    /// re-check and exit cleanly without ever blocking.
+    pub exit_info: AtomicCell<ExitInfo>,
 }
 
 impl Task {
@@ -488,6 +505,8 @@ impl Task {
                 rsp: 0,
                 rip: 0,
             },
+            waiters: WaitQueue::new(),
+            exit_info: AtomicCell::empty(),
         }
     }
 
@@ -566,6 +585,16 @@ impl Task {
                 // (IF=1, reserved bit1=1) rather than 0.
                 addr_of_mut!((*slot).switch_ctx).write(SwitchContext::zero());
 
+                // Wait/exit primitives. WaitQueue's bit pattern
+                // happens to be zero-equivalent today, but write the
+                // const-constructed value explicitly so the gate stays
+                // robust if the lock or counter encoding changes.
+                // AtomicCell::empty() is a null AtomicPtr, which the
+                // initial write_bytes already produced — write
+                // explicitly anyway for symmetry.
+                addr_of_mut!((*slot).waiters).write(WaitQueue::new());
+                addr_of_mut!((*slot).exit_info).write(AtomicCell::empty());
+
                 Ok(())
             })
         }
@@ -603,6 +632,12 @@ impl Task {
             let _ = (*this).kernel_stack.take();
             let _ = (*this).unsafe_stack.take();
             let _ = (*this).test_reports.take();
+            // Drop the published exit value (if any) before the byte-zero
+            // pass corrupts the AtomicPtr — bytewise-nulling without
+            // dropping the heap-backed KBox would leak it. SAFETY: caller
+            // guarantees exclusive access to this slot, so no concurrent
+            // reader can observe the cell mid-reset.
+            (*this).exit_info.reset();
             // Zero the non-drop-bearing fields. We stay away from the
             // `kernel_stack`/`unsafe_stack`/`test_reports` slots because
             // `Option` has no layout guarantee that the all-zeros bit
@@ -633,6 +668,16 @@ impl Task {
             (*this).cwd[0] = b'/';
             (*this).cwd_len = 1;
             (*this).waiting_on.store(INVALID_TASK_ID, Ordering::Relaxed);
+            // Re-establish the wait/exit primitives on top of the
+            // byte-zeroed storage. Use `addr_of_mut!.write` rather
+            // than structured assignment so we don't run Drop on the
+            // byte-zeroed (logically uninitialised) prior value, and
+            // so a future encoding change in WaitQueue can't silently
+            // break recycling. AtomicCell::reset above already left
+            // the cell empty, but write a fresh one for layout
+            // independence — same justification as init_invalid.
+            addr_of_mut!((*this).waiters).write(WaitQueue::new());
+            addr_of_mut!((*this).exit_info).write(AtomicCell::empty());
         }
     }
 
@@ -800,6 +845,16 @@ impl Task {
             // allocates a new ring.
             core::ptr::write(&mut self.test_reports as *mut _, None);
             self.unsafe_stack_sp = 0;
+            // Wait/exit primitives are per-task. The parent's `waiters`
+            // queue holds tasks waiting for the *parent*, not the child;
+            // bitwise-copying it would route the child's wakes to the
+            // wrong observers. The parent's `exit_info` (if published)
+            // is a heap-backed KBox that the parent still owns; running
+            // Drop on the bitwise copy would double-free. `ptr::write`
+            // both fields to fresh values without dropping the
+            // duplicate, matching the kernel_stack/unsafe_stack pattern.
+            core::ptr::write(&mut self.waiters as *mut _, WaitQueue::new());
+            core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
         }
         // Child keeps its own pool position.
         self.slot_index = preserved_slot_index;

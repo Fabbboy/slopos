@@ -1716,6 +1716,18 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
 }
 
 pub fn test_sigchld_and_wait_interaction() -> TestResult {
+    // Scope after Phase 1 (harmonic-cascade): SIGCHLD signal delivery
+    // is independent of the wait-wakeup mechanism. The wakeup path
+    // moved from a pool-scan (which cleared `waiting_on` and forced
+    // Ready as a side effect) to a per-task `waiters` WaitQueue
+    // drained under SpinLock by `release_task_dependents`. A task that
+    // is "waiting" only because something stored an id into its
+    // `waiting_on` field — without going through `task_wait_for` —
+    // is no longer registered on the child's waiters queue and so
+    // is intentionally NOT woken by child exit. That wake path is
+    // exercised by the race-stress tests in
+    // `core/src/scheduler/sched_tests.rs` (`test_task_wait_*`); this
+    // test's remaining scope is the SIGCHLD pending-bit propagation.
     let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
@@ -1727,37 +1739,13 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
     task_set_state(child_id, TaskStatus::Blocked);
 
-    unsafe {
-        (*parent_ptr).waiting_on.store(child_id, Ordering::Release);
-    }
-    assert_eq_test!(
-        task_set_state(parent_id, TaskStatus::Running),
-        0,
-        "failed to set parent running"
-    );
-    assert_eq_test!(
-        task_set_state(parent_id, TaskStatus::Blocked),
-        0,
-        "failed to block parent"
-    );
-
     assert_eq_test!(task_terminate(child_id), 0, "failed to terminate child");
 
     unsafe {
         let pending = (*parent_ptr).signal_pending.load(Ordering::Acquire);
         assert_test!(
             (pending & sig_bit(SIGCHLD)) != 0,
-            "parent missing SIGCHLD pending bit"
-        );
-        assert_eq_test!(
-            (*parent_ptr).waiting_on.load(Ordering::Acquire),
-            INVALID_TASK_ID,
-            "parent wait target not cleared after child exit"
-        );
-        assert_eq_test!(
-            (*parent_ptr).status(),
-            TaskStatus::Ready,
-            "parent not readied after child exit"
+            "parent missing SIGCHLD pending bit after child exit"
         );
     }
 
