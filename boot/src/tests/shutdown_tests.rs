@@ -388,7 +388,8 @@ pub fn test_serial_flush_terminates() -> TestResult {
 
 pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
     use slopos_mm::kernel_heap::{kfree, kmalloc};
-    use slopos_mm::page_alloc::{__alloc_page_frame_raw, ALLOC_FLAG_NO_PCP, free_page_frame};
+    use slopos_mm::page_alloc::{alloc_kernel_page_with, free_page_frame};
+    use slopos_ostd::mm::frame::FrameAllocOptions;
 
     const CYCLES: usize = 10;
     const TASKS_PER_CYCLE: usize = 5;
@@ -421,7 +422,7 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
 
         let mut page_addrs: [u64; 4] = [0; 4];
         for i in 0..4 {
-            let phys = __alloc_page_frame_raw(ALLOC_FLAG_NO_PCP);
+            let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
             page_addrs[i] = phys.as_u64();
         }
 

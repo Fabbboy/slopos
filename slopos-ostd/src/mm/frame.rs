@@ -915,6 +915,16 @@ pub struct FrameAllocOptions {
     pub size_pages: usize,
     pub zeroing: bool,
     pub align_pages: usize,
+    /// Bypass the per-CPU page cache (PCP). Equivalent to the legacy
+    /// `ALLOC_FLAG_NO_PCP` flag — used by stress / OOM tests that
+    /// want every alloc to hit the global buddy free-lists rather
+    /// than draining the per-CPU stack.
+    pub no_pcp: bool,
+    /// Restrict to DMA-suitable physical memory (legacy
+    /// `ALLOC_FLAG_DMA`). Wired through to the buddy's order-shift
+    /// machinery; preserves the policy semantics for callers that
+    /// program DMA descriptors with the returned physical address.
+    pub dma: bool,
 }
 
 impl FrameAllocOptions {
@@ -923,6 +933,8 @@ impl FrameAllocOptions {
             size_pages: 1,
             zeroing: false,
             align_pages: 1,
+            no_pcp: false,
+            dma: false,
         }
     }
 
@@ -931,6 +943,17 @@ impl FrameAllocOptions {
             zeroing: true,
             ..self
         }
+    }
+
+    pub const fn with_no_pcp(self) -> Self {
+        Self {
+            no_pcp: true,
+            ..self
+        }
+    }
+
+    pub const fn with_dma(self) -> Self {
+        Self { dma: true, ..self }
     }
 }
 

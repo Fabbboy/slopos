@@ -908,41 +908,13 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
 
 /// Allocate `size` bytes of kernel heap memory, zeroed.
 ///
-/// **Pages are zeroed by default.** Mirrors the page allocator's
-/// `ALLOC_FLAG_NO_INIT` opt-out: callers that genuinely will overwrite
-/// the entire region before any reader observes it can use
-/// [`kmalloc_uninit`] for the perf savings, but the default is now
-/// "no stale data leaks." This eliminates the bug class behind
-/// `0xdfdedddcdbdad9d8`-shape wild RIPs — a freed slab chunk that
+/// Always zero-initialised. Slab/magazine recycling is the bug class
+/// behind `0xdfdedddcdbdad9d8`-shape wild RIPs — a freed chunk that
 /// retained `(i & 0xFF) as u8`-pattern bytes from a kernel test, was
-/// reused as control-flow data, and decoded as a return address.
+/// reused as control-flow data, and decoded as a return address. The
+/// safe public surface scrubs unconditionally; there is no
+/// uninit-leak escape hatch.
 pub fn kmalloc(size: usize) -> *mut c_void {
-    // SAFETY: we immediately scrub the returned region to `size`
-    // bytes below, satisfying `kmalloc_uninit`'s "caller post-
-    // conditions the contents" contract.
-    let ptr_out = unsafe { kmalloc_uninit(size) };
-    if ptr_out.is_null() {
-        return ptr::null_mut();
-    }
-    // Zero exactly the requested size (rounded to 16-byte slab quantum
-    // upstream). Slab objects' tail padding past `size` is never read
-    // by the caller, so we don't need to scrub the whole rounded chunk.
-    zero_user_buffer(ptr_out as *mut u8, size);
-    ptr_out
-}
-
-/// Same as [`kmalloc`] but does **not** zero the returned memory.
-/// Use only on hot paths where the caller will overwrite the entire
-/// region before any reader observes it.
-///
-/// # Safety
-///
-/// The caller must guarantee that every byte of the returned region
-/// up to `size` is overwritten before any reader observes it. The
-/// region may hold the previous owner's bytes — `(i & 0xFF)`-pattern
-/// data, secrets, or stale function pointers. Misuse is the bug
-/// class behind `0xdfdedddcdbdad9d8`-shape wild RIPs.
-pub unsafe fn kmalloc_uninit(size: usize) -> *mut c_void {
     if size == 0 || size > MAX_ALLOC_SIZE {
         return ptr::null_mut();
     }
@@ -951,7 +923,7 @@ pub unsafe fn kmalloc_uninit(size: usize) -> *mut c_void {
 
     // Per-CPU magazine fast path for slab-sized allocations.
     // The magazine avoids the global KERNEL_HEAP lock for common sizes.
-    if let Some(class_idx) = size_class_index(rounded_size) {
+    let raw = if let Some(class_idx) = size_class_index(rounded_size) {
         if HEAP_CACHES_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
             && !KERNEL_HEAP.is_locked()
         {
@@ -965,31 +937,47 @@ pub unsafe fn kmalloc_uninit(size: usize) -> *mut c_void {
             if !ptr.is_null() {
                 MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                 MAG_ALLOC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                return ptr;
+                ptr
+            } else {
+                // Slow path: refill magazine from global slab, then pop.
+                magazine_refill(mag, class_idx);
+                let ptr = mag.pop();
+                if !ptr.is_null() {
+                    MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                    MAG_ALLOC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+                ptr
             }
-
-            // Slow path: refill magazine from global slab, then pop.
-            magazine_refill(mag, class_idx);
-            let ptr = mag.pop();
-            if !ptr.is_null() {
-                MAG_CACHED_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-                MAG_ALLOC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                return ptr;
-            }
+        } else {
+            ptr::null_mut()
         }
-    }
+    } else {
+        ptr::null_mut()
+    };
 
-    // Fallback: global lock (large allocs, or heap caches not yet enabled).
-    let mut heap = KERNEL_HEAP.lock();
-    if !heap.initialized {
+    let ptr_out = if raw.is_null() {
+        // Fallback: global lock (large allocs, or heap caches not yet enabled).
+        let mut heap = KERNEL_HEAP.lock();
+        if !heap.initialized {
+            return ptr::null_mut();
+        }
+        if let Some(idx) = size_class_index(rounded_size) {
+            slab_alloc_from_cache(&mut heap, idx)
+        } else {
+            alloc_large(&mut heap, rounded_size)
+        }
+    } else {
+        raw
+    };
+
+    if ptr_out.is_null() {
         return ptr::null_mut();
     }
-
-    if let Some(idx) = size_class_index(rounded_size) {
-        slab_alloc_from_cache(&mut heap, idx)
-    } else {
-        alloc_large(&mut heap, rounded_size)
-    }
+    // Zero exactly the requested size (rounded to 16-byte slab quantum
+    // upstream). Slab objects' tail padding past `size` is never read
+    // by the caller, so we don't need to scrub the whole rounded chunk.
+    zero_user_buffer(ptr_out as *mut u8, size);
+    ptr_out
 }
 
 /// **Deprecated, kept for source compatibility.** [`kmalloc`] now
