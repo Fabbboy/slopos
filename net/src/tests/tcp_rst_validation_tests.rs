@@ -59,7 +59,7 @@ fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {
 }
 
 fn make_data_pcb(phase: ClosePhase) -> Pcb {
-    let mut data = DataState::new(
+    let mut data: slopos_ostd::KBox<DataState> = slopos_ostd::KBox::try_init(DataState::init_new(
         SeqNum::new(OUR_ISS),
         SeqNum::new(PEER_IRS),
         SeqNum::new(OUR_ISS + 1),
@@ -72,7 +72,8 @@ fn make_data_pcb(phase: ClosePhase) -> Pcb {
         0,
         false,
         false,
-    );
+    ))
+    .expect("alloc");
     data.close_phase = phase;
     if matches!(
         phase,
@@ -80,10 +81,7 @@ fn make_data_pcb(phase: ClosePhase) -> Pcb {
     ) {
         data.peer_closed = true;
     }
-    Pcb::new(
-        tuple(),
-        PcbState::Data(slopos_ostd::KBox::try_new(data).expect("alloc")),
-    )
+    Pcb::new(tuple(), PcbState::Data(data))
 }
 
 fn make_syn_recv_pcb() -> Pcb {

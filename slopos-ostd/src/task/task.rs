@@ -335,21 +335,11 @@ impl Task {
 // remaining fields are plain data. Inv. 9.
 
 fn boxed_fpu_state() -> Result<KBox<FpuState>, crate::mm::AllocError> {
-    use crate::mm::AllocError;
-
-    // SAFETY: the closure writes a fully-valid `FpuState` into `slot`
-    // before returning `Ok(())`, satisfying `Init::__init`'s contract.
-    // The inner `slot.write(...)` is `unsafe` and is covered by this
-    // `init_from_closure` safety bracket — using `addr_of_mut!`-style
-    // direct writes instead of nested `unsafe` blocks keeps the
-    // unused-unsafe lint quiet under `-D warnings`.
-    let init = unsafe {
-        crate::mm::init_from_closure(|slot: *mut FpuState| -> Result<(), AllocError> {
-            slot.write(FpuState::new());
-            Ok(())
-        })
-    };
-    KBox::<FpuState>::try_init::<AllocError>(init)
+    // `FpuState::init_default` writes the FCW / MXCSR fields directly
+    // into the heap slot, so no 2.6 KiB rvalue ever materialises on
+    // the caller's stack — the `slot.write(FpuState::new())` shape
+    // this replaces did exactly that.
+    KBox::<FpuState>::try_init(FpuState::init_default())
 }
 
 // ---------------------------------------------------------------------------

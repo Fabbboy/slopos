@@ -12,7 +12,10 @@
 //! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
 use core::ptr;
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::init::{Init, init_from_closure};
 use slopos_ostd::{KBox, KVec};
 
 use slopos_abi::unicode::is_double_width;
@@ -429,6 +432,47 @@ impl VConsoleState {
             shadow: None,
             shadow_pitch: 0,
             dirty_rows: 0,
+        }
+    }
+
+    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
+    /// `KBox::try_init(VConsoleState::init_default())` so runtime
+    /// callers (test fixtures) avoid the ~3 KiB stack frame
+    /// `KBox::try_new(VConsoleState::new())` would otherwise produce
+    /// while the rvalue funnels through `Box::try_new_in`.
+    #[allow(dead_code)] // production build uses the const `Self::new` for the static lock; this serves the test fixtures.
+    pub(crate) fn init_default() -> impl Init<Self, AllocError> {
+        // SAFETY: writes every field of `Self` into `slot` exactly once
+        // before returning `Ok(())`. Field-by-field hand-written init
+        // (rather than a closure that captures a `Self::new()` rvalue)
+        // keeps the stack frame inside the gate.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                addr_of_mut!((*slot).cursor_row).write(0);
+                addr_of_mut!((*slot).cursor_col).write(0);
+                addr_of_mut!((*slot).rows).write(DEFAULT_ROWS);
+                addr_of_mut!((*slot).cols).write(DEFAULT_COLS);
+                addr_of_mut!((*slot).cell_w).write(8);
+                addr_of_mut!((*slot).cell_h).write(16);
+                addr_of_mut!((*slot).fb).write(None);
+                addr_of_mut!((*slot).cells).write(CellGrid::empty());
+                addr_of_mut!((*slot).parser).write(VtParser::new());
+                addr_of_mut!((*slot).cursor_attrs).write(CursorAttributes::default_attrs());
+                addr_of_mut!((*slot).saved_cursor_row).write(0);
+                addr_of_mut!((*slot).saved_cursor_col).write(0);
+                addr_of_mut!((*slot).saved_cursor_attrs).write(CursorAttributes::default_attrs());
+                addr_of_mut!((*slot).cursor_visible).write(true);
+                addr_of_mut!((*slot).alt_cells).write(CellGrid::empty());
+                addr_of_mut!((*slot).alt_screen_cursor_row).write(0);
+                addr_of_mut!((*slot).alt_screen_cursor_col).write(0);
+                addr_of_mut!((*slot).in_alt_screen).write(false);
+                addr_of_mut!((*slot).scroll_top).write(0);
+                addr_of_mut!((*slot).scroll_bottom).write(0);
+                addr_of_mut!((*slot).shadow).write(None);
+                addr_of_mut!((*slot).shadow_pitch).write(0);
+                addr_of_mut!((*slot).dirty_rows).write(0);
+                Ok(())
+            })
         }
     }
 

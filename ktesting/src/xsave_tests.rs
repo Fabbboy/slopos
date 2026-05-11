@@ -22,6 +22,14 @@ use crate::{fail, pass};
 use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Xcr0Flags};
 use slopos_arch::cpu::cpuid::XsaveFeatures;
 use slopos_arch::cpu::xsave;
+use slopos_ostd::KBox;
+
+/// 64-byte aligned XSAVE area large enough to cover up to AVX-512.
+#[repr(C, align(64))]
+#[derive(slopos_ostd::Zeroable)]
+struct XsaveArea {
+    data: [u8; 2688],
+}
 
 // =============================================================================
 // 1. XSAVE Detection Sanity
@@ -169,12 +177,7 @@ pub fn test_xcr0_avx_consistent() -> TestResult {
 /// Write known patterns to XMM0-XMM3, xsave to a buffer, zero the
 /// registers, xrstor from the buffer, and verify the patterns survive.
 pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
-    // 64-byte aligned XSAVE area (2688 bytes covers up to AVX-512).
-    #[repr(C, align(64))]
-    struct XsaveArea {
-        data: [u8; 2688],
-    }
-    let mut area = XsaveArea { data: [0u8; 2688] };
+    let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
     let xcr0 = xsave::active_xcr0();
     let xcr0_lo = xcr0 as u32;
@@ -277,11 +280,7 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
         return TestResult::Skipped;
     }
 
-    #[repr(C, align(64))]
-    struct XsaveArea {
-        data: [u8; 2688],
-    }
-    let mut area = XsaveArea { data: [0u8; 2688] };
+    let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
     let xcr0_lo = xcr0 as u32;
     let xcr0_hi = (xcr0 >> 32) as u32;
@@ -377,11 +376,7 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
 /// Verify that XSAVE/XRSTOR preserves many SSE registers independently
 /// (XMM0 through XMM7 with distinct patterns).
 pub fn test_sse_multi_register_isolation() -> TestResult {
-    #[repr(C, align(64))]
-    struct XsaveArea {
-        data: [u8; 2688],
-    }
-    let mut area = XsaveArea { data: [0u8; 2688] };
+    let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
     let xcr0 = xsave::active_xcr0();
     let xcr0_lo = xcr0 as u32;

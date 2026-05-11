@@ -26,7 +26,7 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
@@ -89,7 +89,7 @@ impl KernelMapping {
 
         for i in 0..page_count {
             let page_virt = VirtAddr::new(virt_base.as_u64() + i as u64 * PAGE_SIZE_4KB);
-            let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+            let phys = alloc_kernel_page();
             if phys.is_null() {
                 // Rollback already-mapped prefix so we don't leak.
                 for j in 0..i {
@@ -219,8 +219,6 @@ impl Drop for KernelMapping {
 // `KernelMapping` is a plain owned handle — not `Send`/`Sync` implicit
 // would already be fine (no interior-mutable fields), but we spell it
 // out so reviewers don't have to track it down.
-unsafe impl Send for KernelMapping {}
-unsafe impl Sync for KernelMapping {}
 
 /// Legacy `map_page_4kb` + manual free routine kept for tests that need
 /// to verify a mapping is torn down explicitly. Prefer `KernelMapping`

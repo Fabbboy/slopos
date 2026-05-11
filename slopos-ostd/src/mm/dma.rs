@@ -219,6 +219,8 @@ impl DmaCoherent {
             size_pages: npages,
             zeroing: true,
             align_pages: 1,
+            no_pcp: false,
+            dma: false,
         };
         let head = allocator.alloc(opts).ok_or(DmaError::Exhausted)?;
         let segment = USegment::<DmaCoherentMeta>::from_unused_run_inner(head, npages)?;
@@ -325,6 +327,8 @@ impl DmaStream {
             size_pages: npages,
             zeroing: true,
             align_pages: 1,
+            no_pcp: false,
+            dma: false,
         };
         let head = allocator.alloc(opts).ok_or(DmaError::Exhausted)?;
         let segment = USegment::<DmaStreamMeta>::from_unused_run_inner(head, npages)?;

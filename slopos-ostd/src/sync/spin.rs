@@ -17,10 +17,13 @@
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64 as cpu;
+use crate::mm::AllocError;
+use crate::mm::init::{Init, init_from_closure};
 use crate::sync::lock_tracking;
 
 /// Ticket-lock mutex that disables interrupts AND preemption while held.
@@ -87,6 +90,35 @@ impl<T> SpinLock<T> {
             poisoned: AtomicBool::new(false),
             level,
             data: UnsafeCell::new(data),
+        }
+    }
+
+    /// In-place [`Init`] recipe: build the lock fields directly into
+    /// the heap slot, threading the caller's `data_init` recipe through
+    /// to the inner `UnsafeCell<T>`. Lets large `T` (e.g. a 256-slot
+    /// timer wheel) avoid materialising on the caller's stack between
+    /// allocation and the `SpinLock::new(data, ...)` call. Used via
+    /// `KBox::try_init(SpinLock::init_with(level, T::init_default()))`.
+    pub fn init_with<E>(level: u8, data_init: impl Init<T, E>) -> impl Init<Self, E>
+    where
+        E: From<AllocError>,
+    {
+        // SAFETY: the closure writes every field of `slot`. Atomic-init
+        // and `UnsafeCell::new` shape are fixed by the `SpinLock`
+        // layout — we replicate the byte pattern of `Self::new(data, ..)`
+        // by hand so no `Self` rvalue ever materialises on the stack.
+        // `data_init.__init` writes the inner `T` directly into the
+        // same heap slot via `addr_of_mut!((*slot).data) as *mut T`.
+        unsafe {
+            init_from_closure(move |slot: *mut Self| -> Result<(), E> {
+                addr_of_mut!((*slot).next_ticket).write(AtomicU16::new(0));
+                addr_of_mut!((*slot).now_serving).write(AtomicU16::new(0));
+                addr_of_mut!((*slot).poisoned).write(AtomicBool::new(false));
+                addr_of_mut!((*slot).level).write(level);
+                let data_ptr = addr_of_mut!((*slot).data) as *mut T;
+                data_init.__init(data_ptr)?;
+                Ok(())
+            })
         }
     }
 

@@ -33,7 +33,7 @@ fn make_pcb_in_phase(phase: ClosePhase) -> Pcb {
         remote_ip: REMOTE_IP,
         remote_port: REMOTE_PORT,
     };
-    let mut data = DataState::new(
+    let mut data: slopos_ostd::KBox<DataState> = slopos_ostd::KBox::try_init(DataState::init_new(
         SeqNum::new(OUR_ISS),
         SeqNum::new(PEER_IRS),
         SeqNum::new(OUR_ISS + 1),  // snd_una after handshake
@@ -46,7 +46,8 @@ fn make_pcb_in_phase(phase: ClosePhase) -> Pcb {
         0,                         // rcv_wscale
         false,                     // wscale_enabled
         false,                     // ts_enabled
-    );
+    ))
+    .expect("alloc");
     data.close_phase = phase;
     if matches!(
         phase,
@@ -54,10 +55,7 @@ fn make_pcb_in_phase(phase: ClosePhase) -> Pcb {
     ) {
         data.peer_closed = true;
     }
-    Pcb::new(
-        tuple,
-        PcbState::Data(slopos_ostd::KBox::try_new(data).expect("alloc")),
-    )
+    Pcb::new(tuple, PcbState::Data(data))
 }
 
 fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {

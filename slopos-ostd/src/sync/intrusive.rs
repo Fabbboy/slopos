@@ -1,99 +1,104 @@
 //! Singly-linked, head/tail intrusive list.
 //!
-//! Wraps the `next: *mut T` pattern used by the kernel scheduler's
-//! `ReadyQueue` (`core/src/scheduler/per_cpu.rs`) and `ZombieList`
-//! (`core/src/scheduler/task/task_table.rs`). Each list element
-//! embeds a [`Link<T>`] field; the list itself owns nothing — it
-//! merely splices link slots — so reference-counting and lifecycle
-//! remain the caller's responsibility, matching the behaviour of
-//! the legacy raw-pointer queues this primitive replaces.
-//!
-//! Public API is fully safe; the small amount of `unsafe` is
-//! confined to this file and gated by the [`Linked`] invariant.
+//! `Role` is a zero-sized type tag: an element type `T` that
+//! participates in multiple lists embeds one `Link<T, Role>` per
+//! role and implements `Linked<Role>` once per role, returning a
+//! distinct field each time. Lists parameterised by different roles
+//! are distinct types, so a list of one role cannot splice an
+//! element's link slot belonging to another role — that mismatch is
+//! a compile error, not a runtime invariant.
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
-/// Per-list link slot embedded in the list element.
+/// Per-list link slot embedded in the list element, tagged with the
+/// list `Role` it participates in.
 ///
-/// `Link<T>` is `#[repr(transparent)]` over an [`AtomicPtr<T>`];
-/// elements that participate in a list embed exactly one as a
-/// stable, addressable field.
-#[repr(transparent)]
-pub struct Link<T> {
+/// Membership is tracked by an explicit `linked` flag, not inferred
+/// from `next != null`. A tail node has `next = null` but is still
+/// linked, so a `next`-only check would let a tail be re-pushed and
+/// silently form a self-loop.
+pub struct Link<T, Role> {
     next: AtomicPtr<T>,
+    linked: AtomicBool,
+    // `fn() -> Role` lets `Role` be uninhabited (the typical case).
+    _role: PhantomData<fn() -> Role>,
 }
 
-impl<T> Link<T> {
+impl<T, Role> Link<T, Role> {
     pub const fn new() -> Self {
         Self {
             next: AtomicPtr::new(core::ptr::null_mut()),
+            linked: AtomicBool::new(false),
+            _role: PhantomData,
         }
     }
 
-    /// `true` when this slot's `next` pointer is non-null. A linked
-    /// element's tail-node has `next = null`, so this method
-    /// distinguishes "linked at the tail" from "not linked"
-    /// imperfectly — callers that need a true linked-state bit
-    /// should track it externally (the legacy `ReadyQueue` does
-    /// not, and neither does this primitive).
+    /// True iff this slot is currently a member of some list of `Role`.
     #[inline]
-    pub fn has_next(&self) -> bool {
-        !self.next.load(Ordering::Acquire).is_null()
+    pub fn is_linked(&self) -> bool {
+        self.linked.load(Ordering::Acquire)
     }
 
-    /// Acquire-load the next-pointer slot.
-    ///
-    /// Used by consumers (kernel scheduler accessors) that need to
-    /// read the link slot without going through the list-mutation
-    /// API (e.g. when a Task's link-slot value is queried for
-    /// debugging or invariant checks).  The relaxed-vs-Acquire
-    /// distinction matches the legacy raw-pointer protocol that the
-    /// scheduler queue lock already serialises in practice.
     #[inline]
     pub fn load(&self) -> *mut T {
         self.next.load(Ordering::Acquire)
     }
 
-    /// Release-store the next-pointer slot.
-    ///
-    /// Counterpart to [`Self::load`]; used by consumers that need
-    /// to clear the slot outside the regular push/pop/remove flow
-    /// (e.g. `Task::clone_from_raw` after a bytewise parent → child
-    /// copy that bitwise-duplicated the parent's link slot).
     #[inline]
     pub fn store(&self, next: *mut T) {
         self.next.store(next, Ordering::Release);
     }
 
-    /// Convenience: store a null pointer.
+    /// Restore the slot to "not linked, no successor." Used after
+    /// bytewise copies (e.g. fork's `clone_from_raw`) where the link
+    /// state was inherited from the source.
     #[inline]
     pub fn reset(&self) {
-        self.store(core::ptr::null_mut());
+        self.next.store(core::ptr::null_mut(), Ordering::Release);
+        self.linked.store(false, Ordering::Release);
     }
 }
 
-impl<T> Default for Link<T> {
+impl<T, Role> Default for Link<T, Role> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Trait that lets [`IntrusiveLinkedList`] find the per-list link
-/// slot embedded in `Self`.
+/// CI guard: a `Linked<RoleA>`-only type cannot be used with an
+/// `IntrusiveLinkedList<_, RoleB>`. If this ever compiles, role
+/// separation has regressed.
+///
+/// ```compile_fail
+/// use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, Link, Linked};
+///
+/// pub enum RoleA {}
+/// pub enum RoleB {}
+///
+/// struct N {
+///     link_a: Link<N, RoleA>,
+/// }
+///
+/// unsafe impl Linked<RoleA> for N {
+///     fn link(&self) -> &Link<N, RoleA> { &self.link_a }
+/// }
+///
+/// let _list: IntrusiveLinkedList<N, RoleB> = IntrusiveLinkedList::new();
+/// ```
 ///
 /// # Safety
 ///
-/// Implementations must:
-/// - return a stable reference to a [`Link<Self>`] field that lives
-///   inside `Self`;
-/// - keep that field at a fixed address while the element is linked
-///   into a list (i.e. the element must not be moved while linked);
-/// - not expose the link slot to any other intrusive list at the
-///   same time (one slot per list).
-pub unsafe trait Linked: Sized {
-    fn link(&self) -> &Link<Self>;
+/// - The returned reference must point at a `Link<Self, Role>` field
+///   inside `Self` whose address is stable for the lifetime of any
+///   list membership.
+/// - Distinct `Role`s must return distinct fields. Two impls aliasing
+///   the same slot would let lists of different roles corrupt each
+///   other — re-introducing the very class of bug `Role` exists to
+///   prevent.
+pub unsafe trait Linked<Role>: Sized {
+    fn link(&self) -> &Link<Self, Role>;
 }
 
 /// Errors returned by [`IntrusiveLinkedList::push`] and
@@ -106,37 +111,33 @@ pub enum LinkError {
     AlreadyLinked,
 }
 
-/// Singly-linked, head/tail intrusive list with an atomic-counted
-/// length.
+/// Singly-linked, head/tail intrusive list.
 ///
-/// The list does not own its elements — push transfers no ownership
-/// and pop returns a `NonNull<T>` that the caller must keep alive
-/// for the duration of any subsequent borrow.
-///
-/// Concurrency: all public operations are `&self` and use atomics
-/// internally, but operations are not lock-free across each other —
-/// real callers (per-CPU ready queues, the global zombie list)
-/// already serialise via `PreemptGuard` / `IrqMutex`. The atomics
-/// guarantee that field reads from raw pointers do not tear, which
-/// the legacy raw-pointer queues relied on implicitly.
-pub struct IntrusiveLinkedList<T: Linked> {
+/// Push transfers no ownership; pop returns a `NonNull<T>` that the
+/// caller must keep alive for the duration of any subsequent borrow.
+/// Operations are `&self` but not lock-free across each other —
+/// callers serialise externally (per-CPU ready queue, zombie list,
+/// wait queue all wrap this in a `SpinLock`).
+pub struct IntrusiveLinkedList<T, Role>
+where
+    T: Linked<Role>,
+{
     head: AtomicPtr<T>,
     tail: AtomicPtr<T>,
     count: AtomicUsize,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<fn() -> Role>,
 }
 
-// SAFETY: the list shuttles `*mut T` between threads via its head /
-// tail atomics; `T: Send` is what the consumer asserts when it
-// allows its instances to live in a list shared across CPUs (the
-// legacy `ReadyQueue` makes the same assertion via its containing
-// `IrqMutex`).
-unsafe impl<T: Linked + Send> Send for IntrusiveLinkedList<T> {}
-// SAFETY: as `Send`; cross-thread access is mediated by the
-// caller's outer lock.
-unsafe impl<T: Linked + Send> Sync for IntrusiveLinkedList<T> {}
+// SAFETY: cross-CPU access is mediated by the caller's outer lock;
+// the atomic head/tail prevent torn reads on the unlocked
+// fast-paths (`len`, `is_empty`, `iter`'s head load).
+unsafe impl<T, Role> Send for IntrusiveLinkedList<T, Role> where T: Linked<Role> + Send {}
+unsafe impl<T, Role> Sync for IntrusiveLinkedList<T, Role> where T: Linked<Role> + Send {}
 
-impl<T: Linked> IntrusiveLinkedList<T> {
+impl<T, Role> IntrusiveLinkedList<T, Role>
+where
+    T: Linked<Role>,
+{
     pub const fn new() -> Self {
         Self {
             head: AtomicPtr::new(core::ptr::null_mut()),
@@ -146,52 +147,41 @@ impl<T: Linked> IntrusiveLinkedList<T> {
         }
     }
 
-    /// Number of elements currently linked into the list.
     #[inline]
     pub fn len(&self) -> usize {
         self.count.load(Ordering::Acquire)
     }
 
-    /// `true` when no elements are linked.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.head.load(Ordering::Acquire).is_null()
     }
 
-    /// Push `node` at the tail.
-    ///
-    /// Returns `Err(LinkError::AlreadyLinked)` if `node`'s link
-    /// slot already points somewhere — the legacy `ReadyQueue::enqueue`
-    /// would tolerate a re-push by overwriting; this primitive
-    /// instead refuses, which surfaces double-enqueue bugs.
+    /// Push `node` at the tail. `Err(AlreadyLinked)` if the node's
+    /// link slot is non-null (same-role double-push tripwire).
     pub fn push(&self, node: NonNull<T>) -> Result<(), LinkError> {
-        // SAFETY: `node` is a NonNull<T>; per the `Linked` contract,
-        // the element it points at hosts a stable `Link<T>` field
-        // that lives at least as long as the list membership.
-        let link = unsafe { node.as_ref().link() };
-        if link.has_next() {
+        // SAFETY for the unsafe blocks below: the `Linked<Role>`
+        // contract makes the link field a stable, addressable member
+        // of the element type. Membership in a list keeps the element
+        // alive (the consumer's refcount discipline); pointers we
+        // load from one node's link slot therefore stay valid until
+        // we mutate that slot.
+        let link: &Link<T, Role> = unsafe { <T as Linked<Role>>::link(node.as_ref()) };
+        // Atomic claim of the linked-state. If `linked` was already
+        // true, the node is in some list (head, mid, or tail — all
+        // three are detected uniformly) and we refuse.
+        if link.linked.swap(true, Ordering::AcqRel) {
             return Err(LinkError::AlreadyLinked);
         }
-        // The tail node currently has `next = null`; this is what
-        // the new node will inherit, so explicit reset is a no-op
-        // but preserves the invariant if a caller pushes a node
-        // whose previous list set `next` and then forgot to clear.
         link.next.store(core::ptr::null_mut(), Ordering::Release);
 
         let new = node.as_ptr();
         let prev_tail = self.tail.swap(new, Ordering::AcqRel);
         if prev_tail.is_null() {
-            // Empty list: new is both head and tail.
             self.head.store(new, Ordering::Release);
         } else {
-            // SAFETY: `prev_tail` was the list's tail; per the
-            // `Linked` contract its `Link<T>` slot lives as long
-            // as it's linked into the list. We hold the &self
-            // borrow exclusively (caller-side), so `prev_tail`
-            // remains valid for this store.
-            let prev_link = unsafe { &*(*prev_tail).link() as *const Link<T> };
-            // SAFETY: `prev_link` was just produced from a live
-            // reference; the AtomicPtr inside is `Sync`.
+            let prev_link =
+                unsafe { <T as Linked<Role>>::link(&*prev_tail) as *const Link<T, Role> };
             unsafe { (*prev_link).next.store(new, Ordering::Release) };
         }
 
@@ -199,82 +189,71 @@ impl<T: Linked> IntrusiveLinkedList<T> {
         Ok(())
     }
 
-    /// Pop from the head. Returns `None` if the list is empty.
     pub fn pop(&self) -> Option<NonNull<T>> {
         let head_ptr = self.head.load(Ordering::Acquire);
         if head_ptr.is_null() {
             return None;
         }
-        // SAFETY: head was just observed non-null and per the
-        // `Linked` contract the element at `head_ptr` is alive for
-        // the duration of its list membership.
-        let next = unsafe { (*head_ptr).link().next.load(Ordering::Acquire) };
+        // SAFETY (this fn): `Linked` contract; popped node stays
+        // alive because the caller still holds the original handle.
+        let popped_link = unsafe { <T as Linked<Role>>::link(&*head_ptr) };
+        let next = popped_link.next.load(Ordering::Acquire);
         self.head.store(next, Ordering::Release);
         if next.is_null() {
-            // Popped the last element: tail must follow head down.
             self.tail.store(core::ptr::null_mut(), Ordering::Release);
         }
-        // Reset the popped node's next slot so it can be re-pushed.
-        // SAFETY: as above; the popped node is still alive (caller
-        // still holds the original pointer).
-        unsafe {
-            (*head_ptr)
-                .link()
-                .next
-                .store(core::ptr::null_mut(), Ordering::Release)
-        };
+        // Mark unlinked and clear the chain pointer so the node can
+        // be re-pushed cleanly.
+        popped_link
+            .next
+            .store(core::ptr::null_mut(), Ordering::Release);
+        popped_link.linked.store(false, Ordering::Release);
         self.count.fetch_sub(1, Ordering::AcqRel);
-        // SAFETY: `head_ptr` was observed non-null above.
         Some(unsafe { NonNull::new_unchecked(head_ptr) })
     }
 
-    /// Remove `node` from the list (linear scan from the head).
-    ///
-    /// Returns `Ok(())` if the node was found and removed,
-    /// `Err(LinkError::NotPresent)` otherwise.
+    /// Remove `node` from the list via linear scan from the head.
     pub fn remove(&self, node: NonNull<T>) -> Result<(), LinkError> {
         let target = node.as_ptr();
         let mut prev: *mut T = core::ptr::null_mut();
         let mut cursor = self.head.load(Ordering::Acquire);
 
+        // SAFETY (this fn): all dereferences are of pointers either
+        // loaded from a list-internal slot under the `Linked` contract
+        // or of `cursor`/`prev` derived from such a load.
         while !cursor.is_null() {
+            let cursor_link = unsafe { <T as Linked<Role>>::link(&*cursor) };
             if cursor == target {
-                // Splice out.
-                // SAFETY: cursor is non-null and points at a live
-                // list element per the `Linked` contract.
-                let next = unsafe { (*cursor).link().next.load(Ordering::Acquire) };
+                let next = cursor_link.next.load(Ordering::Acquire);
                 if prev.is_null() {
                     self.head.store(next, Ordering::Release);
                 } else {
-                    // SAFETY: prev is non-null and points at a live
-                    // list element per the `Linked` contract.
-                    unsafe { (*prev).link().next.store(next, Ordering::Release) };
+                    unsafe {
+                        <T as Linked<Role>>::link(&*prev)
+                            .next
+                            .store(next, Ordering::Release)
+                    };
                 }
                 if next.is_null() {
-                    // Removed the tail: pull tail back to prev.
                     self.tail.store(prev, Ordering::Release);
                 }
-                // SAFETY: cursor still alive; clear its link.
-                unsafe {
-                    (*cursor)
-                        .link()
-                        .next
-                        .store(core::ptr::null_mut(), Ordering::Release)
-                };
+                cursor_link
+                    .next
+                    .store(core::ptr::null_mut(), Ordering::Release);
+                cursor_link.linked.store(false, Ordering::Release);
                 self.count.fetch_sub(1, Ordering::AcqRel);
                 return Ok(());
             }
             prev = cursor;
-            // SAFETY: cursor non-null per loop guard.
-            cursor = unsafe { (*cursor).link().next.load(Ordering::Acquire) };
+            cursor = cursor_link.next.load(Ordering::Acquire);
         }
         Err(LinkError::NotPresent)
     }
 
-    /// Snapshot iterator. Walks the chain starting from `head` at
-    /// call time. Concurrent push/pop during iteration may yield a
-    /// stale view but cannot trigger UB (each step null-checks).
-    pub fn iter(&self) -> Iter<'_, T> {
+    /// Snapshot iterator over the chain reachable from `head` at call
+    /// time. Concurrent push/pop may yield a stale view but cannot
+    /// trigger UB (each step null-checks).
+    pub fn iter(&self) -> Iter<'_, T, Role> {
         Iter {
             cursor: self.head.load(Ordering::Acquire),
             _marker: PhantomData,
@@ -282,34 +261,41 @@ impl<T: Linked> IntrusiveLinkedList<T> {
     }
 }
 
-impl<T: Linked> Default for IntrusiveLinkedList<T> {
+impl<T, Role> Default for IntrusiveLinkedList<T, Role>
+where
+    T: Linked<Role>,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Iterator over [`IntrusiveLinkedList`] elements.
-///
-/// Yields `NonNull<T>` rather than `&T` so callers — which are
-/// usually scheduler hot-paths that need to mutate the elements —
-/// can pick the borrow form they need without fighting the iterator
-/// over lifetimes.
-pub struct Iter<'a, T: Linked> {
+/// Yields `NonNull<T>` so consumers (scheduler hot-paths) can pick
+/// their own borrow form without lifetime gymnastics.
+pub struct Iter<'a, T, Role>
+where
+    T: Linked<Role>,
+{
     cursor: *mut T,
-    _marker: PhantomData<&'a IntrusiveLinkedList<T>>,
+    _marker: PhantomData<&'a IntrusiveLinkedList<T, Role>>,
 }
 
-impl<'a, T: Linked> Iterator for Iter<'a, T> {
+impl<'a, T, Role> Iterator for Iter<'a, T, Role>
+where
+    T: Linked<Role>,
+{
     type Item = NonNull<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor.is_null() {
             return None;
         }
-        // SAFETY: cursor non-null and points at a live list element
-        // per the `Linked` contract held by the parent list.
-        let next = unsafe { (*self.cursor).link().next.load(Ordering::Acquire) };
-        // SAFETY: cursor non-null per the guard above.
+        // SAFETY: cursor non-null per the guard; live per `Linked` contract.
+        let next = unsafe {
+            <T as Linked<Role>>::link(&*self.cursor)
+                .next
+                .load(Ordering::Acquire)
+        };
         let cur = unsafe { NonNull::new_unchecked(self.cursor) };
         self.cursor = next;
         Some(cur)

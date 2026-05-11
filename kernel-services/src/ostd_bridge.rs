@@ -48,20 +48,20 @@ unsafe impl WaitQueueBackend for KernelServicesBridge {
         driver_runtime::current_task() as *mut c_void
     }
 
-    fn prepare_to_wait(&self) {
-        driver_runtime::prepare_to_wait();
-    }
-
-    fn finish_wait(&self) {
-        driver_runtime::finish_wait();
-    }
-
     fn block_current_task(&self) {
         driver_runtime::block_current_task();
     }
 
-    fn block_current_task_with_timeout(&self, timeout_ms: u32) {
-        driver_runtime::block_current_task_with_timeout(timeout_ms);
+    fn mark_current_blocked(&self) -> bool {
+        driver_runtime::mark_current_blocked()
+    }
+
+    fn yield_blocked_task(&self) {
+        driver_runtime::yield_blocked_task();
+    }
+
+    fn yield_blocked_task_with_timeout(&self, timeout_ms: u32) {
+        driver_runtime::yield_blocked_task_with_timeout(timeout_ms);
     }
 
     unsafe fn unblock_task(&self, task: WaitTaskHandle) -> i32 {

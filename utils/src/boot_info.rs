@@ -1,4 +1,5 @@
 use slopos_abi::DisplayInfo;
+use slopos_ostd::sync::KernelSync;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -12,11 +13,13 @@ pub struct LimineMemmapEntry {
 pub struct LimineMemmapResponse {
     pub revision: u64,
     pub entry_count: u64,
-    pub entries: *const *const LimineMemmapEntry,
+    /// Bootloader-published `[*const LimineMemmapEntry; entry_count]`.
+    /// `KernelSync` wraps the raw pointer-to-pointer so the surrounding
+    /// struct auto-derives `Send + Sync`; the bootloader publishes
+    /// every entry at a lifetime-stable address before the kernel
+    /// reads them.
+    pub entries: KernelSync<*const *const LimineMemmapEntry>,
 }
-
-unsafe impl Send for LimineMemmapResponse {}
-unsafe impl Sync for LimineMemmapResponse {}
 
 /// Iterate the entries of a Limine memmap response. The single `unsafe`
 /// reborrow of the response pointer + the per-entry deref live here, so
@@ -43,7 +46,7 @@ pub fn limine_memmap_iter(
                 None
             } else {
                 let count = response.entry_count.min(u32::MAX as u64) as usize;
-                Some((count, response.entries))
+                Some((count, *response.entries))
             }
         }
     };
@@ -139,14 +142,22 @@ impl MemoryRegion {
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct BootFramebuffer {
-    pub address: *mut u8,
+    /// Bootloader-published framebuffer base virtual address.
+    /// `KernelSync` wraps the raw pointer so the surrounding struct
+    /// auto-derives `Send + Sync`; the underlying physical memory is
+    /// device-side MMIO that the bootloader maps for the kernel's
+    /// lifetime.
+    pub address: KernelSync<*mut u8>,
     pub info: DisplayInfo,
 }
 
 impl BootFramebuffer {
     #[inline]
     pub const fn new(address: *mut u8, info: DisplayInfo) -> Self {
-        Self { address, info }
+        Self {
+            address: KernelSync::new(address),
+            info,
+        }
     }
 
     #[inline]

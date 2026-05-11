@@ -4,6 +4,7 @@
 //! the TCP state machine, delayed ACK, retransmission, flow control, and
 //! zero-window probing.
 
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -97,7 +98,8 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let mut seq = server_iss.wrapping_add(1);
     let half = TCP_BUFFER_SIZE / 2;
-    let first = [1u8; 256];
+    let mut first: KBox<[u8; 256]> = KBox::zeroed().expect("alloc");
+    first.iter_mut().for_each(|b| *b = 1);
     let mut injected = 0usize;
     while injected < half {
         let n = core::cmp::min(first.len(), half - injected);
@@ -115,10 +117,10 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
         injected += n;
     }
 
-    let mut tmp = [0u8; 256];
+    let mut tmp: KBox<[u8; 256]> = KBox::zeroed().expect("alloc");
     let mut drained = 0usize;
     while drained < half {
-        let n = tcp::recv(id, &mut tmp).unwrap();
+        let n = tcp::recv(id, &mut *tmp).unwrap();
         if n == 0 {
             return fail!("expected data while draining first half");
         }
@@ -127,7 +129,8 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
     }
     assert_eq_test!(drained, half, "read first half");
 
-    let second = [2u8; 256];
+    let mut second: KBox<[u8; 256]> = KBox::zeroed().expect("alloc");
+    second.iter_mut().for_each(|b| *b = 2);
     injected = 0;
     while injected < half {
         let n = core::cmp::min(second.len(), half - injected);
@@ -145,10 +148,10 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
         injected += n;
     }
 
-    let mut out = [0u8; 256];
+    let mut out: KBox<[u8; 256]> = KBox::zeroed().expect("alloc");
     drained = 0;
     while drained < half {
-        let n = tcp::recv(id, &mut out).unwrap();
+        let n = tcp::recv(id, &mut *out).unwrap();
         if n == 0 {
             return fail!("expected data while draining wrapped half");
         }
@@ -360,8 +363,8 @@ pub fn test_send_partial_ack() -> TestResult {
     reset();
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, &[3u8; 1000]).unwrap();
-    let mut payload = [0u8; 1200];
-    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let mut payload: KBox<[u8; 1200]> = KBox::zeroed().expect("alloc");
+    let (seg, n) = tcp::poll_transmit(id, &mut *payload, 0).unwrap();
     assert_eq_test!(n, 1000, "sent full test payload");
 
     let ack = TcpHeader {
@@ -387,7 +390,7 @@ pub fn test_send_partial_ack() -> TestResult {
         Some(id),
         "inflight after partial ack"
     );
-    let (_, retransmit_len) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
+    let (_, retransmit_len) = tcp::poll_transmit(id, &mut *payload, 1001).unwrap();
     assert_eq_test!(retransmit_len, 500, "remaining bytes retransmit");
     pass!()
 }
@@ -616,14 +619,15 @@ pub fn test_tcp_poll_transmit_basic() -> TestResult {
 pub fn test_tcp_poll_transmit_mss_segmentation() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
-    let data = [0x42u8; DEFAULT_MSS as usize + 100];
-    let wrote = tcp::send(id, &data).unwrap();
+    let mut data: KBox<[u8; DEFAULT_MSS as usize + 100]> = KBox::zeroed().expect("alloc");
+    data.iter_mut().for_each(|b| *b = 0x42);
+    let wrote = tcp::send(id, &*data).unwrap();
     assert_eq_test!(wrote, data.len(), "enqueue full test payload");
 
-    let mut payload = [0u8; 2048];
-    let (_, first_len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let mut payload: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
+    let (_, first_len) = tcp::poll_transmit(id, &mut *payload, 0).unwrap();
     assert_eq_test!(first_len, DEFAULT_MSS as usize, "first chunk mss-sized");
-    let (_, second_len) = tcp::poll_transmit(id, &mut payload, 1).unwrap();
+    let (_, second_len) = tcp::poll_transmit(id, &mut *payload, 1).unwrap();
     assert_eq_test!(second_len, 100, "second chunk remainder");
     pass!()
 }
@@ -799,8 +803,8 @@ pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let _ = tcp::send(c.id, &[0xAA; 100]).unwrap();
-    let mut buf = [0u8; 1500];
-    let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
+    let _ = tcp::poll_transmit(c.id, &mut *buf, 0).unwrap();
 
     let (total, entries) = with_data_state!(c.id, |d| (d.sendmap.total_bytes(), d.sendmap.len()));
     assert_eq_test!(total, 100, "sendmap tracks 100 bytes");
@@ -813,14 +817,14 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
     let (id, _, _) = establish_connection();
     // Send a small payload and transmit it.
     let _ = tcp::send(id, b"x").unwrap();
-    let mut buf = [0u8; 1500];
-    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
+    let _ = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     // Trigger RTO → cwnd shrinks to MSS (1460), entry marked Lost.
     let _ = tcp::retransmit_check(1000);
 
     // First poll: retransmits the Lost 1-byte entry.
-    let (_, n0) = tcp::poll_transmit(id, &mut buf, 1001).unwrap();
+    let (_, n0) = tcp::poll_transmit(id, &mut *buf, 1001).unwrap();
     assert_eq_test!(n0, 1, "retransmit of Lost 1-byte entry");
 
     // Fill the buffer well past cwnd.
@@ -833,12 +837,12 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
             d.nagle_enabled = false;
         }
     });
-    let (_, n1) = tcp::poll_transmit(id, &mut buf, 1002).unwrap();
+    let (_, n1) = tcp::poll_transmit(id, &mut *buf, 1002).unwrap();
     assert_eq_test!(n1, 1459, "second segment limited by cwnd - pipe");
 
     // Third poll: cwnd exhausted (pipe = 1 + 1459 = 1460 = cwnd).
     assert_test!(
-        tcp::poll_transmit(id, &mut buf, 1003).is_none(),
+        tcp::poll_transmit(id, &mut *buf, 1003).is_none(),
         "blocked by cwnd"
     );
     pass!()
@@ -856,11 +860,13 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     });
 
     // Send 4 MSS-sized segments.
-    let _ = tcp::send(id, &[0xBB; 4 * DEFAULT_MSS as usize]).unwrap();
-    let mut buf = [0u8; 1500];
+    let mut send_payload: KBox<[u8; 4 * DEFAULT_MSS as usize]> = KBox::zeroed().expect("alloc");
+    send_payload.iter_mut().for_each(|b| *b = 0xBB);
+    let _ = tcp::send(id, &*send_payload).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let mut segs = [(0u32, 0u32); 4];
     for i in 0..4 {
-        let (seg, n) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+        let (seg, n) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
@@ -883,7 +889,12 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
     opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
     opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
-    let _ = tcp_common::inject_with_options(
+    // Heap-allocated reusable Actions slot — keeps the ~400 B return
+    // value off this test's stack frame so the 2 KiB gate holds.
+    let mut actions: KBox<tcp::Actions> =
+        KBox::try_init(tcp::Actions::init_default()).expect("alloc");
+    tcp_common::inject_with_options_into(
+        &mut *actions,
         tcp_common::REMOTE_IP,
         tcp_common::LOCAL_IP,
         tcp_common::REMOTE_PORT,
@@ -906,7 +917,7 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     assert_test!(has_lost, "segment marked Lost");
 
     // poll_transmit selectively retransmits the Lost segment.
-    let resent = tcp::poll_transmit(id, &mut buf, 1);
+    let resent = tcp::poll_transmit(id, &mut *buf, 1);
     assert_test!(resent.is_some(), "retransmit of Lost segment");
     let (seg, _) = resent.unwrap();
     assert_eq_test!(seg.seq_num, segs[0].0, "retransmit starts at seg 1");
@@ -924,11 +935,13 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     });
 
     // Send 4 MSS-sized segments.
-    let _ = tcp::send(id, &[0xCC; 4 * DEFAULT_MSS as usize]).unwrap();
-    let mut buf = [0u8; 1500];
+    let mut send_payload: KBox<[u8; 4 * DEFAULT_MSS as usize]> = KBox::zeroed().expect("alloc");
+    send_payload.iter_mut().for_each(|b| *b = 0xCC);
+    let _ = tcp::send(id, &*send_payload).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let mut segs = [(0u32, 0u32); 4];
     for i in 0..4 {
-        let (seg, n) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+        let (seg, n) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
@@ -981,16 +994,22 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
     });
 
     // Send 5 segments so we can trigger SACK-based loss detection.
-    let _ = tcp::send(id, &[0xDD; 5 * DEFAULT_MSS as usize]).unwrap();
-    let mut buf = [0u8; 1500];
+    let mut send_payload: KBox<[u8; 5 * DEFAULT_MSS as usize]> = KBox::zeroed().expect("alloc");
+    send_payload.iter_mut().for_each(|b| *b = 0xDD);
+    let _ = tcp::send(id, &*send_payload).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let mut segs = [(0u32, 0u32); 5];
     for i in 0..5 {
-        let (seg, n) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+        let (seg, n) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
+    // Heap-allocated reusable Actions slot — see sibling test for
+    // rationale.
+    let mut actions: KBox<tcp::Actions> =
+        KBox::try_init(tcp::Actions::init_default()).expect("alloc");
 
     // SACK segs 2,3,4 → seg 1 is Lost, enters recovery.
     let mut opts = [0u8; 28];
@@ -1004,7 +1023,8 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
     opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
     opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
     opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
-    let _ = tcp_common::inject_with_options(
+    tcp_common::inject_with_options_into(
+        &mut *actions,
         tcp_common::REMOTE_IP,
         tcp_common::LOCAL_IP,
         tcp_common::REMOTE_PORT,
@@ -1028,7 +1048,8 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
     opts2[3] = 10;
     opts2[4..8].copy_from_slice(&segs[4].0.to_be_bytes());
     opts2[8..12].copy_from_slice(&segs[4].1.to_be_bytes());
-    let _ = tcp_common::inject_with_options(
+    tcp_common::inject_with_options_into(
+        &mut *actions,
         tcp_common::REMOTE_IP,
         tcp_common::LOCAL_IP,
         tcp_common::REMOTE_PORT,
@@ -1048,8 +1069,8 @@ pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
     let _ = tcp::send(id, &[0xEE; 100]).unwrap();
-    let mut buf = [0u8; 1500];
-    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
+    let _ = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     assert_eq_test!(
         with_data_state!(id, |d| d.sendmap.total_bytes()),
@@ -1182,8 +1203,8 @@ pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
 
     // Send data so we have inflight.
     let _ = tcp::send(id, &[0xAA; 100]).unwrap();
-    let mut buf = [0u8; 1500];
-    let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
+    let _ = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
 
@@ -1230,8 +1251,8 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
 
     // Send data and get it acked with a forward ACK.
     let _ = tcp::send(id, &[0xBB; 50]).unwrap();
-    let mut buf = [0u8; 1500];
-    let (seg, _) = tcp::poll_transmit(id, &mut buf, 0).unwrap();
+    let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
+    let (seg, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     let ack = tcp_common::make_header(
         tcp_common::REMOTE_PORT,

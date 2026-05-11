@@ -8,6 +8,7 @@
 //!
 //! All tests run in-kernel during the integration test harness (`tests=on`).
 
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -1224,9 +1225,9 @@ pub fn test_tcp_retransmit_timer() -> TestResult {
     let wrote = tcp::send(id, b"hello").unwrap();
     assert_eq_test!(wrote, 5, "wrote 5 bytes to send buffer");
 
-    let mut payload = [0u8; 1460];
+    let mut payload: KBox<[u8; 1460]> = KBox::zeroed().expect("alloc");
     let now_ms = 0u64;
-    let seg = tcp::poll_transmit(id, &mut payload, now_ms);
+    let seg = tcp::poll_transmit(id, &mut *payload, now_ms);
     assert_test!(seg.is_some(), "segment produced for transmit");
 
     let has_retransmit_token = with_data_state!(id, |d| d.retransmit_token.is_some());

@@ -215,6 +215,33 @@ pub fn inject_with_options(
     tcp::input(src_ip, dst_ip, &hdr, options, payload, tcp::clock::now_ms())
 }
 
+/// Variant of [`inject_with_options`] that writes the resulting [`Actions`]
+/// into a caller-provided slot rather than returning it. Lets a test that
+/// makes several injects in sequence reuse one heap-allocated `Actions`
+/// slot instead of paying ~400 B of return-slot space per call site —
+/// the discard-the-result pattern (`let _ = inject_with_options(...)`)
+/// otherwise inflates the caller's frame past the 2 KiB stack-size gate.
+///
+/// `#[inline(never)]` so the per-call Actions return slot stays inside
+/// this helper's frame rather than getting hoisted into the test caller.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub fn inject_with_options_into(
+    out: &mut Actions,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    options: &[u8],
+    payload: &[u8],
+) {
+    let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
+    *out = tcp::input(src_ip, dst_ip, &hdr, options, payload, tcp::clock::now_ms());
+}
+
 /// Build a 12-byte TCP Timestamp option (NOP+NOP+TSopt).
 pub fn build_tsopt(tsval: u32, tsecr: u32) -> [u8; 12] {
     let mut buf = [0u8; 12];

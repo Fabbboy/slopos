@@ -3,7 +3,7 @@
 use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
+use slopos_mm::page_alloc::{alloc_kernel_pages, free_page_frame};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{align_up_u64, klog_info, klog_warn};
@@ -77,7 +77,6 @@ impl XeFramebuffer {
 }
 
 // Safety: Access to this state is synchronized through `XE_DEVICE` SpinLock.
-unsafe impl Send for XeFramebuffer {}
 
 static XE_DEVICE: SpinLock<XeDevice> = SpinLock::new(XeDevice::empty(), LOCK_LEVEL_RESOURCE);
 static XE_PROBED: InitFlag = InitFlag::new();
@@ -195,7 +194,7 @@ pub fn xe_framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<Framebuff
         return Some(boot);
     }
 
-    let phys = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_pages(pages);
     if phys.is_null() {
         klog_warn!("XE: Failed to allocate framebuffer pages");
         return Some(boot);

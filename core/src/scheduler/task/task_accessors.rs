@@ -346,34 +346,6 @@ pub fn task_set_time_slice_remaining(task: *mut Task, remaining: u64) {
     }
 }
 
-/// Read `task->next_ready` — the intrusive-list link used by
-/// `ReadyQueue` and `ZombieList`.
-#[inline]
-pub fn task_next_ready(task: *const Task) -> Option<*mut Task> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; the link slot's atomic load is
-    // internally synchronised, the owning queue's lock orders this
-    // with concurrent push/pop operations.
-    Some(unsafe { (*task).next_ready.load() })
-}
-
-/// Stamp `task->next_ready`. Used by the queue-mutation paths in
-/// `ReadyQueue::{enqueue,dequeue,remove}` and `ZombieList::push`.
-#[inline]
-pub fn task_set_next_ready(task: *mut Task, next: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; the link slot's atomic store is
-    // internally synchronised; ordering with concurrent readers is
-    // upheld by the owning queue's lock.
-    unsafe {
-        (*task).next_ready.store(next);
-    }
-}
-
 /// Bump `task->refcnt`. Returns the post-increment count, mirroring
 /// `Task::inc_ref`. Returns `None` for null pointers.
 #[inline]
@@ -573,57 +545,6 @@ pub fn task_inc_ref_with_id(task: *mut Task) -> Option<(u32, u32)> {
     Some((id, count))
 }
 
-/// Atomic CAS on `task->waiting_on`: succeeds only if the current
-/// value equals `expected`, in which case the field is overwritten
-/// with `desired`. Returns `Some(true)` on success, `Some(false)` on
-/// race loss, `None` if `task` is null.
-#[inline]
-pub fn task_waiting_on_cas(task: *mut Task, expected: u32, desired: u32) -> Option<bool> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `waiting_on` is `AtomicU32`.
-    let result = unsafe {
-        (*task).waiting_on.compare_exchange(
-            expected,
-            desired,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
-        )
-    };
-    Some(result.is_ok())
-}
-
-/// Stamp `task->waiting_on` unconditionally with `task_id`.
-#[inline]
-pub fn task_set_waiting_on(task: *mut Task, task_id: u32) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; `waiting_on` is `AtomicU32`.
-    unsafe {
-        (*task)
-            .waiting_on
-            .store(task_id, core::sync::atomic::Ordering::Release);
-    }
-}
-
-/// Spin-wait until the task's `on_cpu` flag goes false. Used by
-/// `schedule_task` to avoid dispatching a task that another CPU is
-/// still finishing its outgoing context switch on.
-#[inline]
-pub fn task_wait_off_cpu(task: *const Task) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; `on_cpu` is `AtomicBool`.
-    unsafe {
-        while (*task).on_cpu.load(core::sync::atomic::Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-    }
-}
-
 /// Set `task->on_cpu = on`. The dispatcher uses `true` before
 /// switching in, then clears to `false` after the outgoing context
 /// save completes.
@@ -664,4 +585,30 @@ pub fn task_take_test_reports(
     // SAFETY: caller pre-validated; `Option::take` is a single
     // word swap on the in-Task field.
     unsafe { (*task).test_reports.take() }
+}
+
+/// RAII increment of `task->refcnt`. `new` bumps the count; `Drop`
+/// decrements. Used by callers that hold a `*mut Task` across a
+/// scheduler yield (e.g. `task_wait_for`) so the pool slot cannot be
+/// reset by the zombie reaper while the borrow is live — `reap_zombies`
+/// requires `task_ref_count(raw) == Some(0)` before recycling.
+pub struct TaskRefGuard {
+    task: *mut Task,
+}
+
+impl TaskRefGuard {
+    pub fn new(task: *mut Task) -> Self {
+        if !task.is_null() {
+            let _ = task_inc_ref(task);
+        }
+        Self { task }
+    }
+}
+
+impl Drop for TaskRefGuard {
+    fn drop(&mut self) {
+        if !self.task.is_null() {
+            let _ = task_dec_ref(self.task);
+        }
+    }
 }

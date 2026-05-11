@@ -9,6 +9,7 @@ use slopos_utils::{klog_debug, klog_info};
 
 use slopos_ostd::task::switch::task_entry_trampoline;
 
+use super::super::exit_info::ExitInfo;
 use super::super::scheduler;
 use super::super::task_stack::{KernelStack, UnsafeStack};
 use super::super::task_struct::SwitchContext;
@@ -225,7 +226,6 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.creation_time = kdiag_timestamp();
     task.yield_count = 0;
     task.last_run_timestamp = 0;
-    task.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
     task.exit_reason = TaskExitReason::None;
     task.fault_reason = TaskFaultReason::None;
     task.exit_code = 0;
@@ -233,7 +233,8 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.fate_value = 0;
     task.fate_pending = 0;
     task.on_cpu.store(false, Ordering::Release);
-    task.next_ready.reset();
+    task.ready_link.reset();
+    task.zombie_link.reset();
     task.next_inbox.store(ptr::null_mut(), Ordering::Release);
     task.refcnt.store(0, Ordering::Release);
 }
@@ -724,7 +725,6 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     task.fate_token = 0;
     task.fate_value = 0;
     task.fate_pending = 0;
-    task.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
 
     super::super::futex::futex_remove_task(task_ptr);
 
@@ -750,7 +750,28 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     scheduler::unschedule_task(task_ptr);
 
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    // Phase 1's exit_info.try_set + WaitQueue SpinLock superseded the
+    // SeqCst fence here (was: defensive belt-and-braces).
+
+    // Publish exit_info BEFORE the wake fanout. Order is load-bearing:
+    // try_set is Release; the WaitQueue's SpinLock inside wake_all is
+    // a full barrier that pairs with `is_set`'s Acquire load on the
+    // waiter side. A waiter that registered after fanout but before
+    // try_set would deadlock if we reversed these — by publishing
+    // first, late waiters see is_set() == true on their first re-check.
+    //
+    // try_set returns Err on a re-entry (e.g. fault path also calling
+    // task_terminate(self)); discard via `_` — the operation is
+    // idempotent.
+    let info = ExitInfo {
+        exit_code: task.exit_code as i32,
+        exit_reason: task.exit_reason,
+        fault_reason: task.fault_reason,
+        signal: 0,
+        exit_time_ms: now,
+    };
+    let _ = task.exit_info.try_set(info);
+
     release_task_dependents(resolved_id);
 
     if let Some(tty_idx) = should_hangup {

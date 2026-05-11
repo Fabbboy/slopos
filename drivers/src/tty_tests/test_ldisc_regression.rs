@@ -636,8 +636,8 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     ld.input_char(b'\n');
 
     // Drain ALL cooked data to make room for the remainder.
-    let mut drain = [0u8; 8192];
-    let drained = ld.read(&mut drain);
+    let mut drain: KBox<[u8; 8192]> = KBox::zeroed().expect("alloc");
+    let drained = ld.read(&mut *drain);
     if drained == 0 {
         klog_info!("TTY_TEST: BUG - expected to drain some data");
         return TestResult::Fail;
@@ -703,8 +703,9 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
 
     // Fill the slave's cooked buffer past the throttle high-water mark
     // (THROTTLE_HIGH_WATER = 6144).  Write 6400 bytes in blocking mode.
-    let fill = [b'Z'; 6400];
-    let _ = tty::write(master, &fill, false);
+    let mut fill: KBox<[u8; 6400]> = KBox::zeroed().expect("alloc");
+    fill.iter_mut().for_each(|b| *b = b'Z');
+    let _ = tty::write(master, &*fill, false);
 
     // The slave should now be throttled.  A non-blocking write from the
     // master should return WouldBlock.
@@ -864,8 +865,9 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     };
 
     // Fill the master's buffer (4096 bytes via slave_write).
-    let fill = [b'X'; 4096];
-    let written1 = tty::pty::slave_write(slave_peer, &fill);
+    let mut fill: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
+    fill.iter_mut().for_each(|b| *b = b'X');
+    let written1 = tty::pty::slave_write(slave_peer, &*fill);
 
     if written1 != 4096 {
         klog_info!(
@@ -965,8 +967,8 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     }
 
     // Drain the fill bytes first.
-    let mut drain = [0u8; 4096];
-    let n_drain = ld.read(&mut drain);
+    let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
+    let n_drain = ld.read(&mut *drain);
     if n_drain != 4096 {
         klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4096", n_drain);
         return TestResult::Fail;
@@ -1025,8 +1027,8 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
     }
 
     // Drain the fill bytes.
-    let mut drain = [0u8; 4096];
-    let n_drain = ld.read(&mut drain);
+    let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
+    let n_drain = ld.read(&mut *drain);
     if n_drain != 4096 {
         klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4096", n_drain);
         return TestResult::Fail;
@@ -1084,8 +1086,8 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     }
 
     // Drain and verify no partial PARMRK sequence leaked.
-    let mut drain = [0u8; 4096];
-    let n_drain = ld.read(&mut drain);
+    let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
+    let n_drain = ld.read(&mut *drain);
     if n_drain != 4096 {
         klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4096", n_drain);
         return TestResult::Fail;
@@ -1592,7 +1594,7 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
     }
     // Drain to just above low-water (2048) — no_room should persist.
     let drain_to_above = 8192 - (THROTTLE_LOW_WATER + 1);
-    let mut scratch = [0u8; 4096];
+    let mut scratch: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let mut drained = 0usize;
     while drained < drain_to_above {
         let want = core::cmp::min(scratch.len(), drain_to_above - drained);
@@ -1709,9 +1711,9 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
         ld.push_cooked(b'A');
     }
     ld.push_cooked(b'B'); // no_room
-    let mut scratch = [0u8; 4096];
-    let _ = ld.read(&mut scratch);
-    let _ = ld.read(&mut scratch);
+    let mut scratch: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
+    let _ = ld.read(&mut *scratch);
+    let _ = ld.read(&mut *scratch);
     // After full drain, cooked_count == 0 which is below THROTTLE_LOW_WATER.
     if !ld.check_no_room_recovery() {
         klog_info!("TTY_TEST: BUG - recovery did not trigger after full drain");
@@ -1827,7 +1829,7 @@ pub fn test_rawdisc_recovery() -> TestResult {
     }
     // Drain below low-water.
     let drain_amount = 4096 - THROTTLE_LOW_WATER;
-    let mut scratch = [0u8; 4096];
+    let mut scratch: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let got = rd.read(&mut scratch[..drain_amount]);
     if got != drain_amount {
         klog_info!("TTY_TEST: BUG - RawDisc read returned {}", got);

@@ -3,6 +3,7 @@
 //! Covers: schedule + tick dispatch, cancellation, MAX_TIMERS_PER_TICK bound,
 //! advance_to catch-up, and edge cases (empty wheel, cancelled cleanup).
 
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
@@ -13,8 +14,11 @@ use crate::timer::{FiredTimer, MAX_TIMERS_PER_TICK, NetTimerWheel, TimerKind, Ti
 // =============================================================================
 
 /// Create a fresh wheel for each test (avoids shared state between tests).
-fn fresh_wheel() -> NetTimerWheel {
-    NetTimerWheel::new()
+///
+/// Returns a heap-allocated wheel via `KBox::try_init(NetTimerWheel::init())`
+/// so the 18 KiB slot array never materialises on the caller's stack.
+fn fresh_wheel() -> KBox<NetTimerWheel> {
+    KBox::try_init(NetTimerWheel::init()).expect("alloc")
 }
 
 /// Count how many fired timers match the given kind.

@@ -92,6 +92,11 @@ const _: () = {
     assert!(offset_of!(UserRegs, cs) == 20 * 8);
 };
 
+// SAFETY: every field is u64/u16/[u16; 3] — primitive integer types
+// whose all-zero bit pattern is a valid value. No references,
+// pointers, niche-constrained enums, or `bool` fields.
+unsafe impl crate::mm::init::Zeroable for UserRegs {}
+
 impl UserRegs {
     /// `const fn` zero/default constructor — usable in `const`
     /// contexts where `Default::default()` cannot be called.
@@ -146,6 +151,12 @@ pub struct FpuStateRef {
 unsafe impl Send for FpuStateRef {}
 unsafe impl Sync for FpuStateRef {}
 
+// SAFETY: `FpuStateRef` is `(*mut u8, usize)`. Both `*mut u8`
+// (Zeroable yields null) and `usize` (Zeroable yields 0) are valid
+// when zero — the resulting `FpuStateRef` is the same as
+// `FpuStateRef::empty()`.
+unsafe impl crate::mm::init::Zeroable for FpuStateRef {}
+
 impl FpuStateRef {
     /// # Safety
     ///
@@ -190,10 +201,18 @@ impl core::fmt::Debug for FpuStateRef {
 }
 
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct UserContext {
     regs: UserRegs,
     fpu_state: FpuStateRef,
 }
+
+// SAFETY: every field of `UserContext` is `Zeroable`
+// (`UserRegs` and `FpuStateRef` impls above). The all-zero
+// bit pattern is identical to what `UserContext::const_zeroed()`
+// produces. `#[repr(C)]` pins the layout so the impl stays
+// well-formed under field reorder.
+unsafe impl crate::mm::init::Zeroable for UserContext {}
 
 impl UserContext {
     /// `const fn` zero/uninitialised constructor.  All-zero regs +

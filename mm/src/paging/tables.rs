@@ -23,7 +23,7 @@ use slopos_utils::{klog_debug, klog_info};
 use super::walker::PageTableWalker;
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame, page_frame_can_free};
 use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 
 use crate::tlb;
@@ -40,11 +40,18 @@ static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
 /// installed in CR3 (the OSTD `VmSpace` is the load-bearing half).
 #[repr(C)]
 pub struct ProcessPageDir {
-    pub pml4: *mut PageTable,
+    /// `KernelSync` wraps the raw pointer so the surrounding struct
+    /// auto-derives `Send + Sync`; PML4 ownership is single-process
+    /// and access is gated by the per-process `SpinLock` in
+    /// `process_vm.rs`.
+    pub pml4: slopos_ostd::sync::KernelSync<*mut PageTable>,
     pub pml4_phys: PhysAddr,
     pub ref_count: u32,
     pub process_id: u32,
-    pub next: *mut ProcessPageDir,
+    /// `KernelSync`-wrapped intrusive next-pointer. The lookup walk in
+    /// `kernel_page_dir_walk` runs single-writer pre-SMP for now;
+    /// post-SMP migrations use the OSTD `VmSpace` instead.
+    pub next: slopos_ostd::sync::KernelSync<*mut ProcessPageDir>,
     pub kernel_mapping_gen: u64,
     pub mm_ctx_id: crate::mmu::MmContextId,
 }
@@ -60,26 +67,23 @@ impl ProcessPageDir {
         mm_ctx_id: crate::mmu::MmContextId,
     ) -> Self {
         Self {
-            pml4,
+            pml4: slopos_ostd::sync::KernelSync::new(pml4),
             pml4_phys,
             ref_count: 1,
             process_id,
-            next: ptr::null_mut(),
+            next: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
             kernel_mapping_gen: 0,
             mm_ctx_id,
         }
     }
 }
 
-unsafe impl Send for ProcessPageDir {}
-unsafe impl Sync for ProcessPageDir {}
-
 static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(ProcessPageDir {
-    pml4: ptr::null_mut(),
+    pml4: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
     pml4_phys: PhysAddr::NULL,
     ref_count: 1,
     process_id: 0,
-    next: ptr::null_mut(),
+    next: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
     kernel_mapping_gen: 0,
     mm_ctx_id: crate::mmu::MmContextId::INVALID,
 });
@@ -89,7 +93,7 @@ fn table_empty(table: &PageTable) -> bool {
 }
 
 fn alloc_page_table() -> Option<(PhysAddr, *mut PageTable)> {
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_page();
     if phys.is_null() {
         return None;
     }
@@ -216,7 +220,7 @@ fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysA
         return PhysAddr::NULL;
     }
     unsafe {
-        let pml4 = (*page_dir).pml4;
+        let pml4 = *(*page_dir).pml4;
         if pml4.is_null() {
             return PhysAddr::NULL;
         }
@@ -252,7 +256,7 @@ fn map_page_in_directory(
     let inter_flags = intermediate_flags(user_mapping);
 
     unsafe {
-        let pml4 = (*page_dir).pml4;
+        let pml4 = *(*page_dir).pml4;
         if pml4.is_null() {
             return -1;
         }
@@ -378,7 +382,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         return PhysAddr::NULL;
     }
     unsafe {
-        let pml4 = (*page_dir).pml4;
+        let pml4 = *(*page_dir).pml4;
         if pml4.is_null() {
             return PhysAddr::NULL;
         }
@@ -483,7 +487,7 @@ pub fn init_paging() {
         if pml4_ptr.is_null() {
             panic!("Failed to translate kernel PML4 physical address");
         }
-        (*KERNEL_PAGE_DIR.get()).pml4 = pml4_ptr;
+        (*KERNEL_PAGE_DIR.get()).pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
 
         let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
         if kernel_phys.is_null() {
@@ -527,7 +531,7 @@ pub fn get_page_size(vaddr: VirtAddr) -> u64 {
         if (*page_dir).pml4.is_null() {
             return 0;
         }
-        let pml4 = (*page_dir).pml4;
+        let pml4 = *(*page_dir).pml4;
         let walker = PageTableWalker::new();
         match walker.walk(&*pml4, vaddr) {
             Ok(result) => result.page_size,

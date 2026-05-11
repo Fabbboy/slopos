@@ -52,13 +52,11 @@ use crate::memory_reservations::{
 };
 use crate::paging_defs::PAGE_SIZE_4KB;
 
-pub const ALLOC_FLAG_ZERO: u32 = 0x01;
 pub const ALLOC_FLAG_DMA: u32 = 0x02;
 pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;
 pub const ALLOC_FLAG_ORDER_MASK: u32 = 0x1F << ALLOC_FLAG_ORDER_SHIFT;
 pub const ALLOC_FLAG_NO_PCP: u32 = 0x80;
-
 const PAGE_FRAME_FREE: u8 = 0x00;
 const PAGE_FRAME_ALLOCATED: u8 = 0x01;
 const PAGE_FRAME_RESERVED: u8 = 0x02;
@@ -765,7 +763,23 @@ pub fn finalize_page_allocator() -> c_int {
     0
 }
 
-pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
+/// Raw multi-page buddy allocator entry point — bootstrap escape and
+/// policy-flag opt-out (NO_PCP / DMA). Not part of the supported public
+/// surface: every new caller should reach for the typestate
+/// `Frame::<KernelMeta>::alloc` (single page) or `alloc_kernel_pages`
+/// (multi-page legacy bridge) instead. The only legitimate consumers
+/// of this function in tree are:
+///
+/// 1. `kernel_meta::install_meta_slots` — bootstrapping `META_SLOTS`
+///    itself; the typestate path physically cannot work yet.
+/// 2. `frame_alloc_shim::LegacyFrameAllocShim::alloc` — the typestate
+///    backend (the typestate calls into here, not the other way round).
+/// 3. Callers that need `ALLOC_FLAG_NO_PCP` or `ALLOC_FLAG_DMA` (test
+///    suites + the xe driver's MMIO buffer + memfd's multi-page user
+///    backing). These will migrate to a future `FrameAllocOptions`
+///    policy axis; until then they remain on the raw escape.
+#[doc(hidden)]
+pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
     if count == 0 {
         return PhysAddr::NULL;
     }
@@ -818,7 +832,7 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
         };
 
         if frame_num == INVALID_PAGE_FRAME {
-            klog_info!("alloc_page_frames: No suitable block available");
+            klog_info!("__alloc_page_frames_raw: No suitable block available");
             return PhysAddr::NULL;
         }
 
@@ -827,7 +841,15 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
             alloc.frame_to_phys(frame_num)
         };
 
-        if flags & ALLOC_FLAG_ZERO != 0 {
+        // Always zero. The bug class behind `0xdfdedddcdbdad9d8`-shape
+        // wild RIPs was a freed page that kept its `(i & 0xFF) as u8`
+        // test pattern, was reused as kernel/user stack-or-control
+        // memory, and a subsequent `ret` decoded those bytes as a
+        // function address. The buddy unconditionally scrubs; the
+        // typestate `Frame<_, Uninit>` is a type-level audit point
+        // (caller still has to scrub before promoting to `Zeroed`)
+        // but no longer represents a runtime perf escape.
+        {
             let span_pages = if use_pcp {
                 1
             } else {
@@ -838,7 +860,7 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
                 let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
                 if zero_physical_page(page_phys) != 0 {
                     klog_info!(
-                        "alloc_page_frames: Failed to zero page at phys 0x{:x}",
+                        "__alloc_page_frames_raw: Failed to zero page at phys 0x{:x}",
                         page_phys.as_u64()
                     );
                     ok = false;
@@ -859,8 +881,87 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
     }
 }
 
-pub fn alloc_page_frame(flags: u32) -> PhysAddr {
-    let phys = alloc_page_frames(1, flags);
+/// Typestate-checked single-page kernel allocation with caller-supplied
+/// [`FrameAllocOptions`]. Lets the caller toggle policy bits
+/// (`no_pcp`, `dma`) without dropping back to the raw `__*_raw` API.
+/// Returns the raw `PhysAddr` for handoff to legacy free paths;
+/// internals match [`alloc_kernel_page`].
+pub fn alloc_kernel_page_with(opts: slopos_ostd::mm::frame::FrameAllocOptions) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, KernelMeta};
+    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
+        // SAFETY: see `alloc_kernel_page`.
+        unsafe { f.into_phys_release() }
+    })
+}
+
+/// Typestate-checked multi-page kernel allocation with caller-supplied
+/// [`FrameAllocOptions`]. The `count` argument overrides
+/// `opts.size_pages`. See [`alloc_kernel_page_with`].
+pub fn alloc_kernel_pages_with(
+    count: u32,
+    opts: slopos_ostd::mm::frame::FrameAllocOptions,
+) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, KernelMeta};
+    if count == 0 {
+        return PhysAddr::NULL;
+    }
+    let opts = slopos_ostd::mm::frame::FrameAllocOptions {
+        size_pages: count as usize,
+        ..opts
+    };
+    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
+        // SAFETY: see `alloc_kernel_page`.
+        unsafe { f.into_phys_release() }
+    })
+}
+
+/// Typestate-checked multi-page kernel allocation. Routes through
+/// [`slopos_ostd::mm::frame::Frame<KernelMeta, Zeroed>::alloc`] with
+/// `size_pages = count`, releases the leading `MetaSlot` to `UNUSED`,
+/// and returns the raw paddr so legacy `free_page_frame` callers
+/// continue to work unchanged. See [`alloc_kernel_page`].
+pub fn alloc_kernel_pages(count: u32) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
+    if count == 0 {
+        return PhysAddr::NULL;
+    }
+    let opts = FrameAllocOptions {
+        size_pages: count as usize,
+        ..FrameAllocOptions::single()
+    };
+    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
+        // SAFETY: see `alloc_kernel_page`.
+        unsafe { f.into_phys_release() }
+    })
+}
+
+/// Typestate-checked single-page kernel allocation. Routes through
+/// [`slopos_ostd::mm::frame::Frame<KernelMeta, Zeroed>::alloc`] so
+/// the page is guaranteed zeroed (the typestate refuses any other
+/// state without an explicit `unsafe` opt-out) and then releases the
+/// `MetaSlot` to `UNUSED` before returning the raw paddr.
+///
+/// Migration target for legacy `alloc_page_frame(0)` call sites:
+/// the alloc goes through the typestate gate, the resulting `PhysAddr`
+/// stays compatible with today's `free_page_frame` free path. New
+/// code should hold a `Frame<KernelMeta>` directly instead of routing
+/// through this bridge.
+pub fn alloc_kernel_page() -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
+    Frame::<KernelMeta>::alloc(FrameAllocOptions::single()).map_or(PhysAddr::NULL, |f| {
+        // SAFETY: we immediately surrender the typed Frame to the
+        // legacy raw-paddr free path; the caller of this wrapper
+        // owns the dealloc obligation via `free_page_frame`.
+        unsafe { f.into_phys_release() }
+    })
+}
+
+/// Raw single-page buddy allocator entry point. See
+/// [`__alloc_page_frames_raw`] for the audit-point rationale; same
+/// rules apply.
+#[doc(hidden)]
+pub fn __alloc_page_frame_raw(flags: u32) -> PhysAddr {
+    let phys = __alloc_page_frames_raw(1, flags);
     // LUF reuse-drain hook: if the frame we're about to hand out is
     // still referenced by a deferred TLB flush on this CPU, drain the
     // queue before the new owner installs its own mapping. Missing
@@ -894,7 +995,7 @@ pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
         // we don't silently short-return for pathological requests.
         let mut filled = 0usize;
         for slot in out.iter_mut() {
-            let pa = alloc_page_frame(0);
+            let pa = __alloc_page_frame_raw(0);
             if pa.is_null() {
                 break;
             }
@@ -941,6 +1042,22 @@ pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
         let alloc = PAGE_ALLOCATOR.lock();
         for i in 0..filled {
             out[i] = alloc.frame_to_phys(frames[i]);
+        }
+        drop(alloc);
+        // Zero each frame for the same reason `alloc_page_frames` does:
+        // pages are zero by default. `alloc_page_frames_pcp_batch` does
+        // not currently expose a `NO_INIT` opt-out — its sole caller
+        // (`KernelStack::new`) already overwrites the entire stack via
+        // `zero_stack_pages`, so the redundant scrub is acceptable for
+        // now. Refactor to a flagged variant if a perf-critical caller
+        // appears.
+        for i in 0..filled {
+            if zero_physical_page(out[i]) != 0 {
+                klog_info!(
+                    "alloc_page_frames_pcp_batch: zero_physical_page failed at 0x{:x}",
+                    out[i].as_u64()
+                );
+            }
         }
     }
     filled

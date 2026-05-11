@@ -1,6 +1,7 @@
 use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 use slopos_utils::klog_info;
@@ -9,12 +10,12 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::memory_init::get_memory_statistics;
 use crate::page_alloc::{
-    ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames,
-    free_page_frame, get_page_allocator_stats,
+    alloc_kernel_page_with, alloc_kernel_pages_with, free_page_frame, get_page_allocator_stats,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
 use slopos_abi::task::INVALID_PROCESS_ID;
+use slopos_ostd::mm::frame::FrameAllocOptions;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
     let mut total = 0u32;
@@ -26,12 +27,16 @@ pub fn test_page_alloc_until_oom() -> TestResult {
         return pass!();
     }
 
-    let mut allocated: [PhysAddr; 1024] = [PhysAddr::NULL; 1024];
+    // PhysAddr is repr(transparent) over u64; all-zero == PhysAddr::NULL.
+    let mut allocated: KBox<[PhysAddr; 1024]> = unsafe {
+        let raw = KBox::<[u64; 1024]>::zeroed().expect("alloc");
+        KBox::from_raw(KBox::into_raw(raw) as *mut [PhysAddr; 1024])
+    };
     let mut count = 0usize;
 
     let max_alloc = (free_before as usize).min(512);
     for i in 0..max_alloc {
-        let phys = alloc_page_frame(ALLOC_FLAG_NO_PCP);
+        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
         if phys.is_null() {
             klog_info!("OOM_TEST: OOM after {} allocations (expected)", i);
             break;
@@ -68,7 +73,7 @@ pub fn test_page_alloc_fragmentation_oom() -> TestResult {
 
     let mut pages: [PhysAddr; 16] = [PhysAddr::NULL; 16];
     for i in 0..16 {
-        pages[i] = alloc_page_frame(ALLOC_FLAG_NO_PCP);
+        pages[i] = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
         if pages[i].is_null() {
             for j in 0..i {
                 free_page_frame(pages[j]);
@@ -82,7 +87,7 @@ pub fn test_page_alloc_fragmentation_oom() -> TestResult {
         pages[i] = PhysAddr::NULL;
     }
 
-    let large = alloc_page_frames(16, ALLOC_FLAG_NO_PCP);
+    let large = alloc_kernel_pages_with(16, FrameAllocOptions::single().with_no_pcp());
 
     if !large.is_null() {
         free_page_frame(large);
@@ -101,7 +106,7 @@ pub fn test_dma_allocation_exhaustion() -> TestResult {
     let mut count = 0usize;
 
     for _ in 0..64 {
-        let phys = alloc_page_frame(ALLOC_FLAG_DMA | ALLOC_FLAG_NO_PCP);
+        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp().with_dma());
         if phys.is_null() {
             break;
         }
@@ -201,7 +206,7 @@ pub fn test_heap_alloc_one_gib() -> TestResult {
         return pass!();
     }
 
-    let mut ptrs: [*mut core::ffi::c_void; TARGET_BLOCKS] = [ptr::null_mut(); TARGET_BLOCKS];
+    let mut ptrs: KBox<[*mut core::ffi::c_void; TARGET_BLOCKS]> = KBox::zeroed().expect("alloc");
 
     for i in 0..TARGET_BLOCKS {
         let p = kmalloc(ONE_MIB);
@@ -259,7 +264,7 @@ pub fn test_heap_expansion_under_pressure() -> TestResult {
     let mut page_count = 0usize;
 
     for _ in 0..64 {
-        let phys = alloc_page_frame(ALLOC_FLAG_NO_PCP);
+        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
         if phys.is_null() {
             break;
         }
@@ -288,7 +293,7 @@ pub fn test_zero_flag_under_pressure() -> TestResult {
     let mut count = 0usize;
 
     for _ in 0..32 {
-        let phys = alloc_page_frame(ALLOC_FLAG_ZERO | ALLOC_FLAG_NO_PCP);
+        let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
         if phys.is_null() {
             break;
         }
@@ -372,7 +377,7 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
         let mut allocated = 0usize;
 
         for i in 0..PAGES_PER_CYCLE {
-            pages[i] = alloc_page_frame(ALLOC_FLAG_NO_PCP);
+            pages[i] = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
             if pages[i].is_null() {
                 for j in 0..i {
                     free_page_frame(pages[j]);
@@ -401,7 +406,7 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
 pub fn test_multiorder_alloc_failure() -> TestResult {
     for order in 0..10u32 {
         let count = 1u32 << order;
-        let phys = alloc_page_frames(count, ALLOC_FLAG_NO_PCP);
+        let phys = alloc_kernel_pages_with(count, FrameAllocOptions::single().with_no_pcp());
 
         if phys.is_null() {
             klog_info!(
@@ -451,7 +456,7 @@ pub fn test_process_heap_expansion_oom() -> TestResult {
 pub fn test_refcount_during_oom() -> TestResult {
     use crate::page_alloc::{page_frame_get_ref, page_frame_inc_ref};
 
-    let phys = alloc_page_frame(ALLOC_FLAG_NO_PCP);
+    let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
     if phys.is_null() {
         return pass!();
     }

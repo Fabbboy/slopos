@@ -9,6 +9,9 @@
 
 use core::arch::asm;
 
+use crate::mm::AllocError;
+use crate::mm::init::{Init, Zeroable, init_from_closure};
+
 /// Size of the per-task FPU state save area.
 ///
 /// Sized to the AVX-512 worst case (2,688 bytes). FXSAVE-only CPUs use
@@ -31,6 +34,16 @@ pub const MXCSR_DEFAULT: u32 = 0x1F80;
 pub struct FpuState {
     pub data: [u8; FPU_STATE_SIZE],
 }
+
+// SAFETY: `FpuState` is `[u8; FPU_STATE_SIZE]` wrapped in a 64-byte
+// alignment shell. The all-zero pattern matches `FpuState::zero()` —
+// XRSTOR with that buffer treats every component header (XSTATE_BV,
+// XCOMP_BV) as zero and uses processor-reset defaults. The legacy x87
+// FCW / MXCSR are zero too, which is technically a non-default
+// (FCW=0x037F, MXCSR=0x1F80 are the kernel defaults), but the zero
+// pattern is still a representationally valid `FpuState` — anyone
+// requiring the kernel-default mask should call `init_default()`.
+unsafe impl Zeroable for FpuState {}
 
 impl FpuState {
     /// All-zeroes save area.
@@ -57,6 +70,48 @@ impl FpuState {
         state.data[MXCSR_OFFSET] = 0x80;
         state.data[MXCSR_OFFSET + 1] = 0x1F;
         state
+    }
+
+    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
+    /// `KBox::try_init(FpuState::init_default())` so runtime callers
+    /// don't materialise a 2.6 KiB rvalue on their own stack frame.
+    ///
+    /// The `E = AllocError` parameter is purely an absorption shim so
+    /// the recipe slots into `KBox::try_init`'s `E: From<AllocError>`
+    /// bound — the closure itself never errors.
+    pub fn init_default() -> impl Init<Self, AllocError> {
+        // SAFETY: zeroes the slot, then writes the legacy FCW (0x037F)
+        // and MXCSR (0x1F80) so the result is byte-for-byte identical
+        // to `Self::new()`. Returns `Ok(())` only after all writes.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                let bytes = slot as *mut u8;
+                core::ptr::write_bytes(bytes, 0, core::mem::size_of::<Self>());
+                // FCW = 0x037F.
+                bytes.add(0).write(0x7F);
+                bytes.add(1).write(0x03);
+                // MXCSR = 0x1F80.
+                bytes.add(24).write(0x80);
+                bytes.add(25).write(0x1F);
+                Ok(())
+            })
+        }
+    }
+
+    /// In-place [`Init`] recipe equivalent to [`Self::zero`]. Trivial
+    /// counterpart to [`Self::init_default`] when the caller needs an
+    /// XSTATE-untouched buffer with no FCW/MXCSR seed bits. See
+    /// [`Self::init_default`] for the `AllocError` rationale.
+    pub fn init_zero() -> impl Init<Self, AllocError> {
+        // SAFETY: writes `size_of::<Self>()` zero bytes into `slot`,
+        // matching `Self::zero()` byte for byte. `FpuState: Zeroable`
+        // certifies the zero pattern is a valid `Self`.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                core::ptr::write_bytes(slot as *mut u8, 0, core::mem::size_of::<Self>());
+                Ok(())
+            })
+        }
     }
 }
 

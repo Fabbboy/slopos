@@ -8,14 +8,19 @@ use core::ffi::c_void;
 use core::mem::offset_of;
 use core::ptr;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
 use slopos_ostd::cpu::x86_64::pcr::KernelReturnContext;
+use slopos_ostd::sync::AtomicCell;
+use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::intrusive::{Link, Linked};
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{AllocError, Init, init_from_closure};
+
+use crate::scheduler::exit_info::ExitInfo;
+use crate::scheduler::task_state::TaskState;
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -227,14 +232,18 @@ impl SignalAction {
 // Task — the kernel task control block
 // =============================================================================
 
-// Layout sanity check: `fpu_state` sits 0xD0 (208) bytes after `context`
-// inside `Task`.  No asm reads this offset directly today (OSTD's
-// `fpu_xsave` / `fpu_xrstor` take a pointer to `FpuState` straight from
-// the kernel scheduler), but pinning it keeps a regression bell on
-// reordering of the head fields where adding a field between `context`
-// and `fpu_state` would silently change the FPU buffer's stride from
-// the start of the Task struct.
-pub const FPU_STATE_OFFSET: usize = 0xD0;
+// Layout sanity check: `fpu_state` sits 0xC8 (200) bytes after `context`
+// inside `Task` — exactly the size of the `repr(C, packed)`
+// `TaskContext`, with no inter-field padding because Phase 5's
+// `state: TaskState` (8-byte aligned) re-aligned the head so that
+// `context`'s start offset is 64-aligned (no extra slack between
+// `context.end` and `fpu_state.start`).  No asm reads this offset
+// directly today (OSTD's `fpu_xsave` / `fpu_xrstor` take a pointer
+// to `FpuState` straight from the kernel scheduler), but pinning
+// it keeps a regression bell on reordering of the head fields where
+// adding a field between `context` and `fpu_state` would silently
+// change the FPU buffer's stride from the start of the Task struct.
+pub const FPU_STATE_OFFSET: usize = 0xC8;
 const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
 
 /// Offset of `Task.unsafe_stack_sp` — consumed by the naked
@@ -262,11 +271,14 @@ const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 pub struct Task {
     pub task_id: u32,
     pub name: [u8; TASK_NAME_MAX_LEN],
-    state_atomic: AtomicU8,
+    /// Fused (status, reason, epoch) atomic word. Replaces the
+    /// pre-Phase-5 `state_atomic: AtomicU8` + `block_reason: AtomicU8`
+    /// pair, which exposed an observation window in which a stale
+    /// reason could outlive its status (or vice versa). See
+    /// `core/src/scheduler/task_state.rs` for the bit layout.
+    state: TaskState,
     pub priority: TaskPriority,
     pub flags: u16,
-    block_reason: AtomicU8,
-    _pad0: [u8; 3],
     pub process_id: u32,
     pub stack_base: u64,
     pub stack_size: u64,
@@ -352,7 +364,6 @@ pub struct Task {
     pub creation_time: u64,
     pub yield_count: u32,
     pub last_run_timestamp: u64,
-    pub waiting_on: AtomicU32,
     pub user_started: u8,
     pub context_from_user: u8,
     pub exit_reason: TaskExitReason,
@@ -378,18 +389,14 @@ pub struct Task {
     /// woken task is never dispatched on a second CPU before the first
     /// CPU finishes saving its context — the Linux `p->on_cpu` pattern.
     pub on_cpu: AtomicBool,
-    /// Intrusive-list link slot used by `ReadyQueue` (per-CPU run
-    /// queues, `core/src/scheduler/per_cpu.rs`) and `ZombieList`
-    /// (deferred reaper, `core/src/scheduler/task/task_table.rs`).
-    /// A Task is only ever in one of those at a time — terminate
-    /// removes from the ready queue before adding to the zombie
-    /// list — so a single shared `Link<Task>` field suffices.
-    /// Layout-compatible with the previous `*mut Task` (both are
-    /// pointer-sized on x86_64); the all-zero bit pattern matches
-    /// the unlinked state, so `Task::init_invalid`'s `write_bytes`
-    /// zero-fill produces a valid empty link without an explicit
-    /// initialiser.
-    pub next_ready: Link<Task>,
+    /// Intrusive link slot for the per-CPU `ReadyQueue`. Separate
+    /// physical field from `zombie_link` so the two list roles cannot
+    /// share storage. The all-zero bit pattern is "unlinked", so
+    /// `init_invalid`'s `write_bytes` zero-fill is a valid empty link.
+    pub ready_link: Link<Task, crate::scheduler::per_cpu::ReadyQueueRole>,
+    /// Intrusive link slot for the global `ZombieList`. See
+    /// `ready_link`.
+    pub zombie_link: Link<Task, crate::scheduler::task::ZombieListRole>,
     pub next_inbox: AtomicPtr<Task>,
     pub refcnt: AtomicU32,
     /// Per-task user-mode register snapshot consumed by the OSTD
@@ -409,6 +416,19 @@ pub struct Task {
     /// belongs to the user-mode round trip in flight on the running
     /// task.
     pub saved_kernel_return_ctx: KernelReturnContext,
+    /// Tasks waiting for THIS task to exit. Drained by
+    /// `release_task_dependents` (which calls `wake_all`) after
+    /// `exit_info` is published in `mark_task_terminated`. The
+    /// queue's internal SpinLock provides the bidirectional full
+    /// barrier the wait/wake protocol needs, so the publish→wake
+    /// pair cannot be observed out of order.
+    pub waiters: WaitQueue,
+    /// Durable per-task exit value. `Some(_)` after
+    /// `mark_task_terminated` publishes; cleared only by
+    /// `reset_in_place` on slot recycling. Late waiters that race
+    /// past the `wake_all` see this on their next condition
+    /// re-check and exit cleanly without ever blocking.
+    pub exit_info: AtomicCell<ExitInfo>,
 }
 
 impl Task {
@@ -416,11 +436,9 @@ impl Task {
         Self {
             task_id: INVALID_TASK_ID,
             name: [0; TASK_NAME_MAX_LEN],
-            state_atomic: AtomicU8::new(TaskStatus::Invalid.as_u8()),
+            state: TaskState::invalid(),
             priority: TaskPriority::Normal,
             flags: 0,
-            block_reason: AtomicU8::new(BlockReason::None.as_u8()),
-            _pad0: [0; 3],
             process_id: INVALID_PROCESS_ID,
             stack_base: 0,
             stack_size: 0,
@@ -456,7 +474,6 @@ impl Task {
             creation_time: 0,
             yield_count: 0,
             last_run_timestamp: 0,
-            waiting_on: AtomicU32::new(INVALID_TASK_ID),
             user_started: 0,
             context_from_user: 0,
             exit_reason: TaskExitReason::None,
@@ -473,7 +490,8 @@ impl Task {
             signal_actions: [SignalAction::default(); NSIG],
             switch_ctx: SwitchContext::zero(),
             on_cpu: AtomicBool::new(false),
-            next_ready: Link::new(),
+            ready_link: Link::new(),
+            zombie_link: Link::new(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
             user_ctx: UserContext::const_zeroed(),
@@ -488,6 +506,8 @@ impl Task {
                 rsp: 0,
                 rip: 0,
             },
+            waiters: WaitQueue::new(),
+            exit_info: AtomicCell::empty(),
         }
     }
 
@@ -531,9 +551,6 @@ impl Task {
                 // 255 bytes stay zero from the initial write_bytes.
                 (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
 
-                // Waiting-on sentinel.
-                addr_of_mut!((*slot).waiting_on).write(AtomicU32::new(INVALID_TASK_ID));
-
                 // FPU state: FCW = 0x037F, MXCSR = 0x1F80, XSAVE header
                 // zeroed — handled by the in-place initialiser.
                 fpu_reset_in_place(addr_of_mut!((*slot).fpu_state));
@@ -565,6 +582,16 @@ impl Task {
                 // Software-switch context: rflags default is 0x202
                 // (IF=1, reserved bit1=1) rather than 0.
                 addr_of_mut!((*slot).switch_ctx).write(SwitchContext::zero());
+
+                // Wait/exit primitives. WaitQueue's bit pattern
+                // happens to be zero-equivalent today, but write the
+                // const-constructed value explicitly so the gate stays
+                // robust if the lock or counter encoding changes.
+                // AtomicCell::empty() is a null AtomicPtr, which the
+                // initial write_bytes already produced — write
+                // explicitly anyway for symmetry.
+                addr_of_mut!((*slot).waiters).write(WaitQueue::new());
+                addr_of_mut!((*slot).exit_info).write(AtomicCell::empty());
 
                 Ok(())
             })
@@ -603,6 +630,12 @@ impl Task {
             let _ = (*this).kernel_stack.take();
             let _ = (*this).unsafe_stack.take();
             let _ = (*this).test_reports.take();
+            // Drop the published exit value (if any) before the byte-zero
+            // pass corrupts the AtomicPtr — bytewise-nulling without
+            // dropping the heap-backed KBox would leak it. SAFETY: caller
+            // guarantees exclusive access to this slot, so no concurrent
+            // reader can observe the cell mid-reset.
+            (*this).exit_info.reset();
             // Zero the non-drop-bearing fields. We stay away from the
             // `kernel_stack`/`unsafe_stack`/`test_reports` slots because
             // `Option` has no layout guarantee that the all-zeros bit
@@ -632,75 +665,84 @@ impl Task {
             (*this).sid = INVALID_TASK_ID;
             (*this).cwd[0] = b'/';
             (*this).cwd_len = 1;
-            (*this).waiting_on.store(INVALID_TASK_ID, Ordering::Relaxed);
+            // Re-establish the wait/exit primitives on top of the
+            // byte-zeroed storage. Use `addr_of_mut!.write` rather
+            // than structured assignment so we don't run Drop on the
+            // byte-zeroed (logically uninitialised) prior value, and
+            // so a future encoding change in WaitQueue can't silently
+            // break recycling. AtomicCell::reset above already left
+            // the cell empty, but write a fresh one for layout
+            // independence — same justification as init_invalid.
+            addr_of_mut!((*this).waiters).write(WaitQueue::new());
+            addr_of_mut!((*this).exit_info).write(AtomicCell::empty());
+            // The byte-zero pass overwrote `state`, leaving it at
+            // (Invalid, None, epoch=0). Reseat it so the encoding is
+            // a real `TaskState::invalid()` (matters if we later add
+            // non-zero defaults to any sub-field).
+            addr_of_mut!((*this).state).write(TaskState::invalid());
         }
-    }
-
-    #[inline]
-    fn state(&self) -> u8 {
-        self.state_atomic.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub(crate) fn set_state(&self, state: u8) {
-        self.state_atomic.store(state, Ordering::Release);
     }
 
     #[inline]
     pub fn status(&self) -> TaskStatus {
-        TaskStatus::from_u8(self.state())
+        self.state.status()
     }
 
+    /// Force-publish a new status without changing the block reason.
+    /// Single-owner only — used by typestate handles and slot init.
     #[inline]
     pub fn set_status(&self, status: TaskStatus) {
-        self.set_state(status.as_u8());
+        let reason = self.state.reason();
+        self.state.force_set(status, reason);
+    }
+
+    /// Force-publish (status, reason) atomically. Single-owner only.
+    #[inline]
+    pub fn force_set_state(&self, status: TaskStatus, reason: BlockReason) {
+        self.state.force_set(status, reason);
     }
 
     #[inline]
     pub fn try_transition_to(&self, target: TaskStatus) -> bool {
-        let current = self.state();
-        let current_status = TaskStatus::from_u8(current);
-        if !current_status.can_transition_to(target) {
+        let current = self.state.status();
+        if !current.can_transition_to(target) {
             return false;
         }
-        self.state_atomic
-            .compare_exchange(current, target.as_u8(), Ordering::AcqRel, Ordering::Acquire)
+        self.state
+            .try_transition_keep_reason(current, target)
             .is_ok()
     }
 
     /// Atomically transition from `expected` to `target`.
     ///
-    /// Unlike [`try_transition_to`], this CAS only succeeds when the current
-    /// state is exactly `expected`. This is critical for wakeup-safe blocking:
-    /// `try_transition_from(WillBlock, Blocked)` fails if a concurrent
-    /// `unblock_task` already set the state to `Running`.
+    /// Unlike [`try_transition_to`], this CAS only succeeds when the
+    /// current state is exactly `expected`. Wakeup-safe blocking
+    /// relies on this primitive: a wait-protocol caller does
+    /// `try_transition_from(Running, Blocked)` under the wait queue's
+    /// SpinLock; a concurrent `unblock_task` that already won the
+    /// race left status=Ready, so the CAS fails and the caller does
+    /// not yield (the wakeup is preserved).
     #[inline]
     pub fn try_transition_from(&self, expected: TaskStatus, target: TaskStatus) -> bool {
         if !expected.can_transition_to(target) {
             return false;
         }
-        self.state_atomic
-            .compare_exchange(
-                expected.as_u8(),
-                target.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+        self.state
+            .try_transition_keep_reason(expected, target)
             .is_ok()
     }
 
-    /// Block from a specific expected state, setting the block reason.
-    ///
-    /// Stores `reason` *before* the CAS so the Release ordering on
-    /// `state_atomic` publishes it to any CPU that Acquire-loads the
-    /// Blocked state.  If the CAS fails the stale reason is harmless
-    /// because no reader inspects `block_reason` unless `state == Blocked`.
-    ///
-    /// Returns `true` only if the CAS `expected → Blocked` succeeded.
+    /// Block from a specific expected state, stamping the block reason
+    /// in the same CAS.  Returns `true` only if the CAS
+    /// `expected → Blocked` succeeded.
     #[inline]
     pub fn block_from(&self, expected: TaskStatus, reason: BlockReason) -> bool {
-        self.block_reason.store(reason.as_u8(), Ordering::Relaxed);
-        self.try_transition_from(expected, TaskStatus::Blocked)
+        if !expected.can_transition_to(TaskStatus::Blocked) {
+            return false;
+        }
+        self.state
+            .try_transition(expected, TaskStatus::Blocked, reason)
+            .is_ok()
     }
 
     #[inline]
@@ -715,24 +757,29 @@ impl Task {
 
     #[inline]
     pub fn block(&self, reason: BlockReason) -> bool {
-        self.block_reason.store(reason.as_u8(), Ordering::Relaxed);
-        self.try_transition_to(TaskStatus::Blocked)
+        let current = self.state.status();
+        if !current.can_transition_to(TaskStatus::Blocked) {
+            return false;
+        }
+        self.state
+            .try_transition(current, TaskStatus::Blocked, reason)
+            .is_ok()
     }
 
     /// Load the block reason.  Only meaningful when `status() == Blocked`.
     ///
-    /// Callers must first Acquire-load `state_atomic` (via `status()`,
-    /// `is_blocked()`, etc.) to synchronise with the writer's Release CAS.
+    /// Reads the fused state atomic; the value comes back consistent
+    /// with the status that was published in the same CAS.
     #[inline]
     pub fn load_block_reason(&self) -> BlockReason {
-        BlockReason::from_u8(self.block_reason.load(Ordering::Relaxed))
+        self.state.reason()
     }
 
     /// Store the block reason directly (e.g. for futex, which sets the
     /// reason before the generic block path runs).
     #[inline]
     pub fn store_block_reason(&self, reason: BlockReason) {
-        self.block_reason.store(reason.as_u8(), Ordering::Relaxed);
+        self.state.store_reason(reason);
     }
 
     #[inline]
@@ -800,15 +847,32 @@ impl Task {
             // allocates a new ring.
             core::ptr::write(&mut self.test_reports as *mut _, None);
             self.unsafe_stack_sp = 0;
+            // Wait/exit primitives are per-task. The parent's `waiters`
+            // queue holds tasks waiting for the *parent*, not the child;
+            // bitwise-copying it would route the child's wakes to the
+            // wrong observers. The parent's `exit_info` (if published)
+            // is a heap-backed KBox that the parent still owns; running
+            // Drop on the bitwise copy would double-free. `ptr::write`
+            // both fields to fresh values without dropping the
+            // duplicate, matching the kernel_stack/unsafe_stack pattern.
+            core::ptr::write(&mut self.waiters as *mut _, WaitQueue::new());
+            core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
+            // Reseat the fused state atomic. The byte-copy left us
+            // with a snapshot of the parent's status/reason/epoch; the
+            // child is a fresh entity (the caller marks it Ready
+            // shortly after). Starting at `Invalid` with a fresh
+            // epoch keeps any cross-CPU observer that snapshotted the
+            // parent's state from accidentally CASing the child's.
+            core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
         }
         // Child keeps its own pool position.
         self.slot_index = preserved_slot_index;
-        // Reset scheduler linkage and refcount — the copy is a fresh entity.
-        // `next_ready` was bytewise-copied from the parent's link slot;
-        // calling `Link::reset` issues an atomic store on that storage,
-        // which is well-formed even on bytewise-copied AtomicPtr storage
-        // (no padding / tagging on x86_64).
-        self.next_ready.reset();
+        // The link slots were bytewise-copied from the parent; reset
+        // both so this fresh Task is not seen as linked into the
+        // parent's queue (each role has its own slot — both must
+        // clear).
+        self.ready_link.reset();
+        self.zombie_link.reset();
         self.next_inbox = AtomicPtr::new(ptr::null_mut());
         self.refcnt = AtomicU32::new(0);
         // Child inherits signal actions and blocked mask but starts with no pending signals.
@@ -839,15 +903,18 @@ impl Task {
     }
 }
 
-// SAFETY: `next_ready` is an in-Task `Link<Task>` field at a stable
-// offset; the Task struct itself never moves while a Task is linked
-// into a list (pool slots are pinned for kernel lifetime). The
-// scheduler's `terminate → unschedule_task → defer_task_cleanup`
-// ordering guarantees a Task is never simultaneously in `ReadyQueue`
-// and `ZombieList`, so the single shared link slot is unambiguous.
-unsafe impl Linked for Task {
-    fn link(&self) -> &Link<Self> {
-        &self.next_ready
+// SAFETY: task pool slots are pinned for kernel lifetime, so the
+// in-Task link fields have stable addresses. The two impls return
+// distinct fields, satisfying `Linked`'s distinct-field-per-Role rule.
+unsafe impl Linked<crate::scheduler::per_cpu::ReadyQueueRole> for Task {
+    fn link(&self) -> &Link<Self, crate::scheduler::per_cpu::ReadyQueueRole> {
+        &self.ready_link
+    }
+}
+
+unsafe impl Linked<crate::scheduler::task::ZombieListRole> for Task {
+    fn link(&self) -> &Link<Self, crate::scheduler::task::ZombieListRole> {
+        &self.zombie_link
     }
 }
 
@@ -881,8 +948,6 @@ pub mod task_state {
     pub struct Running;
     /// Blocked on a wait condition (sleep, futex, child exit).
     pub struct Blocked;
-    /// Declared intent to block but hasn't transitioned yet (race window).
-    pub struct WillBlock;
     /// Exited; awaiting reaping.
     pub struct Zombie;
     /// Reaped; pool slot released. Handle is no longer valid.
@@ -976,15 +1041,6 @@ impl OwnedTask<task_state::Running> {
         }
     }
 
-    /// Declare intent to block (pre-block race window).
-    pub fn into_will_block(self) -> OwnedTask<task_state::WillBlock> {
-        unsafe { (*self.raw).set_status(slopos_abi::task::TaskStatus::WillBlock) };
-        OwnedTask {
-            raw: self.raw,
-            _state: core::marker::PhantomData,
-        }
-    }
-
     /// Exit. Atomic status: Running → Terminated; reaper will recycle.
     pub fn into_zombie(self) -> OwnedTask<task_state::Zombie> {
         unsafe { (*self.raw).set_status(slopos_abi::task::TaskStatus::Terminated) };
@@ -1000,26 +1056,6 @@ impl OwnedTask<task_state::Blocked> {
     /// handle goes back through dispatch.
     pub fn into_runnable(self) -> OwnedTask<task_state::Runnable> {
         unsafe { (*self.raw).set_status(slopos_abi::task::TaskStatus::Ready) };
-        OwnedTask {
-            raw: self.raw,
-            _state: core::marker::PhantomData,
-        }
-    }
-}
-
-impl OwnedTask<task_state::WillBlock> {
-    /// CAS WillBlock → Blocked, finishing the block.
-    pub fn into_blocked(self) -> OwnedTask<task_state::Blocked> {
-        unsafe { (*self.raw).set_status(slopos_abi::task::TaskStatus::Blocked) };
-        OwnedTask {
-            raw: self.raw,
-            _state: core::marker::PhantomData,
-        }
-    }
-
-    /// Race lost: someone unblocked us before we could finish.
-    pub fn into_running(self) -> OwnedTask<task_state::Running> {
-        unsafe { (*self.raw).set_status(slopos_abi::task::TaskStatus::Running) };
         OwnedTask {
             raw: self.raw,
             _state: core::marker::PhantomData,

@@ -1,13 +1,13 @@
-use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use limine::mp::{MP_FLAG_X2APIC, MpInfo};
+use limine::mp::{MP_FLAG_X2APIC, MpGotoFunction};
 
 use slopos_arch::{cpu, is_cpu_online, pcr};
 use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_core::scheduler::safestack_rt;
 use slopos_drivers::apic;
 use slopos_mm::tlb;
+use slopos_ostd::boot::smp::register_ap_late_entry;
 use slopos_utils::klog_info;
 
 use crate::gdt::syscall_msr_init;
@@ -18,67 +18,17 @@ use crate::limine_protocol;
 const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
 const MAX_CPUS: usize = 256;
 
-/// Naked AP entry trampoline — installs GS_BASE before any instrumented
-/// Rust code runs on this AP.
-///
-/// Limine's MP boot flow jumps each AP directly to this function with
-/// `rdi` pointing at the `Cpu` / `MpInfo` struct whose `extra` field
-/// (offset 24) we set to the 1-based AP slot in [`smp_init`].  The
-/// BSP pre-populated [`pcr::AP_PCR_PTRS`]`[slot - 1]` and primed
-/// `AP_PCRS[slot - 1]`'s `self_ref` + `unsafe_sp` before triggering
-/// the bootstrap, so all this trampoline has to do is:
-///
-///   1. Load the PCR pointer from `AP_PCR_PTRS[slot - 1]`.
-///   2. WRMSR IA32_GS_BASE with that pointer.
-///   3. Jump to [`ap_entry_rust`], preserving `rdi` (the MpInfo ptr).
-///
-/// Naked because the first instruction of any non-naked fn compiled
-/// with `-Zsanitizer=safestack` fetches `gs:[0]` — which would read
-/// garbage on an AP with GS_BASE still at 0.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ap_entry(_cpu_info: &MpInfo) -> ! {
-    naked_asm!(
-        // rdi = &MpInfo, preserved across this trampoline.
-        //
-        // Read slot from MpInfo.extra @ offset 24 (1-based).  This
-        // is the index the BSP assigned in `smp_init` below; each
-        // AP's PCR, bootstrap Task, and bootstrap unsafe stack are
-        // all indexed by `slot - 1` on the Rust side.  All we do here
-        // is install GS_BASE — the Rust `init_bootstrap_tasks` call
-        // already stamped this AP's bootstrap Task's
-        // `unsafe_stack_sp` field, and `init_ap_pcr_lookup` already
-        // stamped this AP's PCR `self_ref` + `current_task`.
-        "mov rax, [rdi + {extra_offset}]",
-        "dec rax",                              // zero-based slot index
-        // rax = AP_PCR_PTRS[rax]
-        "lea rcx, [rip + {ap_pcr_ptrs}]",
-        "mov rax, [rcx + rax*8]",               // rax = &AP_PCRS[slot-1]
-        // WRMSR IA32_GS_BASE = rax
-        "mov rdx, rax",
-        "shr rdx, 32",
-        // eax already holds low 32 of rax
-        "mov ecx, {ia32_gs_base}",              // IA32_GS_BASE MSR number
-        "wrmsr",
-        // Tail-call into the real Rust AP entry.  It is compiled with
-        // -Zsanitizer=safestack and its prologue will now see a valid
-        // `gs:[CURRENT_TASK]` (→ AP's bootstrap Task with primed
-        // unsafe_stack_sp).
-        "jmp {ap_entry_rust}",
-        extra_offset = const 24,
-        ia32_gs_base = const 0xC000_0101_u32,
-        ap_pcr_ptrs = sym pcr::AP_PCR_PTRS,
-        ap_entry_rust = sym ap_entry_rust,
-    )
+// AP boot trampoline lives in `slopos_ostd::arch::x86_64::naked::ap_entry`.
+// Limine's `MpGotoFunction` is `unsafe extern "C" fn(&MpInfo) -> !`; the
+// OSTD trampoline takes `*const ()` to keep the limine dep out of OSTD.
+// Both share x86-64 SysV ABI (single pointer arg in `rdi`), so a
+// transmute at the bootstrap call site is layout-safe.
+fn ap_entry_goto() -> MpGotoFunction {
+    let f: unsafe extern "C" fn(*const ()) -> ! = slopos_ostd::arch::x86_64::naked::ap_entry;
+    // SAFETY: same x86-64 SysV ABI on both sides; the OSTD `*const ()`
+    // is the same `MpInfo*` the limine bootloader passes in `rdi`.
+    unsafe { core::mem::transmute::<unsafe extern "C" fn(*const ()) -> !, MpGotoFunction>(f) }
 }
-
-// The asm trampoline's `mov rax, [rdi + 24]` loads MpInfo.extra_argument.
-// Limine 0.6's MpInfo layout documents this offset as fixed (processor_id
-// u32 + lapic_id u32 + _resvd0 u64 + goto_addr AtomicPtr<()> = 24 bytes).
-// The field is `pub(crate)` so a `const { offset_of!(...) }` probe can't
-// see it; pinning the Cargo.lock to 0.6.3 and the explicit 24 here is the
-// compile-time contract.  A mismatched limine bump would show up as an
-// immediate triple-fault on AP bringup.
 
 /// Per-CPU completion signals.  The BSP passes each AP its index into this
 /// array via `MpInfo::bootstrap(ap_entry, slot)`.  The AP stores
@@ -90,9 +40,19 @@ static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
     [ZERO; MAX_CPUS]
 };
 
-unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
+/// Kernel-side AP late entry. Registered with OSTD's
+/// `slopos_ostd::boot::smp::AP_LATE_ENTRY` before any AP is started;
+/// the OSTD `ap_early_entry` tail-calls this once the AP's GS_BASE is
+/// installed and `MpInfo.extra` has been decoded.
+///
+/// `cpu_idx` is the 1-based slot the BSP encoded in `cpu.extra`. The
+/// naked trampoline already selected `AP_PCRS[cpu_idx - 1]` and
+/// installed GS_BASE to it; this function MUST use the same index
+/// when re-installing the per-CPU PCR via `ApPcrHandle::init` or the
+/// AP would point at a different PCR mid-boot, silently swapping the
+/// SafeStack unsafe-SP slot.
+fn ap_late_entry(cpu_idx: usize) -> ! {
     cpu::disable_interrupts();
-
     cpu::enable_sse();
 
     // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
@@ -132,14 +92,6 @@ unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
     apic::enable();
 
     let apic_id = apic::get_id();
-    // Use the 1-based slot the BSP encoded in `cpu.extra` — the naked
-    // trampoline already selected `AP_PCRS[extra - 1]` and installed
-    // GS_BASE to it, so `init_ap_pcr` below MUST use the same index
-    // or it will point the AP at a different PCR, silently swapping
-    // the SafeStack unsafe-SP slot mid-boot.  The old
-    // `NEXT_CPU_ID.fetch_add(1)` scheme raced with the trampoline's
-    // fixed indexing whenever APs came up out of order.
-    let cpu_idx = cpu_info.extra_argument() as usize;
 
     tlb::notify_cpu_online_id(cpu_idx);
 
@@ -161,15 +113,9 @@ unsafe extern "C" fn ap_entry_rust(cpu_info: &MpInfo) -> ! {
     init_scheduler_for_ap(cpu_idx);
 
     // Signal the BSP that this AP is fully initialised.
-    let signal_slot = cpu_info.extra_argument() as usize;
-    AP_SIGNALS[signal_slot].store(AP_STARTED_MAGIC, Ordering::Release);
+    AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
 
-    klog_info!(
-        "MP: CPU online (idx {}, apic 0x{:x}, acpi {})",
-        cpu_idx,
-        apic_id,
-        cpu_info.processor_id
-    );
+    klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
 
     // AP LAPIC timer is started later by deferred_start_ap_timer() in the
     // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
@@ -218,13 +164,20 @@ pub fn smp_init() {
         );
     }
 
-    // Seed each AP PCR's self_ref + current_task so the naked
-    // `ap_entry` trampoline can install GS_BASE and have
-    // `__safestack_pointer_address` find a valid bootstrap Task
-    // on the very first instrumented call.  Limited to MAX_STATIC_APS
-    // — if the platform reports more APs we only start the first N.
+    // Seed each AP PCR's self_ref + current_task so the OSTD-side
+    // `ap_entry` naked trampoline can install GS_BASE and have
+    // `__safestack_pointer_address` find a valid bootstrap Task on the
+    // very first instrumented call.  Limited to MAX_STATIC_APS — if
+    // the platform reports more APs we only start the first N.
     const MAX_STATIC_APS: usize = safestack_rt::MAX_STATIC_APS;
     safestack_rt::init_bootstrap_tasks();
+
+    // Register the kernel-side AP late entry with OSTD before any AP
+    // is fired. The OSTD trampoline waits on this `OnceLock` after
+    // installing `IA32_GS_BASE`; firing an AP before registration
+    // would spin forever in `OnceLock::wait`.
+    register_ap_late_entry(ap_late_entry);
+
     let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
     // SAFETY: init_ap_pcr_lookup must run exactly once before any AP
     // boots; smp_init is the single caller and runs on the BSP only.
@@ -232,9 +185,15 @@ pub fn smp_init() {
         pcr::init_ap_pcr_lookup(&ap_task_ptrs);
     }
 
+    // AP_SIGNALS is indexed uniformly by `ap_slot` (the 1-based
+    // non-BSP-CPU counter that we also thread through
+    // `cpu.bootstrap(..., ap_slot)`). The AP-side write at
+    // `boot/src/smp.rs:116` uses `cpu_idx = ap_slot`; this BSP-side
+    // zero/wait must match. Using the limine `enumerate` index here
+    // would mis-align whenever the BSP isn't `cpus[0]`.
     let mut ap_count = 0usize;
     let mut ap_slot = 0u64;
-    for (i, cpu) in cpus.iter().enumerate() {
+    for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {
             continue;
         }
@@ -249,8 +208,8 @@ pub fn smp_init() {
             break;
         }
 
-        AP_SIGNALS[i].store(0, Ordering::Release);
-        cpu.bootstrap(ap_entry, ap_slot);
+        AP_SIGNALS[ap_slot as usize].store(0, Ordering::Release);
+        cpu.bootstrap(ap_entry_goto(), ap_slot);
         ap_count += 1;
     }
 
@@ -261,18 +220,26 @@ pub fn smp_init() {
 
     let mut started_count = 0usize;
 
-    for (i, cpu) in cpus.iter().enumerate() {
+    // Re-walk under the same ap_slot mapping the spawn loop above used,
+    // so the wait reads the same AP_SIGNALS slot the AP wrote to.
+    let mut ap_slot = 0u64;
+    for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {
             continue;
         }
+        ap_slot += 1;
+        if (ap_slot as usize) > MAX_STATIC_APS {
+            break;
+        }
 
         let mut spins = 2_000_000u32;
-        while AP_SIGNALS[i].load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0 {
+        while AP_SIGNALS[ap_slot as usize].load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0
+        {
             cpu::pause();
             spins -= 1;
         }
 
-        if AP_SIGNALS[i].load(Ordering::Acquire) == AP_STARTED_MAGIC {
+        if AP_SIGNALS[ap_slot as usize].load(Ordering::Acquire) == AP_STARTED_MAGIC {
             klog_info!("MP: CPU 0x{:x} reported online", cpu.lapic_id);
             started_count += 1;
         } else {

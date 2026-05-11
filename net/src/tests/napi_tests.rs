@@ -1,5 +1,6 @@
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, POLLOUT};
+use slopos_ostd::KBox;
 use slopos_ostd::sync::WaitQueue;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, pass};
@@ -176,7 +177,8 @@ pub fn test_send_backpressure() -> TestResult {
         return TestResult::Fail;
     };
     let _ = socket::socket_set_nonblocking(sock, true);
-    let payload = [0x42u8; 20000];
+    let mut payload: KBox<[u8; 20000]> = KBox::zeroed().expect("alloc");
+    payload.iter_mut().for_each(|b| *b = 0x42);
     let first = socket::socket_send(sock, payload.as_ptr(), payload.len());
     assert_test!(first >= 0, "initial send makes forward progress");
     let second = socket::socket_send(sock, payload.as_ptr(), payload.len());

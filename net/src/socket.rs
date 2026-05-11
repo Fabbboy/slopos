@@ -1,7 +1,9 @@
 use core::fmt;
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_ostd::KVec;
+use slopos_ostd::mm::init::{Init, init_from_closure};
 use slopos_utils::{Bitmap, words_for};
 
 use crate::packetbuf::PacketBuf;
@@ -519,6 +521,38 @@ impl EphemeralPortAllocator {
             bitmap: Bitmap::new(),
             next_port: Self::EPHEMERAL_PORT_START,
             allocated_count: 0,
+        }
+    }
+
+    /// Reset every bit in-place, without materialising a fresh `Self`
+    /// on the caller's stack. Equivalent to `*self = Self::new()` but
+    /// keeps the 2 KiB bitmap on the heap slot it already occupies.
+    pub fn reset(&mut self) {
+        self.bitmap.clear_all();
+        self.next_port = Self::EPHEMERAL_PORT_START;
+        self.allocated_count = 0;
+    }
+
+    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
+    /// `KBox::try_init(EphemeralPortAllocator::init_default())` so
+    /// runtime callers (e.g. test fixtures) avoid the 2 KiB stack
+    /// materialisation that `Self::new()` would otherwise incur. The
+    /// `AllocError` carrier is the absorption shim required by
+    /// `KBox::try_init`'s `E: From<AllocError>` bound — the closure
+    /// itself never errors.
+    pub fn init_default() -> impl Init<Self, slopos_ostd::mm::AllocError> {
+        use slopos_ostd::mm::AllocError;
+        // SAFETY: the closure zero-fills the whole slot (which is a
+        // valid empty `Bitmap`) and then writes the two scalar fields
+        // whose `new()` value isn't all-zero. Returns `Ok(())` only
+        // after every field is initialised.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                core::ptr::write_bytes(slot as *mut u8, 0, core::mem::size_of::<Self>());
+                addr_of_mut!((*slot).next_port).write(Self::EPHEMERAL_PORT_START);
+                addr_of_mut!((*slot).allocated_count).write(0);
+                Ok(())
+            })
         }
     }
 
@@ -2416,7 +2450,7 @@ pub fn socket_reset_all() {
         alloc.set_capacity(table.capacity());
     }
 
-    *EPHEMERAL_PORTS.lock() = EphemeralPortAllocator::new();
+    EPHEMERAL_PORTS.lock().reset();
     crate::icmp::ICMP_DEMUX.lock().clear();
     crate::udp::UDP_DEMUX.lock().clear();
     tcp::reset_all();

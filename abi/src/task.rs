@@ -32,7 +32,7 @@ pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 /// SafeStack-sanitizer unsafe (data) stack size — 16 KiB.
 ///
 /// LLVM's SafeStack pass moves address-taken locals and dynamic allocas
-/// onto this stack at every instrumented function prologue. The 1J-κ
+/// onto this stack at every instrumented function prologue. The
 /// "zero unsafe" refactors push more kernel-side primitives behind
 /// `&mut`-passing safe helpers (`with_mut`, `for_each`, `frame_for_phys`,
 /// `hhdm_*_bytes`, …); LLVM lowers each `&mut local` to an address-take
@@ -53,6 +53,13 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 // --- TaskStatus ---
 
 /// Type-safe task status with explicit state-machine semantics.
+///
+/// The pre-Phase-5 `WillBlock` variant — introduced as the
+/// intermediate step in a `Running → WillBlock → Blocked` race-close
+/// protocol — was deleted: the wait-queue protocol now CAS
+/// `Running → Blocked` directly under the queue's SpinLock, and the
+/// lock-pair against `wake_*` provides the same race-close guarantee
+/// at lower complexity.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskStatus {
@@ -67,8 +74,6 @@ pub enum TaskStatus {
     Blocked = 3,
     /// Task has terminated and is awaiting cleanup.
     Terminated = 4,
-    /// Task declared intent to block, but has not blocked yet.
-    WillBlock = 5,
 }
 
 impl TaskStatus {
@@ -80,7 +85,6 @@ impl TaskStatus {
             2 => Self::Running,
             3 => Self::Blocked,
             4 => Self::Terminated,
-            5 => Self::WillBlock,
             _ => Self::Invalid,
         }
     }
@@ -94,19 +98,8 @@ impl TaskStatus {
     pub const fn can_transition_to(self, target: Self) -> bool {
         match self {
             Self::Invalid => matches!(target, Self::Ready),
-            Self::Ready => matches!(target, Self::Running | Self::Terminated | Self::WillBlock),
-            Self::Running => {
-                matches!(
-                    target,
-                    Self::Ready | Self::Blocked | Self::Terminated | Self::WillBlock
-                )
-            }
-            Self::WillBlock => {
-                matches!(
-                    target,
-                    Self::Blocked | Self::Running | Self::Ready | Self::Terminated
-                )
-            }
+            Self::Ready => matches!(target, Self::Running | Self::Terminated),
+            Self::Running => matches!(target, Self::Ready | Self::Blocked | Self::Terminated),
             Self::Blocked => matches!(target, Self::Ready | Self::Terminated),
             Self::Terminated => matches!(target, Self::Invalid | Self::Terminated),
         }
@@ -116,13 +109,19 @@ impl TaskStatus {
 // --- BlockReason ---
 
 /// Reason why a task is in the Blocked state.
+///
+/// The pre-Phase-1 `WaitingOnTask` variant — paired with the now-deleted
+/// per-task `waiting_on: AtomicU32` field — was retired when
+/// `task_wait_for` migrated to the per-task `waiters: WaitQueue` +
+/// durable `exit_info` cell. Phase 5 finished the cleanup by removing
+/// the `waiting_on` field; the `BlockReason` discriminant for
+/// `WaitingOnTask` is gone, and value `1` is reserved for future
+/// reuse.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BlockReason {
     #[default]
     None = 0,
-    /// Target task ID stored in `waiting_on`.
-    WaitingOnTask = 1,
     Sleep = 2,
     IoWait = 3,
     MutexWait = 4,
@@ -137,7 +136,6 @@ impl BlockReason {
     pub const fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::None,
-            1 => Self::WaitingOnTask,
             2 => Self::Sleep,
             3 => Self::IoWait,
             4 => Self::MutexWait,
@@ -233,7 +231,7 @@ pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 
 /// Reason for task termination.
 #[repr(u16)]
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskExitReason {
     #[default]
     None = 0,
@@ -244,7 +242,7 @@ pub enum TaskExitReason {
 
 /// Specific fault that caused task termination.
 #[repr(u16)]
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskFaultReason {
     #[default]
     None = 0,

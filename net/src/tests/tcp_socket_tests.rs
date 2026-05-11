@@ -3,6 +3,7 @@
 //! Tests the SYN queue, accept queue, SYN-ACK retransmission, overflow
 //! behavior of [`TcpListenState`].
 
+use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
@@ -651,8 +652,8 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     assert_eq_test!(written, 4, "should write 4 bytes");
 
     // Poll transmit to get the outgoing segment.
-    let mut tx_buf = [0u8; 1500];
-    let result = tcp::poll_transmit(id, &mut tx_buf, 0);
+    let mut tx_buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
+    let result = tcp::poll_transmit(id, &mut *tx_buf, 0);
     assert_test!(result.is_some(), "should have data to transmit");
     let (seg, payload_len) = result.unwrap();
     assert_eq_test!(payload_len, 4, "transmitted payload should be 4 bytes");

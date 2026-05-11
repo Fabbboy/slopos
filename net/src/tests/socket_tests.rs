@@ -420,7 +420,8 @@ pub fn test_slab_socket_table_grows_and_enforces_max() -> TestResult {
 }
 
 pub fn test_ephemeral_port_allocator_alloc_release_round_robin() -> TestResult {
-    let mut alloc = EphemeralPortAllocator::new();
+    let mut alloc =
+        slopos_ostd::KBox::try_init(EphemeralPortAllocator::init_default()).expect("alloc");
 
     let p1 = alloc.alloc().unwrap();
     let p2 = alloc.alloc().unwrap();
@@ -438,7 +439,8 @@ pub fn test_ephemeral_port_allocator_alloc_release_round_robin() -> TestResult {
 }
 
 pub fn test_ephemeral_port_allocator_exhaustion_and_no_duplicates() -> TestResult {
-    let mut alloc = EphemeralPortAllocator::new();
+    let mut alloc =
+        slopos_ostd::KBox::try_init(EphemeralPortAllocator::init_default()).expect("alloc");
     let mut first_ports = [0u16; 64];
 
     for i in 0..first_ports.len() {

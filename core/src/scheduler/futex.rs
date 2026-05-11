@@ -14,7 +14,7 @@ use slopos_abi::task::BlockReason;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::scheduler::{
-    block_current_task, finish_wait, prepare_to_wait, scheduler_get_current_task, unblock_task,
+    mark_current_blocked, scheduler_get_current_task, unblock_task, yield_blocked_task,
 };
 use super::task_struct::Task;
 
@@ -80,6 +80,14 @@ fn futex_hash(addr: u64) -> usize {
     (h as usize) & (FUTEX_HASH_BUCKETS - 1)
 }
 
+// AUDIT 2B: futex wait/wake protocol — bucket SpinLock IS the barrier.
+//
+// The per-bucket `SpinLock<FutexBucket>` (FUTEX_TABLE: 64 buckets) covers
+// the entire publish-and-condition-check window: under the same lock we
+// (a) read `*uaddr`, (b) compare against `expected`, and (c) enqueue the
+// waiter. FUTEX_WAKE takes the same bucket lock to dequeue. The lock-pair
+// gives a bidirectional full barrier identical to Linux's `wq_head->lock`
+// pattern in `wake_q_add` / `prepare_to_wait_event`.
 /// FUTEX_WAIT: atomically check that `*uaddr == expected` and block the
 /// calling task on the futex queue keyed by `uaddr`.
 ///
@@ -101,8 +109,15 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
         return slopos_abi::syscall::ERRNO_EAGAIN as i64;
     }
 
-    // Lock the bucket, check the value, and enqueue the waiter atomically.
-    {
+    // The bucket SpinLock plays the same role as a WaitQueue's internal
+    // SpinLock in the harmonic-cascade wait protocol: under the lock we
+    // (a) read+compare *uaddr, (b) enqueue the waiter, AND
+    // (c) CAS Running→Blocked. FUTEX_WAKE takes the same lock to dequeue
+    // and CAS Blocked→Ready. Doing the consumer's state CAS *under* the
+    // lock is what closes the lost-wakeup window: a producer that
+    // observes our waiter on the bucket also necessarily observes
+    // status=Blocked, and its `unblock_task` Blocked→Ready CAS succeeds.
+    let blocked = {
         let mut bucket = FUTEX_TABLE[bucket_idx].lock();
 
         // Read the current value at the futex address.
@@ -134,18 +149,26 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
         };
         bucket.count += 1;
 
-        // Set block reason before releasing the bucket lock.
+        // Stamp the block reason before flipping status so any tracer
+        // (or future signal-aware unblock path) sees the committed
+        // reason at the same moment the status flips.
+        // SAFETY: `current` came from `scheduler_get_current_task`; the
+        // store is a relaxed atomic on the fused state word.
         unsafe {
             (*current).store_block_reason(BlockReason::FutexWait);
-            prepare_to_wait();
         }
-    }
+
+        mark_current_blocked()
+    };
     // Bucket lock is dropped here.
 
-    // Block the current task. The scheduler will context-switch away.
-    // When FUTEX_WAKE wakes us, execution resumes here.
-    block_current_task();
-    finish_wait();
+    // Yield only if we successfully transitioned Running→Blocked. If the
+    // CAS failed (e.g. a wake-side path got there first via some other
+    // route), don't yield — the wakeup is already preserved as the
+    // current Running/Ready status.
+    if blocked {
+        yield_blocked_task();
+    }
 
     0
 }

@@ -14,8 +14,8 @@ use slopos_utils::klog_info;
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
-    get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
+    alloc_kernel_page, alloc_kernel_pages, free_page_frame, get_page_allocator_stats,
+    page_frame_get_ref, page_frame_inc_ref,
 };
 use crate::paging::virt_to_phys;
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -27,7 +27,7 @@ use crate::process_vm::get_process_vm_stats;
 
 /// Test 1: Allocate and free a single 4KB page
 pub fn test_page_alloc_single() -> TestResult {
-    let phys = alloc_page_frame(0);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate single page");
     assert_test!(phys.as_u64() != 0, "allocated address is zero");
 
@@ -46,16 +46,16 @@ pub fn test_page_alloc_single() -> TestResult {
 
 /// Test 2: Allocate multi-order blocks (2, 4, 8 pages)
 pub fn test_page_alloc_multi_order() -> TestResult {
-    let phys2 = alloc_page_frames(2, 0);
+    let phys2 = alloc_kernel_pages(2);
     assert_not_null!(phys2.as_u64() as *const u8, "allocate 2 pages");
 
-    let phys4 = alloc_page_frames(4, 0);
+    let phys4 = alloc_kernel_pages(4);
     if phys4.is_null() {
         free_page_frame(phys2);
         return fail!("allocate 4 pages");
     }
 
-    let phys8 = alloc_page_frames(8, 0);
+    let phys8 = alloc_kernel_pages(8);
     if phys8.is_null() {
         free_page_frame(phys2);
         free_page_frame(phys4);
@@ -70,12 +70,12 @@ pub fn test_page_alloc_multi_order() -> TestResult {
 
 /// Test 3: Alloc→free→alloc same size, verify address reuse (coalescing)
 pub fn test_page_alloc_free_cycle() -> TestResult {
-    let phys1 = alloc_page_frame(0);
+    let phys1 = alloc_kernel_page();
     assert_not_null!(phys1.as_u64() as *const u8, "first alloc");
 
     free_page_frame(phys1);
 
-    let phys2 = alloc_page_frame(0);
+    let phys2 = alloc_kernel_page();
     assert_not_null!(phys2.as_u64() as *const u8, "second alloc after free");
 
     // With good coalescing, we might get the same address back (not guaranteed)
@@ -84,9 +84,9 @@ pub fn test_page_alloc_free_cycle() -> TestResult {
     pass!()
 }
 
-/// Test 4: Allocate with ALLOC_FLAG_ZERO, verify memory is zeroed
+/// Test 4: Allocate with 0, verify memory is zeroed
 pub fn test_page_alloc_zeroed() -> TestResult {
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate zeroed page");
 
     if let Some(virt) = phys.to_virt_checked() {
@@ -110,7 +110,7 @@ pub fn test_page_alloc_zeroed() -> TestResult {
 
 /// Test 5: Reference count increment and decrement
 pub fn test_page_alloc_refcount() -> TestResult {
-    let phys = alloc_page_frame(0);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc for refcount test");
 
     let ref1 = page_frame_get_ref(phys);
@@ -149,7 +149,7 @@ pub fn test_page_alloc_stats() -> TestResult {
 
     assert_test!(total != 0, "total frames is 0");
 
-    let phys = alloc_page_frames(4, 0);
+    let phys = alloc_kernel_pages(4);
     assert_not_null!(phys.as_u64() as *const u8, "alloc 4 pages for stats");
 
     let mut free_after = 0u32;
@@ -176,7 +176,7 @@ pub fn test_page_alloc_free_null() -> TestResult {
 pub fn test_page_alloc_fragmentation() -> TestResult {
     let mut pages: [PhysAddr; 8] = [PhysAddr::NULL; 8];
     for i in 0..8 {
-        pages[i] = alloc_page_frame(0);
+        pages[i] = alloc_kernel_page();
         if pages[i].is_null() {
             for j in 0..i {
                 free_page_frame(pages[j]);
@@ -192,7 +192,7 @@ pub fn test_page_alloc_fragmentation() -> TestResult {
     free_page_frame(pages[6]);
 
     // Try to allocate a 2-page block - may or may not succeed depending on layout
-    let large = alloc_page_frames(2, 0);
+    let large = alloc_kernel_pages(2);
     if !large.is_null() {
         free_page_frame(large);
     }
@@ -978,7 +978,7 @@ pub fn test_memfd_size_query() -> TestResult {
 // ============================================================================
 
 pub fn test_page_alloc_write_verify() -> TestResult {
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate page");
 
     let virt = match phys.to_virt_checked() {
@@ -1019,7 +1019,7 @@ pub fn test_page_alloc_write_verify() -> TestResult {
 }
 
 pub fn test_page_alloc_zero_full_page() -> TestResult {
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate zeroed page");
 
     let virt = match phys.to_virt_checked() {
@@ -1045,7 +1045,7 @@ pub fn test_page_alloc_zero_full_page() -> TestResult {
 }
 
 pub fn test_page_alloc_no_stale_data() -> TestResult {
-    let phys1 = alloc_page_frame(0);
+    let phys1 = alloc_kernel_page();
     assert_not_null!(phys1.as_u64() as *const u8, "first alloc");
 
     if let Some(virt) = phys1.to_virt_checked() {
@@ -1058,7 +1058,7 @@ pub fn test_page_alloc_no_stale_data() -> TestResult {
     free_page_frame(phys1);
 
     // Allocate with ZERO flag - should be zeroed even if same page reused
-    let phys2 = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys2 = alloc_kernel_page();
     assert_not_null!(phys2.as_u64() as *const u8, "second alloc with zero flag");
 
     if let Some(virt) = phys2.to_virt_checked() {
@@ -1240,7 +1240,7 @@ pub fn test_heap_stress_cycles() -> TestResult {
 }
 
 pub fn test_page_alloc_multipage_integrity() -> TestResult {
-    let phys = alloc_page_frames(4, ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_pages(4);
     assert_not_null!(phys.as_u64() as *const u8, "allocate 4 pages");
 
     for page in 0..4u64 {
@@ -1401,7 +1401,7 @@ pub fn test_cow_page_isolation() -> TestResult {
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
     // Allocate physical page and map it within the VMA
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
     let map_result = process_vm_with_dual_paging(parent.pid, |_pd, vs| {
@@ -1464,7 +1464,7 @@ pub fn test_cow_fault_handling() -> TestResult {
     };
 
     let test_addr = 0x2000u64;
-    let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
     let map_result = process_vm_with_dual_paging(vm.pid, |_pd, vs| {

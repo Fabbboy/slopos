@@ -10,7 +10,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_is_blocked,
-    task_is_invalid, task_is_terminated, task_is_will_block, task_set_state_from_with_reason,
+    task_is_invalid, task_is_terminated, task_set_state_from_with_reason,
     task_set_state_with_reason,
 };
 use slopos_kernel_services::platform;
@@ -189,6 +189,30 @@ fn ms_to_sleep_ticks(ms: u32) -> u64 {
     ticks.max(1)
 }
 
+// AUDIT 2A: sleep wait/wake protocol — race-free without harmonic-cascade.
+//
+// Sleep differs from `task_wait_for` and other multi-observer wait queues:
+// there is exactly ONE wake event (the deadline) and exactly ONE observer
+// (the sleeper). The status atomic is the single ground truth.
+//
+// Correctness comes from the CAS chain on `Task::status`:
+//   * `block_current_task_with_timeout` arms the deadline, then
+//     CAS(Running -> Blocked) under IRQ-off. A racing `unblock_task` on
+//     the same task either (a) wins the Blocked->Ready CAS later (we
+//     already committed to Blocked), or (b) finds the task still
+//     Running and is a no-op — fine, our wait-queue contract puts
+//     the waiter on a queue *before* the CAS and the wake side
+//     finds it there.
+//   * `sleep_current_task_ms` does CAS(Running -> Blocked) under
+//     IRQ-off, paired with `wake_sleeping_task`'s
+//     CAS-via-`task_set_state_with_reason` from Blocked -> Ready.
+//
+// Both directions serialise through atomic state CAS. Phase 5
+// collapsed the WillBlock intermediate state — paths that used to
+// pre-set WillBlock now CAS Running -> Blocked directly under their
+// wait queue's lock, and the wake path's Blocked -> Ready CAS sees
+// the committed transition without a separate intermediate to race
+// against.
 fn wake_sleeping_task(task_id: u32) {
     if task_id == INVALID_TASK_ID {
         return;
@@ -253,6 +277,33 @@ pub fn cancel_sleep(task_id: u32) {
     SLEEP_QUEUE.lock().remove(task_id);
 }
 
+/// Arm a millisecond-resolution wake deadline for a task that is
+/// already `Blocked` (the wait-queue protocol's lock-held CAS has
+/// already committed the state). The timer-tick callback
+/// (`wake_due_sleepers`) will CAS `Blocked → Ready` when the deadline
+/// fires. Idempotent: a second call before the first deadline
+/// expires updates the wake tick in place.
+///
+/// Stamps `BlockReason::Sleep` on the task so `wake_sleeping_task`
+/// recognises this as a sleep-queue wake when the deadline fires
+/// (it gates on reason==Sleep to avoid spurious wakes on a task
+/// that has since re-blocked for a different reason).
+pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) {
+    if task_id == INVALID_TASK_ID {
+        return;
+    }
+    let task = task_find_by_id(task_id);
+    if !task.is_null() {
+        // SAFETY: pointer non-null and is a valid Task slot returned by
+        // `task_find_by_id`; the reason stamp is a relaxed atomic store
+        // on the fused state word.
+        unsafe { (*task).store_block_reason(BlockReason::Sleep) };
+    }
+    let now_tick = platform::timer_ticks();
+    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
+    SLEEP_QUEUE.lock().upsert(task_id, wake_tick);
+}
+
 pub fn sleep_current_task_ms(ms: u32) -> c_int {
     if ms == 0 {
         return 0;
@@ -280,13 +331,8 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
 
-    {
-        let mut queue = SLEEP_QUEUE.lock();
-        if !queue.upsert(task_id, wake_tick) {
-            return -1;
-        }
-        // Only block from Running state. WillBlock-aware callers must use
-        // block_current_task_with_timeout instead.
+    // See `block_current_task_with_timeout` for why CAS precedes upsert.
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
         if task_set_state_from_with_reason(
             task_id,
             TaskStatus::Running,
@@ -294,13 +340,20 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
             BlockReason::Sleep,
         ) != 0
         {
-            queue.remove(task_id);
+            return -1;
+        }
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+            let _ = super::task::task_try_transition_from(
+                task_id,
+                TaskStatus::Blocked,
+                TaskStatus::Running,
+            );
             return -1;
         }
         unschedule_task(current);
-    }
-    schedule();
-    0
+        schedule();
+        0
+    })
 }
 
 /// Block the current task with a timeout.
@@ -335,34 +388,40 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
         return;
     }
 
-    // Fast-path: if wakeup already arrived (Running), skip entirely.
-    // This is an optimization only — the CAS below is the authority.
-    if !task_is_will_block(current) {
-        return;
-    }
-
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
-    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+
+    // CAS Running→Blocked must happen before SLEEP_QUEUE.upsert.
+    // If upsert came first, a peer CPU's `wake_due_sleepers` could
+    // pop our entry while we are still Running, drop the wake on the
+    // floor (`wake_sleeping_task` gates on `is_blocked`), and leave
+    // us about to CAS into Blocked with no wakeup armed. Mirrors
+    // Linux's `set_current_state` → `hrtimer_start` ordering.
+    let cancelled = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
+        if task_set_state_from_with_reason(
+            task_id,
+            TaskStatus::Running,
+            TaskStatus::Blocked,
+            BlockReason::Sleep,
+        ) != 0
+        {
+            return true;
+        }
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+            let _ = super::task::task_try_transition_from(
+                task_id,
+                TaskStatus::Blocked,
+                TaskStatus::Running,
+            );
+            return true;
+        }
+        unschedule_task(current);
+        schedule();
+        false
+    });
+    if cancelled {
         return;
     }
-
-    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
-    // If a concurrent unblock_task set Running between the fast-path check
-    // and here, the CAS fails — the wakeup is preserved.
-    if task_set_state_from_with_reason(
-        task_id,
-        TaskStatus::WillBlock,
-        TaskStatus::Blocked,
-        BlockReason::Sleep,
-    ) != 0
-    {
-        cancel_sleep(task_id);
-        return;
-    }
-
-    unschedule_task(current);
-    schedule();
     cancel_sleep(task_id);
 }
 

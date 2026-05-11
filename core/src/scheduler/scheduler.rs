@@ -45,13 +45,12 @@ use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
-    task_fs_base, task_get_info, task_has_flag, task_id_of, task_inc_ref, task_is_blocked,
-    task_is_invalid, task_is_ready, task_is_running, task_is_terminated, task_is_will_block,
-    task_kernel_stack_top, task_name_looks_idle, task_pgid, task_pointer_is_valid, task_priority,
-    task_process_id, task_record_context_switch, task_record_yield, task_set_controlling_tty,
-    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
-    task_set_time_slice_remaining, task_set_waiting_on, task_sid, task_status, task_time_slice,
-    task_time_slice_remaining, task_try_transition_from, task_wait_off_cpu, task_waiting_on_cas,
+    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_invalid, task_is_ready,
+    task_is_running, task_is_terminated, task_kernel_stack_top, task_name_looks_idle, task_pgid,
+    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
+    task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
+    task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_time_slice,
+    task_time_slice_remaining, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -214,13 +213,34 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     });
 
     // Lifecycle state transition — (Ready|Running) → Running.
+    //
+    // After Phase 1 (durable exit_info + per-task waiters WaitQueue),
+    // a task entering `dispatch` MUST be Ready or Running. Anything
+    // else is an invariant violation: a Blocked task in a runqueue
+    // means a wake path enqueued without first transitioning to
+    // Ready, or a state transition raced the dispatcher. Either is
+    // a bug we want surfaced loudly in debug, not silently coerced.
     let current_status = task_status(task);
-    if current_status != Some(TaskStatus::Ready) && current_status != Some(TaskStatus::Running) {
-        klog_info!(
-            "dispatch: unexpected state {} for task {}",
-            current_status.map(|s| s.as_u8()).unwrap_or(0xFF) as u32,
-            task_id_of(task).unwrap_or(INVALID_TASK_ID)
-        );
+    debug_assert!(
+        matches!(
+            current_status,
+            Some(TaskStatus::Ready) | Some(TaskStatus::Running)
+        ),
+        "dispatch: invariant broken — task {} in unexpected state {:?}",
+        task_id_of(task).unwrap_or(INVALID_TASK_ID),
+        current_status,
+    );
+    if !matches!(
+        current_status,
+        Some(TaskStatus::Ready) | Some(TaskStatus::Running)
+    ) {
+        // Production fallback: skip dispatch and let the caller pick
+        // a different task. The pre-Phase-1 code logged + coerced to
+        // Running, which produced the `0xdfdedddcdbdad9d8`-shape page
+        // faults in CI (a wait-protocol-half-state task forced into
+        // Running runs with a corrupted user-mode RIP). Skipping is
+        // the safe move.
+        return;
     }
     task_set_status(task, TaskStatus::Running);
 }
@@ -235,26 +255,6 @@ pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
         "install_idle_task() must receive a non-null task"
     );
     slopos_arch::pcr::set_idle_task(cpu_id, task as *mut ());
-}
-
-#[allow(dead_code)]
-fn requeue_running_task(cpu_id: usize, current: *mut Task) {
-    if current.is_null() {
-        return;
-    }
-
-    // Requeue if Running OR WillBlock.  A WillBlock task is still
-    // executing its pre-block critical section (condition check,
-    // wait-queue enqueue).  If preempted here it must go back to
-    // the Ready queue so it can finish and call block_current_task.
-    let id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    if (task_is_running(current) || task_is_will_block(current))
-        && task_set_state(id, TaskStatus::Ready) == 0
-    {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.enqueue_local(current);
-        });
-    }
 }
 
 fn switch_to_kernel_address_space(_task: *mut Task) {
@@ -515,15 +515,6 @@ fn mark_preempt_if_ready(cpu_id: usize) {
     }
 }
 
-/// Spin until the previous CPU finishes its outgoing context switch for
-/// this task.  Matches Linux's `smp_cond_load_acquire(&p->on_cpu, !VAL)`
-/// in `try_to_wake_up()`.  Without this, a woken task can be dispatched
-/// on CPU B while CPU A is still saving its registers → corruption.
-#[inline]
-fn wait_task_off_cpu(task: *mut Task) {
-    task_wait_off_cpu(task);
-}
-
 pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
@@ -531,8 +522,6 @@ pub fn schedule_task(task: *mut Task) -> c_int {
     if !task_is_ready(task) {
         return -1;
     }
-
-    wait_task_off_cpu(task);
 
     if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
@@ -584,9 +573,6 @@ pub fn schedule_new_task(task: *mut Task) -> c_int {
     if !task_is_ready(task) {
         return -1;
     }
-
-    // New tasks have on_cpu=false from init, but be defensive.
-    wait_task_off_cpu(task);
 
     if task_time_slice_remaining(task) == Some(0) {
         reset_task_quantum(task);
@@ -723,9 +709,13 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(from_task, to_task, timestamp);
 
-    // Mark task as physically on this CPU.  schedule_task() spin-waits on
-    // this flag before allowing the task to be dispatched elsewhere, preventing
-    // the "wake-before-switch-complete" race (Linux p->on_cpu pattern).
+    // Mark task as physically on this CPU. The dispatcher's re-enqueue
+    // check at run_ready_task_from_idle (below) reads this flag before
+    // dispatching a task — if it's still on_cpu on another CPU, the
+    // task is requeued rather than dispatched twice. (Linux's
+    // p->on_cpu pattern; pre-Phase-6 schedule_task also spin-waited
+    // on this flag, but that spin was made redundant by Phase 1's
+    // lock-pair barrier and removed.)
     task_set_on_cpu(to_task, true);
 
     // Single source-of-truth install: writes PCR.current_task
@@ -802,8 +792,9 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     }
 
     // Guard: if the task is still physically on another CPU (context switch
-    // in progress), put it back and skip.  Matches the schedule_task() spin,
-    // but here we re-enqueue instead of spinning (idle loop must not block).
+    // in progress), put it back and skip. Re-enqueue rather than spin —
+    // the idle loop must not block, and Phase 6 removed the schedule_task
+    // spin in favour of this check + the WaitQueue lock-pair barrier.
     // SAFETY: `next_task` is non-null and was just validated through
     // `task_pointer_is_valid`; the `on_cpu` AtomicBool is internally
     // synchronised.
@@ -845,17 +836,38 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     switch_to_kernel_address_space(idle_task);
 
-    // Re-enqueue the task if it was preempted (Running) or in a pre-block
-    // critical section (WillBlock).  Blocked/Terminated tasks are NOT
-    // re-enqueued — they'll be woken by their respective event paths.
+    // Re-enqueue the task if it was preempted (Running) or already
+    // woken (Ready) before its yield completed. The Ready case covers
+    // the self-wakeup window: a wake from the timer ISR transitions
+    // state Blocked→Ready and routes through `enqueue_local` on this
+    // CPU; the in-progress block path then `unschedule_task`s the
+    // entry, leaving the task Ready but in no runqueue. Re-enqueueing
+    // here keeps it schedulable across the yield.
+    //
+    // task_wait_for goes through WaitQueue::wait_event, which
+    // performs the Running→Blocked transition while the queue is
+    // already holding our wait node — by the time `schedule()`
+    // dispatches a peer, our state is committed Blocked and the
+    // peer's `wake_one` will find us on the queue.
+    //
+    // Blocked/Terminated tasks are NOT re-enqueued — they'll be
+    // woken by their respective event paths.
     // This runs AFTER on_cpu=false and context save, so no SMP race.
-    if !task_is_terminated(next_task)
-        && (task_is_running(next_task) || task_is_will_block(next_task))
-        && task_set_state(next_task_id, TaskStatus::Ready) == 0
-    {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            let _ = sched.enqueue_local(next_task);
-        });
+    if !task_is_terminated(next_task) {
+        let already_ready = task_is_ready(next_task);
+        let needs_ready_transition = task_is_running(next_task);
+        let should_enqueue = if already_ready {
+            true
+        } else if needs_ready_transition {
+            task_set_state(next_task_id, TaskStatus::Ready) == 0
+        } else {
+            false
+        };
+        if should_enqueue {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                let _ = sched.enqueue_local(next_task);
+            });
+        }
     }
 
     // Release the dispatch reference.  If the task was re-enqueued above,
@@ -927,30 +939,6 @@ pub fn yield_() {
     r#yield();
 }
 
-pub fn prepare_to_wait() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return;
-    }
-    if task_is_blocked(current) || task_is_will_block(current) {
-        return;
-    }
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    let _ = task_set_state(task_id, TaskStatus::WillBlock);
-}
-
-pub fn finish_wait() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return;
-    }
-    if !task_is_will_block(current) {
-        return;
-    }
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    let _ = task_set_state(task_id, TaskStatus::Running);
-}
-
 pub fn block_current_task() {
     let current = scheduler_get_current_task();
     if current.is_null() {
@@ -959,10 +947,90 @@ pub fn block_current_task() {
 
     let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
 
-    // Atomic CAS(WillBlock, Blocked): only blocks if still in WillBlock.
-    // If a concurrent unblock_task already set Running, the CAS fails and
-    // we return immediately — the wakeup is preserved.
-    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Blocked) != 0 {
+    // Disable IRQs through the state-CAS-then-yield window via the
+    // `IrqDisabled<'cli>` capability. The wrapped closure is the only
+    // place the unsafe primitive `block_current_task_irq_disabled` can
+    // be called — the capability lifetime makes the cli scope a
+    // compile-time requirement, not a discipline-by-comment.
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|irq| {
+        block_current_task_irq_disabled(current, task_id, irq);
+    });
+}
+
+/// CAS the current task's status from `Running` to `Blocked` without
+/// yielding. Returns `true` on CAS success.
+///
+/// Used by the wait-queue protocol from inside the queue's SpinLock
+/// so a `wake_*` taking the same lock necessarily observes either
+/// (a) the queue empty (we haven't pushed yet), or (b) the task in
+/// the queue and `Blocked` — never `Running`-and-on-queue. The
+/// matching yield happens after the lock is dropped via
+/// [`yield_blocked_task`].
+pub fn mark_current_blocked() -> bool {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return false;
+    }
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
+    if task_id == INVALID_TASK_ID {
+        return false;
+    }
+    task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked) == 0
+}
+
+/// Yield a task already CAS-flipped to `Blocked` by
+/// [`mark_current_blocked`]. Must be called outside any SpinLock —
+/// `schedule()` is not reentrant-safe under our locks.
+pub fn yield_blocked_task() {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        unschedule_task(current);
+        schedule();
+    });
+}
+
+/// Yield a task already CAS-flipped to `Blocked` and arm a
+/// millisecond-resolution timeout. The sleep-queue entry will fire
+/// `unblock_task` (CAS `Blocked → Ready`) when the deadline passes;
+/// if a peer `wake_*` arrives first, that path's
+/// `cancel_sleep` removes the entry to keep the timer from firing
+/// spuriously against the (now-`Ready`) task.
+pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
+    if task_id == INVALID_TASK_ID {
+        return;
+    }
+    super::sleep::arm_blocked_timeout(task_id, timeout_ms);
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        unschedule_task(current);
+        schedule();
+    });
+    super::sleep::cancel_sleep(task_id);
+}
+
+/// Unsafe primitive: assumes the caller has already disabled
+/// interrupts (witnessed by the `IrqDisabled<'cli>` token). Performs
+/// the Running→Blocked CAS, removes the task from runqueues, and
+/// yields. Public callers must go through [`block_current_task`] (or
+/// the timeout-aware variants) which materialise the token.
+///
+/// The CAS source is `Running` (not `WillBlock` as in pre-Phase-5):
+/// the wait-queue protocol now serialises wake against block via the
+/// queue's own SpinLock — a wake that arrived first transitioned the
+/// task to `Ready`, so the CAS fails and we don't yield.
+fn block_current_task_irq_disabled(
+    current: *mut Task,
+    task_id: u32,
+    _irq: &slopos_ostd::cpu::x86_64::interrupts::IrqDisabled<'_>,
+) {
+    if task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked) != 0 {
         return;
     }
     unschedule_task(current);
@@ -970,24 +1038,40 @@ pub fn block_current_task() {
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return -1;
-    }
-    if task_id == INVALID_TASK_ID || task_id_of(current) == Some(task_id) {
+    use crate::scheduler::exit_info::ExitInfo;
+    use slopos_ostd::sync::{AtomicCell, WaitQueue};
+
+    if task_id == INVALID_TASK_ID {
         return -1;
     }
 
     let mut target: *mut Task = ptr::null_mut();
-    if task_get_info(task_id, &mut target) != 0 || target.is_null() {
-        task_set_waiting_on(current, INVALID_TASK_ID);
+    if super::task::task_get_info(task_id, &mut target) != 0 || target.is_null() {
+        // Already gone — waitpid semantics treat this as success.
         return 0;
     }
-    task_set_waiting_on(current, task_id);
-    prepare_to_wait();
-    block_current_task();
-    finish_wait();
-    task_set_waiting_on(current, INVALID_TASK_ID);
+
+    let current = scheduler_get_current_task();
+    if !current.is_null() && task_id_of(current) == Some(task_id) {
+        return -1; // self-wait rejected
+    }
+
+    let _ref_guard = super::task::TaskRefGuard::new(target);
+
+    // SAFETY: TaskRefGuard keeps `target`'s slot alive across the
+    // potential yield. The waiters queue and exit_info cell are
+    // valid for the duration of `_ref_guard`. Memory ordering: the
+    // producer's `try_set` is Release; `is_set` (Acquire, evaluated
+    // under the WaitQueue's SpinLock) is the matching consumer. The
+    // SpinLock pair on both sides supplies the bidirectional full
+    // barrier.
+    let waiters: &WaitQueue = unsafe { &(*target).waiters };
+    let exit_cell: &AtomicCell<ExitInfo> = unsafe { &(*target).exit_info };
+
+    // The `task_is_terminated` fallback covers the case where the
+    // target's status flips to Terminated via a path that has not
+    // (yet) published exit_info — defensive, but cheap.
+    let _ = waiters.wait_event(|| exit_cell.is_set() || task_is_terminated(target));
     0
 }
 
@@ -998,15 +1082,10 @@ pub fn unblock_task(task: *mut Task) -> c_int {
 
     let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
 
-    // Try WillBlock -> Running (task declared intent to block but hasn't yet).
-    if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
-        // Cancel any pending sleep-queue entry so it doesn't fire later
-        // and spuriously transition the (now-Running) task.
-        super::sleep::cancel_sleep(task_id);
-        return 0;
-    }
-
-    // Try Blocked -> Ready (task is fully blocked, wake it).
+    // Phase 5 collapsed the WillBlock state; the only blockable
+    // intermediate is `Blocked` itself. Wake-side just transitions
+    // Blocked → Ready; the caller's wait-queue lock-pair guarantees
+    // that the waiter committed to Blocked before we observed it.
     if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
         super::sleep::cancel_sleep(task_id);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -1014,57 +1093,12 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     }
 
     // Task is in some other state (Running, Ready, Terminated) — nothing to do.
+    // A Running waker that races a Blocked→Ready CAS sees Running
+    // here; that's a benign no-op — the waiter never actually slept.
     if task_is_terminated(task) || task_is_invalid(task) {
         return -1;
     }
     0
-}
-
-/// Attempt to wake a task that was waiting on `completed_id`.
-/// Returns true if THIS caller won the wake race and should handle the task.
-/// Returns false if another caller already woke it or task wasn't waiting on this ID.
-///
-/// This is the key primitive for lock-free task termination - uses CAS to ensure
-/// exactly one waker succeeds per waiting task.
-pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
-    if task.is_null() || completed_id == INVALID_TASK_ID {
-        return false;
-    }
-
-    // CAS: Atomically clear waiting_on only if it matches completed_id
-    // Only ONE caller can succeed this CAS - the "winner"
-    let won = task_waiting_on_cas(task, completed_id, INVALID_TASK_ID).unwrap_or(false);
-
-    if won {
-        // We won the CAS race. Now wake the task using the same safe
-        // transitions as unblock_task() to avoid the WillBlock race.
-        let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
-
-        // WillBlock -> Running: task declared intent but hasn't blocked yet.
-        // Cancel any pending sleep; no schedule_task (task is still running).
-        if task_try_transition_from(task_id, TaskStatus::WillBlock, TaskStatus::Running) == 0 {
-            super::sleep::cancel_sleep(task_id);
-            return true;
-        }
-
-        // Blocked -> Ready: task is fully blocked, wake it.
-        if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-            super::sleep::cancel_sleep(task_id);
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            schedule_task(task);
-            return true;
-        }
-
-        // Task is in some other state (Running, Ready, Terminated).
-        if task_is_terminated(task) || task_is_invalid(task) {
-            return false;
-        }
-        true
-    } else {
-        // Lost race OR task is waiting on different ID
-        // Either way, not our responsibility to wake
-        false
-    }
 }
 
 /// Unified task exit for all CPUs.

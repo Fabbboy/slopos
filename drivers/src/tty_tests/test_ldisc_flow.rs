@@ -1143,20 +1143,21 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
         }
     };
 
-    let chunk = [b'C'; 1024];
+    let mut chunk: KBox<[u8; 1024]> = KBox::zeroed().expect("alloc");
+    chunk.iter_mut().for_each(|b| *b = b'C');
     let mut total_written: usize = 0;
     let mut total_read: usize = 0;
 
     // Do 3 fill/drain cycles.
     for _ in 0..3 {
         // Write a chunk via master_write.
-        let accepted = crate::tty::pty::master_write(peer.clone(), &chunk);
+        let accepted = crate::tty::pty::master_write(peer.clone(), &*chunk);
         total_written += accepted;
 
         // Drain all available data from slave.
-        let mut drain_buf = [0u8; 2048];
+        let mut drain_buf: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
         loop {
-            match tty::read(slave, &mut drain_buf, true) {
+            match tty::read(slave, &mut *drain_buf, true) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => total_read += n,
             }
