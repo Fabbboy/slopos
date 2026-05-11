@@ -251,8 +251,7 @@ fn poll_to_select_mask(
 //
 // The structural fix (Linux's `poll_wait` registers a poll_table entry
 // with a remove-on-wake hook so a wake on ANY queue eagerly drains the
-// others) belongs to Phase 7's poll cleanup. Tracked by the regression
-// test `test_poll_multi_wq_wake_clears_others`, currently `Skipped`.
+// others) belongs to Phase 7's poll cleanup.
 define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let nfds = args.arg1_usize();
     let timeout_ms = args.arg2 as i64;
