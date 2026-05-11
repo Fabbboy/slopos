@@ -232,6 +232,24 @@ if [[ "$NET" =~ ^(1|true|on|yes)$ ]]; then
     echo "Network port forwarding enabled: ${NET_PORTS}"
 fi
 
+# ── Debug-mode plumbing ─────────────────────────────────────────────────────
+# Set QEMU_DEBUG=1 to enable the QEMU monitor on a Unix socket plus the GDB
+# stub on TCP :1234. The monitor lets you run `info cpus`, `info registers`,
+# `cpu N`, etc. when the system freezes; GDB gives backtraces per CPU.
+#
+#   Monitor:  socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
+#   GDB:      gdb builddir/kernel.elf -ex "target remote :1234"
+DEBUG_ARGS=()
+if [ "${QEMU_DEBUG:-0}" != "0" ]; then
+    rm -f /tmp/slopos-monitor.sock
+    DEBUG_ARGS=(
+        -monitor "unix:/tmp/slopos-monitor.sock,server,nowait"
+        -s
+    )
+else
+    DEBUG_ARGS=(-monitor none)
+fi
+
 # ── Assemble common QEMU arguments ──────────────────────────────────────────
 QEMU_ARGS=(
     -machine "q35,accel=$QEMU_ACCEL"
@@ -250,7 +268,7 @@ QEMU_ARGS=(
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
     "${SERIAL_ARGS[@]}"
-    -monitor none
+    "${DEBUG_ARGS[@]}"
     "${DISPLAY_ARGS[@]}"
     "${VIDEO_ARGS[@]}"
     "${USB_ARGS[@]}"

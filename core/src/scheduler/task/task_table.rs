@@ -66,23 +66,19 @@ fn bump_pool_high_water(new_idx: usize) {
 /// Deferred-reaper queue holding terminated tasks until their
 /// refcount drops to zero.
 ///
-/// Backed by `IntrusiveLinkedList<Task>` which threads the list
-/// through the Task's own `next_ready` `Link<Task>` slot. Only
-/// terminated tasks live here, and only after `unschedule_task`
-/// removed them from every CPU's ready queue, so the link slot is
-/// clean at push time and there is never a Task in both lists.
-///
+/// Role tag for the zombie-list intrusive list. Threads through
+/// `Task::zombie_link`, distinct from the per-CPU `ReadyQueue`'s
+/// link slot — see `Task::ready_link`.
+pub enum ZombieListRole {}
+
 /// Allocation-free: `IntrusiveLinkedList::push` only updates the
 /// in-Task link slot; no heap touched while the spin-lock is held.
 struct ZombieList {
-    list: IntrusiveLinkedList<Task>,
+    list: IntrusiveLinkedList<Task, ZombieListRole>,
 }
 
-// SAFETY: ZombieList wraps an `IntrusiveLinkedList<Task>`; the list
-// itself is `Send + Sync` only when `Task: Send`, and Task is *not*
-// auto-Send (raw pointers). The actual cross-CPU access is mediated
-// by `ZOMBIE_LIST.lock()` (a SpinLock); these markers assert that
-// the lock provides the required serialisation.
+// SAFETY: `Task` is not auto-Send (raw pointers). Cross-CPU access is
+// mediated by `ZOMBIE_LIST.lock()`; these markers assert that.
 unsafe impl Send for ZombieList {}
 unsafe impl Sync for ZombieList {}
 

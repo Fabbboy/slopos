@@ -84,6 +84,7 @@ use crate::sync::intrusive::IntrusiveLinkedList;
 use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use crate::sync::spin::SpinLock;
 use crate::sync::wait_node::WaitNode;
+use crate::sync::wait_node::WaitQueueRole;
 
 /// Opaque task identifier carried by the wait queue. The actual
 /// representation is the kernel scheduler's task pointer.
@@ -238,7 +239,7 @@ fn backend() -> &'static dyn WaitQueueBackend {
 /// Internal storage: an intrusive list of [`WaitNode`]s and nothing
 /// else. The list's `len()` doubles as the public `waiter_count()`.
 struct WaitQueueInner {
-    list: IntrusiveLinkedList<WaitNode>,
+    list: IntrusiveLinkedList<WaitNode, WaitQueueRole>,
 }
 
 impl WaitQueueInner {
@@ -676,10 +677,11 @@ impl WaitQueue {
     fn push_node(inner: &WaitQueueInner, node: Pin<&WaitNode>) {
         // SAFETY: `node` is pinned, so its address is stable until
         // dropped. Converting to `NonNull<WaitNode>` is sound; the
-        // intrusive list will only access the embedded `Link<WaitNode>`
-        // through that pointer while it is linked, and the waiter is
-        // contractually required to unlink before returning from the
-        // function that created the pin.
+        // intrusive list will only access the embedded
+        // `Link<WaitNode, WaitQueueRole>` through that pointer while
+        // it is linked, and the waiter is contractually required to
+        // unlink before returning from the function that created the
+        // pin.
         let nn = NonNull::from(node.get_ref());
         // The push refusal (already-linked) is treated as a no-op:
         // `wait_event`'s loop guarantees we unlink before pushing,

@@ -16,6 +16,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [NETCAT_PLAN.md](./NETCAT_PLAN.md) | nc (netcat) implementation plan |
 | [PHASE8_UNSAFE_INVARIANT_REGISTRY.md](./PHASE8_UNSAFE_INVARIANT_REGISTRY.md) | Unsafe invariant registry for legacy modernization Phase 8 |
 | [FRAMEKERNEL_PLAN.md](./FRAMEKERNEL_PLAN.md) | 4-phase rip-and-replace plan to redesign SlopOS as an async-first framekernel with a Verus-verified OSTD critical path. Inspired by Asterinas (USENIX ATC '25). |
+| [RAW_PTR_TO_KARC_MIGRATION.md](./RAW_PTR_TO_KARC_MIGRATION.md) | Migrate `*mut T` + open-coded refcount to `KArc<T>` for one consistent kernel-shared-ownership primitive. |
 
 
 ---

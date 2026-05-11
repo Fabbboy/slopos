@@ -346,34 +346,6 @@ pub fn task_set_time_slice_remaining(task: *mut Task, remaining: u64) {
     }
 }
 
-/// Read `task->next_ready` — the intrusive-list link used by
-/// `ReadyQueue` and `ZombieList`.
-#[inline]
-pub fn task_next_ready(task: *const Task) -> Option<*mut Task> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; the link slot's atomic load is
-    // internally synchronised, the owning queue's lock orders this
-    // with concurrent push/pop operations.
-    Some(unsafe { (*task).next_ready.load() })
-}
-
-/// Stamp `task->next_ready`. Used by the queue-mutation paths in
-/// `ReadyQueue::{enqueue,dequeue,remove}` and `ZombieList::push`.
-#[inline]
-pub fn task_set_next_ready(task: *mut Task, next: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; the link slot's atomic store is
-    // internally synchronised; ordering with concurrent readers is
-    // upheld by the owning queue's lock.
-    unsafe {
-        (*task).next_ready.store(next);
-    }
-}
-
 /// Bump `task->refcnt`. Returns the post-increment count, mirroring
 /// `Task::inc_ref`. Returns `None` for null pointers.
 #[inline]

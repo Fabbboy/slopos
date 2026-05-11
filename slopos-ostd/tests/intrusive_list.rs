@@ -4,9 +4,12 @@ use core::ptr::NonNull;
 
 use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, Link, LinkError, Linked};
 
+pub enum TestRole {}
+pub enum OtherRole {}
+
 struct Node {
     value: u32,
-    link: Link<Node>,
+    link: Link<Node, TestRole>,
 }
 
 impl Node {
@@ -18,10 +21,9 @@ impl Node {
     }
 }
 
-// SAFETY: `Node` embeds `link` at a stable offset; tests never
-// move a node while it is linked into a list.
-unsafe impl Linked for Node {
-    fn link(&self) -> &Link<Node> {
+// SAFETY: `Node` is `Box`-owned; tests do not move it while linked.
+unsafe impl Linked<TestRole> for Node {
+    fn link(&self) -> &Link<Node, TestRole> {
         &self.link
     }
 }
@@ -33,7 +35,7 @@ fn nn(b: &Box<Node>) -> NonNull<Node> {
 
 #[test]
 fn empty_list_state() {
-    let list: IntrusiveLinkedList<Node> = IntrusiveLinkedList::new();
+    let list: IntrusiveLinkedList<Node, TestRole> = IntrusiveLinkedList::new();
     assert_eq!(list.len(), 0);
     assert!(list.is_empty());
     assert!(list.pop().is_none());
@@ -41,7 +43,7 @@ fn empty_list_state() {
 
 #[test]
 fn push_one_then_pop() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(7);
     list.push(nn(&a)).unwrap();
     assert_eq!(list.len(), 1);
@@ -56,7 +58,7 @@ fn push_one_then_pop() {
 
 #[test]
 fn fifo_order_pop() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     let c = Node::new(3);
@@ -74,7 +76,7 @@ fn fifo_order_pop() {
 
 #[test]
 fn len_tracks_pushes_and_pops() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(10);
     let b = Node::new(20);
     list.push(nn(&a)).unwrap();
@@ -89,7 +91,7 @@ fn len_tracks_pushes_and_pops() {
 
 #[test]
 fn remove_head() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     let c = Node::new(3);
@@ -106,7 +108,7 @@ fn remove_head() {
 
 #[test]
 fn remove_middle() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     let c = Node::new(3);
@@ -123,7 +125,7 @@ fn remove_middle() {
 
 #[test]
 fn remove_tail() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     let c = Node::new(3);
@@ -143,7 +145,7 @@ fn remove_tail() {
 
 #[test]
 fn remove_not_present_returns_err() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let outsider = Node::new(99);
     list.push(nn(&a)).unwrap();
@@ -153,20 +155,18 @@ fn remove_not_present_returns_err() {
 
 #[test]
 fn double_push_rejected() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     list.push(nn(&a)).unwrap();
     list.push(nn(&b)).unwrap();
-    // `a` is the head; its `link.next` points at `b`, so `has_next`
-    // returns true and a re-push is rejected.
     assert_eq!(list.push(nn(&a)), Err(LinkError::AlreadyLinked));
     assert_eq!(list.len(), 2);
 }
 
 #[test]
 fn iter_yields_all_elements_in_fifo_order() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(10);
     let b = Node::new(20);
     let c = Node::new(30);
@@ -185,7 +185,7 @@ fn iter_yields_all_elements_in_fifo_order() {
 
 #[test]
 fn pop_then_push_clears_link_so_node_can_be_reused() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     list.push(nn(&a)).unwrap();
@@ -202,10 +202,10 @@ fn pop_then_push_clears_link_so_node_can_be_reused() {
 }
 
 #[test]
-fn link_load_returns_null_when_unlinked() {
+fn fresh_link_is_unlinked() {
     let n = Node::new(42);
     assert!(n.link.load().is_null());
-    assert!(!n.link.has_next());
+    assert!(!n.link.is_linked());
 }
 
 #[test]
@@ -213,16 +213,28 @@ fn link_store_round_trip() {
     let a = Node::new(1);
     let b = Node::new(2);
     a.link.store(Box::as_ref(&b) as *const _ as *mut Node);
-    assert!(a.link.has_next());
     assert_eq!(a.link.load(), Box::as_ref(&b) as *const _ as *mut Node);
     a.link.reset();
     assert!(a.link.load().is_null());
-    assert!(!a.link.has_next());
+    assert!(!a.link.is_linked());
+}
+
+#[test]
+fn is_linked_tracks_membership() {
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
+    let a = Node::new(1);
+    assert!(!a.link.is_linked());
+    list.push(nn(&a)).unwrap();
+    assert!(a.link.is_linked(), "linked after push");
+    // Sole element: `a.link.load()` is null (tail) but `is_linked` is true.
+    assert!(a.link.load().is_null());
+    list.pop().unwrap();
+    assert!(!a.link.is_linked(), "unlinked after pop");
 }
 
 #[test]
 fn link_load_observes_push_state() {
-    let list = IntrusiveLinkedList::<Node>::new();
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
     let a = Node::new(1);
     let b = Node::new(2);
     list.push(nn(&a)).unwrap();
@@ -233,4 +245,24 @@ fn link_load_observes_push_state() {
     // pop(a) clears a's link slot.
     list.pop().unwrap();
     assert!(a.link.load().is_null());
+}
+
+#[test]
+fn re_push_of_sole_tail_rejected() {
+    let list = IntrusiveLinkedList::<Node, TestRole>::new();
+    let a = Node::new(1);
+    list.push(nn(&a)).unwrap();
+    assert_eq!(list.push(nn(&a)), Err(LinkError::AlreadyLinked));
+    assert_eq!(list.len(), 1);
+    assert!(a.link.load().is_null(), "no self-loop");
+}
+
+#[test]
+fn cross_role_lists_have_distinct_types() {
+    // Smoke test that `OtherRole` is reachable. The strong guarantee
+    // (no `Linked<OtherRole>` for `Node` → cannot build that list)
+    // is enforced by the `compile_fail` doctest on `Linked` in
+    // `src/sync/intrusive.rs`; this test just keeps the marker live.
+    let _list: IntrusiveLinkedList<Node, TestRole> = IntrusiveLinkedList::new();
+    let _: core::marker::PhantomData<OtherRole> = core::marker::PhantomData;
 }

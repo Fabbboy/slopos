@@ -50,14 +50,14 @@ use slopos_utils::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
-/// Per-priority FIFO of ready tasks.
-///
-/// Wraps `slopos_ostd::sync::intrusive::IntrusiveLinkedList<Task>` so
-/// the linked-list bookkeeping lives in OSTD rather than here. Callers
-/// are responsible for incrementing the task's refcount on enqueue and
-/// decrementing on dequeue / remove / drain.
+/// Role tag for the per-CPU `ReadyQueue` intrusive list.
+pub enum ReadyQueueRole {}
+
+/// Per-priority FIFO of ready tasks. Refcount accounting is the
+/// caller's job (incremented on enqueue, decremented on dequeue /
+/// remove / drain).
 struct ReadyQueue {
-    list: IntrusiveLinkedList<Task>,
+    list: IntrusiveLinkedList<Task, ReadyQueueRole>,
 }
 
 impl ReadyQueue {
@@ -130,7 +130,6 @@ impl ReadyQueue {
         if self.list.len() <= 1 {
             return None;
         }
-        // Snapshot iterator: walk to the last node, then remove it.
         let last = self.list.iter().last()?;
         if self.list.remove(last).is_err() {
             return None;

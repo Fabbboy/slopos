@@ -233,7 +233,8 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.fate_value = 0;
     task.fate_pending = 0;
     task.on_cpu.store(false, Ordering::Release);
-    task.next_ready.reset();
+    task.ready_link.reset();
+    task.zombie_link.reset();
     task.next_inbox.store(ptr::null_mut(), Ordering::Release);
     task.refcnt.store(0, Ordering::Release);
 }

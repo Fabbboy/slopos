@@ -389,18 +389,14 @@ pub struct Task {
     /// woken task is never dispatched on a second CPU before the first
     /// CPU finishes saving its context — the Linux `p->on_cpu` pattern.
     pub on_cpu: AtomicBool,
-    /// Intrusive-list link slot used by `ReadyQueue` (per-CPU run
-    /// queues, `core/src/scheduler/per_cpu.rs`) and `ZombieList`
-    /// (deferred reaper, `core/src/scheduler/task/task_table.rs`).
-    /// A Task is only ever in one of those at a time — terminate
-    /// removes from the ready queue before adding to the zombie
-    /// list — so a single shared `Link<Task>` field suffices.
-    /// Layout-compatible with the previous `*mut Task` (both are
-    /// pointer-sized on x86_64); the all-zero bit pattern matches
-    /// the unlinked state, so `Task::init_invalid`'s `write_bytes`
-    /// zero-fill produces a valid empty link without an explicit
-    /// initialiser.
-    pub next_ready: Link<Task>,
+    /// Intrusive link slot for the per-CPU `ReadyQueue`. Separate
+    /// physical field from `zombie_link` so the two list roles cannot
+    /// share storage. The all-zero bit pattern is "unlinked", so
+    /// `init_invalid`'s `write_bytes` zero-fill is a valid empty link.
+    pub ready_link: Link<Task, crate::scheduler::per_cpu::ReadyQueueRole>,
+    /// Intrusive link slot for the global `ZombieList`. See
+    /// `ready_link`.
+    pub zombie_link: Link<Task, crate::scheduler::task::ZombieListRole>,
     pub next_inbox: AtomicPtr<Task>,
     pub refcnt: AtomicU32,
     /// Per-task user-mode register snapshot consumed by the OSTD
@@ -494,7 +490,8 @@ impl Task {
             signal_actions: [SignalAction::default(); NSIG],
             switch_ctx: SwitchContext::zero(),
             on_cpu: AtomicBool::new(false),
-            next_ready: Link::new(),
+            ready_link: Link::new(),
+            zombie_link: Link::new(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
             user_ctx: UserContext::const_zeroed(),
@@ -870,12 +867,12 @@ impl Task {
         }
         // Child keeps its own pool position.
         self.slot_index = preserved_slot_index;
-        // Reset scheduler linkage and refcount — the copy is a fresh entity.
-        // `next_ready` was bytewise-copied from the parent's link slot;
-        // calling `Link::reset` issues an atomic store on that storage,
-        // which is well-formed even on bytewise-copied AtomicPtr storage
-        // (no padding / tagging on x86_64).
-        self.next_ready.reset();
+        // The link slots were bytewise-copied from the parent; reset
+        // both so this fresh Task is not seen as linked into the
+        // parent's queue (each role has its own slot — both must
+        // clear).
+        self.ready_link.reset();
+        self.zombie_link.reset();
         self.next_inbox = AtomicPtr::new(ptr::null_mut());
         self.refcnt = AtomicU32::new(0);
         // Child inherits signal actions and blocked mask but starts with no pending signals.
@@ -906,15 +903,18 @@ impl Task {
     }
 }
 
-// SAFETY: `next_ready` is an in-Task `Link<Task>` field at a stable
-// offset; the Task struct itself never moves while a Task is linked
-// into a list (pool slots are pinned for kernel lifetime). The
-// scheduler's `terminate → unschedule_task → defer_task_cleanup`
-// ordering guarantees a Task is never simultaneously in `ReadyQueue`
-// and `ZombieList`, so the single shared link slot is unambiguous.
-unsafe impl Linked for Task {
-    fn link(&self) -> &Link<Self> {
-        &self.next_ready
+// SAFETY: task pool slots are pinned for kernel lifetime, so the
+// in-Task link fields have stable addresses. The two impls return
+// distinct fields, satisfying `Linked`'s distinct-field-per-Role rule.
+unsafe impl Linked<crate::scheduler::per_cpu::ReadyQueueRole> for Task {
+    fn link(&self) -> &Link<Self, crate::scheduler::per_cpu::ReadyQueueRole> {
+        &self.ready_link
+    }
+}
+
+unsafe impl Linked<crate::scheduler::task::ZombieListRole> for Task {
+    fn link(&self) -> &Link<Self, crate::scheduler::task::ZombieListRole> {
+        &self.zombie_link
     }
 }
 

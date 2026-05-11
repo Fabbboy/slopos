@@ -184,6 +184,42 @@ boot-headless:
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
 
+# ── Live-debug attach to a running kernel ────────────────────────────────────
+# `boot-debug` enables QEMU's GDB stub on TCP :1234 and a monitor socket at
+# /tmp/slopos-monitor.sock. While that QEMU is running, the `debug-*` recipes
+# attach without rebuilding. Typical session: `just boot-debug` in one
+# terminal, reproduce the freeze, then `just debug-bt` in another.
+
+[doc("Boot with QEMU GDB stub (:1234) + monitor socket (/tmp/slopos-monitor.sock)")]
+boot-debug:
+    QEMU_DEBUG=1 just boot-fast
+
+[doc("Capture all-CPU backtraces from the running kernel (writes builddir/freeze-gdb.log)")]
+debug-bt:
+    @test -f {{build_dir}}/kernel.elf || { echo "missing {{build_dir}}/kernel.elf — run 'just iso' first" >&2; exit 1; }
+    @echo "Attaching to QEMU GDB stub on :1234 — kernel must be running with 'just boot-debug'…"
+    gdb -q {{build_dir}}/kernel.elf \
+        -ex 'set pagination off' \
+        -ex 'target remote :1234' \
+        -ex 'info threads' \
+        -ex 'thread apply all bt 30' \
+        -ex 'detach' \
+        -ex 'quit' 2>&1 | tee {{build_dir}}/freeze-gdb.log
+    @echo "Wrote {{build_dir}}/freeze-gdb.log"
+
+[doc("Interactive GDB attached to the running kernel (Ctrl-D to exit)")]
+debug-gdb:
+    @test -f {{build_dir}}/kernel.elf || { echo "missing {{build_dir}}/kernel.elf — run 'just iso' first" >&2; exit 1; }
+    gdb -q {{build_dir}}/kernel.elf \
+        -ex 'set pagination off' \
+        -ex 'target remote :1234'
+
+[doc("Connect to the QEMU monitor socket — info cpus, cpu N, info registers, …")]
+debug-monitor:
+    @test -S /tmp/slopos-monitor.sock || { echo "no monitor socket at /tmp/slopos-monitor.sock — boot with 'just boot-debug' first" >&2; exit 1; }
+    @echo "Connecting to QEMU monitor — type 'quit' or Ctrl-D to detach…"
+    socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
+
 # Build the Go-based host-side test wrapper. Idempotent: Go's build cache
 # makes warm rebuilds ~50ms. Output is a single static binary that all
 # `test*` recipes below invoke.

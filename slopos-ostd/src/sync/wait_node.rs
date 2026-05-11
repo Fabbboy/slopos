@@ -33,9 +33,12 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use crate::sync::intrusive::{Link, Linked};
 
+/// Role tag for the wait-queue intrusive list.
+pub enum WaitQueueRole {}
+
 /// Stack- or heap-resident wait-list entry.
 pub struct WaitNode {
-    link: Link<WaitNode>,
+    link: Link<WaitNode, WaitQueueRole>,
     /// Opaque task handle — the kernel scheduler's `*mut Task` cast to
     /// `*mut c_void`. Read-only after construction; the wait queue's
     /// `SpinLock` synchronises wake-side reads against waiter-side
@@ -55,12 +58,12 @@ pub struct WaitNode {
 unsafe impl Send for WaitNode {}
 unsafe impl Sync for WaitNode {}
 
-// SAFETY: the embedded `Link<WaitNode>` is a stable, addressable field
-// of `Self` and is the only intrusive link slot on this type, so it
-// cannot be donated to a second list.
-unsafe impl Linked for WaitNode {
+// SAFETY: `link` is a stable in-`Self` field; `WaitNode` participates
+// in only one list role, so a single impl satisfies the distinct-field
+// rule trivially.
+unsafe impl Linked<WaitQueueRole> for WaitNode {
     #[inline]
-    fn link(&self) -> &Link<Self> {
+    fn link(&self) -> &Link<Self, WaitQueueRole> {
         &self.link
     }
 }
@@ -108,24 +111,6 @@ impl WaitNode {
     #[inline]
     pub(crate) fn is_heap_owned(&self) -> bool {
         self.heap_owned.load(Ordering::Relaxed)
-    }
-
-    /// `true` if this node currently has a `next` slot pointing at
-    /// another node — used by waiters returning from a wait to decide
-    /// whether they need to remove themselves from the queue or
-    /// whether the wake side already popped them.
-    ///
-    /// Note: a node that is the *tail* of a non-empty list has
-    /// `next == null`, indistinguishable from a node that is not
-    /// linked at all. Callers must therefore confirm membership by
-    /// taking the queue's `SpinLock` and walking the list, or by
-    /// using the queue-provided helpers that already do so. This
-    /// predicate is only a fast hint for unlinked-from-the-middle
-    /// or unlinked-from-the-head cases.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn link_has_next(&self) -> bool {
-        self.link.has_next()
     }
 }
 

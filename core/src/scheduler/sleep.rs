@@ -331,31 +331,26 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
 
-    // Disable IRQs through the state-CAS-then-yield window via the
-    // `IrqDisabled<'cli>` capability. See `block_current_task` for the
-    // bug-class motivating the cli scope as a typestate, not a
-    // hand-written `cpu::save_flags_cli()` pair.
+    // See `block_current_task_with_timeout` for why CAS precedes upsert.
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
+        if task_set_state_from_with_reason(
+            task_id,
+            TaskStatus::Running,
+            TaskStatus::Blocked,
+            BlockReason::Sleep,
+        ) != 0
         {
-            let mut queue = SLEEP_QUEUE.lock();
-            if !queue.upsert(task_id, wake_tick) {
-                return -1;
-            }
-            // Only block from Running state. Wait-protocol callers
-            // that need a timeout reach this via
-            // block_current_task_with_timeout.
-            if task_set_state_from_with_reason(
-                task_id,
-                TaskStatus::Running,
-                TaskStatus::Blocked,
-                BlockReason::Sleep,
-            ) != 0
-            {
-                queue.remove(task_id);
-                return -1;
-            }
-            unschedule_task(current);
+            return -1;
         }
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+            let _ = super::task::task_try_transition_from(
+                task_id,
+                TaskStatus::Blocked,
+                TaskStatus::Running,
+            );
+            return -1;
+        }
+        unschedule_task(current);
         schedule();
         0
     })
@@ -395,17 +390,14 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
 
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
-    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
-        return;
-    }
 
-    // See `sleep_current_task_ms` for the IRQ-off rationale.
+    // CAS Running→Blocked must happen before SLEEP_QUEUE.upsert.
+    // If upsert came first, a peer CPU's `wake_due_sleepers` could
+    // pop our entry while we are still Running, drop the wake on the
+    // floor (`wake_sleeping_task` gates on `is_blocked`), and leave
+    // us about to CAS into Blocked with no wakeup armed. Mirrors
+    // Linux's `set_current_state` → `hrtimer_start` ordering.
     let cancelled = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
-        // Atomic CAS(Running, Blocked): only blocks if still
-        // Running. The caller's wait-queue lock-pair ensures that a
-        // racing wake which already CAS'd us off Running is
-        // observable here — the CAS fails and we cancel the sleep
-        // entry without yielding.
         if task_set_state_from_with_reason(
             task_id,
             TaskStatus::Running,
@@ -415,12 +407,19 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
         {
             return true;
         }
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+            let _ = super::task::task_try_transition_from(
+                task_id,
+                TaskStatus::Blocked,
+                TaskStatus::Running,
+            );
+            return true;
+        }
         unschedule_task(current);
         schedule();
         false
     });
     if cancelled {
-        cancel_sleep(task_id);
         return;
     }
     cancel_sleep(task_id);
