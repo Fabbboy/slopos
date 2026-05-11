@@ -7,7 +7,6 @@
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
 use slopos_font::FontRenderer;
-use slopos_gfx::blend::fill_rect_blended_clipped;
 use slopos_gfx::canvas_ops::{circle_filled, line_aa};
 
 use crate::gfx::{self, DrawBuffer};
@@ -201,130 +200,68 @@ pub fn hit_test_resize_edge(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Draw the title bar background as a rounded rectangle covering the full
-/// window frame, then let the client area be overdrawn on top.
+/// Draw the opaque title-bar background with rounded top corners.
 ///
-/// This produces the visible rounded-corner title bar in the top 28 px.
+/// The top `r` rows of the bar are filled row-by-row, clipped to the
+/// quarter-circle arc so the corner pixels are never written — leaving
+/// whatever is already in the framebuffer (desktop, shadow, or a lower
+/// window) visible through the rounded corner. The remaining rows fill
+/// the full bar width.
 fn draw_title_bar_background(
     buf: &mut DrawBuffer,
     window_x: i32,
     window_y: i32,
     window_w: u32,
-    window_h: u32,
+    _window_h: u32,
     focused: bool,
     clip: &DamageRect,
 ) {
-    let (bg_color, bg_alpha) = if focused {
-        (theme::TITLE_BAR_FOCUSED, theme::TITLE_BAR_FOCUSED_ALPHA)
+    let bg = if focused {
+        theme::TITLE_BAR_FOCUSED
     } else {
-        (theme::TITLE_BAR_UNFOCUSED, theme::TITLE_BAR_UNFOCUSED_ALPHA)
+        theme::TITLE_BAR_UNFOCUSED
     };
 
-    let total_h = theme::TITLE_BAR_HEIGHT + window_h as i32;
-
-    // Draw the full rounded rectangle (title bar + client area) as the frame
-    // background. The client content will overdraw the lower portion, leaving
-    // only the title bar and rounded top corners visible.
-    let frame_color = Color32::new(bg_color.red(), bg_color.green(), bg_color.blue(), bg_alpha);
-
-    // Check if the rounded rect intersects the clip region at all.
-    let frame_rect = DamageRect {
+    let w = window_w as i32;
+    let bar_rect = DamageRect {
         x0: window_x,
         y0: window_y,
-        x1: window_x + window_w as i32 - 1,
-        y1: window_y + total_h - 1,
+        x1: window_x + w - 1,
+        y1: window_y + theme::TITLE_BAR_HEIGHT - 1,
     };
-    if !rects_intersect(&frame_rect, clip) {
+    if !rects_intersect(&bar_rect, clip) {
         return;
     }
 
-    // For efficiency, only draw the title-bar portion (top 28 px) of the
-    // rounded rect using a blended fill, then overlay rounded top corners.
-    // The bottom of the frame will be covered by client content anyway.
-    let title_bar_color = frame_color;
-    fill_rect_blended_clipped(
-        buf,
-        window_x,
-        window_y,
-        window_w as i32,
-        theme::TITLE_BAR_HEIGHT,
-        title_bar_color,
-        clip,
-    );
+    let r = theme::WINDOW_CORNER_RADIUS
+        .max(0)
+        .min(theme::TITLE_BAR_HEIGHT);
 
-    // Draw anti-aliased rounded top corners by overdrawing the corners of
-    // the title bar with the rounded-rect primitive in opaque mode. This
-    // produces the correct visual result: the title-bar body is blended,
-    // and the corner arcs mask out the rectangular edges.
-    draw_rounded_top_corners(buf, window_x, window_y, window_w, frame_color, clip);
-}
-
-/// Mask the top-left and top-right corners of the title bar to produce
-/// rounded edges. Draws transparent pixels outside the arc to erase the
-/// rectangular overshoot from the blended fill.
-fn draw_rounded_top_corners(
-    buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
-    window_w: u32,
-    color: Color32,
-    clip: &DamageRect,
-) {
-    let r = theme::WINDOW_CORNER_RADIUS;
-    if r <= 0 {
-        return;
-    }
-
-    // For each row in the corner region, compute the arc boundary and clear
-    // pixels outside it. This produces clean rounded corners on the
-    // already-blended title bar fill.
-    let tl_cx = window_x + r;
-    let tr_cx = window_x + window_w as i32 - 1 - r;
-    let cy = window_y + r;
-
-    for row in 0..r {
-        let y = window_y + row;
-        if y < clip.y0 || y > clip.y1 {
-            continue;
-        }
-
-        // Compute the x-extent of the circle at this row.
-        let dy = cy - y;
-        // Use integer square root approximation: the arc boundary is at
-        // x_off where x_off^2 + dy^2 = r^2 => x_off = isqrt(r^2 - dy^2).
+    // Corner band: fill only the span inside the rounded arc on each row.
+    if r > 0 && 2 * r <= w {
+        let cy = window_y + r;
         let r_sq = r * r;
-        let dy_sq = dy * dy;
-        if dy_sq > r_sq {
-            continue;
-        }
-        let x_off = isqrt_i32(r_sq - dy_sq);
-
-        // Left corner: clear pixels from window_x to (tl_cx - x_off - 1).
-        let clear_end_l = tl_cx - x_off;
-        if clear_end_l > window_x {
-            let cx0 = window_x.max(clip.x0);
-            let cx1 = (clear_end_l - 1).min(clip.x1);
-            if cx0 <= cx1 {
-                // Overdraw with transparent to erase the blended fill.
-                gfx::fill_rect(buf, cx0, y, cx1 - cx0 + 1, 1, Color32::TRANSPARENT);
+        for row in 0..r {
+            let y = window_y + row;
+            if y < clip.y0 || y > clip.y1 {
+                continue;
             }
-        }
-
-        // Right corner: clear pixels from (tr_cx + x_off + 1) to window_x + w - 1.
-        let clear_start_r = tr_cx + x_off + 1;
-        let window_right = window_x + window_w as i32 - 1;
-        if clear_start_r <= window_right {
-            let cx0 = clear_start_r.max(clip.x0);
-            let cx1 = window_right.min(clip.x1);
-            if cx0 <= cx1 {
-                gfx::fill_rect(buf, cx0, y, cx1 - cx0 + 1, 1, Color32::TRANSPARENT);
+            let dy = cy - y;
+            let x_off = isqrt_i32(r_sq - dy * dy);
+            let fill_x0 = (window_x + r - x_off).max(clip.x0);
+            let fill_x1 = (window_x + w - 1 - r + x_off).min(clip.x1);
+            if fill_x0 <= fill_x1 {
+                gfx::fill_rect(buf, fill_x0, y, fill_x1 - fill_x0 + 1, 1, bg);
             }
         }
     }
 
-    // Suppress unused-variable warnings in case the color parameter is not
-    // used for AA fringe in this implementation path.
-    let _ = color;
+    // Body: rows below the corner band, full bar width.
+    let body_y0 = window_y + r;
+    let body_y1 = window_y + theme::TITLE_BAR_HEIGHT - 1;
+    if body_y0 <= body_y1 {
+        gfx::fill_rect_clipped(buf, window_x, body_y0, w, body_y1 - body_y0 + 1, bg, clip);
+    }
 }
 
 /// Draw the three signal buttons (close, minimize, expand).

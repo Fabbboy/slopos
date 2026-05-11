@@ -130,13 +130,13 @@ pub const SHELF_LABEL_BG_ALPHA: u8 = 0xCC;
 // Colors -- Window Decorations / Title Bar
 // ===========================================================================
 
-/// Focused window title bar (semi-transparent).
+/// Focused window title bar.
 pub const TITLE_BAR_FOCUSED: Color32 = Color32::rgb(0x2D, 0x2D, 0x30);
-pub const TITLE_BAR_FOCUSED_ALPHA: u8 = 0xD0;
+pub const TITLE_BAR_FOCUSED_ALPHA: u8 = 0xFF;
 
-/// Unfocused window title bar (semi-transparent).
+/// Unfocused window title bar.
 pub const TITLE_BAR_UNFOCUSED: Color32 = Color32::rgb(0x1E, 0x1E, 0x1E);
-pub const TITLE_BAR_UNFOCUSED_ALPHA: u8 = 0xD0;
+pub const TITLE_BAR_UNFOCUSED_ALPHA: u8 = 0xFF;
 
 // ===========================================================================
 // Colors -- Signal Buttons
