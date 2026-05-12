@@ -22,8 +22,12 @@ pub mod mm;
 pub mod pci;
 pub mod sync;
 pub mod task;
+pub mod test_support;
 pub mod user;
 pub mod util;
+
+#[doc(hidden)]
+pub use paste as __paste;
 
 /// Plain-old-data marker trait. Re-exported at the crate root so
 /// the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions can

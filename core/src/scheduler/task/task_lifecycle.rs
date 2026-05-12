@@ -581,7 +581,7 @@ pub fn task_create(
     // Install the unsafe stack and prime its RSP at the top.  Every
     // instrumented function prologue walks this pointer downward; at
     // context-switch time it is saved/restored exactly like RSP.
-    task_ref.unsafe_stack_sp = resources.unsafe_stack.top().as_u64();
+    task_ref.abi.unsafe_stack_sp = resources.unsafe_stack.top().as_u64();
     task_ref.unsafe_stack = Some(resources.unsafe_stack);
     task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
@@ -1014,7 +1014,7 @@ pub fn task_fork(
     // `Drop` on this handle will only run when the task's slot is
     // cleared (`task.kernel_stack = None` in `free_task_stacks`).
     child.kernel_stack = Some(child_kernel_stack);
-    child.unsafe_stack_sp = child_unsafe_stack_top;
+    child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
 
     record_task_created();
@@ -1197,7 +1197,7 @@ pub fn task_clone(
     }
     // Transfer ownership of the kernel stack to the task slot.
     child.kernel_stack = Some(child_kernel_stack);
-    child.unsafe_stack_sp = child_unsafe_stack_top;
+    child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
     record_task_created();
 

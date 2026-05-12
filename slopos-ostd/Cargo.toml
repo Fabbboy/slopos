@@ -14,6 +14,7 @@ test-helpers = []
 
 [dependencies]
 bitflags = { workspace = true }
+paste = { workspace = true }
 slopos-abi = { workspace = true }
 slopos-ostd-derive = { workspace = true }
 

@@ -5,6 +5,7 @@
 //! kernel scheduler in `core::scheduler` continues to drive execution
 //! through its own types; the OSTD primitives compile but are unwired.
 
+pub mod abi;
 pub mod fpu;
 pub mod scheduler;
 pub mod switch;

@@ -27,6 +27,8 @@ use core::arch::naked_asm;
 
 use crate::boot::smp::ap_early_entry;
 use crate::cpu::x86_64::pcr;
+use crate::cpu::x86_64::pcr::offsets as pcr_offsets;
+use crate::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 
 /// AP boot trampoline. Pass to `limine::mp::Cpu::bootstrap` as the AP
 /// entry symbol (needs an unsafe transmute on the kernel side to
@@ -68,5 +70,43 @@ pub unsafe extern "C" fn ap_entry(_cpu_info: *const ()) -> ! {
         ia32_gs_base = const 0xC000_0101_u32,
         ap_pcr_ptrs = sym pcr::AP_PCR_PTRS,
         ap_early_entry = sym ap_early_entry,
+    )
+}
+
+/// LLVM SafeStack pointer-address callback.
+///
+/// LLVM emits a call to this symbol on every instrumented function's
+/// prologue under `-Zsanitizer=safestack -C llvm-args=-safestack-use-pointer-address`.
+/// The function returns `&current_task->abi.unsafe_stack_sp` — a
+/// heap-stable address inside the running task's allocation. LLVM's
+/// pointer-address mode caches the returned pointer on the safe stack
+/// across multiple loads/stores in a function; embedding the slot
+/// inside the Task struct (rather than a per-CPU PCR field) makes
+/// the cached pointer survive CPU migration by construction.
+///
+/// Naked because the function must avoid self-recursion: a non-naked
+/// fn compiled with the sanitizer enabled would itself emit a
+/// prologue that calls `__safestack_pointer_address` before
+/// returning.
+///
+/// # Safety
+///
+/// Only called by LLVM-emitted prologues. The asm assumes:
+/// - `gs:[pcr_offsets::CURRENT_TASK]` holds a valid `*mut Task` (set
+///   by `boot/limine_entry.s` for the BSP and by [`ap_entry`] for
+///   APs, before any instrumented Rust runs on that CPU).
+/// - The `Task` struct embeds `abi: TaskAbi` at offset 0 (enforced
+///   by an `offset_of!` razor inside `slopos-core::scheduler::task_struct`).
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
+    naked_asm!(
+        // rax = current_task (AtomicPtr<()> load on x86-64 is a plain mov).
+        "mov rax, gs:[{off_current_task}]",
+        // rax = &current_task->abi.unsafe_stack_sp
+        "add rax, {off_sp}",
+        "ret",
+        off_current_task = const pcr_offsets::CURRENT_TASK,
+        off_sp = const TASK_UNSAFE_STACK_SP_OFFSET,
     )
 }

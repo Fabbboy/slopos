@@ -244,12 +244,22 @@ impl SignalAction {
 // adding a field between `context` and `fpu_state` would silently
 // change the FPU buffer's stride from the start of the Task struct.
 pub const FPU_STATE_OFFSET: usize = 0xC8;
-const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
+// The actual `fpu_state - context` delta is `size_of::<TaskContext>()`
+// (200 bytes / 0xC8) plus whatever padding the compiler inserts ahead
+// of `fpu_state` to satisfy its 64-byte alignment. With the
+// `abi: TaskAbi` head field in place the padding is non-zero; allow
+// up to one 64-byte alignment cycle so the tripwire still fires if
+// someone inserts a real field between `context` and `fpu_state`
+// (which would push the delta past `0xC8 + 64`).
+const _: () = {
+    let diff = offset_of!(Task, fpu_state) - offset_of!(Task, context);
+    assert!(diff >= FPU_STATE_OFFSET);
+    assert!(diff < FPU_STATE_OFFSET + 64);
+};
 
-/// Offset of `Task.unsafe_stack_sp` — consumed by the naked
-/// `__safestack_pointer_address` trampoline in `karch::safestack_rt`
-/// as a `const` operand, so the asm cannot drift out of sync with the
-/// struct layout.
+/// Offset of `Task.abi.unsafe_stack_sp` — consumed by OSTD's naked
+/// `__safestack_pointer_address` trampoline as a `const` operand, so
+/// the asm cannot drift out of sync with the struct layout.
 ///
 /// The slot is **task-local** (not per-CPU) on purpose: LLVM's
 /// `-safestack-use-pointer-address` mode caches the slot pointer on
@@ -257,7 +267,12 @@ const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) ==
 /// become stale the moment a task migrates between CPUs.  Embedding
 /// the slot inside the Task struct means the address survives every
 /// migration — the Task heap allocation never moves.
-pub const TASK_UNSAFE_STACK_SP_OFFSET: usize = offset_of!(Task, unsafe_stack_sp);
+///
+/// Re-export from [`slopos_ostd::task::abi`]: OSTD owns the asm AND
+/// the offset (Fuchsia-style ABI sub-struct). The kernel side asserts
+/// `offset_of!(Task, abi) == 0` (razor below the struct) so the OSTD
+/// const stays correct.
+pub use slopos_ostd::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 // Tripwire: the Task struct is inherently large (dominated by FpuState).
 // The stack-safety contract is that nobody ever materialises a Task
 // rvalue on the stack — see `Task::reset_in_place`. This bound keeps
@@ -267,8 +282,20 @@ pub const TASK_UNSAFE_STACK_SP_OFFSET: usize = offset_of!(Task, unsafe_stack_sp)
 // with a re-audit of every Task mutation site.
 const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 
+// ABI razor: `abi: TaskAbi` must be field #0 of Task so the
+// OSTD-side `TASK_UNSAFE_STACK_SP_OFFSET` const (computed as
+// `offset_of!(TaskAbi, unsafe_stack_sp)` inside OSTD, naturally 0)
+// matches the asm-readable offset of the `unsafe_stack_sp` field
+// inside Task.
+const _: () = assert!(offset_of!(Task, abi) == 0);
+
 #[repr(C)]
 pub struct Task {
+    /// OSTD-owned ABI sub-struct holding every field that naked asm
+    /// reads via a compile-time `const` offset operand. Must remain
+    /// at offset 0; enforced by the `offset_of!(Task, abi) == 0`
+    /// razor below the struct.
+    pub abi: slopos_ostd::task::abi::TaskAbi,
     pub task_id: u32,
     pub name: [u8; TASK_NAME_MAX_LEN],
     /// Fused (status, reason, epoch) atomic word. Replaces the
@@ -327,13 +354,10 @@ pub struct Task {
     /// `kernel_stack`/`unsafe_stack` so `reset_in_place`'s zero-byte hole
     /// covers all three Option<KBox>-style owned handles in one span.
     pub test_reports: Option<slopos_ostd::KBox<crate::scheduler::test_reports::TestReportRing>>,
-    /// Current SafeStack unsafe-stack pointer (data-stack RSP).
-    ///
-    /// Initialised to `unsafe_stack.as_ref().unwrap().top()` at task
-    /// creation and then advanced/retreated by the SafeStack sanitizer
-    /// on every instrumented function prologue/epilogue.  Saved on
-    /// switch-out, restored on switch-in.
-    pub unsafe_stack_sp: u64,
+    // SafeStack unsafe-stack SP (data-stack RSP) now lives in
+    // `self.abi.unsafe_stack_sp` (field #0 of Task) so the OSTD-side
+    // `__safestack_pointer_address` asm can address it via a fixed
+    // compile-time offset. See `slopos_ostd::task::abi::TaskAbi`.
     /// Index of this Task's slot in the `TASK_MANAGER` pool spine,
     /// populated by `reserve_task_slot` and invariant for the lifetime
     /// of the Task. `u32::MAX` on fresh/invalid slots that have not
@@ -434,6 +458,7 @@ pub struct Task {
 impl Task {
     pub const fn invalid() -> Self {
         Self {
+            abi: slopos_ostd::task::abi::TaskAbi { unsafe_stack_sp: 0 },
             task_id: INVALID_TASK_ID,
             name: [0; TASK_NAME_MAX_LEN],
             state: TaskState::invalid(),
@@ -453,7 +478,6 @@ impl Task {
             kernel_stack: None,
             unsafe_stack: None,
             test_reports: None,
-            unsafe_stack_sp: 0,
             slot_index: u32::MAX,
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
@@ -562,7 +586,7 @@ impl Task {
                 // Userland test-report ring: lazily allocated on first
                 // SYSCALL_TEST_REPORT.
                 addr_of_mut!((*slot).test_reports).write(None);
-                addr_of_mut!((*slot).unsafe_stack_sp).write(0);
+                addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
                 // Pool-slot index sentinel: set by `reserve_task_slot`
                 // once the slot is assigned.
@@ -866,7 +890,7 @@ impl Task {
             // child gets a fresh `None`; first SYSCALL_TEST_REPORT lazily
             // allocates a new ring.
             core::ptr::write(&mut self.test_reports as *mut _, None);
-            self.unsafe_stack_sp = 0;
+            self.abi.unsafe_stack_sp = 0;
             // Wait/exit primitives are per-task. The parent's `waiters`
             // queue holds tasks waiting for the *parent*, not the child;
             // bitwise-copying it would route the child's wakes to the

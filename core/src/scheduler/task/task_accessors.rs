@@ -165,7 +165,7 @@ pub fn task_set_unsafe_stack_sp(task: *mut Task, sp: u64) {
     // u64 inside the Task struct. Pre-SMP single-writer access precludes
     // races on this field.
     unsafe {
-        (*task).unsafe_stack_sp = sp;
+        (*task).abi.unsafe_stack_sp = sp;
     }
 }
 

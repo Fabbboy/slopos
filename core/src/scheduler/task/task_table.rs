@@ -154,7 +154,7 @@ pub(super) fn free_task_stacks(task: *mut Task) {
 
         // Same for the SafeStack unsafe (data) stack.
         (*task).unsafe_stack = None;
-        (*task).unsafe_stack_sp = 0;
+        (*task).abi.unsafe_stack_sp = 0;
 
         // For kernel-mode tasks, `stack_base` aliased the kernel stack.
         // Now that the stack is gone, clear the alias so nothing reads it.
