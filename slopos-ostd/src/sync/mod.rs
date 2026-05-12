@@ -30,7 +30,9 @@ pub use atomic_cell::AtomicCell;
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
 pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};
-pub use kernel_sync::{BspToken, KernelSync};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use kernel_sync::reset_bsp_token_for_tests;
+pub use kernel_sync::{BspToken, KernelSync, run_bsp_init};
 pub use lock_tracking::{
     LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LOCK_LEVEL_SCHEDULER,
     LOCK_LEVEL_UNORDERED, enable_lock_tracking, held_lock_count, poison_unlock_all_held,
