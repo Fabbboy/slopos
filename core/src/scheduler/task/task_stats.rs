@@ -1,5 +1,5 @@
-use super::task_table::{task_slot_index_inner, try_with_task_manager, with_task_manager};
-use super::{Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
+use super::Task;
+use super::task_table::{try_with_task_manager, with_task_manager};
 
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
     with_task_manager(|mgr| {
@@ -55,23 +55,5 @@ pub(super) fn record_task_created() {
         // num_tasks is already incremented by reserve_task_slot(); only
         // bump the lifetime counter here.
         mgr.tasks_created = mgr.tasks_created.saturating_add(1);
-    });
-}
-
-pub(super) fn record_task_exit(
-    task: *const Task,
-    exit_reason: TaskExitReason,
-    fault_reason: TaskFaultReason,
-    exit_code: u32,
-) {
-    with_task_manager(|mgr| {
-        if let Some(idx) = task_slot_index_inner(mgr, task) {
-            mgr.exit_records[idx] = TaskExitRecord {
-                task_id: unsafe { (*task).task_id },
-                exit_reason,
-                fault_reason,
-                exit_code,
-            };
-        }
     });
 }

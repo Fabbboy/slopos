@@ -28,6 +28,7 @@ fn apply_state_transition(task_ref: &Task, new_status: TaskStatus, reason: Block
         TaskStatus::Running => transition_to_c_int(task_ref.mark_running()),
         TaskStatus::Blocked => transition_to_c_int(task_ref.block(reason)),
         TaskStatus::Terminated => transition_to_c_int(task_ref.terminate()),
+        TaskStatus::Zombie => transition_to_c_int(task_ref.mark_zombie()),
         TaskStatus::Invalid => -1,
     }
 }
@@ -110,6 +111,20 @@ pub fn task_is_terminated(task: *const Task) -> bool {
     task_get_state(task) == TaskStatus::Terminated
 }
 
+pub fn task_is_zombie(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::Zombie
+}
+
+/// `Zombie` or `Terminated` — task has exited and is no longer schedulable.
+/// Use this anywhere a "task has stopped running" check is needed; reserve
+/// `task_is_terminated` for the strict, reapable variant.
+pub fn task_is_exited(task: *const Task) -> bool {
+    matches!(
+        task_get_state(task),
+        TaskStatus::Zombie | TaskStatus::Terminated
+    )
+}
+
 pub fn task_is_invalid(task: *const Task) -> bool {
     task_get_state(task) == TaskStatus::Invalid
 }
@@ -121,5 +136,6 @@ pub fn task_state_to_string(status: TaskStatus) -> &'static str {
         TaskStatus::Running => "running",
         TaskStatus::Blocked => "blocked",
         TaskStatus::Terminated => "terminated",
+        TaskStatus::Zombie => "zombie",
     }
 }

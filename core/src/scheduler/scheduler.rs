@@ -45,8 +45,8 @@ use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
-    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_invalid, task_is_ready,
-    task_is_running, task_is_terminated, task_kernel_stack_top, task_name_looks_idle, task_pgid,
+    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_exited, task_is_invalid,
+    task_is_ready, task_is_running, task_kernel_stack_top, task_name_looks_idle, task_pgid,
     task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
     task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
     task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_time_slice,
@@ -784,7 +784,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         return false;
     }
 
-    if task_is_terminated(next_task) || !task_is_ready(next_task) {
+    if task_is_exited(next_task) || !task_is_ready(next_task) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
@@ -850,10 +850,10 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // dispatches a peer, our state is committed Blocked and the
     // peer's `wake_one` will find us on the queue.
     //
-    // Blocked/Terminated tasks are NOT re-enqueued — they'll be
-    // woken by their respective event paths.
+    // Blocked/Zombie/Terminated tasks are NOT re-enqueued — they'll
+    // be woken by their respective event paths.
     // This runs AFTER on_cpu=false and context save, so no SMP race.
-    if !task_is_terminated(next_task) {
+    if !task_is_exited(next_task) {
         let already_ready = task_is_ready(next_task);
         let needs_ready_transition = task_is_running(next_task);
         let should_enqueue = if already_ready {
@@ -1068,10 +1068,10 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     let waiters: &WaitQueue = unsafe { &(*target).waiters };
     let exit_cell: &AtomicCell<ExitInfo> = unsafe { &(*target).exit_info };
 
-    // The `task_is_terminated` fallback covers the case where the
-    // target's status flips to Terminated via a path that has not
-    // (yet) published exit_info — defensive, but cheap.
-    let _ = waiters.wait_event(|| exit_cell.is_set() || task_is_terminated(target));
+    // The `task_is_exited` fallback covers the case where the
+    // target's status flips to Zombie/Terminated via a path that has
+    // not (yet) published exit_info — defensive, but cheap.
+    let _ = waiters.wait_event(|| exit_cell.is_set() || task_is_exited(target));
     0
 }
 
@@ -1092,10 +1092,10 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return schedule_task(task);
     }
 
-    // Task is in some other state (Running, Ready, Terminated) — nothing to do.
-    // A Running waker that races a Blocked→Ready CAS sees Running
-    // here; that's a benign no-op — the waiter never actually slept.
-    if task_is_terminated(task) || task_is_invalid(task) {
+    // Task is in some other state (Running, Ready, Zombie, Terminated) —
+    // nothing to do. A Running waker that races a Blocked→Ready CAS sees
+    // Running here; that's a benign no-op — the waiter never actually slept.
+    if task_is_exited(task) || task_is_invalid(task) {
         return -1;
     }
     0

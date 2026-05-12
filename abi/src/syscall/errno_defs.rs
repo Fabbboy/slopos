@@ -33,6 +33,7 @@ pub const ERRNO_EINTR: u64 = (-4i64) as u64;
 pub const ERRNO_EIO: u64 = (-5i64) as u64;
 pub const ERRNO_ENXIO: u64 = (-6i64) as u64;
 pub const ERRNO_EBUSY: u64 = (-16i64) as u64;
+pub const ERRNO_ECHILD: u64 = (-10i64) as u64;
 
 /// Internal-only error code for restartable syscalls.  MUST NEVER reach
 /// userland — the syscall return path converts it to `ERRNO_EINTR` or

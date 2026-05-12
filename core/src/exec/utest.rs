@@ -19,7 +19,7 @@ use slopos_utils::{catch_panic, klog_info};
 use crate::exec::spawn_program_with_attrs;
 use crate::sched::scheduler_get_current_task;
 use crate::scheduler::scheduler::{sleep_current_task_ms, task_wait_for};
-use crate::scheduler::task::task_find_by_id;
+use crate::scheduler::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
 use crate::scheduler::test_reports::{
     PendingDrain, TestReport, consume_pending_drain, pending_drain_present,
 };
@@ -168,6 +168,12 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         polled_ms = polled_ms.saturating_add(POLL_STEP_MS);
     }
 
+    // Snapshot exit info from the Task's durable `exit_info` cell before
+    // we go on to drain reports — the snapshot transitions the slot from
+    // Zombie to Terminated (or peeks if some other path already reaped),
+    // which is needed before the slot can be tier-2 reused.
+    let exit_info = task_consume_zombie(pid).or_else(|| task_peek_exit_info(pid));
+
     let drain = match consume_pending_drain(pid) {
         Some(d) => d,
         None => {
@@ -187,7 +193,6 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     };
 
     let PendingDrain {
-        exit_record,
         reports: maybe_ring,
     } = drain;
 
@@ -232,15 +237,21 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     if sub_failed > 0 {
         return TestResult::Fail;
     }
-    let exited_normally =
-        exit_record.exit_reason == TaskExitReason::Normal && exit_record.exit_code == 0;
+    let exited_normally = match exit_info.as_ref() {
+        Some(info) => info.exit_reason == TaskExitReason::Normal && info.exit_code == 0,
+        None => false,
+    };
     if !exited_normally && report_vec.is_empty() {
-        klog_info!(
-            "UTEST: '{}' exited reason={} code={} with no reports",
-            bin,
-            exit_reason_str(exit_record.exit_reason),
-            exit_record.exit_code
-        );
+        if let Some(info) = exit_info {
+            klog_info!(
+                "UTEST: '{}' exited reason={} code={} with no reports",
+                bin,
+                exit_reason_str(info.exit_reason),
+                info.exit_code
+            );
+        } else {
+            klog_info!("UTEST: '{}' exit info unavailable with no reports", bin);
+        }
         return TestResult::Fail;
     }
     TestResult::Pass

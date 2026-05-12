@@ -72,8 +72,13 @@ pub enum TaskStatus {
     Running = 2,
     /// Task is blocked waiting for some event.
     Blocked = 3,
-    /// Task has terminated and is awaiting cleanup.
+    /// Task has terminated and is reapable. Slot is eligible for tier-2
+    /// reuse once `ref_count == 0`.
     Terminated = 4,
+    /// Task has exited but still holds its exit info awaiting a `waitpid`
+    /// from a live parent. Tier-2 slot reuse skips Zombie slots so the
+    /// parent's reaper observes a stable `Task::exit_info`.
+    Zombie = 5,
 }
 
 impl TaskStatus {
@@ -85,6 +90,7 @@ impl TaskStatus {
             2 => Self::Running,
             3 => Self::Blocked,
             4 => Self::Terminated,
+            5 => Self::Zombie,
             _ => Self::Invalid,
         }
     }
@@ -98,10 +104,14 @@ impl TaskStatus {
     pub const fn can_transition_to(self, target: Self) -> bool {
         match self {
             Self::Invalid => matches!(target, Self::Ready),
-            Self::Ready => matches!(target, Self::Running | Self::Terminated),
-            Self::Running => matches!(target, Self::Ready | Self::Blocked | Self::Terminated),
-            Self::Blocked => matches!(target, Self::Ready | Self::Terminated),
+            Self::Ready => matches!(target, Self::Running | Self::Terminated | Self::Zombie),
+            Self::Running => matches!(
+                target,
+                Self::Ready | Self::Blocked | Self::Terminated | Self::Zombie
+            ),
+            Self::Blocked => matches!(target, Self::Ready | Self::Terminated | Self::Zombie),
             Self::Terminated => matches!(target, Self::Invalid | Self::Terminated),
+            Self::Zombie => matches!(target, Self::Terminated | Self::Zombie),
         }
     }
 }

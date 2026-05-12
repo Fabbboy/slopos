@@ -16,7 +16,7 @@ use super::super::task_struct::SwitchContext;
 use super::super::task_struct::fpu_reset_in_place;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
-use super::task_stats::{record_task_created, record_task_exit};
+use super::task_stats::record_task_created;
 use super::task_table::{
     ReserveTaskSlotError, defer_task_cleanup, free_task_stacks, release_task_slot,
     reserve_task_slot, task_find_by_id, with_task_manager,
@@ -24,8 +24,8 @@ use super::task_table::{
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskExitRecord, TaskFaultReason, TaskPriority,
-    TaskStatus, task_borrow_mut, task_id_of, task_name_bytes, task_status,
+    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
+    task_borrow_mut, task_id_of, task_name_bytes, task_status,
 };
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
@@ -271,8 +271,10 @@ fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool
             if task.task_id == excluding_task_id {
                 continue;
             }
-            let status = task.status();
-            if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
+            if matches!(
+                task.status(),
+                TaskStatus::Invalid | TaskStatus::Terminated | TaskStatus::Zombie
+            ) {
                 continue;
             }
             if task.process_id == process_id {
@@ -633,7 +635,10 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return -1;
     }
 
-    if task_status(task_ptr) == Some(TaskStatus::Terminated) {
+    if matches!(
+        task_status(task_ptr),
+        Some(TaskStatus::Terminated) | Some(TaskStatus::Zombie)
+    ) {
         return 0;
     }
 
@@ -687,40 +692,52 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     if task.exit_reason == TaskExitReason::None {
         task.exit_reason = TaskExitReason::Kernel;
     }
-    record_task_exit(
-        task_ptr,
-        task.exit_reason,
-        task.fault_reason,
-        task.exit_code,
-    );
 
-    // Stash a slot-lifecycle-independent copy of the exit record + the
-    // per-task test-report ring (if any) into the pending-drain cache.
-    // The userland-test runner reads it from there, so its drain is
-    // robust to subsequent slot reuse / reset_in_place that would
-    // clobber the original `Task` and `mgr.exit_records[idx]`.
-    //
-    // Restricted to tasks that had test_reports populated: non-test
-    // tasks (the vast majority) skip the cache entirely, paying zero
-    // cost.
+    // Stash the per-task test-report ring (if any) so the userland-test
+    // runner can drain reports even after slot recycle. Exit info no
+    // longer needs an out-of-slot copy: `Task::exit_info` is the single
+    // source of truth, kept stable until either `waitpid` consumes the
+    // Zombie or the parent itself dies and auto-reaps.
     if task.test_reports.is_some() {
-        let exit_record = TaskExitRecord {
-            task_id: resolved_id,
-            exit_reason: task.exit_reason,
-            fault_reason: task.fault_reason,
-            exit_code: task.exit_code,
-        };
         let reports = task.test_reports.take();
         crate::scheduler::test_reports::stash_pending_drain(
             resolved_id,
-            crate::scheduler::test_reports::PendingDrain {
-                exit_record,
-                reports,
-            },
+            crate::scheduler::test_reports::PendingDrain { reports },
         );
     }
 
-    task.set_status(TaskStatus::Terminated);
+    // Publish exit_info BEFORE the status transition so any racing
+    // observer that sees status==Zombie is guaranteed to see a fully
+    // populated `exit_info` cell on its next read. Order is load-bearing:
+    // `task_consume_zombie` keys on `status == Zombie` and then reads
+    // `exit_info.try_get()`; with this ordering, the consumer never
+    // sees Zombie+empty (which would force it to either return None
+    // and spin, or transition to Terminated and silently drop the
+    // exit code).
+    //
+    // `try_set` returns Err on a re-entry (e.g. fault path also calling
+    // task_terminate(self)); discard via `_` — the operation is
+    // idempotent.
+    let info = ExitInfo {
+        exit_code: task.exit_code as i32,
+        exit_reason: task.exit_reason,
+        fault_reason: task.fault_reason,
+        signal: 0,
+        exit_time_ms: now,
+    };
+    let _ = task.exit_info.try_set(info);
+
+    // Pick Zombie or Terminated based on whether a live parent might
+    // call `waitpid` on us. Kernel-mode tasks and orphans skip Zombie
+    // and go straight to Terminated — their exit code has no consumer,
+    // so the slot is immediately reapable.
+    let parent_alive = parent_alive_for(task.parent_task_id);
+    let final_status = if parent_alive {
+        TaskStatus::Zombie
+    } else {
+        TaskStatus::Terminated
+    };
+    task.set_status(final_status);
     scheduler::cancel_sleep(resolved_id);
     task.fate_token = 0;
     task.fate_value = 0;
@@ -750,33 +767,64 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     scheduler::unschedule_task(task_ptr);
 
-    // Phase 1's exit_info.try_set + WaitQueue SpinLock superseded the
-    // SeqCst fence here (was: defensive belt-and-braces).
-
-    // Publish exit_info BEFORE the wake fanout. Order is load-bearing:
-    // try_set is Release; the WaitQueue's SpinLock inside wake_all is
-    // a full barrier that pairs with `is_set`'s Acquire load on the
-    // waiter side. A waiter that registered after fanout but before
-    // try_set would deadlock if we reversed these — by publishing
-    // first, late waiters see is_set() == true on their first re-check.
-    //
-    // try_set returns Err on a re-entry (e.g. fault path also calling
-    // task_terminate(self)); discard via `_` — the operation is
-    // idempotent.
-    let info = ExitInfo {
-        exit_code: task.exit_code as i32,
-        exit_reason: task.exit_reason,
-        fault_reason: task.fault_reason,
-        signal: 0,
-        exit_time_ms: now,
-    };
-    let _ = task.exit_info.try_set(info);
-
     release_task_dependents(resolved_id);
+
+    // Adopt children: live ones become orphans (parent_task_id =
+    // INVALID, so their later termination skips Zombie); zombie ones
+    // are auto-reaped (Zombie → Terminated, freeing the slot for tier-2
+    // reuse). This is the SlopOS analog of Linux's reparent-to-init,
+    // simplified for a kernel without a userland-PID-1 reaper.
+    reparent_and_reap_children(resolved_id);
 
     if let Some(tty_idx) = should_hangup {
         tty::hangup(tty_idx);
     }
+}
+
+/// True if `parent_id` refers to a task slot that is currently
+/// runnable / blocked (i.e. has not itself exited). Used by
+/// [`mark_task_terminated`] to decide between Zombie (live parent will
+/// reap) and Terminated (no reaper, slot immediately reusable).
+fn parent_alive_for(parent_id: u32) -> bool {
+    if parent_id == INVALID_TASK_ID {
+        return false;
+    }
+    let parent = task_find_by_id(parent_id);
+    if parent.is_null() {
+        return false;
+    }
+    match task_status(parent) {
+        Some(TaskStatus::Ready) | Some(TaskStatus::Running) | Some(TaskStatus::Blocked) => true,
+        _ => false,
+    }
+}
+
+/// Walk the task pool once and, for every task whose `parent_task_id`
+/// is `dying_id`:
+///   * if the child is still alive (Ready/Running/Blocked), clear its
+///     `parent_task_id` so its eventual exit skips the Zombie state;
+///   * if the child is already in Zombie, transition it to Terminated
+///     (the would-be reaper just died, so the exit code has no
+///     consumer and the slot can be tier-2 reused).
+///
+/// Runs under the task-manager lock so concurrent `reserve_task_slot`
+/// can't recycle a slot while we inspect it. O(`pool_high_water()`);
+/// task exit is not in any tight loop.
+fn reparent_and_reap_children(dying_id: u32) {
+    if dying_id == INVALID_TASK_ID {
+        return;
+    }
+    with_task_manager(|mgr| {
+        for slot in mgr.iter_tasks_mut() {
+            if slot.parent_task_id != dying_id {
+                continue;
+            }
+            slot.parent_task_id = INVALID_TASK_ID;
+            if slot.status() == TaskStatus::Zombie {
+                let _ = slot.try_transition_to(TaskStatus::Terminated);
+            }
+        }
+    });
 }
 
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
@@ -834,8 +882,10 @@ fn refresh_num_tasks_after_shutdown() {
     with_task_manager(|mgr| {
         let mut preserved = 0u32;
         for task in mgr.iter_tasks() {
-            let status = task.status();
-            if status != TaskStatus::Invalid && status != TaskStatus::Terminated {
+            if !matches!(
+                task.status(),
+                TaskStatus::Invalid | TaskStatus::Terminated | TaskStatus::Zombie
+            ) {
                 preserved += 1;
             }
         }

@@ -14,7 +14,7 @@ use crate::syscall::common::{
 use crate::syscall::context::SyscallContext;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::syscall::*;
-use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord, TaskPriority};
+use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
 
 use slopos_arch::cpu;
@@ -22,7 +22,7 @@ use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::user::context::UserContext;
 
-use crate::task::task_get_exit_record;
+use crate::task::{task_consume_zombie, task_peek_exit_info};
 
 fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVec<u64>, ()> {
     let mut out = KVec::<u64>::with_capacity(max_count).map_err(|_| ())?;
@@ -163,27 +163,44 @@ define_syscall!(syscall_spawn_path(ctx, args) {
 
 define_syscall!(syscall_waitpid(ctx, args) {
     let target_id = args.arg0 as u32;
-    let options = args.arg1 as u32;
+    let wnohang = (args.arg1 as u32 & 0x1) != 0;
     if target_id == 0 || target_id == INVALID_TASK_ID {
         return ctx.err();
     }
 
-    let mut record = TaskExitRecord::empty();
-    if task_get_exit_record(target_id, &mut record) == 0 {
-        return ctx.ok(record.exit_code as u64);
+    // Fast path: target is a Zombie. Consume its exit info and
+    // transition Zombie → Terminated under the task-manager lock.
+    if let Some(info) = task_consume_zombie(target_id) {
+        return ctx.ok(info.exit_code as u64);
     }
 
-    if (options & 0x1) != 0 {
-        return ctx.err_with(ERRNO_EAGAIN);
+    if wnohang {
+        // Two distinguishable failure modes:
+        //   * slot still alive (Ready/Running/Blocked) → EAGAIN, the
+        //     caller should poll again.
+        //   * slot missing or already-Terminated (no Zombie observed,
+        //     so it was either auto-reaped on parent's death or never
+        //     a child of this caller) → ECHILD, the caller should
+        //     stop polling.
+        let slot = task_find_by_id(target_id);
+        return if slot.is_null() {
+            ctx.err_with(ERRNO_ECHILD)
+        } else {
+            ctx.err_with(ERRNO_EAGAIN)
+        };
     }
 
     task_wait_for(target_id);
 
-    let mut record2 = TaskExitRecord::empty();
-    if task_get_exit_record(target_id, &mut record2) == 0 {
-        ctx.ok(record2.exit_code as u64)
+    // After the wait either the target became Zombie (consume it now)
+    // or it was already auto-reaped past Zombie (peek for diagnostics,
+    // return ECHILD if the exit info is gone).
+    if let Some(info) = task_consume_zombie(target_id) {
+        ctx.ok(info.exit_code as u64)
+    } else if let Some(info) = task_peek_exit_info(target_id) {
+        ctx.ok(info.exit_code as u64)
     } else {
-        ctx.ok(0)
+        ctx.err_with(ERRNO_ECHILD)
     }
 });
 

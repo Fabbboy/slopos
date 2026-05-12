@@ -10,7 +10,8 @@ use slopos_utils::{klog_debug, klog_info};
 
 use super::super::scheduler;
 use super::task_accessors::{task_id_of, task_ref_count};
-use super::{INVALID_PROCESS_ID, INVALID_TASK_ID, Task, TaskExitRecord, TaskIterateCb, TaskStatus};
+use super::{INVALID_PROCESS_ID, INVALID_TASK_ID, Task, TaskIterateCb, TaskStatus};
+use crate::scheduler::exit_info::ExitInfo;
 
 /// Concurrent task capacity, matching the kernel-stack VA region cap in
 /// `mm/src/memory_layout_defs.rs` — every live task owns a KSTACK VA
@@ -254,11 +255,6 @@ pub(super) struct TaskManagerInner {
     /// The `KBox` lives until kernel shutdown; recycling happens via
     /// `Task::reset_in_place` on the KBox's contents.
     pub(super) tasks: KVec<Option<KBox<Task>>>,
-    /// Exit-record cache, parallel-indexed with `tasks`. Length equals
-    /// `tasks.len()` after init. Each entry is overwritten when a slot
-    /// transitions through Terminated; stale entries carry
-    /// `task_id == INVALID_TASK_ID`.
-    pub(super) exit_records: KVec<TaskExitRecord>,
     pub(super) num_tasks: u32,
     pub(super) next_task_id: u32,
     pub(super) total_context_switches: u64,
@@ -277,7 +273,6 @@ impl TaskManagerInner {
     const fn new() -> Self {
         Self {
             tasks: KVec::new(),
-            exit_records: KVec::new(),
             num_tasks: 0,
             next_task_id: 1,
             total_context_switches: 0,
@@ -352,15 +347,8 @@ fn ensure_pool_allocated() -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    let mut exit_records: KVec<TaskExitRecord> = match KVec::with_capacity(TASK_POOL_CAPACITY) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
     for _ in 0..TASK_POOL_CAPACITY {
         if tasks.push(None).is_err() {
-            return false;
-        }
-        if exit_records.push(TaskExitRecord::empty()).is_err() {
             return false;
         }
     }
@@ -373,7 +361,6 @@ fn ensure_pool_allocated() -> bool {
     let installed = with_task_manager(|mgr| {
         if mgr.tasks.is_empty() {
             mgr.tasks = tasks;
-            mgr.exit_records = exit_records;
             true
         } else {
             false
@@ -441,9 +428,6 @@ pub fn init_task_manager() -> c_int {
             }
             // SAFETY: exclusive `&mut` under the manager lock.
             unsafe { Task::reset_in_place(task_ptr) };
-        }
-        for rec in mgr.exit_records.iter_mut() {
-            *rec = TaskExitRecord::empty();
         }
         mgr.num_tasks = preserved_count;
         mgr.next_task_id = max_task_id.saturating_add(1);
@@ -675,8 +659,6 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             kbox as *mut Task
         };
 
-        mgr.exit_records[idx] = TaskExitRecord::empty();
-
         let task_id = mgr.next_task_id;
         mgr.next_task_id = task_id.wrapping_add(1);
         mgr.num_tasks += 1;
@@ -712,18 +694,67 @@ pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     0
 }
 
-pub fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRecord) -> c_int {
-    if record_out.is_null() {
-        return -1;
+/// Reap a Zombie task: copy its `ExitInfo` and transition the slot to
+/// `Terminated` atomically under the task-manager lock.
+///
+/// This is the parent-side waitpid-success path. The Zombie → Terminated
+/// transition makes the slot eligible for tier-2 reuse on a subsequent
+/// `reserve_task_slot`. Returns `None` if no slot currently carries
+/// `task_id` or the matching slot is not Zombie (already reaped, still
+/// alive, or invalid).
+///
+/// Single source of truth: `Task::exit_info` is read here directly; no
+/// parallel slot-indexed array exists. Holding the manager lock across
+/// the find + read + transition prevents `reserve_task_slot` tier-2 from
+/// recycling the slot mid-read — the historical race that hung pipeline
+/// reapers under TCG.
+pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
+    if task_id == INVALID_TASK_ID {
+        return None;
     }
     with_task_manager(|mgr| {
-        for rec in mgr.exit_records.iter() {
-            if rec.task_id == task_id {
-                unsafe { *record_out = *rec };
-                return 0;
+        for slot in mgr.iter_tasks_mut() {
+            if slot.task_id != task_id {
+                continue;
             }
+            if slot.status() != TaskStatus::Zombie {
+                return None;
+            }
+            // `mark_task_terminated` publishes `exit_info` BEFORE
+            // transitioning to Zombie, so Zombie + empty cell is
+            // unreachable; treat it defensively as "not yet ready"
+            // (leave status at Zombie so the caller can retry rather
+            // than silently dropping the exit code).
+            let info = slot.exit_info.try_get().cloned()?;
+            if !slot.try_transition_to(TaskStatus::Terminated) {
+                return None;
+            }
+            return Some(info);
         }
-        -1
+        None
+    })
+}
+
+/// Read the exit info for a Zombie or already-Terminated slot without
+/// transitioning it. Used by the blocking-waitpid post-wait re-read to
+/// surface an exit code even if the slot has since been moved past
+/// Zombie (e.g. by auto-reap when the parent itself was a grandparent).
+/// Returns `None` if the slot is missing, invalid, or still running.
+pub fn task_peek_exit_info(task_id: u32) -> Option<ExitInfo> {
+    if task_id == INVALID_TASK_ID {
+        return None;
+    }
+    with_task_manager(|mgr| {
+        for slot in mgr.iter_tasks() {
+            if slot.task_id != task_id {
+                continue;
+            }
+            if matches!(slot.status(), TaskStatus::Zombie | TaskStatus::Terminated) {
+                return slot.exit_info.try_get().cloned();
+            }
+            return None;
+        }
+        None
     })
 }
 

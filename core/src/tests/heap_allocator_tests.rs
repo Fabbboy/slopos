@@ -3,7 +3,7 @@ use slopos_utils::klog_info;
 
 use crate::exec::spawn_program_with_attrs;
 use crate::task::{
-    task_get_exit_record, TaskExitRecord, TaskPriority, INVALID_PROCESS_ID, INVALID_TASK_ID,
+    task_consume_zombie, task_peek_exit_info, TaskPriority, INVALID_PROCESS_ID, INVALID_TASK_ID,
     TASK_FLAG_USER_MODE,
 };
 
@@ -27,16 +27,21 @@ pub fn test_heap_allocator_suite() -> TestResult {
 
     crate::sched::task_wait_for(task_id);
 
-    let mut record = TaskExitRecord::empty();
-    if task_get_exit_record(task_id, &mut record) != 0 {
-        klog_info!("HEAP_ALLOC_TEST: missing exit record for task {}", task_id);
+    // After `task_wait_for` returns the child has exited. It is either
+    // a Zombie (orphaned spawn helper — no live parent) waiting to be
+    // reaped, or already Terminated (auto-reaped). Either branch yields
+    // the same `ExitInfo`.
+    let info = task_consume_zombie(task_id)
+        .or_else(|| task_peek_exit_info(task_id));
+    let Some(info) = info else {
+        klog_info!("HEAP_ALLOC_TEST: missing exit info for task {}", task_id);
         return TestResult::Fail;
-    }
+    };
 
     assert_test!(
-        record.exit_code == 0,
+        info.exit_code == 0,
         "heap allocator test suite failed with exit code {}",
-        record.exit_code
+        info.exit_code
     );
 
     TestResult::Pass

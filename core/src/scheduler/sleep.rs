@@ -10,8 +10,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_is_blocked,
-    task_is_invalid, task_is_terminated, task_set_state_from_with_reason,
-    task_set_state_with_reason,
+    task_is_exited, task_is_invalid, task_set_state_from_with_reason, task_set_state_with_reason,
 };
 use slopos_kernel_services::platform;
 
@@ -219,7 +218,7 @@ fn wake_sleeping_task(task_id: u32) {
     }
 
     let task = task_find_by_id(task_id);
-    if task.is_null() || task_is_invalid(task) || task_is_terminated(task) {
+    if task.is_null() || task_is_invalid(task) || task_is_exited(task) {
         return;
     }
 

@@ -7,7 +7,7 @@
 //! to take ownership of the ring and read out the recorded subtests.
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX, TEST_REPORT_RING_CAPACITY};
-use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
+use slopos_abi::task::INVALID_TASK_ID;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{AllocError, Init, KBox, KVec, Zeroable, init_from_closure};
 
@@ -112,20 +112,22 @@ pub fn empty_report() -> TestReport {
 // PendingDrain — slot-lifecycle-independent stash of test-task termination
 // =============================================================================
 //
-// The per-task `TestReportRing` lives in the `Task::test_reports` field, and
-// the per-slot `TaskExitRecord` lives in `TaskManagerInner::exit_records`.
-// Both pieces of state are tied to the slot's lifecycle: tier-2 reuse via
-// `reserve_task_slot` (which fires on `Terminated && refcnt == 0`) calls
-// `Task::reset_in_place` and then `mgr.exit_records[idx] = empty()` — so the
-// data the userland-test runner needs to drain disappears the moment the slot
-// is recycled.
+// The per-task `TestReportRing` lives in the `Task::test_reports` field and
+// is tied to the slot's lifecycle: tier-2 reuse via `reserve_task_slot` calls
+// `Task::reset_in_place`, which drops the ring — so the report data the
+// userland-test runner needs to drain disappears the moment the slot is
+// recycled.
 //
 // `PendingDrain` decouples the test framework from the slot lifecycle: when a
 // task that has lazily allocated a `TestReportRing` terminates, the kernel
-// moves the ring + a copy of the exit record into a process-wide map keyed by
-// the original `task_id`. The userland-test runner reads (and removes) from
-// this map by `task_id`, so it doesn't matter whether the slot has been
-// recycled, reset, or even reassigned to a different task in between.
+// moves the ring into a process-wide map keyed by the original `task_id`. The
+// userland-test runner reads (and removes) from this map by `task_id`, so it
+// doesn't matter whether the slot has been recycled, reset, or even
+// reassigned to a different task in between.
+//
+// Exit info is no longer stashed here — `Task::exit_info` is the single
+// source of truth, kept stable across the Zombie state until `waitpid` (or
+// the parent's own termination) reaps the slot.
 //
 // The map is sized for the handful of in-flight test entries the harness
 // produces (one at a time today, ≤ 256 in pathological future configurations);
@@ -147,7 +149,6 @@ const MAX_PENDING_DRAINS: usize = 256;
 /// crashed before reporting" from "binary reported nothing intentionally" at
 /// the runner-side roll-up.
 pub struct PendingDrain {
-    pub exit_record: TaskExitRecord,
     pub reports: Option<KBox<TestReportRing>>,
 }
 
@@ -199,9 +200,9 @@ impl PendingDrainTable {
 static PENDING_DRAINS: SpinLock<PendingDrainTable> =
     SpinLock::new(PendingDrainTable::new(), LOCK_LEVEL_REGISTRY);
 
-/// Stash a terminated task's exit record + (optional) test-report ring into
-/// the pending-drain cache. Called from `mark_task_terminated` after
-/// `record_task_exit` and BEFORE `release_task_dependents` wakes any waiter.
+/// Stash a terminated task's (optional) test-report ring into the
+/// pending-drain cache. Called from `mark_task_terminated` BEFORE
+/// `release_task_dependents` wakes any waiter.
 ///
 /// The ordering is load-bearing: the runner-side wait completes via
 /// `release_task_dependents` (or via `task_get_info` returning `Invalid` once

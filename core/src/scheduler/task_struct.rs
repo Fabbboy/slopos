@@ -787,6 +787,15 @@ impl Task {
         self.try_transition_to(TaskStatus::Terminated)
     }
 
+    /// Transition to `Zombie` — exit info has been published and a live
+    /// parent is expected to call `waitpid` to reap. Slot stays allocated
+    /// and is not eligible for tier-2 reuse until `waitpid` (or auto-reap
+    /// on parent death) moves it to `Terminated`.
+    #[inline]
+    pub fn mark_zombie(&self) -> bool {
+        self.try_transition_to(TaskStatus::Zombie)
+    }
+
     #[inline]
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
@@ -805,6 +814,17 @@ impl Task {
     #[inline]
     pub fn is_terminated(&self) -> bool {
         self.status() == TaskStatus::Terminated
+    }
+
+    #[inline]
+    pub fn is_zombie(&self) -> bool {
+        self.status() == TaskStatus::Zombie
+    }
+
+    /// True if the task has exited (Zombie or Terminated).
+    #[inline]
+    pub fn is_exited(&self) -> bool {
+        matches!(self.status(), TaskStatus::Zombie | TaskStatus::Terminated)
     }
 
     /// Bulk-copy task state using `ptr::copy_nonoverlapping`, then reset

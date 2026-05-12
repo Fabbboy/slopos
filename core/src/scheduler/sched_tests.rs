@@ -3424,6 +3424,199 @@ pub fn test_serial_reap_stampede() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression: a parent's `waitpid_nohang`-equivalent reaper must still
+/// observe a child's exit info after dozens of unrelated task
+/// allocations fire between the child's termination and the parent's
+/// reaping call. Before the Zombie-state introduction, the child's
+/// exit record lived in a slot-indexed parallel array that was wiped on
+/// every tier-2 slot reuse, so any new `task_create` between the
+/// child's exit and the reap would silently drop the exit code and
+/// hang the WNOHANG spin loop. The fix gates tier-2 reuse on
+/// `Terminated` (not `Zombie`), so the child's `exit_info` cell stays
+/// stable until `task_consume_zombie` transitions it.
+///
+/// What this catches if regressed:
+/// - Anyone re-adding a separate exit-record cache keyed by slot index
+///   that gets wiped on slot reuse → fails because the post-churn
+///   consume returns None.
+/// - A change that lets `reserve_task_slot` tier-2 pick a slot whose
+///   status is still `Zombie` → the recycled slot's exit_info gets
+///   reset, again the post-churn consume returns None.
+pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
+    use super::task::{task_consume_zombie, task_set_parent};
+
+    let _fixture = SchedFixture::new();
+
+    // "Parent" runs the test (`task_set_parent` makes the child's
+    // parent_task_id resolve to a Ready slot, so the child takes the
+    // Zombie path on termination).
+    let parent_id = task_create(
+        b"ZombieParent\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if parent_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let child_id = task_create(
+        b"ZombieChild\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if child_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    task_set_parent(child_id, parent_id);
+
+    if task_terminate(child_id) != 0 {
+        return TestResult::Fail;
+    }
+
+    let child_ptr = task_find_by_id(child_id);
+    if child_ptr.is_null() {
+        return TestResult::Fail;
+    }
+    if unsafe { (*child_ptr).status() } != TaskStatus::Zombie {
+        klog_info!(
+            "SCHED_TEST: child not Zombie after terminate (status={:?})",
+            unsafe { (*child_ptr).status() }
+        );
+        return TestResult::Fail;
+    }
+
+    // Churn: spawn + immediately terminate + reap a long chain of
+    // kernel-mode tasks. These have no parent so they go straight to
+    // Terminated, then reap_zombies + tier-2 reuse will hammer the
+    // pool. None of these may steal the child's slot.
+    for _ in 0..256 {
+        let id = task_create(
+            b"ChurnTask\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            return TestResult::Fail;
+        }
+        let _ = task_terminate(id);
+        reap_zombies();
+    }
+
+    // Re-find the child by ID and confirm its slot is still the same
+    // task (slot_index + task_id pair preserved). This is the "no
+    // slot-reuse for Zombies" invariant under inspection.
+    let child_ptr_after = task_find_by_id(child_id);
+    if child_ptr_after.is_null() {
+        klog_info!("SCHED_TEST: child slot vanished during churn");
+        return TestResult::Fail;
+    }
+    if unsafe { (*child_ptr_after).task_id } != child_id {
+        return TestResult::Fail;
+    }
+    if unsafe { (*child_ptr_after).status() } != TaskStatus::Zombie {
+        klog_info!("SCHED_TEST: child not Zombie after churn");
+        return TestResult::Fail;
+    }
+
+    // Parent's reaper would call this. Must succeed.
+    let info = match task_consume_zombie(child_id) {
+        Some(i) => i,
+        None => {
+            klog_info!("SCHED_TEST: task_consume_zombie returned None after churn");
+            return TestResult::Fail;
+        }
+    };
+    if info.exit_code != 0 {
+        return TestResult::Fail;
+    }
+
+    // After consume, slot should be Terminated and tier-2 reusable.
+    if unsafe { (*child_ptr_after).status() } != TaskStatus::Terminated {
+        klog_info!("SCHED_TEST: child not Terminated after consume");
+        return TestResult::Fail;
+    }
+
+    // Cleanup: terminate the parent so the next test sees a clean pool.
+    let _ = task_terminate(parent_id);
+    reap_zombies();
+
+    TestResult::Pass
+}
+
+/// Regression: when a parent terminates without reaping its Zombie
+/// children, those children must be auto-reaped (Zombie → Terminated)
+/// so their slots become tier-2 reusable. Without this, a parent that
+/// crashes leaves zombie slots pinned forever and the pool eventually
+/// exhausts.
+///
+/// What this catches if regressed:
+/// - `mark_task_terminated` no longer calling `reparent_and_reap_children`
+///   → the zombie stays pinned, this test sees status == Zombie after
+///   the parent's exit and fails.
+pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
+    use super::task::task_set_parent;
+
+    let _fixture = SchedFixture::new();
+
+    let parent_id = task_create(
+        b"OrphanParent\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if parent_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let child_id = task_create(
+        b"OrphanChild\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if child_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    task_set_parent(child_id, parent_id);
+
+    if task_terminate(child_id) != 0 {
+        return TestResult::Fail;
+    }
+    let child_ptr = task_find_by_id(child_id);
+    if child_ptr.is_null() || unsafe { (*child_ptr).status() } != TaskStatus::Zombie {
+        return TestResult::Fail;
+    }
+
+    // Parent dies without ever calling waitpid: the dying parent must
+    // sweep its child list and demote the Zombie to Terminated.
+    if task_terminate(parent_id) != 0 {
+        return TestResult::Fail;
+    }
+
+    let child_ptr_after = task_find_by_id(child_id);
+    if child_ptr_after.is_null() {
+        return TestResult::Fail;
+    }
+    if unsafe { (*child_ptr_after).status() } != TaskStatus::Terminated {
+        klog_info!(
+            "SCHED_TEST: orphan child still {:?} after parent exit",
+            unsafe { (*child_ptr_after).status() }
+        );
+        return TestResult::Fail;
+    }
+
+    reap_zombies();
+    TestResult::Pass
+}
+
 /// Cross-priority wait: a high-priority caller waits on a
 /// low-priority child that has already published its exit. Under the
 /// paused-AP fixture this is not a true SMP priority-inversion
@@ -3697,3 +3890,11 @@ slopos_testing::stest!(name = test_fork_exit_wait_stress_10x100, suite = sched_c
 slopos_testing::stest!(name = test_serial_reap_stampede, suite = sched_core);
 slopos_testing::stest!(name = test_cross_priority_wait, suite = sched_core);
 slopos_testing::stest!(name = test_effective_load_accuracy, suite = sched_core);
+slopos_testing::stest!(
+    name = test_waitpid_survives_concurrent_slot_reuse,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_orphan_child_auto_reaped_on_parent_exit,
+    suite = sched_core
+);

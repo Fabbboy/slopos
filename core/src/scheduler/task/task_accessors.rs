@@ -47,6 +47,23 @@ pub fn task_id_of(task: *const Task) -> Option<u32> {
     Some(unsafe { (*task).task_id })
 }
 
+/// Override the `parent_task_id` for a slot by task_id. Returns 0 on
+/// success, -1 if the slot cannot be located. Used by tests that need
+/// to wire a synthetic parent/child relationship without going through
+/// `task_fork` (kernel-mode tasks created via `task_create` default
+/// their parent to INVALID).
+pub fn task_set_parent(task_id: u32, parent_task_id: u32) -> core::ffi::c_int {
+    let task = super::task_table::task_find_by_id(task_id);
+    if task.is_null() {
+        return -1;
+    }
+    // SAFETY: lock-free write of a naturally-aligned u32; consumers
+    // tolerate stale-vs-fresh reads of this field (see `mark_task_terminated`
+    // → `parent_alive_for`).
+    unsafe { (*task).parent_task_id = parent_task_id };
+    0
+}
+
 /// Read the task's `process_id`.
 #[inline]
 pub fn task_process_id(task: *const Task) -> Option<u32> {
