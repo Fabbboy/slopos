@@ -33,13 +33,13 @@ impl WalkResult {
     }
 }
 
-pub unsafe trait PageTableFrameMapping {
+pub trait PageTableFrameMapping {
     fn phys_to_table_ptr(&self, phys: PhysAddr) -> Option<*mut PageTable>;
 }
 
 pub struct HhdmMapping;
 
-unsafe impl PageTableFrameMapping for HhdmMapping {
+impl PageTableFrameMapping for HhdmMapping {
     #[inline]
     fn phys_to_table_ptr(&self, phys: PhysAddr) -> Option<*mut PageTable> {
         if phys.is_null() {

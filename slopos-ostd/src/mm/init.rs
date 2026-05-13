@@ -166,13 +166,16 @@ impl_zeroable_primitive!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
 );
 
-// Note: `bool` is NOT Zeroable — `false` is 0x00 and `true` is
-// 0x01; any other byte pattern is UB. `char` is NOT Zeroable — the
-// all-zero `char` is U+0000 which is technically valid, but we
-// exclude it to keep `Zeroable` meaning strictly "every byte
-// pattern is valid"; a zeroed `char` is valid, but a zeroed
-// `[char; 2]` is always zero (still valid) — actually it would be.
-// Being strict avoids edge-case surprises.
+// `bool` is Zeroable: `false` is represented as `0x00`, so the
+// all-zero bit pattern is a well-formed `bool`. (The trait does not
+// require every bit pattern to be valid — that stronger property is
+// `Pod`'s job. `bool` is NOT `Pod` because `0x02..=0xFF` are invalid
+// representations, but it IS `Zeroable` because the zero byte alone is
+// a valid representation.) `char` remains excluded: while `U+0000` is
+// also a valid `char`, treating `char` as zero-byte-valid invites
+// surprises around niche layout in container types, and no current
+// kernel call site needs it.
+unsafe impl Zeroable for bool {}
 
 // ---------- composite impls ----------
 

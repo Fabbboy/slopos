@@ -58,18 +58,13 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
 
     // Drain into a kernel scratch buffer, then copy to userspace.
     // Heap-allocate so the ~2 KiB scratch never lands on the kernel
-    // stack — `InputEvent` is `#[repr(C)]` with
-    // `InputEventType::KeyPress = 0`, so the all-zero pattern is a
-    // valid default `InputEvent` (matching this syscall's prior
-    // `const { … KeyPress … }` initialiser).
-    //
-    // SAFETY of the Zeroable impl below: `InputEvent` is `#[repr(C)]`;
-    // `InputEventType` is `#[repr(u8)]` with discriminant 0 for
-    // `KeyPress` (the `#[default]` variant). `_padding`, `timestamp_ms`,
-    // and `data` (two `u32`s) are all zero-valid primitives.
+    // stack — the all-zero pattern is a valid default `InputEvent`
+    // (matching this syscall's prior `const { … KeyPress … }`
+    // initialiser).
     #[allow(dead_code)]
+    #[derive(slopos_ostd::Zeroable)]
+    #[repr(transparent)]
     struct InputEventScratch(InputEvent);
-    unsafe impl slopos_ostd::Zeroable for InputEventScratch {}
 
     const MAX_BATCH: usize = 64;
     let batch = max_count.min(MAX_BATCH);

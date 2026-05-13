@@ -123,7 +123,36 @@ unsafe impl RcuBackend for UnregisteredBackend {
 
 static DEFAULT_BACKEND: UnregisteredBackend = UnregisteredBackend;
 
-struct BackendSlot(UnsafeCell<MaybeUninit<&'static dyn RcuBackend>>);
+// ---------------------------------------------------------------------------
+// Function-pointer ops table — production-backend registration shape.
+// ---------------------------------------------------------------------------
+
+/// Function-pointer table that consumers use to wire up the production
+/// RCU backend without taking a dependency on the OSTD-internal
+/// [`RcuBackend`] trait shape. Every fn pointer must honour the
+/// equivalent method's contract on [`RcuBackend`].
+pub struct RcuOps {
+    /// See [`RcuBackend::clock_monotonic_ns`].
+    pub clock_monotonic_ns: fn() -> u64,
+    /// See [`RcuBackend::log_warn`].
+    pub log_warn: fn(args: core::fmt::Arguments<'_>),
+}
+
+struct OpsBackend(&'static RcuOps);
+
+// SAFETY: every method delegates to the registered ops table; the
+// caller of `register_rcu_backend` certifies the table honours the
+// `RcuBackend` contract documented on each fn pointer.
+unsafe impl RcuBackend for OpsBackend {
+    fn clock_monotonic_ns(&self) -> u64 {
+        (self.0.clock_monotonic_ns)()
+    }
+    fn log_warn(&self, args: core::fmt::Arguments<'_>) {
+        (self.0.log_warn)(args)
+    }
+}
+
+struct BackendSlot(UnsafeCell<MaybeUninit<OpsBackend>>);
 // SAFETY: writes are gated by `BACKEND_INSTALLED.swap(true, AcqRel)`
 // (one-shot); subsequent reads only happen after observing the flag
 // with Acquire, so the read sees the published reference.
@@ -136,14 +165,14 @@ static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 ///
 /// # Safety
 ///
-/// `backend` must live for the static lifetime of the kernel.
-pub unsafe fn register_rcu_backend(backend: &'static dyn RcuBackend) {
+/// `ops` must live for the static lifetime of the kernel.
+pub unsafe fn register_rcu_backend(ops: &'static RcuOps) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(!was_installed, "register_rcu_backend called twice");
     // SAFETY: the swap above transitioned us from "uninstalled" to
     // "installed" exclusively; no other writer can be racing.
     unsafe {
-        (*BACKEND_SLOT.0.get()).write(backend);
+        (*BACKEND_SLOT.0.get()).write(OpsBackend(ops));
     }
 }
 
@@ -152,8 +181,9 @@ fn backend() -> &'static dyn RcuBackend {
     if !BACKEND_INSTALLED.load(Ordering::Acquire) {
         return &DEFAULT_BACKEND;
     }
-    // SAFETY: paired Release in `register_rcu_backend`.
-    unsafe { *(*BACKEND_SLOT.0.get()).as_ptr() }
+    // SAFETY: paired Release in `register_rcu_backend`; the Acquire
+    // load above synchronises with the publishing write.
+    unsafe { (*BACKEND_SLOT.0.get()).assume_init_ref() }
 }
 
 /// Read the current monotonic time in nanoseconds.

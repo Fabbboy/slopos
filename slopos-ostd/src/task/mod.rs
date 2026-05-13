@@ -20,6 +20,6 @@ pub use switch::{
     task_entry_trampoline,
 };
 pub use task::{
-    CurrentTask, KernelStack, Task, TaskContext, TaskId, TaskRuntimeBackend, current,
-    register_task_runtime_backend,
+    CurrentTask, DEFAULT_TASK_RUNTIME_BACKEND, KernelStack, PcrTaskRuntimeBackend, Task,
+    TaskContext, TaskId, TaskRuntimeBackend, current, register_task_runtime_backend,
 };

@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+mod abi_zeroable;
+
 pub mod acpi;
 pub mod arch;
 pub mod boot;

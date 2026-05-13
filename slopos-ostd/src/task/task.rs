@@ -416,6 +416,30 @@ pub unsafe fn register_task_runtime_backend(backend: &'static dyn TaskRuntimeBac
     }
 }
 
+/// Production [`TaskRuntimeBackend`] that reads the per-CPU PCR
+/// `current_task` slot. The kernel scheduler writes a raw `*mut ()`
+/// into the slot whenever it dispatches a task; OSTD treats the
+/// pointer as opaque and the cast to `*const Task` is structurally a
+/// no-op until the kernel `Task` struct is re-skinned over the OSTD
+/// `Task`.
+pub struct PcrTaskRuntimeBackend;
+
+/// Production backend installed by boot via
+/// [`register_task_runtime_backend`].
+pub static DEFAULT_TASK_RUNTIME_BACKEND: PcrTaskRuntimeBackend = PcrTaskRuntimeBackend;
+
+// SAFETY: `current_task` reads the per-CPU PCR slot via
+// `crate::cpu::x86_64::pcr::get_current_task`. The slot is
+// `AtomicPtr<()>` loaded with `Ordering::Acquire` and the kernel
+// scheduler is the sole writer (through its dispatch path). When no
+// task has been dispatched yet the load returns null; `current()`
+// rejects null with a panic — matching the contract.
+unsafe impl TaskRuntimeBackend for PcrTaskRuntimeBackend {
+    fn current_task(&self) -> *const Task {
+        crate::cpu::x86_64::pcr::get_current_task() as *const Task
+    }
+}
+
 #[inline]
 fn task_runtime_backend() -> &'static dyn TaskRuntimeBackend {
     if !BACKEND_INSTALLED.load(Ordering::Acquire) {

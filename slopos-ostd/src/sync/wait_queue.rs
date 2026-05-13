@@ -197,7 +197,76 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
 
 static DEFAULT_BACKEND: UnregisteredBackend = UnregisteredBackend;
 
-struct BackendSlot(UnsafeCell<MaybeUninit<&'static dyn WaitQueueBackend>>);
+// ---------------------------------------------------------------------------
+// Function-pointer ops table — production-backend registration shape.
+// ---------------------------------------------------------------------------
+
+/// Function-pointer table that consumers use to wire up the production
+/// wait-queue backend without taking a dependency on the OSTD-internal
+/// [`WaitQueueBackend`] trait shape. The trait's safety contract is
+/// transferred onto the populated table: every fn pointer must honour
+/// the equivalent method's contract on [`WaitQueueBackend`].
+pub struct WaitQueueOps {
+    /// See [`WaitQueueBackend::is_runtime_initialised`].
+    pub is_runtime_initialised: fn() -> bool,
+    /// See [`WaitQueueBackend::current_task_handle`].
+    pub current_task_handle: fn() -> WaitTaskHandle,
+    /// See [`WaitQueueBackend::block_current_task`].
+    pub block_current_task: fn(),
+    /// See [`WaitQueueBackend::mark_current_blocked`].
+    pub mark_current_blocked: fn() -> bool,
+    /// See [`WaitQueueBackend::yield_blocked_task`].
+    pub yield_blocked_task: fn(),
+    /// See [`WaitQueueBackend::yield_blocked_task_with_timeout`].
+    pub yield_blocked_task_with_timeout: fn(u32),
+    /// See [`WaitQueueBackend::unblock_task`].
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `task` was obtained from
+    /// [`WaitQueueOps::current_task_handle`] and still refers to a
+    /// live task.
+    pub unblock_task: unsafe fn(WaitTaskHandle) -> i32,
+    /// See [`WaitQueueBackend::get_time_ms`].
+    pub get_time_ms: fn() -> u64,
+}
+
+struct OpsBackend(&'static WaitQueueOps);
+
+// SAFETY: every method delegates to the registered ops table; the
+// caller of `register_wait_queue_backend` certifies the table honours
+// the `WaitQueueBackend` contract documented on each fn pointer.
+unsafe impl WaitQueueBackend for OpsBackend {
+    fn is_runtime_initialised(&self) -> bool {
+        (self.0.is_runtime_initialised)()
+    }
+    fn current_task_handle(&self) -> WaitTaskHandle {
+        (self.0.current_task_handle)()
+    }
+    fn block_current_task(&self) {
+        (self.0.block_current_task)()
+    }
+    fn mark_current_blocked(&self) -> bool {
+        (self.0.mark_current_blocked)()
+    }
+    fn yield_blocked_task(&self) {
+        (self.0.yield_blocked_task)()
+    }
+    fn yield_blocked_task_with_timeout(&self, timeout_ms: u32) {
+        (self.0.yield_blocked_task_with_timeout)(timeout_ms)
+    }
+    unsafe fn unblock_task(&self, task: WaitTaskHandle) -> i32 {
+        // SAFETY: forwarding contract — caller of
+        // `WaitQueueBackend::unblock_task` certifies `task`; the ops
+        // table inherits the same contract.
+        unsafe { (self.0.unblock_task)(task) }
+    }
+    fn get_time_ms(&self) -> u64 {
+        (self.0.get_time_ms)()
+    }
+}
+
+struct BackendSlot(UnsafeCell<MaybeUninit<OpsBackend>>);
 // SAFETY: writes are gated by `BACKEND_INSTALLED.swap(true, AcqRel)`
 // (one-shot); subsequent reads only happen after observing the flag
 // with Acquire, so the read sees the published reference.
@@ -210,16 +279,18 @@ static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 ///
 /// # Safety
 ///
-/// `backend` must live for the static lifetime of the kernel. The caller
-/// certifies that the backend's task-handle invariants hold (only valid
-/// task pointers are produced; wakeups on stale handles are tolerated).
-pub unsafe fn register_wait_queue_backend(backend: &'static dyn WaitQueueBackend) {
+/// `ops` must live for the static lifetime of the kernel. The caller
+/// certifies the table's fn-pointer entries honour the
+/// [`WaitQueueBackend`] contract: task handles refer to live tasks,
+/// `unblock_task` tolerates stale handles, and every method is safe to
+/// call from the contexts documented on the trait.
+pub unsafe fn register_wait_queue_backend(ops: &'static WaitQueueOps) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(!was_installed, "register_wait_queue_backend called twice");
     // SAFETY: the swap above transitioned us from "uninstalled" to
     // "installed" exclusively; no other writer can be racing.
     unsafe {
-        (*BACKEND_SLOT.0.get()).write(backend);
+        (*BACKEND_SLOT.0.get()).write(OpsBackend(ops));
     }
 }
 
@@ -228,8 +299,9 @@ fn backend() -> &'static dyn WaitQueueBackend {
     if !BACKEND_INSTALLED.load(Ordering::Acquire) {
         return &DEFAULT_BACKEND;
     }
-    // SAFETY: paired Release in `register_wait_queue_backend`.
-    unsafe { *(*BACKEND_SLOT.0.get()).as_ptr() }
+    // SAFETY: paired Release in `register_wait_queue_backend`; the
+    // Acquire load above synchronises with the publishing write.
+    unsafe { (*BACKEND_SLOT.0.get()).assume_init_ref() }
 }
 
 // ---------------------------------------------------------------------------

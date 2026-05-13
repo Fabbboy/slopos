@@ -9,12 +9,14 @@
 //! # Example
 //!
 //! ```ignore
-//! pub struct SleepQueueShadow;
-//! unsafe impl HermeticState for SleepQueueShadow {
-//!     type Snapshot = KVec<SleepEntry>;
-//!     const NAME: &'static str = "SleepQueueShadow";
-//!     fn snapshot() -> Result<Self::Snapshot, AllocError> { ... }
-//!     unsafe fn restore(snap: Self::Snapshot) { ... }
+//! slopos_ostd::hermetic_state! {
+//!     pub SleepQueueShadow {
+//!         type Snapshot = KVec<SleepEntry>;
+//!         const NAME: &'static str = "SleepQueueShadow";
+//!         const DEPENDS_ON: &'static [&'static str] = &[];
+//!         fn snapshot() -> Result<Self::Snapshot, AllocError> { ... }
+//!         unsafe fn restore(snap: Self::Snapshot) { ... }
+//!     }
 //! }
 //! register_hermetic_state!(SleepQueueShadow);
 //! ```

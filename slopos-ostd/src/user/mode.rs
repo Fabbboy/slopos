@@ -177,6 +177,103 @@ pub fn reset_user_mode_backend_for_test() {
     BACKEND_INSTALLED.store(false, Ordering::Release);
 }
 
+/// Production [`UserModeBackend`] that drives the kernel→user→kernel
+/// round trip via the per-CPU PCR slots.
+///
+/// `execute_round_trip` stashes the active [`UserContext`] pointer in
+/// `pcr.user_ctx_ptr`, resets the return-reason slot, invokes
+/// [`user_mode_round_trip_asm`] (which builds the IRETQ frame and
+/// transitions to user mode), and on user→kernel re-entry decodes the
+/// trampoline's return-reason payload via [`read_return_reason`].
+///
+/// `_space` is intentionally ignored at this layer: CR3 is owned by
+/// the kernel paging code outside OSTD, so address-space activation
+/// happens before the round trip is dispatched.
+pub struct PcrUserModeBackend;
+
+/// Production backend installed by boot via
+/// [`register_user_mode_backend`]. Use as
+/// `register_user_mode_backend(&DEFAULT_USER_MODE_BACKEND)`.
+pub static DEFAULT_USER_MODE_BACKEND: PcrUserModeBackend = PcrUserModeBackend;
+
+// SAFETY: `PcrUserModeBackend` carries no per-instance state. Every
+// method reads the per-CPU PCR slots through `current_pcr()` (which
+// resolves to the running CPU's PCR via `gs:[0]`). The round trip is
+// not preemptible (the caller — `user_task_loop` — runs with IRQs on
+// only inside user mode; the kernel-side window between the
+// `user_ctx_ptr.store` and the iretq is fully serialised on the
+// running CPU).
+#[cfg(all(target_arch = "x86_64", not(test)))]
+unsafe impl UserModeBackend for PcrUserModeBackend {
+    unsafe fn execute_round_trip(
+        &self,
+        ctx_ptr: *mut UserContext,
+        _space: &VmSpace,
+    ) -> ReturnReason {
+        use crate::cpu::x86_64::pcr::{RETURN_REASON_KIND_NONE, current_pcr};
+
+        // Stash the context pointer where `__ostd_user_return` will
+        // find it. Released before the iretq so the trampoline (which
+        // reads with Acquire-equivalent `mov gs:…`) sees the publish.
+        // SAFETY: `current_pcr()` is callable because GS_BASE was
+        // installed at PCR setup; the slot is per-CPU and the CPU is
+        // the sole writer in this scope.
+        let pcr = unsafe { current_pcr() };
+        pcr.user_ctx_ptr.store(ctx_ptr, Ordering::Release);
+
+        // Reset return-reason to a sentinel so a stale value can't be
+        // misread if the trampoline somehow returns without writing
+        // (defense in depth against the asm contract being violated).
+        pcr.return_reason
+            .kind
+            .store(RETURN_REASON_KIND_NONE, Ordering::Release);
+        pcr.return_reason.payload.store(0, Ordering::Release);
+
+        // Drive the actual round trip. The asm helper saves kernel
+        // callee-saves + RSP + return RIP, builds the IRETQ frame from
+        // the supplied UserRegs, and `iretq`s into user. The
+        // trampoline `jmp`s back to a label inside the helper on
+        // user→kernel return, at which point control returns here.
+        //
+        // SAFETY: `ctx_ptr` is valid for the duration of the round
+        // trip (caller invariant via `&'a mut UserContext`); the
+        // helper consumes the regs pointer before iretq, and the
+        // trampoline writes the new user state back through
+        // `pcr.user_ctx_ptr` — not through this regs pointer.
+        let regs_ptr = unsafe { (&*ctx_ptr).regs_ptr() };
+        unsafe {
+            user_mode_round_trip_asm(regs_ptr);
+        }
+
+        // SAFETY: the trampoline wrote a well-formed encoding into the
+        // return-reason slot before it `jmp`ed back; `read_return_reason`
+        // panics on an invalid encoding (defense in depth).
+        read_return_reason()
+    }
+}
+
+// Host-side test build: `user_mode_round_trip_asm` and
+// `read_return_reason` are only compiled on `x86_64` `not(test)`. The
+// trait surface still needs an impl so `DEFAULT_USER_MODE_BACKEND`
+// type-checks; host tests never invoke `execute_round_trip` (they
+// drive `UserMode` through a `reset_user_mode_backend_for_test` reset).
+#[cfg(not(all(target_arch = "x86_64", not(test))))]
+// SAFETY: this build branch never has its `execute_round_trip` called
+// because the host test fixtures install a stub backend; the
+// `unreachable!` is the only operation performed.
+unsafe impl UserModeBackend for PcrUserModeBackend {
+    unsafe fn execute_round_trip(
+        &self,
+        _ctx_ptr: *mut UserContext,
+        _space: &VmSpace,
+    ) -> ReturnReason {
+        unreachable!(
+            "PcrUserModeBackend::execute_round_trip is only callable on \
+             x86_64 production builds"
+        );
+    }
+}
+
 fn current_user_mode_backend() -> &'static dyn UserModeBackend {
     if BACKEND_INSTALLED.load(Ordering::Acquire) {
         // SAFETY: `BACKEND_INSTALLED == true` ⇒ the AcqRel swap that

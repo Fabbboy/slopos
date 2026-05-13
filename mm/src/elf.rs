@@ -466,7 +466,8 @@ impl Elf64Phdr {
 /// - Address space validation
 /// - Alignment validation
 /// - Size validation
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, slopos_ostd::Zeroable)]
+#[repr(C)]
 pub struct ValidatedSegment {
     /// Page-aligned virtual address start
     pub vaddr_start: u64,
@@ -483,11 +484,6 @@ pub struct ValidatedSegment {
     /// Segment flags
     pub flags: u32,
 }
-
-// SAFETY: every field is a primitive integer, whose all-zero bit pattern
-// is a valid `u32`/`u64`. No references, pointers, or enums with
-// non-zero discriminants are present.
-unsafe impl slopos_ostd::Zeroable for ValidatedSegment {}
 
 impl ValidatedSegment {
     /// All-zero sentinel suitable for filling uninitialised scratch.

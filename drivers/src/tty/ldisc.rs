@@ -355,17 +355,8 @@ fn is_word_codepoint(cp: u32) -> bool {
 /// Each `Tty` owns one `LineDisc` instance.  It maintains an edit buffer
 /// (for canonical mode line editing) and a cooked ring buffer (ready for
 /// userland `read()`).
-// SAFETY: Every field of `LineDisc` accepts an all-zero bit-pattern:
-// `UserTermios` is bitflags (empty set = 0), `u8`, `[u8; NCCS]`, and
-// `u32` — all zero-valid. `[u8; EDIT_BUF_SIZE]` is trivially zero-valid.
-// `RingBuffer<u8, COOKED_BUF_SIZE>` is zero-valid via its blanket
-// `Zeroable` impl in `slopos-utils` (an all-zero ring is semantically
-// empty: head = tail = count = 0). The remaining fields are `usize`,
-// `u8`, `u32`, or `bool`, all of which accept zero. Overwriting
-// `termios` with `Self::default_termios()` after zeroing does not
-// affect soundness of the prior all-zero state.
-unsafe impl Zeroable for LineDisc {}
-
+#[derive(Zeroable)]
+#[repr(C)]
 pub struct LineDisc {
     termios: UserTermios,
 
@@ -1763,12 +1754,8 @@ const RAW_BUF_SIZE: usize = 4096;
 /// No input processing, no echo, no signals, no canonical editing.
 /// Bytes pushed via `input_char` go directly to the cooked ring buffer;
 /// output bytes pass through without `c_oflag` processing.
-// SAFETY: Every field of `RawDisc` accepts an all-zero bit-pattern:
-// `UserTermios` is zero-valid (see `LineDisc`'s impl), `RingBuffer<u8,
-// N>` is zero-valid via its `slopos-utils` impl, and the remaining
-// fields are primitives.
-unsafe impl Zeroable for RawDisc {}
-
+#[derive(Zeroable)]
+#[repr(C)]
 pub struct RawDisc {
     termios: UserTermios,
     buf: RingBuffer<u8, RAW_BUF_SIZE>,

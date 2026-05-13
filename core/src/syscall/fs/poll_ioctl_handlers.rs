@@ -267,15 +267,13 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     // function frame stays small. A stack-resident
     // `[u16 + UserPollFd + u32; SELECT_MAX_FDS]` triplet would cost
     // ~3.5 KiB per poll(2) call.
+    #[derive(slopos_ostd::Zeroable)]
     #[repr(C)]
     struct PollScratch {
         cached_revents: [u16; SELECT_MAX_FDS],
         poll_fds: [UserPollFd; SELECT_MAX_FDS],
         registered_ofis: [u32; SELECT_MAX_FDS],
     }
-    // SAFETY: every field is a primitive integer/struct of integers;
-    // the all-zero bit pattern is a valid value.
-    unsafe impl slopos_ostd::Zeroable for PollScratch {}
     let mut scratch_box = match slopos_ostd::KBox::<PollScratch>::zeroed() {
         Ok(b) => b,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
@@ -403,6 +401,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
     // gate. Inline `[u8; FDSET_BYTES]` × 6 + `[u32; SELECT_MAX_FDS]`
     // would put ~1.2 KiB on the stack on every call.
     const FDSET_BYTES: usize = SELECT_MAX_FDS / 8;
+    #[derive(slopos_ostd::Zeroable)]
     #[repr(C)]
     struct SelectScratch {
         read_in: [u8; FDSET_BYTES],
@@ -413,9 +412,6 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         except_out: [u8; FDSET_BYTES],
         registered_ofis: [u32; SELECT_MAX_FDS],
     }
-    // SAFETY: `SelectScratch` is composed entirely of byte/integer arrays;
-    // the all-zero bit pattern is a valid value.
-    unsafe impl slopos_ostd::Zeroable for SelectScratch {}
     let mut scratch_box = match slopos_ostd::KBox::<SelectScratch>::zeroed() {
         Ok(b) => b,
         Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM as u64),
