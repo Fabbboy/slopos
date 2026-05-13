@@ -16,6 +16,8 @@ pub mod boot;
 pub mod cpu;
 pub mod dev;
 pub mod dma;
+pub mod early_console;
+pub mod ffi;
 pub mod io;
 pub mod irq;
 pub mod mm;
