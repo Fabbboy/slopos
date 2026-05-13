@@ -1139,12 +1139,6 @@ pub fn scheduler_task_exit_impl() -> ! {
         "scheduler_task_exit: Schedule returned unexpectedly on CPU {}",
         cpu_id
     );
-    // Same recovery contract as the no-current-task halt above: keep
-    // the CPU responsive to IPIs so the BSP's NMI watchdog does not
-    // time it out. The previous `loop { unsafe { asm!("hlt") } }`
-    // form was accidentally optimised by LLVM into a tail-recursive
-    // `loop { schedule(); klog; }` busy spin, which hid the same IF
-    // hazard — explicit HLT exposes it.
     slopos_arch::cpu::enable_interrupts();
     slopos_ostd::cpu::x86_64::core::halt_loop();
 }

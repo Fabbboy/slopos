@@ -1,4 +1,3 @@
-use core::arch::asm;
 use core::ffi::c_char;
 
 use slopos_arch::cpu;
@@ -138,19 +137,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     klog_info!("Keyboard reset failed, attempting triple fault...");
 
-    #[repr(C, packed)]
-    struct InvalidIdt {
-        limit: u16,
-        base: u64,
-    }
-
-    let invalid_idt = InvalidIdt { limit: 0, base: 0 };
-    unsafe {
-        asm!("lidt [{}]", in(reg) &invalid_idt, options(nostack, preserves_flags));
-        asm!("int3", options(nostack, preserves_flags));
-    }
-
-    halt();
+    slopos_ostd::cpu::x86_64::core::trigger_triple_fault();
 }
 pub fn execute_kernel() {
     klog_info!("=== EXECUTING KERNEL PURIFICATION RITUAL ===");

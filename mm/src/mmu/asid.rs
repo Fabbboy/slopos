@@ -194,33 +194,6 @@ fn set_cr4_pcide_local() {
     klog_debug!("MMU: CR4.PCIDE set on this CPU");
 }
 
-/// INVPCID instruction wrappers. Types per SDM Vol 2A §3.2 "INVPCID":
-///   type 0: individual address invalidation in the given PCID
-///   type 1: single-context invalidation (all non-global entries for PCID)
-///   type 2: all-context invalidation including globals
-///   type 3: all-context invalidation excluding globals
-#[repr(C)]
-struct InvpcidDescriptor {
-    pcid: u64,
-    linear: u64,
-}
-
-#[allow(dead_code)]
-fn invpcid(kind: u64, pcid: u16, linear: u64) {
-    let desc = InvpcidDescriptor {
-        pcid: pcid as u64,
-        linear,
-    };
-    unsafe {
-        core::arch::asm!(
-            "invpcid {kind}, [{desc}]",
-            kind = in(reg) kind,
-            desc = in(reg) &desc,
-            options(nostack, preserves_flags, readonly),
-        );
-    }
-}
-
 /// Flush all entries belonging to a specific PCID (INVPCID type 1).
 ///
 /// Used when reassigning a PCID slot to a different context, or when a
@@ -233,7 +206,7 @@ pub fn flush_pcid(pcid: u16) {
         slopos_arch::cpu::write_cr3(cr3);
         return;
     }
-    invpcid(1, pcid, 0);
+    slopos_ostd::cpu::x86_64::tlb::invpcid(1, pcid, 0);
 }
 
 /// Choose a CR3 value for the next address space to load on this CPU.

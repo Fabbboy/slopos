@@ -138,10 +138,7 @@ fn boot_step_memory_post_typestate(_ctx: &mut BootCtx) -> i32 {
 }
 
 fn boot_step_memory_verify(_ctx: &mut BootCtx) {
-    let stack_ptr: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) stack_ptr, options(nomem, preserves_flags));
-    }
+    let stack_ptr = slopos_ostd::cpu::x86_64::stack::read_rsp();
 
     if klog::is_enabled_level(KlogLevel::Debug) {
         klog_debug!("Stack pointer read successfully!");

@@ -25,3 +25,36 @@ pub fn wbinvd() {
         asm!("wbinvd", options(nostack, preserves_flags));
     }
 }
+
+/// `INVPCID` descriptor per SDM Vol 2A §3.2.
+#[repr(C)]
+struct InvpcidDescriptor {
+    pcid: u64,
+    linear: u64,
+}
+
+/// Issue `INVPCID` with the given type, PCID, and linear address.
+///
+/// SDM Vol 2A §3.2 "INVPCID":
+///   - type 0: individual address invalidation within `pcid`
+///   - type 1: single-context invalidation (non-globals for `pcid`)
+///   - type 2: all-context invalidation including globals
+///   - type 3: all-context invalidation excluding globals
+///
+/// Caller must have already gated on CPUID-leaf availability (e.g.
+/// the `invpcid_available()` check in `mm/src/mmu/asid.rs`).
+#[inline(always)]
+pub fn invpcid(kind: u64, pcid: u16, linear: u64) {
+    let desc = InvpcidDescriptor {
+        pcid: pcid as u64,
+        linear,
+    };
+    unsafe {
+        asm!(
+            "invpcid {kind}, [{desc}]",
+            kind = in(reg) kind,
+            desc = in(reg) &desc,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+}

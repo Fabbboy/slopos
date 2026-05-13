@@ -135,9 +135,7 @@ extern "C" fn unified_idle_loop(_: *mut c_void) {
             slopos_ostd::sync::rcu_process_callbacks();
         }
         slopos_ostd::sync::rcu_note_qs();
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
+        slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
     }
 }
 
@@ -229,25 +227,8 @@ pub(crate) fn resolve_idle_stack_for_cpu(
     Ok((idle_task, stack_top))
 }
 
-#[inline(never)]
-unsafe fn enter_scheduler_on_idle_stack(cpu_id: usize, idle_task: *mut Task, stack_top: u64) -> ! {
-    unsafe {
-        core::arch::asm!(
-            "mov rsp, rdx",
-            "mov rbp, rsp",
-            "call {target}",
-            "ud2",
-            target = sym scheduler_loop_entry,
-            in("rdi") cpu_id,
-            in("rsi") idle_task,
-            in("rdx") stack_top,
-            options(noreturn)
-        );
-    }
-}
-
-extern "C" fn scheduler_loop_entry(cpu_id: usize, idle_task: *mut Task) -> ! {
-    scheduler_loop(cpu_id, idle_task)
+extern "C" fn scheduler_loop_entry(cpu_id: usize, idle_task: *mut ()) -> ! {
+    scheduler_loop(cpu_id, idle_task as *mut Task)
 }
 
 pub fn enter_scheduler(cpu_id: usize) -> ! {
@@ -299,7 +280,14 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     // the per-CPU bootstrap stub's.
     super::scheduler::dispatch(cpu_id, idle_task);
 
-    unsafe { enter_scheduler_on_idle_stack(cpu_id, idle_task, idle_stack_top) }
+    unsafe {
+        slopos_ostd::cpu::x86_64::stack::switch_stack_and_call_noreturn(
+            idle_stack_top,
+            scheduler_loop_entry,
+            cpu_id,
+            idle_task as *mut (),
+        )
+    }
 }
 
 /// Callback registered by the boot layer to start the per-CPU LAPIC timer.
@@ -420,9 +408,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
             slopos_ostd::sync::rcu_note_qs();
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-            }
+            slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
             continue;
         }
 
@@ -440,8 +426,6 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.
         slopos_ostd::sync::rcu_note_qs();
 
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
+        slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
     }
 }
