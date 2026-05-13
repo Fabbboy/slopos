@@ -302,12 +302,6 @@ struct UiQueue {
     wakeup_fd: i32,
 }
 
-// SAFETY: The AtomicPtr itself is Send+Sync. CallbackNode contains a
-// Box<dyn FnOnce + Send> which is Send. Push uses CAS (thread-safe),
-// drain swaps head to null (exclusive to UI thread).
-unsafe impl Send for UiQueue {}
-unsafe impl Sync for UiQueue {}
-
 impl UiQueue {
     /// Create a queue with a wakeup pipe write end.
     fn with_wakeup(wakeup_fd: i32) -> Self {

@@ -3,7 +3,7 @@ use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KBox, KVec};
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
@@ -75,18 +75,13 @@ pub enum ZombieListRole {}
 /// Allocation-free: `IntrusiveLinkedList::push` only updates the
 /// in-Task link slot; no heap touched while the spin-lock is held.
 struct ZombieList {
-    list: IntrusiveLinkedList<Task, ZombieListRole>,
+    list: KernelSync<IntrusiveLinkedList<Task, ZombieListRole>>,
 }
-
-// SAFETY: `Task` is not auto-Send (raw pointers). Cross-CPU access is
-// mediated by `ZOMBIE_LIST.lock()`; these markers assert that.
-unsafe impl Send for ZombieList {}
-unsafe impl Sync for ZombieList {}
 
 impl ZombieList {
     const fn new() -> Self {
         Self {
-            list: IntrusiveLinkedList::new(),
+            list: KernelSync::new(IntrusiveLinkedList::new()),
         }
     }
 
@@ -254,7 +249,7 @@ pub(super) struct TaskManagerInner {
     /// A slot never transitions `Some → None` during normal operation.
     /// The `KBox` lives until kernel shutdown; recycling happens via
     /// `Task::reset_in_place` on the KBox's contents.
-    pub(super) tasks: KVec<Option<KBox<Task>>>,
+    pub(super) tasks: KernelSync<KVec<Option<KBox<Task>>>>,
     pub(super) num_tasks: u32,
     pub(super) next_task_id: u32,
     pub(super) total_context_switches: u64,
@@ -264,15 +259,10 @@ pub(super) struct TaskManagerInner {
     pub(super) initialized: bool,
 }
 
-// SAFETY: TaskManagerInner contains Tasks (boxed) with raw pointers.
-// Cross-CPU access is serialised through the SpinLock, with the
-// documented lock-free read exceptions below.
-unsafe impl Send for TaskManagerInner {}
-
 impl TaskManagerInner {
     const fn new() -> Self {
         Self {
-            tasks: KVec::new(),
+            tasks: KernelSync::new(KVec::new()),
             num_tasks: 0,
             next_task_id: 1,
             total_context_switches: 0,
@@ -360,7 +350,7 @@ fn ensure_pool_allocated() -> bool {
     // practice, but stay race-safe).
     let installed = with_task_manager(|mgr| {
         if mgr.tasks.is_empty() {
-            mgr.tasks = tasks;
+            mgr.tasks = KernelSync::new(tasks);
             true
         } else {
             false

@@ -253,9 +253,6 @@ pub struct MsrSnapshot {
     sfmask: u64,
 }
 
-// SAFETY: a struct of u64 is trivially Send.
-unsafe impl Send for MsrSnapshot {}
-
 hermetic_state! {
     pub MsrShadow {
         type Snapshot = MsrSnapshot;

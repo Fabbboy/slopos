@@ -8,7 +8,7 @@ use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
 };
 use slopos_net as net;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
@@ -1362,10 +1362,10 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 // =============================================================================
 
 static VIRTIO_NET_DRIVER: PciDriver = PciDriver {
-    name: b"virtio-net\0".as_ptr(),
+    name: KernelSync::new(b"virtio-net\0".as_ptr()),
     match_fn: Some(virtio_net_match),
     probe: Some(virtio_net_probe),
-    context: core::ptr::null_mut(),
+    context: KernelSync::new(core::ptr::null_mut()),
 };
 
 pub fn virtio_net_register_driver() {

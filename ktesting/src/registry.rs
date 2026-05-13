@@ -36,10 +36,6 @@ pub struct TestDesc {
     pub argv: &'static [&'static str],
 }
 
-// SAFETY: All fields are immutable `'static` references and function
-// pointers; safe for read-only access from any CPU.
-unsafe impl Sync for TestDesc {}
-
 /// `flags` bit: panic from this test should be reported as Pass with the
 /// `EXPECTED_PANIC` suffix. Used by the bootstrap panic-isolation canary.
 pub const FLAG_EXPECTED_PANIC: u32 = 0x1;

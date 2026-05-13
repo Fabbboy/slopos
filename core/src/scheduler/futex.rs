@@ -11,7 +11,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::task::BlockReason;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::scheduler::{
     mark_current_blocked, scheduler_get_current_task, unblock_task, yield_blocked_task,
@@ -30,14 +30,14 @@ struct FutexWaiter {
     /// Physical address of the futex word (used as the key).
     futex_addr: u64,
     /// Pointer to the blocked task.
-    task: *mut Task,
+    task: KernelSync<*mut Task>,
 }
 
 impl FutexWaiter {
     const fn empty() -> Self {
         Self {
             futex_addr: 0,
-            task: ptr::null_mut(),
+            task: KernelSync::new(ptr::null_mut()),
         }
     }
 
@@ -45,10 +45,6 @@ impl FutexWaiter {
         self.task.is_null()
     }
 }
-
-// SAFETY: FutexWaiter contains raw pointers managed by the scheduler.
-// Access is synchronized through per-bucket SpinLock locks.
-unsafe impl Send for FutexWaiter {}
 
 struct FutexBucket {
     waiters: [FutexWaiter; FUTEX_MAX_WAITERS_PER_BUCKET],
@@ -145,7 +141,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
 
         bucket.waiters[idx] = FutexWaiter {
             futex_addr: uaddr,
-            task: current,
+            task: KernelSync::new(current),
         };
         bucket.count += 1;
 
@@ -188,7 +184,7 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
         }
         let waiter = &mut bucket.waiters[i];
         if !waiter.is_empty() && waiter.futex_addr == uaddr {
-            let task = waiter.task;
+            let task = *waiter.task;
             *waiter = FutexWaiter::empty();
             bucket.count = bucket.count.saturating_sub(1);
 
@@ -220,7 +216,7 @@ pub fn futex_remove_task(task: *mut Task) {
         let mut bucket = bucket_mutex.lock();
         let mut removed = 0usize;
         for waiter in bucket.waiters.iter_mut() {
-            if !waiter.is_empty() && waiter.task == task {
+            if !waiter.is_empty() && *waiter.task == task {
                 *waiter = FutexWaiter::empty();
                 removed += 1;
             }

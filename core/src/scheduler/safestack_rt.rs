@@ -57,6 +57,8 @@
 
 use core::cell::SyncUnsafeCell;
 
+use slopos_ostd::sync::KernelSync;
+
 use super::task::task_set_unsafe_stack_sp;
 use super::task_struct::{TASK_UNSAFE_STACK_SP_OFFSET, Task};
 
@@ -113,44 +115,34 @@ pub static APS_BOOTSTRAP_UNSAFE_STACKS: SyncUnsafeCell<ApBootstrapUnsafeStacks> 
 // stack before the CPU's GS_BASE is installed.  Every other field
 // keeps its `Task::invalid()` default.
 
-/// Newtype wrapper granting `Sync` to our bootstrap-Task static.
-///
-/// `Task` contains raw pointer fields (`entry_arg: *mut c_void`,
-/// `next_ready: *mut Task`, …) that are *not* `Sync` by themselves.
-/// Those fields are never touched on the bootstrap stubs — we only
-/// ever write `unsafe_stack_sp` before SMP bringup, and after that the
-/// stubs are read-only markers.  Wrapping the stub in a single-writer
-/// newtype makes the `Sync` promise explicit at the static boundary
-/// rather than sprinkled across every `get()` call site.
+/// Bootstrap-Task stub cell; `Sync` via `KernelSync<T>`.
 #[repr(transparent)]
-pub struct BootstrapTaskCell(pub SyncUnsafeCell<Task>);
-unsafe impl Sync for BootstrapTaskCell {}
+pub struct BootstrapTaskCell(pub KernelSync<SyncUnsafeCell<Task>>);
 
 impl BootstrapTaskCell {
     #[inline]
     pub const fn new(task: Task) -> Self {
-        Self(SyncUnsafeCell::new(task))
+        Self(KernelSync::new(SyncUnsafeCell::new(task)))
     }
 
     #[inline]
     pub fn get(&self) -> *mut Task {
-        self.0.get()
+        (*self.0).get()
     }
 }
 
 #[repr(transparent)]
-pub struct BootstrapTaskArrayCell(pub SyncUnsafeCell<[Task; MAX_STATIC_APS]>);
-unsafe impl Sync for BootstrapTaskArrayCell {}
+pub struct BootstrapTaskArrayCell(pub KernelSync<SyncUnsafeCell<[Task; MAX_STATIC_APS]>>);
 
 impl BootstrapTaskArrayCell {
     #[inline]
     pub const fn new(tasks: [Task; MAX_STATIC_APS]) -> Self {
-        Self(SyncUnsafeCell::new(tasks))
+        Self(KernelSync::new(SyncUnsafeCell::new(tasks)))
     }
 
     #[inline]
     pub fn get(&self) -> *mut [Task; MAX_STATIC_APS] {
-        self.0.get()
+        (*self.0).get()
     }
 
     /// Pointer to the `i`-th element of the bootstrap-task array.
@@ -160,7 +152,7 @@ impl BootstrapTaskArrayCell {
     #[inline]
     pub fn ptr_at(&self, i: usize) -> *mut Task {
         debug_assert!(i < MAX_STATIC_APS);
-        let base: *mut Task = self.0.get().cast();
+        let base: *mut Task = (*self.0).get().cast();
         base.wrapping_add(i)
     }
 }

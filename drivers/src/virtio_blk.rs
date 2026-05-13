@@ -4,7 +4,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_ostd::dev::FromRawPtr;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
@@ -356,10 +356,10 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     0
 }
 static VIRTIO_BLK_DRIVER: PciDriver = PciDriver {
-    name: b"virtio-blk\0".as_ptr(),
+    name: KernelSync::new(b"virtio-blk\0".as_ptr()),
     match_fn: Some(virtio_blk_match),
     probe: Some(virtio_blk_probe),
-    context: ptr::null_mut(),
+    context: KernelSync::new(ptr::null_mut()),
 };
 
 pub fn virtio_blk_register_driver() {

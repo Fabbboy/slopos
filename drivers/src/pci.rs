@@ -10,7 +10,7 @@ use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::pci::{Bdf, EcamConfigSpace};
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
+use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
 use slopos_ostd::{KVec, Pod};
 use slopos_utils::klog_info;
 use slopos_utils::string::cstr_to_str_lossy;
@@ -49,23 +49,11 @@ impl Default for PciGpuInfo {
 
 #[repr(C)]
 pub struct PciDriver {
-    pub name: *const u8,
+    pub name: KernelSync<*const u8>,
     pub match_fn: Option<fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> bool>,
     pub probe: Option<fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> c_int>,
-    pub context: *mut core::ffi::c_void,
+    pub context: KernelSync<*mut core::ffi::c_void>,
 }
-
-// SAFETY: `PciDriver` records a `'static` driver descriptor whose
-// `name` and `context` fields point at driver-private storage that
-// outlives every reader. Drivers register single-threaded through
-// `pci_register_driver`, gated by the `DRIVER_REGISTRY` SpinLock;
-// cross-CPU reads only see post-registration state. There is **no**
-// unregister API today — driver descriptors live for the kernel's
-// lifetime. (TODO κ phase: introduce typed `&'static PciDriver`
-// handles + a matching `pci_unregister_driver` so descriptors can be
-// retired cleanly; until then, a missed-unregister is a non-issue
-// because nothing unregisters.)
-unsafe impl Sync for PciDriver {}
 
 struct PciEnumState {
     bus_visited: [u8; PCI_MAX_BUSES],
@@ -86,25 +74,18 @@ impl PciEnumState {
 }
 
 struct PciDriverRegistry {
-    drivers: [*const PciDriver; PCI_DRIVER_MAX],
+    drivers: KernelSync<[*const PciDriver; PCI_DRIVER_MAX]>,
     count: usize,
 }
-
-// SAFETY: stores raw `*const PciDriver` pointing at `'static` driver
-// descriptors; cross-CPU mutation is gated by the surrounding
-// SpinLock. Same retirement contract as `unsafe impl Sync for PciDriver`.
-unsafe impl Send for PciDriverRegistry {}
 
 impl PciDriverRegistry {
     const fn new() -> Self {
         Self {
-            drivers: [ptr::null(); PCI_DRIVER_MAX],
+            drivers: KernelSync::new([ptr::null(); PCI_DRIVER_MAX]),
             count: 0,
         }
     }
 }
-
-// SAFETY: PciDriverRegistry only stores pointers to 'static PciDrivers
 
 static PCI_INIT: InitFlag = InitFlag::new();
 static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
@@ -1071,7 +1052,7 @@ pub fn pci_register_driver(driver: &'static PciDriver) -> c_int {
     if idx >= PCI_DRIVER_MAX {
         return -1;
     }
-    let name = cstr_or_placeholder(driver.name);
+    let name = cstr_or_placeholder(*driver.name);
     klog_info!("PCI: Registered driver {}", name);
     registry.drivers[idx] = driver;
     registry.count = idx + 1;
@@ -1089,9 +1070,9 @@ pub fn pci_probe_drivers() {
         for dev_idx in 0..state.device_count {
             let dev = &state.devices[dev_idx];
             if let Some(mf) = drv.match_fn {
-                if mf(dev, drv.context) {
+                if mf(dev, *drv.context) {
                     if let Some(probe) = drv.probe {
-                        let _ = probe(dev, drv.context);
+                        let _ = probe(dev, *drv.context);
                     }
                 }
             }

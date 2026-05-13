@@ -45,7 +45,7 @@ use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_SCHEDULER, SpinLock};
+use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_utils::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -57,13 +57,13 @@ pub enum ReadyQueueRole {}
 /// caller's job (incremented on enqueue, decremented on dequeue /
 /// remove / drain).
 struct ReadyQueue {
-    list: IntrusiveLinkedList<Task, ReadyQueueRole>,
+    list: KernelSync<IntrusiveLinkedList<Task, ReadyQueueRole>>,
 }
 
 impl ReadyQueue {
     const fn new() -> Self {
         Self {
-            list: IntrusiveLinkedList::new(),
+            list: KernelSync::new(IntrusiveLinkedList::new()),
         }
     }
 
@@ -166,13 +166,6 @@ pub struct PerCpuScheduler {
     remote_inbox_head: AtomicPtr<Task>,
     inbox_count: AtomicU32,
 }
-
-// SAFETY: cross-CPU access to mutable fields is mediated by
-// `queue_lock` (ready queues + remote_inbox lock-free CAS protocol)
-// and the `enabled / initialized` atomics; per-CPU init writes
-// `return_context` once in single-threaded boot stage.
-unsafe impl Send for PerCpuScheduler {}
-unsafe impl Sync for PerCpuScheduler {}
 
 impl PerCpuScheduler {
     pub const fn new() -> Self {
