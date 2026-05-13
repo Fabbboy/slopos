@@ -40,6 +40,12 @@ use slopos_mm::process_vm::{
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
 
+slopos_ostd::extern_block! {
+    mod task_externs {
+        fn user_task_first_run();
+    }
+}
+
 fn user_entry_is_allowed(addr: u64) -> bool {
     const PROCESS_CODE_END: u64 = 0x0000_0000_0050_0000;
     addr >= PROCESS_CODE_START_VA && addr < PROCESS_CODE_END
@@ -399,10 +405,7 @@ const _: () = {
 /// SUPERVISOR_RESERVE` is writable, properly aligned, and not
 /// concurrently accessed.
 pub(crate) unsafe fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
-    unsafe extern "C" {
-        fn user_task_first_run();
-    }
-    let entry = user_task_first_run as *const () as u64;
+    let entry = task_externs::user_task_first_run as *const () as u64;
     let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
     unsafe {
         core::ptr::write(ret_addr_slot as *mut u64, entry);

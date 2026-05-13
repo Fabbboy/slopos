@@ -27,10 +27,6 @@ static PER_CPU_SYSCALL_DATA: SyncUnsafeCell<[PerCpuSyscallData; MAX_CPUS]> =
 #[unsafe(no_mangle)]
 static SYSCALL_CPU_DATA_PTR: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
 
-unsafe extern "C" {
-    static kernel_stack_top: u8;
-}
-
 pub fn gdt_init() {
     gdt_init_for_cpu(0);
 }
@@ -53,7 +49,8 @@ pub fn gdt_init_for_cpu(cpu_id: usize) {
 
         (*PER_CPU_TSS.get())[cpu_id].iomap_base = core::mem::size_of::<Tss64>() as u16;
         if cpu_id == 0 {
-            (*PER_CPU_TSS.get())[cpu_id].rsp0 = (&kernel_stack_top as *const u8) as u64;
+            (*PER_CPU_TSS.get())[cpu_id].rsp0 =
+                slopos_ostd::arch::x86_64::linker::kernel_stack_top() as u64;
         }
 
         slopos_ostd::arch::x86_64::gdt::install(

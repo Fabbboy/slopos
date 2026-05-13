@@ -1,5 +1,3 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-
 //! FFI Boundary Layer for Scheduler
 //!
 //! Thin shim around the two cross-language symbols still needed:
@@ -25,14 +23,9 @@ pub extern "C" fn scheduler_task_exit() -> ! {
     super::scheduler::scheduler_task_exit_impl()
 }
 
-unsafe extern "C" {
-    #[link_name = "kernel_stack_top"]
-    static kernel_stack_top_impl: u8;
-}
-
 /// Address of the BSP boot stack top.  Used by `prepare_switch_to`
 /// for kernel-mode tasks (which don't carry their own per-task kernel
-/// stack).
+/// stack). Thin forwarder over the OSTD safe accessor.
 pub fn kernel_stack_top() -> *const u8 {
-    unsafe { &kernel_stack_top_impl }
+    slopos_ostd::arch::x86_64::linker::kernel_stack_top()
 }

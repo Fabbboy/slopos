@@ -27,18 +27,20 @@ use slopos_ostd::{AllocError, KVec};
 // compile unchanged.
 pub use slopos_ostd::test_support::hermetic::HermeticVTable;
 
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    static __start_hermetic_state_registry: HermeticVTable;
-    static __stop_hermetic_state_registry: HermeticVTable;
+slopos_ostd::extern_block! {
+    #[allow(improper_ctypes)]
+    mod externs {
+        static __start_hermetic_state_registry: super::HermeticVTable;
+        static __stop_hermetic_state_registry: super::HermeticVTable;
+    }
 }
 
 /// Iterate every registered `HermeticVTable` in linker order. Order is
 /// fragile (depends on translation-unit link order); `topo_order` is
 /// the scope's actual capture-order source of truth.
 pub fn registry_iter() -> impl Iterator<Item = &'static HermeticVTable> {
-    let start = &raw const __start_hermetic_state_registry;
-    let stop = &raw const __stop_hermetic_state_registry;
+    let start = externs::__start_hermetic_state_registry_addr();
+    let stop = externs::__stop_hermetic_state_registry_addr();
     // SAFETY: the linker emits both sentinels; `offset_from` is sound
     // because both pointers come from the same array (the section).
     let n = unsafe { stop.offset_from(start) } as usize;

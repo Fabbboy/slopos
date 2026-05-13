@@ -61,19 +61,10 @@ const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 const USER_SPACE_TOP: u64 = 0xffff_8000_0000_0000;
 
-unsafe extern "C" {
-    static _text_start: u8;
-    static _text_end: u8;
-}
-
 #[inline]
 fn kernel_text_range() -> (u64, u64) {
-    unsafe {
-        (
-            &_text_start as *const u8 as u64,
-            &_text_end as *const u8 as u64,
-        )
-    }
+    let r = slopos_ostd::arch::x86_64::linker::text_range();
+    (r.start as u64, r.end as u64)
 }
 
 use core::sync::atomic::AtomicU8;

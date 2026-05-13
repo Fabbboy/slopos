@@ -18,6 +18,15 @@
 
 use crate::sync::BspToken;
 
+/// AP boot trampoline ABI: a single pointer in `rdi` (x86-64 SysV).
+///
+/// Layout-equivalent to limine's `MpGotoFunction` (`fn(&MpInfo) -> !`),
+/// which the kernel transmutes to in `boot/src/smp.rs::smp_init`. Named
+/// here so callers never have to spell out the raw fn-pointer signature
+/// at the transmute site — keeping the `unsafe extern` syntax interior
+/// to OSTD.
+pub type ApTrampolineFn = unsafe extern "C" fn(*const ()) -> !;
+
 /// Install the LLVM SafeStack runtime hook.
 ///
 /// Today's implementation is a no-op — LLVM resolves
@@ -53,6 +62,6 @@ pub fn install_safestack_runtime(_token: &BspToken) {
 /// one-shot BSP-init protocol; future use-cases (e.g. swapping the
 /// trampoline for a different SafeStack-disable variant) can attach
 /// side-effects without churning the kernel-side caller.
-pub fn install_ap_trampoline(_token: &BspToken) -> unsafe extern "C" fn(*const ()) -> ! {
+pub fn install_ap_trampoline(_token: &BspToken) -> ApTrampolineFn {
     super::naked::ap_entry
 }
