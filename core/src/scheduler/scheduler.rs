@@ -1174,8 +1174,6 @@ pub fn init_scheduler() -> c_int {
     per_cpu::init_all_percpu_schedulers();
     reset_sleep_queue();
 
-    slopos_utils::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
-
     0
 }
 
@@ -1190,19 +1188,6 @@ pub fn init_scheduler() -> c_int {
 /// callback slot.
 pub fn install_reschedule_callback<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
     slopos_ostd::sync::register_reschedule_callback(token, deferred_reschedule_callback);
-}
-
-fn sched_panic_cleanup() {
-    // Called from the panic recovery path after longjmp. The
-    // task-manager lock may have been held when the panic occurred
-    // and the guard was lost. We poison-unlock to mark the data as
-    // potentially inconsistent; the scheduler reinit path checks
-    // `is_poisoned()` before accepting operations.
-    scheduler_force_unlock();
-    // SAFETY: panic-recovery path; the caller's longjmp invalidated
-    // the lock guard, so a `poison_unlock` is the only legal way to
-    // reset state without panicking again.
-    unsafe { crate::task::task_manager_poison_unlock() };
 }
 
 pub fn scheduler_is_enabled() -> c_int {
@@ -1361,13 +1346,4 @@ pub fn scheduler_timer_tick() {
         sched.increment_preemptions();
     });
     scheduler_request_reschedule(RescheduleReason::TimerTick);
-}
-
-/// No-op: the scheduler no longer holds a global mutex. Per-CPU
-/// schedulers serialise via per-CPU `queue_lock` SpinLocks and
-/// lock-free atomics; nothing global to release here. Kept as a
-/// `pub fn` symbol for the panic-recovery path that historically
-/// called it.
-pub fn scheduler_force_unlock() {
-    // No global scheduler mutex to unlock - per-CPU schedulers use lockless atomics
 }

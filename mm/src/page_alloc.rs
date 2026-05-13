@@ -1280,29 +1280,6 @@ fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
     }
 }
 
-pub fn page_allocator_force_unlock() {
-    // SAFETY: invoked from `mm_panic_cleanup` only.
-    unsafe { PAGE_ALLOCATOR.force_unlock() };
-}
-
-/// Force-unlock the page allocator AND mark it as poisoned.
-/// Called from panic recovery to signal that allocator state may be
-/// inconsistent. Check `page_allocator_is_poisoned()` before trusting state.
-pub fn page_allocator_poison_unlock() {
-    // SAFETY: invoked from `mm_panic_cleanup` only.
-    unsafe { PAGE_ALLOCATOR.poison_unlock() };
-}
-
-/// Returns true if the page allocator was force-unlocked during panic recovery.
-pub fn page_allocator_is_poisoned() -> bool {
-    PAGE_ALLOCATOR.is_poisoned()
-}
-
-/// Clear the page allocator's poisoned state after reinitialization.
-pub fn page_allocator_clear_poison() {
-    PAGE_ALLOCATOR.clear_poison();
-}
-
 // =============================================================================
 // OwnedPageFrame - RAII wrapper for automatic page deallocation
 // =============================================================================

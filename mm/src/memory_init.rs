@@ -188,26 +188,36 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
 
 fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     let _ = memmap;
-    let mut stats = INIT_STATS.lock();
-    stats.hhdm_offset = hhdm_offset;
-    stats.memory_regions_count = mm_region_count();
-    stats.available_memory_bytes = mm_region_total_bytes(MmRegionKind::Usable);
-    if stats.available_memory_bytes == 0 {
-        stats.tracked_page_frames = 0;
+    // Gather snapshots from the region store (REGION_STORE lock, same
+    // LOCK_LEVEL_RESOURCE as INIT_STATS) BEFORE acquiring INIT_STATS.
+    // Holding INIT_STATS while calling mm_region_* would nest two
+    // same-level locks, which OSTD's lock-tracking walker treats as
+    // an AB-BA deadlock risk.
+    let memory_regions_count = mm_region_count();
+    let available_memory_bytes = mm_region_total_bytes(MmRegionKind::Usable);
+    let tracked_page_frames = if available_memory_bytes == 0 {
+        0
     } else {
         let highest_frame = mm_region_highest_usable_frame();
-        stats.tracked_page_frames = if highest_frame >= u32::MAX as u64 {
+        if highest_frame >= u32::MAX as u64 {
             0
         } else {
             (highest_frame + 1) as u32
-        };
-    }
-    if stats.tracked_page_frames == 0 && stats.available_memory_bytes > 0 {
+        }
+    };
+    if tracked_page_frames == 0 && available_memory_bytes > 0 {
         panic!("MM: Usable memory exceeds supported frame range");
     }
-    stats.reserved_region_count = mm_reservations_count();
-    stats.reserved_device_bytes =
-        mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
+    let reserved_region_count = mm_reservations_count();
+    let reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
+
+    let mut stats = INIT_STATS.lock();
+    stats.hhdm_offset = hhdm_offset;
+    stats.memory_regions_count = memory_regions_count;
+    stats.available_memory_bytes = available_memory_bytes;
+    stats.tracked_page_frames = tracked_page_frames;
+    stats.reserved_region_count = reserved_region_count;
+    stats.reserved_device_bytes = reserved_device_bytes;
 }
 
 fn record_kernel_core_reservations() {
@@ -588,8 +598,6 @@ pub fn init_memory_system_pre_typestate(
         klog_info!("MM: WARNING - page allocator finalization reported issues");
     }
 
-    slopos_utils::panic_recovery::register_panic_cleanup(mm_panic_cleanup);
-
     init_paging();
     crate::pat::pat_init();
 
@@ -660,15 +668,4 @@ pub fn get_memory_statistics(
     *total_memory_out = stats.total_memory_bytes;
     *available_memory_out = stats.available_memory_bytes;
     *regions_count_out = stats.memory_regions_count;
-}
-
-fn mm_panic_cleanup() {
-    // SAFETY: Called from panic recovery path. Poison-unlock marks each
-    // allocator as potentially inconsistent so that subsequent callers
-    // can detect and handle the poisoned state appropriately.
-    unsafe {
-        crate::page_alloc::page_allocator_poison_unlock();
-        crate::kernel_heap::kernel_heap_poison_unlock();
-        crate::process_vm::process_vm_poison_unlock();
-    }
 }

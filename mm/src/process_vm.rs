@@ -2916,37 +2916,3 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
     child_id
 }
-
-pub unsafe fn process_vm_force_unlock() {
-    // SAFETY: caller invokes from `mm_panic_cleanup` only — the
-    // panic-recovery contract on `SpinLock::force_unlock` is satisfied.
-    unsafe {
-        VM_SLOT_ALLOC.force_unlock();
-        for i in 0..MAX_PROCESSES {
-            PROCESS_VMS[i].force_unlock();
-        }
-    }
-}
-
-/// Force-unlock all VM locks AND mark the slot allocator as poisoned.
-/// Called from panic recovery to signal that VM state may be
-/// inconsistent. Check `process_vm_is_poisoned()` before trusting state.
-pub unsafe fn process_vm_poison_unlock() {
-    // SAFETY: caller invokes from `mm_panic_cleanup` only.
-    unsafe {
-        VM_SLOT_ALLOC.poison_unlock();
-        for i in 0..MAX_PROCESSES {
-            PROCESS_VMS[i].force_unlock();
-        }
-    }
-}
-
-/// Returns true if the slot allocator was force-unlocked during panic recovery.
-pub fn process_vm_is_poisoned() -> bool {
-    VM_SLOT_ALLOC.is_poisoned()
-}
-
-/// Clear the VM slot allocator's poisoned state after reinitialization.
-pub fn process_vm_clear_poison() {
-    VM_SLOT_ALLOC.clear_poison();
-}

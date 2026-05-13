@@ -18,7 +18,7 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_arch::cpu;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 use slopos_utils::io::Port;
 use slopos_utils::ports::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
@@ -50,13 +50,19 @@ pub struct UartCapabilities {
     pub fifo_size: usize,
 }
 
-static SERIAL: SpinLock<SerialPort> = SpinLock::new(SerialPort::new(COM1), LOCK_LEVEL_RESOURCE);
+// SERIAL and INPUT_BUFFER are diagnostic leaf locks: the panic handler
+// writes through SERIAL while arbitrary kernel locks may still be
+// held. Tagging them UNORDERED bypasses the OSTD walker's ordering
+// check so panic-time `panic_serial_write` cannot trip a recursive
+// ordering violation. Self-deadlock (same lock re-acquired) is still
+// caught by the ticket mechanism in SpinLock.
+static SERIAL: SpinLock<SerialPort> = SpinLock::new(SerialPort::new(COM1), LOCK_LEVEL_UNORDERED);
 const BUF_SIZE: usize = 256;
 
 type SerialBuffer = RingBuffer<u8, BUF_SIZE>;
 
 static INPUT_BUFFER: SpinLock<SerialBuffer> =
-    SpinLock::new(SerialBuffer::new_with(0), LOCK_LEVEL_RESOURCE);
+    SpinLock::new(SerialBuffer::new_with(0), LOCK_LEVEL_UNORDERED);
 
 pub fn init() {
     let mut port = SERIAL.lock();

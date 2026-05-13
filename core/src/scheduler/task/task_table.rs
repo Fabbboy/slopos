@@ -817,18 +817,6 @@ pub fn task_slot_census() -> (u32, u32, u32, u32) {
     })
 }
 
-pub unsafe fn task_manager_force_unlock() {
-    unsafe { TASK_MANAGER.force_unlock() };
-}
-
-/// Force-unlock the task manager AND mark it as poisoned.
-/// Called from panic recovery to signal that the task table may be
-/// in an inconsistent state. The next `init_task_manager()` call
-/// clears the poison after reinitialising invariants.
-pub unsafe fn task_manager_poison_unlock() {
-    unsafe { TASK_MANAGER.poison_unlock() };
-}
-
 /// Take ownership of the per-task `SYSCALL_TEST_REPORT` ring and drain its
 /// contents. Returns an empty vector if the task never reported (ring was
 /// never lazily allocated) or if the slot is no longer the original task

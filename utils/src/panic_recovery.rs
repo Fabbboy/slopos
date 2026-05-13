@@ -83,6 +83,16 @@ pub unsafe fn truncate_cleanup_handlers(count: usize) {
 }
 
 pub fn call_panic_cleanup() {
+    // SAFETY: invoked from catch_panic!'s longjmp tail. The longjmp
+    // invalidated every SpinLockGuard the panicking test body held;
+    // poison-unlock each tracked entry so registered handlers — and
+    // the surrounding KernelTestScope::Drop chain that re-acquires
+    // TASK_MANAGER / KERNEL_HEAP / etc. — don't deadlock on a stale
+    // ticket. Single-writer: the panicking CPU is the only accessor.
+    unsafe {
+        slopos_ostd::sync::lock_tracking::poison_unlock_all_held();
+    }
+
     let count = PANIC_CLEANUP_COUNT
         .load(Ordering::SeqCst)
         .min(MAX_PANIC_CLEANUP_HANDLERS);

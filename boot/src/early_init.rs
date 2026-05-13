@@ -584,6 +584,13 @@ pub fn kernel_main_impl() {
             pcr.install();
         }
 
+        // Activate OSTD's held-lock walker now that PCR is live so
+        // every subsequent SpinLock acquisition is tracked. The panic
+        // handler and catch_panic! recovery use this to poison-unlock
+        // locks the panicking CPU held; before this point
+        // get_current_cpu() is not callable so the walker stays dormant.
+        slopos_ostd::sync::enable_lock_tracking();
+
         // Tell OSTD which PML4 was loaded by the bootloader. CR3 is a
         // pure CPU register read; the value persists for the lifetime
         // of the kernel since this PML4 holds the canonical kernel

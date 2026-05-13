@@ -12,7 +12,7 @@ use slopos_utils::panic_recovery;
 use slopos_utils::stacktrace::{self, StacktraceEntry};
 use slopos_video::panic_screen;
 
-use crate::shutdown::{execute_kernel, kernel_shutdown};
+use crate::shutdown::execute_kernel;
 
 static PANIC_IN_PROGRESS: StateFlag = StateFlag::new();
 static PANIC_RIP: AtomicU64 = AtomicU64::new(0);
@@ -220,7 +220,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         panic_serial_write("Memory system unavailable; skipping paint ritual");
     }
 
-    kernel_shutdown(b"panic\0".as_ptr() as *const core::ffi::c_char);
+    slopos_ostd::sync::panic_recovery::poison_all_held_locks();
 }
 
 struct MessageBuffer {

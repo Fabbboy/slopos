@@ -1182,31 +1182,3 @@ pub fn print_heap_stats() {
         }
     }
 }
-
-/// Wrapped force-unlock for panic recovery. Calls into OSTD's
-/// `SpinLock::force_unlock` whose contract is "panic-recovery only";
-/// we expose a safe surface because `mm_panic_cleanup` is the sole
-/// caller and it runs from the panic-recovery hook by construction.
-pub fn kernel_heap_force_unlock() {
-    // SAFETY: invoked from `mm_panic_cleanup` only — the panic-recovery
-    // contract on `SpinLock::force_unlock` is satisfied.
-    unsafe { KERNEL_HEAP.force_unlock() };
-}
-
-/// Force-unlock the kernel heap AND mark it as poisoned.
-/// Called from panic recovery to signal that heap metadata may be
-/// inconsistent. Check `kernel_heap_is_poisoned()` before trusting state.
-pub fn kernel_heap_poison_unlock() {
-    // SAFETY: invoked from `mm_panic_cleanup` only.
-    unsafe { KERNEL_HEAP.poison_unlock() };
-}
-
-/// Returns true if the kernel heap was force-unlocked during panic recovery.
-pub fn kernel_heap_is_poisoned() -> bool {
-    KERNEL_HEAP.is_poisoned()
-}
-
-/// Clear the kernel heap's poisoned state after reinitialization.
-pub fn kernel_heap_clear_poison() {
-    KERNEL_HEAP.clear_poison();
-}
