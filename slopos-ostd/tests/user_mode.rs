@@ -75,12 +75,12 @@ fn setup() -> MutexGuard<'static, ()> {
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
         Box::leak(slots.into_boxed_slice());
 
-        unsafe {
-            init_meta_slots(slots_ptr, N_PAGES);
-            init_phys_virt_offset(backing_ptr);
-            register_frame_allocator(&BUMP_REF);
-            register_kernel_master_pml4(PhysAddr::new(0));
-        }
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            init_meta_slots(t, slots_ptr, N_PAGES);
+            init_phys_virt_offset(t, backing_ptr);
+            register_frame_allocator(t, &BUMP_REF);
+            register_kernel_master_pml4(t, PhysAddr::new(0));
+        });
         Mutex::new(())
     });
     m.lock().unwrap_or_else(|p| p.into_inner())

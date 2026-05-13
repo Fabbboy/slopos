@@ -46,6 +46,7 @@ use crate::cpu::x86_64::pcr::{
 };
 use crate::irq::idt::RCU_QS_IPI_VECTOR;
 use crate::mm::{KVec, raw_alloc, raw_dealloc};
+use crate::sync::BspToken;
 
 #[repr(C, align(64))]
 struct QsSlot(AtomicU64);
@@ -161,12 +162,10 @@ unsafe impl Sync for BackendSlot {}
 static BACKEND_SLOT: BackendSlot = BackendSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the production RCU backend.
-///
-/// # Safety
-///
-/// `ops` must live for the static lifetime of the kernel.
-pub unsafe fn register_rcu_backend(ops: &'static RcuOps) {
+/// One-shot wiring point for the production RCU backend. The
+/// `&BspToken<'brand>` witnesses BSP-only init; `ops` must live for
+/// the static lifetime of the kernel.
+pub fn register_rcu_backend<'brand>(_token: &BspToken<'brand>, ops: &'static RcuOps) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(!was_installed, "register_rcu_backend called twice");
     // SAFETY: the swap above transitioned us from "uninstalled" to

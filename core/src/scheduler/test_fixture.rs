@@ -43,7 +43,7 @@
 
 use core::marker::PhantomData;
 
-use slopos_hermetic::{BootCtx, HermeticVTable, topo_order};
+use slopos_hermetic::{BootCtx, HermeticVTable, TestInit, topo_order};
 use slopos_ostd::KVec;
 use slopos_ostd::sync::StateFlag;
 use slopos_utils::klog_info;
@@ -81,7 +81,7 @@ use super::task::{init_task_manager, task_shutdown_all};
 pub struct KernelTestScope {
     aps_paused: bool,
     captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)>,
-    boot_ctx: Option<BootCtx>,
+    boot_ctx: Option<BootCtx<'static, TestInit>>,
     /// !Send !Sync: scope is pinned to the constructing CPU (BSP).
     _not_send: PhantomData<*mut ()>,
 }
@@ -229,7 +229,7 @@ impl KernelTestScope {
 
     /// Borrow the BootCtx for the duration of `f`. Used by tests to
     /// call boot-only mutators (gdt_set_ist, init_scheduler, ...).
-    pub fn with_boot<R>(&mut self, f: impl FnOnce(&mut BootCtx) -> R) -> R {
+    pub fn with_boot<R>(&mut self, f: impl FnOnce(&mut BootCtx<'static, TestInit>) -> R) -> R {
         let ctx = self
             .boot_ctx
             .as_mut()

@@ -1146,12 +1146,12 @@ extern "sysv64" fn ostd_task_exit_hook() -> ! {
 /// Install the OSTD task-exit hook.  Must be called once at boot, after
 /// the scheduler is initialised but before any task can return from
 /// its entry function (in practice: before `enter_scheduler`).
-pub fn install_ostd_task_exit_hook() {
-    // SAFETY: `ostd_task_exit_hook` does not return; the OSTD register
-    // hook is one-shot and asserts on double-call.
-    unsafe {
-        slopos_ostd::task::switch::register_task_exit_hook(ostd_task_exit_hook);
-    }
+///
+/// The `&BspToken<'brand>` witness binds the call to the BSP-init scope
+/// opened by `slopos_ostd::sync::run_bsp_init`; OSTD's
+/// [`register_task_exit_hook`] is one-shot and asserts on double-call.
+pub fn install_ostd_task_exit_hook<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
+    slopos_ostd::task::switch::register_task_exit_hook(token, ostd_task_exit_hook);
 }
 
 fn deferred_reschedule_callback() {
@@ -1174,11 +1174,22 @@ pub fn init_scheduler() -> c_int {
     per_cpu::init_all_percpu_schedulers();
     reset_sleep_queue();
 
-    slopos_ostd::sync::register_reschedule_callback(deferred_reschedule_callback);
-
     slopos_utils::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
 
     0
+}
+
+/// Register the kernel scheduler's deferred-reschedule callback with
+/// OSTD's preempt backend.  Called once from the BSP boot path
+/// (`boot_step_scheduler_init`) — the `&BspToken<'brand>` witness
+/// binds the call to the BSP-init scope opened by
+/// `slopos_ostd::sync::run_bsp_init`. Kept separate from
+/// [`init_scheduler`] so test-scope reinit (which lacks a `BspToken`
+/// — `KernelTestScope` holds only a `BootCtx<'_, TestInit>`) can
+/// rerun `init_scheduler` without contending with OSTD's one-shot
+/// callback slot.
+pub fn install_reschedule_callback<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
+    slopos_ostd::sync::register_reschedule_callback(token, deferred_reschedule_callback);
 }
 
 fn sched_panic_cleanup() {

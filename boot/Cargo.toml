@@ -16,7 +16,7 @@ doctest = false
 
 [features]
 default = []
-tests = ["slopos-testing/tests", "test-hooks"]
+tests = ["slopos-testing/tests", "test-hooks", "slopos-ostd/test-helpers"]
 xe-gpu = ["slopos-drivers/xe-gpu", "slopos-video/xe-gpu"]
 test-hooks = ["slopos-core/test-hooks", "slopos-mm/test-hooks", "slopos-drivers/test-hooks"]
 

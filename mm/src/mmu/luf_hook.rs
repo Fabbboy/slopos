@@ -9,13 +9,15 @@
 //! the OSTD core stays free of TLB-policy: slopos-mm decides whether
 //! to queue, broadcast immediately, or coalesce.
 //!
-//! Wiring is one-shot at boot — `register_with_ostd` swaps a
-//! `&'static &'static dyn CursorUnmapHook` into OSTD's internal slot.
-//! After that point, every cursor unmap on a user-half leaf and every
+//! Wiring is one-shot at boot — the boot caller in
+//! `boot::boot_memory::boot_step_register_luf_hook_fn` swaps a
+//! `&'static &'static dyn CursorUnmapHook` into OSTD's internal slot
+//! by passing `LUF_HOOK_REF` to `register_cursor_unmap_hook`. After
+//! that point, every cursor unmap on a user-half leaf and every
 //! address-space activation routes through this module.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_ostd::mm::vm_space::{CursorUnmapHook, register_cursor_unmap_hook};
+use slopos_ostd::mm::vm_space::CursorUnmapHook;
 
 use super::cr3::MmContextId;
 use super::luf;
@@ -50,30 +52,13 @@ impl CursorUnmapHook for LufHook {
 }
 
 /// Process-wide instance. The double-reference is what
-/// [`register_cursor_unmap_hook`] expects — the outer `&'static`
+/// `register_cursor_unmap_hook` expects — the outer `&'static`
 /// stores a vtable pointer, the inner `&'static dyn ...` stores the
 /// trait object's pointer pair. This pattern matches the other
 /// one-shot OSTD registrations (frame allocator, preempt backend, …).
+/// `pub` because the boot caller in
+/// `boot::boot_memory::boot_step_register_luf_hook_fn` registers it
+/// inline (the former `register_with_ostd(token)` shim has been
+/// inlined, taking `&BspToken<'_>` from the boot ctx).
 static LUF_HOOK: LufHook = LufHook;
-static LUF_HOOK_REF: &'static dyn CursorUnmapHook = &LUF_HOOK;
-
-/// Boot-time installer. Hands OSTD's `VmSpace` machinery this module's
-/// hook so that all subsequent cursor unmaps and activations fire into
-/// slopos-mm's LUF.
-///
-/// # Safety
-///
-/// One-shot — OSTD's `register_cursor_unmap_hook` panics on second
-/// call. Caller must invoke after [`super::luf`] is reachable (LUF
-/// state is in zero-initialised statics, so this is implicitly true
-/// from boot start).
-pub unsafe fn register_with_ostd() {
-    // SAFETY: `LUF_HOOK_REF` lives in `static` storage with `'static`
-    // lifetime; `LufHook` is `Send + Sync` (zero-sized, no interior
-    // state). Concurrent invocation across CPUs is sound because
-    // `after_unmap` and `on_activate` only touch atomics and
-    // per-CPU LUF state keyed by the caller's CPU.
-    unsafe {
-        register_cursor_unmap_hook(&LUF_HOOK_REF);
-    }
-}
+pub static LUF_HOOK_REF: &'static dyn CursorUnmapHook = &LUF_HOOK;

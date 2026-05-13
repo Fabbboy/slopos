@@ -26,6 +26,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use crate::mm::pod::Pod;
+use crate::sync::BspToken;
 
 mod private {
     pub trait Sealed {}
@@ -277,14 +278,11 @@ static IO_PORT_REGISTRY: PortRegistrySlot = PortRegistrySlot {
 
 /// One-shot wiring point for the insensitive-port list. Boot installs
 /// the slice (e.g. COM1 0x3F8..0x400, PS/2 0x60..0x65, RTC 0x70..0x72,
-/// QEMU debug-exit 0xF4..0xF5).
-///
-/// # Safety
-///
-/// The caller certifies that `ranges` lives for the static lifetime of
-/// the kernel and that every entry describes a port range the platform
-/// has marked as insensitive (Inv. 7).
-pub unsafe fn register_io_port_registry(ranges: &'static [PortRange]) {
+/// QEMU debug-exit 0xF4..0xF5). The `&BspToken<'brand>` witnesses
+/// BSP-only init; every entry must describe a port range the platform
+/// has marked as insensitive (Inv. 7) — a caller invariant cross-
+/// checked at the gated `IoPort::reserve` path.
+pub fn register_io_port_registry<'brand>(_token: &BspToken<'brand>, ranges: &'static [PortRange]) {
     let raw = ranges.as_ptr() as *mut PortRange;
     let prev = IO_PORT_REGISTRY.base.swap(raw, Ordering::AcqRel);
     assert!(

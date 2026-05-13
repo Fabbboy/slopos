@@ -166,14 +166,19 @@ pub const fn star_from_selectors(kernel_code: SegmentSelector, user_data: Segmen
 /// CPU honours the SYSCALL instruction with `lstar` as the target RIP
 /// and `sfmask` as the RFLAGS clear-mask.
 ///
-/// # Safety
-///
-/// SAFETY (Inv. 2): repointing `LSTAR` changes the kernel-mode entry
-/// path; the caller must ensure `lstar` references a properly-aligned
-/// kernel-mode trampoline that swaps GS (if user-mode entry is reached
-/// via SYSCALL) and saves the user context. The `STAR` selectors must
-/// match the active GDT layout.
-pub unsafe fn install_syscall_msrs(star: u64, lstar: u64, sfmask: u64) {
+/// The `&W: CpuInitWitness` parameter authorises mutation of the
+/// current CPU's MSRs — both BSP-init and per-AP-bringup paths call
+/// this. Inv. 2: `lstar` must reference a properly-aligned kernel-mode
+/// trampoline that swaps GS on SYSCALL entry and saves the user
+/// context; `STAR` selectors must match the active GDT layout. The
+/// MSR writes themselves stay inside a safe surface — only callers
+/// staging the trampoline contract carry the soundness burden.
+pub fn install_syscall_msrs<W: crate::sync::CpuInitWitness>(
+    _witness: &W,
+    star: u64,
+    lstar: u64,
+    sfmask: u64,
+) {
     let efer = read_msr(Msr::EFER);
     if (efer & EFER_SCE) == 0 {
         write_msr(Msr::EFER, efer | EFER_SCE);

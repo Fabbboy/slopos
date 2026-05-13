@@ -22,6 +22,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::mm::vm_space::VmSpace;
 use crate::mm::{KArc, KBox};
+use crate::sync::BspToken;
 use crate::task::fpu::FpuState;
 
 // ---------------------------------------------------------------------------
@@ -402,11 +403,12 @@ static BACKEND_SLOT: BackendSlot = BackendSlot(UnsafeCell::new(MaybeUninit::unin
 static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// One-shot wiring point for the production task-runtime backend.
-///
-/// # Safety
-///
-/// `backend` must live for the static lifetime of the kernel.
-pub unsafe fn register_task_runtime_backend(backend: &'static dyn TaskRuntimeBackend) {
+/// The `&BspToken<'brand>` witnesses BSP-only init; `backend` must
+/// live for the static lifetime of the kernel.
+pub fn register_task_runtime_backend<'brand>(
+    _token: &BspToken<'brand>,
+    backend: &'static dyn TaskRuntimeBackend,
+) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(!was_installed, "register_task_runtime_backend called twice");
     // SAFETY: the swap above transitioned us from "uninstalled" to

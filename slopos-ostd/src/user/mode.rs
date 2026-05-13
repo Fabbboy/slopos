@@ -28,6 +28,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::mm::vm_space::VmSpace;
+use crate::sync::BspToken;
 use crate::user::context::UserContext;
 #[cfg(all(target_arch = "x86_64", not(test)))]
 use crate::user::context::UserRegs;
@@ -152,14 +153,14 @@ unsafe impl Sync for BackendSlot {}
 static BACKEND_SLOT: BackendSlot = BackendSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the production user-mode backend.
-///
-/// # Safety
-///
-/// `backend` must live for the static lifetime of the kernel and
-/// must drive the user-mode round trip in the manner documented on
-/// [`UserModeBackend`]. Caller certifies Inv. 2.
-pub unsafe fn register_user_mode_backend(backend: &'static dyn UserModeBackend) {
+/// One-shot wiring point for the production user-mode backend. The
+/// `&BspToken<'brand>` witnesses BSP-only init; `backend` must live
+/// for the static lifetime of the kernel and drive the user-mode
+/// round trip in the manner documented on [`UserModeBackend`] (Inv. 2).
+pub fn register_user_mode_backend<'brand>(
+    _token: &BspToken<'brand>,
+    backend: &'static dyn UserModeBackend,
+) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(
         !was_installed,

@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_abi::addr::VirtAddr;
 
+use crate::sync::BspToken;
+
 /// Trait the consumer-side TLB driver implements. Only the
 /// local-CPU `INVLPG` is exposed; cross-CPU broadcast TLB shootdown
 /// lives outside OSTD.
@@ -23,15 +25,15 @@ pub trait LocalTlbFlush: Send + Sync {
 static FLUSHER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// One-shot wiring point. See [`register_frame_allocator`] for the
-/// double-reference layout.
+/// double-reference layout. The `&BspToken<'brand>` witnesses BSP-only
+/// init; the underlying `dyn LocalTlbFlush` must be sound for
+/// concurrent calls from any CPU.
 ///
 /// [`register_frame_allocator`]: crate::mm::frame_alloc::register_frame_allocator
-///
-/// # Safety
-///
-/// `slot` must outlive the kernel. The underlying `dyn LocalTlbFlush`
-/// must be sound for concurrent calls from any CPU.
-pub unsafe fn register_local_tlb_flusher(slot: &'static &'static dyn LocalTlbFlush) {
+pub fn register_local_tlb_flusher<'brand>(
+    _token: &BspToken<'brand>,
+    slot: &'static &'static dyn LocalTlbFlush,
+) {
     let raw = slot as *const &'static dyn LocalTlbFlush as *mut ();
     let prev = FLUSHER.swap(raw, Ordering::AcqRel);
     assert!(

@@ -31,7 +31,7 @@ static REGISTERED: InitFlag = InitFlag::new();
 /// [`crate::sync::run_bsp_init`]) ensures this can't be called outside
 /// the one-shot init path. A second call panics so a regression in
 /// the BSP-init protocol is caught loudly.
-pub fn register_hhdm_offset(_token: &BspToken, offset: u64) {
+pub fn register_hhdm_offset<'brand>(_token: &BspToken<'brand>, offset: u64) {
     if !REGISTERED.init_once() {
         panic!("register_hhdm_offset called twice — BSP-init protocol regression");
     }

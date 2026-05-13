@@ -11,7 +11,6 @@ use slopos_ostd::arch::x86_64::safestack::{
     ApTrampolineFn, install_ap_trampoline, install_safestack_runtime,
 };
 use slopos_ostd::boot::smp::register_ap_late_entry;
-use slopos_ostd::sync::run_bsp_init;
 use slopos_utils::klog_info;
 
 use crate::gdt::syscall_msr_init;
@@ -47,77 +46,84 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
     cpu::disable_interrupts();
     cpu::enable_sse();
 
-    // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
-    slopos_arch::cpu::xsave::enable_on_current_cpu();
+    // Enter the per-AP init scope: mint an `ApToken<'brand>` whose
+    // brand is invariant in the HRTB closure, and thread it through
+    // every per-CPU init call below. `enter_scheduler` stays OUTSIDE
+    // the closure (its `-> !` divergence keeps the closure-return
+    // path unreachable in practice).
+    slopos_ostd::sync::run_ap_init(cpu_idx, |ap_token| {
+        // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
+        slopos_arch::cpu::xsave::enable_on_current_cpu();
 
-    // Match the BSP supervisor-mode feature mask (CR4.PGE + SMEP + SMAP).
-    // Must happen before this AP's first CR3 reload so global kernel
-    // mappings are tagged consistently with the BSP.
-    slopos_arch::cpu::security::enable_supervisor_features();
+        // Match the BSP supervisor-mode feature mask (CR4.PGE + SMEP + SMAP).
+        // Must happen before this AP's first CR3 reload so global kernel
+        // mappings are tagged consistently with the BSP.
+        slopos_arch::cpu::security::enable_supervisor_features();
 
-    // Enable CR4.PCIDE on this AP if the BSP decided PCID is live.
-    // Must run before any CR3 load that embeds a non-zero PCID.
-    slopos_mm::mmu::init_ap();
+        // Enable CR4.PCIDE on this AP if the BSP decided PCID is live.
+        // Must run before any CR3 load that embeds a non-zero PCID.
+        slopos_mm::mmu::init_ap();
 
-    // Limine may start APs in x2APIC mode (MSR-based register access).
-    // The kernel uses xAPIC MMIO for all LAPIC access, so if x2APIC is
-    // active we must transition back: x2APIC → disabled → xAPIC.
-    // This must happen before apic::enable() which uses MMIO write_register.
-    {
-        use slopos_arch::cpu::apic_msr::ApicBaseMsr;
-        use slopos_arch::cpu::msr::Msr;
-        let msr_val = cpu::read_msr(Msr::APIC_BASE);
-        if msr_val & ApicBaseMsr::X2APIC_ENABLE != 0 {
-            // Step 1: disable APIC entirely (clear both GLOBAL_ENABLE and X2APIC_ENABLE)
-            cpu::write_msr(
-                Msr::APIC_BASE,
-                msr_val & !(ApicBaseMsr::GLOBAL_ENABLE | ApicBaseMsr::X2APIC_ENABLE),
-            );
-            // Step 2: re-enable in xAPIC mode (set GLOBAL_ENABLE, leave X2APIC_ENABLE clear)
-            cpu::write_msr(
-                Msr::APIC_BASE,
-                (msr_val & !ApicBaseMsr::X2APIC_ENABLE) | ApicBaseMsr::GLOBAL_ENABLE,
-            );
+        // Limine may start APs in x2APIC mode (MSR-based register access).
+        // The kernel uses xAPIC MMIO for all LAPIC access, so if x2APIC is
+        // active we must transition back: x2APIC → disabled → xAPIC.
+        // This must happen before apic::enable() which uses MMIO write_register.
+        {
+            use slopos_arch::cpu::apic_msr::ApicBaseMsr;
+            use slopos_arch::cpu::msr::Msr;
+            let msr_val = cpu::read_msr(Msr::APIC_BASE);
+            if msr_val & ApicBaseMsr::X2APIC_ENABLE != 0 {
+                // Step 1: disable APIC entirely (clear both GLOBAL_ENABLE and X2APIC_ENABLE)
+                cpu::write_msr(
+                    Msr::APIC_BASE,
+                    msr_val & !(ApicBaseMsr::GLOBAL_ENABLE | ApicBaseMsr::X2APIC_ENABLE),
+                );
+                // Step 2: re-enable in xAPIC mode (set GLOBAL_ENABLE, leave X2APIC_ENABLE clear)
+                cpu::write_msr(
+                    Msr::APIC_BASE,
+                    (msr_val & !ApicBaseMsr::X2APIC_ENABLE) | ApicBaseMsr::GLOBAL_ENABLE,
+                );
+            }
         }
-    }
 
-    apic::enable();
+        apic::enable();
 
-    let apic_id = apic::get_id();
+        let apic_id = apic::get_id();
 
-    tlb::notify_cpu_online_id(cpu_idx);
+        tlb::notify_cpu_online_id(cpu_idx);
 
-    pcr::ApPcrHandle::init(cpu_idx, apic_id).init_gdt_and_install();
+        pcr::ApPcrHandle::init(ap_token, apic_id).init_gdt_and_install();
 
-    // APs have per-CPU TSS structures; re-bind IST pointers after installing
-    // the AP GDT/TSS so exceptions (notably #PF) do not enter with IST=0.
-    let mut ap_boot_ctx = slopos_hermetic::take_for_ap(cpu_idx);
-    ist_stacks::ist_bind_current_cpu(&mut ap_boot_ctx);
+        // APs have per-CPU TSS structures; re-bind IST pointers after installing
+        // the AP GDT/TSS so exceptions (notably #PF) do not enter with IST=0.
+        let mut ap_boot_ctx = slopos_hermetic::take_for_ap(ap_token);
+        ist_stacks::ist_bind_current_cpu(&mut ap_boot_ctx);
 
-    idt_load();
-    syscall_msr_init();
-    slopos_hermetic::return_after_ap(cpu_idx, ap_boot_ctx);
+        idt_load(ap_token);
+        syscall_msr_init(ap_token);
+        slopos_hermetic::return_after_ap(cpu_idx, ap_boot_ctx);
 
-    // Initialize the per-CPU scheduler and create the idle task BEFORE
-    // enabling interrupts.  The previous order (enable_interrupts → init)
-    // opened a race window where timer IPIs, TLB shootdowns, or reschedule
-    // IPIs could arrive and touch uninitialised per-CPU scheduler state.
-    init_scheduler_for_ap(cpu_idx);
+        // Initialize the per-CPU scheduler and create the idle task BEFORE
+        // enabling interrupts.  The previous order (enable_interrupts → init)
+        // opened a race window where timer IPIs, TLB shootdowns, or reschedule
+        // IPIs could arrive and touch uninitialised per-CPU scheduler state.
+        init_scheduler_for_ap(cpu_idx);
 
-    // Signal the BSP that this AP is fully initialised.
-    AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
+        // Signal the BSP that this AP is fully initialised.
+        AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
 
-    klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
+        klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
 
-    // AP LAPIC timer is started later by deferred_start_ap_timer() in the
-    // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
-    // Interrupts are enabled here only after all per-CPU state is ready.
-    cpu::enable_interrupts();
+        // AP LAPIC timer is started later by deferred_start_ap_timer() in the
+        // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
+        // Interrupts are enabled here only after all per-CPU state is ready.
+        cpu::enable_interrupts();
+    });
 
     enter_scheduler(cpu_idx);
 }
 
-pub fn smp_init() {
+pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspInit>) {
     let Some(resp) = limine_protocol::mp_response() else {
         klog_info!("MP: Limine MP response unavailable; skipping AP startup");
         return;
@@ -168,28 +174,29 @@ pub fn smp_init() {
     // is fired. The OSTD trampoline waits on this `OnceLock` after
     // installing `IA32_GS_BASE`; firing an AP before registration
     // would spin forever in `OnceLock::wait`.
-    register_ap_late_entry(ap_late_entry);
+    register_ap_late_entry(&ctx.bsp_token(), ap_late_entry);
 
-    // Mint the one-shot BSP-init token and route the SafeStack-runtime
-    // hook + AP boot trampoline through OSTD's safe wrappers. The
-    // trampoline returned by `install_ap_trampoline` is `ApTrampolineFn`
-    // — a function taking `*const ()` in `rdi` per the x86-64 SysV ABI.
-    // Limine's `MpGotoFunction` takes `&MpInfo` in `rdi`; both signatures
-    // pass a single pointer, so the transmute below is layout-safe.
-    let ap_trampoline: MpGotoFunction = run_bsp_init(|tok| {
-        install_safestack_runtime(tok);
-        let f = install_ap_trampoline(tok);
+    // Route the SafeStack-runtime hook + AP boot trampoline through
+    // OSTD's safe wrappers under the outer `run_bsp_init` scope opened
+    // in `kernel_main_impl`. The trampoline returned by
+    // `install_ap_trampoline` is `ApTrampolineFn` — a function taking
+    // `*const ()` in `rdi` per the x86-64 SysV ABI. Limine's
+    // `MpGotoFunction` takes `&MpInfo` in `rdi`; both signatures pass
+    // a single pointer, so the transmute below is layout-safe.
+    let ap_trampoline: MpGotoFunction = {
+        let bsp = ctx.bsp_token();
+        install_safestack_runtime(&bsp);
+        let f = install_ap_trampoline(&bsp);
         // SAFETY: same x86-64 SysV ABI on both sides; the OSTD `*const ()`
         // is the same `MpInfo*` the limine bootloader passes in `rdi`.
         unsafe { core::mem::transmute::<ApTrampolineFn, MpGotoFunction>(f) }
-    });
+    };
 
     let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
-    // SAFETY: init_ap_pcr_lookup must run exactly once before any AP
-    // boots; smp_init is the single caller and runs on the BSP only.
-    unsafe {
-        pcr::init_ap_pcr_lookup(&ap_task_ptrs);
-    }
+    // `init_ap_pcr_lookup` must run exactly once before any AP boots;
+    // `smp_init` is the single caller and runs on the BSP only — the
+    // `&BspToken` witness from `ctx.bsp_token()` carries that proof.
+    pcr::init_ap_pcr_lookup(&ctx.bsp_token(), &ap_task_ptrs);
 
     // AP_SIGNALS is indexed uniformly by `ap_slot` (the 1-based
     // non-BSP-CPU counter that we also thread through

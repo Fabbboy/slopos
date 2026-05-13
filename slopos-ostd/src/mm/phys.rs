@@ -24,6 +24,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::mm::frame::Paddr;
+use crate::sync::BspToken;
 
 /// Sentinel for "phys-to-virt offset not yet installed". `u64::MAX`
 /// is safe as a sentinel because no valid HHDM offset comes anywhere
@@ -36,18 +37,14 @@ static PHYS_VIRT_OFFSET: AtomicU64 = AtomicU64::new(UNINIT);
 
 /// One-shot wiring point. `offset` is the value to add to any
 /// [`Paddr`] to reach a kernel virtual address mapping that page's
-/// contents read+write.
-///
-/// # Safety
-///
-/// The caller certifies that `paddr.as_u64().wrapping_add(offset)`
-/// is a valid kernel virtual address mapped read+write for every
-/// `paddr` that will be passed to a `UFrame`/`USegment` byte-copy
-/// method, and that the mapping persists for the static lifetime of
-/// the kernel.
+/// contents read+write. The `&BspToken<'brand>` witnesses BSP-only
+/// init; `paddr.as_u64().wrapping_add(offset)` must be a valid kernel
+/// virtual address mapped read+write for every `paddr` that will be
+/// passed to a `UFrame`/`USegment` byte-copy method, and the mapping
+/// must persist for the static lifetime of the kernel.
 ///
 /// [`Paddr`]: crate::mm::frame::Paddr
-pub unsafe fn init_phys_virt_offset(offset: u64) {
+pub fn init_phys_virt_offset<'brand>(_token: &BspToken<'brand>, offset: u64) {
     let prev = PHYS_VIRT_OFFSET.swap(offset, Ordering::AcqRel);
     assert_eq!(
         prev, UNINIT,

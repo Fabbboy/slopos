@@ -80,6 +80,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::mm::KBox;
+use crate::sync::BspToken;
 use crate::sync::intrusive::IntrusiveLinkedList;
 use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use crate::sync::spin::SpinLock;
@@ -275,16 +276,14 @@ unsafe impl Sync for BackendSlot {}
 static BACKEND_SLOT: BackendSlot = BackendSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the production wait-queue backend.
-///
-/// # Safety
-///
-/// `ops` must live for the static lifetime of the kernel. The caller
-/// certifies the table's fn-pointer entries honour the
-/// [`WaitQueueBackend`] contract: task handles refer to live tasks,
-/// `unblock_task` tolerates stale handles, and every method is safe to
-/// call from the contexts documented on the trait.
-pub unsafe fn register_wait_queue_backend(ops: &'static WaitQueueOps) {
+/// One-shot wiring point for the production wait-queue backend. The
+/// `&BspToken<'brand>` witnesses BSP-only init; the table's fn-pointer
+/// entries must honour the [`WaitQueueBackend`] contract: task handles
+/// refer to live tasks, `unblock_task` tolerates stale handles, and
+/// every method is safe to call from the contexts documented on the
+/// trait — that's a caller invariant covering the kernel-services
+/// bridge wiring rather than the registration itself.
+pub fn register_wait_queue_backend<'brand>(_token: &BspToken<'brand>, ops: &'static WaitQueueOps) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(!was_installed, "register_wait_queue_backend called twice");
     // SAFETY: the swap above transitioned us from "uninstalled" to

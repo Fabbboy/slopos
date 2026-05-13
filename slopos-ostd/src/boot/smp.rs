@@ -24,7 +24,7 @@
 //! time it was tried.
 
 use crate::cpu::x86_64::interrupts;
-use crate::sync::OnceLock;
+use crate::sync::{BspToken, OnceLock};
 
 /// Kernel-supplied late-entry callback for AP bringup. Must be
 /// registered via [`register_ap_late_entry`] **before** any AP is
@@ -33,10 +33,11 @@ use crate::sync::OnceLock;
 /// populates with the AP slot index when calling `cpu.bootstrap(...)`).
 pub static AP_LATE_ENTRY: OnceLock<fn(usize) -> !> = OnceLock::new();
 
-/// Register the kernel-supplied AP late-entry callback. Single-writer:
-/// call once on the BSP before bootstrapping any AP. Repeated calls
-/// silently keep the first registration (`OnceLock` semantics).
-pub fn register_ap_late_entry(entry: fn(usize) -> !) {
+/// Register the kernel-supplied AP late-entry callback. The
+/// `&BspToken<'brand>` witnesses BSP-only init; call once on the BSP
+/// before bootstrapping any AP. Repeated calls silently keep the
+/// first registration (`OnceLock` semantics).
+pub fn register_ap_late_entry<'brand>(_token: &BspToken<'brand>, entry: fn(usize) -> !) {
     AP_LATE_ENTRY.call_once(|| entry);
 }
 

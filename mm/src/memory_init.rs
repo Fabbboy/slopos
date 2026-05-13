@@ -26,7 +26,7 @@ use slopos_arch::cpu;
 use slopos_arch::cpu::apic_msr::ApicBaseMsr;
 use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_arch::cpu::msr::Msr;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
+use slopos_ostd::sync::{BspToken, InitFlag, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_utils::boot_info::{LimineMemmapResponse, limine_memmap_iter};
 use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
@@ -608,7 +608,7 @@ pub fn init_memory_system_pre_typestate(
 /// On entry the buddy allocator and the typestate `Frame<_>` API are
 /// both live, so every page allocation made here goes through
 /// `Frame::<KernelMeta>::alloc` rather than the raw bootstrap path.
-pub fn init_memory_system_post_typestate() -> c_int {
+pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_int {
     let ctx = MEMORY_INIT_CTX
         .get()
         .expect("init_memory_system_post_typestate before init_memory_system_pre_typestate");
@@ -622,7 +622,7 @@ pub fn init_memory_system_post_typestate() -> c_int {
     if init_kernel_heap() != 0 {
         panic!("MM: Kernel heap initialization failed");
     }
-    crate::global_allocator_use_kernel_heap();
+    crate::global_allocator_use_kernel_heap(token);
 
     // Kernel-stack and SafeStack data-stack VA allocators — must come after
     // paging + heap so each region's `SpinLock` is usable and paging

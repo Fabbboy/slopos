@@ -1,4 +1,4 @@
-use slopos_hermetic::BootCtx;
+use slopos_hermetic::{BootCtx, BspInit};
 use slopos_utils::klog::{self, KlogLevel};
 use slopos_utils::{klog_debug, klog_info};
 
@@ -8,7 +8,7 @@ use slopos_arch::cpu::security::{SupervisorFeatures, enable_supervisor_features}
 use slopos_mm::memory_init::{init_memory_system_post_typestate, init_memory_system_pre_typestate};
 use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 
-fn boot_step_supervisor_features_fn(_ctx: &mut BootCtx) {
+fn boot_step_supervisor_features_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let SupervisorFeatures { pge, smep, smap } = enable_supervisor_features();
     klog_info!(
         "CPU: supervisor features enabled (PGE={}, SMEP={}, SMAP={})",
@@ -18,48 +18,78 @@ fn boot_step_supervisor_features_fn(_ctx: &mut BootCtx) {
     );
 }
 
-fn boot_step_mmu_asid_init_fn(_ctx: &mut BootCtx) {
+fn boot_step_mmu_asid_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let pcid_live = slopos_mm::mmu::init_bsp();
     klog_debug!("MMU: PCID {}", if pcid_live { "live" } else { "disabled" });
 }
 
-fn boot_step_init_meta_slots_fn(_ctx: &mut BootCtx) {
+fn boot_step_init_meta_slots_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // Memory phase priority 5 — runs after the buddy allocator is up
     // (BOOT_STEP_MEMORY_PRE_TYPESTATE, priority 2) and before
     // BOOT_STEP_REGISTER_FRAME_ALLOC at priority 6. `install_meta_slots`
     // itself uses the raw bootstrap escape (`__alloc_page_frames_raw`)
     // because it is bootstrapping META_SLOTS — the typestate path
     // physically cannot work yet.
-    let n_slots = slopos_mm::kernel_meta::install_meta_slots();
+    let n_slots = slopos_mm::kernel_meta::install_meta_slots(&ctx.bsp_token());
     klog_info!("OSTD: meta_slots installed ({} entries)", n_slots);
 }
 
-fn boot_step_register_frame_alloc_fn(_ctx: &mut BootCtx) {
-    // SAFETY: Memory phase priority 6 — runs after the buddy allocator
+fn boot_step_register_frame_alloc_fn(ctx: &mut BootCtx<'_, BspInit>) {
+    // Memory phase priority 6 — runs after the buddy allocator
     // (priority 2) and after meta_slots install (priority 5), which
     // is what the OSTD frame allocator interface needs. After this
     // step the typestate `Frame::<KernelMeta>::alloc` path is live;
     // the post-typestate boot step at priority 10 then performs every
     // remaining kernel page allocation through the typestate gate.
-    // Single registration site.
-    unsafe {
-        slopos_mm::frame_alloc_shim::register_with_ostd();
-    }
+    // Single registration site — body inlined from the former
+    // `slopos_mm::frame_alloc_shim::register_with_ostd(token)` shim.
+    slopos_ostd::mm::frame_alloc::register_frame_allocator(
+        &ctx.bsp_token(),
+        &slopos_mm::frame_alloc_shim::LEGACY_FRAME_ALLOC_DYN,
+    );
     klog_info!("OSTD: frame_allocator registered (LegacyFrameAllocShim)");
 }
 
-fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
-    // SAFETY: Memory phase priority 55 — runs after meta_slots
-    // (priority 5) and frame_alloc (priority 6). The kernel master
-    // PML4 paddr was registered with OSTD at early-init time
+fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    // Memory phase priority 55 — runs after meta_slots (priority 5)
+    // and frame_alloc (priority 6). The kernel master PML4 paddr was
+    // registered with OSTD at early-init time
     // (`register_kernel_master_pml4(read_cr3())` in early_init.rs);
     // CR3 has not been swapped since, so the same paddr is still the
     // live PML4 and is safe to wrap.
+    //
+    // The former `slopos_kernel_services::kernel_vm_space::install_kernel_vm_space`
+    // shim has been inlined here — the boot-step ordering established
+    // by this function is what `install_kernel_vm_space`'s doc
+    // contract referenced; rather than ferry a `&BspToken` through a
+    // wrapper, we touch the public `KERNEL_VM_SPACE` static directly.
+    use slopos_kernel_services::kernel_vm_space::{KERNEL_VM_SPACE, kernel_vm_space};
+    use slopos_ostd::arch::x86_64::cr3::Pcid;
+    use slopos_ostd::mm::vm_space::VmSpace;
+    use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+
     let cr3 = slopos_arch::cpu::control_regs::read_cr3();
     let pml4_phys = slopos_abi::addr::PhysAddr::new(cr3 & 0x000F_FFFF_FFFF_F000);
-    unsafe {
-        slopos_kernel_services::kernel_vm_space::install_kernel_vm_space(pml4_phys);
-    }
+    assert!(
+        !KERNEL_VM_SPACE.is_completed(),
+        "boot_step_install_kernel_vm_space_fn called twice"
+    );
+    KERNEL_VM_SPACE.call_once(|| {
+        // SAFETY: BspInit BootCtx + boot-step ordering jointly
+        // establish `wrap_existing`'s contract: pml4_phys names the
+        // live kernel master, META_SLOTS / FrameAlloc are registered
+        // (priorities 5 and 6 already ran), and we are pre-SMP on the
+        // BSP. The `BootCtx<'_, BspInit>` parameter is what authorises
+        // this BSP-only mutation.
+        let space = unsafe { VmSpace::wrap_existing(pml4_phys, Pcid::KERNEL) }.expect(
+            "boot_step_install_kernel_vm_space_fn: wrap_existing failed (pml4 slot already TYPED?)",
+        );
+        // LOCK_LEVEL_REGISTRY: kernel-half mutations sit between
+        // resource (per-process state) and allocator levels — they
+        // touch the kernel master PML4 which is shared registry-style
+        // across every address space.
+        SpinLock::new(space, LOCK_LEVEL_REGISTRY)
+    });
 
     // Stamp GLOBAL onto every kernel-half leaf via the OSTD cursor.
     // This used to live inside `init_paging` (priority 10, legacy
@@ -77,9 +107,7 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
     // SAFETY: irqs are off in this boot step; KERNEL_VM_SPACE was
     // installed two lines above; kernel-half invariant holds.
     unsafe {
-        slopos_kernel_services::kernel_vm_space::kernel_vm_space()
-            .lock()
-            .activate();
+        kernel_vm_space().lock().activate();
     }
 
     klog_info!(
@@ -88,23 +116,24 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx) {
     );
 }
 
-fn boot_step_register_luf_hook_fn(_ctx: &mut BootCtx) {
+fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // Memory phase priority 56 — runs after KERNEL_VM_SPACE is installed
     // (priority 55) and before any per-process VmSpace cursor mutation
     // can occur (those happen via `create_process_vm`, which is far
     // post-boot). Installing the hook now means every subsequent
     // `CursorMut::unmap` over a USER-flagged leaf and every
-    // `VmSpace::activate` routes into slopos-mm's LUF.
-    //
-    // SAFETY: one-shot install; OSTD's `register_cursor_unmap_hook`
-    // asserts on double-call.
-    unsafe {
-        slopos_mm::mmu::luf_hook::register_with_ostd();
-    }
+    // `VmSpace::activate` routes into slopos-mm's LUF. OSTD's
+    // `register_cursor_unmap_hook` asserts on double-call. Body
+    // inlined from the former `slopos_mm::mmu::luf_hook::register_with_ostd`
+    // shim.
+    slopos_ostd::mm::vm_space::register_cursor_unmap_hook(
+        &ctx.bsp_token(),
+        &slopos_mm::mmu::luf_hook::LUF_HOOK_REF,
+    );
     klog_info!("OSTD: cursor_unmap_hook registered (LufHook)");
 }
 
-fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx) -> i32 {
+fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
         klog_info!("ERROR: Memory map not available");
@@ -127,8 +156,8 @@ fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx) -> i32 {
     0
 }
 
-fn boot_step_memory_post_typestate(_ctx: &mut BootCtx) -> i32 {
-    let rc = init_memory_system_post_typestate();
+fn boot_step_memory_post_typestate(ctx: &mut BootCtx<'_, BspInit>) -> i32 {
+    let rc = init_memory_system_post_typestate(&ctx.bsp_token());
     if rc != 0 {
         klog_info!("ERROR: Memory system post-typestate init failed");
         return -1;
@@ -137,7 +166,7 @@ fn boot_step_memory_post_typestate(_ctx: &mut BootCtx) -> i32 {
     0
 }
 
-fn boot_step_memory_verify(_ctx: &mut BootCtx) {
+fn boot_step_memory_verify(_ctx: &mut BootCtx<'_, BspInit>) {
     let stack_ptr = slopos_ostd::cpu::x86_64::stack::read_rsp();
 
     if klog::is_enabled_level(KlogLevel::Debug) {

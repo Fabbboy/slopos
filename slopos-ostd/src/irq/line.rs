@@ -38,6 +38,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use crate::KBox;
+use crate::sync::BspToken;
 
 // ---------------------------------------------------------------------------
 // Vector range and allocator state.
@@ -208,17 +209,12 @@ fn vector_to_idx(vector: u8) -> Option<usize> {
 /// pool by mistake).
 ///
 /// Additive: multiple calls accumulate. Vectors outside the
-/// 32..224 range are silently ignored. Idempotent.
-///
-/// # Safety
-///
-/// The caller must certify that every vector in `reserved` is in
-/// fact reserved by the platform's vector layout (LAPIC timer,
-/// SYSCALL_VECTOR, IPIs, spurious vector, etc.). Wrongly reserving a
-/// vector excludes it from allocation; under-reserving lets driver
-/// code allocate a vector that hardware will collide with.
-/// Inv. 3.
-pub unsafe fn register_irq_reserved(reserved: &[u8]) {
+/// 32..224 range are silently ignored. Idempotent. The
+/// `&BspToken<'brand>` witnesses BSP-only init; every vector in
+/// `reserved` must be reserved by the platform's vector layout
+/// (LAPIC timer, SYSCALL_VECTOR, IPIs, spurious vector, etc.) —
+/// Inv. 3, a caller invariant.
+pub fn register_irq_reserved<'brand>(_token: &BspToken<'brand>, reserved: &[u8]) {
     for &v in reserved {
         if let Some(idx) = vector_to_idx(v) {
             ALLOC_STATE.reserved.set(idx);
@@ -575,8 +571,9 @@ mod tests {
     #[test]
     fn reserved_vector_is_skipped() {
         isolate(|| {
-            // SAFETY: test-only reservation; values are within range.
-            unsafe { register_irq_reserved(&[ALLOC_VECTOR_BASE]) };
+            crate::sync::run_bsp_init_for_test(|t| {
+                register_irq_reserved(t, &[ALLOC_VECTOR_BASE]);
+            });
             for _ in 0..3 {
                 let l = IrqAllocator::alloc().expect("alloc");
                 assert_ne!(l.vector(), ALLOC_VECTOR_BASE);
@@ -741,8 +738,9 @@ mod tests {
             // allocator's 32..224 pool — the IPI/timer/spurious vectors
             // sit at 0xEC..0xFF, outside the pool entirely, so reserving
             // them is a no-op in the bitmap.
-            // SAFETY: test-only reservation.
-            unsafe { register_irq_reserved(&[0x80]) };
+            crate::sync::run_bsp_init_for_test(|t| {
+                register_irq_reserved(t, &[0x80]);
+            });
             let r = IrqAllocator::reserve_specific(0x80);
             assert_eq!(r.err(), Some(IrqError::AlreadyRegistered));
         });

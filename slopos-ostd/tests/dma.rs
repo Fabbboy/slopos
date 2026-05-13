@@ -125,13 +125,12 @@ fn setup() -> MutexGuard<'static, ()> {
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
         Box::leak(slots.into_boxed_slice());
 
-        // SAFETY: leaked storage; pointers live `'static`.
-        unsafe {
-            init_meta_slots(slots_ptr, N_PAGES);
-            init_phys_virt_offset(backing_ptr);
-            register_frame_allocator(&BUMP_REF);
-            register_iommu_mapper(&RECORDING_MAPPER_REF);
-        }
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            init_meta_slots(t, slots_ptr, N_PAGES);
+            init_phys_virt_offset(t, backing_ptr);
+            register_frame_allocator(t, &BUMP_REF);
+            register_iommu_mapper(t, &RECORDING_MAPPER_REF);
+        });
         Mutex::new(())
     });
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -170,10 +169,9 @@ fn coherent_alloc_returns_not_initialised_without_mapper() {
     let r = DmaCoherent::alloc(1);
     assert_eq!(r.unwrap_err(), DmaError::NotInitialised);
     // Re-install so subsequent tests in this binary still work.
-    // SAFETY: leaked statics; one-shot already cleared.
-    unsafe {
-        register_iommu_mapper(&RECORDING_MAPPER_REF);
-    }
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        register_iommu_mapper(t, &RECORDING_MAPPER_REF);
+    });
 }
 
 #[test]
@@ -182,10 +180,9 @@ fn coherent_alloc_returns_not_initialised_without_frame_alloc() {
     frame_alloc::reset_for_test();
     let r = DmaCoherent::alloc(1);
     assert_eq!(r.unwrap_err(), DmaError::NotInitialised);
-    // SAFETY: leaked static; one-shot already cleared.
-    unsafe {
-        register_frame_allocator(&BUMP_REF);
-    }
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        register_frame_allocator(t, &BUMP_REF);
+    });
 }
 
 #[test]

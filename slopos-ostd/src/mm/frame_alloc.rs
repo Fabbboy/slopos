@@ -12,6 +12,7 @@
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::mm::frame::FrameAlloc;
+use crate::sync::BspToken;
 
 // We store a pointer to a `&'static dyn FrameAlloc`. `dyn` trait
 // objects are wide pointers (data + vtable), so we double-box: the
@@ -29,14 +30,16 @@ static FRAME_ALLOCATOR: AllocSlot = AllocSlot {
 
 /// One-shot wiring point. Pass a reference to a `&'static dyn FrameAlloc`
 /// — typically `&LEGACY_FRAME_ALLOC_SHIM as &'static dyn FrameAlloc`
-/// stored in a `static` consumer-side, then a reference to *that*.
-///
-/// # Safety
-///
-/// The caller certifies that `slot` outlives the kernel (`'static`)
-/// and that the underlying `dyn FrameAlloc` is sound for concurrent
-/// `alloc` / `dealloc` from any CPU.
-pub unsafe fn register_frame_allocator(slot: &'static &'static dyn FrameAlloc) {
+/// stored in a `static` consumer-side, then a reference to *that*. The
+/// `&BspToken<'brand>` witnesses BSP-only init via the HRTB closure
+/// minted by [`crate::sync::run_bsp_init`]; the underlying `dyn
+/// FrameAlloc` is required to be sound for concurrent `alloc`/`dealloc`
+/// from any CPU (the static double-reference guarantees `'static`
+/// storage).
+pub fn register_frame_allocator<'brand>(
+    _token: &BspToken<'brand>,
+    slot: &'static &'static dyn FrameAlloc,
+) {
     let raw = slot as *const &'static dyn FrameAlloc as *mut ();
     let prev = FRAME_ALLOCATOR.inner.swap(raw, Ordering::AcqRel);
     assert!(

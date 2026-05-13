@@ -428,7 +428,7 @@ fn ensure_cpu_stacks_mapped(cpu_id: usize) {
 /// - Memory subsystem is initialized (page allocator, paging)
 /// - GDT/TSS is initialized
 /// - IDT is initialized (but before interrupts are enabled)
-pub fn ist_stacks_init(ctx: &mut slopos_hermetic::BootCtx) {
+pub fn ist_stacks_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspInit>) {
     klog_debug!(
         "IST: Initializing {} dedicated interrupt stacks",
         IST_STACK_COUNT
@@ -463,8 +463,11 @@ pub fn ist_stacks_init(ctx: &mut slopos_hermetic::BootCtx) {
 ///
 /// This must run on every CPU after its per-CPU GDT/TSS is installed. The
 /// stack memory is globally allocated once by `ist_stacks_init`; this routine
-/// only updates CPU-local TSS IST pointers.
-pub fn ist_bind_current_cpu(ctx: &mut slopos_hermetic::BootCtx) {
+/// only updates CPU-local TSS IST pointers. `K: CpuInitKind` keeps the
+/// surface dual-callable from BSP-init, AP-init, and test scopes.
+pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
+    ctx: &mut slopos_hermetic::BootCtx<'b, K>,
+) {
     let cpu_id = get_current_cpu();
     ensure_cpu_stacks_mapped(cpu_id);
 

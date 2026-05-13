@@ -63,11 +63,10 @@ fn setup() -> MutexGuard<'static, ()> {
         let backing_ptr = unsafe { std::alloc::alloc_zeroed(layout) } as u64;
         assert_ne!(backing_ptr, 0, "backing alloc failed");
         BACKING_BASE.store(backing_ptr, Ordering::Release);
-        // SAFETY: leaked storage; ranges and mapper live `'static`.
-        unsafe {
-            register_io_mem_registry(ranges_static());
-            register_io_mem_mapper(&FAKE_MAPPER_REF);
-        }
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            register_io_mem_registry(t, ranges_static());
+            register_io_mem_mapper(t, &FAKE_MAPPER_REF);
+        });
         Mutex::new(())
     });
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -116,11 +115,10 @@ fn reserve_rejects_when_uninitialised() {
     );
     assert_eq!(r.unwrap_err(), IoMemError::Uninitialised);
     // Re-install for subsequent tests in this binary.
-    // SAFETY: leaked statics; one-shot already cleared by reset.
-    unsafe {
-        register_io_mem_registry(ranges_static());
-        register_io_mem_mapper(&FAKE_MAPPER_REF);
-    }
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        register_io_mem_registry(t, ranges_static());
+        register_io_mem_mapper(t, &FAKE_MAPPER_REF);
+    });
 }
 
 #[test]

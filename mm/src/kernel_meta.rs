@@ -17,6 +17,7 @@ use core::mem::size_of;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{MAX_META_ALIGN, MAX_META_SIZE, MetaSlot, init_meta_slots};
+use slopos_ostd::sync::BspToken;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::mm_region_highest_frame_seen;
@@ -39,9 +40,14 @@ const _: () = assert!(
 /// buddy allocator + HHDM are live (Memory phase priority ≥ 10) and
 /// before any `Frame<M>` is constructed.
 ///
+/// The `&BspToken<'brand>` witness binds the call to the BSP-init
+/// scope opened by `slopos_ostd::sync::run_bsp_init` and is forwarded
+/// to OSTD's [`init_meta_slots`] (which enforces one-shot
+/// registration).
+///
 /// Returns the number of slots installed, or `0` if there is nothing
 /// to install (no usable memory or the buddy returned NULL).
-pub fn install_meta_slots() -> usize {
+pub fn install_meta_slots<'brand>(token: &BspToken<'brand>) -> usize {
     // Cover every frame in the memory map — `Usable` is too narrow
     // (the kernel PML4 and other bootloader-allocated frames live
     // in `KernelAndModules` / `BootloaderReclaimable` / `Reserved`
@@ -81,14 +87,15 @@ pub fn install_meta_slots() -> usize {
     let virt = PhysAddr::new(phys.as_u64()).to_virt();
     let slots = virt.as_u64() as *mut MetaSlot;
 
-    // SAFETY: `__alloc_page_frames_raw(.., ZERO)` returned `pages * 4 KiB` of
+    // `__alloc_page_frames_raw(.., ZERO)` returned `pages * 4 KiB` of
     // zero-initialised, page-aligned, exclusively-owned physical memory;
     // `to_virt` translated through the kernel HHDM into a kernel-mode
     // virtual address that is unique to us, so the `MetaSlot` slice
     // covering `[slots, slots + n_slots)` is valid for the kernel's
-    // lifetime and does not alias.
-    unsafe {
-        init_meta_slots(slots, n_slots);
-    }
+    // lifetime and does not alias. The OSTD `init_meta_slots` entry
+    // point is safe (it merely stores the base/len under the BspToken
+    // witness); the raw-pointer soundness obligation it documents is
+    // satisfied by the allocation above.
+    init_meta_slots(token, slots, n_slots);
     n_slots
 }

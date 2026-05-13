@@ -19,6 +19,8 @@ use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 
+use crate::sync::BspToken;
+
 /// Physical address. Aliased to keep call sites lining up with the
 /// `Paddr` vocabulary used throughout the typed-frame API.
 pub type Paddr = PhysAddr;
@@ -262,14 +264,13 @@ static META_SLOTS: MetaSlotsRegion = MetaSlotsRegion {
     len: AtomicUsize::new(0),
 };
 
-/// One-shot boot wiring point.
-///
-/// # Safety
-///
-/// `slots` must point to `len` zero-initialised, non-aliased
-/// [`MetaSlot`]s, valid for the static lifetime of the kernel. The
-/// caller must not retain any other references to that storage.
-pub unsafe fn init_meta_slots(slots: *mut MetaSlot, len: usize) {
+/// One-shot boot wiring point. The `&BspToken<'brand>` witnesses
+/// BSP-only init; `slots` must point to `len` zero-initialised,
+/// non-aliased [`MetaSlot`]s valid for the static lifetime of the
+/// kernel — that's a raw-pointer soundness obligation the type
+/// system cannot express, so the `# Safety` block survives as an
+/// inline contract on the unsafe deref below.
+pub fn init_meta_slots<'brand>(_token: &BspToken<'brand>, slots: *mut MetaSlot, len: usize) {
     let prev = META_SLOTS.base.swap(slots, Ordering::AcqRel);
     assert!(
         prev.is_null(),

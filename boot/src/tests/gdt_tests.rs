@@ -604,8 +604,11 @@ pub fn test_syscall_msr_double_init() -> TestResult {
     let star_before = cpu::read_msr(Msr::STAR);
     let lstar_before = cpu::read_msr(Msr::LSTAR);
 
-    // Reinitialize SYSCALL MSRs
-    syscall_msr_init();
+    // Reinitialize SYSCALL MSRs — this test runs post-boot inside the
+    // KTAP harness; the BSP brand has already minted and dropped, so
+    // re-enter the BSP-init scope via `run_bsp_init_for_test` to obtain
+    // a `&BspToken<'_>` to pass as the `CpuInitWitness`.
+    slopos_ostd::sync::run_bsp_init_for_test(|t| syscall_msr_init(t));
 
     let efer_after = cpu::read_msr(Msr::EFER);
     let star_after = cpu::read_msr(Msr::STAR);

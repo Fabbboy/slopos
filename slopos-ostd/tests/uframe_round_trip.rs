@@ -36,14 +36,14 @@ fn setup() -> MutexGuard<'static, ()> {
         // remains valid for the lifetime of the test binary.
         Box::leak(slots.into_boxed_slice());
         let backing_ptr = backing.0.as_mut_ptr();
-        // SAFETY: slots_ptr / backing live for `'static` (both
-        // leaked above); the offset places paddr `0` at the start
-        // of the backing buffer, so paddrs in `[0, N_PAGES * 4096)`
-        // map into the buffer.
-        unsafe {
-            init_meta_slots(slots_ptr, N_PAGES);
-            init_phys_virt_offset(backing_ptr as u64);
-        }
+        // slots_ptr / backing live for `'static` (both leaked above);
+        // the offset places paddr `0` at the start of the backing
+        // buffer, so paddrs in `[0, N_PAGES * 4096)` map into the
+        // buffer.
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            init_meta_slots(t, slots_ptr, N_PAGES);
+            init_phys_virt_offset(t, backing_ptr as u64);
+        });
         Mutex::new(())
     });
     m.lock().unwrap()

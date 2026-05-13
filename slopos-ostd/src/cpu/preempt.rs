@@ -33,6 +33,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::cpu::x86_64::pcr;
 use crate::cpu::x86_64::{restore_flags, save_flags_cli};
+use crate::sync::BspToken;
 
 // ---------------------------------------------------------------------------
 // PreemptBackend trait.
@@ -149,15 +150,14 @@ static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// One-shot wiring point for the production preempt backend. The
 /// kernel registers a backend that proxies to the per-CPU preempt
 /// count field; before this is called, [`DisabledPreemptGuard`] uses
-/// the OSTD-internal [`NoOpBackend`].
-///
-/// # Safety
-///
-/// `backend` must live for the static lifetime of the kernel and must
-/// only access per-CPU state that the caller is authorised to touch.
-/// The caller certifies Inv. 2 (kernel-mode state untamperable by OSTD
-/// clients).
-pub unsafe fn register_preempt_backend(backend: &'static dyn PreemptBackend) {
+/// the OSTD-internal [`NoOpBackend`]. The `&BspToken<'brand>`
+/// witnesses BSP-only init; `backend` must live for the static
+/// lifetime of the kernel and only access per-CPU state the kernel
+/// authorises (Inv. 2 — kernel-mode state untamperable).
+pub fn register_preempt_backend<'brand>(
+    _token: &BspToken<'brand>,
+    backend: &'static dyn PreemptBackend,
+) {
     let was_installed = BACKEND_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(
         !was_installed,
@@ -397,8 +397,9 @@ impl Drop for IrqPreemptGuard {
 }
 
 /// Register a function to be invoked when a preempt guard drop returns the
-/// count to zero with `reschedule_pending` set.
-pub fn register_reschedule_callback(callback: fn()) {
+/// count to zero with `reschedule_pending` set. The `&BspToken<'brand>`
+/// witnesses BSP-only init.
+pub fn register_reschedule_callback<'brand>(_token: &BspToken<'brand>, callback: fn()) {
     RESCHEDULE_CALLBACK.store(callback as *mut (), Ordering::Release);
 }
 

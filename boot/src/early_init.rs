@@ -45,11 +45,15 @@ impl BootInitPhase {
 }
 
 /// Type alias for boot init step functions. Every step receives a
-/// `&mut BootCtx` capability so it can call boot-time-only mutators
-/// (gdt_set_ist, init_scheduler, etc.). Steps that don't touch boot
-/// mutators still take the parameter — uniform signature avoids a
+/// `&mut BootCtx<'_, BspInit>` capability so it can call boot-time-only
+/// mutators (gdt_set_ist, init_scheduler, etc.). Steps that don't touch
+/// boot mutators still take the parameter — uniform signature avoids a
 /// two-tone API and the borrow checker permits the unused param.
-pub type BootInitFn = fn(&mut BootCtx) -> i32;
+///
+/// HRTB `for<'b>` makes the boot step lifetime-polymorphic so the
+/// step's `'brand` is unified with the brand minted by `run_bsp_init`
+/// at call time rather than baked into the fn-pointer type.
+pub type BootInitFn = for<'b> fn(&mut BootCtx<'b, BspInit>) -> i32;
 
 pub struct BootInitStep {
     name: &'static [u8],
@@ -83,12 +87,24 @@ impl BootInitStep {
 /// `BOOT_INIT_FLAG_OPTIONAL` (failures are non-fatal).
 #[macro_export]
 macro_rules! boot_init {
-    // Fallible fn(&mut BootCtx) -> i32, explicit flags
+    // Fallible fn(&mut BootCtx<'_, BspInit>) -> i32, explicit flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, flags = $flags:expr) => {
-        #[used]
-        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-        static $static_name: $crate::early_init::BootInitStep =
-            $crate::early_init::BootInitStep::new($label, $func, $flags);
+        const _: () = {
+            fn wrapper<'b>(
+                ctx: &mut $crate::early_init::BootCtx<'b, $crate::early_init::BspInit>,
+            ) -> i32 {
+                $func(ctx)
+            }
+            #[used]
+            #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
+            static STEP: $crate::early_init::BootInitStep = $crate::early_init::BootInitStep::new(
+                $label,
+                wrapper as $crate::early_init::BootInitFn,
+                $flags,
+            );
+        };
+        #[allow(dead_code)]
+        const $static_name: () = ();
     };
 
     // Fallible fn(&mut BootCtx) -> i32, optional shorthand
@@ -108,17 +124,22 @@ macro_rules! boot_init {
         $crate::boot_init!($static_name, $phase, $label, $func, fallible, flags = 0);
     };
 
-    // Infallible fn(&mut BootCtx), explicit flags
+    // Infallible fn(&mut BootCtx<'_, BspInit>), explicit flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, flags = $flags:expr) => {
         const _: () = {
-            fn wrapper(ctx: &mut $crate::early_init::BootCtx) -> i32 {
+            fn wrapper<'b>(
+                ctx: &mut $crate::early_init::BootCtx<'b, $crate::early_init::BspInit>,
+            ) -> i32 {
                 $func(ctx);
                 0
             }
             #[used]
             #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-            static STEP: $crate::early_init::BootInitStep =
-                $crate::early_init::BootInitStep::new($label, wrapper, $flags);
+            static STEP: $crate::early_init::BootInitStep = $crate::early_init::BootInitStep::new(
+                $label,
+                wrapper as $crate::early_init::BootInitFn,
+                $flags,
+            );
         };
         #[allow(dead_code)]
         const $static_name: () = ();
@@ -141,9 +162,10 @@ macro_rules! boot_init {
     };
 }
 
-// Re-export BootCtx so the boot_init! macro expansion can name it via
-// the canonical path `crate::early_init::BootCtx`.
-pub use slopos_hermetic::BootCtx;
+// Re-export BootCtx + BspInit so the boot_init! macro expansion can
+// name them via the canonical paths `crate::early_init::BootCtx` and
+// `crate::early_init::BspInit`.
+pub use slopos_hermetic::{BootCtx, BspInit};
 
 pub const fn boot_init_priority(val: u32) -> u32 {
     (val << BOOT_INIT_PRIORITY_SHIFT) & BOOT_INIT_PRIORITY_MASK
@@ -295,7 +317,11 @@ fn boot_init_report_progress(step: &BootInitStep) {
     let _ = splash::splash_report_progress(progress, step.name);
 }
 
-fn boot_run_step(ctx: &mut BootCtx, phase_name: &[u8], step: &BootInitStep) -> i32 {
+fn boot_run_step<'b>(
+    ctx: &mut BootCtx<'b, BspInit>,
+    phase_name: &[u8],
+    step: &BootInitStep,
+) -> i32 {
     serial::write_line("BOOT: running init step");
     boot_init_report_step(KlogLevel::Debug, b"step\0", Some(step.name));
 
@@ -315,7 +341,7 @@ fn boot_run_step(ctx: &mut BootCtx, phase_name: &[u8], step: &BootInitStep) -> i
     0
 }
 
-pub fn boot_init_run_phase(ctx: &mut BootCtx, phase: BootInitPhase) -> i32 {
+pub fn boot_init_run_phase<'b>(ctx: &mut BootCtx<'b, BspInit>, phase: BootInitPhase) -> i32 {
     let steps = phase_steps(phase);
     if steps.is_empty() {
         return 0;
@@ -363,7 +389,7 @@ pub fn boot_init_run_phase(ctx: &mut BootCtx, phase: BootInitPhase) -> i32 {
     0
 }
 
-pub fn boot_init_run_all(ctx: &mut BootCtx) -> i32 {
+pub fn boot_init_run_all<'b>(ctx: &mut BootCtx<'b, BspInit>) -> i32 {
     boot_init_prepare_progress();
     let mut phase_idx = BootInitPhase::EarlyHw as u8;
     while phase_idx <= BootInitPhase::Optional as u8 {
@@ -421,7 +447,7 @@ pub fn report_kernel_status() {
 
 use slopos_core::sched::enter_scheduler;
 
-fn boot_step_serial_init_fn(_ctx: &mut BootCtx) {
+fn boot_step_serial_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     serial::write_line("BOOT: serial step -> init");
     serial::init();
     serial::write_line("BOOT: serial step -> after serial::init");
@@ -432,12 +458,12 @@ fn boot_step_serial_init_fn(_ctx: &mut BootCtx) {
     boot_debug(b"Serial console ready on COM1\0");
 }
 
-fn boot_step_boot_banner_fn(_ctx: &mut BootCtx) {
+fn boot_step_boot_banner_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     boot_info(b"SlopOS Kernel Started!\0");
     boot_info(b"Booting via Limine Protocol...\0");
 }
 
-fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx) -> i32 {
+fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     boot_debug(b"Initializing Limine protocol interface...\0");
     if limine_protocol::init_limine_protocol() != 0 {
         boot_info(b"ERROR: Limine protocol initialization failed\0");
@@ -466,7 +492,7 @@ fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx) -> i32 {
     0
 }
 
-fn boot_step_boot_config_fn(_ctx: &mut BootCtx) {
+fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let cmdline = BOOT_RUNTIME.lock().cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
         || cmdline.contains("boot.debug=1")
@@ -522,14 +548,12 @@ boot_init!(
     boot_step_boot_config_fn
 );
 
-fn boot_step_init_phys_virt_offset_fn(_ctx: &mut BootCtx) {
+fn boot_step_init_phys_virt_offset_fn(ctx: &mut BootCtx<'_, BspInit>) {
     let hhdm = boot_get_hhdm_offset();
-    // SAFETY: one-shot init; the limine step has already populated
-    // `hhdm_offset`, and this is the canonical wiring point for the
-    // OSTD phys/virt offset.
-    unsafe {
-        slopos_ostd::mm::phys::init_phys_virt_offset(hhdm);
-    }
+    // One-shot init; the limine step has already populated `hhdm_offset`,
+    // and this is the canonical wiring point for the OSTD phys/virt
+    // offset. Tier-2 OSTD signature is `fn(&BspToken<'_>, u64)`.
+    slopos_ostd::mm::phys::init_phys_virt_offset(&ctx.bsp_token(), hhdm);
 }
 
 boot_init!(
@@ -544,53 +568,91 @@ boot_init!(
 pub fn kernel_main_impl() {
     wl_currency::reset();
 
-    unsafe {
+    slopos_ostd::sync::run_bsp_init(|token| {
+        // Initialise the BSP PCR (`init_bsp_pcr` is BSP-only one-shot,
+        // gated on the freshly-minted BspToken). After this point
+        // `current_pcr()` is callable from any subsequent boot step.
         let bsp_apic_id = crate::apic_id::read_bsp_apic_id();
-        slopos_arch::pcr::init_bsp_pcr(bsp_apic_id);
-        let pcr = slopos_arch::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
-        pcr.init_gdt();
-        pcr.install();
-    }
+        slopos_arch::pcr::init_bsp_pcr(token, bsp_apic_id);
+        // SAFETY: `get_pcr_mut(0)` returns the unique BSP PCR pointer
+        // just minted by `init_bsp_pcr`; no other CPU has come online
+        // yet (we are pre-SMP), so this is the sole writer to the BSP
+        // PCR's GDT/TSS slots.
+        unsafe {
+            let pcr = slopos_arch::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
+            pcr.init_gdt();
+            pcr.install();
+        }
 
-    // Tell OSTD which PML4 was loaded by the bootloader. CR3 is a pure
-    // CPU register read; the value persists for the lifetime of the
-    // kernel since this PML4 holds the canonical kernel mappings.
-    // SAFETY: one-shot init.
-    unsafe {
+        // Tell OSTD which PML4 was loaded by the bootloader. CR3 is a
+        // pure CPU register read; the value persists for the lifetime
+        // of the kernel since this PML4 holds the canonical kernel
+        // mappings.
         let cr3 = slopos_arch::cpu::control_regs::read_cr3();
-        slopos_ostd::mm::vm_space::register_kernel_master_pml4(slopos_abi::addr::PhysAddr::new(
-            cr3,
-        ));
-    }
+        slopos_ostd::mm::vm_space::register_kernel_master_pml4(
+            token,
+            slopos_abi::addr::PhysAddr::new(cr3),
+        );
 
-    idt::idt_init();
-    serial::write_line("BOOT: before idt_load (early)");
-    idt::idt_load();
-    serial::write_line("BOOT: after idt_load (early)");
-    gdt::syscall_msr_init();
-    serial::write_line("BOOT: early GDT/IDT/SYSCALL initialized");
+        idt::idt_init(token);
+        serial::write_line("BOOT: before idt_load (early)");
+        idt::idt_load(token);
+        serial::write_line("BOOT: after idt_load (early)");
+        gdt::syscall_msr_init(token);
+        serial::write_line("BOOT: early GDT/IDT/SYSCALL initialized");
 
-    // Register platform and syscall service tables before the init phases run.
-    crate::boot_impl::register_boot_services();
-    slopos_core::driver_hooks::register_driver_services();
-    slopos_drivers::syscall_services_init::init_syscall_services();
-    // Wire OSTD's wait-queue / RCU backends to the kernel-services facades.
-    // Must come after the platform + driver-runtime services are registered.
-    // SAFETY: both required services are now registered above; the bridge
-    // is a `'static` ZST so its registration cannot dangle.
-    unsafe {
-        slopos_kernel_services::ostd_bridge::register_with_ostd();
-        slopos_mm::io_mem_mapper_shim::register_with_ostd();
-    }
-    slopos_core::sched::install_ostd_task_exit_hook();
+        // Register platform and syscall service tables before the init phases run.
+        crate::boot_impl::register_boot_services();
+        slopos_core::driver_hooks::register_driver_services();
+        slopos_drivers::syscall_services_init::init_syscall_services();
 
-    serial::write_line("BOOT: entering boot init");
-    let mut boot_ctx = slopos_hermetic::take_for_boot();
-    if boot_init_run_all(&mut boot_ctx) != 0 {
-        panic!("Boot initialization failed");
-    }
-    slopos_hermetic::return_after_boot(boot_ctx);
-    serial::write_line("BOOT: boot init complete");
+        // OSTD bridge registration — formerly the body of
+        // `slopos_kernel_services::ostd_bridge::register_with_ostd`,
+        // inlined here so the OSTD `register_*` hooks see the same
+        // `&BspToken<'brand>` as the surrounding init scope.
+        use slopos_kernel_services::ostd_backends::diagnostic_sink::CONSOLE_SINK;
+        use slopos_kernel_services::ostd_backends::local_tlb::LOCAL_TLB_DYN;
+        use slopos_kernel_services::ostd_backends::preempt::PCR_PREEMPT;
+        use slopos_kernel_services::ostd_bridge::{RCU_OPS, WAIT_QUEUE_OPS};
+        use slopos_kernel_services::ostd_bridge_tables::{
+            MMIO_RANGES, PORT_RANGES, RESERVED_VECTORS,
+        };
+        slopos_ostd::sync::wait_queue::register_wait_queue_backend(token, &WAIT_QUEUE_OPS);
+        slopos_ostd::sync::rcu::register_rcu_backend(token, &RCU_OPS);
+        slopos_ostd::mm::io_mem::register_io_mem_registry(token, MMIO_RANGES);
+        slopos_ostd::io::port::register_io_port_registry(token, PORT_RANGES);
+        slopos_ostd::irq::line::register_irq_reserved(token, RESERVED_VECTORS);
+        slopos_ostd::irq::idt::register_diagnostic_sink(token, &CONSOLE_SINK);
+        slopos_ostd::cpu::preempt::register_preempt_backend(token, &PCR_PREEMPT);
+        slopos_ostd::mm::tlb::register_local_tlb_flusher(token, &LOCAL_TLB_DYN);
+        slopos_ostd::user::mode::register_user_mode_backend(
+            token,
+            &slopos_ostd::user::mode::DEFAULT_USER_MODE_BACKEND,
+        );
+        slopos_ostd::task::register_task_runtime_backend(
+            token,
+            &slopos_ostd::task::DEFAULT_TASK_RUNTIME_BACKEND,
+        );
+        slopos_kernel_services::platform::console_puts(
+            b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode/task_runtime tables\n",
+        );
+
+        // Inlined `slopos_mm::io_mem_mapper_shim::register_with_ostd`.
+        slopos_ostd::mm::io_mem::register_io_mem_mapper(
+            token,
+            &slopos_mm::io_mem_mapper_shim::LEGACY_IO_MEM_MAPPER_DYN,
+        );
+
+        slopos_core::sched::install_ostd_task_exit_hook(token);
+
+        serial::write_line("BOOT: entering boot init");
+        let mut boot_ctx = slopos_hermetic::take_for_boot(token);
+        if boot_init_run_all(&mut boot_ctx) != 0 {
+            panic!("Boot initialization failed");
+        }
+        slopos_hermetic::return_after_boot(boot_ctx);
+        serial::write_line("BOOT: boot init complete");
+    });
 
     if klog::is_enabled_level(KlogLevel::Info) {
         klog_info!("");

@@ -44,7 +44,7 @@ pub type ApTrampolineFn = unsafe extern "C" fn(*const ()) -> !;
 /// Single-writer: BSP only. The [`BspToken`] argument is the same
 /// capability witness used by [`crate::sync::run_bsp_init`] —
 /// consumers acquire one inside the one-shot BSP-init pathway.
-pub fn install_safestack_runtime(_token: &BspToken) {
+pub fn install_safestack_runtime<'brand>(_token: &BspToken<'brand>) {
     // No-op today. See module docs.
 }
 
@@ -62,6 +62,6 @@ pub fn install_safestack_runtime(_token: &BspToken) {
 /// one-shot BSP-init protocol; future use-cases (e.g. swapping the
 /// trampoline for a different SafeStack-disable variant) can attach
 /// side-effects without churning the kernel-side caller.
-pub fn install_ap_trampoline(_token: &BspToken) -> ApTrampolineFn {
+pub fn install_ap_trampoline<'brand>(_token: &BspToken<'brand>) -> ApTrampolineFn {
     super::naked::ap_entry
 }

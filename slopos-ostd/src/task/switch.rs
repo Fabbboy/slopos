@@ -18,6 +18,7 @@ use core::cell::UnsafeCell;
 use core::mem::{MaybeUninit, offset_of};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::sync::BspToken;
 use crate::task::task::TaskContext;
 
 // ---------------------------------------------------------------------------
@@ -157,14 +158,12 @@ unsafe impl Sync for ExitHookSlot {}
 static EXIT_HOOK_SLOT: ExitHookSlot = ExitHookSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static EXIT_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the task-exit hook.
-///
-/// # Safety
-///
-/// `hook` must be a valid function pointer that does not return. It
-/// will be invoked from the trampoline with no arguments and is
-/// expected to perform task termination + reschedule.
-pub unsafe fn register_task_exit_hook(hook: TaskExitHook) {
+/// One-shot wiring point for the task-exit hook. The
+/// `&BspToken<'brand>` witnesses BSP-only init; `hook` must be a valid
+/// function pointer that does not return — it is invoked from the
+/// trampoline with no arguments and is expected to perform task
+/// termination + reschedule.
+pub fn register_task_exit_hook<'brand>(_token: &BspToken<'brand>, hook: TaskExitHook) {
     let was_installed = EXIT_HOOK_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(!was_installed, "register_task_exit_hook called twice");
     // SAFETY: the swap above transitioned us from "uninstalled" to

@@ -102,10 +102,11 @@ static RECORDING: RecordingBackend = RecordingBackend::new();
 
 fn install_recording() {
     RECORDING.reset();
-    // SAFETY: `RECORDING` lives `'static`. `reset_for_test` cleared
-    // any prior installation; the swap inside `register_preempt_backend`
-    // asserts !was_installed.
-    unsafe { register_preempt_backend(&RECORDING) };
+    // `reset_for_test` cleared any prior installation; the swap inside
+    // `register_preempt_backend` asserts !was_installed.
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        register_preempt_backend(t, &RECORDING);
+    });
 }
 
 #[test]
@@ -174,8 +175,10 @@ fn double_register_preempt_backend_panics() {
     let _g = serial();
     install_recording();
     let result = std::panic::catch_unwind(|| {
-        // SAFETY: intentionally trigger the double-registration panic.
-        unsafe { register_preempt_backend(&RECORDING) };
+        // Intentionally trigger the double-registration panic.
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            register_preempt_backend(t, &RECORDING);
+        });
     });
     assert!(result.is_err(), "second register should panic");
 }

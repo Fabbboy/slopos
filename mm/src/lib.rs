@@ -40,6 +40,7 @@ pub mod vma_region;
 use core::alloc::Layout;
 use core::ffi::c_void;
 use slopos_ostd::mm::heap::register_kernel_heap_backend;
+use slopos_ostd::sync::BspToken;
 use slopos_utils::align_up_usize;
 
 /// Safe-callback adapter for the slab allocator. Invoked by OSTD's
@@ -57,8 +58,12 @@ fn slab_dealloc_cb(ptr: *mut u8) {
 /// Promote the global allocator from OSTD's bootstrap bump pool to the
 /// `mm` crate's slab allocator. Must run after `init_kernel_heap()`
 /// completes so the slab backing pages are mapped.
-pub fn global_allocator_use_kernel_heap() {
+///
+/// The `&BspToken<'brand>` witness binds the call to the BSP-init
+/// scope opened by `slopos_ostd::sync::run_bsp_init`; it is forwarded
+/// to OSTD's [`register_kernel_heap_backend`], which is one-shot.
+pub fn global_allocator_use_kernel_heap<'brand>(token: &BspToken<'brand>) {
     let _ = align_up_usize(0, 16); // keep slopos_utils import alive for layout math users
     let _ = Layout::new::<u8>(); // keep core::alloc::Layout import alive
-    register_kernel_heap_backend(slab_alloc_cb, slab_dealloc_cb);
+    register_kernel_heap_backend(token, slab_alloc_cb, slab_dealloc_cb);
 }

@@ -2,7 +2,7 @@ use core::ffi::CStr;
 #[cfg(feature = "xe-gpu")]
 use core::ffi::c_char;
 
-use slopos_hermetic::BootCtx;
+use slopos_hermetic::{BootCtx, BspInit};
 use slopos_testing::{
     TestRunSummary, kernel_phase_summary, tests_reset_panic_state, tests_run_all,
 };
@@ -86,17 +86,17 @@ fn apply_serial_mirror_cmdline() {
     }
 }
 
-fn boot_step_idt_setup_fn(ctx: &mut BootCtx) {
+fn boot_step_idt_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
-    idt_init();
+    idt_init(&ctx.bsp_token());
     ist_stacks_init(ctx);
-    idt_load();
+    idt_load(&ctx.bsp_token());
     serial_note("boot: idt setup done");
     klog_debug!("IDT initialized and loaded.");
 }
 
-fn boot_step_irq_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_irq_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Configuring IRQ dispatcher...");
     slopos_drivers::irq::init();
     slopos_drivers::tty::init();
@@ -109,7 +109,7 @@ fn boot_step_irq_setup_fn(_ctx: &mut BootCtx) {
     klog_debug!("IRQ dispatcher ready.");
 }
 
-fn boot_step_timer_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_timer_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // HPET + LAPIC timer are mandatory (enforced at boot priorities 55–58).
     // The PIT hardware counter is left free-running for LAPIC calibration
     // fallback only — no PIT init, no PIT IRQs.
@@ -161,14 +161,14 @@ fn boot_step_timer_setup_fn(_ctx: &mut BootCtx) {
     sync_mouse_bounds(fb);
 }
 
-fn boot_step_apic_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_apic_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Detecting Local APIC...");
     if !apic::detect() {
         panic!("SlopOS requires a Local APIC - legacy PIC is gone");
     }
 
     klog_debug!("Initializing Local APIC...");
-    if apic::init() != 0 {
+    if apic::init(&ctx.bsp_token()) != 0 {
         panic!("Local APIC initialization failed");
     }
 
@@ -180,7 +180,7 @@ fn boot_step_apic_setup_fn(_ctx: &mut BootCtx) {
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
 }
 
-fn boot_step_xsave_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_xsave_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Detecting XSAVE support...");
     let rc = slopos_arch::cpu::xsave::init();
     if rc != 0 {
@@ -190,12 +190,12 @@ fn boot_step_xsave_setup_fn(_ctx: &mut BootCtx) {
     slopos_core::scheduler::task_struct::validate_fpu_state_size();
 }
 
-fn boot_step_smp_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_smp_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Discovering CPUs and starting APs...");
-    smp_init();
+    smp_init(ctx);
 }
 
-fn boot_step_ioapic_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_ioapic_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
     if ioapic::init() != 0 {
         panic!("IOAPIC discovery failed - SlopOS cannot operate without it");
@@ -203,7 +203,7 @@ fn boot_step_ioapic_setup_fn(_ctx: &mut BootCtx) {
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
 }
 
-fn boot_step_hpet_setup_fn(_ctx: &mut BootCtx) {
+fn boot_step_hpet_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Discovering HPET via ACPI...");
     if hpet::init() != 0 {
         panic!("SlopOS requires HPET — ACPI HPET table not found or hardware unavailable");
@@ -211,7 +211,7 @@ fn boot_step_hpet_setup_fn(_ctx: &mut BootCtx) {
     klog_debug!("HPET: Initialization complete, main counter running.");
 }
 
-fn boot_step_lapic_calibration_fn(_ctx: &mut BootCtx) {
+fn boot_step_lapic_calibration_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Calibrating LAPIC timer...");
     let freq = apic::timer::calibrate();
     if freq == 0 {
@@ -222,7 +222,7 @@ fn boot_step_lapic_calibration_fn(_ctx: &mut BootCtx) {
 /// Scheduler preemption interval in milliseconds (100 Hz).
 const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 
-fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx) {
+fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
 
     // Start BSP timer.
@@ -251,7 +251,7 @@ fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx) {
     slopos_core::scheduler::runtime::register_ap_timer_start(ap_start_timer);
 }
 
-fn boot_step_pci_init_fn(_ctx: &mut BootCtx) {
+fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // register the loopback device BEFORE any physical NIC so it
     // gets DevIndex(0) by convention.  This must happen before pci_init()
     // triggers VirtIO-net probe.
@@ -307,7 +307,7 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx) {
 
 use slopos_testing::config_from_cmdline;
 
-fn boot_step_run_tests_fn(_ctx: &mut BootCtx) -> i32 {
+fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     // Parse command line to get test config
     let cmdline = boot_get_cmdline();
     let cmdline_str = if cmdline.is_null() {
@@ -435,7 +435,7 @@ crate::boot_init!(
     boot_step_hpet_setup_fn,
     flags = boot_init_priority(55)
 );
-fn boot_step_csprng_seed_fn(_ctx: &mut BootCtx) -> i32 {
+fn boot_step_csprng_seed_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     use slopos_arch::cpu::rdrand;
     use slopos_arch::tsc;
 

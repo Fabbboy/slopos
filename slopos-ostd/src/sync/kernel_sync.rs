@@ -33,11 +33,17 @@
 //! BSP-init callback — statically impossible to obtain after SMP
 //! bringup.
 //!
-//! `pub unsafe fn register_with_ostd()` /
-//! `pub unsafe fn register_*` hooks in mm/, kernel-services/, drivers/
-//! can switch to `pub fn register_*(token: &BspToken, …)` once the
-//! kernel's BSP-init path is routed through `run_bsp_init`.
+//! BSP-init witnesses in this module: [`BspToken`] and [`ApToken`],
+//! each carrying an invariant phantom lifetime `'brand` minted by an
+//! HRTB closure (`run_bsp_init` / `run_ap_init`). The brand is unforgeable
+//! outside the closure body: `for<'b> FnOnce(&BspToken<'b>) -> R` requires
+//! `R` to handle every choice of `'b`, so the token reference cannot
+//! escape. The 14+ register/install hooks elsewhere in OSTD adopt
+//! `pub fn register_*<'b>(token: &BspToken<'b>, …)` so the
+//! "caller-must-be-on-BSP" obligation lives in the type system, not in
+//! a `# Safety` doc paragraph.
 
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 
 use crate::sync::init_flag::InitFlag;
@@ -129,94 +135,234 @@ impl<T: Clone> Clone for KernelSync<T> {
 impl<T: Copy> Copy for KernelSync<T> {}
 
 // =============================================================================
-// BspToken
+// BspToken<'brand> / ApToken<'brand>
 // =============================================================================
 
-/// Sealed capability witness for BSP-only init paths.
+/// Sealed capability witness for BSP-only init paths, carrying an
+/// invariant phantom lifetime `'brand`.
 ///
-/// The constructor is `pub(crate)`, so external crates cannot fabricate
-/// one even via `unsafe {}`. The only public way to obtain a borrowed
-/// `&BspToken` is through [`run_bsp_init`], which guarantees single-shot
-/// minting via an [`InitFlag`].
+/// Construction is `pub(crate)` *and* gated by lifetime: external code
+/// has no syntax to name the Skolem `'brand` minted inside
+/// [`run_bsp_init`]'s HRTB closure, so even within OSTD nothing can
+/// fabricate a `BspToken<'static>` or a `BspToken` at any nameable
+/// lifetime — the only `&BspToken<'b>` references in existence live
+/// for the dynamic extent of the closure that received them.
 ///
-/// Use this in registration-hook signatures that today require
-/// `pub unsafe fn register_*`: change to
-/// `pub fn register_*(token: &BspToken, ...)` — the
-/// "caller-must-be-on-BSP" obligation moves from the unsafe-fn decl
-/// into the token's existence proof.
-#[derive(Debug)]
-pub struct BspToken {
-    _seal: (),
+/// The `fn(&'brand ()) -> &'brand ()` PhantomData is the canonical
+/// Rust invariance gadget: arguments are contravariant, returns
+/// covariant, so the same lifetime in both positions becomes
+/// invariant. A `BspToken<'long>` cannot reborrow as `BspToken<'short>`.
+pub struct BspToken<'brand> {
+    _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
+    _not_send: PhantomData<*mut ()>,
 }
 
-impl BspToken {
-    /// Mint a fresh BSP token.
-    ///
-    /// Visibility is `pub(crate)` so external crates cannot fabricate a
-    /// token even by writing `unsafe { BspToken::new() }` — they would
-    /// have to forge OSTD-internal code, which the build rejects.
-    ///
-    /// # Safety
-    ///
-    /// The internal caller must be on the BSP, before any AP has been
-    /// bootstrapped. Tokens minted after SMP bringup violate the
-    /// single-writer contract every consumer relies on. The single
-    /// production mint site is [`run_bsp_init`].
-    #[inline]
-    pub(crate) const unsafe fn new() -> Self {
-        Self { _seal: () }
+impl<'brand> core::fmt::Debug for BspToken<'brand> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BspToken<'_>")
+    }
+}
+
+/// Sealed capability witness for per-AP init paths.
+///
+/// Same brand discipline as [`BspToken`]: the closure body of
+/// [`run_ap_init`] is the only mint site, the `'brand` is unforgeable
+/// outside it, and APs cannot synthesise a `BspToken<'_>` (different
+/// type, different mint pathway, type-checker rejects coercion).
+///
+/// Carries the AP's 1-based slot index for diagnostic and
+/// per-CPU dispatch consumers via [`CpuInitWitness::cpu_id`].
+pub struct ApToken<'brand> {
+    _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
+    _not_send: PhantomData<*mut ()>,
+    cpu_id: usize,
+}
+
+impl<'brand> core::fmt::Debug for ApToken<'brand> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ApToken")
+            .field("cpu_id", &self.cpu_id)
+            .finish()
     }
 }
 
 // ---------------------------------------------------------------------------
-// BSP-init mint pathway
+// CpuInitWitness — sealed trait implemented by BspToken + ApToken
 // ---------------------------------------------------------------------------
 
-/// Process-global one-shot guard for `run_bsp_init`. Toggled monotonically
-/// `false → true` by `InitFlag::init_once()`.
+mod witness_seal {
+    pub trait Sealed {}
+}
+
+/// Common capability witness for per-CPU init routines that run once
+/// on the BSP and once on each AP (`install_syscall_msrs`, `idt_load`,
+/// `enable_supervisor_features`, the xsave/SSE/PCID enablers,
+/// `ist_bind_current_cpu`, …).
+///
+/// The supertrait `witness_seal::Sealed` is private to this module, so
+/// external crates cannot add new impls — only [`BspToken`] and
+/// [`ApToken`] satisfy it. Functions taking `<W: CpuInitWitness>`
+/// monomorphise into exactly two specialisations.
+pub trait CpuInitWitness: witness_seal::Sealed {
+    /// CPU slot this witness authorises. BSP returns 0.
+    fn cpu_id(&self) -> usize;
+    /// `true` iff this is the BSP witness.
+    fn is_bsp(&self) -> bool;
+}
+
+impl<'brand> witness_seal::Sealed for BspToken<'brand> {}
+impl<'brand> witness_seal::Sealed for ApToken<'brand> {}
+
+impl<'brand> CpuInitWitness for BspToken<'brand> {
+    #[inline]
+    fn cpu_id(&self) -> usize {
+        0
+    }
+    #[inline]
+    fn is_bsp(&self) -> bool {
+        true
+    }
+}
+
+impl<'brand> CpuInitWitness for ApToken<'brand> {
+    #[inline]
+    fn cpu_id(&self) -> usize {
+        self.cpu_id
+    }
+    #[inline]
+    fn is_bsp(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mint pathways
+// ---------------------------------------------------------------------------
+
+/// Process-global one-shot guard for `run_bsp_init`.
 static BSP_TOKEN_MINTED: InitFlag = InitFlag::new();
 
-/// Enter the BSP-init phase: mint a [`BspToken`], pass it to `f`, return
-/// `f`'s result.
+/// Hard upper bound on per-AP mint slots. Matches `MAX_CPUS` in
+/// `boot/src/smp.rs`; `safestack_rt::MAX_STATIC_APS` (16) is the
+/// soft cap actually exercised at boot.
+pub const MAX_APS: usize = 256;
+
+/// Per-AP one-shot guard, indexed by `cpu_id`. Slot 0 is the BSP and
+/// is unused (the BSP guard is `BSP_TOKEN_MINTED`).
+static AP_TOKEN_MINTED: [InitFlag; MAX_APS] = [const { InitFlag::new() }; MAX_APS];
+
+/// Enter the BSP-init phase: mint a [`BspToken`] bound to a fresh
+/// Skolem `'brand`, pass it to `f`, return `f`'s result.
+///
+/// The HRTB `for<'b> FnOnce(&BspToken<'b>) -> R` makes `'b` a Skolem
+/// lifetime — there is no syntax for the closure body to *return* any
+/// value mentioning `'b`, and no syntax for the caller to *bind* it.
+/// `R` is therefore independent of `'b`; the token reference is
+/// destroyed with the closure frame.
 ///
 /// # Single-shot
 ///
-/// The first invocation succeeds. Every subsequent invocation **panics**
-/// — this matches OSTD's house style for one-shot registries (cf.
-/// `register_kernel_master_pml4`, `register_frame_allocator`,
-/// `register_io_mem_mapper`, etc.). After the callback returns, the
-/// token reference is destroyed; no copy can leak out.
-///
-/// # Intended use
-///
-/// The kernel's BSP-init path calls
-/// `run_bsp_init(|t| { register_a(t); register_b(t); ... })` to fan the
-/// borrowed token to every `register_*(token: &BspToken, ...)` hook.
-/// Outside of that boot-time call there is no path to obtain a
-/// `&BspToken`.
+/// First call succeeds; subsequent calls panic. Defense-in-depth: the
+/// type system already prevents leaking the prior `&BspToken<'_>` out
+/// of its closure, so a second mint cannot collide with a still-live
+/// reference. The panic catches well-intentioned but mistaken re-init.
 ///
 /// # Panics
 ///
 /// Panics if invoked more than once in the lifetime of the process.
 #[inline]
-pub fn run_bsp_init<R>(f: impl FnOnce(&BspToken) -> R) -> R {
+pub fn run_bsp_init<R, F>(f: F) -> R
+where
+    F: for<'brand> FnOnce(&BspToken<'brand>) -> R,
+{
     if !BSP_TOKEN_MINTED.init_once() {
         panic!("run_bsp_init: BSP token already minted; one-shot violated");
     }
-    // SAFETY: the InitFlag::init_once swap above succeeded, so we are
-    // the unique caller in this process and (by contract) we are on
-    // the BSP before any AP has been bootstrapped.
-    let token = unsafe { BspToken::new() };
+    let token: BspToken<'_> = BspToken {
+        _brand: PhantomData,
+        _not_send: PhantomData,
+    };
     f(&token)
 }
 
-/// Reset the one-shot BSP-token guard so that `run_bsp_init` can be
-/// re-entered. **Test-only.** Gated by the `test-helpers` Cargo feature
-/// (auto-enabled for `cargo test -p slopos-ostd`) so production code
-/// cannot link this symbol.
+/// Enter an AP's init phase: mint an [`ApToken`] bound to a fresh
+/// Skolem `'brand`, pass it to `f`, return `f`'s result.
+///
+/// Same brand discipline as [`run_bsp_init`]. Per-AP one-shot via
+/// `AP_TOKEN_MINTED[cpu_id]`.
+///
+/// # Panics
+///
+/// - if `cpu_id == 0` or `cpu_id >= MAX_APS`;
+/// - if this slot's [`InitFlag`] has already minted.
+#[inline]
+pub fn run_ap_init<R, F>(cpu_id: usize, f: F) -> R
+where
+    F: for<'brand> FnOnce(&ApToken<'brand>) -> R,
+{
+    assert!(
+        cpu_id > 0 && cpu_id < MAX_APS,
+        "run_ap_init: cpu_id {} out of range (1..{})",
+        cpu_id,
+        MAX_APS
+    );
+    if !AP_TOKEN_MINTED[cpu_id].init_once() {
+        panic!(
+            "run_ap_init: AP {} token already minted; one-shot violated",
+            cpu_id
+        );
+    }
+    let token: ApToken<'_> = ApToken {
+        _brand: PhantomData,
+        _not_send: PhantomData,
+        cpu_id,
+    };
+    f(&token)
+}
+
+// ---------------------------------------------------------------------------
+// Test mint pathway (feature-gated; never linked in production)
+// ---------------------------------------------------------------------------
+
+/// Test-only mint helper. Resets the BSP-init guard, then enters
+/// [`run_bsp_init`]. Tests obtain a `&BspToken<'_>` they can pass to
+/// OSTD `register_*` hooks. Production builds cannot link this — the
+/// `test-helpers` feature is auto-enabled only for `cargo test -p
+/// slopos-ostd`.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn run_bsp_init_for_test<R, F>(f: F) -> R
+where
+    F: for<'brand> FnOnce(&BspToken<'brand>) -> R,
+{
+    reset_bsp_token_for_tests();
+    run_bsp_init(f)
+}
+
+/// Test-only mint helper for AP-init witnesses.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn run_ap_init_for_test<R, F>(cpu_id: usize, f: F) -> R
+where
+    F: for<'brand> FnOnce(&ApToken<'brand>) -> R,
+{
+    reset_ap_token_for_tests(cpu_id);
+    run_ap_init(cpu_id, f)
+}
+
+/// Reset the one-shot BSP-token guard *and* every per-AP guard so
+/// `run_bsp_init` / `run_ap_init` can be re-entered. **Test-only.**
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_bsp_token_for_tests() {
     BSP_TOKEN_MINTED.reset();
+    for slot in AP_TOKEN_MINTED.iter() {
+        slot.reset();
+    }
+}
+
+/// Reset a single per-AP guard. **Test-only.**
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_ap_token_for_tests(cpu_id: usize) {
+    assert!(cpu_id > 0 && cpu_id < MAX_APS);
+    AP_TOKEN_MINTED[cpu_id].reset();
 }
 
 #[cfg(test)]
@@ -229,14 +375,11 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    // Cell<u64> is !Sync; wrapping in KernelSync makes it Sync (as a
-    // type-system fact; callers still owe correctness).
     fn assert_sync<T: Sync>() {}
     fn assert_send<T: Send>() {}
 
     #[test]
     fn kernel_sync_implements_send_sync() {
-        // Cell<u64> is Send (since u64: Send) but !Sync.
         assert_send::<KernelSync<Cell<u64>>>();
         assert_sync::<KernelSync<Cell<u64>>>();
     }
@@ -254,7 +397,6 @@ mod tests {
         let shared = Arc::new(KernelSync::new(Cell::new(7_u64)));
         let s2 = Arc::clone(&shared);
         let h = thread::spawn(move || {
-            // Read-only access; we never mutate Cell from two threads.
             let _ = s2.get().get();
         });
         h.join().unwrap();
@@ -263,8 +405,71 @@ mod tests {
 
     #[test]
     fn bsp_token_zero_size() {
-        assert_eq!(core::mem::size_of::<BspToken>(), 0);
-        // Construction is unsafe — type-check only.
-        let _t: BspToken = unsafe { BspToken::new() };
+        assert_eq!(core::mem::size_of::<BspToken<'static>>(), 0);
+    }
+
+    #[test]
+    fn ap_token_size_one_usize() {
+        assert_eq!(
+            core::mem::size_of::<ApToken<'static>>(),
+            core::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn run_bsp_init_passes_token_to_closure() {
+        reset_bsp_token_for_tests();
+        let r = run_bsp_init(|t| {
+            assert_eq!(core::mem::size_of_val(t), 0);
+            assert!(t.is_bsp());
+            assert_eq!(t.cpu_id(), 0);
+            7_u32
+        });
+        assert_eq!(r, 7);
+    }
+
+    #[test]
+    fn run_ap_init_carries_cpu_id() {
+        reset_bsp_token_for_tests();
+        let r = run_ap_init(3, |t| {
+            assert!(!t.is_bsp());
+            assert_eq!(t.cpu_id(), 3);
+            9_u32
+        });
+        assert_eq!(r, 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "BSP token already minted")]
+    fn run_bsp_init_double_call_panics() {
+        reset_bsp_token_for_tests();
+        run_bsp_init(|_| {});
+        run_bsp_init(|_| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "AP 5 token already minted")]
+    fn run_ap_init_double_call_panics() {
+        reset_bsp_token_for_tests();
+        run_ap_init(5, |_| {});
+        run_ap_init(5, |_| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "cpu_id 0 out of range")]
+    fn run_ap_init_rejects_cpu_zero() {
+        reset_bsp_token_for_tests();
+        run_ap_init(0, |_| {});
+    }
+
+    #[test]
+    fn cpu_init_witness_dispatch() {
+        reset_bsp_token_for_tests();
+        fn check<W: CpuInitWitness>(w: &W, expected_id: usize, expect_bsp: bool) {
+            assert_eq!(w.cpu_id(), expected_id);
+            assert_eq!(w.is_bsp(), expect_bsp);
+        }
+        run_bsp_init(|t| check(t, 0, true));
+        run_ap_init(2, |t| check(t, 2, false));
     }
 }

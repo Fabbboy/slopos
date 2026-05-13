@@ -27,10 +27,9 @@ fn ranges_static() -> &'static [PortRange] {
 
 fn setup() -> MutexGuard<'static, ()> {
     let m = SETUP.get_or_init(|| {
-        // SAFETY: leaked storage lives `'static`.
-        unsafe {
-            register_io_port_registry(ranges_static());
-        }
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            register_io_port_registry(t, ranges_static());
+        });
         Mutex::new(())
     });
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -69,10 +68,9 @@ fn reserve_rejects_when_uninitialised() {
     let r: Result<IoPort<u8>, IoPortError> = IoPortRegistry::reserve(0x3F8);
     assert_eq!(r.unwrap_err(), IoPortError::Uninitialised);
     // Re-install for subsequent tests.
-    // SAFETY: leaked storage; one-shot was just cleared.
-    unsafe {
-        register_io_port_registry(ranges_static());
-    }
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        register_io_port_registry(t, ranges_static());
+    });
 }
 
 #[test]

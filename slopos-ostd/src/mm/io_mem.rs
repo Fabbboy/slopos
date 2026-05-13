@@ -51,6 +51,7 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use slopos_abi::addr::PhysAddr;
 
 use crate::mm::pod::Pod;
+use crate::sync::BspToken;
 
 // ---------------------------------------------------------------------------
 // PhysRange.
@@ -154,14 +155,14 @@ static IO_MEM_MAPPER: MapperSlot = MapperSlot {
     inner: AtomicPtr::new(core::ptr::null_mut()),
 };
 
-/// One-shot wiring point for the kernel's [`IoMemMapper`].
-///
-/// # Safety
-///
-/// The caller certifies that `slot` outlives the kernel (`'static`)
-/// and that the underlying `dyn IoMemMapper` is sound for concurrent
-/// `map` / `unmap` from any CPU.
-pub unsafe fn register_io_mem_mapper(slot: &'static &'static dyn IoMemMapper) {
+/// One-shot wiring point for the kernel's [`IoMemMapper`]. The
+/// `&BspToken<'brand>` witnesses BSP-only init; the underlying
+/// `dyn IoMemMapper` must be sound for concurrent `map` / `unmap`
+/// from any CPU.
+pub fn register_io_mem_mapper<'brand>(
+    _token: &BspToken<'brand>,
+    slot: &'static &'static dyn IoMemMapper,
+) {
     let raw = slot as *const &'static dyn IoMemMapper as *mut ();
     let prev = IO_MEM_MAPPER.inner.swap(raw, Ordering::AcqRel);
     assert!(
@@ -199,15 +200,13 @@ static IO_MEM_REGISTRY: RegistrySlot = RegistrySlot {
 /// One-shot wiring point for the insensitive-range list. Boot
 /// constructs the slice from ACPI MCFG (PCIe ECAM), MADT (LAPIC,
 /// IOAPIC), HPET, and the Limine framebuffer response, then installs
-/// it via this hook. The slice is immutable for the kernel's lifetime
-/// — hot-plug is not supported.
-///
-/// # Safety
-///
-/// The caller certifies that `ranges` lives for the static lifetime of
-/// the kernel and that every entry describes a region the firmware /
-/// platform has marked as insensitive (Inv. 7).
-pub unsafe fn register_io_mem_registry(ranges: &'static [PhysRange]) {
+/// it via this hook. The `&BspToken<'brand>` witnesses BSP-only init;
+/// the slice is immutable for the kernel's lifetime — hot-plug is not
+/// supported. Every entry must describe a region the firmware /
+/// platform has marked as insensitive (Inv. 7) — that's a caller
+/// invariant the type system cannot express, but cross-checked at the
+/// reservation path through [`IoMemRegistry::reserve`].
+pub fn register_io_mem_registry<'brand>(_token: &BspToken<'brand>, ranges: &'static [PhysRange]) {
     let raw = ranges.as_ptr() as *mut PhysRange;
     let prev = IO_MEM_REGISTRY.base.swap(raw, Ordering::AcqRel);
     assert!(

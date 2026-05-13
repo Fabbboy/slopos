@@ -8,7 +8,6 @@
 //! it from `paddr` alone and `size_pages` is only validated.
 
 use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
-use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 
 use crate::page_alloc::{
     __alloc_page_frame_raw, __alloc_page_frames_raw, ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP,
@@ -21,7 +20,10 @@ pub static LEGACY_FRAME_ALLOC_SHIM: LegacyFrameAllocShim = LegacyFrameAllocShim;
 
 /// Doubly-indirect handle that `register_frame_allocator` consumes —
 /// it requires a `&'static &'static dyn FrameAlloc`, so we materialise
-/// the inner reference as a `static` first.
+/// the inner reference as a `static` first. `pub` because the boot
+/// caller in `boot::boot_memory::boot_step_register_frame_alloc_fn`
+/// registers it inline (the former `register_with_ostd(token)` shim
+/// has been inlined, taking `&BspToken<'_>` from the boot ctx).
 pub static LEGACY_FRAME_ALLOC_DYN: &'static dyn FrameAlloc = &LEGACY_FRAME_ALLOC_SHIM;
 
 impl FrameAlloc for LegacyFrameAllocShim {
@@ -52,22 +54,5 @@ impl FrameAlloc for LegacyFrameAllocShim {
 
     fn dealloc(&self, paddr: Paddr, _size_pages: usize) {
         let _ = free_page_frame(paddr);
-    }
-}
-
-/// Boot hook: register the legacy buddy allocator with OSTD so
-/// `VmSpace::new`, `Frame::<M>::from_unused`, and other OSTD primitives
-/// that allocate physical frames work.
-///
-/// Must run after the buddy allocator is up (i.e. after the Memory
-/// boot phase).  Safe to call only once — `register_frame_allocator`
-/// asserts on double-registration.
-///
-/// # Safety
-/// Caller guarantees this is the only registration site for the OSTD
-/// frame allocator in the production boot path.
-pub unsafe fn register_with_ostd() {
-    unsafe {
-        register_frame_allocator(&LEGACY_FRAME_ALLOC_DYN);
     }
 }

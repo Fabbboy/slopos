@@ -13,8 +13,7 @@
 //! kept alive in parallel to `IoPort<T>` because the early-boot panic
 //! logger needs port I/O before any registry exists. This module is
 //! the OSTD-side replacement for that early-boot path — eliminating
-//! the `slopos-utils` crate dependency from the kernel (κ.23.J's
-//! retirement target).
+//! the `slopos-utils` crate dependency from the kernel.
 //!
 //! # Lock-free
 //!

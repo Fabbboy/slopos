@@ -42,6 +42,7 @@ use crate::mm::page_table::{
 };
 use crate::mm::tlb;
 use crate::mm::uframe::{AnyUFrameMeta, UFrame};
+use crate::sync::BspToken;
 
 const KERNEL_HALF_START_INDEX: usize = 256;
 const KERNEL_HALF_END_INDEX: usize = 512;
@@ -136,16 +137,13 @@ pub struct CursorEntry {
 static KERNEL_MASTER_PML4: AtomicU64 = AtomicU64::new(KERNEL_MASTER_UNINIT);
 const KERNEL_MASTER_UNINIT: u64 = u64::MAX;
 
-/// Test-only / boot-only: install the kernel-master PML4 paddr.
-///
-/// # Safety
-///
-/// `paddr` must point to a 4 KiB-aligned, valid PML4 reachable
-/// through the kernel HHDM. Indices 256..512 of that PML4 must
-/// describe the canonical kernel mappings; `VmSpace::new` byte-copies
-/// those entries into every fresh address space. The mapping must
-/// persist for the static lifetime of the kernel.
-pub unsafe fn register_kernel_master_pml4(paddr: PhysAddr) {
+/// Install the kernel-master PML4 paddr. The `&BspToken<'brand>`
+/// witnesses BSP-only init. `paddr` must point to a 4 KiB-aligned,
+/// valid PML4 reachable through the kernel HHDM; indices 256..512
+/// must describe the canonical kernel mappings (byte-copied by
+/// `VmSpace::new` into every fresh address space) and the mapping
+/// must persist for the static lifetime of the kernel.
+pub fn register_kernel_master_pml4<'brand>(_token: &BspToken<'brand>, paddr: PhysAddr) {
     let prev = KERNEL_MASTER_PML4.swap(paddr.as_u64(), Ordering::AcqRel);
     assert_eq!(
         prev, KERNEL_MASTER_UNINIT,
@@ -211,13 +209,14 @@ static CURSOR_UNMAP_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// One-shot registration of the consumer-side cursor-unmap hook.
 /// Same double-reference pattern as
-/// [`crate::mm::frame_alloc::register_frame_allocator`].
-///
-/// # Safety
-///
-/// `slot` must outlive the kernel; the underlying `dyn CursorUnmapHook`
-/// must be sound for concurrent calls from any CPU.
-pub unsafe fn register_cursor_unmap_hook(slot: &'static &'static dyn CursorUnmapHook) {
+/// [`crate::mm::frame_alloc::register_frame_allocator`]. The
+/// `&BspToken<'brand>` witnesses BSP-only init; the underlying
+/// `dyn CursorUnmapHook` must be sound for concurrent calls from any
+/// CPU.
+pub fn register_cursor_unmap_hook<'brand>(
+    _token: &BspToken<'brand>,
+    slot: &'static &'static dyn CursorUnmapHook,
+) {
     let raw = slot as *const &'static dyn CursorUnmapHook as *mut ();
     let prev = CURSOR_UNMAP_HOOK.swap(raw, Ordering::AcqRel);
     assert!(

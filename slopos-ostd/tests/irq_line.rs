@@ -36,9 +36,9 @@ fn alloc_returns_distinct_vectors_in_range() {
 fn reserved_vectors_are_excluded() {
     let _g = serial();
     let reserved: &[u8] = &[ALLOC_VECTOR_BASE, ALLOC_VECTOR_BASE + 5, 0xEC, 0x80];
-    // SAFETY: vectors are valid platform-reserved candidates for the
-    // test-only allocator. Out-of-range entries are silently ignored.
-    unsafe { register_irq_reserved(reserved) };
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        register_irq_reserved(t, reserved);
+    });
     for _ in 0..50 {
         let line = IrqAllocator::alloc().expect("alloc");
         let v = line.vector();

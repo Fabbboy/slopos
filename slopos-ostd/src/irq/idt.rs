@@ -27,6 +27,7 @@ use core::mem::{MaybeUninit, size_of};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cpu::preempt;
+use crate::sync::BspToken;
 
 // Inline the OSTD-side IDT entry-point asm stubs. Gated on x86_64 +
 // kernel build (i.e. not host unit tests): the stubs reference Rust
@@ -514,12 +515,13 @@ unsafe impl Sync for SinkSlot {}
 static SINK_SLOT: SinkSlot = SinkSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static SINK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the production diagnostic sink.
-///
-/// # Safety
-///
-/// `sink` must live for `'static`. Only one registration is permitted.
-pub unsafe fn register_diagnostic_sink(sink: &'static dyn DiagnosticSink) {
+/// One-shot wiring point for the production diagnostic sink. The
+/// `&BspToken<'brand>` witnesses BSP-only init; `sink` must live for
+/// `'static`.
+pub fn register_diagnostic_sink<'brand>(
+    _token: &BspToken<'brand>,
+    sink: &'static dyn DiagnosticSink,
+) {
     let was_installed = SINK_INSTALLED.swap(true, Ordering::AcqRel);
     assert!(
         !was_installed,

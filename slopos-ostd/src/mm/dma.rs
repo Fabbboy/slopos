@@ -43,6 +43,7 @@ use crate::mm::frame::{AnyFrameMeta, FrameAllocOptions, Paddr};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::pod::Pod;
 use crate::mm::uframe::{AnyUFrameMeta, UFrameError, USegment};
+use crate::sync::BspToken;
 
 const PAGE_SIZE: usize = 4096;
 
@@ -146,13 +147,13 @@ static IOMMU_MAPPER: MapperSlot = MapperSlot {
     inner: AtomicPtr::new(core::ptr::null_mut()),
 };
 
-/// One-shot wiring point for the kernel's [`IommuMapper`].
-///
-/// # Safety
-///
-/// Caller certifies `slot` lives `'static` and the underlying mapper
-/// is sound for concurrent `map` / `unmap` from any CPU.
-pub unsafe fn register_iommu_mapper(slot: &'static &'static dyn IommuMapper) {
+/// One-shot wiring point for the kernel's [`IommuMapper`]. The
+/// `&BspToken<'brand>` witnesses BSP-only init; the underlying
+/// mapper must be sound for concurrent `map` / `unmap` from any CPU.
+pub fn register_iommu_mapper<'brand>(
+    _token: &BspToken<'brand>,
+    slot: &'static &'static dyn IommuMapper,
+) {
     let raw = slot as *const &'static dyn IommuMapper as *mut ();
     let prev = IOMMU_MAPPER.inner.swap(raw, Ordering::AcqRel);
     assert!(

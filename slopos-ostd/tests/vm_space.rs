@@ -104,15 +104,13 @@ fn setup() -> MutexGuard<'static, ()> {
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
         Box::leak(slots.into_boxed_slice());
 
-        // SAFETY: leaked storage; `slots_ptr` and `backing_ptr` live
-        // for the static lifetime of the test binary.
-        unsafe {
-            init_meta_slots(slots_ptr, N_PAGES);
-            init_phys_virt_offset(backing_ptr);
-            register_frame_allocator(&BUMP_REF);
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            init_meta_slots(t, slots_ptr, N_PAGES);
+            init_phys_virt_offset(t, backing_ptr);
+            register_frame_allocator(t, &BUMP_REF);
             // Page 0 is the kernel master — already zero-initialised.
-            register_kernel_master_pml4(PhysAddr::new(0));
-        }
+            register_kernel_master_pml4(t, PhysAddr::new(0));
+        });
         Mutex::new(())
     });
     // Recover from poison so a panic in one test doesn't cascade
@@ -669,9 +667,9 @@ static HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn install_hook_once() {
     HOOK_INSTALLED.get_or_init(|| {
-        // SAFETY: `COUNTING_HOOK_REF` is a `static` reference with
-        // `'static` lifetime; `register_cursor_unmap_hook` is one-shot.
-        unsafe { register_cursor_unmap_hook(&COUNTING_HOOK_REF) };
+        slopos_ostd::sync::run_bsp_init_for_test(|t| {
+            register_cursor_unmap_hook(t, &COUNTING_HOOK_REF);
+        });
     });
 }
 

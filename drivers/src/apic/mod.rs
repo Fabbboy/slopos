@@ -83,7 +83,7 @@ pub fn detect() -> bool {
     }
 }
 
-pub fn init() -> i32 {
+pub fn init<'b>(token: &slopos_ostd::sync::BspToken<'b>) -> i32 {
     if !is_available() {
         klog_info!("APIC: Cannot initialize - APIC not available");
         return -1;
@@ -91,9 +91,9 @@ pub fn init() -> i32 {
 
     klog_debug!("APIC: Initializing Local APIC");
 
-    slopos_arch::pcr::register_lapic_id_fn(get_id);
-    slopos_arch::pcr::register_send_ipi_to_cpu_fn(send_ipi_to_cpu);
-    slopos_arch::pcr::register_send_nmi_fn(send_nmi_to);
+    slopos_arch::pcr::register_lapic_id_fn(token, get_id);
+    slopos_arch::pcr::register_send_ipi_to_cpu_fn(token, send_ipi_to_cpu);
+    slopos_arch::pcr::register_send_nmi_fn(token, send_nmi_to);
 
     let mut apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
     if apic_base_msr & ApicBaseMsr::GLOBAL_ENABLE == 0 {

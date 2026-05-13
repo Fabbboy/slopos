@@ -39,7 +39,8 @@ pub use paste as __paste;
 
 pub use boot_ctx::{
     clear_test_scope_after_panic, return_after_ap, return_after_boot, return_after_test,
-    take_for_ap, take_for_boot, take_for_test, BootCtx,
+    take_for_ap, take_for_boot, take_for_test, ApInit, BootCtx, BootKind, BspInit, CpuInitKind,
+    TestInit,
 };
 pub use registry::{registry_iter, topo_order, HermeticVTable, RegistryError};
 pub use stack_top::KernelStackTop;

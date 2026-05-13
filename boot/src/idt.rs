@@ -140,7 +140,11 @@ use slopos_core::sched::{
     RescheduleReason, TrapExitSource, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
 
-pub fn idt_init() {
+/// One-shot BSP-only IDT initialisation: install OSTD's default
+/// handlers into the static `BUILDER` and seed our exception-handler
+/// tables. The `&BspToken<'brand>` witness binds the call to the BSP-init
+/// scope opened by `slopos_ostd::sync::run_bsp_init`.
+pub fn idt_init<'b>(_token: &slopos_ostd::sync::BspToken<'b>) {
     klog_debug!("IDT: init start");
     BUILDER.install_default_handlers();
     initialize_handler_tables();
@@ -190,11 +194,13 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
     klog_debug!("IDT: Registered override handler for exception {}", vector);
 }
 
-/// Bind an IDT entry to an IST slot. `&mut BootCtx` gates the call so
-/// production code (post-boot) cannot accidentally rebind interrupt
-/// stacks.
-pub fn idt_set_ist(
-    _ctx: &mut slopos_hermetic::BootCtx,
+/// Bind an IDT entry to an IST slot. `&mut BootCtx<'_, K>` gates the
+/// call so production code (post-boot) cannot accidentally rebind
+/// interrupt stacks. `K: CpuInitKind` keeps the surface dual-callable
+/// from BSP-init, AP-init, and test scopes — every CPU brings up its
+/// own IDT IST bindings.
+pub fn idt_set_ist<'b, K: slopos_hermetic::CpuInitKind>(
+    _ctx: &mut slopos_hermetic::BootCtx<'b, K>,
     vector: u8,
     slot: slopos_arch::arch::gdt::IstSlot,
 ) {
@@ -212,7 +218,11 @@ pub fn exception_is_critical(vector: u8) -> i32 {
     slopos_arch::arch::exception::exception_is_critical(vector) as i32
 }
 
-pub fn idt_load() {
+/// Load the static IDT on the current CPU. Both BSP-init and per-AP
+/// bringup paths call this, so it accepts any `CpuInitWitness`
+/// (`BspToken` or `ApToken`) — the witness gates the call to a
+/// boot-init scope without distinguishing BSP from AP.
+pub fn idt_load<W: slopos_ostd::sync::CpuInitWitness>(_witness: &W) {
     // SAFETY: BUILDER is `static`; gates have been populated by
     // `idt_init` (called earlier in boot); GDT/TSS describing
     // KERNEL_CODE has already been loaded by `gdt_init_for_cpu`.

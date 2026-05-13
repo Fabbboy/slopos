@@ -4,7 +4,7 @@ use slopos_utils::klog_info;
 
 use super::per_cpu;
 use super::runtime::{create_idle_task, create_idle_task_for_cpu};
-use super::scheduler::{init_scheduler, set_scheduler_enabled};
+use super::scheduler::{init_scheduler, install_reschedule_callback, set_scheduler_enabled};
 use super::sleep::reset_sleep_queue;
 
 pub fn stop_scheduler() {
@@ -40,15 +40,26 @@ pub fn get_scheduler_stats(
     }
 }
 
-pub fn boot_step_task_manager_init(_ctx: &mut slopos_hermetic::BootCtx) -> i32 {
+pub fn boot_step_task_manager_init(
+    _ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
+) -> i32 {
     crate::task::init_task_manager()
 }
 
-pub fn boot_step_scheduler_init(_ctx: &mut slopos_hermetic::BootCtx) -> i32 {
-    init_scheduler()
+pub fn boot_step_scheduler_init(
+    ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
+) -> i32 {
+    let rc = init_scheduler();
+    if rc != 0 {
+        return rc;
+    }
+    install_reschedule_callback(&ctx.bsp_token());
+    0
 }
 
-pub fn boot_step_idle_task(_ctx: &mut slopos_hermetic::BootCtx) -> i32 {
+pub fn boot_step_idle_task(
+    _ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
+) -> i32 {
     create_idle_task()
 }
 

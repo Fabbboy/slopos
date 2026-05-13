@@ -22,6 +22,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use crate::arch::x86_64::gdt::{GdtLayout, SegmentSelector, Tss64};
 use crate::arch::x86_64::msr::Msr;
 
+use crate::sync::BspToken;
 use crate::sync::init_flag::InitFlag;
 use crate::user::context::UserContext;
 
@@ -440,21 +441,23 @@ pub static AP_PCR_PTRS: SyncUnsafeCell<PcrPtrLookup> =
 /// whose `unsafe_stack_sp` has already been primed — see
 /// `slopos_core::scheduler::safestack_rt::init_bootstrap_tasks`.
 ///
-/// # Safety
-///
-/// Single-writer (BSP in a sequential pre-SMP phase), must be called
-/// exactly once.
-pub unsafe fn init_ap_pcr_lookup(bootstrap_tasks: &[*mut ()]) {
+/// The `&BspToken<'brand>` witnesses BSP-only init; single-writer
+/// (BSP in a sequential pre-SMP phase), must be called exactly once.
+pub fn init_ap_pcr_lookup<'brand>(_token: &BspToken<'brand>, bootstrap_tasks: &[*mut ()]) {
     debug_assert!(bootstrap_tasks.len() <= MAX_STATIC_APS);
-    let ptrs = &raw mut (*AP_PCR_PTRS.get()).0;
-    let pcrs = AP_PCRS.get();
-    for (i, task) in bootstrap_tasks.iter().enumerate() {
-        let pcr = &raw mut (*pcrs)[i];
-        (*pcr).self_ref = pcr;
-        (*pcr)
-            .current_task
-            .store(*task, core::sync::atomic::Ordering::Release);
-        (*ptrs)[i] = pcr;
+    // SAFETY: BSP-only init pre-SMP per the token witness; we are the
+    // unique writer to `AP_PCR_PTRS` / `AP_PCRS`.
+    unsafe {
+        let ptrs = &raw mut (*AP_PCR_PTRS.get()).0;
+        let pcrs = AP_PCRS.get();
+        for (i, task) in bootstrap_tasks.iter().enumerate() {
+            let pcr = &raw mut (*pcrs)[i];
+            (*pcr).self_ref = pcr;
+            (*pcr)
+                .current_task
+                .store(*task, core::sync::atomic::Ordering::Release);
+            (*ptrs)[i] = pcr;
+        }
     }
 }
 
@@ -526,9 +529,9 @@ pub fn get_bsp_apic_id() -> u32 {
 ///
 /// Does NOT set GS_BASE — call `install()` on the returned PCR for that.
 ///
-/// # Safety
-/// Must be called exactly once during early BSP boot.
-pub unsafe fn init_bsp_pcr(apic_id: u32) {
+/// The `&BspToken<'brand>` witnesses BSP-only init; must be called
+/// exactly once during early BSP boot.
+pub fn init_bsp_pcr<'brand>(_token: &BspToken<'brand>, apic_id: u32) {
     if !PCR_INIT.init_once() {
         return;
     }
@@ -537,29 +540,39 @@ pub unsafe fn init_bsp_pcr(apic_id: u32) {
 
     let pcr = BSP_PCR.get();
 
+    // SAFETY: BSP-only init witnessed by the token + PCR_INIT one-shot;
+    // we are the unique writer to BSP_PCR / ALL_PCRS / PCR_COUNT.
     // NOTE: `self_ref`, `unsafe_sp`, and GS_BASE were already primed by
     // the `_start` asm trampoline in `boot/limine_entry.s` before any
     // instrumented Rust ran.  Re-writing them here is idempotent.
-    (*pcr).self_ref = pcr;
-    (*pcr).cpu_id = 0;
-    (*pcr).apic_id = apic_id;
-    (*pcr).kernel_rsp = (*pcr).kernel_stack_top();
+    unsafe {
+        (*pcr).self_ref = pcr;
+        (*pcr).cpu_id = 0;
+        (*pcr).apic_id = apic_id;
+        (*pcr).kernel_rsp = (*pcr).kernel_stack_top();
 
-    (*ALL_PCRS.get()).0[0] = pcr;
-    PCR_COUNT.store(1, Ordering::Release);
+        (*ALL_PCRS.get()).0[0] = pcr;
+        PCR_COUNT.store(1, Ordering::Release);
 
-    // Register APIC mapping and mark BSP online.
-    register_apic_mapping(0, apic_id);
-    (*pcr).online.store(true, Ordering::Release);
+        // Register APIC mapping and mark BSP online.
+        register_apic_mapping(0, apic_id);
+        (*pcr).online.store(true, Ordering::Release);
+    }
 }
 
 /// Initialize a PCR for an Application Processor.
 ///
 /// Returns a pointer to the new PCR. Caller must call `init_gdt()` + `install()`.
 ///
-/// # Safety
-/// Must be called exactly once per AP during AP boot.
-pub unsafe fn init_ap_pcr(cpu_id: usize, apic_id: u32) -> *mut ProcessorControlRegion {
+/// The `&ApToken<'brand>` witnesses AP-init; the AP-init InitFlag
+/// inside [`crate::sync::run_ap_init`] guarantees exactly one call
+/// per AP slot.
+pub fn init_ap_pcr<'brand>(
+    token: &crate::sync::ApToken<'brand>,
+    apic_id: u32,
+) -> *mut ProcessorControlRegion {
+    use crate::sync::CpuInitWitness;
+    let cpu_id = token.cpu_id();
     if cpu_id == 0 || cpu_id >= MAX_CPUS {
         panic!("init_ap_pcr: invalid cpu_id {}", cpu_id);
     }
@@ -568,21 +581,25 @@ pub unsafe fn init_ap_pcr(cpu_id: usize, apic_id: u32) -> *mut ProcessorControlR
         panic!("init_ap_pcr: too many APs (max {})", MAX_STATIC_APS);
     }
 
-    let pcr = &raw mut (*AP_PCRS.get())[cpu_id - 1];
+    // SAFETY: AP-init witnessed by the token; per-AP one-shot via the
+    // mint-side InitFlag means no other CPU is racing this slot.
+    unsafe {
+        let pcr = &raw mut (*AP_PCRS.get())[cpu_id - 1];
 
-    (*pcr).self_ref = pcr;
-    (*pcr).cpu_id = cpu_id as u32;
-    (*pcr).apic_id = apic_id;
-    (*pcr).kernel_rsp = (*pcr).kernel_stack_top();
+        (*pcr).self_ref = pcr;
+        (*pcr).cpu_id = cpu_id as u32;
+        (*pcr).apic_id = apic_id;
+        (*pcr).kernel_rsp = (*pcr).kernel_stack_top();
 
-    (*ALL_PCRS.get()).0[cpu_id] = pcr;
+        (*ALL_PCRS.get()).0[cpu_id] = pcr;
 
-    PCR_COUNT.fetch_max(cpu_id as u32 + 1, Ordering::AcqRel);
+        PCR_COUNT.fetch_max(cpu_id as u32 + 1, Ordering::AcqRel);
 
-    // Register APIC mapping.
-    register_apic_mapping(cpu_id, apic_id);
+        // Register APIC mapping.
+        register_apic_mapping(cpu_id, apic_id);
 
-    pcr
+        pcr
+    }
 }
 
 /// Safe wrapper around an Application-Processor PCR pointer returned by
@@ -599,13 +616,10 @@ impl ApPcrHandle {
     /// then have [`Self::init_gdt_and_install`] called on it before any
     /// instrumented Rust runs that observes `gs:[…]`.
     ///
-    /// Internally calls [`init_ap_pcr`], which is `unsafe` because it
-    /// must run exactly once per AP. Only AP-bringup code should call
-    /// `ApPcrHandle::init`; callers must ensure single-call semantics.
-    pub fn init(cpu_id: usize, apic_id: u32) -> Self {
-        // SAFETY: AP-bringup code calls this exactly once per cpu_id;
-        // see init_ap_pcr's safety contract.
-        let ptr = unsafe { init_ap_pcr(cpu_id, apic_id) };
+    /// The `&ApToken<'brand>` witnesses AP-init; the underlying
+    /// [`init_ap_pcr`] is per-AP one-shot via the AP-init InitFlag.
+    pub fn init<'brand>(token: &crate::sync::ApToken<'brand>, apic_id: u32) -> Self {
+        let ptr = init_ap_pcr(token, apic_id);
         Self { ptr }
     }
 
@@ -862,8 +876,9 @@ pub type SendIpiToCpuFn = fn(u32, u8);
 static SEND_IPI_TO_CPU_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 static LAPIC_ID_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Register the IPI send function from the APIC driver.
-pub fn register_send_ipi_to_cpu_fn(f: SendIpiToCpuFn) {
+/// Register the IPI send function from the APIC driver. The
+/// `&BspToken<'brand>` witnesses BSP-only init.
+pub fn register_send_ipi_to_cpu_fn<'brand>(_token: &BspToken<'brand>, f: SendIpiToCpuFn) {
     SEND_IPI_TO_CPU_FN.store(f as *mut (), Ordering::Release);
 }
 
@@ -876,8 +891,9 @@ pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
     }
 }
 
-/// Register the LAPIC ID reader function from the APIC driver.
-pub fn register_lapic_id_fn(f: fn() -> u32) {
+/// Register the LAPIC ID reader function from the APIC driver. The
+/// `&BspToken<'brand>` witnesses BSP-only init.
+pub fn register_lapic_id_fn<'brand>(_token: &BspToken<'brand>, f: fn() -> u32) {
     LAPIC_ID_FN.store(f as *mut (), Ordering::Release);
 }
 
@@ -887,8 +903,9 @@ pub type SendNmiToCpuFn = fn(u32);
 
 static SEND_NMI_TO_CPU_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Register the NMI send function from the APIC driver.
-pub fn register_send_nmi_fn(f: SendNmiToCpuFn) {
+/// Register the NMI send function from the APIC driver. The
+/// `&BspToken<'brand>` witnesses BSP-only init.
+pub fn register_send_nmi_fn<'brand>(_token: &BspToken<'brand>, f: SendNmiToCpuFn) {
     SEND_NMI_TO_CPU_FN.store(f as *mut (), Ordering::Release);
 }
 

@@ -34,6 +34,7 @@ use alloc::sync::Arc;
 pub use alloc::alloc::AllocError;
 
 use super::init::{Init, Zeroable};
+use crate::sync::BspToken;
 
 // ---------------------------------------------------------------------------
 // KernelHeap — owned by OSTD, dispatches via registered safe callbacks.
@@ -77,8 +78,9 @@ pub type KernelAllocFn = fn(size: usize) -> *mut u8;
 pub type KernelDeallocFn = fn(ptr: *mut u8);
 
 /// Register the kernel slab allocator's safe `alloc` / `dealloc`
-/// callbacks. Must be called exactly once after `slopos-mm`'s slab
-/// allocator finishes self-initialisation; subsequent calls panic.
+/// callbacks. The `&BspToken<'brand>` witnesses BSP-only init; must
+/// be called exactly once after `slopos-mm`'s slab allocator finishes
+/// self-initialisation; subsequent calls panic.
 ///
 /// After registration, every `KernelHeap` request routes through
 /// `alloc_fn` / `dealloc_fn`. Layouts with `align > 16` get a one-`usize`
@@ -87,7 +89,11 @@ pub type KernelDeallocFn = fn(ptr: *mut u8);
 /// inside this module's SAFETY-noted block, so the `alloc_fn` /
 /// `dealloc_fn` callbacks themselves remain layout-naive and require
 /// no `unsafe`.
-pub fn register_kernel_heap_backend(alloc_fn: KernelAllocFn, dealloc_fn: KernelDeallocFn) {
+pub fn register_kernel_heap_backend<'brand>(
+    _token: &BspToken<'brand>,
+    alloc_fn: KernelAllocFn,
+    dealloc_fn: KernelDeallocFn,
+) {
     let alloc_addr = alloc_fn as usize;
     let dealloc_addr = dealloc_fn as usize;
     if ALLOC_CB.swap(alloc_addr, Ordering::AcqRel) != 0 {
