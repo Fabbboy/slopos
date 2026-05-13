@@ -181,8 +181,8 @@ pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::
 // `__safestack_pointer_address` is the naked LLVM-callback that
 // returns `&current_task->abi.unsafe_stack_sp`. It lives in
 // [`slopos_ostd::arch::x86_64::naked::__safestack_pointer_address`]
-// — the `#[unsafe(naked)]` keyword stays inside OSTD; the kernel
-// side just imports the behavioural contract via the symbol.
+// — the naked-fn attribute stays inside OSTD; the kernel side just
+// imports the behavioural contract via the symbol.
 //
 // The `TASK_UNSAFE_STACK_SP_OFFSET` constant in this module's `use`
 // list is a re-export of [`slopos_ostd::task::abi::TASK_UNSAFE_STACK_SP_OFFSET`];

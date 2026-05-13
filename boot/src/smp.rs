@@ -7,7 +7,9 @@ use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_core::scheduler::safestack_rt;
 use slopos_drivers::apic;
 use slopos_mm::tlb;
+use slopos_ostd::arch::x86_64::safestack::{install_ap_trampoline, install_safestack_runtime};
 use slopos_ostd::boot::smp::register_ap_late_entry;
+use slopos_ostd::sync::run_bsp_init;
 use slopos_utils::klog_info;
 
 use crate::gdt::syscall_msr_init;
@@ -17,18 +19,6 @@ use crate::limine_protocol;
 
 const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
 const MAX_CPUS: usize = 256;
-
-// AP boot trampoline lives in `slopos_ostd::arch::x86_64::naked::ap_entry`.
-// Limine's `MpGotoFunction` is `unsafe extern "C" fn(&MpInfo) -> !`; the
-// OSTD trampoline takes `*const ()` to keep the limine dep out of OSTD.
-// Both share x86-64 SysV ABI (single pointer arg in `rdi`), so a
-// transmute at the bootstrap call site is layout-safe.
-fn ap_entry_goto() -> MpGotoFunction {
-    let f: unsafe extern "C" fn(*const ()) -> ! = slopos_ostd::arch::x86_64::naked::ap_entry;
-    // SAFETY: same x86-64 SysV ABI on both sides; the OSTD `*const ()`
-    // is the same `MpInfo*` the limine bootloader passes in `rdi`.
-    unsafe { core::mem::transmute::<unsafe extern "C" fn(*const ()) -> !, MpGotoFunction>(f) }
-}
 
 /// Per-CPU completion signals.  The BSP passes each AP its index into this
 /// array via `MpInfo::bootstrap(ap_entry, slot)`.  The AP stores
@@ -178,6 +168,20 @@ pub fn smp_init() {
     // would spin forever in `OnceLock::wait`.
     register_ap_late_entry(ap_late_entry);
 
+    // Mint the one-shot BSP-init token and route the SafeStack-runtime
+    // hook + AP boot trampoline through OSTD's safe wrappers. The
+    // trampoline returned by `install_ap_trampoline` shares limine's
+    // `MpGotoFunction` ABI (`unsafe extern "C" fn(*const ()) -> !` vs.
+    // `unsafe extern "C" fn(&MpInfo) -> !`): both pass a single pointer
+    // in `rdi` per the x86-64 SysV ABI, so the transmute is layout-safe.
+    let ap_trampoline: MpGotoFunction = run_bsp_init(|tok| {
+        install_safestack_runtime(tok);
+        let f = install_ap_trampoline(tok);
+        // SAFETY: same x86-64 SysV ABI on both sides; the OSTD `*const ()`
+        // is the same `MpInfo*` the limine bootloader passes in `rdi`.
+        unsafe { core::mem::transmute::<unsafe extern "C" fn(*const ()) -> !, MpGotoFunction>(f) }
+    });
+
     let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
     // SAFETY: init_ap_pcr_lookup must run exactly once before any AP
     // boots; smp_init is the single caller and runs on the BSP only.
@@ -209,7 +213,7 @@ pub fn smp_init() {
         }
 
         AP_SIGNALS[ap_slot as usize].store(0, Ordering::Release);
-        cpu.bootstrap(ap_entry_goto(), ap_slot);
+        cpu.bootstrap(ap_trampoline, ap_slot);
         ap_count += 1;
     }
 
