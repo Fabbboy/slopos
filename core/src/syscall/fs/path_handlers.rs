@@ -131,14 +131,8 @@ define_syscall!(syscall_fs_list(ctx, args) {
 
     list_hdr.count = count;
 
-    let entries_bytes_len = (count as usize) * core::mem::size_of::<UserFsEntry>();
-    // SAFETY: `tmp` is a kernel-owned KVec<UserFsEntry>; the slice covers
-    // the first `count` initialised entries in contiguous heap memory.
-    // UserFsEntry is `#[repr(C)] Copy` over Pod fields — every byte
-    // pattern is a valid representation, so the &[u8] view is sound.
-    let entries_bytes = unsafe {
-        core::slice::from_raw_parts(tmp.as_ptr() as *const u8, entries_bytes_len)
-    };
+    let entries_bytes =
+        slopos_ostd::util::byte_view::pod_slice_as_bytes(&tmp[..count as usize]);
     let entries_user = match UserBytes::try_new(list_hdr.entries as u64, entries_bytes.len()) {
         Ok(b) => b,
         Err(_) => return ctx.err(),

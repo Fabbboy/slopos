@@ -292,8 +292,8 @@ pub fn fb_flip_from_shm_damage(
 
     let max_regions = slopos_abi::damage::MAX_DAMAGE_REGIONS as u32;
     let region_count = damage_count.min(max_regions) as usize;
-    // SAFETY: kernel syscall path validates this pointer and length before calling us.
-    let regions = unsafe { core::slice::from_raw_parts(damage, region_count) };
+    // Kernel syscall path validates this pointer and length before calling us.
+    let regions = slopos_ostd::util::ptr_buf::borrow_buf(damage, region_count);
 
     let mut any_failed = false;
     for rect in regions {

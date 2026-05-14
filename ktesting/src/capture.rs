@@ -81,9 +81,9 @@ impl RingSlot {
 
     fn slice(&self) -> &[u8] {
         let len = self.len.load(Ordering::Acquire).min(PER_CPU_RING_BYTES);
-        // SAFETY: bytes [0..len) were written under `lock` before `len` was
+        // Bytes [0..len) were written under `lock` before `len` was
         // updated; reading via Acquire pairs with the Release in `append`.
-        unsafe { core::slice::from_raw_parts(self.buf.get() as *const u8, len) }
+        slopos_ostd::util::ptr_buf::borrow_buf(self.buf.get() as *const u8, len)
     }
 
     fn dropped_bytes(&self) -> usize {

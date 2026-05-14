@@ -5,6 +5,8 @@
 //! as *const u8, n * size_of::<T>()) }`. This module centralises the
 //! unsafe behind a typed safe API.
 
+use core::mem::MaybeUninit;
+
 use crate::mm::Pod;
 
 /// Reinterpret a `&[T]` as a `&[u8]`. Length scales by
@@ -26,4 +28,71 @@ pub fn pod_slice_as_bytes_mut<T: Pod>(slice: &mut [T]) -> &mut [u8] {
     // SAFETY: see `pod_slice_as_bytes`. The mutable borrow uniquely
     // covers `slice` for the returned lifetime.
     unsafe { core::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u8, len) }
+}
+
+/// Reinterpret a single `&T: Pod` as `&[u8]` of length `size_of::<T>()`.
+///
+/// Sibling of [`pod_slice_as_bytes`] for the common
+/// "expose one struct value to a `copy_bytes_to_user` call" pattern.
+#[inline]
+pub fn pod_as_bytes<T: Pod>(value: &T) -> &[u8] {
+    pod_slice_as_bytes(core::slice::from_ref(value))
+}
+
+/// Mutable byte view of a `MaybeUninit<T>`. Sound for **any** `T` —
+/// `MaybeUninit` permits arbitrary byte writes (including padding
+/// bytes) regardless of `T`'s validity invariants. The caller is
+/// responsible for only invoking `assume_init` once the bytes are
+/// known to represent a valid `T`.
+///
+/// Folds the `unsafe { core::slice::from_raw_parts_mut(val.as_mut_ptr()
+/// as *mut u8, size_of::<T>()) }` idiom into a safe helper.
+#[inline]
+pub fn maybe_uninit_as_bytes_mut<T>(val: &mut MaybeUninit<T>) -> &mut [u8] {
+    // SAFETY: a `MaybeUninit<T>` occupies `size_of::<T>()` bytes of
+    // storage and is freely writable through a byte pointer; we hold
+    // a `&mut` reference so no aliasing borrow exists.
+    unsafe {
+        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pod_as_bytes_round_trip_u32() {
+        let v: u32 = 0xdead_beef;
+        let bytes = pod_as_bytes(&v);
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(bytes, &v.to_ne_bytes()[..]);
+    }
+
+    #[test]
+    fn pod_as_bytes_matches_pod_slice_as_bytes_for_one() {
+        let arr: [u8; 5] = [1, 2, 3, 4, 5];
+        assert_eq!(
+            pod_as_bytes(&arr),
+            pod_slice_as_bytes(core::slice::from_ref(&arr))
+        );
+    }
+
+    #[test]
+    fn maybe_uninit_as_bytes_mut_writes_and_assumes_init() {
+        let mut val: MaybeUninit<u32> = MaybeUninit::uninit();
+        let bytes = maybe_uninit_as_bytes_mut(&mut val);
+        assert_eq!(bytes.len(), 4);
+        bytes.copy_from_slice(&0x1234_5678u32.to_ne_bytes());
+        // SAFETY: bytes above were written for the entire value.
+        let v = unsafe { val.assume_init() };
+        assert_eq!(v, 0x1234_5678);
+    }
+
+    #[test]
+    fn maybe_uninit_as_bytes_mut_sized_correctly_for_array() {
+        let mut val: MaybeUninit<[u8; 7]> = MaybeUninit::uninit();
+        let bytes = maybe_uninit_as_bytes_mut(&mut val);
+        assert_eq!(bytes.len(), 7);
+    }
 }

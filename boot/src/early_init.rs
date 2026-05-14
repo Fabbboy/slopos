@@ -270,16 +270,11 @@ fn phase_steps(phase: BootInitPhase) -> &'static [BootInitStep] {
             boot_init_externs::__stop_boot_init_optional_addr(),
         ),
     };
-    // SAFETY: the linker guarantees that for each phase there is exactly
-    // one contiguous array of `BootInitStep` values bracketed by the
-    // `__start_*` / `__stop_*` symbols (link.ld + the `boot_init!` macro
-    // place every registration into `.boot_init_<phase>`). Computing the
-    // byte distance is sound; the resulting slice covers exactly the
-    // registered steps and never aliases other writable memory.
-    unsafe {
-        let len = stop.offset_from(start).max(0) as usize;
-        core::slice::from_raw_parts(start, len)
-    }
+    // The linker guarantees that for each phase there is exactly one
+    // contiguous array of `BootInitStep` values bracketed by the
+    // `__start_*` / `__stop_*` symbols (link.ld + the `boot_init!`
+    // macro place every registration into `.boot_init_<phase>`).
+    slopos_ostd::util::ptr_buf::section_slice(start, stop)
 }
 
 fn boot_init_count_phase(phase: BootInitPhase) -> usize {
@@ -553,7 +548,14 @@ fn boot_step_init_phys_virt_offset_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // One-shot init; the limine step has already populated `hhdm_offset`,
     // and this is the canonical wiring point for the OSTD phys/virt
     // offset. Tier-2 OSTD signature is `fn(&BspToken<'_>, u64)`.
-    slopos_ostd::mm::phys::init_phys_virt_offset(&ctx.bsp_token(), hhdm);
+    let tok = ctx.bsp_token();
+    slopos_ostd::mm::phys::init_phys_virt_offset(&tok, hhdm);
+    // Mirror the offset into the `boot::hhdm` registry that the
+    // `acpi_handoff` / `acpi_region_bytes` helpers consult. The two
+    // registries (`mm::phys::PHYS_VIRT_OFFSET` and `boot::hhdm`) hold
+    // the same u64; both are populated here so consumers can read
+    // through whichever path their layer permits.
+    slopos_ostd::boot::hhdm::register_hhdm_offset(&tok, hhdm);
 }
 
 boot_init!(

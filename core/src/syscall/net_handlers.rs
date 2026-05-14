@@ -846,13 +846,7 @@ define_syscall!(syscall_getpeername(ctx, args) requires(let process_id) {
             let copy_len = caller_len.min(struct_len);
 
             if copy_len > 0 {
-                // SAFETY: SockAddrUn is repr(C) and we copy at most its size.
-                let addr_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &addr_un as *const SockAddrUn as *const u8,
-                        core::mem::size_of::<SockAddrUn>(),
-                    )
-                };
+                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&addr_un);
                 let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
                 try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
             }
@@ -875,13 +869,7 @@ define_syscall!(syscall_getpeername(ctx, args) requires(let process_id) {
             let copy_len = caller_len.min(struct_len);
 
             if copy_len > 0 {
-                // SAFETY: SockAddrIn is repr(C), 16 bytes, and we copy at most that.
-                let addr_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &sock_addr_in as *const SockAddrIn as *const u8,
-                        struct_len,
-                    )
-                };
+                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&sock_addr_in);
                 let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
                 try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
             }
@@ -927,13 +915,7 @@ define_syscall!(syscall_getsockname(ctx, args) requires(let process_id) {
             let copy_len = caller_len.min(struct_len);
 
             if copy_len > 0 {
-                // SAFETY: SockAddrUn is repr(C) and we copy at most its size.
-                let addr_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &addr_un as *const SockAddrUn as *const u8,
-                        core::mem::size_of::<SockAddrUn>(),
-                    )
-                };
+                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&addr_un);
                 let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
                 try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
             }
@@ -958,13 +940,7 @@ define_syscall!(syscall_getsockname(ctx, args) requires(let process_id) {
                 let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
                 let copy_len = caller_len.min(struct_len);
                 if copy_len > 0 {
-                    // SAFETY: SockAddrIn is repr(C), 16 bytes.
-                    let addr_bytes = unsafe {
-                        core::slice::from_raw_parts(
-                            &zeroed as *const SockAddrIn as *const u8,
-                            struct_len,
-                        )
-                    };
+                    let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&zeroed);
                     let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
                     try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
                 }
@@ -981,13 +957,7 @@ define_syscall!(syscall_getsockname(ctx, args) requires(let process_id) {
             let copy_len = caller_len.min(struct_len);
 
             if copy_len > 0 {
-                // SAFETY: SockAddrIn is repr(C), 16 bytes, and we copy at most that.
-                let addr_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &sock_addr_in as *const SockAddrIn as *const u8,
-                        struct_len,
-                    )
-                };
+                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&sock_addr_in);
                 let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
                 try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
             }

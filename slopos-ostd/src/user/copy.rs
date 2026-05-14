@@ -215,6 +215,65 @@ pub fn copy_to_user<T: Pod>(
     }
 }
 
+/// Copy a single `T: Copy` from user space.
+///
+/// Wider trait bound than [`copy_from_user`] (which requires `T: Pod`)
+/// — accepts any `Copy` type. The caller carries responsibility that
+/// the type's representation tolerates arbitrary byte patterns
+/// (no `bool`, no enum with niches, etc.); the surrounding kernel
+/// validates the value as appropriate. Provided for caller-API parity
+/// with the 84 kernel callsites that pre-date the `Pod` trait — see
+/// `mm/src/user_copy.rs` for the historical rationale.
+pub fn copy_value_from_user<T: Copy>(space: &VmSpace, src: UserPtr<T>) -> Result<T, UserCopyError> {
+    let len = core::mem::size_of::<T>();
+    validate_pages(space, src.as_u64(), len, AccessKind::Read)?;
+    let mut dst = MaybeUninit::<T>::uninit();
+    // SAFETY: `__ostd_raw_usercopy` is the kernel's sole STAC/CLAC-
+    // guarded movsb path; `dst.as_mut_ptr()` is exclusive (we own
+    // the MaybeUninit), `src.as_ptr()` is the user-validated input.
+    let remaining =
+        unsafe { __ostd_raw_usercopy(dst.as_mut_ptr() as *mut u8, src.as_ptr() as *const u8, len) };
+    if remaining == 0 {
+        // SAFETY: all `len` bytes of `dst` were written by the
+        // movsb above; the `T: Copy` contract permits arbitrary
+        // byte patterns to count as a valid `T`.
+        Ok(unsafe { dst.assume_init() })
+    } else {
+        Err(UserCopyError::Fault {
+            bytes_copied: len.saturating_sub(remaining),
+        })
+    }
+}
+
+/// Copy a single `T: Copy` from kernel space into user space.
+///
+/// Sibling of [`copy_value_from_user`] — see its doc for the
+/// `T: Copy` carve-out rationale.
+pub fn copy_value_to_user<T: Copy>(
+    space: &VmSpace,
+    dst: UserPtr<T>,
+    value: &T,
+) -> Result<(), UserCopyError> {
+    let len = core::mem::size_of::<T>();
+    validate_pages(space, dst.as_u64(), len, AccessKind::Write)?;
+    // SAFETY: as in [`copy_to_user`] — single STAC/CLAC-guarded movsb
+    // call with caller-supplied user destination.
+    let remaining = unsafe {
+        __ostd_raw_usercopy(
+            dst.as_mut_ptr() as *mut u8,
+            value as *const T as *const u8,
+            len,
+        )
+    };
+    if remaining == 0 {
+        Ok(())
+    } else {
+        Err(UserCopyError::Fault {
+            bytes_copied: len.saturating_sub(remaining),
+        })
+    }
+}
+
 /// Copy raw bytes from user space.
 pub fn copy_bytes_from_user(
     space: &VmSpace,

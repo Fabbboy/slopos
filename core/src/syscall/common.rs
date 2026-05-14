@@ -64,9 +64,7 @@ pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPt
 }
 
 pub fn syscall_copy_user_str_to_cstr(dst: &mut [i8], user_src: u64) -> c_int {
-    // SAFETY: `i8` and `u8` share layout; the slice metadata stays
-    // identical. The reborrow is bounded by the local `dst_u8` borrow.
-    let dst_u8 = unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+    let dst_u8 = slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(dst);
     match syscall_copy_user_str(dst_u8, user_src) {
         Ok(()) => 0,
         Err(_) => -1,

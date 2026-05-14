@@ -16,7 +16,7 @@ pub mod elf;
 pub mod framebuffer;
 pub mod memmap;
 
-pub use acpi::acpi_handoff;
+pub use acpi::{acpi_handoff, acpi_region_bytes};
 pub use elf::{ElfImage, elf_image_handoff};
 pub use framebuffer::{Framebuffer, framebuffer_handoff};
 pub use memmap::{MemmapEntry, memmap_handoff};

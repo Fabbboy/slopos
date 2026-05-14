@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+mod abi_pod;
 mod abi_zeroable;
 
 pub mod acpi;

@@ -310,7 +310,7 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
         return;
     }
 
-    let bytes = unsafe { core::slice::from_raw_parts(data, length) };
+    let bytes = slopos_ostd::util::ptr_buf::borrow_buf(data, length);
 
     let mut i = 0usize;
     while i < length {

@@ -58,13 +58,24 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
 
     // Drain into a kernel scratch buffer, then copy to userspace.
     // Heap-allocate so the ~2 KiB scratch never lands on the kernel
-    // stack — the all-zero pattern is a valid default `InputEvent`
-    // (matching this syscall's prior `const { … KeyPress … }`
-    // initialiser).
+    // stack.
+    //
+    // The scratch element is a fixed-size byte buffer sized to one
+    // `InputEvent`; `align(8)` matches `InputEvent`'s required
+    // alignment (asserted below). drain_batch writes through a typed
+    // `*mut InputEvent` pointer over the backing storage; the
+    // surrounding kernel reads it back as `&[u8]` for
+    // `copy_bytes_to_user`. `[u8; N]: Pod` allows the byte-view to
+    // route through `pod_slice_as_bytes`.
     #[allow(dead_code)]
-    #[derive(slopos_ostd::Zeroable)]
-    #[repr(transparent)]
-    struct InputEventScratch(InputEvent);
+    #[derive(slopos_ostd::Zeroable, slopos_ostd::Pod, Copy, Clone)]
+    #[repr(C, align(8))]
+    struct InputEventScratch([u8; core::mem::size_of::<InputEvent>()]);
+
+    const _: () = assert!(
+        core::mem::align_of::<InputEvent>() <= 8,
+        "InputEventScratch must be aligned for InputEvent",
+    );
 
     const MAX_BATCH: usize = 64;
     let batch = max_count.min(MAX_BATCH);
@@ -79,15 +90,8 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
         batch,
     );
     if count > 0 {
-        let byte_len = count * core::mem::size_of::<InputEvent>();
-        let user_out = try_or_err!(ctx, UserBytes::try_new(args.arg0, byte_len));
-        // SAFETY: `InputEventScratch(InputEvent)` is `#[repr(C)]` with no
-        // padding; `count` was clamped to the allocated batch length above.
-        // The byte view is read-only and lives only for the
-        // `copy_bytes_to_user` call.
-        let src_bytes = unsafe {
-            core::slice::from_raw_parts(scratch.as_ptr() as *const u8, byte_len)
-        };
+        let src_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes(&scratch[..count]);
+        let user_out = try_or_err!(ctx, UserBytes::try_new(args.arg0, src_bytes.len()));
         try_or_err!(ctx, copy_bytes_to_user(user_out, src_bytes));
     }
 
@@ -262,13 +266,8 @@ define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
             Err(_) => return ctx.err(),
         };
         let dst = &mut damage_regions[..clamped];
-        // SAFETY: `DamageRect` is `#[repr(C)]` of four `i32` with no
-        // padding; arbitrary byte patterns are valid (`is_valid()`
-        // gates downstream use). The mutable byte view exists only for
-        // the synchronous `copy_bytes_from_user` call below.
-        let dst_bytes = unsafe {
-            core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, byte_len)
-        };
+        let dst_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(dst);
+        debug_assert_eq!(dst_bytes.len(), byte_len);
         if copy_bytes_from_user(user_bytes, dst_bytes).is_err() {
             return ctx.err();
         }

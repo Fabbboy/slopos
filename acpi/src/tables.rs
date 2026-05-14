@@ -7,16 +7,15 @@
 //! returns checksum-validated `AcpiTable<'static>` views over each
 //! discovered table.
 //!
-//! All HHDM byte-borrows funnel through the single
-//! [`acpi_region_bytes`] boundary helper — the lone surviving
-//! TCB carve-out in fs/+acpi/.
-
-#![allow(unsafe_code)]
+//! All HHDM byte-borrows funnel through
+//! [`slopos_ostd::boot::handoff::acpi_region_bytes`]; this module
+//! holds no `unsafe` of its own.
 
 use core::mem;
 
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::hhdm::{self, PhysAddrHhdm};
+use slopos_mm::hhdm;
+use slopos_ostd::boot::handoff::acpi_region_bytes as ostd_acpi_region_bytes;
 use slopos_ostd::util::packed_view::read_packed;
 use slopos_utils::klog_info;
 
@@ -26,31 +25,15 @@ pub use slopos_ostd::acpi::{AcpiTable, RSDP_SIGNATURE, RSDP_V1_SIZE, Rsdp, SdtHe
 /// given physical address. Returns `None` if HHDM is unavailable or
 /// the address translates to a null pointer.
 ///
-/// # Safety
-///
-/// The bootloader publishes ACPI tables in firmware-reserved memory
-/// that the kernel keeps mapped for its lifetime. Callers must pass
-/// either:
-/// - a fixed length (`RSDP_V1_SIZE`, `size_of::<Rsdp>()`,
-///   `size_of::<SdtHeader>()`) for a probe read, or
-/// - a length that has been validated against the table's
-///   spec-declared size (`hdr.length` post-checksum) for a full read.
-///
-/// Mapped, kernel-lifetime, read-only — soundness invariants 7 + 8.
+/// Thin delegate over [`slopos_ostd::boot::handoff::acpi_region_bytes`]:
+/// gates on the kernel-side `hhdm::is_available()` flag (the OSTD
+/// helper independently re-checks its own HHDM-offset registry), then
+/// forwards.
 fn acpi_region_bytes(phys: u64, len: usize) -> Option<&'static [u8]> {
-    if !hhdm::is_available() || phys == 0 || len == 0 {
+    if !hhdm::is_available() {
         return None;
     }
-    let virt = PhysAddr::new(phys).try_to_virt()?;
-    let ptr = virt.as_ptr::<u8>();
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: bootloader-published, HHDM-mapped, kernel-lifetime
-    // backing. Length is either a spec-fixed probe size or a
-    // checksum-validated `hdr.length` — both fit in the published
-    // ACPI region.
-    Some(unsafe { core::slice::from_raw_parts(ptr, len) })
+    ostd_acpi_region_bytes(PhysAddr::new(phys), len)
 }
 
 /// Validated handle to the ACPI table hierarchy rooted at an RSDP.

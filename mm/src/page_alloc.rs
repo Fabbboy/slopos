@@ -700,12 +700,12 @@ pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
     // empty or fully populated state.
     if !FRAME_TABLE.is_installed() {
         let frames_ptr = frame_array as *mut PageFrame;
-        // SAFETY: the caller (memory_init) has just allocated and
-        // mapped `max_frames` PageFrame slots starting at `frame_array`
-        // with `'static` lifetime; we hold the only reference and
-        // publish ownership exactly once via `RawTable::install`.
+        // The caller (memory_init) has just allocated and mapped
+        // `max_frames` PageFrame slots starting at `frame_array` with
+        // `'static` lifetime; we hold the only reference and publish
+        // ownership exactly once via `RawTable::install`.
         let slice: &'static mut [PageFrame] =
-            unsafe { core::slice::from_raw_parts_mut(frames_ptr, max_frames as usize) };
+            slopos_ostd::util::ptr_buf::borrow_buf_mut(frames_ptr, max_frames as usize);
         FRAME_TABLE.install(slice);
     }
 
@@ -1258,12 +1258,10 @@ fn paint_page_at_virt(ptr: *mut u8, value: u8) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: caller has resolved `ptr` from a valid `PhysAddr` whose
-    // HHDM mapping is live; the page is exclusively owned for the
-    // duration of the write.
-    unsafe {
-        core::slice::from_raw_parts_mut(ptr, PAGE_SIZE_4KB as usize).fill(value);
-    }
+    // Caller has resolved `ptr` from a valid `PhysAddr` whose HHDM
+    // mapping is live; the page is exclusively owned for the duration
+    // of the write.
+    slopos_ostd::util::ptr_buf::borrow_buf_mut(ptr, PAGE_SIZE_4KB as usize).fill(value);
 }
 
 fn zero_physical_page(phys_addr: PhysAddr) -> c_int {

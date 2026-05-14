@@ -773,12 +773,12 @@ fn apply_elf_relocations(
     if payload.is_null() || payload_len == 0 {
         return -1;
     }
-    // SAFETY: caller (process_vm_load_elf_data → exec) hands in a
-    // bootloader / file-loader-published byte buffer of `payload_len`
-    // bytes whose lifetime exceeds this call. Only the first
-    // `payload_len` bytes are accessed; bounds are re-checked at every
-    // structured read via `read_elf_pod`.
-    let payload_slice: &[u8] = unsafe { core::slice::from_raw_parts(payload, payload_len) };
+    // Caller (process_vm_load_elf_data → exec) hands in a bootloader /
+    // file-loader-published byte buffer of `payload_len` bytes whose
+    // lifetime exceeds this call. Only the first `payload_len` bytes
+    // are accessed; bounds are re-checked at every structured read
+    // via `read_elf_pod`.
+    let payload_slice: &[u8] = slopos_ostd::util::ptr_buf::borrow_buf(payload, payload_len);
 
     let ehdr: Elf64Ehdr = match read_elf_pod::<Elf64Ehdr>(payload_slice, 0) {
         Some(h) => h,

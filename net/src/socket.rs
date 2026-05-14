@@ -1227,7 +1227,7 @@ pub fn socket_sendto(
     let payload = if len == 0 {
         &[][..]
     } else {
-        unsafe { core::slice::from_raw_parts(data, len) }
+        slopos_ostd::util::ptr_buf::borrow_buf(data, len)
     };
 
     if is_udp {
@@ -1266,7 +1266,7 @@ pub fn socket_recvfrom(
     let out = if len == 0 {
         &mut [][..]
     } else {
-        unsafe { core::slice::from_raw_parts_mut(buf, len) }
+        slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
     };
 
     let (nonblocking, timeout_ms, recv_hint) = {
@@ -1827,7 +1827,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         let payload = if len == 0 {
             &[][..]
         } else {
-            unsafe { core::slice::from_raw_parts(data, len) }
+            slopos_ostd::util::ptr_buf::borrow_buf(data, len)
         };
 
         if is_udp {
@@ -1875,7 +1875,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
     let payload = if len == 0 {
         &[][..]
     } else {
-        unsafe { core::slice::from_raw_parts(data, len) }
+        slopos_ostd::util::ptr_buf::borrow_buf(data, len)
     };
 
     let mut total_wrote = 0usize;
@@ -1963,7 +1963,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     let out = if len == 0 {
         &mut [][..]
     } else {
-        unsafe { core::slice::from_raw_parts_mut(buf, len) }
+        slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
     };
 
     let (is_udp, is_icmp, is_shut_rd) = {

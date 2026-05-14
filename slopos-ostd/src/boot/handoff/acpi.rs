@@ -28,6 +28,31 @@ use crate::boot::hhdm;
 /// `slice::from_raw_parts` call is sound under that contract; callers
 /// see only `Option<AcpiTable<'static>>`.
 pub fn acpi_handoff(phys: PhysAddr, len: usize) -> Option<AcpiTable<'static>> {
+    let bytes = acpi_region_bytes(phys, len)?;
+    AcpiTable::from_bytes(bytes)
+}
+
+/// Borrow `len` bytes of HHDM-mapped ACPI firmware memory as a raw
+/// `&'static [u8]`. Returns `None` if:
+///
+/// - `len == 0`,
+/// - the HHDM offset has not been registered yet
+///   (`crate::boot::hhdm::register_hhdm_offset` must precede this call),
+/// - `phys == 0`, or
+/// - the translated pointer would be null.
+///
+/// Unlike [`acpi_handoff`], no checksum or table-length validation is
+/// performed — this is the raw byte primitive for consumers (e.g.
+/// `acpi/src/tables.rs`) that need to probe RSDP / SDT-header prefixes
+/// at multiple lengths before re-borrowing the full table.
+///
+/// # Safety (interior)
+///
+/// The bootloader publishes ACPI tables in firmware-reserved memory
+/// that the kernel keeps mapped for its lifetime. The interior
+/// `slice::from_raw_parts` call is sound under that contract; callers
+/// receive only `Option<&'static [u8]>`.
+pub fn acpi_region_bytes(phys: PhysAddr, len: usize) -> Option<&'static [u8]> {
     if len == 0 || phys.0 == 0 {
         return None;
     }
@@ -40,8 +65,6 @@ pub fn acpi_handoff(phys: PhysAddr, len: usize) -> Option<AcpiTable<'static>> {
     // SAFETY: bootloader-published, HHDM-mapped, kernel-lifetime
     // backing. `len` is supplied by the caller and either fits inside
     // a probe size (e.g. `size_of::<SdtHeader>()`) or has been
-    // validated against `hdr.length` — `AcpiTable::from_bytes`
-    // re-validates the length before returning `Some`.
-    let bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(ptr, len) };
-    AcpiTable::from_bytes(bytes)
+    // validated against `hdr.length` by a higher-level checksum step.
+    Some(unsafe { core::slice::from_raw_parts(ptr, len) })
 }

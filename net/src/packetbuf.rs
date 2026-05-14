@@ -203,9 +203,9 @@ impl PacketBuf {
     fn data(&self) -> &[u8] {
         match &self.inner {
             PacketBufInner::Pooled { pool, slot } => {
-                // SAFETY: We own this slot — exclusive access guaranteed by
+                // We own this slot — exclusive access guaranteed by
                 // move-only semantics (no Clone).
-                unsafe { core::slice::from_raw_parts(pool.slot_data(*slot), BUF_SIZE) }
+                slopos_ostd::util::ptr_buf::borrow_buf(pool.slot_data(*slot), BUF_SIZE)
             }
             PacketBufInner::Oversized { data } => data.as_slice(),
         }
@@ -216,8 +216,8 @@ impl PacketBuf {
     fn data_mut(&mut self) -> &mut [u8] {
         match &mut self.inner {
             PacketBufInner::Pooled { pool, slot } => {
-                // SAFETY: We own this slot and hold &mut self — exclusive access.
-                unsafe { core::slice::from_raw_parts_mut(pool.slot_data(*slot), BUF_SIZE) }
+                // We own this slot and hold &mut self — exclusive access.
+                slopos_ostd::util::ptr_buf::borrow_buf_mut(pool.slot_data(*slot), BUF_SIZE)
             }
             PacketBufInner::Oversized { data } => data.as_mut_slice(),
         }

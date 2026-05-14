@@ -115,11 +115,11 @@ impl SlabHeader {
             return None;
         }
         let body_len = object_size - link_bytes;
-        // SAFETY: caller owns the slab page; `obj + link_bytes` lies
-        // strictly inside the object's allocation slot.
-        let body =
-            unsafe { core::slice::from_raw_parts_mut(obj.as_ptr().add(link_bytes), body_len) };
-        Some(body)
+        // Caller owns the slab page; `obj + link_bytes` lies strictly
+        // inside the object's allocation slot.
+        Some(slopos_ostd::util::ptr_buf::borrow_at_mut::<u8>(
+            obj, link_bytes, body_len,
+        ))
     }
 }
 
@@ -157,10 +157,10 @@ impl LargeAllocHeader {
     #[inline]
     fn body_view_mut<'a>(header: NonNull<LargeAllocHeader>, len: usize) -> &'a mut [u8] {
         let body = Self::body_ptr(header);
-        // SAFETY: caller owns the large-alloc region; `body + len` is
-        // within bounds whenever the caller passed a `len` derived from
-        // the header's `pages` count.
-        unsafe { core::slice::from_raw_parts_mut(body.as_ptr(), len) }
+        // Caller owns the large-alloc region; `body + len` is within
+        // bounds whenever the caller passed a `len` derived from the
+        // header's `pages` count.
+        slopos_ostd::util::ptr_buf::borrow_nonnull_mut(body, len)
     }
 }
 
@@ -445,10 +445,8 @@ fn zero_user_buffer(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
-    // SAFETY: caller-owned buffer of `len` bytes.
-    unsafe {
-        core::slice::from_raw_parts_mut(ptr, len).fill(0);
-    }
+    // Caller-owned buffer of `len` bytes.
+    slopos_ostd::util::ptr_buf::borrow_buf_mut(ptr, len).fill(0);
 }
 
 /// Write a `HeapStats` snapshot to a C-ABI output slot if non-null.

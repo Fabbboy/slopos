@@ -87,22 +87,13 @@ fn current_vm_space() -> Result<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmS
 /// byte patterns.
 pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
     let space = current_vm_space()?;
-    let mut val = core::mem::MaybeUninit::<T>::uninit();
-    let dst_bytes = unsafe {
-        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
-    };
-    slopos_ostd::user::copy::copy_bytes_from_user(&space, src.addr(), dst_bytes)?;
-    Ok(unsafe { val.assume_init() })
+    slopos_ostd::user::copy::copy_value_from_user(&space, src).map_err(Into::into)
 }
 
 /// Copy a `T: Copy` from kernel space into user space.
 pub fn copy_to_user<T: Copy>(dst: UserPtr<T>, value: &T) -> Result<(), UserPtrError> {
     let space = current_vm_space()?;
-    let src_bytes = unsafe {
-        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
-    };
-    slopos_ostd::user::copy::copy_bytes_to_user(&space, dst.addr(), src_bytes)?;
-    Ok(())
+    slopos_ostd::user::copy::copy_value_to_user(&space, dst, value).map_err(Into::into)
 }
 
 /// Copy raw bytes from user space.
