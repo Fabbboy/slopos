@@ -1,5 +1,5 @@
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::{cow, demand, process_vm};

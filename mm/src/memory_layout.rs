@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use slopos_ostd::klog_debug;
 use slopos_ostd::sync::InitFlag;
-use slopos_utils::klog_debug;
 
 use crate::symbols;
 

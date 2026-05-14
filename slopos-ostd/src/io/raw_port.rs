@@ -1,4 +1,18 @@
-//! Type-safe x86 I/O port access.
+//! Non-registry-gated typed I/O port handle.
+//!
+//! This is the pre-registry sibling of [`crate::io::port::IoPort`]. The
+//! registry-gated `IoPort<T>` requires
+//! [`register_io_port_registry`](crate::io::port::register_io_port_registry)
+//! to have run on the BSP — which means it cannot serve early-boot
+//! consumers (the panic logger, the boot driver init paths that touch
+//! the UART / PIT / PS/2 before BSP-init completes).
+//!
+//! `raw_port::Port<T>` provides the same `in/out` asm primitives without
+//! the registry gate. Construction is `pub const fn new(u16)`; reading and
+//! writing remain `unsafe` because port I/O has arbitrary hardware side
+//! effects.
+//!
+//! New code should prefer the registry-gated [`IoPort`](crate::io::port::IoPort).
 
 use core::arch::asm;
 use core::marker::PhantomData;

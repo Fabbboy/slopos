@@ -1,5 +1,6 @@
 use slopos_abi::DisplayInfo;
-use slopos_ostd::sync::KernelSync;
+
+use crate::sync::KernelSync;
 
 #[derive(Clone, Copy)]
 #[repr(C)]

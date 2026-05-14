@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{

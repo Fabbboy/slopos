@@ -5,12 +5,12 @@ use core::{
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_drivers::serial;
+use slopos_ostd::klog::{self, KlogLevel};
 use slopos_ostd::sync::KernelSync;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::spin::SpinLock;
-use slopos_utils::klog::{self, KlogLevel};
-use slopos_utils::wl_currency;
-use slopos_utils::{klog_debug, klog_info, klog_set_level};
+use slopos_ostd::wl_currency;
+use slopos_ostd::{klog_debug, klog_info, klog_set_level};
 use slopos_video::splash;
 
 use crate::limine_protocol;
@@ -507,12 +507,12 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     }
 
     if cmdline.contains("roulette=skip") {
-        slopos_utils::boot_flags::set_flag(slopos_utils::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
         boot_info(b"Boot option: roulette skip enabled\0");
     }
 
     if cmdline.contains("tests=on") {
-        slopos_utils::boot_flags::set_flag(slopos_utils::boot_flags::BOOT_FLAG_TESTS_ENABLED);
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_TESTS_ENABLED);
         boot_info(b"Boot option: userland test mode enabled\0");
     }
 }

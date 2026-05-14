@@ -1,4 +1,4 @@
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 
 /// Convert a C string pointer to a Rust `&str`.
 ///

@@ -26,9 +26,9 @@ use slopos_arch::cpu;
 use slopos_arch::cpu::apic_msr::ApicBaseMsr;
 use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_arch::cpu::msr::Msr;
+use slopos_ostd::boot_info::{LimineMemmapResponse, limine_memmap_iter};
 use slopos_ostd::sync::{BspToken, InitFlag, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
-use slopos_utils::boot_info::{LimineMemmapResponse, limine_memmap_iter};
-use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
+use slopos_ostd::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 const LIMINE_MEMMAP_USABLE: u64 = 0;
 const LIMINE_MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
@@ -465,7 +465,7 @@ fn log_reserved_regions() {
                 continue;
             };
             let label_str = if region.label[0] != 0 {
-                slopos_utils::string::bytes_as_str(&region.label)
+                slopos_ostd::string::bytes_as_str(&region.label)
             } else {
                 mm_reservation_type_name(region.type_)
             };

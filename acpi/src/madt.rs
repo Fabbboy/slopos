@@ -1,8 +1,8 @@
 //! MADT (Multiple APIC Description Table) entry iteration over the
 //! OSTD `AcpiTable<'a>` slice primitive.
 
+use slopos_ostd::klog_info;
 use slopos_ostd::util::packed_view::read_packed;
-use slopos_utils::klog_info;
 
 use crate::tables::{AcpiTable, AcpiTables};
 

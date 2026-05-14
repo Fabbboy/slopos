@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::init::{Init, init_from_closure};
-use slopos_utils::{Bitmap, words_for};
+use slopos_ostd::{Bitmap, words_for};
 
 use crate::packetbuf::PacketBuf;
 use crate::tcp;
@@ -1659,7 +1659,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         return errno_i32(ERRNO_EINPROGRESS);
     }
 
-    let deadline_ms = slopos_utils::clock::uptime_ms().saturating_add(30_000);
+    let deadline_ms = slopos_kernel_services::clock::uptime_ms().saturating_add(30_000);
 
     loop {
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
@@ -1696,7 +1696,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             }
         }
 
-        if slopos_utils::clock::uptime_ms() >= deadline_ms {
+        if slopos_kernel_services::clock::uptime_ms() >= deadline_ms {
             let _ = tcp::abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
@@ -1941,7 +1941,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         Err(_) => return errno_i32(ERRNO_ENOMEM) as i64,
     };
     let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
-    let now_ms = slopos_utils::clock::uptime_ms();
+    let now_ms = slopos_kernel_services::clock::uptime_ms();
     loop {
         let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
             break;
@@ -2749,7 +2749,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
         Err(_) => return errno_i32(ERRNO_ENOMEM),
     };
     let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
-    let now_ms = slopos_utils::clock::uptime_ms();
+    let now_ms = slopos_kernel_services::clock::uptime_ms();
     loop {
         let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
             break;
@@ -2765,7 +2765,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 pub fn socket_process_timers() {
     // Retransmit timers now fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit;
     // the polling path used to shadow this and was a known race hazard.
-    let now_ms = slopos_utils::clock::uptime_ms();
+    let now_ms = slopos_kernel_services::clock::uptime_ms();
     if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);
     }

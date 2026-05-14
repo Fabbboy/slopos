@@ -274,10 +274,10 @@ hermetic_state! {
     pub PanicCleanupHandlers {
         type Snapshot = usize;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            Ok(slopos_utils::panic_recovery::cleanup_handler_count())
+            Ok(slopos_ostd::panic_recovery::cleanup_handler_count())
         }
         fn restore(snap: Self::Snapshot) {
-            slopos_utils::panic_recovery::truncate_cleanup_handlers(snap);
+            slopos_ostd::panic_recovery::truncate_cleanup_handlers(snap);
         }
     }
 }
@@ -288,12 +288,12 @@ hermetic_state! {
 
 hermetic_state! {
     pub KlogLevelShadow {
-        type Snapshot = slopos_utils::klog::KlogLevel;
+        type Snapshot = slopos_ostd::klog::KlogLevel;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            Ok(slopos_utils::klog::klog_get_level())
+            Ok(slopos_ostd::klog::klog_get_level())
         }
         fn restore(snap: Self::Snapshot) {
-            slopos_utils::klog::klog_set_level(snap);
+            slopos_ostd::klog::klog_set_level(snap);
         }
     }
 }

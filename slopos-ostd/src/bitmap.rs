@@ -39,7 +39,7 @@ pub struct Bitmap<const W: usize> {
 // This unlocks `KBox::<Bitmap<W>>::zeroed()` so callers wrapping a
 // large bitmap can heap-allocate it without the W-word stack temp
 // that `let b = Bitmap::new()` materialises.
-unsafe impl<const W: usize> slopos_ostd::mm::init::Zeroable for Bitmap<W> {}
+unsafe impl<const W: usize> crate::mm::init::Zeroable for Bitmap<W> {}
 
 impl<const W: usize> Bitmap<W> {
     pub const CAPACITY: usize = W * WORD_BITS;

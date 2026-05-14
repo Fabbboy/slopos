@@ -1,5 +1,5 @@
 use slopos_testing::{assert_test, TestResult};
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::exec::spawn_program_with_attrs;
 use crate::task::{

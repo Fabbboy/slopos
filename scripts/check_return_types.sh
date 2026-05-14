@@ -42,7 +42,6 @@ KERNEL_DIRS=(
     "$REPO_ROOT/sched/src"
     "$REPO_ROOT/slopos-ostd/src"
     "$REPO_ROOT/sync/src"
-    "$REPO_ROOT/utils/src"
     "$REPO_ROOT/video/src"
 )
 

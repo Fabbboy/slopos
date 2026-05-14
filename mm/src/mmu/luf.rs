@@ -25,9 +25,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::klog_warn;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_ALLOCATOR;
 use slopos_ostd::sync::spin::SpinLock;
-use slopos_utils::klog_warn;
 
 use super::cr3::MmContextId;
 use crate::tlb;

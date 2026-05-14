@@ -11,7 +11,7 @@ use slopos_ostd::arch::x86_64::safestack::{
     ApTrampolineFn, install_ap_trampoline, install_safestack_runtime,
 };
 use slopos_ostd::boot::smp::register_ap_late_entry;
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::gdt::syscall_msr_init;
 use crate::idt::idt_load;

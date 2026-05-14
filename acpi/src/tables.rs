@@ -16,8 +16,8 @@ use core::mem;
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm;
 use slopos_ostd::boot::handoff::acpi_region_bytes as ostd_acpi_region_bytes;
+use slopos_ostd::klog_info;
 use slopos_ostd::util::packed_view::read_packed;
-use slopos_utils::klog_info;
 
 pub use slopos_ostd::acpi::{AcpiTable, RSDP_SIGNATURE, RSDP_V1_SIZE, Rsdp, SdtHeader};
 

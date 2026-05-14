@@ -77,7 +77,7 @@ pub fn handle_demand_fault(
 
     let pte_flags = region.to_page_flags().bits();
     if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(aligned_addr), phys, pte_flags) {
-        slopos_utils::klog_info!("demand::handle_demand_fault: OSTD map failed: {:?}", err);
+        slopos_ostd::klog_info!("demand::handle_demand_fault: OSTD map failed: {:?}", err);
         free_page_frame(phys);
         return Err(MmError::MappingFailed);
     }

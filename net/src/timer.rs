@@ -39,10 +39,10 @@ use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::KVec;
+use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, init_from_closure};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_utils::klog_debug;
 
 /// Number of slots in the timer wheel.
 const NUM_SLOTS: usize = 256;
@@ -507,7 +507,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);
             if let Some((_idx, seg)) =
-                super::tcp::delayed_ack_check(slopos_utils::clock::uptime_ms())
+                super::tcp::delayed_ack_check(slopos_kernel_services::clock::uptime_ms())
             {
                 let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
             }

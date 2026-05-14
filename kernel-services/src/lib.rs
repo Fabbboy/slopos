@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod clock;
 pub mod driver_runtime;
 pub mod kernel_vm_space;
 pub mod ostd_backends;

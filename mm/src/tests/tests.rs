@@ -7,9 +7,9 @@ use slopos_ostd::test_support::page_io;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::cpu;
 use slopos_arch::cpu::msr::Msr;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_not_null, assert_test, fail, pass};
-use slopos_utils::klog_info;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
@@ -659,7 +659,7 @@ pub fn test_paging_cow_kernel() -> TestResult {
 
 /// Test ring buffer basic push/pop
 pub fn test_ring_buffer_basic() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 8> = RingBuffer::new();
     assert_test!(rb.is_empty(), "new buffer should be empty");
@@ -674,7 +674,7 @@ pub fn test_ring_buffer_basic() -> TestResult {
 
 /// Test ring buffer FIFO order
 pub fn test_ring_buffer_fifo() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 8> = RingBuffer::new();
     rb.try_push(1);
@@ -689,7 +689,7 @@ pub fn test_ring_buffer_fifo() -> TestResult {
 
 /// Test ring buffer empty pop
 pub fn test_ring_buffer_empty_pop() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 8> = RingBuffer::new();
     assert_test!(rb.try_pop().is_none(), "pop from empty should return None");
@@ -698,7 +698,7 @@ pub fn test_ring_buffer_empty_pop() -> TestResult {
 
 /// Test ring buffer full behavior
 pub fn test_ring_buffer_full() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 4> = RingBuffer::new();
     for i in 0..4 {
@@ -714,7 +714,7 @@ pub fn test_ring_buffer_full() -> TestResult {
 
 /// Test ring buffer overwrite mode
 pub fn test_ring_buffer_overwrite() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 4> = RingBuffer::new();
     for i in 0..4u32 {
@@ -734,7 +734,7 @@ pub fn test_ring_buffer_overwrite() -> TestResult {
 
 /// Test ring buffer wrap around
 pub fn test_ring_buffer_wrap() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 4> = RingBuffer::new();
     rb.try_push(1);
@@ -757,7 +757,7 @@ pub fn test_ring_buffer_wrap() -> TestResult {
 
 /// Test ring buffer reset
 pub fn test_ring_buffer_reset() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let mut rb: RingBuffer<u32, 8> = RingBuffer::new();
     rb.try_push(1);
@@ -773,7 +773,7 @@ pub fn test_ring_buffer_reset() -> TestResult {
 
 /// Test ring buffer capacity
 pub fn test_ring_buffer_capacity() -> TestResult {
-    use slopos_utils::ring_buffer::RingBuffer;
+    use slopos_ostd::ring_buffer::RingBuffer;
 
     let rb: RingBuffer<u32, 16> = RingBuffer::new();
     assert_test!(rb.capacity() == 16, "capacity should be 16");

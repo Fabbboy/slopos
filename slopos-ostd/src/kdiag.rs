@@ -2,9 +2,9 @@ use core::arch::asm;
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::arch::x86_64::tsc;
+use crate::cpu::x86_64 as cpu;
 use crate::stacktrace::{self, StacktraceEntry};
-use slopos_arch::cpu;
-use slopos_arch::tsc;
 
 // ---------------------------------------------------------------------------
 // Register snapshot — only used by kdiag_dump_cpu_state() below.
@@ -105,7 +105,7 @@ fn snapshot_regs() -> RegSnapshot {
 
 pub const KDIAG_STACK_TRACE_DEPTH: usize = 16;
 
-pub use slopos_arch::InterruptFrame;
+pub use crate::irq::interrupt_frame::InterruptFrame;
 
 fn exception_name(vector: u8) -> &'static str {
     match vector {
@@ -310,7 +310,7 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
         return;
     }
 
-    let bytes = slopos_ostd::util::ptr_buf::borrow_buf(data, length);
+    let bytes = crate::util::ptr_buf::borrow_buf(data, length);
 
     let mut i = 0usize;
     while i < length {

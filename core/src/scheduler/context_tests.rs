@@ -8,8 +8,8 @@ use slopos_ostd::KBox;
 use super::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
 use slopos_arch::InterruptFrame;
+use slopos_ostd::klog_info;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
-use slopos_utils::klog_info;
 
 use super::scheduler::save_task_context_from_interrupt_frame;
 use super::task::{

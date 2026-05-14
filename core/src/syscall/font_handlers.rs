@@ -2,7 +2,7 @@
 
 use slopos_abi::Errno;
 use slopos_mm::user_io_buf::memdup_user;
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
 

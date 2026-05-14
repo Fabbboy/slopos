@@ -1,8 +1,8 @@
 //! IOAPIC/APIC tests - targeting untested initialization and routing edge cases.
 
 use super::regs::*;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use crate::{apic, ioapic};
 

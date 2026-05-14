@@ -5,7 +5,7 @@ use core::ptr::{self, NonNull};
 use slopos_abi::addr::VirtAddr;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{ByteChain, LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
-use slopos_utils::{align_down_u64, align_up_usize, klog_debug, klog_info};
+use slopos_ostd::{align_down_u64, align_up_usize, klog_debug, klog_info};
 
 use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};

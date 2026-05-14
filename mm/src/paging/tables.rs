@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use super::walker::PageTableWalker;
 use crate::hhdm::{self, PhysAddrHhdm};

@@ -13,7 +13,7 @@ use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::hpet;
 use slopos_gfx::canvas_ops;
-use slopos_utils::numfmt;
+use slopos_ostd::numfmt;
 
 use crate::graphics::GraphicsContext;
 use crate::kernel_font;

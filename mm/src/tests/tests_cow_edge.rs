@@ -1,6 +1,6 @@
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
-use slopos_utils::klog_info;
 
 use crate::cow::is_cow_fault;
 use crate::dual_paging::ostd_map_4kb_user;

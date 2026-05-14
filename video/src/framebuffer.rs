@@ -5,7 +5,7 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::{klog_debug, klog_warn};
+use slopos_ostd::{klog_debug, klog_warn};
 
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
 const MIN_FRAMEBUFFER_HEIGHT: u32 = 240;

@@ -19,9 +19,9 @@ use slopos_ostd::irq::{
     IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR, IdtEntry, IrqAllocator, IrqContext,
     IrqError, MSI_VECTOR_BASE, MSI_VECTOR_END, SYSCALL_VECTOR, dispatch,
 };
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_ne_test, assert_test};
-use slopos_utils::klog_info;
 
 const MSI_SAMPLE_VECTORS: [u8; 5] = [48, 100, 150, 200, 223];
 

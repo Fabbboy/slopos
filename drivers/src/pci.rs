@@ -9,11 +9,11 @@ use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::dev::FromRawPtr;
+use slopos_ostd::klog_info;
 use slopos_ostd::pci::{Bdf, EcamConfigSpace};
+use slopos_ostd::string::cstr_to_str_lossy;
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
 use slopos_ostd::{KVec, Pod};
-use slopos_utils::klog_info;
-use slopos_utils::string::cstr_to_str_lossy;
 
 pub use crate::pci_defs::*;
 

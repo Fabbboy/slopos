@@ -6,7 +6,7 @@
 //! bitmap format); the vconsole is notified and resizes automatically.
 
 use slopos_font::atlas::AtlasGuard;
-use slopos_utils::{klog_info, klog_warn};
+use slopos_ostd::{klog_info, klog_warn};
 
 /// Initialise the kernel font subsystem.
 ///

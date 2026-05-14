@@ -8,7 +8,7 @@ use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_SYSTEM,
 };
 use slopos_ostd::user::context::UserContext;
-use slopos_utils::wl_currency::{self, WL_DELTA};
+use slopos_ostd::wl_currency::{self, WL_DELTA};
 
 #[derive(Clone, Copy)]
 pub struct SyscallArgs {

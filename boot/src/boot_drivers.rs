@@ -3,11 +3,11 @@ use core::ffi::CStr;
 use core::ffi::c_char;
 
 use slopos_hermetic::{BootCtx, BspInit};
+use slopos_ostd::klog::{self, KlogLevel};
+use slopos_ostd::{klog_debug, klog_info};
 use slopos_testing::{
     TestRunSummary, kernel_phase_summary, tests_reset_panic_state, tests_run_all,
 };
-use slopos_utils::klog::{self, KlogLevel};
-use slopos_utils::{klog_debug, klog_info};
 use slopos_video as video;
 
 use crate::early_init::{boot_get_cmdline, boot_init_priority};

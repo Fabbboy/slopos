@@ -1,5 +1,5 @@
+use slopos_ostd::klog_info;
 use slopos_ostd::test_support::cpu_state;
-use slopos_utils::klog_info;
 
 use crate::TestResult;
 

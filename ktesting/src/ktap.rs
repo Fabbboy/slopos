@@ -5,7 +5,7 @@
 //! ignoring lines that don't start with the prefix. Diagnostic YAML blocks
 //! are indented `KTAP\t  ` (two spaces after the tab).
 
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::registry::TestDesc;
 use crate::result::TestResult;

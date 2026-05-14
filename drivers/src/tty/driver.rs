@@ -17,7 +17,7 @@
 //! safely discarded.
 
 use slopos_abi::syscall::UserTermios;
-use slopos_utils::ports::COM1;
+use slopos_ostd::io::port_consts::COM1;
 
 use crate::serial;
 use crate::tty::pty;

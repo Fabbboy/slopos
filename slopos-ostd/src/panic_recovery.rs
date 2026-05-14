@@ -2,7 +2,7 @@ use core::arch::naked_asm;
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
-use slopos_arch::pcr::get_current_cpu;
+use crate::cpu::x86_64::pcr::get_current_cpu;
 
 #[repr(C, align(16))]
 pub struct JumpBuf {
@@ -91,7 +91,7 @@ pub fn call_panic_cleanup() {
     // TASK_MANAGER / KERNEL_HEAP / etc. — don't deadlock on a stale
     // ticket. Single-writer: the panicking CPU is the only accessor.
     unsafe {
-        slopos_ostd::sync::lock_tracking::poison_unlock_all_held();
+        crate::sync::lock_tracking::poison_unlock_all_held();
     }
 
     let count = PANIC_CLEANUP_COUNT

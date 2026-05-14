@@ -43,7 +43,7 @@ use slopos_abi::addr::PhysAddr;
 use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
-use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
+use slopos_ostd::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{

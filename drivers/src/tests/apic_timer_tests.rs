@@ -6,9 +6,9 @@
 use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
 use slopos_arch::tsc::rdtsc;
 use slopos_kernel_services::driver_runtime::irq_get_timer_ticks;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::measure_elapsed_ms;
-use slopos_utils::klog_info;
 
 use crate::apic;
 

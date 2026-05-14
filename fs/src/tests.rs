@@ -1,6 +1,6 @@
 use slopos_abi::fs::UserFsEntry;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::{Ext2Error, Ext2Fs};

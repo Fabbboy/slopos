@@ -2,7 +2,7 @@ use super::task::{Task, task_find_by_id};
 use core::ffi::c_int;
 use slopos_abi::fate::FateResult;
 use slopos_kernel_services::platform;
-use slopos_utils::wl_currency::{self, WL_DELTA};
+use slopos_ostd::wl_currency::{self, WL_DELTA};
 
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where

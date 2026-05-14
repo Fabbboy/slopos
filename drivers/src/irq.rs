@@ -8,7 +8,7 @@ use slopos_kernel_services::driver_runtime::{
     irq_increment_keyboard_events, irq_init, irq_is_masked, irq_set_route,
 };
 use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext};
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::{apic, ioapic, ps2};
 

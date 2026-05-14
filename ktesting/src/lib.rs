@@ -49,11 +49,11 @@ macro_rules! fail {
         $crate::TestResult::Fail
     };
     ($msg:expr) => {{
-        slopos_utils::klog_info!("TEST FAIL: {}", $msg);
+        slopos_ostd::klog_info!("TEST FAIL: {}", $msg);
         $crate::TestResult::Fail
     }};
     ($fmt:expr, $($arg:tt)*) => {{
-        slopos_utils::klog_info!(concat!("TEST FAIL: ", $fmt), $($arg)*);
+        slopos_ostd::klog_info!(concat!("TEST FAIL: ", $fmt), $($arg)*);
         $crate::TestResult::Fail
     }};
 }

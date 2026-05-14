@@ -2,7 +2,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::sched::scheduler_get_current_task;
 use crate::scheduler::task::{task_borrow, task_flags};

@@ -2,10 +2,10 @@ use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::KBox;
+use slopos_ostd::klog_info;
 use slopos_ostd::test_support::page_io;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
-use slopos_utils::klog_info;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats_owned, kfree, kmalloc, kzalloc};

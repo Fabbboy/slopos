@@ -6,7 +6,7 @@ macro_rules! assert_eq_test {
         let left = $left;
         let right = $right;
         if left != right {
-            slopos_utils::klog_info!("ASSERT_EQ: expected {:?}, got {:?}", right, left);
+            slopos_ostd::klog_info!("ASSERT_EQ: expected {:?}, got {:?}", right, left);
             return $crate::TestResult::Fail;
         }
     }};
@@ -14,7 +14,7 @@ macro_rules! assert_eq_test {
         let left = $left;
         let right = $right;
         if left != right {
-            slopos_utils::klog_info!("ASSERT_EQ: {} - expected {:?}, got {:?}", $msg, right, left);
+            slopos_ostd::klog_info!("ASSERT_EQ: {} - expected {:?}, got {:?}", $msg, right, left);
             return $crate::TestResult::Fail;
         }
     }};
@@ -26,7 +26,7 @@ macro_rules! assert_ne_test {
         let left = $left;
         let right = $right;
         if left == right {
-            slopos_utils::klog_info!("ASSERT_NE: values should differ, both are {:?}", left);
+            slopos_ostd::klog_info!("ASSERT_NE: values should differ, both are {:?}", left);
             return $crate::TestResult::Fail;
         }
     }};
@@ -34,7 +34,7 @@ macro_rules! assert_ne_test {
         let left = $left;
         let right = $right;
         if left == right {
-            slopos_utils::klog_info!("ASSERT_NE: {} - both are {:?}", $msg, left);
+            slopos_ostd::klog_info!("ASSERT_NE: {} - both are {:?}", $msg, left);
             return $crate::TestResult::Fail;
         }
     }};
@@ -44,13 +44,13 @@ macro_rules! assert_ne_test {
 macro_rules! assert_not_null {
     ($ptr:expr) => {{
         if $ptr.is_null() {
-            slopos_utils::klog_info!("ASSERT_NOT_NULL: pointer is null");
+            slopos_ostd::klog_info!("ASSERT_NOT_NULL: pointer is null");
             return $crate::TestResult::Fail;
         }
     }};
     ($ptr:expr, $msg:expr) => {{
         if $ptr.is_null() {
-            slopos_utils::klog_info!("ASSERT_NOT_NULL: {}", $msg);
+            slopos_ostd::klog_info!("ASSERT_NOT_NULL: {}", $msg);
             return $crate::TestResult::Fail;
         }
     }};
@@ -60,19 +60,19 @@ macro_rules! assert_not_null {
 macro_rules! assert_test {
     ($cond:expr) => {{
         if !$cond {
-            slopos_utils::klog_info!("ASSERT: condition failed");
+            slopos_ostd::klog_info!("ASSERT: condition failed");
             return $crate::TestResult::Fail;
         }
     }};
     ($cond:expr, $msg:expr) => {{
         if !$cond {
-            slopos_utils::klog_info!("ASSERT: {}", $msg);
+            slopos_ostd::klog_info!("ASSERT: {}", $msg);
             return $crate::TestResult::Fail;
         }
     }};
     ($cond:expr, $fmt:expr, $($arg:tt)*) => {{
         if !$cond {
-            slopos_utils::klog_info!(concat!("ASSERT: ", $fmt), $($arg)*);
+            slopos_ostd::klog_info!(concat!("ASSERT: ", $fmt), $($arg)*);
             return $crate::TestResult::Fail;
         }
     }};
@@ -83,14 +83,14 @@ macro_rules! assert_zero {
     ($val:expr) => {{
         let val = $val;
         if val != 0 {
-            slopos_utils::klog_info!("ASSERT_ZERO: expected 0, got {}", val);
+            slopos_ostd::klog_info!("ASSERT_ZERO: expected 0, got {}", val);
             return $crate::TestResult::Fail;
         }
     }};
     ($val:expr, $msg:expr) => {{
         let val = $val;
         if val != 0 {
-            slopos_utils::klog_info!("ASSERT_ZERO: {} - got {}", $msg, val);
+            slopos_ostd::klog_info!("ASSERT_ZERO: {} - got {}", $msg, val);
             return $crate::TestResult::Fail;
         }
     }};
@@ -102,7 +102,7 @@ macro_rules! assert_ok {
         match $result {
             Ok(v) => v,
             Err(e) => {
-                slopos_utils::klog_info!("ASSERT_OK: got Err({:?})", e);
+                slopos_ostd::klog_info!("ASSERT_OK: got Err({:?})", e);
                 return $crate::TestResult::Fail;
             }
         }
@@ -111,7 +111,7 @@ macro_rules! assert_ok {
         match $result {
             Ok(v) => v,
             Err(e) => {
-                slopos_utils::klog_info!("ASSERT_OK: {} - got Err({:?})", $msg, e);
+                slopos_ostd::klog_info!("ASSERT_OK: {} - got Err({:?})", $msg, e);
                 return $crate::TestResult::Fail;
             }
         }

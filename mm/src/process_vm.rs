@@ -6,7 +6,7 @@ use slopos_ostd::mm::vm_space::VmSpace;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::{align_down, align_up, klog_debug, klog_info};
+use slopos_ostd::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
 use crate::dual_paging::{

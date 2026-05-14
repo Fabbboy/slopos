@@ -13,9 +13,9 @@ use slopos_arch::cpu;
 use slopos_arch::cpu::msr::{EFER_SCE, Msr};
 use slopos_core::scheduler::test_fixture::KernelTestScope;
 use slopos_hermetic::KernelStackTop;
+use slopos_ostd::klog_info;
 use slopos_ostd::test_support::{arch as ts_arch, gdt as ts_gdt};
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};

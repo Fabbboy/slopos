@@ -16,8 +16,8 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
+use slopos_ostd::klog_debug;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::klog_debug;
 
 use crate::page_alloc::{alloc_kernel_pages, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;

@@ -5,8 +5,8 @@
 //! [`slopos_drivers::pci`] consumes this information to enable MMIO-based
 //! configuration space access (4 KiB per function, replacing legacy port I/O).
 
+use slopos_ostd::klog_info;
 use slopos_ostd::util::packed_view::read_packed;
-use slopos_utils::klog_info;
 
 use crate::tables::AcpiTables;
 

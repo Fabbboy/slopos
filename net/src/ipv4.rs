@@ -20,7 +20,7 @@
 //! - Protocol dispatch to existing TCP/UDP handlers via the socket layer
 //! - DNS response interception for the in-kernel resolver
 
-use slopos_utils::klog_debug;
+use slopos_ostd::klog_debug;
 
 use super::socket;
 use super::tcp;
@@ -206,7 +206,7 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: 
 
     let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
     let payload = &ip_payload[hdr_len..];
-    let now_ms = slopos_utils::clock::uptime_ms();
+    let now_ms = slopos_kernel_services::clock::uptime_ms();
 
     let actions = tcp::input(src_ip, dst_ip, &hdr, options, payload, now_ms);
 

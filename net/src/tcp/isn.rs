@@ -9,7 +9,7 @@
 //! ```
 //!
 //! - `boot_secret` is a 64-bit value seeded once at first call from
-//!   [`slopos_utils::clock::monotonic_ns`], which is itself driven by the
+//!   [`slopos_kernel_services::clock::monotonic_ns`], which is itself driven by the
 //!   HPET/TSC and unpredictable to a remote observer.  A successful race on
 //!   two cores during initialization is harmless: whichever write wins is
 //!   still a fresh unpredictable secret.
@@ -41,7 +41,7 @@ fn boot_secret() -> u64 {
     // Mix the high-resolution clock through the fractional part of the
     // golden ratio (0x9E37_79B9_7F4A_7C15) so that a low nanosecond count
     // near boot still spreads entropy across all 64 bits.
-    let seed = slopos_utils::clock::monotonic_ns()
+    let seed = slopos_kernel_services::clock::monotonic_ns()
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(0x243F_6A88_85A3_08D3);
     // Guarantee non-zero so subsequent loads short-circuit.
@@ -94,6 +94,6 @@ pub(crate) fn generate_isn(tuple: &TcpTuple) -> u32 {
     // still lands on a different ISN after TIME_WAIT expires.
     //
     // monotonic_ns / 4_000 ≈ 4 µs tick resolution.
-    let drift = (slopos_utils::clock::monotonic_ns() / 4_000) as u32;
+    let drift = (slopos_kernel_services::clock::monotonic_ns() / 4_000) as u32;
     (h as u32).wrapping_add(drift)
 }

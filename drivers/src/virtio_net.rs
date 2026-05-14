@@ -9,7 +9,7 @@ use slopos_abi::net::{
 };
 use slopos_net as net;
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
@@ -636,7 +636,7 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
             }
             let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
             let payload = &ip_payload[hdr_len..];
-            let now_ms = slopos_utils::clock::uptime_ms();
+            let now_ms = slopos_kernel_services::clock::uptime_ms();
             let actions = tcp::input(src_ip, dst_ip, &hdr, options, payload, now_ms);
             for seg in actions.segments() {
                 let _ = socket::socket_send_tcp_segment(seg, &[]);
@@ -1557,13 +1557,13 @@ pub fn dns_rx_clear() {
 /// poll NAPI inline after each wakeup to process RX frames; NAPI's
 /// `dispatch_rx_frame` intercepts DNS replies and signals `DNS_RX_EVENT`.
 pub fn dns_rx_wait(timeout_ms: u32) -> bool {
-    let start = slopos_utils::clock::uptime_ms();
+    let start = slopos_kernel_services::clock::uptime_ms();
     loop {
         // Already arrived?
         if DNS_RX_EVENT.try_consume() {
             return true;
         }
-        let elapsed = slopos_utils::clock::uptime_ms() - start;
+        let elapsed = slopos_kernel_services::clock::uptime_ms() - start;
         if elapsed >= timeout_ms as u64 {
             return false;
         }

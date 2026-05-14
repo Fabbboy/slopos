@@ -54,7 +54,7 @@ use self::segment::SegmentBuilder;
 use self::table::{TCP_LISTENERS, TCP_SHARDS, TcpShard};
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
-use slopos_utils::klog_debug;
+use slopos_ostd::klog_debug;
 
 // =============================================================================
 // Non-header constants
@@ -1033,7 +1033,7 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
     let token = NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, conn_id);
     d.retransmit_token = Some(token);
 
-    let now_ms = slopos_utils::clock::uptime_ms();
+    let now_ms = slopos_kernel_services::clock::uptime_ms();
     bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
     pcb.assert_invariants();
 

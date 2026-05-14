@@ -6,7 +6,7 @@
 
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
-use slopos_utils::numfmt;
+use slopos_ostd::numfmt;
 
 use crate::framebuffer;
 use crate::graphics::GraphicsContext;

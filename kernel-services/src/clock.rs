@@ -8,7 +8,8 @@
 //! every accessor returns `0`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use slopos_kernel_services::platform;
+
+use crate::platform;
 
 static CACHED_TSC_HZ: AtomicU64 = AtomicU64::new(0);
 
@@ -19,10 +20,10 @@ fn tsc_frequency_hz() -> u64 {
         return cached;
     }
 
-    let (max_leaf, _, _, _) = slopos_arch::cpu::cpuid(0);
+    let (max_leaf, _, _, _) = slopos_ostd::arch::x86_64::cpuid::cpuid(0);
     let mut freq_hz = 3_000_000_000u64;
     if max_leaf >= 0x16 {
-        let (base_mhz, _, _, _) = slopos_arch::cpu::cpuid(0x16);
+        let (base_mhz, _, _, _) = slopos_ostd::arch::x86_64::cpuid::cpuid(0x16);
         if base_mhz != 0 {
             freq_hz = (base_mhz as u64) * 1_000_000;
         }

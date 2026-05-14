@@ -1,7 +1,7 @@
 use slopos_abi::net::{USER_NET_MAX_MEMBERS, UserNetMember};
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
-use slopos_utils::klog_info;
 
 use crate::virtio_net;
 

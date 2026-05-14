@@ -3,9 +3,9 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use slopos_arch::cpu;
-use slopos_utils::kdiag_timestamp;
-use slopos_utils::string::bytes_as_str;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::kdiag_timestamp;
+use slopos_ostd::string::bytes_as_str;
+use slopos_ostd::{klog_debug, klog_info};
 
 use slopos_ostd::task::switch::task_entry_trampoline;
 

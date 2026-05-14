@@ -95,7 +95,7 @@ fn resolve_multi_ref(
     // install the freshly-allocated copy.
     let _ = ostd_unmap_4kb_user(vm_space, aligned_vaddr);
     if let Err(err) = ostd_map_4kb_user(vm_space, aligned_vaddr, new_phys, new_flags.bits()) {
-        slopos_utils::klog_info!("cow::resolve_multi_ref: OSTD remap failed: {:?}", err);
+        slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD remap failed: {:?}", err);
         free_page_frame(new_phys);
         return Err(MmError::MappingFailed);
     }

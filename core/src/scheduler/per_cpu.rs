@@ -46,7 +46,7 @@ use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 

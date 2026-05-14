@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use slopos_utils::catch_panic;
+use slopos_ostd::catch_panic;
 
 use crate::result::TestResult;
 

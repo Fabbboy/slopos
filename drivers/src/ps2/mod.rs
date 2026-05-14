@@ -48,7 +48,7 @@ pub mod mouse;
 use slopos_arch::cpu;
 use slopos_ostd::io::port::{IoPort, IoPortRegistry};
 use slopos_ostd::sync::OnceLock;
-use slopos_utils::{klog_debug, klog_info, klog_warn};
+use slopos_ostd::{klog_debug, klog_info, klog_warn};
 
 struct Ps2Ports {
     data: IoPort<u8>,

@@ -119,7 +119,7 @@ impl NetDevice for LoopbackDev {
 // 3C.2 — Loopback registration
 // =============================================================================
 
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 /// Register the loopback device in the global device registry and configure
 /// its IPv4 address and route.

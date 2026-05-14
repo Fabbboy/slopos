@@ -18,7 +18,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_arch::pcr::{current_cpu_id, MAX_CPUS};
-use slopos_utils::{klog_swap_backend, KlogBackend};
+use slopos_ostd::{klog_swap_backend, KlogBackend};
 
 const PER_CPU_RING_BYTES: usize = 8 * 1024;
 

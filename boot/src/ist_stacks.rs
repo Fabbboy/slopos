@@ -67,7 +67,7 @@ use slopos_mm::memory_layout_defs::{
 use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use slopos_ostd::mm::frame::Frame;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 // =============================================================================
 // IST Categories

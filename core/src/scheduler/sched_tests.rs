@@ -10,8 +10,8 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use super::runtime::{self, IdleStackResolveError};
 use super::scheduler::{

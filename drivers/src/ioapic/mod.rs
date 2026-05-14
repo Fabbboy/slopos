@@ -3,7 +3,7 @@ pub(crate) mod regs;
 pub mod tests;
 
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, SpinLock, StateFlag};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use regs::*;
 use slopos_abi::addr::PhysAddr;

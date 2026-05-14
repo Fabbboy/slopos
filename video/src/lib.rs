@@ -12,7 +12,7 @@ use slopos_drivers::xe;
 use slopos_kernel_services::syscall_services::video::{
     VideoServices, compositor_task_id, register_video_services, set_compositor_task_id,
 };
-use slopos_utils::{klog_info, klog_warn};
+use slopos_ostd::{klog_info, klog_warn};
 
 pub mod framebuffer;
 pub mod graphics;

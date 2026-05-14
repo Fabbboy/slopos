@@ -2,9 +2,9 @@ use core::ffi::c_char;
 
 use slopos_arch::cpu;
 use slopos_ostd::io::port::IoPortRegistry;
+use slopos_ostd::klog_info;
+use slopos_ostd::string::cstr_to_str_lossy;
 use slopos_ostd::sync::StateFlag;
-use slopos_utils::klog_info;
-use slopos_utils::string::cstr_to_str_lossy;
 
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();

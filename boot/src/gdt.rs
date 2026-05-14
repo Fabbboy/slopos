@@ -4,7 +4,7 @@ use slopos_arch::arch::gdt::{GDT_STANDARD_ENTRIES, GdtLayout, IstSlot, SegmentSe
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_hermetic::KernelStackTop;
 use slopos_ostd::arch::x86_64::msr::{Msr, install_syscall_msrs, star_from_selectors, write_msr};
-use slopos_utils::klog_debug;
+use slopos_ostd::klog_debug;
 
 #[repr(C)]
 struct PerCpuSyscallData {

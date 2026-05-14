@@ -3,8 +3,8 @@
 //! Discovers the HPET base address and timer block capabilities from the
 //! ACPI `"HPET"` table (IA-PC HPET Specification §3.2.4).
 
+use slopos_ostd::klog_info;
 use slopos_ostd::util::packed_view::read_packed;
-use slopos_utils::klog_info;
 
 use crate::tables::AcpiTables;
 

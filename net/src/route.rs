@@ -30,10 +30,10 @@ use core::fmt;
 use core::ptr::addr_of_mut;
 
 use slopos_ostd::KVec;
+use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, init_from_closure};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_utils::klog_debug;
 
 use super::types::{DevIndex, Ipv4Addr};
 

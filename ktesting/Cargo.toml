@@ -19,4 +19,3 @@ slopos-ostd = { workspace = true }
 slopos-arch = { path = "../karch" }
 slopos-kernel-services = { path = "../kernel-services" }
 slopos-service-core = { path = "../service-core" }
-slopos-utils = { path = "../utils" }

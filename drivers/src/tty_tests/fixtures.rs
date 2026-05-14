@@ -19,8 +19,8 @@ pub(super) use slopos_abi::signal::{
 pub(super) use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, OutputFlags, POSIX_VDISABLE,
 };
+pub(super) use slopos_ostd::klog_info;
 pub(super) use slopos_testing::TestResult;
-pub(super) use slopos_utils::klog_info;
 
 pub(super) use crate::tty;
 pub(super) use crate::tty::TtyError;

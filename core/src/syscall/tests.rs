@@ -36,9 +36,9 @@ use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
+use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
-use slopos_utils::klog_info;
 
 use crate::scheduler::scheduler::unblock_task;
 use crate::scheduler::task;

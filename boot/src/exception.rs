@@ -8,7 +8,7 @@ use slopos_core::scheduler::task::{
 };
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::process_vm;
-use slopos_utils::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
+use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
 
 use crate::ist_stacks;
 use crate::user_fault::*;
@@ -91,7 +91,7 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
 
     if let Some(stack_name) = ist_stacks::ist_guard_fault(fault_addr) {
         klog_info!("FATAL: IST stack overflow detected via guard page");
-        klog_info!("Stack: {}", slopos_utils::string::bytes_as_str(stack_name));
+        klog_info!("Stack: {}", slopos_ostd::string::bytes_as_str(stack_name));
         klog_info!("Fault address: 0x{:x}", fault_addr);
         kdiag_dump_interrupt_frame(frame);
         panic_with_frame("IST stack overflow", frame);
@@ -179,7 +179,7 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
             klog_info!(
                 "Current task: id={} name='{}' kstack=0x{:x}..0x{:x} flags=0x{:x} ctx_cr3=0x{:x}",
                 tid,
-                slopos_utils::string::bytes_as_str(name_bytes),
+                slopos_ostd::string::bytes_as_str(name_bytes),
                 kbase,
                 ktop,
                 fl,

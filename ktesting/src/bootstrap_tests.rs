@@ -9,7 +9,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::filter::glob_match;
 use crate::TestResult;

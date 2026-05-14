@@ -28,7 +28,7 @@ use slopos_arch::cpu::cpuid::{
     cpuid, cpuid_count,
 };
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use super::cr3::{Cr3Value, MmContextId, Pcid};
 

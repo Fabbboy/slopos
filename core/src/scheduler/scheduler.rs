@@ -5,8 +5,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_arch::cpu;
 use slopos_ostd::sync::PreemptGuard;
 
-use slopos_utils::kdiag_timestamp;
-use slopos_utils::klog_info;
+use slopos_ostd::kdiag_timestamp;
+use slopos_ostd::klog_info;
 
 use slopos_kernel_services::platform;
 

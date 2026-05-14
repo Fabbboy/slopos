@@ -11,7 +11,7 @@ use slopos_core::scheduler::task::{
 use slopos_core::scheduler::task_struct::Task;
 use slopos_core::task::task_terminate;
 use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
-use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
+use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
 
 use crate::panic::set_panic_cpu_state;
 

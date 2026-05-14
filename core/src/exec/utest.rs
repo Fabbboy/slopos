@@ -13,8 +13,8 @@ use slopos_abi::task::{
     TaskPriority,
 };
 use slopos_ostd::KVec;
+use slopos_ostd::{catch_panic, klog_info};
 use slopos_testing::{TestDesc, TestResult, ktap};
-use slopos_utils::{catch_panic, klog_info};
 
 use crate::exec::spawn_program_with_attrs;
 use crate::sched::scheduler_get_current_task;

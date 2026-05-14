@@ -44,11 +44,11 @@ use core::marker::PhantomData;
 
 use slopos_hermetic::{BootCtx, HermeticVTable, TestInit, topo_order};
 use slopos_ostd::KVec;
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
 use slopos_ostd::test_support::hermetic::{
     SnapshotError, run_restore_phase_drain, run_snapshot_phase,
 };
-use slopos_utils::klog_info;
 
 /// Idempotent registration of the panic-cleanup that clears the
 /// `TEST_SCOPE_ACTIVE` flag if a test body panics inside its
@@ -61,7 +61,7 @@ fn ensure_panic_cleanup_registered() {
         return;
     }
     PANIC_CLEANUP_REGISTERED.set_active();
-    slopos_utils::panic_recovery::register_panic_cleanup(panic_clear_test_scope);
+    slopos_ostd::panic_recovery::register_panic_cleanup(panic_clear_test_scope);
 }
 
 fn panic_clear_test_scope() {

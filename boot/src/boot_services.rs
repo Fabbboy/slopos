@@ -1,5 +1,5 @@
 use slopos_hermetic::{BootCtx, BspInit};
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
 use slopos_core::exec;

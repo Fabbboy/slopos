@@ -24,8 +24,8 @@ use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
     UserTermios,
 };
+use slopos_ostd::ring_buffer::RingBuffer;
 use slopos_ostd::{AllocError, PinBox, Zeroable};
-use slopos_utils::ring_buffer::RingBuffer;
 
 use super::driver::{InputEvent, InputStatus};
 

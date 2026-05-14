@@ -42,7 +42,7 @@ use crate::pci::{PciDeviceInfo, pci_config_read16, pci_config_read32, pci_config
 use crate::pci_defs::PCI_MAX_BARS;
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 // =============================================================================
 // MSI-X Message Control register bits (offset +2 from capability base)

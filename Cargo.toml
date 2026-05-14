@@ -15,7 +15,6 @@ members = [
   "mm",
   "net",
   "service-core",
-  "utils",
   "ktesting",
   "slibc",
   "userland",
@@ -59,7 +58,6 @@ slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
 slopos-ostd = { path = "slopos-ostd" }
 slopos-ostd-derive = { path = "slopos-ostd-derive" }
-  slopos-utils = { path = "utils" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }
 slopos-mm = { path = "mm" }

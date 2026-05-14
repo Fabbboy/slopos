@@ -1,7 +1,7 @@
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM};
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
-use slopos_utils::klog_info;
 
 use crate::icmp::{self, ICMP_HEADER_LEN};
 use crate::route::{ROUTE_TABLE, RouteEntry};

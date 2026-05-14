@@ -12,8 +12,8 @@
 //! on task creation/destruction.
 
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use slopos_ostd::RingBuffer;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock, SpinLock};
-use slopos_utils::RingBuffer;
 
 /// Monotonic millisecond timestamp for input events.
 pub fn get_timestamp_ms() -> u64 {

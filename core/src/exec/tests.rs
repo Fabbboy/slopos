@@ -6,8 +6,8 @@ use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 

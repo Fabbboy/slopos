@@ -42,7 +42,7 @@ use slopos_abi::syscall::UserWinsize;
 use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, PinBox};
-use slopos_utils::{AtomicBitmap, words_for};
+use slopos_ostd::{AtomicBitmap, words_for};
 
 // ---------------------------------------------------------------------------
 // Per-TTY slots

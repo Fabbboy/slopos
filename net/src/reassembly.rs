@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::KVec;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_utils::{klog_debug, klog_warn};
+use slopos_ostd::{klog_debug, klog_warn};
 
 use super::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 use super::types::Ipv4Addr;

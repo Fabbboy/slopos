@@ -9,8 +9,8 @@
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::MAX_CPUS;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use crate::tlb::{
     CpuMask, FlushType, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, enter_lazy_tlb, exit_lazy_tlb,

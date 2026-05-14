@@ -14,9 +14,9 @@ use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIG
 use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, OutputFlags, POSIX_VDISABLE,
 };
+use slopos_ostd::klog_info;
+use slopos_ostd::ring_buffer::RingBuffer;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
-use slopos_utils::ring_buffer::RingBuffer;
 
 use crate::tty;
 use crate::tty::TtyError;

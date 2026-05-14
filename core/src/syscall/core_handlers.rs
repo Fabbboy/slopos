@@ -5,8 +5,8 @@ use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
 use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
+use slopos_ostd::klog_debug;
 use slopos_ostd::user::context::UserContext;
-use slopos_utils::klog_debug;
 
 use crate::sched::{
     get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
@@ -39,7 +39,7 @@ pub fn syscall_yield(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispo
 
 define_syscall!(syscall_get_time_ms(ctx, args) {
     let _ = args;
-    let ms = slopos_utils::clock::uptime_ms();
+    let ms = slopos_kernel_services::clock::uptime_ms();
     ctx.ok(ms)
 });
 
@@ -53,7 +53,7 @@ define_syscall!(syscall_clock_gettime(ctx, args) {
 
     require_nonzero!(ctx, args.arg1);
 
-    let ns = slopos_utils::clock::monotonic_ns();
+    let ns = slopos_kernel_services::clock::monotonic_ns();
     let ts = Timespec {
         tv_sec: ns / 1_000_000_000,
         tv_nsec: ns % 1_000_000_000,
@@ -161,8 +161,8 @@ define_syscall!(syscall_sys_info(ctx, args) {
         scheduler_yields: 0,
         ready_tasks: 0,
         schedule_calls: 0,
-        wl_balance: slopos_utils::wl_currency::check_balance(),
-        boot_flags: slopos_utils::boot_flags::get_flags(),
+        wl_balance: slopos_ostd::wl_currency::check_balance(),
+        boot_flags: slopos_ostd::boot_flags::get_flags(),
     };
 
     get_page_allocator_stats(
@@ -209,7 +209,7 @@ define_syscall!(syscall_net_scan(ctx, args) {
         i += 1;
     }
 
-    slopos_utils::wl_currency::adjust_balance(slopos_utils::wl_currency::WL_DELTA);
+    slopos_ostd::wl_currency::adjust_balance(slopos_ostd::wl_currency::WL_DELTA);
     ctx.ok(discovered as u64)
 });
 
@@ -280,7 +280,7 @@ define_syscall!(syscall_process_list(ctx, args) {
         entry.priority = task.priority.as_u8();
         entry.last_cpu = task.last_cpu;
         entry.cpu_affinity = task.cpu_affinity;
-        entry.total_runtime_us = slopos_utils::clock::ticks_to_microseconds(task.total_runtime);
+        entry.total_runtime_us = slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime);
         entry.creation_time_ms = task.creation_time;
         entry.yield_count = task.yield_count;
         entry.name = task.name;

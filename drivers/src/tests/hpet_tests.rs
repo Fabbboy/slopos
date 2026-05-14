@@ -1,7 +1,7 @@
 use slopos_arch::tsc::rdtsc;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::measure_elapsed_ms;
-use slopos_utils::klog_info;
 
 use crate::hpet;
 

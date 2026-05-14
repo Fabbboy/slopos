@@ -5,7 +5,7 @@ use crate::msix;
 use crate::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use crate::pci::{
     PciDeviceInfo, pci_config_read8, pci_config_read16, pci_config_read32, pci_config_write16,

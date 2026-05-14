@@ -1,5 +1,5 @@
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::{RingBuffer, klog_debug, klog_info, klog_warn};
+use slopos_ostd::{RingBuffer, klog_debug, klog_info, klog_warn};
 
 use crate::input_event::{has_keyboard_focus, input_route_key_event};
 use crate::ps2;
@@ -231,7 +231,12 @@ pub fn handle_scancode(scancode: u8) {
     if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
         handle_modifier(&mut state.modifiers, make_code, is_press);
         drop(state);
-        input_route_key_event(scancode, 0, is_press, slopos_utils::clock::uptime_ms());
+        input_route_key_event(
+            scancode,
+            0,
+            is_press,
+            slopos_kernel_services::clock::uptime_ms(),
+        );
         return;
     }
 
@@ -244,13 +249,23 @@ pub fn handle_scancode(scancode: u8) {
             0x5B => {
                 state.modifiers.super_left = is_press;
                 drop(state);
-                input_route_key_event(scancode, 0, is_press, slopos_utils::clock::uptime_ms());
+                input_route_key_event(
+                    scancode,
+                    0,
+                    is_press,
+                    slopos_kernel_services::clock::uptime_ms(),
+                );
                 return;
             }
             0x5C => {
                 state.modifiers.super_right = is_press;
                 drop(state);
-                input_route_key_event(scancode, 0, is_press, slopos_utils::clock::uptime_ms());
+                input_route_key_event(
+                    scancode,
+                    0,
+                    is_press,
+                    slopos_kernel_services::clock::uptime_ms(),
+                );
                 return;
             }
             _ => {}
@@ -311,7 +326,7 @@ pub fn handle_scancode(scancode: u8) {
         };
         if extended_key != 0 {
             drop(state);
-            let ts = slopos_utils::clock::uptime_ms();
+            let ts = slopos_kernel_services::clock::uptime_ms();
             input_route_key_event(scancode, extended_key, true, ts);
             if !has_keyboard_focus() {
                 push_input(active_tty(), extended_key);
@@ -323,14 +338,19 @@ pub fn handle_scancode(scancode: u8) {
 
     if !is_press {
         drop(state);
-        input_route_key_event(make_code, 0, false, slopos_utils::clock::uptime_ms());
+        input_route_key_event(
+            make_code,
+            0,
+            false,
+            slopos_kernel_services::clock::uptime_ms(),
+        );
         return;
     }
 
     let ascii = translate_scancode(scancode, &state.modifiers);
     drop(state);
 
-    let ts = slopos_utils::clock::uptime_ms();
+    let ts = slopos_kernel_services::clock::uptime_ms();
     input_route_key_event(make_code, ascii, true, ts);
 
     if ascii != 0 && !has_keyboard_focus() {

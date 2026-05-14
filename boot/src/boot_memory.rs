@@ -1,6 +1,6 @@
 use slopos_hermetic::{BootCtx, BspInit};
-use slopos_utils::klog::{self, KlogLevel};
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::klog::{self, KlogLevel};
+use slopos_ostd::{klog_debug, klog_info};
 
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap, boot_init_priority};
 

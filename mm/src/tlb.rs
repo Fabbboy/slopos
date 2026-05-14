@@ -26,7 +26,7 @@ use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_arch::cpu;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_utils::{klog_debug, klog_info, klog_warn};
+use slopos_ostd::{klog_debug, klog_info, klog_warn};
 
 use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::paging_defs::PAGE_SIZE_4KB;

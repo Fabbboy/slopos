@@ -2,10 +2,10 @@
 //!
 //! All kernel log output funnels through a single **backend** function pointer.
 //! During early boot (before the serial driver is ready) the backend writes
-//! directly to COM1 via raw port I/O.  Once the serial driver initialises it
-//! registers itself as the backend, and all subsequent output goes through the
-//! driver's `SpinLock`-protected path — giving us proper locking, FIFO
-//! awareness, and `\n → \r\n` conversion for free.
+//! directly to COM1 via [`crate::early_console`].  Once the serial driver
+//! initialises it registers itself as the backend, and all subsequent output
+//! goes through the driver's `SpinLock`-protected path — giving us proper
+//! locking, FIFO awareness, and `\n → \r\n` conversion for free.
 //!
 //! # Backend contract
 //!
@@ -17,20 +17,18 @@
 //! 2. Appending a trailing newline after the text.
 //!
 //! The early-boot fallback satisfies (1) trivially (single-threaded boot) and
-//! handles (2) by emitting `\r\n` after the text.
+//! handles (2) by emitting `\n` (which `early_console` expands to `\r\n`).
 //!
 //! # Registration
 //!
 //! ```ignore
 //! // In your serial driver init:
-//! slopos_utils::klog::klog_register_backend(my_backend_fn);
+//! slopos_ostd::klog::klog_register_backend(my_backend_fn);
 //! ```
 
 use core::ffi::c_int;
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
-
-use crate::ports::COM1;
 
 // ---------------------------------------------------------------------------
 // Log levels
@@ -80,19 +78,17 @@ pub type KlogBackend = fn(fmt::Arguments<'_>);
 static BACKEND: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 fn early_backend(args: fmt::Arguments<'_>) {
-    use crate::ports::serial_write_bytes;
-
     struct EarlyWriter;
 
     impl fmt::Write for EarlyWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            unsafe { serial_write_bytes(COM1, s.as_bytes()) };
+            crate::early_console::write_bytes(s.as_bytes());
             Ok(())
         }
     }
 
     let _ = fmt::write(&mut EarlyWriter, args);
-    unsafe { serial_write_bytes(COM1, b"\n") };
+    crate::early_console::write_bytes(b"\n");
 }
 
 /// Dispatch a log line through the active backend.
@@ -166,11 +162,7 @@ pub fn klog_get_level() -> KlogLevel {
 }
 
 pub fn klog_is_enabled(level: KlogLevel) -> c_int {
-    if is_enabled(level) {
-        1
-    } else {
-        0
-    }
+    if is_enabled(level) { 1 } else { 0 }
 }
 
 pub fn is_enabled_level(level: KlogLevel) -> bool {

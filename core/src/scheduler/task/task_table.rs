@@ -2,11 +2,11 @@ use core::ffi::{c_int, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KBox, KVec};
-use slopos_utils::string::bytes_as_str;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use super::super::scheduler;
 use super::task_accessors::{task_id_of, task_ref_count};

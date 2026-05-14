@@ -3,14 +3,11 @@
 //! # Carve-out: file-wide `unsafe`
 //!
 //! This file is the kernel's panic-time / early-boot serial diagnostic
-//! source of truth. It funnels through `slopos_utils::ports::serial_*`
-//! and `slopos_utils::io::Port` — the lock-free port-I/O primitives
-//! that must run before allocators, before GDT/IDT, and during panic
-//! recovery. The `slopos-utils` crate is intentionally outside the
-//! kernel's `forbid(unsafe_code)` perimeter so the panic logger can
-//! keep its single-source-of-truth port writes; this driver inherits
-//! that exclusion. Every `unsafe` here is either a direct port-I/O
-//! `read()` / `write()` or a delegating call to a `slopos_utils::ports`
+//! source of truth. It funnels through `slopos_ostd::early_console`
+//! and `slopos_ostd::io::raw_port::Port` — the lock-free port-I/O
+//! primitives that must run before allocators, before GDT/IDT, and
+//! during panic recovery. Every `unsafe` here is either a direct
+//! port-I/O `read()` / `write()` or a delegating call to a port
 //! helper that is itself part of the panic-logger TCB.
 
 #![allow(unsafe_code)]
@@ -18,9 +15,7 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_arch::cpu;
-use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
-use slopos_utils::io::Port;
-use slopos_utils::ports::{
+use slopos_ostd::io::port_consts::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
     UART_FCR_CLEAR_TX as FCR_CLEAR_TX, UART_FCR_ENABLE_FIFO as FCR_ENABLE_FIFO,
     UART_IIR_FIFO_ENABLED as IIR_FIFO_ENABLED, UART_IIR_FIFO_MASK as IIR_FIFO_MASK,
@@ -29,7 +24,9 @@ use slopos_utils::ports::{
     UART_REG_IIR as REG_IIR, UART_REG_LCR as REG_LCR, UART_REG_LSR as REG_LSR,
     UART_REG_MCR as REG_MCR, UART_REG_RBR as REG_RBR, UART_REG_SCR as REG_SCR,
 };
-use slopos_utils::ring_buffer::RingBuffer;
+use slopos_ostd::io::raw_port::Port;
+use slopos_ostd::ring_buffer::RingBuffer;
+use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UartType {
@@ -69,7 +66,7 @@ pub fn init() {
     unsafe { port.init() }
     drop(port);
 
-    slopos_utils::klog::klog_register_backend(serial_klog_backend);
+    slopos_ostd::klog::klog_register_backend(serial_klog_backend);
 }
 
 /// PCR-independent **ticket lock** for klog serial output.
@@ -115,7 +112,7 @@ fn serial_klog_backend(args: fmt::Arguments<'_>) {
         struct KlogWriter;
         impl fmt::Write for KlogWriter {
             fn write_str(&mut self, s: &str) -> fmt::Result {
-                unsafe { slopos_utils::ports::serial_write_bytes(COM1, s.as_bytes()) };
+                slopos_ostd::early_console::write_bytes(s.as_bytes());
                 Ok(())
             }
         }
@@ -141,8 +138,8 @@ pub fn serial_locked_write_bytes(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
-    with_klog_lock(|| unsafe {
-        slopos_utils::ports::serial_write_bytes(COM1, bytes);
+    with_klog_lock(|| {
+        slopos_ostd::early_console::write_bytes(bytes);
     });
 }
 
@@ -303,7 +300,9 @@ impl SerialPort {
     }
 
     fn write_byte(&mut self, byte: u8) {
-        unsafe { slopos_utils::ports::serial_putc(self.base, byte) };
+        // `self.base` is COM1 by construction (see `init_port`).
+        let _ = self.base;
+        slopos_ostd::early_console::write_byte(byte);
     }
 
     pub fn capabilities(&self) -> UartCapabilities {
@@ -313,7 +312,8 @@ impl SerialPort {
 
 impl Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        unsafe { slopos_utils::ports::serial_write_bytes(self.base, s.as_bytes()) };
+        let _ = self.base;
+        slopos_ostd::early_console::write_bytes(s.as_bytes());
         Ok(())
     }
 }

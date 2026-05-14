@@ -5,8 +5,8 @@
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
-use slopos_utils::klog_info;
 
 use crate::config::TestConfig;
 
@@ -417,10 +417,10 @@ fn register_panic_klog_cleanup() {
         return;
     }
     PANIC_HOOK_REGISTERED.set_active();
-    slopos_utils::panic_recovery::register_panic_cleanup(klog_panic_cleanup);
+    slopos_ostd::panic_recovery::register_panic_cleanup(klog_panic_cleanup);
 }
 
 #[cfg(feature = "tests")]
 fn klog_panic_cleanup() {
-    slopos_utils::klog_force_restore_default();
+    slopos_ostd::klog_force_restore_default();
 }

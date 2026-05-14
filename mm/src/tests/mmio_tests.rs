@@ -1,6 +1,6 @@
 use slopos_abi::addr::PhysAddr;
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_utils::klog_info;
 
 use crate::mmio::{MmioRegion, MmioRegionExt};
 

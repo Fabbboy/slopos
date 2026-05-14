@@ -39,9 +39,9 @@ pub mod vma_region;
 
 use core::alloc::Layout;
 use core::ffi::c_void;
+use slopos_ostd::align_up_usize;
 use slopos_ostd::mm::heap::register_kernel_heap_backend;
 use slopos_ostd::sync::BspToken;
-use slopos_utils::align_up_usize;
 
 /// Safe-callback adapter for the slab allocator. Invoked by OSTD's
 /// `KernelHeap::alloc` after the slab tier is wired up. `align > 16`
@@ -63,7 +63,7 @@ fn slab_dealloc_cb(ptr: *mut u8) {
 /// scope opened by `slopos_ostd::sync::run_bsp_init`; it is forwarded
 /// to OSTD's [`register_kernel_heap_backend`], which is one-shot.
 pub fn global_allocator_use_kernel_heap<'brand>(token: &BspToken<'brand>) {
-    let _ = align_up_usize(0, 16); // keep slopos_utils import alive for layout math users
+    let _ = align_up_usize(0, 16); // keep slopos_ostd import alive for layout math users
     let _ = Layout::new::<u8>(); // keep core::alloc::Layout import alive
     register_kernel_heap_backend(token, slab_alloc_cb, slab_dealloc_cb);
 }

@@ -1,5 +1,5 @@
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::klog_info;
 
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;

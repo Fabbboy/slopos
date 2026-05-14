@@ -24,7 +24,7 @@ use slopos_mm::process_vm::{
     process_vm_get_page_dir, process_vm_get_stack_top, process_vm_get_vm_space,
     process_vm_load_elf_data, process_vm_reset_stack, process_vm_write_user_bytes,
 };
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use crate::sched::schedule_new_task;
 use crate::scheduler::task::{

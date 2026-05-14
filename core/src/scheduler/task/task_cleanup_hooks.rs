@@ -1,5 +1,5 @@
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_utils::klog_info;
 
 // =============================================================================
 // Task Resource Cleanup Hooks

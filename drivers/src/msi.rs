@@ -31,7 +31,7 @@
 
 use crate::msi_common;
 use crate::pci::{pci_config_read16, pci_config_read32, pci_config_write16, pci_config_write32};
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 // =============================================================================
 // MSI Message Control register bits (offset +2 from capability base)

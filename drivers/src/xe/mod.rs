@@ -6,7 +6,7 @@ use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_mm::page_alloc::{alloc_kernel_pages, free_page_frame};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_utils::{align_up_u64, klog_info, klog_warn};
+use slopos_ostd::{align_up_u64, klog_info, klog_warn};
 
 use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
 use crate::pci_defs::PCI_CLASS_DISPLAY;

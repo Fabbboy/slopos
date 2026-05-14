@@ -17,7 +17,7 @@ pub use slopos_ostd::irq::{
     LUF_DRAIN_IPI_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
     TLB_SHOOTDOWN_VECTOR,
 };
-use slopos_utils::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
+use slopos_ostd::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
 
 use crate::exception::*;
 use crate::ist_stacks;
@@ -613,7 +613,7 @@ fn initialize_handler_tables() {
 /// `u64` values laid out as `[RIP, CS, RFLAGS, RSP, SS]`.  The pointer
 /// need not be aligned (values are read with `read_unaligned`).
 pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
-    use slopos_utils::klog_info;
+    use slopos_ostd::klog_info;
 
     // SAFETY: caller guarantees iret_frame points to 5 readable u64s.
     let (rip, cs, rflags, rsp, ss) = unsafe {

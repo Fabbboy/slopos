@@ -3,7 +3,7 @@ use super::cache::BlockCache;
 use super::ondisk::{GroupDesc, Superblock};
 use super::types::{BlockNum, GroupIdx, InodeNum};
 use crate::blockdev::BlockDevice;
-use slopos_utils::bitmap_slice;
+use slopos_ostd::bitmap_slice;
 
 /// Goal-directed block allocation: try the goal's group first, then scan.
 pub fn allocate_block_near(

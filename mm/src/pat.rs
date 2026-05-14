@@ -27,7 +27,7 @@ use slopos_arch::cpu;
 use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_PAT, CPUID_LEAF_FEATURES};
 use slopos_arch::cpu::msr::Msr;
 use slopos_ostd::sync::InitFlag;
-use slopos_utils::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 // =============================================================================
 // Memory Type Constants

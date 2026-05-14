@@ -289,4 +289,4 @@ impl<const N: usize> RingBuffer<u8, N> {
 // When `T: Zeroable`, `[T; N]` is also zero-valid; `head = tail = count = 0` is
 // the canonical empty-buffer state. An all-zero bit pattern is therefore a
 // valid `RingBuffer<T, N>`.
-unsafe impl<T: slopos_ostd::Zeroable, const N: usize> slopos_ostd::Zeroable for RingBuffer<T, N> {}
+unsafe impl<T: crate::Zeroable, const N: usize> crate::Zeroable for RingBuffer<T, N> {}

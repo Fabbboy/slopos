@@ -24,8 +24,8 @@
 //! satisfies `Zeroable` through the blanket impl on `RingBuffer<u8, N>`
 //! shipped by `slopos-utils`.
 
+use slopos_ostd::RingBuffer;
 use slopos_ostd::{AllocError, KBox};
-use slopos_utils::RingBuffer;
 
 /// Size of per-connection send/receive ring buffers.
 pub const TCP_BUFFER_SIZE: usize = 32768;

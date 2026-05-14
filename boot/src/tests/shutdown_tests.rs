@@ -11,9 +11,9 @@ use slopos_core::scheduler::task::{
     task_create, task_find_by_id, task_shutdown_all, task_terminate,
 };
 use slopos_core::scheduler::test_fixture::KernelTestScope;
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
-use slopos_utils::klog_info;
 
 use core::ffi::{c_char, c_void};
 use core::ptr;

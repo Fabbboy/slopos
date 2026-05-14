@@ -1,6 +1,6 @@
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
-use slopos_utils::klog_info;
 
 use crate::neighbor::NEIGHBOR_CACHE;
 use crate::netstack::NET_STACK;

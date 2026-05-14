@@ -22,7 +22,7 @@ use super::per_cpu::{
 };
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
-use slopos_utils::{kdiag_timestamp, klog_debug};
+use slopos_ostd::{kdiag_timestamp, klog_debug};
 
 // ---------------------------------------------------------------------------
 // Tuning constants

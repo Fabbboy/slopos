@@ -7,9 +7,9 @@ use slopos_arch::cpu;
 use slopos_drivers::keyboard::poll_wait_enter;
 use slopos_drivers::serial;
 use slopos_mm::memory_init::is_memory_system_initialized;
+use slopos_ostd::panic_recovery;
+use slopos_ostd::stacktrace::{self, StacktraceEntry};
 use slopos_ostd::sync::StateFlag;
-use slopos_utils::panic_recovery;
-use slopos_utils::stacktrace::{self, StacktraceEntry};
 use slopos_video::panic_screen;
 
 use crate::shutdown::execute_kernel;

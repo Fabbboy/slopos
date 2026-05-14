@@ -1,6 +1,6 @@
 //! Monotonic clock abstraction used by the TCP state machine.
 //!
-//! Production code reads `now_ms()` which returns [`slopos_utils::clock::uptime_ms`].
+//! Production code reads `now_ms()` which returns [`slopos_kernel_services::clock::uptime_ms`].
 //! Under `#[cfg(feature = "test-hooks")]` the same call routes through a global
 //! mock clock: when the mock is inactive (value zero) it falls back to real
 //! wall time so live tests are unaffected, otherwise it returns the value set
@@ -23,24 +23,24 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     #[inline]
     fn now_ms(&self) -> u64 {
-        slopos_utils::clock::uptime_ms()
+        slopos_kernel_services::clock::uptime_ms()
     }
 }
 
 /// Read the current time in milliseconds.
 ///
-/// Production builds resolve directly to `slopos_utils::clock::uptime_ms()`.
+/// Production builds resolve directly to `slopos_kernel_services::clock::uptime_ms()`.
 #[cfg(not(feature = "test-hooks"))]
 #[inline]
 pub fn now_ms() -> u64 {
-    slopos_utils::clock::uptime_ms()
+    slopos_kernel_services::clock::uptime_ms()
 }
 
 /// Read the current time in milliseconds.
 ///
 /// Test builds consult the mock clock; a value of zero means "pass through to
 /// real wall time" so that live tests (which never install a mock) keep using
-/// `slopos_utils::clock::uptime_ms()`.
+/// `slopos_kernel_services::clock::uptime_ms()`.
 #[cfg(feature = "test-hooks")]
 #[inline]
 pub fn now_ms() -> u64 {
@@ -68,7 +68,7 @@ mod mock {
     pub fn current_ms() -> u64 {
         let m = MOCK_CLOCK.load(Ordering::Relaxed);
         if m == 0 {
-            slopos_utils::clock::uptime_ms()
+            slopos_kernel_services::clock::uptime_ms()
         } else {
             m
         }

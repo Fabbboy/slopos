@@ -7,7 +7,7 @@
 //! - **Request** (`oper=1`) for our IP: sends a unicast ARP reply.
 //! - **Any ARP**: opportunistically updates the cache if the sender is known.
 
-use slopos_utils::klog_debug;
+use slopos_ostd::klog_debug;
 
 use super::neighbor::{NEIGHBOR_CACHE, NeighborAction};
 use super::netdev::DeviceHandle;

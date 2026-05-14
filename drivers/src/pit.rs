@@ -10,7 +10,7 @@
 //! frequency (~1.193 182 MHz) after power-on reset.
 
 use slopos_ostd::io::port::IoPortRegistry;
-use slopos_utils::ports::PIT_BASE_FREQUENCY_HZ;
+use slopos_ostd::io::port_consts::PIT_BASE_FREQUENCY_HZ;
 
 /// Hardware default reload value (counter wraps at 0x10000 = 65 536).
 const DEFAULT_RELOAD: u32 = 0x10000;

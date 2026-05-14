@@ -9,16 +9,18 @@
 //!
 //! # Why a parallel primitive to `IoPort<T>`?
 //!
-//! Per `crate::io::port` docs: `slopos_utils::io::Port` is intentionally
-//! kept alive in parallel to `IoPort<T>` because the early-boot panic
-//! logger needs port I/O before any registry exists. This module is
-//! the OSTD-side replacement for that early-boot path — eliminating
-//! the `slopos-utils` crate dependency from the kernel.
+//! The registry-gated `IoPort<T>` cannot serve the early-boot panic
+//! logger because the registry does not yet exist when the panic
+//! handler runs. The non-registry-gated
+//! [`raw_port::Port<T>`](crate::io::raw_port::Port) sits at the same
+//! pre-registry level as this module; this module further specialises
+//! that primitive for the COM1-only fast path used by `klog`'s default
+//! backend.
 //!
 //! # Lock-free
 //!
 //! No internal locking. Callers serialise externally (cli/sti,
-//! `SpinLock`, etc.) — same contract as `slopos_utils::ports::serial_putc`.
+//! `SpinLock`, etc.).
 //!
 //! # Host-side behaviour
 //!
@@ -46,8 +48,7 @@ mod imp {
         // UART base address on every supported platform. Reading the
         // LSR is side-effect-free; writing the THR transmits one byte.
         // The poll loop on `UART_LSR_TX_EMPTY` ensures we don't
-        // overrun the transmitter — matching the
-        // `slopos_utils::ports::serial_putc` contract verbatim.
+        // overrun the transmitter.
         unsafe {
             while (u8::read_from_port(COM1_BASE + UART_REG_LSR) & UART_LSR_TX_EMPTY) == 0 {
                 core::hint::spin_loop();

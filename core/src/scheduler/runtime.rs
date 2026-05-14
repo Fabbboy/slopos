@@ -1,8 +1,8 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
-use slopos_utils::klog_info;
 
 use super::per_cpu;
 use super::scheduler::{

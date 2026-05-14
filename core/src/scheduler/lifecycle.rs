@@ -1,6 +1,6 @@
 use core::sync::atomic::Ordering;
 
-use slopos_utils::klog_info;
+use slopos_ostd::klog_info;
 
 use super::per_cpu;
 use super::runtime::{create_idle_task, create_idle_task_for_cpu};

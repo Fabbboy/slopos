@@ -16,12 +16,12 @@
 //!   `tests.shutdown=on`.
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX};
+use slopos_ostd::klog_info;
 use slopos_testing::{
     TestRunSummary,
     config::{TestConfig, Verbosity},
     kernel_phase_summary, tests_request_shutdown, tests_run_userland,
 };
-use slopos_utils::klog_info;
 
 use crate::scheduler::test_reports::{TestReport, alloc_ring, empty_report};
 
