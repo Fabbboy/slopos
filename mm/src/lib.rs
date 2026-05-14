@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(sync_unsafe_cell)]
+#![forbid(unsafe_code)]
 
 pub mod aslr;
 pub mod cow;

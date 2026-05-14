@@ -1,4 +1,5 @@
 #![no_std]
+#![forbid(unsafe_code)]
 
 pub mod apic_id;
 pub mod boot_drivers;

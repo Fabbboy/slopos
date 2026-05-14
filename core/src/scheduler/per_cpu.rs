@@ -518,30 +518,24 @@ impl PerCpuScheduler {
     }
 }
 
-static CPU_SCHEDULERS: SyncUnsafeCell<[PerCpuScheduler; MAX_CPUS]> = SyncUnsafeCell::new({
-    const INIT: PerCpuScheduler = PerCpuScheduler::new();
-    [INIT; MAX_CPUS]
-});
+static CPU_SCHEDULERS: slopos_ostd::sync::KernelSync<[PerCpuScheduler; MAX_CPUS]> =
+    slopos_ostd::sync::KernelSync::new({
+        const INIT: PerCpuScheduler = PerCpuScheduler::new();
+        [INIT; MAX_CPUS]
+    });
 
 /// Bounds-checked accessor over the per-CPU scheduler array.
 ///
-/// Centralises the single `unsafe { &*CPU_SCHEDULERS.get() }` deref
-/// — every caller that previously poked the `SyncUnsafeCell`
-/// directly now goes through this wrapper. The returned `&'static`
-/// borrow is sound because:
-///
-/// - the storage is a `'static` array; addresses do not move,
-/// - bounds are checked here before the deref,
-/// - all interior mutation lives behind `AtomicXxx` /
-///   `IntrusiveLinkedList` / `queue_lock`, never via `&mut self`.
+/// The `KernelSync<[T; N]>` wrapper hands out a shared `&[T]` borrow
+/// through `cell_get`-style accessors. All interior mutation lives
+/// behind `AtomicXxx` / `IntrusiveLinkedList` / `queue_lock`, so no
+/// `&mut` is ever needed at this surface.
 #[inline]
 fn cpu_scheduler(cpu_id: usize) -> Option<&'static PerCpuScheduler> {
     if cpu_id >= MAX_CPUS {
         return None;
     }
-    // SAFETY: bounds checked; the SyncUnsafeCell is a `'static`
-    // array and we only hand out a shared borrow.
-    let arr = unsafe { &*CPU_SCHEDULERS.get() };
+    let arr: &'static [PerCpuScheduler; MAX_CPUS] = CPU_SCHEDULERS.get();
     Some(&arr[cpu_id])
 }
 

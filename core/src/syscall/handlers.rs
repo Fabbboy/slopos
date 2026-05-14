@@ -1,5 +1,4 @@
 use core::ffi::c_char;
-use core::ptr;
 
 use slopos_abi::syscall::*;
 
@@ -201,14 +200,11 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
 };
 
-pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {
-    if (sysno as usize) >= SYSCALL_TABLE.len() {
-        return ptr::null();
-    }
-    let entry = &SYSCALL_TABLE[sysno as usize];
+pub fn syscall_lookup(sysno: u64) -> Option<&'static SyscallEntry> {
+    let entry = SYSCALL_TABLE.get(sysno as usize)?;
     if entry.handler.is_none() {
-        ptr::null()
+        None
     } else {
-        entry as *const SyscallEntry
+        Some(entry)
     }
 }

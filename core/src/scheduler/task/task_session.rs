@@ -21,11 +21,9 @@ fn clear_controlling_tty_for_session_task(task: *mut Task, context: *mut c_void)
         return;
     }
 
-    let ctx_ptr = context.cast::<ClearControllingTtyContext>();
-    // SAFETY: caller (`task_iterate_active`) hands us a pointer to the
-    // `ClearControllingTtyContext` stack-allocated above; non-null
-    // checked.
-    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+    let Some(ctx) =
+        slopos_ostd::util::ptr_buf::try_void_ctx_mut::<ClearControllingTtyContext>(context)
+    else {
         return;
     };
     if task_clear_controlling_tty_for(task, ctx.session_id, ctx.tty) {

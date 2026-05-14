@@ -170,7 +170,7 @@ fn allocate_unsafe_stack(size: u64, what: &'static str) -> Option<UnsafeStack> {
 
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack")?;
     let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
@@ -191,7 +191,7 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     }
 
     let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack")?;
 
     Some(TaskCreateResources {
         process_id: process.disarm(),
@@ -408,11 +408,10 @@ const _: () = {
 pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
     let entry = task_externs::user_task_first_run as *const () as u64;
     let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
-    // SAFETY: see function-level contract; the caller has just
-    // allocated the kernel stack and no observer is yet attached.
-    unsafe {
-        core::ptr::write(ret_addr_slot as *mut u64, entry);
-    }
+    // OSTD's `write_kernel_va` carries the one `unsafe`; the caller-
+    // facing contract says the kernel stack was just allocated and no
+    // observer is yet attached.
+    slopos_ostd::util::ptr_buf::write_kernel_va::<u64>(ret_addr_slot, entry);
     SwitchContext {
         rbx: 0,
         r12: 0,
@@ -483,31 +482,20 @@ fn init_task_context(task: &mut Task) {
 /// Walk a caller-owned C string up to `TASK_NAME_MAX_LEN-1` bytes,
 /// copying into `dest` and NUL-padding the remainder.
 ///
-/// # Safety
-/// `src`, when non-null, must point at a NUL-terminated C string with
-/// at least one valid byte; in practice callers pass static or
-/// stack-allocated `*const c_char` from the syscall layer.
-unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
-    if src.is_null() {
-        dest[0] = 0;
+/// Copy `src` (NUL-terminated kernel pointer) into the fixed-length
+/// `dest` buffer, padding the tail with zero. Null `src` clears `dest`.
+///
+/// The interior `unsafe` (NUL-bounded walk through the C string) lives
+/// inside OSTD's `cstr_from_kernel_ptr`; this consumer sees only the
+/// resulting byte slice.
+fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
+    *dest = [0u8; TASK_NAME_MAX_LEN];
+    let Some(bytes) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(src) else {
         return;
-    }
-    let mut i = 0;
-    while i < TASK_NAME_MAX_LEN - 1 {
-        // SAFETY: caller's contract above guarantees the C string is
-        // readable up to its NUL terminator.
-        let ch = unsafe { *src.add(i) };
-        if ch == 0 {
-            break;
-        }
-        dest[i] = ch as u8;
-        i += 1;
-    }
-    dest[i] = 0;
-    while i + 1 < TASK_NAME_MAX_LEN {
-        i += 1;
-        dest[i] = 0;
-    }
+    };
+    let take = core::cmp::min(bytes.len(), TASK_NAME_MAX_LEN - 1);
+    dest[..take].copy_from_slice(&bytes[..take]);
+    // `dest[take]` is already 0 from the wipe above; tail stays zero.
 }
 
 pub fn task_create(
@@ -555,10 +543,7 @@ pub fn task_create(
         return INVALID_TASK_ID;
     };
     task_ref.task_id = task_id;
-    // SAFETY: `name` is a `*const c_char` from the caller; `copy_name`
-    // walks it until NUL or `TASK_NAME_MAX_LEN-1`. The destination
-    // borrow is exclusive via `task_ref`.
-    unsafe { copy_name(&mut task_ref.name, name) };
+    copy_name(&mut task_ref.name, name);
     // Status stays Blocked (set by reserve_task_slot) until fully initialised.
     task_ref.priority = TaskPriority::from_u8(priority);
     task_ref.flags = flags;
@@ -965,7 +950,7 @@ pub fn task_fork(
     let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(stack) => stack,
         Err(e) => {
-            klog_info!("task_fork: unsafe stack alloc failed: {:?}", e);
+            klog_info!("task_fork: data-stack alloc failed: {:?}", e);
             drop(child_kernel_stack);
             return INVALID_TASK_ID;
         }
@@ -1003,11 +988,13 @@ pub fn task_fork(
     // OSTD user-mode entry: seed `child.user_ctx` from the parent's
     // syscall-time UserContext (when supplied) with rax forced to 0
     // for fork's child return, and set up the kernel stack so
-    // `switch_registers` rets into `user_task_first_run`.
-    // SAFETY: caller asserts `parent_user_ctx` (when non-null) is a
-    // valid `*const UserContext` snapshot of the parent's syscall
-    // frame, stable for the duration of this call.
-    let parent_ctx_opt = unsafe { parent_user_ctx.as_ref() };
+    // `switch_registers` rets into `user_task_first_run`. The caller-
+    // facing contract on `parent_user_ctx` (null or valid snapshot)
+    // is upheld by `task_fork`'s callers in the syscall layer;
+    // OSTD's `try_borrow_ref` carries the one `unsafe` deref.
+    let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_borrow_ref::<
+        slopos_ostd::user::context::UserContext,
+    >(parent_user_ctx);
     if let Some(parent_ctx) = parent_ctx_opt {
         let mut regs = *parent_ctx.regs();
         regs.rax = 0;
@@ -1137,7 +1124,7 @@ pub fn task_clone(
     let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(stack) => stack,
         Err(e) => {
-            klog_info!("task_clone: unsafe stack alloc failed: {:?}", e);
+            klog_info!("task_clone: data-stack alloc failed: {:?}", e);
             drop(child_kernel_stack);
             return Err(ERRNO_ENOMEM);
         }

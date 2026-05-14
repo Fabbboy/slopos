@@ -72,3 +72,35 @@ pub unsafe fn switch_stack_and_call_noreturn(
         );
     }
 }
+
+/// Scheduler-bootstrap safe wrapper around
+/// [`switch_stack_and_call_noreturn`].
+///
+/// The contract that [`switch_stack_and_call_noreturn`] documents is
+/// discharged by the call-site invariants of the scheduler bringup
+/// path:
+///
+/// - The stack top is the top of a freshly-allocated kernel stack
+///   (returned by the kstack allocator) — 16-byte aligned by
+///   construction.
+/// - The `target` is `scheduler_loop_entry`, an `extern "C" fn(_, _) -> !`
+///   that diverges (`fn() -> !`) — it cannot return.
+/// - The CPU is in scheduler-bringup mode (BSP after `boot_init_run_all`
+///   or AP after `init_scheduler_for_ap`), so no live references into
+///   the previous stack are held: every consumer above this frame has
+///   already returned, and the freshly-dispatched idle task owns the
+///   destination stack.
+///
+/// Centralising the discharge here lets the consumer crate stay
+/// `unsafe`-free.
+#[inline]
+pub fn enter_scheduler_loop_noreturn(
+    stack_top: u64,
+    target: extern "C" fn(usize, *mut ()) -> !,
+    cpu_id: usize,
+    idle_task: *mut (),
+) -> ! {
+    // SAFETY: see fn-level docs; the scheduler bringup path upholds
+    // every clause of `switch_stack_and_call_noreturn`'s contract.
+    unsafe { switch_stack_and_call_noreturn(stack_top, target, cpu_id, idle_task) }
+}

@@ -374,11 +374,11 @@ pub fn process_vm_get_ostd_pml4_paddr(process_id: u32) -> u64 {
 /// The per-process lock is held only across the brief `&VmSpace`
 /// borrow + activate call; activate itself takes `&self`.
 ///
-/// # Safety
-///
-/// Caller must uphold [`VmSpace::activate`]'s contract — interrupts
-/// disabled, kernel-half invariant maintained.
-pub unsafe fn process_vm_activate(process_id: u32) -> bool {
+/// Safe entry: the scheduler upholds the context-switch contract for
+/// `VmSpace::activate` (IRQs disabled, on this CPU, kernel-half
+/// preserved). The activate body lazily resyncs the kernel half on
+/// the way to CR3 reload, so consumers never observe a stale window.
+pub fn process_vm_activate(process_id: u32) -> bool {
     let Some(slot) = find_slot_for_pid(process_id) else {
         return false;
     };
@@ -389,10 +389,7 @@ pub unsafe fn process_vm_activate(process_id: u32) -> bool {
     let Some(vm_space) = guard.vm_space.as_ref() else {
         return false;
     };
-    // SAFETY: caller's contract.
-    unsafe {
-        vm_space.activate();
-    }
+    vm_space.activate_at_context_switch();
     true
 }
 

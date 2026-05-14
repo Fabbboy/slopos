@@ -8,7 +8,7 @@
 //! small fixed-capacity list of waiting tasks.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 
 use slopos_abi::task::BlockReason;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
@@ -116,11 +116,11 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
     let blocked = {
         let mut bucket = FUTEX_TABLE[bucket_idx].lock();
 
-        // Read the current value at the futex address.
-        // SAFETY: The syscall handler has validated that uaddr is a valid,
-        // mapped, 4-byte-aligned user address in the current process.
+        // OSTD's `borrow_user_atomic_u32` folds the one interior
+        // `unsafe`; the syscall handler validated that uaddr is a
+        // 4-byte-aligned, mapped user address in the current process.
         let current_val =
-            unsafe { ptr::read_volatile(uaddr as *const AtomicU32) }.load(Ordering::SeqCst);
+            slopos_ostd::util::ptr_buf::borrow_user_atomic_u32(uaddr as u64).load(Ordering::SeqCst);
 
         if current_val != expected {
             return slopos_abi::syscall::ERRNO_EAGAIN as i64;

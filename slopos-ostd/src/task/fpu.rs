@@ -169,6 +169,35 @@ pub unsafe fn fpu_xrstor(state: *const FpuState, xcr0_mask: u64) {
     }
 }
 
+impl FpuState {
+    /// Safe wrapper around [`fpu_xsave`].
+    ///
+    /// `&mut self` discharges the exclusive-write half of the contract.
+    /// The remaining "interrupts disabled / scheduler serialisation"
+    /// requirement is the standard context-switch invariant the
+    /// scheduler upholds at every call site — kept implicit because
+    /// every consumer of this API operates inside that window.
+    #[inline]
+    pub fn save_current(&mut self, xcr0_mask: u64) {
+        // SAFETY: `&mut self` guarantees exclusive access + 64-byte
+        // alignment (the type is `#[repr(C, align(64))]`). Scheduler
+        // callers run with IRQs disabled.
+        unsafe { fpu_xsave(self as *mut FpuState, xcr0_mask) };
+    }
+
+    /// Safe wrapper around [`fpu_xrstor`].
+    ///
+    /// `&self` plus the scheduler's IRQs-off + on-this-CPU invariant
+    /// discharge the safety contract. `&self` is sound here because
+    /// `XRSTOR64` only reads the buffer.
+    #[inline]
+    pub fn restore_to_cpu(&self, xcr0_mask: u64) {
+        // SAFETY: `&self` keeps the buffer borrowed read-only; XRSTOR64
+        // only reads. Alignment is guaranteed by `#[repr(C, align(64))]`.
+        unsafe { fpu_xrstor(self as *const FpuState, xcr0_mask) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

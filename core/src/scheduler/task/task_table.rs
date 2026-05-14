@@ -432,17 +432,19 @@ pub fn task_find_by_id(task_id: u32) -> *mut Task {
         return ptr::null_mut();
     }
 
-    // SAFETY: lock-free read — see function doc for invariants.
-    let mgr_ptr = unsafe { &*TASK_MANAGER.as_ptr() };
-    let bound = pool_high_water().min(mgr_ptr.tasks.len());
-    for slot in &mgr_ptr.tasks[..bound] {
-        if let Some(kbox) = slot.as_deref() {
-            if kbox.task_id == task_id {
-                return kbox as *const Task as *mut Task;
+    // Lock-free read — see function doc for invariants. OSTD's
+    // `read_atomic_field` folds the one `unsafe` reborrow.
+    TASK_MANAGER.read_atomic_field(|mgr| {
+        let bound = pool_high_water().min(mgr.tasks.len());
+        for slot in &mgr.tasks[..bound] {
+            if let Some(kbox) = slot.as_deref() {
+                if kbox.task_id == task_id {
+                    return kbox as *const Task as *mut Task;
+                }
             }
         }
-    }
-    ptr::null_mut()
+        ptr::null_mut()
+    })
 }
 
 /// Find a live task whose active address space matches `cr3`.
@@ -456,37 +458,39 @@ pub fn task_find_by_cr3(cr3: u64) -> *mut Task {
     }
 
     let target = cr3 & !0xFFF;
-    // SAFETY: lock-free read — same rationale as task_find_by_id.
-    let mgr_ptr = unsafe { &*TASK_MANAGER.as_ptr() };
-    let bound = pool_high_water().min(mgr_ptr.tasks.len());
-    let mut fallback: *mut Task = ptr::null_mut();
+    // Lock-free read — same rationale as task_find_by_id; OSTD's
+    // `read_atomic_field` folds the one `unsafe` reborrow.
+    TASK_MANAGER.read_atomic_field(|mgr| {
+        let bound = pool_high_water().min(mgr.tasks.len());
+        let mut fallback: *mut Task = ptr::null_mut();
 
-    for slot in &mgr_ptr.tasks[..bound] {
-        let Some(kbox) = slot.as_deref() else {
-            continue;
-        };
-        let status = kbox.status();
-        if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
-            continue;
+        for slot in &mgr.tasks[..bound] {
+            let Some(kbox) = slot.as_deref() else {
+                continue;
+            };
+            let status = kbox.status();
+            if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
+                continue;
+            }
+
+            let task_cr3 =
+                super::task_accessors::task_context_cr3(kbox as *const Task).unwrap_or(0) & !0xFFF;
+            if task_cr3 != target {
+                continue;
+            }
+
+            let task_ptr = kbox as *const Task as *mut Task;
+            if status == TaskStatus::Running {
+                return task_ptr;
+            }
+
+            if fallback.is_null() {
+                fallback = task_ptr;
+            }
         }
 
-        let task_cr3 =
-            super::task_accessors::task_context_cr3(kbox as *const Task).unwrap_or(0) & !0xFFF;
-        if task_cr3 != target {
-            continue;
-        }
-
-        let task_ptr = kbox as *const Task as *mut Task;
-        if status == TaskStatus::Running {
-            return task_ptr;
-        }
-
-        if fallback.is_null() {
-            fallback = task_ptr;
-        }
-    }
-
-    fallback
+        fallback
+    })
 }
 
 /// Look up the pool index of `task` in `mgr`.
@@ -660,12 +664,10 @@ pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     }
     let task = task_find_by_id(task_id);
     if task.is_null() || super::task_accessors::task_status(task) == Some(TaskStatus::Invalid) {
-        // SAFETY: caller-supplied out-pointer; pre-null-checked above.
-        unsafe { *task_info = ptr::null_mut() };
+        slopos_ostd::util::ptr_buf::nullable_write(task_info, ptr::null_mut());
         return -1;
     }
-    // SAFETY: caller-supplied out-pointer; pre-null-checked above.
-    unsafe { *task_info = task };
+    slopos_ostd::util::ptr_buf::nullable_write(task_info, task);
     0
 }
 

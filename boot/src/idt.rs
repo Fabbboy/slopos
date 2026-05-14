@@ -540,22 +540,14 @@ fn initialize_handler_tables() {
 /// `ffi_boundary::isr_iret_frame_corrupt`), so the `pub(crate)` shim
 /// here only needs to forward.
 pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
-    use slopos_ostd::arch::x86_64::kernel_ptr::read_unaligned_u64;
+    use slopos_ostd::arch::x86_64::kernel_ptr::{read_iret_frame, read_unaligned_u64_in_range};
     use slopos_ostd::klog_info;
 
-    // SAFETY: caller (ISR asm stub) guarantees `iret_frame` points to
-    // 5 readable u64s laid out as `[RIP, CS, RFLAGS, RSP, SS]`. The
-    // unsafe `read_unaligned` is centralised inside OSTD's
-    // `read_unaligned_u64` helper.
-    let (rip, cs, rflags, rsp, ss) = unsafe {
-        (
-            read_unaligned_u64(iret_frame),
-            read_unaligned_u64(iret_frame.add(1)),
-            read_unaligned_u64(iret_frame.add(2)),
-            read_unaligned_u64(iret_frame.add(3)),
-            read_unaligned_u64(iret_frame.add(4)),
-        )
-    };
+    // Safe helper centralises the `read_unaligned`. If the ISR-asm
+    // pointer fails the canonical-kernel pre-check (should not happen
+    // for a real corrupt-frame trap), fall back to zeros so the dump
+    // can still proceed without nested-faulting.
+    let [rip, cs, rflags, rsp, ss] = read_iret_frame(iret_frame).unwrap_or([0u64; 5]);
 
     klog_info!(
         "ISR IRET FRAME CORRUPT: CS=0x{:x} (expected 0x08 or 0x23)",
@@ -590,14 +582,10 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
         // Use wrapping_offset to avoid UB when the resulting pointer
         // falls outside the allocated object (negative offsets).
         let addr = iret_frame.wrapping_offset(offset);
-        let addr_val = addr as usize;
-        if addr_val < dump_lo || addr_val + 8 > dump_hi {
+        let Some(val) = read_unaligned_u64_in_range(addr, dump_lo, dump_hi) else {
             klog_info!("  [{:+}] {:p} = <out of bounds>", offset, addr);
             continue;
-        }
-        // SAFETY: bounds-checked above against the live kernel-stack
-        // range; the unsafe `read_unaligned` is centralised in OSTD.
-        let val = unsafe { read_unaligned_u64(addr) };
+        };
         let marker = if offset == 0 {
             " <-- RIP"
         } else if offset == 1 {

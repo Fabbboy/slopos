@@ -16,11 +16,13 @@
 //! `init_kernel_context`, `task_entry_wrapper`,
 //! `context_switch_bad_target`) are gone.
 
-/// Task exit hook called from the OSTD `task_entry_trampoline` (when a
-/// kernel task's entry function returns) and from `super::kthread`.
-#[unsafe(no_mangle)]
-pub extern "C" fn scheduler_task_exit() -> ! {
-    super::scheduler::scheduler_task_exit_impl()
+slopos_ostd::extern_c_entry! {
+    /// Task exit hook called from the OSTD `task_entry_trampoline`
+    /// (when a kernel task's entry function returns) and from
+    /// `super::kthread`.
+    pub fn scheduler_task_exit() -> ! {
+        super::scheduler::scheduler_task_exit_impl()
+    }
 }
 
 /// Address of the BSP boot stack top.  Used by `prepare_switch_to`

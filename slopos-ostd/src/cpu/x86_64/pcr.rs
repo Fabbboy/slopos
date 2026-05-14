@@ -756,6 +756,27 @@ pub fn get_pcr_mut_via_token(cpu_id: usize) -> Option<&'static mut ProcessorCont
     unsafe { get_pcr_mut(cpu_id) }
 }
 
+/// Safe surface for "get the *local* CPU's PCR by id". Resolves the
+/// current CPU via [`get_current_cpu`] then looks the slot up in the
+/// table. Returns `None` if PCR init hasn't run yet.
+///
+/// Replaces `unsafe { current_pcr() }` for the common pattern of
+/// reading the local CPU's PCR fields (counters, flags, atomic
+/// scratch slots like `syscall_pid`) — the per-CPU slot is alive for
+/// the kernel lifetime and the GS-relative fast path is not actually
+/// required for these uses.
+#[inline]
+pub fn current_pcr_local() -> Option<&'static ProcessorControlRegion> {
+    get_pcr(get_current_cpu())
+}
+
+/// Mutable variant of [`current_pcr_local`]. Sound under Inv. 8: the
+/// caller commits to mutating only this CPU's slot.
+#[inline]
+pub fn current_pcr_local_mut() -> Option<&'static mut ProcessorControlRegion> {
+    get_pcr_mut_via_token(get_current_cpu())
+}
+
 /// Get the number of initialized PCRs (i.e. CPU count).
 #[inline]
 pub fn get_pcr_count() -> usize {

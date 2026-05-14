@@ -253,11 +253,11 @@ define_syscall!(syscall_process_list(ctx, args) {
     }
 
     fn collect_task(task_ptr: *mut crate::scheduler::task_struct::Task, ctx_ptr: *mut c_void) {
-        // SAFETY: collect_task is only invoked through `iterate_tasks`,
-        // which passes back the same `*mut IterCtx` the caller stashed
-        // a moment ago.
-        let mut cb = unsafe { slopos_ostd::util::callback_ctx::CallbackCtx::<IterCtx>::from_raw(ctx_ptr) };
-        let Some(iter_ctx) = cb.try_borrow() else {
+        // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow.
+        // `iterate_tasks` passes back the same `*mut IterCtx` the
+        // caller stashed a moment ago.
+        let Some(iter_ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<IterCtx>(ctx_ptr)
+        else {
             return;
         };
         if iter_ctx.count >= iter_ctx.max {

@@ -7,7 +7,6 @@ use slopos_ostd::klog_info;
 use crate::sched::scheduler_get_current_task;
 use crate::scheduler::task::{task_borrow, task_flags};
 use crate::scheduler::task_struct::Task;
-use crate::syscall::common::{SyscallEntry, SyscallHandler};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::user::context::UserContext;
@@ -33,11 +32,11 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
     user_ctx.set_rax(slopos_abi::syscall::ERRNO_EINVAL as u64);
 
     let entry = syscall_lookup(sysno);
-    if entry.is_null() {
+    if entry.is_none() {
         klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
         user_ctx.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
     } else {
-        let handler = read_entry_handler(entry);
+        let handler = entry.and_then(|e| e.handler);
         if let Some(func) = handler {
             func(task, ctx_ptr);
 
@@ -71,21 +70,6 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
     // a handler ran.  Linux checks TIF_SIGPENDING unconditionally on
     // return to userspace.
     crate::syscall::signal::deliver_pending_signal(task, ctx_ptr);
-}
-
-/// Read `entry.handler` from the syscall table.
-///
-/// The pointer is pre-validated by `syscall_lookup` (returns null on
-/// out-of-range / unhandled). The dereference reads a single function
-/// pointer slot from kernel-readonly memory.
-#[inline]
-fn read_entry_handler(entry: *const SyscallEntry) -> Option<SyscallHandler> {
-    if entry.is_null() {
-        return None;
-    }
-    // SAFETY: pre-validated by syscall_lookup; entry points into the
-    // statically-allocated SYSCALL_TABLE in kernel rodata.
-    unsafe { (*entry).handler }
 }
 
 // ---------------------------------------------------------------------------

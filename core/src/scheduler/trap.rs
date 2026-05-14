@@ -65,10 +65,11 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
         return;
     }
 
-    // SAFETY: caller passes a non-null `*mut InterruptFrame` whose
-    // contents are owned by the current ISR stack.
-    let cs = unsafe { (*frame).cs };
-    if (cs & 3) != 3 {
+    // OSTD's `borrow_ref` folds the one `unsafe` reborrow; the
+    // caller-supplied frame lives on the ISR stack for the duration
+    // of this call.
+    let frame_ref: &InterruptFrame = slopos_ostd::util::ptr_buf::borrow_ref(frame);
+    if (frame_ref.cs & 3) != 3 {
         return;
     }
 

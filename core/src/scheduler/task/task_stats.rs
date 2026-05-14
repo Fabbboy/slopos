@@ -6,18 +6,11 @@ use super::task_accessors::{
 use super::task_table::{try_with_task_manager, with_task_manager};
 
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
+    use slopos_ostd::util::ptr_buf::nullable_write;
     with_task_manager(|mgr| {
-        // SAFETY: out-pointers are caller-owned; non-null check gates
-        // each write; nothing else aliases the slot during this call.
-        if !total_tasks.is_null() {
-            unsafe { *total_tasks = mgr.tasks_created };
-        }
-        if !active_tasks.is_null() {
-            unsafe { *active_tasks = mgr.num_tasks };
-        }
-        if !context_switches.is_null() {
-            unsafe { *context_switches = mgr.total_context_switches };
-        }
+        nullable_write(total_tasks, mgr.tasks_created);
+        nullable_write(active_tasks, mgr.num_tasks);
+        nullable_write(context_switches, mgr.total_context_switches);
     });
 }
 

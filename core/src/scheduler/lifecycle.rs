@@ -26,18 +26,11 @@ pub fn get_scheduler_stats(
     ready_tasks: *mut u32,
     schedule_calls: *mut u32,
 ) {
-    if !context_switches.is_null() {
-        unsafe { *context_switches = per_cpu::get_total_switches() };
-    }
-    if !yields.is_null() {
-        unsafe { *yields = per_cpu::get_total_yields() };
-    }
-    if !schedule_calls.is_null() {
-        unsafe { *schedule_calls = per_cpu::get_total_schedule_calls() };
-    }
-    if !ready_tasks.is_null() {
-        unsafe { *ready_tasks = per_cpu::get_total_ready_tasks() };
-    }
+    use slopos_ostd::util::ptr_buf::nullable_write;
+    nullable_write(context_switches, per_cpu::get_total_switches());
+    nullable_write(yields, per_cpu::get_total_yields());
+    nullable_write(schedule_calls, per_cpu::get_total_schedule_calls());
+    nullable_write(ready_tasks, per_cpu::get_total_ready_tasks());
 }
 
 pub fn boot_step_task_manager_init(
@@ -80,16 +73,11 @@ pub fn get_percpu_scheduler_stats(
     preemptions: *mut u64,
     ready_tasks: *mut u32,
 ) {
+    use slopos_ostd::util::ptr_buf::nullable_write;
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        if !switches.is_null() {
-            unsafe { *switches = sched.total_switches.load(Ordering::Relaxed) };
-        }
-        if !preemptions.is_null() {
-            unsafe { *preemptions = sched.total_preemptions.load(Ordering::Relaxed) };
-        }
-        if !ready_tasks.is_null() {
-            unsafe { *ready_tasks = sched.total_ready_count() };
-        }
+        nullable_write(switches, sched.total_switches.load(Ordering::Relaxed));
+        nullable_write(preemptions, sched.total_preemptions.load(Ordering::Relaxed));
+        nullable_write(ready_tasks, sched.total_ready_count());
     });
 }
 

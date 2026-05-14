@@ -316,7 +316,7 @@ pub fn forget_context_local(cpu_id: usize, ctx_id: MmContextId) {
     if cpu_id >= MAX_CPUS || !pcid_enabled() {
         return;
     }
-    let state = unsafe { &mut *PER_CPU[cpu_id].0.get().get() };
+    let state = PER_CPU[cpu_id].0.cell_get_mut();
     for (i, slot) in state.slots.iter_mut().enumerate() {
         if slot.ctx_id == ctx_id.raw() {
             flush_pcid(i as u16 + 1);

@@ -280,14 +280,15 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     // the per-CPU bootstrap stub's.
     super::scheduler::dispatch(cpu_id, idle_task);
 
-    unsafe {
-        slopos_ostd::cpu::x86_64::stack::switch_stack_and_call_noreturn(
-            idle_stack_top,
-            scheduler_loop_entry,
-            cpu_id,
-            idle_task as *mut (),
-        )
-    }
+    // OSTD's `enter_scheduler_loop_noreturn` folds the one `unsafe`
+    // stack-switch primitive behind the documented scheduler-bringup
+    // discharge.
+    slopos_ostd::cpu::x86_64::stack::enter_scheduler_loop_noreturn(
+        idle_stack_top,
+        scheduler_loop_entry,
+        cpu_id,
+        idle_task as *mut (),
+    )
 }
 
 /// Callback registered by the boot layer to start the per-CPU LAPIC timer.
@@ -323,11 +324,9 @@ fn deferred_start_ap_timer(cpu_id: usize) {
     }
 
     let ptr = AP_TIMER_START_CB.load(Ordering::Acquire);
-    if ptr.is_null() {
+    let Some(cb) = slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<fn() -> bool>(ptr) else {
         return;
-    }
-
-    let cb: fn() -> bool = unsafe { core::mem::transmute(ptr) };
+    };
     if cb() {
         klog_info!("SCHED: CPU {} LAPIC timer started (deferred)", cpu_id);
         AP_TIMER_DONE[cpu_id].store(true, Ordering::Relaxed);

@@ -307,9 +307,7 @@ fn state_for(cpu: usize) -> Option<&'static mut PerCpuLuf> {
     if cpu >= MAX_CPUS {
         return None;
     }
-    // SAFETY: per-CPU single-writer discipline; caller must hold off
-    // preemption / IRQs on the owning CPU before calling.
-    Some(unsafe { &mut *PER_CPU_LUF[cpu].0.get().get() })
+    Some(PER_CPU_LUF[cpu].0.cell_get_mut())
 }
 
 fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
@@ -503,7 +501,10 @@ fn state_for_readonly(cpu: usize) -> Option<&'static PerCpuLuf> {
     if cpu >= MAX_CPUS {
         return None;
     }
-    Some(unsafe { &*PER_CPU_LUF[cpu].0.get().get() })
+    // Read-only sibling: per-CPU IRQs-off discipline gates writers;
+    // diagnostic snapshot is fine even from another CPU because the
+    // contained AtomicU64 counters tolerate concurrent reads.
+    Some(PER_CPU_LUF[cpu].0.cell_get())
 }
 
 // =============================================================================

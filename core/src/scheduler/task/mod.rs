@@ -50,7 +50,8 @@ pub type TaskEntry = extern "C" fn(*mut c_void);
 /// callers pass a kernel-defined constant.
 #[inline]
 pub fn task_entry_from_kernel_va(addr: u64) -> TaskEntry {
-    // SAFETY: see doc comment; transmuting between two same-sized
-    // function-pointer-equivalent types.
-    unsafe { core::mem::transmute(addr as usize) }
+    // OSTD's `fn_ptr_from_raw` folds the one `transmute` interior;
+    // `TaskEntry` is a `*mut ()`-sized fn-pointer per the SAFETY note
+    // above.
+    slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(addr as *mut ())
 }

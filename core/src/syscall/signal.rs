@@ -79,13 +79,11 @@ struct AllCollectContext {
 }
 
 fn collect_group_member(task: *mut Task, context: *mut c_void) {
-    // SAFETY: `context` originates from `collect_targets_for_group`'s
-    // typed `&mut GroupCollectContext` cast a few frames up; null was
-    // pre-checked.
-    let mut cb = unsafe {
-        slopos_ostd::util::callback_ctx::CallbackCtx::<GroupCollectContext>::from_raw(context)
-    };
-    let Some(ctx) = cb.try_borrow() else {
+    // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow;
+    // the caller in `collect_targets_for_group` stashed a
+    // `&mut GroupCollectContext` into `context`.
+    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<GroupCollectContext>(context)
+    else {
         return;
     };
 
@@ -101,21 +99,16 @@ fn collect_group_member(task: *mut Task, context: *mut c_void) {
     };
     // `ctx.targets` holds a `*mut TargetSet` whose backing
     // `&mut TargetSet` is owned by the caller frame in
-    // `collect_targets_for_group`; null was implicitly cleared by the
-    // outer `&mut ctx as *mut _` cast.
-    let set = unsafe { ctx.targets.as_mut() };
-    if let Some(set) = set {
+    // `collect_targets_for_group`; OSTD's `try_borrow_ref_mut` folds
+    // the one `unsafe` reborrow internal.
+    if let Some(set) = slopos_ostd::util::ptr_buf::try_borrow_ref_mut(ctx.targets) {
         set.push(tid);
     }
 }
 
 fn collect_all_members(task: *mut Task, context: *mut c_void) {
-    // SAFETY: `context` is the typed `&mut AllCollectContext` cast
-    // from `collect_targets_for_all` a few frames up.
-    let mut cb = unsafe {
-        slopos_ostd::util::callback_ctx::CallbackCtx::<AllCollectContext>::from_raw(context)
-    };
-    let Some(ctx) = cb.try_borrow() else {
+    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<AllCollectContext>(context)
+    else {
         return;
     };
 
@@ -127,8 +120,7 @@ fn collect_all_members(task: *mut Task, context: *mut c_void) {
     }
 
     // Same reasoning as collect_group_member.
-    let set = unsafe { ctx.targets.as_mut() };
-    if let Some(set) = set {
+    if let Some(set) = slopos_ostd::util::ptr_buf::try_borrow_ref_mut(ctx.targets) {
         set.push(task_id);
     }
 }

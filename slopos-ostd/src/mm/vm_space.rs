@@ -477,6 +477,20 @@ impl VmSpace {
         unsafe { self.activate() };
     }
 
+    /// Safe activate for the scheduler context-switch path. The
+    /// scheduler upholds the `activate` contract for every dispatch
+    /// (IRQs off, kernel-half invariant maintained by the resync that
+    /// runs inside `activate` itself). Centralising the safe-fn
+    /// surface here keeps the consumer free of `unsafe`.
+    #[inline]
+    pub fn activate_at_context_switch(&self) {
+        // SAFETY: scheduler invariant — context-switch runs with IRQs
+        // disabled on the local CPU; `activate` resyncs the kernel
+        // half before reloading CR3, satisfying the kernel-half
+        // contract for the new mm.
+        unsafe { self.activate() };
+    }
+
     pub unsafe fn activate(&self) {
         // Pick up any kernel-master mutation that happened since last
         // activate. This is the framekernel-correct sync point: by

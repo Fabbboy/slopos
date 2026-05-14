@@ -33,14 +33,13 @@ pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
     let mut result = -1;
     let _ = with_task(task_id, |t| {
         if t.fate_pending != 0 {
-            if !out.is_null() {
-                unsafe {
-                    *out = FateResult {
-                        token: t.fate_token,
-                        value: t.fate_value,
-                    };
-                }
-            }
+            slopos_ostd::util::ptr_buf::nullable_write(
+                out,
+                FateResult {
+                    token: t.fate_token,
+                    value: t.fate_value,
+                },
+            );
             t.fate_pending = 0;
             result = 0;
         }

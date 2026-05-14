@@ -41,10 +41,11 @@ fn signal_group_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx_ptr = context.cast::<SignalGroupContext>();
-    // SAFETY: caller (`task_iterate_active`) hands us a non-null
-    // pointer to a `SignalGroupContext` we created above; no aliasing.
-    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+    // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow.
+    // Caller (`task_iterate_active`) stashed a `&mut SignalGroupContext`
+    // into `context`; no aliasing inside the iteration.
+    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<SignalGroupContext>(context)
+    else {
         return;
     };
     if task_pgid(task) != Some(ctx.pgid) {
@@ -86,10 +87,8 @@ fn signal_session_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx_ptr = context.cast::<SignalSessionContext>();
-    // SAFETY: caller hands us a non-null `SignalSessionContext`; no
-    // aliasing in the iteration.
-    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<SignalSessionContext>(context)
+    else {
         return;
     };
     if task_sid(task) != Some(ctx.sid) {
@@ -135,10 +134,8 @@ fn pgrp_exists_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx_ptr = context.cast::<PgrpExistsContext>();
-    // SAFETY: callback receives a non-null `PgrpExistsContext` from
-    // our caller above.
-    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<PgrpExistsContext>(context)
+    else {
         return;
     };
     if ctx.found {
@@ -225,10 +222,8 @@ fn orphan_check_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx_ptr = context.cast::<OrphanCheckContext>();
-    // SAFETY: callback gets a non-null `OrphanCheckContext` from our
-    // caller; no aliasing.
-    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<OrphanCheckContext>(context)
+    else {
         return;
     };
     if !ctx.is_orphaned {

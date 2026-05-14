@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(sync_unsafe_cell)]
+#![forbid(unsafe_code)]
 
 pub mod driver_hooks;
 pub mod exec;
@@ -46,24 +47,29 @@ macro_rules! utest {
                 $crate::exec::utest::run_thunk(&[<TEST_DESC_ $ident>])
             }
 
-            #[used]
-            #[allow(non_upper_case_globals)]
-            #[unsafe(link_section = ".test_registry")]
-            pub static [<TEST_DESC_ $ident>]: $crate::__testing::TestDesc =
-                $crate::__testing::TestDesc {
-                    name: stringify!($ident),
-                    module: module_path!(),
-                    file: file!(),
-                    line: line!(),
-                    run: [<__utest_thunk_ $ident>],
-                    kind: $crate::__testing::TestKind::Userland,
-                    flags: 0,
-                    bin: ::core::option::Option::Some($bin),
-                    argv: &[$($arg),*],
-                };
+            $crate::__ostd::link_section_static! {
+                #[used]
+                #[allow(non_upper_case_globals)]
+                section = ".test_registry";
+                pub static [<TEST_DESC_ $ident>]: $crate::__testing::TestDesc =
+                    $crate::__testing::TestDesc {
+                        name: stringify!($ident),
+                        module: module_path!(),
+                        file: file!(),
+                        line: line!(),
+                        run: [<__utest_thunk_ $ident>],
+                        kind: $crate::__testing::TestKind::Userland,
+                        flags: 0,
+                        bin: ::core::option::Option::Some($bin),
+                        argv: &[$($arg),*],
+                    };
+            }
         }
     };
 }
+
+#[doc(hidden)]
+pub use slopos_ostd as __ostd;
 
 #[doc(hidden)]
 pub use slopos_testing as __testing;

@@ -137,6 +137,42 @@ pub fn borrow_ref<'a, T>(ptr: *const T) -> &'a T {
     unsafe { &*ptr }
 }
 
+/// Nullable companion to [`borrow_ref`]. Returns `None` on null, else
+/// a borrow into the pointee with the same caller contract.
+#[inline]
+pub fn try_borrow_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(borrow_ref(ptr))
+}
+
+/// Nullable companion to [`borrow_ref_mut`]. Returns `None` on null.
+#[inline]
+pub fn try_borrow_ref_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(borrow_ref_mut(ptr))
+}
+
+/// Reborrow a `*mut c_void` callback context as `Option<&mut T>` where
+/// `T` is the originally stashed type. Returns `None` on null. Used by
+/// the iterate-callback pattern (e.g.
+/// `task_iterate_active(callback, &mut ctx as *mut Ctx as *mut c_void)`)
+/// where the callback reconstructs `&mut Ctx` from the opaque pointer.
+///
+/// # Safety contract on the caller
+///
+/// The pointer must be null or have been derived from `&mut T` by the
+/// caller's stash site. Mismatched `T` is undefined behaviour. The
+/// returned borrow is bounded by `'a`; the call site is responsible
+/// for keeping `T`'s underlying storage alive for that lifetime.
+#[inline]
+pub fn try_void_ctx_mut<'a, T>(ptr: *mut core::ffi::c_void) -> Option<&'a mut T> {
+    try_borrow_ref_mut(ptr as *mut T)
+}
+
 /// Mutable sibling of [`borrow_ref`].
 #[inline]
 pub fn borrow_ref_mut<'a, T>(ptr: *mut T) -> &'a mut T {
@@ -238,6 +274,71 @@ pub fn write_at_index<T>(ptr: *mut T, index: usize, value: T) {
     unsafe {
         ptr.add(index).write(value);
     }
+}
+
+/// Write `value` at the kernel-virtual byte address `addr`. Folds
+/// `unsafe { core::ptr::write(addr as *mut T, value) }` interior to
+/// OSTD for the common kernel-stack-init pattern, where the caller
+/// has just freshly allocated the destination region and no other CPU
+/// can observe it yet.
+///
+/// The caller must ensure:
+///
+/// - `addr` is a valid kernel-virtual byte address aligned for `T`,
+/// - the region `[addr, addr + size_of::<T>())` is owned exclusively
+///   by the caller for the duration of the write,
+/// - no other reference into that region is live.
+#[inline]
+pub fn write_kernel_va<T>(addr: u64, value: T) {
+    let p = addr as *mut T;
+    // SAFETY: caller upholds the per-helper contract above. Used
+    // during task-create kernel-stack priming where the stack frame
+    // is freshly allocated and no observer is yet attached.
+    unsafe { core::ptr::write(p, value) };
+}
+
+/// Zero `len` bytes starting at the kernel-virtual byte address
+/// `addr`. Folds `unsafe { core::ptr::write_bytes(addr, 0, len) }`
+/// interior to OSTD for the freshly-allocated-region zeroing pattern
+/// (task-stack hygiene, kernel-stack zero-fill).
+///
+/// The caller must ensure `addr` is a valid kernel-virtual byte
+/// address, that the byte range `[addr, addr + len)` is owned
+/// exclusively for the duration of the call, and that no live
+/// reference into that range is held elsewhere.
+#[inline]
+pub fn zero_bytes_at_kernel_va(addr: u64, len: usize) {
+    let p = addr as *mut u8;
+    // SAFETY: caller upholds the per-helper contract above.
+    unsafe { core::ptr::write_bytes(p, 0, len) };
+}
+
+/// Volatile-borrow a `core::sync::atomic::AtomicU32` at the user-space
+/// virtual address `addr` (already mapped into the current process's
+/// VmSpace by the caller's syscall validation). The interior `unsafe`
+/// (a `read_volatile` of the typed pointer to extract a borrow into
+/// the atomic) lives here.
+///
+/// Returns the borrow tied to lifetime `'a`. The futex hot path uses
+/// this to call `.load(Ordering::SeqCst)` on the in-place atomic;
+/// `read_volatile` semantics ensure the read is not cached across the
+/// surrounding `unsafe`-free Rust.
+///
+/// # Safety contract on the caller
+///
+/// `addr` must be a 4-byte-aligned, currently-mapped user-space
+/// address inside the process whose VmSpace is active on this CPU.
+/// The mapping must remain stable for the duration of `'a` — futex
+/// callers hold the per-bucket spin lock plus IRQs-off, which jointly
+/// satisfy that contract.
+#[inline]
+pub fn borrow_user_atomic_u32<'a>(addr: u64) -> &'a core::sync::atomic::AtomicU32 {
+    let p = addr as *const core::sync::atomic::AtomicU32;
+    // SAFETY: caller-supplied address is validated user-space,
+    // 4-byte aligned, mapped in the current process VmSpace, and the
+    // surrounding bucket-lock + IRQs-off pin the mapping during the
+    // borrow.
+    unsafe { &*p }
 }
 
 /// Append a NUL terminator at `buf[len]` after copying `len` bytes

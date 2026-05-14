@@ -114,6 +114,52 @@ pub unsafe fn read_unaligned_u64(ptr: *const u64) -> u64 {
     unsafe { core::ptr::read_unaligned(ptr) }
 }
 
+/// Read the five-word IRETQ frame `[RIP, CS, RFLAGS, RSP, SS]` from a
+/// kernel-space pointer published by an ISR asm stub. The interior
+/// `unsafe` is centralised here; consumers stay safe.
+///
+/// The pointer is treated as the base of a 5×`u64` window. The helper
+/// validates canonical-kernel + 8-byte-aligned + 40-byte headroom; if
+/// the check fails, returns `None` so the caller can render a
+/// diagnostic without faulting. The lone caller is the corruption-
+/// recovery shim and accepts the residual unmapped-page risk in
+/// exchange for the panic-time forensic value.
+#[inline]
+pub fn read_iret_frame(ptr: *const u64) -> Option<[u64; 5]> {
+    let addr = ptr as u64;
+    if !is_canonical_kernel(addr, 8, 40) {
+        return None;
+    }
+    let mut out = [0u64; 5];
+    // SAFETY: address validated canonical-kernel + 8-byte-aligned with
+    // 40 bytes of headroom; the read sequence stays within the same
+    // 5×u64 window the ISR asm stub set up.
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = unsafe { core::ptr::read_unaligned(ptr.add(i)) };
+    }
+    Some(out)
+}
+
+/// Read an unaligned `u64` at `ptr` only if the byte window
+/// `[ptr, ptr + 8)` lies inside `[lo, hi)`. Returns `None` when the
+/// window escapes the supplied bounds.
+///
+/// Used by panic-time stack-vicinity dumps to bound forensic reads to
+/// a known-mapped region (the current task's kernel stack, or a tight
+/// window around a probed pointer).
+#[inline]
+pub fn read_unaligned_u64_in_range(ptr: *const u64, lo: usize, hi: usize) -> Option<u64> {
+    let addr = ptr as usize;
+    let end = addr.checked_add(8)?;
+    if addr < lo || end > hi {
+        return None;
+    }
+    // SAFETY: caller-supplied `[lo, hi)` is the bounds of a live mapped
+    // region (kernel stack or vicinity window); we just checked that
+    // the 8-byte read lies entirely inside it.
+    Some(unsafe { core::ptr::read_unaligned(ptr) })
+}
+
 /// Safe `fn(*mut InterruptFrame)` ↔ `*mut ()` round-trip.
 ///
 /// fn-pointers and `*mut ()` are layout-compatible on x86_64; round-

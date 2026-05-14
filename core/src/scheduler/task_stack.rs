@@ -46,8 +46,6 @@
 //! - The guard page is always included by the stride arithmetic; it
 //!   cannot be accidentally mapped.
 
-use core::ptr;
-
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_mm::page_alloc::{alloc_page_frames_pcp_batch, free_page_frame};
 use slopos_mm::paging::{map_page_4kb, unmap_page};
@@ -193,15 +191,11 @@ impl<R: StackRegion> TaskStack<R> {
     }
 
     /// Zero `page_count` pages starting at `base`.  Safe because `base`
-    /// points into the caller's exclusively-owned stack slot.
+    /// points into the caller's exclusively-owned stack slot. OSTD's
+    /// `zero_bytes_at_kernel_va` folds the one `unsafe` write_bytes.
     fn zero_stack_pages(base: u64, page_count: usize) {
         let bytes = page_count * PAGE_SIZE_4KB as usize;
-        // SAFETY: `base` is the start of a slot-owned mapped region of
-        // exactly `bytes` bytes (verified by caller), and we hold
-        // exclusive access via the slot handle.
-        unsafe {
-            ptr::write_bytes(base as *mut u8, 0, bytes);
-        }
+        slopos_ostd::util::ptr_buf::zero_bytes_at_kernel_va(base, bytes);
     }
 
     /// Unmap & free the first `mapped` pages of `slot`.  Used by

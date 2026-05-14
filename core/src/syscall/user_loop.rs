@@ -70,19 +70,21 @@ fn placeholder_vm_space() -> &'static KArc<VmSpace> {
         .expect("placeholder_vm_space: OnceLock not populated after call_once")
 }
 
-/// Entry point used by the scheduler for new user tasks.  The kernel
-/// stack is set up so `switch_registers` rets here on first dispatch;
-/// see [`crate::scheduler::task::task_lifecycle::build_user_task_entry_frame`].
-///
-/// `extern "C"` because the address is taken and stored as a `u64` on
-/// the kernel stack as a synthetic return address.
-#[unsafe(no_mangle)]
-pub extern "C" fn user_task_first_run() -> ! {
-    let task = scheduler_get_current_task() as *mut Task;
-    if task.is_null() {
-        panic!("user_task_first_run: scheduler_get_current_task returned null");
+slopos_ostd::extern_c_entry! {
+    /// Entry point used by the scheduler for new user tasks. The
+    /// kernel stack is set up so `switch_registers` rets here on first
+    /// dispatch; see
+    /// [`crate::scheduler::task::task_lifecycle::build_user_task_entry_frame`].
+    ///
+    /// `extern "C"` because the address is taken and stored as a `u64`
+    /// on the kernel stack as a synthetic return address.
+    pub fn user_task_first_run() -> ! {
+        let task = scheduler_get_current_task() as *mut Task;
+        if task.is_null() {
+            panic!("user_task_first_run: scheduler_get_current_task returned null");
+        }
+        user_task_loop(task)
     }
-    user_task_loop(task)
 }
 
 fn user_task_loop(task: *mut Task) -> ! {

@@ -31,9 +31,10 @@ pub fn kthread_spawn_ex(
     let id = task_create(name, entry_point.unwrap(), arg, priority, combined_flags);
 
     if id == INVALID_TASK_ID {
-        klog_info!("kthread_spawn_ex: failed to create thread '{}'", unsafe {
-            string::cstr_to_str(name)
-        });
+        klog_info!(
+            "kthread_spawn_ex: failed to create thread '{}'",
+            string::cstr_to_str_lossy(name)
+        );
     }
 
     id

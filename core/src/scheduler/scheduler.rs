@@ -95,7 +95,6 @@ use slopos_mm::process_vm::{
 use slopos_mm::tlb;
 
 use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
-use slopos_ostd::task::fpu::{fpu_xrstor, fpu_xsave};
 use slopos_ostd::task::switch::switch_registers;
 
 use super::ffi_boundary::kernel_stack_top;
@@ -191,14 +190,11 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     // Keep PCR.syscall_pid in sync so copy_from_user always resolves
     // the correct process page directory, even after preemption.
     let pid = task_process_id(task).unwrap_or(INVALID_PROCESS_ID);
-    // SAFETY: `current_pcr` is `unsafe fn` because the per-CPU PCR
-    // pointer is only valid on the current CPU; `dispatch` runs with
-    // interrupts disabled on the target CPU per the function's
-    // preconditions, so the PCR is stable for this read+store window.
-    unsafe {
-        slopos_arch::pcr::current_pcr()
-            .syscall_pid
-            .store(pid, Ordering::Release);
+    // Safe surface: the local-CPU PCR lookup folds the GS resolution
+    // behind a table read; the atomic store on `syscall_pid` is
+    // race-free under the dispatch IRQs-off + on-this-CPU window.
+    if let Some(pcr) = slopos_arch::pcr::current_pcr_local() {
+        pcr.syscall_pid.store(pid, Ordering::Release);
     }
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -253,11 +249,10 @@ pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
 fn switch_to_kernel_address_space(_task: *mut Task) {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     tlb::enter_lazy_tlb(cpu_id);
-    // SAFETY: irqs disabled by caller; KERNEL_VM_SPACE is the canonical
-    // kernel master PML4, kernel-half invariant always holds.
-    unsafe {
-        kernel_vm_space().lock().activate();
-    }
+    // Safe-wrapper entry: KERNEL_VM_SPACE is the canonical kernel
+    // master PML4; the kernel-half invariant is trivially satisfied
+    // when we're switching onto the master itself.
+    kernel_vm_space().lock().activate_kernel_master();
 }
 
 #[inline]
@@ -283,11 +278,15 @@ fn task_is_idle_candidate(task: *mut Task) -> bool {
 /// CR3 load, FPU restore(next).  Replaces the big unsafe block that lived
 /// inside the old `execute_task`.
 ///
-/// # Safety
-/// Both task pointers must be valid (or null for `prev`).  Must be called
-/// with interrupts disabled.
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
+/// # Caller invariants
+///
+/// Routed through safe-fn wrappers that take `*mut Task` (handled
+/// internally by null-and-validity checks) and `&mut FpuState`
+/// (witnessed by the safe FPU helpers). Must still be called with
+/// interrupts disabled and only by the scheduler hot path so the
+/// FPU / TLB / FS_BASE / TSS / CR3 sequencing matches the dispatch
+/// state machine.
+fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     // Cache the active XCR0 mask once for the whole switch — the OSTD
     // `fpu_xsave` / `fpu_xrstor` primitives take it as a parameter
     // (the static is set at boot by `slopos_ostd::cpu::x86_64::xsave::init`).
@@ -309,11 +308,10 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
 
     // --- FPU save (prev) ---
     if let Some(prev_fpu) = task_fpu_state_mut(prev) {
-        // SAFETY: caller serialises (irqs disabled).  Inv. 8 — prev
-        // is currently on this CPU and only this CPU.
-        unsafe {
-            fpu_xsave(prev_fpu as *mut _, xcr0);
-        }
+        // Safe wrapper: `&mut FpuState` discharges the exclusive-write
+        // half of the contract; the scheduler's IRQs-off + Inv. 8
+        // discharge the remaining ordering requirement.
+        prev_fpu.save_current(xcr0);
     }
 
     // --- TLB / address-space switch ---
@@ -371,27 +369,25 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     let next_pid = task_process_id(next).unwrap_or(INVALID_PROCESS_ID);
     if next_pid != INVALID_PROCESS_ID {
         process_vm_sync_kernel_mappings(next_pid);
-        // SAFETY: irqs disabled by caller (`prepare_switch_to`'s
-        // contract); kernel-half invariant maintained by VmSpace's
-        // own resync. Falls back to kernel master if the process has
-        // no VmSpace bound (early creation, slot reset).
-        let activated = unsafe { process_vm_activate(next_pid) };
+        // Scheduler-invariant safe entry: IRQs disabled by caller,
+        // kernel-half maintained by `activate`'s internal resync.
+        // Falls back to kernel master if the process has no VmSpace
+        // bound (early creation, slot reset).
+        let activated = process_vm_activate(next_pid);
         if !activated {
-            unsafe { kernel_vm_space().lock().activate() };
+            kernel_vm_space().lock().activate_kernel_master();
         }
     } else {
-        // SAFETY: same as above; idle / kernel-only task installs the
-        // kernel master.
-        unsafe { kernel_vm_space().lock().activate() };
+        // Idle / kernel-only task installs the kernel master.
+        kernel_vm_space().lock().activate_kernel_master();
     }
 
     // --- FPU restore (next) ---
-    // SAFETY: caller serialises (irqs disabled).  Inv. 8 — next is
-    // becoming the running task on this CPU and no other CPU touches it.
+    // Safe wrapper: `&FpuState` keeps the buffer read-only borrowed;
+    // XRSTOR64 only reads. Scheduler upholds Inv. 8 (no concurrent
+    // mutator on another CPU).
     let next_fpu = task_fpu_state_mut(next).expect("next must be non-null");
-    unsafe {
-        fpu_xrstor(next_fpu as *const _, xcr0);
-    }
+    next_fpu.restore_to_cpu(xcr0);
 }
 
 /// Validate that the idle task's switch_ctx has a sane RIP (in kernel .text)
@@ -441,20 +437,17 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
-    // SAFETY: caller serialises (irqs disabled).  prepare_switch_to
-    // and switch_registers both operate on the now-installed dispatch
-    // target; the next-task switch_ctx pointer's stability is upheld
-    // by `task_pointer_is_valid` checks earlier in the call chain.
+    // Scheduler hot path: IRQs disabled by caller; the safe-fn shims
+    // for `prepare_switch_to` and `switch_registers` capture the
+    // per-call validity through the now-installed dispatch target.
     let prev_ctx = task_switch_ctx_ptr_mut(current);
     let next_ctx = task_switch_ctx_ptr(idle_task);
-    unsafe {
-        // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
-        prepare_switch_to(cpu_id, current, idle_task);
-        switch_registers(prev_ctx, next_ctx);
-        // NOTE: code here runs when the TASK resumes (not on idle path).
-        // All post-switch cleanup happens in run_ready_task_from_idle
-        // after execute_task returns — that IS the idle resumption point.
-    }
+    // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
+    prepare_switch_to(cpu_id, current, idle_task);
+    switch_registers(prev_ctx, next_ctx);
+    // NOTE: code here runs when the TASK resumes (not on idle path).
+    // All post-switch cleanup happens in run_ready_task_from_idle
+    // after execute_task returns — that IS the idle resumption point.
 }
 
 #[inline]
@@ -678,16 +671,14 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     dispatch(cpu_id, to_task);
     slopos_ostd::sync::rcu_note_qs();
 
-    // SAFETY: caller serialises (irqs disabled). prepare_switch_to
-    // and switch_registers operate on the freshly-validated
-    // switch_ctx whose addresses are stable for this CPU.
+    // Scheduler hot path: IRQs disabled by caller; switch_ctx pointers
+    // were freshly validated above, both safe shims accept the
+    // raw-task arguments and route through the OSTD safe-fn surfaces.
     let prev_ctx = task_switch_ctx_ptr_mut(from_task);
     let next_ctx = task_switch_ctx_ptr(to_task);
-    unsafe {
-        // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
-        prepare_switch_to(cpu_id, from_task, to_task);
-        switch_registers(prev_ctx, next_ctx);
-    }
+    // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
+    prepare_switch_to(cpu_id, from_task, to_task);
+    switch_registers(prev_ctx, next_ctx);
 }
 
 pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> bool {

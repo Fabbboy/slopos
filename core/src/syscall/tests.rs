@@ -135,22 +135,17 @@ fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
     if slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(pid) == 0 {
         return None;
     }
-    // SAFETY: test scaffolding — irqs are masked by the caller's
-    // test harness, kernel-half invariant always holds for an OSTD
-    // VmSpace built via `VmSpace::new`.
-    if !unsafe { slopos_mm::process_vm::process_vm_activate(pid) } {
+    if !slopos_mm::process_vm::process_vm_activate(pid) {
         return None;
     }
     set_test_process_id(pid);
     let out = f();
     set_test_process_id(slopos_abi::task::INVALID_PROCESS_ID);
-    // SAFETY: same as above; kernel master always satisfies activate's
-    // invariant.
-    unsafe {
-        slopos_kernel_services::kernel_vm_space::kernel_vm_space()
-            .lock()
-            .activate();
-    }
+    // Reset to kernel master — the test scope runs against the kernel
+    // master VmSpace once the per-process scope returns.
+    slopos_kernel_services::kernel_vm_space::kernel_vm_space()
+        .lock()
+        .activate_kernel_master();
     Some(out)
 }
 
@@ -208,28 +203,30 @@ fn map_user_rw_page(pid: u32) -> Option<u64> {
 
 pub fn test_syscall_lookup_invalid_number() -> TestResult {
     assert_test!(
-        syscall_lookup(0xFFFF).is_null(),
+        syscall_lookup(0xFFFF).is_none(),
         "should reject out-of-bounds"
     );
     assert_test!(
-        syscall_lookup(SYSCALL_TABLE_SIZE as u64).is_null(),
+        syscall_lookup(SYSCALL_TABLE_SIZE as u64).is_none(),
         "should reject boundary"
     );
-    assert_test!(syscall_lookup(u64::MAX).is_null(), "should reject u64::MAX");
+    assert_test!(syscall_lookup(u64::MAX).is_none(), "should reject u64::MAX");
     TestResult::Pass
 }
 
 pub fn test_syscall_lookup_empty_slot() -> TestResult {
     let entry = syscall_lookup(9);
-    assert_test!(entry.is_null(), "unimplemented slot should return null");
+    assert_test!(entry.is_none(), "unimplemented slot should return null");
     TestResult::Pass
 }
 
 pub fn test_syscall_lookup_valid() -> TestResult {
     // SYSCALL_EXIT = 1
     let entry = syscall_lookup(1);
-    assert_not_null!(entry, "SYSCALL_EXIT lookup returned null");
-    let entry_ref = unsafe { &*entry };
+    let Some(entry_ref) = entry else {
+        klog_info!("SYSCALL_EXIT lookup returned None");
+        return TestResult::Fail;
+    };
     assert_test!(entry_ref.handler.is_some(), "SYSCALL_EXIT has no handler");
     TestResult::Pass
 }
@@ -246,12 +243,11 @@ pub fn test_process_syscall_lookup_valid() -> TestResult {
     ];
 
     for sysno in required {
-        let entry = syscall_lookup(sysno);
-        assert_not_null!(entry, "required syscall missing from table");
-        assert_test!(
-            unsafe { (*entry).handler.is_some() },
-            "required syscall has no handler"
-        );
+        let Some(entry) = syscall_lookup(sysno) else {
+            klog_info!("required syscall {} missing from table", sysno);
+            return TestResult::Fail;
+        };
+        assert_test!(entry.handler.is_some(), "required syscall has no handler");
     }
 
     TestResult::Pass
@@ -270,10 +266,12 @@ pub fn test_io_syscall_lookup_valid() -> TestResult {
     ];
 
     for sysno in required {
-        let entry = syscall_lookup(sysno);
-        assert_not_null!(entry, "required syscall missing from dispatch table");
+        let Some(entry) = syscall_lookup(sysno) else {
+            klog_info!("required syscall {} missing from dispatch table", sysno);
+            return TestResult::Fail;
+        };
         assert_test!(
-            unsafe { (*entry).handler.is_some() },
+            entry.handler.is_some(),
             "required syscall has no handler in dispatch table"
         );
     }
@@ -282,12 +280,11 @@ pub fn test_io_syscall_lookup_valid() -> TestResult {
 }
 
 pub fn test_net_scan_syscall_lookup_valid() -> TestResult {
-    let entry = syscall_lookup(SYSCALL_NET_SCAN);
-    assert_not_null!(entry, "net_scan syscall missing from table");
-    assert_test!(
-        unsafe { (*entry).handler.is_some() },
-        "net_scan syscall has no handler"
-    );
+    let Some(entry) = syscall_lookup(SYSCALL_NET_SCAN) else {
+        klog_info!("net_scan syscall missing from table");
+        return TestResult::Fail;
+    };
+    assert_test!(entry.handler.is_some(), "net_scan syscall has no handler");
     TestResult::Pass
 }
 
@@ -2408,9 +2405,10 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
 
 /// SYSCALL_VHANGUP is registered in the dispatch table.
 pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
-    let entry = syscall_lookup(SYSCALL_VHANGUP);
-    assert_not_null!(entry, "SYSCALL_VHANGUP lookup returned null");
-    let entry_ref = unsafe { &*entry };
+    let Some(entry_ref) = syscall_lookup(SYSCALL_VHANGUP) else {
+        klog_info!("SYSCALL_VHANGUP lookup returned None");
+        return TestResult::Fail;
+    };
     assert_test!(
         entry_ref.handler.is_some(),
         "SYSCALL_VHANGUP has no handler"

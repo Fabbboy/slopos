@@ -71,19 +71,21 @@ pub const MAX_STATIC_APS: usize = 16;
 /// `kernel_main` / `ap_entry_rust`.
 pub const BOOTSTRAP_UNSAFE_STACK_SIZE: usize = 0x10000;
 
-/// Linker-visible copy of [`TASK_UNSAFE_STACK_SP_OFFSET`] — the
-/// trampoline asm in `boot/limine_entry.s` and the AP naked trampoline
-/// need the value to stamp each bootstrap Task's `unsafe_stack_sp`
-/// field in asm before any instrumented Rust runs.  A Rust `const`
-/// alone is invisible to the linker; this `static` round-trips the
-/// value through a BSS-resident symbol the asm can `mov` against.
-///
-/// Declared `#[used]` so dead-code elimination keeps it even when the
-/// Rust-side `TASK_UNSAFE_STACK_SP_OFFSET` is already inlined
-/// everywhere.
-#[used]
-#[unsafe(no_mangle)]
-pub static BOOTSTRAP_TASK_UNSAFE_SP_OFFSET: u64 = TASK_UNSAFE_STACK_SP_OFFSET as u64;
+slopos_ostd::no_mangle_static! {
+    /// Linker-visible copy of [`TASK_UNSAFE_STACK_SP_OFFSET`] — the
+    /// trampoline asm in `boot/limine_entry.s` and the AP naked
+    /// trampoline need the value to stamp each bootstrap Task's
+    /// `unsafe_stack_sp` field in asm before any instrumented Rust
+    /// runs. A Rust `const` alone is invisible to the linker; this
+    /// `static` round-trips the value through a BSS-resident symbol
+    /// the asm can `mov` against.
+    ///
+    /// Declared `#[used]` so dead-code elimination keeps it even when
+    /// the Rust-side `TASK_UNSAFE_STACK_SP_OFFSET` is already inlined
+    /// everywhere.
+    #[used]
+    pub static BOOTSTRAP_TASK_UNSAFE_SP_OFFSET: u64 = TASK_UNSAFE_STACK_SP_OFFSET as u64;
+}
 
 // ---------------------------------------------------------------------------
 // Bootstrap data-stack buffers (raw BSS)
@@ -92,18 +94,20 @@ pub static BOOTSTRAP_TASK_UNSAFE_SP_OFFSET: u64 = TASK_UNSAFE_STACK_SP_OFFSET as
 #[repr(C, align(16))]
 pub struct BootstrapUnsafeStack(pub [u8; BOOTSTRAP_UNSAFE_STACK_SIZE]);
 
-#[unsafe(no_mangle)]
-pub static BOOTSTRAP_UNSAFE_STACK: SyncUnsafeCell<BootstrapUnsafeStack> =
-    SyncUnsafeCell::new(BootstrapUnsafeStack([0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]));
+slopos_ostd::no_mangle_static! {
+    pub static BOOTSTRAP_UNSAFE_STACK: SyncUnsafeCell<BootstrapUnsafeStack> =
+        SyncUnsafeCell::new(BootstrapUnsafeStack([0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]));
+}
 
 #[repr(C, align(16))]
 pub struct ApBootstrapUnsafeStacks(pub [[u8; BOOTSTRAP_UNSAFE_STACK_SIZE]; MAX_STATIC_APS]);
 
-#[unsafe(no_mangle)]
-pub static APS_BOOTSTRAP_UNSAFE_STACKS: SyncUnsafeCell<ApBootstrapUnsafeStacks> =
-    SyncUnsafeCell::new(ApBootstrapUnsafeStacks(
-        [[0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]; MAX_STATIC_APS],
-    ));
+slopos_ostd::no_mangle_static! {
+    pub static APS_BOOTSTRAP_UNSAFE_STACKS: SyncUnsafeCell<ApBootstrapUnsafeStacks> =
+        SyncUnsafeCell::new(ApBootstrapUnsafeStacks(
+            [[0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]; MAX_STATIC_APS],
+        ));
+}
 
 // ---------------------------------------------------------------------------
 // Bootstrap Task stubs
@@ -157,14 +161,16 @@ impl BootstrapTaskArrayCell {
     }
 }
 
-#[unsafe(no_mangle)]
-pub static BSP_BOOTSTRAP_TASK: BootstrapTaskCell = BootstrapTaskCell::new(Task::invalid());
+slopos_ostd::no_mangle_static! {
+    pub static BSP_BOOTSTRAP_TASK: BootstrapTaskCell = BootstrapTaskCell::new(Task::invalid());
+}
 
-#[unsafe(no_mangle)]
-pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::new({
-    const INIT: Task = Task::invalid();
-    [INIT; MAX_STATIC_APS]
-});
+slopos_ostd::no_mangle_static! {
+    pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::new({
+        const INIT: Task = Task::invalid();
+        [INIT; MAX_STATIC_APS]
+    });
+}
 
 // ---------------------------------------------------------------------------
 // LLVM SafeStack callback
