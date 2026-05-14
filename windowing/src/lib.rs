@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! slopos-windowing — compositor connection, surface management, and event loop.
 //!
 //! Provides everything needed to create a window, get a pixel buffer,

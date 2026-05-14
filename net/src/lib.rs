@@ -1,6 +1,6 @@
 #![no_std]
 #![feature(allocator_api)]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
 
 //! Network subsystem.
 //!
