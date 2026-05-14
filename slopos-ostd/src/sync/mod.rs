@@ -13,6 +13,7 @@
 pub mod atomic_cell;
 pub mod cpu_local;
 pub mod init_flag;
+pub mod init_in_place;
 pub mod intrusive;
 pub mod kernel_sync;
 pub mod lock_graph;
@@ -31,6 +32,7 @@ pub mod wait_queue;
 pub use atomic_cell::AtomicCell;
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
+pub use init_in_place::InitInPlace;
 pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};
 pub use kernel_sync::{ApToken, BspToken, CpuInitWitness, KernelSync, run_ap_init, run_bsp_init};
 #[cfg(any(test, feature = "test-helpers"))]

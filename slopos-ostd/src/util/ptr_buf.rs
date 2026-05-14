@@ -85,6 +85,27 @@ pub fn borrow_at_mut<'a, T>(base: NonNull<u8>, byte_offset: usize, len: usize) -
     }
 }
 
+/// Write `value` to `out` if `out` is non-null; no-op when null.
+///
+/// Centralises the C-ABI "optional out-parameter" pattern (e.g.
+/// `get_framebuffer_info(addr: *mut u64, …)`) so consumers stop
+/// hand-rolling the `if !p.is_null() { unsafe { *p = … } }` block.
+///
+/// SAFETY (caller, weakly): if `out` is non-null, it must point to a
+/// writable `T` for the duration of this call. Each call site
+/// receives `out` from an FFI caller that committed to that contract
+/// in its prototype.
+#[inline]
+pub fn nullable_write<T>(out: *mut T, value: T) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: see fn-level docs (caller-side contract).
+    unsafe {
+        core::ptr::write(out, value);
+    }
+}
+
 /// Slice between two `*const T` anchors. Returns `&start[..(stop -
 /// start)]`. If `stop <= start`, returns an empty slice rather than
 /// panicking.

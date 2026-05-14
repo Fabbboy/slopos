@@ -29,12 +29,6 @@ pub fn verify_cpu_state() {
     }
 }
 
-slopos_ostd::extern_block! {
-    mod kernel_entry_sym {
-        static _start: u8;
-    }
-}
-
 pub fn verify_memory_layout() {
     let addr = verify_memory_layout as *const () as u64;
     if addr < KERNEL_VIRTUAL_BASE {
@@ -46,9 +40,10 @@ pub fn verify_memory_layout() {
         }
     }
 
-    // SAFETY: `_start` is a linker-published byte; reading it is a
-    // sanity check that the kernel image is mapped where we expect.
-    let _ = unsafe { core::ptr::read_volatile(kernel_entry_sym::_start_addr()) };
+    // Sanity-check the kernel-image mapping via OSTD's safe probe
+    // surface — the unsafe `read_volatile` of the linker `_start`
+    // byte lives inside OSTD's `verify_kernel_entry_alive`.
+    slopos_ostd::arch::x86_64::kernel_ptr::verify_kernel_entry_alive();
 }
 
 pub fn check_stack_health() {

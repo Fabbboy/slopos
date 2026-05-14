@@ -7,9 +7,7 @@ use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_core::scheduler::safestack_rt;
 use slopos_drivers::apic;
 use slopos_mm::tlb;
-use slopos_ostd::arch::x86_64::safestack::{
-    ApTrampolineFn, install_ap_trampoline, install_safestack_runtime,
-};
+use slopos_ostd::arch::x86_64::safestack::{install_ap_trampoline_as, install_safestack_runtime};
 use slopos_ostd::boot::smp::register_ap_late_entry;
 use slopos_ostd::klog_info;
 
@@ -178,18 +176,15 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
 
     // Route the SafeStack-runtime hook + AP boot trampoline through
     // OSTD's safe wrappers under the outer `run_bsp_init` scope opened
-    // in `kernel_main_impl`. The trampoline returned by
-    // `install_ap_trampoline` is `ApTrampolineFn` — a function taking
-    // `*const ()` in `rdi` per the x86-64 SysV ABI. Limine's
-    // `MpGotoFunction` takes `&MpInfo` in `rdi`; both signatures pass
-    // a single pointer, so the transmute below is layout-safe.
+    // in `kernel_main_impl`. `install_ap_trampoline_as::<MpGotoFunction>`
+    // returns the OSTD `ApTrampolineFn` already reinterpreted as
+    // limine's `MpGotoFunction`; both are `extern "C" fn(<single
+    // pointer>) -> !`, so the transmute is centralised inside OSTD and
+    // boot stays unsafe-free.
     let ap_trampoline: MpGotoFunction = {
         let bsp = ctx.bsp_token();
         install_safestack_runtime(&bsp);
-        let f = install_ap_trampoline(&bsp);
-        // SAFETY: same x86-64 SysV ABI on both sides; the OSTD `*const ()`
-        // is the same `MpInfo*` the limine bootloader passes in `rdi`.
-        unsafe { core::mem::transmute::<ApTrampolineFn, MpGotoFunction>(f) }
+        install_ap_trampoline_as::<MpGotoFunction>(&bsp)
     };
 
     let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();

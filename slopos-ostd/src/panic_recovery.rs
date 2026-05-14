@@ -161,6 +161,25 @@ pub fn get_recovery_buf() -> *mut JumpBuf {
     RECOVERY_BUF.get()
 }
 
+/// Safe surface around [`test_longjmp`].
+///
+/// `recovery_is_active()` must have returned `true` before reaching
+/// this call — that guarantees `RECOVERY_BUF` was populated by a
+/// prior [`test_setjmp`] frame still on the stack. The unsafe
+/// `test_longjmp` asm and its raw-pointer dance live inside OSTD;
+/// consumers (boot's `#[panic_handler]`) call this safe entry point.
+pub fn longjmp_to_recovery(val: i32) -> ! {
+    // SAFETY: `RECOVERY_BUF` is a `'static` `SyncUnsafeCell<JumpBuf>`
+    // populated by the matching `test_setjmp` in `catch_panic!`. The
+    // longjmp restores callee-saved registers and resumes at the
+    // setjmp call site; the contract is the same as standard libc
+    // setjmp/longjmp and is verified by the calling order
+    // `catch_panic!` enforces.
+    unsafe {
+        test_longjmp(get_recovery_buf(), val);
+    }
+}
+
 #[macro_export]
 macro_rules! catch_panic {
     ($code:block) => {{

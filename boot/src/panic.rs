@@ -119,9 +119,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
             cpu::enable_interrupts();
         }
 
-        unsafe {
-            panic_recovery::test_longjmp(panic_recovery::get_recovery_buf(), 1);
-        }
+        panic_recovery::longjmp_to_recovery(1);
     }
 
     cpu::disable_interrupts();

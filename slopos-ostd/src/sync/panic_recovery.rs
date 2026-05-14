@@ -38,6 +38,25 @@ pub fn poison_all_held_locks() -> ! {
     halt_forever()
 }
 
+/// Walk the panicking CPU's held-lock stack and poison-unlock every
+/// entry, then return control to the caller (no halt).
+///
+/// Equivalent to [`poison_all_held_locks`] minus the trailing HLT
+/// loop — useful for NMI watchdog / fatal-IRET-frame paths that want
+/// to free locks held by the dying CPU before chaining into a
+/// downstream `panic!()` so other CPUs make progress.
+///
+/// Safe-fn surface: same contract as [`poison_all_held_locks`].
+pub fn poison_all_held_locks_no_halt() {
+    // SAFETY: per-CPU held-lock list is sound to walk from the
+    // panicking CPU itself (single-writer). Lock addresses are
+    // statics → always valid. Inv. 9 covers the lifetime relaxation
+    // during fatal abort.
+    unsafe {
+        super::lock_tracking::poison_unlock_all_held();
+    }
+}
+
 /// `cli; hlt` loop. Centralised so panic / fatal-exception code paths
 /// stop spelling out the asm per site.
 #[inline(never)]

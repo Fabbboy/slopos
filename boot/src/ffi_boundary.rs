@@ -12,25 +12,28 @@
 // Functions called FROM assembly (must be extern "C")
 // ============================================================================
 
-/// Entry point called from limine_entry.s
-#[unsafe(no_mangle)]
-pub extern "C" fn kernel_main() {
-    crate::early_init::kernel_main_impl();
-}
-#[unsafe(no_mangle)]
-pub extern "C" fn common_exception_handler(frame: *mut slopos_arch::InterruptFrame) {
-    crate::idt::common_exception_handler_impl(frame);
+slopos_ostd::extern_c_entry! {
+    /// Entry point called from limine_entry.s
+    pub fn kernel_main() {
+        crate::early_init::kernel_main_impl();
+    }
 }
 
-/// Called from ISR assembly when the IRET frame's CS field is not 0x08 or
-/// 0x23.  `iret_frame` points at the 5-word IRET frame on the kernel stack:
-/// [RIP, CS, RFLAGS, RSP, SS].  We log the corruption and panic instead of
-/// taking a triple-fault from a bad IRETQ.
-#[unsafe(no_mangle)]
-pub extern "C" fn isr_iret_frame_corrupt(iret_frame: *const u64) -> ! {
-    // SAFETY: called from ISR assembly which pushes the 5-word IRET
-    // frame [RIP, CS, RFLAGS, RSP, SS] at this pointer.
-    unsafe { crate::idt::handle_corrupt_iret_frame(iret_frame) }
+slopos_ostd::extern_c_entry! {
+    pub fn common_exception_handler(frame: *mut slopos_arch::InterruptFrame) {
+        crate::idt::common_exception_handler_impl(frame);
+    }
+}
+
+slopos_ostd::extern_c_entry! {
+    /// Called from ISR assembly when the IRET frame's CS field is not
+    /// 0x08 or 0x23. `iret_frame` points at the 5-word IRET frame on
+    /// the kernel stack: [RIP, CS, RFLAGS, RSP, SS]. We log the
+    /// corruption and panic instead of taking a triple-fault from a
+    /// bad IRETQ.
+    pub fn isr_iret_frame_corrupt(iret_frame: *const u64) -> ! {
+        crate::idt::handle_corrupt_iret_frame(iret_frame)
+    }
 }
 
 // ============================================================================

@@ -1,5 +1,4 @@
 #![no_std]
-#![feature(sync_unsafe_cell)]
 
 pub mod apic_id;
 pub mod boot_drivers;

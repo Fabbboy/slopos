@@ -346,6 +346,26 @@ impl VmSpace {
         })
     }
 
+    /// Safe wrapper around [`Self::wrap_existing`] gated by a
+    /// [`BspToken`](crate::sync::BspToken). Used at boot to install
+    /// the singleton `KERNEL_VM_SPACE` around the live kernel master
+    /// PML4 left behind by Limine.
+    ///
+    /// The token discharges the BSP-only-init clause of `wrap_existing`'s
+    /// contract; clauses 1 (alignment + HHDM-reachability), 2 (UNUSED
+    /// slot), 3 (kernel-half already populated), and 4 (`pcid` is
+    /// `Pcid::KERNEL`) are facts encoded by the boot phase ordering
+    /// (meta_slots installed at priority 5, frame_alloc at priority 6,
+    /// this call at priority 55).
+    pub fn wrap_kernel_master<'brand>(
+        _token: &crate::sync::BspToken<'brand>,
+        pml4_phys: PhysAddr,
+    ) -> Result<Self, MapError> {
+        // SAFETY: token + boot ordering jointly discharge the four
+        // clauses of `wrap_existing`'s contract (see fn-level docs).
+        unsafe { Self::wrap_existing(pml4_phys, Pcid::KERNEL) }
+    }
+
     /// Resync this VmSpace's kernel-half (PML4 indices 256..512) from
     /// the registered master if [`KERNEL_MASTER_GEN`] has advanced
     /// since the last sync. Cheap when up-to-date — single Acquire
@@ -434,6 +454,12 @@ impl VmSpace {
     /// scheduler hot path uses [`activate`] directly because it
     /// activates per-process VmSpaces whose kernel-half is resynced
     /// via [`resync_kernel_half_if_stale`].
+    /// Safe wrapper around [`Self::activate`] for the kernel master
+    /// VmSpace (the singleton wrapping the bootloader-installed PML4).
+    /// Sound to call from kernel-only contexts where the kernel-half
+    /// invariant is trivially satisfied: the master maps kernel-half
+    /// indices 256..512 directly, and the user-half is unused for
+    /// kernel-side work.
     pub fn activate_kernel_master(&self) {
         // SAFETY: the kernel master VmSpace always satisfies the
         // kernel-half invariant; CR3 reload to it is sound from any
@@ -441,12 +467,19 @@ impl VmSpace {
         unsafe { self.activate() }
     }
 
-    /// process.
-    ///
-    /// # Safety
-    ///
-    /// See [`crate::arch::x86_64::cr3::write_cr3_pcid`] — kernel-half
-    /// invariant.
+    /// BSP-token-gated variant for boot-time kernel master CR3 reload.
+    /// Same body as [`Self::activate_kernel_master`]; the token
+    /// witnesses BSP-init scope (IRQs off, single CPU).
+    pub fn activate_kernel_master_bsp<'brand>(
+        &self,
+        _token: &crate::sync::BspToken<'brand>,
+    ) {
+        // SAFETY: BSP-init scope + IRQs off + KERNEL_VM_SPACE just
+        // installed jointly discharge the kernel-half invariant the
+        // `unsafe fn activate` contract names.
+        unsafe { self.activate() };
+    }
+
     pub unsafe fn activate(&self) {
         // Pick up any kernel-master mutation that happened since last
         // activate. This is the framekernel-correct sync point: by

@@ -50,7 +50,7 @@ fn boot_step_register_frame_alloc_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_info!("OSTD: frame_allocator registered (LegacyFrameAllocShim)");
 }
 
-fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // Memory phase priority 55 — runs after meta_slots (priority 5)
     // and frame_alloc (priority 6). The kernel master PML4 paddr was
     // registered with OSTD at early-init time
@@ -64,10 +64,10 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // contract referenced; rather than ferry a `&BspToken` through a
     // wrapper, we touch the public `KERNEL_VM_SPACE` static directly.
     use slopos_kernel_services::kernel_vm_space::{KERNEL_VM_SPACE, kernel_vm_space};
-    use slopos_ostd::arch::x86_64::cr3::Pcid;
     use slopos_ostd::mm::vm_space::VmSpace;
     use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
+    let bsp = ctx.bsp_token();
     let cr3 = slopos_arch::cpu::control_regs::read_cr3();
     let pml4_phys = slopos_abi::addr::PhysAddr::new(cr3 & 0x000F_FFFF_FFFF_F000);
     assert!(
@@ -75,13 +75,13 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         "boot_step_install_kernel_vm_space_fn called twice"
     );
     KERNEL_VM_SPACE.call_once(|| {
-        // SAFETY: BspInit BootCtx + boot-step ordering jointly
-        // establish `wrap_existing`'s contract: pml4_phys names the
-        // live kernel master, META_SLOTS / FrameAlloc are registered
-        // (priorities 5 and 6 already ran), and we are pre-SMP on the
-        // BSP. The `BootCtx<'_, BspInit>` parameter is what authorises
-        // this BSP-only mutation.
-        let space = unsafe { VmSpace::wrap_existing(pml4_phys, Pcid::KERNEL) }.expect(
+        // BspInit BootCtx + boot-step ordering jointly establish the
+        // four wrap-existing safety clauses (pml4_phys names the live
+        // kernel master, META_SLOTS / FrameAlloc are registered at
+        // priorities 5 and 6, we are pre-SMP on the BSP, and PCID is
+        // `Pcid::KERNEL`). `VmSpace::wrap_kernel_master` discharges
+        // them via the `&BspToken`.
+        let space = VmSpace::wrap_kernel_master(&bsp, pml4_phys).expect(
             "boot_step_install_kernel_vm_space_fn: wrap_existing failed (pml4 slot already TYPED?)",
         );
         // LOCK_LEVEL_REGISTRY: kernel-half mutations sit between
@@ -99,16 +99,14 @@ fn boot_step_install_kernel_vm_space_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // meaningful on the leaves we're stamping.
     slopos_mm::paging::paging_mark_kernel_global();
 
-    // Force the TLB to re-walk and re-tag kernel entries as global.
-    // Intel SDM §4.10.2.4: the CPU may have cached kernel entries
-    // before the GLOBAL bit was set; a CR3 reload drops those
-    // non-global entries. `VmSpace::activate` writes CR3 and is the
-    // sanctioned post-framekernel CR3 entry point.
-    // SAFETY: irqs are off in this boot step; KERNEL_VM_SPACE was
-    // installed two lines above; kernel-half invariant holds.
-    unsafe {
-        kernel_vm_space().lock().activate();
-    }
+    // Force the TLB to re-walk and re-tag kernel entries as global —
+    // Intel SDM §4.10.2.4 says the CPU may have cached kernel entries
+    // before the GLOBAL bit was set, so a CR3 reload drops the
+    // non-global entries. `activate_kernel_master` is the safe BSP-
+    // init wrapper around the otherwise-unsafe `activate`.
+    kernel_vm_space()
+        .lock()
+        .activate_kernel_master_bsp(&bsp);
 
     klog_info!(
         "OSTD: KERNEL_VM_SPACE installed (pml4_phys=0x{:x}, pcid=0)",

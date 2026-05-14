@@ -44,6 +44,102 @@
 #[doc(hidden)]
 pub use core::ptr;
 
+/// Declarative wrapper around `#[used] #[unsafe(link_section = "…")]`
+/// statics.
+///
+/// Edition 2024 spells the `link_section` attribute as
+/// `#[unsafe(link_section = "…")]` — the `unsafe` keyword is required
+/// by the attribute grammar even though the runtime semantics are
+/// inert (the linker reads the section label and emplaces the static
+/// at the configured offset). This macro absorbs the literal `unsafe`
+/// keyword so consumers don't spell it at the registration site.
+///
+/// Each invocation form:
+/// ```ignore
+/// slopos_ostd::link_section_static! {
+///     #[used]
+///     section = ".limine_requests";
+///     static FOO: FooT = FooT::new();
+/// }
+/// ```
+/// expands to:
+/// ```ignore
+/// #[used]
+/// #[unsafe(link_section = ".limine_requests")]
+/// static FOO: FooT = FooT::new();
+/// ```
+///
+/// `vis` and item-level attributes are forwarded; the visibility
+/// defaults to private (`static`) if omitted.
+#[macro_export]
+macro_rules! link_section_static {
+    (
+        $(#[$attr:meta])*
+        section = $section:literal;
+        $vis:vis static $name:ident : $ty:ty = $init:expr ;
+    ) => {
+        $(#[$attr])*
+        #[unsafe(link_section = $section)]
+        $vis static $name : $ty = $init;
+    };
+}
+
+/// Declarative wrapper around `#[unsafe(no_mangle)] pub extern "C" fn …`.
+///
+/// Edition 2024 marks the `no_mangle` attribute as `unsafe(no_mangle)`
+/// at the attribute grammar level. The `unsafe` token is syntactic —
+/// the body is plain `pub extern "C" fn`. This macro absorbs the
+/// `unsafe` keyword so consumers declare entry points without spelling
+/// it.
+///
+/// Two forms — with and without a return type:
+/// ```ignore
+/// slopos_ostd::extern_c_entry! {
+///     pub fn kernel_main() { kernel_main_impl() }
+/// }
+/// slopos_ostd::extern_c_entry! {
+///     pub fn isr_iret_frame_corrupt(iret_frame: *const u64) -> ! {
+///         handle_corrupt_iret_frame(iret_frame)
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! extern_c_entry {
+    (
+        $(#[$attr:meta])*
+        $vis:vis fn $name:ident ( $($args:tt)* ) -> $ret:ty $body:block
+    ) => {
+        $(#[$attr])*
+        #[unsafe(no_mangle)]
+        $vis extern "C" fn $name ( $($args)* ) -> $ret $body
+    };
+    (
+        $(#[$attr:meta])*
+        $vis:vis fn $name:ident ( $($args:tt)* ) $body:block
+    ) => {
+        $(#[$attr])*
+        #[unsafe(no_mangle)]
+        $vis extern "C" fn $name ( $($args)* ) $body
+    };
+}
+
+/// Declarative wrapper around `#[unsafe(no_mangle)] $vis static FOO: T = …`.
+///
+/// Same syntactic-`unsafe`-absorbing role as [`extern_c_entry`], for
+/// `static` symbols that need the unmangled C-linkage name (e.g. the
+/// `SYSCALL_CPU_DATA_PTR` slot consumed by the asm syscall trampoline).
+#[macro_export]
+macro_rules! no_mangle_static {
+    (
+        $(#[$attr:meta])*
+        $vis:vis static $name:ident : $ty:ty = $init:expr ;
+    ) => {
+        $(#[$attr])*
+        #[unsafe(no_mangle)]
+        $vis static $name : $ty = $init;
+    };
+}
+
 /// Wrap an `unsafe extern "C" { … }` declaration.
 ///
 /// See the module-level docs for the expansion shape. The macro

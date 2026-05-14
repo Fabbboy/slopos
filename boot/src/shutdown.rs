@@ -1,7 +1,7 @@
 use core::ffi::c_char;
 
 use slopos_arch::cpu;
-use slopos_ostd::io::port::IoPortRegistry;
+use slopos_ostd::io::power as ostd_power;
 use slopos_ostd::klog_info;
 use slopos_ostd::string::cstr_to_str_lossy;
 use slopos_ostd::sync::StateFlag;
@@ -20,28 +20,14 @@ use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
 
 fn serial_flush() {
-    let lsr_port = IoPortRegistry::reserve::<u8>(0x3F8 + 5).expect("COM1 LSR port");
-    for _ in 0..1024 {
-        let lsr = unsafe { lsr_port.read() };
-        if (lsr & 0x40) != 0 {
-            break;
-        }
-        cpu::pause();
-    }
+    ostd_power::drain_serial_tx(|| cpu::pause(), 1024);
 }
 fn ensure_kernel_page_dir() {
     // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
     activate_post_user_fault();
 }
 fn poweroff_hardware() {
-    let acpi = IoPortRegistry::reserve::<u16>(0x604).expect("ACPI PM1A_CNT port");
-    let acpi_bochs = IoPortRegistry::reserve::<u16>(0xB004).expect("Bochs ACPI PM1A_CNT port");
-    let acpi_vbox = IoPortRegistry::reserve::<u16>(0x4004).expect("VBox ACPI PM1A_CNT port");
-    unsafe {
-        acpi.write(0x2000);
-        acpi_bochs.write(0x2000);
-        acpi_vbox.write(0x3400);
-    }
+    ostd_power::acpi_poweroff_broadcast();
 }
 pub fn kernel_quiesce_interrupts() {
     ensure_kernel_page_dir();
@@ -132,8 +118,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
     klog_info!("Rebooting via keyboard controller...");
 
     hpet::delay_ms(50);
-    let ps2_cmd = IoPortRegistry::reserve::<u8>(0x64).expect("PS/2 command port");
-    unsafe { ps2_cmd.write(0xFE) };
+    ostd_power::ps2_reset_pulse();
 
     klog_info!("Keyboard reset failed, attempting triple fault...");
 

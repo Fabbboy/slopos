@@ -1,4 +1,3 @@
-use core::ffi::CStr;
 #[cfg(feature = "xe-gpu")]
 use core::ffi::c_char;
 
@@ -44,11 +43,9 @@ fn serial_note(msg: &str) {
 
 #[cfg(feature = "xe-gpu")]
 fn cmdline_contains(cmdline: *const c_char, needle: &str) -> bool {
-    if cmdline.is_null() {
+    let Some(haystack) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(cmdline) else {
         return false;
-    }
-
-    let haystack = unsafe { CStr::from_ptr(cmdline) }.to_bytes();
+    };
     let needle = needle.as_bytes();
     if needle.is_empty() || needle.len() > haystack.len() {
         return false;
@@ -71,11 +68,8 @@ fn boot_video_backend() -> video::VideoBackend {
 }
 
 fn apply_serial_mirror_cmdline() {
-    let cmdline = boot_get_cmdline();
-    if cmdline.is_null() {
-        return;
-    }
-    let Ok(cmdline) = (unsafe { CStr::from_ptr(cmdline) }).to_str() else {
+    let Some(cmdline) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
+    else {
         return;
     };
     if cmdline
@@ -309,12 +303,7 @@ use slopos_testing::config_from_cmdline;
 
 fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     // Parse command line to get test config
-    let cmdline = boot_get_cmdline();
-    let cmdline_str = if cmdline.is_null() {
-        None
-    } else {
-        unsafe { CStr::from_ptr(cmdline) }.to_str().ok()
-    };
+    let cmdline_str = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
     let test_config = config_from_cmdline(cmdline_str);
 
     if !test_config.enabled {

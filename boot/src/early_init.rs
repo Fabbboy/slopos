@@ -75,6 +75,44 @@ impl BootInitStep {
     }
 }
 
+/// Internal helper: pick the literal `.boot_init_<phase>` section
+/// label and route through OSTD's `link_section_static!` so the
+/// Edition-2024 `unsafe(link_section = …)` keyword stays inside the
+/// OSTD macro expansion.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __boot_init_link_section {
+    (early_hw, $($item:tt)*) => {
+        $crate::__boot_init_emit!(".boot_init_early_hw", $($item)*);
+    };
+    (memory, $($item:tt)*) => {
+        $crate::__boot_init_emit!(".boot_init_memory", $($item)*);
+    };
+    (drivers, $($item:tt)*) => {
+        $crate::__boot_init_emit!(".boot_init_drivers", $($item)*);
+    };
+    (services, $($item:tt)*) => {
+        $crate::__boot_init_emit!(".boot_init_services", $($item)*);
+    };
+    (optional, $($item:tt)*) => {
+        $crate::__boot_init_emit!(".boot_init_optional", $($item)*);
+    };
+}
+
+/// Internal helper: emit one `#[used] #[unsafe(link_section = "...")]`
+/// static via OSTD's syntactic-`unsafe`-absorbing macro.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __boot_init_emit {
+    ($section:literal, static $name:ident : $ty:ty = $init:expr ;) => {
+        ::slopos_ostd::link_section_static! {
+            #[used]
+            section = $section;
+            static $name : $ty = $init;
+        }
+    };
+}
+
 /// Register a boot-init step.
 ///
 /// All boot init functions take `&mut BootCtx` and return `i32`. Use
@@ -95,13 +133,14 @@ macro_rules! boot_init {
             ) -> i32 {
                 $func(ctx)
             }
-            #[used]
-            #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-            static STEP: $crate::early_init::BootInitStep = $crate::early_init::BootInitStep::new(
-                $label,
-                wrapper as $crate::early_init::BootInitFn,
-                $flags,
-            );
+            $crate::__boot_init_link_section! {
+                $phase,
+                static STEP: $crate::early_init::BootInitStep = $crate::early_init::BootInitStep::new(
+                    $label,
+                    wrapper as $crate::early_init::BootInitFn,
+                    $flags,
+                );
+            }
         };
         #[allow(dead_code)]
         const $static_name: () = ();
@@ -133,13 +172,14 @@ macro_rules! boot_init {
                 $func(ctx);
                 0
             }
-            #[used]
-            #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-            static STEP: $crate::early_init::BootInitStep = $crate::early_init::BootInitStep::new(
-                $label,
-                wrapper as $crate::early_init::BootInitFn,
-                $flags,
-            );
+            $crate::__boot_init_link_section! {
+                $phase,
+                static STEP: $crate::early_init::BootInitStep = $crate::early_init::BootInitStep::new(
+                    $label,
+                    wrapper as $crate::early_init::BootInitFn,
+                    $flags,
+                );
+            }
         };
         #[allow(dead_code)]
         const $static_name: () = ();
@@ -576,15 +616,14 @@ pub fn kernel_main_impl() {
         // `current_pcr()` is callable from any subsequent boot step.
         let bsp_apic_id = crate::apic_id::read_bsp_apic_id();
         slopos_arch::pcr::init_bsp_pcr(token, bsp_apic_id);
-        // SAFETY: `get_pcr_mut(0)` returns the unique BSP PCR pointer
-        // just minted by `init_bsp_pcr`; no other CPU has come online
-        // yet (we are pre-SMP), so this is the sole writer to the BSP
-        // PCR's GDT/TSS slots.
-        unsafe {
-            let pcr = slopos_arch::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
-            pcr.init_gdt();
-            pcr.install();
-        }
+        // `get_pcr_mut_via_token(0)` is the safe surface: it relies on
+        // the per-CPU-slot Inv. 8 contract, which holds trivially at
+        // BSP-init time because the BSP is the only writer (pre-SMP)
+        // and the slot was minted by `init_bsp_pcr` immediately above.
+        // `bsp_init_gdt_and_install` pairs the `init_gdt`/`install`
+        // halves of the PCR-bringup contract under the same token.
+        let pcr = slopos_arch::pcr::get_pcr_mut_via_token(0).expect("BSP PCR not initialized");
+        pcr.bsp_init_gdt_and_install(token);
 
         // Activate OSTD's held-lock walker now that PCR is live so
         // every subsequent SpinLock acquisition is tracked. The panic

@@ -13,9 +13,9 @@ pub use slopos_ostd::irq::{
     EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
-    EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry, LAPIC_TIMER_VECTOR,
-    LUF_DRAIN_IPI_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
-    TLB_SHOOTDOWN_VECTOR,
+    EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry, IstPreemptHold,
+    LAPIC_TIMER_VECTOR, LUF_DRAIN_IPI_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR,
+    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
 
@@ -81,44 +81,32 @@ impl ExceptionMode {
 mod handler_tables {
     use super::ExceptionHandler;
     use core::sync::atomic::{AtomicPtr, Ordering};
+    use slopos_ostd::arch::x86_64::kernel_ptr::fn_ptr;
 
     const NULL_SLOT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
     static PANIC: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
     static OVERRIDE: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
 
-    fn encode(h: Option<ExceptionHandler>) -> *mut () {
-        match h {
-            Some(f) => f as *mut (),
-            None => core::ptr::null_mut(),
-        }
-    }
-
-    fn decode(raw: *mut ()) -> Option<ExceptionHandler> {
-        if raw.is_null() {
-            None
-        } else {
-            // SAFETY: every value stored here is either null (handled
-            // above) or a value cast from `ExceptionHandler` in `encode`.
-            // `fn` pointers and `*mut ()` are layout-compatible on
-            // x86_64, so the round-trip preserves the original fn ptr.
-            Some(unsafe { core::mem::transmute::<*mut (), ExceptionHandler>(raw) })
-        }
-    }
-
     pub fn install_panic(vector: u8, handler: ExceptionHandler) {
-        PANIC[vector as usize].store(encode(Some(handler)), Ordering::Release);
+        PANIC[vector as usize].store(
+            fn_ptr::encode::<ExceptionHandler>(Some(handler)),
+            Ordering::Release,
+        );
     }
 
     pub fn panic_for(vector: u8) -> Option<ExceptionHandler> {
-        decode(PANIC[vector as usize].load(Ordering::Acquire))
+        fn_ptr::decode::<ExceptionHandler>(PANIC[vector as usize].load(Ordering::Acquire))
     }
 
     pub fn install_override(vector: u8, handler: Option<ExceptionHandler>) {
-        OVERRIDE[vector as usize].store(encode(handler), Ordering::Release);
+        OVERRIDE[vector as usize].store(
+            fn_ptr::encode::<ExceptionHandler>(handler),
+            Ordering::Release,
+        );
     }
 
     pub fn override_for(vector: u8) -> Option<ExceptionHandler> {
-        decode(OVERRIDE[vector as usize].load(Ordering::Acquire))
+        fn_ptr::decode::<ExceptionHandler>(OVERRIDE[vector as usize].load(Ordering::Acquire))
     }
 
     pub fn clear_overrides() {
@@ -160,18 +148,7 @@ pub fn idt_set_gate(vector: u8, handler: u64, selector: u16, typ: u8) {
 }
 
 pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
-    if out_entry.is_null() {
-        return -1;
-    }
-    let entry = BUILDER.get_gate(vector);
-    // SAFETY: out_entry is non-null per the guard above; the caller's
-    // C-ABI contract is that it points at a writable `IdtEntry`. This
-    // is the FFI boundary write — Rust cannot encode the caller's
-    // promise about the pointee's validity.
-    unsafe {
-        core::ptr::write(out_entry, entry);
-    }
-    0
+    BUILDER.write_gate_to_caller(vector, out_entry)
 }
 
 pub fn idt_get_gate_opaque(vector: u8, out_entry: *mut c_void) -> i32 {
@@ -222,14 +199,11 @@ pub fn exception_is_critical(vector: u8) -> i32 {
 /// bringup paths call this, so it accepts any `CpuInitWitness`
 /// (`BspToken` or `ApToken`) — the witness gates the call to a
 /// boot-init scope without distinguishing BSP from AP.
-pub fn idt_load<W: slopos_ostd::sync::CpuInitWitness>(_witness: &W) {
-    // SAFETY: BUILDER is `static`; gates have been populated by
-    // `idt_init` (called earlier in boot); GDT/TSS describing
-    // KERNEL_CODE has already been loaded by `gdt_init_for_cpu`.
-    // Inv. 2.
-    unsafe {
-        BUILDER.load();
-    }
+pub fn idt_load<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
+    // BUILDER is `static` and BSP-init / AP-init ordering guarantees
+    // gate population + GDT/TSS load already happened — encoded by
+    // the typed `&'static IdtBuilder` + `CpuInitWitness` signature.
+    BUILDER.load_static(witness);
 }
 
 fn handle_tlb_shootdown_ipi() {
@@ -258,43 +232,10 @@ fn handle_luf_drain_ipi() {
     send_eoi();
 }
 
-/// RAII guard that holds preempt_count elevated without triggering the
-/// reschedule callback on drop.  Used for IST-based exception handlers
-/// where yielding would leave the handler suspended on a reusable IST stack.
-struct IstPreemptHold {
-    active: bool,
-}
-
-impl IstPreemptHold {
-    /// Increment preempt_count to prevent deferred rescheduling.
-    #[inline]
-    fn new(active: bool) -> Self {
-        if active {
-            unsafe {
-                slopos_arch::pcr::current_pcr()
-                    .preempt_count
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        Self { active }
-    }
-}
-
-impl Drop for IstPreemptHold {
-    #[inline]
-    fn drop(&mut self) {
-        if self.active {
-            // Decrement WITHOUT calling the reschedule callback.
-            // Any pending reschedule will be handled naturally by the next
-            // timer tick or voluntary yield after we return via IRET.
-            unsafe {
-                slopos_arch::pcr::current_pcr()
-                    .preempt_count
-                    .fetch_sub(1, core::sync::atomic::Ordering::Release);
-            }
-        }
-    }
-}
+// `IstPreemptHold` is provided by OSTD's `slopos_ostd::irq` module —
+// see the import at the top of this file. The boot-side path used to
+// duplicate the inc/dec body; now it just borrows the canonical guard
+// type.
 
 /// NMI watchdog handler -- invoked when a neighbouring CPU sends an NMI
 /// because this CPU has not recorded a timer tick for >500 ms.
@@ -331,33 +272,20 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     // we're on an IST stack), but it eliminates the obvious fault classes
     // — null, user-half, unaligned, and end-of-canonical-space wrap-around.
     {
+        use slopos_ostd::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64;
         let mut rbp = frame.rbp;
         klog_info!("NMI WATCHDOG: CPU {} backtrace:", cpu_id);
         klog_info!("  [0] {:#x}", frame.rip);
         for depth in 1..=16u32 {
-            if rbp == 0
-                || (rbp >> 47) != 0x1FFFF
-                || (rbp & 7) != 0
-                || rbp
-                    .checked_add(16)
-                    .map_or(true, |end| (end >> 47) != 0x1FFFF)
-            {
+            // Validate-then-read inside `read_volatile_canonical_kernel_u64`:
+            // canonical-kernel, 8-byte-aligned, 8-byte headroom on each
+            // word. The second read needs an extra 8 bytes of canonical
+            // headroom — re-validate by asking for the +8 offset.
+            let Some(next_rbp) = read_volatile_canonical_kernel_u64(rbp) else {
                 break;
-            }
-            let saved_rbp_ptr = rbp as *const u64;
-            let ret_addr_ptr = (rbp as *const u64).wrapping_add(1);
-            // SAFETY: best-effort diag read in NMI context. The four
-            // checks above guarantee the address is canonical-kernel,
-            // aligned, and that both u64 reads stay in the canonical
-            // half. A read into an unmapped kernel page would still
-            // fault, but that is a strictly smaller risk than the
-            // pre-validation version which could fault on null /
-            // misaligned / non-canonical addresses too.
-            let (next_rbp, ret_addr) = unsafe {
-                (
-                    core::ptr::read_volatile(saved_rbp_ptr),
-                    core::ptr::read_volatile(ret_addr_ptr),
-                )
+            };
+            let Some(ret_addr) = read_volatile_canonical_kernel_u64(rbp.wrapping_add(8)) else {
+                break;
             };
             klog_info!("  [{}] {:#x}", depth, ret_addr);
             if next_rbp <= rbp {
@@ -368,9 +296,7 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     }
 
     // Force-release all tracked locks so other CPUs can make progress.
-    unsafe {
-        slopos_ostd::sync::poison_unlock_all_held();
-    }
+    slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
 
     panic!("NMI WATCHDOG: CPU {} not responding for >500ms", cpu_id);
 }
@@ -608,21 +534,26 @@ fn initialize_handler_tables() {
 /// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET
 /// frame.  Logs the corruption for debugging, then panics.
 ///
-/// # Safety
-/// `iret_frame` must point to a readable region of at least 5 consecutive
-/// `u64` values laid out as `[RIP, CS, RFLAGS, RSP, SS]`.  The pointer
-/// need not be aligned (values are read with `read_unaligned`).
-pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
+/// Safe-fn surface: the OSTD helper `read_unaligned_u64` centralises
+/// the `read_unaligned` unsafe; the caller-supplied pointer arrives
+/// from the ISR-asm stub (described by the FFI boundary contract in
+/// `ffi_boundary::isr_iret_frame_corrupt`), so the `pub(crate)` shim
+/// here only needs to forward.
+pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
+    use slopos_ostd::arch::x86_64::kernel_ptr::read_unaligned_u64;
     use slopos_ostd::klog_info;
 
-    // SAFETY: caller guarantees iret_frame points to 5 readable u64s.
+    // SAFETY: caller (ISR asm stub) guarantees `iret_frame` points to
+    // 5 readable u64s laid out as `[RIP, CS, RFLAGS, RSP, SS]`. The
+    // unsafe `read_unaligned` is centralised inside OSTD's
+    // `read_unaligned_u64` helper.
     let (rip, cs, rflags, rsp, ss) = unsafe {
         (
-            core::ptr::read_unaligned(iret_frame),
-            core::ptr::read_unaligned(iret_frame.add(1)),
-            core::ptr::read_unaligned(iret_frame.add(2)),
-            core::ptr::read_unaligned(iret_frame.add(3)),
-            core::ptr::read_unaligned(iret_frame.add(4)),
+            read_unaligned_u64(iret_frame),
+            read_unaligned_u64(iret_frame.add(1)),
+            read_unaligned_u64(iret_frame.add(2)),
+            read_unaligned_u64(iret_frame.add(3)),
+            read_unaligned_u64(iret_frame.add(4)),
         )
     };
 
@@ -664,7 +595,9 @@ pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
             klog_info!("  [{:+}] {:p} = <out of bounds>", offset, addr);
             continue;
         }
-        let val = unsafe { core::ptr::read_unaligned(addr) };
+        // SAFETY: bounds-checked above against the live kernel-stack
+        // range; the unsafe `read_unaligned` is centralised in OSTD.
+        let val = unsafe { read_unaligned_u64(addr) };
         let marker = if offset == 0 {
             " <-- RIP"
         } else if offset == 1 {

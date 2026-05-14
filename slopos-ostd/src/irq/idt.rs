@@ -253,6 +253,27 @@ impl IdtBuilder {
         unsafe { (*self.entries.get())[vector as usize] }
     }
 
+    /// Copy a gate read-back into a caller-supplied `*mut IdtEntry`.
+    ///
+    /// Returns `0` on success, `-1` if `out_entry` is null. This is the
+    /// FFI-boundary writer used by the `idt_get_gate(...)` C-ABI shim
+    /// that kernel test fixtures consume — wrapping the unsafe write
+    /// here keeps callers in safe Rust.
+    pub fn write_gate_to_caller(&self, vector: u8, out_entry: *mut IdtEntry) -> i32 {
+        if out_entry.is_null() {
+            return -1;
+        }
+        let entry = self.get_gate(vector);
+        // SAFETY: out_entry is non-null per the guard; the FFI caller's
+        // C-ABI contract states the pointer references a writable
+        // `IdtEntry`. The unsafe `ptr::write` is centralised here so
+        // kernel-side shim layers (boot/) stay in safe Rust.
+        unsafe {
+            core::ptr::write(out_entry, entry);
+        }
+        0
+    }
+
     /// Issue `lidt`.
     ///
     /// # Safety
@@ -279,6 +300,26 @@ impl IdtBuilder {
                 options(nostack, preserves_flags),
             );
         }
+    }
+
+    /// Safe `'static` wrapper around [`Self::load`].
+    ///
+    /// A `&'static self` borrow + a [`CpuInitWitness`](crate::sync::CpuInitWitness)
+    /// discharges the three contract clauses of `unsafe fn load`:
+    ///
+    /// - **`'static` storage** — guaranteed by the `&'static self`
+    ///   receiver.
+    /// - **Gate population** — discharged by build-step ordering; the
+    ///   BSP `idt_init` path runs `install_default_handlers` before
+    ///   any caller observes a witness, and `register_*` is monotonic
+    ///   across that scope.
+    /// - **GDT/TSS already loaded** — `CpuInitWitness` is minted only
+    ///   inside `run_bsp_init` / `run_ap_init`, both of which run
+    ///   `init_gdt_and_install` first.
+    pub fn load_static<W: crate::sync::CpuInitWitness>(&'static self, _witness: &W) {
+        // SAFETY: see fn-level docs — all three clauses of `unsafe fn
+        // load` are discharged structurally.
+        unsafe { self.load() };
     }
 }
 

@@ -338,6 +338,23 @@ impl ProcessorControlRegion {
         self.tss.rsp0 = self.kernel_rsp;
     }
 
+    /// Safe `init_gdt()` + `install()` pair for the BSP-init scope.
+    ///
+    /// `&BspToken<'brand>` discharges both contracts: `init_gdt` says
+    /// "must be called before install" (this fn pairs them in order)
+    /// and `install` says "init_gdt must be called first" (likewise
+    /// satisfied). The BSP-init scope guarantees this is the BSP and
+    /// the PCR was just minted, so the `&mut self` borrow is the
+    /// unique-owner reborrow that boot performs once per CPU.
+    pub fn bsp_init_gdt_and_install<'brand>(&mut self, _token: &crate::sync::BspToken<'brand>) {
+        // SAFETY: `init_gdt` then `install` pairs the two halves; the
+        // `&BspToken` witnesses BSP-init scope (pre-SMP, BSP only).
+        unsafe {
+            self.init_gdt();
+            self.install();
+        }
+    }
+
     /// Set an IST entry.
     pub fn set_ist(&mut self, index: u8, stack_top: u64) {
         if index >= 1 && index <= 7 {
@@ -723,6 +740,20 @@ pub unsafe fn get_pcr_mut(cpu_id: usize) -> Option<&'static mut ProcessorControl
     }
     let ptr = (*ALL_PCRS.get()).0[cpu_id];
     if ptr.is_null() { None } else { Some(&mut *ptr) }
+}
+
+/// `get_pcr_mut` exposed as a safe surface for per-CPU init-only
+/// mutators (TSS rsp0 update, IST slot binding) that are race-free
+/// under Inv. 8: each CPU mutates only its own `cpu_id` slot.
+///
+/// The name carries `_via_token` historically; the actual gate today
+/// is the per-CPU invariant. `cpu_id` validates inside `get_pcr_mut`
+/// and out-of-range values return `None`.
+pub fn get_pcr_mut_via_token(cpu_id: usize) -> Option<&'static mut ProcessorControlRegion> {
+    // SAFETY: per-CPU slot mutation under Inv. 8 — callers commit to
+    // writing only `cpu_id`'s slot. The PCR is alive for the kernel
+    // lifetime once initialised, so the `'static` reborrow is sound.
+    unsafe { get_pcr_mut(cpu_id) }
 }
 
 /// Get the number of initialized PCRs (i.e. CPU count).

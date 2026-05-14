@@ -1,5 +1,6 @@
 pub mod port;
 pub mod port_consts;
+pub mod power;
 pub mod raw_port;
 
 pub use port::{

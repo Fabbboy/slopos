@@ -65,3 +65,29 @@ pub fn install_safestack_runtime<'brand>(_token: &BspToken<'brand>) {
 pub fn install_ap_trampoline<'brand>(_token: &BspToken<'brand>) -> ApTrampolineFn {
     super::naked::ap_entry
 }
+
+/// Like [`install_ap_trampoline`], but reinterprets the returned pointer
+/// as caller-supplied fn-pointer type `F`. The cast is sound when `F`
+/// describes the same x86-64 SysV ABI: a single `*const`-shaped pointer
+/// argument in `rdi` and a `-> !` divergent return. Limine's
+/// `MpGotoFunction = unsafe extern "C" fn(&MpInfo) -> !` qualifies — both
+/// `&MpInfo` and `*const ()` map to the same calling convention. Lets
+/// kernel boot code receive the trampoline already typed against the
+/// bootloader API without re-doing the transmute on the caller side
+/// (and therefore without spelling `unsafe` outside OSTD).
+///
+/// # Safety contract (centralised here)
+/// `F` MUST be a `extern "C" fn(*const-shaped-pointer) -> !`-compatible
+/// fn-pointer type. `size_of::<F>() == size_of::<ApTrampolineFn>()` is
+/// asserted at compile time below; the SysV ABI guarantees identical
+/// register layout for any single-pointer-arg, divergent-return signature.
+pub fn install_ap_trampoline_as<'brand, F: Copy>(token: &BspToken<'brand>) -> F {
+    const {
+        assert!(core::mem::size_of::<F>() == core::mem::size_of::<ApTrampolineFn>());
+    }
+    let f = install_ap_trampoline(token);
+    // SAFETY: const assert above guarantees layout-equal fn-pointer
+    // sizes; SysV ABI passes a single pointer arg in rdi regardless of
+    // the pointer's `T` type, so the cast preserves the call ABI.
+    unsafe { core::mem::transmute_copy::<ApTrampolineFn, F>(&f) }
+}

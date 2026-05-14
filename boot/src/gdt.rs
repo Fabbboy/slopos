@@ -1,31 +1,22 @@
-use core::cell::SyncUnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_arch::arch::gdt::{GDT_STANDARD_ENTRIES, GdtLayout, IstSlot, SegmentSelector, Tss64};
+use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_hermetic::KernelStackTop;
 use slopos_ostd::arch::x86_64::msr::{Msr, install_syscall_msrs, star_from_selectors, write_msr};
+use slopos_ostd::arch::x86_64::per_cpu_gdt;
 use slopos_ostd::klog_debug;
 
-#[repr(C)]
-struct PerCpuSyscallData {
-    user_rsp_scratch: u64,
-    kernel_rsp: u64,
+// `SYSCALL_CPU_DATA_PTR` keeps the same C-ABI symbol the asm
+// trampoline reads via `gs:[16]` on CPU 0 before PCR is live. The
+// underlying per-CPU storage lives in
+// `slopos_ostd::arch::x86_64::per_cpu_gdt`; this atomic caches the
+// CPU-0 pointer for the syscall asm to load on entry. `AtomicU64`
+// has the same memory layout as a bare `u64`, so the asm side's
+// `gs:[16]` load sees the value verbatim.
+slopos_ostd::no_mangle_static! {
+    static SYSCALL_CPU_DATA_PTR: AtomicU64 = AtomicU64::new(0);
 }
-
-const EMPTY_SYSCALL_DATA: PerCpuSyscallData = PerCpuSyscallData {
-    user_rsp_scratch: 0,
-    kernel_rsp: 0,
-};
-
-static PER_CPU_GDT: SyncUnsafeCell<[GdtLayout; MAX_CPUS]> =
-    SyncUnsafeCell::new([GdtLayout::new(); MAX_CPUS]);
-static PER_CPU_TSS: SyncUnsafeCell<[Tss64; MAX_CPUS]> =
-    SyncUnsafeCell::new([Tss64::new(); MAX_CPUS]);
-static PER_CPU_SYSCALL_DATA: SyncUnsafeCell<[PerCpuSyscallData; MAX_CPUS]> =
-    SyncUnsafeCell::new([EMPTY_SYSCALL_DATA; MAX_CPUS]);
-
-#[unsafe(no_mangle)]
-static SYSCALL_CPU_DATA_PTR: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
 
 pub fn gdt_init() {
     gdt_init_for_cpu(0);
@@ -43,21 +34,13 @@ pub fn gdt_init_for_cpu(cpu_id: usize) {
 
     klog_debug!("GDT: Initializing descriptor tables for CPU {}", cpu_id);
 
-    unsafe {
-        (*PER_CPU_GDT.get())[cpu_id].entries = GDT_STANDARD_ENTRIES;
-        (*PER_CPU_GDT.get())[cpu_id].load_tss(&(*PER_CPU_TSS.get())[cpu_id]);
-
-        (*PER_CPU_TSS.get())[cpu_id].iomap_base = core::mem::size_of::<Tss64>() as u16;
-        if cpu_id == 0 {
-            (*PER_CPU_TSS.get())[cpu_id].rsp0 =
-                slopos_ostd::arch::x86_64::linker::kernel_stack_top() as u64;
-        }
-
-        slopos_ostd::arch::x86_64::gdt::install(
-            &(*PER_CPU_GDT.get())[cpu_id],
-            SegmentSelector::TSS,
+    if cpu_id == 0 {
+        per_cpu_gdt::set_kernel_rsp0(
+            cpu_id,
+            slopos_ostd::arch::x86_64::linker::kernel_stack_top() as u64,
         );
     }
+    per_cpu_gdt::init_and_install(cpu_id);
 
     klog_debug!("GDT: Initialized with TSS loaded for CPU {}", cpu_id);
 }
@@ -70,11 +53,8 @@ pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-    unsafe {
-        (*PER_CPU_TSS.get())[cpu_id].rsp0 = rsp0;
-        (*PER_CPU_SYSCALL_DATA.get())[cpu_id].kernel_rsp = rsp0;
-    }
-    if let Some(pcr) = unsafe { slopos_arch::pcr::get_pcr_mut(cpu_id) } {
+    per_cpu_gdt::set_kernel_rsp0(cpu_id, rsp0);
+    if let Some(pcr) = slopos_arch::pcr::get_pcr_mut_via_token(cpu_id) {
         pcr.kernel_rsp = rsp0;
         pcr.sync_tss_rsp0();
     }
@@ -111,10 +91,8 @@ pub fn gdt_set_ist_for_cpu<'b, K: slopos_hermetic::CpuInitKind>(
     }
     let addr = stack_top.as_u64();
     let offset = slot.as_tss_offset();
-    unsafe {
-        (*PER_CPU_TSS.get())[cpu_id].ist[offset] = addr;
-    }
-    if let Some(pcr) = unsafe { slopos_arch::pcr::get_pcr_mut(cpu_id) } {
+    per_cpu_gdt::set_ist(cpu_id, offset, addr);
+    if let Some(pcr) = slopos_arch::pcr::get_pcr_mut_via_token(cpu_id) {
         pcr.set_ist(slot.as_index(), addr);
     }
 }
@@ -126,6 +104,8 @@ pub fn gdt_set_ist_for_cpu<'b, K: slopos_hermetic::CpuInitKind>(
 /// any `CpuInitWitness` (`BspToken` or `ApToken`); the witness simply
 /// gates the call to a boot-init scope.
 pub fn syscall_msr_init<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
+    use slopos_arch::arch::gdt::SegmentSelector;
+
     klog_debug!("SYSCALL: Initializing MSRs for fast syscall path");
 
     let star_value = star_from_selectors(SegmentSelector::KERNEL_CODE, SegmentSelector::USER_DATA);
@@ -167,19 +147,25 @@ fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-    unsafe {
-        (*PER_CPU_SYSCALL_DATA.get())[cpu_id].kernel_rsp = (*PER_CPU_TSS.get())[cpu_id].rsp0;
-        let cpu_data_ptr = &(*PER_CPU_SYSCALL_DATA.get())[cpu_id] as *const _ as u64;
-        if cpu_id == 0 {
-            *SYSCALL_CPU_DATA_PTR.get() = cpu_data_ptr;
-        }
-        write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
-        klog_debug!(
-            "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
-            cpu_id,
-            cpu_data_ptr
-        );
+    let rsp0 = per_cpu_gdt::rsp0(cpu_id);
+    per_cpu_gdt::set_syscall_kernel_rsp(cpu_id, rsp0);
+    let cpu_data_ptr = per_cpu_gdt::syscall_data_ptr(cpu_id);
+    if cpu_id == 0 {
+        store_syscall_cpu_data_ptr(cpu_data_ptr);
     }
+    write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
+    klog_debug!(
+        "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
+        cpu_id,
+        cpu_data_ptr
+    );
+}
+
+/// Store `cpu_data_ptr` into the `SYSCALL_CPU_DATA_PTR` cell. The
+/// asm syscall trampoline reads this address before PCR-based
+/// `gs:[…]` accessors come online.
+fn store_syscall_cpu_data_ptr(cpu_data_ptr: u64) {
+    SYSCALL_CPU_DATA_PTR.store(cpu_data_ptr, Ordering::Release);
 }
 
 pub fn syscall_update_kernel_rsp(rsp: u64) {
@@ -188,10 +174,5 @@ pub fn syscall_update_kernel_rsp(rsp: u64) {
 }
 
 pub fn syscall_update_kernel_rsp_for_cpu(cpu_id: usize, rsp: u64) {
-    if cpu_id >= MAX_CPUS {
-        return;
-    }
-    unsafe {
-        (*PER_CPU_SYSCALL_DATA.get())[cpu_id].kernel_rsp = rsp;
-    }
+    per_cpu_gdt::set_syscall_kernel_rsp(cpu_id, rsp);
 }

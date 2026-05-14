@@ -30,7 +30,6 @@
 //!    grammar. They are not runtime unsafe.
 
 use core::{
-    cell::SyncUnsafeCell,
     ffi::{c_char, c_void},
     ptr,
 };
@@ -44,7 +43,7 @@ use limine::{
 };
 
 use slopos_abi::DisplayInfo;
-use slopos_ostd::sync::{KernelSync, OnceLock};
+use slopos_ostd::sync::{InitInPlace, KernelSync, OnceLock};
 use slopos_ostd::{klog_debug, klog_info};
 
 pub use slopos_ostd::boot_info::{
@@ -52,49 +51,61 @@ pub use slopos_ostd::boot_info::{
     MemoryRegionKind,
 };
 
-#[used]
-#[unsafe(link_section = ".limine_requests_start_marker")]
-static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static KERNEL_FILE_REQUEST: ExecutableFileRequest = ExecutableFileRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static BOOTLOADER_INFO_REQUEST: BootloaderInfoRequest = BootloaderInfoRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static MP_REQUEST: MpRequest = MpRequest::new(0);
-
-#[used]
-#[unsafe(link_section = ".limine_requests_end_marker")]
-static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests_start_marker";
+    static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static BASE_REVISION: BaseRevision = BaseRevision::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static KERNEL_FILE_REQUEST: ExecutableFileRequest = ExecutableFileRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static BOOTLOADER_INFO_REQUEST: BootloaderInfoRequest = BootloaderInfoRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static MP_REQUEST: MpRequest = MpRequest::new(0);
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests_end_marker";
+    static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
+}
 
 fn convert_entry_type(entry_type: u64) -> MemoryRegionKind {
     match entry_type {
@@ -344,6 +355,27 @@ pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
     }
 }
 
+pub fn get_framebuffer_info(
+    addr: *mut u64,
+    width: *mut u32,
+    height: *mut u32,
+    pitch: *mut u32,
+    bpp: *mut u8,
+) -> i32 {
+    let info = sysinfo();
+    if let Some(boot_fb) = info.framebuffer {
+        use slopos_ostd::util::ptr_buf::nullable_write;
+        nullable_write(addr, *boot_fb.address as u64);
+        nullable_write(width, boot_fb.info.width);
+        nullable_write(height, boot_fb.info.height);
+        nullable_write(pitch, boot_fb.info.pitch);
+        nullable_write(bpp, boot_fb.info.format.bytes_per_pixel() * 8);
+        1
+    } else {
+        0
+    }
+}
+
 pub fn is_framebuffer_available() -> i32 {
     sysinfo().flags.framebuffer_available as i32
 }
@@ -475,7 +507,7 @@ struct LegacyMemmap {
 #[repr(transparent)]
 struct SyncMemmapPtrArray(KernelSync<[*const LimineMemmapEntry; 256]>);
 
-static LEGACY_MEMMAP: SyncUnsafeCell<LegacyMemmap> = SyncUnsafeCell::new(LegacyMemmap {
+static LEGACY_MEMMAP: InitInPlace<LegacyMemmap> = InitInPlace::new(LegacyMemmap {
     entries: [LimineMemmapEntry {
         base: 0,
         length: 0,
@@ -489,56 +521,45 @@ static LEGACY_MEMMAP: SyncUnsafeCell<LegacyMemmap> = SyncUnsafeCell::new(LegacyM
     },
 });
 
-static LEGACY_MEMMAP_INIT: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
 fn init_legacy_memmap() {
-    use core::sync::atomic::Ordering;
+    LEGACY_MEMMAP.init_once(|cell| {
+        let Some(memmap) = MEMMAP_REQUEST.response() else {
+            return;
+        };
 
-    if LEGACY_MEMMAP_INIT.swap(true, Ordering::SeqCst) {
-        return;
-    }
+        let entries = memmap.entries();
+        let count = entries.len().min(256);
 
-    let Some(memmap) = MEMMAP_REQUEST.response() else {
-        return;
-    };
-
-    let entries = memmap.entries();
-    let count = entries.len().min(256);
-
-    // SAFETY (Inv. 8): `LEGACY_MEMMAP_INIT.swap(true, SeqCst)` above
-    // gates this branch to a single thread for the kernel's lifetime;
-    // every other path returns early. The cell is `'static`, so the
-    // self-referential `cell.ptrs.0[i] = &cell.entries[i]` writes
-    // produce pointers that stay valid until the kernel exits. The
-    // `LimineMemmapResponse` C-ABI consumer contract requires this
-    // self-referential layout — retiring the `SyncUnsafeCell` would
-    // require flipping the consumer to `&[LimineMemmapEntry]`.
-    unsafe {
-        let cell = &mut *LEGACY_MEMMAP.get();
-
+        // The cell is at its final `'static` address (InitInPlace
+        // contract); writing self-referential `*const` pointers into
+        // `cell.ptrs.0[i] = &cell.entries[i]` produces addresses that
+        // remain valid for the kernel's lifetime. The
+        // `LimineMemmapResponse` C-ABI consumer contract requires
+        // this self-referential layout — retiring the cell would
+        // require flipping the consumer to `&[LimineMemmapEntry]`.
         for (i, entry) in entries.iter().take(count).enumerate() {
             cell.entries[i] = LimineMemmapEntry {
                 base: entry.base,
                 length: entry.length,
                 typ: entry_type_to_u64(entry.type_),
             };
-            (*cell.ptrs.0)[i] = &cell.entries[i];
+            cell.ptrs.0[i] = &cell.entries[i];
         }
 
         cell.response.entry_count = count as u64;
         cell.response.entries = KernelSync::new(cell.ptrs.0.as_ptr());
-    }
+    });
 }
 
 pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     init_legacy_memmap();
-    // SAFETY (Inv. 8): post-init the response struct is read-only for
-    // the kernel's lifetime; returning a `*const` to the static cell
-    // is sound for the boot consumer's downstream `*const` reads. The
-    // `*const`-only return type is the published C-ABI contract;
-    // returning `&'static LimineMemmapResponse` would let consumers
-    // observe stale `entries` should the cell ever be re-init'd, which
-    // the `LEGACY_MEMMAP_INIT.swap` gate intentionally forbids.
-    unsafe { &(*LEGACY_MEMMAP.get()).response as *const LimineMemmapResponse }
+    // Post-init the response struct is read-only for the kernel's
+    // lifetime; returning a `*const` to the cell is sound for the
+    // boot consumer's downstream `*const` reads. `as_ptr` projects
+    // the `*const LegacyMemmap` from the cell; we further `.cast` to
+    // `*const LimineMemmapResponse` via the `response` field offset
+    // (which is `repr(C)`-stable).
+    let base = LEGACY_MEMMAP.as_ptr();
+    let offset = core::mem::offset_of!(LegacyMemmap, response);
+    (base as *const u8).wrapping_add(offset) as *const LimineMemmapResponse
 }
