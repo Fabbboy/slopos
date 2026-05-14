@@ -1,6 +1,5 @@
 #[cfg(feature = "test-hooks")]
 pub mod context_tests;
-pub mod exit_info;
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod futex;
@@ -18,14 +17,19 @@ pub mod sleep;
 pub mod task;
 pub mod task_lock;
 pub mod task_stack;
-pub mod task_state;
 pub mod task_struct;
 #[cfg(feature = "test-hooks")]
 pub mod test_fixture;
 #[cfg(feature = "test-hooks")]
 pub mod test_hermetic;
-pub mod test_reports;
 pub mod trap;
 pub mod work_steal;
+
+// Re-export the OSTD-owned modules under their historical kernel-side
+// paths so existing `crate::scheduler::{exit_info, task_state,
+// test_reports}` imports continue to resolve.
+pub use slopos_ostd::task::exit_info;
+pub use slopos_ostd::task::state as task_state;
+pub use slopos_ostd::task::test_reports;
 
 pub use exit_info::ExitInfo;

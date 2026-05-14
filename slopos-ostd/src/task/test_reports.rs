@@ -3,13 +3,14 @@
 //! A user task's first `SYSCALL_TEST_REPORT` lazily allocates one of these
 //! rings into `Task::test_reports`. Non-test tasks never call the syscall
 //! and pay zero cost. After the task exits, the kernel-side userland-test
-//! runner calls [`task_drain_test_reports`](super::task::task_table::task_drain_test_reports)
+//! runner calls `task_drain_test_reports` (in the kernel-side scheduler)
 //! to take ownership of the ring and read out the recorded subtests.
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX, TEST_REPORT_RING_CAPACITY};
 use slopos_abi::task::INVALID_TASK_ID;
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_ostd::{AllocError, KBox, KVec, Zeroable};
+
+use crate::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+use crate::{AllocError, KBox, KVec, Zeroable};
 
 /// One subtest result. `name`/`msg` are length-prefixed byte arrays — the
 /// `*_len` fields hold the populated prefix length; the remainder is zero.

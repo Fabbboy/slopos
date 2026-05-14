@@ -9,6 +9,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+// Self-alias so the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions
+// (which name the trait as `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`)
+// resolve when used inside this crate itself.
+extern crate self as slopos_ostd;
 
 mod abi_pod;
 mod abi_zeroable;

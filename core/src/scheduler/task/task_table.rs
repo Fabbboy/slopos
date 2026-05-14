@@ -69,8 +69,10 @@ fn bump_pool_high_water(new_idx: usize) {
 ///
 /// Role tag for the zombie-list intrusive list. Threads through
 /// `Task::zombie_link`, distinct from the per-CPU `ReadyQueue`'s
-/// link slot — see `Task::ready_link`.
-pub enum ZombieListRole {}
+/// link slot — see `Task::ready_link`. Body lives in OSTD because the
+/// `LinkProvider<ZombieListRole>` impl for `Task` is emitted from the
+/// generic `TaskInner<K, U>` body inside OSTD.
+pub use slopos_ostd::task::link_roles::ZombieListRole;
 
 /// Allocation-free: `IntrusiveLinkedList::push` only updates the
 /// in-Task link slot; no heap touched while the spin-lock is held.
@@ -147,7 +149,7 @@ pub(super) fn free_task_stacks(task: *mut Task) {
         (*task).kernel_stack_top = 0;
         (*task).kernel_stack_size = 0;
 
-        // Same for the SafeStack data stack.
+        // Same for the SafeStack unsafe (data) stack.
         (*task).unsafe_stack = None;
         (*task).abi.unsafe_stack_sp = 0;
 

@@ -50,8 +50,10 @@ use slopos_ostd::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
-/// Role tag for the per-CPU `ReadyQueue` intrusive list.
-pub enum ReadyQueueRole {}
+/// Role tag for the per-CPU `ReadyQueue` intrusive list. Body lives in
+/// OSTD because the `LinkProvider<ReadyQueueRole>` impl for `Task` is
+/// emitted from the generic `TaskInner<K, U>` body inside OSTD.
+pub use slopos_ostd::task::link_roles::ReadyQueueRole;
 
 /// Per-priority FIFO of ready tasks. Refcount accounting is the
 /// caller's job (incremented on enqueue, decremented on dequeue /

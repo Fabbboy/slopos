@@ -1,5 +1,4 @@
 #![no_std]
-#![feature(allocator_api)]
 #![feature(sync_unsafe_cell)]
 
 pub mod driver_hooks;
