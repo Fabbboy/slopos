@@ -238,12 +238,9 @@ impl fmt::Display for NetDeviceFeatures {
 /// in use is **undefined behavior**.  The caller must ensure that NAPI polling
 /// and all socket TX paths are drained before unregistration.
 pub struct DeviceHandle {
-    /// Stable reference to the device, valid for the kernel's lifetime.
-    /// Devices are registered via `KBox` whose backing allocation is
-    /// then leaked into `'static` — networking devices are kernel-image
-    /// lifetime resources and there is no production unregister path
-    /// for them.
-    dev: &'static (dyn NetDevice + Send + Sync),
+    /// Stable pointer to the device, valid for its registered lifetime.
+    /// The pointed-to allocation is owned by the registry's `Box<dyn NetDevice>`.
+    dev: *const (dyn NetDevice + Send + Sync),
     /// Device index for identification and registry lookups.
     index: DevIndex,
     /// Per-device TX serialization.  Multiple sockets may transmit to the same
@@ -252,6 +249,12 @@ pub struct DeviceHandle {
     tx_lock: SpinLock<()>,
 }
 
+// SAFETY: DeviceHandle is designed for cross-thread use.  The raw pointer
+// targets a `dyn NetDevice + Send + Sync` allocation whose lifetime is
+// managed by the registry.  TX is serialized by `tx_lock`; RX is
+// single-consumer (NAPI loop).  Read-only accessors (mac, mtu, stats,
+// features) are inherently safe via the `Sync` bound on `NetDevice`.
+
 impl DeviceHandle {
     /// Transmit a packet through this device.
     ///
@@ -259,7 +262,11 @@ impl DeviceHandle {
     /// callers (socket TX paths) are serialized by this lock.
     pub fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
         let _guard = self.tx_lock.lock();
-        self.dev.tx(pkt)
+        // Caller invariant on `self.dev`: published by the registry,
+        // valid for the device's registered lifetime; the trait
+        // method takes `&self`, so no mutable aliasing.
+        let dev = slopos_ostd::dev::borrow_dyn(self.dev);
+        dev.tx(pkt)
     }
 
     /// Poll for received packets.
@@ -268,7 +275,10 @@ impl DeviceHandle {
     /// Does not acquire any lock — the NAPI loop is the sole consumer of the
     /// RX ring for a given device.
     pub fn poll_rx(&self, budget: usize, pool: &'static PacketPool) -> KVec<PacketBuf> {
-        self.dev.poll_rx(budget, pool)
+        // Same lifetime/aliasing argument as `tx`; this is the single
+        // RX consumer.
+        let dev = slopos_ostd::dev::borrow_dyn(self.dev);
+        dev.poll_rx(budget, pool)
     }
 
     /// Device index.
@@ -279,22 +289,26 @@ impl DeviceHandle {
 
     /// Read the device's MAC address (lock-free).
     pub fn mac(&self) -> MacAddr {
-        self.dev.mac()
+        // Pointer valid for device lifetime; mac() is read-only.
+        slopos_ostd::dev::borrow_dyn(self.dev).mac()
     }
 
     /// Read the device's MTU (lock-free).
     pub fn mtu(&self) -> u16 {
-        self.dev.mtu()
+        // Pointer valid for device lifetime; mtu() is read-only.
+        slopos_ostd::dev::borrow_dyn(self.dev).mtu()
     }
 
     /// Read a snapshot of device statistics (lock-free).
     pub fn stats(&self) -> NetDeviceStats {
-        self.dev.stats()
+        // Pointer valid for device lifetime; stats() is read-only.
+        slopos_ostd::dev::borrow_dyn(self.dev).stats()
     }
 
     /// Read device feature flags (lock-free).
     pub fn features(&self) -> NetDeviceFeatures {
-        self.dev.features()
+        // Pointer valid for device lifetime; features() is read-only.
+        slopos_ostd::dev::borrow_dyn(self.dev).features()
     }
 }
 
@@ -333,11 +347,8 @@ pub struct NetDeviceRegistry {
 
 /// Inner state behind the registry's `SpinLock`.
 pub(crate) struct RegistryInner {
-    /// Device slots. Each occupied slot holds a `&'static` reference
-    /// into the device's leaked heap allocation (devices are
-    /// kernel-lifetime resources, registered via `KBox::leak_unsized`
-    /// in `register`). `None` = empty slot.
-    slots: [Option<&'static (dyn NetDevice + Send + Sync)>; MAX_DEVICES],
+    /// Device slots.  `None` = empty slot.
+    slots: [Option<KBox<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
     /// Number of occupied slots.
     count: usize,
 }
@@ -376,16 +387,15 @@ impl NetDeviceRegistry {
         let mut inner = self.inner.lock();
         for (i, slot) in inner.slots.iter_mut().enumerate() {
             if slot.is_none() {
-                // Leak the box into a `&'static` reference. Network
-                // devices are kernel-lifetime resources — there is no
-                // production unregister path. The slot still tracks
-                // "device present" by `Some(())`, but the device data
-                // lives in the leaked allocation for the kernel's life.
-                let dev_ref: &'static (dyn NetDevice + Send + Sync) = KBox::leak_unsized(dev);
-                *slot = Some(dev_ref);
+                // Extract the raw pointer BEFORE moving the Box into the slot.
+                // The Box heap allocation is stable — moving the Box (a pointer-
+                // sized value) does not move the pointee.  The raw pointer
+                // captures both the data address and the vtable.
+                let dev_ptr: *const (dyn NetDevice + Send + Sync) = &*dev;
+                *slot = Some(dev);
                 inner.count += 1;
                 return Some(DeviceHandle {
-                    dev: dev_ref,
+                    dev: dev_ptr,
                     index: DevIndex(i),
                     tx_lock: SpinLock::new((), LOCK_LEVEL_RESOURCE),
                 });
@@ -394,24 +404,26 @@ impl NetDeviceRegistry {
         None
     }
 
-    /// Unregister a network device slot.
+    /// Unregister a network device.
     ///
-    /// Marks the slot as free (the device's heap allocation is
-    /// kernel-lifetime-leaked at register time, so this only frees
-    /// the slot index; any outstanding `DeviceHandle` continues to
-    /// reference the live device data via its `&'static` borrow).
+    /// Calls [`set_down()`](NetDevice::set_down) on the device, then frees the slot.
+    /// **The caller must ensure** that no [`DeviceHandle`] for this device is
+    /// still in use — any outstanding raw pointers become dangling after this call.
     ///
-    /// Returns `true` if a slot was found and freed, `false` if the
-    /// slot was already empty. There is no production caller for this
-    /// method — kept for symmetry with the registration API.
+    /// Returns `true` if a device was found and removed, `false` if the slot
+    /// was already empty.
     pub fn unregister(&self, index: DevIndex) -> bool {
         let mut inner = self.inner.lock();
         let idx = index.0;
         if idx >= MAX_DEVICES {
             return false;
         }
-        if inner.slots[idx].take().is_some() {
+        if let Some(dev) = inner.slots[idx].take() {
+            dev.set_down();
             inner.count -= 1;
+            // `dev` (Box) is dropped here, freeing the heap allocation.
+            // Any DeviceHandle raw pointers are now dangling — the caller
+            // must have drained all data-plane activity before this call.
             true
         } else {
             false

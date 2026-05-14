@@ -209,6 +209,78 @@ pub fn section_slice<'a, T>(start: *const T, stop: *const T) -> &'a [T] {
     unsafe { core::slice::from_raw_parts(start, len) }
 }
 
+/// Write `value` through a raw `*mut T` if the pointer is non-null.
+/// No-op when `ptr.is_null()`.
+///
+/// Used by syscall handlers that accept optional out-pointers from
+/// userspace and need to publish a single value (e.g. `src_ip`,
+/// `peer_port`). Caller upholds the module-level contract for `ptr`
+/// when non-null (writable for `size_of::<T>()` bytes, aligned for `T`,
+/// no aliasing borrow live).
+#[inline]
+pub fn write_if_non_null<T>(ptr: *mut T, value: T) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: caller upholds the module-level contract; the null
+    // branch above narrows to the non-null case.
+    unsafe {
+        *ptr = value;
+    }
+}
+
+/// Write `value` at `ptr.add(index)` using `ptr::write`. Folds
+/// `unsafe { ptr.add(index).write(value) }` interior to OSTD.
+#[inline]
+pub fn write_at_index<T>(ptr: *mut T, index: usize, value: T) {
+    // SAFETY: caller upholds the module-level contract for the
+    // `[ptr, ptr + index + 1)` range.
+    unsafe {
+        ptr.add(index).write(value);
+    }
+}
+
+/// Append a NUL terminator at `buf[len]` after copying `len` bytes
+/// from `src`. Used by C-string–producing syscall paths.
+///
+/// Caller upholds the module-level contract for `buf` over the range
+/// `[buf, buf + len + 1)`.
+#[inline]
+pub fn copy_with_nul_terminator(buf: *mut u8, src: &[u8], len: usize) {
+    // SAFETY: caller-verified bounds; copy plus one trailing NUL.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), buf, len);
+        *buf.add(len) = 0;
+    }
+}
+
+/// Copy `len` bytes from `src` to `dst` using
+/// `copy_nonoverlapping`. Caller upholds non-overlap + bounds.
+#[inline]
+pub fn copy_bytes(dst: *mut u8, src: *const u8, len: usize) {
+    // SAFETY: caller upholds the module-level contract for both
+    // ranges and certifies they do not overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, len);
+    }
+}
+
+/// Advance `ptr` by `byte_offset` elements (typed) — i.e.
+/// `ptr.add(byte_offset)`. Caller asserts the resulting pointer
+/// stays within the same allocation.
+#[inline]
+pub fn ptr_add<T>(ptr: *mut T, count: usize) -> *mut T {
+    // SAFETY: caller asserts the in-bounds offset.
+    unsafe { ptr.add(count) }
+}
+
+/// Same as [`ptr_add`] but for `*const T`.
+#[inline]
+pub fn ptr_add_const<T>(ptr: *const T, count: usize) -> *const T {
+    // SAFETY: caller asserts the in-bounds offset.
+    unsafe { ptr.add(count) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

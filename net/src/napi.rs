@@ -97,7 +97,7 @@ static NAPI_KICK_FN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 /// Called once during NIC driver init (e.g., `virtio_net::init`).
 /// The function should schedule + execute a NAPI poll cycle.
 pub fn register_kick(f: fn()) {
-    NAPI_KICK_FN.store(f as *mut (), Ordering::Release);
+    NAPI_KICK_FN.store(slopos_ostd::util::fn_ptr::encode(f), Ordering::Release);
 }
 
 /// Trigger a NAPI poll cycle if a kick function has been registered.
@@ -106,9 +106,7 @@ pub fn register_kick(f: fn()) {
 #[inline]
 pub fn kick() {
     let ptr = NAPI_KICK_FN.load(Ordering::Acquire);
-    if !ptr.is_null() {
-        // SAFETY: `ptr` was stored via `register_kick` from a valid `fn()`.
-        let f: fn() = unsafe { core::mem::transmute(ptr) };
+    if let Some(f) = slopos_ostd::util::fn_ptr::decode(ptr) {
         f();
     }
 }

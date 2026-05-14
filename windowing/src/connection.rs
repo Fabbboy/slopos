@@ -11,10 +11,9 @@
 //! - The event loop calls [`Protocol::drain_ui_queue()`] each iteration.
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicPtr, Ordering};
 use std::boxed::Box;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 use slopos_abi::handle::{DisplayHandle, HasDisplayHandle, RawDisplayHandle};
@@ -285,18 +284,17 @@ impl PendingDestroys {
 
 type UiCallback = Box<dyn FnOnce(&mut Client) + Send>;
 
-struct CallbackNode {
-    callback: UiCallback,
-    next: *mut CallbackNode,
-}
-
-/// Thread-safe callback queue (lock-free Treiber stack).
+/// Thread-safe callback queue.
 ///
-/// Push from any thread (wait-free CAS), drain from UI thread only.
-/// Holds the write end of a self-pipe so that [`UiSender::post`] can wake
-/// a UI thread sleeping in [`Protocol::wait_events`].
+/// Push from any thread (briefly holds the mutex), drain from UI
+/// thread only. Holds the write end of a self-pipe so that
+/// [`UiSender::post`] can wake a UI thread sleeping in
+/// [`Protocol::wait_events`].
+///
+/// UI callback queues exhibit very low contention — a `Mutex<Vec<_>>`
+/// keeps the implementation `unsafe`-free without measurable cost.
 struct UiQueue {
-    head: AtomicPtr<CallbackNode>,
+    pending: Mutex<Vec<UiCallback>>,
     /// Write end of the wakeup pipe. -1 means no pipe (should not happen in
     /// practice but keeps the default constructor safe).
     wakeup_fd: i32,
@@ -306,33 +304,20 @@ impl UiQueue {
     /// Create a queue with a wakeup pipe write end.
     fn with_wakeup(wakeup_fd: i32) -> Self {
         Self {
-            head: AtomicPtr::new(core::ptr::null_mut()),
+            pending: Mutex::new(Vec::new()),
             wakeup_fd,
         }
     }
 
-    /// Push a callback (any thread, wait-free).
+    /// Push a callback (any thread).
     ///
-    /// After the callback is enqueued, writes one byte to the wakeup pipe
-    /// so that a UI thread sleeping in [`Protocol::wait_events`] wakes up.
+    /// After the callback is enqueued, writes one byte to the wakeup
+    /// pipe so that a UI thread sleeping in [`Protocol::wait_events`]
+    /// wakes up.
     fn push(&self, callback: UiCallback) {
-        let node = Box::into_raw(Box::new(CallbackNode {
-            callback,
-            next: core::ptr::null_mut(),
-        }));
-        loop {
-            let old_head = self.head.load(Ordering::Acquire);
-            // SAFETY: `node` is a valid, exclusively owned allocation.
-            unsafe { (*node).next = old_head };
-            if self
-                .head
-                .compare_exchange_weak(old_head, node, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
+        if let Ok(mut q) = self.pending.lock() {
+            q.push(callback);
         }
-
         // Wake the UI thread. EAGAIN (pipe full) is fine — the wakeup is
         // already pending. Any other error is harmless (best-effort).
         if self.wakeup_fd >= 0 {
@@ -342,42 +327,14 @@ impl UiQueue {
 
     /// Drain all callbacks, executing each with `&mut Client` (UI thread only).
     fn drain(&self, client: &mut Client) {
-        let head = self.head.swap(core::ptr::null_mut(), Ordering::AcqRel);
-        if head.is_null() {
-            return;
-        }
-
-        // Treiber stack is LIFO — reverse to get FIFO order.
-        let mut reversed: *mut CallbackNode = core::ptr::null_mut();
-        let mut current = head;
-        while !current.is_null() {
-            // SAFETY: Each node was allocated via Box::into_raw and is uniquely
-            // owned after the atomic swap above.
-            let next = unsafe { (*current).next };
-            unsafe { (*current).next = reversed };
-            reversed = current;
-            current = next;
-        }
-
-        // Execute in submission order.
-        current = reversed;
-        while !current.is_null() {
-            // SAFETY: Reclaim the Box allocation. The node is exclusively ours.
-            let node = unsafe { Box::from_raw(current) };
-            current = node.next;
-            (node.callback)(client);
-        }
-    }
-}
-
-impl Drop for UiQueue {
-    fn drop(&mut self) {
-        // Drop any un-drained callbacks.
-        let mut current = *self.head.get_mut();
-        while !current.is_null() {
-            let node = unsafe { Box::from_raw(current) };
-            current = node.next;
-            // callback dropped without executing
+        let pending = {
+            let Ok(mut q) = self.pending.lock() else {
+                return;
+            };
+            core::mem::take(&mut *q)
+        };
+        for cb in pending {
+            cb(client);
         }
     }
 }

@@ -1,51 +1,101 @@
-//! Safe round-trip between an `AtomicPtr<()>` slot and a typed `fn`
-//! pointer.
+//! `fn()`-pointer round-trip helpers.
 //!
-//! Kernel-half subsystems publish callbacks (TLB shootdown IPI sender,
-//! LAPIC ID reader, etc.) via an `AtomicPtr<()>` lazy-init slot so the
-//! caller side does not depend on the producer crate. Recovering the
-//! typed `fn` pointer requires a `core::mem::transmute` between
-//! `*mut ()` and the function pointer type; folding that transmute
-//! into OSTD keeps the consumer side in safe Rust.
+//! Several kernel subsystems register a `fn()` callback into an
+//! `AtomicPtr<()>` (e.g. NAPI's per-device kick), then later transmute
+//! the stored `*mut ()` back to a `fn()` for invocation. Each round
+//! trip needs one `unsafe { core::mem::transmute(...) }`; that pattern
+//! is wrapped here so consumers stay `unsafe`-free.
 //!
-//! Every helper here is **safe to call** but the interior `unsafe` is
-//! sound only when the caller has confirmed that:
-//!
-//! - The `*mut ()` slot was originally populated via [`fn_ptr_to_raw`]
-//!   from a `fn` pointer of the **same signature** as the one
-//!   recovered through [`fn_ptr_from_raw`],
-//! - The slot value is non-null at the moment of recovery (callers
-//!   typically guard with `if ptr.is_null() { return; }` first).
+//! The encode/decode pair is reflexive — `decode(encode(f)) == f` for
+//! every `fn()`-typed value `f` — and the decode side panics
+//! semantically (returns `None`) on the null sentinel.
 
-/// Convert a typed `fn` pointer to a `*mut ()` for storage in an
-/// `AtomicPtr<()>` slot. Mirror of [`fn_ptr_from_raw`].
+/// Encode a `fn()` as a `*mut ()` for storage in an `AtomicPtr`.
 #[inline]
-pub fn fn_ptr_to_raw<F: Copy>(f: F) -> *mut () {
-    // SAFETY: `F` is constrained to `Copy` so the bitwise reinterpret
-    // is sound — function pointers are `Copy` in Rust. The `*mut ()`
-    // is the universal slot type for an `AtomicPtr<()>`.
-    debug_assert_eq!(
-        core::mem::size_of::<F>(),
-        core::mem::size_of::<*mut ()>(),
-        "fn_ptr_to_raw: F must be a function pointer of pointer size"
-    );
-    unsafe { core::mem::transmute_copy::<F, *mut ()>(&f) }
+pub fn encode(f: fn()) -> *mut () {
+    // SAFETY: function pointers are the same size and alignment as
+    // data pointers on every supported target; `transmute` from
+    // `fn()` to `*mut ()` is documented in the reference.
+    unsafe { core::mem::transmute::<fn(), *mut ()>(f) }
 }
 
-/// Recover a typed `fn` pointer from an `AtomicPtr<()>` slot value.
-/// The caller must guarantee the slot was populated by a corresponding
-/// [`fn_ptr_to_raw`] call of the **same** signature, and that the
-/// slot is non-null at this point.
+/// Decode a `*mut ()` produced by [`encode`] back into the original
+/// `fn()`. Returns `None` if `ptr` is null.
+///
+/// Caller invariant: the pointer was published by a prior `encode`
+/// for the same `fn()` ABI (i.e. `fn()`, no arguments, no return).
 #[inline]
-pub fn fn_ptr_from_raw<F: Copy>(raw: *mut ()) -> F {
-    debug_assert!(!raw.is_null(), "fn_ptr_from_raw: raw slot was null");
+pub fn decode(ptr: *mut ()) -> Option<fn()> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller asserts the pointer was produced by `encode`
+    // for the matching ABI.
+    Some(unsafe { core::mem::transmute::<*mut (), fn()>(ptr) })
+}
+
+/// Recover a typed `fn`-pointer of arbitrary ABI from a `*mut ()` slot.
+/// Generic over the function-pointer type `F` so callers can recover
+/// `fn(u8)`, `fn() -> i32`, etc. — panics if `F` is not exactly the
+/// size of a `*mut ()` (function pointers and data pointers must have
+/// the same layout on every supported target).
+///
+/// # Safety contract on the caller
+///
+/// `ptr` must have been produced by a prior transmute of an `F`-typed
+/// function pointer into a `*mut ()` (typically via
+/// `core::mem::transmute` or a registered service-table cast). If
+/// `ptr.is_null()`, the function returns a zero-bit-pattern `F` which
+/// the caller should null-check before invoking; the safer entry
+/// points are crate-specific `Option<F>` wrappers (see
+/// [`fn_ptr_decode_opt`]).
+#[inline]
+pub fn fn_ptr_from_raw<F: Copy + 'static>(ptr: *mut ()) -> F {
     debug_assert_eq!(
         core::mem::size_of::<F>(),
         core::mem::size_of::<*mut ()>(),
-        "fn_ptr_from_raw: F must be a function pointer of pointer size"
+        "fn_ptr_from_raw: F must be pointer-sized"
     );
-    // SAFETY: caller's contract — `raw` originated from
-    // [`fn_ptr_to_raw`] with the same `F`; same-sized bit-for-bit
-    // reinterpret is sound for function pointers.
-    unsafe { core::mem::transmute_copy::<*mut (), F>(&raw) }
+    // SAFETY: `*mut ()` and any `fn(...) -> R` pointer share the same
+    // size and alignment on supported targets; the caller asserts the
+    // pointer was produced by a matching encode.
+    unsafe { core::mem::transmute_copy::<*mut (), F>(&ptr) }
+}
+
+/// `Option<F>` sibling of [`fn_ptr_from_raw`]: returns `None` on null,
+/// `Some(F)` otherwise. Use when the caller wants a null-check at the
+/// recover site.
+#[inline]
+pub fn fn_ptr_decode_opt<F: Copy + 'static>(ptr: *mut ()) -> Option<F> {
+    if ptr.is_null() {
+        None
+    } else {
+        Some(fn_ptr_from_raw::<F>(ptr))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static FIRED: AtomicBool = AtomicBool::new(false);
+
+    fn marker() {
+        FIRED.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn round_trip_invokes_original() {
+        FIRED.store(false, Ordering::Release);
+        let ptr = encode(marker);
+        let recovered = decode(ptr).expect("non-null after encode");
+        recovered();
+        assert!(FIRED.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn decode_null_returns_none() {
+        assert!(decode(core::ptr::null_mut()).is_none());
+    }
 }

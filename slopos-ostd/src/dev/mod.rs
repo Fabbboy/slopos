@@ -40,6 +40,19 @@
 pub trait FromRawPtr: Sized {
     fn from_ptr<'a>(ptr: *const Self) -> Option<&'a Self>;
     fn from_ptr_mut<'a>(ptr: *mut Self) -> Option<&'a mut Self>;
+
+    /// Reborrow `ptr` as `&Self` without a null check.
+    ///
+    /// Caller invariant: `ptr` is non-null, aligned, dereferenceable
+    /// for `size_of::<Self>()` bytes, and no aliasing `&mut Self`
+    /// exists for the lifetime `'a`. Matches the standard
+    /// `&*ptr` precondition.
+    ///
+    /// Used by device handles whose backing `*const Self` is published
+    /// once at registration and outlives every consumer (e.g. the net
+    /// `DeviceHandle::dev` pointer is valid for the device's
+    /// registered lifetime).
+    fn from_ptr_unchecked<'a>(ptr: *const Self) -> &'a Self;
 }
 
 impl<T> FromRawPtr for T {
@@ -63,4 +76,30 @@ impl<T> FromRawPtr for T {
             Some(unsafe { &mut *ptr })
         }
     }
+
+    #[inline]
+    fn from_ptr_unchecked<'a>(ptr: *const Self) -> &'a Self {
+        // SAFETY: caller asserts the contract documented on
+        // `from_ptr_unchecked` — non-null, aligned, dereferenceable,
+        // no aliasing mutable borrow.
+        unsafe { &*ptr }
+    }
+}
+
+/// Reborrow a `*const T` (including fat trait-object pointers) as
+/// `&T` without a null check.
+///
+/// `?Sized` companion of [`FromRawPtr::from_ptr_unchecked`] — accepts
+/// `*const dyn Trait` for device handles whose backing pointer is
+/// published once and outlives every consumer.
+///
+/// # Safety
+///
+/// Caller invariant: `ptr` is non-null, dereferenceable, and no
+/// aliasing `&mut T` exists for the lifetime `'a`. Matches the
+/// standard `&*ptr` precondition.
+#[inline]
+pub fn borrow_dyn<'a, T: ?Sized>(ptr: *const T) -> &'a T {
+    // SAFETY: caller upholds the contract documented above.
+    unsafe { &*ptr }
 }

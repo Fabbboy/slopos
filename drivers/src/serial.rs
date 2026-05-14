@@ -1,28 +1,19 @@
 //! Early-boot serial driver.
 //!
-//! # Carve-out: file-wide `unsafe`
-//!
-//! This file is the kernel's panic-time / early-boot serial diagnostic
-//! source of truth. It funnels through `slopos_ostd::early_console`
-//! and `slopos_ostd::io::raw_port::Port` — the lock-free port-I/O
-//! primitives that must run before allocators, before GDT/IDT, and
-//! during panic recovery. Every `unsafe` here is either a direct
-//! port-I/O `read()` / `write()` or a delegating call to a port
-//! helper that is itself part of the panic-logger TCB.
-
-#![allow(unsafe_code)]
+//! Funnels through `slopos_ostd::early_console` plus the safe
+//! `slopos_ostd::io::UartRegs` register window. Every port-I/O `unsafe`
+//! lives interior to OSTD; this file stays `unsafe`-free.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_arch::cpu;
+use slopos_ostd::io::UartRegs;
 use slopos_ostd::io::port_consts::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
     UART_FCR_CLEAR_TX as FCR_CLEAR_TX, UART_FCR_ENABLE_FIFO as FCR_ENABLE_FIFO,
     UART_IIR_FIFO_ENABLED as IIR_FIFO_ENABLED, UART_IIR_FIFO_MASK as IIR_FIFO_MASK,
     UART_LCR_DLAB as LCR_DLAB, UART_LSR_DATA_READY as LSR_DATA_READY, UART_MCR_AUX2 as MCR_AUX2,
-    UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS, UART_REG_IER as REG_IER,
-    UART_REG_IIR as REG_IIR, UART_REG_LCR as REG_LCR, UART_REG_LSR as REG_LSR,
-    UART_REG_MCR as REG_MCR, UART_REG_RBR as REG_RBR, UART_REG_SCR as REG_SCR,
+    UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS,
 };
 use slopos_ostd::io::raw_port::Port;
 use slopos_ostd::ring_buffer::RingBuffer;
@@ -63,7 +54,7 @@ static INPUT_BUFFER: SpinLock<SerialBuffer> =
 
 pub fn init() {
     let mut port = SERIAL.lock();
-    unsafe { port.init() }
+    port.init();
     drop(port);
 
     slopos_ostd::klog::klog_register_backend(serial_klog_backend);
@@ -146,7 +137,7 @@ pub fn serial_locked_write_bytes(bytes: &[u8]) {
 pub fn init_port(base: u16) -> Result<UartCapabilities, ()> {
     if base == COM1.address() {
         let mut port = SERIAL.lock();
-        unsafe { port.init() }
+        port.init();
         Ok(port.capabilities())
     } else {
         Err(())
@@ -176,11 +167,9 @@ pub fn print_args(args: fmt::Arguments<'_>) {
 }
 
 pub fn serial_poll_receive(base: u16) {
-    let port = Port::<u8>::new(base);
-    let lsr = port.offset(REG_LSR);
-    let rbr = port.offset(REG_RBR);
-    while unsafe { lsr.read() } & LSR_DATA_READY != 0 {
-        let byte = unsafe { rbr.read() };
+    let regs = UartRegs::new(Port::<u8>::new(base));
+    while regs.read_lsr() & LSR_DATA_READY != 0 {
+        let byte = regs.read_rbr();
         let mut buf = INPUT_BUFFER.lock();
         let _ = buf.try_push(byte);
     }
@@ -197,9 +186,7 @@ pub fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
     let mut buf = INPUT_BUFFER.lock();
     match buf.try_pop() {
         Some(b) => {
-            if !out.is_null() {
-                unsafe { *out = b };
-            }
+            slopos_ostd::util::ptr_buf::write_if_non_null(out, b);
             0
         }
         None => -1,
@@ -213,14 +200,14 @@ pub fn input_buffer_lock() -> slopos_ostd::sync::SpinLockGuard<'static, SerialBu
 }
 
 struct SerialPort {
-    base: Port<u8>,
+    regs: UartRegs,
     caps: UartCapabilities,
 }
 
 impl SerialPort {
     const fn new(base: Port<u8>) -> Self {
         Self {
-            base,
+            regs: UartRegs::new(base),
             caps: UartCapabilities {
                 uart_type: UartType::Unknown,
                 has_fifo: false,
@@ -230,23 +217,18 @@ impl SerialPort {
         }
     }
 
-    #[inline]
-    fn reg(&self, offset: u16) -> Port<u8> {
-        self.base.offset(offset)
-    }
-
-    unsafe fn detect_uart(&mut self) -> UartCapabilities {
-        self.reg(REG_IIR)
-            .write(FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
+    fn detect_uart(&mut self) -> UartCapabilities {
+        self.regs
+            .write_fcr(FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
 
         for _ in 0..10 {
             core::hint::spin_loop();
         }
 
-        let iir_after = self.reg(REG_IIR).read();
+        let iir_after = self.regs.read_iir();
         let has_fifo = (iir_after & IIR_FIFO_MASK) == IIR_FIFO_ENABLED;
 
-        self.reg(REG_IIR).write(0);
+        self.regs.write_fcr(0);
 
         if !has_fifo {
             return UartCapabilities {
@@ -258,8 +240,8 @@ impl SerialPort {
         }
 
         let test_value = 0xAA;
-        self.reg(REG_SCR).write(test_value);
-        let scratch_read = self.reg(REG_SCR).read();
+        self.regs.write_scr(test_value);
+        let scratch_read = self.regs.read_scr();
         let fifo_working = scratch_read == test_value;
 
         let fifo_size = 16;
@@ -277,31 +259,32 @@ impl SerialPort {
         }
     }
 
-    unsafe fn init(&mut self) {
+    fn init(&mut self) {
         self.caps = self.detect_uart();
 
-        self.reg(REG_IER).write(0x00);
-        self.reg(REG_LCR).write(LCR_DLAB);
-        self.reg(REG_RBR).write(0x01);
-        self.reg(REG_IER).write(0x00);
-        self.reg(REG_LCR).write(0x03);
+        self.regs.write_ier(0x00);
+        self.regs.write_lcr(LCR_DLAB);
+        self.regs.write_rbr(0x01);
+        self.regs.write_ier(0x00);
+        self.regs.write_lcr(0x03);
 
         if self.caps.has_fifo {
             if self.caps.fifo_working {
-                self.reg(REG_IIR)
-                    .write(FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX | FCR_14_BYTE_THRESHOLD);
+                self.regs.write_fcr(
+                    FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX | FCR_14_BYTE_THRESHOLD,
+                );
             } else {
-                self.reg(REG_IIR)
-                    .write(FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
+                self.regs
+                    .write_fcr(FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
             }
         }
 
-        self.reg(REG_MCR).write(MCR_DTR | MCR_RTS | MCR_AUX2);
+        self.regs.write_mcr(MCR_DTR | MCR_RTS | MCR_AUX2);
     }
 
     fn write_byte(&mut self, byte: u8) {
-        // `self.base` is COM1 by construction (see `init_port`).
-        let _ = self.base;
+        // `self.regs` is COM1 by construction (see `init_port`).
+        let _ = self.regs;
         slopos_ostd::early_console::write_byte(byte);
     }
 
@@ -312,7 +295,7 @@ impl SerialPort {
 
 impl Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let _ = self.base;
+        let _ = self.regs;
         slopos_ostd::early_console::write_bytes(s.as_bytes());
         Ok(())
     }

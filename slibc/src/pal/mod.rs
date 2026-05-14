@@ -21,6 +21,7 @@ pub trait Pal {
     fn dup2(old: i32, new: i32) -> Result<i32, Errno>;
     fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i32, Errno>;
     fn pipe(fds: *mut [i32; 2]) -> Result<(), Errno>;
+    fn pipe2(fds: *mut [i32; 2], flags: u32) -> Result<(), Errno>;
     fn poll(fds: *mut u8, nfds: u32, timeout: i32) -> Result<i32, Errno>;
     fn select(
         nfds: i32,

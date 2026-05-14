@@ -100,6 +100,12 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn pipe2(fds: *mut [i32; 2], flags: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_PIPE2, fds as u64, flags as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn poll(fds: *mut u8, nfds: u32, timeout: i32) -> Result<i32, Errno> {
         let ret = unsafe { syscall3(SYSCALL_POLL, fds as u64, nfds as u64, timeout as u64) };
         let val = to_result(ret)?;

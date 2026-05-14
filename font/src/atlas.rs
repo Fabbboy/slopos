@@ -488,38 +488,18 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 #[cfg(feature = "kernel")]
 mod global_atlas {
     use super::*;
-    use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU64, Ordering};
     use slopos_ostd::KBox;
-    use slopos_ostd::sync::RcuReadGuard;
+    use slopos_ostd::sync::{RcuCell, RcuCellGuard};
 
     /// Self-owning RCU-protected borrow of the global glyph atlas.
     ///
-    /// Embeds an [`RcuReadGuard`] so the RCU read-side critical section
-    /// is held for exactly as long as the caller keeps this value alive.
-    /// Derefs to [`GlyphAtlas`] for ergonomic rendering calls.
-    ///
-    /// Deliberately `!Send` and `!Sync` — must be used on the CPU that
-    /// created it, within the preemption-disabled window.
-    #[must_use = "dropping the guard immediately ends the RCU read-side critical section"]
-    pub struct AtlasGuard {
-        _rcu: RcuReadGuard,
-        ptr: *const GlyphAtlas,
-        _not_send_sync: core::marker::PhantomData<*mut ()>,
-    }
+    /// Backed by [`RcuCellGuard`], which holds an
+    /// [`slopos_ostd::sync::RcuReadGuard`] for the borrow's lifetime
+    /// and derefs to [`GlyphAtlas`] for ergonomic rendering calls.
+    pub type AtlasGuard = RcuCellGuard<GlyphAtlas>;
 
-    impl core::ops::Deref for AtlasGuard {
-        type Target = GlyphAtlas;
-
-        #[inline]
-        fn deref(&self) -> &GlyphAtlas {
-            // SAFETY: ptr is non-null (checked by global()), and _rcu
-            // keeps the RCU read-side critical section active so no
-            // writer can free the atlas while this guard exists.
-            unsafe { &*self.ptr }
-        }
-    }
-
-    static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
+    static GLOBAL_ATLAS: RcuCell<GlyphAtlas> = RcuCell::empty();
 
     /// Monotonic generation counter incremented on every `replace_global`.
     ///
@@ -554,15 +534,7 @@ mod global_atlas {
 
     pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
         if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
-            let old = replace_global(atlas);
-            if !old.is_null() {
-                // SAFETY: old was allocated via KBox::into_raw in a previous
-                // replace_global call.  During early boot no concurrent
-                // readers exist, so immediate free is safe.
-                unsafe {
-                    drop(KBox::from_raw(old));
-                }
-            }
+            replace_global(atlas);
             true
         } else {
             false
@@ -586,13 +558,7 @@ mod global_atlas {
                     FontSource::BitmapFallback,
                 ) {
                     Some(atlas) => {
-                        let old = replace_global(atlas);
-                        if !old.is_null() {
-                            // SAFETY: see init_global — early boot, no readers.
-                            unsafe {
-                                drop(KBox::from_raw(old));
-                            }
-                        }
+                        replace_global(atlas);
                         true
                     }
                     None => false,
@@ -602,42 +568,30 @@ mod global_atlas {
         }
     }
 
-    /// Atomically replace the global atlas.
+    /// Atomically replace the global atlas, deferring the displaced
+    /// box's drop until the next RCU grace period via [`RcuCell::replace`].
     ///
-    /// Returns a pointer to the previous atlas (may be null on first
-    /// call).  **The caller must arrange deferred freeing** — in kernel
-    /// context this means passing the old pointer to `call_rcu()`.
-    /// During early boot (before the scheduler is running) the old
-    /// pointer may be freed immediately since no concurrent readers are
-    /// possible.
-    pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
-        let new_ptr = match KBox::try_new(new_atlas) {
-            Ok(b) => KBox::into_raw(b),
-            Err(_) => return core::ptr::null_mut(),
+    /// Returns `true` on success, `false` if the new-box allocation
+    /// failed.
+    pub fn replace_global(new_atlas: GlyphAtlas) -> bool {
+        let new_box = match KBox::try_new(new_atlas) {
+            Ok(b) => b,
+            Err(_) => return false,
         };
-        let old = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
+        let _ = GLOBAL_ATLAS.replace(new_box);
         ATLAS_GENERATION.fetch_add(1, Ordering::Release);
-        old
+        true
     }
 
     /// Acquire the global glyph atlas under an RCU read lock.
     ///
-    /// The returned [`AtlasGuard`] owns an [`RcuReadGuard`], so the RCU
-    /// read-side critical section is held for exactly as long as the
-    /// guard is alive.  Drop promptly after rendering to minimise the
-    /// critical section length.
+    /// The returned [`AtlasGuard`] owns an
+    /// [`slopos_ostd::sync::RcuReadGuard`], so the RCU read-side
+    /// critical section is held for exactly as long as the guard is
+    /// alive.  Drop promptly after rendering to minimise the critical
+    /// section length.
     pub fn global() -> Option<AtlasGuard> {
-        let rcu = slopos_ostd::sync::rcu_read_lock();
-        let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
-        if ptr.is_null() {
-            None
-        } else {
-            Some(AtlasGuard {
-                _rcu: rcu,
-                ptr,
-                _not_send_sync: core::marker::PhantomData,
-            })
-        }
+        GLOBAL_ATLAS.load()
     }
 }
 

@@ -60,8 +60,8 @@ pub use slopos_ostd_derive::{Pod, Zeroable};
 
 pub use mm::{
     AllocError, FrameAlloc, FrameAllocOptions, Init, InitClosure, KArc, KBTreeMap, KBox, KVec,
-    KVecDeque, KernelHeap, PinBox, Slab, Zeroable, boxed_zeroed, init_from_closure, init_zeroed,
-    raw_alloc, raw_dealloc,
+    KVecDeque, KernelHeap, PinBox, Slab, SlotPtr, Zeroable, boxed_zeroed, init_from_closure,
+    init_struct_with, init_zeroed, raw_alloc, raw_dealloc,
 };
 
 pub use user::{

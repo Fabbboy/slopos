@@ -24,7 +24,9 @@ pub use heap::{
     AllocError, KArc, KBTreeMap, KBox, KVec, KVecDeque, KernelHeap, PinBox, boxed_zeroed,
     raw_alloc, raw_dealloc,
 };
-pub use init::{Init, InitClosure, Zeroable, init_from_closure, init_zeroed};
+pub use init::{
+    Init, InitClosure, SlotPtr, Zeroable, init_from_closure, init_struct_with, init_zeroed,
+};
 pub use io_mem::{
     IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
     register_io_mem_mapper, register_io_mem_range, register_io_mem_registry,

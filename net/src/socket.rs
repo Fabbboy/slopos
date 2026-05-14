@@ -1,9 +1,9 @@
 use core::fmt;
-use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_ostd::KVec;
-use slopos_ostd::mm::init::{Init, init_from_closure};
+use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::write_field;
 use slopos_ostd::{Bitmap, words_for};
 
 use crate::packetbuf::PacketBuf;
@@ -542,18 +542,15 @@ impl EphemeralPortAllocator {
     /// itself never errors.
     pub fn init_default() -> impl Init<Self, slopos_ostd::mm::AllocError> {
         use slopos_ostd::mm::AllocError;
-        // SAFETY: the closure zero-fills the whole slot (which is a
-        // valid empty `Bitmap`) and then writes the two scalar fields
-        // whose `new()` value isn't all-zero. Returns `Ok(())` only
-        // after every field is initialised.
-        unsafe {
-            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
-                core::ptr::write_bytes(slot as *mut u8, 0, core::mem::size_of::<Self>());
-                addr_of_mut!((*slot).next_port).write(Self::EPHEMERAL_PORT_START);
-                addr_of_mut!((*slot).allocated_count).write(0);
-                Ok(())
-            })
-        }
+        // Closure zero-fills the whole slot (a valid empty `Bitmap`)
+        // and then writes the two scalar fields whose `new()` isn't
+        // all-zero.
+        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            slot.zero_all();
+            write_field!(slot, next_port, Self::EPHEMERAL_PORT_START);
+            write_field!(slot, allocated_count, 0);
+            Ok(())
+        })
     }
 
     /// Allocate one ephemeral port using round-robin selection.
@@ -1301,16 +1298,8 @@ pub fn socket_recvfrom(
             let copy_len = cmp::min(out.len(), payload.len());
             out[..copy_len].copy_from_slice(&payload[..copy_len]);
 
-            if !src_ip.is_null() {
-                unsafe {
-                    *src_ip = src.ip.0;
-                }
-            }
-            if !src_port.is_null() {
-                unsafe {
-                    *src_port = src.port.0;
-                }
-            }
+            slopos_ostd::util::ptr_buf::write_if_non_null(src_ip, src.ip.0);
+            slopos_ostd::util::ptr_buf::write_if_non_null(src_port, src.port.0);
             return copy_len as i64;
         }
 
@@ -1529,16 +1518,14 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 sock.options = listen_opts;
                 sock.set_nonblocking(is_nonblocking);
 
-                if !peer_addr.is_null() {
-                    unsafe {
-                        *peer_addr = accepted_conn.tuple.remote_ip;
-                    }
-                }
-                if !peer_port.is_null() {
-                    unsafe {
-                        *peer_port = accepted_conn.tuple.remote_port;
-                    }
-                }
+                slopos_ostd::util::ptr_buf::write_if_non_null(
+                    peer_addr,
+                    accepted_conn.tuple.remote_ip,
+                );
+                slopos_ostd::util::ptr_buf::write_if_non_null(
+                    peer_port,
+                    accepted_conn.tuple.remote_port,
+                );
 
                 // Set bidirectional socket↔connection link.
                 tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(new_idx as u32)));

@@ -95,10 +95,7 @@ fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 
         return tty::TtyError::InvalidArg.to_errno();
     }
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(path.as_ptr(), buf, len);
-        *buf.add(len) = 0;
-    }
+    slopos_ostd::util::ptr_buf::copy_with_nul_terminator(buf, &path[..len], len);
     0
 }
 

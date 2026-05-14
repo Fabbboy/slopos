@@ -10,7 +10,7 @@
 //! CPU without synchronization.  Init is guarded by [`InitFlag`] +
 //! [`StateFlag`] for SMP safety.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::hpet::Hpet;
@@ -18,7 +18,7 @@ use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_ostd::sync::{InitFlag, StateFlag};
+use slopos_ostd::sync::{InitFlag, OnceLock, StateFlag};
 use slopos_ostd::{klog_debug, klog_info};
 
 /// General Capabilities and ID (64-bit RO).
@@ -47,8 +47,10 @@ static HPET_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 /// Tick period in femtoseconds — cached for lock-free conversion.
 static PERIOD_FS: AtomicU32 = AtomicU32::new(0);
 
-/// MMIO virtual base — cached for hot-path counter reads without Option.
-static MMIO_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
+/// MMIO region — cached for hot-path counter reads.  Wrapped in
+/// [`OnceLock`] so the `read_counter` lookup is lock-free after a
+/// single `Acquire` load.
+static MMIO_REGION: OnceLock<MmioRegion> = OnceLock::new();
 
 /// Initialize the HPET from ACPI tables.
 ///
@@ -75,13 +77,10 @@ pub fn init() -> i32 {
 /// Read the HPET main counter (64-bit monotonic). Returns `0` if not init'd.
 #[inline]
 pub fn read_counter() -> u64 {
-    let base = MMIO_VIRT_BASE.load(Ordering::Relaxed);
-    if base == 0 {
-        return 0;
+    match MMIO_REGION.get() {
+        Some(mmio) => mmio.read::<u64>(REG_MAIN_COUNTER),
+        None => 0,
     }
-    // SAFETY: base was validated during init and points to a mapped MMIO page.
-    // The main counter register is read-only and safe from any CPU.
-    unsafe { core::ptr::read_volatile((base + REG_MAIN_COUNTER as u64) as *const u64) }
 }
 
 /// Convert ticks to nanoseconds: `ns = ticks × period_fs / 1_000_000`.
@@ -197,7 +196,7 @@ fn init_inner() -> i32 {
     mmio.write::<u64>(REG_GENERAL_CONFIG, config);
 
     PERIOD_FS.store(period_fs, Ordering::Relaxed);
-    MMIO_VIRT_BASE.store(mmio.virt_base(), Ordering::Relaxed);
+    MMIO_REGION.call_once(|| mmio);
 
     let freq_mhz = 1_000_000_000_000_000u64 / period_fs as u64 / 1_000_000;
 

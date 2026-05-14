@@ -3,6 +3,10 @@ use core::ffi::c_int;
 use crate::framebuffer::{self, FbState};
 use slopos_abi::draw::{Canvas, EncodedPixel};
 use slopos_abi::video_traits::VideoError;
+use slopos_ostd::boot::handoff::framebuffer::{
+    fb_fill_u8_bulk, fb_ptr_add, fb_write_u8_at, fb_write_u16_at, fb_write_u32_at, fb_write_u64_at,
+};
+use slopos_ostd::util::ptr_buf::ptr_add;
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
 
@@ -65,21 +69,17 @@ impl Canvas for GraphicsContext {
     #[inline]
     fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel) {
         let color = pixel.to_u32();
-        let pixel_ptr = unsafe { self.fb.base_ptr().add(byte_offset) };
+        let pixel_ptr = fb_ptr_add(self.fb.base_ptr(), byte_offset);
         let bytes_pp = self.fb.info.bytes_per_pixel();
-        unsafe {
-            match bytes_pp {
-                4 => (pixel_ptr as *mut u32).write_volatile(color),
-                3 => {
-                    pixel_ptr.write_volatile((color & 0xFF) as u8);
-                    pixel_ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
-                    pixel_ptr
-                        .add(2)
-                        .write_volatile(((color >> 16) & 0xFF) as u8);
-                }
-                2 => (pixel_ptr as *mut u16).write_volatile(color as u16),
-                _ => {}
+        match bytes_pp {
+            4 => fb_write_u32_at(pixel_ptr, color),
+            3 => {
+                fb_write_u8_at(pixel_ptr, (color & 0xFF) as u8);
+                fb_write_u8_at(fb_ptr_add(pixel_ptr, 1), ((color >> 8) & 0xFF) as u8);
+                fb_write_u8_at(fb_ptr_add(pixel_ptr, 2), ((color >> 16) & 0xFF) as u8);
             }
+            2 => fb_write_u16_at(pixel_ptr, color as u16),
+            _ => {}
         }
     }
 
@@ -93,7 +93,7 @@ impl Canvas for GraphicsContext {
         let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
         let pitch = self.fb.pitch() as usize;
         let buffer = self.fb.base_ptr();
-        let pixel_ptr = unsafe { buffer.add(row * pitch + x0 * bytes_pp) };
+        let pixel_ptr = fb_ptr_add(buffer, row * pitch + x0 * bytes_pp);
         let pixel_count = x1 - x0 + 1;
 
         if bytes_pp == 4 {
@@ -103,49 +103,43 @@ impl Canvas for GraphicsContext {
             let b3 = ((color >> 24) & 0xFF) as u8;
 
             if b0 == b1 && b1 == b2 && b2 == b3 {
-                unsafe {
-                    core::ptr::write_bytes(pixel_ptr, b0, pixel_count * 4);
-                }
+                fb_fill_u8_bulk(pixel_ptr, b0, pixel_count * 4);
             } else {
                 let color64 = (color as u64) | ((color as u64) << 32);
-                unsafe {
-                    let mut ptr = pixel_ptr;
-                    let mut remaining = pixel_count;
+                let mut ptr = pixel_ptr;
+                let mut remaining = pixel_count;
 
-                    if remaining > 0 && ((ptr as usize) & (core::mem::align_of::<u64>() - 1)) != 0 {
-                        (ptr as *mut u32).write_volatile(color);
-                        ptr = ptr.add(4);
-                        remaining -= 1;
-                    }
+                if remaining > 0 && ((ptr as usize) & (core::mem::align_of::<u64>() - 1)) != 0 {
+                    fb_write_u32_at(ptr, color);
+                    ptr = fb_ptr_add(ptr, 4);
+                    remaining -= 1;
+                }
 
-                    let pairs = remaining / 2;
-                    let remainder = remaining % 2;
-                    let mut ptr64 = ptr as *mut u64;
+                let pairs = remaining / 2;
+                let remainder = remaining % 2;
+                let mut ptr64 = ptr as *mut u64;
 
-                    for _ in 0..pairs {
-                        ptr64.write_volatile(color64);
-                        ptr64 = ptr64.add(1);
-                    }
-                    if remainder > 0 {
-                        (ptr64 as *mut u32).write_volatile(color);
-                    }
+                for _ in 0..pairs {
+                    fb_write_u64_at(ptr64, color64);
+                    ptr64 = ptr_add(ptr64, 1);
+                }
+                if remainder > 0 {
+                    fb_write_u32_at(ptr64 as *mut u8, color);
                 }
             }
         } else {
             let mut ptr = pixel_ptr;
             for _ in 0..pixel_count {
-                unsafe {
-                    match bytes_pp {
-                        2 => (ptr as *mut u16).write_volatile(color as u16),
-                        3 => {
-                            ptr.write_volatile((color & 0xFF) as u8);
-                            ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
-                            ptr.add(2).write_volatile(((color >> 16) & 0xFF) as u8);
-                        }
-                        _ => {}
+                match bytes_pp {
+                    2 => fb_write_u16_at(ptr, color as u16),
+                    3 => {
+                        fb_write_u8_at(ptr, (color & 0xFF) as u8);
+                        fb_write_u8_at(fb_ptr_add(ptr, 1), ((color >> 8) & 0xFF) as u8);
+                        fb_write_u8_at(fb_ptr_add(ptr, 2), ((color >> 16) & 0xFF) as u8);
                     }
-                    ptr = ptr.add(bytes_pp);
+                    _ => {}
                 }
+                ptr = fb_ptr_add(ptr, bytes_pp);
             }
         }
     }

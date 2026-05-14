@@ -9,26 +9,12 @@ use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
 static FONT_WRITER_LOCK: slopos_ostd::sync::SpinLock<()> =
     slopos_ostd::sync::SpinLock::new((), slopos_ostd::sync::LOCK_LEVEL_RESOURCE);
 
-fn drop_atlas(_b: slopos_ostd::KBox<slopos_font::atlas::GlyphAtlas>) {
-    // KBox's Drop releases the heap allocation.
-}
-
 fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
     {
         let _writer = FONT_WRITER_LOCK.lock();
-        let old = slopos_font::atlas::replace_global(new_atlas);
-        if !old.is_null() {
-            // SAFETY: `replace_global` returned a pointer that
-            // originated from `KBox::into_raw` (see
-            // `slopos_font::atlas::initialize_global`); reconstruct the
-            // owning box so the typed RCU callback can drop it after a
-            // grace period.
-            let old_box =
-                unsafe { slopos_ostd::KBox::<slopos_font::atlas::GlyphAtlas>::from_raw(old) };
-            slopos_ostd::sync::rcu::rcu_call_typed::<slopos_font::atlas::GlyphAtlas>(
-                old_box, drop_atlas,
-            );
-        }
+        // `replace_global` defers the displaced box's drop until the
+        // next RCU grace period via `RcuCell::replace` interior to OSTD.
+        slopos_font::atlas::replace_global(new_atlas);
     }
     slopos_font::atlas::invoke_font_change_callback();
 }

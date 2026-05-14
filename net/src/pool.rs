@@ -189,8 +189,9 @@ impl PacketPool {
     #[inline]
     pub(crate) fn slot_data(&self, slot: u16) -> *mut u8 {
         debug_assert!((slot as usize) < POOL_SIZE);
-        // SAFETY: UnsafeCell grants interior mutability.  Pointer arithmetic
-        // is in-bounds because slot < POOL_SIZE and each slot is BUF_SIZE bytes.
-        unsafe { (POOL_STORAGE.slots.get().get() as *mut u8).add(slot as usize * BUF_SIZE) }
+        // Pointer arithmetic is in-bounds because slot < POOL_SIZE
+        // and each slot is BUF_SIZE bytes.
+        let base = POOL_STORAGE.slots.get().get() as *mut u8;
+        slopos_ostd::util::ptr_buf::ptr_add(base, slot as usize * BUF_SIZE)
     }
 }

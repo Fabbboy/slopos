@@ -124,23 +124,6 @@ impl SendMap {
         }
     }
 
-    /// Initialise an empty `SendMap` directly in a caller-provided
-    /// slot. Used by heap-direct constructors (e.g. `DataState::init_*`)
-    /// so the ~800 B `Self::new()` rvalue never lands on the caller's
-    /// stack — the entire ~800 B struct is zeroed in place instead.
-    ///
-    /// # Safety
-    ///
-    /// `slot` must point to writable, properly aligned memory sized
-    /// for `Self`. On return, `*slot` is a valid empty `SendMap`.
-    pub unsafe fn new_in_slot(slot: *mut Self) {
-        // SAFETY: `Self` is all zero-valid — `entries[]` of
-        // `SendMapEntry { seq: SeqNum::ZERO, len: 0, first_send_ms: 0,
-        // state: SegmentState::InFlight = 0 (repr(u8)) }`, and
-        // `len: 0`. Zeroing every byte produces that state exactly.
-        unsafe { core::ptr::write_bytes(slot as *mut u8, 0, core::mem::size_of::<Self>()) }
-    }
-
     // -----------------------------------------------------------------------
     // Capacity / queries
     // -----------------------------------------------------------------------

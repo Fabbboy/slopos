@@ -18,11 +18,10 @@
 //! programmer error caught by `debug_assert!` inside [`Actions::push_segment`]
 //! / [`Actions::push_timer`].
 
-use core::ptr::addr_of_mut;
-
 use bitflags::bitflags;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, init_from_closure};
+use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::{write_array_field, write_field};
 
 use crate::timer::{TimerKind, TimerToken};
 
@@ -95,29 +94,25 @@ impl Actions {
     /// `AllocError` is the carrier required by `KBox::try_init`'s
     /// `E: From<AllocError>` bound — the closure itself never errors.
     pub fn init_default() -> impl Init<Self, AllocError> {
-        // SAFETY: writes every field of `Self` exactly once into
-        // `slot` before returning `Ok(())`. The `[Option<_>; N]`
-        // initialisers also use `addr_of_mut!` element-by-element so
-        // no by-value array literal materialises in this closure.
-        unsafe {
-            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
-                let segs_ptr = addr_of_mut!((*slot).segments) as *mut Option<TcpOutSegment>;
-                for i in 0..MAX_SEGMENTS {
-                    segs_ptr.add(i).write(None);
-                }
-                addr_of_mut!((*slot).segments_len).write(0);
-                let ops_ptr = addr_of_mut!((*slot).timer_ops) as *mut Option<TimerOp>;
-                for i in 0..MAX_TIMER_OPS {
-                    ops_ptr.add(i).write(None);
-                }
-                addr_of_mut!((*slot).timer_ops_len).write(0);
-                addr_of_mut!((*slot).notify).write(SocketNotify::empty());
-                addr_of_mut!((*slot).conn_id).write(None);
-                addr_of_mut!((*slot).accepted).write(None);
-                addr_of_mut!((*slot).release).write(false);
-                Ok(())
-            })
-        }
+        // Writes every field of `Self` exactly once via the safe
+        // field-writer wrappers. The `[Option<_>; N]` arrays are
+        // initialised element-by-element so no by-value array literal
+        // materialises in this closure.
+        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_array_field!(slot, segments, MAX_SEGMENTS, |_| -> Option<TcpOutSegment> {
+                None
+            });
+            write_field!(slot, segments_len, 0u8);
+            write_array_field!(slot, timer_ops, MAX_TIMER_OPS, |_| -> Option<TimerOp> {
+                None
+            });
+            write_field!(slot, timer_ops_len, 0u8);
+            write_field!(slot, notify, SocketNotify::empty());
+            write_field!(slot, conn_id, None);
+            write_field!(slot, accepted, None);
+            write_field!(slot, release, false);
+            Ok(())
+        })
     }
 
     /// Append an outbound segment.  Panics in debug builds if the inline

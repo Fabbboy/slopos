@@ -35,14 +35,14 @@
 //! loop and the idle wakeup callback to ensure timers fire both during active
 //! networking and during idle periods.
 
-use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, init_from_closure};
+use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::{write_array_field, write_field, write_init_field};
 
 /// Number of slots in the timer wheel.
 const NUM_SLOTS: usize = 256;
@@ -227,30 +227,23 @@ impl NetTimerWheel {
     pub fn init() -> impl Init<Self, AllocError> {
         // Inner-state initialiser: writes each of the 256 slots and
         // the `current_tick` field directly into the heap slot.
-        // SAFETY: `init_from_closure` requires the closure write a
-        // valid `TimerWheelInner` into `slot`. We populate every field.
-        let inner_init = unsafe {
-            init_from_closure(|slot: *mut TimerWheelInner| -> Result<(), AllocError> {
-                let slots_ptr = addr_of_mut!((*slot).slots) as *mut KVec<TimerEntry>;
-                for i in 0..NUM_SLOTS {
-                    slots_ptr.add(i).write(KVec::new());
-                }
-                addr_of_mut!((*slot).current_tick).write(0);
+        let inner_init =
+            init_struct_with(|slot: SlotPtr<TimerWheelInner>| -> Result<(), AllocError> {
+                write_array_field!(slot, slots, NUM_SLOTS, |_| KVec::<TimerEntry>::new());
+                write_field!(slot, current_tick, 0);
                 Ok(())
-            })
-        };
-        // Outer initialiser: thread `inner_init` through `SpinLock::init_with`
-        // and write the `next_token` AtomicU64.
-        // SAFETY: every field of `Self` is initialised before `Ok(())`.
-        unsafe {
-            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
-                let inner_ptr = addr_of_mut!((*slot).inner) as *mut SpinLock<TimerWheelInner>;
+            });
+        // Outer initialiser: thread `inner_init` through
+        // `SpinLock::init_with` and write the `next_token` AtomicU64.
+        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_init_field!(
+                slot,
+                inner,
                 SpinLock::<TimerWheelInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
-                    .__init(inner_ptr)?;
-                addr_of_mut!((*slot).next_token).write(AtomicU64::new(1));
-                Ok(())
-            })
-        }
+            )?;
+            write_field!(slot, next_token, AtomicU64::new(1));
+            Ok(())
+        })
     }
 
     // =========================================================================

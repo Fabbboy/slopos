@@ -148,11 +148,9 @@ impl PacketBuf {
             return None;
         }
         let slot = PACKET_POOL.alloc()?;
-        // SAFETY: We own this slot exclusively after alloc().
-        unsafe {
-            let dst = PACKET_POOL.slot_data(slot);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
-        }
+        // We own this slot exclusively after alloc().
+        let dst = PACKET_POOL.slot_data(slot);
+        slopos_ostd::util::ptr_buf::copy_bytes(dst, data.as_ptr(), data.len());
         Some(Self {
             inner: PacketBufInner::Pooled {
                 pool: &PACKET_POOL,

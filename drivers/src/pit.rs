@@ -9,6 +9,7 @@
 //! never called.  The hardware counter free-runs at its base oscillator
 //! frequency (~1.193 182 MHz) after power-on reset.
 
+use slopos_ostd::io::Pit;
 use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::io::port_consts::PIT_BASE_FREQUENCY_HZ;
 
@@ -20,15 +21,12 @@ const DEFAULT_RELOAD: u32 = 0x10000;
 /// Interrupts are briefly disabled to prevent a stale two-byte read.
 /// Safe to call at any point — the counter free-runs from power-on.
 fn pit_read_count() -> u16 {
-    let cmd = IoPortRegistry::reserve::<u8>(0x43).expect("PIT command port");
-    let ch0 = IoPortRegistry::reserve::<u8>(0x40).expect("PIT channel 0 port");
+    let pit = Pit::new(
+        IoPortRegistry::reserve::<u8>(0x43).expect("PIT command port"),
+        IoPortRegistry::reserve::<u8>(0x40).expect("PIT channel 0 port"),
+    );
     let flags = slopos_arch::cpu::save_flags_cli();
-    let count = unsafe {
-        cmd.write(0x00); // latch channel 0
-        let low = ch0.read();
-        let high = ch0.read();
-        ((high as u16) << 8) | (low as u16)
-    };
+    let count = pit.read_count();
     slopos_arch::cpu::restore_flags(flags);
     count
 }

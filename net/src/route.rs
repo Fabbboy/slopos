@@ -27,13 +27,12 @@
 
 use core::fmt;
 
-use core::ptr::addr_of_mut;
-
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, init_from_closure};
+use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::{write_array_field, write_init_field};
 
 use super::types::{DevIndex, Ipv4Addr};
 
@@ -164,29 +163,23 @@ impl RouteTable {
     /// array is otherwise materialised on the caller's stack frame —
     /// `KBox::try_init(RouteTable::init())` keeps it on the heap.
     pub fn init() -> impl Init<Self, AllocError> {
-        // SAFETY: closure populates each of the 33 buckets and the
-        // `current_tick` analogue (none here) before returning Ok(()).
-        let inner_init = unsafe {
-            init_from_closure(|slot: *mut RouteTableInner| -> Result<(), AllocError> {
-                let buckets_ptr = addr_of_mut!((*slot).buckets) as *mut KVec<RouteEntry>;
-                for i in 0..33 {
-                    buckets_ptr.add(i).write(KVec::new());
-                }
+        // Inner-state initialiser: populates each of the 33 buckets.
+        let inner_init =
+            init_struct_with(|slot: SlotPtr<RouteTableInner>| -> Result<(), AllocError> {
+                write_array_field!(slot, buckets, 33, |_| KVec::<RouteEntry>::new());
                 Ok(())
-            })
-        };
-        // SAFETY: the inner SpinLock is initialised in place via
-        // `SpinLock::init_with`, which writes the lock state and then
-        // forwards `inner_init` into the data slot. No `Self` rvalue is
-        // built.
-        unsafe {
-            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
-                let inner_ptr = addr_of_mut!((*slot).inner);
+            });
+        // Outer initialiser: the inner SpinLock is initialised in
+        // place via `SpinLock::init_with`, which writes the lock
+        // state and then forwards `inner_init` into the data slot.
+        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_init_field!(
+                slot,
+                inner,
                 SpinLock::<RouteTableInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
-                    .__init(inner_ptr)?;
-                Ok(())
-            })
-        }
+            )?;
+            Ok(())
+        })
     }
 
     pub fn reset(&self) {

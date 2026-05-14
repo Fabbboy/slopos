@@ -11,12 +11,10 @@
 //! Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
 //! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
-use core::ptr;
-use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, init_from_closure};
-use slopos_ostd::{KBox, KVec};
+use slopos_ostd::mm::init::{Init, init_struct_with};
+use slopos_ostd::{KBox, KVec, write_field};
 
 use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};
@@ -442,38 +440,34 @@ impl VConsoleState {
     /// while the rvalue funnels through `Box::try_new_in`.
     #[allow(dead_code)] // production build uses the const `Self::new` for the static lock; this serves the test fixtures.
     pub(crate) fn init_default() -> impl Init<Self, AllocError> {
-        // SAFETY: writes every field of `Self` into `slot` exactly once
-        // before returning `Ok(())`. Field-by-field hand-written init
-        // (rather than a closure that captures a `Self::new()` rvalue)
-        // keeps the stack frame inside the gate.
-        unsafe {
-            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
-                addr_of_mut!((*slot).cursor_row).write(0);
-                addr_of_mut!((*slot).cursor_col).write(0);
-                addr_of_mut!((*slot).rows).write(DEFAULT_ROWS);
-                addr_of_mut!((*slot).cols).write(DEFAULT_COLS);
-                addr_of_mut!((*slot).cell_w).write(8);
-                addr_of_mut!((*slot).cell_h).write(16);
-                addr_of_mut!((*slot).fb).write(None);
-                addr_of_mut!((*slot).cells).write(CellGrid::empty());
-                addr_of_mut!((*slot).parser).write(VtParser::new());
-                addr_of_mut!((*slot).cursor_attrs).write(CursorAttributes::default_attrs());
-                addr_of_mut!((*slot).saved_cursor_row).write(0);
-                addr_of_mut!((*slot).saved_cursor_col).write(0);
-                addr_of_mut!((*slot).saved_cursor_attrs).write(CursorAttributes::default_attrs());
-                addr_of_mut!((*slot).cursor_visible).write(true);
-                addr_of_mut!((*slot).alt_cells).write(CellGrid::empty());
-                addr_of_mut!((*slot).alt_screen_cursor_row).write(0);
-                addr_of_mut!((*slot).alt_screen_cursor_col).write(0);
-                addr_of_mut!((*slot).in_alt_screen).write(false);
-                addr_of_mut!((*slot).scroll_top).write(0);
-                addr_of_mut!((*slot).scroll_bottom).write(0);
-                addr_of_mut!((*slot).shadow).write(None);
-                addr_of_mut!((*slot).shadow_pitch).write(0);
-                addr_of_mut!((*slot).dirty_rows).write(0);
+        init_struct_with(
+            |slot: slopos_ostd::mm::init::SlotPtr<Self>| -> Result<(), AllocError> {
+                write_field!(slot, cursor_row, 0);
+                write_field!(slot, cursor_col, 0);
+                write_field!(slot, rows, DEFAULT_ROWS);
+                write_field!(slot, cols, DEFAULT_COLS);
+                write_field!(slot, cell_w, 8);
+                write_field!(slot, cell_h, 16);
+                write_field!(slot, fb, None);
+                write_field!(slot, cells, CellGrid::empty());
+                write_field!(slot, parser, VtParser::new());
+                write_field!(slot, cursor_attrs, CursorAttributes::default_attrs());
+                write_field!(slot, saved_cursor_row, 0);
+                write_field!(slot, saved_cursor_col, 0);
+                write_field!(slot, saved_cursor_attrs, CursorAttributes::default_attrs());
+                write_field!(slot, cursor_visible, true);
+                write_field!(slot, alt_cells, CellGrid::empty());
+                write_field!(slot, alt_screen_cursor_row, 0);
+                write_field!(slot, alt_screen_cursor_col, 0);
+                write_field!(slot, in_alt_screen, false);
+                write_field!(slot, scroll_top, 0);
+                write_field!(slot, scroll_bottom, 0);
+                write_field!(slot, shadow, None);
+                write_field!(slot, shadow_pitch, 0);
+                write_field!(slot, dirty_rows, 0);
                 Ok(())
-            })
-        }
+            },
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -1608,15 +1602,11 @@ impl VConsoleState {
 /// against the shadow buffer's length, which mirrors framebuffer dims).
 #[inline]
 fn fb_blit(base: u64, byte_offset: usize, src: &[u8]) {
-    // SAFETY: framebuffer is a kernel-static MMIO region published by
-    // the bootloader and registered through `register_framebuffer`. The
-    // caller pre-checks `byte_offset + src.len() <= shadow_size`, where
-    // `shadow_size = pitch * height` matches the framebuffer extent.
-    // The kernel never frees this mapping for the duration of boot.
-    unsafe {
-        let dst = (base as *mut u8).add(byte_offset);
-        ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-    }
+    // Bounds: `flush_dirty_rows` pre-checks `byte_offset + src.len()
+    // <= shadow_size` where `shadow_size = pitch * height` mirrors
+    // the framebuffer extent. The framebuffer mapping outlives the
+    // kernel for the duration of boot.
+    slopos_ostd::boot::handoff::framebuffer::fb_blit_bytes(base, byte_offset, src);
 }
 
 /// Write a single pixel at `base + offset` using the given pixel format.
@@ -1624,30 +1614,30 @@ fn fb_blit(base: u64, byte_offset: usize, src: &[u8]) {
 /// and bounds-checked by the caller (`put_pixel`'s width/height gate).
 #[inline]
 fn fb_put_pixel(base: u64, offset: usize, bytes_per_pixel: u8, color: u32) {
-    // SAFETY: `put_pixel` gates on `x < width && y < height` and computes
-    // `offset = y*pitch + x*bpp`, which stays within `pitch * height`.
-    // The framebuffer mapping outlives the kernel.
-    unsafe {
-        let p = (base as *mut u8).add(offset);
-        match bytes_per_pixel {
-            4 => {
-                let bgra = color & 0x00FF_FFFF;
-                ptr::write_unaligned(p as *mut u32, bgra);
-            }
-            3 => {
-                ptr::write(p, (color & 0xFF) as u8);
-                ptr::write(p.add(1), ((color >> 8) & 0xFF) as u8);
-                ptr::write(p.add(2), ((color >> 16) & 0xFF) as u8);
-            }
-            2 => {
-                let r = ((color >> 16) & 0xFF) as u16;
-                let g = ((color >> 8) & 0xFF) as u16;
-                let b = (color & 0xFF) as u16;
-                let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-                ptr::write_unaligned(p as *mut u16, rgb565);
-            }
-            _ => {}
+    use slopos_ostd::boot::handoff::framebuffer::{
+        fb_ptr_add, fb_write_u8_at, fb_write_u16_at, fb_write_u32_unaligned,
+    };
+    // Bounds: `put_pixel` gates on `x < width && y < height` and
+    // computes `offset = y*pitch + x*bpp`, staying within the FB.
+    let p = fb_ptr_add(base as *mut u8, offset);
+    match bytes_per_pixel {
+        4 => {
+            let bgra = color & 0x00FF_FFFF;
+            fb_write_u32_unaligned(p, bgra);
         }
+        3 => {
+            fb_write_u8_at(p, (color & 0xFF) as u8);
+            fb_write_u8_at(fb_ptr_add(p, 1), ((color >> 8) & 0xFF) as u8);
+            fb_write_u8_at(fb_ptr_add(p, 2), ((color >> 16) & 0xFF) as u8);
+        }
+        2 => {
+            let r = ((color >> 16) & 0xFF) as u16;
+            let g = ((color >> 8) & 0xFF) as u16;
+            let b = (color & 0xFF) as u16;
+            let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+            fb_write_u16_at(p, rgb565);
+        }
+        _ => {}
     }
 }
 

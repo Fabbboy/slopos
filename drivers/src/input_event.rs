@@ -496,9 +496,7 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
     let mut count = 0;
     while count < max_count {
         if let Some(event) = queue.events.try_pop() {
-            unsafe {
-                out_buffer.add(count).write(event);
-            }
+            slopos_ostd::util::ptr_buf::write_at_index(out_buffer, count, event);
             count += 1;
         } else {
             break;

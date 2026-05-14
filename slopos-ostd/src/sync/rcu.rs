@@ -472,6 +472,145 @@ pub fn rcu_process_callbacks() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RcuCell<T> — safe RCU-protected atomic-pointer cell.
+// ---------------------------------------------------------------------------
+
+/// RCU-protected single-slot cell of `KBox<T>`.
+///
+/// Stores at most one heap-owned `T`. Readers obtain an
+/// [`RcuCellGuard`] which holds an [`RcuReadGuard`] for its lifetime
+/// and derefs to `&T`. Writers replace the contents with another
+/// `KBox<T>`; the displaced value is freed after a grace period via
+/// [`rcu_call_typed`].
+///
+/// Designed for the global glyph atlas / per-namespace policy table
+/// pattern: hot-path readers are wait-free, writers are rare and
+/// pay for the grace period.
+///
+/// `T: Send + 'static` is required because writers may need to free
+/// the displaced box from a different CPU after the grace period.
+///
+/// Use [`RcuCell::store_unchecked`] for pre-scheduler init when no
+/// concurrent reader can exist — the displaced box is dropped
+/// synchronously, sidestepping the deferred-free fast path.
+pub struct RcuCell<T: Send + 'static> {
+    ptr: AtomicPtr<T>,
+}
+
+/// RAII guard returned by [`RcuCell::load`]. Derefs to `&T` and holds
+/// the RCU read-side critical section open for its lifetime.
+#[must_use = "dropping the guard immediately ends the RCU read-side critical section"]
+pub struct RcuCellGuard<T: 'static> {
+    _rcu: RcuReadGuard,
+    ptr: *const T,
+    _not_send_sync: core::marker::PhantomData<*mut ()>,
+}
+
+impl<T: 'static> core::ops::Deref for RcuCellGuard<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        // SAFETY: `ptr` is non-null (guarded by `RcuCell::load`'s
+        // null-check) and remains valid for the duration of the
+        // embedded `RcuReadGuard` — writers do not free until the
+        // next grace period boundary, which cannot be observed by
+        // this CPU while preemption is disabled inside `_rcu`.
+        unsafe { &*self.ptr }
+    }
+}
+
+impl<T: Send + 'static> RcuCell<T> {
+    /// Construct an empty cell.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            ptr: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    /// Load the current value under an RCU read-side critical section.
+    /// Returns `None` if the cell is empty.
+    #[inline]
+    pub fn load(&self) -> Option<RcuCellGuard<T>> {
+        let rcu = rcu_read_lock();
+        let ptr = self.ptr.load(Ordering::Acquire);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(RcuCellGuard {
+                _rcu: rcu,
+                ptr: ptr as *const T,
+                _not_send_sync: core::marker::PhantomData,
+            })
+        }
+    }
+
+    /// Replace the cell contents with `new_value`. The displaced
+    /// `KBox<T>` (if any) is scheduled for deferred drop via
+    /// [`rcu_call_typed`] so concurrent readers can complete safely.
+    ///
+    /// Returns the raw `*mut T` of the displaced value (may be null
+    /// on first publish). Callers who need the typed `KBox<T>` back
+    /// for a custom drop should use [`replace_take`] instead.
+    pub fn replace(&self, new_value: crate::mm::KBox<T>) -> *mut T {
+        let new_ptr = crate::mm::KBox::into_raw(new_value);
+        let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
+        if !old.is_null() {
+            // SAFETY: `old` was produced by a previous `into_raw` on
+            // a `KBox<T>` we owned exclusively; reclaim ownership for
+            // the deferred drop.
+            let old_box = unsafe { crate::mm::KBox::from_raw(old) };
+            rcu_call_typed::<T>(old_box, drop_typed::<T>);
+        }
+        old
+    }
+
+    /// Replace the cell contents with `new_value` and return the
+    /// displaced `KBox<T>` to the caller (instead of scheduling a
+    /// deferred drop).
+    ///
+    /// **Caller must arrange grace-period safety** — typically by
+    /// either (a) this being a pre-scheduler init or panic path
+    /// where no reader can exist, or (b) passing the returned box
+    /// to [`rcu_call_typed`] themselves.
+    pub fn replace_take(&self, new_value: crate::mm::KBox<T>) -> Option<crate::mm::KBox<T>> {
+        let new_ptr = crate::mm::KBox::into_raw(new_value);
+        let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
+        if old.is_null() {
+            None
+        } else {
+            // SAFETY: see `replace`; caller takes responsibility for
+            // grace-period safety.
+            Some(unsafe { crate::mm::KBox::from_raw(old) })
+        }
+    }
+
+    /// Pre-scheduler-only store: replace the cell contents and drop
+    /// the displaced value immediately. Sound only when the caller
+    /// can prove no concurrent reader exists (e.g. the call happens
+    /// before the scheduler starts).
+    pub fn store_pre_scheduler(&self, new_value: crate::mm::KBox<T>) {
+        let new_ptr = crate::mm::KBox::into_raw(new_value);
+        let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
+        if !old.is_null() {
+            // SAFETY: caller asserts no reader is observing `old`.
+            drop(unsafe { crate::mm::KBox::from_raw(old) });
+        }
+    }
+}
+
+// SAFETY: `RcuCell<T>` shares `T` across threads via the embedded
+// `AtomicPtr`. `T: Send + 'static` ensures the publishable value can
+// cross thread boundaries; the RCU machinery serialises observation.
+unsafe impl<T: Send + 'static> Send for RcuCell<T> {}
+unsafe impl<T: Send + Sync + 'static> Sync for RcuCell<T> {}
+
+fn drop_typed<T: Send + 'static>(_b: crate::mm::KBox<T>) {
+    // `KBox::drop` releases the heap allocation.
+}
+
 /// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_backend_for_test() {

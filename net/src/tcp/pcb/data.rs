@@ -26,9 +26,8 @@
 //! 6. [`emit_ack_if_needed`] — delayed-ACK decision.
 
 use core::mem;
-use core::ptr::addr_of_mut;
 
-use slopos_ostd::{AllocError, Init, init_from_closure};
+use slopos_ostd::{AllocError, Init, SlotPtr, init_struct_with, write_field, zero_field};
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::buffer::TcpBufferPair;
@@ -140,51 +139,40 @@ impl DataState {
         ts_enabled: bool,
     ) -> impl Init<Self, AllocError> {
         let cc_mss = peer_mss.max(DEFAULT_MSS) as u32;
-        // SAFETY: we write every field of `Self` exactly once via
-        // `addr_of_mut!` + `.write()` before returning `Ok(())`,
-        // satisfying `Init::__init`'s contract. No intermediate
+        // Writes every field of `Self` exactly once via the safe
+        // `write_field!` / `zero_field!` wrappers. No intermediate
         // `Self` rvalue is built.
-        unsafe {
-            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
-                // SAFETY: `slot` is writable for `size_of::<Self>()`
-                // and aligned for `Self` per `Init::__init`'s
-                // precondition; each `.write()` below initialises one
-                // field.
-                addr_of_mut!((*slot).iss).write(iss);
-                addr_of_mut!((*slot).irs).write(irs);
-                addr_of_mut!((*slot).snd_una).write(snd_una);
-                addr_of_mut!((*slot).snd_nxt).write(snd_nxt);
-                addr_of_mut!((*slot).snd_wnd).write(snd_wnd);
-                addr_of_mut!((*slot).rcv_nxt).write(rcv_nxt);
-                addr_of_mut!((*slot).rcv_wnd).write(rcv_wnd);
-                addr_of_mut!((*slot).peer_mss).write(peer_mss);
-                addr_of_mut!((*slot).rcv_wscale).write(rcv_wscale);
-                addr_of_mut!((*slot).snd_wscale).write(snd_wscale);
-                addr_of_mut!((*slot).wscale_enabled).write(wscale_enabled);
-                addr_of_mut!((*slot).sack_permitted).write(false);
-                addr_of_mut!((*slot).nagle_enabled).write(true);
-                addr_of_mut!((*slot).close_phase).write(ClosePhase::Established);
-                addr_of_mut!((*slot).rtt).write(RttEstimator::new());
-                addr_of_mut!((*slot).cc).write(CcAlgo::cubic(cc_mss));
-                // SAFETY: the field slot is valid per the surrounding
-                // `Init::__init` precondition; `new_in_slot` zeroes
-                // the entire ~800 B struct in place, avoiding the
-                // by-value return that would otherwise inflate the
-                // closure's stack frame.
-                SendMap::new_in_slot(addr_of_mut!((*slot).sendmap));
-                addr_of_mut!((*slot).retransmit_token).write(None);
-                addr_of_mut!((*slot).keepalive_token).write(None);
-                addr_of_mut!((*slot).keepalive_probes_sent).write(0);
-                addr_of_mut!((*slot).last_activity_tick).write(0);
-                addr_of_mut!((*slot).fin_wait2_token).write(None);
-                addr_of_mut!((*slot).ts_enabled).write(ts_enabled);
-                addr_of_mut!((*slot).ts_recent).write(0);
-                addr_of_mut!((*slot).last_ack_sent).write(0);
-                addr_of_mut!((*slot).reset_received).write(false);
-                addr_of_mut!((*slot).peer_closed).write(false);
-                Ok(())
-            })
-        }
+        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_field!(slot, iss, iss);
+            write_field!(slot, irs, irs);
+            write_field!(slot, snd_una, snd_una);
+            write_field!(slot, snd_nxt, snd_nxt);
+            write_field!(slot, snd_wnd, snd_wnd);
+            write_field!(slot, rcv_nxt, rcv_nxt);
+            write_field!(slot, rcv_wnd, rcv_wnd);
+            write_field!(slot, peer_mss, peer_mss);
+            write_field!(slot, rcv_wscale, rcv_wscale);
+            write_field!(slot, snd_wscale, snd_wscale);
+            write_field!(slot, wscale_enabled, wscale_enabled);
+            write_field!(slot, sack_permitted, false);
+            write_field!(slot, nagle_enabled, true);
+            write_field!(slot, close_phase, ClosePhase::Established);
+            write_field!(slot, rtt, RttEstimator::new());
+            write_field!(slot, cc, CcAlgo::cubic(cc_mss));
+            // `SendMap` is all-zero-valid (see `SendMap::zero_init_slot`).
+            zero_field!(slot, sendmap);
+            write_field!(slot, retransmit_token, None);
+            write_field!(slot, keepalive_token, None);
+            write_field!(slot, keepalive_probes_sent, 0u8);
+            write_field!(slot, last_activity_tick, 0u64);
+            write_field!(slot, fin_wait2_token, None);
+            write_field!(slot, ts_enabled, ts_enabled);
+            write_field!(slot, ts_recent, 0u32);
+            write_field!(slot, last_ack_sent, 0u32);
+            write_field!(slot, reset_received, false);
+            write_field!(slot, peer_closed, false);
+            Ok(())
+        })
     }
 
     /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED`
@@ -210,44 +198,39 @@ impl DataState {
         let wscale_enabled = s.wscale_enabled;
         let sack_permitted = s.sack_permitted;
         let ts_enabled = s.ts_enabled;
-        // SAFETY: see `init_new` above — identical invariant.
-        unsafe {
-            init_from_closure(move |slot: *mut Self| -> Result<(), AllocError> {
-                addr_of_mut!((*slot).iss).write(iss);
-                addr_of_mut!((*slot).irs).write(irs);
-                addr_of_mut!((*slot).snd_una).write(snd_una);
-                addr_of_mut!((*slot).snd_nxt).write(snd_nxt);
-                addr_of_mut!((*slot).snd_wnd).write(snd_wnd);
-                addr_of_mut!((*slot).rcv_nxt).write(rcv_nxt);
-                addr_of_mut!((*slot).rcv_wnd).write(rcv_wnd);
-                addr_of_mut!((*slot).peer_mss).write(peer_mss);
-                addr_of_mut!((*slot).rcv_wscale).write(rcv_wscale);
-                addr_of_mut!((*slot).snd_wscale).write(snd_wscale);
-                addr_of_mut!((*slot).wscale_enabled).write(wscale_enabled);
-                addr_of_mut!((*slot).sack_permitted).write(sack_permitted);
-                addr_of_mut!((*slot).nagle_enabled).write(true);
-                addr_of_mut!((*slot).close_phase).write(ClosePhase::Established);
-                addr_of_mut!((*slot).rtt).write(RttEstimator::new());
-                addr_of_mut!((*slot).cc).write(CcAlgo::cubic(cc_mss));
-                // SAFETY: the field slot is valid per the surrounding
-                // `Init::__init` precondition; `new_in_slot` zeroes
-                // the entire ~800 B struct in place, avoiding the
-                // by-value return that would otherwise inflate the
-                // closure's stack frame.
-                SendMap::new_in_slot(addr_of_mut!((*slot).sendmap));
-                addr_of_mut!((*slot).retransmit_token).write(None);
-                addr_of_mut!((*slot).keepalive_token).write(None);
-                addr_of_mut!((*slot).keepalive_probes_sent).write(0);
-                addr_of_mut!((*slot).last_activity_tick).write(0);
-                addr_of_mut!((*slot).fin_wait2_token).write(None);
-                addr_of_mut!((*slot).ts_enabled).write(ts_enabled);
-                addr_of_mut!((*slot).ts_recent).write(ts_recent);
-                addr_of_mut!((*slot).last_ack_sent).write(0);
-                addr_of_mut!((*slot).reset_received).write(false);
-                addr_of_mut!((*slot).peer_closed).write(false);
-                Ok(())
-            })
-        }
+        // Same field-by-field idiom as `init_new` — see there for the
+        // overall invariant.
+        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_field!(slot, iss, iss);
+            write_field!(slot, irs, irs);
+            write_field!(slot, snd_una, snd_una);
+            write_field!(slot, snd_nxt, snd_nxt);
+            write_field!(slot, snd_wnd, snd_wnd);
+            write_field!(slot, rcv_nxt, rcv_nxt);
+            write_field!(slot, rcv_wnd, rcv_wnd);
+            write_field!(slot, peer_mss, peer_mss);
+            write_field!(slot, rcv_wscale, rcv_wscale);
+            write_field!(slot, snd_wscale, snd_wscale);
+            write_field!(slot, wscale_enabled, wscale_enabled);
+            write_field!(slot, sack_permitted, sack_permitted);
+            write_field!(slot, nagle_enabled, true);
+            write_field!(slot, close_phase, ClosePhase::Established);
+            write_field!(slot, rtt, RttEstimator::new());
+            write_field!(slot, cc, CcAlgo::cubic(cc_mss));
+            // `SendMap` is all-zero-valid.
+            zero_field!(slot, sendmap);
+            write_field!(slot, retransmit_token, None);
+            write_field!(slot, keepalive_token, None);
+            write_field!(slot, keepalive_probes_sent, 0u8);
+            write_field!(slot, last_activity_tick, 0u64);
+            write_field!(slot, fin_wait2_token, None);
+            write_field!(slot, ts_enabled, ts_enabled);
+            write_field!(slot, ts_recent, ts_recent);
+            write_field!(slot, last_ack_sent, 0u32);
+            write_field!(slot, reset_received, false);
+            write_field!(slot, peer_closed, false);
+            Ok(())
+        })
     }
 
     /// Test-and-test-hooks-only by-value constructor. Materialises a `Self`

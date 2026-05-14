@@ -46,23 +46,20 @@
 pub mod keyboard;
 pub mod mouse;
 use slopos_arch::cpu;
-use slopos_ostd::io::port::{IoPort, IoPortRegistry};
+use slopos_ostd::io::Ps2Regs;
+use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::sync::OnceLock;
 use slopos_ostd::{klog_debug, klog_info, klog_warn};
 
-struct Ps2Ports {
-    data: IoPort<u8>,
-    status: IoPort<u8>,
-    command: IoPort<u8>,
-}
+static PORTS: OnceLock<Ps2Regs> = OnceLock::new();
 
-static PORTS: OnceLock<Ps2Ports> = OnceLock::new();
-
-fn ports() -> &'static Ps2Ports {
-    PORTS.call_once(|| Ps2Ports {
-        data: IoPortRegistry::reserve::<u8>(0x60).expect("PS/2 data port"),
-        status: IoPortRegistry::reserve::<u8>(0x64).expect("PS/2 status port"),
-        command: IoPortRegistry::reserve::<u8>(0x64).expect("PS/2 command port"),
+fn ports() -> &'static Ps2Regs {
+    PORTS.call_once(|| {
+        Ps2Regs::new(
+            IoPortRegistry::reserve::<u8>(0x60).expect("PS/2 data port"),
+            IoPortRegistry::reserve::<u8>(0x64).expect("PS/2 status port"),
+            IoPortRegistry::reserve::<u8>(0x64).expect("PS/2 command port"),
+        )
     });
     PORTS.get().expect("PS/2 ports initialised")
 }
@@ -136,7 +133,7 @@ const FLUSH_MAX_BYTES: u32 = 64;
 /// Returns the current status byte. Check individual bits using the STATUS_* constants.
 #[inline(always)]
 pub fn read_status() -> u8 {
-    unsafe { ports().status.read() }
+    ports().read_status()
 }
 /// Check if data is available to read from the controller.
 #[inline(always)]
@@ -196,7 +193,7 @@ pub fn wait_data() -> bool {
 #[inline(always)]
 pub fn write_command(cmd: u8) {
     wait_ready();
-    unsafe { ports().command.write(cmd) }
+    ports().write_command(cmd);
 }
 /// Write data to the PS/2 data port (port 0x60).
 ///
@@ -205,7 +202,7 @@ pub fn write_command(cmd: u8) {
 #[inline(always)]
 pub fn write_data(data: u8) {
     wait_ready();
-    unsafe { ports().data.write(data) }
+    ports().write_data(data);
 }
 /// Read data from the PS/2 data port (port 0x60).
 ///
@@ -214,7 +211,7 @@ pub fn write_data(data: u8) {
 #[inline(always)]
 pub fn read_data() -> u8 {
     wait_data();
-    unsafe { ports().data.read() }
+    ports().read_data()
 }
 /// Read data immediately without waiting.
 ///
@@ -222,7 +219,7 @@ pub fn read_data() -> u8 {
 /// Caller must ensure data is available (check status first).
 #[inline(always)]
 pub fn read_data_nowait() -> u8 {
-    unsafe { ports().data.read() }
+    ports().read_data()
 }
 
 // =============================================================================
