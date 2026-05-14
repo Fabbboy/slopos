@@ -10,11 +10,10 @@
 //! v1 hard-coded snapshot fields for `cpu_online`, `cpu_enabled`,
 //! `PCR.current_task[BSP]`, and `PCR.idle_task[BSP]`. v2 walks the
 //! `slopos_hermetic` linker-section registry: each subsystem with
-//! mutable singleton state declares an `unsafe impl HermeticState` and
-//! a `register_hermetic_state!` line. The scope captures snapshots in
-//! topo-sorted dependency order at enter, and restores in reverse on
-//! Drop. Adding a new mutable singleton is a one-liner per subsystem,
-//! not a central edit to this scope.
+//! mutable singleton state declares a `hermetic_state! { ... }` block
+//! and the framework handles snapshot, topo-sort, and restore. Adding
+//! a new mutable singleton is a one-liner per subsystem, not a central
+//! edit to this scope.
 //!
 //! ## What v2 still owns directly
 //!
@@ -46,6 +45,9 @@ use core::marker::PhantomData;
 use slopos_hermetic::{BootCtx, HermeticVTable, TestInit, topo_order};
 use slopos_ostd::KVec;
 use slopos_ostd::sync::StateFlag;
+use slopos_ostd::test_support::hermetic::{
+    SnapshotError, run_restore_phase_drain, run_snapshot_phase,
+};
 use slopos_utils::klog_info;
 
 /// Idempotent registration of the panic-cleanup that clears the
@@ -63,10 +65,10 @@ fn ensure_panic_cleanup_registered() {
 }
 
 fn panic_clear_test_scope() {
-    // SAFETY: registered with panic_recovery; runs from the recovery
-    // cleanup chain after `catch_panic!`'s longjmp. Single-CPU; the
-    // test-running CPU.
-    unsafe { slopos_hermetic::clear_test_scope_after_panic() };
+    // Single-CPU atomic flag clear; registered with panic_recovery
+    // and invoked from the recovery cleanup chain after
+    // `catch_panic!`'s longjmp on the test-running CPU.
+    slopos_hermetic::clear_test_scope_after_panic();
 }
 
 use super::per_cpu::{
@@ -131,35 +133,21 @@ impl KernelTestScope {
             }
         };
 
-        let mut captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)> = KVec::new();
-        let mut snapshot_failure: Option<&'static str> = None;
-        for vt in order.iter() {
-            // SAFETY: registry vtable invariant — `snapshot` is safe to call
-            // here because APs are paused and we are on BSP.
-            match unsafe { (vt.snapshot)() } {
-                Ok(payload) => {
-                    if captured.push((*vt, payload)).is_err() {
-                        snapshot_failure = Some("KVec push OOM");
-                        break;
-                    }
-                }
-                Err(_) => {
-                    snapshot_failure = Some(vt.name);
-                    break;
-                }
+        let captured = match run_snapshot_phase(order.as_slice()) {
+            Ok(captured) => captured,
+            Err((mut partial, err)) => {
+                let label = match err {
+                    SnapshotError::Oom => "KVec push OOM",
+                    SnapshotError::StateAllocFailed(name) => name,
+                };
+                klog_info!("KernelTestScope: snapshot OOM for state {}", label);
+                run_restore_phase_drain(&mut partial);
+                resume_all_aps_if_not_nested(aps_paused);
+                slopos_hermetic::return_after_test(boot_ctx);
+                panic!("KernelTestScope: snapshot OOM");
             }
-        }
-
-        if let Some(failed_state) = snapshot_failure {
-            klog_info!("KernelTestScope: snapshot OOM for state {}", failed_state);
-            // Rewind whatever we captured.
-            while let Some((rvt, rpayload)) = captured.pop() {
-                unsafe { (rvt.restore)(rpayload) };
-            }
-            resume_all_aps_if_not_nested(aps_paused);
-            slopos_hermetic::return_after_test(boot_ctx);
-            panic!("KernelTestScope: snapshot OOM");
-        }
+        };
+        let mut captured = captured;
 
         // Reset-to-fresh-state: park PCR on the bootstrap stub, shut
         // down the existing task manager + scheduler, then re-init.
@@ -180,9 +168,7 @@ impl KernelTestScope {
 
         if let Some(stage) = reset_failure {
             klog_info!("KernelTestScope: {} failed", stage);
-            while let Some((rvt, rpayload)) = captured.pop() {
-                unsafe { (rvt.restore)(rpayload) };
-            }
+            run_restore_phase_drain(&mut captured);
             resume_all_aps_if_not_nested(aps_paused);
             slopos_hermetic::return_after_test(boot_ctx);
             panic!("KernelTestScope: {} failed", stage);
@@ -200,9 +186,7 @@ impl KernelTestScope {
                 }
             }
             if let Some(cpu) = missing_cpu {
-                while let Some((rvt, rpayload)) = captured.pop() {
-                    unsafe { (rvt.restore)(rpayload) };
-                }
+                run_restore_phase_drain(&mut captured);
                 resume_all_aps_if_not_nested(aps_paused);
                 slopos_hermetic::return_after_test(boot_ctx);
                 panic!(
@@ -246,11 +230,7 @@ impl Drop for KernelTestScope {
 
         // Restore in reverse topo order: dependents undone first, then
         // dependencies.
-        while let Some((vt, payload)) = self.captured.pop() {
-            // SAFETY: payload was produced by the matching vtable's
-            // snapshot under our enter() control; APs are paused.
-            unsafe { (vt.restore)(payload) };
-        }
+        run_restore_phase_drain(&mut self.captured);
 
         if let Some(ctx) = self.boot_ctx.take() {
             slopos_hermetic::return_after_test(ctx);

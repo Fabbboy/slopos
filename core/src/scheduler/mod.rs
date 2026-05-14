@@ -4,6 +4,8 @@ pub mod exit_info;
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod futex;
+#[cfg(feature = "test-hooks")]
+pub mod inspect;
 pub mod kthread;
 pub mod lifecycle;
 pub mod per_cpu;

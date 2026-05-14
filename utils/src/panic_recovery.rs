@@ -70,11 +70,12 @@ pub fn cleanup_handler_count() -> usize {
 /// Truncate the cleanup-handler list to `count` entries. Slots from
 /// `count` onward are zeroed so future registrations start fresh.
 ///
-/// # Safety
-/// Caller must guarantee no panic-cleanup is in flight. Hermetic-state
-/// framework calls this from `KernelTestScope::Drop` with APs paused,
-/// which satisfies the precondition.
-pub unsafe fn truncate_cleanup_handlers(count: usize) {
+/// All operations are bounded-index atomic stores — sound regardless
+/// of caller context. Hermetic-state framework calls this from
+/// `KernelTestScope::Drop` with APs paused, which is the intended
+/// use site, but a racing call would at worst clobber another caller's
+/// truncation, not violate memory safety.
+pub fn truncate_cleanup_handlers(count: usize) {
     let count = count.min(MAX_PANIC_CLEANUP_HANDLERS);
     PANIC_CLEANUP_COUNT.store(count, Ordering::SeqCst);
     for i in count..MAX_PANIC_CLEANUP_HANDLERS {

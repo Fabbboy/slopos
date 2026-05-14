@@ -1133,6 +1133,19 @@ pub fn get_heap_stats(stats: *mut HeapStats) {
     write_optional_heap_stats(stats, s);
 }
 
+/// Owned-return variant of [`get_heap_stats`] for callers that want a
+/// safe-fn surface without raw-ptr handoff. The pre-existing
+/// `get_heap_stats(*mut HeapStats)` form stays for the C-ABI shim.
+pub fn get_heap_stats_owned() -> HeapStats {
+    let heap = KERNEL_HEAP.lock();
+    let mut s = heap.stats;
+    let mag_allocs = MAG_ALLOC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    let mag_frees = MAG_FREE_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    s.allocation_count = s.allocation_count.saturating_add(mag_allocs);
+    s.free_count = s.free_count.saturating_add(mag_frees);
+    s
+}
+
 pub fn kernel_heap_enable_diagnostics(enable: c_int) {
     let mut heap = KERNEL_HEAP.lock();
     heap.diagnostics_enabled = enable != 0;

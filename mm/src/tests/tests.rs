@@ -1,8 +1,8 @@
 use core::ffi::c_void;
-use core::mem::MaybeUninit;
 use core::ptr;
 
 use slopos_ostd::KVec;
+use slopos_ostd::test_support::page_io;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::cpu;
@@ -12,7 +12,7 @@ use slopos_testing::{assert_not_null, assert_test, fail, pass};
 use slopos_utils::klog_info;
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
+use crate::kernel_heap::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use crate::page_alloc::{
     alloc_kernel_page, alloc_kernel_pages, free_page_frame, get_page_allocator_stats,
     page_frame_get_ref, page_frame_inc_ref,
@@ -91,16 +91,13 @@ pub fn test_page_alloc_zeroed() -> TestResult {
 
     if let Some(virt) = phys.to_virt_checked() {
         let ptr: *const u8 = virt.as_ptr();
-        for i in 0..64 {
-            let byte = unsafe { *ptr.add(i) };
-            if byte != 0 {
-                klog_info!(
-                    "PAGE_ALLOC_TEST: Zeroed page has non-zero byte at offset {}",
-                    i
-                );
-                free_page_frame(phys);
-                return fail!("zeroed page has non-zero byte at offset {}", i);
-            }
+        if let Some(i) = page_io::verify_pattern(ptr, 0, 64) {
+            klog_info!(
+                "PAGE_ALLOC_TEST: Zeroed page has non-zero byte at offset {}",
+                i
+            );
+            free_page_frame(phys);
+            return fail!("zeroed page has non-zero byte at offset {}", i);
         }
     }
 
@@ -279,12 +276,9 @@ pub fn test_heap_kzalloc_zeroed() -> TestResult {
     assert_not_null!(ptr, "kzalloc 128 bytes");
 
     let bytes = ptr as *const u8;
-    for i in 0..128 {
-        let b = unsafe { *bytes.add(i) };
-        if b != 0 {
-            kfree(ptr);
-            return fail!("kzalloc memory not zeroed at offset {}", i);
-        }
+    if let Some(i) = page_io::verify_pattern(bytes, 0, 128) {
+        kfree(ptr);
+        return fail!("kzalloc memory not zeroed at offset {}", i);
     }
 
     kfree(ptr);
@@ -309,16 +303,12 @@ pub fn test_heap_alloc_zero() -> TestResult {
 
 /// Test 7: Stats tracking accuracy
 pub fn test_heap_stats() -> TestResult {
-    let mut stats_before = MaybeUninit::uninit();
-    get_heap_stats(stats_before.as_mut_ptr());
-    let before = unsafe { stats_before.assume_init() };
+    let before = get_heap_stats_owned();
 
     let ptr = kmalloc(256);
     assert_not_null!(ptr, "alloc for stats test");
 
-    let mut stats_after = MaybeUninit::uninit();
-    get_heap_stats(stats_after.as_mut_ptr());
-    let after = unsafe { stats_after.assume_init() };
+    let after = get_heap_stats_owned();
 
     if after.allocated_size <= before.allocated_size {
         kfree(ptr);
@@ -344,9 +334,7 @@ pub fn test_global_alloc_vec() -> TestResult {
 }
 
 pub fn test_heap_free_list_search() -> TestResult {
-    let mut stats_before = MaybeUninit::uninit();
-    get_heap_stats(stats_before.as_mut_ptr());
-    let initial_heap_size = unsafe { stats_before.assume_init() }.total_size;
+    let initial_heap_size = get_heap_stats_owned().total_size;
 
     let p1 = kmalloc(256);
     assert_not_null!(p1, "alloc p1");
@@ -362,9 +350,7 @@ pub fn test_heap_free_list_search() -> TestResult {
         return fail!("alloc p3");
     }
 
-    let mut stats_after_alloc = MaybeUninit::uninit();
-    get_heap_stats(stats_after_alloc.as_mut_ptr());
-    let heap_after_alloc = unsafe { stats_after_alloc.assume_init() }.total_size;
+    let heap_after_alloc = get_heap_stats_owned().total_size;
 
     kfree(p1);
     kfree(p2);
@@ -381,9 +367,7 @@ pub fn test_heap_free_list_search() -> TestResult {
         return fail!("alloc p5");
     }
 
-    let mut stats_final = MaybeUninit::uninit();
-    get_heap_stats(stats_final.as_mut_ptr());
-    let final_heap_size = unsafe { stats_final.assume_init() }.total_size;
+    let final_heap_size = get_heap_stats_owned().total_size;
 
     if final_heap_size > heap_after_alloc {
         kfree(p3);
@@ -993,16 +977,14 @@ pub fn test_page_alloc_write_verify() -> TestResult {
 
     // Write 0xAA/0x55 alternating pattern
     for i in 0..4096 {
-        unsafe {
-            let val = if i % 2 == 0 { 0xAA } else { 0x55 };
-            ptr.add(i).write_volatile(val);
-        }
+        let val = if i % 2 == 0 { 0xAA } else { 0x55 };
+        page_io::write_volatile_byte(ptr, i, val);
     }
 
     // Read back and verify
     for i in 0..4096 {
         let expected = if i % 2 == 0 { 0xAA } else { 0x55 };
-        let actual = unsafe { ptr.add(i).read_volatile() };
+        let actual = page_io::read_volatile_byte(ptr, i);
         if actual != expected {
             free_page_frame(phys);
             return fail!(
@@ -1033,7 +1015,7 @@ pub fn test_page_alloc_zero_full_page() -> TestResult {
     let ptr = virt.as_mut_ptr::<u8>();
 
     for i in 0..4096 {
-        let val = unsafe { ptr.add(i).read_volatile() };
+        let val = page_io::read_volatile_byte(ptr, i);
         if val != 0 {
             free_page_frame(phys);
             return fail!("zeroed page has non-zero at offset {}: {:#x}", i, val);
@@ -1050,9 +1032,7 @@ pub fn test_page_alloc_no_stale_data() -> TestResult {
 
     if let Some(virt) = phys1.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
-        for i in 0..4096 {
-            unsafe { ptr.add(i).write_volatile(0xDE) };
-        }
+        page_io::fill_volatile(ptr, 0xDE, 4096);
     }
 
     free_page_frame(phys1);
@@ -1064,7 +1044,7 @@ pub fn test_page_alloc_no_stale_data() -> TestResult {
     if let Some(virt) = phys2.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
         for i in 0..256 {
-            let val = unsafe { ptr.add(i).read_volatile() };
+            let val = page_io::read_volatile_byte(ptr, i);
             if val != 0 {
                 free_page_frame(phys2);
                 return fail!("stale data found at offset {}: {:#x} (expected 0)", i, val);
@@ -1089,12 +1069,12 @@ pub fn test_heap_boundary_write() -> TestResult {
         let byte_ptr = ptr as *mut u8;
 
         for i in 0..size {
-            unsafe { byte_ptr.add(i).write_volatile((i & 0xFF) as u8) };
+            page_io::write_volatile_byte(byte_ptr, i, (i & 0xFF) as u8);
         }
 
         for i in 0..size {
             let expected = (i & 0xFF) as u8;
-            let actual = unsafe { byte_ptr.add(i).read_volatile() };
+            let actual = page_io::read_volatile_byte(byte_ptr, i);
             if actual != expected {
                 scrub_chunk(ptr, size);
                 kfree(ptr);
@@ -1132,7 +1112,7 @@ pub fn test_heap_no_overlap() -> TestResult {
 
         let byte_ptr = ptrs[i] as *mut u8;
         for j in 0..sizes[i] {
-            unsafe { byte_ptr.add(j).write_volatile(i as u8) };
+            page_io::write_volatile_byte(byte_ptr, j, i as u8);
         }
     }
 
@@ -1140,7 +1120,7 @@ pub fn test_heap_no_overlap() -> TestResult {
     for i in 0..NUM_ALLOCS {
         let byte_ptr = ptrs[i] as *mut u8;
         for j in 0..sizes[i] {
-            let actual = unsafe { byte_ptr.add(j).read_volatile() };
+            let actual = page_io::read_volatile_byte(byte_ptr, j);
             if actual != i as u8 {
                 for k in 0..NUM_ALLOCS {
                     kfree(ptrs[k]);
@@ -1183,12 +1163,12 @@ pub fn test_heap_large_block_integrity() -> TestResult {
 
     for i in 0..size {
         let pattern = ((i * 17) & 0xFF) as u8;
-        unsafe { byte_ptr.add(i).write_volatile(pattern) };
+        page_io::write_volatile_byte(byte_ptr, i, pattern);
     }
 
     for i in 0..size {
         let expected = ((i * 17) & 0xFF) as u8;
-        let actual = unsafe { byte_ptr.add(i).read_volatile() };
+        let actual = page_io::read_volatile_byte(byte_ptr, i);
         if actual != expected {
             scrub_chunk(ptr, size);
             kfree(ptr);
@@ -1215,13 +1195,11 @@ pub fn test_heap_stress_cycles() -> TestResult {
         }
 
         let byte_ptr = ptr as *mut u8;
-        unsafe {
-            byte_ptr.write_volatile(0xAB);
-            byte_ptr.add(127).write_volatile(0xCD);
-        }
+        page_io::write_volatile_byte(byte_ptr, 0, 0xAB);
+        page_io::write_volatile_byte(byte_ptr, 127, 0xCD);
 
-        let first = unsafe { byte_ptr.read_volatile() };
-        let last = unsafe { byte_ptr.add(127).read_volatile() };
+        let first = page_io::read_volatile_byte(byte_ptr, 0);
+        let last = page_io::read_volatile_byte(byte_ptr, 127);
 
         if first != 0xAB || last != 0xCD {
             kfree(ptr);
@@ -1249,7 +1227,7 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
             let ptr = virt.as_mut_ptr::<u8>();
             for i in 0..4096 {
                 let pattern = ((page as u8).wrapping_mul(17)).wrapping_add((i & 0xFF) as u8);
-                unsafe { ptr.add(i).write_volatile(pattern) };
+                page_io::write_volatile_byte(ptr, i, pattern);
             }
         }
     }
@@ -1260,7 +1238,7 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
             let ptr = virt.as_mut_ptr::<u8>();
             for i in 0..4096 {
                 let expected = ((page as u8).wrapping_mul(17)).wrapping_add((i & 0xFF) as u8);
-                let actual = unsafe { ptr.add(i).read_volatile() };
+                let actual = page_io::read_volatile_byte(ptr, i);
                 if actual != expected {
                     scrub_pages(phys, 4);
                     free_page_frame(phys);
@@ -1296,7 +1274,7 @@ fn scrub_pages(phys: PhysAddr, npages: u64) {
         let page_phys = PhysAddr::new(phys.as_u64() + page * 4096);
         if let Some(virt) = page_phys.to_virt_checked() {
             let ptr = virt.as_mut_ptr::<u8>();
-            unsafe { core::ptr::write_bytes(ptr, 0, 4096) };
+            page_io::write_bytes(ptr, 0, 4096);
         }
     }
 }
@@ -1311,7 +1289,7 @@ fn scrub_chunk(ptr: *mut core::ffi::c_void, len: usize) {
     if ptr.is_null() {
         return;
     }
-    unsafe { core::ptr::write_bytes(ptr as *mut u8, 0, len) };
+    page_io::write_bytes(ptr as *mut u8, 0, len);
 }
 
 // ============================================================================
@@ -1352,11 +1330,9 @@ pub fn test_process_vm_alloc_and_access() -> TestResult {
     if !phys.is_null() {
         if let Some(virt) = phys.to_virt_checked() {
             let ptr = virt.as_mut_ptr::<u8>();
-            unsafe {
-                ptr.write_volatile(0x42);
-                let val = ptr.read_volatile();
-                assert_test!(val == 0x42, "memory write/read mismatch");
-            }
+            page_io::write_volatile_byte(ptr, 0, 0x42);
+            let val = page_io::read_volatile_byte(ptr, 0);
+            assert_test!(val == 0x42, "memory write/read mismatch");
         }
     }
 
@@ -1420,9 +1396,7 @@ pub fn test_cow_page_isolation() -> TestResult {
     // Write pattern via HHDM
     if let Some(virt) = phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
-        for i in 0..4096 {
-            unsafe { ptr.add(i).write_volatile(0xAA) };
-        }
+        page_io::fill_volatile(ptr, 0xAA, 4096);
     }
 
     // Clone with COW
@@ -1449,7 +1423,7 @@ pub fn test_cow_page_isolation() -> TestResult {
     // Verify child can read the same data
     if let Some(virt) = child_phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
-        let val = unsafe { ptr.read_volatile() };
+        let val = page_io::read_volatile_byte(ptr, 0);
         if val != 0xAA {
             return fail!("child COW page has wrong data: {:#x}", val);
         }
@@ -1504,11 +1478,9 @@ pub fn test_cow_fault_handling() -> TestResult {
 
     if let Some(virt) = new_phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
-        unsafe {
-            ptr.write_volatile(0xBB);
-            let val = ptr.read_volatile();
-            assert_test!(val == 0xBB, "post-COW write verification failed");
-        }
+        page_io::write_volatile_byte(ptr, 0, 0xBB);
+        let val = page_io::read_volatile_byte(ptr, 0);
+        assert_test!(val == 0xBB, "post-COW write verification failed");
     }
 
     pass!()

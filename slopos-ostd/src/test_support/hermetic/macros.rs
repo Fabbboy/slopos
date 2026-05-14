@@ -13,10 +13,15 @@
 //!         type Snapshot = u32;
 //!         const DEPENDS_ON: &[&str] = &["OtherState"];   // optional
 //!         fn snapshot() -> Result<Self::Snapshot, AllocError> { ... }
-//!         unsafe fn restore(snap: Self::Snapshot) { ... }
+//!         fn restore(snap: Self::Snapshot) { ... }
 //!     }
 //! }
 //! ```
+//!
+//! The user-facing `restore` signature drops the `unsafe fn` token —
+//! the macro emits the required `unsafe fn restore(...)` impl item
+//! internally, so user bodies stay free of the `unsafe` keyword and
+//! the call site (test_hermetic.rs) is unsafe-token-free.
 //!
 //! Inspired by `bitflags!` / `pin_project!` — the trait body isn't
 //! field-composable (snapshot/restore touch external globals, not
@@ -59,7 +64,7 @@ macro_rules! hermetic_state {
             type Snapshot = $snap_ty:ty;
             $(const DEPENDS_ON: &[&str] = $deps:expr;)?
             fn snapshot() -> Result<Self::Snapshot, AllocError> $snap_body:block
-            unsafe fn restore($snap_arg:ident: Self::Snapshot) $rest_body:block
+            fn restore($snap_arg:ident: Self::Snapshot) $rest_body:block
         }
     ) => {
         $(#[$meta])*

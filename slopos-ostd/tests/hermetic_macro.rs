@@ -37,7 +37,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(GLOBAL_VALUE.load(Ordering::Acquire))
         }
-        unsafe fn restore(snap: Self::Snapshot) {
+        fn restore(snap: Self::Snapshot) {
             GLOBAL_VALUE.store(snap, Ordering::Release);
         }
     }
@@ -82,7 +82,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(0)
         }
-        unsafe fn restore(_snap: Self::Snapshot) {}
+        fn restore(_snap: Self::Snapshot) {}
     }
 }
 
@@ -107,7 +107,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(COUNTER.load(Ordering::Acquire))
         }
-        unsafe fn restore(snap: Self::Snapshot) {
+        fn restore(snap: Self::Snapshot) {
             COUNTER.store(snap, Ordering::Release);
         }
     }

@@ -7,10 +7,10 @@
 //! `hermetic_state! { ... }` block — never editing the scope itself.
 //!
 //! Each entry uses the `hermetic_state! { ... }` block form: one
-//! macro invocation emits the marker struct, the
-//! `unsafe impl HermeticState`, and the `.hermetic_state_registry`
-//! linker-section entry. The custom per-impl snapshot/restore logic
-//! stays — the boilerplate is what the macro absorbs.
+//! macro invocation emits the marker struct, the trait impl, and the
+//! `.hermetic_state_registry` linker-section entry. The custom
+//! per-impl snapshot/restore logic stays — the boilerplate is what
+//! the macro absorbs.
 
 #![cfg(feature = "test-hooks")]
 
@@ -18,6 +18,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_arch::pcr;
 use slopos_ostd::hermetic_state;
+use slopos_ostd::test_support;
 
 use super::per_cpu::{SCHEDULERS_INIT, with_cpu_scheduler};
 
@@ -40,7 +41,7 @@ hermetic_state! {
             }
             Ok(bits)
         }
-        unsafe fn restore(bits: Self::Snapshot) {
+        fn restore(bits: Self::Snapshot) {
             let cpu_count = pcr::get_cpu_count().min(SCOPE_BITMAP_MAX_CPUS);
             for cpu_id in 0..cpu_count {
                 if bits & (1u32 << cpu_id) != 0 {
@@ -74,7 +75,7 @@ hermetic_state! {
             }
             Ok(bits)
         }
-        unsafe fn restore(bits: Self::Snapshot) {
+        fn restore(bits: Self::Snapshot) {
             let cpu_count = pcr::get_cpu_count().min(SCOPE_BITMAP_MAX_CPUS);
             for cpu_id in 0..cpu_count {
                 let want = bits & (1u32 << cpu_id) != 0;
@@ -108,7 +109,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(SCHEDULERS_INIT.is_set())
         }
-        unsafe fn restore(was_set: Self::Snapshot) {
+        fn restore(was_set: Self::Snapshot) {
             if was_set {
                 // Already-set semantics: ensure the flag is set so subsequent
                 // init_once() returns false. InitFlag::reset() puts it back
@@ -133,7 +134,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(pcr::get_current_task_for(0) as u64)
         }
-        unsafe fn restore(addr: Self::Snapshot) {
+        fn restore(addr: Self::Snapshot) {
             pcr::set_current_task(addr as *mut ());
         }
     }
@@ -149,7 +150,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(pcr::get_idle_task(0) as u64)
         }
-        unsafe fn restore(addr: Self::Snapshot) {
+        fn restore(addr: Self::Snapshot) {
             pcr::set_idle_task(0, addr as *mut ());
         }
     }
@@ -166,7 +167,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(super::scheduler::SCHEDULER_ENABLED.load(Ordering::Acquire))
         }
-        unsafe fn restore(prev: Self::Snapshot) {
+        fn restore(prev: Self::Snapshot) {
             super::scheduler::SCHEDULER_ENABLED.store(prev, Ordering::Release);
         }
     }
@@ -187,23 +188,10 @@ hermetic_state! {
     pub TssIstShadow {
         type Snapshot = [u64; 7];
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            let mut ist = [0u64; 7];
-            // SAFETY: BSP PCR is initialised early in kernel_main_impl
-            // and remains valid for the kernel's lifetime; tests run
-            // on BSP.
-            if let Some(pcr) = unsafe { pcr::get_pcr_mut(0) } {
-                for i in 0..7 {
-                    ist[i] = pcr.tss.ist[i];
-                }
-            }
-            Ok(ist)
+            Ok(test_support::pcr::bsp_ist_snapshot().unwrap_or([0; 7]))
         }
-        unsafe fn restore(snap: Self::Snapshot) {
-            if let Some(pcr) = unsafe { pcr::get_pcr_mut(0) } {
-                for i in 0..7 {
-                    pcr.tss.ist[i] = snap[i];
-                }
-            }
+        fn restore(snap: Self::Snapshot) {
+            test_support::pcr::bsp_ist_restore(snap);
         }
     }
 }
@@ -221,17 +209,10 @@ hermetic_state! {
     pub TssRsp0Shadow {
         type Snapshot = u64;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            if let Some(pcr) = unsafe { pcr::get_pcr_mut(0) } {
-                Ok(pcr.kernel_rsp)
-            } else {
-                Ok(0)
-            }
+            Ok(test_support::pcr::bsp_kernel_rsp_snapshot().unwrap_or(0))
         }
-        unsafe fn restore(snap: Self::Snapshot) {
-            if let Some(pcr) = unsafe { pcr::get_pcr_mut(0) } {
-                pcr.kernel_rsp = snap;
-                pcr.sync_tss_rsp0();
-            }
+        fn restore(snap: Self::Snapshot) {
+            test_support::pcr::bsp_kernel_rsp_restore(snap);
         }
     }
 }
@@ -265,7 +246,7 @@ hermetic_state! {
                 sfmask: slopos_arch::cpu::read_msr(Msr::SFMASK),
             })
         }
-        unsafe fn restore(snap: Self::Snapshot) {
+        fn restore(snap: Self::Snapshot) {
             use slopos_arch::cpu::msr::Msr;
             slopos_arch::cpu::write_msr(Msr::EFER, snap.efer);
             slopos_arch::cpu::write_msr(Msr::STAR, snap.star);
@@ -295,8 +276,8 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(slopos_utils::panic_recovery::cleanup_handler_count())
         }
-        unsafe fn restore(snap: Self::Snapshot) {
-            unsafe { slopos_utils::panic_recovery::truncate_cleanup_handlers(snap) };
+        fn restore(snap: Self::Snapshot) {
+            slopos_utils::panic_recovery::truncate_cleanup_handlers(snap);
         }
     }
 }
@@ -311,7 +292,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(slopos_utils::klog::klog_get_level())
         }
-        unsafe fn restore(snap: Self::Snapshot) {
+        fn restore(snap: Self::Snapshot) {
             slopos_utils::klog::klog_set_level(snap);
         }
     }
@@ -336,7 +317,7 @@ hermetic_state! {
             // about watchdog ticks has a stable baseline.
             Ok(super::scheduler::watchdog_last_tick(0))
         }
-        unsafe fn restore(_snap: Self::Snapshot) {
+        fn restore(_snap: Self::Snapshot) {
             // The per-CPU AtomicU64 array is private to scheduler.rs
             // and there's no public reset. The watchdog auto-corrects
             // from any drift, so a no-op restore is functionally safe;
@@ -356,7 +337,7 @@ hermetic_state! {
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok(super::per_cpu::fork_rr_counter_value())
         }
-        unsafe fn restore(snap: Self::Snapshot) {
+        fn restore(snap: Self::Snapshot) {
             super::per_cpu::fork_rr_counter_set(snap);
         }
     }

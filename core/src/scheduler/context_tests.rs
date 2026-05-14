@@ -20,13 +20,13 @@ use super::test_fixture::KernelTestScope;
 use slopos_arch::arch::gdt::SegmentSelector;
 
 struct ContextFixture {
-    _scope: KernelTestScope,
+    scope: KernelTestScope,
 }
 
 impl ContextFixture {
     fn new() -> Self {
         Self {
-            _scope: KernelTestScope::enter(),
+            scope: KernelTestScope::enter(),
         }
     }
 }
@@ -56,10 +56,9 @@ pub fn test_task_context_initial_state() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    unsafe {
-        let task = &*task_ptr;
-        let ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!(task.context.rsp));
-        let ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!(task.context.rip));
+    if let Some(h) = super::inspect::wrap(&_fixture.scope, task_ptr) {
+        let ctx_rsp = h.context_rsp();
+        let ctx_rip = h.context_rip();
 
         if ctx_rsp == 0 && ctx_rip == 0 {
             klog_info!("CONTEXT_TEST: WARNING - Context RSP and RIP both zero");
@@ -79,7 +78,9 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    let initial_state = unsafe { (*task_ptr).status() };
+    let initial_state = super::inspect::wrap(&_fixture.scope, task_ptr)
+        .map(|h| h.status())
+        .unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(
         initial_state,
         TaskStatus::Ready,
@@ -104,8 +105,8 @@ pub fn test_task_invalid_state_transition() -> TestResult {
     let _result = task_set_state(task_id, TaskStatus::Running);
 
     let task_ptr = task_find_by_id(task_id);
-    if !task_ptr.is_null() {
-        let state = unsafe { (*task_ptr).status() };
+    if let Some(h) = super::inspect::wrap(&_fixture.scope, task_ptr) {
+        let state = h.status();
         assert_test!(
             state != TaskStatus::Running,
             "revived terminated task to RUNNING"
@@ -187,8 +188,8 @@ pub fn test_task_find_after_terminate() -> TestResult {
     task_terminate(task_id);
 
     let ptr_after = task_find_by_id(task_id);
-    if !ptr_after.is_null() {
-        let state = unsafe { (*ptr_after).status() };
+    if let Some(h) = super::inspect::wrap(&_fixture.scope, ptr_after) {
+        let state = h.status();
         assert_eq_test!(
             state,
             TaskStatus::Terminated,
@@ -222,7 +223,9 @@ pub fn test_task_process_id_consistency() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    let _proc_id = unsafe { (*task_ptr).process_id };
+    let _proc_id = super::inspect::wrap(&_fixture.scope, task_ptr)
+        .map(|h| h.process_id())
+        .unwrap_or(0);
 
     task_terminate(task_id);
     TestResult::Pass
@@ -237,7 +240,9 @@ pub fn test_task_flags_preserved() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    let flags = unsafe { (*task_ptr).flags };
+    let flags = super::inspect::wrap(&_fixture.scope, task_ptr)
+        .map(|h| h.flags())
+        .unwrap_or(0);
     assert_test!(
         (flags & TASK_FLAG_KERNEL_MODE) != 0,
         "kernel mode flag not preserved"
@@ -323,12 +328,10 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    let switch_ctx = unsafe { &(*task_ptr).switch_ctx };
-    assert_eq_test!(
-        switch_ctx.rflags,
-        0x202,
-        "switch_ctx rflags not initialized"
-    );
+    let rflags = super::inspect::wrap(&_fixture.scope, task_ptr)
+        .map(|h| h.task().switch_ctx.rflags)
+        .unwrap_or(0);
+    assert_eq_test!(rflags, 0x202, "switch_ctx rflags not initialized");
 
     task_terminate(task_id);
     TestResult::Pass

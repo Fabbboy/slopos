@@ -13,6 +13,7 @@ use crate::tests::test_fixtures::ProcessVmGuard;
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr, reference_count_at};
+use slopos_ostd::test_support::page_io;
 
 pub fn test_cow_read_not_cow_fault() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
@@ -124,9 +125,7 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
 
     if let Some(virt) = phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
-        for i in 0..PAGE_SIZE_4KB as usize {
-            unsafe { *ptr.add(i) = (i & 0xFF) as u8 };
-        }
+        page_io::fill_indexed(ptr, PAGE_SIZE_4KB as usize, |i| (i & 0xFF) as u8);
     }
 
     vm.mark_cow(test_addr);
@@ -155,17 +154,16 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
 
     if let Some(virt) = phys_after.to_virt_checked() {
         let ptr = virt.as_ptr::<u8>();
-        for i in 0..PAGE_SIZE_4KB as usize {
-            let val = unsafe { *ptr.add(i) };
+        if let Some(i) = page_io::verify_indexed(ptr, PAGE_SIZE_4KB as usize, |i| (i & 0xFF) as u8)
+        {
+            let val = page_io::read_byte(ptr, i);
             let expected = (i & 0xFF) as u8;
-            if val != expected {
-                return fail!(
-                    "data not copied correctly at offset {}: expected {:#x}, got {:#x}",
-                    i,
-                    expected,
-                    val
-                );
-            }
+            return fail!(
+                "data not copied correctly at offset {}: expected {:#x}, got {:#x}",
+                i,
+                expected,
+                val
+            );
         }
     }
 
@@ -214,9 +212,7 @@ pub fn test_cow_clone_modify_both() -> TestResult {
 
     if let Some(virt) = phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
-        for i in 0..PAGE_SIZE_4KB as usize {
-            unsafe { *ptr.add(i) = 0xAA };
-        }
+        page_io::fill_pattern(ptr, 0xAA, PAGE_SIZE_4KB as usize);
     }
 
     let Some(child) = parent.clone_cow() else {
@@ -231,7 +227,7 @@ pub fn test_cow_clone_modify_both() -> TestResult {
 
     let parent_phys = parent.virt_to_phys(test_addr);
     if let Some(virt) = parent_phys.to_virt_checked() {
-        unsafe { *virt.as_mut_ptr::<u8>() = 0xBB };
+        page_io::write_byte(virt.as_mut_ptr::<u8>(), 0, 0xBB);
     }
 
     if child.is_cow(test_addr) {
@@ -242,12 +238,12 @@ pub fn test_cow_clone_modify_both() -> TestResult {
 
     let child_phys = child.virt_to_phys(test_addr);
     if let Some(virt) = child_phys.to_virt_checked() {
-        unsafe { *virt.as_mut_ptr::<u8>() = 0xCC };
+        page_io::write_byte(virt.as_mut_ptr::<u8>(), 0, 0xCC);
     }
 
     if let (Some(pv), Some(cv)) = (parent_phys.to_virt_checked(), child_phys.to_virt_checked()) {
-        let parent_val = unsafe { *pv.as_ptr::<u8>() };
-        let child_val = unsafe { *cv.as_ptr::<u8>() };
+        let parent_val = page_io::read_byte(pv.as_ptr::<u8>(), 0);
+        let child_val = page_io::read_byte(cv.as_ptr::<u8>(), 0);
 
         assert_test!(
             parent_val != child_val,
@@ -309,10 +305,10 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
     }
 
     if let Some(v1) = phys1.to_virt_checked() {
-        unsafe { core::ptr::write_bytes(v1.as_mut_ptr::<u8>(), 0x11, PAGE_SIZE_4KB as usize) };
+        page_io::write_bytes(v1.as_mut_ptr::<u8>(), 0x11, PAGE_SIZE_4KB as usize);
     }
     if let Some(v2) = phys2.to_virt_checked() {
-        unsafe { core::ptr::write_bytes(v2.as_mut_ptr::<u8>(), 0x22, PAGE_SIZE_4KB as usize) };
+        page_io::write_bytes(v2.as_mut_ptr::<u8>(), 0x22, PAGE_SIZE_4KB as usize);
     }
 
     let map_addr1 = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
@@ -342,7 +338,7 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
     assert_test!(phys2_after == phys2, "second page physical address changed");
 
     if let Some(v2) = phys2_after.to_virt_checked() {
-        let val = unsafe { *v2.as_ptr::<u8>() };
+        let val = page_io::read_byte(v2.as_ptr::<u8>(), 0);
         assert_test!(val == 0x22, "second page data corrupted");
     }
 

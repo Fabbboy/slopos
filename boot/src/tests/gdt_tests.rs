@@ -8,13 +8,12 @@
 //!
 //! MANY OF THESE TESTS ARE EXPECTED TO FIND BUGS - that's the point.
 
-use core::arch::asm;
-
 use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::cpu;
 use slopos_arch::cpu::msr::{EFER_SCE, Msr};
 use slopos_core::scheduler::test_fixture::KernelTestScope;
 use slopos_hermetic::KernelStackTop;
+use slopos_ostd::test_support::{arch as ts_arch, gdt as ts_gdt};
 use slopos_testing::TestResult;
 use slopos_utils::klog_info;
 
@@ -36,19 +35,8 @@ static DUMMY_TEST_STACK: DummyStack = DummyStack([0u8; 64]);
 
 /// Read the current GDT limit and base from the CPU
 fn read_gdtr() -> (u16, u64) {
-    let mut gdtr: [u8; 10] = [0; 10];
-    unsafe {
-        asm!(
-            "sgdt [{}]",
-            in(reg) gdtr.as_mut_ptr(),
-            options(nostack, preserves_flags)
-        );
-    }
-    let limit = u16::from_le_bytes([gdtr[0], gdtr[1]]);
-    let base = u64::from_le_bytes([
-        gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
-    ]);
-    (limit, base)
+    let g = ts_arch::read_gdtr();
+    (g.limit, g.base)
 }
 
 /// Test: GDT is loaded and has valid limit
@@ -83,10 +71,7 @@ pub fn test_gdt_loaded_valid_limit() -> TestResult {
 /// Test: Read current CS and verify it's the kernel code selector
 /// BUG FINDER: Wrong CS means we're running in wrong privilege level
 pub fn test_current_cs_is_kernel() -> TestResult {
-    let cs: u16;
-    unsafe {
-        asm!("mov {:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags));
-    }
+    let cs = ts_arch::read_cs();
 
     // Expected kernel CS is 0x08 (index 1, TI=0, RPL=0)
     if cs != 0x08 {
@@ -106,10 +91,7 @@ pub fn test_current_cs_is_kernel() -> TestResult {
 
 /// Test: Read current SS and verify it's the kernel data selector
 pub fn test_current_ss_is_kernel() -> TestResult {
-    let ss: u16;
-    unsafe {
-        asm!("mov {:x}, ss", out(reg) ss, options(nomem, nostack, preserves_flags));
-    }
+    let ss = ts_arch::read_ss();
 
     // Expected kernel SS is 0x10 (index 2, TI=0, RPL=0)
     if ss != 0x10 {
@@ -122,17 +104,10 @@ pub fn test_current_ss_is_kernel() -> TestResult {
 
 /// Test: Verify DS/ES/FS/GS are valid data selectors
 pub fn test_data_segment_selectors() -> TestResult {
-    let ds: u16;
-    let es: u16;
-    let fs: u16;
-    let gs: u16;
-
-    unsafe {
-        asm!("mov {:x}, ds", out(reg) ds, options(nomem, nostack, preserves_flags));
-        asm!("mov {:x}, es", out(reg) es, options(nomem, nostack, preserves_flags));
-        asm!("mov {:x}, fs", out(reg) fs, options(nomem, nostack, preserves_flags));
-        asm!("mov {:x}, gs", out(reg) gs, options(nomem, nostack, preserves_flags));
-    }
+    let ds = ts_arch::read_ds();
+    let es = ts_arch::read_es();
+    let fs = ts_arch::read_fs();
+    let gs = ts_arch::read_gs();
 
     // In 64-bit mode, DS/ES/FS/GS can be 0 (null) or a valid data selector
     // They should NOT be code selectors or have user RPL
@@ -163,11 +138,7 @@ pub fn test_data_segment_selectors() -> TestResult {
 
 /// Read the Task Register to get the TSS selector
 fn read_tr() -> u16 {
-    let tr: u16;
-    unsafe {
-        asm!("str {:x}", out(reg) tr, options(nomem, nostack, preserves_flags));
-    }
-    tr
+    ts_arch::read_tr()
 }
 
 /// Test: TSS is loaded
@@ -549,23 +520,15 @@ pub fn test_syscall_idt_entry() -> TestResult {
 /// BUG FINDER: Double init could corrupt selectors mid-execution
 pub fn test_gdt_double_init() -> TestResult {
     let (limit_before, _base_before) = read_gdtr();
-    let cs_before: u16;
-    let ss_before: u16;
-    unsafe {
-        asm!("mov {:x}, cs", out(reg) cs_before, options(nomem, nostack, preserves_flags));
-        asm!("mov {:x}, ss", out(reg) ss_before, options(nomem, nostack, preserves_flags));
-    }
+    let cs_before = ts_arch::read_cs();
+    let ss_before = ts_arch::read_ss();
 
     // Reinitialize GDT
     gdt_init();
 
     let (limit_after, _base_after) = read_gdtr();
-    let cs_after: u16;
-    let ss_after: u16;
-    unsafe {
-        asm!("mov {:x}, cs", out(reg) cs_after, options(nomem, nostack, preserves_flags));
-        asm!("mov {:x}, ss", out(reg) ss_after, options(nomem, nostack, preserves_flags));
-    }
+    let cs_after = ts_arch::read_cs();
+    let ss_after = ts_arch::read_ss();
 
     // CS and SS should be the same
     if cs_before != cs_after {
@@ -653,10 +616,10 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
 
     // Read actual GDT entries
     // Selector 0x08 = index 1, 0x10 = index 2, 0x18 = index 3, 0x20 = index 4
-    let entry1 = unsafe { *((base + 8) as *const u64) }; // Should be kernel code
-    let entry2 = unsafe { *((base + 16) as *const u64) }; // Should be kernel data
-    let entry3 = unsafe { *((base + 24) as *const u64) }; // Should be user data (0x1B with RPL=3)
-    let entry4 = unsafe { *((base + 32) as *const u64) }; // Should be user code (0x23 with RPL=3)
+    let entry1 = ts_gdt::read_entry(base, 1); // Should be kernel code
+    let entry2 = ts_gdt::read_entry(base, 2); // Should be kernel data
+    let entry3 = ts_gdt::read_entry(base, 3); // Should be user data (0x1B with RPL=3)
+    let entry4 = ts_gdt::read_entry(base, 4); // Should be user code (0x23 with RPL=3)
 
     // Check kernel code segment (0x08) has DPL=0
     let entry1_dpl = (entry1 >> 45) & 0x3;
@@ -779,20 +742,12 @@ pub fn test_tss_rsp0_value_valid() -> TestResult {
     let (_limit, gdt_base) = read_gdtr();
     let tss_index = (tr >> 3) as usize;
 
-    // TSS entry is 16 bytes (system segment descriptor)
-    let tss_entry_addr = gdt_base + (tss_index * 8) as u64;
+    // TSS descriptor is double-wide; helper folds the two-u64 read.
+    let (tss_base, _limit) = ts_gdt::read_tss_descriptor(gdt_base, tss_index);
 
-    // Read TSS base from the GDT entry (TSS descriptor format)
-    let tss_low = unsafe { *(tss_entry_addr as *const u64) };
-    let tss_high = unsafe { *((tss_entry_addr + 8) as *const u64) };
-
-    let tss_base = ((tss_low >> 16) & 0xFFFF)
-        | (((tss_low >> 32) & 0xFF) << 16)
-        | (((tss_low >> 56) & 0xFF) << 24)
-        | ((tss_high & 0xFFFF_FFFF) << 32);
-
-    // Read RSP0 from TSS (offset 4 in TSS64)
-    let rsp0 = unsafe { *((tss_base + 4) as *const u64) };
+    // Read RSP0 from TSS (offset 4 in TSS64). TSS RSP0 is at an
+    // 8-bytes-but-not-8-aligned offset, so use the byte-array helper.
+    let rsp0 = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(tss_base + 4));
 
     if rsp0 == 0 {
         klog_info!("GDT_TEST: BUG - TSS.RSP0 is NULL!");
@@ -830,15 +785,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
 
     let (_limit, gdt_base) = read_gdtr();
     let tss_index = (tr >> 3) as usize;
-    let tss_entry_addr = gdt_base + (tss_index * 8) as u64;
-
-    let tss_low = unsafe { *(tss_entry_addr as *const u64) };
-    let tss_high = unsafe { *((tss_entry_addr + 8) as *const u64) };
-
-    let tss_base = ((tss_low >> 16) & 0xFFFF)
-        | (((tss_low >> 32) & 0xFF) << 16)
-        | (((tss_low >> 56) & 0xFF) << 24)
-        | ((tss_high & 0xFFFF_FFFF) << 32);
+    let (tss_base, _limit) = ts_gdt::read_tss_descriptor(gdt_base, tss_index);
 
     // IST entries are at offset 36 in TSS64 (after RSP0-2 and reserved)
     // Each IST is 8 bytes, IST1-IST7
@@ -846,7 +793,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
 
     let mut issues = 0u32;
     for i in 0..7u64 {
-        let ist_ptr = unsafe { *((ist_base + i * 8) as *const u64) };
+        let ist_ptr = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(ist_base + i * 8));
 
         if ist_ptr == 0 {
             // IST not configured - that's fine for unused slots
@@ -864,7 +811,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
         }
 
         // Check that IST isn't pointing to same location as RSP0 (common bug)
-        let rsp0 = unsafe { *((tss_base + 4) as *const u64) };
+        let rsp0 = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(tss_base + 4));
         if ist_ptr == rsp0 {
             klog_info!(
                 "GDT_TEST: WARNING - IST{} shares address with RSP0 (no isolation)",
@@ -887,7 +834,7 @@ pub fn test_lstar_points_to_executable_code() -> TestResult {
 
     // Read first few bytes at LSTAR to check it looks like code
     // A function should NOT start with 0x00 bytes (NUL padding)
-    let first_bytes = unsafe { *(lstar as *const [u8; 4]) };
+    let first_bytes = ts_gdt::read_bytes_at::<4>(lstar);
 
     // Check for obvious bad patterns
     if first_bytes == [0, 0, 0, 0] {

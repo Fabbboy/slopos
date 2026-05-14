@@ -197,66 +197,22 @@ pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
         ],
     };
 
-    // Readback buffer (4 x 128-bit, 16-byte aligned).
-    #[repr(C, align(16))]
-    struct Readback {
-        data: [[u64; 2]; 4],
-    }
-    let mut readback = Readback {
-        data: [[0u64; 2]; 4],
-    };
-
-    unsafe {
-        let buf = area.data.as_mut_ptr();
-        let pat = patterns.data.as_ptr() as *const u8;
-        let rb = readback.data.as_mut_ptr() as *mut u8;
-
-        core::arch::asm!(
-            // Load 128-bit patterns from memory into XMM0-XMM3.
-            "movdqu xmm0, [{pat}]",
-            "movdqu xmm1, [{pat} + 16]",
-            "movdqu xmm2, [{pat} + 32]",
-            "movdqu xmm3, [{pat} + 48]",
-
-            // XSAVE to buffer.
-            "xsave64 [{buf}]",
-
-            // Zero XMM0-XMM3.
-            "xorps xmm0, xmm0",
-            "xorps xmm1, xmm1",
-            "xorps xmm2, xmm2",
-            "xorps xmm3, xmm3",
-
-            // XRSTOR from buffer.
-            "xrstor64 [{buf}]",
-
-            // Read back XMM0-XMM3 to memory.
-            "movdqu [{rb}], xmm0",
-            "movdqu [{rb} + 16], xmm1",
-            "movdqu [{rb} + 32], xmm2",
-            "movdqu [{rb} + 48], xmm3",
-
-            buf = in(reg) buf,
-            pat = in(reg) pat,
-            rb = in(reg) rb,
-            in("eax") xcr0_lo,
-            in("edx") xcr0_hi,
-            out("xmm0") _,
-            out("xmm1") _,
-            out("xmm2") _,
-            out("xmm3") _,
-        );
-    }
+    let readback = slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_4(
+        &patterns.data,
+        &mut area.data,
+        xcr0,
+    );
+    let _ = (xcr0_lo, xcr0_hi);
 
     for i in 0..4 {
-        if patterns.data[i] != readback.data[i] {
+        if patterns.data[i] != readback[i] {
             return fail!(
                 "XMM{} mismatch after XSAVE/XRSTOR: expected ({:016x},{:016x}), got ({:016x},{:016x})",
                 i,
                 patterns.data[i][0],
                 patterns.data[i][1],
-                readback.data[i][0],
-                readback.data[i][1]
+                readback[i][0],
+                readback[i][1]
             );
         }
     }
@@ -301,67 +257,23 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
         ],
     };
 
-    #[repr(C, align(16))]
-    struct YmmReadback {
-        data: [[u64; 2]; 4],
-    }
-    let mut readback = YmmReadback {
-        data: [[0u64; 2]; 4],
-    };
-
-    unsafe {
-        let buf = area.data.as_mut_ptr();
-        let pat = patterns.data.as_ptr() as *const u8;
-        let rb = readback.data.as_mut_ptr() as *mut u8;
-
-        core::arch::asm!(
-            // Load YMM0: lower 128 from pat[0], upper 128 from pat[1].
-            "movdqu xmm0, [{pat}]",
-            "movdqu xmm5, [{pat} + 16]",
-            "vinsertf128 ymm0, ymm0, xmm5, 1",
-
-            // Load YMM1: lower 128 from pat[2], upper 128 from pat[3].
-            "movdqu xmm1, [{pat} + 32]",
-            "movdqu xmm5, [{pat} + 48]",
-            "vinsertf128 ymm1, ymm1, xmm5, 1",
-
-            // XSAVE.
-            "xsave64 [{buf}]",
-
-            // Zero YMM0 and YMM1.
-            "vxorps ymm0, ymm0, ymm0",
-            "vxorps ymm1, ymm1, ymm1",
-
-            // XRSTOR.
-            "xrstor64 [{buf}]",
-
-            // Read back: lower 128 directly, upper 128 via VEXTRACTF128.
-            "movdqu [{rb}], xmm0",
-            "vextractf128 [{rb} + 16], ymm0, 1",
-            "movdqu [{rb} + 32], xmm1",
-            "vextractf128 [{rb} + 48], ymm1, 1",
-
-            buf = in(reg) buf,
-            pat = in(reg) pat,
-            rb = in(reg) rb,
-            in("eax") xcr0_lo,
-            in("edx") xcr0_hi,
-            out("ymm0") _,
-            out("ymm1") _,
-            out("xmm5") _,
-        );
-    }
+    let readback = slopos_ostd::test_support::cpu_state::avx_xsave_xrstor_roundtrip_2ymm(
+        &patterns.data,
+        &mut area.data,
+        xcr0,
+    );
+    let _ = (xcr0_lo, xcr0_hi);
 
     let labels = ["YMM0 lower", "YMM0 UPPER", "YMM1 lower", "YMM1 UPPER"];
     for i in 0..4 {
-        if patterns.data[i] != readback.data[i] {
+        if patterns.data[i] != readback[i] {
             return fail!(
                 "{} mismatch: expected ({:016x},{:016x}), got ({:016x},{:016x})",
                 labels[i],
                 patterns.data[i][0],
                 patterns.data[i][1],
-                readback.data[i][0],
-                readback.data[i][1]
+                readback[i][0],
+                readback[i][1]
             );
         }
     }
@@ -401,81 +313,22 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
         ],
     };
 
-    #[repr(C, align(16))]
-    struct MultiReadback {
-        data: [[u64; 2]; 8],
-    }
-    let mut readback = MultiReadback {
-        data: [[0u64; 2]; 8],
-    };
-
-    unsafe {
-        let buf = area.data.as_mut_ptr();
-        let pat = patterns.data.as_ptr() as *const u8;
-        let rb = readback.data.as_mut_ptr() as *mut u8;
-
-        core::arch::asm!(
-            // Load XMM0-XMM7 from contiguous pattern memory.
-            "movdqu xmm0, [{pat}]",
-            "movdqu xmm1, [{pat} + 16]",
-            "movdqu xmm2, [{pat} + 32]",
-            "movdqu xmm3, [{pat} + 48]",
-            "movdqu xmm4, [{pat} + 64]",
-            "movdqu xmm5, [{pat} + 80]",
-            "movdqu xmm6, [{pat} + 96]",
-            "movdqu xmm7, [{pat} + 112]",
-
-            // XSAVE.
-            "xsave64 [{buf}]",
-
-            // Zero all 8 registers.
-            "xorps xmm0, xmm0",
-            "xorps xmm1, xmm1",
-            "xorps xmm2, xmm2",
-            "xorps xmm3, xmm3",
-            "xorps xmm4, xmm4",
-            "xorps xmm5, xmm5",
-            "xorps xmm6, xmm6",
-            "xorps xmm7, xmm7",
-
-            // XRSTOR.
-            "xrstor64 [{buf}]",
-
-            // Store XMM0-XMM7 back to readback memory.
-            "movdqu [{rb}], xmm0",
-            "movdqu [{rb} + 16], xmm1",
-            "movdqu [{rb} + 32], xmm2",
-            "movdqu [{rb} + 48], xmm3",
-            "movdqu [{rb} + 64], xmm4",
-            "movdqu [{rb} + 80], xmm5",
-            "movdqu [{rb} + 96], xmm6",
-            "movdqu [{rb} + 112], xmm7",
-
-            buf = in(reg) buf,
-            pat = in(reg) pat,
-            rb = in(reg) rb,
-            in("eax") xcr0_lo,
-            in("edx") xcr0_hi,
-            out("xmm0") _,
-            out("xmm1") _,
-            out("xmm2") _,
-            out("xmm3") _,
-            out("xmm4") _,
-            out("xmm5") _,
-            out("xmm6") _,
-            out("xmm7") _,
-        );
-    }
+    let readback = slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_8(
+        &patterns.data,
+        &mut area.data,
+        xcr0,
+    );
+    let _ = (xcr0_lo, xcr0_hi);
 
     for i in 0..8 {
-        if patterns.data[i] != readback.data[i] {
+        if patterns.data[i] != readback[i] {
             return fail!(
                 "XMM{} mismatch: expected ({:016x},{:016x}), got ({:016x},{:016x})",
                 i,
                 patterns.data[i][0],
                 patterns.data[i][1],
-                readback.data[i][0],
-                readback.data[i][1]
+                readback[i][0],
+                readback[i][1]
             );
         }
     }

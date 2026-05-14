@@ -225,9 +225,9 @@ pub fn return_after_ap<'brand>(_cpu_id: usize, _ctx: BootCtx<'brand, ApInit>) {
 /// cleanup callback. Used when a test panics inside its body and the
 /// scope's `Drop` is skipped via `catch_panic!`'s longjmp.
 ///
-/// # Safety
-/// Only callable from `panic_recovery`'s registered cleanup chain on
+/// A single atomic store to a `'static` flag; sound from any context.
+/// Intended caller is `panic_recovery`'s registered cleanup chain on
 /// the test-running CPU.
-pub unsafe fn clear_test_scope_after_panic() {
+pub fn clear_test_scope_after_panic() {
     TEST_SCOPE_ACTIVE.store(false, Ordering::Release);
 }

@@ -12,6 +12,7 @@
 //! value of the type. See `slopos_ostd::Zeroable` for the trait
 //! contract.
 
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::input::{InputEvent, InputEventData, InputEventType};
 use slopos_abi::syscall::UserPollFd;
 use slopos_abi::syscall::termios::{
@@ -56,3 +57,9 @@ unsafe impl Zeroable for InputEventType {}
 // represents a `KeyPress` event with empty payload and zero timestamp,
 // which is also `InputEvent::default()`).
 unsafe impl Zeroable for InputEvent {}
+
+// SAFETY: `PhysAddr` and `VirtAddr` are `#[repr(transparent)]` over
+// `u64`. The all-zero pattern is the canonical NULL physical / virtual
+// address (`PhysAddr::NULL` is `PhysAddr(0)`).
+unsafe impl Zeroable for PhysAddr {}
+unsafe impl Zeroable for VirtAddr {}

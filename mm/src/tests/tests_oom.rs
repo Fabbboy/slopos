@@ -2,12 +2,13 @@ use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::KBox;
+use slopos_ostd::test_support::page_io;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 use slopos_utils::klog_info;
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
+use crate::kernel_heap::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use crate::memory_init::get_memory_statistics;
 use crate::page_alloc::{
     alloc_kernel_page_with, alloc_kernel_pages_with, free_page_frame, get_page_allocator_stats,
@@ -27,11 +28,9 @@ pub fn test_page_alloc_until_oom() -> TestResult {
         return pass!();
     }
 
-    // PhysAddr is repr(transparent) over u64; all-zero == PhysAddr::NULL.
-    let mut allocated: KBox<[PhysAddr; 1024]> = unsafe {
-        let raw = KBox::<[u64; 1024]>::zeroed().expect("alloc");
-        KBox::from_raw(KBox::into_raw(raw) as *mut [PhysAddr; 1024])
-    };
+    // PhysAddr is repr(transparent) over u64 and Zeroable; all-zero
+    // == PhysAddr::NULL.
+    let mut allocated: KBox<[PhysAddr; 1024]> = KBox::zeroed().expect("alloc");
     let mut count = 0usize;
 
     let max_alloc = (free_before as usize).min(512);
@@ -133,9 +132,7 @@ pub fn test_dma_allocation_exhaustion() -> TestResult {
 }
 
 pub fn test_heap_alloc_pressure() -> TestResult {
-    let mut stats_before = core::mem::MaybeUninit::uninit();
-    get_heap_stats(stats_before.as_mut_ptr());
-    let _before = unsafe { stats_before.assume_init() };
+    let _before = get_heap_stats_owned();
 
     let mut ptrs: [*mut core::ffi::c_void; 128] = [ptr::null_mut(); 128];
     let mut count = 0usize;
@@ -157,27 +154,23 @@ pub fn test_heap_alloc_pressure() -> TestResult {
 
     for i in 0..count {
         let byte_ptr = ptrs[i] as *mut u8;
-        for j in 0..256 {
-            unsafe { *byte_ptr.add(j) = (i & 0xFF) as u8 };
-        }
+        page_io::fill_pattern(byte_ptr, (i & 0xFF) as u8, 256);
     }
 
     for i in 0..count {
-        let byte_ptr = ptrs[i] as *mut u8;
-        for j in 0..256 {
-            let val = unsafe { *byte_ptr.add(j) };
-            if val != (i & 0xFF) as u8 {
-                for k in 0..count {
-                    kfree(ptrs[k]);
-                }
-                return fail!(
-                    "heap corruption at block {}, offset {}: expected {:#x}, got {:#x}",
-                    i,
-                    j,
-                    (i & 0xFF) as u8,
-                    val
-                );
+        let byte_ptr = ptrs[i] as *const u8;
+        if let Some(j) = page_io::verify_pattern(byte_ptr, (i & 0xFF) as u8, 256) {
+            let val = page_io::read_byte(byte_ptr, j);
+            for k in 0..count {
+                kfree(ptrs[k]);
             }
+            return fail!(
+                "heap corruption at block {}, offset {}: expected {:#x}, got {:#x}",
+                i,
+                j,
+                (i & 0xFF) as u8,
+                val
+            );
         }
     }
 
@@ -216,7 +209,7 @@ pub fn test_heap_alloc_one_gib() -> TestResult {
             }
             return fail!("failed to allocate 1MiB block {}", i);
         }
-        unsafe { *(p as *mut u8) = (i & 0xFF) as u8 };
+        page_io::write_byte(p as *mut u8, 0, (i & 0xFF) as u8);
         ptrs[i] = p;
     }
 
@@ -312,19 +305,17 @@ pub fn test_zero_flag_under_pressure() -> TestResult {
     for i in 0..count {
         if let Some(virt) = pages[i].to_virt_checked() {
             let ptr = virt.as_ptr::<u8>();
-            for j in 0..PAGE_SIZE_4KB as usize {
-                let val = unsafe { *ptr.add(j) };
-                if val != 0 {
-                    for k in 0..count {
-                        free_page_frame(pages[k]);
-                    }
-                    return fail!(
-                        "ZERO flag page {} has non-zero at offset {}: {:#x}",
-                        i,
-                        j,
-                        val
-                    );
+            if let Some(j) = page_io::verify_pattern(ptr, 0, PAGE_SIZE_4KB as usize) {
+                let val = page_io::read_byte(ptr, j);
+                for k in 0..count {
+                    free_page_frame(pages[k]);
                 }
+                return fail!(
+                    "ZERO flag page {} has non-zero at offset {}: {:#x}",
+                    i,
+                    j,
+                    val
+                );
             }
         }
     }
@@ -339,7 +330,7 @@ pub fn test_zero_flag_under_pressure() -> TestResult {
 pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
     let pollute = kmalloc(512);
     if !pollute.is_null() {
-        unsafe { ptr::write_bytes(pollute as *mut u8, 0xDE, 512) };
+        page_io::write_bytes(pollute as *mut u8, 0xDE, 512);
         kfree(pollute);
     }
 
@@ -349,16 +340,14 @@ pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
     }
 
     let byte_ptr = p as *const u8;
-    for i in 0..512 {
-        let val = unsafe { *byte_ptr.add(i) };
-        if val != 0 {
-            kfree(p);
-            return fail!(
-                "kzalloc returned non-zeroed memory at offset {}: {:#x}",
-                i,
-                val
-            );
-        }
+    if let Some(i) = page_io::verify_pattern(byte_ptr, 0, 512) {
+        let val = page_io::read_byte(byte_ptr, i);
+        kfree(p);
+        return fail!(
+            "kzalloc returned non-zeroed memory at offset {}: {:#x}",
+            i,
+            val
+        );
     }
 
     kfree(p);

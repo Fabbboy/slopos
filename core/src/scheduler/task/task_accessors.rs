@@ -604,6 +604,72 @@ pub fn task_take_test_reports(
     unsafe { (*task).test_reports.take() }
 }
 
+/// Read `task->exit_info.is_set()`.
+#[inline]
+pub fn task_exit_info_is_set(task: *const Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; `is_set` is an atomic-load on the
+    // AtomicCell.
+    unsafe { (*task).exit_info.is_set() }
+}
+
+/// Read `task->signal_pending` as a single `u64`.
+#[inline]
+pub fn task_signal_pending(task: *const Task) -> u64 {
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `AtomicU64::load` is sound from any context.
+    unsafe {
+        (*task)
+            .signal_pending
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Read `task->waiters.waiter_count()`.
+#[inline]
+pub fn task_waiter_count(task: *const Task) -> usize {
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `WaitQueue::waiter_count` takes
+    // `&self`.
+    unsafe { (*task).waiters.waiter_count() }
+}
+
+/// Read `task->slot_index`.
+#[inline]
+pub fn task_slot_index(task: *const Task) -> Option<u32> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `slot_index` is a `u32` field.
+    Some(unsafe { (*task).slot_index })
+}
+
+/// Read `task->last_cpu`.
+#[inline]
+pub fn task_last_cpu(task: *const Task) -> Option<u8> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `last_cpu` is a `u8` field.
+    Some(unsafe { (*task).last_cpu })
+}
+
+/// Read `task->context.rflags`.
+#[inline]
+pub fn task_context_rflags(task: *const Task) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `rflags` is a u64 field.
+    Some(unsafe { (*task).context.rflags })
+}
+
 /// RAII increment of `task->refcnt`. `new` bumps the count; `Drop`
 /// decrements. Used by callers that hold a `*mut Task` across a
 /// scheduler yield (e.g. `task_wait_for`) so the pool slot cannot be

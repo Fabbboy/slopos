@@ -13,8 +13,10 @@
 //! in `slopos-core`.
 
 pub mod macros;
+pub mod scope;
 pub mod trait_def;
 pub mod vtable;
 
+pub use scope::{SnapshotError, run_restore_phase_drain, run_snapshot_phase};
 pub use trait_def::HermeticState;
 pub use vtable::HermeticVTable;

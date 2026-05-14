@@ -6,4 +6,10 @@
 //! `slopos_ostd::test_support` keeps these visually separated from
 //! the kernel runtime APIs even though they share the same crate.
 
+pub mod arch;
+pub mod cpu_state;
+pub mod gdt;
 pub mod hermetic;
+pub mod page_io;
+pub mod pcr;
+pub mod serial;

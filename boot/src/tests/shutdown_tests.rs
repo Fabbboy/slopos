@@ -24,13 +24,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 // =============================================================================
 
 struct ShutdownFixture {
-    _scope: KernelTestScope,
+    scope: KernelTestScope,
 }
 
 impl ShutdownFixture {
     fn new() -> Self {
         Self {
-            _scope: KernelTestScope::enter(),
+            scope: KernelTestScope::enter(),
         }
     }
 }
@@ -367,12 +367,11 @@ pub fn test_kernel_page_directory_available() -> TestResult {
 }
 
 pub fn test_serial_flush_terminates() -> TestResult {
-    use slopos_utils::ports::COM1;
+    use slopos_ostd::test_support::serial as ts_serial;
 
-    let lsr_port = COM1.offset(5);
     let mut iterations = 0;
     for _ in 0..1024 {
-        let lsr = unsafe { lsr_port.read() };
+        let lsr = ts_serial::read_lsr();
         iterations += 1;
         if (lsr & 0x40) != 0 {
             break;
@@ -474,9 +473,10 @@ pub fn test_task_terminate_idempotent() -> TestResult {
     assert_eq_test!(task_terminate(task_id), 0, "first terminate should succeed");
 
     // Verify the task is actually terminated.
-    let task_ptr = task_find_by_id(task_id);
-    if !task_ptr.is_null() {
-        let status = unsafe { (*task_ptr).status() };
+    if let Some(handle) =
+        slopos_core::scheduler::inspect::wrap(&_fixture.scope, task_find_by_id(task_id))
+    {
+        let status = handle.status();
         assert_eq_test!(
             status,
             TaskStatus::Terminated,

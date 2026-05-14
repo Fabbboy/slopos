@@ -20,9 +20,10 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_find_by_id, task_get_info,
-    task_is_blocked, task_is_terminated, task_set_state, task_set_state_with_reason,
-    task_terminate,
+    Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_exit_info_is_set,
+    task_find_by_id, task_get_info, task_id_of, task_is_blocked, task_is_terminated,
+    task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count, task_set_state,
+    task_set_state_with_reason, task_slot_index, task_status, task_terminate, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -83,7 +84,7 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    let initial_state = unsafe { (*task).status() };
+    let initial_state = task_status(task).unwrap_or(TaskStatus::Terminated);
     if initial_state != TaskStatus::Ready {
         klog_info!("SCHED_TEST: Expected READY state, got {:?}", initial_state);
         return TestResult::Fail;
@@ -94,7 +95,7 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    let new_state = unsafe { (*task).status() };
+    let new_state = task_status(task).unwrap_or(TaskStatus::Terminated);
     if new_state != TaskStatus::Running {
         klog_info!(
             "SCHED_TEST: Expected RUNNING state after transition, got {:?}",
@@ -132,7 +133,7 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
     }
 
     let task = task_find_by_id(task_id);
-    let state = unsafe { (*task).status() };
+    let state = task_status(task).unwrap_or(TaskStatus::Terminated);
     if state != TaskStatus::Blocked {
         klog_info!("SCHED_TEST: Expected BLOCKED, got {:?}", state);
         return TestResult::Fail;
@@ -164,7 +165,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
 
     if !task.is_null() {
         let _result = task_set_state(task_id, TaskStatus::Running);
-        let new_state = unsafe { (*task).status() };
+        let new_state = task_status(task).unwrap_or(TaskStatus::Terminated);
 
         if new_state == TaskStatus::Running {
             klog_info!("SCHED_TEST: BUG - Invalid transition TERMINATED->RUNNING was allowed!");
@@ -197,7 +198,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
     let _result = task_set_state(task_id, TaskStatus::Running);
 
     let task = task_find_by_id(task_id);
-    let state = unsafe { (*task).status() };
+    let state = task_status(task).unwrap_or(TaskStatus::Terminated);
 
     if state == TaskStatus::Running {
         klog_info!("SCHED_TEST: BUG - Invalid transition BLOCKED->RUNNING was allowed!");
@@ -1672,7 +1673,7 @@ pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResu
         return TestResult::Fail;
     }
 
-    let expected_top = unsafe { (*idle_task).kernel_stack_top };
+    let expected_top = task_kernel_stack_top(idle_task).unwrap_or(0);
     if expected_top == 0 || stack_top != expected_top {
         klog_info!(
             "SCHED_TEST: Idle stack mismatch (expected=0x{:x}, got=0x{:x})",
@@ -1739,7 +1740,7 @@ pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
         return TestResult::Fail;
     }
 
-    let original_top = unsafe { (*idle_task).kernel_stack_top };
+    let original_top = task_kernel_stack_top(idle_task).unwrap_or(0);
     unsafe {
         (*idle_task).kernel_stack_top = 0;
     }
@@ -2117,10 +2118,10 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
         return TestResult::Fail;
     }
 
-    if unsafe { (*task_ptr).ref_count() } != 0 {
+    if task_ref_count(task_ptr).unwrap_or(0) != 0 {
         klog_info!(
             "SCHED_TEST: Task refcount leaked after inbox drain (refcnt={})",
-            unsafe { (*task_ptr).ref_count() }
+            task_ref_count(task_ptr).unwrap_or(0)
         );
         return TestResult::Fail;
     }
@@ -2207,11 +2208,11 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Fail;
     }
 
-    if unsafe { (*task_ptr).last_cpu } != target_cpu_u8 {
+    if task_last_cpu(task_ptr).unwrap_or(0) != target_cpu_u8 {
         klog_info!(
             "SCHED_TEST: last_cpu not updated to target CPU (expected {}, got {})",
             target_cpu,
-            unsafe { (*task_ptr).last_cpu }
+            task_last_cpu(task_ptr).unwrap_or(0)
         );
         return TestResult::Fail;
     }
@@ -2481,7 +2482,7 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
             );
             return TestResult::Fail;
         }
-        if !unsafe { (*child_ptr).exit_info.is_set() } {
+        if !task_exit_info_is_set(child_ptr) {
             klog_info!(
                 "SCHED_TEST: exit_info not published after task_terminate at iter {}",
                 i
@@ -2577,7 +2578,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             );
             return TestResult::Fail;
         }
-        if !unsafe { (*child_ptr).exit_info.is_set() } {
+        if !task_exit_info_is_set(child_ptr) {
             klog_info!(
                 "SCHED_TEST: exit_info not published after terminate at iter {}",
                 i
@@ -2638,7 +2639,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     }
 
     // Pre-condition: waiters queue is empty before terminate.
-    if unsafe { (*child_ptr).waiters.has_waiters() } {
+    if task_waiter_count(child_ptr) > 0 {
         klog_info!("SCHED_TEST: child waiters queue non-empty before terminate");
         return TestResult::Fail;
     }
@@ -2653,7 +2654,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         klog_info!("SCHED_TEST: child not Terminated after terminate");
         return TestResult::Fail;
     }
-    if !unsafe { (*child_ptr).exit_info.is_set() } {
+    if !task_exit_info_is_set(child_ptr) {
         klog_info!("SCHED_TEST: exit_info not set after terminate");
         return TestResult::Fail;
     }
@@ -2673,7 +2674,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         // exit_info must remain set across multiple observations
         // (try_get is non-consuming; only `take` consumes — and the
         // wait path never takes).
-        if !unsafe { (*child_ptr).exit_info.is_set() } {
+        if !task_exit_info_is_set(child_ptr) {
             klog_info!(
                 "SCHED_TEST: exit_info became unset after waiter {} returned",
                 waiter
@@ -3079,7 +3080,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         if schedule_new_task(tp) != 0 {
             return TestResult::Fail;
         }
-        placed_on[i] = unsafe { (*tp).last_cpu } as usize;
+        placed_on[i] = task_last_cpu(tp).unwrap_or(0) as usize;
     }
 
     // Verify that at least 2 distinct CPUs were used (not all on CPU0).
@@ -3239,7 +3240,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
                 );
                 return TestResult::Fail;
             }
-            if unsafe { (*ptr).waiters.has_waiters() } {
+            if task_waiter_count(ptr) > 0 {
                 klog_info!(
                     "SCHED_TEST: fresh child has stale waiters at outer={} slot={}",
                     outer,
@@ -3247,7 +3248,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
                 );
                 return TestResult::Fail;
             }
-            if unsafe { (*ptr).exit_info.is_set() } {
+            if task_exit_info_is_set(ptr) {
                 klog_info!(
                     "SCHED_TEST: fresh child has stale exit_info at outer={} slot={}",
                     outer,
@@ -3354,7 +3355,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
         // fresh slot the pool would have to be >= STAMPEDE, but
         // reap_zombies below should free slots for reuse and so
         // `slot_index` should repeat.
-        let slot_index = unsafe { (*ptr).slot_index };
+        let slot_index = task_slot_index(ptr).unwrap_or(0);
         if slot_index != last_slot {
             distinct_slots += 1;
         }
@@ -3364,7 +3365,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
         // These two assertions are the heart of this test — they
         // catch any regression in `reset_in_place`'s reuse
         // discipline.
-        if unsafe { (*ptr).waiters.has_waiters() } {
+        if task_waiter_count(ptr) > 0 {
             klog_info!(
                 "SCHED_TEST: recycled slot {} has stale waiters at iter {}",
                 slot_index,
@@ -3372,7 +3373,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
             );
             return TestResult::Fail;
         }
-        if unsafe { (*ptr).exit_info.is_set() } {
+        if task_exit_info_is_set(ptr) {
             klog_info!(
                 "SCHED_TEST: recycled slot {} has stale exit_info at iter {}",
                 slot_index,
@@ -3391,7 +3392,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
             klog_info!("SCHED_TEST: child not Terminated at iter {}", i);
             return TestResult::Fail;
         }
-        if !unsafe { (*ptr).exit_info.is_set() } {
+        if !task_exit_info_is_set(ptr) {
             klog_info!("SCHED_TEST: exit_info not published at iter {}", i);
             return TestResult::Fail;
         }
@@ -3481,10 +3482,10 @@ pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
     if child_ptr.is_null() {
         return TestResult::Fail;
     }
-    if unsafe { (*child_ptr).status() } != TaskStatus::Zombie {
+    if task_status(child_ptr).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
         klog_info!(
             "SCHED_TEST: child not Zombie after terminate (status={:?})",
-            unsafe { (*child_ptr).status() }
+            task_status(child_ptr).unwrap_or(TaskStatus::Terminated)
         );
         return TestResult::Fail;
     }
@@ -3516,10 +3517,10 @@ pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
         klog_info!("SCHED_TEST: child slot vanished during churn");
         return TestResult::Fail;
     }
-    if unsafe { (*child_ptr_after).task_id } != child_id {
+    if task_id_of(child_ptr_after).unwrap_or(0) != child_id {
         return TestResult::Fail;
     }
-    if unsafe { (*child_ptr_after).status() } != TaskStatus::Zombie {
+    if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
         klog_info!("SCHED_TEST: child not Zombie after churn");
         return TestResult::Fail;
     }
@@ -3537,7 +3538,7 @@ pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
     }
 
     // After consume, slot should be Terminated and tier-2 reusable.
-    if unsafe { (*child_ptr_after).status() } != TaskStatus::Terminated {
+    if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Terminated {
         klog_info!("SCHED_TEST: child not Terminated after consume");
         return TestResult::Fail;
     }
@@ -3591,7 +3592,9 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
         return TestResult::Fail;
     }
     let child_ptr = task_find_by_id(child_id);
-    if child_ptr.is_null() || unsafe { (*child_ptr).status() } != TaskStatus::Zombie {
+    if child_ptr.is_null()
+        || task_status(child_ptr).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie
+    {
         return TestResult::Fail;
     }
 
@@ -3605,10 +3608,10 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     if child_ptr_after.is_null() {
         return TestResult::Fail;
     }
-    if unsafe { (*child_ptr_after).status() } != TaskStatus::Terminated {
+    if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Terminated {
         klog_info!(
             "SCHED_TEST: orphan child still {:?} after parent exit",
-            unsafe { (*child_ptr_after).status() }
+            task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated)
         );
         return TestResult::Fail;
     }
@@ -3666,10 +3669,10 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: task_find_by_id(High) null");
         return TestResult::Fail;
     }
-    if unsafe { (*high_ptr).priority } != TaskPriority::High {
+    if task_priority(high_ptr).unwrap_or(TaskPriority::Low) != TaskPriority::High {
         klog_info!(
             "SCHED_TEST: High waiter priority is {:?}, expected High",
-            unsafe { (*high_ptr).priority }
+            task_priority(high_ptr).unwrap_or(TaskPriority::Low)
         );
         return TestResult::Fail;
     }
@@ -3695,10 +3698,10 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: task_find_by_id(Low) null");
         return TestResult::Fail;
     }
-    if unsafe { (*child_ptr).priority } != TaskPriority::Low {
+    if task_priority(child_ptr).unwrap_or(TaskPriority::Low) != TaskPriority::Low {
         klog_info!(
             "SCHED_TEST: Low child priority is {:?}, expected Low",
-            unsafe { (*child_ptr).priority }
+            task_priority(child_ptr).unwrap_or(TaskPriority::Low)
         );
         return TestResult::Fail;
     }
@@ -3722,7 +3725,7 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: Low child not Terminated after task_terminate");
         return TestResult::Fail;
     }
-    if !unsafe { (*child_ptr).exit_info.is_set() } {
+    if !task_exit_info_is_set(child_ptr) {
         klog_info!("SCHED_TEST: exit_info not published by Low producer");
         return TestResult::Fail;
     }
@@ -3748,7 +3751,7 @@ pub fn test_cross_priority_wait() -> TestResult {
     // recycle path. The wait path uses `try_get`/`is_set`
     // (non-consuming), never `take`; a regression that consumed
     // the cell would leave subsequent waiters stranded.
-    if !unsafe { (*child_ptr).exit_info.is_set() } {
+    if !task_exit_info_is_set(child_ptr) {
         klog_info!("SCHED_TEST: exit_info became unset after High-priority wait returned");
         return TestResult::Fail;
     }
