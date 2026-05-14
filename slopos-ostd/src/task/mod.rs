@@ -6,6 +6,7 @@
 //! through its own types; the OSTD primitives compile but are unwired.
 
 pub mod abi;
+pub mod accessors;
 pub mod exit_info;
 pub mod fpu;
 pub mod handles;
