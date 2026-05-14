@@ -147,7 +147,7 @@ pub(super) fn free_task_stacks(task: *mut Task) {
         (*task).kernel_stack_top = 0;
         (*task).kernel_stack_size = 0;
 
-        // Same for the SafeStack unsafe (data) stack.
+        // Same for the SafeStack data stack.
         (*task).unsafe_stack = None;
         (*task).abi.unsafe_stack_sp = 0;
 

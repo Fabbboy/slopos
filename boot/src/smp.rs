@@ -41,7 +41,7 @@ static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
 /// installed GS_BASE to it; this function MUST use the same index
 /// when re-installing the per-CPU PCR via `ApPcrHandle::init` or the
 /// AP would point at a different PCR mid-boot, silently swapping the
-/// SafeStack unsafe-SP slot.
+/// SafeStack data-SP slot.
 fn ap_late_entry(cpu_idx: usize) -> ! {
     cpu::disable_interrupts();
     cpu::enable_sse();

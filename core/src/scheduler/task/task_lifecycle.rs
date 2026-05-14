@@ -59,7 +59,7 @@ struct TaskCreateResources {
     /// Owning handle to the kernel-mode stack.  Moves into `Task` on
     /// success; dropped on failure to auto-release all backing memory.
     kernel_stack: KernelStack,
-    /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
+    /// Owning handle to the SafeStack-sanitizer data stack.
     /// Allocated alongside `kernel_stack` so every live task owns both.
     unsafe_stack: UnsafeStack,
 }
@@ -171,7 +171,7 @@ fn allocate_unsafe_stack(size: u64, what: &'static str) -> Option<UnsafeStack> {
 
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "data stack")?;
     let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
@@ -192,7 +192,7 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     }
 
     let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "data stack")?;
 
     Some(TaskCreateResources {
         process_id: process.disarm(),
@@ -329,7 +329,7 @@ fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch
 /// user→kernel transition the CPU pushes the IRET frame there and the
 /// ISR/handler chain grows downward.  Concurrently, `user_task_loop`
 /// (the OSTD round-trip supervisor) holds a multi-hundred-byte safe-stack
-/// frame *on the same stack*, including a SafeStack-saved unsafe-SP slot
+/// frame *on the same stack*, including a SafeStack-saved data-SP slot
 /// at `[rbp-0xb8]`.
 ///
 /// If the supervisor's frame sat at the top of the stack (the historical
@@ -338,7 +338,7 @@ fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch
 /// `common_exception_handler_impl` alone allocates 264 bytes of safe
 /// stack, which pulls RSP into the supervisor's [rbp-0xb8] slot.  The
 /// resulting clobber surfaces later as a kernel page fault when the
-/// supervisor reads its now-corrupt unsafe-SP back.
+/// supervisor reads its now-corrupt data-SP back.
 ///
 /// The fix: place the supervisor's RSP at `kernel_stack_top -
 /// SUPERVISOR_RESERVE`.  That gives the CPU `SUPERVISOR_RESERVE` bytes
@@ -581,7 +581,7 @@ pub fn task_create(
     task_ref.kernel_stack_top = kstack_top;
     task_ref.kernel_stack_size = kstack_size;
     task_ref.kernel_stack = Some(resources.kernel_stack);
-    // Install the unsafe stack and prime its RSP at the top.  Every
+    // Install the data stack and prime its RSP at the top.  Every
     // instrumented function prologue walks this pointer downward; at
     // context-switch time it is saved/restored exactly like RSP.
     task_ref.abi.unsafe_stack_sp = resources.unsafe_stack.top().as_u64();
@@ -951,7 +951,7 @@ pub fn task_fork(
     let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(stack) => stack,
         Err(e) => {
-            klog_info!("task_fork: unsafe stack alloc failed: {:?}", e);
+            klog_info!("task_fork: data stack alloc failed: {:?}", e);
             drop(child_kernel_stack);
             return INVALID_TASK_ID;
         }
@@ -1116,7 +1116,7 @@ pub fn task_clone(
     let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(stack) => stack,
         Err(e) => {
-            klog_info!("task_clone: unsafe stack alloc failed: {:?}", e);
+            klog_info!("task_clone: data stack alloc failed: {:?}", e);
             drop(child_kernel_stack);
             return Err(ERRNO_ENOMEM);
         }

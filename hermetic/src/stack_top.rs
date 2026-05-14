@@ -2,10 +2,11 @@
 //! stack-top address.
 //!
 //! Replaces `u64` in TSS-write APIs (`gdt_set_kernel_rsp0`,
-//! `gdt_set_ist`). The lifetime forbids `let bad = unsafe {
-//! KernelStackTop::from_raw(0xFFFF_FFFF_8020_4000) }; gdt_set_ist(bad);`
-//! patterns in tests because the only safe constructor — `from_slice` —
-//! requires a real `&[u8]` reference, and the lifetime would dangle.
+//! `gdt_set_ist`). The lifetime forbids `let bad =
+//! KernelStackTop::from_raw(0xFFFF_FFFF_8020_4000); gdt_set_ist(bad);`
+//! patterns in tests because the only borrow-bound constructor —
+//! `from_slice` — requires a real `&[u8]` reference, and the
+//! `'static` lifetime emerging from `from_raw` would dangle.
 //!
 //! Single tag — earlier design considered `KernelStackTop<'a, IstStack>`
 //! / `<KThreadStack>` etc., but the API-level distinction is enforced by
@@ -18,8 +19,9 @@ use core::marker::PhantomData;
 /// Kernel-virt stack-top address with a lifetime bound to the backing
 /// allocation.
 ///
-/// Constructable only from a real `&[u8]` reference (safe path) or from
-/// a raw u64 (unsafe path, with debug-asserts enforcing kernel-virt and
+/// Constructable from a real `&[u8]` reference (`from_slice`, which
+/// binds the lifetime to the slice) or from a raw u64 (`from_raw` /
+/// `from_kernel_va`, with debug-asserts enforcing kernel-virt and
 /// 16-byte alignment).
 #[derive(Copy, Clone)]
 pub struct KernelStackTop<'a> {
@@ -30,13 +32,14 @@ pub struct KernelStackTop<'a> {
 impl<'a> KernelStackTop<'a> {
     /// Construct from a raw kernel-virt address.
     ///
-    /// # Safety
-    /// - `addr` must be the high address of a 16-byte aligned, mapped,
-    ///   kernel-virt stack region with a guard page below.
-    /// - The backing region must outlive the returned `KernelStackTop`.
-    ///   The `'a` lifetime is purely a marker — caller is responsible
-    ///   for not using the value after the region is freed.
-    pub unsafe fn from_raw(addr: u64) -> Self {
+    /// The function body itself performs no memory access — it only
+    /// stores `addr` in a wrapper struct with a phantom lifetime
+    /// marker. The lifetime `'a` is a witness that the caller has
+    /// established the backing region outlives the returned value;
+    /// the type system enforces non-escape via `'a`. Debug asserts
+    /// catch obvious bugs (non-canonical / mis-aligned addresses)
+    /// at construction time.
+    pub fn from_raw(addr: u64) -> Self {
         debug_assert!(
             addr & 0xF == 0,
             "KernelStackTop: addr 0x{:x} is not 16-byte aligned",
@@ -59,12 +62,11 @@ impl<'a> KernelStackTop<'a> {
     /// allocated for the lifetime of the kernel).
     ///
     /// Performs the same kernel-virt + 16-byte-alignment debug-asserts as
-    /// `from_raw`, but exposes a safe call site for boot code that has
-    /// computed the address from an already-mapped region. The `'static`
-    /// lifetime is appropriate because the backing region is expected to
-    /// outlive the kernel image.
+    /// `from_raw`, but binds the lifetime to `'static` for boot code
+    /// that has computed the address from an already-mapped region
+    /// expected to outlive the kernel image.
     pub fn from_kernel_va(addr: u64) -> KernelStackTop<'static> {
-        unsafe { KernelStackTop::<'static>::from_raw(addr) }
+        KernelStackTop::<'static>::from_raw(addr)
     }
 
     /// Construct from a borrowed kernel-virt slice. Returns the

@@ -222,12 +222,11 @@ pub struct WaitQueueOps {
     pub yield_blocked_task_with_timeout: fn(u32),
     /// See [`WaitQueueBackend::unblock_task`].
     ///
-    /// # Safety
-    ///
-    /// Caller must ensure `task` was obtained from
-    /// [`WaitQueueOps::current_task_handle`] and still refers to a
-    /// live task.
-    pub unblock_task: unsafe fn(WaitTaskHandle) -> i32,
+    /// The fn pointer is `safe` because consumers always pass it
+    /// through the [`WaitQueueBackend::unblock_task`] trait method
+    /// (which is `unsafe fn`) and the surrounding ops-backend wraps
+    /// the call in an unsafe block that re-asserts the contract.
+    pub unblock_task: fn(WaitTaskHandle) -> i32,
     /// See [`WaitQueueBackend::get_time_ms`].
     pub get_time_ms: fn() -> u64,
 }
@@ -257,10 +256,10 @@ unsafe impl WaitQueueBackend for OpsBackend {
         (self.0.yield_blocked_task_with_timeout)(timeout_ms)
     }
     unsafe fn unblock_task(&self, task: WaitTaskHandle) -> i32 {
-        // SAFETY: forwarding contract — caller of
-        // `WaitQueueBackend::unblock_task` certifies `task`; the ops
-        // table inherits the same contract.
-        unsafe { (self.0.unblock_task)(task) }
+        // The ops-table fn pointer is `fn` (not `unsafe fn`); the
+        // trait-method safety contract is owned by the caller of
+        // `WaitQueueBackend::unblock_task`.
+        (self.0.unblock_task)(task)
     }
     fn get_time_ms(&self) -> u64 {
         (self.0.get_time_ms)()

@@ -1,4 +1,5 @@
 #![no_std]
+#![forbid(unsafe_code)]
 
 pub const MAX_PATH_LEN: usize = 256;
 pub const MAX_NAME_LEN: usize = 32;

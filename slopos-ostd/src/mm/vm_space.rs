@@ -422,6 +422,25 @@ impl VmSpace {
     /// sync — cheap when up-to-date (single atomic load). Fires the
     /// registered [`CursorUnmapHook::on_activate`] callback (if any)
     /// so the consumer's per-CPU LUF state tracks the current
+    /// Activate this VmSpace as the running address space, intended
+    /// for the **kernel master** VmSpace (the singleton wrapping the
+    /// bootloader-installed PML4). Sound to call from kernel-only
+    /// contexts where the kernel-half invariant is trivially satisfied:
+    /// the master maps kernel-half indices 256..512 directly, and the
+    /// user-half is unused for kernel-side work.
+    ///
+    /// Wraps [`VmSpace::activate`] so callers don't write `unsafe`
+    /// blocks. Intended caller is the post-user-fault park path; the
+    /// scheduler hot path uses [`activate`] directly because it
+    /// activates per-process VmSpaces whose kernel-half is resynced
+    /// via [`resync_kernel_half_if_stale`].
+    pub fn activate_kernel_master(&self) {
+        // SAFETY: the kernel master VmSpace always satisfies the
+        // kernel-half invariant; CR3 reload to it is sound from any
+        // kernel-mode context.
+        unsafe { self.activate() }
+    }
+
     /// process.
     ///
     /// # Safety

@@ -29,14 +29,14 @@ pub const MAX_TASKS: usize = 8192;
 pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 
-/// SafeStack-sanitizer unsafe (data) stack size — 16 KiB.
+/// SafeStack-sanitizer data stack size — 16 KiB.
 ///
 /// LLVM's SafeStack pass moves address-taken locals and dynamic allocas
 /// onto this stack at every instrumented function prologue. The
-/// "zero unsafe" refactors push more kernel-side primitives behind
+/// zero-`unsafe`-keyword refactors push more kernel-side primitives behind
 /// `&mut`-passing safe helpers (`with_mut`, `for_each`, `frame_for_phys`,
 /// `hhdm_*_bytes`, …); LLVM lowers each `&mut local` to an address-take
-/// and the local migrates to the unsafe stack. Cumulative depth on
+/// and the local migrates to the data stack. Cumulative depth on
 /// long syscall paths (fork → COW → exec → load_segment_pages → …)
 /// approaches the prior 8 KiB ceiling on slow TCG/CI hosts where dev
 /// builds can't inline these helpers — the watchdog catches it as a

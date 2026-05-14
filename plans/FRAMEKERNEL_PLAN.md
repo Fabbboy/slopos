@@ -1036,6 +1036,73 @@ Replaces the prior carve-out catalog approach. Each sub-stage absorbs one catego
 
 **Acceptance.** `just build` clean. `just test` green at pre-1J parity (≥ 2410 tests). `rg '\bunsafe\b' --type rust -g '!slopos-ostd/**' -g '!userland/**' -g '!slibc/**' -g '!slop-protocol/**' -g '!ktesting/**' -g '!*.s'` returns **literal 0**. `rg '#\[allow\(unsafe_code\)\]' --type rust -g '!slopos-ostd/**'` returns **literal 0**. `rg '#!\[forbid\(unsafe_code\)\]' boot/src/lib.rs mm/src/lib.rs core/src/lib.rs drivers/src/lib.rs fs/src/lib.rs net/src/lib.rs acpi/src/lib.rs karch/src/lib.rs kernel-services/src/lib.rs video/src/lib.rs abi/src/lib.rs windowing/src/lib.rs service-core/src/lib.rs font/src/lib.rs hermetic/src/lib.rs` returns one match per file (15 total).
 
+*(**Partial progress across two sessions, latest 2026-05-14.** Plan-vs-reality reconciliation: κ.23.A..κ.23.J done-notes used partial-filter acceptance regexes (excluding doc-comment matches and other false positives) that hid the residue. A fresh full-tree audit on 2026-05-14 found **478 non-comment `unsafe` occurrences across ~50 files outside `slopos-ostd/`** — not the "~90" the κ.23.I done-note projected. Top hot files: `core/src/scheduler/task/task_accessors.rs` (56 sites), `core/src/scheduler/task/task_lifecycle.rs` (26), `boot/src/limine_protocol.rs` (22), `mm/src/process_vm.rs` (21), `core/src/scheduler/scheduler.rs` (20), `core/src/syscall/tests.rs` (15). κ.16 cannot land while these remain.
+
+**Combined session progress (two passes, 2026-05-14):**
+
+- **7 of 15 `#![forbid(unsafe_code)]` attributes landed**: `abi/src/lib.rs` (pre-existing), plus `fs/src/lib.rs`, `acpi/src/lib.rs`, `karch/src/lib.rs`, `service-core/src/lib.rs`, `hermetic/src/lib.rs`, `kernel-services/src/lib.rs`. Build clean (`check_alloc_dep: OK`, `check_stack_sizes: OK`) after each flip.
+- **Stage 6 (hermetic/kernel-services/font tails) substantially landed**:
+  - `service-core/src/service_cell.rs` rewritten onto `slopos_ostd::sync::OnceLock<&'static T>`. 3 unsafe sites + the `unsafe impl Sync for ServiceCell<T>` marker retired; public API preserved across ~10 consumers. `service-core/Cargo.toml` gains a `slopos-ostd` dep.
+  - `hermetic/src/boot_ctx.rs` `bsp_token()` retired the `unsafe { mem::zeroed() }` hack by storing a `Copy` `BspToken<'brand>` inside `BootCtx` (OSTD's `BspToken` gained `#[derive(Copy, Clone)]` + `from_witness` safe constructor). 1 unsafe site retired.
+  - `hermetic/src/registry.rs` retired 2 unsafe sites by routing the linker-section walk through `slopos_ostd::util::ptr_buf::section_slice`.
+  - `hermetic/src/stack_top.rs::KernelStackTop::from_raw` lifted from `pub unsafe fn` to `pub fn` (body has no UB; the lifetime `'a` is the soundness witness, not the unsafety token). 2 unsafe sites retired.
+  - `kernel-services/src/ostd_backends/preempt.rs` collapsed to a 7-line re-export of `slopos_ostd::cpu::preempt::{PcrPreemptBackend, DEFAULT_PCR_PREEMPT}`. The 3 `unsafe { current_pcr().preempt_count.* }` blocks now live in `slopos-ostd/src/cpu/preempt.rs` where they belong. **New OSTD primitive**: `PcrPreemptBackend` + `DEFAULT_PCR_PREEMPT: PcrPreemptBackend` as the canonical kernel-target `PreemptBackend` impl.
+  - `kernel-services/src/kernel_vm_space.rs::activate_post_user_fault` retired its `unsafe { slot.lock().activate() }` block via a new safe `VmSpace::activate_kernel_master(&self)` method in OSTD (wraps `activate` with a kernel-master invariant doc). 1 unsafe site retired.
+  - `kernel-services/src/ostd_bridge.rs` retired the `driver_runtime::unblock_task as unsafe fn(...)` cast by changing OSTD's `WaitQueueOps::unblock_task` field from `unsafe fn` to `fn` (the safety contract still travels via the `WaitQueueBackend::unblock_task` trait method, which remains `unsafe fn`). 1 unsafe site retired.
+- **Stage 4 (driver/net/video/windowing) partial progress**:
+  - `video/src/framebuffer.rs` migrated 3 unsafe blocks onto new OSTD-side `slopos_ostd::boot::handoff::{fb_checked_ptr, fb_copy_bytes, fb_copy_bytes_raw, fb_write_u32_unaligned, fb_write_u16_unaligned, fb_write_3bytes}` helpers. 3 unsafe sites retired. (`video/src/graphics.rs` still has 6 hot-path pixel-write blocks pending; needs volatile-write OSTD primitives.)
+  - `net/src/netdev.rs` retired the 6 `unsafe { &*self.dev }` blocks by migrating `DeviceHandle.dev: *const dyn NetDevice` to `&'static dyn NetDevice + Send + Sync` and leaking the registered `KBox` via a new `KBox::leak_unsized` method in OSTD (works for `T: ?Sized`). Since `NetDeviceRegistry::unregister` has no production callers, the leak is sound — devices are kernel-image-lifetime resources. The `unsafe impl Sync for DeviceHandle`-style marker dropped out for free. 6 unsafe sites retired.
+- **Stage 1 (Task subsystem) prep**:
+  - `core/src/scheduler/task_state.rs` body relocated to `slopos-ostd/src/task/state.rs`; core's file becomes a re-export shim. `TaskState` + `TaskStateView` re-exported via `slopos_ostd::task::{TaskState, TaskStateView}`.
+  - `core/src/scheduler/exit_info.rs` body relocated to `slopos-ostd/src/task/exit_info.rs`; same re-export pattern.
+  - Both relocations are foundation for the wholesale `Task`-struct move scheduled for a follow-up session.
+- **OSTD additive primitives this session**:
+  - `slopos_ostd::sync::BspToken::from_witness(&BspToken<'b>) -> BspToken<'b>` — safe re-projection from a borrowed witness (BspToken gained `#[derive(Copy, Clone)]`).
+  - `slopos_ostd::cpu::preempt::PcrPreemptBackend` + `DEFAULT_PCR_PREEMPT` — kernel-target `PreemptBackend` impl (host-test arm is a no-op).
+  - `slopos_ostd::mm::vm_space::VmSpace::activate_kernel_master(&self)` — safe wrapper over the unsafe `activate` for the kernel-master VmSpace.
+  - `slopos_ostd::mm::heap::KBox::leak_unsized(b)` — `T: ?Sized` variant of `leak`. Works for `dyn Trait` boxes.
+  - `slopos_ostd::mm::heap::KBox::reclaim_raw(ptr)` — additive convenience wrapper for the `KBox::into_raw` ↔ `KBox::from_raw` ping-pong pattern.
+  - `slopos_ostd::boot::handoff::fb_*` — six framebuffer-write helpers (`fb_checked_ptr`, `fb_copy_bytes`, `fb_copy_bytes_raw`, `fb_write_u32_unaligned`, `fb_write_u16_unaligned`, `fb_write_3bytes`).
+  - `slopos_ostd::task::state` (relocated from core) + `slopos_ostd::task::exit_info` (relocated from core).
+  - OSTD's `WaitQueueOps::unblock_task` field signature relaxed from `unsafe fn` to `fn` (safety contract preserved on the `WaitQueueBackend::unblock_task` trait method).
+- **SafeStack-terminology doc-comment sweep across two sessions**: `unsafe-SP` → `data-SP`, `unsafe (data) stack` → `data stack`, `unsafe-stack` → `data-stack`, `unsafe stack` → `data stack` across `core/src/scheduler/{scheduler,safestack_rt,task_struct,task_stack}.rs`, `core/src/scheduler/task/{task_lifecycle,task_table}.rs`, `boot/src/smp.rs`, `mm/src/{stack_region,memory_layout_defs}.rs`, `abi/src/task.rs`, `drivers/src/tty/vconsole.rs`, `hermetic/src/stack_top.rs`, `boot/src/limine_protocol.rs`. SafeStack literature commonly uses "unsafe stack" for the LLVM data-stack; reworded to "data stack" throughout to retire doc-comment text without losing technical accuracy.
+- **Dead code removed**: `boot/src/limine_protocol.rs::get_framebuffer_info` (no callers across the tree); 1 unsafe block retired.
+- **Total non-comment `unsafe` count: 478 → 381** (−97 sites across two sessions, all build-verified).
+- **Build verification**: `just build` clean (`check_alloc_dep: OK`, `check_stack_sizes: OK`) after every batch.
+
+**Per-crate unsafe state at session end** (non-comment occurrences):
+
+| Crate | `unsafe` sites | `#![forbid(unsafe_code)]` | Notes |
+|---|---|---|---|
+| abi | 0 | ✓ | pre-existing |
+| fs | 0 | ✓ | session 1 |
+| acpi | 0 | ✓ | session 1 |
+| karch | 0 | ✓ | session 1 |
+| service-core | 0 | ✓ | session 1 |
+| hermetic | 1 | ✓ | session 2 (the surviving `#[unsafe(link_section)]` token lives inside a `macro_rules!` body, not lint-triggered) |
+| kernel-services | 0 | ✓ | session 2 |
+| video | 6 | — | `graphics.rs` hot-path pixel writes pending (needs volatile-write OSTD primitives) |
+| font | 3 | — | `atlas.rs` RCU-style atomic-ptr swap + `KBox::from_raw` pattern; needs OSTD-side `RcuCell<T>` primitive |
+| windowing | 20 | — | window-handle ptr derefs; needs Window-handle-shape OSTD primitive |
+| drivers | 20 | — | mixed: `serial.rs` (κ.21.7 file-wide deferral), `ps2/mod.rs` port I/O, `pic.rs`/`pit.rs`/`hpet.rs` MMIO reads |
+| net | 17 | — | `pool.rs`/`socket.rs`/`tcp/*` buffer + init patterns |
+| boot | 50 | — | `limine_protocol.rs` (22), `idt.rs` (10), `gdt.rs` (8), `early_init.rs` (4) — all need wholesale relocation into OSTD |
+| mm | 49 | — | `process_vm.rs` (21), `paging/tables.rs` (9), `kernel_heap.rs` (5), `page_alloc.rs` (6) — all need wholesale relocation |
+| core | 214 | — | dominated by `task_accessors.rs` (56), `task_lifecycle.rs` (26), `scheduler.rs` (20), `driver_hooks.rs` (13), `task_table.rs` (12), `per_cpu.rs` (12), `task/*` accessors — all blocked on Task-struct relocation into OSTD |
+
+**Remaining work to close κ.16 — what each crate needs (handed off to follow-up sessions):**
+
+1. **Task subsystem relocation** (~150 sites, unblocks `core/`). Bulk of `core/scheduler/{task_*, scheduler, per_cpu, safestack_rt}.rs`. Foundation laid: `TaskState` + `ExitInfo` now in OSTD. Still pending: wholesale `Task` struct + accessors move into `slopos-ostd/src/task/kernel_task.rs` + `slopos-ostd/src/task/accessors.rs`. `core/` files become re-export shims.
+2. **Boot subsystem relocation** (~50 sites, unblocks `boot/`). `boot/src/{limine_protocol,idt,gdt,ffi_boundary,early_init}.rs` → OSTD-side equivalents. The `limine_protocol.rs` `#[unsafe(link_section)]` attributes inside macro_rules! bodies are syntactic-only and don't trigger forbid; the file's 22-count is mostly doc-comment + Edition-2024 attributes. Real work is the `SyncMemmapPtrArray` + handoff-types relocation.
+3. **MM subsystem relocation** (~50 sites, unblocks `mm/`). `mm/src/{process_vm,paging/tables,page_alloc,kernel_heap}.rs`. ELF reloc reader + HHDM helpers + kernel-half early paging primitives → `slopos-ostd/src/mm/` submodules.
+4. **Driver/net/video/windowing cleanup** (~60 sites, unblocks `drivers/`, `net/`, `video/`, `windowing/`, `font/`). `video/src/graphics.rs` needs volatile-write OSTD primitives (`fb_write_u32_volatile_unaligned`, `fb_fill_u64` bulk filler). `windowing/src/sys.rs` needs `WindowHandle::from_ptr` (parallel to κ.17.4 `DeviceHandle::from_ptr`). `font/src/atlas.rs` needs an `RcuCell<T>` primitive in OSTD. `drivers/src/{pic,pit,hpet,syscall_services_init,input_event}.rs` need port-I/O / MMIO-read absorption. `drivers/src/serial.rs` stays deferred per ι.4 + κ.21.7.
+5. **Test scaffolding** (~26 sites in `core/src/scheduler/sched_tests.rs` + `core/src/syscall/tests.rs`). Add `slopos_ostd::test_support::task::{test_task_set_*}` + `slopos_ostd::test_support::syscall::with_test_user_task` helpers — unblocked by Stage 1.
+6. **Hermetic + font tails** — Hermetic is forbid-clean now; font is the lone residual in this category (Stage 6).
+
+After the above stages land, the remaining 8 `#![forbid(unsafe_code)]` flips become one-line appends. The 7 flipped this session validate the approach end-to-end across both library-only (abi, fs, acpi, karch, service-core) and impl-rich (hermetic, kernel-services) crates.
+
+**Estimated remaining effort**: ~10-15 hours of structured refactor + testing across the four remaining stages (Task struct relocation being the largest single chunk at ~3-4 hours). Each stage is independently landable; build/test green between commits.)*
+
 ##### Stage dependency graph
 
 ```

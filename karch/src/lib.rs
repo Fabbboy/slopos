@@ -7,6 +7,7 @@
 //! should import from `slopos_ostd` directly.
 
 #![no_std]
+#![forbid(unsafe_code)]
 
 pub mod pcr {
     pub use slopos_ostd::cpu::x86_64::pcr::*;

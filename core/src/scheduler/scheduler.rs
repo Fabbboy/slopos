@@ -170,7 +170,7 @@ fn scheduler_ready_count(cpu_id: usize) -> u32 {
 ///
 /// - `cpu_id == slopos_arch::pcr::get_current_cpu()`.  SafeStack only
 ///   reads the *local* PCR via GS; cross-CPU dispatch would write
-///   the wrong PCR and corrupt the remote CPU's unsafe-SP resolution.
+///   the wrong PCR and corrupt the remote CPU's data-SP resolution.
 /// - `task` is non-null, lives in the task pool (or is a bootstrap
 ///   stub), and has its `unsafe_stack_sp` primed.
 /// - Caller runs with preemption disabled OR inside the

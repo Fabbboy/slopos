@@ -344,38 +344,6 @@ pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
     }
 }
 
-pub fn get_framebuffer_info(
-    addr: *mut u64,
-    width: *mut u32,
-    height: *mut u32,
-    pitch: *mut u32,
-    bpp: *mut u8,
-) -> i32 {
-    let info = sysinfo();
-    if let Some(boot_fb) = info.framebuffer {
-        unsafe {
-            if !addr.is_null() {
-                *addr = *boot_fb.address as u64;
-            }
-            if !width.is_null() {
-                *width = boot_fb.info.width;
-            }
-            if !height.is_null() {
-                *height = boot_fb.info.height;
-            }
-            if !pitch.is_null() {
-                *pitch = boot_fb.info.pitch;
-            }
-            if !bpp.is_null() {
-                *bpp = boot_fb.info.format.bytes_per_pixel() * 8;
-            }
-        }
-        1
-    } else {
-        0
-    }
-}
-
 pub fn is_framebuffer_available() -> i32 {
     sysinfo().flags.framebuffer_available as i32
 }

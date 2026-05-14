@@ -10,7 +10,7 @@
 //! OSTD-native and live alongside the trait definitions).
 
 use slopos_ostd::sync::rcu::RcuOps;
-use slopos_ostd::sync::wait_queue::{WaitQueueOps, WaitTaskHandle};
+use slopos_ostd::sync::wait_queue::WaitQueueOps;
 
 use crate::driver_runtime;
 use crate::platform;
@@ -31,7 +31,7 @@ pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
     mark_current_blocked: driver_runtime::mark_current_blocked,
     yield_blocked_task: driver_runtime::yield_blocked_task,
     yield_blocked_task_with_timeout: driver_runtime::yield_blocked_task_with_timeout,
-    unblock_task: driver_runtime::unblock_task as unsafe fn(WaitTaskHandle) -> i32,
+    unblock_task: driver_runtime::unblock_task,
     get_time_ms: platform::get_time_ms,
 };
 

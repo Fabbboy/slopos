@@ -2,7 +2,7 @@
 //!
 //! Provides the two primitives that let the LLVM SafeStack pass
 //! (`-Zsanitizer=safestack -C llvm-args=-safestack-use-pointer-address`)
-//! drive per-task unsafe (data) stacks on our SMP kernel:
+//! drive per-task data stacks on our SMP kernel:
 //!
 //! 1. [`__safestack_pointer_address`] — naked C-ABI function LLVM's
 //!    instrumented prologues call to fetch the slot address.  Returns
@@ -22,7 +22,7 @@
 //! address on one specific CPU's PCR page), the cached pointer would
 //! become **stale** the moment the scheduler migrates the task to
 //! another CPU — the task resumes on the new CPU but its cached
-//! pointer still names the old CPU's unsafe-SP slot.
+//! pointer still names the old CPU's data-SP slot.
 //! Reads/writes through the stale pointer hit the old CPU's PCR —
 //! which belongs to whichever task is scheduled there now —
 //! corrupting both.
@@ -66,7 +66,7 @@ use super::task_struct::{TASK_UNSAFE_STACK_SP_OFFSET, Task};
 /// Matches `slopos_arch::pcr::MAX_STATIC_APS`.
 pub const MAX_STATIC_APS: usize = 16;
 
-/// Size of each bootstrap unsafe-stack buffer — 64 KiB.  Ample for
+/// Size of each bootstrap data-stack buffer — 64 KiB.  Ample for
 /// any early-boot instrumented prologues on the path to
 /// `kernel_main` / `ap_entry_rust`.
 pub const BOOTSTRAP_UNSAFE_STACK_SIZE: usize = 0x10000;
@@ -86,7 +86,7 @@ pub const BOOTSTRAP_UNSAFE_STACK_SIZE: usize = 0x10000;
 pub static BOOTSTRAP_TASK_UNSAFE_SP_OFFSET: u64 = TASK_UNSAFE_STACK_SP_OFFSET as u64;
 
 // ---------------------------------------------------------------------------
-// Bootstrap unsafe-stack buffers (raw BSS)
+// Bootstrap data-stack buffers (raw BSS)
 // ---------------------------------------------------------------------------
 
 #[repr(C, align(16))]
@@ -186,7 +186,7 @@ pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::
 // Bootstrap seeding helpers
 // ---------------------------------------------------------------------------
 
-/// Compute the top of the BSP bootstrap unsafe stack.
+/// Compute the top of the BSP bootstrap data stack.
 ///
 /// The end-of-buffer is a one-past-the-end pointer used only for
 /// stack-top arithmetic; it is never dereferenced as the top itself,
@@ -199,7 +199,7 @@ pub fn bsp_bootstrap_unsafe_sp() -> *mut u8 {
     ((top as usize) & !0xF) as *mut u8
 }
 
-/// Compute the top of AP slot `i`'s bootstrap unsafe stack
+/// Compute the top of AP slot `i`'s bootstrap data stack
 /// (0-based: slot `i` corresponds to the AP whose `cpu_info.extra`
 /// was set to `i + 1`).
 #[inline]

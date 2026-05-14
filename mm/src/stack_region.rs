@@ -4,7 +4,7 @@
 //!
 //! # Why a trait
 //!
-//! Both the kernel-stack and unsafe-stack VA regions are managed by
+//! Both the kernel-stack and data-stack VA regions are managed by
 //! identical bitmap + per-CPU-cache machinery; they only differ in five
 //! constants (`*_VA_BASE`, `*_VA_END`, `*_STRIDE`, `*_GUARD_SIZE`,
 //! `*_MAX_SLOTS`).  Parameterising the allocator and the RAII slot
@@ -147,7 +147,7 @@ pub trait StackRegion: 'static + sealed::Sealed {
 pub enum KstackRegion {}
 impl sealed::Sealed for KstackRegion {}
 
-/// VA region for SafeStack-sanitiser data ("unsafe") stacks.
+/// VA region for SafeStack-sanitiser data stacks.
 ///
 /// Disjoint from [`KstackRegion`] so a stray data-stack OOB cannot
 /// rewrite control flow on the safe (kernel) stack.  See

@@ -1,24 +1,23 @@
 //! Generic kernel service registration cell.
 //!
-//! Eliminates duplicated `AtomicPtr` boilerplate for kernel service tables.
+//! Thin wrapper over `slopos_ostd::sync::OnceLock<&'static T>` that
+//! preserves the historical `ServiceCell` API (`register` / `get` /
+//! `try_get` / `is_initialized`) used by ~10 kernel service tables.
 
-use core::sync::atomic::{AtomicPtr, Ordering};
+use slopos_ostd::sync::OnceLock;
 
 /// A cell for single-registration kernel service tables.
-pub struct ServiceCell<T> {
-    ptr: AtomicPtr<T>,
+pub struct ServiceCell<T: 'static> {
+    inner: OnceLock<&'static T>,
     name: &'static str,
 }
 
-// SAFETY: Only stores pointer to 'static T; AtomicPtr provides synchronization.
-unsafe impl<T> Sync for ServiceCell<T> {}
-
-impl<T> ServiceCell<T> {
+impl<T: 'static> ServiceCell<T> {
     /// Create an uninitialized cell. `name` appears in panic messages.
     #[inline]
     pub const fn new(name: &'static str) -> Self {
         Self {
-            ptr: AtomicPtr::new(core::ptr::null_mut()),
+            inner: OnceLock::new(),
             name,
         }
     }
@@ -26,36 +25,32 @@ impl<T> ServiceCell<T> {
     /// Register the service table. Panics if already registered.
     #[inline]
     pub fn register(&self, services: &'static T) {
-        let prev = self
-            .ptr
-            .swap(services as *const T as *mut T, Ordering::Release);
-        assert!(prev.is_null(), "{} already registered", self.name);
+        let mut placed = false;
+        self.inner.call_once(|| {
+            placed = true;
+            services
+        });
+        assert!(placed, "{} already registered", self.name);
     }
 
     #[inline]
     pub fn is_initialized(&self) -> bool {
-        !self.ptr.load(Ordering::Acquire).is_null()
+        self.inner.is_completed()
     }
 
     /// Get the service table. Panics if not initialized.
     #[inline]
     pub fn get(&self) -> &'static T {
-        let ptr = self.ptr.load(Ordering::Acquire);
-        assert!(!ptr.is_null(), "{} not initialized", self.name);
-        // SAFETY: Only store valid &'static T pointers; assert ensures non-null.
-        unsafe { &*ptr }
+        match self.inner.get() {
+            Some(r) => *r,
+            None => panic!("{} not initialized", self.name),
+        }
     }
 
     /// Try to get the service table, returns `None` if not registered.
     #[inline]
     pub fn try_get(&self) -> Option<&'static T> {
-        let ptr = self.ptr.load(Ordering::Acquire);
-        if ptr.is_null() {
-            None
-        } else {
-            // SAFETY: Only store valid &'static T pointers.
-            Some(unsafe { &*ptr })
-        }
+        self.inner.get().copied()
     }
 
     #[inline]

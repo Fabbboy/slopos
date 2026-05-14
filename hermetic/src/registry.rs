@@ -41,13 +41,7 @@ slopos_ostd::extern_block! {
 pub fn registry_iter() -> impl Iterator<Item = &'static HermeticVTable> {
     let start = externs::__start_hermetic_state_registry_addr();
     let stop = externs::__stop_hermetic_state_registry_addr();
-    // SAFETY: the linker emits both sentinels; `offset_from` is sound
-    // because both pointers come from the same array (the section).
-    let n = unsafe { stop.offset_from(start) } as usize;
-    (0..n).map(move |i| {
-        // SAFETY: `i < n`; pointer arithmetic stays within the section.
-        unsafe { &*start.add(i) }
-    })
+    slopos_ostd::util::ptr_buf::section_slice::<HermeticVTable>(start, stop).iter()
 }
 
 /// Errors from registry analysis.

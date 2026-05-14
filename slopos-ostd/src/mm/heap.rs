@@ -431,7 +431,30 @@ impl<T> KBox<T> {
         }
     }
 
-    /// Leak the boxed value into a `'static` reference.
+    /// Reclaim and drop a raw pointer that was previously produced by
+    /// [`KBox::into_raw`]. Convenience wrapper for the common
+    /// "atomically swap an `AtomicPtr<T>`, then free the previous
+    /// pointer" pattern.
+    ///
+    /// # Safety
+    /// `ptr` must originate from a matching `into_raw` call and must
+    /// not be aliased. No other reference may exist to the value at
+    /// `ptr` at the time of the reclaim.
+    pub unsafe fn reclaim_raw(ptr: *mut T) {
+        if !ptr.is_null() {
+            // SAFETY: caller upholds Box::from_raw invariants; we drop
+            // the reconstructed Box immediately, freeing the allocation.
+            unsafe {
+                drop(Self::from_raw(ptr));
+            }
+        }
+    }
+
+    /// Leak the boxed value into a static-lifetime reference.
+    ///
+    /// Moved into [`KBox::leak_unsized`] for the unsized case. Kept
+    /// here for backward-compat call sites that hold `KBox<T>` with
+    /// `T: Sized`.
     pub fn leak<'a>(b: Self) -> &'a mut T
     where
         T: 'a,
@@ -445,6 +468,15 @@ impl<T> KBox<T> {
     pub fn into_inner(b: Self) -> T {
         // `Box<T>` supports move-out via `*` in stable Rust.
         *b.inner
+    }
+}
+
+impl<T: ?Sized> KBox<T> {
+    /// Leak the boxed value into a static-lifetime reference. Works
+    /// for both sized and unsized `T` (e.g. `dyn Trait` for trait
+    /// objects whose registry holds them for the kernel's lifetime).
+    pub fn leak_unsized(b: Self) -> &'static mut T {
+        Box::leak(b.inner)
     }
 }
 

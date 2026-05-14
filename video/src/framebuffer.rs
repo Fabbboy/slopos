@@ -1,5 +1,4 @@
 use core::ffi::c_int;
-use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::{DisplayInfo, PixelFormat};
@@ -50,16 +49,7 @@ impl FbState {
 
     #[inline]
     fn checked_ptr(&self, offset: usize, len: usize) -> Option<*mut u8> {
-        let end = offset.checked_add(len)?;
-        if end > self.buffer_size() {
-            return None;
-        }
-        let base = self.base_ptr();
-        if base.is_null() {
-            return None;
-        }
-        // SAFETY: offset and len were bounds-checked against framebuffer size above.
-        Some(unsafe { base.add(offset) })
+        slopos_ostd::boot::handoff::fb_checked_ptr(self.base_ptr(), offset, len, self.buffer_size())
     }
 }
 
@@ -224,13 +214,20 @@ fn copy_rect_from_shm(
             return false;
         }
 
-        let Some(dst_ptr) = fb.checked_ptr(dst_off, row_bytes) else {
+        if fb.checked_ptr(dst_off, row_bytes).is_none() {
             return false;
         };
-        // SAFETY: src range is checked against shm_size, dst range checked by checked_ptr.
-        unsafe {
-            ptr::copy_nonoverlapping(shm_virt.add(src_off), dst_ptr, row_bytes);
-        }
+        // Source range checked against shm_size by the loop's
+        // `src_end > shm_size` guard above. Destination range
+        // checked by `fb.checked_ptr` returning Some. Borrow the
+        // source as a byte slice and copy into the OSTD-validated
+        // framebuffer offset.
+        let src_slice = slopos_ostd::util::ptr_buf::borrow_buf::<u8>(shm_virt, shm_size);
+        slopos_ostd::boot::handoff::fb_copy_bytes(
+            fb.base_ptr(),
+            dst_off,
+            &src_slice[src_off..src_off + row_bytes],
+        );
     }
 
     true
@@ -280,13 +277,14 @@ pub fn fb_flip_from_shm_damage(
     let shm_ptr = shm_virt as *const u8;
 
     if damage.is_null() || damage_count == 0 {
-        let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
+        if fb.checked_ptr(0, copy_size).is_none() {
             return -1;
         };
-        // SAFETY: source and destination have been validated and are non-overlapping.
-        unsafe {
-            ptr::copy_nonoverlapping(shm_ptr, dst_ptr, copy_size);
-        }
+        // Destination range bounds-checked above; source range
+        // bounds-checked against `copy_size` (= min of caller-supplied
+        // size and fb byte size). Both ranges are validated and the
+        // OSTD `fb_copy_bytes_raw` helper applies the dest precondition.
+        slopos_ostd::boot::handoff::fb_copy_bytes_raw(fb.base_ptr(), 0, shm_ptr, copy_size);
         return framebuffer_flush();
     }
 

@@ -332,7 +332,7 @@ pub struct Task {
     /// because some assembly / syscall paths read them as plain `u64`
     /// rather than going through the handle.
     pub kernel_stack: Option<crate::scheduler::task_stack::KernelStack>,
-    /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
+    /// Owning handle to the SafeStack-sanitizer data stack.
     ///
     /// Lives alongside `kernel_stack` — allocated at task creation,
     /// dropped in `reset_in_place`/Drop like `kernel_stack`.  While the

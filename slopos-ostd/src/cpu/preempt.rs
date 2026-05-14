@@ -135,6 +135,69 @@ pub fn default_backend() -> &'static NoOpBackend {
 }
 
 // ---------------------------------------------------------------------------
+// PCR-backed preempt backend (production default for the kernel target).
+// ---------------------------------------------------------------------------
+
+/// `PreemptBackend` impl that proxies to the per-CPU preempt count
+/// living in `slopos_ostd::cpu::x86_64::pcr::ProcessorControlRegion::preempt_count`.
+///
+/// Registered at boot via [`register_preempt_backend`] with a
+/// `&BspToken<'_>` witness. Pre-registration the [`NoOpBackend`]
+/// default is active; the kernel's main path passes through here only
+/// after the BSP PCR has been installed (`pcr.install()` happens
+/// before `register_preempt_backend` is called).
+pub struct PcrPreemptBackend;
+
+/// Shared instance — `register_preempt_backend(token, &DEFAULT_PCR_PREEMPT)`.
+pub static DEFAULT_PCR_PREEMPT: PcrPreemptBackend = PcrPreemptBackend;
+
+#[cfg(all(target_arch = "x86_64", not(test)))]
+impl PreemptBackend for PcrPreemptBackend {
+    #[inline]
+    fn enter(&self) {
+        // SAFETY: `register_preempt_backend` is only invoked after
+        // `pcr.install()` has run on the BSP, so `current_pcr()`
+        // returns a valid `&'static ProcessorControlRegion`.
+        unsafe {
+            crate::cpu::x86_64::pcr::current_pcr()
+                .preempt_count
+                .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[inline]
+    fn leave(&self) {
+        // No reschedule-callback dispatch yet — that wiring lands with
+        // the scheduler migration. Maintaining the count is sufficient
+        // for now; legacy paths still drive scheduling.
+        unsafe {
+            crate::cpu::x86_64::pcr::current_pcr()
+                .preempt_count
+                .fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    #[inline]
+    fn count(&self) -> u32 {
+        unsafe {
+            crate::cpu::x86_64::pcr::current_pcr()
+                .preempt_count
+                .load(Ordering::Acquire)
+        }
+    }
+}
+
+// Host-test stub: no PCR, no GS-base — fall back to NoOp-style atomics.
+#[cfg(not(all(target_arch = "x86_64", not(test))))]
+impl PreemptBackend for PcrPreemptBackend {
+    fn enter(&self) {}
+    fn leave(&self) {}
+    fn count(&self) -> u32 {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // One-shot backend registration.
 // ---------------------------------------------------------------------------
 

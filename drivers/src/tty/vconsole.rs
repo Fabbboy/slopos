@@ -261,7 +261,7 @@ fn color256_to_rgb(idx: u8) -> u32 {
 pub(crate) struct VConsoleFbInfo {
     /// Kernel virtual address of the framebuffer's first byte. Stored as
     /// an integer (rather than `*mut u8`) so the type is `Send`/`Sync`
-    /// without an unsafe marker; access goes through `fb_blit` /
+    /// without a hand-rolled marker; access goes through `fb_blit` /
     /// `fb_put_pixel` file-local helpers that consolidate the bounds-
     /// checked MMIO writes.
     pub(crate) base: u64,

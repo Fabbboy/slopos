@@ -118,14 +118,23 @@ pub struct BootCtx<'brand, K: BootKind> {
     _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     _kind: PhantomData<K>,
     _consume: PhantomData<PhantomPinned>,
+    /// Stashed BSP-init witness for the `BspInit` kind. Holds a Copy ZST
+    /// of the same brand the BootCtx is parameterised over, so
+    /// `bsp_token` can hand back an owned token without `unsafe`.
+    /// `None` for non-`BspInit` kinds; unreachable through the public
+    /// API because `bsp_token` is only defined on `BootCtx<'_, BspInit>`,
+    /// and `take_for_boot` is the only path that constructs a `BspInit`
+    /// BootCtx (always `Some`).
+    _token: Option<BspToken<'brand>>,
 }
 
 impl<'brand, K: BootKind> BootCtx<'brand, K> {
-    pub(crate) const fn new_unchecked() -> Self {
+    pub(crate) const fn new_unchecked(token: Option<BspToken<'brand>>) -> Self {
         Self {
             _brand: PhantomData,
             _kind: PhantomData,
             _consume: PhantomData,
+            _token: token,
         }
     }
 }
@@ -142,17 +151,12 @@ impl<'brand> BootCtx<'brand, BspInit> {
     /// `register_*` hooks.
     #[inline]
     pub fn bsp_token(&self) -> BspToken<'brand> {
-        // SAFETY: This BootCtx was minted by `take_for_boot(&BspToken<'brand>)`,
-        // which means the caller held a `BspToken<'brand>` reference at
-        // mint time. `BspToken<'brand>` is a sealed ZST whose only
-        // production state is its phantom brand `'brand`. `mem::zeroed()`
-        // for a ZST is well-defined (no bytes to initialise) and the
-        // resulting value carries the same brand. Sealed visibility on
-        // `BspToken::new` keeps this technique a hermetic-crate-only
-        // capability — production code outside this crate cannot
-        // construct a `BspToken<'b>` via the same trick because the
-        // brand `'b` is unnameable.
-        unsafe { core::mem::zeroed() }
+        // BootCtx<'_, BspInit> always stores `Some(token)` (set by
+        // `take_for_boot`). Unwrap is unreachable in correct code —
+        // the `BspInit` type-parameter is the structural witness that
+        // we went through the BSP mint path.
+        self._token
+            .expect("BootCtx<'_, BspInit> constructed without a BspToken")
     }
 }
 
@@ -177,8 +181,8 @@ static TEST_SCOPE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// minted `&BspToken<'brand>` through to OSTD `register_*` hooks
 /// and downstream boot steps.
 #[inline]
-pub fn take_for_boot<'brand>(_token: &BspToken<'brand>) -> BootCtx<'brand, BspInit> {
-    BootCtx::new_unchecked()
+pub fn take_for_boot<'brand>(token: &BspToken<'brand>) -> BootCtx<'brand, BspInit> {
+    BootCtx::new_unchecked(Some(*token))
 }
 
 /// Consume the `BootCtx` returned by `take_for_boot`. The token drops
@@ -197,7 +201,7 @@ pub fn take_for_test() -> BootCtx<'static, TestInit> {
     if TEST_SCOPE_ACTIVE.swap(true, Ordering::AcqRel) {
         panic!("BootCtx::take_for_test: nested KernelTestScope");
     }
-    BootCtx::new_unchecked()
+    BootCtx::new_unchecked(None)
 }
 
 /// Consume the `BootCtx` returned by `take_for_test`. Clears the
@@ -212,7 +216,7 @@ pub fn return_after_test(_ctx: BootCtx<'static, TestInit>) {
 /// minted `&ApToken<'brand>` to AP-only init paths.
 #[inline]
 pub fn take_for_ap<'brand>(_token: &ApToken<'brand>) -> BootCtx<'brand, ApInit> {
-    BootCtx::new_unchecked()
+    BootCtx::new_unchecked(None)
 }
 
 /// Consume the `BootCtx` returned by `take_for_ap`.

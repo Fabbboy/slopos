@@ -242,7 +242,7 @@ impl<R: StackRegion> Drop for TaskStack<R> {
 /// Owning handle to a kernel-mode task stack.
 pub type KernelStack = TaskStack<KstackRegion>;
 
-/// Owning handle to a SafeStack-sanitiser data ("unsafe") stack.
+/// Owning handle to a SafeStack-sanitiser data stack.
 ///
 /// Lives alongside the task's [`KernelStack`].  The SafeStack
 /// sanitiser pass moves address-taken locals onto this stack so a

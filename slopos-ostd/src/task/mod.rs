@@ -6,15 +6,19 @@
 //! through its own types; the OSTD primitives compile but are unwired.
 
 pub mod abi;
+pub mod exit_info;
 pub mod fpu;
 pub mod handles;
 pub mod scheduler;
+pub mod state;
 pub mod switch;
 pub mod task;
 
+pub use exit_info::ExitInfo;
 pub use fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, fpu_xrstor, fpu_xsave};
 pub use handles::{LinkProvider, OwnedTaskHandle, SharedTaskHandle, TaskOps, task_state};
 pub use scheduler::{RoundRobinRq, RoundRobinScheduler, RunQueue, Scheduler, TaskRef};
+pub use state::{TaskState, TaskStateView};
 pub use switch::{
     TaskExitHook, init_current_context, register_task_exit_hook, switch_registers,
     task_entry_trampoline,

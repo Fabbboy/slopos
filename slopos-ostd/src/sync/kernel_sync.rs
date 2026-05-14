@@ -152,6 +152,7 @@ impl<T: Copy> Copy for KernelSync<T> {}
 /// Rust invariance gadget: arguments are contravariant, returns
 /// covariant, so the same lifetime in both positions becomes
 /// invariant. A `BspToken<'long>` cannot reborrow as `BspToken<'short>`.
+#[derive(Copy, Clone)]
 pub struct BspToken<'brand> {
     _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     _not_send: PhantomData<*mut ()>,
@@ -160,6 +161,22 @@ pub struct BspToken<'brand> {
 impl<'brand> core::fmt::Debug for BspToken<'brand> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BspToken<'_>")
+    }
+}
+
+impl<'brand> BspToken<'brand> {
+    /// Reconstruct an owned `BspToken<'brand>` from a borrowed witness
+    /// of the same brand. Sound because `BspToken<'brand>` is a sealed
+    /// ZST whose only state is its phantom brand — the brand already
+    /// matches the witness, and a ZST has no bytes to forge. Safe
+    /// surface so capability-passing layers (e.g. `slopos_hermetic`'s
+    /// `BootCtx`) can synthesise an owned token without `unsafe`.
+    #[inline]
+    pub const fn from_witness(_w: &BspToken<'brand>) -> Self {
+        Self {
+            _brand: PhantomData,
+            _not_send: PhantomData,
+        }
     }
 }
 
