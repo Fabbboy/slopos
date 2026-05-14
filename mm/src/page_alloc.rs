@@ -888,10 +888,7 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
 /// internals match [`alloc_kernel_page`].
 pub fn alloc_kernel_page_with(opts: slopos_ostd::mm::frame::FrameAllocOptions) -> PhysAddr {
     use slopos_ostd::mm::frame::{Frame, KernelMeta};
-    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
-        // SAFETY: see `alloc_kernel_page`.
-        unsafe { f.into_phys_release() }
-    })
+    Frame::<KernelMeta>::alloc_release_phys(opts)
 }
 
 /// Typestate-checked multi-page kernel allocation with caller-supplied
@@ -909,10 +906,7 @@ pub fn alloc_kernel_pages_with(
         size_pages: count as usize,
         ..opts
     };
-    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
-        // SAFETY: see `alloc_kernel_page`.
-        unsafe { f.into_phys_release() }
-    })
+    Frame::<KernelMeta>::alloc_release_phys(opts)
 }
 
 /// Typestate-checked multi-page kernel allocation. Routes through
@@ -929,10 +923,7 @@ pub fn alloc_kernel_pages(count: u32) -> PhysAddr {
         size_pages: count as usize,
         ..FrameAllocOptions::single()
     };
-    Frame::<KernelMeta>::alloc(opts).map_or(PhysAddr::NULL, |f| {
-        // SAFETY: see `alloc_kernel_page`.
-        unsafe { f.into_phys_release() }
-    })
+    Frame::<KernelMeta>::alloc_release_phys(opts)
 }
 
 /// Typestate-checked single-page kernel allocation. Routes through
@@ -948,12 +939,7 @@ pub fn alloc_kernel_pages(count: u32) -> PhysAddr {
 /// through this bridge.
 pub fn alloc_kernel_page() -> PhysAddr {
     use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
-    Frame::<KernelMeta>::alloc(FrameAllocOptions::single()).map_or(PhysAddr::NULL, |f| {
-        // SAFETY: we immediately surrender the typed Frame to the
-        // legacy raw-paddr free path; the caller of this wrapper
-        // owns the dealloc obligation via `free_page_frame`.
-        unsafe { f.into_phys_release() }
-    })
+    Frame::<KernelMeta>::alloc_release_phys(FrameAllocOptions::single())
 }
 
 /// Raw single-page buddy allocator entry point. See
@@ -1185,12 +1171,7 @@ pub fn get_pcp_stats(cpu: usize, count: *mut u32, allocs: *mut u32, frees: *mut 
 /// shim outputs.
 #[inline]
 fn write_optional_u32(out: *mut u32, value: u32) {
-    if out.is_null() {
-        return;
-    }
-    // SAFETY: out is non-null per the check above; caller-supplied
-    // C-ABI output slot.
-    unsafe { *out = value };
+    slopos_ostd::util::ptr_buf::nullable_write(out, value);
 }
 
 pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {

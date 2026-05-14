@@ -595,6 +595,33 @@ impl Frame<KernelMeta, init_state::Zeroed> {
     pub fn alloc_zeroed() -> Option<Self> {
         Self::alloc(FrameAllocOptions::single())
     }
+
+    /// Safe wrapper: allocate a fresh zeroed `Frame<KernelMeta>` and
+    /// immediately release its `MetaSlot` to `UNUSED`, returning the
+    /// raw `Paddr` for handoff to legacy raw-paddr free paths.
+    ///
+    /// Returns [`Paddr::null`] on allocation failure. The
+    /// "sole owner" invariant required by [`Frame::into_phys_release`]
+    /// is satisfied automatically because the `Frame` produced by
+    /// [`Self::alloc`] is the only handle for the slot at the moment
+    /// of this call.
+    ///
+    /// Caller takes ownership of the returned `Paddr` and is solely
+    /// responsible for eventual deallocation via
+    /// `slopos_mm::page_alloc::free_page_frame`.
+    pub fn alloc_release_phys(opts: FrameAllocOptions) -> Paddr {
+        match Self::alloc(opts) {
+            Some(f) => {
+                // SAFETY: `f` is the sole `Frame` handle for the slot
+                // — `Self::alloc` returned it moments ago and we have
+                // not exposed it to any other consumer. The
+                // sole-owner invariant of `into_phys_release` is
+                // therefore upheld.
+                unsafe { f.into_phys_release() }
+            }
+            None => Paddr::NULL,
+        }
+    }
 }
 
 impl Frame<KernelMeta, init_state::Uninit> {

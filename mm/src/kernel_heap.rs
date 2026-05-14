@@ -100,10 +100,12 @@ impl SlabHeader {
         if off.checked_add(object_size)? > PAGE_SIZE_4KB as usize {
             return None;
         }
-        // SAFETY: bounds-checked above; the slab page is exclusively
-        // owned by the lock holder for the duration of this call.
-        let raw = unsafe { slab_base.as_ptr().add(off) };
-        NonNull::new(raw)
+        // Bounds-checked above; the slab page is exclusively owned by
+        // the lock holder for the duration of this call. OSTD's
+        // `nonnull_byte_offset` carries the one `unsafe` arithmetic.
+        Some(slopos_ostd::util::ptr_buf::nonnull_byte_offset(
+            slab_base, off,
+        ))
     }
 
     /// Mutable byte view of object `obj`'s body region (the bytes after
@@ -143,12 +145,11 @@ impl LargeAllocHeader {
     /// region.
     #[inline]
     fn body_ptr(header: NonNull<LargeAllocHeader>) -> NonNull<u8> {
-        // SAFETY: header was produced by `map_heap_pages`, so the
-        // following bytes belong to the same large-alloc region.
-        let raw = unsafe { (header.as_ptr() as *mut u8).add(Self::body_offset()) };
-        // The body offset is always > 0 and `raw` is derived from a
-        // non-null pointer, so the result is non-null.
-        NonNull::new(raw).expect("large-alloc body pointer must be non-null")
+        // The header was produced by `map_heap_pages`, so the following
+        // bytes belong to the same large-alloc region. OSTD's
+        // `nonnull_byte_offset` carries the one `unsafe` arithmetic.
+        let base = header.cast::<u8>();
+        slopos_ostd::util::ptr_buf::nonnull_byte_offset(base, Self::body_offset())
     }
 
     /// Mutable byte view spanning `len` bytes starting at the body of a
@@ -418,24 +419,20 @@ fn slab_poison_object_body(obj: NonNull<u8>, object_size: usize) {
 
 /// Read the leading two `u32`s (magic + object_size) of a candidate slab
 /// page. Caller must have already verified `base_va` lies inside the
-/// heap address range (HEAP_START..HEAP_END).
+/// heap address range (HEAP_START..HEAP_END). Delegates to OSTD's
+/// `kernel_ptr::read_kernel_at` so the consumer site stays in safe Rust.
 #[inline]
 fn slab_magic_and_size_at(base_va: u64) -> (u32, u32) {
-    // SAFETY: caller's bounds check guarantees `base_va` lies in the heap
-    // mapping; the leading 8 bytes of any in-range slab page are either
-    // (SLAB_MAGIC, object_size) for active slabs or (LARGE_MAGIC|0, _)
-    // for large-alloc headers — both representations are valid `u32`.
-    unsafe {
-        let p = base_va as *const u32;
-        (*p, *p.add(1))
-    }
+    let m0 = slopos_ostd::arch::x86_64::kernel_ptr::read_kernel_at::<u32>(base_va, 0);
+    let m1 = slopos_ostd::arch::x86_64::kernel_ptr::read_kernel_at::<u32>(base_va, 1);
+    (m0, m1)
 }
 
 /// Read just the leading `u32` magic of a candidate heap region.
+/// Delegates to OSTD's `kernel_ptr::read_kernel`.
 #[inline]
 fn heap_magic_at(base_va: u64) -> u32 {
-    // SAFETY: caller has checked `base_va` lies inside the heap mapping.
-    unsafe { *(base_va as *const u32) }
+    slopos_ostd::arch::x86_64::kernel_ptr::read_kernel::<u32>(base_va)
 }
 
 /// Zero `len` bytes starting at `ptr`. Caller must own the buffer
@@ -452,11 +449,7 @@ fn zero_user_buffer(ptr: *mut u8, len: usize) {
 /// Write a `HeapStats` snapshot to a C-ABI output slot if non-null.
 #[inline]
 fn write_optional_heap_stats(out: *mut HeapStats, value: HeapStats) {
-    if out.is_null() {
-        return;
-    }
-    // SAFETY: out is non-null per the check above; caller-owned slot.
-    unsafe { *out = value };
+    slopos_ostd::util::ptr_buf::nullable_write(out, value);
 }
 
 fn size_class_index(size: usize) -> Option<usize> {

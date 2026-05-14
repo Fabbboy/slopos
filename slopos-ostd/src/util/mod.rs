@@ -7,5 +7,6 @@
 pub mod byte_view;
 pub mod callback_ctx;
 pub mod cstr;
+pub mod fn_ptr;
 pub mod packed_view;
 pub mod ptr_buf;

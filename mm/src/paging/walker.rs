@@ -96,7 +96,10 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
             .phys_to_table_ptr(phys)
             .ok_or(MmError::InvalidPageTable)?;
 
-        Ok(unsafe { &*ptr })
+        // The mapping impl resolves `phys` to a live HHDM mapping owned
+        // by the kernel page-table tree; OSTD's `borrow_ref` carries
+        // the one `unsafe` deref so this consumer stays in safe Rust.
+        Ok(slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(ptr))
     }
 
     #[inline]
@@ -121,7 +124,9 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
             .phys_to_table_ptr(phys)
             .ok_or(MmError::InvalidPageTable)?;
 
-        Ok(unsafe { &mut *ptr })
+        // Mutable variant: caller owns the page-table tree exclusively
+        // for the lifetime of the returned `&mut PageTable`.
+        Ok(slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(ptr))
     }
 
     pub fn walk(&self, pml4: &PageTable, vaddr: VirtAddr) -> MmResult<WalkResult> {

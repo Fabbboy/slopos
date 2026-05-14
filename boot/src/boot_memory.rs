@@ -104,9 +104,7 @@ fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // before the GLOBAL bit was set, so a CR3 reload drops the
     // non-global entries. `activate_kernel_master` is the safe BSP-
     // init wrapper around the otherwise-unsafe `activate`.
-    kernel_vm_space()
-        .lock()
-        .activate_kernel_master_bsp(&bsp);
+    kernel_vm_space().lock().activate_kernel_master_bsp(&bsp);
 
     klog_info!(
         "OSTD: KERNEL_VM_SPACE installed (pml4_phys=0x{:x}, pcid=0)",

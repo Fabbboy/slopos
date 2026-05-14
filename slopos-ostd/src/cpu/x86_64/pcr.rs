@@ -842,6 +842,32 @@ pub fn get_current_task() -> *mut () {
     unsafe { current_pcr().current_task.load(Ordering::Acquire) }
 }
 
+/// Read the current CPU's `syscall_pid` atomically. Returns
+/// `u32::MAX` (`INVALID_PROCESS_ID` sentinel) if GS_BASE has not yet
+/// been installed on this CPU. Folds the single `unsafe` deref of the
+/// PCR pointer interior to OSTD so kernel-half copy / mm helpers stay
+/// in safe Rust.
+#[inline]
+pub fn current_syscall_pid() -> u32 {
+    if !GS_BASE_SET.is_set() {
+        return u32::MAX;
+    }
+    // SAFETY: GS_BASE is installed (checked above), so `current_pcr()`
+    // returns a valid 'static reference.
+    unsafe { current_pcr().syscall_pid.load(Ordering::Acquire) }
+}
+
+/// Store `pid` into the current CPU's `syscall_pid`. No-op until the
+/// PCR is installed. Counterpart of [`current_syscall_pid`].
+#[inline]
+pub fn set_current_syscall_pid(pid: u32) {
+    if !GS_BASE_SET.is_set() {
+        return;
+    }
+    // SAFETY: GS_BASE is installed (checked above).
+    unsafe { current_pcr().syscall_pid.store(pid, Ordering::Release) };
+}
+
 /// Set the idle-task pointer for `cpu_id`.
 ///
 /// Cross-CPU-safe (takes explicit `cpu_id`) so the BSP can seed every

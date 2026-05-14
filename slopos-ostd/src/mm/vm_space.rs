@@ -470,10 +470,7 @@ impl VmSpace {
     /// BSP-token-gated variant for boot-time kernel master CR3 reload.
     /// Same body as [`Self::activate_kernel_master`]; the token
     /// witnesses BSP-init scope (IRQs off, single CPU).
-    pub fn activate_kernel_master_bsp<'brand>(
-        &self,
-        _token: &crate::sync::BspToken<'brand>,
-    ) {
+    pub fn activate_kernel_master_bsp<'brand>(&self, _token: &crate::sync::BspToken<'brand>) {
         // SAFETY: BSP-init scope + IRQs off + KERNEL_VM_SPACE just
         // installed jointly discharge the kernel-half invariant the
         // `unsafe fn activate` contract names.

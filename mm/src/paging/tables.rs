@@ -59,7 +59,7 @@ pub struct ProcessPageDir {
 impl ProcessPageDir {
     /// Build a fresh per-process page-directory descriptor with default
     /// fields. The caller writes the result into a freshly `kmalloc`'d
-    /// slot via `core::ptr::write`.
+    /// slot via [`init_in_kmalloc_slot`](Self::init_in_kmalloc_slot).
     pub fn new(
         pml4: *mut PageTable,
         pml4_phys: PhysAddr,
@@ -75,6 +75,72 @@ impl ProcessPageDir {
             kernel_mapping_gen: 0,
             mm_ctx_id,
         }
+    }
+
+    /// Read `pml4_phys` from a `*mut ProcessPageDir` whose backing slot
+    /// was produced by `kmalloc(size_of::<ProcessPageDir>())` +
+    /// [`Self::init_in_kmalloc_slot`]. Returns `PhysAddr::NULL` if the
+    /// handle is null. The raw-pointer deref is folded into OSTD's
+    /// `borrow_ref` helper so this site stays in safe Rust.
+    #[inline]
+    pub fn pml4_phys_from_raw(page_dir: *mut ProcessPageDir) -> PhysAddr {
+        if page_dir.is_null() {
+            return PhysAddr::NULL;
+        }
+        slopos_ostd::util::ptr_buf::borrow_ref::<ProcessPageDir>(page_dir).pml4_phys
+    }
+
+    /// Initialise the freshly `kmalloc`'d slot at `dst` with `init`.
+    /// Replaces the bare `core::ptr::write(dst, init)` callers used to
+    /// write so that the only `unsafe` is the OSTD helper internal to
+    /// `slopos_ostd::util::ptr_buf::init_slot`.
+    #[inline]
+    pub fn init_in_kmalloc_slot(dst: *mut ProcessPageDir, init: ProcessPageDir) {
+        slopos_ostd::util::ptr_buf::init_slot(dst, init);
+    }
+
+    /// Read the wrapped `pml4: *mut PageTable` for a non-null
+    /// `*mut ProcessPageDir`. Callers handle the null check on the
+    /// outer page-dir pointer; this routes through OSTD's
+    /// `borrow_ref::<ProcessPageDir>` so the field access stays in
+    /// safe Rust.
+    #[inline]
+    fn pml4_ptr_from(page_dir: *mut ProcessPageDir) -> *mut PageTable {
+        let dir = slopos_ostd::util::ptr_buf::borrow_ref::<ProcessPageDir>(page_dir);
+        *dir.pml4
+    }
+
+    /// Borrow the PML4 page-table at `page_dir`'s `pml4` field as a
+    /// shared `&PageTable`. Returns `None` if `page_dir` is null or
+    /// its `pml4` pointer is null. Folds the chain of raw-pointer
+    /// dereferences interior so callers walk in safe Rust.
+    #[inline]
+    pub fn pml4_table<'a>(page_dir: *mut ProcessPageDir) -> Option<&'a PageTable> {
+        if page_dir.is_null() {
+            return None;
+        }
+        let pml4 = Self::pml4_ptr_from(page_dir);
+        if pml4.is_null() {
+            return None;
+        }
+        Some(slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pml4))
+    }
+
+    /// Mutable variant of [`Self::pml4_table`]. Caller is responsible
+    /// for ensuring single-writer access to the PML4 (typically by
+    /// holding the per-process slot lock in `process_vm.rs`).
+    #[inline]
+    pub fn pml4_table_mut<'a>(page_dir: *mut ProcessPageDir) -> Option<&'a mut PageTable> {
+        if page_dir.is_null() {
+            return None;
+        }
+        let pml4 = Self::pml4_ptr_from(page_dir);
+        if pml4.is_null() {
+            return None;
+        }
+        Some(slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(
+            pml4,
+        ))
     }
 }
 
@@ -102,7 +168,9 @@ fn alloc_page_table() -> Option<(PhysAddr, *mut PageTable)> {
         free_page_frame(phys);
         return None;
     }
-    unsafe { (*virt).zero() };
+    // Freshly allocated, exclusively owned page-table page; the `&mut`
+    // reborrow lives in OSTD's `borrow_ref_mut` helper.
+    slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(virt).zero();
     Some((phys, virt))
 }
 
@@ -146,12 +214,13 @@ fn split_pdpt_huge(pdpt_entry: &mut PageTableEntry) -> Option<*mut PageTable> {
         return None;
     };
 
-    unsafe {
-        for i in 0..PAGE_TABLE_ENTRIES {
-            let phys = huge_phys.offset(i as u64 * PAGE_SIZE_2MB);
-            let entry = (*pd_ptr).entry_mut(i);
-            entry.set(phys, huge_flags | PageFlags::HUGE);
-        }
+    // Freshly allocated `pd_ptr` is exclusively owned; the `&mut`
+    // reborrow lives in OSTD's `borrow_ref_mut`.
+    let pd_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pd_ptr);
+    for i in 0..PAGE_TABLE_ENTRIES {
+        let phys = huge_phys.offset(i as u64 * PAGE_SIZE_2MB);
+        let entry = pd_table.entry_mut(i);
+        entry.set(phys, huge_flags | PageFlags::HUGE);
     }
 
     pdpt_entry.set(pd_phys, table_flags_from_leaf(huge_flags));
@@ -170,12 +239,11 @@ fn split_pd_huge(pd_entry: &mut PageTableEntry) -> Option<*mut PageTable> {
         return None;
     };
 
-    unsafe {
-        for i in 0..PAGE_TABLE_ENTRIES {
-            let phys = huge_phys.offset(i as u64 * PAGE_SIZE_4KB);
-            let entry = (*pt_ptr).entry_mut(i);
-            entry.set(phys, huge_flags);
-        }
+    let pt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pt_ptr);
+    for i in 0..PAGE_TABLE_ENTRIES {
+        let phys = huge_phys.offset(i as u64 * PAGE_SIZE_4KB);
+        let entry = pt_table.entry_mut(i);
+        entry.set(phys, huge_flags);
     }
 
     pd_entry.set(pt_phys, table_flags_from_leaf(huge_flags));
@@ -216,19 +284,13 @@ pub fn paging_mark_kernel_global() {
 }
 
 fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
-    if page_dir.is_null() {
+    let Some(pml4) = ProcessPageDir::pml4_table(page_dir) else {
         return PhysAddr::NULL;
-    }
-    unsafe {
-        let pml4 = *(*page_dir).pml4;
-        if pml4.is_null() {
-            return PhysAddr::NULL;
-        }
-        let walker = PageTableWalker::new();
-        match walker.walk(&*pml4, vaddr) {
-            Ok(result) => result.phys_addr,
-            Err(_) => PhysAddr::NULL,
-        }
+    };
+    let walker = PageTableWalker::new();
+    match walker.walk(pml4, vaddr) {
+        Ok(result) => result.phys_addr,
+        Err(_) => PhysAddr::NULL,
     }
 }
 
@@ -243,10 +305,6 @@ fn map_page_in_directory(
     flags: u64,
     page_size: u64,
 ) -> c_int {
-    if page_dir.is_null() {
-        return -1;
-    }
-
     if !vaddr.is_aligned(page_size) || !paddr.is_aligned(page_size) {
         return -1;
     }
@@ -255,120 +313,118 @@ fn map_page_in_directory(
     let user_mapping = flags.contains(PageFlags::USER) && is_user_address(vaddr);
     let inter_flags = intermediate_flags(user_mapping);
 
-    unsafe {
-        let pml4 = *(*page_dir).pml4;
-        if pml4.is_null() {
+    // Single-writer access to the kernel-half PML4 tree; the `&mut`
+    // reborrows live in OSTD's `borrow_ref_mut`.
+    let Some(pml4_table) = ProcessPageDir::pml4_table_mut(page_dir) else {
+        return -1;
+    };
+
+    let pml4_idx = PageTableLevel::Four.index_of(vaddr);
+    let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
+    let pd_idx = PageTableLevel::Two.index_of(vaddr);
+    let pt_idx = PageTableLevel::One.index_of(vaddr);
+
+    let pml4_entry = pml4_table.entry_mut(pml4_idx);
+    let pdpt = if !pml4_entry.is_present() {
+        let Some((phys, ptr)) = alloc_page_table() else {
+            klog_info!(
+                "Paging: Failed to allocate PDPT for vaddr 0x{:x}",
+                vaddr.as_u64()
+            );
+            return -1;
+        };
+        pml4_entry.set(phys, inter_flags);
+        ptr
+    } else {
+        if pml4_entry.is_huge() {
             return -1;
         }
+        if user_mapping && !pml4_entry.is_user() {
+            pml4_entry.add_flags(PageFlags::USER);
+        }
+        phys_to_table(pml4_entry.address())
+    };
 
-        let pml4_idx = PageTableLevel::Four.index_of(vaddr);
-        let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
-        let pd_idx = PageTableLevel::Two.index_of(vaddr);
-        let pt_idx = PageTableLevel::One.index_of(vaddr);
+    let pdpt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pdpt);
+    let pdpt_entry = pdpt_table.entry_mut(pdpt_idx);
 
-        let pml4_entry = (&mut *pml4).entry_mut(pml4_idx);
-        let pdpt = if !pml4_entry.is_present() {
-            let Some((phys, ptr)) = alloc_page_table() else {
-                klog_info!(
-                    "Paging: Failed to allocate PDPT for vaddr 0x{:x}",
-                    vaddr.as_u64()
-                );
-                return -1;
-            };
-            pml4_entry.set(phys, inter_flags);
-            ptr
-        } else {
-            if pml4_entry.is_huge() {
-                return -1;
-            }
-            if user_mapping && !pml4_entry.is_user() {
-                pml4_entry.add_flags(PageFlags::USER);
-            }
-            phys_to_table(pml4_entry.address())
-        };
-
-        let pdpt_entry = (&mut *pdpt).entry_mut(pdpt_idx);
-
-        let pd = if !pdpt_entry.is_present() {
-            let Some((phys, ptr)) = alloc_page_table() else {
-                klog_info!(
-                    "Paging: Failed to allocate PD for vaddr 0x{:x}",
-                    vaddr.as_u64()
-                );
-                return -1;
-            };
-            pdpt_entry.set(phys, inter_flags);
-            ptr
-        } else {
-            if pdpt_entry.is_huge() {
-                let Some(ptr) = split_pdpt_huge(pdpt_entry) else {
-                    return -1;
-                };
-                ptr
-            } else {
-                if user_mapping && !pdpt_entry.is_user() {
-                    pdpt_entry.add_flags(PageFlags::USER);
-                }
-                phys_to_table(pdpt_entry.address())
-            }
-        };
-
-        let pd_entry = (&mut *pd).entry_mut(pd_idx);
-
-        if page_size == PAGE_SIZE_2MB {
-            if pd_entry.is_present() {
-                return -1;
-            }
-            pd_entry.set(
-                paddr,
-                leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT | PageFlags::HUGE,
+    let pd = if !pdpt_entry.is_present() {
+        let Some((phys, ptr)) = alloc_page_table() else {
+            klog_info!(
+                "Paging: Failed to allocate PD for vaddr 0x{:x}",
+                vaddr.as_u64()
             );
-            flush_kernel_page_after_mod(vaddr);
-            return 0;
-        }
-
-        let pt = if !pd_entry.is_present() {
-            let Some((phys, ptr)) = alloc_page_table() else {
-                klog_info!(
-                    "Paging: Failed to allocate PT for vaddr 0x{:x}",
-                    vaddr.as_u64()
-                );
-                return -1;
-            };
-            pd_entry.set(phys, inter_flags);
-            ptr
-        } else {
-            if pd_entry.is_huge() {
-                let Some(ptr) = split_pd_huge(pd_entry) else {
-                    return -1;
-                };
-                ptr
-            } else {
-                if user_mapping && !pd_entry.is_user() {
-                    pd_entry.add_flags(PageFlags::USER);
-                }
-                phys_to_table(pd_entry.address())
-            }
+            return -1;
         };
-
-        let pt_entry = (&mut *pt).entry_mut(pt_idx);
-
-        let was_present = pt_entry.is_present();
-        if was_present {
-            let old_phys = pt_entry.address();
-            if !old_phys.is_null() && page_frame_can_free(old_phys) != 0 {
-                free_page_frame(old_phys);
-            }
+        pdpt_entry.set(phys, inter_flags);
+        ptr
+    } else if pdpt_entry.is_huge() {
+        let Some(ptr) = split_pdpt_huge(pdpt_entry) else {
+            return -1;
+        };
+        ptr
+    } else {
+        if user_mapping && !pdpt_entry.is_user() {
+            pdpt_entry.add_flags(PageFlags::USER);
         }
+        phys_to_table(pdpt_entry.address())
+    };
 
-        pt_entry.set(
+    let pd_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pd);
+    let pd_entry = pd_table.entry_mut(pd_idx);
+
+    if page_size == PAGE_SIZE_2MB {
+        if pd_entry.is_present() {
+            return -1;
+        }
+        pd_entry.set(
             paddr,
-            leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT,
+            leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT | PageFlags::HUGE,
         );
+        flush_kernel_page_after_mod(vaddr);
+        return 0;
+    }
 
-        if was_present {
-            flush_kernel_page_after_mod(vaddr);
+    let pt = if !pd_entry.is_present() {
+        let Some((phys, ptr)) = alloc_page_table() else {
+            klog_info!(
+                "Paging: Failed to allocate PT for vaddr 0x{:x}",
+                vaddr.as_u64()
+            );
+            return -1;
+        };
+        pd_entry.set(phys, inter_flags);
+        ptr
+    } else if pd_entry.is_huge() {
+        let Some(ptr) = split_pd_huge(pd_entry) else {
+            return -1;
+        };
+        ptr
+    } else {
+        if user_mapping && !pd_entry.is_user() {
+            pd_entry.add_flags(PageFlags::USER);
         }
+        phys_to_table(pd_entry.address())
+    };
+
+    let pt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pt);
+    let pt_entry = pt_table.entry_mut(pt_idx);
+
+    let was_present = pt_entry.is_present();
+    if was_present {
+        let old_phys = pt_entry.address();
+        if !old_phys.is_null() && page_frame_can_free(old_phys) != 0 {
+            free_page_frame(old_phys);
+        }
+    }
+
+    pt_entry.set(
+        paddr,
+        leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT,
+    );
+
+    if was_present {
+        flush_kernel_page_after_mod(vaddr);
     }
     0
 }
@@ -378,96 +434,110 @@ pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
 }
 
 fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
-    if page_dir.is_null() {
+    let Some(pml4_table) = ProcessPageDir::pml4_table_mut(page_dir) else {
+        return PhysAddr::NULL;
+    };
+
+    let pml4_idx = PageTableLevel::Four.index_of(vaddr);
+    let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
+    let pd_idx = PageTableLevel::Two.index_of(vaddr);
+    let pt_idx = PageTableLevel::One.index_of(vaddr);
+
+    let pml4_entry = pml4_table.entry_mut(pml4_idx);
+    if !pml4_entry.is_present() {
         return PhysAddr::NULL;
     }
-    unsafe {
-        let pml4 = *(*page_dir).pml4;
-        if pml4.is_null() {
-            return PhysAddr::NULL;
-        }
+    let pml4_entry_phys = pml4_entry.address();
 
-        let pml4_idx = PageTableLevel::Four.index_of(vaddr);
-        let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
-        let pd_idx = PageTableLevel::Two.index_of(vaddr);
-        let pt_idx = PageTableLevel::One.index_of(vaddr);
+    let pdpt_ptr = phys_to_table(pml4_entry_phys);
+    let pdpt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pdpt_ptr);
+    let pdpt_entry = pdpt_table.entry_mut(pdpt_idx);
+    if !pdpt_entry.is_present() {
+        return PhysAddr::NULL;
+    }
 
-        let pml4_entry = (&mut *pml4).entry_mut(pml4_idx);
-        if !pml4_entry.is_present() {
-            return PhysAddr::NULL;
-        }
-        let pml4_entry_phys = pml4_entry.address();
-
-        let pdpt = phys_to_table(pml4_entry_phys);
-        let pdpt_entry = (&mut *pdpt).entry_mut(pdpt_idx);
-        if !pdpt_entry.is_present() {
-            return PhysAddr::NULL;
-        }
-
-        if pdpt_entry.is_huge() {
-            let phys = pdpt_entry.address();
-            pdpt_entry.clear();
-            flush_kernel_page_after_mod(vaddr);
-            if table_empty(&*pdpt) {
-                pml4_entry.clear();
-                if page_frame_can_free(pml4_entry_phys) != 0 {
-                    free_page_frame(pml4_entry_phys);
-                }
-            }
-            return phys;
-        }
-
-        let pdpt_entry_phys = pdpt_entry.address();
-        let pd = phys_to_table(pdpt_entry_phys);
-        let pd_entry = (&mut *pd).entry_mut(pd_idx);
-        if !pd_entry.is_present() {
-            return PhysAddr::NULL;
-        }
-
-        let unmapped_phys;
-
-        if pd_entry.is_huge() {
-            unmapped_phys = pd_entry.address();
-            pd_entry.clear();
-            flush_kernel_page_after_mod(vaddr);
-        } else {
-            let pd_entry_phys = pd_entry.address();
-            let pt = phys_to_table(pd_entry_phys);
-            if pt.is_null() {
-                return PhysAddr::NULL;
-            }
-            let pt_entry = (&mut *pt).entry_mut(pt_idx);
-            if pt_entry.is_present() {
-                unmapped_phys = pt_entry.address();
-                pt_entry.clear();
-                flush_kernel_page_after_mod(vaddr);
-            } else {
-                unmapped_phys = PhysAddr::NULL;
-            }
-            if table_empty(&*pt) {
-                pd_entry.clear();
-                if page_frame_can_free(pd_entry_phys) != 0 {
-                    free_page_frame(pd_entry_phys);
-                }
-            }
-        }
-
-        if table_empty(&*pd) {
-            pdpt_entry.clear();
-            if page_frame_can_free(pdpt_entry_phys) != 0 {
-                free_page_frame(pdpt_entry_phys);
-            }
-        }
-
-        if table_empty(&*pdpt) {
+    if pdpt_entry.is_huge() {
+        let phys = pdpt_entry.address();
+        pdpt_entry.clear();
+        flush_kernel_page_after_mod(vaddr);
+        // Re-borrow `pdpt_table` after dropping `pdpt_entry`.
+        let pdpt_empty = {
+            let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pdpt_ptr);
+            table_empty(t)
+        };
+        if pdpt_empty {
             pml4_entry.clear();
             if page_frame_can_free(pml4_entry_phys) != 0 {
                 free_page_frame(pml4_entry_phys);
             }
         }
-
-        unmapped_phys
+        return phys;
     }
+
+    let pdpt_entry_phys = pdpt_entry.address();
+    let pd_ptr = phys_to_table(pdpt_entry_phys);
+    let pd_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pd_ptr);
+    let pd_entry = pd_table.entry_mut(pd_idx);
+    if !pd_entry.is_present() {
+        return PhysAddr::NULL;
+    }
+
+    let unmapped_phys;
+
+    if pd_entry.is_huge() {
+        unmapped_phys = pd_entry.address();
+        pd_entry.clear();
+        flush_kernel_page_after_mod(vaddr);
+    } else {
+        let pd_entry_phys = pd_entry.address();
+        let pt_ptr = phys_to_table(pd_entry_phys);
+        if pt_ptr.is_null() {
+            return PhysAddr::NULL;
+        }
+        let pt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pt_ptr);
+        let pt_entry = pt_table.entry_mut(pt_idx);
+        if pt_entry.is_present() {
+            unmapped_phys = pt_entry.address();
+            pt_entry.clear();
+            flush_kernel_page_after_mod(vaddr);
+        } else {
+            unmapped_phys = PhysAddr::NULL;
+        }
+        let pt_empty = {
+            let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pt_ptr);
+            table_empty(t)
+        };
+        if pt_empty {
+            pd_entry.clear();
+            if page_frame_can_free(pd_entry_phys) != 0 {
+                free_page_frame(pd_entry_phys);
+            }
+        }
+    }
+
+    let pd_empty = {
+        let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pd_ptr);
+        table_empty(t)
+    };
+    if pd_empty {
+        pdpt_entry.clear();
+        if page_frame_can_free(pdpt_entry_phys) != 0 {
+            free_page_frame(pdpt_entry_phys);
+        }
+    }
+
+    let pdpt_empty = {
+        let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pdpt_ptr);
+        table_empty(t)
+    };
+    if pdpt_empty {
+        pml4_entry.clear();
+        if page_frame_can_free(pml4_entry_phys) != 0 {
+            free_page_frame(pml4_entry_phys);
+        }
+    }
+
+    unmapped_phys
 }
 
 pub fn unmap_page(vaddr: VirtAddr) -> PhysAddr {
@@ -479,46 +549,43 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
 }
 
 pub fn init_paging() {
-    unsafe {
-        let cr3 = get_cr3();
-        (*KERNEL_PAGE_DIR.get()).pml4_phys = cr3;
+    let cr3 = get_cr3();
+    let kernel_dir =
+        slopos_ostd::util::ptr_buf::borrow_ref_mut::<ProcessPageDir>(KERNEL_PAGE_DIR.get());
+    kernel_dir.pml4_phys = cr3;
 
-        let pml4_ptr = phys_to_table((*KERNEL_PAGE_DIR.get()).pml4_phys);
-        if pml4_ptr.is_null() {
-            panic!("Failed to translate kernel PML4 physical address");
-        }
-        (*KERNEL_PAGE_DIR.get()).pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
-
-        let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
-        if kernel_phys.is_null() {
-            panic!("Higher-half kernel mapping not found");
-        }
-
-        klog_debug!(
-            "Higher-half kernel mapping verified at 0x{:x}",
-            kernel_phys.as_u64()
-        );
-
-        let identity_phys = virt_to_phys(VirtAddr::new(0x100000));
-        if identity_phys == PhysAddr::new(0x100000) || hhdm::is_available() {
-            klog_debug!("Identity mapping verified");
-        } else {
-            klog_debug!("Identity mapping not found (may be normal after early boot)");
-        }
-
-        klog_debug!("Paging system initialized successfully");
+    let pml4_ptr = phys_to_table(kernel_dir.pml4_phys);
+    if pml4_ptr.is_null() {
+        panic!("Failed to translate kernel PML4 physical address");
     }
+    kernel_dir.pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
+
+    let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
+    if kernel_phys.is_null() {
+        panic!("Higher-half kernel mapping not found");
+    }
+
+    klog_debug!(
+        "Higher-half kernel mapping verified at 0x{:x}",
+        kernel_phys.as_u64()
+    );
+
+    let identity_phys = virt_to_phys(VirtAddr::new(0x100000));
+    if identity_phys == PhysAddr::new(0x100000) || hhdm::is_available() {
+        klog_debug!("Identity mapping verified");
+    } else {
+        klog_debug!("Identity mapping not found (may be normal after early boot)");
+    }
+
+    klog_debug!("Paging system initialized successfully");
 }
 
 pub fn get_memory_layout_info(kernel_virt_base: *mut u64, kernel_phys_base: *mut u64) {
-    unsafe {
-        if !kernel_virt_base.is_null() {
-            *kernel_virt_base = KERNEL_VIRTUAL_BASE;
-        }
-        if !kernel_phys_base.is_null() {
-            *kernel_phys_base = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE)).as_u64();
-        }
-    }
+    slopos_ostd::util::ptr_buf::nullable_write(kernel_virt_base, KERNEL_VIRTUAL_BASE);
+    slopos_ostd::util::ptr_buf::nullable_write(
+        kernel_phys_base,
+        virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE)).as_u64(),
+    );
 }
 
 pub fn is_mapped(vaddr: VirtAddr) -> c_int {
@@ -526,16 +593,12 @@ pub fn is_mapped(vaddr: VirtAddr) -> c_int {
 }
 
 pub fn get_page_size(vaddr: VirtAddr) -> u64 {
-    unsafe {
-        let page_dir = KERNEL_PAGE_DIR.get();
-        if (*page_dir).pml4.is_null() {
-            return 0;
-        }
-        let pml4 = *(*page_dir).pml4;
-        let walker = PageTableWalker::new();
-        match walker.walk(&*pml4, vaddr) {
-            Ok(result) => result.page_size,
-            Err(_) => 0,
-        }
+    let Some(pml4) = ProcessPageDir::pml4_table(KERNEL_PAGE_DIR.get()) else {
+        return 0;
+    };
+    let walker = PageTableWalker::new();
+    match walker.walk(pml4, vaddr) {
+        Ok(result) => result.page_size,
+        Err(_) => 0,
     }
 }

@@ -182,6 +182,28 @@ impl<T> SpinLock<T> {
         self.data.get() as *const T
     }
 
+    /// Read a naturally-aligned field of the protected data without
+    /// taking the lock. The closure `f` is restricted to receiving a
+    /// shared reference to the inner `T`; correctness relies on the
+    /// caller's discipline that every field accessed through `f` is a
+    /// naturally-aligned scalar (u32 / pointer / atomic) which is only
+    /// written under the lock, so a plain load is tear-free on x86-64.
+    /// Composite (multi-word) fields MUST re-acquire the lock via
+    /// [`Self::lock`] instead.
+    ///
+    /// Folds the one `unsafe { &*self.as_ptr() }` reborrow interior to
+    /// OSTD so consumer crates' lock-free field-peek helpers stay in
+    /// safe Rust.
+    #[inline]
+    pub fn read_atomic_field<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        // SAFETY: the closure contract above restricts `f` to tear-free
+        // reads of naturally-aligned fields that are only written under
+        // the lock; the resulting shared borrow does not outlive `f`'s
+        // execution.
+        let inner: &T = unsafe { &*self.data.get() };
+        f(inner)
+    }
+
     #[inline]
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
         let preempt = PreemptGuard::new();

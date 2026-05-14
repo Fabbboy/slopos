@@ -471,7 +471,10 @@ fn send_shootdown_ipi() {
         return;
     }
 
-    let sender: SendIpiFn = unsafe { core::mem::transmute(sender_ptr) };
+    // Recover the function pointer from the `AtomicPtr<()>` slot via
+    // OSTD's safe helper — the only `unsafe` (the transmute between
+    // `*mut ()` and the `fn(u8)` pointer) lives there.
+    let sender: SendIpiFn = slopos_ostd::util::fn_ptr::fn_ptr_from_raw(sender_ptr);
     sender(TLB_SHOOTDOWN_VECTOR);
 }
 

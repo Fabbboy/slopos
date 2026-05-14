@@ -172,100 +172,42 @@ fn map_user_range(
 /// shim outputs that the legacy callers pass in.
 #[inline]
 fn write_optional_u32(out: *mut u32, value: u32) {
-    if out.is_null() {
-        return;
-    }
-    // SAFETY: out is non-null per the check above; caller-supplied
-    // C-ABI output slot.
-    unsafe { *out = value };
+    slopos_ostd::util::ptr_buf::nullable_write(out, value);
 }
 
 /// Copy `src.len()` bytes through the HHDM mapping at `virt + offset`.
-/// `virt` must be a fresh resolution of a 4 KiB user-mapped frame's
-/// physical address; `offset + src.len() <= PAGE_SIZE_4KB`. Returns
-/// `false` if `virt` is null or the bounds check fails.
+/// Thin shim over OSTD's [`slopos_ostd::mm::hhdm_bytes::write_bytes`];
+/// the interior `unsafe` lives in OSTD. Caller contract: `virt` is a
+/// fresh resolution of a 4 KiB user-mapped frame's physical address
+/// and the user-space `VmSpace` cursor pins the underlying page for
+/// the duration of the call.
 #[inline]
 fn hhdm_write_bytes(virt: VirtAddr, offset: usize, src: &[u8]) -> bool {
-    if virt.is_null() {
-        return false;
-    }
-    if offset
-        .checked_add(src.len())
-        .is_none_or(|e| e > PAGE_SIZE_4KB as usize)
-    {
-        return false;
-    }
-    // SAFETY: caller has resolved `virt` from a valid 4 KiB physical
-    // mapping; `offset + len <= PAGE_SIZE_4KB` per the bounds check
-    // above. The HHDM mapping is exclusively held for the duration of
-    // the write, since the caller's user-space VmSpace cursor pinned
-    // the underlying page.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            src.as_ptr(),
-            virt.as_mut_ptr::<u8>().add(offset),
-            src.len(),
-        );
-    }
-    true
+    slopos_ostd::mm::hhdm_bytes::write_bytes(virt, offset, src)
 }
 
 /// Read `dst.len()` bytes from the HHDM mapping at `virt + offset` into
 /// `dst`. Same caller contract as [`hhdm_write_bytes`].
 #[inline]
 fn hhdm_read_bytes(virt: VirtAddr, offset: usize, dst: &mut [u8]) -> bool {
-    if virt.is_null() {
-        return false;
-    }
-    if offset
-        .checked_add(dst.len())
-        .is_none_or(|e| e > PAGE_SIZE_4KB as usize)
-    {
-        return false;
-    }
-    // SAFETY: as `hhdm_write_bytes` — the read direction is symmetric.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            virt.as_ptr::<u8>().add(offset),
-            dst.as_mut_ptr(),
-            dst.len(),
-        );
-    }
-    true
+    slopos_ostd::mm::hhdm_bytes::read_bytes(virt, offset, dst)
 }
 
 /// Fill `len` bytes at the HHDM mapping at `virt + offset` with `value`.
 /// Same caller contract as [`hhdm_write_bytes`].
 #[inline]
 fn hhdm_fill_bytes(virt: VirtAddr, offset: usize, len: usize, value: u8) -> bool {
-    if virt.is_null() || len == 0 {
-        return false;
-    }
-    if offset
-        .checked_add(len)
-        .is_none_or(|e| e > PAGE_SIZE_4KB as usize)
-    {
-        return false;
-    }
-    // SAFETY: as `hhdm_write_bytes`.
-    unsafe {
-        core::ptr::write_bytes(virt.as_mut_ptr::<u8>().add(offset), value, len);
-    }
-    true
+    slopos_ostd::mm::hhdm_bytes::fill_bytes(virt, offset, len, value)
 }
 
 /// Read `pml4_phys` from a `*mut ProcessPageDir` without exposing the
 /// raw pointer to the caller. Returns `PhysAddr::NULL` if the handle is
-/// null. The single SAFETY-noted block lives here so callers stay safe.
+/// null. Delegates to `ProcessPageDir::pml4_phys_from_raw` so the
+/// interior `unsafe` (raw-pointer field deref) lives in
+/// `paging/tables.rs` alongside the type definition.
 #[inline]
 fn page_dir_pml4_phys(page_dir: *mut ProcessPageDir) -> PhysAddr {
-    if page_dir.is_null() {
-        return PhysAddr::NULL;
-    }
-    // SAFETY: caller guarantees `page_dir` (when non-null) was produced
-    // by a prior `kmalloc`/`ptr::write` in `create_process_vm` and has
-    // not been freed; the read is of a naturally-aligned `PhysAddr`.
-    unsafe { (*page_dir).pml4_phys }
+    ProcessPageDir::pml4_phys_from_raw(page_dir)
 }
 
 fn rollback_range(
@@ -294,23 +236,20 @@ fn unmap_user_range(vm_space: &mut KArc<VmSpace>, start_addr: u64, end_addr: u64
 }
 
 /// Lock-free read of a naturally-aligned field of `ProcessVmInner`.
-/// Centralises the single `unsafe { *as_ptr() }` access so the call
-/// sites stay in safe Rust.
+/// Thin wrapper over OSTD's `SpinLock::read_atomic_field` so the single
+/// `unsafe` reborrow lives in the lock implementation, not here.
 ///
-/// SAFETY contract: every field accessed through `f` must be a
-/// naturally-aligned scalar (u32 / pointer-sized) that is only written
-/// under the per-slot lock, so a plain load is tear-free on x86-64.
-/// Callers MUST re-acquire the per-slot lock before reading any
-/// composite (multi-word) field.
+/// Caller contract (matches `SpinLock::read_atomic_field`'s): every
+/// field accessed through `f` must be a naturally-aligned scalar (u32
+/// / pointer / atomic) that is only written under the per-slot lock,
+/// so a plain load is tear-free on x86-64. Callers MUST re-acquire the
+/// per-slot lock before reading any composite (multi-word) field.
 #[inline]
 fn slot_read_lock_free<R>(
     slot: &SpinLock<ProcessVmInner>,
     f: impl FnOnce(&ProcessVmInner) -> R,
 ) -> R {
-    // SAFETY: see fn doc — caller restricts `f` to tear-free reads of
-    // single naturally-aligned fields.
-    let inner: &ProcessVmInner = unsafe { &*slot.as_ptr() };
-    f(inner)
+    slot.read_atomic_field(f)
 }
 
 #[inline]
@@ -750,18 +689,12 @@ const R_X86_64_32: u32 = 10; // Absolute 32-bit
 const R_X86_64_32S: u32 = 11; // Absolute 32-bit sign-extended
 
 /// Read a `T: Copy` (unaligned) at byte `offset` of `payload`. Returns
-/// `None` if the read would extend past the slice. Single SAFETY-noted
-/// `unsafe` lives here so the relocation walker stays safe.
+/// `None` if the read would extend past the slice. Thin shim over
+/// `slopos_ostd::util::ptr_buf::read_pod_at` so the relocation walker
+/// stays in safe Rust.
 #[inline]
 fn read_elf_pod<T: Copy>(payload: &[u8], offset: usize) -> Option<T> {
-    let needed = core::mem::size_of::<T>();
-    if offset.checked_add(needed)? > payload.len() {
-        return None;
-    }
-    let p = unsafe { payload.as_ptr().add(offset) } as *const T;
-    // SAFETY: bounds-checked above; `T: Copy` permits any byte pattern;
-    // `read_unaligned` lifts the alignment requirement.
-    Some(unsafe { core::ptr::read_unaligned(p) })
+    slopos_ostd::util::ptr_buf::read_pod_at::<T>(payload, offset)
 }
 
 fn apply_elf_relocations(
@@ -931,15 +864,18 @@ fn apply_elf_relocations(
                     if read_virt.is_null() {
                         continue;
                     }
-                    // SAFETY: `read_virt` resolves to a live HHDM mapping
-                    // for the user-VA's physical page; the immediate
-                    // straddles into the contiguous next physical page
-                    // when present (see invariant explained above).
-                    let current_offset = unsafe {
-                        core::ptr::read_unaligned(
-                            read_virt.as_ptr::<u8>().add(read_page_off) as *const i32
-                        )
-                    } as i64;
+                    // `read_virt` resolves to a live HHDM mapping for the
+                    // user-VA's physical page; the immediate straddles
+                    // into the contiguous next physical page when present
+                    // (see invariant explained above). The OSTD-side
+                    // `read_unaligned` helper carries the one `unsafe`.
+                    let current_offset = match slopos_ostd::mm::hhdm_bytes::read_unaligned::<i32>(
+                        read_virt,
+                        read_page_off,
+                    ) {
+                        Some(v) => v as i64,
+                        None => continue,
+                    };
                     // S = offset + P - A, where P is the rip after the rel32.
                     let original_kernel_rip_after = reloc_kern_addr.wrapping_add(4);
                     (original_kernel_rip_after as i64)
@@ -962,19 +898,23 @@ fn apply_elf_relocations(
                             continue;
                         }
                         match reloc_type {
-                            // SAFETY: as the PC32 branch above.
-                            R_X86_64_64 => unsafe {
-                                core::ptr::read_unaligned(
-                                    read_virt.as_ptr::<u8>().add(read_page_off) as *const u64,
-                                )
-                            },
+                            R_X86_64_64 => {
+                                match slopos_ostd::mm::hhdm_bytes::read_unaligned::<u64>(
+                                    read_virt,
+                                    read_page_off,
+                                ) {
+                                    Some(v) => v,
+                                    None => continue,
+                                }
+                            }
                             R_X86_64_32 | R_X86_64_32S => {
-                                // SAFETY: as the PC32 branch above.
-                                let val = unsafe {
-                                    core::ptr::read_unaligned(
-                                        read_virt.as_ptr::<u8>().add(read_page_off) as *const u32,
-                                    )
-                                } as u64;
+                                let val = match slopos_ostd::mm::hhdm_bytes::read_unaligned::<u32>(
+                                    read_virt,
+                                    read_page_off,
+                                ) {
+                                    Some(v) => v as u64,
+                                    None => continue,
+                                };
                                 if reloc_type == R_X86_64_32S {
                                     (val as i32 as i64) as u64
                                 } else {
@@ -1001,32 +941,33 @@ fn apply_elf_relocations(
             if reloc_virt.is_null() {
                 continue;
             }
-            // SAFETY: `reloc_virt` resolves to a live HHDM mapping for
-            // the user-VA's physical page; the immediate straddles
-            // into the contiguous next physical page when present.
-            let reloc_ptr = unsafe { reloc_virt.as_mut_ptr::<u8>().add(reloc_page_off) };
-
-            // Apply relocation based on type.
+            // `reloc_virt` resolves to a live HHDM mapping for the
+            // user-VA's physical page; the immediate straddles into the
+            // contiguous next physical page when present. The OSTD-side
+            // `write_unaligned` helper carries the one `unsafe`.
             match reloc_type {
                 R_X86_64_64 => {
-                    // SAFETY: as the read above.
-                    unsafe {
-                        core::ptr::write_unaligned(reloc_ptr as *mut u64, user_symbol_va);
-                    }
+                    let _ = slopos_ostd::mm::hhdm_bytes::write_unaligned::<u64>(
+                        reloc_virt,
+                        reloc_page_off,
+                        user_symbol_va,
+                    );
                 }
                 R_X86_64_PC32 | 4 => {
                     let rip_after = reloc_user_addr + 4;
                     let offset = (user_symbol_va as i64 - rip_after as i64) as i32;
-                    // SAFETY: as the read above.
-                    unsafe {
-                        core::ptr::write_unaligned(reloc_ptr as *mut i32, offset);
-                    }
+                    let _ = slopos_ostd::mm::hhdm_bytes::write_unaligned::<i32>(
+                        reloc_virt,
+                        reloc_page_off,
+                        offset,
+                    );
                 }
                 R_X86_64_32 | R_X86_64_32S => {
-                    // SAFETY: as the read above.
-                    unsafe {
-                        core::ptr::write_unaligned(reloc_ptr as *mut u32, user_symbol_va as u32);
-                    }
+                    let _ = slopos_ostd::mm::hhdm_bytes::write_unaligned::<u32>(
+                        reloc_virt,
+                        reloc_page_off,
+                        user_symbol_va as u32,
+                    );
                 }
                 _ => continue,
             }
@@ -1603,10 +1544,11 @@ pub fn create_process_vm() -> u32 {
     // ProcessPageDir's PML4 stays empty — it is never installed in CR3
     // anymore.
     let page_dir_init = ProcessPageDir::new(pml4, pml4_phys, process_id, mm_ctx_id);
-    // SAFETY: `page_dir_ptr` came from `kmalloc(size_of::<ProcessPageDir>())`,
-    // so the slot is valid and exclusively owned. `ptr::write` initialises
-    // the slot without reading the (uninitialised) old contents.
-    unsafe { ptr::write(page_dir_ptr, page_dir_init) };
+    // `page_dir_ptr` came from `kmalloc(size_of::<ProcessPageDir>())`,
+    // so the slot is valid and exclusively owned. The OSTD-side
+    // `init_slot` helper performs the one `ptr::write` so this site
+    // stays in safe Rust.
+    ProcessPageDir::init_in_kmalloc_slot(page_dir_ptr, page_dir_init);
 
     // Allocate the framekernel-correct OSTD VmSpace alongside the
     // legacy ProcessPageDir (transitional dual-allocation). Both PML4
@@ -2762,10 +2704,10 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     // OSTD `VmSpace::new` populates the child's kernel half via
     // `KERNEL_MASTER_PML4`. The legacy ProcessPageDir's PML4 stays empty.
     let child_init = ProcessPageDir::new(pml4, pml4_phys, child_id, child_mm_ctx_id);
-    // SAFETY: `child_page_dir` came from `kmalloc(size_of::<ProcessPageDir>())`
-    // — slot is valid and exclusively owned. `ptr::write` initialises the
-    // slot without reading the (uninitialised) old contents.
-    unsafe { ptr::write(child_page_dir, child_init) };
+    // `child_page_dir` came from `kmalloc(size_of::<ProcessPageDir>())`
+    // — slot is valid and exclusively owned. OSTD's `init_slot`
+    // helper carries the one `ptr::write` so this site stays in safe Rust.
+    ProcessPageDir::init_in_kmalloc_slot(child_page_dir, child_init);
 
     // Allocate the child's framekernel-correct OSTD VmSpace alongside
     // the legacy ProcessPageDir (transitional dual-allocation). The

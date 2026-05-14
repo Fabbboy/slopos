@@ -22,9 +22,6 @@
 //! `is_ostd_usercopy_ip` directly. No SMAP-STAC asm lives in
 //! `slopos_mm` anymore.
 
-use core::sync::atomic::Ordering;
-
-use slopos_arch::pcr;
 use slopos_ostd::sync::InitFlag;
 
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError};
@@ -33,15 +30,11 @@ static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
 
 #[inline]
 fn current_process_id() -> u32 {
-    unsafe { pcr::current_pcr() }
-        .syscall_pid
-        .load(Ordering::Acquire)
+    slopos_arch::pcr::current_syscall_pid()
 }
 
 pub fn set_test_process_id(pid: u32) {
-    unsafe {
-        pcr::current_pcr().syscall_pid.store(pid, Ordering::Release);
-    }
+    slopos_arch::pcr::set_current_syscall_pid(pid);
 }
 
 /// One-shot probe (latched after the first run) confirming the

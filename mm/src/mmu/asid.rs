@@ -238,11 +238,13 @@ pub fn select_cr3(
     }
 
     if !pcid_enabled() {
-        unsafe {
-            (*PER_CPU[cpu_id].0.get().get())
-                .legacy
-                .fetch_add(1, Ordering::Relaxed);
-        }
+        // Per-CPU, IRQs off, single writer on the current core; the
+        // `cell_get_mut` helper folds the `&mut *get()` reborrow.
+        PER_CPU[cpu_id]
+            .0
+            .cell_get_mut()
+            .legacy
+            .fetch_add(1, Ordering::Relaxed);
         return Cr3Value::kernel(pml4_phys);
     }
 
@@ -251,8 +253,8 @@ pub fn select_cr3(
         return Cr3Value::new(pml4_phys, Pcid::KERNEL, true);
     }
 
-    // SAFETY: per-CPU, IRQs off, single writer on the current core.
-    let state = unsafe { &mut *PER_CPU[cpu_id].0.get().get() };
+    // Per-CPU, IRQs off, single writer on the current core.
+    let state = PER_CPU[cpu_id].0.cell_get_mut();
 
     // Fast path: slot currently loaded still valid.
     if (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU {

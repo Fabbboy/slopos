@@ -2,6 +2,7 @@ pub mod dma;
 pub mod frame;
 pub mod frame_alloc;
 pub mod heap;
+pub mod hhdm_bytes;
 pub mod init;
 pub mod io_mem;
 pub mod page_property;

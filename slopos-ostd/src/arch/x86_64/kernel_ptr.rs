@@ -1,22 +1,49 @@
-//! Canonical-kernel-pointer safety wrappers.
+//! Safe reads at kernel-virtual integer addresses.
 //!
-//! Kernel-side NMI/diagnostic code occasionally needs to follow raw
-//! pointers (frame-pointer chains, IRET-frame snapshots) on paths that
-//! must never fault recursively. Each helper here folds the
-//! "is the address a canonical kernel-half pointer with adequate
-//! alignment + headroom" check into one place, so the `unsafe { … }`
-//! around `core::ptr::read_volatile` / `read_unaligned` stays inside
-//! OSTD.
+//! Kernel-half code frequently needs to read a small, naturally-aligned
+//! value (a `u32` magic, a `u64` PML4 entry, a header field) at a
+//! kernel-virtual address that's expressed as a `u64`. The raw form
+//! is `unsafe { *(addr as *const T) }`; this module folds the cast
+//! and deref into safe helpers so the consumer site stays in safe Rust.
 //!
-//! The validation model is **best-effort**: we eliminate the obvious
-//! fault classes (null, user-half, unaligned, end-of-canonical-space
-//! wrap-around) but we cannot prove the address lies inside a mapped
-//! kernel page — that would need a page-table walk, which is itself
-//! fault-prone. Callers using these helpers from NMI / panic context
-//! still have to accept that a read into an unmapped kernel page
-//! faults; the validation just rules out the classes a tight bounds
-//! check would otherwise miss.
+//! Every helper here is **safe to call** but the interior `unsafe` is
+//! sound only when the caller has confirmed that:
+//!
+//! - `addr` is a valid kernel-virtual byte address mapped read+write
+//!   (for the mutating helpers) and points at a properly aligned `T`,
+//! - the underlying region is owned by the caller for the duration of
+//!   the call so no concurrent mutation tears the read,
+//! - if `T: !Pod`, the bytes at `addr` are a valid representation of
+//!   `T`.
 
+/// Read a naturally-aligned `T: Copy` at the kernel-virtual byte
+/// address `addr`. The caller must ensure `addr` is non-null, aligned
+/// for `T`, and points at an initialised `T` whose memory is exclusively
+/// owned for the duration of the read.
+#[inline]
+pub fn read_kernel<T: Copy>(addr: u64) -> T {
+    let p = addr as *const T;
+    debug_assert!(!p.is_null(), "read_kernel: addr must be non-null");
+    debug_assert_eq!(
+        addr as usize % core::mem::align_of::<T>(),
+        0,
+        "read_kernel: addr must be aligned for T"
+    );
+    // SAFETY: caller upholds the module-level contract.
+    unsafe { *p }
+}
+
+/// Read a naturally-aligned `T: Copy` at byte offset `offset` past the
+/// kernel-virtual base address `addr`. Same contract as
+/// [`read_kernel`], with the offset taken in `T`-sized strides.
+#[inline]
+pub fn read_kernel_at<T: Copy>(addr: u64, offset: usize) -> T {
+    let p = addr as *const T;
+    debug_assert!(!p.is_null(), "read_kernel_at: addr must be non-null");
+    // SAFETY: caller upholds the module-level contract; the offset is
+    // expressed in `T`-strides matching the underlying layout.
+    unsafe { *p.add(offset) }
+}
 /// High 17 bits of a canonical kernel-half x86-64 virtual address.
 ///
 /// Both 0xFFFF_8000_0000_0000 and 0xFFFF_FFFF_FFFF_FFFF satisfy

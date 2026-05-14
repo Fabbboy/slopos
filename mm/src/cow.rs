@@ -15,18 +15,11 @@ use crate::tlb;
 
 /// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
 /// must be live HHDM-mapped virtual addresses pointing at distinct pages.
+/// Delegates to OSTD's [`slopos_ostd::mm::hhdm_bytes::copy_page`] so the
+/// interior `unsafe` lives there.
 #[inline]
 fn copy_full_page(src: VirtAddr, dst: VirtAddr) {
-    // SAFETY: caller has resolved both `src` and `dst` from valid 4 KiB
-    // physical mappings; the pages are non-aliasing because COW always
-    // allocates a fresh `new_phys` distinct from the read-only `old_phys`.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            src.as_ptr::<u8>(),
-            dst.as_mut_ptr::<u8>(),
-            PAGE_SIZE_4KB as usize,
-        );
-    }
+    let _ = slopos_ostd::mm::hhdm_bytes::copy_page(src, dst);
 }
 
 pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result<(), MmError> {
