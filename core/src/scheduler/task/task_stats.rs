@@ -1,8 +1,14 @@
 use super::Task;
+use super::task_accessors::{
+    task_add_total_runtime, task_last_run_timestamp_volatile, task_set_last_run_timestamp,
+    task_yield_count_inc,
+};
 use super::task_table::{try_with_task_manager, with_task_manager};
 
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
     with_task_manager(|mgr| {
+        // SAFETY: out-pointers are caller-owned; non-null check gates
+        // each write; nothing else aliases the slot during this call.
         if !total_tasks.is_null() {
             unsafe { *total_tasks = mgr.tasks_created };
         }
@@ -17,17 +23,15 @@ pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_swi
 
 pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64) {
     if !from.is_null() {
-        unsafe {
-            let last = core::ptr::read_volatile(core::ptr::addr_of!((*from).last_run_timestamp));
-            if last != 0 {
-                (*from).total_runtime += timestamp.saturating_sub(last);
-            }
-            (*from).last_run_timestamp = 0;
+        let last = task_last_run_timestamp_volatile(from).unwrap_or(0);
+        if last != 0 {
+            task_add_total_runtime(from, timestamp.saturating_sub(last));
         }
+        task_set_last_run_timestamp(from, 0);
     }
 
     if !to.is_null() {
-        unsafe { (*to).last_run_timestamp = timestamp };
+        task_set_last_run_timestamp(to, timestamp);
     }
 
     if !to.is_null() && to != from {
@@ -42,7 +46,7 @@ pub fn task_record_yield(task: *mut Task) {
         mgr.total_yields += 1;
     });
     if !task.is_null() {
-        unsafe { (*task).yield_count = (*task).yield_count.saturating_add(1) };
+        task_yield_count_inc(task);
     }
 }
 

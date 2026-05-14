@@ -1,15 +1,14 @@
 use core::ffi::c_int;
 
+use super::task_accessors::{task_borrow, task_status};
 use super::task_table::task_find_by_id;
 use super::{BlockReason, Task, TaskStatus};
 
 pub fn task_set_state(task_id: u32, new_status: TaskStatus) -> c_int {
     let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(task_ref) = task_borrow(task) else {
         return -1;
-    }
-
-    let task_ref = unsafe { &*task };
+    };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }
@@ -39,11 +38,9 @@ pub fn task_set_state_with_reason(
     reason: BlockReason,
 ) -> c_int {
     let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(task_ref) = task_borrow(task) else {
         return -1;
-    }
-
-    let task_ref = unsafe { &*task };
+    };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }
@@ -57,10 +54,9 @@ pub fn task_set_state_with_reason(
 /// or the transition is invalid.
 pub fn task_try_transition_from(task_id: u32, expected: TaskStatus, target: TaskStatus) -> c_int {
     let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(task_ref) = task_borrow(task) else {
         return -1;
-    }
-    let task_ref = unsafe { &*task };
+    };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }
@@ -75,10 +71,9 @@ pub fn task_set_state_from_with_reason(
     reason: BlockReason,
 ) -> c_int {
     let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(task_ref) = task_borrow(task) else {
         return -1;
-    }
-    let task_ref = unsafe { &*task };
+    };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }
@@ -89,10 +84,7 @@ pub fn task_set_state_from_with_reason(
 }
 
 pub fn task_get_state(task: *const Task) -> TaskStatus {
-    if task.is_null() {
-        return TaskStatus::Invalid;
-    }
-    unsafe { (*task).status() }
+    task_status(task).unwrap_or(TaskStatus::Invalid)
 }
 
 pub fn task_is_ready(task: *const Task) -> bool {

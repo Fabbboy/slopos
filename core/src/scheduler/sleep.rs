@@ -9,8 +9,9 @@ use super::scheduler::{
     is_scheduling_active, schedule, schedule_task, scheduler_get_current_task, unschedule_task,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_is_blocked,
-    task_is_exited, task_is_invalid, task_set_state_from_with_reason, task_set_state_with_reason,
+    INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
+    task_is_exited, task_is_invalid, task_load_block_reason, task_set_state_from_with_reason,
+    task_set_state_with_reason, task_store_block_reason,
 };
 use slopos_kernel_services::platform;
 
@@ -223,7 +224,7 @@ fn wake_sleeping_task(task_id: u32) {
     }
 
     let is_sleep_blocked =
-        task_is_blocked(task) && unsafe { (*task).load_block_reason() == BlockReason::Sleep };
+        task_is_blocked(task) && task_load_block_reason(task) == Some(BlockReason::Sleep);
     if !is_sleep_blocked {
         return;
     }
@@ -293,10 +294,10 @@ pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) {
     }
     let task = task_find_by_id(task_id);
     if !task.is_null() {
-        // SAFETY: pointer non-null and is a valid Task slot returned by
-        // `task_find_by_id`; the reason stamp is a relaxed atomic store
-        // on the fused state word.
-        unsafe { (*task).store_block_reason(BlockReason::Sleep) };
+        // Pointer is a valid Task slot returned by `task_find_by_id`;
+        // `task_store_block_reason` performs the relaxed atomic store
+        // on the fused state word internally.
+        task_store_block_reason(task, BlockReason::Sleep);
     }
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
@@ -322,7 +323,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
         return 0;
     }
 
-    let task_id = unsafe { (*current).task_id };
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
     if task_id == INVALID_TASK_ID {
         return -1;
     }
@@ -382,7 +383,7 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
         return;
     }
 
-    let task_id = unsafe { (*current).task_id };
+    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
     if task_id == INVALID_TASK_ID {
         return;
     }

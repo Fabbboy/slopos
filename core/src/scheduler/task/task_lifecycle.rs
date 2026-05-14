@@ -13,7 +13,6 @@ use super::super::exit_info::ExitInfo;
 use super::super::scheduler;
 use super::super::task_stack::{KernelStack, UnsafeStack};
 use super::super::task_struct::SwitchContext;
-use super::super::task_struct::fpu_reset_in_place;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
@@ -24,7 +23,7 @@ use super::task_table::{
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
+    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus, task_borrow,
     task_borrow_mut, task_id_of, task_name_bytes, task_status,
 };
 use slopos_fs::fileio::{
@@ -59,7 +58,7 @@ struct TaskCreateResources {
     /// Owning handle to the kernel-mode stack.  Moves into `Task` on
     /// success; dropped on failure to auto-release all backing memory.
     kernel_stack: KernelStack,
-    /// Owning handle to the SafeStack-sanitizer data stack.
+    /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
     /// Allocated alongside `kernel_stack` so every live task owns both.
     unsafe_stack: UnsafeStack,
 }
@@ -171,7 +170,7 @@ fn allocate_unsafe_stack(size: u64, what: &'static str) -> Option<UnsafeStack> {
 
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "data stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
     let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
@@ -192,7 +191,7 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     }
 
     let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "data stack")?;
+    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "unsafe (data) stack")?;
 
     Some(TaskCreateResources {
         process_id: process.disarm(),
@@ -329,7 +328,7 @@ fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch
 /// user→kernel transition the CPU pushes the IRET frame there and the
 /// ISR/handler chain grows downward.  Concurrently, `user_task_loop`
 /// (the OSTD round-trip supervisor) holds a multi-hundred-byte safe-stack
-/// frame *on the same stack*, including a SafeStack-saved data-SP slot
+/// frame *on the same stack*, including a SafeStack-saved unsafe-SP slot
 /// at `[rbp-0xb8]`.
 ///
 /// If the supervisor's frame sat at the top of the stack (the historical
@@ -338,7 +337,7 @@ fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch
 /// `common_exception_handler_impl` alone allocates 264 bytes of safe
 /// stack, which pulls RSP into the supervisor's [rbp-0xb8] slot.  The
 /// resulting clobber surfaces later as a kernel page fault when the
-/// supervisor reads its now-corrupt data-SP back.
+/// supervisor reads its now-corrupt unsafe-SP back.
 ///
 /// The fix: place the supervisor's RSP at `kernel_stack_top -
 /// SUPERVISOR_RESERVE`.  That gives the CPU `SUPERVISOR_RESERVE` bytes
@@ -403,10 +402,14 @@ const _: () = {
 /// # Safety
 /// Caller must ensure that the slot at `kernel_stack_top -
 /// SUPERVISOR_RESERVE` is writable, properly aligned, and not
-/// concurrently accessed.
-pub(crate) unsafe fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
+/// concurrently accessed. This is upheld by the surrounding
+/// `task_create` / `task_fork` / `task_clone` paths, where the
+/// kernel stack was just allocated and no other CPU can observe it.
+pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
     let entry = task_externs::user_task_first_run as *const () as u64;
     let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
+    // SAFETY: see function-level contract; the caller has just
+    // allocated the kernel stack and no observer is yet attached.
     unsafe {
         core::ptr::write(ret_addr_slot as *mut u64, entry);
     }
@@ -425,19 +428,14 @@ pub(crate) unsafe fn build_user_task_entry_frame(kernel_stack_top: u64) -> Switc
 
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
-    // SAFETY: `task.fpu_state` is a valid in-place FpuState owned by the
-    // caller-provided `&mut Task`. Writing into it does not alias with
-    // any other reference because we hold the unique `&mut`.
-    unsafe {
-        fpu_reset_in_place(&raw mut task.fpu_state);
-    }
+    // `task.fpu_state` is a valid in-place FpuState owned by the
+    // caller-provided `&mut Task`. Writing into it does not alias
+    // with any other reference because we hold the unique `&mut`.
+    super::task_accessors::task_reset_fpu_state(task);
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
-        unsafe {
-            let ret_addr_ptr = (task.kernel_stack_top - 8) as *mut u64;
-            core::ptr::write(ret_addr_ptr, trampoline);
-        }
+        super::task_accessors::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
         task.switch_ctx = SwitchContext::new_for_task(
             task.entry_point,
             task.entry_arg as u64,
@@ -466,7 +464,7 @@ fn init_task_context(task: &mut Task) {
             task.entry_arg as u64,
         );
         // SAFETY: kernel_stack region was just allocated and is writable.
-        task.switch_ctx = unsafe { build_user_task_entry_frame(task.kernel_stack_top) };
+        task.switch_ctx = build_user_task_entry_frame(task.kernel_stack_top);
         task.context.rip = task.entry_point;
         task.context.rsp = task.stack_pointer;
         task.context.rflags = 0x202;
@@ -482,6 +480,13 @@ fn init_task_context(task: &mut Task) {
     task.context.cr3 = 0;
 }
 
+/// Walk a caller-owned C string up to `TASK_NAME_MAX_LEN-1` bytes,
+/// copying into `dest` and NUL-padding the remainder.
+///
+/// # Safety
+/// `src`, when non-null, must point at a NUL-terminated C string with
+/// at least one valid byte; in practice callers pass static or
+/// stack-allocated `*const c_char` from the syscall layer.
 unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
     if src.is_null() {
         dest[0] = 0;
@@ -489,6 +494,8 @@ unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
     }
     let mut i = 0;
     while i < TASK_NAME_MAX_LEN - 1 {
+        // SAFETY: caller's contract above guarantees the C string is
+        // readable up to its NUL terminator.
         let ch = unsafe { *src.add(i) };
         if ch == 0 {
             break;
@@ -544,8 +551,13 @@ pub fn task_create(
         }
     };
 
-    let task_ref = unsafe { &mut *task };
+    let Some(task_ref) = task_borrow_mut(task) else {
+        return INVALID_TASK_ID;
+    };
     task_ref.task_id = task_id;
+    // SAFETY: `name` is a `*const c_char` from the caller; `copy_name`
+    // walks it until NUL or `TASK_NAME_MAX_LEN-1`. The destination
+    // borrow is exclusive via `task_ref`.
     unsafe { copy_name(&mut task_ref.name, name) };
     // Status stays Blocked (set by reserve_task_slot) until fully initialised.
     task_ref.priority = TaskPriority::from_u8(priority);
@@ -581,7 +593,7 @@ pub fn task_create(
     task_ref.kernel_stack_top = kstack_top;
     task_ref.kernel_stack_size = kstack_size;
     task_ref.kernel_stack = Some(resources.kernel_stack);
-    // Install the data stack and prime its RSP at the top.  Every
+    // Install the unsafe stack and prime its RSP at the top.  Every
     // instrumented function prologue walks this pointer downward; at
     // context-switch time it is saved/restored exactly like RSP.
     task_ref.abi.unsafe_stack_sp = resources.unsafe_stack.top().as_u64();
@@ -918,7 +930,9 @@ pub fn task_fork(
         return INVALID_TASK_ID;
     }
 
-    let parent = unsafe { &*parent_task };
+    let Some(parent) = task_borrow(parent_task) else {
+        return INVALID_TASK_ID;
+    };
 
     if parent.process_id == INVALID_PROCESS_ID {
         klog_info!("task_fork: parent has no process VM (kernel task?)");
@@ -951,7 +965,7 @@ pub fn task_fork(
     let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(stack) => stack,
         Err(e) => {
-            klog_info!("task_fork: data stack alloc failed: {:?}", e);
+            klog_info!("task_fork: unsafe stack alloc failed: {:?}", e);
             drop(child_kernel_stack);
             return INVALID_TASK_ID;
         }
@@ -966,11 +980,13 @@ pub fn task_fork(
         }
     };
 
-    let child = unsafe { &mut *child_task_ptr };
+    let Some(child) = task_borrow_mut(child_task_ptr) else {
+        return INVALID_TASK_ID;
+    };
 
-    // SAFETY: child and parent are distinct task slots from the static TASK_TABLE,
+    // Child and parent are distinct task slots from the static TASK_TABLE,
     // and we hold exclusive access to child (just reserved).
-    unsafe { child.clone_from_raw(parent) };
+    super::task_accessors::task_clone_from(child, parent);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
@@ -988,8 +1004,11 @@ pub fn task_fork(
     // syscall-time UserContext (when supplied) with rax forced to 0
     // for fork's child return, and set up the kernel stack so
     // `switch_registers` rets into `user_task_first_run`.
-    if !parent_user_ctx.is_null() {
-        let parent_ctx = unsafe { &*parent_user_ctx };
+    // SAFETY: caller asserts `parent_user_ctx` (when non-null) is a
+    // valid `*const UserContext` snapshot of the parent's syscall
+    // frame, stable for the duration of this call.
+    let parent_ctx_opt = unsafe { parent_user_ctx.as_ref() };
+    if let Some(parent_ctx) = parent_ctx_opt {
         let mut regs = *parent_ctx.regs();
         regs.rax = 0;
         child.user_ctx.set_regs(regs);
@@ -1002,7 +1021,7 @@ pub fn task_fork(
         child.user_ctx.set_regs(regs);
     }
     // SAFETY: child kernel stack was just allocated and is writable.
-    child.switch_ctx = unsafe { build_user_task_entry_frame(child.kernel_stack_top) };
+    child.switch_ctx = build_user_task_entry_frame(child.kernel_stack_top);
     child.context_from_user = 0;
     child.context.rax = 0;
 
@@ -1056,7 +1075,9 @@ pub fn task_clone(
         return Err(ERRNO_EINVAL);
     }
 
-    let parent = unsafe { &*parent_task };
+    let Some(parent) = task_borrow(parent_task) else {
+        return Err(ERRNO_EINVAL);
+    };
 
     if parent.flags & TASK_FLAG_KERNEL_MODE != 0 || parent.process_id == INVALID_PROCESS_ID {
         return Err(ERRNO_EINVAL);
@@ -1116,7 +1137,7 @@ pub fn task_clone(
     let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
         Ok(stack) => stack,
         Err(e) => {
-            klog_info!("task_clone: data stack alloc failed: {:?}", e);
+            klog_info!("task_clone: unsafe stack alloc failed: {:?}", e);
             drop(child_kernel_stack);
             return Err(ERRNO_ENOMEM);
         }
@@ -1128,11 +1149,13 @@ pub fn task_clone(
         Err(_) => return Err(ERRNO_EAGAIN),
     };
 
-    let child = unsafe { &mut *child_task_ptr };
+    let Some(child) = task_borrow_mut(child_task_ptr) else {
+        return Err(ERRNO_EINVAL);
+    };
 
-    // SAFETY: child and parent are distinct task slots from the static TASK_TABLE,
+    // Child and parent are distinct task slots from the static TASK_TABLE,
     // and we hold exclusive access to child (just reserved).
-    unsafe { child.clone_from_raw(parent) };
+    super::task_accessors::task_clone_from(child, parent);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
@@ -1168,7 +1191,7 @@ pub fn task_clone(
         let iframe = interrupt_frame_from_context(ctx, user_rsp);
         crate::syscall::user_loop::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
         // SAFETY: child kernel stack was just allocated and is writable.
-        child.switch_ctx = unsafe { build_user_task_entry_frame(child.kernel_stack_top) };
+        child.switch_ctx = build_user_task_entry_frame(child.kernel_stack_top);
     }
     child.context_from_user = 0;
     child.context.rax = 0;

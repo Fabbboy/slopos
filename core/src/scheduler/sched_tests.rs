@@ -1625,10 +1625,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
         return TestResult::Pass;
     }
 
-    unsafe {
-        (*task_ptr).cpu_affinity = 1u32 << cpu_id;
-        (*task_ptr).last_cpu = cpu_id as u8;
-    }
+    crate::scheduler::task::task_install_idle_affinity(task_ptr, 1u32 << cpu_id, cpu_id as u8);
 
     if schedule_task(task_ptr) != 0 {
         klog_info!(
@@ -1741,9 +1738,7 @@ pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
     }
 
     let original_top = task_kernel_stack_top(idle_task).unwrap_or(0);
-    unsafe {
-        (*idle_task).kernel_stack_top = 0;
-    }
+    crate::scheduler::task::task_set_kernel_stack_top(idle_task, 0);
 
     let result = match runtime::resolve_idle_stack_for_cpu(0) {
         Err(IdleStackResolveError::MissingKernelStack) => TestResult::Pass,
@@ -1763,9 +1758,7 @@ pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
         }
     };
 
-    unsafe {
-        (*idle_task).kernel_stack_top = original_top;
-    }
+    crate::scheduler::task::task_set_kernel_stack_top(idle_task, original_top);
 
     result
 }
@@ -2180,10 +2173,11 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Fail;
     }
     // Keep last_cpu on the current CPU so the scheduler must migrate it.
-    unsafe {
-        (*task_ptr).cpu_affinity = 1u32 << target_cpu;
-        (*task_ptr).last_cpu = current_cpu as u8;
-    }
+    crate::scheduler::task::task_install_idle_affinity(
+        task_ptr,
+        1u32 << target_cpu,
+        current_cpu as u8,
+    );
 
     let result = schedule_task(task_ptr);
     if result != 0 {
@@ -2232,7 +2226,7 @@ pub fn test_privilege_separation_invariants() -> TestResult {
 
     let user_task_id = task_create(
         b"UserStub\0".as_ptr() as *const c_char,
-        unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) },
+        crate::scheduler::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_USER_MODE,
@@ -2250,27 +2244,28 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         return TestResult::Fail;
     }
 
-    unsafe {
-        if (*task_ptr).process_id == INVALID_PROCESS_ID {
-            klog_info!("SCHED_TEST: user task missing process VM");
-            return TestResult::Fail;
-        }
-        if (*task_ptr).kernel_stack_top == 0 {
-            klog_info!("SCHED_TEST: user task missing kernel RSP0 stack");
-            return TestResult::Fail;
-        }
-        let cs = (*task_ptr).context.cs;
-        let ss = (*task_ptr).context.ss;
-        if cs != SegmentSelector::USER_CODE.bits() as u64
-            || ss != SegmentSelector::USER_DATA.bits() as u64
-        {
-            klog_info!(
-                "SCHED_TEST: user selectors wrong (cs=0x{:x} ss=0x{:x})",
-                cs,
-                ss
-            );
-            return TestResult::Fail;
-        }
+    let Some(task_ref) = crate::scheduler::task::task_borrow(task_ptr) else {
+        return TestResult::Fail;
+    };
+    if task_ref.process_id == INVALID_PROCESS_ID {
+        klog_info!("SCHED_TEST: user task missing process VM");
+        return TestResult::Fail;
+    }
+    if task_ref.kernel_stack_top == 0 {
+        klog_info!("SCHED_TEST: user task missing kernel RSP0 stack");
+        return TestResult::Fail;
+    }
+    let cs = task_ref.context.cs;
+    let ss = task_ref.context.ss;
+    if cs != SegmentSelector::USER_CODE.bits() as u64
+        || ss != SegmentSelector::USER_DATA.bits() as u64
+    {
+        klog_info!(
+            "SCHED_TEST: user selectors wrong (cs=0x{:x} ss=0x{:x})",
+            cs,
+            ss
+        );
+        return TestResult::Fail;
     }
 
     let mut gate = IdtEntry {
@@ -2552,9 +2547,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             klog_info!("SCHED_TEST: failed Running transition at iter {}", i);
             return TestResult::Fail;
         }
-        unsafe {
-            (*child_ptr).last_run_timestamp = 1;
-        }
+        crate::scheduler::task::task_set_last_run_timestamp(child_ptr, 1);
         // Spin a few iterations to advance any kdiag timestamp source
         // and shift the relative ordering of publish vs. observe.
         for _ in 0..16 {
@@ -2864,10 +2857,11 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             return TestResult::Fail;
         }
         // Pin fillers to cpu_id so they stay in its queue.
-        unsafe {
-            (*tp).cpu_affinity = super::per_cpu::affinity_mask_for_cpu(cpu_id);
-            (*tp).last_cpu = cpu_id as u8;
-        }
+        crate::scheduler::task::task_install_idle_affinity(
+            tp,
+            super::per_cpu::affinity_mask_for_cpu(cpu_id),
+            cpu_id as u8,
+        );
         if schedule_task(tp) != 0 {
             return TestResult::Fail;
         }
@@ -2890,10 +2884,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         return TestResult::Fail;
     }
 
-    unsafe {
-        (*task_ptr).cpu_affinity = 0; // any CPU
-        (*task_ptr).last_cpu = cpu_id as u8; // last ran on the busy CPU
-    }
+    crate::scheduler::task::task_install_idle_affinity(task_ptr, 0, cpu_id as u8);
 
     let target = super::per_cpu::select_target_cpu(task_ptr);
     match target {
@@ -2992,10 +2983,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
         return TestResult::Fail;
     }
-    unsafe {
-        (*task_ptr).cpu_affinity = 0;
-        (*task_ptr).last_cpu = cpu_id as u8;
-    }
+    crate::scheduler::task::task_install_idle_affinity(task_ptr, 0, cpu_id as u8);
 
     let target = super::per_cpu::select_target_cpu(task_ptr);
     match target {
@@ -3074,9 +3062,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         if task_get_info(tid, &mut tp) != 0 || tp.is_null() {
             return TestResult::Fail;
         }
-        unsafe {
-            (*tp).cpu_affinity = 0; // any CPU
-        }
+        crate::scheduler::task::task_set_cpu_affinity(tp, 0); // any CPU
         if schedule_new_task(tp) != 0 {
             return TestResult::Fail;
         }

@@ -43,8 +43,8 @@ use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 use crate::scheduler::scheduler::unblock_task;
 use crate::scheduler::task;
 use crate::scheduler::task::{
-    task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_pgid,
-    task_process_id, task_set_state, task_set_state_from_with_reason, task_sid,
+    task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
+    task_pgid, task_process_id, task_set_state, task_set_state_from_with_reason, task_sid,
     task_signal_pending, task_status, task_terminate, task_try_transition_from,
 };
 use crate::syscall::handlers::syscall_lookup;
@@ -96,7 +96,8 @@ fn create_test_kernel_task() -> u32 {
 }
 
 fn create_test_user_task() -> u32 {
-    let user_entry = unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
+    let user_entry =
+        crate::scheduler::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     let id = task_create(
         b"UserTest\0".as_ptr() as *const c_char,
         user_entry,
@@ -431,10 +432,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "kill(group, 0) probe should succeed"
     );
 
-    unsafe {
-        (*leader_ptr).signal_pending.store(0, Ordering::Release);
-        (*member_ptr).signal_pending.store(0, Ordering::Release);
-    }
+    crate::scheduler::task::task_signal_pending_store(leader_ptr, 0);
+    crate::scheduler::task::task_signal_pending_store(member_ptr, 0);
 
     let mut negative_group_frame = zero_frame();
     negative_group_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
@@ -460,10 +459,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "member did not receive group signal"
     );
 
-    unsafe {
-        (*leader_ptr).signal_pending.store(0, Ordering::Release);
-        (*member_ptr).signal_pending.store(0, Ordering::Release);
-    }
+    crate::scheduler::task::task_signal_pending_store(leader_ptr, 0);
+    crate::scheduler::task::task_signal_pending_store(member_ptr, 0);
 
     let mut caller_group_frame = zero_frame();
     caller_group_frame.regs_mut().rdi = 0;
@@ -1218,9 +1215,7 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     let parent_ptr = task_find_by_id(parent_id);
     assert_not_null!(parent_ptr, "parent task lookup failed");
 
-    unsafe {
-        (*parent_ptr).fs_base = 0x0000_1111_2222_3000;
-    }
+    crate::scheduler::task::task_set_fs_base(parent_ptr, 0x0000_1111_2222_3000);
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
     let child_id = match task_clone(parent_ptr, flags, 0, 0, 0, 0x0000_5555_6666_7000) {
@@ -1237,23 +1232,22 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     let child_ptr = task_find_by_id(child_id);
     assert_not_null!(child_ptr, "child task lookup failed");
 
-    unsafe {
-        assert_eq_test!(
-            (*child_ptr).tgid,
-            (*parent_ptr).tgid,
-            "thread did not join parent thread-group"
-        );
-        assert_eq_test!(
-            (*child_ptr).fs_base,
-            0x0000_5555_6666_7000,
-            "child TLS base not set by CLONE_SETTLS"
-        );
-        assert_eq_test!(
-            (*parent_ptr).fs_base,
-            0x0000_1111_2222_3000,
-            "parent TLS base unexpectedly modified"
-        );
-    }
+    use crate::scheduler::task::{task_fs_base, task_tgid};
+    assert_eq_test!(
+        task_tgid(child_ptr),
+        task_tgid(parent_ptr),
+        "thread did not join parent thread-group"
+    );
+    assert_eq_test!(
+        task_fs_base(child_ptr),
+        Some(0x0000_5555_6666_7000),
+        "child TLS base not set by CLONE_SETTLS"
+    );
+    assert_eq_test!(
+        task_fs_base(parent_ptr),
+        Some(0x0000_1111_2222_3000),
+        "parent TLS base unexpectedly modified"
+    );
 
     task_terminate(child_id);
     task_terminate(parent_id);
@@ -1292,23 +1286,22 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
     assert_not_null!(thread_ptr, "thread task lookup failed");
     assert_not_null!(fork_ptr, "fork child task lookup failed");
 
-    unsafe {
-        assert_eq_test!(
-            (*thread_ptr).tgid,
-            (*parent_ptr).tgid,
-            "thread tgid mismatch"
-        );
-        assert_eq_test!(
-            (*fork_ptr).tgid,
-            fork_id,
-            "fork child should be its own thread-group leader"
-        );
-        assert_eq_test!(
-            (*fork_ptr).parent_task_id,
-            parent_id,
-            "fork child parent id mismatch"
-        );
-    }
+    use crate::scheduler::task::{task_parent_task_id, task_tgid};
+    assert_eq_test!(
+        task_tgid(thread_ptr),
+        task_tgid(parent_ptr),
+        "thread tgid mismatch"
+    );
+    assert_eq_test!(
+        task_tgid(fork_ptr),
+        Some(fork_id),
+        "fork child should be its own thread-group leader"
+    );
+    assert_eq_test!(
+        task_parent_task_id(fork_ptr),
+        Some(parent_id),
+        "fork child parent id mismatch"
+    );
 
     task_terminate(fork_id);
     task_terminate(thread_id);
@@ -1747,13 +1740,11 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
 
     assert_eq_test!(task_terminate(child_id), 0, "failed to terminate child");
 
-    unsafe {
-        let pending = (*parent_ptr).signal_pending.load(Ordering::Acquire);
-        assert_test!(
-            (pending & sig_bit(SIGCHLD)) != 0,
-            "parent missing SIGCHLD pending bit after child exit"
-        );
-    }
+    let pending = task_signal_pending(parent_ptr);
+    assert_test!(
+        (pending & sig_bit(SIGCHLD)) != 0,
+        "parent missing SIGCHLD pending bit after child exit"
+    );
 
     task_terminate(parent_id);
     TestResult::Pass
@@ -1818,13 +1809,11 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     };
     let child_ptr = task_find_by_id(child_no_settls);
     assert_not_null!(child_ptr, "clone child lookup failed");
-    unsafe {
-        assert_eq_test!(
-            (*child_ptr).fs_base,
-            expected_fs,
-            "clone without CLONE_SETTLS must inherit FS base"
-        );
-    }
+    assert_eq_test!(
+        task_fs_base(child_ptr),
+        Some(expected_fs),
+        "clone without CLONE_SETTLS must inherit FS base"
+    );
 
     task_terminate(child_no_settls);
     task_terminate(task_id);

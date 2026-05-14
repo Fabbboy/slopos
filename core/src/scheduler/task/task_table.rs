@@ -10,7 +10,7 @@ use slopos_ostd::{klog_debug, klog_info};
 
 use super::super::scheduler;
 use super::task_accessors::{task_id_of, task_ref_count};
-use super::{INVALID_PROCESS_ID, INVALID_TASK_ID, Task, TaskIterateCb, TaskStatus};
+use super::{INVALID_TASK_ID, Task, TaskIterateCb, TaskStatus};
 use crate::scheduler::exit_info::ExitInfo;
 
 /// Concurrent task capacity, matching the kernel-stack VA region cap in
@@ -69,9 +69,9 @@ fn bump_pool_high_water(new_idx: usize) {
 ///
 /// Role tag for the zombie-list intrusive list. Threads through
 /// `Task::zombie_link`, distinct from the per-CPU `ReadyQueue`'s
-/// link slot — see `Task::ready_link`. Body lives in OSTD because the
-/// `LinkProvider<ZombieListRole>` impl for `Task` is emitted from the
-/// generic `TaskInner<K, U>` body inside OSTD.
+/// link slot — see `Task::ready_link`. Defined in OSTD so the
+/// generic `TaskInner<K, U>` can `impl LinkProvider` against it
+/// without OSTD reaching into `core/`.
 pub use slopos_ostd::task::link_roles::ZombieListRole;
 
 /// Allocation-free: `IntrusiveLinkedList::push` only updates the
@@ -139,26 +139,9 @@ const ZOMBIE_REAP_BATCH: usize = 16;
 /// User-space stacks live in the owning process's VM and are reclaimed
 /// by `destroy_process_vm`, not here.
 pub(super) fn free_task_stacks(task: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-    unsafe {
-        // Dropping the handle releases the stack's VA slot + physical frames.
-        (*task).kernel_stack = None;
-        (*task).kernel_stack_base = 0;
-        (*task).kernel_stack_top = 0;
-        (*task).kernel_stack_size = 0;
-
-        // Same for the SafeStack unsafe (data) stack.
-        (*task).unsafe_stack = None;
-        (*task).abi.unsafe_stack_sp = 0;
-
-        // For kernel-mode tasks, `stack_base` aliased the kernel stack.
-        // Now that the stack is gone, clear the alias so nothing reads it.
-        if (*task).process_id == INVALID_PROCESS_ID {
-            (*task).stack_base = 0;
-        }
-    }
+    // Drops the kernel/unsafe stack handles and zeroes the plain-u64
+    // mirrors; safe wrapper lives in `task_accessors`.
+    super::task_accessors::task_release_stacks(task);
 }
 
 pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
@@ -166,9 +149,7 @@ pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
         return;
     }
     free_task_stacks(task);
-    unsafe {
-        Task::reset_in_place(task);
-    }
+    super::task_accessors::task_reset_in_place(task);
 }
 
 /// Reap zombie tasks that are ready to be reset.
@@ -418,8 +399,8 @@ pub fn init_task_manager() -> c_int {
                 );
                 continue;
             }
-            // SAFETY: exclusive `&mut` under the manager lock.
-            unsafe { Task::reset_in_place(task_ptr) };
+            // Exclusive `&mut` under the manager lock.
+            super::task_accessors::task_reset_in_place(task_ptr);
         }
         mgr.num_tasks = preserved_count;
         mgr.next_task_id = max_task_id.saturating_add(1);
@@ -490,7 +471,7 @@ pub fn task_find_by_cr3(cr3: u64) -> *mut Task {
         }
 
         let task_cr3 =
-            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(kbox.context.cr3)) } & !0xFFF;
+            super::task_accessors::task_context_cr3(kbox as *const Task).unwrap_or(0) & !0xFFF;
         if task_cr3 != target {
             continue;
         }
@@ -520,7 +501,9 @@ pub(super) fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -
         return None;
     }
     // Fast path: Task's own slot_index field.
-    let hint = unsafe { (*task).slot_index } as usize;
+    let hint = super::task_accessors::task_slot_index(task)
+        .map(|i| i as usize)
+        .unwrap_or(usize::MAX);
     if hint < mgr.tasks.len() {
         if let Some(kbox) = mgr.tasks[hint].as_deref() {
             if (kbox as *const Task) == task {
@@ -610,8 +593,8 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             for (i, slot) in mgr.tasks[..hwm].iter_mut().enumerate() {
                 if let Some(kbox) = slot.as_deref_mut() {
                     if kbox.status() == TaskStatus::Terminated && kbox.ref_count() == 0 {
-                        // SAFETY: exclusive &mut under the manager lock.
-                        unsafe { Task::reset_in_place(kbox as *mut Task) };
+                        // Exclusive &mut under the manager lock.
+                        super::task_accessors::task_reset_in_place(kbox as *mut Task);
                         chosen_idx = Some(i);
                         break;
                     }
@@ -666,7 +649,7 @@ pub(super) fn release_task_slot(slot: *mut Task) {
         return;
     }
     with_task_manager(|mgr| {
-        unsafe { Task::reset_in_place(slot) };
+        super::task_accessors::task_reset_in_place(slot);
         mgr.num_tasks = mgr.num_tasks.saturating_sub(1);
     });
 }

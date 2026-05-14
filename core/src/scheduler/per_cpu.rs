@@ -40,7 +40,11 @@ pub fn fork_rr_counter_set(value: usize) {
     FORK_RR_COUNTER.store(value, Ordering::Relaxed);
 }
 
-use super::task::{task_dec_ref, task_inc_ref, task_priority, task_set_last_cpu, task_status};
+use super::task::{
+    task_cpu_affinity, task_dec_ref, task_inc_ref, task_last_cpu, task_next_inbox_load,
+    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority, task_set_last_cpu,
+    task_status,
+};
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
@@ -50,9 +54,9 @@ use slopos_ostd::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
-/// Role tag for the per-CPU `ReadyQueue` intrusive list. Body lives in
-/// OSTD because the `LinkProvider<ReadyQueueRole>` impl for `Task` is
-/// emitted from the generic `TaskInner<K, U>` body inside OSTD.
+/// Role tag for the per-CPU `ReadyQueue` intrusive list. Defined in
+/// OSTD so the kernel `TaskInner<K, U>` can `impl LinkProvider` against
+/// it without OSTD reaching into `core/`.
 pub use slopos_ostd::task::link_roles::ReadyQueueRole;
 
 /// Per-priority FIFO of ready tasks. Refcount accounting is the
@@ -401,13 +405,9 @@ impl PerCpuScheduler {
             let old_head = self.remote_inbox_head.load(Ordering::Acquire);
 
             // Point our next to current head — the `next_inbox` atomic
-            // is `&self`-mutable so the borrow stays safe.
-            // SAFETY: `node` is a non-null `*mut Task`; the underlying
-            // Task is pool-pinned, the AtomicPtr is internally
-            // synchronised.
-            unsafe {
-                node.as_ref().next_inbox.store(old_head, Ordering::Relaxed);
-            }
+            // is `&self`-mutable so the borrow stays safe. `node` is a
+            // non-null `*mut Task` pointing at a pool-pinned Task.
+            task_next_inbox_store_relaxed(node.as_ptr(), old_head);
 
             // Try to become new head
             match self.remote_inbox_head.compare_exchange_weak(
@@ -445,14 +445,8 @@ impl PerCpuScheduler {
 
         let mut reversed: *mut Task = ptr::null_mut();
         while !current.is_null() {
-            // SAFETY: `current` was just observed via the inbox-head
-            // CAS; it points at a pool-pinned Task whose `next_inbox`
-            // atomic remains valid for this drain.
-            let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
-            // SAFETY: as above; same access window.
-            unsafe {
-                (*current).next_inbox.store(reversed, Ordering::Relaxed);
-            }
+            let next = task_next_inbox_load(current);
+            task_next_inbox_store_relaxed(current, reversed);
             reversed = current;
             current = next;
             count += 1;
@@ -460,15 +454,8 @@ impl PerCpuScheduler {
 
         current = reversed;
         while !current.is_null() {
-            // SAFETY: `current` is a pool-pinned Task pointer.
-            let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
-
-            // SAFETY: as above; clear the inbox link before re-queue.
-            unsafe {
-                (*current)
-                    .next_inbox
-                    .store(ptr::null_mut(), Ordering::Release);
-            }
+            let next = task_next_inbox_load(current);
+            task_next_inbox_store_release(current, ptr::null_mut());
 
             let should_enqueue = task_status(current) == Some(TaskStatus::Ready);
             if should_enqueue {
@@ -495,14 +482,8 @@ impl PerCpuScheduler {
             .swap(ptr::null_mut(), Ordering::AcqRel);
         let mut drained = 0u32;
         while !cursor.is_null() {
-            // SAFETY: `cursor` is a pool-pinned Task pointer.
-            let next = unsafe { (*cursor).next_inbox.load(Ordering::Acquire) };
-            // SAFETY: as above; clear the inbox link.
-            unsafe {
-                (*cursor)
-                    .next_inbox
-                    .store(ptr::null_mut(), Ordering::Release);
-            }
+            let next = task_next_inbox_load(cursor);
+            task_next_inbox_store_release(cursor, ptr::null_mut());
             let _ = task_dec_ref(cursor);
             cursor = next;
             drained = drained.saturating_add(1);
@@ -711,8 +692,8 @@ pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
         };
     }
 
-    let affinity = unsafe { (*task).cpu_affinity };
-    let last_cpu = unsafe { (*task).last_cpu as usize };
+    let affinity = task_cpu_affinity(task).unwrap_or(0);
+    let last_cpu = task_last_cpu(task).map(|c| c as usize).unwrap_or(0);
 
     // 1. Prefer last_cpu when idle — cache-warm data is still there and
     //    no contention.  Mirrors Linux wake_affine_idle(): "If prev_cpu is
@@ -769,7 +750,7 @@ pub fn select_target_cpu_for_new(task: *mut Task) -> Option<usize> {
         };
     }
 
-    let affinity = unsafe { (*task).cpu_affinity };
+    let affinity = task_cpu_affinity(task).unwrap_or(0);
 
     // Go straight to the global idlest-CPU search — no last_cpu preference.
     if let Some(best_cpu) = find_idlest_cpu(affinity) {

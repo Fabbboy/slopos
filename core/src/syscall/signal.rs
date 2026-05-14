@@ -13,7 +13,8 @@ use slopos_ostd::user::context::UserContext;
 
 use crate::sched::{schedule, unblock_task};
 use crate::scheduler::task::{
-    task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_terminate,
+    task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_pending_or,
+    task_terminate,
 };
 use crate::scheduler::task_struct::{SignalAction, Task};
 use crate::syscall::common::{SyscallDisposition, syscall_return_err};
@@ -98,12 +99,13 @@ fn collect_group_member(task: *mut Task, context: *mut c_void) {
     let Some(tid) = task_id_of(task) else {
         return;
     };
-    // SAFETY: `ctx.targets` holds a `*mut TargetSet` whose backing
+    // `ctx.targets` holds a `*mut TargetSet` whose backing
     // `&mut TargetSet` is owned by the caller frame in
     // `collect_targets_for_group`; null was implicitly cleared by the
     // outer `&mut ctx as *mut _` cast.
-    unsafe {
-        (&mut *ctx.targets).push(tid);
+    let set = unsafe { ctx.targets.as_mut() };
+    if let Some(set) = set {
+        set.push(tid);
     }
 }
 
@@ -124,9 +126,10 @@ fn collect_all_members(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    // SAFETY: same reasoning as collect_group_member.
-    unsafe {
-        (&mut *ctx.targets).push(task_id);
+    // Same reasoning as collect_group_member.
+    let set = unsafe { ctx.targets.as_mut() };
+    if let Some(set) = set {
+        set.push(task_id);
     }
 }
 
@@ -372,14 +375,9 @@ pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
             continue;
         }
 
-        // SAFETY: `target` was just located via `task_find_by_id` and
-        // null-checked above; `signal_pending` is an AtomicU64 inside
-        // the per-task struct.
-        unsafe {
-            (*target)
-                .signal_pending
-                .fetch_or(sig_bit(signum), Ordering::AcqRel);
-        }
+        // `target` was just located via `task_find_by_id` and
+        // null-checked above; the accessor performs the atomic OR.
+        let _ = task_signal_pending_or(target, sig_bit(signum));
         let _ = unblock_task(target);
         signaled += 1;
     }

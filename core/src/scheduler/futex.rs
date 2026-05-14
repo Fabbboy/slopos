@@ -148,11 +148,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
         // Stamp the block reason before flipping status so any tracer
         // (or future signal-aware unblock path) sees the committed
         // reason at the same moment the status flips.
-        // SAFETY: `current` came from `scheduler_get_current_task`; the
-        // store is a relaxed atomic on the fused state word.
-        unsafe {
-            (*current).store_block_reason(BlockReason::FutexWait);
-        }
+        crate::scheduler::task::task_store_block_reason(current, BlockReason::FutexWait);
 
         mark_current_blocked()
     };

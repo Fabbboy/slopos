@@ -9,12 +9,10 @@ where
     F: FnOnce(&mut Task) -> R,
 {
     let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(t) = crate::scheduler::task::task_borrow_mut(task) else {
         return -1;
-    }
-    unsafe {
-        f(&mut *task);
-    }
+    };
+    f(t);
     0
 }
 pub fn fate_spin() -> FateResult {

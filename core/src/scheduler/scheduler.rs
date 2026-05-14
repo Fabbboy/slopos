@@ -44,13 +44,15 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_fpu_state_mut,
-    task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_exited, task_is_invalid,
-    task_is_ready, task_is_running, task_kernel_stack_top, task_name_looks_idle, task_pgid,
-    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
-    task_record_yield, task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
-    task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_time_slice,
-    task_time_slice_remaining, task_try_transition_from,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_exit_info_ref,
+    task_fpu_state_mut, task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_exited,
+    task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top, task_name_looks_idle,
+    task_on_cpu_load, task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority,
+    task_process_id, task_record_context_switch, task_record_yield, task_set_controlling_tty,
+    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
+    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
+    task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
+    task_try_transition_from, task_waiters_ref,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -170,7 +172,7 @@ fn scheduler_ready_count(cpu_id: usize) -> u32 {
 ///
 /// - `cpu_id == slopos_arch::pcr::get_current_cpu()`.  SafeStack only
 ///   reads the *local* PCR via GS; cross-CPU dispatch would write
-///   the wrong PCR and corrupt the remote CPU's data-SP resolution.
+///   the wrong PCR and corrupt the remote CPU's unsafe-SP resolution.
 /// - `task` is non-null, lives in the task pool (or is a bootstrap
 ///   stub), and has its `unsafe_stack_sp` primed.
 /// - Caller runs with preemption disabled OR inside the
@@ -303,24 +305,7 @@ unsafe fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     // resume the original task's trampoline would otherwise jump into
     // the wrong saved RIP/RSP.  Mirror them onto the per-task `Task`
     // struct here so each task carries its own copy across switches.
-    unsafe {
-        let pcr = slopos_arch::pcr::current_pcr();
-        if !prev.is_null() {
-            (*prev).saved_user_ctx_ptr = pcr.user_ctx_ptr.load(Ordering::Acquire);
-            core::ptr::copy_nonoverlapping(
-                pcr.kernel_return_ctx.get(),
-                &raw mut (*prev).saved_kernel_return_ctx,
-                1,
-            );
-        }
-        pcr.user_ctx_ptr
-            .store((*next).saved_user_ctx_ptr, Ordering::Release);
-        core::ptr::copy_nonoverlapping(
-            &raw const (*next).saved_kernel_return_ctx,
-            pcr.kernel_return_ctx.get(),
-            1,
-        );
-    }
+    task_pcr_round_trip_swap(prev, next);
 
     // --- FPU save (prev) ---
     if let Some(prev_fpu) = task_fpu_state_mut(prev) {
@@ -415,15 +400,7 @@ fn ensure_idle_switch_ctx_valid(idle_task: *mut Task) -> bool {
     if idle_task.is_null() {
         return false;
     }
-    // SAFETY: caller pre-checked non-null; switch_ctx is an in-Task
-    // field, naturally aligned u64 reads on x86_64 are atomic.
-    let (rip, rsp) = unsafe {
-        let ctx = &raw const (*idle_task).switch_ctx;
-        (
-            core::ptr::read_unaligned(&raw const (*ctx).rip),
-            core::ptr::read_unaligned(&raw const (*ctx).rsp),
-        )
-    };
+    let (rip, rsp) = task_switch_ctx_rip_rsp(idle_task).unwrap_or((0, 0));
 
     let (text_start, text_end) = kernel_text_range();
     let rip_ok = rip >= text_start && rip < text_end;
@@ -468,16 +445,11 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // and switch_registers both operate on the now-installed dispatch
     // target; the next-task switch_ctx pointer's stability is upheld
     // by `task_pointer_is_valid` checks earlier in the call chain.
+    let prev_ctx = task_switch_ctx_ptr_mut(current);
+    let next_ctx = task_switch_ctx_ptr(idle_task);
     unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
         prepare_switch_to(cpu_id, current, idle_task);
-
-        let prev_ctx = if !current.is_null() {
-            &raw mut (*current).switch_ctx
-        } else {
-            ptr::null_mut()
-        };
-        let next_ctx = &raw const (*idle_task).switch_ctx;
         switch_registers(prev_ctx, next_ctx);
         // NOTE: code here runs when the TASK resumes (not on idle path).
         // All post-switch cleanup happens in run_ready_task_from_idle
@@ -648,16 +620,7 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // Validate switch_ctx.rip — must be in kernel .text (the OSTD
     // task-entry trampoline / user_task_first_run wrapper / a
     // schedule resume point all live there).
-    // SAFETY: `to_task` is non-null and was just validated through
-    // `task_pointer_is_valid`. The switch_ctx is an in-Task field;
-    // its u64 word reads are atomic on x86_64.
-    let (rip, rsp) = unsafe {
-        let ctx = &raw const (*to_task).switch_ctx;
-        (
-            core::ptr::read_unaligned(&raw const (*ctx).rip),
-            core::ptr::read_unaligned(&raw const (*ctx).rsp),
-        )
-    };
+    let (rip, rsp) = task_switch_ctx_rip_rsp(to_task).unwrap_or((0, 0));
     let (text_start, text_end) = kernel_text_range();
     if rip < text_start || rip >= text_end {
         klog_info!(
@@ -718,16 +681,11 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // SAFETY: caller serialises (irqs disabled). prepare_switch_to
     // and switch_registers operate on the freshly-validated
     // switch_ctx whose addresses are stable for this CPU.
+    let prev_ctx = task_switch_ctx_ptr_mut(from_task);
+    let next_ctx = task_switch_ctx_ptr(to_task);
     unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
         prepare_switch_to(cpu_id, from_task, to_task);
-
-        let prev_ctx = if !from_task.is_null() {
-            &raw mut (*from_task).switch_ctx
-        } else {
-            ptr::null_mut()
-        };
-        let next_ctx = &raw const (*to_task).switch_ctx;
         switch_registers(prev_ctx, next_ctx);
     }
 }
@@ -786,10 +744,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // in progress), put it back and skip. Re-enqueue rather than spin —
     // the idle loop must not block, and Phase 6 removed the schedule_task
     // spin in favour of this check + the WaitQueue lock-pair barrier.
-    // SAFETY: `next_task` is non-null and was just validated through
-    // `task_pointer_is_valid`; the `on_cpu` AtomicBool is internally
-    // synchronised.
-    if unsafe { (*next_task).on_cpu.load(Ordering::Acquire) } {
+    if task_on_cpu_load(next_task) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             let _ = sched.enqueue_local(next_task);
             sched.set_executing_task(false);
@@ -1029,9 +984,6 @@ fn block_current_task_irq_disabled(
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {
-    use crate::scheduler::exit_info::ExitInfo;
-    use slopos_ostd::sync::{AtomicCell, WaitQueue};
-
     if task_id == INVALID_TASK_ID {
         return -1;
     }
@@ -1049,15 +1001,18 @@ pub fn task_wait_for(task_id: u32) -> c_int {
 
     let _ref_guard = super::task::TaskRefGuard::new(target);
 
-    // SAFETY: TaskRefGuard keeps `target`'s slot alive across the
-    // potential yield. The waiters queue and exit_info cell are
-    // valid for the duration of `_ref_guard`. Memory ordering: the
-    // producer's `try_set` is Release; `is_set` (Acquire, evaluated
-    // under the WaitQueue's SpinLock) is the matching consumer. The
-    // SpinLock pair on both sides supplies the bidirectional full
-    // barrier.
-    let waiters: &WaitQueue = unsafe { &(*target).waiters };
-    let exit_cell: &AtomicCell<ExitInfo> = unsafe { &(*target).exit_info };
+    // `_ref_guard` keeps `target`'s slot alive across the potential
+    // yield. The waiters queue and exit_info cell are valid for the
+    // duration of `_ref_guard`. Memory ordering: the producer's
+    // `try_set` is Release; `is_set` (Acquire, evaluated under the
+    // WaitQueue's SpinLock) is the matching consumer. The SpinLock
+    // pair on both sides supplies the bidirectional full barrier.
+    let Some(waiters) = task_waiters_ref(target) else {
+        return 0;
+    };
+    let Some(exit_cell) = task_exit_info_ref(target) else {
+        return 0;
+    };
 
     // The `task_is_exited` fallback covers the case where the
     // target's status flips to Zombie/Terminated via a path that has

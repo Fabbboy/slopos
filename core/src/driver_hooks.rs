@@ -1,5 +1,4 @@
 use core::ffi::c_void;
-use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIG_IGN, sig_bit};
 use slopos_kernel_services::driver_runtime::{
@@ -8,7 +7,10 @@ use slopos_kernel_services::driver_runtime::{
 
 use crate::irq;
 use crate::scheduler::scheduler;
-use crate::scheduler::task::{self, Task};
+use crate::scheduler::task::{
+    self, Task, task_has_deliverable_signal, task_parent_task_id, task_pgid, task_sid,
+    task_signal_blocked, task_signal_handler, task_signal_pending_or,
+};
 
 // ---------------------------------------------------------------------------
 // Adapter functions — only for service methods that need type conversion or
@@ -39,16 +41,17 @@ fn signal_group_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx = unsafe { &mut *context.cast::<SignalGroupContext>() };
-    if unsafe { (*task).pgid } != ctx.pgid {
+    let ctx_ptr = context.cast::<SignalGroupContext>();
+    // SAFETY: caller (`task_iterate_active`) hands us a non-null
+    // pointer to a `SignalGroupContext` we created above; no aliasing.
+    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+        return;
+    };
+    if task_pgid(task) != Some(ctx.pgid) {
         return;
     }
 
-    unsafe {
-        (*task)
-            .signal_pending
-            .fetch_or(sig_bit(ctx.signum), Ordering::AcqRel);
-    }
+    let _ = task_signal_pending_or(task, sig_bit(ctx.signum));
     let _ = scheduler::unblock_task(task);
     ctx.matched = true;
 }
@@ -83,16 +86,17 @@ fn signal_session_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx = unsafe { &mut *context.cast::<SignalSessionContext>() };
-    if unsafe { (*task).sid } != ctx.sid {
+    let ctx_ptr = context.cast::<SignalSessionContext>();
+    // SAFETY: caller hands us a non-null `SignalSessionContext`; no
+    // aliasing in the iteration.
+    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+        return;
+    };
+    if task_sid(task) != Some(ctx.sid) {
         return;
     }
 
-    unsafe {
-        (*task)
-            .signal_pending
-            .fetch_or(sig_bit(ctx.signum), Ordering::AcqRel);
-    }
+    let _ = task_signal_pending_or(task, sig_bit(ctx.signum));
     let _ = scheduler::unblock_task(task);
     ctx.matched = true;
 }
@@ -131,12 +135,16 @@ fn pgrp_exists_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx = unsafe { &mut *context.cast::<PgrpExistsContext>() };
+    let ctx_ptr = context.cast::<PgrpExistsContext>();
+    // SAFETY: callback receives a non-null `PgrpExistsContext` from
+    // our caller above.
+    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+        return;
+    };
     if ctx.found {
         return; // already found, skip remaining tasks
     }
-    let t = unsafe { &*task };
-    if t.pgid == ctx.pgid && t.sid == ctx.sid {
+    if task_pgid(task) == Some(ctx.pgid) && task_sid(task) == Some(ctx.sid) {
         ctx.found = true;
     }
 }
@@ -173,16 +181,14 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
     if bit == 0 {
         return false; // invalid signal number
     }
-    unsafe {
-        // Check if signal is in the blocked mask.
-        if ((*task).signal_blocked & bit) != 0 {
+    if let Some(blocked) = task_signal_blocked(task) {
+        if (blocked & bit) != 0 {
             return true;
         }
-        // Check if the signal handler is SIG_IGN.
-        let idx = (signum as usize).wrapping_sub(1);
-        if idx < (*task).signal_actions.len() && (*task).signal_actions[idx].handler == SIG_IGN {
-            return true;
-        }
+    }
+    let idx = (signum as usize).wrapping_sub(1);
+    if task_signal_handler(task, idx) == Some(SIG_IGN) {
+        return true;
     }
     false
 }
@@ -195,14 +201,7 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
 
 fn runtime_has_pending_signal() -> bool {
     let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
-        return false;
-    }
-    unsafe {
-        let pending = (*task).signal_pending.load(Ordering::Acquire);
-        let deliverable = pending & !(*task).signal_blocked;
-        deliverable != 0
-    }
+    task_has_deliverable_signal(task)
 }
 
 // ---------------------------------------------------------------------------
@@ -226,20 +225,24 @@ fn orphan_check_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let ctx = unsafe { &mut *context.cast::<OrphanCheckContext>() };
+    let ctx_ptr = context.cast::<OrphanCheckContext>();
+    // SAFETY: callback gets a non-null `OrphanCheckContext` from our
+    // caller; no aliasing.
+    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+        return;
+    };
     if !ctx.is_orphaned {
         return; // already found a non-orphan indicator, skip
     }
 
-    let t = unsafe { &*task };
     // Only look at members of the target process group.
-    if t.pgid != ctx.pgid || t.sid != ctx.sid {
+    if task_pgid(task) != Some(ctx.pgid) || task_sid(task) != Some(ctx.sid) {
         return;
     }
 
     // Check if this member's parent is in a different pgrp within the same
     // session — if so, the pgrp is NOT orphaned.
-    let parent_id = t.parent_task_id;
+    let parent_id = task_parent_task_id(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
     if parent_id == 0 || parent_id == slopos_abi::task::INVALID_TASK_ID {
         return; // no parent or init — can't help
     }
@@ -249,9 +252,8 @@ fn orphan_check_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let parent_ref = unsafe { &*parent };
     // Parent is in the same session but a different pgrp → not orphaned.
-    if parent_ref.sid == ctx.sid && parent_ref.pgid != ctx.pgid {
+    if task_sid(parent) == Some(ctx.sid) && task_pgid(parent) != Some(ctx.pgid) {
         ctx.is_orphaned = false;
     }
 }

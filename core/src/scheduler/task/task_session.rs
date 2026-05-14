@@ -1,9 +1,12 @@
 use core::ffi::c_void;
-use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGCHLD, sig_bit};
 use slopos_abi::syscall::TtyIndex;
 
+use super::task_accessors::{
+    task_clear_controlling_tty_for, task_id_of, task_parent_task_id, task_signal_pending_or,
+    task_tgid, task_wake_all_waiters,
+};
 use super::task_table::{task_find_by_id, task_iterate_active};
 use super::{INVALID_TASK_ID, Task};
 
@@ -18,12 +21,15 @@ fn clear_controlling_tty_for_session_task(task: *mut Task, context: *mut c_void)
         return;
     }
 
-    let ctx = unsafe { &mut *context.cast::<ClearControllingTtyContext>() };
-    unsafe {
-        if (*task).sid == ctx.session_id && (*task).controlling_tty == Some(ctx.tty) {
-            (*task).controlling_tty = None;
-            ctx.cleared = ctx.cleared.saturating_add(1);
-        }
+    let ctx_ptr = context.cast::<ClearControllingTtyContext>();
+    // SAFETY: caller (`task_iterate_active`) hands us a pointer to the
+    // `ClearControllingTtyContext` stack-allocated above; non-null
+    // checked.
+    let Some(ctx) = (unsafe { ctx_ptr.as_mut() }) else {
+        return;
+    };
+    if task_clear_controlling_tty_for(task, ctx.session_id, ctx.tty) {
+        ctx.cleared = ctx.cleared.saturating_add(1);
     }
 }
 
@@ -49,17 +55,15 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
     if task.is_null() {
         return;
     }
-    // SAFETY: caller (mark_task_terminated) holds the task pointer
-    // stable via the task-manager lock window in which it runs;
-    // additionally, the per-task `waiters` queue is a `WaitQueue`
-    // whose internal SpinLock makes wake_all interrupt-safe and
-    // serialises against any concurrent waiter registration. The
-    // SpinLock pair (this side + the waiter's `is_set` check inside
-    // `wait_event`) is the bidirectional full barrier that pairs
-    // with the Release `try_set` published just before this call.
-    unsafe {
-        (*task).waiters.wake_all();
-    }
+    // Caller (mark_task_terminated) holds the task pointer stable via
+    // the task-manager lock window in which it runs; additionally,
+    // the per-task `waiters` queue is a `WaitQueue` whose internal
+    // SpinLock makes wake_all interrupt-safe and serialises against
+    // any concurrent waiter registration. The SpinLock pair (this
+    // side + the waiter's `is_set` check inside `wait_event`) is the
+    // bidirectional full barrier that pairs with the Release
+    // `try_set` published just before this call.
+    task_wake_all_waiters(task);
 }
 
 pub(super) fn notify_parent_of_child_exit(task_ptr: *mut Task) {
@@ -67,13 +71,9 @@ pub(super) fn notify_parent_of_child_exit(task_ptr: *mut Task) {
         return;
     }
 
-    let (task_id, tgid, parent_task_id) = unsafe {
-        (
-            (*task_ptr).task_id,
-            (*task_ptr).tgid,
-            (*task_ptr).parent_task_id,
-        )
-    };
+    let task_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
+    let tgid = task_tgid(task_ptr).unwrap_or(INVALID_TASK_ID);
+    let parent_task_id = task_parent_task_id(task_ptr).unwrap_or(INVALID_TASK_ID);
 
     if parent_task_id == INVALID_TASK_ID || parent_task_id == task_id {
         return;
@@ -88,9 +88,5 @@ pub(super) fn notify_parent_of_child_exit(task_ptr: *mut Task) {
         return;
     }
 
-    unsafe {
-        (*parent)
-            .signal_pending
-            .fetch_or(sig_bit(SIGCHLD), Ordering::AcqRel);
-    }
+    task_signal_pending_or(parent, sig_bit(SIGCHLD));
 }
