@@ -159,84 +159,69 @@ These ten invariants come from Asterinas paper §4.3. Every OSTD `unsafe` block 
 
 ### Phase 1 Background
 
-Today's irreducible `unsafe` clusters in seven places: `core/src/scheduler/switch_asm.rs` (context switch), FPU XSAVE/XRSTOR, `boot/src/idt.rs:645` (IRET frame recovery), `mm/src/user_copy.rs:28–54` (user-copy assembly), `karch/src/` (CPU HAL: cli/sti, CR3, CPUID, MSR), and bits of `mm/src/paging/`. Phase 1 lifts these into `slopos-ostd` and wraps each in a typed safe API. Existing `mm/`, `core/`, `fs/`, `drivers/`, `net/` keep working — they're rewritten to call OSTD instead of their current internals.
+The original framekernel migration consolidated every `unsafe` block in the kernel into a single trusted-domain crate, `slopos-ostd`, and made every other kernel crate compile under `#![forbid(unsafe_code)]`. The historical clusters: `core/src/scheduler/switch_asm.rs` (context switch), FPU XSAVE/XRSTOR, `boot/src/idt.rs` (IRET-frame recovery), `mm/src/user_copy.rs` (user-copy assembly), `karch/src/` (CPU HAL), and the per-process pieces of `mm/src/paging/` — all lifted into OSTD behind typed safe APIs. Every consumer crate was rewritten to call OSTD instead of its own internals.
 
-The phase is structured as: 1A creates the crate; 1B–1I build primitives in dependency order; 1J migrates the existing kernel (all done — see status table below); 1N retires the trailing slibc/userland test-scaffolding `unsafe` (out-of-scope for the kernel-side exit criterion but tracked); 1K adds dynamic verification under Miri; 1L locks in build gates and closes the phase.
+That migration is done. What follows is the remaining work to formally close Phase 1.
 
-### What's done (1A–1J)
+### Done
 
-Sections 1A through 1J are closed. Together they: built the `slopos-ostd` crate, populated it with `Frame<M>` / `UFrame` / `VmSpace` / `IoMem` / `IoPort` / `IrqLine` / `UserContext` / sync / task primitives, folded the global allocator into OSTD, and migrated every existing kernel crate (boot, mm, core, drivers, fs, net, video, windowing, font, acpi, karch, kernel-services, abi, service-core, hermetic) to consume OSTD's safe API.
+Built `slopos-ostd` and populated it with `Frame<M>` / `UFrame` / `VmSpace` / `IoMem` / `IoPort` / `IrqLine` / `UserContext` / sync / task primitives. Folded the global allocator into OSTD. Migrated every existing kernel crate (boot, mm, core, drivers, fs, net, video, windowing, font, acpi, karch, kernel-services, abi, service-core, hermetic) to consume OSTD's safe API. Detailed implementation notes for each piece live in `git log`.
 
-| Sub | Title | Status |
-|---|---|---|
-| 1A | Crate skeleton + module layout | done |
-| 1B | `Frame<M>` with typed metadata | done |
-| 1C | `UFrame` + `USegment` (untyped memory) | done |
-| 1D | `VmSpace` + cursor | done |
-| 1E | `IoMem`, `IoPort`, `DmaCoherent`, `DmaStream` | done |
-| 1F | `IrqLine` + interrupt registration | done |
-| 1G | `UserContext` + `UserMode` | done |
-| 1H | Allocation surface — `slopos-alloc` folded into OSTD | done |
-| 1I | Sync primitives + Task primitive | done |
-| 1J | Migrate existing kernel to consume OSTD (parity) | done |
-
-**Net result at this commit.**
+**State at this commit.**
 
 - All 15 non-OSTD kernel crates carry `#![forbid(unsafe_code)]`: `abi`, `acpi`, `boot`, `core`, `drivers`, `fs`, `font`, `hermetic`, `karch`, `kernel-services`, `mm`, `net`, `service-core`, `video`, `windowing`. Zero `#[allow(unsafe_code)]` exemptions outside `slopos-ostd/`.
 - Non-comment `unsafe` outside OSTD: 0 in kernel crates. Three grep-matches survive (two in `slopos-ostd-derive/src/lib.rs` proc-macro output text, one in `hermetic/src/macros.rs` `macro_rules!` body); none expand to runtime unsafe in any kernel consumer.
-- `just test` parity: **2417 passed, 0 failed, 0 skipped, 0 over-time** (kernel 2414 + userland 3).
+- `just test`: **2417 passed, 0 failed, 0 skipped, 0 over-time** (kernel 2414 + userland 3).
 - `just build` clean (`check_alloc_dep: OK`, `check_stack_sizes: OK`). `cargo fmt --all -- --check` clean.
 
-Detailed implementation notes for each sub-phase live in the git history (see `git log --grep='framekernel\|κ\.\|1[A-J]-' --since=2025-12-01`).
+### Remaining: test-scaffolding unsafe in slibc / userland
 
-### 1N: Retire remaining test-scaffolding unsafe
+~63 `unsafe` sites in `slibc/` and `userland/` test files (FFI extern declarations + `unsafe { extern_fn(args) }` call sites). **Userland code, not kernel crates** — does not block Phase 1 Exit Criterion #1 (which scopes "no `unsafe` outside `slopos-ostd`" to kernel crates) and is not part of the `#![forbid(unsafe_code)]` set. Tracked here so it isn't forgotten; could equally move to Phase 2 / Deferred.
 
-`κ.23.I` left a tail of ~63 `unsafe` sites in `slibc/` and `userland/` test files (FFI extern declarations + `unsafe { extern_fn(args) }` call sites). These are **userland code, not kernel crates** — they do not block Phase 1 Exit Criterion #1 (which scopes "no `unsafe` outside `slopos-ostd`" to kernel crates) and they are not in the κ.16 forbid set. Listed here so the work isn't forgotten; could equally move to Phase 2 / Deferred.
+- [ ] Add a `slopos_slibc::alloc::raw_buffer` + safe-fn FFI shim layer covering the `tty`, `time`, `thread`, `stdio`, `io`, `ffi`, `net` modules' extern blocks.
+- [ ] Migrate `slibc/src/{io,net,time,tty,ffi,thread,stdio}/tests.rs` (~53 sites) + `slibc/src/test_harness.rs` (1) + `userland/src/bin/tests/heap_allocator_test.rs` (7) onto the new shim.
+- [ ] Confirm `rg '\bunsafe\b' --type rust -g '!slopos-ostd/**' -g '*test*' | grep -vE '^[^:]+:\s*(//|///|//!|/\*)'` returns literal 0.
 
-- [ ] **1N.1** Add a `slopos_slibc::alloc::raw_buffer` + safe-fn FFI shim layer covering the `tty`, `time`, `thread`, `stdio`, `io`, `ffi`, `net` modules' extern blocks.
-- [ ] **1N.2** Migrate `slibc/src/{io,net,time,tty,ffi,thread,stdio}/tests.rs` (~53 sites) + `slibc/src/test_harness.rs` (1) + `userland/src/bin/tests/heap_allocator_test.rs` (7) onto the new shim.
-- [ ] **1N.3** Confirm `rg '\bunsafe\b' --type rust -g '!slopos-ostd/**' -g '*test*' | grep -vE '^[^:]+:\s*(//|///|//!|/\*)'` returns literal 0.
+### Remaining: KernMiri port
 
-### 1K: KernMiri port
+Dynamic UB detection on OSTD. Asterinas's KernMiri reference is ~1,200 LoC; port the concepts (no Miri fork on day one).
 
-Dynamic UB detection on OSTD. Asterinas's KernMiri reference is +1,200 LoC; we port the concepts (no Miri fork on day one).
-
-- [ ] **1K.1** Add `tools/kernmiri/` with a README explaining the harness and linking the Asterinas reference.
-- [ ] **1K.2** Pick the integration model and document it. Recommendation: stock Miri + a `cfg(miri)` feature on `slopos-ostd` that swaps real-hardware ops for fakes.
-- [ ] **1K.3** Write Miri shims:
+- [ ] Add `tools/kernmiri/` with a README explaining the harness and linking the Asterinas reference.
+- [ ] Pick the integration model and document it. Recommendation: stock Miri + a `cfg(miri)` feature on `slopos-ostd` that swaps real-hardware ops for fakes.
+- [ ] Write Miri shims:
   - Physical memory simulation (`Vec<u8>` backing store; `Frame::from_unused` allocates from it).
   - Page-table simulation (in-memory tree, no real CR3 writes).
   - IRQ simulation (deterministic delivery).
-- [ ] **1K.4** Port `slopos_ostd::mm::frame` tests to run under Miri (`cargo +nightly miri test -p slopos-ostd --features miri`).
-- [ ] **1K.5** Port `slopos_ostd::mm::vm_space` tests under Miri.
-- [ ] **1K.6** Port `slopos_ostd::sync` tests (spinlock, RCU, wait queue) under Miri.
-- [ ] **1K.7** Add `just check-miri` recipe; wire into CI.
-- [ ] **1K.8** Coverage gate: `slopos_ostd::mm` and `slopos_ostd::sync` ≥ 90% line coverage under Miri. Zero UBs.
-- [ ] **1K.9** Document any UBs found and the fixes in `slopos-ostd/MIRI_FINDINGS.md`.
+- [ ] Port `slopos_ostd::mm::frame` tests to run under Miri (`cargo +nightly miri test -p slopos-ostd --features miri`).
+- [ ] Port `slopos_ostd::mm::vm_space` tests under Miri.
+- [ ] Port `slopos_ostd::sync` tests (spinlock, RCU, wait queue) under Miri.
+- [ ] Add `just check-miri` recipe; wire into CI.
+- [ ] Coverage gate: `slopos_ostd::mm` and `slopos_ostd::sync` ≥ 90% line coverage under Miri. Zero UBs.
+- [ ] Document any UBs found and the fixes in `slopos-ostd/MIRI_FINDINGS.md`.
 
-### 1L: Build gates + Phase 1 close
+### Remaining: Build gates + close
 
 Make the framekernel discipline load-bearing in CI, then close the phase.
 
 **Build gates.**
 
-- [ ] **1L.1** Add `scripts/check_unsafe_outside_ostd.sh`: greps every `.rs` under kernel crates for `\bunsafe\b` (with cfg-gated lookback), skipping `slopos-ostd/` and `kernel/src/main.rs`. Fails build on any match.
-- [ ] **1L.2** Extend `scripts/check_alloc_dep.sh` to also catch `use ::alloc::` inside non-OSTD crates.
-- [ ] **1L.3** `scripts/check_stack_sizes.sh`: keep the 2 KiB ceiling. Add a comment that this is Inv. 5'.
-- [ ] **1L.4** Add `scripts/tcb_ratio.sh` (and `just tcb-ratio` recipe): count `unsafe` tokens in `slopos-ostd/`, divide by total kernel LoC, print percent.
-- [ ] **1L.5** Add `just check-framekernel` recipe: `check_unsafe_outside_ostd.sh` + `check_alloc_dep.sh` + `check_stack_sizes.sh` + `cargo fmt --all -- --check` + `cargo clippy -- -D warnings` + `just check-miri`.
-- [ ] **1L.6** Update `CLAUDE.md` "Allocation surface" section: replace with an "Unsafe-code surface" paragraph noting `slopos-ostd` is the only crate allowed to use `unsafe`, gated by `check_unsafe_outside_ostd.sh`. Keep the stack-size and `KBox::try_init` prose.
+- [ ] Add `scripts/check_unsafe_outside_ostd.sh`: greps every `.rs` under kernel crates for `\bunsafe\b` (with cfg-gated lookback), skipping `slopos-ostd/` and `kernel/src/main.rs`. Fails build on any match.
+- [ ] Extend `scripts/check_alloc_dep.sh` to also catch `use ::alloc::` inside non-OSTD crates.
+- [ ] `scripts/check_stack_sizes.sh`: keep the 2 KiB ceiling. Add a comment that this is Inv. 5'.
+- [ ] Add `scripts/tcb_ratio.sh` (and `just tcb-ratio` recipe): count `unsafe` tokens in `slopos-ostd/`, divide by total kernel LoC, print percent.
+- [ ] Add `just check-framekernel` recipe: `check_unsafe_outside_ostd.sh` + `check_alloc_dep.sh` + `check_stack_sizes.sh` + `cargo fmt --all -- --check` + `cargo clippy -- -D warnings` + `just check-miri`.
+- [ ] Update `CLAUDE.md` "Allocation surface" section: replace with an "Unsafe-code surface" paragraph noting `slopos-ostd` is the only crate allowed to use `unsafe`, gated by `check_unsafe_outside_ostd.sh`. Keep the stack-size and `KBox::try_init` prose.
 
-**Phase 1 close.**
+**Close.**
 
-- [ ] **1L.7** Run `just check-framekernel`. Zero failures.
-- [ ] **1L.8** Run `just test`. Full pass; count ≥ pre-Phase-1.
-- [ ] **1L.9** `just tcb-ratio` ≤ 1.5%.
-- [ ] **1L.10** LMbench-equivalent perf parity within ±5% of pre-Phase-1 (use `tools/run_tests/` perf subset or hand-write one).
-- [ ] **1L.11** Audit OSTD `// SAFETY:` comments: confirm every one of Inv. 1..10 is named at least once.
-- [ ] **1L.12** Update `plans/README.md` with a `FRAMEKERNEL_PLAN.md` entry summarising the close metrics.
-- [ ] **1L.13** Tag the commit `framekernel-phase-1`. Open a Phase-1 close PR with TCB ratio, test summary, perf delta.
-- [ ] **1L.14** Mark every Phase-1 box checked here; flip the front-matter status to `phase-2-ready`.
+- [ ] Run `just check-framekernel`. Zero failures.
+- [ ] Run `just test`. Full pass; count ≥ pre-Phase-1.
+- [ ] `just tcb-ratio` ≤ 1.5%.
+- [ ] LMbench-equivalent perf parity within ±5% of pre-Phase-1 (use `tools/run_tests/` perf subset or hand-write one).
+- [ ] Audit OSTD `// SAFETY:` comments: confirm every one of Inv. 1..10 is named at least once.
+- [ ] Update `plans/README.md` with a `FRAMEKERNEL_PLAN.md` entry summarising the close metrics.
+- [ ] Tag the commit `framekernel-phase-1`. Open a Phase-1 close PR with TCB ratio, test summary, perf delta.
+- [ ] Mark every Phase-1 box checked here; flip the front-matter status to `phase-2-ready`.
 
 
 ### Phase 1 Exit Criteria
