@@ -1,4 +1,5 @@
 #![no_std]
+#![cfg_attr(feature = "test-hooks", feature(allocator_api))]
 #![feature(sync_unsafe_cell)]
 #![forbid(unsafe_code)]
 

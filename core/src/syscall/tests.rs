@@ -5,7 +5,6 @@
 
 use core::ffi::c_char;
 use core::ptr;
-use core::sync::atomic::Ordering;
 
 use crate::scheduler::task_struct::Task;
 use crate::syscall::fs::syscall_ioctl;
