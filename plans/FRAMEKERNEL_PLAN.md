@@ -174,54 +174,54 @@ Built `slopos-ostd` and populated it with `Frame<M>` / `UFrame` / `VmSpace` / `I
 - `just test`: **2417 passed, 0 failed, 0 skipped, 0 over-time** (kernel 2414 + userland 3).
 - `just build` clean (`check_alloc_dep: OK`, `check_stack_sizes: OK`). `cargo fmt --all -- --check` clean.
 
-### Remaining: test-scaffolding unsafe in slibc / userland
+### A: Test-scaffolding unsafe in slibc / userland
 
 ~63 `unsafe` sites in `slibc/` and `userland/` test files (FFI extern declarations + `unsafe { extern_fn(args) }` call sites). **Userland code, not kernel crates** — does not block Phase 1 Exit Criterion #1 (which scopes "no `unsafe` outside `slopos-ostd`" to kernel crates) and is not part of the `#![forbid(unsafe_code)]` set. Tracked here so it isn't forgotten; could equally move to Phase 2 / Deferred.
 
-- [ ] Add a `slopos_slibc::alloc::raw_buffer` + safe-fn FFI shim layer covering the `tty`, `time`, `thread`, `stdio`, `io`, `ffi`, `net` modules' extern blocks.
-- [ ] Migrate `slibc/src/{io,net,time,tty,ffi,thread,stdio}/tests.rs` (~53 sites) + `slibc/src/test_harness.rs` (1) + `userland/src/bin/tests/heap_allocator_test.rs` (7) onto the new shim.
-- [ ] Confirm `rg '\bunsafe\b' --type rust -g '!slopos-ostd/**' -g '*test*' | grep -vE '^[^:]+:\s*(//|///|//!|/\*)'` returns literal 0.
+- [ ] **A.1** Add a `slopos_slibc::alloc::raw_buffer` + safe-fn FFI shim layer covering the `tty`, `time`, `thread`, `stdio`, `io`, `ffi`, `net` modules' extern blocks.
+- [ ] **A.2** Migrate `slibc/src/{io,net,time,tty,ffi,thread,stdio}/tests.rs` (~53 sites) + `slibc/src/test_harness.rs` (1) + `userland/src/bin/tests/heap_allocator_test.rs` (7) onto the new shim.
+- [ ] **A.3** Confirm `rg '\bunsafe\b' --type rust -g '!slopos-ostd/**' -g '*test*' | grep -vE '^[^:]+:\s*(//|///|//!|/\*)'` returns literal 0.
 
-### Remaining: KernMiri port
+### B: KernMiri port
 
 Dynamic UB detection on OSTD. Asterinas's KernMiri reference is ~1,200 LoC; port the concepts (no Miri fork on day one).
 
-- [ ] Add `tools/kernmiri/` with a README explaining the harness and linking the Asterinas reference.
-- [ ] Pick the integration model and document it. Recommendation: stock Miri + a `cfg(miri)` feature on `slopos-ostd` that swaps real-hardware ops for fakes.
-- [ ] Write Miri shims:
+- [ ] **B.1** Add `tools/kernmiri/` with a README explaining the harness and linking the Asterinas reference.
+- [ ] **B.2** Pick the integration model and document it. Recommendation: stock Miri + a `cfg(miri)` feature on `slopos-ostd` that swaps real-hardware ops for fakes.
+- [ ] **B.3** Write Miri shims:
   - Physical memory simulation (`Vec<u8>` backing store; `Frame::from_unused` allocates from it).
   - Page-table simulation (in-memory tree, no real CR3 writes).
   - IRQ simulation (deterministic delivery).
-- [ ] Port `slopos_ostd::mm::frame` tests to run under Miri (`cargo +nightly miri test -p slopos-ostd --features miri`).
-- [ ] Port `slopos_ostd::mm::vm_space` tests under Miri.
-- [ ] Port `slopos_ostd::sync` tests (spinlock, RCU, wait queue) under Miri.
-- [ ] Add `just check-miri` recipe; wire into CI.
-- [ ] Coverage gate: `slopos_ostd::mm` and `slopos_ostd::sync` ≥ 90% line coverage under Miri. Zero UBs.
-- [ ] Document any UBs found and the fixes in `slopos-ostd/MIRI_FINDINGS.md`.
+- [ ] **B.4** Port `slopos_ostd::mm::frame` tests to run under Miri (`cargo +nightly miri test -p slopos-ostd --features miri`).
+- [ ] **B.5** Port `slopos_ostd::mm::vm_space` tests under Miri.
+- [ ] **B.6** Port `slopos_ostd::sync` tests (spinlock, RCU, wait queue) under Miri.
+- [ ] **B.7** Add `just check-miri` recipe; wire into CI.
+- [ ] **B.8** Coverage gate: `slopos_ostd::mm` and `slopos_ostd::sync` ≥ 90% line coverage under Miri. Zero UBs.
+- [ ] **B.9** Document any UBs found and the fixes in `slopos-ostd/MIRI_FINDINGS.md`.
 
-### Remaining: Build gates + close
+### C: Build gates + Phase 1 close
 
 Make the framekernel discipline load-bearing in CI, then close the phase.
 
 **Build gates.**
 
-- [ ] Add `scripts/check_unsafe_outside_ostd.sh`: greps every `.rs` under kernel crates for `\bunsafe\b` (with cfg-gated lookback), skipping `slopos-ostd/` and `kernel/src/main.rs`. Fails build on any match.
-- [ ] Extend `scripts/check_alloc_dep.sh` to also catch `use ::alloc::` inside non-OSTD crates.
-- [ ] `scripts/check_stack_sizes.sh`: keep the 2 KiB ceiling. Add a comment that this is Inv. 5'.
-- [ ] Add `scripts/tcb_ratio.sh` (and `just tcb-ratio` recipe): count `unsafe` tokens in `slopos-ostd/`, divide by total kernel LoC, print percent.
-- [ ] Add `just check-framekernel` recipe: `check_unsafe_outside_ostd.sh` + `check_alloc_dep.sh` + `check_stack_sizes.sh` + `cargo fmt --all -- --check` + `cargo clippy -- -D warnings` + `just check-miri`.
-- [ ] Update `CLAUDE.md` "Allocation surface" section: replace with an "Unsafe-code surface" paragraph noting `slopos-ostd` is the only crate allowed to use `unsafe`, gated by `check_unsafe_outside_ostd.sh`. Keep the stack-size and `KBox::try_init` prose.
+- [ ] **C.1** Add `scripts/check_unsafe_outside_ostd.sh`: greps every `.rs` under kernel crates for `\bunsafe\b` (with cfg-gated lookback), skipping `slopos-ostd/` and `kernel/src/main.rs`. Fails build on any match.
+- [ ] **C.2** Extend `scripts/check_alloc_dep.sh` to also catch `use ::alloc::` inside non-OSTD crates.
+- [ ] **C.3** `scripts/check_stack_sizes.sh`: keep the 2 KiB ceiling. Add a comment that this is Inv. 5'.
+- [ ] **C.4** Add `scripts/tcb_ratio.sh` (and `just tcb-ratio` recipe): count `unsafe` tokens in `slopos-ostd/`, divide by total kernel LoC, print percent.
+- [ ] **C.5** Add `just check-framekernel` recipe: `check_unsafe_outside_ostd.sh` + `check_alloc_dep.sh` + `check_stack_sizes.sh` + `cargo fmt --all -- --check` + `cargo clippy -- -D warnings` + `just check-miri`.
+- [ ] **C.6** Update `CLAUDE.md` "Allocation surface" section: replace with an "Unsafe-code surface" paragraph noting `slopos-ostd` is the only crate allowed to use `unsafe`, gated by `check_unsafe_outside_ostd.sh`. Keep the stack-size and `KBox::try_init` prose.
 
 **Close.**
 
-- [ ] Run `just check-framekernel`. Zero failures.
-- [ ] Run `just test`. Full pass; count ≥ pre-Phase-1.
-- [ ] `just tcb-ratio` ≤ 1.5%.
-- [ ] LMbench-equivalent perf parity within ±5% of pre-Phase-1 (use `tools/run_tests/` perf subset or hand-write one).
-- [ ] Audit OSTD `// SAFETY:` comments: confirm every one of Inv. 1..10 is named at least once.
-- [ ] Update `plans/README.md` with a `FRAMEKERNEL_PLAN.md` entry summarising the close metrics.
-- [ ] Tag the commit `framekernel-phase-1`. Open a Phase-1 close PR with TCB ratio, test summary, perf delta.
-- [ ] Mark every Phase-1 box checked here; flip the front-matter status to `phase-2-ready`.
+- [ ] **C.7** Run `just check-framekernel`. Zero failures.
+- [ ] **C.8** Run `just test`. Full pass; count ≥ pre-Phase-1.
+- [ ] **C.9** `just tcb-ratio` ≤ 1.5%.
+- [ ] **C.10** LMbench-equivalent perf parity within ±5% of pre-Phase-1 (use `tools/run_tests/` perf subset or hand-write one).
+- [ ] **C.11** Audit OSTD `// SAFETY:` comments: confirm every one of Inv. 1..10 is named at least once.
+- [ ] **C.12** Update `plans/README.md` with a `FRAMEKERNEL_PLAN.md` entry summarising the close metrics.
+- [ ] **C.13** Tag the commit `framekernel-phase-1`. Open a Phase-1 close PR with TCB ratio, test summary, perf delta.
+- [ ] **C.14** Mark every Phase-1 box checked here; flip the front-matter status to `phase-2-ready`.
 
 
 ### Phase 1 Exit Criteria
