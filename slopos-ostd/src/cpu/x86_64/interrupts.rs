@@ -74,7 +74,7 @@ use core::marker::PhantomData;
 /// Constructed only by [`IrqDisabled::with`], which `cli`/`sti`-wraps
 /// the supplied closure and hands the closure a borrowed token whose
 /// lifetime is bounded by the call scope. Functions that must run
-/// with IRQs off (e.g. `block_current_task` in the scheduler) take
+/// with IRQs off (e.g. `yield_blocked_task` in the scheduler) take
 /// `&IrqDisabled<'_>` to push the discipline into the type system —
 /// a future block path that forgets `cli` will not compile.
 ///

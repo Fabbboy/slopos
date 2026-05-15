@@ -307,12 +307,31 @@ impl FileOps for PipeWriteOps {
                 return total as isize;
             }
 
-            // Push the staged bytes under the slot lock and wake one
-            // reader if anything was buffered. The slot lock pairs
-            // with the reader's wait_event closure (which also takes
-            // the slot lock) — the reader's condition observation
-            // happens-before its WQ-lock acquire, and the WQ lock-pair
-            // gives the cross-CPU visibility for the writer's update.
+            // Push the staged bytes under the slot lock, *release the
+            // slot lock*, and only then call `wake_one()` on the reader
+            // wait-queue.
+            //
+            // The order matters: `wake_one()` acquires the wait-queue's
+            // internal SpinLock, and `PipeReadOps::read`'s waiter goes
+            // through `wait_event` whose closure (re-)acquires this
+            // same pipe slot lock under the wait-queue's SpinLock.
+            // If we called `wake_one()` while still holding the slot
+            // lock here, the two paths would form a classical AB-BA
+            // pair (PS → WQ here, WQ → PS in the waiter), and on TCG /
+            // any sufficiently spread-out interleaving two CPUs would
+            // ticket-lock each other into a permanent freeze with
+            // interrupts disabled.
+            //
+            // Note: the kernel relies on the WaitQueue protocol calling
+            // `condition()` outside its internal SpinLock (see
+            // `slopos_ostd::sync::wait_queue::WaitQueue::wait_event`),
+            // so even if a future change were to add another
+            // wake-under-data-lock site, the AB-BA would no longer be
+            // expressible. This release-before-wake here is defence
+            // in depth: producers must not retain the data lock across
+            // a wake call.
+            let written;
+            let no_readers_after;
             {
                 let Some(mut slot) = pipe::lock_slot(h) else {
                     return if total > 0 {
@@ -330,11 +349,12 @@ impl FileOps for PipeWriteOps {
                     };
                 }
 
-                let written = slot.write_from(&local[..staged]);
+                written = slot.write_from(&local[..staged]);
                 total += written;
-                if written > 0 {
-                    pipe::reader_wq(h).wake_one();
-                }
+                no_readers_after = slot.readers == 0;
+            }
+            if written > 0 && !no_readers_after {
+                pipe::reader_wq(h).wake_one();
             }
 
             if total >= buf_len {

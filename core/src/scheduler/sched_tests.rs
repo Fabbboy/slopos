@@ -3887,3 +3887,211 @@ slopos_testing::stest!(
     name = test_orphan_child_auto_reaped_on_parent_exit,
     suite = sched_core
 );
+
+// =============================================================================
+// WAIT_QUEUE TESTS
+//
+// These tests cover the wait/wake primitive's APIs and defense-in-depth
+// invariants:
+//
+// - `WaitOutcome<R>` enum return type.
+// - `wait_event_until` / `wait_event_timeout_until` generic-return APIs.
+// - Lock-free `has_waiters()` (callers that want to skip a `wake_*`
+//   when no one is queued do this at the call site rather than baked
+//   into `wake_*` itself — the in-place fast path is unsound on
+//   weakly-ordered architectures; see `wait_protocol.md` §6.3).
+// - `WaitNode::has_woken` auxiliary atomic, exercised indirectly via
+//   the wake-empty-queue tests and via the wider scheduler integration.
+// - `WaitNode` Drop with null queue back-pointer is a no-op (the
+//   common case — back-pointer is cleared inside the WQ critical
+//   section by every pop path, so by the time stack-pinned `WaitNode`s
+//   go out of scope they hold null).
+//
+// A panic-mid-wait Drop-firing test is intentionally not included: the
+// test-harness uses `catch_panic!` / longjmp, which skips Drops during
+// recovery; the Drop-based unlink is defense-in-depth for production
+// unwinding paths and runs implicitly on every successful wait.
+// =============================================================================
+
+use slopos_ostd::sync::wait_queue::{WaitOutcome, WaitQueue};
+
+/// `wait_event_until` returns the closure's `Some(R)` immediately via
+/// the pre-check fast path, without touching the scheduler backend.
+pub fn test_wait_event_until_pre_check_returns_carried_value() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    let r: Option<u32> = wq.wait_event_until(|| Some(0xCAFE_F00D_u32));
+    if r == Some(0xCAFE_F00D_u32) {
+        TestResult::Pass
+    } else {
+        klog_info!(
+            "WAIT_QUEUE_TEST: pre-check returned {:?}, expected Some(0xCAFE_F00D)",
+            r
+        );
+        TestResult::Fail
+    }
+}
+
+/// `wait_event_timeout_until` returns `WaitOutcome::Ready(R)` on
+/// the pre-check fast path.
+pub fn test_wait_event_timeout_until_pre_check_ready() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    let r: WaitOutcome<u32> = wq.wait_event_timeout_until(|| Some(7u32), 100);
+    if matches!(r, WaitOutcome::Ready(7)) {
+        TestResult::Pass
+    } else {
+        klog_info!(
+            "WAIT_QUEUE_TEST: pre-check returned {:?}, expected Ready(7)",
+            r
+        );
+        TestResult::Fail
+    }
+}
+
+/// `wait_event_timeout_until` with an always-`None` closure does NOT
+/// return `Ready` — it must end in either `Timeout` (real wait
+/// elapsed) or `NoRuntime` (current task null / backend not yet
+/// fully wired in this test fixture). Both are acceptable
+/// soundness-preserving outcomes; the property we care about is
+/// "the call returns without hanging or panicking and produces a
+/// non-Ready outcome when the condition is unsatisfiable."
+pub fn test_wait_event_timeout_until_does_not_return_ready_on_none() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    let r: WaitOutcome<u32> = wq.wait_event_timeout_until(|| None, 1);
+    match r {
+        WaitOutcome::Timeout | WaitOutcome::NoRuntime => TestResult::Pass,
+        WaitOutcome::Ready(_) => {
+            klog_info!(
+                "WAIT_QUEUE_TEST: timeout test returned {:?}, expected Timeout or NoRuntime",
+                r
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// `wait_event` (backwards-compat bool wrapper) returns `true` on
+/// the pre-check fast path.
+pub fn test_wait_event_bool_wrapper_pre_check_true() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    if wq.wait_event(|| true) {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `wait_event_timeout` (backwards-compat bool wrapper) returns
+/// `false` on timeout.
+pub fn test_wait_event_timeout_bool_wrapper_times_out() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    if !wq.wait_event_timeout(|| false, 1) {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `has_waiters()` on a fresh queue returns `false` via the lock-free
+/// read path (it must NOT take the queue's `SpinLock` — if it did,
+/// it would still work in kernel mode, but the soundness invariant
+/// from the plan would be violated).
+pub fn test_has_waiters_fresh_queue_is_false() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    if !wq.has_waiters() {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `WaitQueue::new()` produces a queue with `generation == 0`.
+pub fn test_wait_queue_initial_generation() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    if wq.generation() == 0 {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `wake_one` on an empty queue returns `false` without panicking —
+/// confirms the has_woken / queue-back-pointer bookkeeping handles
+/// the empty-pop branch cleanly.
+pub fn test_wake_one_on_empty_queue() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    if !wq.wake_one() {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `wake_all` on an empty queue returns 0 without panicking.
+pub fn test_wake_all_on_empty_queue() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    if wq.wake_all() == 0 {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// Verify that wake_one / wake_all on an empty queue do NOT bump the
+/// generation counter — the generation is only incremented when at
+/// least one waiter was actually woken.
+pub fn test_generation_unchanged_when_no_waiters() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let wq = WaitQueue::new();
+    let gen_before = wq.generation();
+    let _ = wq.wake_one();
+    let _ = wq.wake_all();
+    if wq.generation() == gen_before {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+slopos_testing::stest!(
+    name = test_wait_event_until_pre_check_returns_carried_value,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_wait_event_timeout_until_pre_check_ready,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_wait_event_timeout_until_does_not_return_ready_on_none,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_wait_event_bool_wrapper_pre_check_true,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_wait_event_timeout_bool_wrapper_times_out,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_has_waiters_fresh_queue_is_false,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_wait_queue_initial_generation,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_wake_one_on_empty_queue, suite = sched_core);
+slopos_testing::stest!(name = test_wake_all_on_empty_queue, suite = sched_core);
+slopos_testing::stest!(
+    name = test_generation_unchanged_when_no_waiters,
+    suite = sched_core
+);

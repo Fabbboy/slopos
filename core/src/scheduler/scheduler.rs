@@ -876,24 +876,6 @@ pub fn yield_() {
     r#yield();
 }
 
-pub fn block_current_task() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return;
-    }
-
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-
-    // Disable IRQs through the state-CAS-then-yield window via the
-    // `IrqDisabled<'cli>` capability. The wrapped closure is the only
-    // place the unsafe primitive `block_current_task_irq_disabled` can
-    // be called — the capability lifetime makes the cli scope a
-    // compile-time requirement, not a discipline-by-comment.
-    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|irq| {
-        block_current_task_irq_disabled(current, task_id, irq);
-    });
-}
-
 /// CAS the current task's status from `Running` to `Blocked` without
 /// yielding. Returns `true` on CAS success.
 ///
@@ -918,13 +900,52 @@ pub fn mark_current_blocked() -> bool {
 /// Yield a task already CAS-flipped to `Blocked` by
 /// [`mark_current_blocked`]. Must be called outside any SpinLock —
 /// `schedule()` is not reentrant-safe under our locks.
+///
+/// # State-aware contract
+///
+/// The wait-queue protocol now evaluates `condition()` *outside*
+/// the queue's internal SpinLock (see
+/// [`slopos_ostd::sync::wait_queue::WaitQueue::wait_event`]). That
+/// opens a race window: a producer's `wake_*` may CAS
+/// `Blocked → Ready` between our prior `mark_current_blocked` and
+/// our call into this function. If we blindly descheduled in that
+/// case, the wake would be silently dropped (we'd be removed from
+/// the runqueue with state `Ready` and nobody to dispatch us).
+///
+/// Defence: at entry, `unschedule_task` strips us from every
+/// runqueue (serialised against any racing wake's `schedule_task`
+/// via the per-CPU `queue_lock`). Then re-load the task state. If
+/// the state is no longer `Blocked` (a wake CAS happened-before our
+/// Acquire-load), force state back to `Running`, scrub any
+/// residual runqueue presence, and return without context-switching.
+/// The caller's `wait_event` loop will re-check the condition on
+/// the next iteration and observe whatever data the producer stored
+/// before its `wake_*`.
+///
+/// If the state is still `Blocked`, no wake has been observed; we
+/// call `schedule()` to context-switch. A wake that fires after the
+/// state-load but before the context-switch still enqueues us
+/// (via its own `schedule_task`), so we are dispatched on a later
+/// scheduler tick — no lost wakeup.
 pub fn yield_blocked_task() {
     let current = scheduler_get_current_task();
     if current.is_null() {
         return;
     }
+    if task_id_of(current).unwrap_or(INVALID_TASK_ID) == INVALID_TASK_ID {
+        return;
+    }
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         unschedule_task(current);
+        if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
+            // Wake raced in. Either the wake's `schedule_task` happened
+            // before our `unschedule_task` (we removed the entry) or
+            // after (we left the entry). Force `Running` and scrub the
+            // residual enqueue defensively.
+            task_set_status(current, TaskStatus::Running);
+            unschedule_task(current);
+            return;
+        }
         schedule();
     });
 }
@@ -935,6 +956,11 @@ pub fn yield_blocked_task() {
 /// if a peer `wake_*` arrives first, that path's
 /// `cancel_sleep` removes the entry to keep the timer from firing
 /// spuriously against the (now-`Ready`) task.
+///
+/// Carries the same state-aware contract as [`yield_blocked_task`]:
+/// if a wake or a sleep deadline raced us between
+/// `mark_current_blocked` and entry here, we restore `Running` and
+/// return without descheduling.
 pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
     let current = scheduler_get_current_task();
     if current.is_null() {
@@ -947,31 +973,63 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
     super::sleep::arm_blocked_timeout(task_id, timeout_ms);
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         unschedule_task(current);
+        if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
+            task_set_status(current, TaskStatus::Running);
+            unschedule_task(current);
+            return;
+        }
         schedule();
     });
     super::sleep::cancel_sleep(task_id);
 }
 
-/// Unsafe primitive: assumes the caller has already disabled
-/// interrupts (witnessed by the `IrqDisabled<'cli>` token). Performs
-/// the Running→Blocked CAS, removes the task from runqueues, and
-/// yields. Public callers must go through [`block_current_task`] (or
-/// the timeout-aware variants) which materialise the token.
+/// Force the current task's state back to `Running` and remove any
+/// stale runqueue presence. Used by
+/// [`slopos_ostd::sync::wait_queue::WaitQueue::wait_event_until`] to
+/// cancel a previously committed `Running → Blocked` CAS when the
+/// wait condition becomes observable after the queue's SpinLock has
+/// been dropped (Linux's `set_current_state(TASK_RUNNING)` in
+/// `finish_wait`).
 ///
-/// The CAS source is `Running` (not `WillBlock` as in pre-Phase-5):
-/// the wait-queue protocol now serialises wake against block via the
-/// queue's own SpinLock — a wake that arrived first transitioned the
-/// task to `Ready`, so the CAS fails and we don't yield.
-fn block_current_task_irq_disabled(
-    current: *mut Task,
-    task_id: u32,
-    _irq: &slopos_ostd::cpu::x86_64::interrupts::IrqDisabled<'_>,
-) {
-    if task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked) != 0 {
+/// Idempotent vs. a concurrent producer-side `wake_*`: a wake that
+/// already CAS'd us to `Ready` and enqueued us on a runqueue is
+/// absorbed here by the unconditional state store + `unschedule_task`
+/// removal, so the next scheduler dispatch will not try to
+/// double-dispatch the still-executing task.
+///
+/// # Force-store idempotency (Linux `include/linux/sched.h:201-208`)
+///
+/// > Wakeup will do: if (@state & p->__state) p->__state =
+/// > TASK_RUNNING, that is, once it observes the
+/// > TASK_UNINTERRUPTIBLE store the waking CPU can issue a
+/// > TASK_RUNNING store which can collide with
+/// > `__set_current_state(TASK_RUNNING)`. […] Losing that store is
+/// > not a problem either because that will result in one extra go
+/// > around the loop and our @cond test will save the day.
+///
+/// SlopOS's argument is the same: the wake-side CAS
+/// `Blocked → Ready` and this function's store `→ Running` are
+/// indistinguishable for the purpose of "task is no longer blocked
+/// on this wait-queue"; whichever order they land in, the
+/// `wait_event_until` loop's condition recheck closes the residual
+/// race via the data lock's own happens-before chain.
+pub fn set_current_runnable() {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
         return;
     }
-    unschedule_task(current);
-    schedule();
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        // Force-set state to Running. `set_status` is a plain
+        // store (force_set on the underlying packed TaskState atomic),
+        // so it deterministically overrides whatever transient state
+        // a racing wake left behind.
+        task_set_status(current, TaskStatus::Running);
+        // Remove any runqueue presence a racing wake's
+        // `schedule_task` may have added — we are about to keep
+        // running on this CPU, the task must not also be eligible
+        // for dispatch from a ready queue.
+        unschedule_task(current);
+    });
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {

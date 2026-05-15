@@ -358,7 +358,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
 
 /// Block the current task with a timeout.
 ///
-/// Combines scheduler-backed blocking (`block_current_task` semantics)
+/// Combines scheduler-backed blocking (Running→Blocked CAS + yield semantics)
 /// with sleep-queue timeout (`sleep_current_task_ms` semantics).
 ///
 /// The caller is expected to have registered a wakeup mechanism (e.g.

@@ -24,38 +24,78 @@
 //!     friends via `KBox<WaitNode>`. Whichever side dequeues the node
 //!     (the wake side or [`WaitQueue::remove_current`]) reclaims the
 //!     `KBox` and drops it.
-//! - Calls `block_current_task()` (Running→Blocked CAS + yield) and
-//!   `unblock_task()` (Blocked→Ready CAS) on the registered backend.
-//!   Wakeup-loss is prevented by serialising the block and the wake
-//!   through the queue's own SpinLock — see the contract block below.
+//! - Calls `mark_current_blocked()` (Running→Blocked CAS, under WQ lock)
+//!   + `yield_blocked_task()` (state-aware deschedule, outside WQ lock)
+//!   + `unblock_task()` (Blocked→Ready CAS, producer side) on the
+//!   registered backend. Wakeup-loss is prevented by serialising the
+//!   block and the wake through the queue's own SpinLock — see the
+//!   contract block below.
 //!
-//! # Wait/wake correctness contract (AUDIT 2C)
+//! # Wait/wake correctness contract
 //!
 //! Producers do **NOT** need to issue explicit memory fences between the
 //! condition update (e.g. a data store, `exit_info.try_set`, a pipe-buffer
 //! fill/drain, a socket `rx_ready` flag flip) and the call to
 //! [`WaitQueue::wake_one`] / [`WaitQueue::wake_all`]. The internal
-//! [`SpinLock`](super::spin::SpinLock) supplies the bidirectional full
-//! barrier required by the wait/wake protocol:
+//! [`SpinLock`](super::spin::SpinLock) supplies the release-acquire pair
+//! that anchors the protocol:
 //!
-//! - The producer's release-on-unlock when `wake_*` drops the lock pairs
-//!   with the consumer's acquire-on-lock when [`wait_event`](WaitQueue::wait_event)
-//!   re-runs the condition closure under the same lock. Any stores made
-//!   before `wake_*` (and before any prior unlock of an unrelated lock the
-//!   producer also held) are visible to the closure.
-//! - Symmetrically, the consumer's enqueue under the lock pairs with the
-//!   producer's lock acquire in `wake_*`, so a producer that observes
-//!   "no waiters" did so AFTER any condition update the consumer's
-//!   pre-enqueue check could have observed.
+//! - The producer's `wake_*` acquires the queue's SpinLock to dequeue a
+//!   waiter. Whatever stores the producer made before `wake_*()` are
+//!   sequenced before the producer's lock-acquire (program order),
+//!   which is then ordered before any subsequent lock-acquire on the
+//!   same queue (lock-pair).
+//! - The consumer's [`wait_event`](WaitQueue::wait_event) enqueues +
+//!   commits `Running → Blocked` under the queue's SpinLock, releases
+//!   the lock, and then re-checks `condition()` *outside* the queue
+//!   lock. The condition check is therefore sequenced after our
+//!   release of the queue lock, which is sequenced after any earlier
+//!   producer's lock-acquire/release pair — so the condition observes
+//!   any prior producer store.
 //!
-//! This is the same contract Linux relies on for `wq_head->lock` in
-//! `prepare_to_wait_event` / `wake_up` — the equivalent of Linux's
-//! `prepare_to_wait_event` is, here, the act of pushing the
-//! [`WaitNode`] under [`SpinLock`](super::spin::SpinLock) inside
-//! [`wait_event`](WaitQueue::wait_event)'s loop body before the
-//! backend's `block_current_task` call. Subsystems that depend on
-//! this property (and therefore do **not** need their own fences
-//! before `wake_*`):
+//! # Why condition() runs OUTSIDE the queue lock (anti-AB-BA)
+//!
+//! Evaluating `condition()` under the queue's SpinLock would pull
+//! whatever lock the closure takes (typically a per-resource data
+//! lock — pipe slot, socket inner, etc.) into the queue's lock
+//! hierarchy. If any producer pattern holds the same data lock around
+//! its `wake_*` call (a structurally tempting pattern, e.g.
+//! "fill the buffer under `slot.lock()`, then `wake_one()`"), that
+//! mismatch produces the classical AB-BA:
+//!
+//! - Producer: `data.lock() → wake_*` takes `WQ_lock` while holding
+//!   `data.lock`.
+//! - Consumer: `wait_event` takes `WQ_lock` then `condition()` takes
+//!   `data.lock`.
+//!
+//! Both spin under disabled IRQs and freeze the kernel. The new
+//! protocol forbids the second half of that ordering by construction:
+//! `condition()` is never under `WQ_lock`. Producers can safely call
+//! `wake_*` while holding any data lock — though
+//! [`fs::pipe_file_ops::PipeWriteOps`] and friends still release the
+//! data lock first, as defence in depth.
+//!
+//! # Race-close
+//!
+//! A producer's `wake_*` that fires between consumer's WQ-unlock and
+//! consumer's post-unlock condition check observes our `Blocked`
+//! task state (committed under WQ-lock in step 2 of the protocol)
+//! and CAS-flips us to `Ready` + enqueues us on a runqueue. Two
+//! consumer-side branches handle this race:
+//!
+//! - If our post-unlock `condition()` returns true, we call
+//!   [`WaitQueueBackend::set_current_runnable`] which force-stores
+//!   `Running` and strips the stale runqueue presence — we keep
+//!   executing on this CPU.
+//! - If `condition()` returns false but a wake CAS'd us to `Ready`
+//!   anyway, [`WaitQueueBackend::yield_blocked_task`] is state-aware:
+//!   it sees state != `Blocked`, restores `Running`, strips the
+//!   runqueue presence, and returns without context-switching. The
+//!   `wait_event` loop iterates and the next condition check observes
+//!   the data the producer stored before its `wake_*`.
+//!
+//! Subsystems that inherit this contract (and therefore do **not**
+//! need their own fences before `wake_*`):
 //!
 //! - Pipes (`fs/src/pipe.rs`, `fs/src/pipe_file_ops.rs`) — `READER_WQS`
 //!   / `WRITER_WQS`, woken on buffer-fill / drain / EOF.
@@ -95,6 +135,58 @@ pub type WaitTaskHandle = *mut c_void;
 const NULL_HANDLE: WaitTaskHandle = core::ptr::null_mut();
 
 // ---------------------------------------------------------------------------
+// WaitOutcome — the canonical result type for generic-return waits.
+// ---------------------------------------------------------------------------
+
+/// Outcome of a generic-return wait (see [`WaitQueue::wait_event_until`]
+/// and [`WaitQueue::wait_event_timeout_until`]).
+///
+/// Modelled on illumos's `cv_wait_sig` return semantics: the caller wants
+/// to distinguish a satisfied condition (carrying its result) from a
+/// timeout or an unavailable-runtime early-exit, without re-checking
+/// task state afterwards. This eliminates a class of "I forgot to
+/// re-check the timeout / signal-pending state after wait_event returned
+/// `false`" bugs that the bool-returning API admits.
+///
+/// The variant set is deliberately small. Signal-pending is intentionally
+/// **not** an outcome — callers check `has_pending_signal()` themselves
+/// after the wait returns, matching the existing SlopOS discipline used
+/// by `PipeReadOps::read`, the TTY input path, and the poll/select loop.
+/// Adding `Signal` here would invite double-checking and is left for a
+/// future API revision if a caller-driven need emerges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome<R> {
+    /// Condition observed true; the closure's return value is carried.
+    Ready(R),
+    /// Deadline elapsed without the condition becoming true. Only emitted
+    /// by [`WaitQueue::wait_event_timeout_until`].
+    Timeout,
+    /// Wait queue backend is not registered yet, or the current task
+    /// handle is null (idle CPU / pre-init / test harness reset). The
+    /// unbounded [`WaitQueue::wait_event_until`] returns `None` rather
+    /// than this variant; this is only surfaced by the timeout flavour.
+    NoRuntime,
+}
+
+impl<R> WaitOutcome<R> {
+    /// `true` iff the outcome is `Ready(_)`.
+    #[inline]
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, WaitOutcome::Ready(_))
+    }
+
+    /// Unwrap to `Option<R>`, discarding the `Timeout` / `NoRuntime`
+    /// distinction.
+    #[inline]
+    pub fn into_ready(self) -> Option<R> {
+        match self {
+            WaitOutcome::Ready(r) => Some(r),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WaitQueueBackend trait + one-shot registration.
 // ---------------------------------------------------------------------------
 
@@ -118,18 +210,6 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// null if there is no current task.
     fn current_task_handle(&self) -> WaitTaskHandle;
 
-    /// Block the current task until something calls
-    /// [`unblock_task`](Self::unblock_task) on its handle.
-    ///
-    /// Performs a `Running → Blocked` CAS internally and yields. If
-    /// a concurrent `unblock_task` already CAS'd the task off
-    /// `Running` (e.g. `Blocked → Ready` from a wake that arrived
-    /// between the caller's pre-block check and this call), the CAS
-    /// is a no-op and this returns immediately — the wait-queue
-    /// caller's loop re-checks the condition and observes the
-    /// pending wake.
-    fn block_current_task(&self);
-
     /// Mark the *current* task `Blocked` immediately, without yielding.
     /// Returns `true` if the CAS `Running → Blocked` succeeded; `false`
     /// if the task wasn't `Running` (e.g. a wake already won the race).
@@ -146,14 +226,48 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// Removes the task from runqueues and calls `schedule()`. Must
     /// be called *outside* any SpinLock — `schedule()` is not
     /// reentrant-safe under our locks.
+    ///
+    /// # State-aware contract
+    ///
+    /// The wait-queue protocol now checks `condition()` *outside* the
+    /// queue's internal SpinLock (see [`WaitQueue::wait_event`]). This
+    /// creates a window where a producer's `wake_*` may CAS
+    /// `Blocked → Ready` between our `mark_current_blocked` and our
+    /// `yield_blocked_task` call. Implementations MUST observe that
+    /// window: if the task is no longer `Blocked` at entry, restore
+    /// it to `Running`, remove any spurious runqueue presence, and
+    /// return without context-switching. Otherwise the racing wake
+    /// would be silently dropped.
     fn yield_blocked_task(&self);
 
     /// Variant of [`yield_blocked_task`] that also arms a
     /// millisecond-resolution timeout. The sleep-queue entry will
     /// CAS `Blocked → Ready` when the deadline fires; if a
     /// `wake_*` arrives first, the racing `cancel_sleep` removes
-    /// the entry. Must be called outside any SpinLock.
+    /// the entry. Must be called outside any SpinLock. Carries the
+    /// same state-aware contract as [`yield_blocked_task`].
     fn yield_blocked_task_with_timeout(&self, timeout_ms: u32);
+
+    /// Force the current task's state back to `Running`. Used by the
+    /// wait-queue protocol to cancel a previously committed
+    /// `Running → Blocked` CAS when the wait condition is observed
+    /// true *after* the queue's SpinLock has been released. The
+    /// analog of Linux's `set_current_state(TASK_RUNNING)` in
+    /// `finish_wait`.
+    ///
+    /// Unconditional — implementations must force-store `Running`
+    /// regardless of the prior state. A concurrent wake that fired
+    /// between [`mark_current_blocked`](Self::mark_current_blocked)
+    /// and this call may have transitioned us to `Ready` and
+    /// enqueued our task on a run-queue; implementations should
+    /// remove that stale runqueue presence so the task does not get
+    /// double-dispatched.
+    ///
+    /// The force-store-not-CAS soundness rests on Linux's idempotency
+    /// argument from `include/linux/sched.h:201-208`. See the
+    /// production-side implementation doc for the verbatim quote
+    /// (kernel-side `set_current_runnable` in `scheduler.rs`).
+    fn set_current_runnable(&self);
 
     /// Wake a previously-blocked task. Returns 0 on success or a
     /// negative errno-shaped value on failure.
@@ -182,12 +296,12 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     fn current_task_handle(&self) -> WaitTaskHandle {
         NULL_HANDLE
     }
-    fn block_current_task(&self) {}
     fn mark_current_blocked(&self) -> bool {
         false
     }
     fn yield_blocked_task(&self) {}
     fn yield_blocked_task_with_timeout(&self, _timeout_ms: u32) {}
+    fn set_current_runnable(&self) {}
     unsafe fn unblock_task(&self, _task: WaitTaskHandle) -> i32 {
         0
     }
@@ -212,14 +326,14 @@ pub struct WaitQueueOps {
     pub is_runtime_initialised: fn() -> bool,
     /// See [`WaitQueueBackend::current_task_handle`].
     pub current_task_handle: fn() -> WaitTaskHandle,
-    /// See [`WaitQueueBackend::block_current_task`].
-    pub block_current_task: fn(),
     /// See [`WaitQueueBackend::mark_current_blocked`].
     pub mark_current_blocked: fn() -> bool,
     /// See [`WaitQueueBackend::yield_blocked_task`].
     pub yield_blocked_task: fn(),
     /// See [`WaitQueueBackend::yield_blocked_task_with_timeout`].
     pub yield_blocked_task_with_timeout: fn(u32),
+    /// See [`WaitQueueBackend::set_current_runnable`].
+    pub set_current_runnable: fn(),
     /// See [`WaitQueueBackend::unblock_task`].
     ///
     /// The fn pointer is `safe` because consumers always pass it
@@ -243,9 +357,6 @@ unsafe impl WaitQueueBackend for OpsBackend {
     fn current_task_handle(&self) -> WaitTaskHandle {
         (self.0.current_task_handle)()
     }
-    fn block_current_task(&self) {
-        (self.0.block_current_task)()
-    }
     fn mark_current_blocked(&self) -> bool {
         (self.0.mark_current_blocked)()
     }
@@ -254,6 +365,9 @@ unsafe impl WaitQueueBackend for OpsBackend {
     }
     fn yield_blocked_task_with_timeout(&self, timeout_ms: u32) {
         (self.0.yield_blocked_task_with_timeout)(timeout_ms)
+    }
+    fn set_current_runnable(&self) {
+        (self.0.set_current_runnable)()
     }
     unsafe fn unblock_task(&self, task: WaitTaskHandle) -> i32 {
         // The ops-table fn pointer is `fn` (not `unsafe fn`); the
@@ -356,98 +470,199 @@ impl WaitQueue {
 
     /// Block the current task until `condition()` returns `true`.
     ///
-    /// Race-close protocol (post-Phase-5, no `WillBlock` intermediate):
+    /// # Race-close protocol (post-AB-BA fix)
+    ///
+    /// The closure is **deliberately never** evaluated while the
+    /// queue's internal `SpinLock` is held. Linux's `wait_event`
+    /// works this way too (see `___wait_event` +
+    /// `prepare_to_wait_event` in `kernel/sched/wait.c`); SlopOS's
+    /// earlier "re-check condition under the lock" shortcut leaked
+    /// whatever lock the closure took (typically a per-resource
+    /// data lock such as the pipe slot lock) into the wait-queue's
+    /// lock hierarchy. Combined with any producer that briefly held
+    /// the same data lock around its `wake_*` call (e.g.
+    /// `PipeWriteOps::write` doing `slot.lock(); write_from;
+    /// wake_one()`), the two paths formed a classical AB-BA
+    /// (`PS → WQ` on the wake side, `WQ → PS` on the wait side)
+    /// that froze two CPUs on busy-spinning ticket locks with IRQs
+    /// disabled.
+    ///
+    /// The new protocol:
     ///
     /// 1. Pre-check condition outside any lock (fast path).
-    /// 2. Take the queue's SpinLock.
-    /// 3. Re-check condition under the lock — drop & return if true.
-    /// 4. Push our node onto the list (lock-held).
-    /// 5. CAS `Running → Blocked` under the same lock (lock-held).
-    /// 6. Drop the lock.
-    /// 7. Yield (no-op CAS schedule()) — the lock-released, status-
-    ///    Blocked task sleeps until a producer's `wake_*` flips it
-    ///    `Blocked → Ready`.
+    /// 2. Under the queue's SpinLock: unlink any stale node, push a
+    ///    fresh one, CAS `Running → Blocked`. Then drop the lock.
+    /// 3. Re-check condition **outside** any lock.
+    /// 4. If true: force state back to `Running` (via
+    ///    [`WaitQueueBackend::set_current_runnable`]), unlink, return.
+    /// 5. Else: yield. [`WaitQueueBackend::yield_blocked_task`] is
+    ///    state-aware and silently no-ops if a wake raced in between
+    ///    step 2 and step 5, so a producer that fires `wake_*`
+    ///    between WQ-unlock and our yield does not lose its wake.
     ///
-    /// Why the CAS belongs under the lock: a producer that takes the
-    /// queue lock between (4) and (5) and pops our node would see
-    /// us still `Running` and call `unblock_task` whose `Blocked →
-    /// Ready` CAS would fail — lost wakeup. By doing the
-    /// `Running → Blocked` CAS under the same lock, we guarantee
-    /// that any `wake_*` that observes our node also observes us as
-    /// `Blocked` and successfully CAS-flips us to `Ready`.
-    pub fn wait_event<F: Fn() -> bool>(&self, condition: F) -> bool {
+    /// # Memory-ordering proof
+    ///
+    /// The producer's contract is: store the wake-signal data, then
+    /// call `wake_*()`. `wake_*()` acquires this queue's SpinLock.
+    /// Two cases for the producer's WQ-acquire timing relative to
+    /// our step 2 WQ-acquire:
+    ///
+    /// - Producer **before** our step 2: lock-pair release/acquire
+    ///   establishes producer-store → our step 2 WQ.acquire →
+    ///   our step 2 WQ.release → our step 3 condition check. The
+    ///   condition closure observes the producer's data (any per-
+    ///   resource lock the closure also takes only sharpens the
+    ///   happens-before).
+    /// - Producer **after** our step 2: producer sees our queued
+    ///   node + `Blocked` state. `unblock_task` CAS `Blocked → Ready`
+    ///   succeeds. Either:
+    ///   - Our step 3 sees the data → we cancel-block, return true.
+    ///     The producer's prior `schedule_task` enqueue is benign
+    ///     (the runqueue is idempotent on duplicate push).
+    ///   - Our step 3 doesn't see the data → step 5 yield is a no-op
+    ///     (state is `Ready` not `Blocked`), we loop, fast-path's
+    ///     condition check (next iteration step 1) sees the data
+    ///     because the producer's WQ-acquire/release pair preceded
+    ///     it.
+    ///
+    /// Producers do NOT need to issue an explicit memory fence
+    /// between their data store and `wake_*()`. The SpinLock acquire
+    /// supplies the necessary release-barrier paired with our
+    /// matching acquire when we next take the queue's lock or run
+    /// any other piece of code that takes the data lock the producer
+    /// also used.
+    pub fn wait_event<F: FnMut() -> bool>(&self, mut condition: F) -> bool {
+        self.wait_event_until(|| if condition() { Some(()) } else { None })
+            .is_some()
+    }
+
+    /// Block the current task until `condition()` returns `Some(R)`,
+    /// returning the carried value. The Asterinas-style generic-return
+    /// variant; `wait_event` is now a thin wrapper around this.
+    ///
+    /// Returns `None` only when the wait-queue backend is unregistered
+    /// (pre-init, test-harness reset) or the current task handle is
+    /// null (idle CPU calling wait, which should not happen but is
+    /// defended against).
+    ///
+    /// # Race-close protocol
+    ///
+    /// The closure is **deliberately never** evaluated while the
+    /// queue's internal `SpinLock` is held. Linux's `wait_event`
+    /// works this way too (see `___wait_event` +
+    /// `prepare_to_wait_event` in `kernel/sched/wait.c`); SlopOS's
+    /// earlier "re-check condition under the lock" shortcut leaked
+    /// whatever lock the closure took (typically a per-resource
+    /// data lock such as the pipe slot lock) into the wait-queue's
+    /// lock hierarchy. Combined with any producer that briefly held
+    /// the same data lock around its `wake_*` call (e.g.
+    /// `PipeWriteOps::write` doing `slot.lock(); write_from;
+    /// wake_one()`), the two paths formed a classical AB-BA
+    /// (`PS → WQ` on the wake side, `WQ → PS` on the wait side)
+    /// that froze two CPUs on busy-spinning ticket locks with IRQs
+    /// disabled.
+    ///
+    /// The protocol per iteration:
+    ///
+    /// 1. Pre-check condition outside any lock (fast path). If
+    ///    `Some(r)`, return `Some(r)` immediately.
+    /// 2. Under the queue's SpinLock: unlink any stale node, push a
+    ///    fresh one (which also resets `has_woken` and sets the queue
+    ///    back-pointer — see `push_node`), CAS `Running → Blocked`.
+    ///    Drop the lock.
+    /// 3. Re-check condition **outside** any lock, and Acquire-load
+    ///    `has_woken` to detect a producer wake that raced our
+    ///    decision to yield.
+    /// 4. Three-way decision:
+    ///    - `Some(r)`: return `Some(r)` (cancelling our Blocked CAS
+    ///      via `set_current_runnable`). The producer's wake — if any
+    ///      — already dequeued our node and `unblock_task` raced
+    ///      `Blocked → Ready`; force-Running through this path is
+    ///      sound because `set_current_runnable` is unconditional
+    ///      (Linux's `__set_current_state(TASK_RUNNING)` model — see
+    ///      `WaitQueueBackend::set_current_runnable`).
+    ///    - `None` but `woke == true`: a spurious wake fired before
+    ///      our recheck observed the data (e.g. the producer's data
+    ///      lock is not the data lock our closure takes, so the
+    ///      lock-pair barrier across the producer's data store and
+    ///      our condition load is not yet established). Cancel the
+    ///      block and loop — do NOT yield, because our state is
+    ///      already `Ready` and a yield would deschedule us into
+    ///      a permanently-blocked state.
+    ///    - `None` and `woke == false`: yield. The state-aware
+    ///      [`WaitQueueBackend::yield_blocked_task`] handles the
+    ///      rare race where a wake fires between our load of
+    ///      `has_woken` and our yield call (state is `Ready` at
+    ///      that point; yield observes it and short-circuits).
+    pub fn wait_event_until<F, R>(&self, mut condition: F) -> Option<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
         let bk = backend();
         let node = core::pin::pin!(WaitNode::new());
 
         loop {
-            if condition() {
+            // Step 1: pre-check condition (no locks).
+            if let Some(r) = condition() {
                 self.unlink_if_linked(node.as_ref());
-                return true;
+                return Some(r);
             }
 
             if !bk.is_runtime_initialised() {
                 self.unlink_if_linked(node.as_ref());
-                return false;
+                return None;
             }
 
             let task = bk.current_task_handle();
             if task.is_null() {
                 self.unlink_if_linked(node.as_ref());
-                return false;
+                return None;
             }
 
-            let blocked = {
+            // Step 2: enqueue and commit Blocked under the queue lock.
+            // `push_node` resets `has_woken=false` and sets the queue
+            // back-pointer under this same critical section, so any
+            // wake from this moment on will swap `has_woken=true`
+            // (visible to step 3 via Acquire) and clear the back-pointer
+            // (visible to a racing Drop via Acquire).
+            //
+            // We do NOT call `condition()` here — that would pull the
+            // closure's data-lock into the queue's lock hierarchy and
+            // re-introduce the AB-BA documented above.
+            let marked_blocked = {
                 let inner = self.inner.lock();
-                if condition() {
-                    drop(inner);
-                    self.unlink_if_linked(node.as_ref());
-                    return true;
-                }
                 self.unlink_locked(node.as_ref(), &inner);
                 node.as_ref().set_task(task);
-                Self::push_node(&inner, node.as_ref());
+                self.push_node(&inner, node.as_ref());
                 bk.mark_current_blocked()
             };
 
-            if blocked {
-                bk.yield_blocked_task();
+            // Step 3: re-check condition outside the queue lock, and
+            // also observe `has_woken` to catch a wake that raced our
+            // decision to yield. The (Ready) and (spurious-wake) arms
+            // share their cleanup — cancel block + unlink — and only
+            // differ in whether we return immediately or loop.
+            let condition_ready = condition();
+            let woke = node.as_ref().has_woken_load();
+            if condition_ready.is_some() || woke {
+                if marked_blocked {
+                    bk.set_current_runnable();
+                }
+                self.unlink_if_linked(node.as_ref());
+                if let Some(r) = condition_ready {
+                    return Some(r);
+                }
+                // Spurious wake: loop. The next iteration's pre-check
+                // observes the producer's data via the data lock's own
+                // happens-before chain (not the WQ-lock-pair).
+                continue;
             }
 
-            // Loop back: re-test condition. If `wake_one` popped us,
-            // the node is no longer linked; otherwise we'll unlink
-            // ourselves on the next iteration's pre-enqueue cleanup.
+            // Step 4: neither condition nor wake — yield (state-aware).
+            if marked_blocked {
+                bk.yield_blocked_task();
+            }
         }
-    }
-
-    /// Block the current task exactly once, without checking any
-    /// condition. See [`wait_event`](Self::wait_event) for the
-    /// lock-held push + CAS protocol that prevents lost wakeups.
-    pub fn wait_once(&self) -> bool {
-        let bk = backend();
-        if !bk.is_runtime_initialised() {
-            return false;
-        }
-
-        let task = bk.current_task_handle();
-        if task.is_null() {
-            return false;
-        }
-
-        let node = core::pin::pin!(WaitNode::new());
-        node.as_ref().set_task(task);
-
-        let blocked = {
-            let inner = self.inner.lock();
-            Self::push_node(&inner, node.as_ref());
-            bk.mark_current_blocked()
-        };
-
-        if blocked {
-            bk.yield_blocked_task();
-        }
-
-        self.unlink_if_linked(node.as_ref());
-        true
     }
 
     /// Block the current task until `condition()` returns `true` or
@@ -455,26 +670,63 @@ impl WaitQueue {
     /// condition was observed true; `false` on timeout or runtime
     /// not initialised.
     ///
-    /// Uses the same lock-held push + `Running → Blocked` CAS
-    /// protocol as [`wait_event`](Self::wait_event). The timeout is
-    /// implemented by `yield_blocked_task_with_timeout` arming a
-    /// sleep-queue entry that fires `unblock_task` after the
-    /// deadline; if a peer `wake_*` arrives first, that path's
-    /// `cancel_sleep` removes the entry to keep the timer from
-    /// firing spuriously against the (now-`Ready`) task.
-    pub fn wait_event_timeout<F: Fn() -> bool>(&self, condition: F, timeout_ms: u64) -> bool {
+    /// Carries the same race-close protocol as
+    /// [`wait_event`](Self::wait_event): `condition()` is never
+    /// evaluated under the queue's internal SpinLock, eliminating
+    /// the AB-BA risk between this queue and whatever lock the
+    /// closure takes. The timeout is implemented by
+    /// `yield_blocked_task_with_timeout` arming a sleep-queue entry
+    /// that fires `unblock_task` after the deadline; if a peer
+    /// `wake_*` arrives first, that path's `cancel_sleep` removes
+    /// the entry to keep the timer from firing spuriously against
+    /// the (now-`Ready`) task.
+    pub fn wait_event_timeout<F: FnMut() -> bool>(
+        &self,
+        mut condition: F,
+        timeout_ms: u64,
+    ) -> bool {
+        matches!(
+            self.wait_event_timeout_until(
+                || if condition() { Some(()) } else { None },
+                timeout_ms,
+            ),
+            WaitOutcome::Ready(_)
+        )
+    }
+
+    /// Block the current task until `condition()` returns `Some(R)` or
+    /// `timeout_ms` milliseconds elapse. Generic-return analogue of
+    /// [`wait_event_timeout`]; carries the same race-close protocol as
+    /// [`wait_event_until`] including the three-way recheck logic
+    /// (`Some` → Ready, spurious wake → cancel + loop, neither →
+    /// yield-with-timeout).
+    ///
+    /// Returns:
+    /// - `WaitOutcome::Ready(R)` if the condition was observed before
+    ///   the deadline.
+    /// - `WaitOutcome::Timeout` if the deadline elapsed first.
+    /// - `WaitOutcome::NoRuntime` if the backend is unregistered or
+    ///   the current task is null.
+    pub fn wait_event_timeout_until<F, R>(
+        &self,
+        mut condition: F,
+        timeout_ms: u64,
+    ) -> WaitOutcome<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
         let bk = backend();
-        if condition() {
-            return true;
+        if let Some(r) = condition() {
+            return WaitOutcome::Ready(r);
         }
 
         if !bk.is_runtime_initialised() {
-            return false;
+            return WaitOutcome::NoRuntime;
         }
 
         let task = bk.current_task_handle();
         if task.is_null() {
-            return false;
+            return WaitOutcome::NoRuntime;
         }
 
         let node = core::pin::pin!(WaitNode::new());
@@ -485,24 +737,38 @@ impl WaitQueue {
         let result = loop {
             let now = bk.get_time_ms();
             if now >= deadline_ms {
-                break false;
+                break WaitOutcome::Timeout;
             }
 
             let remaining = deadline_ms.saturating_sub(now);
             let sleep_ms = remaining.min(500) as u32;
 
-            let blocked = {
+            // Enqueue + commit Blocked under the queue lock. Condition
+            // is NOT evaluated here (see wait_event_until for rationale).
+            // `push_node` also resets `has_woken` and sets the queue
+            // back-pointer under the same critical section.
+            let marked_blocked = {
                 let inner = self.inner.lock();
-                if condition() {
-                    drop(inner);
-                    break true;
-                }
                 self.unlink_locked(node.as_ref(), &inner);
-                Self::push_node(&inner, node.as_ref());
+                self.push_node(&inner, node.as_ref());
                 bk.mark_current_blocked()
             };
 
-            if blocked {
+            // Three-way recheck: condition / has_woken / neither. See
+            // `wait_event_until` for the rationale.
+            let condition_ready = condition();
+            let woke = node.as_ref().has_woken_load();
+            if condition_ready.is_some() || woke {
+                if marked_blocked {
+                    bk.set_current_runnable();
+                }
+                self.unlink_if_linked(node.as_ref());
+                if let Some(r) = condition_ready {
+                    break WaitOutcome::Ready(r);
+                }
+                continue; // spurious wake — loop, deadline still applies.
+            }
+            if marked_blocked {
                 bk.yield_blocked_task_with_timeout(sleep_ms);
             }
         };
@@ -585,19 +851,34 @@ impl WaitQueue {
     // ---------------------------------------------------------------
 
     /// Wake one waiting task. Returns `true` if a task was woken.
+    ///
+    /// All node mutations (read `task` + `heap_owned`, swap
+    /// `has_woken` to `true`, clear the queue back-pointer) happen
+    /// *under the WQ critical section* so the consumer's Drop and
+    /// the consumer's post-unlock recheck observe a consistent state.
+    /// `unblock_task` happens outside the lock — it may take
+    /// scheduler runqueue locks and we must never invoke them under
+    /// ours.
     pub fn wake_one(&self) -> bool {
         let popped = {
             let inner = self.inner.lock();
             inner.list.pop().map(|nn| {
-                // Read fields under the lock so a concurrently-timing-out
-                // waiter cannot free the stack node before we capture
-                // the values we need.
                 // SAFETY: `nn` was just popped from the list and is
                 // alive: stack waiters are blocked / will block before
                 // freeing their frame, and heap nodes are owned by the
                 // queue until we explicitly drop them.
-                let task = unsafe { nn.as_ref().task() };
-                let heap_owned = unsafe { nn.as_ref().is_heap_owned() };
+                let n = unsafe { nn.as_ref() };
+                let task = n.task();
+                let heap_owned = n.is_heap_owned();
+                // Mark the node woken AND clear the back-pointer
+                // *before* releasing the lock. The has_woken store gives
+                // the consumer's post-unlock recheck (or `Drop`) a
+                // free signal that a wake happened; the queue_clear is
+                // load-bearing for heap-owned nodes whose Drop reads
+                // the back-pointer outside the lock to decide whether
+                // to re-acquire it.
+                let _ = n.has_woken_swap_true();
+                n.queue_clear();
                 (nn, task, heap_owned)
             })
         };
@@ -609,7 +890,10 @@ impl WaitQueue {
                 if heap_owned {
                     // SAFETY: `heap_owned` implies the node was
                     // produced by `enqueue_current` via `KBox::into_raw`;
-                    // we now own it and reclaim it.
+                    // we now own it and reclaim it. The back-pointer
+                    // was cleared under the WQ lock above, so the
+                    // KBox's `Drop for WaitNode` will see null and
+                    // short-circuit.
                     unsafe {
                         drop(KBox::from_raw(nn.as_ptr()));
                     }
@@ -628,6 +912,8 @@ impl WaitQueue {
     /// Drains the queue one node at a time, releasing the inner
     /// `SpinLock` between iterations so `unblock_task` (which may take
     /// scheduler runqueue locks) is never invoked under our lock.
+    ///
+    /// Same per-node bookkeeping as [`wake_one`] applies under the lock.
     pub fn wake_all(&self) -> usize {
         let mut woken = 0usize;
         loop {
@@ -635,8 +921,11 @@ impl WaitQueue {
                 let inner = self.inner.lock();
                 inner.list.pop().map(|nn| {
                     // SAFETY: as in `wake_one` — `nn` is freshly popped.
-                    let task = unsafe { nn.as_ref().task() };
-                    let heap_owned = unsafe { nn.as_ref().is_heap_owned() };
+                    let n = unsafe { nn.as_ref() };
+                    let task = n.task();
+                    let heap_owned = n.is_heap_owned();
+                    let _ = n.has_woken_swap_true();
+                    n.queue_clear();
                     (nn, task, heap_owned)
                 })
             };
@@ -667,9 +956,48 @@ impl WaitQueue {
     // Inspection.
     // ---------------------------------------------------------------
 
-    /// Check if there are any waiters.
+    /// Check if there are any waiters. **Lock-free** — does not take
+    /// the queue's `SpinLock`. Callers that want to skip a `wake_*`
+    /// call when no waiters are queued can use this as a cheap
+    /// pre-filter without paying the spinlock acquire cost.
+    ///
+    /// # Soundness vs. a `num_wakers` fast path inside `wake_*`
+    ///
+    /// The cross-kernel audit considered baking a lock-free fast
+    /// path into `wake_one`/`wake_all` itself (so producers would
+    /// skip the spinlock entirely when no one was waiting — the
+    /// Asterinas `num_wakers` pattern). That was rejected because
+    /// the soundness argument burdens every producer with a
+    /// non-obvious contract ("you must hold and release the same
+    /// data lock the consumer's condition closure uses, around your
+    /// data store"). Linux always takes `wq_head->lock` in
+    /// `__wake_up_common` for exactly this reason. Exposing the
+    /// lock-free probe here, instead of hiding it inside `wake_*`,
+    /// makes the caller's decision explicit at the call site —
+    /// pipe producers etc. can do `if wq.has_waiters() { wq.wake_one(); }`
+    /// with the soundness reasoning visible.
+    ///
+    /// # Memory ordering
+    ///
+    /// `IntrusiveLinkedList::is_empty()` reads the `head` pointer
+    /// with `Acquire`. That pairs with the `Release` store inside
+    /// the WQ critical section of `push_node`. A reader that
+    /// observes `is_empty() == false` is guaranteed that some
+    /// producer's WQ-locked push happened-before, and thus any
+    /// store the producer made before its push is visible.
+    /// Observing `is_empty() == true` may race with a
+    /// just-committed push and is therefore advisory — the caller
+    /// is expected to follow up with a real wake call when in
+    /// doubt; the cost of a spurious "no waiters" miss is one
+    /// extra spin-loop iteration on the consumer side.
     pub fn has_waiters(&self) -> bool {
-        let inner = self.inner.lock();
+        // SAFETY: `as_ptr` exposes a `*const WaitQueueInner` without
+        // taking the lock; we only read the `list.head` atomic
+        // through it, which is safe because (a) the head pointer
+        // is `AtomicPtr` with its own synchronisation and (b) the
+        // `WaitQueueInner`'s memory is `'static` (the `WaitQueue`
+        // outlives all its waiters by API contract).
+        let inner = unsafe { &*self.inner.as_ptr() };
         !inner.list.is_empty()
     }
 
@@ -698,7 +1026,9 @@ impl WaitQueue {
         }
 
         // Scan + remove under the lock so a concurrent `wake_*` cannot
-        // free the same node out from under us.
+        // free the same node out from under us. Same bookkeeping as
+        // `wake_*`: mark has_woken + clear back-pointer under the
+        // lock before reclaiming the heap allocation.
         let removed = {
             let inner = self.inner.lock();
             let mut found: Option<NonNull<WaitNode>> = None;
@@ -717,6 +1047,12 @@ impl WaitQueue {
                 // SAFETY: we just produced `nn` from `iter()`; remove
                 // it from the same list.
                 let _ = inner.list.remove(nn);
+                // SAFETY: same as above — the node is still alive (we
+                // are holding the WQ lock so no concurrent reclaimer
+                // can run yet).
+                let n = unsafe { nn.as_ref() };
+                let _ = n.has_woken_swap_true();
+                n.queue_clear();
             }
             found
         };
@@ -744,7 +1080,19 @@ impl WaitQueue {
     /// Push a stack-pinned node onto the list under the caller's lock.
     /// The caller must hold `self.inner` and the node must outlive the
     /// list membership (stack-pinning enforces this).
-    fn push_node(inner: &WaitQueueInner, node: Pin<&WaitNode>) {
+    ///
+    /// Also performs the defense-in-depth bookkeeping under the
+    /// same WQ critical section:
+    /// - Reset `has_woken` to `false` so a previous-iteration wake on
+    ///   this node does not false-positive the next iteration's check.
+    /// - Store the queue back-pointer (`self as *mut c_void`) so a
+    ///   future `Drop for WaitNode` can unlink the node if upstream
+    ///   code forgot.
+    ///
+    /// `&self` is now required (was just `inner` before) because we
+    /// store the queue back-pointer; the cast to `*mut c_void` happens
+    /// here so `wait_node.rs` stays free of `WaitQueue` references.
+    fn push_node(&self, inner: &WaitQueueInner, node: Pin<&WaitNode>) {
         // SAFETY: `node` is pinned, so its address is stable until
         // dropped. Converting to `NonNull<WaitNode>` is sound; the
         // intrusive list will only access the embedded
@@ -753,6 +1101,14 @@ impl WaitQueue {
         // unlink before returning from the function that created the
         // pin.
         let nn = NonNull::from(node.get_ref());
+        // Reset has_woken + store back-pointer BEFORE list.push. The
+        // ordering matters: by the time the node is observable to a
+        // wake on this queue, its has_woken flag must be reset and its
+        // back-pointer set, so the wake's pop-path stores are
+        // consistent with the consumer's view.
+        node.get_ref().has_woken_reset();
+        node.get_ref()
+            .queue_store(self as *const WaitQueue as *mut c_void);
         // The push refusal (already-linked) is treated as a no-op:
         // `wait_event`'s loop guarantees we unlink before pushing,
         // so this branch is defensive only.
@@ -766,7 +1122,9 @@ impl WaitQueue {
         self.unlink_locked(node, &inner);
     }
 
-    /// Unlink `node` from the list under an already-held lock.
+    /// Unlink `node` from the list under an already-held lock. Also
+    /// clears the queue back-pointer under the lock so `Drop for
+    /// WaitNode` sees null and short-circuits.
     fn unlink_locked(&self, node: Pin<&WaitNode>, inner: &WaitQueueInner) {
         // SAFETY: we hold the queue lock; either `node` is a member of
         // the list (in which case removing it is sound) or it isn't
@@ -775,6 +1133,84 @@ impl WaitQueue {
         // stack address, valid for the duration of this call.
         let nn = NonNull::from(node.get_ref());
         let _ = inner.list.remove(nn);
+        node.get_ref().queue_clear();
+    }
+
+    /// Called from `Drop for WaitNode` when the node finds itself with
+    /// a non-null queue back-pointer at drop time. This means some
+    /// upstream code-path failed to unlink the node before its owning
+    /// stack frame / `KBox` was destroyed — a defense-in-depth
+    /// recovery path.
+    ///
+    /// Uses `try_lock` rather than `lock()` so a future buggy refactor
+    /// that drops a `WaitNode` while still holding the WQ lock surfaces
+    /// as a `debug_assert!` in debug builds rather than a permanent
+    /// deadlock. In release builds the `try_lock` failure path leaks
+    /// the node on the queue (the upstream invariant violation is
+    /// already a bug; the goal here is to not make it worse).
+    ///
+    /// # Safety
+    ///
+    /// `nn` must point to the `WaitNode` whose `queue_load()` returned
+    /// `self as *mut c_void`. The node's address must still be valid
+    /// for the duration of this call (true during `Drop` since the
+    /// node's memory hasn't been freed yet; Drop runs *before* the
+    /// stack frame unwinds / heap block is released).
+    pub(crate) unsafe fn drop_unlink(&self, nn: NonNull<WaitNode>) {
+        match self.inner.try_lock() {
+            Some(inner) => {
+                // `remove` is idempotent on unlinked nodes (returns
+                // Err(NotPresent)) and only touches the embedded `Link`
+                // field — never user data — so it is safe to call on
+                // a node whose user data is mid-Drop.
+                let _ = inner.list.remove(nn);
+            }
+            None => {
+                debug_assert!(
+                    false,
+                    "WaitNode dropped while the owning WaitQueue's lock is held by the current CPU — \
+                     check that no return path inside `wait_event_*` exits without unlinking the node \
+                     first, and that no wake_*() path holds the WQ lock across a panic-recovery \
+                     unwind that destroys the node."
+                );
+                // Release-build: silently leak the node entry. The
+                // upstream invariant is already violated; a deadlock
+                // here would compound the bug.
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drop for WaitNode — defined here so it can reach `WaitQueue::drop_unlink`
+// without exposing the queue internals through `wait_node.rs`.
+// ---------------------------------------------------------------------------
+
+impl Drop for WaitNode {
+    fn drop(&mut self) {
+        let q = self.queue_load();
+        if !q.is_null() {
+            // SAFETY: `queue_store` always casts a `*const WaitQueue`
+            // (a static array element, an inline field of a `TaskInner`
+            // kept alive by `TaskRefGuard`, etc.) into the back-pointer.
+            // The WaitQueue is required by its API contract to outlive
+            // every WaitNode that has been linked into it (see
+            // `wait_node.rs` module doc + `docs/scheduler/wait_protocol.md`
+            // §4.4 for the lifetime invariant).
+            let queue = unsafe { &*(q as *const WaitQueue) };
+            let nn = NonNull::from(&*self);
+            // SAFETY: the back-pointer was set under the queue's WQ
+            // lock by `push_node`; `nn` is a valid pointer to `self`
+            // for the duration of this call (Drop runs before the
+            // memory is freed).
+            unsafe { queue.drop_unlink(nn) };
+        }
+        // Set has_woken=true as a final flourish: any wake_one popping
+        // a node that this Drop somehow missed (shouldn't be possible
+        // — the back-pointer check above covers the case) would see
+        // an already-woken sentinel and elide the spurious unblock.
+        // Pure defense-in-depth; not load-bearing.
+        let _ = self.has_woken_swap_true();
     }
 }
 
