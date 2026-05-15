@@ -25,17 +25,27 @@ Use `python knowledge/query.py \"<question>\"` to ask about signatures, drivers,
 ## Coding Style & Naming Conventions
 All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) are Intel syntax (`*.s`) and should document register contracts.
 
-### Allocation surface
-**`slopos_ostd::mm::heap` is the only kernel allocation surface.** Every kernel crate (everything outside `userland/`, `slibc/`, `slop-protocol/`, `ktesting/`, and `slopos-ostd/` itself) routes heap allocation through `slopos_ostd`'s `KBox`, `KVec`, `KArc`, `KVecDeque`, `KBTreeMap`, and `PinBox` rather than `alloc::*`. The lone exception is `kernel/src/main.rs`, which keeps `extern crate alloc;` for the `#[global_allocator]` / `#[alloc_error_handler]` declarations.
+### Unsafe-code surface
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (per `plans/FRAMEKERNEL_PLAN.md` AD-1/AD-2). Every other kernel crate (`abi`, `acpi`, `boot`, `core`, `drivers`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `mm`, `net`, `service-core`, `video`, `windowing`) carries `#![forbid(unsafe_code)]`. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `ktesting/`, `appkit/`) are out of scope for this discipline.
 
-The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_closure`, `init_zeroed`) is **in-house** — defined in `slopos-ostd/src/mm/init.rs` with no external dependency on `pinned-init` or Rust-for-Linux's `pin-init`. Large structs must be constructed via `KBox::try_init(T::init_…())` / `PinBox::try_init(T::init_…())` so the `T` rvalue never materialises on the caller's stack.
+Two documented exempt sites exist outside `slopos-ostd/`:
 
-Build-time gates enforce the discipline (run on every `just build`, also via `just check`):
+- **`kernel/src/main.rs`** — global allocator + alloc-error-handler declarations (`#[global_allocator]`, `#[alloc_error_handler]`) require `extern crate alloc;` direct.
+- **`hermetic/src/macros.rs`** — `macro_rules!` body containing the Edition-2024 `#[unsafe(link_section = …)]` attribute used at the macro's expansion sites elsewhere. The keyword is required by the attribute grammar, not a runtime unsafe block.
 
+Build-time gates enforce the discipline (run on every `just build`, also exposed via `just check-framekernel`):
+
+- **`scripts/check_unsafe_outside_ostd.sh`** — fails if any `.rs` file under a kernel crate (other than `slopos-ostd/`, `slopos-ostd-derive/`, or the two exempt files above) contains an `unsafe` keyword that is not a comment, not the `#[unsafe(...)]` attribute form, and not `#[cfg(...)]`-gated. Mirrors `check_alloc_dep.sh`'s cfg-aware lookback. Belt-and-braces gate alongside the per-crate `#![forbid(unsafe_code)]` attribute.
 - **`scripts/check_alloc_dep.sh`** — fails if any kernel crate's `Cargo.toml` declares a direct `alloc` dependency **and** fails if any kernel `.rs` file (other than `kernel/src/main.rs` and the `slopos-ostd/` tree) contains a bare `extern crate alloc;` / `use alloc::` / `use ::alloc::` statement (with `#[cfg(...)]`-aware lookback so cfg-gated usages that compile out of the kernel build are accepted).
-- **`scripts/check_stack_sizes.sh`** — fails if any function in `builddir/kernel.elf` has a stack frame larger than `STACK_SIZE_THRESHOLD` (default **2048 bytes / 2 KiB**, matching Linux mainline's `CONFIG_FRAME_WARN` default on x86_64/arm64 but stricter in enforcement — SlopOS fails the build, Linux merely warns). Driven by `-Zemit-stack-sizes`; inspects the final ELF's `.stack_sizes` section, so it catches NRVO failures, inlining, and trait-object dispatch that a source-level heuristic would miss.
+- **`scripts/check_stack_sizes.sh`** — fails if any function in `builddir/kernel.elf` has a stack frame larger than `STACK_SIZE_THRESHOLD` (default **2048 bytes / 2 KiB**, matching Linux mainline's `CONFIG_FRAME_WARN` default on x86_64/arm64 but stricter in enforcement — SlopOS fails the build, Linux merely warns). This is the load-bearing enforcement of framekernel **Inv. 5'**. Driven by `-Zemit-stack-sizes`; inspects the final ELF's `.stack_sizes` section, so it catches NRVO failures, inlining, and trait-object dispatch that a source-level heuristic would miss.
+- **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — informational. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Phase 1 target ≤ 1.5 %; Phase 2 target ≤ 1.0 %.
 
 `scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.
+
+### Allocation discipline
+**`slopos_ostd::mm::heap` is the only kernel allocation surface.** Every kernel crate routes heap allocation through `slopos_ostd`'s `KBox`, `KVec`, `KArc`, `KVecDeque`, `KBTreeMap`, and `PinBox` rather than `alloc::*`. The `kernel/src/main.rs` global-allocator carve-out above is the lone exception.
+
+The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_closure`, `init_zeroed`) is **in-house** — defined in `slopos-ostd/src/mm/init.rs` with no external dependency on `pinned-init` or Rust-for-Linux's `pin-init`. Large structs must be constructed via `KBox::try_init(T::init_…())` / `PinBox::try_init(T::init_…())` so the `T` rvalue never materialises on the caller's stack. `check_stack_sizes.sh` enforces the upper bound from the other direction.
 
 ## Testing Guidelines
 The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over the serial console in a KTAP-grammar format documented in `docs/test_output.md`. The host wrapper at `tools/run_tests/` (Go, builds to `builddir/run_tests`) parses that stream and renders a live progress bar + per-failure detail blocks. Before sending changes, run `just test` (non-interactive, auto-shutdown). For manual inspection use `just boot` (interactive) or `just boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Note any observed regressions or warnings in your PR description.

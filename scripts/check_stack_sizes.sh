@@ -13,6 +13,12 @@
 # `panic_handler_impl`, `tcp::input`, `tcp::close`,
 # `virtio_net_probe`, ramfs insertion).
 #
+# This 2 KiB ceiling is the load-bearing enforcement of **Inv. 5'**
+# (framekernel soundness invariant): an OSTD client's stack frame
+# cannot grow large enough to puncture the kernel guard page in a
+# single function entry. Derived from Asterinas paper §4.3 Inv. 5 +
+# the per-task stack guard frame requirement.
+#
 # Relies on `-Zemit-stack-sizes` populating the `.stack_sizes` ELF section;
 # see scripts/build_kernel.sh for where the flag is injected.
 

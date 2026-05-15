@@ -391,6 +391,18 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// has not yet been called, [`FrameError::OutOfRange`] when
     /// `paddr` does not have a slot, and [`FrameError::StateMismatch`]
     /// when the slot is already TYPED.
+    ///
+    /// **Soundness invariant (Inv. 1, Asterinas paper §4.3).** This is
+    /// the framekernel's single entry point for claiming a physical
+    /// frame as a typed `Frame<M>`. The atomic UNUSED→TYPED state
+    /// transition below means at most one `Frame<M>` exists for any
+    /// given `paddr` at any time; together with the contract on
+    /// `FrameAlloc::alloc` (registered via
+    /// [`crate::mm::frame_alloc::register_frame_allocator`]) — that
+    /// the injected allocator only returns paddrs corresponding to
+    /// currently unused physical memory — every successful return
+    /// from `from_unused` originates from memory not aliased to any
+    /// other live OSTD object.
     pub fn from_unused(paddr: Paddr, meta: M) -> Result<Self, FrameError> {
         const {
             assert_meta_fits::<M>();
@@ -415,7 +427,11 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
             .map_err(|_| FrameError::StateMismatch)?;
         // SAFETY: the CAS above transitioned the slot from UNUSED to
         // TYPED, so we hold exclusive access to `storage` until we
-        // publish the slot via the ref_count store below.
+        // publish the slot via the ref_count store below. This is the
+        // moment OSTD trusts Inv. 1: the caller has certified that
+        // `paddr` came from currently-unused memory (via the
+        // registered FrameAlloc), so no other live `Frame<M'>` aliases
+        // the bytes we are about to write.
         unsafe {
             let storage = slot.storage.get() as *mut M;
             core::ptr::write(storage, meta);

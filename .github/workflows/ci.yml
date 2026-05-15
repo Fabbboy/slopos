@@ -66,6 +66,11 @@ jobs:
       - name: Build kernel
         run: just build
 
+      - name: Framekernel gates (unsafe surface + TCB ratio)
+        run: |
+          scripts/check_unsafe_outside_ostd.sh
+          scripts/tcb_ratio.sh --max 1.5
+
       - name: Run tests
         run: |
           set -o pipefail

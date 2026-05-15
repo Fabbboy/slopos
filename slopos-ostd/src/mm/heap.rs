@@ -175,6 +175,12 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
         let cookie = (aligned - core::mem::size_of::<usize>()) as *mut usize;
         // SAFETY: `aligned >= base + extra`, so `cookie` lives strictly
         // inside the just-allocated `[base, base + total)` region.
+        //
+        // This branch is OSTD's enforcement of **Inv. 10**: the user-
+        // visible pointer returned below is aligned to `align` and
+        // backed by `size` bytes of usable storage, so any object the
+        // caller subsequently constructs from this slot has its size +
+        // alignment requirements satisfied by construction.
         unsafe {
             *cookie = base;
         }
@@ -397,7 +403,11 @@ impl<T> KBox<T> {
         E: From<AllocError>,
     {
         let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit().map_err(E::from)?;
-        // SAFETY: see `PinBox::try_init` — identical invariants.
+        // SAFETY: see `PinBox::try_init` — identical invariants. The
+        // `Box::try_new_uninit::<T>()` slot is sized and aligned to
+        // `T`'s `Layout` by construction, upholding **Inv. 10**: the
+        // `T` value the `init` recipe writes into `slot` lands in
+        // storage that meets `T`'s size and alignment requirements.
         unsafe {
             let raw = Box::into_raw(boxed);
             let slot: *mut T = (*raw).as_mut_ptr();

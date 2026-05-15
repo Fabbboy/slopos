@@ -84,6 +84,9 @@ SOURCE_WHITELIST="kernel/src/main.rs"
 # compile out of the kernel build; they're safe and we don't want to
 # touch them.
 #
+# Both `use alloc::` and `use ::alloc::` (path-absolute form) are
+# matched by the regex below.
+#
 # `git ls-files` respects `.gitignore` and skips third_party / builddir
 # / target automatically.
 source_offenders="$(

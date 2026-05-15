@@ -15,7 +15,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [NETWORKING_EVOLUTION_PLAN.md](./NETWORKING_EVOLUTION_PLAN.md) | 9-phase roadmap to evolve SlopOS networking from prototype to BSD-socket-compatible TCP/IP stack — ~125 tasks |
 | [NETCAT_PLAN.md](./NETCAT_PLAN.md) | nc (netcat) implementation plan |
 | [PHASE8_UNSAFE_INVARIANT_REGISTRY.md](./PHASE8_UNSAFE_INVARIANT_REGISTRY.md) | Unsafe invariant registry for legacy modernization Phase 8 |
-| [FRAMEKERNEL_PLAN.md](./FRAMEKERNEL_PLAN.md) | 4-phase rip-and-replace plan to redesign SlopOS as an async-first framekernel with a Verus-verified OSTD critical path. Inspired by Asterinas (USENIX ATC '25). |
+| [FRAMEKERNEL_PLAN.md](./FRAMEKERNEL_PLAN.md) | 4-phase rip-and-replace plan to redesign SlopOS as an async-first framekernel with a Verus-verified OSTD critical path. Inspired by Asterinas (USENIX ATC '25). **Phase 1 closed**: TCB ratio 0.678 %; KernMiri 395 pass / 28 ignored; 2427 kernel + userland tests pass; § C.10 (LMbench parity) intentionally skipped — runner deferred to Phase 2 § 2J.1. |
 | [RAW_PTR_TO_KARC_MIGRATION.md](./RAW_PTR_TO_KARC_MIGRATION.md) | Migrate `*mut T` + open-coded refcount to `KArc<T>` for one consistent kernel-shared-ownership primitive. |
 
 
