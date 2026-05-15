@@ -1,7 +1,28 @@
 //! Control register access (CR0, CR2, CR3, CR4) with type-safe bitflags.
+//!
+//! Host build behaviour (`cfg(not(target_os = "none"))`, including
+//! `cargo miri test`): each register is backed by a static `AtomicU64`
+//! so reads observe prior writes; the actual `mov cr*` / `stac` /
+//! `clac` / `xgetbv` / `xsetbv` instructions are skipped. This is
+//! sufficient for Miri's purposes — the tests in `mm/` and `sync/`
+//! that are the focus of Phase 1B do not depend on real control-
+//! register semantics.
 
 use bitflags::bitflags;
+#[allow(unused_imports)]
 use core::arch::asm;
+
+#[cfg(not(target_os = "none"))]
+use core::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(not(target_os = "none"))]
+static MOCK_CR0: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static MOCK_CR3: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static MOCK_CR4: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "none"))]
+static MOCK_XCR0: AtomicU64 = AtomicU64::new(0x1); // x87 bit is hardware-forced to 1.
 
 // =============================================================================
 // CR0
@@ -38,11 +59,18 @@ bitflags! {
 
 #[inline(always)]
 pub fn read_cr0() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
+    #[cfg(target_os = "none")]
+    {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
     }
-    value
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_CR0.load(Ordering::Relaxed)
+    }
 }
 
 #[inline(always)]
@@ -52,8 +80,13 @@ pub fn read_cr0_flags() -> Cr0Flags {
 
 #[inline(always)]
 pub fn write_cr0(value: u64) {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_CR0.store(value, Ordering::Relaxed);
     }
 }
 
@@ -68,11 +101,19 @@ pub fn write_cr0_flags(flags: Cr0Flags) {
 
 #[inline(always)]
 pub fn read_cr2() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
+    #[cfg(target_os = "none")]
+    {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
     }
-    value
+    #[cfg(not(target_os = "none"))]
+    {
+        // No #PF can be recorded by a host process; report 0.
+        0
+    }
 }
 
 // =============================================================================
@@ -81,17 +122,29 @@ pub fn read_cr2() -> u64 {
 
 #[inline(always)]
 pub fn read_cr3() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
+    #[cfg(target_os = "none")]
+    {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
     }
-    value
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_CR3.load(Ordering::Relaxed)
+    }
 }
 
 #[inline(always)]
 pub fn write_cr3(value: u64) {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_CR3.store(value, Ordering::Relaxed);
     }
 }
 
@@ -150,11 +203,18 @@ bitflags! {
 
 #[inline(always)]
 pub fn read_cr4() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
+    #[cfg(target_os = "none")]
+    {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
     }
-    value
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_CR4.load(Ordering::Relaxed)
+    }
 }
 
 #[inline(always)]
@@ -164,8 +224,13 @@ pub fn read_cr4_flags() -> Cr4Flags {
 
 #[inline(always)]
 pub fn write_cr4(value: u64) {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_CR4.store(value, Ordering::Relaxed);
     }
 }
 
@@ -230,6 +295,7 @@ pub const CR4_PKE: u64 = Cr4Flags::PKE.bits();
 /// with a `clac` on the success path.
 #[inline(always)]
 pub fn stac() {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("stac", options(nomem, nostack));
     }
@@ -238,6 +304,7 @@ pub fn stac() {
 /// Clear `RFLAGS.AC` via `CLAC`. See [`stac`] for usage.
 #[inline(always)]
 pub fn clac() {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("clac", options(nomem, nostack));
     }
@@ -285,19 +352,26 @@ bitflags! {
 /// Reading XCR0 when OSXSAVE is clear triggers `#UD`.
 #[inline(always)]
 pub fn xcr0_read() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // ECX = 0 selects XCR0.
-    unsafe {
-        asm!(
-            "xgetbv",
-            in("ecx") 0u32,
-            out("eax") lo,
-            out("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let lo: u32;
+        let hi: u32;
+        // ECX = 0 selects XCR0.
+        unsafe {
+            asm!(
+                "xgetbv",
+                in("ecx") 0u32,
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        ((hi as u64) << 32) | (lo as u64)
     }
-    ((hi as u64) << 32) | (lo as u64)
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_XCR0.load(Ordering::Relaxed)
+    }
 }
 
 /// Read XCR0 and return typed [`Xcr0Flags`].
@@ -317,17 +391,24 @@ pub fn xcr0_read_flags() -> Xcr0Flags {
 ///   be set; setting unsupported bits triggers `#GP`.
 #[inline(always)]
 pub fn xcr0_write(value: u64) {
-    let lo = value as u32;
-    let hi = (value >> 32) as u32;
-    // ECX = 0 selects XCR0.
-    unsafe {
-        asm!(
-            "xsetbv",
-            in("ecx") 0u32,
-            in("eax") lo,
-            in("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let lo = value as u32;
+        let hi = (value >> 32) as u32;
+        // ECX = 0 selects XCR0.
+        unsafe {
+            asm!(
+                "xsetbv",
+                in("ecx") 0u32,
+                in("eax") lo,
+                in("edx") hi,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_XCR0.store(value, Ordering::Relaxed);
     }
 }
 

@@ -47,6 +47,11 @@ slopos_ostd::extern_block! {
     }
 }
 
+// Tests that take addresses of extern statics are unsupported by Miri
+// (its interpreter does not resolve `unsafe extern static` symbols);
+// they are exercised on real binaries by the standard `cargo test`
+// host run. Ignore under Miri.
+#[cfg_attr(miri, ignore)]
 #[test]
 fn static_symbol_form_compiles_and_accessor_returns_non_null() {
     let addr = static_only::EXTERN_BLOCK_TEST_BYTE_addr();
@@ -90,6 +95,7 @@ slopos_ostd::extern_block! {
     }
 }
 
+#[cfg_attr(miri, ignore)]
 #[test]
 fn mixed_block_with_statics_and_fns() {
     let addr = mixed::EXTERN_BLOCK_TEST_MIXED_STATIC_addr();
@@ -113,6 +119,12 @@ slopos_ostd::extern_block! {
     }
 }
 
+// Miri does not support resolving external statics declared with a
+// custom `#[link_name]`; the symbol table its interpreter maintains
+// is keyed on Rust names, not linker names. Skip under Miri — the
+// real linker / rustc front-end coverage is provided by the host
+// `cargo test` run.
+#[cfg_attr(miri, ignore)]
 #[test]
 fn link_name_attr_preserved() {
     let addr = link_name_alias::LOCAL_ALIAS_addr();
@@ -133,6 +145,7 @@ slopos_ostd::extern_block! {
     }
 }
 
+#[cfg_attr(miri, ignore)]
 #[test]
 fn outer_attr_on_mod_survives() {
     // We can't easily verify the attribute is actively *applied* — only
@@ -158,6 +171,7 @@ slopos_ostd::extern_block! {
     }
 }
 
+#[cfg_attr(miri, ignore)]
 #[test]
 fn multiple_extern_blocks_in_same_scope_dont_collide() {
     let a = scope_a::EXTERN_BLOCK_TEST_DUP_A_addr();

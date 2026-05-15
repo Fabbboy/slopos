@@ -41,8 +41,9 @@ impl FrameAlloc for BumpAlloc {
             // SAFETY: backing buffer covers `[0, N_PAGES * PAGE_SIZE)`;
             // the just-allocated range is unique.
             unsafe {
-                let virt = (BACKING_BASE.load(Ordering::Acquire) as usize + paddr.as_u64() as usize)
-                    as *mut u8;
+                let base = BACKING_BASE.load(Ordering::Acquire) as usize;
+                let virt: *mut u8 =
+                    core::ptr::with_exposed_provenance_mut(base + paddr.as_u64() as usize);
                 core::ptr::write_bytes(virt, 0, n as usize * PAGE_SIZE);
             }
         }
@@ -54,6 +55,10 @@ impl FrameAlloc for BumpAlloc {
     }
 }
 
+// BACKING_BASE holds the *exposed* address of the leaked scratch arena.
+// `expose_provenance()` is called once during `setup()`; every later
+// `with_exposed_provenance_mut(addr)` against an address inside the
+// arena round-trips back to that provenance under strict provenance.
 static BACKING_BASE: AtomicU64 = AtomicU64::new(0);
 static BUMP_ALLOC: BumpAlloc = BumpAlloc {
     next_page: AtomicU64::new(0),
@@ -117,8 +122,13 @@ fn setup() -> MutexGuard<'static, ()> {
         let layout = std::alloc::Layout::from_size_align(N_PAGES * PAGE_SIZE, PAGE_SIZE)
             .expect("backing layout");
         // SAFETY: nonzero size; standard allocator contract.
-        let backing_ptr = unsafe { std::alloc::alloc_zeroed(layout) } as u64;
-        assert_ne!(backing_ptr, 0, "backing alloc failed");
+        // SAFETY: `layout.size() > 0`; standard allocator contract.
+        let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!backing_ptr_real.is_null(), "backing alloc failed");
+        // Expose provenance once so every later
+        // `with_exposed_provenance_mut(backing + offset)` round-trips
+        // back to the original allocation under strict provenance.
+        let backing_ptr = backing_ptr_real.expose_provenance() as u64;
         BACKING_BASE.store(backing_ptr, Ordering::Release);
 
         let mut slots: Vec<MetaSlot> = (0..N_PAGES).map(|_| MetaSlot::new_unused()).collect();

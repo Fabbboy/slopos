@@ -540,7 +540,7 @@ impl IoMem {
         // `IoMemMapper`; bounds + alignment were just checked, so
         // `read_volatile::<T>` reads a fully-mapped, suitably-aligned
         // address. `T: Pod` makes every byte pattern a valid `T`.
-        unsafe { core::ptr::read_volatile(addr as *const T) }
+        unsafe { core::ptr::read_volatile(core::ptr::with_exposed_provenance::<T>(addr as usize)) }
     }
 
     /// Write a `Pod` value at `offset`. Panics on out-of-bounds or
@@ -569,7 +569,12 @@ impl IoMem {
         // SAFETY: Inv. 7. Same justification as `read`: the region is
         // certified insensitive, the mapping covers the address, and
         // `T: Pod` permits arbitrary byte writes.
-        unsafe { core::ptr::write_volatile(addr as *mut T, value) }
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::with_exposed_provenance_mut::<T>(addr as usize),
+                value,
+            )
+        }
     }
 
     /// Fallible variant of [`Self::read`]. Returns
@@ -587,7 +592,9 @@ impl IoMem {
         }
         // SAFETY: Inv. 7. As `read`, with bounds + alignment proven
         // by the checks above.
-        Ok(unsafe { core::ptr::read_volatile(addr as *const T) })
+        Ok(unsafe {
+            core::ptr::read_volatile(core::ptr::with_exposed_provenance::<T>(addr as usize))
+        })
     }
 
     /// Fallible variant of [`Self::write`].
@@ -604,7 +611,12 @@ impl IoMem {
         }
         // SAFETY: Inv. 7. As `write`, with bounds + alignment proven
         // by the checks above.
-        unsafe { core::ptr::write_volatile(addr as *mut T, value) };
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::with_exposed_provenance_mut::<T>(addr as usize),
+                value,
+            )
+        };
         Ok(())
     }
 
@@ -629,7 +641,7 @@ impl IoMem {
         }
         // SAFETY: bounds and alignment proven; the IoMem registry-tracked
         // mapping outlives `&self` and `T: Pod` accepts any byte pattern.
-        Some(unsafe { &*(self.virt_base as *const T) })
+        Some(unsafe { &*core::ptr::with_exposed_provenance::<T>(self.virt_base as usize) })
     }
 
     /// Carve a sub-region out of this region. The returned handle

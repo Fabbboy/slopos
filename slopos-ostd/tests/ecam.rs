@@ -57,8 +57,10 @@ fn setup() -> MutexGuard<'static, ()> {
         let layout =
             std::alloc::Layout::from_size_align(ECAM_SIZE, PAGE_SIZE).expect("backing layout");
         // SAFETY: nonzero size; standard allocator contract.
-        let backing_ptr = unsafe { std::alloc::alloc_zeroed(layout) } as u64;
-        assert_ne!(backing_ptr, 0, "backing alloc failed");
+        // SAFETY: nonzero size; standard allocator contract.
+        let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!backing_ptr_real.is_null(), "backing alloc failed");
+        let backing_ptr = backing_ptr_real.expose_provenance() as u64;
         BACKING_BASE.store(backing_ptr, Ordering::Release);
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             register_io_mem_registry(t, ranges_static());

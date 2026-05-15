@@ -14,6 +14,13 @@
 //! The CPU is assumed to be in long mode (true by the time any kernel
 //! test runs).
 
+//!
+//! Miri behaviour: every `asm!` site is gated `#[cfg(not(miri))]`; the
+//! `#[cfg(miri)]` stub returns zero so tests calling these compile but
+//! observe deterministic placeholder values. Tests that depend on real
+//! segment / GDTR state must additionally `#[cfg_attr(miri, ignore)]`.
+
+#[cfg(not(miri))]
 use core::arch::asm;
 
 /// GDTR descriptor parsed from `sgdt`.
@@ -24,6 +31,7 @@ pub struct GdtrDescriptor {
 }
 
 /// Read the GDTR (Global Descriptor Table Register) via `sgdt`.
+#[cfg(not(miri))]
 #[inline]
 pub fn read_gdtr() -> GdtrDescriptor {
     let mut buf: [u8; 10] = [0; 10];
@@ -43,6 +51,13 @@ pub fn read_gdtr() -> GdtrDescriptor {
     GdtrDescriptor { limit, base }
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_gdtr() -> GdtrDescriptor {
+    GdtrDescriptor { limit: 0, base: 0 }
+}
+
+#[cfg(not(miri))]
 #[inline]
 pub fn read_cs() -> u16 {
     let v: u16;
@@ -53,6 +68,13 @@ pub fn read_cs() -> u16 {
     v
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_cs() -> u16 {
+    0
+}
+
+#[cfg(not(miri))]
 #[inline]
 pub fn read_ds() -> u16 {
     let v: u16;
@@ -63,6 +85,13 @@ pub fn read_ds() -> u16 {
     v
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_ds() -> u16 {
+    0
+}
+
+#[cfg(not(miri))]
 #[inline]
 pub fn read_es() -> u16 {
     let v: u16;
@@ -73,6 +102,13 @@ pub fn read_es() -> u16 {
     v
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_es() -> u16 {
+    0
+}
+
+#[cfg(not(miri))]
 #[inline]
 pub fn read_fs() -> u16 {
     let v: u16;
@@ -83,6 +119,13 @@ pub fn read_fs() -> u16 {
     v
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_fs() -> u16 {
+    0
+}
+
+#[cfg(not(miri))]
 #[inline]
 pub fn read_gs() -> u16 {
     let v: u16;
@@ -93,6 +136,13 @@ pub fn read_gs() -> u16 {
     v
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_gs() -> u16 {
+    0
+}
+
+#[cfg(not(miri))]
 #[inline]
 pub fn read_ss() -> u16 {
     let v: u16;
@@ -103,7 +153,14 @@ pub fn read_ss() -> u16 {
     v
 }
 
+#[cfg(miri)]
+#[inline]
+pub fn read_ss() -> u16 {
+    0
+}
+
 /// Read the Task Register (TR) via `str`.
+#[cfg(not(miri))]
 #[inline]
 pub fn read_tr() -> u16 {
     let v: u16;
@@ -113,4 +170,10 @@ pub fn read_tr() -> u16 {
         asm!("str {:x}", out(reg) v, options(nomem, nostack, preserves_flags));
     }
     v
+}
+
+#[cfg(miri)]
+#[inline]
+pub fn read_tr() -> u16 {
+    0
 }

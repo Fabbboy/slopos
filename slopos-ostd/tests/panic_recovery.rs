@@ -55,9 +55,9 @@ fn reset_held_stack() {
     // Each pop is keyed by the synthetic addresses we registered.
     while held_lock_count() > 0 {
         unsafe {
-            pop_lock(0x1 as *const ());
-            pop_lock(0x2 as *const ());
-            pop_lock(0x3 as *const ());
+            pop_lock(core::ptr::without_provenance::<()>(0x1));
+            pop_lock(core::ptr::without_provenance::<()>(0x2));
+            pop_lock(core::ptr::without_provenance::<()>(0x3));
         }
         // Safety net: if the held entries weren't ours, do a
         // poison-walk to clear them.
@@ -79,8 +79,8 @@ fn poison_walk_fires_each_held_lock_callback() {
     enable_lock_tracking();
     reset_held_stack();
 
-    let addr_a = 0xAAAA_AAAA_usize as *const ();
-    let addr_b = 0xBBBB_BBBB_usize as *const ();
+    let addr_a = core::ptr::without_provenance::<()>(0xAAAA_AAAA);
+    let addr_b = core::ptr::without_provenance::<()>(0xBBBB_BBBB);
 
     unsafe {
         push_lock(addr_a, poison_a, LOCK_LEVEL_UNORDERED);

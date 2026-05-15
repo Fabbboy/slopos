@@ -2,6 +2,7 @@
 //! `boot/src/tests/shutdown_tests.rs::test_serial_flush_terminates`
 //! test loop.
 
+#[cfg(not(miri))]
 use core::arch::asm;
 
 /// COM1 base I/O port.
@@ -14,6 +15,7 @@ const COM1_LSR_OFFSET: u16 = 5;
 /// Bit 0x40 is "transmit holding register empty + transmit shift
 /// register empty", which the shutdown stress test polls to confirm
 /// the UART has actually drained pending bytes.
+#[cfg(not(miri))]
 #[inline]
 pub fn read_lsr() -> u8 {
     let port = COM1_BASE + COM1_LSR_OFFSET;
@@ -29,4 +31,13 @@ pub fn read_lsr() -> u8 {
         );
     }
     v
+}
+
+/// Miri stub: report TX empty + drained immediately so any poll loop
+/// terminates on the first iteration.
+#[cfg(miri)]
+#[inline]
+pub fn read_lsr() -> u8 {
+    let _ = (COM1_BASE, COM1_LSR_OFFSET);
+    0x60 // THRE | TEMT (transmit holding empty + transmit empty)
 }

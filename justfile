@@ -267,6 +267,13 @@ check-tests-host:
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
 
+[doc("Run slopos-ostd unit + integration tests under Miri to detect UB in the OSTD critical path. See tools/kernmiri/README.md.")]
+check-miri:
+    @rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' || rustup component add miri --toolchain {{rust_channel}}
+    {{cargo}} +{{rust_channel}} miri setup
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" \
+        {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
+
 # ── Utilities ────────────────────────────────────────────────────────────────
 
 [doc("Show detected QEMU framebuffer resolution")]

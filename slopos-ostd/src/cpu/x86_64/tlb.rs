@@ -1,6 +1,12 @@
 //! TLB and cache management instructions.
+//!
+//! On `target_os = "none"` (the real kernel build) these issue the
+//! corresponding x86_64 instructions. On host builds — including
+//! `cargo miri test` — they are no-ops, since the host process has
+//! no TLB or cache hierarchy that the OSTD model is responsible for.
 
 use super::control_regs::{read_cr3, write_cr3};
+#[allow(unused_imports)]
 use core::arch::asm;
 
 /// Flush the entire TLB by reloading CR3.
@@ -13,14 +19,20 @@ pub fn flush_tlb_all() {
 /// Invalidate TLB entry for a single virtual address.
 #[inline(always)]
 pub fn invlpg(vaddr: u64) {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = vaddr;
     }
 }
 
 /// Write-back and invalidate all cache lines.
 #[inline(always)]
 pub fn wbinvd() {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("wbinvd", options(nostack, preserves_flags));
     }
@@ -45,16 +57,25 @@ struct InvpcidDescriptor {
 /// the `invpcid_available()` check in `mm/src/mmu/asid.rs`).
 #[inline(always)]
 pub fn invpcid(kind: u64, pcid: u16, linear: u64) {
-    let desc = InvpcidDescriptor {
-        pcid: pcid as u64,
-        linear,
-    };
-    unsafe {
-        asm!(
-            "invpcid {kind}, [{desc}]",
-            kind = in(reg) kind,
-            desc = in(reg) &desc,
-            options(nostack, preserves_flags, readonly),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let desc = InvpcidDescriptor {
+            pcid: pcid as u64,
+            linear,
+        };
+        unsafe {
+            asm!(
+                "invpcid {kind}, [{desc}]",
+                kind = in(reg) kind,
+                desc = in(reg) &desc,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (kind, pcid, linear);
+        // Keep the InvpcidDescriptor type "used" so dead_code lints stay quiet.
+        let _ = core::mem::size_of::<InvpcidDescriptor>();
     }
 }

@@ -215,9 +215,16 @@ pub fn nonnull_byte_offset(base: NonNull<u8>, byte_offset: usize) -> NonNull<u8>
 pub fn borrow_at_mut<'a, T>(base: NonNull<u8>, byte_offset: usize, len: usize) -> &'a mut [T] {
     // SAFETY: caller upholds the module-level contract; `base` is
     // NonNull and the byte arithmetic stays inside the caller-owned
-    // allocation.
+    // allocation. Alignment for `T` is asserted below — Miri-detected
+    // soundness gap: `from_raw_parts_mut::<T>` is UB on a pointer that
+    // is not aligned for `T`, so we trap the buggy-caller case in
+    // debug builds rather than silently producing an unaligned slice.
     unsafe {
         let typed_ptr = base.as_ptr().add(byte_offset) as *mut T;
+        debug_assert!(
+            (typed_ptr as usize) % core::mem::align_of::<T>() == 0,
+            "borrow_at_mut::<T>: typed pointer is not aligned for T"
+        );
         core::slice::from_raw_parts_mut(typed_ptr, len)
     }
 }
@@ -426,17 +433,24 @@ mod tests {
 
     #[test]
     fn borrow_at_mut_advances_by_byte_offset() {
-        let mut buf = [0u8; 16];
-        let base = NonNull::new(buf.as_mut_ptr()).unwrap();
+        // Use a u32-aligned backing storage so the `&mut [u32]` view at
+        // byte_offset 4 is sound. A bare `[u8; 16]` only carries 1-byte
+        // alignment at the type level and Miri's allocator may hand back
+        // a buffer that lands on a 2-byte boundary, which would violate
+        // `from_raw_parts_mut::<u32>`'s alignment requirement.
+        #[repr(align(4))]
+        struct AlignedBuf([u8; 16]);
+        let mut wrap = AlignedBuf([0u8; 16]);
+        let base = NonNull::new(wrap.0.as_mut_ptr()).unwrap();
         {
             let view: &mut [u32] = borrow_at_mut::<u32>(base, 4, 2);
             view[0] = 0xdeadbeefu32;
             view[1] = 0x1234_5678u32;
         }
         // First 4 bytes untouched, then u32 LE/BE pattern.
-        assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
-        assert_eq!(&buf[4..8], &0xdeadbeefu32.to_ne_bytes());
-        assert_eq!(&buf[8..12], &0x1234_5678u32.to_ne_bytes());
+        assert_eq!(&wrap.0[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&wrap.0[4..8], &0xdeadbeefu32.to_ne_bytes());
+        assert_eq!(&wrap.0[8..12], &0x1234_5678u32.to_ne_bytes());
     }
 
     #[test]

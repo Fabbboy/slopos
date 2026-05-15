@@ -2,7 +2,13 @@
 //!
 //! This module provides the type-safe `Msr` newtype and RDMSR/WRMSR
 //! instruction wrappers.
+//!
+//! Host build behaviour (`cfg(not(target_os = "none"))`, including
+//! `cargo miri test`): MSR reads / writes go to a tiny in-process
+//! key/value store (`MOCK_MSRS`). Sufficient for any caller that
+//! only reads back what it wrote (EFER toggle + SYSCALL MSRs).
 
+#[allow(unused_imports)]
 use core::arch::asm;
 
 // =============================================================================
@@ -111,33 +117,84 @@ pub const EFER_NXE: u64 = 1 << 11;
 /// Read a 64-bit value from the specified MSR.
 #[inline(always)]
 pub fn read_msr(msr: Msr) -> u64 {
-    let low: u32;
-    let high: u32;
-    unsafe {
-        asm!(
-            "rdmsr",
-            out("eax") low,
-            out("edx") high,
-            in("ecx") msr.address(),
-            options(nomem, nostack, preserves_flags)
-        );
+    #[cfg(target_os = "none")]
+    {
+        let low: u32;
+        let high: u32;
+        unsafe {
+            asm!(
+                "rdmsr",
+                out("eax") low,
+                out("edx") high,
+                in("ecx") msr.address(),
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        ((high as u64) << 32) | (low as u64)
     }
-    ((high as u64) << 32) | (low as u64)
+    #[cfg(not(target_os = "none"))]
+    {
+        host_mock::read(msr.address())
+    }
 }
 
 /// Write a 64-bit value to the specified MSR.
 #[inline(always)]
 pub fn write_msr(msr: Msr, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    unsafe {
-        asm!(
-            "wrmsr",
-            in("eax") low,
-            in("edx") high,
-            in("ecx") msr.address(),
-            options(nomem, nostack, preserves_flags)
-        );
+    #[cfg(target_os = "none")]
+    {
+        let low = value as u32;
+        let high = (value >> 32) as u32;
+        unsafe {
+            asm!(
+                "wrmsr",
+                in("eax") low,
+                in("edx") high,
+                in("ecx") msr.address(),
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_mock::write(msr.address(), value);
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+mod host_mock {
+    //! Tiny fixed-size MSR mock backing store for host tests / Miri.
+    //!
+    //! Bounded slot table indexed by address mod CAP. Stores
+    //! `(address, value)` so unrelated MSRs that collide on the same
+    //! slot do not silently corrupt each other's stored value.
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    const CAP: usize = 32;
+    // Use NONE = u64::MAX as the empty sentinel for `address` (no real
+    // MSR address comes near 2^32, so the high 32 bits being all-1 is
+    // safe as a vacant marker).
+    const VACANT: u64 = u64::MAX;
+    static SLOTS_ADDR: [AtomicU64; CAP] = [const { AtomicU64::new(VACANT) }; CAP];
+    static SLOTS_VALUE: [AtomicU64; CAP] = [const { AtomicU64::new(0) }; CAP];
+
+    fn slot_index(address: u32) -> usize {
+        (address as usize) % CAP
+    }
+
+    pub(super) fn write(address: u32, value: u64) {
+        let i = slot_index(address);
+        SLOTS_ADDR[i].store(address as u64, Ordering::Relaxed);
+        SLOTS_VALUE[i].store(value, Ordering::Relaxed);
+    }
+
+    pub(super) fn read(address: u32) -> u64 {
+        let i = slot_index(address);
+        if SLOTS_ADDR[i].load(Ordering::Relaxed) == address as u64 {
+            SLOTS_VALUE[i].load(Ordering::Relaxed)
+        } else {
+            0
+        }
     }
 }
 

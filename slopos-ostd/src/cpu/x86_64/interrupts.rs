@@ -1,20 +1,49 @@
 //! Interrupt flag management: sti, cli, irqsave/irqrestore.
+//!
+//! Host build behaviour (`cfg(not(target_os = "none"))`, including
+//! `cargo miri test`): the IF bit is tracked in a single static
+//! `AtomicU64` standing in for RFLAGS. `cli`/`sti` flip bit 9 of
+//! that store; `save_flags_cli` returns the prior value;
+//! `restore_flags` writes the value back. This means `IrqDisabled::with`
+//! exercises its protocol correctly under Miri.
 
+#[allow(unused_imports)]
 use core::arch::asm;
+
+#[cfg(not(target_os = "none"))]
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Host-only RFLAGS shadow. Initial value mirrors a "normal" RFLAGS
+/// with IF set (bit 9) — same default as a freshly-booted CPU after
+/// `sti` would normally have happened.
+#[cfg(not(target_os = "none"))]
+static MOCK_RFLAGS: AtomicU64 = AtomicU64::new(1u64 << 9);
+
+const RFLAGS_IF: u64 = 1u64 << 9;
 
 /// Enable interrupts (STI).
 #[inline(always)]
 pub fn enable_interrupts() {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("sti", options(nomem, nostack));
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_RFLAGS.fetch_or(RFLAGS_IF, Ordering::Relaxed);
     }
 }
 
 /// Disable interrupts (CLI).
 #[inline(always)]
 pub fn disable_interrupts() {
+    #[cfg(target_os = "none")]
     unsafe {
         asm!("cli", options(nomem, nostack));
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_RFLAGS.fetch_and(!RFLAGS_IF, Ordering::Relaxed);
     }
 }
 
@@ -22,17 +51,25 @@ pub fn disable_interrupts() {
 /// Returns the saved RFLAGS value.
 #[inline(always)]
 pub fn save_flags_cli() -> u64 {
-    let flags: u64;
-    unsafe {
-        asm!(
-            "pushfq",
-            "pop {}",
-            "cli",
-            out(reg) flags,
-            options(nomem)
-        );
+    #[cfg(target_os = "none")]
+    {
+        let flags: u64;
+        unsafe {
+            asm!(
+                "pushfq",
+                "pop {}",
+                "cli",
+                out(reg) flags,
+                options(nomem)
+            );
+        }
+        flags
     }
-    flags
+    #[cfg(not(target_os = "none"))]
+    {
+        let prior = MOCK_RFLAGS.fetch_and(!RFLAGS_IF, Ordering::Relaxed);
+        prior
+    }
 }
 
 /// Restore interrupt flag from saved RFLAGS (irqrestore pattern).
@@ -40,7 +77,7 @@ pub fn save_flags_cli() -> u64 {
 #[inline(always)]
 pub fn restore_flags(flags: u64) {
     // Check if IF (bit 9) was set in the saved flags
-    if flags & (1 << 9) != 0 {
+    if flags & RFLAGS_IF != 0 {
         enable_interrupts();
     }
 }
@@ -49,17 +86,24 @@ pub fn restore_flags(flags: u64) {
 /// Use `save_flags_cli()` if you need to disable interrupts atomically.
 #[inline(always)]
 pub fn read_rflags() -> u64 {
-    let flags: u64;
-    unsafe {
-        asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
+    #[cfg(target_os = "none")]
+    {
+        let flags: u64;
+        unsafe {
+            asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
+        }
+        flags
     }
-    flags
+    #[cfg(not(target_os = "none"))]
+    {
+        MOCK_RFLAGS.load(Ordering::Relaxed)
+    }
 }
 
 /// Returns true if interrupts are currently enabled (IF bit set).
 #[inline(always)]
 pub fn are_interrupts_enabled() -> bool {
-    (read_rflags() & (1 << 9)) != 0
+    (read_rflags() & RFLAGS_IF) != 0
 }
 
 // ---------------------------------------------------------------------------

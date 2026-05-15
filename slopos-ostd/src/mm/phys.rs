@@ -73,7 +73,15 @@ pub(crate) fn phys_to_virt(paddr: Paddr) -> *mut u8 {
         off, UNINIT,
         "slopos_ostd::mm::phys::phys_to_virt before init_phys_virt_offset"
     );
-    paddr.as_u64().wrapping_add(off) as *mut u8
+    // Use `with_exposed_provenance_mut` instead of `as *mut u8` so the
+    // construction is sound under `-Zmiri-strict-provenance`. The
+    // caller of `init_phys_virt_offset` is responsible for having
+    // already called `.expose_provenance()` on the source allocation
+    // (in production: the kernel's HHDM mapping is hardware-backed and
+    // the integer-to-pointer cast is benign; under host/Miri the test
+    // scaffolding exposes the backing allocation's provenance).
+    let virt_addr = paddr.as_u64().wrapping_add(off) as usize;
+    core::ptr::with_exposed_provenance_mut(virt_addr)
 }
 
 /// Test-only reset hook. Allows host integration-test binaries to

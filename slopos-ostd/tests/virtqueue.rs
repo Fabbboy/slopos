@@ -23,9 +23,13 @@ fn setup() -> MutexGuard<'static, ()> {
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
         Box::leak(slots.into_boxed_slice());
         let backing_ptr = backing.0.as_mut_ptr();
+        // Expose provenance once so `phys_to_virt` can soundly
+        // reconstruct pointers into this arena under
+        // `-Zmiri-strict-provenance`.
+        let backing_addr = backing_ptr.expose_provenance() as u64;
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_ptr as u64);
+            init_phys_virt_offset(t, backing_addr);
         });
         Mutex::new(())
     });

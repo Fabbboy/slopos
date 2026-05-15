@@ -52,8 +52,9 @@ impl FrameAlloc for BumpAlloc {
             // SAFETY: backing buffer is valid for `[0, N_PAGES * PAGE_SIZE)`;
             // page index was just allocated and not handed to anyone else.
             unsafe {
-                let virt = (BACKING_BASE.load(Ordering::Acquire) as usize + paddr.as_u64() as usize)
-                    as *mut u8;
+                let base = BACKING_BASE.load(Ordering::Acquire) as usize;
+                let virt: *mut u8 =
+                    core::ptr::with_exposed_provenance_mut(base + paddr.as_u64() as usize);
                 core::ptr::write_bytes(virt, 0, PAGE_SIZE);
             }
         }
@@ -96,8 +97,13 @@ fn setup() -> MutexGuard<'static, ()> {
         let layout = std::alloc::Layout::from_size_align(N_PAGES * PAGE_SIZE, PAGE_SIZE)
             .expect("backing layout");
         // SAFETY: `layout.size() > 0`; standard allocator contract.
-        let backing_ptr = unsafe { std::alloc::alloc_zeroed(layout) } as u64;
-        assert_ne!(backing_ptr, 0, "backing alloc failed");
+        let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!backing_ptr_real.is_null(), "backing alloc failed");
+        // Expose the allocation's provenance once so that every later
+        // `with_exposed_provenance_mut(addr)` against an address inside
+        // `[backing_ptr_real, backing_ptr_real + N_PAGES * PAGE_SIZE)`
+        // is sound under `-Zmiri-strict-provenance`.
+        let backing_ptr = backing_ptr_real.expose_provenance() as u64;
         BACKING_BASE.store(backing_ptr, Ordering::Release);
 
         let mut slots: Vec<MetaSlot> = (0..N_PAGES).map(|_| MetaSlot::new_unused()).collect();
@@ -529,8 +535,9 @@ fn resync_kernel_half_propagates_master_mutation() {
     // meant to track.
     let master_paddr = PhysAddr::new(0); // setup() registered page 0.
     let entry_addr = unsafe {
-        let virt = (BACKING_BASE.load(Ordering::Acquire) as usize + master_paddr.as_u64() as usize)
-            as *mut u64;
+        let base = BACKING_BASE.load(Ordering::Acquire) as usize;
+        let virt: *mut u64 =
+            core::ptr::with_exposed_provenance_mut(base + master_paddr.as_u64() as usize);
         virt.add(300)
     };
     let sentinel: u64 = 0x0000_DEAD_BEEF_0001;
@@ -547,8 +554,9 @@ fn resync_kernel_half_propagates_master_mutation() {
     // Read PML4 index 300 of space_a; must match the sentinel.
     let space_a_phys = space_a.pml4_paddr();
     let entry_after = unsafe {
-        let virt = (BACKING_BASE.load(Ordering::Acquire) as usize + space_a_phys.as_u64() as usize)
-            as *const u64;
+        let base = BACKING_BASE.load(Ordering::Acquire) as usize;
+        let virt: *const u64 =
+            core::ptr::with_exposed_provenance(base + space_a_phys.as_u64() as usize);
         virt.add(300).read_volatile()
     };
     assert_eq!(entry_after, sentinel);

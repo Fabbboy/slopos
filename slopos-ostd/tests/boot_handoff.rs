@@ -64,7 +64,7 @@ fn acpi_handoff_round_trips_checksum_validated_table() {
     reset_bsp_token_for_tests();
 
     let table = build_synthetic_acpi_table(*b"APIC", 36);
-    let table_ptr = table.as_ptr() as u64;
+    let table_ptr = table.as_ptr().expose_provenance() as u64;
     // Choose offset so phys + offset = table_ptr. The kernel's HHDM
     // is `virt = phys + offset`, so we just register `table_ptr`
     // itself as the offset (phys 0 is then mapped at table_ptr).
@@ -105,7 +105,7 @@ fn acpi_region_bytes_round_trips_raw_bytes() {
     reset_bsp_token_for_tests();
 
     let payload: Vec<u8> = (0..16u8).collect();
-    let ptr = payload.as_ptr() as u64;
+    let ptr = payload.as_ptr().expose_provenance() as u64;
     let phys_base = 0x1000_u64;
     let offset = ptr.wrapping_sub(phys_base);
 

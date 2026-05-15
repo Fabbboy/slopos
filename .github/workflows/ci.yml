@@ -27,15 +27,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Setup Go toolchain
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.22'
           cache-dependency-path: tools/run_tests/go.sum
@@ -73,7 +73,38 @@ jobs:
 
       - name: Upload test log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-test-log
           path: ci-test.log
+
+  miri:
+    name: KernMiri (OSTD UB detection)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Setup Rust toolchain
+        run: just setup
+
+      - name: Cache Miri sysroot
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/miri
+          key: miri-sysroot-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Cache Rust artifacts (Miri target dir)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> builddir/target"
+          prefix-key: "v0-miri"
+          cache-on-failure: true
+
+      - name: Run KernMiri suite
+        run: just check-miri

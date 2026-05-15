@@ -44,9 +44,9 @@ fn ascending_levels_accepted() {
     let _g = LOCK_LOCK.lock().unwrap();
     setup();
 
-    let a = 0x1001_usize as *const ();
-    let b = 0x1002_usize as *const ();
-    let c = 0x1003_usize as *const ();
+    let a = core::ptr::without_provenance::<()>(0x1001);
+    let b = core::ptr::without_provenance::<()>(0x1002);
+    let c = core::ptr::without_provenance::<()>(0x1003);
 
     unsafe {
         push_lock(a, noop_poison, LOCK_LEVEL_RESOURCE);
@@ -70,8 +70,8 @@ fn same_level_distinct_classes_accepted() {
     // Two distinct lock instances at the same RESOURCE level. Under the
     // old strict-level rule this would panic; under the cycle-detection
     // model it's accepted as long as the order is consistent.
-    let a = 0x2001_usize as *const ();
-    let b = 0x2002_usize as *const ();
+    let a = core::ptr::without_provenance::<()>(0x2001);
+    let b = core::ptr::without_provenance::<()>(0x2002);
 
     unsafe {
         push_lock(a, noop_poison, LOCK_LEVEL_RESOURCE);
@@ -90,8 +90,8 @@ fn ab_then_ba_detects_cycle() {
     let _g = LOCK_LOCK.lock().unwrap();
     setup();
 
-    let a = 0x3001_usize as *const ();
-    let b = 0x3002_usize as *const ();
+    let a = core::ptr::without_provenance::<()>(0x3001);
+    let b = core::ptr::without_provenance::<()>(0x3002);
 
     // First chain: A then B. Establishes the edge A -> B.
     unsafe {
@@ -126,8 +126,8 @@ fn chain_hash_cache_repeated_chain_is_fast() {
     let _g = LOCK_LOCK.lock().unwrap();
     setup();
 
-    let a = 0x4001_usize as *const ();
-    let b = 0x4002_usize as *const ();
+    let a = core::ptr::without_provenance::<()>(0x4001);
+    let b = core::ptr::without_provenance::<()>(0x4002);
 
     // Acquire the same chain (A, B) 100 times. After the first pass the
     // chain key is cached; subsequent passes should hit the chain-hash
@@ -153,8 +153,8 @@ fn panic_bypass_suppresses_ordering_check() {
     let _g = LOCK_LOCK.lock().unwrap();
     setup();
 
-    let a = 0x5001_usize as *const ();
-    let b = 0x5002_usize as *const ();
+    let a = core::ptr::without_provenance::<()>(0x5001);
+    let b = core::ptr::without_provenance::<()>(0x5002);
 
     // Establish A -> B.
     unsafe {
@@ -192,9 +192,9 @@ fn held_stack_walk_after_chain_acquisition() {
     setup();
 
     let addrs = [
-        0x6001_usize as *const (),
-        0x6002_usize as *const (),
-        0x6003_usize as *const (),
+        core::ptr::without_provenance::<()>(0x6001),
+        core::ptr::without_provenance::<()>(0x6002),
+        core::ptr::without_provenance::<()>(0x6003),
     ];
 
     // Acquire three locks in ascending levels (no cycle possible).

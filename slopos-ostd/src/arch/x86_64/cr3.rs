@@ -61,16 +61,28 @@ pub unsafe fn write_cr3_pcid(pml4_phys: PhysAddr, pcid: Pcid, no_flush: bool) {
     if no_flush {
         value |= 1u64 << 63;
     }
-    // SAFETY: caller's contract above. The value is built entirely
-    // from typed inputs (`PhysAddr`, `Pcid`), so no arbitrary u64
-    // can sneak in. The single assembly statement clobbers no
-    // general-purpose register.
-    unsafe {
-        core::arch::asm!(
-            "mov {value}, %cr3",
-            value = in(reg) value,
-            options(nostack, preserves_flags, att_syntax),
-        );
+    #[cfg(target_os = "none")]
+    {
+        // SAFETY: caller's contract above. The value is built entirely
+        // from typed inputs (`PhysAddr`, `Pcid`), so no arbitrary u64
+        // can sneak in. The single assembly statement clobbers no
+        // general-purpose register.
+        unsafe {
+            core::arch::asm!(
+                "mov {value}, %cr3",
+                value = in(reg) value,
+                options(nostack, preserves_flags, att_syntax),
+            );
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Host / cargo-miri-test: no real CR3 to write to. Stash the
+        // would-be value in an atomic so any caller that immediately
+        // re-reads observes the write.
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static MOCK_CR3: AtomicU64 = AtomicU64::new(0);
+        MOCK_CR3.store(value, Ordering::Relaxed);
     }
 }
 

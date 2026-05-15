@@ -332,12 +332,20 @@ mod tests {
         assert!(!is_ostd_usercopy_ip(fault));
     }
 
+    // The next two cases depend on the real binary layout of the
+    // `global_asm!` block (`__ostd_usercopy_start` immediately precedes
+    // the `rep movsb` byte, `__ostd_usercopy_end` follows it). Miri's
+    // interpreter assigns external-fn pointer values that do not
+    // preserve that layout, so the start..end range collapses and the
+    // checks become meaningless. Skip under Miri.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn fault_range_contains_movsb() {
         let start = __ostd_usercopy_start as *const () as u64;
         assert!(is_ostd_usercopy_ip(start));
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn fault_range_excludes_addresses_below_start() {
         let start = __ostd_usercopy_start as *const () as u64;

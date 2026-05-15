@@ -10,6 +10,9 @@ workspace = true
 [features]
 # Exposes test-only constructors (e.g. `MetaSlot::new_unused`) needed
 # by host-side integration tests that wire OSTD against scratch memory.
+# Auto-enabled for the `cargo test` / `cargo miri test` paths via the
+# `[dev-dependencies] slopos-ostd = { path = ".", features = [...] }`
+# trick below; Miri-only pivots use `cfg(miri)` (auto-set by cargo-miri).
 test-helpers = []
 
 [dependencies]

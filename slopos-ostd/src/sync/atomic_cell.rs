@@ -8,11 +8,9 @@
 //! scheduler's wait/wake protocol: a producer publishes a value
 //! exactly once, observers see either *not yet* or *the value*, and
 //! the value remains addressable for the cell's lifetime once
-//! published. The race-fix reasoning lives in
-//! `plans/ok-lets-fully-implement-harmonic-cascade.md` (Phase 1A);
-//! the short version is that pairing a durable per-task `exit_info`
-//! cell with a per-task `WaitQueue` collapses the two-atomic
-//! observation race that the old `(status, waiting_on)` pair had.
+//! published. Pairing a durable per-task `exit_info` cell with a
+//! per-task `WaitQueue` collapses the two-atomic observation race
+//! that the previous `(status, waiting_on)` pair had.
 //!
 //! Storage is heap-backed: a single [`AtomicPtr<T>`] holding either
 //! null or a [`KBox<T>`] leaked via [`KBox::into_raw`]. The cell
