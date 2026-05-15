@@ -37,10 +37,10 @@ jobs:
       - name: Setup Go toolchain
         uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: tools/run_tests/go.mod
           cache-dependency-path: tools/run_tests/go.sum
 
-      - name: Setup Rust toolchain
+      - name: Setup Rust + Go toolchains
         run: just setup
 
       - name: Check formatting
@@ -95,7 +95,13 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
 
-      - name: Setup Rust toolchain
+      - name: Setup Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/run_tests/go.mod
+          cache-dependency-path: tools/run_tests/go.sum
+
+      - name: Setup Rust + Go toolchains
         run: just setup
 
       - name: Cache Miri sysroot
