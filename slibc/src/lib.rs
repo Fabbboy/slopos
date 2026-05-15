@@ -6,8 +6,7 @@
 #![feature(sync_unsafe_cell)]
 #![feature(c_variadic)]
 
-extern crate alloc;
-
+pub mod alloc;
 pub mod crt;
 pub mod env;
 pub mod errno;

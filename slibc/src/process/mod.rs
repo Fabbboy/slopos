@@ -1,6 +1,8 @@
 //! Process lifecycle — the Rites of Birth and Death.
 
 pub mod atexit;
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod tests;
 pub mod wait;
 

@@ -1,82 +1,52 @@
 #![feature(restricted_std)]
 
-use core::ffi::c_void;
-
 // Pull in the `slopos-userland` lib crate so its `_start` ELF entry
 // point is linked into the binary. Without this `use _` reference, the
 // binary has no `_start`, the linker emits an entry of 0x0, and the
 // kernel's `do_exec` rejects the ELF as `NoExec`.
 use slopos_userland as _;
 
-use slopos_slibc::mem::malloc;
+use slopos_slibc::alloc::RawBuffer;
 
 fn test_alloc_dealloc_basic() -> bool {
-    let ptr = malloc::alloc(64).cast::<u8>();
-    if ptr.is_null() {
+    let Some(mut buf) = RawBuffer::new(64) else {
         return false;
-    }
-
-    unsafe {
-        for i in 0..64 {
-            *ptr.add(i) = (i as u8).wrapping_mul(3);
-        }
-        for i in 0..64 {
-            if *ptr.add(i) != (i as u8).wrapping_mul(3) {
-                malloc::dealloc(ptr.cast::<c_void>());
-                return false;
-            }
-        }
-    }
-
-    malloc::dealloc(ptr.cast::<c_void>());
-    true
+    };
+    buf.fill_with(|i| (i as u8).wrapping_mul(3));
+    buf.verify(|i| (i as u8).wrapping_mul(3))
 }
 
 fn test_forward_coalesce() -> bool {
-    let a = malloc::alloc(64).cast::<u8>();
-    let b = malloc::alloc(64).cast::<u8>();
-    if a.is_null() || b.is_null() {
-        if !a.is_null() {
-            malloc::dealloc(a.cast::<c_void>());
-        }
-        if !b.is_null() {
-            malloc::dealloc(b.cast::<c_void>());
-        }
+    let Some(a) = RawBuffer::new(64) else {
         return false;
-    }
-
-    malloc::dealloc(b.cast::<c_void>());
-    malloc::dealloc(a.cast::<c_void>());
-
-    let c = malloc::alloc(128).cast::<u8>();
-    if c.is_null() {
+    };
+    let Some(b) = RawBuffer::new(64) else {
         return false;
-    }
-    malloc::dealloc(c.cast::<c_void>());
+    };
+    drop(b);
+    drop(a);
+
+    let Some(c) = RawBuffer::new(128) else {
+        return false;
+    };
+    drop(c);
     true
 }
 
 fn test_backward_coalesce() -> bool {
-    let a = malloc::alloc(64).cast::<u8>();
-    let b = malloc::alloc(64).cast::<u8>();
-    if a.is_null() || b.is_null() {
-        if !a.is_null() {
-            malloc::dealloc(a.cast::<c_void>());
-        }
-        if !b.is_null() {
-            malloc::dealloc(b.cast::<c_void>());
-        }
+    let Some(a) = RawBuffer::new(64) else {
         return false;
-    }
-
-    malloc::dealloc(a.cast::<c_void>());
-    malloc::dealloc(b.cast::<c_void>());
-
-    let c = malloc::alloc(128).cast::<u8>();
-    if c.is_null() {
+    };
+    let Some(b) = RawBuffer::new(64) else {
         return false;
-    }
-    malloc::dealloc(c.cast::<c_void>());
+    };
+    drop(a);
+    drop(b);
+
+    let Some(c) = RawBuffer::new(128) else {
+        return false;
+    };
+    drop(c);
     true
 }
 
@@ -87,117 +57,71 @@ fn test_format_pattern_stability() -> bool {
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
         let size = 32 + (seed as usize % 97);
 
-        let ptr = malloc::alloc(size).cast::<u8>();
-        if ptr.is_null() {
+        let Some(mut buf) = RawBuffer::new(size) else {
+            return false;
+        };
+
+        let base = (iter as u8).wrapping_mul(13);
+        buf.fill_with(|i| base.wrapping_add(i as u8));
+        if !buf.verify(|i| base.wrapping_add(i as u8)) {
             return false;
         }
-
-        unsafe {
-            let base = (iter as u8).wrapping_mul(13);
-            for i in 0..size {
-                *ptr.add(i) = base.wrapping_add(i as u8);
-            }
-            for i in 0..size {
-                if *ptr.add(i) != base.wrapping_add(i as u8) {
-                    malloc::dealloc(ptr.cast::<c_void>());
-                    return false;
-                }
-            }
-        }
-
-        malloc::dealloc(ptr.cast::<c_void>());
     }
 
-    let big = malloc::alloc(64 * 1024).cast::<u8>();
-    if big.is_null() {
+    let Some(mut big) = RawBuffer::new(64 * 1024) else {
         return false;
-    }
-    unsafe {
-        *big = 0xA5;
-        *big.add(64 * 1024 - 1) = 0x5A;
-        if *big != 0xA5 || *big.add(64 * 1024 - 1) != 0x5A {
-            malloc::dealloc(big.cast::<c_void>());
-            return false;
-        }
-    }
-    malloc::dealloc(big.cast::<c_void>());
-    true
+    };
+    big.write_byte(0, 0xA5);
+    big.write_byte(64 * 1024 - 1, 0x5A);
+    big.read_byte(0) == 0xA5 && big.read_byte(64 * 1024 - 1) == 0x5A
 }
 
 fn test_mmap_fallback() -> bool {
     let size = 256 * 1024;
-    let ptr = malloc::alloc(size).cast::<u8>();
-    if ptr.is_null() {
+    let Some(mut buf) = RawBuffer::new(size) else {
         return false;
-    }
-    unsafe {
-        *ptr = 0xC1;
-        *ptr.add(size - 1) = 0x1C;
-        if *ptr != 0xC1 || *ptr.add(size - 1) != 0x1C {
-            malloc::dealloc(ptr.cast::<c_void>());
-            return false;
-        }
-    }
-    malloc::dealloc(ptr.cast::<c_void>());
-    true
+    };
+    buf.write_byte(0, 0xC1);
+    buf.write_byte(size - 1, 0x1C);
+    buf.read_byte(0) == 0xC1 && buf.read_byte(size - 1) == 0x1C
 }
 
 fn test_realloc_grow() -> bool {
-    let p1 = malloc::alloc(32).cast::<u8>();
-    if p1.is_null() {
+    let Some(mut p) = RawBuffer::new(32) else {
         return false;
-    }
+    };
+    p.fill_with(|i| i as u8);
 
-    unsafe {
-        for i in 0..32 {
-            *p1.add(i) = i as u8;
+    let Some(p) = p.realloc(128) else {
+        return false;
+    };
+    for i in 0..32 {
+        if p.read_byte(i) != i as u8 {
+            return false;
         }
     }
 
-    let p2 = malloc::realloc(p1.cast::<c_void>(), 128).cast::<u8>();
-    if p2.is_null() {
+    let Some(p) = p.realloc(256) else {
         return false;
-    }
-
-    unsafe {
-        for i in 0..32 {
-            if *p2.add(i) != i as u8 {
-                malloc::dealloc(p2.cast::<c_void>());
-                return false;
-            }
+    };
+    for i in 0..32 {
+        if p.read_byte(i) != i as u8 {
+            return false;
         }
     }
-
-    let p3 = malloc::realloc(p2.cast::<c_void>(), 256).cast::<u8>();
-    if p3.is_null() {
-        return false;
-    }
-
-    unsafe {
-        for i in 0..32 {
-            if *p3.add(i) != i as u8 {
-                malloc::dealloc(p3.cast::<c_void>());
-                return false;
-            }
-        }
-    }
-
-    malloc::dealloc(p3.cast::<c_void>());
     true
 }
 
 fn test_small_recycling() -> bool {
-    let a = malloc::alloc(64).cast::<u8>();
-    if a.is_null() {
+    let Some(a) = RawBuffer::new(64) else {
         return false;
-    }
-    malloc::dealloc(a.cast::<c_void>());
+    };
+    drop(a);
 
-    let b = malloc::alloc(64).cast::<u8>();
-    if b.is_null() {
+    let Some(b) = RawBuffer::new(64) else {
         return false;
-    }
-    malloc::dealloc(b.cast::<c_void>());
+    };
+    drop(b);
     true
 }
 

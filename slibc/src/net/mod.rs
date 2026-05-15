@@ -3,6 +3,8 @@
 
 pub mod addr;
 pub mod dns;
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod tests;
 
 use crate::errno::errno_set;

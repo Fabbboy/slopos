@@ -6,6 +6,8 @@ pub mod join;
 pub mod keys;
 pub mod mutex;
 pub mod rwlock;
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod tcb;
 pub mod tests;
 pub mod tls;

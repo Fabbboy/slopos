@@ -1,5 +1,6 @@
 use super::addr::*;
 use super::dns::*;
+use super::shim;
 
 pub fn run_net_tests() -> (u32, u32) {
     let mut pass = 0u32;
@@ -42,48 +43,33 @@ pub fn run_net_tests() -> (u32, u32) {
         ntohs(val) == u16::from_be(val)
     });
 
-    check!("inet_addr_127_0_0_1", unsafe {
-        let s = b"127.0.0.1\0";
-        let addr = inet_addr(s.as_ptr());
+    check!("inet_addr_127_0_0_1", {
+        let addr = shim::inet_addr_cstr(b"127.0.0.1\0");
         addr != INADDR_NONE && addr == u32::from_ne_bytes([127, 0, 0, 1])
     });
-    check!("inet_addr_0_0_0_0", unsafe {
-        let s = b"0.0.0.0\0";
-        inet_addr(s.as_ptr()) == 0
-    });
-    check!("inet_addr_255_255_255_255", unsafe {
-        let s = b"255.255.255.255\0";
-        let addr = inet_addr(s.as_ptr());
+    check!("inet_addr_0_0_0_0", shim::inet_addr_cstr(b"0.0.0.0\0") == 0);
+    check!("inet_addr_255_255_255_255", {
+        let addr = shim::inet_addr_cstr(b"255.255.255.255\0");
         addr == u32::from_ne_bytes([255, 255, 255, 255])
     });
-    check!("inet_addr_invalid_empty", unsafe {
-        inet_addr(b"\0".as_ptr()) == INADDR_NONE
-    });
-    check!("inet_addr_invalid_letters", unsafe {
-        inet_addr(b"abc\0".as_ptr()) == INADDR_NONE
-    });
-    check!("inet_addr_null", unsafe {
-        inet_addr(core::ptr::null()) == INADDR_NONE
-    });
-    check!("inet_addr_too_few_octets", unsafe {
-        inet_addr(b"1.2.3\0".as_ptr()) == INADDR_NONE
-    });
-    check!("inet_addr_octet_overflow", unsafe {
-        inet_addr(b"1.2.3.256\0".as_ptr()) == INADDR_NONE
-    });
+    check!("inet_addr_invalid_empty", shim::inet_addr_is_none(b"\0"));
+    check!(
+        "inet_addr_invalid_letters",
+        shim::inet_addr_invalid_letters() == INADDR_NONE
+    );
+    check!("inet_addr_null", shim::inet_addr_null() == INADDR_NONE);
+    check!(
+        "inet_addr_too_few_octets",
+        shim::inet_addr_is_none(b"1.2.3\0")
+    );
+    check!(
+        "inet_addr_octet_overflow",
+        shim::inet_addr_is_none(b"1.2.3.256\0")
+    );
 
-    check!("inet_ntoa_127_0_0_1", unsafe {
+    check!("inet_ntoa_127_0_0_1", {
         let addr = u32::from_ne_bytes([127, 0, 0, 1]);
-        let ptr = inet_ntoa(addr);
-        !ptr.is_null() && {
-            let mut len = 0;
-            let mut p = ptr;
-            while *p != 0 {
-                len += 1;
-                p = p.add(1);
-            }
-            len == 9
-        }
+        shim::inet_ntoa_len(addr) == Some(9)
     });
 
     check!("EAI_NONAME_negative", EAI_NONAME < 0);
@@ -96,34 +82,18 @@ pub fn run_net_tests() -> (u32, u32) {
         !p.is_null()
     });
 
-    check!("getaddrinfo_null_node", unsafe {
-        let mut res: *mut AddrInfo = core::ptr::null_mut();
-        let ret = getaddrinfo(
-            core::ptr::null(),
-            core::ptr::null(),
-            core::ptr::null(),
-            &mut res,
-        );
-        ret == EAI_NONAME
+    check!(
+        "getaddrinfo_null_node",
+        shim::getaddrinfo_all_null() == EAI_NONAME
+    );
+
+    check!("getaddrinfo_numeric_ip", {
+        let (ret, family) = shim::getaddrinfo_numeric(b"127.0.0.1\0");
+        ret == 0 && family == Some(AF_INET)
     });
 
-    check!("getaddrinfo_numeric_ip", unsafe {
-        let mut res: *mut AddrInfo = core::ptr::null_mut();
-        let ret = getaddrinfo(
-            b"127.0.0.1\0".as_ptr(),
-            core::ptr::null(),
-            core::ptr::null(),
-            &mut res,
-        );
-        let ok = ret == 0 && !res.is_null() && (*res).ai_family == AF_INET;
-        if !res.is_null() {
-            freeaddrinfo(res);
-        }
-        ok
-    });
-
-    check!("freeaddrinfo_null_safe", unsafe {
-        freeaddrinfo(core::ptr::null_mut());
+    check!("freeaddrinfo_null_safe", {
+        shim::freeaddrinfo_null_safe();
         true
     });
 

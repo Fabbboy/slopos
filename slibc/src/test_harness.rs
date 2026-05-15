@@ -47,9 +47,5 @@ pub fn run(cases: &[(&'static str, fn() -> bool)]) -> ! {
         }
     }
     let exit_code = failed.min(255) as i32;
-    // SAFETY: `process::exit` is `unsafe extern "C"` because it's exported
-    // as the C `exit` symbol; calling it from Rust with a plain integer
-    // is sound — it never reads memory through the argument and never
-    // returns.
-    unsafe { process::exit(exit_code) }
+    process::shim::exit(exit_code)
 }

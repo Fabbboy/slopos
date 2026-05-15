@@ -1,6 +1,8 @@
 //! Terminal I/O — ioctl, termios, and the sacred runes of raw mode.
 //! The terminal is the gateway between the wizards and the Wheel.
 
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod tests;
 
 use crate::errno::errno_set;

@@ -8,6 +8,8 @@ pub mod chars;
 pub mod file;
 pub mod printf;
 pub mod scanf;
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod streams;
 pub mod tests;
 

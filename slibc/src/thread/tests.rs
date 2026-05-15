@@ -4,6 +4,7 @@ use core::sync::atomic::AtomicI32;
 use super::condvar::*;
 use super::mutex::*;
 use super::rwlock::*;
+use super::shim;
 use super::tcb::PTHREAD_KEYS_MAX;
 use super::tcb::*;
 use super::*;
@@ -84,12 +85,8 @@ pub fn run_thread_tests() -> (u32, u32) {
         mem::size_of::<AtomicI32>() == mem::size_of::<i32>()
     );
 
-    check!("pthread_equal same", unsafe {
-        super::join::pthread_equal(42, 42) != 0
-    });
-    check!("pthread_equal diff", unsafe {
-        super::join::pthread_equal(1, 2) == 0
-    });
+    check!("pthread_equal same", shim::pthread_equal(42, 42));
+    check!("pthread_equal diff", !shim::pthread_equal(1, 2));
 
     (pass, fail)
 }

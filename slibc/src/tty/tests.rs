@@ -1,3 +1,4 @@
+use super::shim;
 use super::*;
 use slopos_abi::syscall::{ControlFlags, InputFlags, LocalFlags, OutputFlags, UserTermios};
 
@@ -29,7 +30,7 @@ pub fn run_tty_tests() -> (u32, u32) {
     check!("TCSETSW_eq_0x5403", slopos_abi::syscall::TCSETSW == 0x5403);
     check!("TCSETSF_eq_0x5404", slopos_abi::syscall::TCSETSF == 0x5404);
 
-    check!("cfmakeraw_clears_flags", unsafe {
+    check!("cfmakeraw_clears_flags", {
         let mut t = UserTermios {
             c_iflag: InputFlags::from_bits_retain(0xFFFF_FFFF),
             c_oflag: OutputFlags::from_bits_retain(0xFFFF_FFFF),
@@ -40,7 +41,7 @@ pub fn run_tty_tests() -> (u32, u32) {
             c_ispeed: 0,
             c_ospeed: 0,
         };
-        cfmakeraw(&mut t);
+        shim::cfmakeraw(&mut t);
         let iflags_cleared = !t.c_iflag.intersects(InputFlags::ICRNL | InputFlags::IXON);
         let oflags_cleared = !t.c_oflag.contains(OutputFlags::OPOST);
         let lflags_cleared = !t
@@ -51,7 +52,7 @@ pub fn run_tty_tests() -> (u32, u32) {
         iflags_cleared && oflags_cleared && lflags_cleared && vmin_set && vtime_set
     });
 
-    check!("cfgetispeed_returns_value", unsafe {
+    check!("cfgetispeed_returns_value", {
         let t = UserTermios {
             c_iflag: InputFlags::empty(),
             c_oflag: OutputFlags::empty(),
@@ -62,10 +63,10 @@ pub fn run_tty_tests() -> (u32, u32) {
             c_ispeed: 9600,
             c_ospeed: 19200,
         };
-        cfgetispeed(&t) == 9600 && cfgetospeed(&t) == 19200
+        shim::cfgetispeed(&t) == 9600 && shim::cfgetospeed(&t) == 19200
     });
 
-    check!("cfsetispeed_sets_value", unsafe {
+    check!("cfsetispeed_sets_value", {
         let mut t = UserTermios {
             c_iflag: InputFlags::empty(),
             c_oflag: OutputFlags::empty(),
@@ -76,10 +77,10 @@ pub fn run_tty_tests() -> (u32, u32) {
             c_ispeed: 0,
             c_ospeed: 0,
         };
-        cfsetispeed(&mut t, 115200) == 0 && t.c_ispeed == 115200
+        shim::cfsetispeed(&mut t, 115200) == 0 && t.c_ispeed == 115200
     });
 
-    check!("cfsetospeed_sets_value", unsafe {
+    check!("cfsetospeed_sets_value", {
         let mut t = UserTermios {
             c_iflag: InputFlags::empty(),
             c_oflag: OutputFlags::empty(),
@@ -90,26 +91,21 @@ pub fn run_tty_tests() -> (u32, u32) {
             c_ispeed: 0,
             c_ospeed: 0,
         };
-        cfsetospeed(&mut t, 38400) == 0 && t.c_ospeed == 38400
+        shim::cfsetospeed(&mut t, 38400) == 0 && t.c_ospeed == 38400
     });
 
-    check!("cfgetispeed_null", unsafe {
-        cfgetispeed(core::ptr::null()) == 0
-    });
+    check!("cfgetispeed_null", shim::cfgetispeed_null() == 0);
 
-    check!("cfsetispeed_null", unsafe {
-        cfsetispeed(core::ptr::null_mut(), 9600) == -1
-    });
+    check!("cfsetispeed_null", shim::cfsetispeed_null(9600) == -1);
 
-    check!("tcgetattr_null_termios", unsafe {
-        tcgetattr(0, core::ptr::null_mut()) == -1
-    });
+    check!("tcgetattr_null_termios", shim::tcgetattr_null(0) == -1);
 
-    check!("tcsetattr_null_termios", unsafe {
-        tcsetattr(0, TCSANOW, core::ptr::null()) == -1
-    });
+    check!(
+        "tcsetattr_null_termios",
+        shim::tcsetattr_null(0, TCSANOW) == -1
+    );
 
-    check!("tcsetattr_invalid_action", unsafe {
+    check!("tcsetattr_invalid_action", {
         let t = UserTermios {
             c_iflag: InputFlags::empty(),
             c_oflag: OutputFlags::empty(),
@@ -120,7 +116,7 @@ pub fn run_tty_tests() -> (u32, u32) {
             c_ispeed: 0,
             c_ospeed: 0,
         };
-        tcsetattr(0, 99, &t) == -1
+        shim::tcsetattr(0, 99, &t) == -1
     });
 
     (pass, fail)

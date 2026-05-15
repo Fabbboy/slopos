@@ -1,6 +1,8 @@
 //! Time functions — the ticking clock of Sloptopia.
 //! Time is a flat circle; the Wheel spins regardless.
 
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod tests;
 
 use crate::errno::errno_set;

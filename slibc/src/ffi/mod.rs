@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+pub(crate) mod shim;
 pub mod syscalls;
 pub mod tests;
 
