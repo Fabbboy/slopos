@@ -8,13 +8,13 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::kernel_heap::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use crate::memory_init::get_memory_statistics;
 use crate::page_alloc::{
     alloc_kernel_page_with, alloc_kernel_pages_with, free_page_frame, get_page_allocator_stats,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
+use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::FrameAllocOptions;
 

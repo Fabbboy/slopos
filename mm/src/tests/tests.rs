@@ -12,7 +12,6 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_not_null, assert_test, fail, pass};
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::kernel_heap::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use crate::page_alloc::{
     alloc_kernel_page, alloc_kernel_pages, free_page_frame, get_page_allocator_stats,
     page_frame_get_ref, page_frame_inc_ref,
@@ -20,6 +19,7 @@ use crate::page_alloc::{
 use crate::paging::virt_to_phys;
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::get_process_vm_stats;
+use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 
 // ============================================================================
 // PAGE ALLOCATOR (BUDDY) TESTS - 12 tests
@@ -396,7 +396,7 @@ pub fn test_heap_free_list_search() -> TestResult {
 /// If this test fails, framebuffer performance will degrade to ~1 FPS after soft reboot.
 /// See: Intel Application Note 317080-002 "TLBs, Paging-Structure Caches"
 pub fn test_heap_warmup_pages_minimum() -> TestResult {
-    use crate::kernel_heap::HEAP_WARMUP_PAGES;
+    use crate::slab::HEAP_WARMUP_PAGES;
 
     const MINIMUM_WARMUP_PAGES: u32 = 2;
 

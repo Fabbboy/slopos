@@ -44,14 +44,13 @@ pub const MMIO_VIRT_BASE: u64 = 0xFFFF_8100_0000_0000;
 /// MMIO virtual address space size (16 GB should be more than enough).
 pub const MMIO_VIRT_SIZE: u64 = 0x0000_0004_0000_0000;
 
-/// Kernel heap virtual base address.
-pub const KERNEL_HEAP_VBASE: u64 = 0xFFFF_FFFF_9000_0000;
-
-/// Kernel heap size (256 MB).
-pub const KERNEL_HEAP_SIZE: u64 = 256 * 1024 * 1024;
-
-/// Kernel heap end virtual address (derived from base + size).
-pub const KERNEL_HEAP_VEND: u64 = KERNEL_HEAP_VBASE + KERNEL_HEAP_SIZE;
+/// Sentinel kernel-half virtual address for the user-VA-predicate
+/// guard in `mm/src/user_copy.rs::check_kernel_guard`. Any reliably-
+/// mapped higher-half address suffices — the guard merely asserts
+/// that the predicate rejects a known-kernel VA. The constant has no
+/// memory-layout role beyond being kernel-half and stable across
+/// boots.
+pub const KERNEL_HALF_PROBE_VA: u64 = 0xFFFF_FFFF_9000_0000;
 
 // =============================================================================
 // Kernel Stack Virtual Region (dynamic task stacks)

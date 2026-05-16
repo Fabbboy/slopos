@@ -25,7 +25,8 @@
 use core::cell::SyncUnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -37,25 +38,21 @@ use super::init::{Init, Zeroable};
 use crate::sync::BspToken;
 
 // ---------------------------------------------------------------------------
-// KernelHeap — owned by OSTD, dispatches via registered safe callbacks.
+// KernelHeap — owned by OSTD, dispatches via a registered safe `dyn`
+// trait handle.
 //
-// During very early boot (before mm's slab allocator is up), allocation
-// requests fall through to `OstdBumpHeap`, a 2 MiB bss-resident bump pool
-// owned by this crate. After mm has finished initialising its slab tier
-// and calls `register_kernel_heap_backend(...)`, all subsequent allocations
-// route through the registered safe callbacks. Callbacks are `fn` pointers
-// (not closures) so the registration slot is a plain `AtomicUsize`.
+// During very early boot (before the kernel slab is up), allocation
+// requests fall through to a 2 MiB bss-resident bump pool owned by
+// this crate. After the kernel slab calls
+// `register_kernel_slab_handle(...)`, all subsequent allocations route
+// through the registered `dyn KernelHeapBackend` — same shape as
+// `register_frame_allocator` consumes `dyn FrameAlloc`.
 //
 // Alignment cookies for layouts with `align > 16` are written **here**
-// (inside the SAFETY-noted block of `KernelHeap::alloc`/`dealloc`), so
-// the kernel `mm` crate's callback signatures stay layout-naive — they
-// receive a flat `(size, align)` pair and return / take a `*mut u8`,
-// matching the existing `kmalloc(size) -> *mut c_void` / `kfree(ptr)`
-// surface verbatim.
+// (inside the SAFETY-noted block of `KernelHeap::alloc`/`dealloc`),
+// so the backend stays layout-naive — `alloc(size)` returns /
+// `dealloc(ptr)` takes a flat byte pointer.
 // ---------------------------------------------------------------------------
-
-const ALLOC_MODE_BUMP: u8 = 0;
-const ALLOC_MODE_REGISTERED: u8 = 1;
 
 const BUMP_HEAP_SIZE: usize = 2 * 1024 * 1024;
 
@@ -67,46 +64,95 @@ static BUMP_HEAP: SyncUnsafeCell<AlignedHeap> =
     SyncUnsafeCell::new(AlignedHeap([0; BUMP_HEAP_SIZE]));
 static BUMP_NEXT: AtomicUsize = AtomicUsize::new(0);
 
-static ALLOC_MODE: AtomicU8 = AtomicU8::new(ALLOC_MODE_BUMP);
-static ALLOC_CB: AtomicUsize = AtomicUsize::new(0);
-static DEALLOC_CB: AtomicUsize = AtomicUsize::new(0);
+/// Set to `true` exactly once by [`register_kernel_slab_handle`]; gates
+/// `KernelHeap::alloc/dealloc` dispatch.
+static BACKEND_LIVE: AtomicBool = AtomicBool::new(false);
 
-/// Backend callback for `register_kernel_heap_backend`. The pair is
-/// passed as raw `fn` pointers stored in atomics so registration is a
-/// lock-free, one-shot publish.
-pub type KernelAllocFn = fn(size: usize) -> *mut u8;
-pub type KernelDeallocFn = fn(ptr: *mut u8);
+/// Registered backend handle. Stored as `AtomicPtr<&dyn …>` (the
+/// "double-indirect static" idiom: `slot` is itself a `'static`
+/// reference whose address we publish). Mirrors
+/// `slopos_ostd::mm::frame_alloc::register_frame_allocator`. Null until
+/// `register_kernel_slab_handle` runs.
+static BACKEND_SLOT: AtomicPtr<&'static dyn KernelHeapBackend> =
+    AtomicPtr::new(core::ptr::null_mut());
 
-/// Register the kernel slab allocator's safe `alloc` / `dealloc`
-/// callbacks. The `&BspToken<'brand>` witnesses BSP-only init; must
-/// be called exactly once after `slopos-mm`'s slab allocator finishes
-/// self-initialisation; subsequent calls panic.
+/// Variable-size heap backend consumed by the [`KernelHeap`] global
+/// allocator. Exactly one impl is registered per kernel via
+/// [`register_kernel_slab_handle`].
 ///
-/// After registration, every `KernelHeap` request routes through
-/// `alloc_fn` / `dealloc_fn`. Layouts with `align > 16` get a one-`usize`
-/// cookie written ahead of the user-visible pointer so `dealloc` can
-/// recover the underlying allocation; the cookie write/read happens
-/// inside this module's SAFETY-noted block, so the `alloc_fn` /
-/// `dealloc_fn` callbacks themselves remain layout-naive and require
-/// no `unsafe`.
-pub fn register_kernel_heap_backend<'brand>(
+/// Intentionally distinct from [`super::slab::Slab`]: `Slab` is a
+/// typed, fixed-size per-class surface (each impl knows its own
+/// element size at compile time), whereas `KernelHeap` needs a
+/// variable-size entry point. Pushing variable size onto `Slab` would
+/// either require an extra `size` parameter on every `Slab` impl or
+/// degrade the per-class type-state guarantee that each fixed-size
+/// slab provides.
+pub trait KernelHeapBackend: Send + Sync {
+    /// Allocate `size` bytes of kernel heap memory aligned to at least
+    /// 16. Returns `None` when the backing pool is exhausted or `size`
+    /// exceeds the implementation's upper bound. The returned pointer
+    /// is non-null and aligned to 16 bytes; the bytes are
+    /// implementation-defined (the SlopOS in-tree impl zeroes them).
+    fn alloc(&self, size: usize) -> Option<NonNull<u8>>;
+
+    /// Return a previously [`KernelHeapBackend::alloc`]-ed pointer to
+    /// the backend. `ptr` must be the exact value returned by a prior
+    /// `alloc`; size is recovered from the backend's own bookkeeping.
+    fn dealloc(&self, ptr: NonNull<u8>);
+}
+
+/// Register the kernel slab allocator as the [`KernelHeap`] backend.
+/// The `&BspToken<'brand>` witnesses BSP-only init; the doubly-indirect
+/// `&'static &'static dyn KernelHeapBackend` argument matches the shape
+/// of [`crate::mm::frame_alloc::register_frame_allocator`] — `slot`
+/// points at a `'static` reference held in the registering crate's BSS,
+/// so registration is a lock-free, one-shot publish of a stable
+/// pointer.
+///
+/// Must be called exactly once after `slopos-mm`'s slab tier finishes
+/// self-initialisation; subsequent calls panic. After registration,
+/// every `KernelHeap` request routes through `slot`. Layouts with
+/// `align > 16` get a one-`usize` cookie written ahead of the user-
+/// visible pointer so `dealloc` can recover the underlying allocation;
+/// the cookie write/read happens inside this module's SAFETY-noted
+/// block, so the backend itself stays layout-naive and requires no
+/// `unsafe`.
+pub fn register_kernel_slab_handle<'brand>(
     _token: &BspToken<'brand>,
-    alloc_fn: KernelAllocFn,
-    dealloc_fn: KernelDeallocFn,
+    slot: &'static &'static dyn KernelHeapBackend,
 ) {
-    let alloc_addr = alloc_fn as usize;
-    let dealloc_addr = dealloc_fn as usize;
-    if ALLOC_CB.swap(alloc_addr, Ordering::AcqRel) != 0 {
-        panic!("register_kernel_heap_backend: alloc callback already registered");
-    }
-    DEALLOC_CB.store(dealloc_addr, Ordering::Release);
-    ALLOC_MODE.store(ALLOC_MODE_REGISTERED, Ordering::Release);
+    let slot_ptr =
+        slot as *const &'static dyn KernelHeapBackend as *mut &'static dyn KernelHeapBackend;
+    let prev = BACKEND_SLOT.swap(slot_ptr, Ordering::AcqRel);
+    assert!(
+        prev.is_null(),
+        "register_kernel_slab_handle: backend already registered"
+    );
+    BACKEND_LIVE.store(true, Ordering::Release);
 }
 
 #[inline]
 fn align_up_usize(value: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)
+}
+
+#[inline]
+fn current_backend() -> Option<&'static dyn KernelHeapBackend> {
+    if !BACKEND_LIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let ptr = BACKEND_SLOT.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `ptr` was published by `register_kernel_slab_handle` as
+    // the address of a `&'static &'static dyn KernelHeapBackend`; the
+    // `BACKEND_LIVE` flag was published with Release ordering after the
+    // pointer store, and the matching Acquire load above guarantees we
+    // observe a non-null, valid slot. The pointee outlives the kernel,
+    // so dereferencing is sound.
+    Some(*unsafe { &*ptr })
 }
 
 fn bump_alloc(layout: core::alloc::Layout) -> *mut u8 {
@@ -126,7 +172,7 @@ fn bump_alloc(layout: core::alloc::Layout) -> *mut u8 {
 
 /// The kernel's `#[global_allocator]` type. Owns the dispatch from
 /// `core::alloc::GlobalAlloc` to either the OSTD bump pool (early boot)
-/// or the `mm` crate's registered slab callbacks (post-init).
+/// or the `mm` crate's registered `KernelHeapBackend` (post-init).
 ///
 /// `kernel/src/main.rs` is the only consumer:
 ///
@@ -138,25 +184,16 @@ pub struct KernelHeap;
 
 unsafe impl core::alloc::GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        if ALLOC_MODE.load(Ordering::Acquire) == ALLOC_MODE_BUMP {
+        let Some(backend) = current_backend() else {
             return bump_alloc(layout);
-        }
-
-        let cb = ALLOC_CB.load(Ordering::Acquire);
-        if cb == 0 {
-            return core::ptr::null_mut();
-        }
-        // SAFETY: `cb` was published by `register_kernel_heap_backend`
-        // with `KernelAllocFn`'s type via `fn-as-usize`; the same
-        // transmute-back recovers the original fn pointer, and
-        // `register_*` is called exactly once before any allocation
-        // observes `ALLOC_MODE_REGISTERED`.
-        let alloc_fn: KernelAllocFn = unsafe { core::mem::transmute::<usize, KernelAllocFn>(cb) };
+        };
 
         let align = layout.align().max(16);
         let size = layout.size();
         if align <= 16 {
-            return alloc_fn(size);
+            return backend
+                .alloc(size)
+                .map_or(core::ptr::null_mut(), |p| p.as_ptr());
         }
 
         // Over-allocate so we can stash a back-pointer cookie ahead of the
@@ -165,10 +202,10 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
         // the alignment guarantee on the user pointer.
         let extra = align_up_usize(core::mem::size_of::<usize>(), 16);
         let total = size.saturating_add(align).saturating_add(extra);
-        let raw = alloc_fn(total);
-        if raw.is_null() {
-            return core::ptr::null_mut();
-        }
+        let raw = match backend.alloc(total) {
+            Some(p) => p.as_ptr(),
+            None => return core::ptr::null_mut(),
+        };
 
         let base = raw as usize;
         let aligned = align_up_usize(base + extra, align);
@@ -191,24 +228,16 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
         if ptr.is_null() {
             return;
         }
-        if ALLOC_MODE.load(Ordering::Acquire) == ALLOC_MODE_BUMP {
+        let Some(backend) = current_backend() else {
             // The bump pool never frees.
             return;
-        }
-
-        let cb = DEALLOC_CB.load(Ordering::Acquire);
-        if cb == 0 {
-            return;
-        }
-        // SAFETY: `cb` was published by `register_kernel_heap_backend`
-        // with `KernelDeallocFn`'s type via `fn-as-usize`; the
-        // transmute-back recovers the original fn pointer.
-        let dealloc_fn: KernelDeallocFn =
-            unsafe { core::mem::transmute::<usize, KernelDeallocFn>(cb) };
+        };
 
         let align = layout.align().max(16);
         if align <= 16 {
-            dealloc_fn(ptr);
+            if let Some(nn) = NonNull::new(ptr) {
+                backend.dealloc(nn);
+            }
             return;
         }
 
@@ -217,8 +246,8 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
         // the `align > 16` branch of `alloc`, so the back-cookie was
         // written one `usize`-sized slot before `ptr`.
         let raw = unsafe { *cookie } as *mut u8;
-        if !raw.is_null() {
-            dealloc_fn(raw);
+        if let Some(nn) = NonNull::new(raw) {
+            backend.dealloc(nn);
         }
     }
 }

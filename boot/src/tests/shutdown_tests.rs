@@ -386,8 +386,8 @@ pub fn test_serial_flush_terminates() -> TestResult {
 }
 
 pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
-    use slopos_mm::kernel_heap::{kfree, kmalloc};
     use slopos_mm::page_alloc::{alloc_kernel_page_with, free_page_frame};
+    use slopos_mm::slab::{kfree, kmalloc};
     use slopos_ostd::mm::frame::FrameAllocOptions;
 
     const CYCLES: usize = 10;

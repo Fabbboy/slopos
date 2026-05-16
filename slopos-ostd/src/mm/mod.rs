@@ -21,8 +21,8 @@ pub use dma::{
 };
 pub use frame::{FrameAlloc, FrameAllocOptions};
 pub use heap::{
-    AllocError, KArc, KBTreeMap, KBox, KVec, KVecDeque, KernelHeap, PinBox, boxed_zeroed,
-    raw_alloc, raw_dealloc,
+    AllocError, KArc, KBTreeMap, KBox, KVec, KVecDeque, KernelHeap, KernelHeapBackend, PinBox,
+    boxed_zeroed, raw_alloc, raw_dealloc, register_kernel_slab_handle,
 };
 pub use init::{
     Init, InitClosure, SlotPtr, Zeroable, init_from_closure, init_struct_with, init_zeroed,

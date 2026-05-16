@@ -1,4 +1,3 @@
-use crate::kernel_heap::init_kernel_heap;
 use crate::memory_layout::{init_kernel_bounds, kernel_image_bounds};
 use crate::memory_layout_defs::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
@@ -625,10 +624,14 @@ pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_
     // This is required for Limine revision 3 which no longer maps these regions
     map_acpi_regions(memmap, hhdm_offset);
 
-    if init_kernel_heap() != 0 {
-        panic!("MM: Kernel heap initialization failed");
-    }
-    crate::global_allocator_use_kernel_heap(token);
+    // Bring up the kernel slab: state-machine transition to `Live`,
+    // register the slab as OSTD's `KernelHeapBackend` so every global
+    // allocation routes through `KERNEL_SLAB`, run the soft-reboot
+    // coherency warmup (load-bearing for framebuffer perf after PS/2
+    // soft reset — see the comment block in `mm/src/slab/mod.rs`).
+    crate::slab::init_kernel_slab(token);
+    crate::global_allocator_use_kernel_slab(token);
+    crate::slab::warmup_for_soft_reboot();
 
     // Kernel-stack and SafeStack data-stack VA allocators — must come after
     // paging + heap so each region's `SpinLock` is usable and paging
@@ -636,12 +639,11 @@ pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_
     // generic `TaskStack<R>` handle in `core::scheduler::task_stack`.
     crate::stack_va::init::<crate::stack_region::KstackRegion>();
     crate::stack_va::init::<crate::stack_region::UstackRegion>();
-    // Per-CPU heap magazine caches: infrastructure is in place but
-    // disabled pending investigation of a crash in the exec/fork test
-    // suites. The magazine code (magazine_refill, magazine_drain,
-    // per-CPU PerCpuHeapCache) is correct for normal alloc/free patterns
-    // but has a subtle interaction with the test harness's heap
-    // reinitialization path. Enable with: crate::kernel_heap::enable_heap_caches();
+    // Arm the per-CPU magazine fast path. Safe to do here: each
+    // `SlabAllocator<SIZE>` owns its own lock, so magazine re-entry
+    // is bounded to a single size class and `IrqPreemptGuard` pins
+    // the CPU for the duration of every push/pop.
+    crate::slab::enable_heap_caches();
 
     if init_process_vm() != 0 {
         panic!("MM: Process VM initialization failed");

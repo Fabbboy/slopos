@@ -47,7 +47,7 @@ fn check_kernel_guard(pid: u32) -> Result<(), UserPtrError> {
     if KERNEL_GUARD_CHECKED.is_set() {
         return Ok(());
     }
-    let kernel_probe = crate::memory_layout_defs::KERNEL_HEAP_VBASE;
+    let kernel_probe = crate::memory_layout_defs::KERNEL_HALF_PROBE_VA;
     if crate::process_vm::process_vm_user_va_is_user_accessible(pid, kernel_probe) {
         return Err(UserPtrError::NotMapped);
     }

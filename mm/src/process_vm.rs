@@ -15,12 +15,12 @@ use crate::dual_paging::{
 };
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
-use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PROCESS_TLS_BASE_VA};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging::{PageTable, ProcessPageDir};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::slab::{kfree, kmalloc};
 use crate::tlb;
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
