@@ -54,6 +54,21 @@ jobs:
             xorriso \
             e2fsprogs
 
+      - name: Verify KVM availability
+        run: |
+          if [ ! -c /dev/kvm ]; then
+            echo "::error::/dev/kvm not present on runner — KVM is required"
+            exit 1
+          fi
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+          ls -l /dev/kvm
+          qemu-system-x86_64 -accel help | grep -qw kvm || {
+            echo "::error::qemu-system-x86_64 does not list kvm under -accel help"
+            exit 1
+          }
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
