@@ -125,11 +125,20 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
     }
 
     /// Return an object. Magazine first, then slab page free-list.
+    /// Double-frees are swallowed: if `ptr` is already cached in
+    /// either the per-CPU magazine or the slab page's free chain, the
+    /// dealloc is a no-op.
     pub(crate) fn dealloc_one(&self, ptr: NonNull<u8>) {
         if super::HEAP_CACHES_ENABLED.load(Ordering::Acquire) && !self.inner.is_locked() {
             let _pin = IrqPreemptGuard::new();
             let cpu = get_current_cpu();
             let mag = self.magazines.get_pinned_mut(cpu);
+            // Defend against double-free: rejecting a duplicate now
+            // prevents the magazine from later handing the same
+            // pointer to two callers (silent use-after-free).
+            if mag.contains(ptr) {
+                return;
+            }
             if mag.push(ptr) {
                 self.stats.free_count.fetch_add(1, Ordering::Relaxed);
                 self.stats.free_objects.fetch_add(1, Ordering::Relaxed);
@@ -145,7 +154,10 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             }
         }
         // Fallback path: directly insert into the owning slab page's
-        // free-list under the class lock.
+        // free-list under the class lock. `push_to_slab` walks the
+        // chain and rejects duplicates, so double-frees that bypass
+        // the magazine (caches disabled, or magazine fast path skipped
+        // for any other reason) are still swallowed here.
         let state = self.inner.lock();
         if self.push_to_slab(&*state, ptr) {
             self.stats.free_count.fetch_add(1, Ordering::Relaxed);

@@ -81,4 +81,23 @@ impl Magazine {
         self.len += 1;
         true
     }
+
+    /// Is `ptr` already cached in this magazine? Used by the dealloc
+    /// path to swallow double-frees that would otherwise install the
+    /// same pointer twice (so a subsequent alloc would return the
+    /// same object to two callers — silent use-after-free).
+    #[inline]
+    pub(crate) fn contains(&self, ptr: NonNull<u8>) -> bool {
+        let needle = Slot::from_ptr(ptr).0;
+        let len = self.len as usize;
+        // Use a u32-counted index to keep the bounds check tight; the
+        // magazine size is a fixed compile-time constant well within
+        // u32 range.
+        for i in 0..len {
+            if self.slots[i].0 == needle {
+                return true;
+            }
+        }
+        false
+    }
 }

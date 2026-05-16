@@ -9,6 +9,7 @@
 use core::sync::atomic::Ordering;
 
 use super::KERNEL_SLAB;
+use super::SIZE_CLASSES;
 use super::page::{LARGE_ALLOC_COUNT, SLAB_PAGE_COUNT};
 use crate::paging_defs::PAGE_SIZE_4KB;
 
@@ -35,58 +36,59 @@ pub fn snapshot() -> HeapStats {
     let mut free_count: u64 = 0;
     let mut total_objects: u64 = 0;
     let mut free_objects: u64 = 0;
+    let mut slab_allocated_bytes: u64 = 0;
 
     macro_rules! fold {
-        ($slab:ident) => {{
-            alloc_count = alloc_count
-                .saturating_add(KERNEL_SLAB.$slab.stats.alloc_count.load(Ordering::Relaxed));
-            free_count = free_count
-                .saturating_add(KERNEL_SLAB.$slab.stats.free_count.load(Ordering::Relaxed));
-            total_objects = total_objects.saturating_add(
-                KERNEL_SLAB
-                    .$slab
-                    .stats
-                    .total_objects
-                    .load(Ordering::Relaxed) as u64,
-            );
-            free_objects =
-                free_objects.saturating_add(
-                    KERNEL_SLAB.$slab.stats.free_objects.load(Ordering::Relaxed) as u64,
-                );
+        ($slab:ident, $class_idx:expr) => {{
+            let ac = KERNEL_SLAB.$slab.stats.alloc_count.load(Ordering::Relaxed);
+            let fc = KERNEL_SLAB.$slab.stats.free_count.load(Ordering::Relaxed);
+            let total = KERNEL_SLAB
+                .$slab
+                .stats
+                .total_objects
+                .load(Ordering::Relaxed) as u64;
+            let free = KERNEL_SLAB.$slab.stats.free_objects.load(Ordering::Relaxed) as u64;
+            alloc_count = alloc_count.saturating_add(ac);
+            free_count = free_count.saturating_add(fc);
+            total_objects = total_objects.saturating_add(total);
+            free_objects = free_objects.saturating_add(free);
+            let in_use = total.saturating_sub(free);
+            let class_bytes = SIZE_CLASSES[$class_idx] as u64;
+            slab_allocated_bytes =
+                slab_allocated_bytes.saturating_add(in_use.saturating_mul(class_bytes));
         }};
     }
-    fold!(slab16);
-    fold!(slab32);
-    fold!(slab64);
-    fold!(slab128);
-    fold!(slab256);
-    fold!(slab512);
-    fold!(slab1024);
-    fold!(slab2048);
+    fold!(slab16, 0);
+    fold!(slab32, 1);
+    fold!(slab64, 2);
+    fold!(slab128, 3);
+    fold!(slab256, 4);
+    fold!(slab512, 5);
+    fold!(slab1024, 6);
+    fold!(slab2048, 7);
 
     let slab_pages = SLAB_PAGE_COUNT.load(Ordering::Relaxed) as u64;
     let large_count = LARGE_ALLOC_COUNT.load(Ordering::Relaxed) as u64;
-    let total_size = slab_pages.saturating_mul(PAGE_SIZE_4KB);
     let large_bytes = KERNEL_SLAB
         .large
         .total_bytes_allocated
         .load(Ordering::Relaxed)
         .saturating_sub(KERNEL_SLAB.large.total_bytes_freed.load(Ordering::Relaxed));
 
-    let allocated_blocks = (total_objects.saturating_sub(free_objects)) as u32;
-    let total_blocks = total_objects as u32;
-    let free_blocks = free_objects as u32;
-    let allocated_size = large_bytes;
+    let total_size = slab_pages
+        .saturating_mul(PAGE_SIZE_4KB)
+        .saturating_add(large_bytes);
+    let allocated_size = slab_allocated_bytes.saturating_add(large_bytes);
     let free_size = total_size.saturating_sub(allocated_size);
 
     HeapStats {
         total_size,
         allocated_size,
         free_size,
-        total_blocks,
-        allocated_blocks,
-        free_blocks,
-        allocation_count: (alloc_count.saturating_add(large_count)) as u32,
+        total_blocks: total_objects as u32,
+        allocated_blocks: (total_objects.saturating_sub(free_objects)) as u32,
+        free_blocks: free_objects as u32,
+        allocation_count: alloc_count.saturating_add(large_count) as u32,
         free_count: free_count as u32,
     }
 }
