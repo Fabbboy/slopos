@@ -4,12 +4,12 @@ use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_ostd::klog_info;
 
-use crate::sched::scheduler_get_current_task;
-use crate::scheduler::task::{task_borrow, task_flags};
-use crate::scheduler::task_struct::Task;
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::user::context::UserContext;
+use slopos_sched::scheduler::scheduler_get_current_task;
+use slopos_sched::task::{task_borrow, task_flags};
+use slopos_sched::task_struct::Task;
 
 pub fn syscall_handle(ctx_ptr: *mut UserContext) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {

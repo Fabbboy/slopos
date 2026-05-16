@@ -26,7 +26,7 @@ Use `python knowledge/query.py \"<question>\"` to ask about signatures, drivers,
 All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) are Intel syntax (`*.s`) and should document register contracts.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (per `plans/FRAMEKERNEL_PLAN.md` AD-1/AD-2). Every other kernel crate (`abi`, `acpi`, `boot`, `core`, `drivers`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `mm`, `net`, `service-core`, `video`, `windowing`) carries `#![forbid(unsafe_code)]`. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `ktesting/`, `appkit/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (per `plans/FRAMEKERNEL_PLAN.md` AD-1/AD-2). Every other kernel crate (`abi`, `acpi`, `boot`, `core`, `drivers`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `mm`, `net`, `sched`, `service-core`, `video`, `windowing`) carries `#![forbid(unsafe_code)]`. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `ktesting/`, `appkit/`) are out of scope for this discipline.
 
 Two documented exempt sites exist outside `slopos-ostd/`:
 

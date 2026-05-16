@@ -3,16 +3,16 @@
 //! Tests verify the kernel shutdown machinery: StateFlag atomicity,
 //! scheduler/task teardown, and reinit-after-shutdown correctness.
 
-use slopos_core::scheduler::scheduler::{
+use slopos_ostd::klog_info;
+use slopos_ostd::sync::StateFlag;
+use slopos_sched::scheduler::{
     init_scheduler, scheduler_enable, scheduler_is_enabled, scheduler_shutdown,
 };
-use slopos_core::scheduler::task::{
+use slopos_sched::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, init_task_manager,
     task_create, task_find_by_id, task_shutdown_all, task_terminate,
 };
-use slopos_core::scheduler::test_fixture::KernelTestScope;
-use slopos_ostd::klog_info;
-use slopos_ostd::sync::StateFlag;
+use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
 
 use core::ffi::{c_char, c_void};
@@ -473,9 +473,7 @@ pub fn test_task_terminate_idempotent() -> TestResult {
     assert_eq_test!(task_terminate(task_id), 0, "first terminate should succeed");
 
     // Verify the task is actually terminated.
-    if let Some(handle) =
-        slopos_core::scheduler::inspect::wrap(&_fixture.scope, task_find_by_id(task_id))
-    {
+    if let Some(handle) = slopos_sched::inspect::wrap(&_fixture.scope, task_find_by_id(task_id)) {
         let status = handle.status();
         assert_eq_test!(
             status,

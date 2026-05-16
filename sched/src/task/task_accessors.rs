@@ -2,7 +2,7 @@
 //!
 //! The body relocated to `slopos_ostd::task::accessors`. Kernel callers
 //! continue to spell each accessor as
-//! `crate::scheduler::task::task_accessors::*`.
+//! `crate::task::task_accessors::*`.
 
 pub use slopos_ostd::task::accessors::*;
 

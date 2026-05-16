@@ -10,9 +10,11 @@ pub mod accessors;
 pub mod exit_info;
 pub mod fpu;
 pub mod handles;
+pub mod idle_factory;
 pub mod kernel_task;
 pub mod link_roles;
 pub mod scheduler;
+pub mod scheduler_registry;
 pub mod state;
 pub mod switch;
 pub mod task;
@@ -28,7 +30,9 @@ pub use test_reports::{
 
 pub use fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, fpu_xrstor, fpu_xsave};
 pub use handles::{LinkProvider, OwnedTaskHandle, SharedTaskHandle, TaskOps, task_state};
-pub use scheduler::{RoundRobinRq, RoundRobinScheduler, RunQueue, Scheduler, TaskRef};
+pub use idle_factory::{IdleTaskFactory, current_idle_task_factory, register_idle_task_factory};
+pub use scheduler::{RunQueue, Scheduler, TaskRef};
+pub use scheduler_registry::{current_scheduler, register_scheduler};
 pub use switch::{
     TaskExitHook, init_current_context, register_task_exit_hook, switch_registers,
     task_entry_trampoline,

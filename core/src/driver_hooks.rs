@@ -6,8 +6,8 @@ use slopos_kernel_services::driver_runtime::{
 };
 
 use crate::irq;
-use crate::scheduler::scheduler;
-use crate::scheduler::task::{
+use slopos_sched::scheduler;
+use slopos_sched::task::{
     self, Task, task_has_deliverable_signal, task_parent_task_id, task_pgid, task_sid,
     task_signal_blocked, task_signal_handler, task_signal_pending_or,
 };

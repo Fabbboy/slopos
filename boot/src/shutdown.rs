@@ -10,14 +10,14 @@ static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
 static SERIAL_DRAINED: StateFlag = StateFlag::new();
 
-use slopos_core::sched::scheduler_shutdown;
-use slopos_core::task::task_shutdown_all;
 use slopos_drivers::apic;
 use slopos_drivers::hpet;
 use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
+use slopos_sched::scheduler::scheduler_shutdown;
+use slopos_sched::task::task_shutdown_all;
 
 fn serial_flush() {
     ostd_power::drain_serial_tx(|| cpu::pause(), 1024);

@@ -7,6 +7,7 @@ mod task_session;
 mod task_state;
 mod task_stats;
 mod task_table;
+mod user_ctx_init;
 
 pub use super::task_struct::{FpuState, Task, TaskContext};
 pub use slopos_abi::task::{
@@ -25,6 +26,7 @@ pub use task_session::*;
 pub use task_state::*;
 pub use task_stats::*;
 pub use task_table::*;
+pub use user_ctx_init::{init_user_ctx_for_new_task, init_user_ctx_from_parent_frame};
 
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
 

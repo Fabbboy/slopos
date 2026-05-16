@@ -1,12 +1,6 @@
 use slopos_ostd::KVec;
 
 use crate::exec;
-use crate::sched::task_wait_for;
-use crate::scheduler::task::{
-    task_borrow, task_borrow_mut, task_cpu_affinity, task_find_by_id, task_fork, task_id_of,
-    task_pgid, task_set_cpu_affinity, task_set_fs_base, task_terminate,
-};
-use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
     SyscallDisposition, syscall_bounded_from_user, syscall_copy_to_user_bounded,
     syscall_copy_user_str, syscall_return_err,
@@ -16,13 +10,19 @@ use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::syscall::*;
 use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
+use slopos_sched::scheduler::task_wait_for;
+use slopos_sched::task::{
+    task_borrow, task_borrow_mut, task_cpu_affinity, task_find_by_id, task_fork, task_id_of,
+    task_pgid, task_set_cpu_affinity, task_set_fs_base, task_terminate,
+};
+use slopos_sched::task_struct::Task;
 
 use slopos_arch::cpu;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::user::context::UserContext;
 
-use crate::task::{task_consume_zombie, task_peek_exit_info};
+use slopos_sched::task::{task_consume_zombie, task_peek_exit_info};
 
 fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVec<u64>, ()> {
     let mut out = KVec::<u64>::with_capacity(max_count).map_err(|_| ())?;
@@ -337,7 +337,7 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
             // resources (compositor surface, shm buffers, input queues, …)
             // so the new program can register fresh ones.
             let task_id = task_id_of(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
-            crate::scheduler::task::task_cleanup_for_exec(task_id);
+            slopos_sched::task::task_cleanup_for_exec(task_id);
 
             if tls_tp != 0 {
                 task_set_fs_base(task, tls_tp);
@@ -647,14 +647,8 @@ pub fn syscall_clone(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispo
     let child_tidptr = args.arg3;
     let tls = args.arg4;
 
-    match crate::scheduler::task::task_clone(
-        task,
-        flags,
-        child_stack,
-        parent_tidptr,
-        child_tidptr,
-        tls,
-    ) {
+    match slopos_sched::task::task_clone(task, flags, child_stack, parent_tidptr, child_tidptr, tls)
+    {
         Ok(child_id) => ctx.ok(child_id as u64),
         Err(errno) => syscall_return_err(ctx_ptr, errno),
     }
@@ -687,8 +681,8 @@ pub fn syscall_futex(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispo
     }
 
     let rc = match op {
-        FUTEX_WAIT => crate::scheduler::futex::futex_wait(uaddr, val, timeout),
-        FUTEX_WAKE => crate::scheduler::futex::futex_wake(uaddr, val),
+        FUTEX_WAIT => slopos_sched::futex::futex_wait(uaddr, val, timeout),
+        FUTEX_WAKE => slopos_sched::futex::futex_wake(uaddr, val),
         _ => ENOSYS_RETURN as i64,
     };
 

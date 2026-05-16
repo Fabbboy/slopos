@@ -234,6 +234,18 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     task_set_status(task, TaskStatus::Running);
 }
 
+/// Cross-crate, test-only entry point into [`dispatch`] for hermetic
+/// fixtures that live outside `slopos-sched` (notably
+/// `core/src/syscall/tests.rs`). Carries the same safety preconditions
+/// as [`dispatch`] — only invoke from a fixture that has primed
+/// `unsafe_stack_sp` and is running with preemption disabled on the
+/// target CPU.
+#[cfg(feature = "test-hooks")]
+#[inline]
+pub fn dispatch_for_test(cpu_id: usize, task: *mut Task) {
+    dispatch(cpu_id, task);
+}
+
 /// Install `task` as `cpu_id`'s idle task.  Writes `PCR.idle_task` —
 /// the single source of truth for "idle task on CPU N".
 /// Called once per CPU by `create_idle_task_for_cpu`.
@@ -1254,7 +1266,7 @@ pub fn set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyInde
 }
 
 pub fn clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize {
-    crate::scheduler::task::task_clear_controlling_tty_for_session(session_id, tty)
+    crate::task::task_clear_controlling_tty_for_session(session_id, tty)
 }
 
 pub fn scheduler_set_preemption_enabled(enabled: c_int) {
@@ -1278,7 +1290,10 @@ pub fn scheduler_timer_tick() {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // NMI watchdog: record that this CPU is alive before touching any lock.
-    WATCHDOG_TICKS[cpu_id].store(crate::irq::get_timer_ticks(), Ordering::Relaxed);
+    WATCHDOG_TICKS[cpu_id].store(
+        slopos_kernel_services::clock::get_timer_ticks(),
+        Ordering::Relaxed,
+    );
 
     // Unconditional QS: the timer ISR firing proves this CPU is not
     // inside an RCU read-side critical section (those disable preemption

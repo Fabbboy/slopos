@@ -8,18 +8,18 @@ use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
 use slopos_ostd::klog_debug;
 use slopos_ostd::user::context::UserContext;
 
-use crate::sched::{
-    get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
-};
-use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
     SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
     syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
-use crate::task::{get_task_stats, task_terminate};
 use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::tty;
+use slopos_sched::scheduler::{
+    get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
+};
+use slopos_sched::task::{get_task_stats, task_terminate};
+use slopos_sched::task_struct::Task;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
@@ -236,7 +236,7 @@ define_syscall!(syscall_process_list(ctx, args) {
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_ostd::KVec;
-    use crate::task::task_iterate_active;
+    use slopos_sched::task::task_iterate_active;
     // Allocate exactly `max_entries` (caller-requested, bounded by
     // `MAX_TASKS`) — not `MAX_TASKS` unconditionally; scanning 8192
     // default-initialised entries per syscall is unacceptable overhead
@@ -252,7 +252,7 @@ define_syscall!(syscall_process_list(ctx, args) {
         max: usize,
     }
 
-    fn collect_task(task_ptr: *mut crate::scheduler::task_struct::Task, ctx_ptr: *mut c_void) {
+    fn collect_task(task_ptr: *mut slopos_sched::task_struct::Task, ctx_ptr: *mut c_void) {
         // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow.
         // `iterate_tasks` passes back the same `*mut IterCtx` the
         // caller stashed a moment ago.
@@ -264,7 +264,7 @@ define_syscall!(syscall_process_list(ctx, args) {
             return;
         }
 
-        let Some(task) = crate::scheduler::task::task_borrow(task_ptr) else {
+        let Some(task) = slopos_sched::task::task_borrow(task_ptr) else {
             return;
         };
         if task.task_id == INVALID_TASK_ID {
@@ -351,7 +351,7 @@ define_syscall!(syscall_percpu_stats(ctx, args) {
     let max_entries = (args.arg1 as usize).min(cpu_count);
 
     for i in 0..max_entries {
-        let stats = crate::per_cpu::with_cpu_scheduler(i, |sched| UserPerCpuStats {
+        let stats = slopos_sched::per_cpu::with_cpu_scheduler(i, |sched| UserPerCpuStats {
             cpu_id: i as u32,
             _pad: 0,
             total_switches: sched.total_switches.load(Ordering::Relaxed),

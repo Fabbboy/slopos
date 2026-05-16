@@ -188,9 +188,9 @@ impl SignalAction {
 ///
 /// Parameterised over:
 /// - `K`: kernel-mode stack handle (kernel side passes
-///   `slopos_core::scheduler::task_stack::KernelStack`).
+///   `slopos_sched::task_stack::KernelStack`).
 /// - `U`: SafeStack data ("unsafe") stack handle (kernel side passes
-///   `slopos_core::scheduler::task_stack::UnsafeStack`).
+///   `slopos_sched::task_stack::UnsafeStack`).
 ///
 /// The `test_reports` ring is concrete because `TestReportRing` now
 /// lives in OSTD alongside the rest of the task plumbing.

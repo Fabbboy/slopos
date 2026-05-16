@@ -97,7 +97,7 @@ fn boot_step_irq_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     apply_serial_mirror_cmdline();
     // Register input cleanup so exec() and task termination tear down
     // keyboard/pointer focus and event queues for the old process image.
-    slopos_core::task::register_task_resource_cleanup_hook(
+    slopos_sched::task::register_task_resource_cleanup_hook(
         slopos_drivers::input_event::input_cleanup_task,
     );
     klog_debug!("IRQ dispatcher ready.");
@@ -181,7 +181,7 @@ fn boot_step_xsave_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         panic!("XSAVE initialization failed");
     }
     // Ensure the detected XSAVE area fits in our compile-time FpuState buffer.
-    slopos_core::scheduler::task_struct::validate_fpu_state_size();
+    slopos_sched::task_struct::validate_fpu_state_size();
 }
 
 fn boot_step_smp_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
@@ -242,7 +242,7 @@ fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
         apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS)
     }
-    slopos_core::scheduler::runtime::register_ap_timer_start(ap_start_timer);
+    slopos_sched::runtime::register_ap_timer_start(ap_start_timer);
 }
 
 fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {

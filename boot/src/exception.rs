@@ -2,13 +2,13 @@ use slopos_abi::addr::PhysAddr;
 use slopos_abi::task::TaskFaultReason;
 use slopos_arch::InterruptFrame;
 use slopos_arch::cpu;
-use slopos_core::scheduler::task::{
-    task_context_cr3, task_context_rip, task_context_rsp, task_flags, task_id_of,
-    task_kernel_stack_bounds, task_name_bytes, task_process_id,
-};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::process_vm;
 use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
+use slopos_sched::task::{
+    task_context_cr3, task_context_rip, task_context_rsp, task_flags, task_id_of,
+    task_kernel_stack_bounds, task_name_bytes, task_process_id,
+};
 
 use crate::ist_stacks;
 use crate::user_fault::*;
@@ -143,7 +143,7 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         // Determine a safe probe range for the stack dump.  Call
         // scheduler_get_current_task() once and reuse the pointer for
         // both bounds computation and the task-context dump below.
-        let task_ptr = slopos_core::sched::scheduler_get_current_task();
+        let task_ptr = slopos_sched::scheduler::scheduler_get_current_task();
         let (stack_lo, stack_hi) = match task_kernel_stack_bounds(task_ptr) {
             Some((base, top)) if base != 0 && top > base => (base as usize, top as usize),
             _ => (frame_ref.rsp as usize, frame_ref.rsp as usize + 128),

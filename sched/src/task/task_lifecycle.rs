@@ -9,10 +9,6 @@ use slopos_ostd::{klog_debug, klog_info};
 
 use slopos_ostd::task::switch::task_entry_trampoline;
 
-use super::super::exit_info::ExitInfo;
-use super::super::scheduler;
-use super::super::task_stack::{KernelStack, UnsafeStack};
-use super::super::task_struct::SwitchContext;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
@@ -26,6 +22,10 @@ use super::{
     TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus, task_borrow,
     task_borrow_mut, task_id_of, task_name_bytes, task_status,
 };
+use crate::exit_info::ExitInfo;
+use crate::scheduler;
+use crate::task_stack::{KernelStack, UnsafeStack};
+use crate::task_struct::SwitchContext;
 use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
     fileio_destroy_table_for_process,
@@ -456,7 +456,7 @@ fn init_task_context(task: &mut Task) {
         // `switch_registers` rets into `user_task_first_run`.  The
         // first iteration of `user_task_loop` will iretq into user
         // mode at (entry_point, stack_pointer) with rdi=entry_arg.
-        crate::syscall::user_loop::init_user_ctx_for_new_task(
+        crate::task::init_user_ctx_for_new_task(
             &mut task.user_ctx,
             task.entry_point,
             task.stack_pointer,
@@ -700,9 +700,9 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     // Zombie or the parent itself dies and auto-reaps.
     if task.test_reports.is_some() {
         let reports = task.test_reports.take();
-        crate::scheduler::test_reports::stash_pending_drain(
+        crate::test_reports::stash_pending_drain(
             resolved_id,
-            crate::scheduler::test_reports::PendingDrain { reports },
+            crate::test_reports::PendingDrain { reports },
         );
     }
 
@@ -743,14 +743,14 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     task.fate_value = 0;
     task.fate_pending = 0;
 
-    super::super::futex::futex_remove_task(task_ptr);
+    crate::futex::futex_remove_task(task_ptr);
 
     let clear_tid = task.clear_child_tid;
     if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
         if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {
             let _ = copy_to_user(clear_ptr, &0u32);
         }
-        let _ = super::super::futex::futex_wake_one(clear_tid);
+        let _ = crate::futex::futex_wake_one(clear_tid);
         task.clear_child_tid = 0;
     }
 
@@ -1176,7 +1176,7 @@ pub fn task_clone(
             ctx.rsp
         };
         let iframe = interrupt_frame_from_context(ctx, user_rsp);
-        crate::syscall::user_loop::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
+        crate::task::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
         // SAFETY: child kernel stack was just allocated and is writable.
         child.switch_ctx = build_user_task_entry_frame(child.kernel_stack_top);
     }

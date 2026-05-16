@@ -352,14 +352,28 @@ Today's `mm/src/kernel_heap.rs` (slab, kfree, poisoning) becomes a safe-Rust `Sl
 
 Today's `core/src/scheduler/` becomes a safe-Rust `Scheduler` + `RunQueue` impl. Phase 2 keeps the scheduler preemptive; Phase 3 rewrites it for async.
 
-- [ ] **2C.1** Move `core/src/scheduler/` (everything except switch.rs which is in OSTD) to `sched/` (new top-level crate, replaces today's mention in AGENTS.md).
-- [ ] **2C.2** `pub struct PriorityScheduler { runqueues: CpuLocal<PriorityRunQueue> }` implementing `slopos_ostd::task::Scheduler`.
-- [ ] **2C.3** `pub struct PriorityRunQueue { ... }` implementing `slopos_ostd::task::RunQueue`. Today's logic preserved.
-- [ ] **2C.4** Boot wires it: `slopos_ostd::task::set_scheduler(KArc::new(PriorityScheduler::new()))`.
-- [ ] **2C.5** Cross-CPU wake: today's `push_remote_wake` becomes a safe method on `PriorityScheduler` using `slopos_ostd::cpu::send_ipi`.
-- [ ] **2C.6** Idle task: defined in `sched/src/idle.rs`, registered with OSTD via `slopos_ostd::task::set_idle_task_factory`.
-- [ ] **2C.7** Delete `slopos_ostd::task::RoundRobinScheduler` (the Phase-1 default impl).
-- [ ] **2C.8** Verify: `rg unsafe sched/` returns zero. `just test` passes. Context-switch perf within ±5%.
+- [x] **2C.1** Move `core/src/scheduler/` (everything except switch.rs which is in OSTD) to `sched/` (new top-level crate, replaces today's mention in AGENTS.md).
+- [x] **2C.2** `pub struct PriorityScheduler { runqueues: CpuLocal<PriorityRunQueue> }` implementing `slopos_ostd::task::Scheduler`.
+- [x] **2C.3** `pub struct PriorityRunQueue { ... }` implementing `slopos_ostd::task::RunQueue`. Today's logic preserved.
+- [x] **2C.4** Boot wires it: `slopos_ostd::task::set_scheduler(KArc::new(PriorityScheduler::new()))`.
+- [x] **2C.5** Cross-CPU wake: today's `push_remote_wake` becomes a safe method on `PriorityScheduler` using `slopos_ostd::cpu::send_ipi`.
+- [x] **2C.6** Idle task: defined in `sched/src/idle.rs`, registered with OSTD via `slopos_ostd::task::set_idle_task_factory`.
+- [x] **2C.7** Delete `slopos_ostd::task::RoundRobinScheduler` (the Phase-1 default impl).
+- [x] **2C.8** Verify: `rg unsafe sched/` returns zero. `just test` passes. Context-switch perf within ±5%.
+
+### Phase 2 § 2C — Outcomes
+
+Landed 2026-05-17:
+- New `sched/` crate at workspace member; `#![no_std] #![forbid(unsafe_code)]`. Absorbs ~16k LoC of `core/src/scheduler/` plus per-task user-context init helpers (extracted from `core/src/syscall/user_loop.rs` to break the sched → core back-edge).
+- OSTD scheduler surface trimmed to traits only: `RoundRobinScheduler` / `RoundRobinRq` deleted; `slopos_ostd::task::scheduler_registry` and `slopos_ostd::task::idle_factory` added (one-shot `&BspToken`-gated registration, mirroring `mm::frame_alloc::register_frame_allocator`). `register_scheduler(&BspToken, &'static &'static dyn Scheduler)` and `register_idle_task_factory(&BspToken, fn(cpu_id) -> i32)` are the two new boot wiring points.
+- Literal restructure: today's hand-rolled `KernelSync<[PerCpuScheduler; MAX_CPUS]>` becomes `PriorityScheduler { runqueues: CpuLocal<PriorityRunQueue>, enabled: AtomicBool }`. `PerCpuScheduler` → `PriorityRunQueue` rename. `Scheduler` / `RunQueue` trait impls are placeholders at Phase 2C — no OSTD consumer drives scheduling through them yet; the kernel's rich preemptive API (`schedule_task`, `block_*`, `sleep_*`, …) remains the live path. Phase 3 will light up the trait dispatch when scheduling moves to `TaskRef = KArc<Task>`.
+- Boot wiring: new `boot_step_register_scheduler_fn` at priority 35 (between `boot_step_scheduler_init`=30 and `boot_step_idle_task`=50) calls `register_scheduler` + `register_idle_task_factory`.
+- Coarse `TIMER_TICK_COUNTER` moved from `core/src/irq.rs` into `slopos_kernel_services::clock` (the natural shared home for sched + core + boot). `core::irq::{get,increment}_timer_ticks` are now thin re-exports.
+- Full cutover: every consumer of the old `core::scheduler::*` / `slopos_core::sched::*` / `slopos_core::task::*` rewritten to `slopos_sched::*` across `core/`, `boot/`, `video/`. Zero re-export shim. `core/src/lib.rs` no longer enumerates the scheduler subtree.
+- `ktesting/src/bootstrap_tests.rs` glob-match literal updated from `slopos_core::sched::test_basic` → `slopos_sched::scheduler::test_basic`.
+- Test infrastructure: `dispatch()` (hot path, `pub(crate)`) gains a `#[cfg(feature = "test-hooks")] pub fn dispatch_for_test` wrapper for the cross-crate test fixture in `core/src/syscall/tests.rs`. `dummy_task_entry` helper duplicated into `sched/src/test_fixture.rs` (was `core/src/tests/helpers.rs`) so sched tests don't depend back on core. `slopos-core/test-hooks` now propagates to `slopos-sched/test-hooks`.
+- `AGENTS.md`/`CLAUDE.md` crate enumeration extended with `sched`.
+- Gate results: `rg unsafe sched/src/` → 0 hits. `just check-framekernel` green (check_unsafe_outside_ostd, check_alloc_dep, check_stack_sizes, fmt --check, check-miri). `just tcb-ratio` → 0.727 % (well under the Phase 2 ≤1 % target). `just test` → 2427/2427 passing on three consecutive runs.
 
 ### 2D: Syscall dispatch redesign (typed args)
 

@@ -3,9 +3,25 @@ use slopos_ostd::klog_info;
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
 use slopos_core::exec;
-use slopos_core::sched::{
+use slopos_sched::scheduler::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
 };
+
+fn boot_step_register_scheduler_fn(ctx: &mut BootCtx<'_, BspInit>) {
+    // Tell OSTD where the kernel scheduler and idle-task factory
+    // live. Both hooks are one-shot — `register_*` panics on second
+    // call — and must complete before AP bring-up triggers idle-task
+    // creation via `current_idle_task_factory()`.
+    slopos_ostd::task::register_scheduler(
+        &ctx.bsp_token(),
+        slopos_sched::per_cpu::scheduler_handle(),
+    );
+    slopos_ostd::task::register_idle_task_factory(
+        &ctx.bsp_token(),
+        slopos_sched::runtime::create_idle_task_for_cpu,
+    );
+    klog_info!("OSTD: scheduler registered (PriorityScheduler)");
+}
 use slopos_drivers::virtio_blk;
 use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
 use slopos_fs::vfs::{mount, unmount};
@@ -89,6 +105,13 @@ crate::boot_init!(
     boot_step_scheduler_init,
     fallible,
     flags = boot_init_priority(30)
+);
+crate::boot_init!(
+    BOOT_STEP_REGISTER_SCHEDULER,
+    services,
+    b"register scheduler with OSTD\0",
+    boot_step_register_scheduler_fn,
+    flags = boot_init_priority(35)
 );
 crate::boot_init!(
     BOOT_STEP_IDLE_TASK,

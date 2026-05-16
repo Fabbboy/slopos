@@ -480,7 +480,7 @@ pub fn report_kernel_status() {
     }
 }
 
-use slopos_core::sched::enter_scheduler;
+use slopos_sched::scheduler::enter_scheduler;
 
 fn boot_step_serial_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     serial::write_line("BOOT: serial step -> init");
@@ -691,7 +691,7 @@ pub fn kernel_main_impl() {
             &slopos_mm::io_mem_mapper_shim::LEGACY_IO_MEM_MAPPER_DYN,
         );
 
-        slopos_core::sched::install_ostd_task_exit_hook(token);
+        slopos_sched::scheduler::install_ostd_task_exit_hook(token);
 
         serial::write_line("BOOT: entering boot init");
         let mut boot_ctx = slopos_hermetic::take_for_boot(token);

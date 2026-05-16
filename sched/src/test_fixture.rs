@@ -38,7 +38,12 @@
 //! - PCR.current_task[BSP] → `BspCurrentTask`
 //! - PCR.idle_task[BSP] → `BspIdleTask`
 //!
-//! See `crate::scheduler::test_hermetic` for the impls.
+//! See `crate::test_hermetic` for the impls.
+
+/// No-op task entry point usable as a placeholder for tests that
+/// only care about the task struct, not the body. `extern "C"` to
+/// match the `TaskEntry` alias the scheduler exports.
+pub extern "C" fn dummy_task_entry(_arg: *mut core::ffi::c_void) {}
 
 use core::marker::PhantomData;
 

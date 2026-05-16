@@ -5,7 +5,7 @@
 //!
 //! # Safety Model
 //!
-//! `PerCpuScheduler` uses interior mutability throughout so that all public
+//! `PriorityRunQueue` uses interior mutability throughout so that all public
 //! APIs take `&self` (shared reference). This eliminates the UB that arose
 //! from handing out `&mut` to a `static` array element from multiple CPUs.
 //!
@@ -149,7 +149,7 @@ impl ReadyQueue {
 const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 
 #[repr(C, align(64))]
-pub struct PerCpuScheduler {
+pub struct PriorityRunQueue {
     /// Owning CPU id. Written once during `init`, read everywhere via
     /// the `cpu_id` accessor; backed by `AtomicUsize` so the read path
     /// stays in safe Rust without an `UnsafeCell` carve-out.
@@ -173,7 +173,7 @@ pub struct PerCpuScheduler {
     inbox_count: AtomicU32,
 }
 
-impl PerCpuScheduler {
+impl PriorityRunQueue {
     pub const fn new() -> Self {
         Self {
             cpu_id_atom: AtomicUsize::new(0),
@@ -320,7 +320,7 @@ impl PerCpuScheduler {
         let current = slopos_arch::pcr::get_current_task_for(cpu_id) as *mut Task;
         let idle = slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task;
         let running_real = !current.is_null()
-            && !crate::scheduler::safestack_rt::is_bootstrap_task_ptr(current)
+            && !crate::safestack_rt::is_bootstrap_task_ptr(current)
             && current != idle;
         let load = queued.saturating_add(inbox);
         if running_real {
@@ -518,25 +518,117 @@ impl PerCpuScheduler {
     }
 }
 
-static CPU_SCHEDULERS: slopos_ostd::sync::KernelSync<[PerCpuScheduler; MAX_CPUS]> =
-    slopos_ostd::sync::KernelSync::new({
-        const INIT: PerCpuScheduler = PerCpuScheduler::new();
-        [INIT; MAX_CPUS]
-    });
+use slopos_ostd::sync::CacheAligned;
+use slopos_ostd::sync::cpu_local::CpuLocal;
+use slopos_ostd::task::scheduler::{RunQueue, Scheduler, TaskRef};
 
-/// Bounds-checked accessor over the per-CPU scheduler array.
+/// The global preemptive priority scheduler. Owns one
+/// [`PriorityRunQueue`] per CPU through [`CpuLocal`], which guarantees
+/// per-slot pinning and cache-line alignment.
 ///
-/// The `KernelSync<[T; N]>` wrapper hands out a shared `&[T]` borrow
-/// through `cell_get`-style accessors. All interior mutation lives
-/// behind `AtomicXxx` / `IntrusiveLinkedList` / `queue_lock`, so no
-/// `&mut` is ever needed at this surface.
-#[inline]
-fn cpu_scheduler(cpu_id: usize) -> Option<&'static PerCpuScheduler> {
-    if cpu_id >= MAX_CPUS {
-        return None;
+/// Implements [`slopos_ostd::task::Scheduler`] so OSTD has a typed
+/// handle to the kernel's scheduler. The kernel's rich preemptive
+/// surface (block, unblock, sleep, `schedule_task`, …) lives as free
+/// functions in [`crate::scheduler`] and operates on raw `*mut Task`
+/// with manual refcount accounting; the [`Scheduler`] / [`RunQueue`]
+/// trait bodies here are dormant — they exist so OSTD-side consumers
+/// can talk to whichever scheduler is registered without depending on
+/// `slopos-sched` directly, but no such consumer drives scheduling
+/// through them today.
+pub struct PriorityScheduler {
+    runqueues: CpuLocal<PriorityRunQueue>,
+    pub enabled: AtomicBool,
+}
+
+const PRIORITY_RQ_INIT: CacheAligned<PriorityRunQueue> = CacheAligned(PriorityRunQueue::new());
+
+impl PriorityScheduler {
+    pub const fn new() -> Self {
+        Self {
+            runqueues: CpuLocal::new_with([PRIORITY_RQ_INIT; MAX_CPUS]),
+            enabled: AtomicBool::new(false),
+        }
     }
-    let arr: &'static [PerCpuScheduler; MAX_CPUS] = CPU_SCHEDULERS.get();
-    Some(&arr[cpu_id])
+
+    /// Borrow the per-CPU [`PriorityRunQueue`] for `cpu_id`. Returns
+    /// `None` if `cpu_id` is out of range. Cross-CPU reads are valid
+    /// because every interior field is atomic / `SpinLock`-protected.
+    #[inline]
+    pub fn runqueue_for(&'static self, cpu_id: usize) -> Option<&'static PriorityRunQueue> {
+        self.runqueues.snapshot_for_cpu(cpu_id)
+    }
+}
+
+impl Scheduler for PriorityScheduler {
+    fn enqueue(&self, _task: TaskRef) {
+        // See struct docs: trait dispatch is dormant. Reaching here
+        // means a new OSTD-side consumer started driving scheduling
+        // through the trait — wire it up to `crate::scheduler` then.
+        unreachable!(
+            "PriorityScheduler::enqueue (trait method) is not a live dispatch \
+             path; the kernel's scheduling driver goes through \
+             crate::scheduler::schedule_task."
+        );
+    }
+
+    fn local_rq_with(&self, f: &mut dyn FnMut(&mut dyn RunQueue)) {
+        // The per-CPU `PriorityRunQueue` is interior-mutable, so the
+        // outer `&mut` borrow on the trait method maps onto a shared
+        // `&` borrow on the run queue. `CpuLocal::get_mut` returns a
+        // `CpuPinnedMut<'_>` that holds a `PreemptGuard` for the
+        // duration of the closure, matching the trait's critical-
+        // section contract.
+        let mut pinned = self.runqueues.get_mut();
+        let rq: &mut PriorityRunQueue = &mut *pinned;
+        f(rq as &mut dyn RunQueue);
+    }
+}
+
+impl RunQueue for PriorityRunQueue {
+    fn update_curr(&mut self) {
+        // Per-tick bookkeeping. The kernel's hot path calls
+        // `scheduler_handle_timer_interrupt` (in scheduler.rs) which
+        // does the heavy lifting; this trait method exists so OSTD-
+        // side tick consumers can also bump the per-CPU counter.
+        self.total_ticks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn pick_next(&mut self) -> Option<TaskRef> {
+        // Nothing on the run queue is wrapped in a `TaskRef` today;
+        // see struct docs. The kernel's scheduling driver pops tasks
+        // via the rich `crate::scheduler` API and the trait dispatch
+        // path is dormant.
+        None
+    }
+
+    fn dequeue_curr(&mut self) -> Option<TaskRef> {
+        // The "currently running" task is tracked in the per-CPU PCR
+        // (`pcr.current_task`), not on the run queue, so there is
+        // nothing to remove at this layer. Block/exit transitions go
+        // through scheduler.rs.
+        None
+    }
+}
+
+/// The global preemptive scheduler instance.
+pub static PRIORITY_SCHEDULER: PriorityScheduler = PriorityScheduler::new();
+
+/// `&'static &'static dyn Scheduler` handle for the OSTD registration
+/// hook. Boot calls
+/// [`slopos_ostd::task::register_scheduler`] with this handle.
+static PRIORITY_SCHEDULER_DYN: &dyn Scheduler = &PRIORITY_SCHEDULER;
+
+/// Boot wiring entry point — pass the returned handle to
+/// [`slopos_ostd::task::register_scheduler`].
+pub fn scheduler_handle() -> &'static &'static dyn Scheduler {
+    &PRIORITY_SCHEDULER_DYN
+}
+
+/// Bounds-checked accessor over the per-CPU run queues. Thin
+/// delegate to [`PriorityScheduler::runqueue_for`].
+#[inline]
+fn cpu_scheduler(cpu_id: usize) -> Option<&'static PriorityRunQueue> {
+    PRIORITY_SCHEDULER.runqueue_for(cpu_id)
 }
 
 /// `init_all_percpu_schedulers` init-once gate. `pub(crate)` so the
@@ -570,13 +662,13 @@ pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {
         .unwrap_or(false)
 }
 
-pub fn with_local_scheduler<R>(f: impl FnOnce(&PerCpuScheduler) -> R) -> R {
+pub fn with_local_scheduler<R>(f: impl FnOnce(&PriorityRunQueue) -> R) -> R {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let sched = cpu_scheduler(cpu_id).expect("get_current_cpu() returned an out-of-range CPU id");
     f(sched)
 }
 
-pub fn with_cpu_scheduler<R>(cpu_id: usize, f: impl FnOnce(&PerCpuScheduler) -> R) -> Option<R> {
+pub fn with_cpu_scheduler<R>(cpu_id: usize, f: impl FnOnce(&PriorityRunQueue) -> R) -> Option<R> {
     let sched = cpu_scheduler(cpu_id)?;
     if !sched.is_initialized() {
         return None;

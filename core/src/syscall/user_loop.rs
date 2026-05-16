@@ -27,28 +27,22 @@
 //! points at the per-task kernel-stack top, so IRQ pushes from user
 //! mode land on the same stack.  To keep the supervisor's frame from
 //! being clobbered, the task-creation path
-//! ([`crate::scheduler::task::task_lifecycle::build_user_task_entry_frame`])
-//! seeds [`crate::scheduler::task_struct::SwitchContext::rsp`] far
+//! ([`slopos_sched::task::task_lifecycle::build_user_task_entry_frame`])
+//! seeds [`slopos_sched::task_struct::SwitchContext::rsp`] far
 //! below `kernel_stack_top` (`SUPERVISOR_RESERVE` bytes lower).  The
 //! top region is reserved for IRQ pushes and the IRQ-handler chain;
 //! the supervisor lives in the bottom region.  See
 //! `task_lifecycle::SUPERVISOR_RESERVE` for the full rationale and the
 //! IRQ vs. supervisor budget sizing.
 
-use slopos_arch::InterruptFrame;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::sync::once_lock::OnceLock;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::user::mode::{ReturnReason, UserMode};
 
-// The legacy `slopos_arch::InterruptFrame` import remains for
-// `init_user_ctx_from_parent_frame`, which is still consumed by
-// `task_clone`'s legacy-frame synthesis path. The syscall-dispatch
-// flow no longer touches `InterruptFrame`.
-
-use crate::scheduler::scheduler::scheduler_get_current_task;
-use crate::scheduler::task_struct::Task;
+use slopos_sched::scheduler::scheduler_get_current_task;
+use slopos_sched::task_struct::Task;
 
 /// Single shared `VmSpace` handle used by every user task.
 ///
@@ -74,7 +68,7 @@ slopos_ostd::extern_c_entry! {
     /// Entry point used by the scheduler for new user tasks. The
     /// kernel stack is set up so `switch_registers` rets here on first
     /// dispatch; see
-    /// [`crate::scheduler::task::task_lifecycle::build_user_task_entry_frame`].
+    /// [`slopos_sched::task::task_lifecycle::build_user_task_entry_frame`].
     ///
     /// `extern "C"` because the address is taken and stored as a `u64`
     /// on the kernel stack as a synthetic return address.
@@ -95,7 +89,7 @@ fn user_task_loop(task: *mut Task) -> ! {
         // `task_user_ctx_mut` accessor null-checks `task` once and
         // hands back a `&mut UserContext` whose lifetime is the loop
         // iteration scope.
-        let ctx_ref = crate::scheduler::task::task_user_ctx_mut(task)
+        let ctx_ref = slopos_sched::task::task_user_ctx_mut(task)
             .expect("user_task_loop: scheduler dispatched null task");
         let ctx_ptr: *mut UserContext = ctx_ref as *mut UserContext;
 
@@ -134,54 +128,4 @@ fn user_task_loop(task: *mut Task) -> ! {
             }
         }
     }
-}
-
-/// Seed a freshly-created user task's [`UserContext`] from
-/// (entry_point, stack_pointer, entry_arg) the legacy task-create
-/// path used to encode in a synthetic `InterruptFrame`.
-pub(crate) fn init_user_ctx_for_new_task(
-    ctx: &mut UserContext,
-    entry_point: u64,
-    stack_pointer: u64,
-    entry_arg: u64,
-) {
-    use slopos_ostd::user::context::UserRegs;
-    let mut regs = UserRegs::default();
-    regs.rip = entry_point;
-    regs.rsp = stack_pointer;
-    regs.rdi = entry_arg;
-    regs.rflags_user_subset = 0x202;
-    ctx.set_regs(regs);
-}
-
-/// Seed a forked / cloned child's [`UserContext`] from the parent's
-/// syscall-time `InterruptFrame`.  Caller guarantees `frame` is the
-/// parent's frame at SYSCALL exit.  `force_rax` is the value to
-/// install in the child's RAX (typically 0 for fork's child return).
-pub(crate) fn init_user_ctx_from_parent_frame(
-    ctx: &mut UserContext,
-    frame: &InterruptFrame,
-    force_rax: u64,
-) {
-    use slopos_ostd::user::context::UserRegs;
-    let mut regs = UserRegs::default();
-    regs.r15 = frame.r15;
-    regs.r14 = frame.r14;
-    regs.r13 = frame.r13;
-    regs.r12 = frame.r12;
-    regs.r11 = frame.r11;
-    regs.r10 = frame.r10;
-    regs.r9 = frame.r9;
-    regs.r8 = frame.r8;
-    regs.rbp = frame.rbp;
-    regs.rdi = frame.rdi;
-    regs.rsi = frame.rsi;
-    regs.rdx = frame.rdx;
-    regs.rcx = frame.rcx;
-    regs.rbx = frame.rbx;
-    regs.rax = force_rax;
-    regs.rip = frame.rip;
-    regs.rsp = frame.rsp;
-    regs.rflags_user_subset = frame.rflags;
-    ctx.set_regs(regs);
 }

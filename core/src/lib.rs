@@ -1,12 +1,9 @@
 #![no_std]
-#![cfg_attr(feature = "test-hooks", feature(allocator_api))]
-#![feature(sync_unsafe_cell)]
 #![forbid(unsafe_code)]
 
 pub mod driver_hooks;
 pub mod exec;
 pub mod irq;
-pub mod scheduler;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 #[macro_use]
@@ -76,15 +73,3 @@ pub use slopos_ostd as __ostd;
 pub use slopos_testing as __testing;
 #[doc(hidden)]
 pub use slopos_testing::paste as __paste;
-
-#[cfg(feature = "test-hooks")]
-pub use scheduler::context_tests;
-pub use scheduler::fate_api;
-pub use scheduler::ffi_boundary;
-pub use scheduler::kthread;
-pub use scheduler::per_cpu;
-#[cfg(feature = "test-hooks")]
-pub use scheduler::sched_tests;
-pub use scheduler::scheduler as sched;
-pub use scheduler::task;
-pub use scheduler::work_steal;

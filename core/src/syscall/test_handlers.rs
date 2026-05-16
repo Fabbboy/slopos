@@ -3,7 +3,7 @@
 //! - **`SYSCALL_TEST_REPORT`** — userland test binaries call this once
 //!   per subtest to report their result. Reports are buffered into the
 //!   calling task's per-task `TestReportRing` (lazily allocated) and
-//!   drained by [`crate::scheduler::task::task_table::task_drain_test_reports`]
+//!   drained by [`slopos_sched::task::task_table::task_drain_test_reports`]
 //!   after the task has exited.
 //!
 //! - **`SYSCALL_RUN_USERLAND_TESTS`** — `/sbin/init` calls this once when
@@ -23,7 +23,7 @@ use slopos_testing::{
     kernel_phase_summary, tests_request_shutdown, tests_run_userland,
 };
 
-use crate::scheduler::test_reports::{TestReport, alloc_ring, empty_report};
+use slopos_sched::test_reports::{TestReport, alloc_ring, empty_report};
 
 define_syscall!(syscall_test_report(ctx, args) {
     let status_raw = args.arg0 as u32;

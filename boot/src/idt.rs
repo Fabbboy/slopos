@@ -4,7 +4,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_arch::cpu;
-use slopos_core::task::{task_has_flag, task_id_of, task_kernel_stack_bounds, task_process_id};
+use slopos_sched::task::{task_has_flag, task_id_of, task_kernel_stack_bounds, task_process_id};
 // Re-export the OSTD IDT types/constants the legacy `boot::idt::*`
 // surface exposed (consumed by `boot/src/tests/gdt_tests.rs` and similar).
 pub use slopos_ostd::irq::{
@@ -124,7 +124,7 @@ use slopos_core::syscall::syscall_handle;
 use slopos_drivers::apic::send_eoi;
 use slopos_mm::tlb;
 
-use slopos_core::sched::{
+use slopos_sched::scheduler::{
     RescheduleReason, TrapExitSource, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
 
@@ -424,7 +424,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         // clears IF, so the next timer interrupt won't nest — it stays
         // pending until IRET re-enables interrupts.
         send_eoi();
-        slopos_core::sched::scheduler_handle_timer_interrupt(frame);
+        slopos_sched::scheduler::scheduler_handle_timer_interrupt(frame);
         scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
         return;
     }
@@ -568,7 +568,7 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     // conservatively bound to ±128 bytes around iret_frame.
     // Call scheduler_get_current_task() once and reuse for both the
     // bounds computation and the task-info dump below.
-    let task_ptr = slopos_core::sched::scheduler_get_current_task();
+    let task_ptr = slopos_sched::scheduler::scheduler_get_current_task();
 
     klog_info!("=== IRET FRAME VICINITY DUMP ===");
     let (dump_lo, dump_hi) = match task_kernel_stack_bounds(task_ptr) {

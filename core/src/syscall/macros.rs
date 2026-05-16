@@ -32,7 +32,7 @@ macro_rules! define_syscall {
     // Implementation: generate the function, then expand requirements via TT munching
     (@impl $name:ident, $ctx:ident, $args:ident, [$($req:tt)*], $body:block) => {
         pub fn $name(
-            task: *mut $crate::scheduler::task_struct::Task,
+            task: *mut ::slopos_sched::task_struct::Task,
             user_ctx_ptr: *mut slopos_ostd::user::context::UserContext,
         ) -> $crate::syscall::common::SyscallDisposition {
             let Some(user_ctx) = slopos_ostd::user::context::UserContext::from_ptr_mut(user_ctx_ptr) else {

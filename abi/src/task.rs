@@ -3,7 +3,7 @@
 //! This module contains **only** the types, constants, and enums that form the
 //! stable interface between kernel subsystems. Kernel-internal implementation
 //! details (Task struct, register contexts, FPU state, scheduler linkage) live
-//! in `slopos_core::scheduler::task_struct`.
+//! in `slopos_sched::task_struct`.
 
 // --- Task Configuration ---
 

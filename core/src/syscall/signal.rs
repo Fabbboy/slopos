@@ -11,14 +11,14 @@ use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::user::context::UserContext;
 
-use crate::sched::{schedule, unblock_task};
-use crate::scheduler::task::{
+use crate::syscall::common::{SyscallDisposition, syscall_return_err};
+use crate::syscall::context::SyscallContext;
+use slopos_sched::scheduler::{schedule, unblock_task};
+use slopos_sched::task::{
     task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_pending_or,
     task_terminate,
 };
-use crate::scheduler::task_struct::{SignalAction, Task};
-use crate::syscall::common::{SyscallDisposition, syscall_return_err};
-use crate::syscall::context::SyscallContext;
+use slopos_sched::task_struct::{SignalAction, Task};
 
 fn parse_signum(raw: u64) -> Option<u8> {
     if raw == 0 || raw as usize > NSIG {
@@ -449,7 +449,7 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return;
     };
-    let Some(task_ref) = crate::scheduler::task::task_borrow_mut(task) else {
+    let Some(task_ref) = slopos_sched::task::task_borrow_mut(task) else {
         return;
     };
 

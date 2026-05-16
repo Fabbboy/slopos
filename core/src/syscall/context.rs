@@ -1,7 +1,3 @@
-use crate::scheduler::task::{
-    task_borrow_mut, task_flags as task_flags_of, task_id_of, task_process_id,
-};
-use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
 use slopos_abi::task::{
@@ -9,6 +5,10 @@ use slopos_abi::task::{
 };
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
+use slopos_sched::task::{
+    task_borrow_mut, task_flags as task_flags_of, task_id_of, task_process_id,
+};
+use slopos_sched::task_struct::Task;
 
 #[derive(Clone, Copy)]
 pub struct SyscallArgs {

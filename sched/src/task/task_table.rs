@@ -8,10 +8,10 @@ use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KBox, KVec};
 use slopos_ostd::{klog_debug, klog_info};
 
-use super::super::scheduler;
 use super::task_accessors::{task_id_of, task_ref_count};
 use super::{INVALID_TASK_ID, Task, TaskIterateCb, TaskStatus};
-use crate::scheduler::exit_info::ExitInfo;
+use crate::exit_info::ExitInfo;
+use crate::scheduler;
 
 /// Concurrent task capacity, matching the kernel-stack VA region cap in
 /// `mm/src/memory_layout_defs.rs` — every live task owns a KSTACK VA
@@ -342,7 +342,7 @@ fn ensure_pool_allocated() -> bool {
     // Seeding the sleep queue here rather than inside init_task_manager
     // means early IRQ paths that block with timeouts survive even if
     // they're exercised before the service-phase init.
-    super::super::sleep::init_sleep_queue();
+    crate::sleep::init_sleep_queue();
     if installed {
         TASK_MANAGER.clear_poison();
     }
@@ -545,7 +545,7 @@ pub fn task_pointer_is_valid(task: *const Task) -> bool {
     // task has been `reset_in_place`'d and the next test hasn't
     // dispatched anything yet).  Whitelisting prevents the
     // corruption-recovery loop in `scheduler_tasks_for_cpu`.
-    crate::scheduler::safestack_rt::is_bootstrap_task_ptr(task)
+    crate::safestack_rt::is_bootstrap_task_ptr(task)
 }
 
 pub(super) enum ReserveTaskSlotError {
@@ -809,7 +809,7 @@ pub fn task_slot_census() -> (u32, u32, u32, u32) {
 /// never lazily allocated) or if the slot is no longer the original task
 /// (recycled or invalid). Caller-required invariant: invoke only after the
 /// child task has exited, so no further pushes can race with the take.
-pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::scheduler::test_reports::TestReport> {
+pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestReport> {
     let task = task_find_by_id(task_id);
     if task.is_null() {
         return KVec::new();

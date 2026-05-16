@@ -3,13 +3,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use limine::mp::{MP_FLAG_X2APIC, MpGotoFunction};
 
 use slopos_arch::{cpu, is_cpu_online, pcr};
-use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
-use slopos_core::scheduler::safestack_rt;
 use slopos_drivers::apic;
 use slopos_mm::tlb;
 use slopos_ostd::arch::x86_64::safestack::{install_ap_trampoline_as, install_safestack_runtime};
 use slopos_ostd::boot::smp::register_ap_late_entry;
 use slopos_ostd::klog_info;
+use slopos_sched::safestack_rt;
+use slopos_sched::scheduler::{enter_scheduler, init_scheduler_for_ap};
 
 use crate::gdt::syscall_msr_init;
 use crate::idt::idt_load;

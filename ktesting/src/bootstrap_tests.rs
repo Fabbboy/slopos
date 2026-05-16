@@ -27,7 +27,7 @@ fn bootstrap_aaa_glob_match() -> TestResult {
     if glob_match(b"a::*", b"b::a") {
         return TestResult::Fail;
     }
-    if !glob_match(b"*sched*", b"slopos_core::sched::test_basic") {
+    if !glob_match(b"*sched*", b"slopos_sched::scheduler::test_basic") {
         return TestResult::Fail;
     }
     if !glob_match(b"slopos_mm::*", b"slopos_mm::heap::alloc") {

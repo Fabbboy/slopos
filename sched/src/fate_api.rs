@@ -9,7 +9,7 @@ where
     F: FnOnce(&mut Task) -> R,
 {
     let task = task_find_by_id(task_id);
-    let Some(t) = crate::scheduler::task::task_borrow_mut(task) else {
+    let Some(t) = crate::task::task_borrow_mut(task) else {
         return -1;
     };
     f(t);

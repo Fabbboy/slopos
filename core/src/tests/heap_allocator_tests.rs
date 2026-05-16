@@ -2,7 +2,7 @@ use slopos_testing::{assert_test, TestResult};
 use slopos_ostd::klog_info;
 
 use crate::exec::spawn_program_with_attrs;
-use crate::task::{
+use slopos_sched::task::{
     task_consume_zombie, task_peek_exit_info, TaskPriority, INVALID_PROCESS_ID, INVALID_TASK_ID,
     TASK_FLAG_USER_MODE,
 };
@@ -25,7 +25,7 @@ pub fn test_heap_allocator_suite() -> TestResult {
         }
     };
 
-    crate::sched::task_wait_for(task_id);
+    slopos_sched::scheduler::task_wait_for(task_id);
 
     // After `task_wait_for` returns the child has exited. It is either
     // a Zombie (orphaned spawn helper — no live parent) waiting to be

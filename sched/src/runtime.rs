@@ -356,7 +356,7 @@ fn check_watchdog_for_neighbor(my_cpu: usize) {
         return;
     }
 
-    let current_tick = crate::irq::get_timer_ticks();
+    let current_tick = slopos_kernel_services::clock::get_timer_ticks();
 
     // Don't arm the watchdog during early boot while CPUs are still
     // starting their LAPIC timers.

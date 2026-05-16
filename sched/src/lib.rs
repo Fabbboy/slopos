@@ -1,3 +1,8 @@
+#![no_std]
+#![forbid(unsafe_code)]
+#![cfg_attr(feature = "test-hooks", feature(allocator_api))]
+#![feature(sync_unsafe_cell)]
+
 #[cfg(feature = "test-hooks")]
 pub mod context_tests;
 pub mod fate_api;
@@ -26,8 +31,8 @@ pub mod trap;
 pub mod work_steal;
 
 // Re-export the OSTD-owned modules under their historical kernel-side
-// paths so existing `crate::scheduler::{exit_info, task_state,
-// test_reports}` imports continue to resolve.
+// paths so existing `crate::{exit_info, task_state, test_reports}`
+// imports inside moved files continue to resolve.
 pub use slopos_ostd::task::exit_info;
 pub use slopos_ostd::task::state as task_state;
 pub use slopos_ostd::task::test_reports;

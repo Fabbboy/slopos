@@ -3,15 +3,15 @@ use core::ffi::CStr;
 use slopos_abi::task::{INVALID_TASK_ID, TaskFaultReason};
 use slopos_arch::InterruptFrame;
 use slopos_arch::cpu;
-use slopos_core::sched::{schedule, scheduler_get_current_task};
-use slopos_core::scheduler::task::{
+use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
+use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
+use slopos_sched::scheduler::{schedule, scheduler_get_current_task};
+use slopos_sched::task::task_terminate;
+use slopos_sched::task::{
     task_context_cr3, task_entry_point, task_find_by_cr3, task_flags, task_id_of, task_name_bytes,
     task_pointer_is_valid, task_process_id, task_record_user_fault_exit,
 };
-use slopos_core::scheduler::task_struct::Task;
-use slopos_core::task::task_terminate;
-use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
-use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
+use slopos_sched::task_struct::Task;
 
 use crate::panic::set_panic_cpu_state;
 

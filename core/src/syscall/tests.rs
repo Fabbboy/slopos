@@ -6,7 +6,6 @@
 use core::ffi::c_char;
 use core::ptr;
 
-use crate::scheduler::task_struct::Task;
 use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
@@ -37,15 +36,9 @@ use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
+use slopos_sched::task_struct::Task;
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 
-use crate::scheduler::scheduler::unblock_task;
-use crate::scheduler::task;
-use crate::scheduler::task::{
-    task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
-    task_pgid, task_process_id, task_set_state, task_set_state_from_with_reason, task_sid,
-    task_signal_pending, task_status, task_terminate, task_try_transition_from,
-};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
 use slopos_abi::task::BlockReason;
@@ -54,6 +47,13 @@ use slopos_fs::fileio::{
     file_read_fd, file_write_fd, fileio_clone_table_for_process, fileio_destroy_table_for_process,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_sched::scheduler::unblock_task;
+use slopos_sched::task;
+use slopos_sched::task::{
+    task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
+    task_pgid, task_process_id, task_set_state, task_set_state_from_with_reason, task_sid,
+    task_signal_pending, task_status, task_terminate, task_try_transition_from,
+};
 
 // =============================================================================
 // Test Helpers
@@ -64,22 +64,22 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 /// The previous hand-rolled fixture leaked PCR pointers and per-CPU
 /// `enabled` bits; the hermetic scope's registry walk handles every
 /// such leak through the per-subsystem `HermeticState` impls in
-/// `crate::scheduler::test_hermetic`.
-type SyscallFixture = crate::scheduler::test_fixture::KernelTestScope;
+/// `slopos_sched::test_hermetic`.
+type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 
 /// Park PCR's `current_task` on the BSP bootstrap stub. Used by tests
 /// that mutate the running-task pointer. The hermetic
 /// `BspCurrentTask` impl restores the original value on scope drop.
 fn park_bootstrap_on_current_cpu() {
     slopos_arch::pcr::set_current_task(
-        crate::scheduler::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()
+        slopos_sched::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()
     );
 }
 
 fn make_task_current(task_ptr: *mut Task) {
     assert!(!task_ptr.is_null(), "make_task_current: null task_ptr");
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    crate::scheduler::scheduler::dispatch(cpu_id, task_ptr);
+    slopos_sched::scheduler::dispatch_for_test(cpu_id, task_ptr);
 }
 
 use crate::tests::helpers::dummy_task_entry;
@@ -95,8 +95,7 @@ fn create_test_kernel_task() -> u32 {
 }
 
 fn create_test_user_task() -> u32 {
-    let user_entry =
-        crate::scheduler::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
+    let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     let id = task_create(
         b"UserTest\0".as_ptr() as *const c_char,
         user_entry,
@@ -428,8 +427,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "kill(group, 0) probe should succeed"
     );
 
-    crate::scheduler::task::task_signal_pending_store(leader_ptr, 0);
-    crate::scheduler::task::task_signal_pending_store(member_ptr, 0);
+    slopos_sched::task::task_signal_pending_store(leader_ptr, 0);
+    slopos_sched::task::task_signal_pending_store(member_ptr, 0);
 
     let mut negative_group_frame = zero_frame();
     negative_group_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
@@ -455,8 +454,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "member did not receive group signal"
     );
 
-    crate::scheduler::task::task_signal_pending_store(leader_ptr, 0);
-    crate::scheduler::task::task_signal_pending_store(member_ptr, 0);
+    slopos_sched::task::task_signal_pending_store(leader_ptr, 0);
+    slopos_sched::task::task_signal_pending_store(member_ptr, 0);
 
     let mut caller_group_frame = zero_frame();
     caller_group_frame.regs_mut().rdi = 0;
@@ -827,7 +826,7 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
 pub fn test_fork_null_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 
-    use crate::scheduler::task::task_fork;
+    use slopos_sched::task::task_fork;
     let child_id = task_fork(ptr::null_mut(), core::ptr::null());
     assert_test!(
         child_id == INVALID_TASK_ID,
@@ -845,7 +844,7 @@ pub fn test_fork_kernel_task() -> TestResult {
     let kernel_task = task_find_by_id(kernel_task_id);
     assert_not_null!(kernel_task);
 
-    use crate::scheduler::task::task_fork;
+    use slopos_sched::task::task_fork;
     let child_id = task_fork(kernel_task, core::ptr::null());
     assert_test!(
         child_id == INVALID_TASK_ID,
@@ -859,7 +858,7 @@ pub fn test_fork_kernel_task() -> TestResult {
 pub fn test_fork_terminated_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 
-    use crate::scheduler::task::task_fork;
+    use slopos_sched::task::task_fork;
 
     let task_id = create_test_kernel_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -887,7 +886,7 @@ pub fn test_fork_terminated_parent() -> TestResult {
 pub fn test_fork_blocked_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 
-    use crate::scheduler::task::{task_fork, task_set_state};
+    use slopos_sched::task::{task_fork, task_set_state};
 
     let task_id = create_test_kernel_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -1076,11 +1075,11 @@ pub fn test_operations_on_terminated_task() -> TestResult {
 
     task_terminate(task_id);
 
-    use crate::scheduler::task::task_get_info;
+    use slopos_sched::task::task_get_info;
     let mut task_ptr: *mut Task = ptr::null_mut();
     let _info_result = task_get_info(task_id, &mut task_ptr);
 
-    use crate::scheduler::task::task_set_state;
+    use slopos_sched::task::task_set_state;
     let state_result = task_set_state(task_id, TaskStatus::Ready);
     if state_result == 0 {
         let task = task_find_by_id(task_id);
@@ -1211,7 +1210,7 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     let parent_ptr = task_find_by_id(parent_id);
     assert_not_null!(parent_ptr, "parent task lookup failed");
 
-    crate::scheduler::task::task_set_fs_base(parent_ptr, 0x0000_1111_2222_3000);
+    slopos_sched::task::task_set_fs_base(parent_ptr, 0x0000_1111_2222_3000);
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
     let child_id = match task_clone(parent_ptr, flags, 0, 0, 0, 0x0000_5555_6666_7000) {
@@ -1228,7 +1227,7 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     let child_ptr = task_find_by_id(child_id);
     assert_not_null!(child_ptr, "child task lookup failed");
 
-    use crate::scheduler::task::{task_fs_base, task_tgid};
+    use slopos_sched::task::{task_fs_base, task_tgid};
     assert_eq_test!(
         task_tgid(child_ptr),
         task_tgid(parent_ptr),
@@ -1282,7 +1281,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
     assert_not_null!(thread_ptr, "thread task lookup failed");
     assert_not_null!(fork_ptr, "fork child task lookup failed");
 
-    use crate::scheduler::task::{task_parent_task_id, task_tgid};
+    use slopos_sched::task::{task_parent_task_id, task_tgid};
     assert_eq_test!(
         task_tgid(thread_ptr),
         task_tgid(parent_ptr),
@@ -3063,7 +3062,7 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
 ///   2^32), exercising the wrapping arithmetic that backs the wrap
 ///   from `u32::MAX` to `0`.
 pub fn test_task_state_fused_cas() -> TestResult {
-    use crate::scheduler::task_state::TaskState;
+    use slopos_sched::task_state::TaskState;
 
     let s = TaskState::invalid();
     s.force_set(TaskStatus::Running, BlockReason::None);

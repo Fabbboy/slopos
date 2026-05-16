@@ -65,3 +65,30 @@ pub fn ticks_to_microseconds(ticks: u64) -> u64 {
     }
     ((ticks as u128 * 1_000_000u128) / (freq_hz as u128)) as u64
 }
+
+// =============================================================================
+// Coarse timer tick counter
+// =============================================================================
+//
+// Incremented from the LAPIC timer arm in `boot/src/idt.rs`. Used by the
+// scheduler watchdog and by tests to confirm timer delivery. Lives here so
+// both `slopos-core` (legacy re-exports in `core::irq`) and the out-of-OSTD
+// scheduler in `slopos-sched` can read/write it without depending on each
+// other.
+
+static TIMER_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub fn get_timer_ticks() -> u64 {
+    TIMER_TICK_COUNTER.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn increment_timer_ticks() {
+    TIMER_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn reset_timer_ticks() {
+    TIMER_TICK_COUNTER.store(0, Ordering::Relaxed);
+}

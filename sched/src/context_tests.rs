@@ -31,7 +31,7 @@ impl ContextFixture {
     }
 }
 
-use crate::tests::helpers::dummy_task_entry;
+use crate::test_fixture::dummy_task_entry;
 
 fn create_test_task(name: &[u8], flags: u16) -> u32 {
     task_create(

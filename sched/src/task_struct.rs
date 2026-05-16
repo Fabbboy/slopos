@@ -7,7 +7,7 @@
 
 use core::mem::offset_of;
 
-use crate::scheduler::task_stack::{KernelStack, UnsafeStack};
+use crate::task_stack::{KernelStack, UnsafeStack};
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,

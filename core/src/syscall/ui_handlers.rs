@@ -4,10 +4,10 @@ use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::{ERRNO_ERESTARTSYS, TtyIndex};
 use slopos_abi::{DisplayInfo, InputEvent};
 
-use crate::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 use slopos_fs::fileio::file_open_tty_fd;
 use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::{input, tty, video};
+use slopos_sched::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};

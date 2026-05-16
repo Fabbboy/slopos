@@ -17,10 +17,10 @@ use slopos_ostd::{catch_panic, klog_info};
 use slopos_testing::{TestDesc, TestResult, ktap};
 
 use crate::exec::spawn_program_with_attrs;
-use crate::sched::scheduler_get_current_task;
-use crate::scheduler::scheduler::{sleep_current_task_ms, task_wait_for};
-use crate::scheduler::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
-use crate::scheduler::test_reports::{
+use slopos_sched::scheduler::scheduler_get_current_task;
+use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
+use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
+use slopos_sched::test_reports::{
     PendingDrain, TestReport, consume_pending_drain, pending_drain_present,
 };
 
@@ -91,8 +91,8 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     // from delivering SIGCHLD anywhere meaningful.
     let (parent_pid, parent_tid) = {
         let cur = scheduler_get_current_task();
-        let pid = crate::scheduler::task::task_process_id(cur).unwrap_or(INVALID_PROCESS_ID);
-        let tid = crate::scheduler::task::task_id_of(cur).unwrap_or(INVALID_TASK_ID);
+        let pid = slopos_sched::task::task_process_id(cur).unwrap_or(INVALID_PROCESS_ID);
+        let tid = slopos_sched::task::task_id_of(cur).unwrap_or(INVALID_TASK_ID);
         (pid, tid)
     };
 

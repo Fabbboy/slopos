@@ -24,23 +24,18 @@ use slopos_kernel_services::platform;
 // Timer + keyboard event counters
 // =============================================================================
 
-/// Global timer tick counter, incremented from the LAPIC timer arm in
-/// `boot/src/idt.rs::common_exception_handler_impl`. Relaxed because tests
-/// only need eventual consistency.
-static TIMER_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Global keyboard event counter, incremented from the PS/2 keyboard
 /// dispatch closure in `drivers/src/irq.rs`.
 static KEYBOARD_EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub fn get_timer_ticks() -> u64 {
-    TIMER_TICK_COUNTER.load(Ordering::Relaxed)
+    slopos_kernel_services::clock::get_timer_ticks()
 }
 
 #[inline]
 pub fn increment_timer_ticks() {
-    TIMER_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    slopos_kernel_services::clock::increment_timer_ticks();
 }
 
 #[inline]
@@ -98,7 +93,7 @@ pub fn init() {
         IRQ_GSI[i].store(0, Ordering::Release);
         IRQ_FLAGS[i].store(FLAG_MASKED, Ordering::Release);
     }
-    TIMER_TICK_COUNTER.store(0, Ordering::Relaxed);
+    slopos_kernel_services::clock::reset_timer_ticks();
     KEYBOARD_EVENT_COUNTER.store(0, Ordering::Relaxed);
 }
 

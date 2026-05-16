@@ -456,7 +456,7 @@ pub static AP_PCR_PTRS: SyncUnsafeCell<PcrPtrLookup> =
 /// 0-based AP slot (AP slot i ↔ PCR at `AP_PCRS[i]`).
 /// `bootstrap_tasks[i]` is a pointer to the AP's bootstrap Task stub
 /// whose `unsafe_stack_sp` has already been primed — see
-/// `slopos_core::scheduler::safestack_rt::init_bootstrap_tasks`.
+/// `slopos_sched::safestack_rt::init_bootstrap_tasks`.
 ///
 /// The `&BspToken<'brand>` witnesses BSP-only init; single-writer
 /// (BSP in a sequential pre-SMP phase), must be called exactly once.

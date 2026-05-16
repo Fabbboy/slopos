@@ -26,14 +26,14 @@ use slopos_mm::process_vm::{
 };
 use slopos_ostd::klog_info;
 
-use crate::sched::schedule_new_task;
-use crate::scheduler::task::{
+use slopos_abi::task::INVALID_TASK_ID;
+use slopos_sched::scheduler::schedule_new_task;
+use slopos_sched::task::{
     TaskEntry, task_borrow, task_borrow_mut, task_entry_from_kernel_va, task_process_id,
     task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_set_status,
     task_user_ctx_mut,
 };
-use crate::task::{task_create, task_find_by_id, task_get_info, task_terminate};
-use slopos_abi::task::INVALID_TASK_ID;
+use slopos_sched::task::{task_create, task_find_by_id, task_get_info, task_terminate};
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
@@ -128,7 +128,7 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::NoMem);
         }
 
-        let mut task_info: *mut crate::scheduler::task_struct::Task = ptr::null_mut();
+        let mut task_info: *mut slopos_sched::task_struct::Task = ptr::null_mut();
         if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
             task_terminate(task_id);
             return Err(ExecError::Fault);
@@ -169,7 +169,7 @@ pub fn spawn_program_with_attrs(
         // the iretq frame is rebuilt from `user_ctx` on every
         // round-trip by `user_mode_round_trip_asm`.
         if let Some(uc) = task_user_ctx_mut(task_info) {
-            crate::syscall::user_loop::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
+            slopos_sched::task::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
         }
 
         // Clone the parent's fd table BEFORE scheduling so the child has

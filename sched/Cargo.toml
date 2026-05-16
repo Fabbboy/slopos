@@ -1,5 +1,5 @@
 [package]
-name = "slopos-core"
+name = "slopos-sched"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,18 +16,15 @@ doctest = false
 
 [features]
 default = []
-test-hooks = ["slopos-mm/test-hooks", "slopos-sched/test-hooks"]
+test-hooks = []
 
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-arch = { workspace = true }
+slopos-ostd = { workspace = true }
 slopos-kernel-services = { workspace = true }
-slopos-testing = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-fs = { workspace = true }
-slopos-net = { workspace = true }
-slopos-ostd = { workspace = true }
-slopos-sched = { workspace = true }
-slopos-font = { workspace = true, features = ["kernel"] }
 slopos-hermetic = { workspace = true }
+slopos-testing = { workspace = true }
 paste.workspace = true
