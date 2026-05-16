@@ -41,13 +41,16 @@ fn boot_step_register_frame_alloc_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // step the typestate `Frame::<KernelMeta>::alloc` path is live;
     // the post-typestate boot step at priority 10 then performs every
     // remaining kernel page allocation through the typestate gate.
-    // Single registration site — body inlined from the former
-    // `slopos_mm::frame_alloc_shim::register_with_ostd(token)` shim.
+    //
+    // `slopos_mm::page_alloc::BUDDY_ALLOCATOR` is the production
+    // `FrameAlloc` implementation; the doubly-indirect handle
+    // matches OSTD's setter signature without going through any
+    // adapter struct.
     slopos_ostd::mm::frame_alloc::register_frame_allocator(
         &ctx.bsp_token(),
-        &slopos_mm::frame_alloc_shim::LEGACY_FRAME_ALLOC_DYN,
+        slopos_mm::page_alloc::frame_alloc_handle(),
     );
-    klog_info!("OSTD: frame_allocator registered (LegacyFrameAllocShim)");
+    klog_info!("OSTD: frame_allocator registered (BuddyAllocator)");
 }
 
 fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {

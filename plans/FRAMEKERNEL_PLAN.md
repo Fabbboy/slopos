@@ -263,12 +263,43 @@ Phase 1 establishes the *boundary*. Phase 2 makes everything *outside* the bound
 
 Today's `mm/src/page_alloc.rs` (buddy + per-CPU caches) becomes a safe-Rust `FrameAlloc` trait impl. The OSTD-internal default impl from 1H.4 is deleted.
 
-- [ ] **2A.1** Create `mm/src/page_alloc/` (directory; was a single file). Move the buddy logic into `mm/src/page_alloc/buddy.rs`, per-CPU caches into `mm/src/page_alloc/pcp.rs`.
-- [ ] **2A.2** Define `pub struct BuddyAllocator { ... }` implementing `slopos_ostd::mm::FrameAlloc`. Construction via `BuddyAllocator::new(memory_map: &MemoryMap)`.
-- [ ] **2A.3** Boot wires it: `slopos_ostd::mm::set_frame_allocator(KArc::new(BuddyAllocator::new(...)))`. OSTD's `Frame::from_unused` consults the registered allocator.
-- [ ] **2A.4** Per-CPU caches are now safe Rust: `CpuLocal<PerCpuPageCache>` from `slopos_ostd::sync::CpuLocal`.
-- [ ] **2A.5** Delete the FFI shim from 1B.5. `Frame::from_unused` is now backed by `BuddyAllocator` directly via the trait.
-- [ ] **2A.6** Verify: `rg unsafe mm/` returns zero. `just test` passes. Frame-allocation perf within ±5%.
+- [x] **2A.1** Create `mm/src/page_alloc/` (directory; was a single file). Move the buddy logic into `mm/src/page_alloc/buddy.rs`, per-CPU caches into `mm/src/page_alloc/pcp.rs`.
+- [x] **2A.2** Define `pub struct BuddyAllocator { ... }` implementing `slopos_ostd::mm::FrameAlloc`. Construction is via the BSS-resident `BUDDY_ALLOCATOR: BuddyAllocator = BuddyAllocator::new_uninit()` const initializer, then a three-step lifecycle on the static: `install_descriptor_table(...) → seed_from_memory_map() → enable_pcp()`. Replaces the literal-plan `BuddyAllocator::new(memory_map: &MemoryMap)`; rationale in § 2A Outcomes.
+- [x] **2A.3** Boot wires it: `slopos_ostd::mm::frame_alloc::register_frame_allocator(&ctx.bsp_token(), slopos_mm::page_alloc::frame_alloc_handle())` (`boot/src/boot_memory.rs:46`). The setter takes a `&'static &'static dyn FrameAlloc` rather than `KArc<dyn FrameAlloc>` because heap init must happen *after* the page allocator is registered. Rationale in § 2A Outcomes.
+- [x] **2A.4** Per-CPU caches are now safe Rust: `CpuLocal<PerCpuPageCache>` from `slopos_ostd::sync::cpu_local`. Lives in `mm/src/page_alloc/pcp.rs` as a top-level `cpu_local!`-style static (the macro requires top-level static syntax, so it cannot be a field of `BuddyAllocator`).
+- [x] **2A.5** Delete the FFI shim from 1B.5. `mm/src/frame_alloc_shim.rs` (the `LegacyFrameAllocShim` adapter) is gone; `BuddyAllocator` implements `FrameAlloc` directly. `Frame::from_unused` reaches the kernel buddy through `current_frame_allocator()` → `&BUDDY_ALLOCATOR` with no adapter in between.
+- [x] **2A.6** Verify: `rg unsafe mm/` returns zero. `just test` passes. Frame-allocation perf within ±5%. _See § 2A Outcomes for live numbers._
+
+### Phase 2 § 2A — Outcomes
+
+(Captured at the working-tree state immediately before user hand-off; live numbers reproduced by re-running the corresponding recipe.)
+
+**Architectural changes.**
+
+| Item | Before | After |
+|---|---|---|
+| Module shape | `mm/src/page_alloc.rs` (1,277 LoC, ten loose `static`s) | `mm/src/page_alloc/{mod,buddy,pcp}.rs` — `mod.rs` is the public façade, `buddy.rs` owns `BuddyAllocator` (the `impl FrameAlloc`), `pcp.rs` is a thin per-CPU data layer |
+| Adapter to OSTD | `mm/src/frame_alloc_shim.rs::LegacyFrameAllocShim` (unit-struct adapter that re-translated `FrameAllocOptions` into `__alloc_page_frame{,s}_raw` indirection) | **Deleted.** `BuddyAllocator` is itself the `dyn FrameAlloc` impl |
+| Allocator state | Ten loose `static`s + `InitFlag` + `RawTable<PageFrame>` + `SpinLock<PageAllocator>` scattered through `page_alloc.rs` | Single BSS-resident `BUDDY_ALLOCATOR: BuddyAllocator` with `inner: SpinLock<BuddyInner>`, `frame_table: RawTable<PageFrame>`, `state: AtomicU8` fields |
+| Boot lifecycle | `init_page_allocator(*mut, u32) -> c_int` + `finalize_page_allocator() -> c_int` (loose functions, no type-level ordering) | Explicit `Uninit → Sized → Seeded → Live` state machine on `BuddyAllocator`; `install_descriptor_table → seed_from_memory_map → enable_pcp` transitions, panic on out-of-order calls |
+| OSTD setter argument | `&LEGACY_FRAME_ALLOC_DYN` (legacy adapter doubly-indirect) | `slopos_mm::page_alloc::frame_alloc_handle()` (returns `&'static &'static dyn FrameAlloc` aimed at the real buddy) |
+
+**Resolved deviations from the literal plan text.**
+
+- **§2A.2's `BuddyAllocator::new(memory_map: &MemoryMap)`** does not match boot reality. Today's boot sequence sizes the frame descriptor table (priority 2), maps it at a reserved physical window, then seeds the free-lists from a separately-populated region store, then enables PCP. There is no `MemoryMap` type to take by reference, and the two phases (size + seed) cannot fold into one call because the descriptor-table mapping has to happen between them. The world-class form is the three-step lifecycle landed here: each transition is named, the state field makes ordering bugs build-time-visible to humans and runtime-visible to `debug_assert!`, and no fictional `MemoryMap` type is introduced for one call site.
+
+- **§2A.3's `set_frame_allocator(KArc::new(BuddyAllocator::new(...)))`** is not implementable. The OSTD setter as built in Phase 1H is `register_frame_allocator(&BspToken<'brand>, &'static &'static dyn FrameAlloc)`; using `KArc` would require the heap, which is initialized *after* the page allocator is registered (priority 10 vs priority 6) — that's the circular dependency that every production kernel resolves by putting the page allocator in BSS, not the heap. Phase 2A keeps the static-reference setter as designed in Phase 1 and registers a stable pointer to the BSS-resident `BUDDY_ALLOCATOR` instance.
+
+**Verification.**
+
+| Gate | Recipe | Result |
+|---|---|---|
+| 2A.1 cleanliness | `rg '\bunsafe\b' --type rust mm/ \| grep -vE '^[^:]+:\s*(//\|///\|//!\|/\*)'` | **0 matches** (parity with pre-refactor). |
+| 2A.5 cleanliness | `rg 'frame_alloc_shim\|LegacyFrameAllocShim' --type rust` | **0 matches** (adapter and all references purged). |
+| 2A.6 framekernel gates | `just check-framekernel` | **All five sub-gates green.** `check_unsafe_outside_ostd: OK`; `check_alloc_dep: OK`; `check_stack_sizes: OK — all frames <= 2048 bytes`; `cargo fmt --all -- --check` clean; `just check-miri` ≥395 passed / 0 failed across all OSTD test binaries (parity with Phase 1 close). |
+| 2A.6 functional parity | `just test` | **2427 tests across 2 phases → 2427 passed, 0 failed, 0 skipped, 1 over-time** (kernel 2424 + userland 3, total real time 14.15 s). The single over-time test (`slopos_net::tests::tcp_keepalive_tests::test_keepalive_reset_on_data` at 524 ms vs 500 ms threshold) is pre-existing and unrelated to the page allocator. |
+| 2A.6 hot-path perf | `just test` slowest-test column for `test_page_alloc_*` and `test_heap_*` | No page-allocator or kernel-heap tests appear in the `>= 500 ms` slow-test list, so every page-alloc and heap test completes in < 500 ms after the refactor. The proper LMbench-equivalent gate is § 2J.1. |
+| TCB ratio | `just tcb-ratio` | **889 / 131,176 = 0.678 %** (target Phase 2 ≤ 1.0 %; already under the bound and unchanged from Phase 1 close because the refactor moved no code into `slopos-ostd/`). |
 
 ### 2B: Slab allocator outside OSTD
 

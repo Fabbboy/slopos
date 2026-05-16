@@ -1,0 +1,232 @@
+//! Physical page frame allocator (buddy + per-CPU caches).
+//!
+//! The kernel's safe-Rust [`FrameAlloc`] implementation lives here.
+//! OSTD's frame-allocation API consults the registered allocator via
+//! [`slopos_ostd::mm::frame_alloc::register_frame_allocator`]; boot
+//! hands it [`frame_alloc_handle`] which points at the BSS-resident
+//! [`BUDDY_ALLOCATOR`] singleton.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │              Frame::<KernelMeta>::alloc(opts)                   │
+//! │                           │                                     │
+//! │                           ▼                                     │
+//! │              current_frame_allocator()?.alloc(opts)             │
+//! │                           │                                     │
+//! │                           ▼                                     │
+//! │              <BuddyAllocator as FrameAlloc>::alloc              │
+//! │                           │                                     │
+//! │              ┌────────────┴────────────┐                        │
+//! │              │    Order == 0?          │                        │
+//! │              └────────────┬────────────┘                        │
+//! │                   Yes     │      No                             │
+//! │              ┌────────────┴────────────┐                        │
+//! │              ▼                         ▼                        │
+//! │   ┌─────────────────────┐   ┌─────────────────────┐             │
+//! │   │ Per-CPU Page Cache  │   │   Buddy Allocator   │             │
+//! │   │   (lock-free)       │   │   (global lock)     │             │
+//! │   └─────────┬───────────┘   └─────────────────────┘             │
+//! │             │ Empty?                                            │
+//! │             ▼                                                   │
+//! │   ┌─────────────────────┐                                       │
+//! │   │ Refill from buddy   │                                       │
+//! │   └─────────────────────┘                                       │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! See [`buddy`] for the allocator type and [`pcp`] for the per-CPU
+//! cache data layer.
+
+pub mod buddy;
+mod pcp;
+
+use core::ffi::c_int;
+
+use slopos_abi::addr::PhysAddr;
+use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::mm::frame::FrameAlloc;
+
+pub use buddy::{
+    ALLOC_FLAG_DMA, ALLOC_FLAG_KERNEL, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ORDER_MASK,
+    ALLOC_FLAG_ORDER_SHIFT, BuddyAllocator,
+};
+
+// ---------------------------------------------------------------------------
+// The single global instance.
+// ---------------------------------------------------------------------------
+
+/// BSS-resident buddy allocator. Drives the kernel's physical page
+/// supply once boot has driven the lifecycle through `install_descriptor_table
+/// → seed_from_memory_map → enable_pcp`. The `Send + Sync` bounds on
+/// [`FrameAlloc`] are satisfied by the type's interior locking.
+pub static BUDDY_ALLOCATOR: BuddyAllocator = BuddyAllocator::new_uninit();
+
+/// Doubly-indirect reference for
+/// [`slopos_ostd::mm::frame_alloc::register_frame_allocator`]; the
+/// setter requires a `&'static &'static dyn FrameAlloc` so the inner
+/// reference must live in a `static`.
+static BUDDY_ALLOCATOR_DYN: &dyn FrameAlloc = &BUDDY_ALLOCATOR;
+
+/// Hand boot the static reference it needs to pass to OSTD's
+/// `register_frame_allocator`. Stable address; safe to call any time
+/// after link.
+#[inline]
+pub fn frame_alloc_handle() -> &'static &'static dyn FrameAlloc {
+    &BUDDY_ALLOCATOR_DYN
+}
+
+// ---------------------------------------------------------------------------
+// Public API. Names preserved from the pre-refactor flat module so
+// callers outside `mm/` are unaffected; bodies are thin wrappers over
+// the static [`BUDDY_ALLOCATOR`].
+// ---------------------------------------------------------------------------
+
+/// Raw multi-page buddy entry point. Bootstrap escape for
+/// `kernel_meta::install_meta_slots` (which runs before the OSTD
+/// frame-allocator registration is live) and policy-flag opt-out
+/// (`ALLOC_FLAG_NO_PCP`, `ALLOC_FLAG_DMA`) for callers that bypass
+/// the typestate.
+#[doc(hidden)]
+pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
+    BUDDY_ALLOCATOR.alloc_raw(count, flags)
+}
+
+/// Raw single-page buddy entry point. See [`__alloc_page_frames_raw`]
+/// for the audit-point rationale. Always runs the LUF reuse-drain.
+#[doc(hidden)]
+pub fn __alloc_page_frame_raw(flags: u32) -> PhysAddr {
+    let phys = BUDDY_ALLOCATOR.alloc_raw(1, flags);
+    if !phys.is_null() {
+        crate::mmu::luf::drain_if_reusing_frame(phys);
+    }
+    phys
+}
+
+/// Typestate-checked single-page kernel allocation, zeroed.
+pub fn alloc_kernel_page() -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
+    Frame::<KernelMeta>::alloc_release_phys(FrameAllocOptions::single())
+}
+
+/// Typestate-checked single-page kernel allocation with caller-supplied options.
+pub fn alloc_kernel_page_with(opts: slopos_ostd::mm::frame::FrameAllocOptions) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, KernelMeta};
+    Frame::<KernelMeta>::alloc_release_phys(opts)
+}
+
+/// Typestate-checked multi-page kernel allocation.
+pub fn alloc_kernel_pages(count: u32) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, FrameAllocOptions, KernelMeta};
+    if count == 0 {
+        return PhysAddr::NULL;
+    }
+    let opts = FrameAllocOptions {
+        size_pages: count as usize,
+        ..FrameAllocOptions::single()
+    };
+    Frame::<KernelMeta>::alloc_release_phys(opts)
+}
+
+/// Typestate-checked multi-page kernel allocation with caller-supplied options.
+pub fn alloc_kernel_pages_with(
+    count: u32,
+    opts: slopos_ostd::mm::frame::FrameAllocOptions,
+) -> PhysAddr {
+    use slopos_ostd::mm::frame::{Frame, KernelMeta};
+    if count == 0 {
+        return PhysAddr::NULL;
+    }
+    let opts = slopos_ostd::mm::frame::FrameAllocOptions {
+        size_pages: count as usize,
+        ..opts
+    };
+    Frame::<KernelMeta>::alloc_release_phys(opts)
+}
+
+/// Batch-allocate up to `out.len()` zeroed order-0 pages.
+pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
+    BUDDY_ALLOCATOR.alloc_pcp_batch(out)
+}
+
+/// Free a single allocation (single page or multi-page block) back
+/// to the buddy. The buddy recovers the order from the descriptor.
+pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
+    BUDDY_ALLOCATOR.free_phys(phys_addr)
+}
+
+/// Drain every CPU's PCP cache into the buddy. Shutdown only.
+pub fn pcp_drain_all() {
+    BUDDY_ALLOCATOR.drain_pcp_all();
+}
+
+// ---------------------------------------------------------------------------
+// Stats / diagnostic accessors.
+// ---------------------------------------------------------------------------
+
+pub fn page_allocator_descriptor_size() -> usize {
+    core::mem::size_of::<buddy::PageFrame>()
+}
+
+pub fn page_allocator_max_supported_frames() -> u32 {
+    BUDDY_ALLOCATOR.max_supported_frames()
+}
+
+pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32) {
+    let (t, f, a) = BUDDY_ALLOCATOR.stats();
+    slopos_ostd::util::ptr_buf::nullable_write(total, t);
+    slopos_ostd::util::ptr_buf::nullable_write(free, f);
+    slopos_ostd::util::ptr_buf::nullable_write(allocated, a);
+}
+
+pub fn get_pcp_stats(cpu: usize, count: *mut u32, allocs: *mut u32, frees: *mut u32) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    if let Some((c, a, f)) = BUDDY_ALLOCATOR.pcp_stats(cpu) {
+        slopos_ostd::util::ptr_buf::nullable_write(count, c);
+        slopos_ostd::util::ptr_buf::nullable_write(allocs, a);
+        slopos_ostd::util::ptr_buf::nullable_write(frees, f);
+    }
+}
+
+pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
+    BUDDY_ALLOCATOR.frame_is_tracked(phys_addr) as c_int
+}
+
+pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
+    BUDDY_ALLOCATOR.frame_can_free(phys_addr) as c_int
+}
+
+pub fn page_frame_inc_ref(phys_addr: PhysAddr) -> c_int {
+    match BUDDY_ALLOCATOR.frame_inc_ref(phys_addr) {
+        Some(n) => n as c_int,
+        None => -1,
+    }
+}
+
+pub fn page_frame_get_ref(phys_addr: PhysAddr) -> u32 {
+    BUDDY_ALLOCATOR.frame_get_ref(phys_addr)
+}
+
+pub fn page_allocator_paint_all(value: u8) {
+    BUDDY_ALLOCATOR.paint_all(value);
+}
+
+// ---------------------------------------------------------------------------
+// OwnedPageFrame typestate alias.
+// ---------------------------------------------------------------------------
+
+/// Owning handle to a single 4 KiB kernel-owned physical frame.
+///
+/// Aliased onto `slopos_ostd::mm::frame::Frame<KernelMeta>` so the
+/// underlying ref-counted slot machinery from OSTD drives the
+/// allocate/free lifecycle. The kernel-side allocator
+/// ([`BUDDY_ALLOCATOR`]) is registered with OSTD through
+/// [`frame_alloc_handle`], and the final
+/// [`slopos_ostd::mm::frame::Frame`] drop routes back into
+/// [`free_page_frame`] via OSTD's `KernelMeta::on_drop`.
+pub type OwnedPageFrame = slopos_ostd::mm::frame::Frame<crate::kernel_meta::KernelMeta>;
+
+pub use OwnedPageFrame as KernelFrame;

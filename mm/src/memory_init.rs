@@ -12,9 +12,7 @@ use crate::memory_reservations::{
     mm_reservations_count, mm_reservations_get, mm_reservations_overflow_count,
     mm_reservations_total_bytes,
 };
-use crate::page_alloc::{
-    finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
-};
+use crate::page_alloc::{BUDDY_ALLOCATOR, page_allocator_descriptor_size};
 use crate::paging::{init_paging, map_page_4kb};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::init_process_vm;
@@ -587,16 +585,16 @@ pub fn init_memory_system_pre_typestate(
 
     EARLY_PAGING_INIT.mark_set();
 
-    if init_page_allocator(
-        allocator_plan.buffer as *mut _,
+    // Drive the buddy allocator's lifecycle:
+    //   Uninit → Sized: install the boot-allocated frame descriptor table.
+    //   Sized  → Seeded: seed the free-lists from the recorded memory map.
+    //   Seeded → Live: enable per-CPU page caches for the order-0 fast path.
+    BUDDY_ALLOCATOR.install_descriptor_table(
+        allocator_plan.buffer as *mut u8,
         allocator_plan.capacity_frames,
-    ) != 0
-    {
-        panic!("MM: Page allocator initialization failed");
-    }
-    if finalize_page_allocator() != 0 {
-        klog_info!("MM: WARNING - page allocator finalization reported issues");
-    }
+    );
+    BUDDY_ALLOCATOR.seed_from_memory_map();
+    BUDDY_ALLOCATOR.enable_pcp();
 
     init_paging();
     crate::pat::pat_init();
