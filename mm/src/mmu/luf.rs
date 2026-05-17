@@ -27,7 +27,7 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::klog_warn;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_ALLOCATOR;
-use slopos_ostd::sync::spin::SpinLock;
+use slopos_ostd::sync::spin::PreemptMutex;
 
 use super::cr3::MmContextId;
 use crate::tlb;
@@ -183,12 +183,26 @@ impl LufDrainRequest {
 
 static DRAIN_REQUEST: LufDrainRequest = LufDrainRequest::new();
 
-/// Single-writer serialisation for the shared drain request. Drains
-/// are rare (only fire when a freed frame is being reused AND some CPU
-/// still has queued LUF entries), so the lock is effectively
-/// uncontended. SpinLock closes interrupts so a nested drain from an
-/// IRQ handler cannot deadlock on the shared request state.
-static DRAIN_LOCK: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_ALLOCATOR);
+/// Single-writer serialisation for the shared drain request.
+///
+/// **MUST be `PreemptMutex`, NOT `SpinLock`.** Drains broadcast an LUF IPI
+/// and spin-wait for acks; remote handlers respond by issuing
+/// `tlb::flush_all()` which sends a TLB IPI back at the initiator. If
+/// `DRAIN_LOCK` cli'd (as `SpinLock` does), the lock holder couldn't ack
+/// that incoming TLB IPI — and a *second* CPU trying to acquire the same
+/// lock couldn't ack the original LUF IPI it's the target of — giving a
+/// three-way deadlock (initiator waiting for LUF ack ↔ contender waiting
+/// for lock ↔ contender's TLB IPI waiting for initiator's ack). Confirmed
+/// in `builddir/hang_repro/iter_4_bt.log`:
+///   * CPU 0 in `luf::drain_by_phys_cross_cpu` (line 258 spin)
+///   * CPU 2 in `__mm_pause` from `SpinLock::lock` waiting for `DRAIN_LOCK`,
+///     called from its own `BuddyAllocator::alloc → drain_if_reusing_frame`
+///
+/// `PreemptMutex` keeps IRQs enabled, so both lock holders and lock
+/// spinners can service incoming IPIs and break the cycle. Safe because
+/// `DRAIN_LOCK` is never acquired from an IRQ handler (only from frame
+/// allocation paths). `handle_drain_ipi` reads `DRAIN_REQUEST` lock-free.
+static DRAIN_LOCK: PreemptMutex<()> = PreemptMutex::new((), LOCK_LEVEL_ALLOCATOR);
 
 /// Broadcast a "drain any entries referencing this phys" request to
 /// every CPU whose bit is set in `cpu_mask`. Blocks until every
@@ -220,7 +234,44 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
         return;
     }
 
-    let _guard = DRAIN_LOCK.lock();
+    // Acquire `DRAIN_LOCK` via a try-lock loop that **re-enables IRQs
+    // between attempts**. This is load-bearing for liveness.
+    //
+    // Why we can't use the normal `DRAIN_LOCK.lock()`: even though
+    // `PreemptMutex` doesn't itself `cli`, its inner ticket spin
+    // (`for _ in 0..distance.min(64) { spin_loop(); }`) inherits IF
+    // from the caller. If we got here from a path that cli'd higher up
+    // (or for any other reason), the spin runs forever with IF=0:
+    //
+    //   * other initiators' LUF IPIs back at us never run their
+    //     `handle_drain_ipi`, so the lock holder never sees our ack,
+    //   * remote handlers' TLB-shootdown IPIs back at us never run
+    //     their per-target queue swap, so the holder's `wait_for_acks`
+    //     stalls,
+    //   * even timer ticks miss, so the NMI watchdog eventually fires
+    //     (`builddir/hang_repro/iter_11_bt.log` — CPU 0 frozen in
+    //     `PreemptMutex::lock spin_loop` for >500 ms).
+    //
+    // The try-lock + sti-on-backoff pattern guarantees that every
+    // contended slice has IRQs enabled at least briefly, so IPIs
+    // queued for us get drained before we re-attempt the lock. Once
+    // we acquire the lock we hold IRQs enabled for the full critical
+    // section (IPI fan-out + ack spin + release). Caller's IRQ state
+    // is restored at the bottom of the function.
+    let was_enabled = slopos_arch::cpu::are_interrupts_enabled();
+    let _guard = loop {
+        if let Some(g) = DRAIN_LOCK.try_lock() {
+            break g;
+        }
+        // Contended. Make absolutely sure IRQs are enabled for the
+        // backoff so any IPI we're the target of can fire and ack.
+        slopos_arch::cpu::enable_interrupts();
+        for _ in 0..256 {
+            slopos_arch::cpu::pause();
+        }
+    };
+    // Lock held. Ensure IRQs are enabled for the wait below.
+    slopos_arch::cpu::enable_interrupts();
 
     DRAIN_REQUEST
         .target_phys
@@ -250,8 +301,10 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
         }
     }
 
-    // Spin-wait for all acks. Timeout symmetric to the TLB shootdown
-    // path (but logged, never panicking).
+    // Spin-wait for all acks. IRQs are enabled (set above before
+    // mutex acquisition) so remote handlers' TLB-shootdown IPIs back
+    // at us, and other initiators' LUF IPIs back at us, both get
+    // serviced — closing the three-way LUF↔TLB↔contender deadlock.
     let mut spin: u64 = 0;
     while DRAIN_REQUEST.ack.load(Ordering::Acquire) < pending as u64 {
         slopos_arch::cpu::pause();
@@ -263,6 +316,12 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
                 pending
             );
         }
+    }
+
+    drop(_guard);
+
+    if !was_enabled {
+        slopos_arch::cpu::disable_interrupts();
     }
 }
 
