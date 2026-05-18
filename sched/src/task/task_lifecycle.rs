@@ -646,6 +646,29 @@ pub fn task_terminate(task_id: u32) -> c_int {
     klog_info!("Terminating task '{}' (ID {})", name_str, resolved_id);
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
+
+    // Hold preemption disabled across the `mark_task_terminated` →
+    // cleanup → defer/free sequence below. Without this guard, a
+    // spinlock-drop deep inside `mark_task_terminated` (e.g. inside
+    // `release_task_dependents` → `task_wake_all_waiters` → `wake_all`
+    // → `unblock_task` → `schedule_task`'s runqueue lock) can release
+    // the only outstanding `PreemptGuard` while a `reschedule_pending`
+    // flag is set. That flag was set by a previous timer-tick ISR that
+    // saw `is_scheduling_active()` true but couldn't reschedule because
+    // some inner critical section still held preemption.
+    //
+    // When the spinlock guard finally drops with preempt_count → 0 and
+    // reschedule_pending set, OSTD invokes
+    // `deferred_reschedule_callback`, which calls `schedule()`. We are
+    // already in `Zombie` state (mark_task_terminated transitioned us
+    // there before its first lock-drop), so the scheduler picks any
+    // other task — and the current task's task_terminate continuation
+    // (the call to `cleanup_task_process_resources` two lines below)
+    // never runs. Zombie tasks are not schedulable, so the dropped
+    // continuation stays dropped: the fd table is never destroyed, FD
+    // refcounts on inherited file objects never reach zero, and any
+    // waiter on a pipe whose only writer was this task hangs forever.
+    let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     mark_task_terminated(task_ptr, resolved_id);
 
     if !is_current {
