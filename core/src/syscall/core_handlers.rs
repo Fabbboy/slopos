@@ -1,83 +1,71 @@
 use core::ffi::{c_char, c_void};
 use core::mem::size_of;
 
-use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
+use slopos_abi::Errno;
+use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
 use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
 use slopos_ostd::klog_debug;
-use slopos_ostd::user::context::UserContext;
 
+use crate::syscall::args::{UserBytes, UserPtr};
 use crate::syscall::common::{
-    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_return_err,
+    USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
 };
-use crate::syscall::context::SyscallContext;
+use crate::syscall::result::SyscallResult;
 use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::tty;
 use slopos_sched::scheduler::{
     get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
 };
 use slopos_sched::task::{get_task_stats, task_terminate};
-use slopos_sched::task_struct::Task;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
-use slopos_mm::user_ptr::UserPtr;
 
-pub fn syscall_yield(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let _ = ctx.ok(0);
+define_syscall!(syscall_yield (ctx) -> SyscallResult {
+    // Bump the WL balance before yielding so the post-yield path
+    // doesn't double-account. yield_() suspends; when control
+    // resumes here the dispatcher's normal `write_ok` will adjust
+    // again, so we return NoReturn and write rax manually.
+    ctx.write_ok(0);
     yield_();
-    SyscallDisposition::Ok
-}
-
-define_syscall!(syscall_get_time_ms(ctx, args) {
-    let _ = args;
-    let ms = slopos_kernel_services::clock::uptime_ms();
-    ctx.ok(ms)
+    SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_clock_gettime(ctx, args) {
-    use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec};
+define_syscall!(syscall_get_time_ms (ctx) -> u64 {
+    slopos_kernel_services::clock::uptime_ms()
+});
 
-    let clock_id = args.arg0;
+define_syscall!(syscall_clock_gettime
+    (ctx, clock_id: u64, ts: UserPtr<Timespec>) -> Result<(), Errno>
+{
     if clock_id != CLOCK_MONOTONIC && clock_id != CLOCK_REALTIME {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
-
-    require_nonzero!(ctx, args.arg1);
-
     let ns = slopos_kernel_services::clock::monotonic_ns();
-    let ts = Timespec {
+    let value = Timespec {
         tv_sec: ns / 1_000_000_000,
         tv_nsec: ns % 1_000_000_000,
     };
-
-    let user_ptr = try_or_err!(ctx, UserPtr::<Timespec>::try_new(args.arg1));
-    try_or_err!(ctx, copy_to_user(user_ptr, &ts));
-    ctx.ok(0)
+    copy_to_user(ts.inner(), &value).map_err(|_| Errno::EFAULT)?;
+    Ok(())
 });
 
-pub fn syscall_halt(_task: *mut Task, _ctx_ptr: *mut UserContext) -> SyscallDisposition {
+define_syscall!(syscall_halt (ctx) -> SyscallResult {
     platform::kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
-    SyscallDisposition::Ok
-}
+    SyscallResult::NoReturn
+});
 
-pub fn syscall_reboot(_task: *mut Task, _ctx_ptr: *mut UserContext) -> SyscallDisposition {
+define_syscall!(syscall_reboot (ctx) -> SyscallResult {
     platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
-    SyscallDisposition::Ok
-}
+    SyscallResult::NoReturn
+});
 
-define_syscall!(syscall_sleep_ms(ctx, args) {
-    let mut ms = args.arg0;
+define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
+    let mut ms = ms;
     if ms > 60000 {
         ms = 60000;
     }
@@ -87,27 +75,16 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
         slopos_kernel_services::platform::timer_poll_delay_ms(ms as u32);
         0
     };
-    if rc == 0 {
-        ctx.ok(0)
-    } else {
-        ctx.err()
-    }
+    if rc == 0 { Ok(()) } else { Err(Errno::EINVAL) }
 });
 
-pub fn syscall_exit(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let ctx = match UserContext::from_ptr_mut(ctx_ptr) {
-        Some(uc) => SyscallContext::from_user_context(task, uc),
-        None => None,
-    };
-    let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
+define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
+    let task_id = ctx.task_id().unwrap_or(u32::MAX);
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
-    if let Some(ref c) = ctx {
-        let code = c.args().arg0 as u32;
-        if let Some(t) = c.task_mut() {
-            t.exit_reason = TaskExitReason::Normal;
-            t.fault_reason = TaskFaultReason::None;
-            t.exit_code = code;
-        }
+    if let Some(t) = ctx.task_mut() {
+        t.exit_reason = TaskExitReason::Normal;
+        t.fault_reason = TaskFaultReason::None;
+        t.exit_code = code;
     }
     klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
     task_terminate(task_id);
@@ -116,40 +93,42 @@ pub fn syscall_exit(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
         "SYSCALL_EXIT: task {} schedule returned (should not happen)",
         task_id
     );
-    SyscallDisposition::NoReturn
-}
-
-define_syscall!(syscall_user_write(ctx, args) {
-    let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    require_nonzero!(ctx, args.arg0);
-    let write_len = try_or_err!(ctx, syscall_bounded_from_user(&mut tmp, args.arg0, args.arg1, USER_IO_MAX_BYTES));
-    platform::console_puts(&tmp[..write_len]);
-    ctx.ok(write_len as u64)
+    SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_user_read(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-    require_nonzero!(ctx, args.arg1);
-
+define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
+    if buf.base_u64() == 0 {
+        return Err(Errno::EFAULT);
+    }
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let max_len = args.arg1_usize().min(USER_IO_MAX_BYTES);
+    let write_len = syscall_bounded_from_user(
+        &mut tmp,
+        buf.base_u64(),
+        buf.len() as u64,
+        USER_IO_MAX_BYTES,
+    )
+    .map_err(|_| Errno::EFAULT)?;
+    platform::console_puts(&tmp[..write_len]);
+    Ok(write_len as u64)
+});
 
+define_syscall!(syscall_user_read (ctx, buf: UserBytes) -> Result<u64, Errno> {
+    if buf.base_u64() == 0 || buf.len() == 0 {
+        return Err(Errno::EFAULT);
+    }
+    let mut tmp = [0u8; USER_IO_MAX_BYTES];
+    let max_len = buf.len().min(USER_IO_MAX_BYTES);
     let read_len = tty::read_cooked(TtyIndex(0), tmp.as_mut_ptr(), max_len, false);
     let n = match read_len {
         Ok(n) => n,
-        Err(TtyError::Restart) => {
-            return ctx.err_with(slopos_abi::syscall::ERRNO_ERESTARTSYS);
-        }
-        Err(_) => return ctx.err(),
+        Err(TtyError::Restart) => return Err(Errno::ERESTARTSYS),
+        Err(_) => return Err(Errno::EINVAL),
     };
-
-    try_or_err!(ctx, syscall_copy_to_user_bounded(args.arg0, &tmp[..n]));
-    ctx.ok(n as u64)
+    syscall_copy_to_user_bounded(buf.base_u64(), &tmp[..n]).map_err(|_| Errno::EFAULT)?;
+    Ok(n as u64)
 });
 
-define_syscall!(syscall_sys_info(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-
+define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) -> Result<(), Errno> {
     let mut info = UserSysInfo {
         total_pages: 0,
         free_pages: 0,
@@ -182,40 +161,37 @@ define_syscall!(syscall_sys_info(ctx, args) {
         &mut info.schedule_calls,
     );
 
-    let user_ptr = try_or_err!(ctx, UserPtr::<UserSysInfo>::try_new(args.arg0));
-    try_or_err!(ctx, copy_to_user(user_ptr, &info));
-    ctx.ok(0)
+    copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
+    Ok(())
 });
 
-define_syscall!(syscall_net_scan(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-
-    let max_members = (args.arg1 as usize).min(USER_NET_MAX_MEMBERS);
+define_syscall!(syscall_net_scan
+    (ctx, buf: UserPtr<UserNetMember>, max: u64, refresh: u64) -> Result<u64, Errno>
+{
+    let max_members = (max as usize).min(USER_NET_MAX_MEMBERS);
     if max_members == 0 {
-        return ctx.ok(0);
+        return Ok(0);
     }
 
     let mut scratch = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
-    let discovered =
-        slopos_net::netinfo::net_scan_members(&mut scratch[..max_members], args.arg2 != 0)
-            .min(max_members)
-            .min(USER_NET_MAX_MEMBERS);
+    let discovered = slopos_net::netinfo::net_scan_members(&mut scratch[..max_members], refresh != 0)
+        .min(max_members)
+        .min(USER_NET_MAX_MEMBERS);
 
     let mut i = 0usize;
     while i < discovered {
-        let dst = args.arg0.wrapping_add((i * size_of::<UserNetMember>()) as u64);
-        let user_ptr = try_or_err!(ctx, UserPtr::<UserNetMember>::try_new(dst));
-        try_or_err!(ctx, copy_to_user(user_ptr, &scratch[i]));
+        let dst = buf.as_u64().wrapping_add((i * size_of::<UserNetMember>()) as u64);
+        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserNetMember>::try_new(dst)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, &scratch[i]).map_err(|_| Errno::EFAULT)?;
         i += 1;
     }
 
     slopos_ostd::wl_currency::adjust_balance(slopos_ostd::wl_currency::WL_DELTA);
-    ctx.ok(discovered as u64)
+    Ok(discovered as u64)
 });
 
-define_syscall!(syscall_net_info(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-
+define_syscall!(syscall_net_info (ctx, info_out: UserPtr<UserNetInfo>) -> Result<(), Errno> {
     let ready = slopos_net::netinfo::net_is_ready();
     let mut info = UserNetInfo::default();
     info.nic_ready = u8::from(ready);
@@ -224,28 +200,18 @@ define_syscall!(syscall_net_info(ctx, args) {
         let _ = slopos_net::netinfo::net_get_info(&mut info);
     }
 
-    let user_ptr = try_or_err!(ctx, UserPtr::<UserNetInfo>::try_new(args.arg0));
-    try_or_err!(ctx, copy_to_user(user_ptr, &info));
-    ctx.ok(0)
+    copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
+    Ok(())
 });
 
-define_syscall!(syscall_process_list(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-    require_nonzero!(ctx, args.arg1);
-
+define_syscall!(syscall_process_list
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) -> Result<u64, Errno>
+{
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_ostd::KVec;
     use slopos_sched::task::task_iterate_active;
-    // Allocate exactly `max_entries` (caller-requested, bounded by
-    // `MAX_TASKS`) — not `MAX_TASKS` unconditionally; scanning 8192
-    // default-initialised entries per syscall is unacceptable overhead
-    // when the caller only wants the first few.
 
-    // `IterCtx` holds the entries on the heap via `KVec` rather than
-    // inline — a `[UserTaskEntry; MAX_TASKS]` array would push this
-    // syscall's frame past the 2 KiB stack-gate at the current
-    // `MAX_TASKS` value.
     struct IterCtx {
         entries: KVec<UserTaskEntry>,
         count: usize,
@@ -253,9 +219,6 @@ define_syscall!(syscall_process_list(ctx, args) {
     }
 
     fn collect_task(task_ptr: *mut slopos_sched::task_struct::Task, ctx_ptr: *mut c_void) {
-        // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow.
-        // `iterate_tasks` passes back the same `*mut IterCtx` the
-        // caller stashed a moment ago.
         let Some(iter_ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<IterCtx>(ctx_ptr)
         else {
             return;
@@ -280,24 +243,25 @@ define_syscall!(syscall_process_list(ctx, args) {
         entry.priority = task.priority.as_u8();
         entry.last_cpu = task.last_cpu;
         entry.cpu_affinity = task.cpu_affinity;
-        entry.total_runtime_us = slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime);
+        entry.total_runtime_us =
+            slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime);
         entry.creation_time_ms = task.creation_time;
         entry.yield_count = task.yield_count;
         entry.name = task.name;
         iter_ctx.count += 1;
     }
 
-    let max_entries = (args.arg1 as usize).min(MAX_TASKS);
+    let max_entries = (max as usize).min(MAX_TASKS);
     let entries = match KVec::<UserTaskEntry>::with_capacity(max_entries) {
         Ok(mut v) => {
             for _ in 0..max_entries {
                 if v.push(UserTaskEntry::default()).is_err() {
-                    return ctx.err();
+                    return Err(Errno::ENOMEM);
                 }
             }
             v
         }
-        Err(_) => return ctx.err(),
+        Err(_) => return Err(Errno::ENOMEM),
     };
     let mut iter_ctx = IterCtx {
         entries,
@@ -309,19 +273,20 @@ define_syscall!(syscall_process_list(ctx, args) {
 
     let count = iter_ctx.count;
     for i in 0..count {
-        let dst_addr = args
-            .arg0
+        let dst_addr = buf
+            .as_u64()
             .wrapping_add((i * core::mem::size_of::<UserTaskEntry>()) as u64);
-        let user_ptr = try_or_err!(ctx, UserPtr::<UserTaskEntry>::try_new(dst_addr));
-        try_or_err!(ctx, copy_to_user(user_ptr, &iter_ctx.entries[i]));
+        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserTaskEntry>::try_new(dst_addr)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, &iter_ctx.entries[i]).map_err(|_| Errno::EFAULT)?;
     }
 
-    ctx.ok(count as u64)
+    Ok(count as u64)
 });
 
-define_syscall!(syscall_cpu_info(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-
+define_syscall!(syscall_cpu_info
+    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) -> Result<(), Errno>
+{
     use slopos_abi::syscall::UserCpuInfo;
     use slopos_arch::cpu::cpuid;
 
@@ -335,20 +300,18 @@ define_syscall!(syscall_cpu_info(ctx, args) {
     info.stepping = stepping;
     info.features = cpuid::cpu_features_bitmask();
 
-    let user_ptr = try_or_err!(ctx, UserPtr::<UserCpuInfo>::try_new(args.arg0));
-    try_or_err!(ctx, copy_to_user(user_ptr, &info));
-    ctx.ok(0)
+    copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
+    Ok(())
 });
 
-define_syscall!(syscall_percpu_stats(ctx, args) {
-    require_nonzero!(ctx, args.arg0);
-    require_nonzero!(ctx, args.arg1);
-
+define_syscall!(syscall_percpu_stats
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) -> Result<u64, Errno>
+{
     use core::sync::atomic::Ordering;
     use slopos_abi::syscall::UserPerCpuStats;
 
     let cpu_count = slopos_arch::pcr::get_cpu_count();
-    let max_entries = (args.arg1 as usize).min(cpu_count);
+    let max_entries = (max as usize).min(cpu_count);
 
     for i in 0..max_entries {
         let stats = slopos_sched::per_cpu::with_cpu_scheduler(i, |sched| UserPerCpuStats {
@@ -365,12 +328,13 @@ define_syscall!(syscall_percpu_stats(ctx, args) {
             ..UserPerCpuStats::default()
         });
 
-        let dst_addr = args
-            .arg0
+        let dst_addr = buf
+            .as_u64()
             .wrapping_add((i * core::mem::size_of::<UserPerCpuStats>()) as u64);
-        let user_ptr = try_or_err!(ctx, UserPtr::<UserPerCpuStats>::try_new(dst_addr));
-        try_or_err!(ctx, copy_to_user(user_ptr, &stats));
+        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserPerCpuStats>::try_new(dst_addr)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, &stats).map_err(|_| Errno::EFAULT)?;
     }
 
-    ctx.ok(max_entries as u64)
+    Ok(max_entries as u64)
 });

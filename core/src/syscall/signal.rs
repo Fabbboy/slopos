@@ -1,18 +1,18 @@
 use core::ffi::c_void;
 use core::sync::atomic::Ordering;
 
+use slopos_abi::Errno;
 use slopos_abi::signal::{
     NSIG, SA_NODEFER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE, SIGKILL,
     SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
 };
-use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_ESRCH};
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr;
+use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 use slopos_ostd::user::context::UserContext;
 
-use crate::syscall::common::{SyscallDisposition, syscall_return_err};
-use crate::syscall::context::SyscallContext;
+use crate::syscall::args::{Signum, UserPtr};
+use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
     task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_pending_or,
@@ -29,10 +29,7 @@ fn parse_signum(raw: u64) -> Option<u8> {
 }
 
 /// Heap-backed list of unique task IDs collected during signal
-/// delivery. Uses a `KVec` so the struct is fixed size on the stack
-/// (just the three `KVec` header words) regardless of how many tasks
-/// we end up targeting — sized arrays would force the whole stack
-/// frame over the 2 KiB gate.
+/// delivery.
 struct TargetSet {
     ids: slopos_ostd::KVec<u32>,
 }
@@ -53,9 +50,6 @@ impl TargetSet {
                 return;
             }
         }
-        // Best-effort: on OOM the target is silently dropped. A rare
-        // signal-send to an exhausted heap is acceptable — the caller
-        // receives at most `signaled == 0 → ERRNO_ESRCH`.
         let _ = self.ids.push(task_id);
     }
 
@@ -79,28 +73,19 @@ struct AllCollectContext {
 }
 
 fn collect_group_member(task: *mut Task, context: *mut c_void) {
-    // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow;
-    // the caller in `collect_targets_for_group` stashed a
-    // `&mut GroupCollectContext` into `context`.
     let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<GroupCollectContext>(context)
     else {
         return;
     };
-
     let Some(pgid) = task_pgid(task) else {
         return;
     };
     if pgid != ctx.pgid {
         return;
     }
-
     let Some(tid) = task_id_of(task) else {
         return;
     };
-    // `ctx.targets` holds a `*mut TargetSet` whose backing
-    // `&mut TargetSet` is owned by the caller frame in
-    // `collect_targets_for_group`; OSTD's `try_borrow_ref_mut` folds
-    // the one `unsafe` reborrow internal.
     if let Some(set) = slopos_ostd::util::ptr_buf::try_borrow_ref_mut(ctx.targets) {
         set.push(tid);
     }
@@ -111,15 +96,12 @@ fn collect_all_members(task: *mut Task, context: *mut c_void) {
     else {
         return;
     };
-
     let Some(task_id) = task_id_of(task) else {
         return;
     };
     if task_id == INVALID_TASK_ID || task_id == ctx.exclude_task_id {
         return;
     }
-
-    // Same reasoning as collect_group_member.
     if let Some(set) = slopos_ostd::util::ptr_buf::try_borrow_ref_mut(ctx.targets) {
         set.push(task_id);
     }
@@ -165,187 +147,128 @@ fn action_to_user(action: &SignalAction) -> UserSigaction {
     }
 }
 
-pub fn syscall_rt_sigaction(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+define_syscall!(syscall_rt_sigaction
+    (ctx, signum: Signum, new_act_ptr: u64, old_act_ptr: u64, sigsetsize: u64)
+    -> Result<(), Errno>
+{
+    if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
+        return Err(Errno::EINVAL);
     }
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
-    let args = ctx.args();
-    if args.arg3 != core::mem::size_of::<SigSet>() as u64 {
-        return ctx.err_with(ERRNO_EINVAL);
-    }
-
-    let Some(signum) = parse_signum(args.arg0) else {
-        return ctx.err_with(ERRNO_EINVAL);
-    };
-
-    let task_ref = match ctx.task_mut() {
-        Some(t) => t,
-        None => return ctx.err_with(ERRNO_EINVAL),
-    };
+    let signum = signum.raw();
+    let task_ref = ctx.task_mut().ok_or(Errno::EINVAL)?;
     let idx = (signum - 1) as usize;
 
-    if args.arg2 != 0 {
-        let old_ptr = match UserPtr::<UserSigaction>::try_new(args.arg2) {
-            Ok(p) => p,
-            Err(_) => return ctx.err_with(ERRNO_EFAULT),
-        };
+    if old_act_ptr != 0 {
+        let old_ptr = MmUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
         let old_action = action_to_user(&task_ref.signal_actions[idx]);
-        if copy_to_user(old_ptr, &old_action).is_err() {
-            return ctx.err_with(ERRNO_EFAULT);
-        }
+        copy_to_user(old_ptr, &old_action).map_err(|_| Errno::EFAULT)?;
     }
 
-    if args.arg1 != 0 {
+    if new_act_ptr != 0 {
         if (sig_bit(signum) & SIG_UNCATCHABLE) != 0 {
-            return ctx.err_with(ERRNO_EINVAL);
+            return Err(Errno::EINVAL);
         }
-        let new_ptr = match UserPtr::<UserSigaction>::try_new(args.arg1) {
-            Ok(p) => p,
-            Err(_) => return ctx.err_with(ERRNO_EFAULT),
-        };
-        let new_action = match copy_from_user(new_ptr) {
-            Ok(a) => a,
-            Err(_) => return ctx.err_with(ERRNO_EFAULT),
-        };
+        let new_ptr = MmUserPtr::<UserSigaction>::try_new(new_act_ptr).map_err(|_| Errno::EFAULT)?;
+        let new_action = copy_from_user(new_ptr).map_err(|_| Errno::EFAULT)?;
         if new_action.sa_handler != SIG_DFL
             && new_action.sa_handler != SIG_IGN
             && new_action.sa_restorer == 0
         {
-            return ctx.err_with(ERRNO_EINVAL);
+            return Err(Errno::EINVAL);
         }
         task_ref.signal_actions[idx] = action_from_user(new_action);
     }
 
-    ctx.ok(0)
-}
+    Ok(())
+});
 
-pub fn syscall_rt_sigprocmask(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
+define_syscall!(syscall_rt_sigprocmask
+    (ctx, how: u32, set_ptr: u64, oldset_ptr: u64, sigsetsize: u64)
+    -> Result<(), Errno>
+{
+    if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
+        return Err(Errno::EINVAL);
     }
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
+    let task_ref = ctx.task_mut().ok_or(Errno::EINVAL)?;
 
-    let args = ctx.args();
-    if args.arg3 != core::mem::size_of::<SigSet>() as u64 {
-        return ctx.err_with(ERRNO_EINVAL);
+    if oldset_ptr != 0 {
+        let old_ptr = MmUserPtr::<SigSet>::try_new(oldset_ptr).map_err(|_| Errno::EFAULT)?;
+        copy_to_user(old_ptr, &task_ref.signal_blocked).map_err(|_| Errno::EFAULT)?;
     }
 
-    let task_ref = match ctx.task_mut() {
-        Some(t) => t,
-        None => return ctx.err_with(ERRNO_EINVAL),
-    };
-
-    if args.arg2 != 0 {
-        let old_ptr = match UserPtr::<SigSet>::try_new(args.arg2) {
-            Ok(p) => p,
-            Err(_) => return ctx.err_with(ERRNO_EFAULT),
-        };
-        if copy_to_user(old_ptr, &task_ref.signal_blocked).is_err() {
-            return ctx.err_with(ERRNO_EFAULT);
-        }
-    }
-
-    if args.arg1 != 0 {
-        let new_ptr = match UserPtr::<SigSet>::try_new(args.arg1) {
-            Ok(p) => p,
-            Err(_) => return ctx.err_with(ERRNO_EFAULT),
-        };
-        let set = match copy_from_user(new_ptr) {
-            Ok(v) => v,
-            Err(_) => return ctx.err_with(ERRNO_EFAULT),
-        };
+    if set_ptr != 0 {
+        let new_ptr = MmUserPtr::<SigSet>::try_new(set_ptr).map_err(|_| Errno::EFAULT)?;
+        let set = copy_from_user(new_ptr).map_err(|_| Errno::EFAULT)?;
 
         let mut blocked = task_ref.signal_blocked;
-        match args.arg0 as u32 {
+        match how {
             slopos_abi::signal::SIG_BLOCK => blocked |= set,
             SIG_UNBLOCK => blocked &= !set,
             SIG_SETMASK => blocked = set,
-            _ => return ctx.err_with(ERRNO_EINVAL),
+            _ => return Err(Errno::EINVAL),
         }
         task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
     }
 
-    ctx.ok(0)
-}
+    Ok(())
+});
 
-pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
-    let args = ctx.args();
+define_syscall!(syscall_kill
+    (ctx, raw_pid_arg: i64, sig: u64) -> SyscallResult
+{
     let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
 
-    let raw_pid = args.arg0 as i64;
-    if raw_pid < i32::MIN as i64 || raw_pid > i32::MAX as i64 {
-        return ctx.err_with(ERRNO_ESRCH);
+    if raw_pid_arg < i32::MIN as i64 || raw_pid_arg > i32::MAX as i64 {
+        return SyscallResult::Err(Errno::ESRCH);
     }
-    let pid = raw_pid as i32;
+    let pid = raw_pid_arg as i32;
 
     let mut targets = TargetSet::new();
     if pid > 0 {
         let target_id = pid as u32;
         if task_find_by_id(target_id).is_null() {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         targets.push(target_id);
     } else if pid == 0 {
         if caller_id == INVALID_TASK_ID {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         let caller = task_find_by_id(caller_id);
         if caller.is_null() {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         let caller_pgid = task_pgid(caller).unwrap_or(INVALID_TASK_ID);
         if caller_pgid == INVALID_TASK_ID {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         collect_targets_for_group(caller_pgid, &mut targets);
     } else if pid == -1 {
         if caller_id == INVALID_TASK_ID {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         collect_targets_for_all(caller_id, &mut targets);
     } else {
         if pid == i32::MIN {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         let group_id = (-pid) as u32;
         if group_id == INVALID_TASK_ID {
-            return ctx.err_with(ERRNO_ESRCH);
+            return SyscallResult::Err(Errno::ESRCH);
         }
         collect_targets_for_group(group_id, &mut targets);
     }
 
     if targets.len() == 0 {
-        return ctx.err_with(ERRNO_ESRCH);
+        return SyscallResult::Err(Errno::ESRCH);
     }
 
-    if args.arg1 == 0 {
-        return ctx.ok(0);
+    if sig == 0 {
+        return SyscallResult::Ok(0);
     }
 
-    let Some(signum) = parse_signum(args.arg1) else {
-        return ctx.err_with(ERRNO_EINVAL);
+    let Some(signum) = parse_signum(sig) else {
+        return SyscallResult::Err(Errno::EINVAL);
     };
 
     let mut signaled = 0usize;
@@ -367,60 +290,46 @@ pub fn syscall_kill(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
             continue;
         }
 
-        // `target` was just located via `task_find_by_id` and
-        // null-checked above; the accessor performs the atomic OR.
         let _ = task_signal_pending_or(target, sig_bit(signum));
         let _ = unblock_task(target);
         signaled += 1;
     }
 
     if signaled == 0 {
-        return ctx.err_with(ERRNO_ESRCH);
+        return SyscallResult::Err(Errno::ESRCH);
     }
 
     if caller_terminated {
         schedule();
-        return SyscallDisposition::NoReturn;
+        return SyscallResult::NoReturn;
     }
 
-    ctx.ok(0)
-}
+    SyscallResult::Ok(0)
+});
 
 fn read_signal_frame(rsp: u64) -> Option<SignalFrame> {
-    let ptr = UserPtr::<SignalFrame>::try_new(rsp).ok()?;
+    let ptr = MmUserPtr::<SignalFrame>::try_new(rsp).ok()?;
     copy_from_user(ptr).ok()
 }
 
-pub fn syscall_rt_sigreturn(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    if ctx_ptr.is_null() {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    }
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
+define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     let task_ref = match ctx.task_mut() {
         Some(t) => t,
-        None => return ctx.err_with(ERRNO_EINVAL),
+        None => return SyscallResult::Err(Errno::EINVAL),
     };
 
     // After the handler's `ret` pops the restorer address, RSP points
-    // directly at the SignalFrame.  Read it from there.
-    let rsp = ctx.user_ctx().rsp();
+    // directly at the SignalFrame.
+    let rsp = ctx.user_rsp();
     let sigframe = match read_signal_frame(rsp) {
         Some(sf) => sf,
-        None => return ctx.err_with(ERRNO_EFAULT),
+        None => return SyscallResult::Err(Errno::EFAULT),
     };
 
     task_ref.signal_blocked = sigframe.saved_mask & !SIG_UNCATCHABLE;
 
-    // Rebuild the user GPR snapshot from the SignalFrame and commit it
-    // through `set_regs`, which re-applies the user-CS/SS selectors and
-    // RFLAGS sensitive-bit mask — user code cannot escape the sandbox
-    // by crafting a sigframe with IOPL/AC/NT/VM/IF=0 set.
+    // Rebuild the user GPR snapshot from the SignalFrame and commit
+    // through `set_regs` (re-applies CS/SS selectors and RFLAGS mask).
     let mut regs = *ctx.user_ctx().regs();
     regs.rax = sigframe.rax;
     regs.rbx = sigframe.rbx;
@@ -442,8 +351,10 @@ pub fn syscall_rt_sigreturn(task: *mut Task, ctx_ptr: *mut UserContext) -> Sysca
     regs.rflags_user_subset = sigframe.rflags;
     ctx.user_ctx_mut().set_regs(regs);
 
-    ctx.ok(0)
-}
+    // sigreturn fully replaced the user-mode register state — the
+    // dispatcher must not overwrite RAX after we return.
+    SyscallResult::NoReturn
+});
 
 pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
@@ -492,23 +403,12 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
         return;
     }
 
-    // Snapshot of pre-delivery user registers — same struct that
-    // `rt_sigreturn` will rebuild the user state from later.
     let regs_snapshot = *user_ctx.regs();
 
-    // Linux convention: push the restorer address as a separate word
-    // on the stack BEFORE the SignalFrame.  When the handler does
-    // `ret`, it pops the restorer into RIP and RSP advances to point
-    // at the SignalFrame, which rt_sigreturn reads directly.
-    //
-    // Stack layout (low address → high address):
-    //   [frame_addr + 0]  = restorer address   (popped by `ret`)
-    //   [frame_addr + 8]  = SignalFrame { signum, rax, … }
     let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
     let frame_addr = regs_snapshot.rsp.wrapping_sub(total_size) & !0xF;
 
-    // Write restorer as a separate u64 at frame_addr.
-    let restorer_ptr = match UserPtr::<u64>::try_new(frame_addr) {
+    let restorer_ptr = match MmUserPtr::<u64>::try_new(frame_addr) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -516,9 +416,8 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
         return;
     }
 
-    // Write SignalFrame at frame_addr + 8.
     let sigframe_addr = frame_addr.wrapping_add(8);
-    let sigframe_ptr = match UserPtr::<SignalFrame>::try_new(sigframe_addr) {
+    let sigframe_ptr = match MmUserPtr::<SignalFrame>::try_new(sigframe_addr) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -557,10 +456,6 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
     }
     task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
 
-    // Install the handler's entry state on the user context: redirect
-    // RIP/RSP into the handler with `signum` in RDI, RSI/RDX zeroed.
-    // `set_regs` reapplies CS/SS/RFLAGS-mask so a malicious caller
-    // cannot smuggle in a forged user-RFLAGS via `regs_snapshot`.
     let mut regs = regs_snapshot;
     regs.rsp = frame_addr;
     regs.rip = action.handler;
@@ -569,3 +464,6 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
     regs.rdx = 0;
     user_ctx.set_regs(regs);
 }
+
+#[allow(dead_code)]
+type _Unused<T> = UserPtr<T>;

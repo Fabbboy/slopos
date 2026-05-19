@@ -1,23 +1,25 @@
+//! Shared syscall infrastructure: dispatch-table entry type, user-string
+//! copy helpers, fixed I/O cap.
+//!
+//! The pre-Phase-2D `SyscallDisposition` enum and the
+//! `syscall_return_ok` / `syscall_return_err` helpers have been
+//! removed: handlers now return [`SyscallResult`] and the dispatcher
+//! is the sole site that writes `rax`.
+
 use core::ffi::{c_char, c_int};
 
 use slopos_ostd::sync::KernelSync;
-use slopos_ostd::user::context::UserContext;
-use slopos_sched::task_struct::Task;
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtrError};
 
+use crate::syscall::context::SyscallContext;
+use crate::syscall::result::SyscallResult;
+
 pub const USER_IO_MAX_BYTES: usize = 512;
 pub use slopos_abi::fs::USER_PATH_MAX;
 
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SyscallDisposition {
-    Ok = 0,
-    NoReturn = 1,
-}
-
-pub type SyscallHandler = fn(*mut Task, *mut UserContext) -> SyscallDisposition;
+pub type SyscallHandler = fn(&SyscallContext) -> SyscallResult;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -30,19 +32,10 @@ pub struct SyscallEntry {
     pub name: KernelSync<*const c_char>,
 }
 
-pub fn syscall_return_ok(ctx: *mut UserContext, value: u64) -> SyscallDisposition {
-    if let Some(uc) = UserContext::from_ptr_mut(ctx) {
-        uc.set_rax(value);
-    }
-    SyscallDisposition::Ok
-}
-
-pub fn syscall_return_err(ctx: *mut UserContext, err_value: u64) -> SyscallDisposition {
-    if let Some(uc) = UserContext::from_ptr_mut(ctx) {
-        uc.set_rax(err_value);
-    }
-    SyscallDisposition::Ok
-}
+// ─────────────────────────────────────────────────────────────────────
+// User-string copy helpers (kept — used by `UserCStr::from_raw` and a
+// handful of handler bodies that still want explicit bounded copies).
+// ─────────────────────────────────────────────────────────────────────
 
 pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPtrError> {
     if dst.is_empty() {

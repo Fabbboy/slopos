@@ -343,7 +343,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     assert_not_null!(child_ptr);
 
     let mut frame = zero_frame();
-    let _ = syscall_getpgid(parent_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_getpgid, parent_ptr, &mut frame);
     assert_eq_test!(
         frame.regs().rax as u32,
         task_pgid(parent_ptr).unwrap_or(0),
@@ -353,7 +353,8 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     let mut setpgid_frame = zero_frame();
     setpgid_frame.regs_mut().rdi = child_id as u64;
     setpgid_frame.regs_mut().rsi = parent_id as u64;
-    let _ = syscall_setpgid(parent_ptr, &mut setpgid_frame as *mut UserContext);
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setpgid, parent_ptr, &mut setpgid_frame);
     assert_eq_test!(
         setpgid_frame.regs().rax,
         0,
@@ -366,7 +367,8 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     );
 
     let mut setsid_frame = zero_frame();
-    let _ = syscall_setsid(child_ptr, &mut setsid_frame as *mut UserContext);
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setsid, child_ptr, &mut setsid_frame);
     assert_eq_test!(
         setsid_frame.regs().rax as u32,
         child_id,
@@ -405,7 +407,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     let mut setpgid_frame = zero_frame();
     setpgid_frame.regs_mut().rdi = member_id as u64;
     setpgid_frame.regs_mut().rsi = leader_id as u64;
-    let _ = syscall_setpgid(leader_ptr, &mut setpgid_frame as *mut UserContext);
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setpgid, leader_ptr, &mut setpgid_frame);
     assert_eq_test!(
         setpgid_frame.regs().rax,
         0,
@@ -419,7 +422,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     probe_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
     probe_frame.regs_mut().rsi = 0;
     let _ = with_user_process_context(leader_pid, || {
-        syscall_kill(leader_ptr, &mut probe_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, leader_ptr, &mut probe_frame)
     });
     assert_eq_test!(
         probe_frame.regs().rax,
@@ -434,7 +437,11 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     negative_group_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
     negative_group_frame.regs_mut().rsi = SIGUSR1 as u64;
     let _ = with_user_process_context(leader_pid, || {
-        syscall_kill(leader_ptr, &mut negative_group_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_kill,
+            leader_ptr,
+            &mut negative_group_frame,
+        )
     });
     assert_eq_test!(
         negative_group_frame.regs().rax,
@@ -461,7 +468,11 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     caller_group_frame.regs_mut().rdi = 0;
     caller_group_frame.regs_mut().rsi = SIGUSR1 as u64;
     let _ = with_user_process_context(member_pid, || {
-        syscall_kill(member_ptr, &mut caller_group_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_kill,
+            member_ptr,
+            &mut caller_group_frame,
+        )
     });
     assert_eq_test!(caller_group_frame.regs().rax, 0, "kill(0, SIGUSR1) failed");
 
@@ -493,7 +504,7 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     frame.regs_mut().rdi = 0;
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(task_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, task_ptr, &mut frame);
     assert_eq_test!(
         frame.regs().rax,
         0,
@@ -531,7 +542,7 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
     frame.regs_mut().rdi = 0;
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(child_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, child_ptr, &mut frame);
     assert_test!(
         frame.regs().rax != 0,
         "TIOCSCTTY should fail for non-session leader"
@@ -560,7 +571,7 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
     frame.regs_mut().rdi = 0;
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(task_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, task_ptr, &mut frame);
     assert_eq_test!(
         frame.regs().rax,
         0,
@@ -599,7 +610,7 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     ioctl_frame.regs_mut().rdi = 0;
     ioctl_frame.regs_mut().rsi = TIOCSCTTY;
     ioctl_frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(parent_ptr, &mut ioctl_frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, parent_ptr, &mut ioctl_frame);
     assert_eq_test!(ioctl_frame.regs().rax, 0, "parent TIOCSCTTY should succeed");
 
     let child_id = task_fork(parent_ptr, core::ptr::null());
@@ -610,7 +621,8 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     assert_not_null!(child_ptr, "child lookup failed");
 
     let mut setsid_frame = zero_frame();
-    let _ = syscall_setsid(child_ptr, &mut setsid_frame as *mut UserContext);
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setsid, child_ptr, &mut setsid_frame);
     assert_eq_test!(
         setsid_frame.regs().rax as u32,
         child_id,
@@ -652,7 +664,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
     ioctl_frame.regs_mut().rdi = 0;
     ioctl_frame.regs_mut().rsi = TIOCSCTTY;
     ioctl_frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(leader_ptr, &mut ioctl_frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, leader_ptr, &mut ioctl_frame);
     assert_eq_test!(ioctl_frame.regs().rax, 0, "leader TIOCSCTTY should succeed");
 
     let child_id = task_fork(leader_ptr, core::ptr::null());
@@ -1331,7 +1343,7 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
     wait_frame.regs_mut().rdx = 2;
     wait_frame.regs_mut().r10 = 0;
     let _ = with_user_process_context(pid, || {
-        syscall_futex(task_ptr, &mut wait_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_futex, task_ptr, &mut wait_frame)
     });
     assert_eq_test!(
         wait_frame.regs().rax,
@@ -1344,7 +1356,7 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
     wake_frame.regs_mut().rsi = FUTEX_WAKE;
     wake_frame.regs_mut().rdx = 1;
     let _ = with_user_process_context(pid, || {
-        syscall_futex(task_ptr, &mut wake_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_futex, task_ptr, &mut wake_frame)
     });
     assert_eq_test!(
         wake_frame.regs().rax,
@@ -1382,7 +1394,7 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
     wake_frame.regs_mut().rsi = FUTEX_WAKE;
     wake_frame.regs_mut().rdx = 1;
     let _ = with_user_process_context(pid, || {
-        syscall_futex(task_ptr, &mut wake_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_futex, task_ptr, &mut wake_frame)
     });
     assert_eq_test!(
         wake_frame.regs().rax,
@@ -1396,7 +1408,7 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
     wait_frame.regs_mut().rdx = 2;
     wait_frame.regs_mut().r10 = 0;
     let _ = with_user_process_context(pid, || {
-        syscall_futex(task_ptr, &mut wait_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_futex, task_ptr, &mut wait_frame)
     });
     assert_eq_test!(
         wait_frame.regs().rax,
@@ -1435,7 +1447,7 @@ pub fn test_futex_contention_path_stability() -> TestResult {
         wake_frame.regs_mut().rsi = FUTEX_WAKE;
         wake_frame.regs_mut().rdx = (i % 4) + 1;
         let _ = with_user_process_context(pid, || {
-            syscall_futex(task_ptr, &mut wake_frame as *mut UserContext)
+            crate::syscall::dispatch::dispatch_handler(syscall_futex, task_ptr, &mut wake_frame)
         });
         if wake_frame.regs().rax > wake_frame.regs().rdx {
             task_terminate(task_id);
@@ -1448,7 +1460,7 @@ pub fn test_futex_contention_path_stability() -> TestResult {
         wait_frame.regs_mut().rdx = 2;
         wait_frame.regs_mut().r10 = 0;
         let _ = with_user_process_context(pid, || {
-            syscall_futex(task_ptr, &mut wait_frame as *mut UserContext)
+            crate::syscall::dispatch::dispatch_handler(syscall_futex, task_ptr, &mut wait_frame)
         });
         if wait_frame.regs().rax != ERRNO_EAGAIN {
             task_terminate(task_id);
@@ -1496,7 +1508,11 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     action_frame.regs_mut().rdx = old_action_addr;
     action_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigaction(task_ptr, &mut *action_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigaction,
+            task_ptr,
+            &mut *action_frame,
+        )
     });
     assert_eq_test!(action_frame.regs().rax, 0, "rt_sigaction failed");
 
@@ -1521,7 +1537,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     kill_frame.regs_mut().rdi = task_id as u64;
     kill_frame.regs_mut().rsi = SIGUSR1 as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_kill(task_ptr, &mut *kill_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, task_ptr, &mut *kill_frame)
     });
     assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGUSR1) failed");
 
@@ -1583,7 +1599,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     // so it now points at the SignalFrame — matching the real flow.
     user_frame.regs_mut().rsp = user_frame.regs().rsp.wrapping_add(8);
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigreturn(task_ptr, &mut *user_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigreturn, task_ptr, &mut *user_frame)
     });
     assert_eq_test!(
         user_frame.regs().rip,
@@ -1637,7 +1653,11 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     install_frame.regs_mut().rdx = 0;
     install_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigaction(task_ptr, &mut install_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigaction,
+            task_ptr,
+            &mut install_frame,
+        )
     });
     assert_eq_test!(install_frame.regs().rax, 0, "sigaction install failed");
 
@@ -1653,7 +1673,11 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     block_frame.regs_mut().rdx = old_addr;
     block_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigprocmask(task_ptr, &mut block_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigprocmask,
+            task_ptr,
+            &mut block_frame,
+        )
     });
     assert_eq_test!(
         block_frame.regs().rax,
@@ -1665,7 +1689,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     kill_frame.regs_mut().rdi = task_id as u64;
     kill_frame.regs_mut().rsi = SIGUSR1 as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_kill(task_ptr, &mut kill_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, task_ptr, &mut kill_frame)
     });
     assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGUSR1) failed");
 
@@ -1688,7 +1712,11 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     unblock_frame.regs_mut().rdx = 0;
     unblock_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
     let _ = with_user_process_context(pid, || {
-        syscall_rt_sigprocmask(task_ptr, &mut unblock_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigprocmask,
+            task_ptr,
+            &mut unblock_frame,
+        )
     });
     assert_eq_test!(
         unblock_frame.regs().rax,
@@ -1767,7 +1795,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     set_frame.regs_mut().rdi = ARCH_SET_FS;
     set_frame.regs_mut().rsi = expected_fs;
     let _ = with_user_process_context(pid, || {
-        syscall_arch_prctl(task_ptr, &mut set_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_arch_prctl, task_ptr, &mut set_frame)
     });
     assert_eq_test!(set_frame.regs().rax, 0, "ARCH_SET_FS failed");
 
@@ -1775,7 +1803,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     get_frame.regs_mut().rdi = ARCH_GET_FS;
     get_frame.regs_mut().rsi = out_addr;
     let _ = with_user_process_context(pid, || {
-        syscall_arch_prctl(task_ptr, &mut get_frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_arch_prctl, task_ptr, &mut get_frame)
     });
     assert_eq_test!(get_frame.regs().rax, 0, "ARCH_GET_FS failed");
 
@@ -2179,7 +2207,7 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
     frame_stale.regs_mut().r8 = 0xDEAD_BEEF_CAFE_BABEu64; // arg4 = garbage argv_ptr
     frame_stale.regs_mut().r9 = 42; // arg5 = garbage argc
     let _ = with_user_process_context(pid, || {
-        syscall_spawn_path(task_ptr, &mut frame_stale as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, task_ptr, &mut frame_stale)
     });
     assert_eq_test!(
         frame_stale.regs().rax,
@@ -2197,7 +2225,7 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
     frame_clean.regs_mut().r8 = 0; // arg4 = no argv
     frame_clean.regs_mut().r9 = 0; // arg5 = no argc
     let _ = with_user_process_context(pid, || {
-        syscall_spawn_path(task_ptr, &mut frame_clean as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, task_ptr, &mut frame_clean)
     });
 
     // ExecError::NoEntry = -2, returned via ctx.ok(err as i32 as u64)
@@ -2269,7 +2297,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     frame.regs_mut().rdi = 0; // fd 0 (console)
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(task_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, task_ptr, &mut frame);
     assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed");
     assert_eq_test!(
         task_controlling_tty(task_ptr),
@@ -2308,7 +2336,7 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     frame.regs_mut().rdi = 0;
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(parent_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, parent_ptr, &mut frame);
     assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed");
 
     // Fork a child — it inherits the controlling terminal.
@@ -2327,7 +2355,8 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
 
     // Child calls setsid() — controlling terminal cleared.
     let mut setsid_frame = zero_frame();
-    let _ = syscall_setsid(child_ptr, &mut setsid_frame as *mut UserContext);
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setsid, child_ptr, &mut setsid_frame);
     assert_eq_test!(
         task_controlling_tty(child_ptr),
         None,
@@ -2366,7 +2395,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     frame.regs_mut().rdi = 0;
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
-    let _ = syscall_ioctl(parent_ptr, &mut frame as *mut UserContext);
+    let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, parent_ptr, &mut frame);
     assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed for parent");
 
     // Fork child.
@@ -3210,7 +3239,7 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
 
     let start = slopos_kernel_services::platform::get_time_ms();
     let _ = with_user_process_context(pid, || {
-        syscall_poll(task_ptr, &mut frame as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_poll, task_ptr, &mut frame)
     });
     let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start);
 
@@ -3254,7 +3283,7 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
 
     let start2 = slopos_kernel_services::platform::get_time_ms();
     let _ = with_user_process_context(pid, || {
-        syscall_poll(task_ptr, &mut frame2 as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_poll, task_ptr, &mut frame2)
     });
     let elapsed2 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start2);
 
@@ -3290,7 +3319,7 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
 
     let start3 = slopos_kernel_services::platform::get_time_ms();
     let _ = with_user_process_context(pid, || {
-        syscall_poll(task_ptr, &mut frame3 as *mut UserContext)
+        crate::syscall::dispatch::dispatch_handler(syscall_poll, task_ptr, &mut frame3)
     });
     let elapsed3 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start3);
 

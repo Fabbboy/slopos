@@ -1,28 +1,27 @@
-use slopos_ostd::KVec;
-
-use crate::exec;
-use crate::syscall::common::{
-    SyscallDisposition, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_copy_user_str, syscall_return_err,
-};
-use crate::syscall::context::SyscallContext;
+use slopos_abi::Errno;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
-use slopos_abi::syscall::*;
+use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, FUTEX_WAKE};
 use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
+use slopos_ostd::KVec;
+use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::task_wait_for;
 use slopos_sched::task::{
-    task_borrow, task_borrow_mut, task_cpu_affinity, task_find_by_id, task_fork, task_id_of,
-    task_pgid, task_set_cpu_affinity, task_set_fs_base, task_terminate,
+    task_borrow, task_borrow_mut, task_consume_zombie, task_cpu_affinity, task_find_by_id,
+    task_fork, task_peek_exit_info, task_pgid, task_set_cpu_affinity, task_set_fs_base,
+    task_terminate,
 };
-use slopos_sched::task_struct::Task;
 
 use slopos_arch::cpu;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr;
-use slopos_ostd::user::context::UserContext;
+use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
-use slopos_sched::task::{task_consume_zombie, task_peek_exit_info};
+use crate::exec;
+use crate::syscall::args::{Tid, UserBytes, UserCStr, UserPtr};
+use crate::syscall::common::{
+    USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
+};
+use crate::syscall::result::SyscallResult;
 
 fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVec<u64>, ()> {
     let mut out = KVec::<u64>::with_capacity(max_count).map_err(|_| ())?;
@@ -31,7 +30,7 @@ fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVe
         let slot_addr = base_ptr
             .checked_add((idx * core::mem::size_of::<u64>()) as u64)
             .ok_or(())?;
-        let user_slot = UserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
+        let user_slot = MmUserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
         let value = copy_from_user(user_slot).map_err(|_| ())?;
         if value == 0 {
             return Ok(out);
@@ -57,7 +56,7 @@ fn read_user_ptr_array_count(
         let slot_addr = base_ptr
             .checked_add((idx * core::mem::size_of::<u64>()) as u64)
             .ok_or(())?;
-        let user_slot = UserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
+        let user_slot = MmUserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
         let value = copy_from_user(user_slot).map_err(|_| ())?;
         if value == 0 {
             break;
@@ -71,9 +70,6 @@ fn read_user_ptr_array_count(
 fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
     let mut out = KVec::<KVec<u8>>::with_capacity(ptrs.len()).map_err(|_| ())?;
 
-    // Single heap-backed scratch reused across the iterations; a
-    // stack-resident `[u8; EXEC_MAX_ARG_STRLEN]` would cost 4 KiB per
-    // execve path.
     let mut buf = KVec::<u8>::zeroed(exec::EXEC_MAX_ARG_STRLEN).map_err(|_| ())?;
 
     for &ptr in ptrs {
@@ -96,43 +92,31 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
     Ok(out)
 }
 
-define_syscall!(syscall_spawn_path(ctx, args) {
-    let path_ptr = args.arg0 as *const u8;
-    let path_len = args.arg1 as usize;
-    let priority = match TaskPriority::try_from_u8(args.arg2 as u8) {
-        Some(p) => p,
-        None => return ctx.err(),
-    };
-    let flags = args.arg3 as u16;
-    let argv_ptr = args.arg4;
-    let argc = args.arg5 as usize;
-
-    if path_ptr.is_null() || path_len == 0 || path_len > exec::EXEC_MAX_PATH {
-        return ctx.err();
+define_syscall!(syscall_spawn_path
+    (ctx, path: UserBytes, priority_raw: u8, flags_raw: u16, argv_ptr: u64, argc_raw: u32)
+    -> Result<u64, Errno>
+{
+    if path.base_u64() == 0 || path.len() == 0 || path.len() > exec::EXEC_MAX_PATH {
+        return Err(Errno::EINVAL);
     }
 
+    let priority = TaskPriority::try_from_u8(priority_raw).ok_or(Errno::EINVAL)?;
+    let flags = flags_raw;
+    let argc = argc_raw as usize;
+
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
-    let copied_len = match syscall_bounded_from_user(
+    let copied_len = syscall_bounded_from_user(
         &mut path_buf,
-        path_ptr as u64,
-        path_len as u64,
+        path.base_u64(),
+        path.len() as u64,
         exec::EXEC_MAX_PATH,
-    ) {
-        Ok(len) => len,
-        Err(_) => {
-            return ctx.err();
-        }
-    };
+    )
+    .map_err(|_| Errno::EFAULT)?;
 
     let argv_storage = if argv_ptr != 0 && argc > 0 {
-        let argv_ptrs = match read_user_ptr_array_count(argv_ptr, argc, exec::EXEC_MAX_ARGS) {
-            Ok(ptrs) => ptrs,
-            Err(_) => return ctx.err(),
-        };
-        match read_user_cstr_list(argv_ptrs.as_slice()) {
-            Ok(values) => Some(values),
-            Err(_) => return ctx.err(),
-        }
+        let argv_ptrs = read_user_ptr_array_count(argv_ptr, argc, exec::EXEC_MAX_ARGS)
+            .map_err(|_| Errno::EINVAL)?;
+        Some(read_user_cstr_list(argv_ptrs.as_slice()).map_err(|_| Errno::EFAULT)?)
     } else {
         None
     };
@@ -142,7 +126,7 @@ define_syscall!(syscall_spawn_path(ctx, args) {
         .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
     {
         Some(Ok(refs)) => Some(refs),
-        Some(Err(_)) => return ctx.err(),
+        Some(Err(_)) => return Err(Errno::ENOMEM),
         None => None,
     };
 
@@ -156,97 +140,75 @@ define_syscall!(syscall_spawn_path(ctx, args) {
         parent_pid,
         parent_tid,
     ) {
-        Ok(task_id) => ctx.ok(task_id as u64),
-        Err(err) => ctx.ok(err as i32 as u64),
+        Ok(task_id) => Ok(task_id as u64),
+        Err(err) => Ok((err as i32) as u64),
     }
 });
 
-define_syscall!(syscall_waitpid(ctx, args) {
-    let target_id = args.arg0 as u32;
-    let wnohang = (args.arg1 as u32 & 0x1) != 0;
-    if target_id == 0 || target_id == INVALID_TASK_ID {
-        return ctx.err();
+define_syscall!(syscall_waitpid
+    (ctx, target: Tid, flags: u32) -> Result<u64, Errno>
+{
+    let target_id = target.raw();
+    let wnohang = (flags & 0x1) != 0;
+    if target_id == 0 {
+        return Err(Errno::EINVAL);
     }
 
-    // Fast path: target is a Zombie. Consume its exit info and
-    // transition Zombie → Terminated under the task-manager lock.
     if let Some(info) = task_consume_zombie(target_id) {
-        return ctx.ok(info.exit_code as u64);
+        return Ok(info.exit_code as u64);
     }
 
     if wnohang {
-        // Two distinguishable failure modes:
-        //   * slot still alive (Ready/Running/Blocked) → EAGAIN, the
-        //     caller should poll again.
-        //   * slot missing or already-Terminated (no Zombie observed,
-        //     so it was either auto-reaped on parent's death or never
-        //     a child of this caller) → ECHILD, the caller should
-        //     stop polling.
         let slot = task_find_by_id(target_id);
         return if slot.is_null() {
-            ctx.err_with(ERRNO_ECHILD)
+            Err(Errno::ECHILD)
         } else {
-            ctx.err_with(ERRNO_EAGAIN)
+            Err(Errno::EAGAIN)
         };
     }
 
     task_wait_for(target_id);
 
-    // After the wait either the target became Zombie (consume it now)
-    // or it was already auto-reaped past Zombie (peek for diagnostics,
-    // return ECHILD if the exit info is gone).
     if let Some(info) = task_consume_zombie(target_id) {
-        ctx.ok(info.exit_code as u64)
+        Ok(info.exit_code as u64)
     } else if let Some(info) = task_peek_exit_info(target_id) {
-        ctx.ok(info.exit_code as u64)
+        Ok(info.exit_code as u64)
     } else {
-        ctx.err_with(ERRNO_ECHILD)
+        Err(Errno::ECHILD)
     }
 });
 
-define_syscall!(syscall_terminate_task(ctx, args) requires(compositor) {
-    let target_id = args.arg0_u32();
-    if target_id == 0 || target_id == INVALID_TASK_ID {
-        return ctx.err();
+define_syscall!(syscall_terminate_task
+    (ctx, target: Tid)
+    requires(compositor)
+    -> Result<(), Errno>
+{
+    let target_id = target.raw();
+    if target_id == 0 {
+        return Err(Errno::EINVAL);
     }
-
     let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
     if target_id == caller_id {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
-
     if task_terminate(target_id) != 0 {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
-
-    ctx.ok(0)
+    Ok(())
 });
 
-pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
-    let process_id = match ctx.require_process_id() {
-        Ok(id) => id,
-        Err(d) => return d,
-    };
-
-    let args = ctx.args();
-    let path_ptr = args.arg0;
-    let argv_ptr = args.arg1;
-    let envp_ptr = args.arg2;
-
+define_syscall!(syscall_exec
+    (ctx, path_ptr: u64, argv_ptr: u64, envp_ptr: u64)
+    requires(let process_id: process_id)
+    -> SyscallResult
+{
     if path_ptr == 0 {
-        return ctx.err();
+        return SyscallResult::Err(Errno::EFAULT);
     }
 
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
     if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
-        return ctx.err();
+        return SyscallResult::Err(Errno::EFAULT);
     }
 
     let path_len = path_buf
@@ -256,26 +218,24 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
     let path = &path_buf[..path_len];
 
     let argv_storage = if argv_ptr != 0 {
-        let argv_ptrs = match read_user_ptr_array_terminated(argv_ptr, exec::EXEC_MAX_ARGS) {
-            Ok(ptrs) => ptrs,
-            Err(_) => return ctx.err(),
-        };
-        match read_user_cstr_list(argv_ptrs.as_slice()) {
-            Ok(values) => Some(values),
-            Err(_) => return ctx.err(),
+        match read_user_ptr_array_terminated(argv_ptr, exec::EXEC_MAX_ARGS) {
+            Ok(argv_ptrs) => match read_user_cstr_list(argv_ptrs.as_slice()) {
+                Ok(values) => Some(values),
+                Err(_) => return SyscallResult::Err(Errno::EFAULT),
+            },
+            Err(_) => return SyscallResult::Err(Errno::EINVAL),
         }
     } else {
         None
     };
 
     let envp_storage = if envp_ptr != 0 {
-        let envp_ptrs = match read_user_ptr_array_terminated(envp_ptr, exec::EXEC_MAX_ENVS) {
-            Ok(ptrs) => ptrs,
-            Err(_) => return ctx.err(),
-        };
-        match read_user_cstr_list(envp_ptrs.as_slice()) {
-            Ok(values) => Some(values),
-            Err(_) => return ctx.err(),
+        match read_user_ptr_array_terminated(envp_ptr, exec::EXEC_MAX_ENVS) {
+            Ok(envp_ptrs) => match read_user_cstr_list(envp_ptrs.as_slice()) {
+                Ok(values) => Some(values),
+                Err(_) => return SyscallResult::Err(Errno::EFAULT),
+            },
+            Err(_) => return SyscallResult::Err(Errno::EINVAL),
         }
     } else {
         None
@@ -286,7 +246,7 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
         .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
     {
         Some(Ok(refs)) => Some(refs),
-        Some(Err(_)) => return ctx.err(),
+        Some(Err(_)) => return SyscallResult::Err(Errno::ENOMEM),
         None => None,
     };
     let envp_refs = match envp_storage
@@ -294,7 +254,7 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
         .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
     {
         Some(Ok(refs)) => Some(refs),
-        Some(Err(_)) => return ctx.err(),
+        Some(Err(_)) => return SyscallResult::Err(Errno::ENOMEM),
         None => None,
     };
 
@@ -324,360 +284,278 @@ pub fn syscall_exec(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispos
     match exec_result {
         Ok(()) => {
             if tls_tp != 0 {
-                let user_tp = match UserPtr::<u64>::try_new(tls_tp) {
+                let user_tp = match MmUserPtr::<u64>::try_new(tls_tp) {
                     Ok(ptr) => ptr,
-                    Err(_) => return ctx.err_with(ERRNO_EFAULT),
+                    Err(_) => return SyscallResult::Err(Errno::EFAULT),
                 };
                 if copy_to_user(user_tp, &tls_tp).is_err() {
-                    return ctx.err_with(ERRNO_EFAULT);
+                    return SyscallResult::Err(Errno::EFAULT);
                 }
             }
 
-            // Point of no return: old image is gone.  Tear down task-bound
-            // resources (compositor surface, shm buffers, input queues, …)
-            // so the new program can register fresh ones.
-            let task_id = task_id_of(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
+            // Point of no return: old image is gone. Tear down task-bound
+            // resources (compositor surface, shm buffers, input queues, ...).
+            let task_id = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
             slopos_sched::task::task_cleanup_for_exec(task_id);
 
             if tls_tp != 0 {
-                task_set_fs_base(task, tls_tp);
+                task_set_fs_base(ctx.task_ptr(), tls_tp);
                 slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
             }
-            // Build the new user-mode entry register snapshot in one
-            // shot, then commit through `set_regs` so CS/SS/RFLAGS
-            // sandbox bits are reapplied for the freshly-execed image.
-            if let Some(uc) = UserContext::from_ptr_mut(ctx_ptr) {
-                let mut regs = *uc.regs();
-                regs.rip = entry_point;
-                regs.rsp = stack_ptr;
-                regs.rax = 0;
-                regs.rdi = 0;
-                regs.rsi = 0;
-                regs.rdx = 0;
-                regs.rcx = 0;
-                regs.r8 = 0;
-                regs.r9 = 0;
-                regs.r10 = 0;
-                regs.r11 = 0;
-                uc.set_regs(regs);
-            }
-            SyscallDisposition::Ok
+            // Build the new user-mode entry register snapshot, then commit
+            // through `set_regs` so CS/SS/RFLAGS sandbox bits are reapplied.
+            let uc = ctx.user_ctx_mut();
+            let mut regs = *uc.regs();
+            regs.rip = entry_point;
+            regs.rsp = stack_ptr;
+            regs.rax = 0;
+            regs.rdi = 0;
+            regs.rsi = 0;
+            regs.rdx = 0;
+            regs.rcx = 0;
+            regs.r8 = 0;
+            regs.r9 = 0;
+            regs.r10 = 0;
+            regs.r11 = 0;
+            uc.set_regs(regs);
+            SyscallResult::NoReturn
         }
-        Err(e) => {
-            if let Some(uc) = UserContext::from_ptr_mut(ctx_ptr) {
-                uc.set_rax(e as i32 as u64);
-            }
-            SyscallDisposition::Ok
-        }
+        Err(e) => SyscallResult::Err(Errno::from_raw(e as i32).unwrap_or(Errno::EINVAL)),
     }
-}
-
-define_syscall!(syscall_get_cpu_count(ctx, args) {
-    let _ = args;
-    ctx.ok(slopos_arch::pcr::get_cpu_count() as u64)
 });
 
-define_syscall!(syscall_get_current_cpu(ctx, args) {
-    let _ = args;
-    ctx.ok(slopos_arch::pcr::get_current_cpu() as u64)
+define_syscall!(syscall_get_cpu_count (ctx) -> Result<u64, Errno> {
+    Ok(slopos_arch::pcr::get_cpu_count() as u64)
 });
 
-define_syscall!(syscall_set_cpu_affinity(ctx, args) requires(let task_id) {
-    let target_or_zero = args.arg0_u32();
-    let new_affinity = args.arg1_u32();
-    let resolved_task_id = if target_or_zero == 0 { task_id } else { target_or_zero };
-
-    let task_ptr = task_find_by_id(resolved_task_id);
-    if task_ptr.is_null() {
-        return ctx.err();
-    }
-
-    task_set_cpu_affinity(task_ptr, new_affinity);
-    ctx.ok(0)
+define_syscall!(syscall_get_current_cpu (ctx) -> Result<u64, Errno> {
+    Ok(slopos_arch::pcr::get_current_cpu() as u64)
 });
 
-define_syscall!(syscall_get_cpu_affinity(ctx, args) requires(let task_id) {
-    let target_or_zero = args.arg0_u32();
-    let resolved_task_id = if target_or_zero == 0 { task_id } else { target_or_zero };
-
-    let task_ptr = task_find_by_id(resolved_task_id);
-    if task_ptr.is_null() {
-        return ctx.err();
-    }
-
-    ctx.ok(task_cpu_affinity(task_ptr).unwrap_or(0) as u64)
-});
-
-define_syscall!(syscall_getpid(ctx, args) requires(let task_id) {
-    let _ = args;
-    ctx.ok(task_id as u64)
-});
-
-define_syscall!(syscall_getppid(ctx, args) {
-    let _ = args;
-    let task = some_or_err!(ctx, ctx.task_mut());
-    ctx.ok(task.parent_task_id as u64)
-});
-
-define_syscall!(syscall_getpgid(ctx, args) requires(let task_id) {
-    let target = args.arg0_u32();
+define_syscall!(syscall_set_cpu_affinity
+    (ctx, target: u32, new_affinity: u32)
+    requires(let task_id: task_id)
+    -> Result<(), Errno>
+{
     let resolved = if target == 0 { task_id } else { target };
     let task_ptr = task_find_by_id(resolved);
     if task_ptr.is_null() {
-        return ctx.err();
+        return Err(Errno::ESRCH);
     }
-    ctx.ok(task_pgid(task_ptr).unwrap_or(0) as u64)
+    task_set_cpu_affinity(task_ptr, new_affinity);
+    Ok(())
 });
 
-define_syscall!(syscall_setpgid(ctx, args) requires(let task_id) {
-    let pid = args.arg0_u32();
-    let pgid_arg = args.arg1_u32();
+define_syscall!(syscall_get_cpu_affinity
+    (ctx, target: u32)
+    requires(let task_id: task_id)
+    -> Result<u64, Errno>
+{
+    let resolved = if target == 0 { task_id } else { target };
+    let task_ptr = task_find_by_id(resolved);
+    if task_ptr.is_null() {
+        return Err(Errno::ESRCH);
+    }
+    Ok(task_cpu_affinity(task_ptr).unwrap_or(0) as u64)
+});
+
+define_syscall!(syscall_getpid (ctx)
+    requires(let task_id: task_id)
+    -> Result<u32, Errno>
+{
+    Ok(task_id)
+});
+
+define_syscall!(syscall_getppid (ctx) -> Result<u32, Errno> {
+    let task = ctx.task_mut().ok_or(Errno::ESRCH)?;
+    Ok(task.parent_task_id)
+});
+
+define_syscall!(syscall_getpgid
+    (ctx, target: u32)
+    requires(let task_id: task_id)
+    -> Result<u32, Errno>
+{
+    let resolved = if target == 0 { task_id } else { target };
+    let task_ptr = task_find_by_id(resolved);
+    if task_ptr.is_null() {
+        return Err(Errno::ESRCH);
+    }
+    Ok(task_pgid(task_ptr).unwrap_or(0))
+});
+
+define_syscall!(syscall_setpgid
+    (ctx, pid: u32, pgid_arg: u32)
+    requires(let task_id: task_id)
+    -> Result<(), Errno>
+{
     let resolved_pid = if pid == 0 { task_id } else { pid };
     let resolved_pgid = if pgid_arg == 0 { resolved_pid } else { pgid_arg };
 
     let caller_ptr = task_find_by_id(task_id);
     let target_ptr = task_find_by_id(resolved_pid);
     if caller_ptr.is_null() || target_ptr.is_null() || resolved_pgid == 0 {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
 
-    let Some(caller) = task_borrow(caller_ptr) else {
-        return ctx.err();
-    };
+    let caller = task_borrow(caller_ptr).ok_or(Errno::EINVAL)?;
     let caller_sid = caller.sid;
-    let caller_parent = caller.task_id; // for `target.parent_task_id != task_id` check below
-    let _ = caller_parent;
-    let Some(target) = task_borrow_mut(target_ptr) else {
-        return ctx.err();
-    };
+    let target = task_borrow_mut(target_ptr).ok_or(Errno::EINVAL)?;
     if resolved_pid != task_id && target.parent_task_id != task_id {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
     if target.sid != caller_sid {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
 
     if resolved_pgid != resolved_pid {
         let leader_ptr = task_find_by_id(resolved_pgid);
         if leader_ptr.is_null() {
-            return ctx.err();
+            return Err(Errno::EINVAL);
         }
-        let Some(leader) = task_borrow(leader_ptr) else {
-            return ctx.err();
-        };
+        let leader = task_borrow(leader_ptr).ok_or(Errno::EINVAL)?;
         if leader.sid != caller_sid {
-            return ctx.err();
+            return Err(Errno::EINVAL);
         }
     }
 
     target.pgid = resolved_pgid;
-    ctx.ok(0)
+    Ok(())
 });
 
-define_syscall!(syscall_setsid(ctx, args) requires(let task_id) {
-    let _ = args;
+define_syscall!(syscall_setsid (ctx)
+    requires(let task_id: task_id)
+    -> Result<u32, Errno>
+{
     let task_ptr = task_find_by_id(task_id);
     if task_ptr.is_null() {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
-    let Some(task) = task_borrow_mut(task_ptr) else {
-        return ctx.err();
-    };
-    // POSIX: EPERM if the process is already a process group leader
-    // or already a session leader.
+    let task = task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
     if task.pgid == task.task_id || task.sid == task.task_id {
-        return ctx.err();
+        return Err(Errno::EPERM);
     }
-    // Clear any inherited controlling terminal. Since we already rejected
-    // session leaders above, the caller is never their session's leader,
-    // so just drop the reference without a full release.
     if task.controlling_tty.is_some() {
         task.controlling_tty = None;
     }
-    // Create new session: task becomes session leader and pgrp leader.
     task.sid = task.task_id;
     task.pgid = task.task_id;
-    ctx.ok(task.sid as u64)
+    Ok(task.sid)
 });
 
-define_syscall!(syscall_getuid(ctx, args) {
-    let _ = args;
-    ctx.ok(0)
-});
+define_syscall!(syscall_getuid (ctx) -> u32 { 0 });
+define_syscall!(syscall_getgid (ctx) -> u32 { 0 });
+define_syscall!(syscall_geteuid (ctx) -> u32 { 0 });
+define_syscall!(syscall_getegid (ctx) -> u32 { 0 });
 
-define_syscall!(syscall_getgid(ctx, args) {
-    let _ = args;
-    ctx.ok(0)
-});
-
-define_syscall!(syscall_geteuid(ctx, args) {
-    let _ = args;
-    ctx.ok(0)
-});
-
-define_syscall!(syscall_getegid(ctx, args) {
-    let _ = args;
-    ctx.ok(0)
-});
-
-define_syscall!(syscall_chdir(ctx, args) {
-    let path_ptr = args.arg0;
-    if path_ptr == 0 {
-        return ctx.bad_address();
+define_syscall!(syscall_chdir
+    (ctx, path: UserCStr<USER_PATH_MAX>) -> Result<(), Errno>
+{
+    if path.is_empty() {
+        return Err(Errno::EINVAL);
     }
-
-    let mut path_buf = [0u8; 256];
-    if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
-        return ctx.bad_address();
-    }
-
-    let path_len = path_buf
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(path_buf.len());
-    if path_len == 0 {
-        return ctx.err_with(ERRNO_EINVAL);
-    }
-
-    let path = &path_buf[..path_len];
-    match slopos_fs::vfs::ops::vfs_stat(path) {
+    match slopos_fs::vfs::ops::vfs_stat(path.as_bytes()) {
         Ok((file_type, _size)) => {
             if file_type != FS_TYPE_DIRECTORY {
-                return ctx.err_with(ERRNO_ENOTDIR);
+                return Err(Errno::ENOTDIR);
             }
         }
-        Err(VfsError::NotDirectory) => return ctx.err_with(ERRNO_ENOTDIR),
-        Err(VfsError::InvalidPath) => return ctx.err_with(ERRNO_EINVAL),
-        Err(_) => return ctx.err_with(ERRNO_ENOENT),
+        Err(VfsError::NotDirectory) => return Err(Errno::ENOTDIR),
+        Err(VfsError::InvalidPath) => return Err(Errno::EINVAL),
+        Err(_) => return Err(Errno::ENOENT),
     }
 
-    let task = some_or_err!(ctx, ctx.task_mut());
-    task.cwd[..=path_len].copy_from_slice(&path_buf[..=path_len]);
+    let task = ctx.task_mut().ok_or(Errno::EINVAL)?;
+    let path_len = path.len();
+    task.cwd[..path_len].copy_from_slice(path.as_bytes());
+    task.cwd[path_len] = 0;
     task.cwd_len = path_len as u16;
-
-    ctx.ok(0)
+    Ok(())
 });
 
-define_syscall!(syscall_getcwd(ctx, args) {
-    let buf_ptr = args.arg0;
-    let buf_size = args.arg1 as usize;
-
-    if buf_ptr == 0 {
-        return ctx.bad_address();
+define_syscall!(syscall_getcwd
+    (ctx, buf: UserBytes) -> Result<u64, Errno>
+{
+    if buf.base_u64() == 0 {
+        return Err(Errno::EFAULT);
     }
-
-    let task = some_or_err!(ctx, ctx.task_mut());
+    let task = ctx.task_mut().ok_or(Errno::EINVAL)?;
     let cwd_len = task.cwd_len as usize;
     let needed = cwd_len + 1;
 
-    if buf_size < needed {
-        return ctx.err_with(ERRNO_ERANGE);
+    if buf.len() < needed {
+        return Err(Errno::ERANGE);
     }
 
-    if syscall_copy_to_user_bounded(buf_ptr, &task.cwd[..needed]).is_err() {
-        return ctx.bad_address();
-    }
-
-    ctx.ok(needed as u64)
+    syscall_copy_to_user_bounded(buf.base_u64(), &task.cwd[..needed]).map_err(|_| Errno::EFAULT)?;
+    Ok(needed as u64)
 });
 
-pub fn syscall_arch_prctl(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
-    let args = ctx.args();
-    let cmd = args.arg0;
-    let addr = args.arg1;
-
+define_syscall!(syscall_arch_prctl
+    (ctx, cmd: u64, addr: u64) -> Result<(), Errno>
+{
     match cmd {
         ARCH_SET_FS => {
             if addr >= slopos_mm::memory_layout_defs::USER_SPACE_END_VA && addr != 0 {
-                return ctx.invalid_arg();
+                return Err(Errno::EINVAL);
             }
-            let t = some_or_err!(ctx, ctx.task_mut());
+            let t = ctx.task_mut().ok_or(Errno::ESRCH)?;
             t.fs_base = addr;
             slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, addr);
-            ctx.ok(0)
+            Ok(())
         }
         ARCH_GET_FS => {
             if addr == 0 {
-                return ctx.invalid_arg();
+                return Err(Errno::EINVAL);
             }
-            let t = some_or_err!(ctx, ctx.task_mut());
+            let t = ctx.task_mut().ok_or(Errno::ESRCH)?;
             let fs_base_val = t.fs_base;
-            let user_ptr = try_or_err!(ctx, UserPtr::<u64>::try_new(addr));
-            try_or_err!(ctx, copy_to_user(user_ptr, &fs_base_val));
-            ctx.ok(0)
+            let user_ptr = MmUserPtr::<u64>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+            copy_to_user(user_ptr, &fs_base_val).map_err(|_| Errno::EFAULT)?;
+            Ok(())
         }
-        _ => ctx.invalid_arg(),
+        _ => Err(Errno::EINVAL),
     }
-}
+});
 
-pub fn syscall_fork(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
-    let child_id = task_fork(task, ctx_ptr as *const UserContext);
-    ctx.from_bool_value(
-        child_id != slopos_abi::task::INVALID_TASK_ID,
-        child_id as u64,
-    )
-}
-
-pub fn syscall_clone(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-
-    let args = ctx.args();
-    let flags = args.arg0;
-    let child_stack = args.arg1;
-    let parent_tidptr = args.arg2;
-    let child_tidptr = args.arg3;
-    let tls = args.arg4;
-
-    match slopos_sched::task::task_clone(task, flags, child_stack, parent_tidptr, child_tidptr, tls)
-    {
-        Ok(child_id) => ctx.ok(child_id as u64),
-        Err(errno) => syscall_return_err(ctx_ptr, errno),
+define_syscall!(syscall_fork (ctx) -> Result<u64, Errno> {
+    let task = ctx.task_ptr();
+    let user_ctx_ptr = ctx.user_ctx_ptr() as *const UserContext;
+    let child_id = task_fork(task, user_ctx_ptr);
+    if child_id == slopos_abi::task::INVALID_TASK_ID {
+        Err(Errno::EAGAIN)
+    } else {
+        Ok(child_id as u64)
     }
-}
+});
 
-pub fn syscall_futex(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDisposition {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
-    let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
-        return syscall_return_err(ctx_ptr, ERRNO_EINVAL);
-    };
+define_syscall!(syscall_clone
+    (ctx, flags: u64, child_stack: u64, parent_tidptr: u64, child_tidptr: u64, tls: u64)
+    -> Result<u64, Errno>
+{
+    match slopos_sched::task::task_clone(
+        ctx.task_ptr(),
+        flags,
+        child_stack,
+        parent_tidptr,
+        child_tidptr,
+        tls,
+    ) {
+        Ok(child_id) => Ok(child_id as u64),
+        Err(errno) => Err(Errno::from_raw(errno as i32).unwrap_or(Errno::EINVAL)),
+    }
+});
 
-    let args = ctx.args();
-    let uaddr = args.arg0;
-    let op = args.arg1;
-    let val = args.arg2_u32();
-    let timeout = args.arg3;
-
+define_syscall!(syscall_futex
+    (ctx, uaddr: u64, op: u64, val: u32, timeout: u64) -> Result<u64, Errno>
+{
     if (uaddr & 0x3) != 0 {
-        return ctx.invalid_arg();
+        return Err(Errno::EINVAL);
     }
 
-    let user_word = match UserPtr::<u32>::try_new(uaddr) {
-        Ok(p) => p,
-        Err(_) => return ctx.bad_address(),
-    };
+    let user_word = MmUserPtr::<u32>::try_new(uaddr).map_err(|_| Errno::EFAULT)?;
     if copy_from_user(user_word).is_err() {
-        return ctx.bad_address();
+        return Err(Errno::EFAULT);
     }
 
     let rc = match op {
@@ -686,28 +564,25 @@ pub fn syscall_futex(task: *mut Task, ctx_ptr: *mut UserContext) -> SyscallDispo
         _ => ENOSYS_RETURN as i64,
     };
 
-    ctx.ok(rc as u64)
-}
+    Ok(rc as u64)
+});
 
-define_syscall!(syscall_vhangup(ctx, args) requires(let task_id) {
-    let _ = args;
+define_syscall!(syscall_vhangup (ctx)
+    requires(let task_id: task_id)
+    -> Result<(), Errno>
+{
     let task_ptr = task_find_by_id(task_id);
     if task_ptr.is_null() {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
-    let Some(task) = task_borrow(task_ptr) else {
-        return ctx.err();
-    };
-    // POSIX: caller must have a controlling terminal.
+    let task = task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
     let ctty = match task.controlling_tty {
         Some(idx) => idx,
-        None => {
-            return ctx.ok(ERRNO_EPERM);
-        }
+        None => return Err(Errno::EPERM),
     };
-    // Delegate to the TTY subsystem's existing hangup infrastructure
-    //.  This flushes buffers, detaches the session,
-    // signals SIGHUP + SIGCONT, and wakes all blocked readers/writers.
     slopos_kernel_services::syscall_services::tty::hangup(ctty);
-    ctx.ok(0)
+    Ok(())
 });
+
+#[allow(dead_code)]
+type _Unused<T> = UserPtr<T>;

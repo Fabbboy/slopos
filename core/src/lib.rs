@@ -1,5 +1,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
+#![feature(try_trait_v2)]
 
 pub mod driver_hooks;
 pub mod exec;

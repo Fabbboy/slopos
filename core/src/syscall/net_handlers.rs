@@ -1,33 +1,46 @@
-use crate::syscall::common::SyscallDisposition;
-use crate::syscall::context::SyscallContext;
+use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
-use slopos_abi::syscall::*;
+use slopos_abi::syscall::SOL_SOCKET;
 use slopos_abi::unix::SockAddrUn;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
-use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 
-fn errno_i32(errno: i32) -> u64 {
-    (errno as i64) as u64
+use crate::syscall::args::{Fd, UserBytes, UserPtr};
+
+fn errno_from_neg(rc: i32) -> Errno {
+    Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
 }
 
-fn rc_i32(ctx: &SyscallContext, rc: i32) -> SyscallDisposition {
+fn errno_from_neg64(rc: i64) -> Errno {
+    Errno::from_raw(rc as i32).unwrap_or(Errno::EINVAL)
+}
+
+fn rc_i32_to_unit(rc: i32) -> Result<(), Errno> {
     if rc < 0 {
-        ctx.err_with(errno_i32(rc))
+        Err(errno_from_neg(rc))
     } else {
-        ctx.ok(rc as u64)
+        Ok(())
     }
 }
 
-fn rc_i64(ctx: &SyscallContext, rc: i64) -> SyscallDisposition {
+fn rc_i32_to_u64(rc: i32) -> Result<u64, Errno> {
     if rc < 0 {
-        ctx.err_with(rc as u64)
+        Err(errno_from_neg(rc))
     } else {
-        ctx.ok(rc as u64)
+        Ok(rc as u64)
+    }
+}
+
+fn rc_i64_to_u64(rc: i64) -> Result<u64, Errno> {
+    if rc < 0 {
+        Err(errno_from_neg64(rc))
+    } else {
+        Ok(rc as u64)
     }
 }
 
@@ -48,12 +61,12 @@ fn is_unix_socket_ops(ops: &'static dyn FileOps) -> bool {
 }
 
 /// Retrieve the socket handle for `fd`, distinguishing AF_UNIX from AF_INET.
-fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, u64> {
+fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, Errno> {
     let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(process_id, fd) else {
-        return Err(ERRNO_ENOTSOCK);
+        return Err(Errno::ENOTSOCK);
     };
     if ops.kind() != FileKind::Socket {
-        return Err(ERRNO_ENOTSOCK);
+        return Err(Errno::ENOTSOCK);
     }
     if is_unix_socket_ops(ops) {
         Ok(SocketFd::Unix(SocketHandle::from_usize(handle)))
@@ -62,18 +75,20 @@ fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, u64> {
     }
 }
 
-define_syscall!(syscall_socket(ctx, args) requires(let process_id) {
-    let domain = args.arg0 as u16;
-    let sock_type = args.arg1 as u16;
-    let protocol = args.arg2 as u16;
+define_syscall!(syscall_socket
+    (ctx, domain: u32, sock_type: u32, protocol: u32)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let domain = domain as u16;
+    let sock_type = sock_type as u16;
+    let protocol = protocol as u16;
 
     if domain == AF_UNIX {
         if sock_type != SOCK_STREAM {
-            return ctx.err_with(ERRNO_EPROTONOSUPPORT);
+            return Err(Errno::EPROTONOSUPPORT);
         }
-        let Some(handle) = unix_socket::unix_create() else {
-            return ctx.err_with(ERRNO_ENOMEM);
-        };
+        let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
         let fd = slopos_fs::fileio_open_fd_with_ops(
             process_id,
             &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
@@ -81,101 +96,98 @@ define_syscall!(syscall_socket(ctx, args) requires(let process_id) {
         );
         if fd < 0 {
             let _ = unix_socket::unix_close(handle);
-            return ctx.err_with(ERRNO_ENOMEM);
+            return Err(Errno::ENOMEM);
         }
-        return ctx.ok(fd as u64);
+        return Ok(fd as u64);
     }
 
     if domain != AF_INET {
-        return ctx.err_with(ERRNO_EAFNOSUPPORT);
+        return Err(Errno::EAFNOSUPPORT);
     }
     if sock_type != SOCK_STREAM && sock_type != SOCK_DGRAM {
-        return ctx.err_with(ERRNO_EPROTONOSUPPORT);
+        return Err(Errno::EPROTONOSUPPORT);
     }
     let _icmp_datagram = sock_type == SOCK_DGRAM && protocol == IPPROTO_ICMP;
 
     let sock_idx = socket::socket_create(domain, sock_type, protocol);
     if sock_idx < 0 {
-        return ctx.err_with(errno_i32(sock_idx));
+        return Err(errno_from_neg(sock_idx));
     }
 
     let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32);
     if fd < 0 {
         let _ = socket::socket_close(sock_idx as u32);
-        return ctx.err_with(ERRNO_ENOMEM);
+        return Err(Errno::ENOMEM);
     }
 
-    ctx.ok(fd as u64)
+    Ok(fd as u64)
 });
 
-define_syscall!(syscall_bind(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+define_syscall!(syscall_bind
+    (ctx, fd: Fd, addr_ptr: u64, addr_len: u64)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
-    if args.arg1 == 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if addr_ptr == 0 {
+        return Err(Errno::EFAULT);
     }
+    let addr_len = addr_len as usize;
 
     match sock_fd {
         SocketFd::Unix(sh) => {
-            // AF_UNIX bind: parse SockAddrUn from userspace.
-            let addr_len = args.arg2_usize();
             if addr_len < 4 {
-                return ctx.err_with(ERRNO_EINVAL);
+                return Err(Errno::EINVAL);
             }
-            let user_addr = try_or_err!(ctx, UserPtr::<SockAddrUn>::try_new(args.arg1));
-            let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+            let user_addr = MmUserPtr::<SockAddrUn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let path_len = (addr_len - 2).min(slopos_abi::unix::UNIX_PATH_MAX);
             let actual_len = sock_addr.path[..path_len]
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(path_len);
             if actual_len == 0 {
-                return ctx.err_with(ERRNO_EINVAL);
+                return Err(Errno::EINVAL);
             }
-            rc_i32(&ctx, unix_socket::unix_bind(sh, &sock_addr.path[..actual_len]))
+            rc_i32_to_unit(unix_socket::unix_bind(sh, &sock_addr.path[..actual_len]))
         }
         SocketFd::Inet(sock_idx) => {
-            if args.arg2_usize() < core::mem::size_of::<SockAddrIn>() {
-                return ctx.err_with(ERRNO_EINVAL);
+            if addr_len < core::mem::size_of::<SockAddrIn>() {
+                return Err(Errno::EINVAL);
             }
-            let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
-            let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+            let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
-            rc_i32(&ctx, socket::socket_bind(sock_idx, sock_addr.addr, port))
+            rc_i32_to_unit(socket::socket_bind(sock_idx, sock_addr.addr, port))
         }
     }
 });
 
-define_syscall!(syscall_listen(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let backlog = args.arg1_u32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+define_syscall!(syscall_listen
+    (ctx, fd: Fd, backlog: u32)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
     match sock_fd {
-        SocketFd::Unix(sh) => rc_i32(&ctx, unix_socket::unix_listen(sh, backlog)),
-        SocketFd::Inet(sock_idx) => rc_i32(&ctx, socket::socket_listen(sock_idx, backlog)),
+        SocketFd::Unix(sh) => rc_i32_to_unit(unix_socket::unix_listen(sh, backlog)),
+        SocketFd::Inet(sock_idx) => rc_i32_to_unit(socket::socket_listen(sock_idx, backlog)),
     }
 });
 
-define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+define_syscall!(syscall_accept
+    (ctx, fd: Fd, peer_ptr: u64, peer_len: u64)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
+    let peer_len = peer_len as usize;
 
     match sock_fd {
         SocketFd::Unix(sh) => {
-            let accepted_handle = match unix_socket::unix_accept(sh) {
-                Ok(h) => h,
-                Err(errno) => return ctx.err_with(errno_i32(errno)),
-            };
+            let accepted_handle =
+                unix_socket::unix_accept(sh).map_err(errno_from_neg)?;
             let new_fd = slopos_fs::fileio_open_fd_with_ops(
                 process_id,
                 &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
@@ -183,39 +195,31 @@ define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
             );
             if new_fd < 0 {
                 let _ = unix_socket::unix_close(accepted_handle);
-                return ctx.err_with(ERRNO_ENOMEM);
+                return Err(Errno::ENOMEM);
             }
-            ctx.ok(new_fd as u64)
+            Ok(new_fd as u64)
         }
         SocketFd::Inet(sock_idx) => {
             let mut peer_ip = [0u8; 4];
             let mut peer_port = 0u16;
-            let want_peer = args.arg1 != 0;
-            if want_peer && args.arg2_usize() < core::mem::size_of::<SockAddrIn>() {
-                return ctx.err_with(ERRNO_EINVAL);
+            let want_peer = peer_ptr != 0;
+            if want_peer && peer_len < core::mem::size_of::<SockAddrIn>() {
+                return Err(Errno::EINVAL);
             }
 
             let accepted_idx = socket::socket_accept(
                 sock_idx,
-                if want_peer {
-                    &mut peer_ip as *mut [u8; 4]
-                } else {
-                    core::ptr::null_mut()
-                },
-                if want_peer {
-                    &mut peer_port as *mut u16
-                } else {
-                    core::ptr::null_mut()
-                },
+                if want_peer { &mut peer_ip as *mut [u8; 4] } else { core::ptr::null_mut() },
+                if want_peer { &mut peer_port as *mut u16 } else { core::ptr::null_mut() },
             );
             if accepted_idx < 0 {
-                return ctx.err_with(errno_i32(accepted_idx));
+                return Err(errno_from_neg(accepted_idx));
             }
 
             let new_fd = slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32);
             if new_fd < 0 {
                 let _ = socket::socket_close(accepted_idx as u32);
-                return ctx.err_with(ERRNO_ENOMEM);
+                return Err(Errno::ENOMEM);
             }
 
             if want_peer {
@@ -225,242 +229,217 @@ define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
                     addr: peer_ip,
                     _pad: [0; 8],
                 };
-                let user_peer = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
-                try_or_err!(ctx, copy_to_user(user_peer, &peer));
+                let user_peer = MmUserPtr::<SockAddrIn>::try_new(peer_ptr)
+                    .map_err(|_| Errno::EFAULT)?;
+                copy_to_user(user_peer, &peer).map_err(|_| Errno::EFAULT)?;
             }
 
-            ctx.ok(new_fd as u64)
+            Ok(new_fd as u64)
         }
     }
 });
 
-define_syscall!(syscall_connect(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+define_syscall!(syscall_connect
+    (ctx, fd: Fd, addr_ptr: u64, addr_len: u64)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
-    if args.arg1 == 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if addr_ptr == 0 {
+        return Err(Errno::EFAULT);
     }
+    let addr_len = addr_len as usize;
 
     match sock_fd {
         SocketFd::Unix(sh) => {
-            let addr_len = args.arg2_usize();
             if addr_len < 4 {
-                return ctx.err_with(ERRNO_EINVAL);
+                return Err(Errno::EINVAL);
             }
-            let user_addr = try_or_err!(ctx, UserPtr::<SockAddrUn>::try_new(args.arg1));
-            let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+            let user_addr = MmUserPtr::<SockAddrUn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let path_len = (addr_len - 2).min(slopos_abi::unix::UNIX_PATH_MAX);
             let actual_len = sock_addr.path[..path_len]
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(path_len);
             if actual_len == 0 {
-                return ctx.err_with(ERRNO_EINVAL);
+                return Err(Errno::EINVAL);
             }
-            rc_i32(&ctx, unix_socket::unix_connect(sh, &sock_addr.path[..actual_len]))
+            rc_i32_to_unit(unix_socket::unix_connect(sh, &sock_addr.path[..actual_len]))
         }
         SocketFd::Inet(sock_idx) => {
-            if args.arg2_usize() < core::mem::size_of::<SockAddrIn>() {
-                return ctx.err_with(ERRNO_EINVAL);
+            if addr_len < core::mem::size_of::<SockAddrIn>() {
+                return Err(Errno::EINVAL);
             }
-            let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
-            let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+            let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
-            rc_i32(&ctx, socket::socket_connect(sock_idx, sock_addr.addr, port))
+            rc_i32_to_unit(socket::socket_connect(sock_idx, sock_addr.addr, port))
         }
     }
 });
 
-define_syscall!(syscall_send(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+define_syscall!(syscall_send
+    (ctx, fd: Fd, buf: UserBytes, _flags: u32)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
-    if args.arg1 == 0 && args.arg2 != 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if buf.base_u64() == 0 && buf.len() != 0 {
+        return Err(Errno::EFAULT);
     }
 
-    let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
-    };
+    let len = buf.len().min(4096);
+    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
 
     match sock_fd {
         SocketFd::Unix(sh) => {
             if len > 0 {
-                let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
-                let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]));
-                return rc_i32(&ctx, unix_socket::unix_send(sh, &scratch[..copied]));
+                let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
+                let copied = copy_bytes_from_user(user_data, &mut scratch[..len])
+                    .map_err(|_| Errno::EFAULT)?;
+                return rc_i32_to_u64(unix_socket::unix_send(sh, &scratch[..copied]));
             }
-            ctx.ok(0)
+            Ok(0)
         }
         SocketFd::Inet(sock_idx) => {
             if len > 0 {
-                let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
-                let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]));
-                return rc_i64(&ctx, socket::socket_send(sock_idx, scratch.as_ptr(), copied));
+                let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
+                let copied = copy_bytes_from_user(user_data, &mut scratch[..len])
+                    .map_err(|_| Errno::EFAULT)?;
+                return rc_i64_to_u64(socket::socket_send(sock_idx, scratch.as_ptr(), copied));
             }
-            rc_i64(&ctx, socket::socket_send(sock_idx, core::ptr::null(), 0))
+            rc_i64_to_u64(socket::socket_send(sock_idx, core::ptr::null(), 0))
         }
     }
 });
 
-define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+define_syscall!(syscall_recv
+    (ctx, fd: Fd, buf: UserBytes, _flags: u32)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
-    if args.arg1 == 0 && args.arg2 != 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if buf.base_u64() == 0 && buf.len() != 0 {
+        return Err(Errno::EFAULT);
     }
 
-    let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
-    };
+    let len = buf.len().min(4096);
+    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
 
     match sock_fd {
         SocketFd::Unix(sh) => {
             let rc = unix_socket::unix_recv(sh, &mut scratch[..len]);
             if rc < 0 {
-                return ctx.err_with(errno_i32(rc));
+                return Err(errno_from_neg(rc));
             }
             let copied = rc as usize;
             if copied > 0 {
-                let user_out = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, copied));
-                try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_out, &scratch[..copied]));
+                let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
+                copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
             }
-            ctx.ok(copied as u64)
+            Ok(copied as u64)
         }
         SocketFd::Inet(sock_idx) => {
             let rc = socket::socket_recv(sock_idx, scratch.as_mut_ptr(), len);
             if rc < 0 {
-                return ctx.err_with(rc as u64);
+                return Err(errno_from_neg64(rc));
             }
             let copied = rc as usize;
             if copied > 0 {
-                let user_out = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, copied));
-                try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_out, &scratch[..copied]));
+                let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
+                copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
             }
-            ctx.ok(copied as u64)
+            Ok(copied as u64)
         }
     }
 });
 
-define_syscall!(syscall_sendto(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_idx = match socket_fd_for(process_id, fd) {
-        Ok(SocketFd::Inet(idx)) => idx,
-        Ok(SocketFd::Unix(_)) => return ctx.err_with(ERRNO_ENOTSOCK),
-        Err(errno) => return ctx.err_with(errno),
+define_syscall!(syscall_sendto
+    (ctx, fd: Fd, buf: UserBytes, _flags: u32, addr_ptr: u64, addr_len: u64)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Inet(idx) => idx,
+        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
     };
 
-    if args.arg1 == 0 && args.arg2 != 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if buf.base_u64() == 0 && buf.len() != 0 {
+        return Err(Errno::EFAULT);
     }
-    if args.arg4 == 0 {
-        return ctx.err_with(ERRNO_EDESTADDRREQ);
+    if addr_ptr == 0 {
+        return Err(Errno::EDESTADDRREQ);
     }
-    if args.arg5_usize() < core::mem::size_of::<SockAddrIn>() {
-        return ctx.err_with(ERRNO_EINVAL);
+    if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {
+        return Err(Errno::EINVAL);
     }
 
-    let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg4));
-    let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+    let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+    let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
     if sock_addr.family != AF_INET {
-        return ctx.err_with(ERRNO_EAFNOSUPPORT);
+        return Err(Errno::EAFNOSUPPORT);
     }
 
-    let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
-    };
+    let len = buf.len().min(4096);
+    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
     let copied = if len > 0 {
-        let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
-        try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]))
+        let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_from_user(user_data, &mut scratch[..len]).map_err(|_| Errno::EFAULT)?
     } else {
         0
     };
 
-    rc_i64(
-        &ctx,
-        socket::socket_sendto(
-            sock_idx,
-            if copied == 0 {
-                core::ptr::null()
-            } else {
-                scratch.as_ptr()
-            },
-            copied,
-            sock_addr.addr,
-            u16::from_be(sock_addr.port),
-        ),
-    )
+    rc_i64_to_u64(socket::socket_sendto(
+        sock_idx,
+        if copied == 0 { core::ptr::null() } else { scratch.as_ptr() },
+        copied,
+        sock_addr.addr,
+        u16::from_be(sock_addr.port),
+    ))
 });
 
-define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_idx = match socket_fd_for(process_id, fd) {
-        Ok(SocketFd::Inet(idx)) => idx,
-        Ok(SocketFd::Unix(_)) => return ctx.err_with(ERRNO_ENOTSOCK),
-        Err(errno) => return ctx.err_with(errno),
+define_syscall!(syscall_recvfrom
+    (ctx, fd: Fd, buf: UserBytes, _flags: u32, src_ptr: u64, src_len: u64)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Inet(idx) => idx,
+        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
     };
 
-    if args.arg1 == 0 && args.arg2 != 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if buf.base_u64() == 0 && buf.len() != 0 {
+        return Err(Errno::EFAULT);
+    }
+    let want_src = src_ptr != 0;
+    if want_src && (src_len as usize) < core::mem::size_of::<SockAddrIn>() {
+        return Err(Errno::EINVAL);
     }
 
-    let want_src = args.arg4 != 0;
-    if want_src && args.arg5_usize() < core::mem::size_of::<SockAddrIn>() {
-        return ctx.err_with(ERRNO_EINVAL);
-    }
-
-    let len = args.arg2_usize().min(4096);
-    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
-    };
+    let len = buf.len().min(4096);
+    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
     let mut src_ip = [0u8; 4];
     let mut src_port = 0u16;
 
     let rc = socket::socket_recvfrom(
         sock_idx,
-        if len == 0 {
-            core::ptr::null_mut()
-        } else {
-            scratch.as_mut_ptr()
-        },
+        if len == 0 { core::ptr::null_mut() } else { scratch.as_mut_ptr() },
         len,
-        if want_src {
-            &mut src_ip as *mut [u8; 4]
-        } else {
-            core::ptr::null_mut()
-        },
-        if want_src {
-            &mut src_port as *mut u16
-        } else {
-            core::ptr::null_mut()
-        },
+        if want_src { &mut src_ip as *mut [u8; 4] } else { core::ptr::null_mut() },
+        if want_src { &mut src_port as *mut u16 } else { core::ptr::null_mut() },
     );
     if rc < 0 {
-        return ctx.err_with(rc as u64);
+        return Err(errno_from_neg64(rc));
     }
 
     let copied = rc as usize;
     if copied > 0 {
-        let user_out = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, copied));
-        try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_out, &scratch[..copied]));
+        let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
     }
 
     if want_src {
@@ -470,169 +449,157 @@ define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
             addr: src_ip,
             _pad: [0; 8],
         };
-        let user_peer = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg4));
-        try_or_err!(ctx, copy_to_user(user_peer, &peer));
+        let user_peer = MmUserPtr::<SockAddrIn>::try_new(src_ptr).map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_peer, &peer).map_err(|_| Errno::EFAULT)?;
     }
 
-    ctx.ok(copied as u64)
+    Ok(copied as u64)
 });
 
-define_syscall!(syscall_setsockopt(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_idx = match socket_fd_for(process_id, fd) {
-        Ok(SocketFd::Inet(idx)) => idx,
-        Ok(SocketFd::Unix(_)) => return ctx.err_with(ERRNO_ENOTSOCK),
-        Err(errno) => return ctx.err_with(errno),
+define_syscall!(syscall_setsockopt
+    (ctx, fd: Fd, level: u32, optname: u32, optval: UserBytes)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Inet(idx) => idx,
+        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
     };
 
-    let level = args.arg1 as i32;
-    let optname = args.arg2 as i32;
-    let optval_ptr = args.arg3;
-    let optlen = args.arg4_usize();
-
-    if optval_ptr == 0 && optlen > 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if optval.base_u64() == 0 && optval.len() > 0 {
+        return Err(Errno::EFAULT);
     }
 
-    let optlen = optlen.min(64);
+    let optlen = optval.len().min(64);
     let mut scratch = [0u8; 64];
     if optlen > 0 {
-        let user_data = try_or_err!(ctx, UserBytes::try_new(optval_ptr, optlen));
-        try_or_err!(ctx, copy_bytes_from_user(user_data, &mut scratch[..optlen]));
+        let user_data = MmUserBytes::try_new(optval.base_u64(), optlen).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_from_user(user_data, &mut scratch[..optlen]).map_err(|_| Errno::EFAULT)?;
     }
 
-    rc_i32(
-        &ctx,
-        socket::socket_setsockopt(sock_idx, level, optname, &scratch[..optlen]),
-    )
+    rc_i32_to_unit(socket::socket_setsockopt(sock_idx, level as i32, optname as i32, &scratch[..optlen]))
 });
 
-define_syscall!(syscall_getsockopt(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_idx = match socket_fd_for(process_id, fd) {
-        Ok(SocketFd::Inet(idx)) => idx,
-        Ok(SocketFd::Unix(_)) => return ctx.err_with(ERRNO_ENOTSOCK),
-        Err(errno) => return ctx.err_with(errno),
+define_syscall!(syscall_getsockopt
+    (ctx, fd: Fd, level: u32, optname: u32, optval_ptr: u64, optlen_ptr_raw: u64)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Inet(idx) => idx,
+        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
     };
 
-    let level = args.arg1 as i32;
-    let optname = args.arg2 as i32;
-    let optval_ptr = args.arg3;
-    let optlen_ptr = args.arg4;
-
-    if optval_ptr == 0 || optlen_ptr == 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if optval_ptr == 0 || optlen_ptr_raw == 0 {
+        return Err(Errno::EFAULT);
     }
 
-    let user_optlen = try_or_err!(ctx, UserPtr::<u32>::try_new(optlen_ptr));
-    let optlen = try_or_err!(ctx, copy_from_user(user_optlen)) as usize;
+    let user_optlen = MmUserPtr::<u32>::try_new(optlen_ptr_raw).map_err(|_| Errno::EFAULT)?;
+    let optlen = copy_from_user(user_optlen).map_err(|_| Errno::EFAULT)? as usize;
     let optlen = optlen.min(64);
 
     let mut scratch = [0u8; 64];
-    let rc = socket::socket_getsockopt(sock_idx, level, optname, &mut scratch[..optlen]);
+    let rc = socket::socket_getsockopt(sock_idx, level as i32, optname as i32, &mut scratch[..optlen]);
     if rc < 0 {
-        return ctx.err_with(errno_i32(rc));
+        return Err(errno_from_neg(rc));
     }
 
     let written = rc as usize;
     if written > 0 {
-        let user_data = try_or_err!(ctx, UserBytes::try_new(optval_ptr, written));
-        try_or_err!(ctx, copy_bytes_to_user(user_data, &scratch[..written]));
+        let user_data = MmUserBytes::try_new(optval_ptr, written).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_data, &scratch[..written]).map_err(|_| Errno::EFAULT)?;
     }
 
     let actual_len = written as u32;
-    try_or_err!(ctx, copy_to_user(user_optlen, &actual_len));
+    copy_to_user(user_optlen, &actual_len).map_err(|_| Errno::EFAULT)?;
 
-    ctx.ok(0)
+    Ok(())
 });
 
-define_syscall!(syscall_shutdown(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let sock_idx = match socket_fd_for(process_id, fd) {
-        Ok(SocketFd::Inet(idx)) => idx,
-        Ok(SocketFd::Unix(_)) => return ctx.err_with(ERRNO_ENOTSOCK),
-        Err(errno) => return ctx.err_with(errno),
+define_syscall!(syscall_shutdown
+    (ctx, fd: Fd, how: u32)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Inet(idx) => idx,
+        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
     };
 
-    let how = args.arg1 as i32;
-    rc_i32(&ctx, socket::socket_shutdown(sock_idx, how))
+    rc_i32_to_unit(socket::socket_shutdown(sock_idx, how as i32))
 });
 
-define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
-    // arg0 = hostname pointer, arg1 = hostname length, arg2 = result pointer
-    if args.arg0 == 0 || args.arg2 == 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+define_syscall!(syscall_resolve
+    (ctx, hostname_ptr: u64, hostname_len: u64, result_ptr: u64)
+    requires(let _process_id: process_id)
+    -> Result<(), Errno>
+{
+    if hostname_ptr == 0 || result_ptr == 0 {
+        return Err(Errno::EFAULT);
     }
 
-    let hostname_len = args.arg1_usize();
+    let hostname_len = hostname_len as usize;
     if hostname_len == 0 || hostname_len > 253 {
-        return ctx.err_with(ERRNO_EINVAL);
+        return Err(Errno::EINVAL);
     }
 
     let mut hostname_buf = [0u8; 253];
-    let user_hostname = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg0, hostname_len));
-    let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_hostname, &mut hostname_buf[..hostname_len]));
+    let user_hostname = MmUserBytes::try_new(hostname_ptr, hostname_len).map_err(|_| Errno::EFAULT)?;
+    let copied = copy_bytes_from_user(user_hostname, &mut hostname_buf[..hostname_len])
+        .map_err(|_| Errno::EFAULT)?;
     if copied != hostname_len {
-        return ctx.err_with(ERRNO_EFAULT);
+        return Err(Errno::EFAULT);
     }
 
     let result_addr = match dns::dns_resolve(&hostname_buf[..hostname_len]) {
         Ok(addr) => addr,
-        Err(dns::DnsResolveError::InvalidHostname) => return ctx.err_with(ERRNO_EINVAL),
-        Err(dns::DnsResolveError::NoDnsServer) => return ctx.err_with(ERRNO_ENETUNREACH),
+        Err(dns::DnsResolveError::InvalidHostname) => return Err(Errno::EINVAL),
+        Err(dns::DnsResolveError::NoDnsServer) => return Err(Errno::ENETUNREACH),
         Err(dns::DnsResolveError::Timeout | dns::DnsResolveError::TransmitFailed) => {
-            return ctx.err_with(ERRNO_EAGAIN);
+            return Err(Errno::EAGAIN);
         }
-        Err(dns::DnsResolveError::ParseFailed) => return ctx.err_with(ERRNO_EHOSTUNREACH),
+        Err(dns::DnsResolveError::ParseFailed) => return Err(Errno::EHOSTUNREACH),
     };
 
-    let user_result = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg2, 4));
-    try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_result, &result_addr));
+    let user_result = MmUserBytes::try_new(result_ptr, 4).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_to_user(user_result, &result_addr).map_err(|_| Errno::EFAULT)?;
 
-    ctx.ok(0)
+    Ok(())
 });
 
 // ---------------------------------------------------------------------------
 // sendmsg / recvmsg — fd passing via SCM_RIGHTS
 // ---------------------------------------------------------------------------
 
-define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
-    use slopos_abi::syscall::{MsgHdr, CmsgHdr, SCM_RIGHTS, SCM_MAX_FDS};
+define_syscall!(syscall_sendmsg
+    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
 
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
     let sh = match sock_fd {
         SocketFd::Unix(sh) => sh,
-        SocketFd::Inet(_) => return ctx.err_with(ERRNO_ENOTSOCK),
+        SocketFd::Inet(_) => return Err(Errno::ENOTSOCK),
     };
 
-    // Copy MsgHdr from userspace.
-    let msg_ptr = try_or_err!(ctx, UserPtr::<MsgHdr>::try_new(args.arg1));
-    let msg: MsgHdr = try_or_err!(ctx, copy_from_user(msg_ptr));
+    let msg: MsgHdr = copy_from_user(msg_ptr.inner()).map_err(|_| Errno::EFAULT)?;
 
-    // Copy data bytes.
     let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
-    };
+    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
     if data_len > 0 && msg.iov_base != 0 {
-        let user_data = try_or_err!(ctx, UserBytes::try_new(msg.iov_base, data_len));
-        try_or_err!(ctx, copy_bytes_from_user(user_data, &mut scratch[..data_len]));
+        let user_data = MmUserBytes::try_new(msg.iov_base, data_len).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_from_user(user_data, &mut scratch[..data_len]).map_err(|_| Errno::EFAULT)?;
     }
 
-    // Parse ancillary data for SCM_RIGHTS fds.
     let mut inflight: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =
         [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
     let mut fd_count = 0usize;
 
     if msg.control_len >= core::mem::size_of::<CmsgHdr>() as u64 && msg.control != 0 {
-        // Read CmsgHdr
-        let cmsg_ptr = try_or_err!(ctx, UserPtr::<CmsgHdr>::try_new(msg.control));
-        let cmsg: CmsgHdr = try_or_err!(ctx, copy_from_user(cmsg_ptr));
+        let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
+        let cmsg: CmsgHdr = copy_from_user(cmsg_ptr).map_err(|_| Errno::EFAULT)?;
 
         if cmsg.cmsg_type == SCM_RIGHTS {
             let hdr_size = core::mem::size_of::<CmsgHdr>();
@@ -643,31 +610,28 @@ define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
                 let fd_array_addr = msg.control + hdr_size as u64;
                 let mut fd_buf = [0i32; SCM_MAX_FDS];
                 let fd_bytes = n_fds * 4;
-                let user_fds = try_or_err!(ctx, UserBytes::try_new(fd_array_addr, fd_bytes));
-                // Read raw bytes then reinterpret as i32 array.
+                let user_fds = MmUserBytes::try_new(fd_array_addr, fd_bytes)
+                    .map_err(|_| Errno::EFAULT)?;
                 let fd_buf_bytes =
                     &mut slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(&mut fd_buf)
                         [..fd_bytes];
-                try_or_err!(ctx, copy_bytes_from_user(user_fds, fd_buf_bytes));
+                copy_bytes_from_user(user_fds, fd_buf_bytes).map_err(|_| Errno::EFAULT)?;
 
-                // Resolve and dup each fd
                 for j in 0..n_fds {
                     let send_fd = fd_buf[j];
                     let Some((handle, ops)) =
                         slopos_fs::fileio::fileio_get_handle_and_ops(process_id, send_fd)
                     else {
-                        // Release already-dup'd fds on error
                         for k in 0..fd_count {
                             inflight[k].1.release(inflight[k].0);
                         }
-                        return ctx.err_with(ERRNO_ENOTSOCK); // closest available errno
+                        return Err(Errno::ENOTSOCK);
                     };
-                    // Dup to create a new reference
                     let Some(new_handle) = ops.dup(handle) else {
                         for k in 0..fd_count {
                             inflight[k].1.release(inflight[k].0);
                         }
-                        return ctx.err_with(ERRNO_ENOMEM);
+                        return Err(Errno::ENOMEM);
                     };
                     inflight[fd_count] = (new_handle, ops);
                     fd_count += 1;
@@ -683,289 +647,260 @@ define_syscall!(syscall_sendmsg(ctx, args) requires(let process_id) {
         fd_count,
     );
     if rc < 0 {
-        // On error, release any fds that weren't consumed
         for j in 0..fd_count {
             if inflight[j].0 != 0 {
                 inflight[j].1.release(inflight[j].0);
             }
         }
-        return ctx.err_with(errno_i32(rc));
+        return Err(errno_from_neg(rc));
     }
-    ctx.ok(rc as u64)
+    Ok(rc as u64)
 });
 
-define_syscall!(syscall_recvmsg(ctx, args) requires(let process_id) {
-    use slopos_abi::syscall::{MsgHdr, CmsgHdr, SCM_RIGHTS, SCM_MAX_FDS};
+#[inline(never)]
+fn recvmsg_writeback_cmsg(
+    process_id: u32,
+    msg: &slopos_abi::syscall::MsgHdr,
+    received_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
+) -> Result<(), Errno> {
+    use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
 
-    let fd = args.arg0_i32();
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
+    let n_fds = received_fds.len();
+    if msg.control == 0 {
+        for j in 0..n_fds {
+            received_fds[j].1.release(received_fds[j].0);
+        }
+        return Ok(());
+    }
+
+    let hdr_size = core::mem::size_of::<CmsgHdr>();
+    let needed = hdr_size + n_fds * 4;
+    if (msg.control_len as usize) < needed {
+        for j in 0..n_fds {
+            received_fds[j].1.release(received_fds[j].0);
+        }
+        let updated_msg = MsgHdr {
+            iov_base: msg.iov_base,
+            iov_len: msg.iov_len,
+            control: msg.control,
+            control_len: 0,
+        };
+        copy_to_user(msg_ptr.inner(), &updated_msg).map_err(|_| Errno::EFAULT)?;
+        return Ok(());
+    }
+
+    let mut fd_nums = [0i32; SCM_MAX_FDS];
+    for j in 0..n_fds {
+        let (handle, ops) = received_fds[j];
+        let new_fd = slopos_fs::fileio::fileio_open_fd_with_ops(process_id, ops, handle);
+        if new_fd < 0 {
+            ops.release(handle);
+            for k in (j + 1)..n_fds {
+                received_fds[k].1.release(received_fds[k].0);
+            }
+            return Err(Errno::ENOMEM);
+        }
+        fd_nums[j] = new_fd;
+    }
+
+    let cmsg = CmsgHdr {
+        cmsg_len: needed as u32,
+        cmsg_level: SOL_SOCKET as u32,
+        cmsg_type: SCM_RIGHTS,
     };
-    let sh = match sock_fd {
+    let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
+    copy_to_user(cmsg_ptr, &cmsg).map_err(|_| Errno::EFAULT)?;
+
+    let fd_bytes = &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
+    let fd_out = MmUserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4)
+        .map_err(|_| Errno::EFAULT)?;
+    copy_bytes_to_user(fd_out, fd_bytes).map_err(|_| Errno::EFAULT)?;
+
+    let updated_msg = MsgHdr {
+        iov_base: msg.iov_base,
+        iov_len: msg.iov_len,
+        control: msg.control,
+        control_len: needed as u64,
+    };
+    copy_to_user(msg_ptr.inner(), &updated_msg).map_err(|_| Errno::EFAULT)?;
+    Ok(())
+}
+
+#[inline(never)]
+fn recvmsg_impl(
+    process_id: u32,
+    fd: Fd,
+    msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
+) -> Result<u64, Errno> {
+    use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS};
+
+    let sh = match socket_fd_for(process_id, fd.raw())? {
         SocketFd::Unix(sh) => sh,
-        SocketFd::Inet(_) => return ctx.err_with(ERRNO_ENOTSOCK),
+        SocketFd::Inet(_) => return Err(Errno::ENOTSOCK),
     };
 
-    // Copy MsgHdr from userspace.
-    let msg_ptr = try_or_err!(ctx, UserPtr::<MsgHdr>::try_new(args.arg1));
-    let msg: MsgHdr = try_or_err!(ctx, copy_from_user(msg_ptr));
+    let msg: MsgHdr = copy_from_user(msg_ptr.inner()).map_err(|_| Errno::EFAULT)?;
 
     let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(4096) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(ERRNO_ENOMEM),
-    };
+    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
 
-    // Receive data + fds
     let mut received_fds: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =
         [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
-    let (bytes_read, n_fds) = unix_socket::unix_recvmsg(
-        sh,
-        &mut scratch[..data_len],
-        &mut received_fds,
-        SCM_MAX_FDS,
-    );
+    let (bytes_read, n_fds) =
+        unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received_fds, SCM_MAX_FDS);
 
     if bytes_read < 0 {
-        // Release any fds we received despite the error
         for j in 0..n_fds {
             received_fds[j].1.release(received_fds[j].0);
         }
-        return ctx.err_with(errno_i32(bytes_read));
+        return Err(errno_from_neg(bytes_read));
     }
 
-    // Copy data to user.
     let copied = bytes_read as usize;
     if copied > 0 && msg.iov_base != 0 {
-        let user_out = try_or_err!(ctx, UserBytes::try_new(msg.iov_base, copied));
-        try_or_err!(ctx, copy_bytes_to_user(user_out, &scratch[..copied]));
+        let user_out = MmUserBytes::try_new(msg.iov_base, copied).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
     }
 
-    // Install received fds into the calling process's fd table and build cmsg.
-    if n_fds > 0 && msg.control != 0 {
-        let hdr_size = core::mem::size_of::<CmsgHdr>();
-        let needed = hdr_size + n_fds * 4;
-        if msg.control_len as usize >= needed {
-            let mut fd_nums = [0i32; SCM_MAX_FDS];
-            for j in 0..n_fds {
-                let (handle, ops) = received_fds[j];
-                let new_fd = slopos_fs::fileio::fileio_open_fd_with_ops(process_id, ops, handle);
-                if new_fd < 0 {
-                    // Failed to install — release this and remaining
-                    ops.release(handle);
-                    for k in (j + 1)..n_fds {
-                        received_fds[k].1.release(received_fds[k].0);
-                    }
-                    return ctx.err_with(ERRNO_ENOMEM);
-                }
-                fd_nums[j] = new_fd;
-            }
-
-            // Write CmsgHdr to user
-            let cmsg = CmsgHdr {
-                cmsg_len: needed as u32,
-                cmsg_level: SOL_SOCKET as u32,
-                cmsg_type: SCM_RIGHTS,
-            };
-            let cmsg_ptr = try_or_err!(ctx, UserPtr::<CmsgHdr>::try_new(msg.control));
-            try_or_err!(ctx, copy_to_user(cmsg_ptr, &cmsg));
-
-            // Write fd array after header
-            let fd_bytes =
-                &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
-            let fd_out = try_or_err!(ctx, UserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4));
-            try_or_err!(ctx, copy_bytes_to_user(fd_out, fd_bytes));
-
-            // Update control_len in the user's MsgHdr
-            let updated_msg = MsgHdr {
-                iov_base: msg.iov_base,
-                iov_len: msg.iov_len,
-                control: msg.control,
-                control_len: needed as u64,
-            };
-            try_or_err!(ctx, copy_to_user(msg_ptr, &updated_msg));
-        } else {
-            // Not enough space — release fds
-            for j in 0..n_fds {
-                received_fds[j].1.release(received_fds[j].0);
-            }
-            // Zero out control_len to indicate no ancillary data
-            let updated_msg = MsgHdr {
-                iov_base: msg.iov_base,
-                iov_len: msg.iov_len,
-                control: msg.control,
-                control_len: 0,
-            };
-            try_or_err!(ctx, copy_to_user(msg_ptr, &updated_msg));
-        }
-    } else if n_fds > 0 {
-        // No control buffer provided — release received fds
-        for j in 0..n_fds {
-            received_fds[j].1.release(received_fds[j].0);
-        }
+    if n_fds > 0 {
+        recvmsg_writeback_cmsg(process_id, &msg, &mut received_fds[..n_fds], msg_ptr)?;
     }
 
-    ctx.ok(copied as u64)
+    Ok(copied as u64)
+}
+
+define_syscall!(syscall_recvmsg
+    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    recvmsg_impl(process_id, fd, msg_ptr)
 });
 
-// ---------------------------------------------------------------------------
-// getpeername / getsockname
-// ---------------------------------------------------------------------------
+// `getsockname` / `getpeername` need to materialise a `SockAddrUn`
+// (110 bytes) on the unix branch; splitting the branches into
+// `#[inline(never)]` helpers keeps the dispatch closure's stack frame
+// out of the union of both branches' locals (which together would
+// blow the 2 KiB stack-frame gate).
+#[inline(never)]
+fn write_unix_sockaddr(
+    addr_un: &SockAddrUn,
+    path_len: usize,
+    addr_buf: u64,
+    addrlen_ptr: u64,
+) -> Result<(), Errno> {
+    let struct_len = 2 + path_len;
+    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let caller_len = copy_from_user(user_len_ptr).map_err(|_| Errno::EFAULT)? as usize;
+    let copy_len = caller_len.min(struct_len);
 
-define_syscall!(syscall_getpeername(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let addr_buf = args.arg1;
-    let addrlen_ptr = args.arg2;
-
-    if addr_buf == 0 || addrlen_ptr == 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+    if copy_len > 0 {
+        let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(addr_un);
+        let user_buf = MmUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]).map_err(|_| Errno::EFAULT)?;
     }
+    let actual = struct_len as u32;
+    copy_to_user(user_len_ptr, &actual).map_err(|_| Errno::EFAULT)?;
+    Ok(())
+}
 
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
+#[inline(never)]
+fn write_inet_sockaddr(
+    sock_addr_in: &SockAddrIn,
+    addr_buf: u64,
+    addrlen_ptr: u64,
+) -> Result<(), Errno> {
+    let struct_len = core::mem::size_of::<SockAddrIn>();
+    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let caller_len = copy_from_user(user_len_ptr).map_err(|_| Errno::EFAULT)? as usize;
+    let copy_len = caller_len.min(struct_len);
+
+    if copy_len > 0 {
+        let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(sock_addr_in);
+        let user_buf = MmUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]).map_err(|_| Errno::EFAULT)?;
+    }
+    let actual = struct_len as u32;
+    copy_to_user(user_len_ptr, &actual).map_err(|_| Errno::EFAULT)?;
+    Ok(())
+}
+
+#[inline(never)]
+fn getpeername_unix(sh: SocketHandle, addr_buf: u64, addrlen_ptr: u64) -> Result<(), Errno> {
+    let (path, path_len) = unix_socket::unix_get_peer_path(sh).ok_or(Errno::ENOTCONN)?;
+    let mut addr_un = SockAddrUn::default();
+    addr_un.family = AF_UNIX;
+    if path_len > 0 {
+        addr_un.path[..path_len].copy_from_slice(&path[..path_len]);
+    }
+    write_unix_sockaddr(&addr_un, path_len, addr_buf, addrlen_ptr)
+}
+
+#[inline(never)]
+fn getpeername_inet(sock_idx: u32, addr_buf: u64, addrlen_ptr: u64) -> Result<(), Errno> {
+    let peer = socket::socket_get_peer_addr(sock_idx).ok_or(Errno::ENOTCONN)?;
+    let sock_addr_in = peer.to_user();
+    write_inet_sockaddr(&sock_addr_in, addr_buf, addrlen_ptr)
+}
+
+#[inline(never)]
+fn getsockname_unix(sh: SocketHandle, addr_buf: u64, addrlen_ptr: u64) -> Result<(), Errno> {
+    let path_len = unix_socket::unix_get_local_path_len(sh);
+    let mut addr_un = SockAddrUn::default();
+    addr_un.family = AF_UNIX;
+    if path_len > 0 {
+        if let Some(path) = unix_socket::unix_get_local_path(sh) {
+            addr_un.path[..path_len].copy_from_slice(&path[..path_len]);
+        }
+    }
+    write_unix_sockaddr(&addr_un, path_len, addr_buf, addrlen_ptr)
+}
+
+#[inline(never)]
+fn getsockname_inet(sock_idx: u32, addr_buf: u64, addrlen_ptr: u64) -> Result<(), Errno> {
+    let local = match socket::socket_get_local_addr(sock_idx) {
+        Some(l) => l,
+        None => {
+            // POSIX: getsockname on an unbound socket returns
+            // AF_INET + zero/zero rather than EINVAL.
+            let zeroed = SockAddrIn {
+                family: AF_INET,
+                port: 0,
+                addr: [0; 4],
+                _pad: [0; 8],
+            };
+            return write_inet_sockaddr(&zeroed, addr_buf, addrlen_ptr);
+        }
     };
+    let sock_addr_in = local.to_user();
+    write_inet_sockaddr(&sock_addr_in, addr_buf, addrlen_ptr)
+}
 
-    match sock_fd {
-        SocketFd::Unix(sh) => {
-            // For AF_UNIX, return the peer's bound path as SockAddrUn.
-            let Some((path, path_len)) = unix_socket::unix_get_peer_path(sh) else {
-                return ctx.err_with(ERRNO_ENOTCONN);
-            };
-            let mut addr_un = SockAddrUn::default();
-            addr_un.family = AF_UNIX;
-            if path_len > 0 {
-                addr_un.path[..path_len].copy_from_slice(&path[..path_len]);
-            }
-            let struct_len = 2 + path_len; // family + path bytes
-
-            // Read caller's buffer length.
-            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
-            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
-            let copy_len = caller_len.min(struct_len);
-
-            if copy_len > 0 {
-                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&addr_un);
-                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
-                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
-            }
-
-            // Write back actual length.
-            let actual = struct_len as u32;
-            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
-            ctx.ok(0)
-        }
-        SocketFd::Inet(sock_idx) => {
-            let Some(peer) = socket::socket_get_peer_addr(sock_idx) else {
-                return ctx.err_with(ERRNO_ENOTCONN);
-            };
-            let sock_addr_in = peer.to_user();
-            let struct_len = core::mem::size_of::<SockAddrIn>();
-
-            // Read caller's buffer length.
-            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
-            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
-            let copy_len = caller_len.min(struct_len);
-
-            if copy_len > 0 {
-                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&sock_addr_in);
-                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
-                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
-            }
-
-            // Write back actual length.
-            let actual = struct_len as u32;
-            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
-            ctx.ok(0)
-        }
+define_syscall!(syscall_getpeername
+    (ctx, fd: Fd, addr_buf: u64, addrlen_ptr: u64)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    if addr_buf == 0 || addrlen_ptr == 0 {
+        return Err(Errno::EFAULT);
+    }
+    match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Unix(sh) => getpeername_unix(sh, addr_buf, addrlen_ptr),
+        SocketFd::Inet(sock_idx) => getpeername_inet(sock_idx, addr_buf, addrlen_ptr),
     }
 });
 
-define_syscall!(syscall_getsockname(ctx, args) requires(let process_id) {
-    let fd = args.arg0_i32();
-    let addr_buf = args.arg1;
-    let addrlen_ptr = args.arg2;
-
+define_syscall!(syscall_getsockname
+    (ctx, fd: Fd, addr_buf: u64, addrlen_ptr: u64)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
     if addr_buf == 0 || addrlen_ptr == 0 {
-        return ctx.err_with(ERRNO_EFAULT);
+        return Err(Errno::EFAULT);
     }
-
-    let sock_fd = match socket_fd_for(process_id, fd) {
-        Ok(v) => v,
-        Err(errno) => return ctx.err_with(errno),
-    };
-
-    match sock_fd {
-        SocketFd::Unix(sh) => {
-            // For AF_UNIX, return the socket's own bound path as SockAddrUn.
-            let path_len = unix_socket::unix_get_local_path_len(sh);
-            let mut addr_un = SockAddrUn::default();
-            addr_un.family = AF_UNIX;
-            if path_len > 0 {
-                if let Some(path) = unix_socket::unix_get_local_path(sh) {
-                    addr_un.path[..path_len].copy_from_slice(&path[..path_len]);
-                }
-            }
-            let struct_len = 2 + path_len; // family + path bytes
-
-            // Read caller's buffer length.
-            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
-            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
-            let copy_len = caller_len.min(struct_len);
-
-            if copy_len > 0 {
-                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&addr_un);
-                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
-                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
-            }
-
-            // Write back actual length.
-            let actual = struct_len as u32;
-            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
-            ctx.ok(0)
-        }
-        SocketFd::Inet(sock_idx) => {
-            let Some(local) = socket::socket_get_local_addr(sock_idx) else {
-                // Per POSIX, getsockname on an unbound socket returns
-                // AF_INET + zeroed addr/port rather than EINVAL.
-                let zeroed = SockAddrIn {
-                    family: AF_INET,
-                    port: 0,
-                    addr: [0; 4],
-                    _pad: [0; 8],
-                };
-                let struct_len = core::mem::size_of::<SockAddrIn>();
-                let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
-                let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
-                let copy_len = caller_len.min(struct_len);
-                if copy_len > 0 {
-                    let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&zeroed);
-                    let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
-                    try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
-                }
-                let actual = struct_len as u32;
-                try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
-                return ctx.ok(0);
-            };
-            let sock_addr_in = local.to_user();
-            let struct_len = core::mem::size_of::<SockAddrIn>();
-
-            // Read caller's buffer length.
-            let user_len_ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(addrlen_ptr));
-            let caller_len = try_or_err!(ctx, copy_from_user(user_len_ptr)) as usize;
-            let copy_len = caller_len.min(struct_len);
-
-            if copy_len > 0 {
-                let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&sock_addr_in);
-                let user_buf = try_or_err!(ctx, UserBytes::try_new(addr_buf, copy_len));
-                try_or_err!(ctx, copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]));
-            }
-
-            // Write back actual length.
-            let actual = struct_len as u32;
-            try_or_err!(ctx, copy_to_user(user_len_ptr, &actual));
-            ctx.ok(0)
-        }
+    match socket_fd_for(process_id, fd.raw())? {
+        SocketFd::Unix(sh) => getsockname_unix(sh, addr_buf, addrlen_ptr),
+        SocketFd::Inet(sock_idx) => getsockname_inet(sock_idx, addr_buf, addrlen_ptr),
     }
 });

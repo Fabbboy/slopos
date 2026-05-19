@@ -1,7 +1,8 @@
+use slopos_abi::Errno;
 use slopos_abi::KernelErrno;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
-use slopos_abi::syscall::{ERRNO_ERESTARTSYS, TtyIndex};
+use slopos_abi::syscall::TtyIndex;
 use slopos_abi::{DisplayInfo, InputEvent};
 
 use slopos_fs::fileio::file_open_tty_fd;
@@ -10,22 +11,22 @@ use slopos_kernel_services::syscall_services::{input, tty, video};
 use slopos_sched::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
-use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 
-define_syscall!(syscall_getrandom(ctx, args) {
-    let buf_ptr = args.arg0;
-    let buf_len = args.arg1_usize();
-    let _flags = args.arg2 as u32;
+use crate::syscall::args::{UserBytes, UserPtr};
+use crate::syscall::result::SyscallResult;
 
-    if buf_ptr == 0 || buf_len == 0 {
-        return ctx.ok(0);
+define_syscall!(syscall_getrandom
+    (ctx, buf: UserBytes, _flags: u32) -> Result<u64, Errno>
+{
+    if buf.base_u64() == 0 || buf.len() == 0 {
+        return Ok(0);
     }
 
     // Cap at 256 bytes per call to limit IRQ-mutex hold time.
-    let len = buf_len.min(256);
+    let len = buf.len().min(256);
     let mut scratch = [0u8; 256];
 
-    // Fill via platform service (routes to ChaCha20 CSPRNG in drivers).
     let mut pos = 0;
     while pos < len {
         let val = platform::rng_next();
@@ -35,38 +36,28 @@ define_syscall!(syscall_getrandom(ctx, args) {
         pos += chunk;
     }
 
-    let user_out = try_or_err!(ctx, UserBytes::try_new(buf_ptr, len));
-    try_or_err!(ctx, copy_bytes_to_user(user_out, &scratch[..len]));
-
-    ctx.ok(len as u64)
+    let user_out = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_to_user(user_out, &scratch[..len]).map_err(|_| Errno::EFAULT)?;
+    Ok(len as u64)
 });
 
-define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
-    let max_count = args.arg1_usize();
-
-    if args.arg0 == 0 || max_count == 0 {
-        return ctx.ok(0);
+define_syscall!(syscall_input_poll_batch
+    (ctx, events_out: UserPtr<u8>, max_count: u64)
+    requires(task_id: task_id)
+    -> Result<u64, Errno>
+{
+    if events_out.as_u64() == 0 || max_count == 0 {
+        return Ok(0);
     }
+    let max_count = max_count as usize;
 
     if ctx.is_compositor() {
-        // Register the compositor so all raw input routes to its queue
         input::register_compositor(task_id);
         if input::get_pointer_focus() == 0 {
             input::set_pointer_focus(task_id, 0);
         }
     }
 
-    // Drain into a kernel scratch buffer, then copy to userspace.
-    // Heap-allocate so the ~2 KiB scratch never lands on the kernel
-    // stack.
-    //
-    // The scratch element is a fixed-size byte buffer sized to one
-    // `InputEvent`; `align(8)` matches `InputEvent`'s required
-    // alignment (asserted below). drain_batch writes through a typed
-    // `*mut InputEvent` pointer over the backing storage; the
-    // surrounding kernel reads it back as `&[u8]` for
-    // `copy_bytes_to_user`. `[u8; N]: Pod` allows the byte-view to
-    // route through `pod_slice_as_bytes`.
     #[allow(dead_code)]
     #[derive(slopos_ostd::Zeroable, slopos_ostd::Pod, Copy, Clone)]
     #[repr(C, align(8))]
@@ -79,10 +70,8 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
 
     const MAX_BATCH: usize = 64;
     let batch = max_count.min(MAX_BATCH);
-    let mut scratch = match slopos_ostd::KVec::<InputEventScratch>::zeroed(batch) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
-    };
+    let mut scratch = slopos_ostd::KVec::<InputEventScratch>::zeroed(batch)
+        .map_err(|_| Errno::ENOMEM)?;
 
     let count = input::drain_batch(
         task_id,
@@ -91,169 +80,168 @@ define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
     );
     if count > 0 {
         let src_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes(&scratch[..count]);
-        let user_out = try_or_err!(ctx, UserBytes::try_new(args.arg0, src_bytes.len()));
-        try_or_err!(ctx, copy_bytes_to_user(user_out, src_bytes));
+        let user_out = MmUserBytes::try_new(events_out.as_u64(), src_bytes.len())
+            .map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_out, src_bytes).map_err(|_| Errno::EFAULT)?;
     }
-
-    ctx.ok(count as u64)
+    Ok(count as u64)
 });
 
-define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {
+define_syscall!(syscall_clipboard_copy
+    (ctx, src: UserBytes)
+    requires(task_id: task_id)
+    -> Result<u64, Errno>
+{
     let _ = task_id;
-    let src_ptr = args.arg0;
-    let src_len = args.arg1_usize();
-
-    if src_ptr == 0 || src_len == 0 {
-        return ctx.ok(0);
+    if src.base_u64() == 0 || src.len() == 0 {
+        return Ok(0);
     }
 
-    let copy_len = src_len.min(slopos_abi::CLIPBOARD_MAX_SIZE);
-    let user_bytes = try_or_err!(ctx, UserBytes::try_new(src_ptr, copy_len));
-    let mut buf = match slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
-    };
-    try_or_err!(ctx, copy_bytes_from_user(user_bytes, &mut buf[..copy_len]));
+    let copy_len = src.len().min(slopos_abi::CLIPBOARD_MAX_SIZE);
+    let user_bytes = MmUserBytes::try_new(src.base_u64(), copy_len).map_err(|_| Errno::EFAULT)?;
+    let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
+        .map_err(|_| Errno::ENOMEM)?;
+    copy_bytes_from_user(user_bytes, &mut buf[..copy_len]).map_err(|_| Errno::EFAULT)?;
     let stored = input::clipboard_copy(&buf[..copy_len]);
-    ctx.ok(stored as u64)
+    Ok(stored as u64)
 });
 
-define_syscall!(syscall_clipboard_paste(ctx, args) requires(let task_id) {
+define_syscall!(syscall_clipboard_paste
+    (ctx, dst: UserBytes)
+    requires(task_id: task_id)
+    -> Result<u64, Errno>
+{
     let _ = task_id;
-    let dst_ptr = args.arg0;
-    let max_len = args.arg1_usize();
-
-    if dst_ptr == 0 || max_len == 0 {
-        return ctx.ok(0);
+    if dst.base_u64() == 0 || dst.len() == 0 {
+        return Ok(0);
     }
 
-    let mut buf = match slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE) {
-        Ok(v) => v,
-        Err(_) => return ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
-    };
+    let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
+        .map_err(|_| Errno::ENOMEM)?;
     let pasted = input::clipboard_paste(&mut buf);
     if pasted == 0 {
-        return ctx.ok(0);
+        return Ok(0);
     }
 
-    let write_len = pasted.min(max_len);
-    let user_ptr = try_or_err!(ctx, UserBytes::try_new(dst_ptr, write_len));
-    try_or_err!(ctx, copy_bytes_to_user(user_ptr, &buf[..write_len]));
-    ctx.ok(write_len as u64)
+    let write_len = pasted.min(dst.len());
+    let user_ptr = MmUserBytes::try_new(dst.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_to_user(user_ptr, &buf[..write_len]).map_err(|_| Errno::EFAULT)?;
+    Ok(write_len as u64)
 });
 
-define_syscall!(syscall_openpty(ctx, args) {
-    let master_out = try_or_err!(ctx, UserPtr::<u32>::try_new(args.arg0));
-    let slave_out = try_or_err!(ctx, UserPtr::<u32>::try_new(args.arg1));
-
+define_syscall!(syscall_openpty
+    (ctx, master_out: UserPtr<u32>, slave_out: UserPtr<u32>) -> Result<(), Errno>
+{
     let master_idx = match tty::alloc_pty() {
         Ok(idx) => idx,
-        Err(e) => return ctx.ok_i64(e.to_errno() as i64),
+        Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
     };
 
     let slave_num = match tty::get_pty_number(master_idx) {
         Ok(n) => n,
-        Err(e) => return ctx.ok_i64(e.to_errno() as i64),
+        Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
     };
 
     if let Err(e) = tty::grantpt(master_idx) {
-        return ctx.ok_i64(e.to_errno() as i64);
+        return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL));
     }
 
-    try_or_err!(ctx, copy_to_user(master_out, &(master_idx.0 as u32)));
-    try_or_err!(ctx, copy_to_user(slave_out, &slave_num));
-    ctx.ok(0)
+    copy_to_user(master_out.inner(), &(master_idx.0 as u32)).map_err(|_| Errno::EFAULT)?;
+    copy_to_user(slave_out.inner(), &slave_num).map_err(|_| Errno::EFAULT)?;
+    Ok(())
 });
 
-define_syscall!(syscall_tty_read(ctx, args) {
-    let tty_idx = TtyIndex(args.arg0 as u8);
-    let user_ptr = args.arg1;
-    let max_len = args.arg2_usize();
-
-    if user_ptr == 0 || max_len == 0 {
-        return ctx.ok(0);
+define_syscall!(syscall_tty_read
+    (ctx, tty_idx: u8, dst: UserBytes) -> Result<u64, Errno>
+{
+    let tty_idx = TtyIndex(tty_idx);
+    if dst.base_u64() == 0 || dst.len() == 0 {
+        return Ok(0);
     }
 
     const MAX_COPY: usize = 512;
     let mut scratch = [0u8; MAX_COPY];
-    let read_len = max_len.min(MAX_COPY);
+    let read_len = dst.len().min(MAX_COPY);
 
     match tty::read_cooked(tty_idx, scratch.as_mut_ptr(), read_len, true) {
         Ok(n) => {
-            let user_bytes = try_or_err!(ctx, UserBytes::try_new(user_ptr, n));
-            try_or_err!(ctx, copy_bytes_to_user(user_bytes, &scratch[..n]));
-            ctx.ok(n as u64)
+            let user_bytes = MmUserBytes::try_new(dst.base_u64(), n).map_err(|_| Errno::EFAULT)?;
+            copy_bytes_to_user(user_bytes, &scratch[..n]).map_err(|_| Errno::EFAULT)?;
+            Ok(n as u64)
         }
         Err(e) => {
-            let errno = e.to_errno() as i64;
+            let errno = e.to_errno();
             if errno == -512 {
-                ctx.err_with(ERRNO_ERESTARTSYS)
+                Err(Errno::ERESTARTSYS)
             } else {
-                ctx.ok_i64(errno)
+                Err(Errno::from_raw(errno).unwrap_or(Errno::EINVAL))
             }
         }
     }
 });
 
-define_syscall!(syscall_tty_write(ctx, args) {
-    let tty_idx = TtyIndex(args.arg0 as u8);
-    let user_ptr = args.arg1;
-    let len = args.arg2_usize();
-
-    if user_ptr == 0 || len == 0 {
-        return ctx.ok(0);
+define_syscall!(syscall_tty_write
+    (ctx, tty_idx: u8, src: UserBytes) -> Result<u64, Errno>
+{
+    let tty_idx = TtyIndex(tty_idx);
+    if src.base_u64() == 0 || src.len() == 0 {
+        return Ok(0);
     }
 
     const MAX_COPY: usize = 512;
     let mut scratch = [0u8; MAX_COPY];
-    let write_len = len.min(MAX_COPY);
-    let user_bytes = try_or_err!(ctx, UserBytes::try_new(user_ptr, write_len));
-    try_or_err!(ctx, copy_bytes_from_user(user_bytes, &mut scratch[..write_len]));
+    let write_len = src.len().min(MAX_COPY);
+    let user_bytes = MmUserBytes::try_new(src.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_from_user(user_bytes, &mut scratch[..write_len]).map_err(|_| Errno::EFAULT)?;
 
     match tty::write_bytes(tty_idx, scratch.as_ptr(), write_len, true) {
-        Ok(n) => ctx.ok(n as u64),
+        Ok(n) => Ok(n as u64),
         Err(e) => {
-            let errno = e.to_errno() as i64;
+            let errno = e.to_errno();
             if errno == -512 {
-                ctx.err_with(ERRNO_ERESTARTSYS)
+                Err(Errno::ERESTARTSYS)
             } else {
-                ctx.ok_i64(errno)
+                Err(Errno::from_raw(errno).unwrap_or(Errno::EINVAL))
             }
         }
     }
 });
 
-// Open a file descriptor pointing to a TTY by its kernel index.
-// Increments the TTY's open_count first (matching the VFS open path).
-define_syscall!(syscall_open_tty_fd(ctx, args) requires(let pid: process_id) {
-    let tty_idx = TtyIndex(args.arg0 as u8);
+define_syscall!(syscall_open_tty_fd
+    (ctx, tty_idx: u8)
+    requires(let pid: process_id)
+    -> Result<u64, Errno>
+{
+    let tty_idx = TtyIndex(tty_idx);
     if tty::open_ref(tty_idx).is_err() {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
     let fd = file_open_tty_fd(pid, tty_idx, 0);
     if fd < 0 {
         let _ = tty::close_ref(tty_idx);
-        ctx.ok_i64(fd as i64)
+        Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL))
     } else {
-        ctx.ok(fd as u64)
+        Ok(fd as u64)
     }
 });
 
-define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
-    let fd = args.arg0 as i32;
-    let damage_ptr = args.arg1;
-    let damage_count = args.arg2_usize();
+define_syscall!(syscall_fb_flip
+    (ctx, fd: i64, damage_ptr: u64, damage_count: u64)
+    requires(compositor)
+    -> Result<(), Errno>
+{
+    let fd = fd as i32;
+    let damage_count = damage_count as usize;
 
-    // Resolve memfd fd to physical address (lock-free hot path).
-    let process_id = some_or_err!(ctx, ctx.process_id());
-    let (kind, handle) = some_or_err!(ctx,
-        slopos_fs::fileio::fileio_get_open_file_handle(process_id, fd));
+    let process_id = ctx.process_id().ok_or(Errno::ESRCH)?;
+    let (kind, handle) = slopos_fs::fileio::fileio_get_open_file_handle(process_id, fd)
+        .ok_or(Errno::EBADF)?;
     if kind != slopos_abi::file_ops::FileKind::Memfd {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
     let (phys_addr, size) = slopos_mm::memfd::memfd_get_phys(handle);
     if phys_addr.is_null() || size == 0 {
-        return ctx.err();
+        return Err(Errno::EINVAL);
     }
 
     let mut damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
@@ -261,81 +249,91 @@ define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
     if damage_ptr != 0 && damage_count > 0 {
         let clamped = damage_count.min(MAX_DAMAGE_REGIONS);
         let byte_len = core::mem::size_of::<DamageRect>() * clamped;
-        let user_bytes = match UserBytes::try_new(damage_ptr, byte_len) {
-            Ok(ptr) => ptr,
-            Err(_) => return ctx.err(),
-        };
+        let user_bytes = MmUserBytes::try_new(damage_ptr, byte_len).map_err(|_| Errno::EFAULT)?;
         let dst = &mut damage_regions[..clamped];
         let dst_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(dst);
         debug_assert_eq!(dst_bytes.len(), byte_len);
-        if copy_bytes_from_user(user_bytes, dst_bytes).is_err() {
-            return ctx.err();
-        }
+        copy_bytes_from_user(user_bytes, dst_bytes).map_err(|_| Errno::EFAULT)?;
         damage_region_count = clamped as u32;
     }
 
-    some_or_err!(ctx, video::get_display_info());
-    let damage_ptr = if damage_region_count > 0 {
+    video::get_display_info().ok_or(Errno::EINVAL)?;
+    let damage_ptr_ffi = if damage_region_count > 0 {
         damage_regions.as_ptr()
     } else {
         core::ptr::null()
     };
-    check_result!(ctx, video::fb_flip_from_shm(
-        phys_addr,
-        size,
-        damage_ptr,
-        damage_region_count,
-    ));
+    let rc = video::fb_flip_from_shm(phys_addr, size, damage_ptr_ffi, damage_region_count);
+    if rc != 0 {
+        return Err(Errno::EINVAL);
+    }
     video::set_compositor_task_id(ctx.task_id().unwrap_or(0));
-    ctx.ok(0)
+    Ok(())
 });
 
-define_syscall!(syscall_roulette_draw(ctx, args) requires(display_exclusive) {
+define_syscall!(syscall_roulette_draw
+    (ctx, fate: u32)
+    requires(display_exclusive)
+    -> Result<(), Errno>
+{
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
-    let fate = args.arg0_u32();
     let caller_pid = ctx.process_id();
-    // Switch to the kernel master so the roulette draw runs against
-    // a canonical PML4; safe-wrapper entries route through the
-    // documented kernel-half invariants.
     kernel_vm_space().lock().activate_kernel_master();
-    let disp = ctx.from_result(video::roulette_draw(fate));
+    let result = video::roulette_draw(fate);
     if let Some(pid) = caller_pid {
         let _ = slopos_mm::process_vm::process_vm_activate(pid);
     }
-    disp
+    result.map_err(|_| Errno::EINVAL)
 });
 
-define_syscall!(syscall_roulette_spin(ctx, args) requires(let task_id) {
-    let _ = args;
+define_syscall!(syscall_roulette_spin (ctx)
+    requires(task_id: task_id)
+    -> Result<u64, Errno>
+{
     let res = fate_spin();
-    check_result!(ctx, fate_set_pending(res, task_id));
+    if fate_set_pending(res, task_id) != 0 {
+        return Err(Errno::EINVAL);
+    }
     let packed = ((res.token as u64) << 32) | res.value as u64;
-    ctx.ok(packed)
+    Ok(packed)
 });
 
-define_syscall!(syscall_roulette_result(ctx, args) requires(let task_id) {
+define_syscall!(syscall_roulette_result
+    (ctx, packed: u64)
+    requires(task_id: task_id)
+    -> SyscallResult
+{
     let mut stored = FateResult { token: 0, value: 0 };
-    check_result!(ctx, fate_take_pending(task_id, &mut stored));
+    if fate_take_pending(task_id, &mut stored) != 0 {
+        return SyscallResult::Err(Errno::EINVAL);
+    }
 
-    let token = (args.arg0 >> 32) as u32;
+    let token = (packed >> 32) as u32;
     if token != stored.token {
-        return ctx.err();
+        return SyscallResult::Err(Errno::EINVAL);
     }
 
     let is_win = (stored.value & 1) == 1;
 
     if is_win {
         fate_apply_outcome(&stored as *const FateResult, 0, true);
-        ctx.ok(0)
+        SyscallResult::Ok(0)
     } else {
         fate_apply_outcome(&stored as *const FateResult, 0, false);
         platform::kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const i8);
+        #[allow(unreachable_code)]
+        SyscallResult::NoReturn
     }
 });
 
-define_syscall!(syscall_fb_info(ctx, args) {
-    let display_info = some_or_err!(ctx, video::get_display_info());
-    let user_ptr = try_or_err!(ctx, UserPtr::<DisplayInfo>::try_new(args.arg0));
-    try_or_err!(ctx, copy_to_user(user_ptr, &display_info));
-    ctx.ok(0)
+define_syscall!(syscall_fb_info
+    (ctx, info_out: UserPtr<DisplayInfo>) -> Result<(), Errno>
+{
+    let info = video::get_display_info().ok_or(Errno::EINVAL)?;
+    copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
+    Ok(())
 });
+
+// Silence unused warning for the legacy alias.
+#[allow(dead_code)]
+type _Unused = MmUserPtr<u8>;

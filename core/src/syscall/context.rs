@@ -1,53 +1,102 @@
-use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
-use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
+//! Per-syscall context.
+//!
+//! Built once by [`crate::syscall::dispatch::syscall_handle`] when a
+//! syscall enters the kernel. Handler bodies receive `&SyscallContext`
+//! and never touch raw register state for argument parsing — typed
+//! arguments are decoded by the macro from `ctx.regs()`. The context
+//! also exposes the active task, the calling process's
+//! [`slopos_ostd::mm::vm_space::VmSpace`], and the full
+//! [`UserContext`] for the few handlers that perform whole-frame
+//! manipulation (`exec`, `fork`, `clone`, `rt_sigreturn`).
+
+use slopos_abi::Errno;
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_SYSTEM,
 };
+use slopos_ostd::KArc;
+use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
 use slopos_sched::task::{
-    task_borrow_mut, task_flags as task_flags_of, task_id_of, task_process_id,
+    task_borrow, task_borrow_mut, task_flags as task_flags_of, task_id_of, task_process_id,
 };
 use slopos_sched::task_struct::Task;
 
-#[derive(Clone, Copy)]
-pub struct SyscallArgs {
-    pub arg0: u64,
-    pub arg1: u64,
-    pub arg2: u64,
-    pub arg3: u64,
-    pub arg4: u64,
-    pub arg5: u64,
-}
+use crate::syscall::result::SyscallResult;
+
+/// Six-register argument payload, snapshotted at syscall entry.
+///
+/// Index conventions (System V AMD64, with `R10` standing in for
+/// `RCX`, which the `syscall` instruction clobbers):
+///
+/// | Index | Register |
+/// |-------|----------|
+/// | 0     | `rdi`    |
+/// | 1     | `rsi`    |
+/// | 2     | `rdx`    |
+/// | 3     | `r10`    |
+/// | 4     | `r8`     |
+/// | 5     | `r9`     |
+pub type SyscallRegs = [u64; 6];
 
 pub struct SyscallContext {
     task_ptr: *mut Task,
     user_ctx_ptr: *mut UserContext,
-    args: SyscallArgs,
+    regs: SyscallRegs,
 }
 
 impl SyscallContext {
+    /// Construct from a live `UserContext` reference. Used by the
+    /// dispatch entry point.
     pub fn from_user_context(task: *mut Task, ctx: &mut UserContext) -> Option<Self> {
-        let regs = ctx.regs();
-        let args = SyscallArgs {
-            arg0: regs.rdi,
-            arg1: regs.rsi,
-            arg2: regs.rdx,
-            arg3: regs.r10,
-            arg4: regs.r8,
-            arg5: regs.r9,
-        };
-
+        let r = ctx.regs();
+        let regs: SyscallRegs = [r.rdi, r.rsi, r.rdx, r.r10, r.r8, r.r9];
         Some(Self {
             task_ptr: task,
             user_ctx_ptr: ctx as *mut UserContext,
-            args,
+            regs,
         })
+    }
+
+    /// Test-only constructor — used by `core/src/syscall/tests.rs`.
+    /// Builds a `SyscallContext` directly from a caller-owned
+    /// `UserContext`, identical to the dispatch-path constructor.
+    #[doc(hidden)]
+    pub fn from_test_frame(task: *mut Task, ctx: &mut UserContext) -> Option<Self> {
+        Self::from_user_context(task, ctx)
+    }
+
+    // ── Raw argument payload (macro-internal) ─────────────────────────
+
+    /// The macro-internal hook used by `define_syscall!` to thread
+    /// argument parsing across `SyscallArg::from_raw` calls. Not for
+    /// hand-written handler bodies — bodies never reach for raw
+    /// register slots; typed args flow through `SyscallArg::from_raw`.
+    #[inline]
+    pub fn regs(&self) -> &SyscallRegs {
+        &self.regs
+    }
+
+    // ── Task / process / VM space accessors ───────────────────────────
+
+    #[inline]
+    pub fn task_ptr(&self) -> *mut Task {
+        self.task_ptr
     }
 
     #[inline]
     pub fn has_task(&self) -> bool {
         !self.task_ptr.is_null()
+    }
+
+    #[inline]
+    pub fn task(&self) -> Option<&Task> {
+        task_borrow(self.task_ptr)
+    }
+
+    #[inline]
+    pub fn task_mut(&self) -> Option<&mut Task> {
+        task_borrow_mut(self.task_ptr)
     }
 
     #[inline]
@@ -59,6 +108,37 @@ impl SyscallContext {
     pub fn process_id(&self) -> Option<u32> {
         task_process_id(self.task_ptr)
     }
+
+    #[inline]
+    pub fn require_task(&self) -> Result<(), Errno> {
+        if self.task_ptr.is_null() {
+            Err(Errno::ESRCH)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    pub fn require_task_id(&self) -> Result<u32, Errno> {
+        self.task_id().ok_or(Errno::ESRCH)
+    }
+
+    #[inline]
+    pub fn require_process_id(&self) -> Result<u32, Errno> {
+        match self.process_id() {
+            Some(pid) if pid != INVALID_PROCESS_ID => Ok(pid),
+            _ => Err(Errno::ESRCH),
+        }
+    }
+
+    /// Resolve the caller's [`VmSpace`]. Returns `EFAULT` if the
+    /// caller is bound to no process or the process has no VM space.
+    pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {
+        let pid = self.require_process_id()?;
+        slopos_mm::process_vm::process_vm_get_vm_space(pid).ok_or(Errno::EFAULT)
+    }
+
+    // ── Permission checks ─────────────────────────────────────────────
 
     #[inline]
     pub fn has_flag(&self, flag: u16) -> bool {
@@ -78,29 +158,44 @@ impl SyscallContext {
         self.has_flag(TASK_FLAG_DISPLAY_EXCLUSIVE)
     }
 
-    /// Check if the calling task has console administration privilege.
-    ///
-    /// Modelled on Linux's `capable(CAP_SYS_TTY_CONFIG)` check in
-    /// `drivers/tty/vt/vt_ioctl.c`.  Uses `TASK_FLAG_SYSTEM` as the
-    /// SlopOS equivalent until a proper capability bitfield is added.
+    /// Console-administration privilege — modelled on Linux's
+    /// `capable(CAP_SYS_TTY_CONFIG)`. Uses `TASK_FLAG_SYSTEM` as the
+    /// SlopOS equivalent until a proper capability bitfield exists.
     #[inline]
     pub fn is_console_admin(&self) -> bool {
         self.has_flag(TASK_FLAG_SYSTEM)
     }
 
     #[inline]
-    pub fn require_console_admin(&self) -> Result<(), SyscallDisposition> {
-        if !self.is_console_admin() {
-            Err(self.err_with(slopos_abi::Errno::EPERM.as_u64()))
-        } else {
+    pub fn require_compositor(&self) -> Result<(), Errno> {
+        if self.is_compositor() {
             Ok(())
+        } else {
+            Err(Errno::EPERM)
         }
     }
 
     #[inline]
-    pub fn args(&self) -> &SyscallArgs {
-        &self.args
+    pub fn require_display_exclusive(&self) -> Result<(), Errno> {
+        if self.is_display_exclusive() {
+            Ok(())
+        } else {
+            Err(Errno::EPERM)
+        }
     }
+
+    #[inline]
+    pub fn require_console_admin(&self) -> Result<(), Errno> {
+        if self.is_console_admin() {
+            Ok(())
+        } else {
+            Err(Errno::EPERM)
+        }
+    }
+
+    // ── Full user-context access (used by exec / fork / clone /
+    // rt_sigreturn — whole-frame manipulation, NOT argument parsing).
+    // ────────────────────────────────────────────────────────────────
 
     #[inline]
     pub fn user_ctx_ptr(&self) -> *mut UserContext {
@@ -113,237 +208,69 @@ impl SyscallContext {
     }
 
     /// Mutable view of the per-task user-mode register snapshot the
-    /// syscall handler is operating on. Returned reference's lifetime
-    /// is the borrow of `self`; callers must not retain it across a
-    /// reentrant `&mut UserContext` reborrow (e.g. nested handler dispatch).
+    /// syscall handler is operating on. Lifetime is the borrow of
+    /// `self`; callers must not retain it across nested handler
+    /// dispatch.
     #[inline]
     pub fn user_ctx_mut(&self) -> &mut UserContext {
         UserContext::from_ptr_mut(self.user_ctx_ptr).expect("syscall: user_ctx_ptr null")
     }
 
+    /// User-mode RSP at syscall entry. Convenience for `rt_sigreturn`
+    /// (and any future handler that needs to peek the user stack
+    /// pointer without rebuilding the whole frame view).
     #[inline]
-    pub fn task_ptr(&self) -> *mut Task {
-        self.task_ptr
+    pub fn user_rsp(&self) -> u64 {
+        self.user_ctx().rsp()
     }
 
-    #[inline]
-    pub fn task_mut(&self) -> Option<&mut Task> {
-        task_borrow_mut(self.task_ptr)
-    }
+    // ── Dispatcher-only return-value writers ──────────────────────────
+    //
+    // These are the **only** sites that write `rax`. The dispatcher
+    // matches on `SyscallResult` and calls one of these; handler
+    // bodies never invoke them directly.
 
-    #[inline]
-    pub fn ok(&self, value: u64) -> SyscallDisposition {
+    /// Write a successful return value to user `rax`. Bumps the
+    /// `wl_currency` balance, mirroring the pre-Phase-2D
+    /// `ctx.ok(value)` accounting.
+    pub fn write_ok(&self, value: u64) {
         wl_currency::adjust_balance(WL_DELTA);
-        syscall_return_ok(self.user_ctx_ptr, value)
+        if let Some(uc) = UserContext::from_ptr_mut(self.user_ctx_ptr) {
+            uc.set_rax(value);
+        }
     }
 
-    #[inline]
-    pub fn ok_i64(&self, value: i64) -> SyscallDisposition {
-        self.ok(value as u64)
-    }
-
-    #[inline]
-    pub fn err(&self) -> SyscallDisposition {
-        self.err_with(ERRNO_EINVAL)
-    }
-
-    #[inline]
-    pub fn err_with(&self, errno: u64) -> SyscallDisposition {
+    /// Write an errno return value to user `rax`. Decrements the
+    /// `wl_currency` balance.
+    pub fn write_err(&self, errno: Errno) {
         wl_currency::adjust_balance(-WL_DELTA);
-        syscall_return_err(self.user_ctx_ptr, errno)
-    }
-
-    #[inline]
-    pub fn invalid_arg(&self) -> SyscallDisposition {
-        self.err_with(ERRNO_EINVAL)
-    }
-
-    #[inline]
-    pub fn bad_address(&self) -> SyscallDisposition {
-        self.err_with(ERRNO_EFAULT)
-    }
-
-    #[inline]
-    pub fn require_task(&self) -> Result<(), SyscallDisposition> {
-        if self.task_ptr.is_null() {
-            Err(self.err())
-        } else {
-            Ok(())
+        if let Some(uc) = UserContext::from_ptr_mut(self.user_ctx_ptr) {
+            uc.set_rax(errno.as_u64());
         }
     }
 
-    #[inline]
-    pub fn require_task_id(&self) -> Result<u32, SyscallDisposition> {
-        self.task_id().ok_or_else(|| self.err())
-    }
-
-    #[inline]
-    pub fn require_process_id(&self) -> Result<u32, SyscallDisposition> {
-        match self.process_id() {
-            Some(pid) if pid != INVALID_PROCESS_ID => Ok(pid),
-            _ => Err(self.err()),
+    /// Write a raw u64 (used for the `ERRNO_ERESTARTSYS` sentinel that
+    /// is outside the `[-4095, -1]` `Errno` range).
+    pub fn write_err_u64(&self, raw: u64) {
+        wl_currency::adjust_balance(-WL_DELTA);
+        if let Some(uc) = UserContext::from_ptr_mut(self.user_ctx_ptr) {
+            uc.set_rax(raw);
         }
     }
 
-    #[inline]
-    pub fn require_compositor(&self) -> Result<(), SyscallDisposition> {
-        if !self.is_compositor() {
-            Err(self.err())
-        } else {
-            Ok(())
-        }
-    }
-
-    #[inline]
-    pub fn require_display_exclusive(&self) -> Result<(), SyscallDisposition> {
-        if !self.is_display_exclusive() {
-            Err(self.err())
-        } else {
-            Ok(())
-        }
-    }
-
-    #[inline]
-    pub fn check_result(&self, result: i32) -> Result<(), SyscallDisposition> {
-        if result != 0 { Err(self.err()) } else { Ok(()) }
-    }
-
-    #[inline]
-    pub fn check_negative(&self, result: i32) -> Result<(), SyscallDisposition> {
-        if result < 0 { Err(self.err()) } else { Ok(()) }
-    }
-
-    #[inline]
-    pub fn err_user_ptr(&self, _err: slopos_mm::user_ptr::UserPtrError) -> SyscallDisposition {
-        self.err_with(ERRNO_EFAULT)
-    }
-
-    #[inline]
-    pub fn check_user_ptr<T>(
-        &self,
-        result: Result<T, slopos_mm::user_ptr::UserPtrError>,
-    ) -> Result<T, SyscallDisposition> {
-        result.map_err(|e| self.err_user_ptr(e))
-    }
-
-    // =========================================================================
-    // Result conversion helpers - eliminate boilerplate patterns
-    // =========================================================================
-
-    /// Convert a signed return code to a disposition.
-    /// Returns `err()` if rc < 0, otherwise `ok(0)`.
-    ///
-    /// Replaces: `if rc < 0 { ctx.err() } else { ctx.ok(0) }`
-    #[inline]
-    pub fn from_rc(&self, rc: i32) -> SyscallDisposition {
-        if rc < 0 { self.err() } else { self.ok(0) }
-    }
-
-    /// Convert a signed return code to a disposition, returning the value on success.
-    /// Returns `err()` if rc < 0, otherwise `ok(rc as u64)`.
-    ///
-    /// Replaces: `if rc < 0 { ctx.err() } else { ctx.ok(rc as u64) }`
-    #[inline]
-    pub fn from_rc_value(&self, rc: i64) -> SyscallDisposition {
-        if rc < 0 {
-            self.err()
-        } else {
-            self.ok(rc as u64)
-        }
-    }
-
-    /// Convert a token/handle value to a disposition.
-    /// Returns `err()` if value == 0, otherwise `ok(value as u64)`.
-    ///
-    /// Replaces: `if token == 0 { ctx.err() } else { ctx.ok(token as u64) }`
-    #[inline]
-    pub fn from_token(&self, token: u32) -> SyscallDisposition {
-        if token == 0 {
-            self.err()
-        } else {
-            self.ok(token as u64)
-        }
-    }
-
-    /// Convert a u64 address/value to a disposition.
-    /// Returns `err()` if value == 0, otherwise `ok(value)`.
-    ///
-    /// Replaces: `if vaddr == 0 { ctx.err() } else { ctx.ok(vaddr) }`
-    #[inline]
-    pub fn from_nonzero(&self, value: u64) -> SyscallDisposition {
-        if value == 0 {
-            self.err()
-        } else {
-            self.ok(value)
-        }
-    }
-
-    /// Convert a Result<(), E> to a disposition.
-    /// Returns `err()` on Err, otherwise `ok(0)`.
-    #[inline]
-    pub fn from_result<E>(&self, result: Result<(), E>) -> SyscallDisposition {
+    /// Convenience: write the post-handler `SyscallResult` directly.
+    /// `NoReturn` leaves `rax` untouched.
+    pub fn write_result(&self, result: SyscallResult) {
         match result {
-            Ok(()) => self.ok(0),
-            Err(_) => self.err(),
-        }
-    }
-
-    /// Convert a Result<T, E> to a disposition with a mapper for the success value.
-    /// Returns `err()` on Err, otherwise `ok(f(value))`.
-    #[inline]
-    pub fn from_result_map<T, E, F>(&self, result: Result<T, E>, f: F) -> SyscallDisposition
-    where
-        F: FnOnce(T) -> u64,
-    {
-        match result {
-            Ok(v) => self.ok(f(v)),
-            Err(_) => self.err(),
-        }
-    }
-
-    /// Convert a bool to a disposition.
-    /// Returns `err()` if false, otherwise `ok(0)`.
-    #[inline]
-    pub fn from_bool(&self, success: bool) -> SyscallDisposition {
-        if success { self.ok(0) } else { self.err() }
-    }
-
-    /// Convert a bool to a disposition with a custom success value.
-    /// Returns `err()` if false, otherwise `ok(value)`.
-    #[inline]
-    pub fn from_bool_value(&self, success: bool, value: u64) -> SyscallDisposition {
-        if success { self.ok(value) } else { self.err() }
-    }
-
-    /// Convert an i32 result where != 0 means failure (common for C-style APIs).
-    /// Returns `err()` if rc != 0, otherwise `ok(0)`.
-    ///
-    /// Replaces: `if rc != 0 { ctx.err() } else { ctx.ok(0) }`
-    #[inline]
-    pub fn from_zero_success(&self, rc: i32) -> SyscallDisposition {
-        if rc != 0 { self.err() } else { self.ok(0) }
-    }
-}
-
-macro_rules! syscall_arg_accessors {
-    ($($field:ident),+) => {
-        $(
-            paste::paste! {
-                #[inline]
-                pub fn [<$field _u32>](&self) -> u32 { self.$field as u32 }
-                #[inline]
-                pub fn [<$field _i32>](&self) -> i32 { self.$field as i32 }
-                #[inline]
-                pub fn [<$field _usize>](&self) -> usize { self.$field as usize }
-                #[inline]
-                pub fn [<$field _ptr>]<T>(&self) -> *mut T { self.$field as *mut T }
-                #[inline]
-                pub fn [<$field _const_ptr>]<T>(&self) -> *const T { self.$field as *const T }
+            SyscallResult::Ok(v) => self.write_ok(v),
+            SyscallResult::Err(e) => {
+                if e == Errno::ERESTARTSYS {
+                    self.write_err_u64(slopos_abi::syscall::ERRNO_ERESTARTSYS);
+                } else {
+                    self.write_err(e);
+                }
             }
-        )+
-    };
-}
-
-impl SyscallArgs {
-    syscall_arg_accessors!(arg0, arg1, arg2, arg3, arg4, arg5);
+            SyscallResult::NoReturn => {}
+        }
+    }
 }

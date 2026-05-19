@@ -379,38 +379,35 @@ Landed 2026-05-17:
 
 Replace raw-`u64` syscall handler signatures with typed-argument structs. Validation shifts left into dispatch.
 
-- [ ] **2D.1** Define `core/src/syscall/args.rs`:
+- [x] **2D.1** `core/src/syscall/args.rs` lands the `SyscallArg` / `SyscallArgList` traits. `SyscallArgList` is hand-rolled for arity 0..=6 (a `SyscallArgs<A: SyscallArgList>` wrapper is unnecessary in practice — the macro expands directly into per-parameter `SyscallArg::from_raw` calls with a const-cursor walking `ctx.regs()`).
+- [x] **2D.2** `pub trait SyscallArg { const ARITY: usize; fn from_raw(regs: &[u64], ctx: &SyscallContext) -> Result<Self, Errno>; }`. Implementations:
+  - `u8`/`u16`/`u32`/`u64`/`usize`/`i8`/`i16`/`i32`/`i64`/`isize` raw integer args.
+  - `Fd(i32)` (range-checks non-negative i32; `EBADF` on violation).
+  - `RawFd(i32)` (allows `-1` for `mmap(MAP_ANONYMOUS, …)`).
+  - `Pid(u32)`, `Tid(u32)`, `SigPid(i32)`, `Signum(u8)`.
+  - `UserPtr<T>` / `Option<UserPtr<T>>` (`Pod` bound dropped; copy primitives take `T: Copy` at the call site).
+  - `UserSlice<T>` / `Option<UserSlice<T>>` (arity 2 — `base` + `count`).
+  - `UserBytes = UserSlice<u8>`.
+  - `UserCStr<const N: usize>` / `Option<UserCStr<N>>` (inline NUL-terminated copy, `N <= USER_PATH_MAX` to stay under the 2 KiB frame gate).
+- [x] **2D.3** `define_syscall!` rewritten in `core/src/syscall/macros.rs`:
   ```rust
-  pub struct SyscallArgs<A: SyscallArgList> {
-      args: A,
-      ctx: SyscallContext,
-  }
-  pub trait SyscallArgList {
-      fn parse(ctx: &SyscallContext) -> Result<Self, SyscallError>;
-  }
-  // Compositional impls:
-  impl SyscallArgList for () { ... }
-  impl<A: SyscallArg> SyscallArgList for (A,) { ... }
-  impl<A: SyscallArg, B: SyscallArg> SyscallArgList for (A, B) { ... }
-  // ... up to (A,B,C,D,E,F)
-  ```
-- [ ] **2D.2** Define `pub trait SyscallArg: Sized { fn from_raw(reg: u64, ctx: &SyscallContext) -> Result<Self, SyscallError>; }`. Implementations:
-  - `u64`, `i64`, `usize`, `isize` (raw integer args).
-  - `Fd(u32)` (validated against process FD table).
-  - `Pid(u32)` (validated; supports current).
-  - `UserPtr<T: Pod>` (validates user-space range).
-  - `UserSlice<T: Pod>` (paired with length arg; validated).
-  - `UserCStr` (length-bounded user C string).
-- [ ] **2D.3** Rewrite the `define_syscall!` macro to take a typed signature:
-  ```rust
-  define_syscall!(read(fd: Fd, buf: UserSlice<u8>, len: usize) -> isize {
+  define_syscall!(syscall_fs_read
+      (ctx, fd: Fd, buf: UserBytes)
+      requires(let pid: process_id)
+      -> Result<u64, Errno>
+  {
       // body in safe Rust; OSTD calls under the hood
   });
   ```
-- [ ] **2D.4** Migrate every existing syscall handler to typed args. Track in 2D.4.{a..z}: each handler becomes one sub-item.
-- [ ] **2D.5** `core/src/syscall/dispatch.rs`: the dispatch table is `[fn(&SyscallContext) -> SyscallResult; SYSCALL_TABLE_SIZE]`. Each entry is a generated thunk that parses args and invokes the typed handler.
-- [ ] **2D.6** Delete raw-frame access from handlers. `SyscallContext` only exposes `task()`, `process_id()`, `vm_space()`, etc. — no `frame.rdi`-style reads.
-- [ ] **2D.7** Verify: `rg 'frame\.r[adcdsibp]' core/src/syscall/` returns zero matches outside the dispatch glue.
+  The body's return type can be `()`, `u64`, `i64`/`isize`, `Result<T, Errno>`, or `SyscallResult` — `IntoSyscallResult` flattens to `SyscallResult` after the body runs.
+- [x] **2D.4** Every existing syscall handler migrated to typed args. Total: 115 handlers across `core_handlers.rs`, `ui_handlers.rs`, `memory_handlers.rs`, `net_handlers.rs`, `process_handlers.rs`, `signal.rs`, `font_handlers.rs`, `test_handlers.rs`, and `fs/{path,fd,poll_ioctl}_handlers.rs`. `getsockname` / `getpeername` / `recvmsg` extracted unix/inet branches into `#[inline(never)]` helpers so the closure body's frame stays under the 2 KiB framekernel gate.
+- [x] **2D.5** Dispatch table type changed to `SyscallHandler = fn(&SyscallContext) -> SyscallResult`. `SyscallDisposition` removed; `syscall_handle` in `dispatch.rs` builds a `SyscallContext` once, calls the handler, and routes the resulting `SyscallResult` through `ctx.write_result(...)`. `ctx.write_*` is the sole site that touches `rax` / `wl_currency`. A `dispatch_handler` test helper covers the ~25 direct invocation sites in `core/src/syscall/tests.rs`.
+- [x] **2D.6** `SyscallContext` no longer exposes raw register accessors (`args()` / `arg0_u32` / …). Body code reads typed parameters from the macro; the only methods on `&SyscallContext` are `task*()`, `process_id()`, `vm_space()`, `user_ctx()` / `user_ctx_mut()` / `user_rsp()` (for whole-frame manipulation in `exec` / `fork` / `clone` / `rt_sigreturn`), permission checks, and `write_ok` / `write_err` / `write_err_u64` / `write_result` (dispatcher sinks).
+- [x] **2D.7** Verification:
+  - `rg 'args\.arg' core/src/syscall/` → zero matches.
+  - `rg 'frame\.r[adcdsibp]' core/src/syscall/` → matches only inside `dispatch.rs` (sysno read), `signal.rs` (sigframe rebuild for `rt_sigreturn` / `deliver_pending_signal`), and `tests.rs` (rax read-back assertions).
+  - `just check-framekernel` clean: no unsafe outside OSTD, no kernel-crate `alloc` import, every frame ≤ 2 KiB.
+  - `just test`: 2427 tests pass (2424 kernel + 3 userland), 0 fail, 1 over-time.
 
 ### 2E: Driver reorganization
 
