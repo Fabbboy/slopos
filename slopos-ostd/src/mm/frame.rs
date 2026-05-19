@@ -15,7 +15,7 @@
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::mem::{MaybeUninit, align_of, size_of};
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 
@@ -239,6 +239,44 @@ unsafe impl AnyFrameMeta for AnonymousMeta {
     }
 }
 const _: () = assert_meta_fits::<AnonymousMeta>();
+
+/// Page-cache frame metadata. One slot per cached page of file or
+/// block-device contents; the metadata carries the dirty bit and an
+/// opaque owner-backref key chosen by the consumer (e.g. the ext2
+/// `BlockCache` encodes the on-disk block number; a future
+/// file-page-cache layer could pack `(inode, page_index)`). Atomics
+/// so the dirty bit can be sampled / flipped from shared references
+/// without taking the consumer's outer lock for the read.
+///
+/// Sized exactly at the [`MAX_META_SIZE`] cap: `AtomicU8 (1) +
+/// 7 padding + AtomicU64 (8) = 16` bytes. `assert_meta_fits` below
+/// is the load-bearing compile-time gate.
+#[derive(Default)]
+pub struct PageCacheMeta {
+    /// 0 = clean, 1 = dirty. `AtomicU8` so consumers can read the
+    /// dirty bit through a shared `Frame` borrow without exclusive
+    /// access. Producers (the writer that mutates the page bytes)
+    /// must already hold an exclusive view of the page contents, so
+    /// the dirty store and the byte writes are linearised by the
+    /// consumer's slot lock.
+    pub dirty: AtomicU8,
+    /// Opaque owner-backref key. Encoding is the consumer's choice;
+    /// the ext2 `BlockCache` stores the on-disk block number. Atomic
+    /// so a future inode-keyed variant can update it without holding
+    /// the slot lock (e.g. during background writeback).
+    pub owner_key: AtomicU64,
+}
+
+// SAFETY: payload is two atomics with no cross-field invariants
+// beyond `Atomic*`'s own contract. `on_drop` returns the underlying
+// physical frame to the registered allocator — required so the
+// `Frame<PageCacheMeta>` does not leak the page on its last Drop.
+unsafe impl AnyFrameMeta for PageCacheMeta {
+    fn on_drop(&mut self, paddr: Paddr) {
+        return_frame_to_allocator(paddr);
+    }
+}
+const _: () = assert_meta_fits::<PageCacheMeta>();
 
 /// Helper: dealloc `paddr` (one page) via the registered allocator.
 /// No-op when no allocator is registered (test scaffolding can drop
@@ -958,6 +996,105 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Frame<PageCacheMeta> convenience surface.
+//
+// Mirrors the `Frame<KernelMeta>` HHDM accessors but specialised to the
+// page-cache meta. Consumers (the ext2 `BlockCache` is the only one
+// today) hold one `Frame<PageCacheMeta>` per cached page and need:
+//
+//   * a safe `alloc()` that pairs `FrameAlloc::alloc` with `from_unused`,
+//   * `&[u8]` / `&mut [u8]` views over the page's HHDM mapping for the
+//     existing `data() -> &[u8]` / `data_mut() -> &mut [u8]` call sites,
+//   * atomic getters / setters for the dirty bit and owner-key backref.
+//
+// The `&mut [u8]` view is sound because page-cache slots have a strict
+// one-handle-per-paddr invariant: `BlockCache` constructs its frames
+// via `Frame::alloc` and never publishes the paddr to a `from_in_use`
+// consumer, so `&mut Frame<PageCacheMeta>` is the only mutable view of
+// the page bytes. The SAFETY comments on the helpers document the
+// invariant.
+// ---------------------------------------------------------------------------
+
+impl Frame<PageCacheMeta, init_state::Zeroed> {
+    /// Allocate a single zeroed page and install a fresh
+    /// [`PageCacheMeta`] (dirty=0, owner_key=0) into its slot. Returns
+    /// `None` if no allocator is registered or the buddy returned no
+    /// page. Mirrors [`Frame::<KernelMeta>::alloc`] for the
+    /// page-cache flavour.
+    pub fn alloc() -> Option<Self> {
+        let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
+        let opts = FrameAllocOptions::single().zeroed();
+        let paddr = alloc.alloc(opts)?;
+        match Self::from_unused(paddr, PageCacheMeta::default()) {
+            Ok(frame) => Some(frame),
+            Err(_) => {
+                alloc.dealloc(paddr, 1);
+                None
+            }
+        }
+    }
+}
+
+impl<S: init_state::InitState> Frame<PageCacheMeta, S> {
+    /// Kernel HHDM virtual address pointing at this frame's contents.
+    #[inline]
+    pub fn virt_addr_u64(&self) -> u64 {
+        crate::mm::phys::phys_to_virt(self.paddr()) as u64
+    }
+
+    /// Read-only byte view of the full 4 KiB frame through the HHDM
+    /// mapping. The borrow's lifetime is the caller's borrow of `self`.
+    pub fn as_bytes(&self) -> &[u8] {
+        let p = self.virt_addr_u64() as *const u8;
+        // SAFETY: the slot is `TYPED` and ref_count >= 1 for `&self`,
+        // so the HHDM mapping is live for the returned borrow's
+        // lifetime. The 4 KiB range fits a single physical frame.
+        // Shared `&[u8]` from a shared `&Frame` is consistent with
+        // OSTD's stance for kernel-typed pages (slab, page tables).
+        unsafe { core::slice::from_raw_parts(p, crate::mm::page_table::PAGE_SIZE_4KB as usize) }
+    }
+
+    /// Mutable byte view of the full 4 KiB frame through the HHDM
+    /// mapping. Requires `&mut self` to enforce exclusive access at
+    /// the source level.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        let p = self.virt_addr_u64() as *mut u8;
+        // SAFETY: `&mut self` guarantees this is the only outstanding
+        // borrow of the frame through *this* handle. The page-cache
+        // contract (one `Frame<PageCacheMeta>` handle per paddr; no
+        // `from_in_use` calls on `PageCacheMeta`) ensures no second
+        // handle exists either. The HHDM mapping is live.
+        unsafe { core::slice::from_raw_parts_mut(p, crate::mm::page_table::PAGE_SIZE_4KB as usize) }
+    }
+
+    /// `true` iff the page is currently marked dirty.
+    #[inline]
+    pub fn dirty(&self) -> bool {
+        self.borrow().dirty.load(Ordering::Acquire) != 0
+    }
+
+    /// Set / clear the dirty bit.
+    #[inline]
+    pub fn set_dirty(&self, dirty: bool) {
+        self.borrow()
+            .dirty
+            .store(u8::from(dirty), Ordering::Release);
+    }
+
+    /// Read the opaque owner-backref key.
+    #[inline]
+    pub fn owner_key(&self) -> u64 {
+        self.borrow().owner_key.load(Ordering::Acquire)
+    }
+
+    /// Publish a new owner-backref key.
+    #[inline]
+    pub fn set_owner_key(&self, key: u64) {
+        self.borrow().owner_key.store(key, Ordering::Release);
+    }
+}
+
 impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
     fn drop(&mut self) {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as
@@ -1059,5 +1196,13 @@ mod tests {
         assert!(KernelMeta::SIZE <= MAX_META_SIZE);
         assert!(PageTableMeta::SIZE <= MAX_META_SIZE);
         assert!(AnonymousMeta::SIZE <= MAX_META_SIZE);
+        assert!(PageCacheMeta::SIZE <= MAX_META_SIZE);
+    }
+
+    #[test]
+    fn page_cache_meta_atomics_default_to_zero() {
+        let m = PageCacheMeta::default();
+        assert_eq!(m.dirty.load(Ordering::Acquire), 0);
+        assert_eq!(m.owner_key.load(Ordering::Acquire), 0);
     }
 }

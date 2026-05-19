@@ -1,4 +1,5 @@
-use slopos_ostd::{KBTreeMap, KBox, KVec};
+use slopos_ostd::mm::frame::{Frame, PageCacheMeta};
+use slopos_ostd::{KBTreeMap, KVec};
 
 use super::Ext2Error;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
@@ -7,10 +8,15 @@ use crate::blockdev::BlockDevice;
 
 const CACHE_ENTRIES: usize = 128;
 
+/// One cache slot. The 4 KiB backing storage lives in
+/// `frame: Frame<PageCacheMeta>` (HHDM-mapped, returned to the buddy
+/// allocator when the slot drops). The dirty bit and the owner-key
+/// backref are stored on the frame's typed metadata. `pinned`, `lru`,
+/// and `valid` are host-side bookkeeping that does not need to
+/// survive eviction.
 struct CacheEntry {
     block: BlockNum,
-    data: KBox<[u8; EXT2_MAX_BLOCK_SIZE as usize]>,
-    dirty: bool,
+    frame: Frame<PageCacheMeta>,
     pinned: u16,
     lru: u64,
     valid: bool,
@@ -18,13 +24,10 @@ struct CacheEntry {
 
 impl CacheEntry {
     fn new() -> Result<Self, Ext2Error> {
+        let frame = Frame::<PageCacheMeta>::alloc().ok_or(Ext2Error::OutOfMemory)?;
         Ok(Self {
             block: BlockNum::ZERO,
-            // Heap-direct zeroed allocation: avoids materialising a
-            // 4 KiB `[0u8; EXT2_MAX_BLOCK_SIZE]` rvalue on the stack.
-            data: KBox::<[u8; EXT2_MAX_BLOCK_SIZE as usize]>::zeroed()
-                .map_err(|_| Ext2Error::OutOfMemory)?,
-            dirty: false,
+            frame,
             pinned: 0,
             lru: 0,
             valid: false,
@@ -32,6 +35,12 @@ impl CacheEntry {
     }
 }
 
+/// LRU-ordered, fixed-capacity block cache backed by
+/// [`Frame<PageCacheMeta>`] pages from the buddy allocator. Each
+/// slot's metadata carries the dirty bit and an owner-backref key
+/// (the on-disk [`BlockNum`]) so background writeback or future
+/// inode-keyed lookup paths can sample the state without touching
+/// the cache's outer lock.
 pub struct BlockCache {
     entries: KVec<CacheEntry>,
     index: KBTreeMap<BlockNum, usize>,
@@ -41,8 +50,17 @@ pub struct BlockCache {
 
 impl BlockCache {
     pub fn new(block_size: u32) -> Result<Self, Ext2Error> {
+        // Belt-and-braces: the slab callers already validate the
+        // block size, but a stray construction with a larger size
+        // would silently truncate sub-block reads.
+        debug_assert!(block_size as usize <= EXT2_MAX_BLOCK_SIZE as usize);
+
         let mut entries = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;
         for _ in 0..CACHE_ENTRIES {
+            // On the failing iteration `entries` drops with the
+            // partial run already in flight; each in-flight
+            // `Frame<PageCacheMeta>` returns its physical page to
+            // the buddy via `PageCacheMeta::on_drop`.
             entries
                 .push(CacheEntry::new()?)
                 .map_err(|_| Ext2Error::OutOfMemory)?;
@@ -55,7 +73,8 @@ impl BlockCache {
         })
     }
 
-    /// Get a block from the cache, reading from device if not cached.
+    /// Get a block from the cache, reading from the device if not
+    /// cached. The returned [`CachedBlock`] guard pins the slot.
     pub fn get<'a>(
         &'a mut self,
         block: BlockNum,
@@ -71,14 +90,18 @@ impl BlockCache {
         let slot = self.find_or_evict(device)?;
         let offset = block.to_disk_offset(self.block_size);
         let bs = self.block_size as usize;
-        device
-            .read_at(offset.raw(), &mut self.entries[slot].data[..bs])
-            .map_err(|_| Ext2Error::DeviceError)?;
+        {
+            let entry = &mut self.entries[slot];
+            device
+                .read_at(offset.raw(), &mut entry.frame.as_bytes_mut()[..bs])
+                .map_err(|_| Ext2Error::DeviceError)?;
+        }
 
         self.lru_clock += 1;
         let entry = &mut self.entries[slot];
         entry.block = block;
-        entry.dirty = false;
+        entry.frame.set_owner_key(block.raw() as u64);
+        entry.frame.set_dirty(false);
         entry.pinned = 1;
         entry.lru = self.lru_clock;
         entry.valid = true;
@@ -87,17 +110,17 @@ impl BlockCache {
         Ok(CachedBlock { cache: self, slot })
     }
 
-    /// Get a block and zero-fill it (for newly allocated blocks — no disk read).
+    /// Get a block and zero-fill it (for newly allocated blocks — no
+    /// disk read).
     pub fn get_zero(
         &mut self,
         block: BlockNum,
         device: &dyn BlockDevice,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
-            // Already cached — zero it and mark dirty
             let bs = self.block_size as usize;
-            self.entries[slot].data[..bs].fill(0);
-            self.entries[slot].dirty = true;
+            self.entries[slot].frame.as_bytes_mut()[..bs].fill(0);
+            self.entries[slot].frame.set_dirty(true);
             self.lru_clock += 1;
             self.entries[slot].lru = self.lru_clock;
             self.entries[slot].pinned += 1;
@@ -109,9 +132,10 @@ impl BlockCache {
 
         self.lru_clock += 1;
         let entry = &mut self.entries[slot];
-        entry.data[..bs].fill(0);
+        entry.frame.as_bytes_mut()[..bs].fill(0);
         entry.block = block;
-        entry.dirty = true;
+        entry.frame.set_owner_key(block.raw() as u64);
+        entry.frame.set_dirty(true);
         entry.pinned = 1;
         entry.lru = self.lru_clock;
         entry.valid = true;
@@ -127,13 +151,14 @@ impl BlockCache {
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
-            if self.entries[slot].dirty {
-                let offset = block.to_disk_offset(self.block_size);
+            let entry = &mut self.entries[slot];
+            if entry.frame.dirty() {
+                let offset = entry.block.to_disk_offset(self.block_size);
                 let bs = self.block_size as usize;
                 device
-                    .write_at(offset.raw(), &self.entries[slot].data[..bs])
+                    .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
                     .map_err(|_| Ext2Error::DeviceError)?;
-                self.entries[slot].dirty = false;
+                entry.frame.set_dirty(false);
             }
         }
         Ok(())
@@ -142,13 +167,13 @@ impl BlockCache {
     /// Flush all dirty blocks to disk.
     pub fn flush_all(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         for entry in &mut self.entries {
-            if entry.valid && entry.dirty {
+            if entry.valid && entry.frame.dirty() {
                 let offset = entry.block.to_disk_offset(self.block_size);
                 let bs = self.block_size as usize;
                 device
-                    .write_at(offset.raw(), &entry.data[..bs])
+                    .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
                     .map_err(|_| Ext2Error::DeviceError)?;
-                entry.dirty = false;
+                entry.frame.set_dirty(false);
             }
         }
         Ok(())
@@ -157,20 +182,23 @@ impl BlockCache {
     /// Invalidate a cached block (evict without writing).
     pub fn invalidate(&mut self, block: BlockNum) {
         if let Some(slot) = self.index.remove(&block) {
-            self.entries[slot].valid = false;
-            self.entries[slot].pinned = 0;
+            let entry = &mut self.entries[slot];
+            entry.valid = false;
+            entry.pinned = 0;
+            entry.frame.set_dirty(false);
+            entry.frame.set_owner_key(0);
         }
     }
 
     fn find_or_evict(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
-        // First pass: find an empty slot
+        // First pass: find an empty slot.
         for (i, entry) in self.entries.iter().enumerate() {
             if !entry.valid {
                 return Ok(i);
             }
         }
 
-        // Second pass: find LRU unpinned entry
+        // Second pass: find LRU unpinned entry.
         let mut best_slot = None;
         let mut best_lru = u64::MAX;
         for (i, entry) in self.entries.iter().enumerate() {
@@ -182,19 +210,22 @@ impl BlockCache {
 
         let slot = best_slot.ok_or(Ext2Error::DeviceError)?;
 
-        // Flush the victim if dirty
+        // Flush the victim if dirty.
         let victim = &self.entries[slot];
-        if victim.dirty {
+        if victim.frame.dirty() {
             let offset = victim.block.to_disk_offset(self.block_size);
             let bs = self.block_size as usize;
             device
-                .write_at(offset.raw(), &victim.data[..bs])
+                .write_at(offset.raw(), &victim.frame.as_bytes()[..bs])
                 .map_err(|_| Ext2Error::DeviceError)?;
         }
 
-        // Remove from index
+        // Remove from index.
         self.index.remove(&self.entries[slot].block);
-        self.entries[slot].valid = false;
+        let entry = &mut self.entries[slot];
+        entry.valid = false;
+        entry.frame.set_dirty(false);
+        entry.frame.set_owner_key(0);
 
         Ok(slot)
     }
@@ -209,13 +240,14 @@ pub struct CachedBlock<'a> {
 impl<'a> CachedBlock<'a> {
     pub fn data(&self) -> &[u8] {
         let bs = self.cache.block_size as usize;
-        &self.cache.entries[self.slot].data[..bs]
+        &self.cache.entries[self.slot].frame.as_bytes()[..bs]
     }
 
     pub fn data_mut(&mut self) -> &mut [u8] {
         let bs = self.cache.block_size as usize;
-        self.cache.entries[self.slot].dirty = true;
-        &mut self.cache.entries[self.slot].data[..bs]
+        let entry = &mut self.cache.entries[self.slot];
+        entry.frame.set_dirty(true);
+        &mut entry.frame.as_bytes_mut()[..bs]
     }
 
     pub fn block_num(&self) -> BlockNum {
