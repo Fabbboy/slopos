@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 
 use slopos_arch::InterruptFrame;
 
@@ -32,9 +32,6 @@ slopos_service_core::define_service! {
         set_current_runnable();
         unblock_task(task: DriverTaskHandle) -> c_int;
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
-        register_bottom_half(callback: fn());
-        run_bottom_halves();
-        spawn_kernel_task(name: *const c_char, entry: extern "C" fn(*mut c_void), arg: *mut c_void, priority: u8) -> u32;
         signal_process_group(pgid: u32, signum: u8) -> bool;
         signal_session(sid: u32, signum: u8) -> bool;
         pgrp_exists_in_session(pgid: u32, sid: u32) -> bool;

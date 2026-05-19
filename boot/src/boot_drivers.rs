@@ -20,8 +20,6 @@ use slopos_drivers::{
     apic, hpet, ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
-    virtio_blk::virtio_blk_register_driver,
-    virtio_net::virtio_net_register_driver,
 };
 use slopos_mm::tlb;
 
@@ -245,6 +243,19 @@ fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_sched::runtime::register_ap_timer_start(ap_start_timer);
 }
 
+fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
+    // OSTD owns the `slopos_ostd::task::spawn(...)` facade; the concrete
+    // out-of-OSTD spawner lives in `slopos_sched`. PCI probes
+    // (priority 80, below) spawn long-lived service threads such as
+    // virtio-net's netpoll task through that facade, so the spawner
+    // must be wired before the drivers phase reaches `pci`.
+    slopos_ostd::task::register_kernel_thread_spawner(
+        &ctx.bsp_token(),
+        slopos_sched::runtime::kernel_thread_spawner_handle(),
+    );
+    klog_debug!("OSTD: kernel-thread spawner registered (sched/runtime)");
+}
+
 fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // register the loopback device BEFORE any physical NIC so it
     // gets DevIndex(0) by convention.  This must happen before pci_init()
@@ -252,8 +263,10 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_net::loopback::init_loopback();
 
     klog_debug!("Enumerating PCI devices...");
-    virtio_blk_register_driver();
-    virtio_net_register_driver();
+    // Driver registration happens at link time via the
+    // `.driver_registry` section (see `crate::pci_driver!` invocations
+    // in `drivers/src/virtio_*.rs`); the linker delivers a contiguous
+    // `[PciDriverEntry]` array to `pci_probe_drivers()` below.
     pci_init();
     pci_probe_drivers();
     #[cfg(feature = "xe-gpu")]
@@ -503,6 +516,13 @@ crate::boot_init!(
     b"timer\0",
     boot_step_timer_setup_fn,
     flags = boot_init_priority(70)
+);
+crate::boot_init!(
+    BOOT_STEP_REGISTER_SPAWNER,
+    drivers,
+    b"register kernel-thread spawner with OSTD\0",
+    boot_step_register_spawner_fn,
+    flags = boot_init_priority(75)
 );
 crate::boot_init!(
     BOOT_STEP_PCI_INIT,

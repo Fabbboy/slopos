@@ -9,21 +9,15 @@ use super::scheduler::{
     run_ready_task_from_idle, schedule_new_task, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskEntry, TaskPriority, reap_zombies,
-    task_create, task_get_info,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskPriority, reap_zombies, task_create,
+    task_get_info,
 };
 use super::work_steal::try_work_steal;
 
 const MAX_IDLE_CALLBACKS: usize = 4;
-const MAX_BOTTOM_HALVES: usize = 4;
 
 struct IdleCallbacks {
     slots: [Option<fn() -> c_int>; MAX_IDLE_CALLBACKS],
-    count: usize,
-}
-
-struct BottomHalves {
-    slots: [Option<fn()>; MAX_BOTTOM_HALVES],
     count: usize,
 }
 
@@ -36,17 +30,7 @@ impl IdleCallbacks {
     }
 }
 
-impl BottomHalves {
-    const fn new() -> Self {
-        Self {
-            slots: [None; MAX_BOTTOM_HALVES],
-            count: 0,
-        }
-    }
-}
-
 static IDLE_CBS: OnceLock<SpinLock<IdleCallbacks>> = OnceLock::new();
-static BOTTOM_HALVES: OnceLock<SpinLock<BottomHalves>> = OnceLock::new();
 
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
     IDLE_CBS.call_once(|| SpinLock::new(IdleCallbacks::new(), LOCK_LEVEL_REGISTRY));
@@ -61,53 +45,107 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
     }
 }
 
-pub fn scheduler_register_bottom_half(callback: fn()) {
-    BOTTOM_HALVES.call_once(|| SpinLock::new(BottomHalves::new(), LOCK_LEVEL_REGISTRY));
-    if let Some(mutex) = BOTTOM_HALVES.get() {
-        let mut halves = mutex.lock();
-        let idx = halves.count;
-        if idx < MAX_BOTTOM_HALVES {
-            halves.slots[idx] = Some(callback);
-            halves.count = idx + 1;
+// ---------------------------------------------------------------------------
+// Kernel-thread spawner: out-of-OSTD impl of `slopos_ostd::task::KernelThreadSpawner`.
+// ---------------------------------------------------------------------------
+//
+// Drivers and other Phase-2 services spawn kernel threads through OSTD's
+// safe `slopos_ostd::task::spawn(name, entry, priority)` facade; the
+// facade defers to the impl registered here at boot.
+//
+// The `fn()` entry shape comes from OSTD. Internally we trampoline
+// through an `extern "C" fn(*mut c_void)` because that is the
+// scheduler's native `TaskEntry` (`*mut c_void` arg is the legacy task
+// payload; new spawners stash the fn pointer in the payload slot and
+// the trampoline dispatches into it). This trick keeps the scheduler
+// internals stable while exposing a modern signature to drivers.
+
+use slopos_ostd::task::{KernelThreadEntry, KernelThreadSpawner, SpawnError, SpawnedTaskId};
+
+/// Trampoline. The OSTD-facing `spawn` API takes a `fn()`; the
+/// scheduler's native `TaskEntry` is `extern "C" fn(*mut c_void)` with
+/// a different ABI. We bridge by packing the caller's `fn()` into the
+/// `*mut c_void` payload slot — `fn` pointers and data pointers share
+/// size and alignment on every supported target — and recovering the
+/// function pointer here at task entry via OSTD's safe-Rust
+/// `fn_ptr_decode_opt` helper.
+extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
+    let raw = arg as *mut ();
+    let Some(entry) = slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<KernelThreadEntry>(raw) else {
+        klog_info!("spawn: kernel-thread trampoline received null payload");
+        return;
+    };
+    entry();
+}
+
+/// Build a NUL-terminated `&str -> [u8; N]` copy for the scheduler's
+/// legacy C-string name input. Truncates at `TASK_NAME_MAX_LEN - 1`.
+fn name_to_task_buffer(name: &str) -> [u8; super::task::TASK_NAME_MAX_LEN] {
+    let mut buf = [0u8; super::task::TASK_NAME_MAX_LEN];
+    let bytes = name.as_bytes();
+    let take = core::cmp::min(bytes.len(), super::task::TASK_NAME_MAX_LEN - 1);
+    buf[..take].copy_from_slice(&bytes[..take]);
+    // tail already zero from initialisation
+    buf
+}
+
+/// Concrete spawner impl. Routes through the existing
+/// `task_create` + `schedule_new_task` pair, but uses typed errors
+/// instead of the legacy `INVALID_TASK_ID` sentinel.
+pub struct KernelThreadSpawnerImpl;
+
+impl KernelThreadSpawner for KernelThreadSpawnerImpl {
+    fn spawn(
+        &self,
+        name: &'static str,
+        entry: KernelThreadEntry,
+        priority: u8,
+    ) -> Result<SpawnedTaskId, SpawnError> {
+        // Pack the `fn()` into the scheduler's legacy `*mut c_void`
+        // payload slot; `kernel_thread_trampoline` unpacks at task
+        // entry. `fn as usize as *mut c_void` is safe Rust on every
+        // supported target — function pointers and data pointers have
+        // the same layout.
+        let payload = (entry as usize) as *mut c_void;
+        let name_buf = name_to_task_buffer(name);
+        let task_id = task_create(
+            name_buf.as_ptr() as *const c_char,
+            kernel_thread_trampoline,
+            payload,
+            priority,
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if task_id == INVALID_TASK_ID {
+            return Err(SpawnError::OutOfTaskIds);
         }
+        let mut task_ptr: *mut Task = core::ptr::null_mut();
+        if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+            return Err(SpawnError::OutOfTaskIds);
+        }
+        if schedule_new_task(task_ptr) != 0 {
+            return Err(SpawnError::ScheduleFailed);
+        }
+        Ok(SpawnedTaskId::new(task_id))
     }
 }
 
-pub fn scheduler_run_bottom_halves() {
-    let mut callbacks = [None; MAX_BOTTOM_HALVES];
-    let mut callback_count = 0usize;
+/// Stable BSS singleton; address is exported via
+/// [`kernel_thread_spawner_handle`] for the boot wiring.
+static KERNEL_THREAD_SPAWNER: KernelThreadSpawnerImpl = KernelThreadSpawnerImpl;
 
-    if let Some(mutex) = BOTTOM_HALVES.get() {
-        let halves = mutex.lock();
-        callback_count = halves.count;
-        callbacks[..callback_count].copy_from_slice(&halves.slots[..callback_count]);
-    }
+/// Doubly-indirect reference for
+/// [`slopos_ostd::task::register_kernel_thread_spawner`]; the setter
+/// requires a `&'static &'static dyn KernelThreadSpawner` so the inner
+/// reference must live in a `static`. Mirrors the
+/// `BUDDY_ALLOCATOR_DYN` shape in `mm/src/page_alloc/mod.rs`.
+static KERNEL_THREAD_SPAWNER_DYN: &dyn KernelThreadSpawner = &KERNEL_THREAD_SPAWNER;
 
-    for callback in &callbacks[..callback_count] {
-        if let Some(callback) = callback {
-            callback();
-        }
-    }
-}
-
-pub fn spawn_kernel_task_from_driver(
-    name: *const c_char,
-    entry: TaskEntry,
-    arg: *mut c_void,
-    priority: u8,
-) -> u32 {
-    let task_id = task_create(name, entry, arg, priority, TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return task_id;
-    }
-    let mut task_ptr: *mut Task = core::ptr::null_mut();
-    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
-        return INVALID_TASK_ID;
-    }
-    if schedule_new_task(task_ptr) != 0 {
-        return INVALID_TASK_ID;
-    }
-    task_id
+/// Hand boot the static reference it needs to pass to OSTD's
+/// `register_kernel_thread_spawner`. Stable address; safe to call any
+/// time after link.
+#[inline]
+pub fn kernel_thread_spawner_handle() -> &'static &'static dyn KernelThreadSpawner {
+    &KERNEL_THREAD_SPAWNER_DYN
 }
 
 extern "C" fn unified_idle_loop(_: *mut c_void) {

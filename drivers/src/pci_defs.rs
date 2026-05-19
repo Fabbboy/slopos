@@ -165,9 +165,6 @@ pub const PCI_MAX_BUSES: usize = 256;
 /// Maximum tracked PCI devices.
 pub const PCI_MAX_DEVICES: usize = 256;
 
-/// Maximum registered PCI drivers.
-pub const PCI_DRIVER_MAX: usize = 16;
-
 /// Maximum number of BARs per device.
 pub const PCI_MAX_BARS: usize = 6;
 

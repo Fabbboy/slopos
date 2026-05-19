@@ -1,13 +1,10 @@
-use core::ffi::c_int;
 use core::mem::size_of;
-use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_ostd::dev::FromRawPtr;
-use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
-use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
+use crate::pci::{PciDeviceInfo, PciProbeError};
 use crate::virtio::{
     self, CompletionEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
     VirtioMmioCaps, VirtioMsixState,
@@ -116,10 +113,7 @@ impl RequestBuffers {
     }
 }
 
-fn virtio_blk_match(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> bool {
-    let Some(info) = PciDeviceInfo::from_ptr(info) else {
-        return false;
-    };
+fn virtio_blk_matches(info: &PciDeviceInfo) -> bool {
     if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
     }
@@ -261,16 +255,12 @@ fn virtio_blk_irq_handler(_queue_idx: u8) {
     BLK_QUEUE_EVENT.signal();
 }
 
-fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
+fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-blk: already claimed");
-        return -1;
+        return Err(PciProbeError::Mismatch);
     }
 
-    let Some(info) = PciDeviceInfo::from_ptr(info) else {
-        DEVICE_CLAIMED.reset();
-        return -1;
-    };
     klog_info!(
         "virtio-blk: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -294,14 +284,14 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     if !caps.has_common_cfg() {
         klog_info!("virtio-blk: missing common cfg");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::Unsupported);
     }
 
     let feat_result = negotiate_features(&caps, virtio::VIRTIO_F_VERSION_1, 0);
     if !feat_result.success {
         klog_info!("virtio-blk: features negotiation failed");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::DeviceFault);
     }
 
     // --- MSI-X / MSI interrupt setup ---
@@ -325,7 +315,7 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         None => {
             klog_info!("virtio-blk: queue setup failed");
             DEVICE_CLAIMED.reset();
-            return -1;
+            return Err(PciProbeError::OutOfMemory);
         }
     };
 
@@ -353,19 +343,15 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         irq_mode,
     );
 
-    0
+    Ok(())
 }
-static VIRTIO_BLK_DRIVER: PciDriver = PciDriver {
-    name: KernelSync::new(b"virtio-blk\0".as_ptr()),
-    match_fn: Some(virtio_blk_match),
-    probe: Some(virtio_blk_probe),
-    context: KernelSync::new(ptr::null_mut()),
-};
 
-pub fn virtio_blk_register_driver() {
-    if pci_register_driver(&VIRTIO_BLK_DRIVER) != 0 {
-        klog_info!("virtio-blk: driver registration failed");
-    }
+crate::pci_driver! {
+    pub static VIRTIO_BLK_DRIVER = {
+        name: "virtio-blk",
+        matches: virtio_blk_matches,
+        probe: virtio_blk_probe,
+    };
 }
 
 pub fn virtio_blk_is_ready() -> bool {

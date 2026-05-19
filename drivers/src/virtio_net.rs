@@ -1,4 +1,3 @@
-use core::ffi::c_int;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use slopos_ostd::dev::FromRawPtr;
@@ -8,10 +7,10 @@ use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
 };
 use slopos_net as net;
-use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
-use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
+use crate::pci::{PciDeviceInfo, PciProbeError};
 use crate::virtio::{
     self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
     pci::{
@@ -20,7 +19,6 @@ use crate::virtio::{
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
-use slopos_kernel_services::driver_runtime::{register_bottom_half, spawn_kernel_task};
 use slopos_net::{
     self, PACKET_POOL, dhcp, ingress,
     napi::NapiContext,
@@ -320,14 +318,10 @@ pub fn sniff_packet_for_members(frame: &[u8]) {
 // Device configuration helpers
 // =============================================================================
 
-fn virtio_net_match(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> bool {
-    let Some(info) = PciDeviceInfo::from_ptr(info) else {
-        return false;
-    };
+fn virtio_net_matches(info: &PciDeviceInfo) -> bool {
     if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
     }
-
     info.device_id == VIRTIO_NET_DEVICE_ID_LEGACY || info.device_id == VIRTIO_NET_DEVICE_ID_MODERN
 }
 
@@ -1076,12 +1070,11 @@ pub fn virtnet_force_napi_poll() {
     virtnet_napi_poll_loop();
 }
 
-fn napi_bottom_half() {
-    napi_schedule();
-    virtnet_napi_poll_loop();
-}
-
-extern "C" fn napi_thread_entry(_arg: *mut core::ffi::c_void) {
+/// Long-lived netpoll worker. Spawned once per virtio-net probe via
+/// `slopos_ostd::task::spawn`. Drives NAPI polling and the net-stack
+/// timer wheel; sleeps 1 ms between iterations so the loop yields the
+/// CPU between bursts.
+fn napi_thread_entry() {
     use slopos_kernel_services::driver_runtime::sleep_current_task_ms;
     loop {
         napi_schedule();
@@ -1187,16 +1180,12 @@ fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
     true
 }
 
-fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
+fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-net: already claimed");
-        return -1;
+        return Err(PciProbeError::Mismatch);
     }
 
-    let Some(info) = PciDeviceInfo::from_ptr(info) else {
-        DEVICE_CLAIMED.reset();
-        return -1;
-    };
     klog_info!(
         "virtio-net: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -1219,13 +1208,13 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     if !caps.has_common_cfg() {
         klog_info!("virtio-net: missing common cfg");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::Unsupported);
     }
 
     if !caps.has_notify_cfg() {
         klog_info!("virtio-net: missing notify cfg");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::Unsupported);
     }
 
     let required_features = virtio::VIRTIO_F_VERSION_1;
@@ -1238,7 +1227,7 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     if !feat_result.success {
         klog_info!("virtio-net: features negotiation failed");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::DeviceFault);
     }
 
     // --- MSI-X / MSI interrupt setup ---
@@ -1268,7 +1257,7 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     ) else {
         klog_info!("virtio-net: rx queue setup failed");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::OutOfMemory);
     };
 
     let Some(tx_queue) = queue::setup_queue(
@@ -1279,7 +1268,7 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     ) else {
         klog_info!("virtio-net: tx queue setup failed");
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::OutOfMemory);
     };
 
     let negotiated_features = feat_result.driver_features;
@@ -1306,11 +1295,10 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         state.dns = [0; 4];
 
         if !virtio_net_acquire_dhcp_and_register(&mut state) {
-            return -1;
+            return Err(PciProbeError::OutOfMemory);
         }
     }
 
-    register_bottom_half(napi_bottom_half);
     slopos_net::napi::register_kick(virtnet_force_napi_poll);
     static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
         virtio_net_ipv4_addr,
@@ -1331,16 +1319,22 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     };
     register_net_driver_services(&NET_DRIVER_SVC);
 
-    let netpoll_task = spawn_kernel_task(
-        b"netpoll\0".as_ptr() as *const i8,
+    // Spawn at Normal priority. The netpoll task runs the network
+    // timer wheel (ARP aging, TCP retransmit) and consumes IRQ-driven
+    // RX bursts; the poll-driven `napi::kick()` invoked from
+    // `socket_poll_readable` closes the latency gap when a caller has
+    // just woken from sleep and is asking for readiness immediately.
+    if let Err(err) = slopos_ostd::task::spawn(
+        "netpoll",
         napi_thread_entry,
-        core::ptr::null_mut(),
-        3,
-    );
-    if netpoll_task == slopos_abi::task::INVALID_TASK_ID {
-        klog_info!("virtio-net: failed to spawn netpoll kernel thread");
+        slopos_abi::task::TaskPriority::Normal.as_u8(),
+    ) {
+        klog_info!(
+            "virtio-net: failed to spawn netpoll kernel thread ({:?})",
+            err
+        );
         DEVICE_CLAIMED.reset();
-        return -1;
+        return Err(PciProbeError::OutOfMemory);
     }
 
     klog_info!(
@@ -1355,23 +1349,18 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         irq_mode,
     );
 
-    0
+    Ok(())
 }
 // =============================================================================
 // Driver registration & public API
 // =============================================================================
 
-static VIRTIO_NET_DRIVER: PciDriver = PciDriver {
-    name: KernelSync::new(b"virtio-net\0".as_ptr()),
-    match_fn: Some(virtio_net_match),
-    probe: Some(virtio_net_probe),
-    context: KernelSync::new(core::ptr::null_mut()),
-};
-
-pub fn virtio_net_register_driver() {
-    if pci_register_driver(&VIRTIO_NET_DRIVER) != 0 {
-        klog_info!("virtio-net: driver registration failed");
-    }
+crate::pci_driver! {
+    pub static VIRTIO_NET_DRIVER = {
+        name: "virtio-net",
+        matches: virtio_net_matches,
+        probe: virtio_net_probe,
+    };
 }
 
 pub fn virtio_net_is_ready() -> bool {

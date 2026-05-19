@@ -2226,7 +2226,17 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    slopos_kernel_services::driver_runtime::run_bottom_halves();
+    // Drive one NAPI poll cycle so any packets the NIC has already
+    // committed to its used ring get delivered to the socket layer
+    // before we check readiness. `napi::kick` invokes the active NIC
+    // driver's force-poll function (registered via
+    // `napi::register_kick`) — a single fn pointer, not a softirq
+    // registry. The dedicated netpoll kernel task remains the primary
+    // cadence for timer-wheel processing and IRQ-driven RX; this poll
+    // just closes the inherent poll-driver / netpoll-task race when
+    // latency-sensitive callers come back from a sleep and immediately
+    // ask "is there data?".
+    crate::napi::kick();
 
     let (state, is_datagram, tcp_idx, has_dgram_data) = {
         let mut table = NEW_SOCKET_TABLE.lock();

@@ -16,8 +16,7 @@ use slopos_fs::fileio::{
 };
 
 use slopos_kernel_services::driver_runtime::{
-    current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, run_bottom_halves,
-    signal_process_group,
+    current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, signal_process_group,
 };
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
@@ -262,8 +261,6 @@ define_syscall!(syscall_poll
     let registered_ofis = &mut scratch.registered_ofis;
 
     loop {
-        run_bottom_halves();
-
         for idx in 0..nfds {
             let user_ptr = MmUserPtr::<UserPollFd>::try_new(
                 base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,

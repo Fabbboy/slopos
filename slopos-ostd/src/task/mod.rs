@@ -15,6 +15,7 @@ pub mod kernel_task;
 pub mod link_roles;
 pub mod scheduler;
 pub mod scheduler_registry;
+pub mod spawner;
 pub mod state;
 pub mod switch;
 pub mod task;
@@ -33,6 +34,10 @@ pub use handles::{LinkProvider, OwnedTaskHandle, SharedTaskHandle, TaskOps, task
 pub use idle_factory::{IdleTaskFactory, current_idle_task_factory, register_idle_task_factory};
 pub use scheduler::{RunQueue, Scheduler, TaskRef};
 pub use scheduler_registry::{current_scheduler, register_scheduler};
+pub use spawner::{
+    KernelThreadEntry, KernelThreadSpawner, SpawnError, SpawnedTaskId,
+    current_kernel_thread_spawner, register_kernel_thread_spawner, spawn,
+};
 pub use switch::{
     TaskExitHook, init_current_context, register_task_exit_hook, switch_registers,
     task_entry_trampoline,

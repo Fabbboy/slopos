@@ -71,6 +71,12 @@ SECTIONS
     __stop_boot_init_optional = .;
   } :rodata
 
+  .driver_registry ALIGN(8) : {
+    __start_driver_registry = .;
+    KEEP(*(.driver_registry))
+    __stop_driver_registry = .;
+  } :rodata
+
   .test_registry ALIGN(8) : {
     __start_test_registry = .;
     KEEP(*(.test_registry))

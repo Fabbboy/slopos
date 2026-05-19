@@ -36,9 +36,8 @@ pub use super::lifecycle::{
 };
 use super::per_cpu;
 pub use super::runtime::{
-    create_idle_task, create_idle_task_for_cpu, enter_scheduler, scheduler_register_bottom_half,
-    scheduler_register_idle_wakeup_callback, scheduler_run_bottom_halves,
-    spawn_kernel_task_from_driver,
+    create_idle_task, create_idle_task_for_cpu, enter_scheduler,
+    scheduler_register_idle_wakeup_callback,
 };
 pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};

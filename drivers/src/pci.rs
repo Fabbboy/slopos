@@ -1,5 +1,4 @@
 use core::ffi::c_int;
-use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
@@ -8,11 +7,9 @@ use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::klog_info;
 use slopos_ostd::pci::{Bdf, EcamConfigSpace};
-use slopos_ostd::string::cstr_to_str_lossy;
-use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
 use slopos_ostd::{KVec, Pod};
 
 pub use crate::pci_defs::*;
@@ -47,12 +44,42 @@ impl Default for PciGpuInfo {
     }
 }
 
+/// Reason a PCI probe rejected a candidate device.
+///
+/// Replaces the legacy `c_int` return so probe paths can log a typed
+/// reason rather than burning sentinel values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PciProbeError {
+    /// Initial vendor/device match passed but post-inspection rules
+    /// rejected the candidate (e.g., feature negotiation failed).
+    Mismatch,
+    /// Resource allocation failed during probe (kernel heap, frames,
+    /// DMA pools, etc.).
+    OutOfMemory,
+    /// The device was reachable but reported a fault or bad state.
+    DeviceFault,
+    /// A required capability (e.g., MSI-X) is unavailable on the device.
+    Unsupported,
+}
+
+/// Static, link-section-resident PCI driver descriptor.
+///
+/// Replaces the legacy `PciDriver` (raw pointer name, `Option<fn>`
+/// callbacks taking `*const PciDeviceInfo` / `*mut c_void`,
+/// `KernelSync` Sync hacks). Every field is `'static`-constructible so
+/// the struct fits into a `static` placed in the `.driver_registry`
+/// link section by the [`crate::pci_driver!`] macro.
 #[repr(C)]
-pub struct PciDriver {
-    pub name: KernelSync<*const u8>,
-    pub match_fn: Option<fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> bool>,
-    pub probe: Option<fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> c_int>,
-    pub context: KernelSync<*mut core::ffi::c_void>,
+pub struct PciDriverEntry {
+    /// Human-readable driver name. Logged on registration and probe.
+    pub name: &'static str,
+    /// Initial device match: returns `true` when this driver is
+    /// willing to claim the candidate device.
+    pub matches: fn(&PciDeviceInfo) -> bool,
+    /// Probe the matched device; on success the driver retains
+    /// ownership of any allocated resources, on failure it must
+    /// release them and the registry moves on to the next candidate.
+    pub probe: fn(&PciDeviceInfo) -> Result<(), PciProbeError>,
 }
 
 struct PciEnumState {
@@ -73,25 +100,63 @@ impl PciEnumState {
     }
 }
 
-struct PciDriverRegistry {
-    drivers: KernelSync<[*const PciDriver; PCI_DRIVER_MAX]>,
-    count: usize,
-}
+static PCI_INIT: InitFlag = InitFlag::new();
+static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
+static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
-impl PciDriverRegistry {
-    const fn new() -> Self {
-        Self {
-            drivers: KernelSync::new([ptr::null(); PCI_DRIVER_MAX]),
-            count: 0,
-        }
+// ---------------------------------------------------------------------------
+// Link-section-driven driver registry.
+//
+// The linker gathers every `PciDriverEntry` placed in `.driver_registry`
+// (via the `pci_driver!` macro) into a contiguous array bracketed by
+// `__start_driver_registry` / `__stop_driver_registry` symbols (see
+// `link.ld`). `driver_registry_iter` walks that slice; `pci_probe_drivers`
+// iterates it during boot.
+// ---------------------------------------------------------------------------
+
+slopos_ostd::extern_block! {
+    #[allow(improper_ctypes)]
+    mod registry_externs {
+        static __start_driver_registry: super::PciDriverEntry;
+        static __stop_driver_registry: super::PciDriverEntry;
     }
 }
 
-static PCI_INIT: InitFlag = InitFlag::new();
-static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
-static DRIVER_REGISTRY: SpinLock<PciDriverRegistry> =
-    SpinLock::new(PciDriverRegistry::new(), LOCK_LEVEL_REGISTRY);
-static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
+/// Borrow the linker-built `[PciDriverEntry]` slice.
+pub fn driver_registry_iter() -> impl Iterator<Item = &'static PciDriverEntry> {
+    slopos_ostd::util::ptr_buf::section_slice::<PciDriverEntry>(
+        registry_externs::__start_driver_registry_addr(),
+        registry_externs::__stop_driver_registry_addr(),
+    )
+    .iter()
+}
+
+/// Declarative wrapper around `link_section_static!` for emitting a
+/// [`PciDriverEntry`] into the `.driver_registry` link section. Each
+/// driver crate uses this macro exactly once per driver; the linker
+/// gathers all expansions into a single contiguous array.
+#[macro_export]
+macro_rules! pci_driver {
+    (
+        $(#[$attr:meta])*
+        $vis:vis static $name:ident = {
+            name: $drv_name:expr,
+            matches: $matches:path,
+            probe: $probe:path $(,)?
+        };
+    ) => {
+        slopos_ostd::link_section_static! {
+            #[used]
+            $(#[$attr])*
+            section = ".driver_registry";
+            $vis static $name: $crate::pci::PciDriverEntry = $crate::pci::PciDriverEntry {
+                name: $drv_name,
+                matches: $matches,
+                probe: $probe,
+            };
+        }
+    };
+}
 
 // =============================================================================
 // MCFG / ECAM State
@@ -149,10 +214,6 @@ const ECAM_FUNCTION_SIZE: u16 = 4096;
 // ECAM MMIO is mapped during pci_discover_mcfg() and is a hard boot
 // requirement — pci_init() panics if MCFG is absent or mapping fails.
 // =============================================================================
-
-fn cstr_or_placeholder(s: *const u8) -> &'static str {
-    cstr_to_str_lossy(s as *const core::ffi::c_char)
-}
 
 // =============================================================================
 // ECAM MMIO Implementation
@@ -1046,34 +1107,24 @@ pub fn pci_get_primary_gpu() -> PciGpuInfo {
     ENUM_STATE.lock().primary_gpu.clone()
 }
 
-pub fn pci_register_driver(driver: &'static PciDriver) -> c_int {
-    let mut registry = DRIVER_REGISTRY.lock();
-    let idx = registry.count;
-    if idx >= PCI_DRIVER_MAX {
-        return -1;
-    }
-    let name = cstr_or_placeholder(*driver.name);
-    klog_info!("PCI: Registered driver {}", name);
-    registry.drivers[idx] = driver;
-    registry.count = idx + 1;
-    0
-}
-
 pub fn pci_probe_drivers() {
-    let registry = DRIVER_REGISTRY.lock();
+    // Hold the enum-state lock during iteration: copying the full
+    // `[PciDeviceInfo; PCI_MAX_DEVICES]` array onto the local frame
+    // would blow the 2 KiB framekernel stack-size gate. `pci_probe_drivers`
+    // is called exactly once from the boot sequence (priority 80 in
+    // the drivers phase) so contention is impossible by construction.
     let state = ENUM_STATE.lock();
-
-    for drv_idx in 0..registry.count {
-        let Some(drv) = PciDriver::from_ptr(registry.drivers[drv_idx]) else {
-            continue;
-        };
+    for entry in driver_registry_iter() {
+        klog_info!("PCI: Probing driver {}", entry.name);
         for dev_idx in 0..state.device_count {
             let dev = &state.devices[dev_idx];
-            if let Some(mf) = drv.match_fn {
-                if mf(dev, *drv.context) {
-                    if let Some(probe) = drv.probe {
-                        let _ = probe(dev, *drv.context);
-                    }
+            if !(entry.matches)(dev) {
+                continue;
+            }
+            match (entry.probe)(dev) {
+                Ok(()) => {}
+                Err(err) => {
+                    klog_info!("PCI: {} probe rejected device: {:?}", entry.name, err);
                 }
             }
         }
