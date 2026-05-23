@@ -35,8 +35,9 @@ mod handle;
 mod pair;
 mod slot;
 
+use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock, WaitQueue};
+use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{InFlightFd, PairSide, PairTable};
@@ -46,13 +47,17 @@ pub use buffer::UNIX_BUF_SIZE;
 pub use handle::SocketHandle;
 
 /// Maximum number of concurrent AF_UNIX sockets.
-pub const MAX_UNIX_SOCKETS: usize = 32;
+pub use slopos_abi::event::MAX_UNIX_SOCKETS;
 
-// ---------------------------------------------------------------------------
-// Wait queues — one per socket slot, separate from UNIX_STATE.
-// ---------------------------------------------------------------------------
-
-static SOCKET_WQS: [WaitQueue; MAX_UNIX_SOCKETS] = [const { WaitQueue::new() }; MAX_UNIX_SOCKETS];
+/// The readiness event for a Unix socket slot. Recv- and send-blockers share
+/// one queue per socket, so a single publish wakes both — preserving the
+/// pre-migration `SOCKET_WQS[idx].wake_all()` semantics.
+#[inline]
+fn unix_ev(slot: usize) -> KernelEvent {
+    KernelEvent::UnixSocket {
+        sock: UnixSocketSlot(slot as u32),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -210,7 +215,7 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
             return Err(-11); // EAGAIN
         }
 
-        SOCKET_WQS[wq_idx].wait_event(|| {
+        BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
             let state = UNIX_STATE.lock();
             let slot = &state.slots[wq_idx];
             match &slot.state {
@@ -313,7 +318,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     }
 
     drop(state);
-    SOCKET_WQS[listener_idx].wake_all();
+    BUS.publish(unix_ev(listener_idx));
 
     0
 }
@@ -374,13 +379,13 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
         match result {
             Ok((n, peer)) => {
                 if n > 0 && peer < MAX_UNIX_SOCKETS {
-                    SOCKET_WQS[peer].wake_all();
+                    BUS.publish(unix_ev(peer));
                 }
                 return n as i32;
             }
             Err(true) => return -11, // EAGAIN
             Err(false) => {
-                SOCKET_WQS[wq_idx].wait_event(|| {
+                BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     let slot = &state.slots[wq_idx];
                     if slot.generation != slot_gen {
@@ -555,7 +560,7 @@ pub fn unix_sendmsg(
         match result {
             Ok((n, peer, committed_fds)) => {
                 if (n > 0 || committed_fds > 0) && peer < MAX_UNIX_SOCKETS {
-                    SOCKET_WQS[peer].wake_all();
+                    BUS.publish(unix_ev(peer));
                 }
                 return n;
             }
@@ -571,7 +576,7 @@ pub fn unix_sendmsg(
                 // closes. fds remain in the caller's array — the
                 // next iteration runs the full capacity check +
                 // atomic publish again.
-                SOCKET_WQS[wq_idx].wait_event(|| {
+                BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     let slot = &state.slots[wq_idx];
                     if slot.generation != slot_gen {
@@ -740,17 +745,17 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
 
     if let Some(peer) = wake_peer {
         if peer < MAX_UNIX_SOCKETS {
-            SOCKET_WQS[peer].wake_all();
+            BUS.publish(unix_ev(peer));
         }
     }
     for k in 0..backlog_wake_count {
         let a_idx = backlog_a_peers[k];
         if a_idx < MAX_UNIX_SOCKETS {
-            SOCKET_WQS[a_idx].wake_all();
+            BUS.publish(unix_ev(a_idx));
         }
     }
     if was_listener {
-        SOCKET_WQS[wq_idx].wake_all();
+        BUS.publish(unix_ev(wq_idx));
     }
 
     0
@@ -811,7 +816,7 @@ pub fn unix_poll_fused(handle: SocketHandle, requested: u16) -> (u16, bool) {
         return (0, false);
     };
 
-    let registered = SOCKET_WQS[wq_idx].enqueue_current();
+    let registered = BUS.subscribe_current(unix_ev(wq_idx));
 
     let revents = {
         let state = UNIX_STATE.lock();
@@ -829,7 +834,7 @@ pub fn unix_poll_register(handle: SocketHandle) -> bool {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return false;
     };
-    SOCKET_WQS[wq_idx].enqueue_current()
+    BUS.subscribe_current(unix_ev(wq_idx))
 }
 
 /// Remove the current task from the socket's poll wait queue.
@@ -837,7 +842,7 @@ pub fn unix_poll_unregister(handle: SocketHandle) {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return;
     };
-    SOCKET_WQS[wq_idx].remove_current();
+    BUS.unsubscribe_current(unix_ev(wq_idx));
 }
 
 /// Set or clear non-blocking mode on a Unix socket.

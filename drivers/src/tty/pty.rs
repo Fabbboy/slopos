@@ -34,10 +34,11 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
-    TTY_GENERATIONS, TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding,
-    mark_slot_allocated, mark_slot_free,
+    TTY_GENERATIONS, TTY_SLOTS, find_free_slot, find_free_slot_excluding, mark_slot_allocated,
+    mark_slot_free, tty_input_event,
 };
 use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex, open_ref};
+use slopos_ostd::sync::BUS;
 
 // ---------------------------------------------------------------------------
 // Generation-safe peer identity
@@ -363,7 +364,7 @@ pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     };
 
     if should_wake {
-        TTY_INPUT_WAITERS[slot].wake_all();
+        BUS.publish(tty_input_event(slot));
     }
     written
 }
@@ -414,7 +415,7 @@ pub fn mark_peer_closed(idx: TtyIndex) {
         tty.flags.insert(TtyFlags::PEER_CLOSED);
     }
     drop(guard);
-    TTY_INPUT_WAITERS[slot].wake_all();
+    BUS.publish(tty_input_event(slot));
 }
 
 pub(crate) fn clear_peer_closed(idx: TtyIndex) {
@@ -649,7 +650,7 @@ pub fn queue_packet_event(slave_idx: TtyIndex, event_bits: u8) {
     };
 
     if should_wake {
-        TTY_INPUT_WAITERS[master_slot].wake_all();
-        super::table::TTY_POLL_WAITERS[master_slot].wake_all();
+        // Poll waiters park on the input queue too, so one publish covers both.
+        BUS.publish(tty_input_event(master_slot));
     }
 }

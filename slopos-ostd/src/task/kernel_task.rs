@@ -26,7 +26,6 @@ pub use slopos_abi::task::{
 
 use crate::cpu::x86_64::pcr::KernelReturnContext;
 use crate::sync::AtomicCell;
-use crate::sync::WaitQueue;
 use crate::sync::intrusive::Link;
 use crate::task::abi::TaskAbi;
 use crate::task::exit_info::ExitInfo;
@@ -297,8 +296,6 @@ pub struct TaskInner<K, U> {
     pub saved_user_ctx_ptr: *mut UserContext,
     /// Saved per-task copy of `pcr.kernel_return_ctx`.
     pub saved_kernel_return_ctx: KernelReturnContext,
-    /// Tasks waiting for THIS task to exit.
-    pub waiters: WaitQueue,
     /// Durable per-task exit value.
     pub exit_info: AtomicCell<ExitInfo>,
 }
@@ -378,7 +375,6 @@ impl<K, U> TaskInner<K, U> {
                 rsp: 0,
                 rip: 0,
             },
-            waiters: WaitQueue::new(),
             exit_info: AtomicCell::empty(),
         }
     }
@@ -426,7 +422,6 @@ impl<K, U> TaskInner<K, U> {
 
                 addr_of_mut!((*slot).switch_ctx).write(SwitchContext::zero());
 
-                addr_of_mut!((*slot).waiters).write(WaitQueue::new());
                 addr_of_mut!((*slot).exit_info).write(AtomicCell::empty());
 
                 Ok(())
@@ -469,7 +464,6 @@ impl<K, U> TaskInner<K, U> {
             (*this).sid = INVALID_TASK_ID;
             (*this).cwd[0] = b'/';
             (*this).cwd_len = 1;
-            addr_of_mut!((*this).waiters).write(WaitQueue::new());
             addr_of_mut!((*this).exit_info).write(AtomicCell::empty());
             addr_of_mut!((*this).state).write(TaskState::invalid());
         }
@@ -626,7 +620,6 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::write(&mut self.unsafe_stack as *mut _, None);
             core::ptr::write(&mut self.test_reports as *mut _, None);
             self.abi.unsafe_stack_sp = 0;
-            core::ptr::write(&mut self.waiters as *mut _, WaitQueue::new());
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
         }

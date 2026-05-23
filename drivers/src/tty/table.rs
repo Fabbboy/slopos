@@ -17,19 +17,20 @@
 //!
 //! 1. **`TTY_SLOTS[i]`** (per-TTY) — held for ldisc/session/termios
 //!    operations.  **Never hold two per-TTY locks simultaneously.**
-//! 2. **`TTY_INPUT_WAITERS[i]`** — never hold a per-TTY slot lock while
-//!    performing a blocking wait.  The `wait_event` condition closure may
-//!    transiently acquire the same per-TTY lock (this is safe because
-//!    `wait_event` releases its internal lock before calling the closure).
+//! 2. **Blocking waits** go through the kernel event bus
+//!    (`KernelEvent::TtyInput` / `KernelEvent::TtyOutput`) — never hold a
+//!    per-TTY slot lock across a blocking wait.  The `wait_event` condition
+//!    closure may transiently acquire the same per-TTY lock (this is safe
+//!    because `wait_event` releases its internal lock before calling the
+//!    closure).
 //!
 //! Rule: **Never acquire `TTY_SLOTS[j]` while holding `TTY_SLOTS[i]`**
 //!       (for `i ≠ j`).  Functions that iterate all slots (like
 //!       `detach_session_by_id`) acquire and release each lock in turn.
 //!
-//! `TTY_INPUT_WAITERS` is a **separate** static array of `WaitQueue`s — one
-//! per TTY slot.  They live outside `TTY_SLOTS` so that `read()` can call
-//! `wait_event(|| ...)` without holding the slot lock (the condition closure
-//! locks the slot internally to check for data).
+//! Blocking and wakeups are keyed by TTY slot through the event bus, so a
+//! sleeper never holds the slot lock while a waker holds the wait-queue
+//! lock (the condition closure locks the slot internally to check for data).
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -38,11 +39,29 @@ use super::ldisc::{LdiscKind, LineDisc};
 use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
+use slopos_abi::event::{KernelEvent, TtySlot};
 use slopos_abi::syscall::UserWinsize;
-use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, PinBox};
 use slopos_ostd::{AtomicBitmap, words_for};
+
+/// The input-side event for a TTY slot (cooked input or a poll-relevant
+/// status change became readable).
+#[inline]
+pub(crate) fn tty_input_event(slot: usize) -> KernelEvent {
+    KernelEvent::TtyInput {
+        tty: TtySlot(slot as u32),
+    }
+}
+
+/// The output-side event for a TTY slot (flow control resumed, or a
+/// poll-relevant status change became writable).
+#[inline]
+pub(crate) fn tty_output_event(slot: usize) -> KernelEvent {
+    KernelEvent::TtyOutput {
+        tty: TtySlot(slot as u32),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Per-TTY slots
@@ -61,24 +80,6 @@ use slopos_ostd::{AtomicBitmap, words_for};
 pub static TTY_SLOTS: [SpinLock<Option<PinBox<Tty>>>; MAX_TTYS] =
     [const { SpinLock::new(None, LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
 
-/// Per-TTY input wait queues — separate from TTY_SLOTS to avoid lock ordering
-/// issues (read() needs to block on the wait queue while the condition closure
-/// independently locks TTY_SLOTS[idx] to check for data).
-pub static TTY_INPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
-
-/// Per-TTY output wait queues — used by `write()` to block when IXON flow
-/// control has stopped output (Ctrl+S).  Writers sleep on this queue and are
-/// woken when output is resumed (Ctrl+Q or any key with IXON set).
-pub static TTY_OUTPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
-
-/// Per-TTY poll/select notification queues.  Tasks blocked in `poll()` or
-/// `select()` register on the specific slot's queue instead of a single
-/// global `WaitQueue`.  Any event that could change poll readiness (input
-/// arrival, hangup, IXON resume, peer close) wakes only the waiters on
-/// the affected slot — eliminating the thundering-herd problem of the old
-/// global `POLL_NOTIFY`.
-pub static TTY_POLL_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
-
 /// Per-TTY output-in-flight **byte** counter.  Tracks the number of
 /// bytes that have been processed through the line discipline but have
 /// not yet completed the unlocked hardware write.  Used by
@@ -87,8 +88,8 @@ pub static TTY_POLL_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }
 /// accurate queue depth.
 ///
 /// Increment by the chunk byte count **before** `write_driver_unlocked`,
-/// decrement by the same count **after**, then wake
-/// `TTY_OUTPUT_WAITERS` so drain waiters re-check.
+/// decrement by the same count **after**, then publish
+/// `KernelEvent::TtyOutput` so drain waiters re-check.
 pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
 
 /// Per-TTY write serialization locks.

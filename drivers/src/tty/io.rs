@@ -31,10 +31,11 @@ use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
 use super::ldisc::{self, BatchResult, OutputAction};
 use super::session::ForegroundCheck;
 use super::table::{
-    InflightGuard, TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS,
-    TTY_SLOTS, TTY_WRITE_LOCKS,
+    InflightGuard, TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_LOCKS, tty_input_event,
+    tty_output_event,
 };
 use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
+use slopos_ostd::sync::BUS;
 
 // ---------------------------------------------------------------------------
 // Tty helper method — hardware drain
@@ -176,7 +177,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         drop(_inflight);
         drop(_write_guard);
         drop(out);
-        TTY_OUTPUT_WAITERS[slot].wake_all();
+        BUS.publish(tty_output_event(slot));
     }
 
     if wake {
@@ -195,9 +196,9 @@ fn notify_input_ready(idx: TtyIndex) {
     if slot >= MAX_TTYS {
         return;
     }
-    TTY_INPUT_WAITERS[slot].wake_one();
-    // Wake per-slot poll sleepers.
-    TTY_POLL_WAITERS[slot].wake_all();
+    // Input arrival wakes readers and poll waiters alike — both park on
+    // the input event queue.
+    BUS.publish(tty_input_event(slot));
 }
 
 fn check_read_foreground(tty: &Tty, caller_pgid: u32, caller_sid: u32) -> Result<(), TtyError> {
@@ -479,10 +480,12 @@ pub fn read_with_attach(
         };
 
         let wait_ok = match wait_timeout_ms {
-            Some(timeout_ms) => {
-                TTY_INPUT_WAITERS[slot].wait_event_timeout(wait_condition, timeout_ms)
-            }
-            None => TTY_INPUT_WAITERS[slot].wait_event(wait_condition),
+            Some(timeout_ms) => BUS
+                .subscribe(tty_input_event(slot))
+                .wait_event_timeout(wait_condition, timeout_ms),
+            None => BUS
+                .subscribe(tty_input_event(slot))
+                .wait_event(wait_condition),
         };
         if !wait_ok {
             return if total > 0 { Ok(total) } else { Ok(0) };
@@ -560,7 +563,7 @@ fn wait_for_write_ready(
                 return Err(TtyError::WouldBlock);
             }
         } else {
-            TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
+            BUS.subscribe(tty_output_event(peer_slot)).wait_event(|| {
                 if has_pending_signal() {
                     return true;
                 }
@@ -599,7 +602,7 @@ fn wait_for_write_ready(
                 return Err(TtyError::WouldBlock);
             }
         } else {
-            TTY_OUTPUT_WAITERS[master_slot].wait_event(|| {
+            BUS.subscribe(tty_output_event(master_slot)).wait_event(|| {
                 let guard = TTY_SLOTS[master_slot].lock();
                 match guard.as_ref() {
                     Some(tty) => {
@@ -631,7 +634,7 @@ fn wait_for_write_ready(
             return Err(TtyError::WouldBlock);
         }
     } else {
-        TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+        BUS.subscribe(tty_output_event(slot)).wait_event(|| {
             if has_pending_signal() {
                 return true;
             }
@@ -769,7 +772,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         if driver_written < out_len {
             break;
         }
-        TTY_OUTPUT_WAITERS[slot].wake_all();
+        BUS.publish(tty_output_event(slot));
     }
 
     Ok(pos)

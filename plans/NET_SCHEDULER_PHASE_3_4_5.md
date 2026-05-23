@@ -1,14 +1,14 @@
 ---
 name: SlopOS Net/Scheduler Refactor — Phases 3, 4, 5
 description: Lock-free TCP demux (Phase 3) + typed KernelEvent substrate (Phase 4) + Rust-typed XDP (Phase 5). Continuation of the Phase 1+2 RX/scheduler rip-and-replace.
-status: Phase 3 shipped. Phases 4 + 5 ready.
+status: Phases 3 + 4 shipped. Phase 5 ready.
 parent_plan: (not committed) — original five-phase plan lived at `~/.claude/plans/fully-implleme-tlong-term-refactored-rocket.md`
 working_directory: /home/lon60/repos/slopos
 ---
 
 # SlopOS Net/Scheduler Refactor — Phases 3, 4, 5
 
-> **Status:** Phase 1 (threaded NAPI + scheduler invariants + tickless idle + `KernelIoToken`) shipped. Phase 2 (state-machine retirement + lost-wakeup recheck via `Virtqueue::has_pending`) shipped. The single-critical-section `unix_sendmsg` atomicity fix for SCM_RIGHTS shipped on top (made window rendering work again). **Phase 3 (this commit) shipped: typed `Epoch` primitive over RCU, lock-free TCP demux read path under `NET_EPOCH`, per-slot PCB locks (64 + 16 listener), lockdep-backed enforcement of the "no SpinLock inside an Epoch scope" rule, 9 new tests, 2447 total passing.** Phase 4 + 5 unchanged.
+> **Status:** Phase 1 (threaded NAPI + scheduler invariants + tickless idle + `KernelIoToken`) shipped. Phase 2 (state-machine retirement + lost-wakeup recheck via `Virtqueue::has_pending`) shipped. The single-critical-section `unix_sendmsg` atomicity fix for SCM_RIGHTS shipped on top (made window rendering work again). **Phase 3 shipped: typed `Epoch` primitive over RCU, lock-free TCP demux read path under `NET_EPOCH`, per-slot PCB locks (64 + 16 listener), lockdep-backed enforcement of the "no SpinLock inside an Epoch scope" rule, 9 new tests, 2447 total passing.** **Phase 4 (this commit) shipped: typed `KernelEvent` event bus (`slopos_ostd::sync::BUS`) replaced all 9 ad-hoc `[WaitQueue; CAP]` arrays + per-task child-exit waiters; sockets re-keyed precise per-direction; 2449/2450 passing.** Phase 5 unchanged.
 
 > **Target:** finish the network/scheduler rip-and-replace by retiring the last per-packet RX serialisation point (Phase 3), unifying the 33+ ad-hoc wait queues into one typed event substrate (Phase 4), and replacing BPF-style packet filtering with safe-Rust filters monomorphised by `rustc` (Phase 5).
 
@@ -194,6 +194,18 @@ Today's `TcpShard::lock()` is taken per RX packet. At 1 Gbit/s = 80k pps minimum
 ---
 
 ## 3. Phase 4 — Typed `KernelEvent` substrate
+
+> **Status: SHIPPED.** A typed kernel-wide event bus replaced all 9 ad-hoc `static [WaitQueue; CAP]` arrays (socket recv/send/accept, tty input/output/poll, pipe reader/writer, unix socket) plus the per-task child-exit waiters. `just test` reports 2449 / 2450 passing (0 failed); `just check-framekernel` green; `just check-test-count` 2450 ≥ baseline. Notes on what shipped vs. the original spec:
+>
+> - **`KernelEvent` + id newtypes — `abi/src/event.rs` (new).** `SocketSlot`/`PipeSlot`/`TtySlot`/`UnixSocketSlot`/`TaskSlot` newtypes. The enum is **exhaustive (not `#[non_exhaustive]`)** so the bus's `queue_for` match is compile-checked — adding a variant without wiring its queue fails to build (stronger than the spec's forward-compat note; revisit when Phase 5 adds `NetRxBatch`). `NetRxBatch`/`TimerFired` were dropped as YAGNI (RX uses `NapiWaker`, timers use `SleepQueue` — no backing array). Resource caps `MAX_PIPES`/`MAX_TTYS`/`MAX_UNIX_SOCKETS` moved here with `pub use` shims in the owning crates.
+> - **The bus — `slopos-ostd/src/sync/event_bus.rs` (new).** A concrete `pub static BUS: EventBus` singleton, **not** the spec's `Pollee` trait (one impl; the enum *is* the compile-time check, so the trait's `type Event: Into<KernelEvent>` round-trip was pure ceremony). `EventBus` owns all backing `[WaitQueue; CAP]` tables, initialised by a direct struct literal so there is no runtime constructor for the large value (no `check_stack_sizes` hit). API: `publish` / `publish_one` / `subscribe_current` / `unsubscribe_current` / `subscribe(ev) -> Subscription` / `waiter_count` / `has_waiters`. No lockdep hookup needed (publish = array index + `wake_all`; no epoch).
+> - **`Subscription`** is a thin typed handle (`wait_event` / `wait_event_timeout` forward to the backing queue) with no pre-enqueue/Drop — the poll/select multi-queue path uses `subscribe_current`/`unsubscribe_current` directly (Design A below), avoiding double-registration.
+> - **Sockets: precise per-direction (user-chosen).** The hint pool (`SOCKET_WQ_HINT`, `wq_slot`, `recv_wq_idx`/`send_wq_idx`/`accept_wq_idx` fields) was deleted; recv/send/accept now get separate per-socket queues keyed by the socket table index. `socket_notify_*` loops switched to `.enumerate()`.
+> - **TTY: `TTY_POLL_WAITERS` dropped (user-chosen).** Poll/select on a tty registers on **both** `TtyInput` and `TtyOutput` (`poll_register_slot`); hangup/flow-control sites that previously woke the poll queue now publish the matching input/output event (the bus's independent `wake_poll` mask publishes both).
+> - **FileOps "Design A".** `poll_wait`/`poll_unwait` became thin `BUS.subscribe_current`/`unsubscribe_current` swaps; `syscall_poll`/`syscall_select` are unchanged (queue-agnostic — they block the current task via `block_current_task_with_timeout`, which is already the "wait on the task's multi-queue registration" primitive). The `open_file_idx` refcount path is preserved byte-for-byte.
+> - **`unix_sendmsg` atomicity preserved** — only the single post-unlock `wake_all` became `BUS.publish`; the fds-then-data critical section is untouched.
+> - **Child-exit** — the embedded `TaskInner.waiters` field was removed; `task_wake_all_waiters` / the scheduler `wait_for` path key `ChildExit` on `task_id_of`, with the `exit_cell` re-check + `TaskRefGuard` window preserved (a colliding hash bucket is benign).
+> - **Test reality:** the kernel `stest!` phase runs pre-scheduler (no current task), so real blocking/wakeup round-trips are validated by the **userland `utest!` phase** (real processes); kernel-phase `event` tests assert task-free observables (routing-in-range, idle-publish, pre-check fast paths).
 
 **Goal.** Replace 33+ static `[WaitQueue; CAP]` arrays (sockets, ttys, pipes, unix sockets, child-exit) with one typed kernel-wide event bus. The existing `WaitQueue` primitive stays as the implementation backend; the *API surface* becomes typed so producer/consumer mismatches are `rustc` errors instead of silent `void *key` drift à la Linux's `__wake_up_common`.
 

@@ -14,8 +14,9 @@ use slopos_kernel_services::driver_runtime::{
 
 use super::driver::TtyDriverKind;
 use super::pty;
-use super::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
+use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
+use slopos_ostd::sync::BUS;
 
 // ---------------------------------------------------------------------------
 // Active TTY tracking (for keyboard input routing)
@@ -58,8 +59,8 @@ pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
 
     set_active_tty(idx);
     if scheduler_is_enabled() != 0 {
-        TTY_INPUT_WAITERS[slot].wake_all();
-        TTY_POLL_WAITERS[slot].wake_all();
+        // Poll waiters park on the input queue too, so one publish covers both.
+        BUS.publish(tty_input_event(slot));
     }
     Ok(())
 }
@@ -217,11 +218,10 @@ pub fn hangup(idx: TtyIndex) {
     }
 
     if scheduler_is_enabled() != 0 {
-        TTY_INPUT_WAITERS[slot].wake_all();
-        // Wake output waiters and per-slot poll sleepers
-        // so they see POLLHUP.
-        TTY_OUTPUT_WAITERS[slot].wake_all();
-        TTY_POLL_WAITERS[slot].wake_all();
+        // A hangup wakes readers, writers, and poll waiters so they all
+        // observe POLLHUP. Poll waiters park on both queues.
+        BUS.publish(tty_input_event(slot));
+        BUS.publish(tty_output_event(slot));
     }
 }
 

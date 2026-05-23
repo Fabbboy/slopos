@@ -29,13 +29,14 @@ impl SocketHandle {
         (self.0 as usize) & SLOT_MASK
     }
 
-    /// Slot index for wait-queue indexing (static `SOCKET_WQS` arrays).
+    /// Slot index used to key the socket's `KernelEvent::UnixSocket` queue.
     ///
     /// This performs a **bounds check** against `MAX_UNIX_SOCKETS` but does
-    /// **not** validate the generation counter.  Safe for `SOCKET_WQS[i]`
-    /// because the wait-queue array is a fixed-size static — indexing a
-    /// recycled slot's queue is harmless (spurious wakeups are tolerated).
-    /// All slot *data* access must go through `validate_socket_handle`.
+    /// **not** validate the generation counter.  Safe as an event key
+    /// because the event bus's backing queue is a fixed-size static —
+    /// keying a recycled slot's queue is harmless (spurious wakeups are
+    /// tolerated).  All slot *data* access must go through
+    /// `validate_socket_handle`.
     pub(crate) fn slot_for_wq(self) -> Option<usize> {
         let i = (self.0 as usize) & SLOT_MASK;
         if i < MAX_UNIX_SOCKETS { Some(i) } else { None }

@@ -6,18 +6,16 @@
 //! pipes never contend. A separate [`PIPE_ALLOC`] lock protects only the
 //! allocation bitmap (touched on pipe create/destroy only).
 //!
-//! Wait queues live in separate statics ([`READER_WQS`], [`WRITER_WQS`])
-//! indexed by pipe slot, so wakers and sleepers never hold a pipe lock
-//! and a wait-queue lock simultaneously.
+//! Blocking and wakeups go through the kernel event bus keyed by
+//! `KernelEvent::PipeRead` / `KernelEvent::PipeWrite`, so wakers and sleepers
+//! never hold a pipe lock and a wait-queue lock simultaneously.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
-use slopos_ostd::sync::{
-    LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard, WaitQueue,
-};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard};
 
-pub(crate) const MAX_PIPES: usize = 64;
+pub(crate) use slopos_abi::event::MAX_PIPES;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
 
 /// Bits used for the slot index in the handle encoding.
@@ -66,19 +64,6 @@ impl PipeHandle {
 
 /// Global generation counter for pipe slot allocation.
 static PIPE_GENERATION: AtomicU32 = AtomicU32::new(1);
-
-pub(crate) static READER_WQS: [WaitQueue; MAX_PIPES] = [const { WaitQueue::new() }; MAX_PIPES];
-pub(crate) static WRITER_WQS: [WaitQueue; MAX_PIPES] = [const { WaitQueue::new() }; MAX_PIPES];
-
-#[inline]
-pub(crate) fn reader_wq(handle: PipeHandle) -> &'static WaitQueue {
-    &READER_WQS[handle.slot()]
-}
-
-#[inline]
-pub(crate) fn writer_wq(handle: PipeHandle) -> &'static WaitQueue {
-    &WRITER_WQS[handle.slot()]
-}
 
 pub(crate) struct PipeSlot {
     pub(crate) valid: bool,

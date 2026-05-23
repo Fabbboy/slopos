@@ -9,8 +9,26 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 
-use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
+use slopos_ostd::sync::BUS;
+
+use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
+
+/// Register the current task for poll readiness on a TTY slot. Poll waiters
+/// park on both the input and output queues so any readiness change — in
+/// either direction — wakes them. Returns true if either registration
+/// succeeded.
+fn poll_register_slot(slot: usize) -> bool {
+    let input = BUS.subscribe_current(tty_input_event(slot));
+    let output = BUS.subscribe_current(tty_output_event(slot));
+    input || output
+}
+
+/// Remove the current task from both poll queues of a TTY slot.
+fn poll_unregister_slot(slot: usize) {
+    BUS.unsubscribe_current(tty_input_event(slot));
+    BUS.unsubscribe_current(tty_output_event(slot));
+}
 
 // ---------------------------------------------------------------------------
 // Compositor focus
@@ -46,7 +64,7 @@ pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
         return Err(TtyError::NotAllocated);
     }
     if scheduler_is_enabled() != 0 {
-        TTY_INPUT_WAITERS[slot].wake_all();
+        BUS.publish(tty_input_event(slot));
     }
     Ok(())
 }
@@ -145,7 +163,7 @@ pub fn poll_enqueue(idx: TtyIndex) -> bool {
     if scheduler_is_enabled() == 0 {
         return false;
     }
-    TTY_POLL_WAITERS[slot].enqueue_current()
+    poll_register_slot(slot)
 }
 
 /// Remove the current task from a TTY poll wait queue.
@@ -154,7 +172,7 @@ pub fn poll_dequeue(idx: TtyIndex) {
     if slot >= MAX_TTYS {
         return;
     }
-    TTY_POLL_WAITERS[slot].remove_current();
+    poll_unregister_slot(slot);
 }
 
 /// Sleep until a poll-relevant event occurs on one of the given TTY slots,
@@ -162,7 +180,7 @@ pub fn poll_dequeue(idx: TtyIndex) {
 ///
 /// Per-slot registration.  The caller provides the set
 /// of TTY indices it is currently monitoring.  The current task is enqueued
-/// on each slot's `TTY_POLL_WAITERS` entry, then blocked exactly once.
+/// on each slot's input and output event queues, then blocked exactly once.
 /// When *any* of the registered slots fires a wake, the task resumes and
 /// is cleaned up from all queues.
 ///
@@ -198,7 +216,7 @@ pub fn poll_sleep_on(slots: &[u8]) {
     let mut registered = 0usize;
     for &slot in slots {
         let s = slot as usize;
-        if s < MAX_TTYS && TTY_POLL_WAITERS[s].enqueue_current() {
+        if s < MAX_TTYS && poll_register_slot(s) {
             registered += 1;
         }
     }
@@ -215,7 +233,7 @@ pub fn poll_sleep_on(slots: &[u8]) {
     for &slot in slots {
         let s = slot as usize;
         if s < MAX_TTYS {
-            TTY_POLL_WAITERS[s].remove_current();
+            poll_unregister_slot(s);
         }
     }
 }

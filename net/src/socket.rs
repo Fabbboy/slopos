@@ -1,5 +1,4 @@
 use core::fmt;
-use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
@@ -278,8 +277,6 @@ impl<T> fmt::Debug for BoundedQueue<T> {
     }
 }
 
-static SOCKET_WQ_HINT: AtomicU16 = AtomicU16::new(0);
-
 pub struct Socket {
     /// Protocol-specific socket state.
     pub inner: SocketInner,
@@ -299,12 +296,6 @@ pub struct Socket {
     pub pending_error: Option<NetError>,
     /// Owning process identifier.
     pub process_id: u32,
-    /// Placeholder receive wait queue index.
-    pub recv_wq_idx: u8,
-    /// Placeholder accept wait queue index.
-    pub accept_wq_idx: u8,
-    /// Placeholder send wait queue index.
-    pub send_wq_idx: u8,
 }
 
 impl Socket {
@@ -313,7 +304,6 @@ impl Socket {
 
     /// Create a new socket object with defaults.
     pub fn new(inner: SocketInner) -> Self {
-        let wq_idx = (SOCKET_WQ_HINT.fetch_add(1, Ordering::Relaxed) & 0x00FF) as u8;
         Self {
             inner,
             state: SocketState::Unbound,
@@ -324,9 +314,6 @@ impl Socket {
             recv_queue: BoundedQueue::new(Self::RECV_QUEUE_DEFAULT_CAPACITY),
             pending_error: None,
             process_id: 0,
-            recv_wq_idx: wq_idx,
-            accept_wq_idx: wq_idx,
-            send_wq_idx: wq_idx,
         }
     }
 
@@ -706,6 +693,7 @@ pub static EPHEMERAL_PORTS: slopos_ostd::sync::SpinLock<EphemeralPortAllocator> 
 
 use core::cmp;
 
+use slopos_abi::event::{KernelEvent, SocketSlot};
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_ECONNRESET,
@@ -713,7 +701,7 @@ use slopos_abi::syscall::{
     ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
     ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
-use slopos_ostd::sync::WaitQueue;
+use slopos_ostd::sync::BUS;
 
 use crate as net;
 use crate::tcp::{TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
@@ -731,18 +719,29 @@ pub enum SocketState {
     Closed,
 }
 
-static RECV_WQS: [WaitQueue; MAX_SOCKETS] = {
-    const WAIT_QUEUE: WaitQueue = WaitQueue::new();
-    [WAIT_QUEUE; MAX_SOCKETS]
-};
-static ACCEPT_WQS: [WaitQueue; MAX_SOCKETS] = {
-    const WAIT_QUEUE: WaitQueue = WaitQueue::new();
-    [WAIT_QUEUE; MAX_SOCKETS]
-};
-static SEND_WQS: [WaitQueue; MAX_SOCKETS] = {
-    const WAIT_QUEUE: WaitQueue = WaitQueue::new();
-    [WAIT_QUEUE; MAX_SOCKETS]
-};
+/// The recv-readiness event for a socket table slot.
+#[inline]
+fn sock_recv_ev(idx: u32) -> KernelEvent {
+    KernelEvent::SocketRecv {
+        sock: SocketSlot(idx),
+    }
+}
+
+/// The send-readiness event for a socket table slot.
+#[inline]
+fn sock_send_ev(idx: u32) -> KernelEvent {
+    KernelEvent::SocketSend {
+        sock: SocketSlot(idx),
+    }
+}
+
+/// The accept-readiness event for a listening socket table slot.
+#[inline]
+fn sock_accept_ev(idx: u32) -> KernelEvent {
+    KernelEvent::SocketAccept {
+        sock: SocketSlot(idx),
+    }
+}
 fn errno_i32(errno: u64) -> i32 {
     errno as i64 as i32
 }
@@ -851,10 +850,6 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     }
 }
 
-fn wq_slot(hint: u8) -> usize {
-    (hint as usize) % MAX_SOCKETS
-}
-
 /// Outcome of a signal-interruptible socket wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SockWait {
@@ -890,7 +885,11 @@ enum SockWait {
 /// wakes us synchronously). Both arms re-check
 /// `has_pending_signal()` after wake to disambiguate "signal woke
 /// us" from "data woke us"/"timeout expired".
-fn wait_socket_event<F: FnMut() -> bool>(wq: &WaitQueue, mut pred: F, timeout_ms: u64) -> SockWait {
+fn wait_socket_event<F: FnMut() -> bool>(
+    ev: KernelEvent,
+    mut pred: F,
+    timeout_ms: u64,
+) -> SockWait {
     if slopos_kernel_services::driver_runtime::has_pending_signal() {
         return SockWait::Signal;
     }
@@ -907,10 +906,11 @@ fn wait_socket_event<F: FnMut() -> bool>(wq: &WaitQueue, mut pred: F, timeout_ms
         crate::napi::kick();
         slopos_kernel_services::driver_runtime::has_pending_signal() || pred()
     };
+    let sub = BUS.subscribe(ev);
     let observed = if timeout_ms > 0 {
-        wq.wait_event_timeout(&mut predicate, timeout_ms)
+        sub.wait_event_timeout(&mut predicate, timeout_ms)
     } else {
-        wq.wait_event(&mut predicate)
+        sub.wait_event(&mut predicate)
     };
     if slopos_kernel_services::driver_runtime::has_pending_signal() {
         return SockWait::Signal;
@@ -920,18 +920,6 @@ fn wait_socket_event<F: FnMut() -> bool>(wq: &WaitQueue, mut pred: F, timeout_ms
     } else {
         SockWait::Timeout
     }
-}
-
-fn socket_wake_recv_hint(wq_hint: u8) {
-    RECV_WQS[wq_slot(wq_hint)].wake_all();
-}
-
-fn socket_wake_send_hint(wq_hint: u8) {
-    SEND_WQS[wq_slot(wq_hint)].wake_all();
-}
-
-fn socket_wake_accept_hint(wq_hint: u8) {
-    ACCEPT_WQS[wq_slot(wq_hint)].wake_all();
 }
 
 fn socket_tcp_conn_id(sock: &Socket) -> Option<tcp::ConnId> {
@@ -951,29 +939,36 @@ fn socket_is_icmp(sock: &Socket) -> bool {
 
 fn socket_notify_tcp_idx_waiters(tcp_idx: tcp::ConnId) {
     let table = NEW_SOCKET_TABLE.lock();
-    for slot in table.slots.iter().flatten() {
+    for (idx, slot) in table.slots.iter().enumerate() {
+        let Some(slot) = slot.as_ref() else {
+            continue;
+        };
         if socket_tcp_conn_id(slot) != Some(tcp_idx) {
             continue;
         }
+        let idx = idx as u32;
         if tcp::recv_available(tcp_idx) > 0 || tcp::is_peer_closed(tcp_idx) {
-            socket_wake_recv_hint(slot.recv_wq_idx);
+            BUS.publish(sock_recv_ev(idx));
         }
         if tcp::send_buffer_space(tcp_idx) > 0 {
-            socket_wake_send_hint(slot.send_wq_idx);
+            BUS.publish(sock_send_ev(idx));
         }
         if !matches!(
             tcp::get_state(tcp_idx),
             Some(TcpState::Established | TcpState::CloseWait)
         ) {
-            socket_wake_recv_hint(slot.recv_wq_idx);
-            socket_wake_send_hint(slot.send_wq_idx);
+            BUS.publish(sock_recv_ev(idx));
+            BUS.publish(sock_send_ev(idx));
         }
     }
 }
 
 fn socket_notify_accept_waiters() {
     let mut table = NEW_SOCKET_TABLE.lock();
-    for sock in table.slots.iter_mut().flatten() {
+    for (idx, slot) in table.slots.iter_mut().enumerate() {
+        let Some(sock) = slot.as_mut() else {
+            continue;
+        };
         if sock.state != SocketState::Listening {
             continue;
         }
@@ -988,7 +983,7 @@ fn socket_notify_accept_waiters() {
             false
         };
         if has_pending {
-            socket_wake_accept_hint(sock.accept_wq_idx);
+            BUS.publish(sock_accept_ev(idx as u32));
         }
     }
 }
@@ -1057,7 +1052,7 @@ pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload
         None => return,
     };
 
-    let mut wake_hint = None;
+    let mut should_wake = false;
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
@@ -1068,12 +1063,12 @@ pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload
         }
         let src = SockAddr::new(Ipv4Addr(src_ip), Port(src_port));
         if sock.recv_queue.push((packet, src)) {
-            wake_hint = Some(sock.recv_wq_idx);
+            should_wake = true;
         }
     }
 
-    if let Some(hint) = wake_hint {
-        socket_wake_recv_hint(hint);
+    if should_wake {
+        BUS.publish(sock_recv_ev(sock_idx));
     }
 }
 
@@ -1083,7 +1078,7 @@ pub fn socket_deliver_icmp(sock_idx: u32, src_ip: [u8; 4], icmp_message: &[u8]) 
         None => return,
     };
 
-    let mut wake_hint = None;
+    let mut should_wake = false;
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
@@ -1094,12 +1089,12 @@ pub fn socket_deliver_icmp(sock_idx: u32, src_ip: [u8; 4], icmp_message: &[u8]) 
         }
         let src = SockAddr::new(Ipv4Addr(src_ip), Port(0));
         if sock.recv_queue.push((packet, src)) {
-            wake_hint = Some(sock.recv_wq_idx);
+            should_wake = true;
         }
     }
 
-    if let Some(hint) = wake_hint {
-        socket_wake_recv_hint(hint);
+    if should_wake {
+        BUS.publish(sock_recv_ev(sock_idx));
     }
 }
 
@@ -1333,7 +1328,7 @@ pub fn socket_recvfrom(
         slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
     };
 
-    let (nonblocking, timeout_ms, recv_hint) = {
+    let (nonblocking, timeout_ms) = {
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
@@ -1347,7 +1342,6 @@ pub fn socket_recvfrom(
         (
             sock.is_nonblocking(),
             sock.options.recv_timeout.unwrap_or(0),
-            sock.recv_wq_idx,
         )
     };
 
@@ -1375,7 +1369,7 @@ pub fn socket_recvfrom(
         }
 
         match wait_socket_event(
-            &RECV_WQS[wq_slot(recv_hint)],
+            sock_recv_ev(sock_idx),
             || {
                 let table = NEW_SOCKET_TABLE.lock();
                 table
@@ -1496,7 +1490,7 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
 
 pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16) -> i32 {
     loop {
-        let (nonblocking, timeout_ms, accept_hint) = {
+        let (nonblocking, timeout_ms) = {
             let table = NEW_SOCKET_TABLE.lock();
             let Some(sock) = table.get(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
@@ -1507,7 +1501,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             (
                 sock.is_nonblocking(),
                 sock.options.recv_timeout.unwrap_or(0),
-                sock.accept_wq_idx,
             )
         };
 
@@ -1598,7 +1591,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 
         // Wait for accept queue to become non-empty.
         match wait_socket_event(
-            &ACCEPT_WQS[wq_slot(accept_hint)],
+            sock_accept_ev(sock_idx),
             || {
                 let table = NEW_SOCKET_TABLE.lock();
                 let Some(sock) = table.get(sock_idx as usize) else {
@@ -1624,7 +1617,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 }
 
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
-    let (tcp_idx, nonblocking, _send_hint, syn_seg) = {
+    let (tcp_idx, nonblocking, syn_seg) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
@@ -1656,8 +1649,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                         tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
 
                         let nb = sock.is_nonblocking();
-                        let hint = sock.send_wq_idx;
-                        (tcp_idx, nb, hint, syn)
+                        (tcp_idx, nb, syn)
                     }
                     Err(e) => return map_tcp_err(e),
                 }
@@ -1885,7 +1877,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         };
     }
 
-    let (tcp_idx, state, nonblocking, timeout_ms, send_hint) = {
+    let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
@@ -1896,7 +1888,6 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             sock.state,
             sock.is_nonblocking(),
             sock.options.send_timeout.unwrap_or(0),
-            sock.send_wq_idx,
         )
     };
 
@@ -1924,7 +1915,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 return errno_i32(ERRNO_EAGAIN) as i64;
             }
             match wait_socket_event(
-                &SEND_WQS[wq_slot(send_hint)],
+                sock_send_ev(sock_idx),
                 || tcp::send_buffer_space(tcp_idx) > 0,
                 timeout_ms,
             ) {
@@ -1956,7 +1947,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 return errno_i32(ERRNO_EAGAIN) as i64;
             }
             match wait_socket_event(
-                &SEND_WQS[wq_slot(send_hint)],
+                sock_send_ev(sock_idx),
                 || tcp::send_buffer_space(tcp_idx) > 0,
                 timeout_ms,
             ) {
@@ -2019,7 +2010,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     }
 
     if is_udp || is_icmp {
-        let (nonblocking, timeout_ms, recv_hint, peer_filter) = {
+        let (nonblocking, timeout_ms, peer_filter) = {
             let table = NEW_SOCKET_TABLE.lock();
             let Some(sock) = table.get(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK) as i64;
@@ -2032,7 +2023,6 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
             (
                 sock.is_nonblocking(),
                 sock.options.recv_timeout.unwrap_or(0),
-                sock.recv_wq_idx,
                 peer,
             )
         };
@@ -2069,7 +2059,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
             }
 
             let wait_ok = if timeout_ms > 0 {
-                RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
+                BUS.subscribe(sock_recv_ev(sock_idx)).wait_event_timeout(
                     || {
                         let table = NEW_SOCKET_TABLE.lock();
                         table
@@ -2080,7 +2070,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     timeout_ms,
                 )
             } else {
-                RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
+                BUS.subscribe(sock_recv_ev(sock_idx)).wait_event(|| {
                     let table = NEW_SOCKET_TABLE.lock();
                     table
                         .get(sock_idx as usize)
@@ -2095,7 +2085,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         }
     }
 
-    let (tcp_idx, state, nonblocking, timeout_ms, recv_hint) = {
+    let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
@@ -2106,7 +2096,6 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
             sock.state,
             sock.is_nonblocking(),
             sock.options.recv_timeout.unwrap_or(0),
-            sock.recv_wq_idx,
         )
     };
 
@@ -2147,7 +2136,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 }
 
                 match wait_socket_event(
-                    &RECV_WQS[wq_slot(recv_hint)],
+                    sock_recv_ev(sock_idx),
                     || {
                         tcp::recv_available(tcp_idx) > 0
                             || tcp::is_peer_closed(tcp_idx)
@@ -2180,7 +2169,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
 }
 
 pub fn socket_close(sock_idx: u32) -> i32 {
-    let (tcp_idx, udp_unbind, icmp_unbind, recv_hint, send_hint, accept_hint, _was_listener) = {
+    let (tcp_idx, udp_unbind, icmp_unbind, _was_listener) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
@@ -2202,9 +2191,6 @@ pub fn socket_close(sock_idx: u32) -> i32 {
             None
         };
         let was_listener = sock.state == SocketState::Listening;
-        let recv_hint = sock.recv_wq_idx;
-        let send_hint = sock.send_wq_idx;
-        let accept_hint = sock.accept_wq_idx;
         sock.recv_queue.clear();
 
         // Clean up TcpListenState (cancels SYN-ACK retransmit timers).
@@ -2216,15 +2202,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         }
 
         table.free(sock_idx as usize);
-        (
-            tcp_idx,
-            udp_unbind,
-            icmp_unbind,
-            recv_hint,
-            send_hint,
-            accept_hint,
-            was_listener,
-        )
+        (tcp_idx, udp_unbind, icmp_unbind, was_listener)
     };
 
     // Release the TCP connection (if any).  The sharded table handles
@@ -2243,9 +2221,9 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         EPHEMERAL_PORTS.lock().release(Port(identifier));
     }
 
-    socket_wake_recv_hint(recv_hint);
-    socket_wake_send_hint(send_hint);
-    socket_wake_accept_hint(accept_hint);
+    BUS.publish(sock_recv_ev(sock_idx));
+    BUS.publish(sock_send_ev(sock_idx));
+    BUS.publish(sock_accept_ev(sock_idx));
 
     if let Some(tcp_idx) = tcp_idx {
         match tcp::close(tcp_idx) {
@@ -2347,25 +2325,11 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
 }
 
 pub fn socket_poll_enqueue_recv(sock_idx: u32) -> bool {
-    let wq_hint = {
-        let table = NEW_SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx as usize) else {
-            return false;
-        };
-        sock.recv_wq_idx
-    };
-    RECV_WQS[wq_slot(wq_hint)].enqueue_current()
+    BUS.subscribe_current(sock_recv_ev(sock_idx))
 }
 
 pub fn socket_poll_dequeue_recv(sock_idx: u32) {
-    let wq_hint = {
-        let table = NEW_SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx as usize) else {
-            return;
-        };
-        sock.recv_wq_idx
-    };
-    RECV_WQS[wq_slot(wq_hint)].remove_current();
+    BUS.unsubscribe_current(sock_recv_ev(sock_idx));
 }
 
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
@@ -2455,19 +2419,19 @@ pub fn socket_reset_all() {
         table.init_if_needed();
         let cap = table.capacity();
         for idx in 0..cap {
-            if let Some(sock) = table.get(idx) {
-                socket_wake_recv_hint(sock.recv_wq_idx);
-                socket_wake_accept_hint(sock.accept_wq_idx);
-                socket_wake_send_hint(sock.send_wq_idx);
+            if table.get(idx).is_some() {
+                BUS.publish(sock_recv_ev(idx as u32));
+                BUS.publish(sock_accept_ev(idx as u32));
+                BUS.publish(sock_send_ev(idx as u32));
             }
             table.free(idx);
         }
     }
 
     for idx in 0..MAX_SOCKETS {
-        RECV_WQS[idx].wake_all();
-        ACCEPT_WQS[idx].wake_all();
-        SEND_WQS[idx].wake_all();
+        BUS.publish(sock_recv_ev(idx as u32));
+        BUS.publish(sock_accept_ev(idx as u32));
+        BUS.publish(sock_send_ev(idx as u32));
     }
 
     // Reset the allocation bitmap to match the cleared table.
@@ -2713,14 +2677,13 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
 pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
     use slopos_abi::syscall::*;
 
-    let (tcp_idx, recv_hint) = {
+    let tcp_idx = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
 
         let tcp_idx = socket_tcp_conn_id(sock);
-        let recv_hint = sock.recv_wq_idx;
 
         match how {
             SHUT_RD => {
@@ -2742,7 +2705,7 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
             _ => return errno_i32(ERRNO_EINVAL),
         }
 
-        (tcp_idx, recv_hint)
+        tcp_idx
     };
 
     // For TCP sockets, perform protocol-level shutdown actions.
@@ -2759,7 +2722,7 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
         if shut_rd {
             tcp::recv_discard(tcp_idx);
             // Wake recv waiters so they see EOF.
-            socket_wake_recv_hint(recv_hint);
+            BUS.publish(sock_recv_ev(sock_idx));
         }
     }
 

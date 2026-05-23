@@ -2,7 +2,9 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_arch::cpu;
+use slopos_ostd::sync::BUS;
 use slopos_ostd::sync::PreemptGuard;
 
 use slopos_ostd::kdiag_timestamp;
@@ -133,7 +135,7 @@ use super::task::{
     task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
     task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
     task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
-    task_try_transition_from, task_waiters_ref,
+    task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -1181,12 +1183,12 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     let _ref_guard = super::task::TaskRefGuard::new(target);
 
     // `_ref_guard` keeps `target`'s slot alive across the potential
-    // yield. The waiters queue and exit_info cell are valid for the
-    // duration of `_ref_guard`. Memory ordering: the producer's
-    // `try_set` is Release; `is_set` (Acquire, evaluated under the
-    // WaitQueue's SpinLock) is the matching consumer. The SpinLock
-    // pair on both sides supplies the bidirectional full barrier.
-    let Some(waiters) = task_waiters_ref(target) else {
+    // yield, so its id and exit_info cell stay valid for the duration of
+    // the wait. Memory ordering: the producer's `try_set` is Release;
+    // `is_set` (Acquire, evaluated under the event-bus queue's SpinLock)
+    // is the matching consumer. The SpinLock pair on both sides supplies
+    // the bidirectional full barrier.
+    let Some(target_id) = task_id_of(target) else {
         return 0;
     };
     let Some(exit_cell) = task_exit_info_ref(target) else {
@@ -1195,8 +1197,13 @@ pub fn task_wait_for(task_id: u32) -> c_int {
 
     // The `task_is_exited` fallback covers the case where the
     // target's status flips to Zombie/Terminated via a path that has
-    // not (yet) published exit_info — defensive, but cheap.
-    let _ = waiters.wait_event(|| exit_cell.is_set() || task_is_exited(target));
+    // not (yet) published exit_info — defensive, but cheap. The exit-cell
+    // re-check also makes a colliding `ChildExit` bucket harmless.
+    let _ = BUS
+        .subscribe(KernelEvent::ChildExit {
+            task: TaskSlot(target_id),
+        })
+        .wait_event(|| exit_cell.is_set() || task_is_exited(target));
     0
 }
 

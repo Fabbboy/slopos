@@ -20,10 +20,9 @@ use super::ldisc::LdiscKind;
 use super::lifecycle::hangup;
 use super::pty;
 use super::session::ForegroundCheck;
-use super::table::{
-    TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS, TTY_WRITE_LOCKS,
-};
+use super::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_LOCKS, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
+use slopos_ostd::sync::BUS;
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -141,11 +140,11 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
 /// For synchronous backends (serial, vconsole) both conditions are
 /// trivially satisfied because the driver blocks until each byte is on
 /// the wire.  For future async/interrupt-driven drivers, callers will
-/// genuinely sleep on `TTY_OUTPUT_WAITERS` until the TX FIFO empties.
+/// genuinely sleep on the TTY output event until the TX FIFO empties.
 ///
 /// ## Scheduler awareness
 ///
-/// The function sleeps on `TTY_OUTPUT_WAITERS[slot]` if the scheduler is
+/// The function sleeps on `KernelEvent::TtyOutput` if the scheduler is
 /// available; otherwise it busy-polls (pre-scheduler boot path only).
 fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
@@ -178,7 +177,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
 
     // Slow path: wait until drain completes.
     if scheduler_is_enabled() != 0 {
-        TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+        BUS.subscribe(tty_output_event(slot)).wait_event(|| {
             if has_pending_signal() {
                 return true;
             }
@@ -588,8 +587,8 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
     // Wake the master-side writer now that the lock is released.
     if let Some(peer_slot) = unthrottled_peer {
         if peer_slot < MAX_TTYS {
-            TTY_OUTPUT_WAITERS[peer_slot].wake_all();
-            TTY_POLL_WAITERS[peer_slot].wake_all();
+            // Poll waiters park on the output queue too, so one publish covers both.
+            BUS.publish(tty_output_event(peer_slot));
         }
     }
 
@@ -688,8 +687,7 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
             };
             // Wake writers and poll waiters regardless — no harm in a
             // spurious wake, and it keeps the logic simple.
-            TTY_OUTPUT_WAITERS[slot].wake_all();
-            TTY_POLL_WAITERS[slot].wake_all();
+            BUS.publish(tty_output_event(slot));
             // Notify master of flow-control start transition.
             if was_stopped {
                 pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_START);

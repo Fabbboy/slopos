@@ -1,8 +1,10 @@
 use slopos_abi::Errno;
+use slopos_abi::event::{KernelEvent, PipeSlot};
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP};
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
+use slopos_ostd::sync::BUS;
 
 use crate::pipe;
 use crate::pipe::PipeHandle;
@@ -12,6 +14,22 @@ pub struct PipeWriteOps;
 
 pub static PIPE_READ_OPS: PipeReadOps = PipeReadOps;
 pub static PIPE_WRITE_OPS: PipeWriteOps = PipeWriteOps;
+
+/// The read-side event for a pipe handle (data became available to read).
+#[inline]
+fn read_ev(h: PipeHandle) -> KernelEvent {
+    KernelEvent::PipeRead {
+        pipe: PipeSlot(h.slot() as u32),
+    }
+}
+
+/// The write-side event for a pipe handle (buffer space became available).
+#[inline]
+fn write_ev(h: PipeHandle) -> KernelEvent {
+    KernelEvent::PipeWrite {
+        pipe: PipeSlot(h.slot() as u32),
+    }
+}
 
 fn pipe_dup_reader(h: PipeHandle) -> Option<usize> {
     if h == PipeHandle::INVALID {
@@ -53,7 +71,7 @@ fn pipe_release_reader(h: PipeHandle) {
         pipe::free_slot(h);
     }
     if wake_writers {
-        pipe::writer_wq(h).wake_all();
+        BUS.publish(write_ev(h));
     }
 }
 
@@ -79,7 +97,7 @@ fn pipe_release_writer(h: PipeHandle) {
         pipe::free_slot(h);
     }
     if wake_readers {
-        pipe::reader_wq(h).wake_all();
+        BUS.publish(read_ev(h));
     }
 }
 
@@ -141,7 +159,7 @@ impl FileOps for PipeReadOps {
                         };
                     }
                 }
-                pipe::writer_wq(h).wake_one();
+                BUS.publish_one(write_ev(h));
                 continue;
             }
 
@@ -165,12 +183,13 @@ impl FileOps for PipeReadOps {
             // ad-hoc state CAS. The closure re-checks data/EOF under
             // the slot lock so the wake-up condition is observed
             // atomically with respect to the producer's slot store.
-            pipe::reader_wq(h).wait_event(|| match pipe::lock_slot(h) {
-                Some(slot) => slot.len > 0 || slot.writers == 0,
-                // Slot evaporated under us — fall out of the wait so
-                // the next iteration's lock_slot returns EBADF.
-                None => true,
-            });
+            BUS.subscribe(read_ev(h))
+                .wait_event(|| match pipe::lock_slot(h) {
+                    Some(slot) => slot.len > 0 || slot.writers == 0,
+                    // Slot evaporated under us — fall out of the wait so
+                    // the next iteration's lock_slot returns EBADF.
+                    None => true,
+                });
         }
     }
 
@@ -189,7 +208,7 @@ impl FileOps for PipeReadOps {
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness (Linux pattern).
-        let registered = pipe::reader_wq(h).enqueue_current();
+        let registered = BUS.subscribe_current(read_ev(h));
         let revents = match pipe::lock_slot(h) {
             Some(slot) => slot.revents(true, false, events),
             None => POLLERR,
@@ -210,11 +229,11 @@ impl FileOps for PipeReadOps {
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        pipe::reader_wq(PipeHandle::from_usize(handle)).enqueue_current()
+        BUS.subscribe_current(read_ev(PipeHandle::from_usize(handle)))
     }
 
     fn poll_unwait(&self, handle: usize) {
-        pipe::reader_wq(PipeHandle::from_usize(handle)).remove_current();
+        BUS.unsubscribe_current(read_ev(PipeHandle::from_usize(handle)));
     }
 }
 
@@ -285,7 +304,7 @@ impl FileOps for PipeWriteOps {
                 if scheduler_is_enabled() == 0 {
                     return Errno::EAGAIN.as_isize();
                 }
-                pipe::writer_wq(h).wait_event(drain_or_close);
+                BUS.subscribe(write_ev(h)).wait_event(drain_or_close);
                 continue;
             }
 
@@ -354,7 +373,7 @@ impl FileOps for PipeWriteOps {
                 no_readers_after = slot.readers == 0;
             }
             if written > 0 && !no_readers_after {
-                pipe::reader_wq(h).wake_one();
+                BUS.publish_one(read_ev(h));
             }
 
             if total >= buf_len {
@@ -372,7 +391,7 @@ impl FileOps for PipeWriteOps {
             }
             // Buffer drained partially but the whole staged batch
             // didn't fit — wait for room and resume the loop.
-            pipe::writer_wq(h).wait_event(drain_or_close);
+            BUS.subscribe(write_ev(h)).wait_event(drain_or_close);
         }
     }
 
@@ -387,7 +406,7 @@ impl FileOps for PipeWriteOps {
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness (Linux pattern).
-        let registered = pipe::writer_wq(h).enqueue_current();
+        let registered = BUS.subscribe_current(write_ev(h));
         let revents = match pipe::lock_slot(h) {
             Some(slot) => slot.revents(false, true, events),
             None => POLLERR | POLLHUP,
@@ -408,10 +427,10 @@ impl FileOps for PipeWriteOps {
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        pipe::writer_wq(PipeHandle::from_usize(handle)).enqueue_current()
+        BUS.subscribe_current(write_ev(PipeHandle::from_usize(handle)))
     }
 
     fn poll_unwait(&self, handle: usize) {
-        pipe::writer_wq(PipeHandle::from_usize(handle)).remove_current();
+        BUS.unsubscribe_current(write_ev(PipeHandle::from_usize(handle)));
     }
 }

@@ -50,7 +50,7 @@ use slopos_abi::syscall::TtyIndex;
 use super::exit_info::ExitInfo;
 use super::task::{
     TaskStatus, task_borrow, task_dec_ref, task_find_by_cr3, task_find_by_id, task_inc_ref,
-    task_pointer_is_valid,
+    task_pointer_is_valid, task_waiter_count,
 };
 use super::task_struct::{Task, TaskPriority};
 use super::test_fixture::KernelTestScope;
@@ -189,7 +189,7 @@ impl<'pool> TaskHandle<'pool> {
 
     #[inline]
     pub fn waiter_count(&self) -> usize {
-        self.task().waiters.waiter_count()
+        task_waiter_count(self.task())
     }
 
     /// Context register reads — used by `context_tests.rs` for the

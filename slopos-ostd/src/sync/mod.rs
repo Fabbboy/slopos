@@ -13,6 +13,7 @@
 pub mod atomic_cell;
 pub mod cpu_local;
 pub mod epoch;
+pub mod event_bus;
 pub mod init_flag;
 pub mod init_in_place;
 pub mod intrusive;
@@ -34,6 +35,7 @@ pub mod wait_queue;
 pub use atomic_cell::AtomicCell;
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use epoch::{Epoch, EpochGuard};
+pub use event_bus::{BUS, EventBus, Subscription};
 pub use init_flag::{InitFlag, StateFlag};
 pub use init_in_place::InitInPlace;
 pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};

@@ -11,8 +11,9 @@ use slopos_kernel_services::driver_runtime::{
     clear_session_controlling_tty, scheduler_is_enabled, signal_process_group,
 };
 
-use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
+use super::table::{TTY_SLOTS, tty_input_event};
 use super::{MAX_TTYS, TtyError, TtyIndex};
+use slopos_ostd::sync::BUS;
 
 // ---------------------------------------------------------------------------
 // Foreground process group
@@ -53,8 +54,8 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     }
 
     if scheduler_is_enabled() != 0 {
-        TTY_INPUT_WAITERS[slot].wake_all();
-        TTY_POLL_WAITERS[slot].wake_all();
+        // Poll waiters park on the input queue too, so one publish covers both.
+        BUS.publish(tty_input_event(slot));
     }
     Ok(())
 }
@@ -112,8 +113,8 @@ pub fn set_foreground_pgrp_checked(
     };
 
     if changed && scheduler_is_enabled() != 0 {
-        TTY_INPUT_WAITERS[slot].wake_all();
-        TTY_POLL_WAITERS[slot].wake_all();
+        // Poll waiters park on the input queue too, so one publish covers both.
+        BUS.publish(tty_input_event(slot));
     }
     Ok(())
 }

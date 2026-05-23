@@ -15,12 +15,23 @@
 //! All helpers return `Option<T>`; the caller threads the `None` case
 //! through their existing diagnostics.
 
+use crate::sync::BUS;
 use crate::task::fpu::FpuState;
 use crate::user::context::UserContext;
+use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::syscall::TtyIndex;
 use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus};
 
 use crate::task::kernel_task::TaskInner;
+
+/// The child-exit event for a task id. Parents blocked in `waitpid`-style
+/// waits park on this; the task's exit path publishes it.
+#[inline]
+fn child_exit_event(task_id: u32) -> KernelEvent {
+    KernelEvent::ChildExit {
+        task: TaskSlot(task_id),
+    }
+}
 
 /// Read the task's stable `task_id`.
 #[inline]
@@ -615,15 +626,13 @@ pub fn task_signal_pending<K, U>(task: *const TaskInner<K, U>) -> u64 {
     }
 }
 
-/// Read `task->waiters.waiter_count()`.
+/// Number of tasks blocked waiting for this task to exit.
 #[inline]
 pub fn task_waiter_count<K, U>(task: *const TaskInner<K, U>) -> usize {
-    if task.is_null() {
-        return 0;
+    match task_id_of(task) {
+        Some(id) => BUS.waiter_count(child_exit_event(id)),
+        None => 0,
     }
-    // SAFETY: caller pre-validated; `WaitQueue::waiter_count` takes
-    // `&self`.
-    unsafe { (*task).waiters.waiter_count() }
 }
 
 /// Read `task->slot_index`.
@@ -696,20 +705,6 @@ pub fn task_on_cpu_load<K, U>(task: *const TaskInner<K, U>) -> bool {
     }
     // SAFETY: caller pre-validated; `on_cpu` is `AtomicBool`.
     unsafe { (*task).on_cpu.load(core::sync::atomic::Ordering::Acquire) }
-}
-
-/// Borrow `task->waiters` as `&WaitQueue`. The returned borrow's
-/// lifetime is bounded by the caller's borrow of `task`.
-#[inline]
-pub fn task_waiters_ref<'a, K, U>(
-    task: *const TaskInner<K, U>,
-) -> Option<&'a crate::sync::WaitQueue> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `waiters` is in-Task; reborrow
-    // produces a `&WaitQueue` valid for the caller's frame.
-    Some(unsafe { &(*task).waiters })
 }
 
 /// Borrow `task->exit_info` as `&AtomicCell<ExitInfo>`. The returned
@@ -845,18 +840,16 @@ pub fn task_task_id<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
     task_id_of(task)
 }
 
-/// Wake every task currently blocked in `task->waiters`. Caller must
-/// hold the task pointer stable (e.g. via the task-manager lock or a
-/// `TaskRefGuard`); the `WaitQueue`'s internal SpinLock makes the
-/// `wake_all` interrupt-safe and serialises against any concurrent
-/// waiter registration.
+/// Wake every task currently blocked waiting for this task to exit.
+/// Caller must hold the task pointer stable (e.g. via the task-manager
+/// lock or a `TaskRefGuard`) long enough to resolve its id; the event
+/// bus queue's internal SpinLock makes the publish interrupt-safe and
+/// serialises against any concurrent waiter registration.
 #[inline]
 pub fn task_wake_all_waiters<K, U>(task: *const TaskInner<K, U>) {
-    if task.is_null() {
-        return;
+    if let Some(id) = task_id_of(task) {
+        BUS.publish(child_exit_event(id));
     }
-    // SAFETY: caller pre-validated; `waiters` is in-Task.
-    unsafe { (*task).waiters.wake_all() };
 }
 
 /// Store `value` into `task->signal_pending` with `Release` ordering.

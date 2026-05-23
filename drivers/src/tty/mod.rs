@@ -61,7 +61,8 @@ use slopos_abi::syscall::UserWinsize;
 use self::driver::{DriverId, TtyDriverKind, write_driver_unlocked};
 use self::ldisc::LdiscKind;
 use self::session::TtySession;
-use self::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_WRITE_LOCKS};
+use self::table::{TTY_WRITE_LOCKS, tty_input_event, tty_output_event};
+use slopos_ostd::sync::BUS;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -72,7 +73,7 @@ use self::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_W
 pub use slopos_abi::syscall::TtyIndex;
 
 /// Maximum number of TTY instances.
-pub const MAX_TTYS: usize = 32;
+pub use slopos_abi::event::MAX_TTYS;
 
 bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -281,19 +282,22 @@ impl PostLockWork {
         let mut bits = self.wake_input;
         while bits != 0 {
             let slot = bits.trailing_zeros() as usize;
-            TTY_INPUT_WAITERS[slot].wake_all();
+            BUS.publish(tty_input_event(slot));
             bits &= bits - 1;
         }
         bits = self.wake_output;
         while bits != 0 {
             let slot = bits.trailing_zeros() as usize;
-            TTY_OUTPUT_WAITERS[slot].wake_all();
+            BUS.publish(tty_output_event(slot));
             bits &= bits - 1;
         }
         bits = self.wake_poll;
         while bits != 0 {
             let slot = bits.trailing_zeros() as usize;
-            TTY_POLL_WAITERS[slot].wake_all();
+            // Poll waiters register on both the input and output queues, so
+            // wake both to cover either readiness direction.
+            BUS.publish(tty_input_event(slot));
+            BUS.publish(tty_output_event(slot));
             bits &= bits - 1;
         }
     }
