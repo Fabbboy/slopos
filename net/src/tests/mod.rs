@@ -39,3 +39,4 @@ pub mod tcp_timestamp_tests;
 pub mod timer_tests;
 pub mod udp_demux_tests;
 pub mod udp_socket_tests;
+pub mod xdp_tests;

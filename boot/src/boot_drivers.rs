@@ -273,6 +273,11 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // triggers VirtIO-net probe.
     slopos_net::loopback::init_loopback();
 
+    // Publish the (empty) XDP filter chain before any NIC starts delivering
+    // packets. This is the single auditable site where built-in filters would
+    // be registered.
+    slopos_net::xdp::init();
+
     klog_debug!("Enumerating PCI devices...");
     // Driver registration happens at link time via the
     // `.driver_registry` section (see `crate::pci_driver!` invocations

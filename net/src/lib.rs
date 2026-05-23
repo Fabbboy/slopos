@@ -7,6 +7,11 @@
 //! Core abstractions (types, pool, packet buffers, device trait) and protocol
 //! modules (DHCP, DNS, TCP, UDP) shared across network drivers.
 
+// Self-alias so the `#[xdp_filter]` proc-macro (which emits fully-qualified
+// `::slopos_net::xdp::…` paths) resolves when filters are authored inside this
+// crate, exactly as it does from external crates.
+extern crate self as slopos_net;
+
 pub mod net_driver_service;
 pub mod netdev;
 pub mod netinfo;
@@ -37,6 +42,7 @@ pub mod timer;
 pub mod udp;
 pub mod unix_socket;
 pub mod unix_socket_file_ops;
+pub mod xdp;
 
 // Re-export key type-safe primitives for convenient access.
 pub use netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};

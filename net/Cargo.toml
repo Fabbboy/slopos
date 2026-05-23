@@ -23,5 +23,6 @@ slopos-arch = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
 slopos-ostd = { workspace = true }
+slopos-ostd-derive = { workspace = true }
 slopos-service-core = { path = "../service-core" }
 bitflags = { workspace = true }

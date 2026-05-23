@@ -45,6 +45,24 @@ pub fn net_rx(handle: &DeviceHandle, mut pkt: PacketBuf) {
     let dst_mac = MacAddr([frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]]);
     let ethertype_raw = u16::from_be_bytes([frame[12], frame[13]]);
 
+    // XDP filter chain: run installed filters on the full L2 frame before the
+    // stack inspects it. `execute` scopes its own RCU/epoch read guard, so it is
+    // released before the TX paths below take any lock. Bind the verdict to a
+    // local so the borrowing `PacketView` is dropped before `pkt` is moved.
+    let verdict = crate::xdp::XDP.execute(&mut crate::xdp::PacketView::new(&mut pkt));
+    match verdict {
+        crate::xdp::XdpAction::Pass => {}
+        crate::xdp::XdpAction::Drop => return,
+        crate::xdp::XdpAction::Tx => {
+            let _ = handle.tx(pkt);
+            return;
+        }
+        crate::xdp::XdpAction::Redirect(dev) => {
+            let _ = crate::netdev::DEVICE_REGISTRY.tx_by_index(dev, pkt);
+            return;
+        }
+    }
+
     // Destination MAC filter: accept our MAC, broadcast, or multicast.
     let our_mac = handle.mac();
     if dst_mac != our_mac && !dst_mac.is_broadcast() && !dst_mac.is_multicast() {
