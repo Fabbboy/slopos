@@ -169,18 +169,33 @@ impl BlockReason {
 /// matching the order used by `dequeue_highest_priority`. The repr value
 /// is the index into the per-CPU `ready_queues` array; adding a variant
 /// requires bumping `NUM_PRIORITY_LEVELS` in the scheduler.
+///
+/// `KernelIo` was inserted between `High` and `Normal` in the Phase-1
+/// scheduler refactor. It is reserved for kernel I/O kthreads (NAPI,
+/// net-timer, deferred-driver-work) that **must run on their sleep
+/// deadlines regardless of user-task load**. User-space cannot select
+/// it — the syscall boundary in `core/src/syscall/process_handlers.rs`
+/// rejects it with `EINVAL`. `slopos_ostd::task::spawn_kernel_io` is
+/// the only sanctioned spawn surface; it requires a `KernelIoToken`
+/// witness for every `yield_with_deadline` call so starvation
+/// avoidance becomes a compile-time property.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskPriority {
     /// Latency-critical work: compositor, RT kernel paths.
     High = 0,
+    /// Kernel I/O kthreads (NAPI, net-timer, …). Above any user task;
+    /// reserved for paths whose progress is required for correctness
+    /// (delivering packets, draining TX rings, firing TCP retransmit
+    /// timers). Never selectable from user space.
+    KernelIo = 1,
     /// Default class for ordinary user tasks and kernel threads.
     #[default]
-    Normal = 1,
+    Normal = 2,
     /// Background work that should yield to anything else.
-    Low = 2,
+    Low = 3,
     /// Per-CPU idle loop only — never used by user-spawned tasks.
-    Idle = 3,
+    Idle = 4,
 }
 
 impl TaskPriority {
@@ -191,9 +206,10 @@ impl TaskPriority {
     pub const fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::High,
-            1 => Self::Normal,
-            2 => Self::Low,
-            3 => Self::Idle,
+            1 => Self::KernelIo,
+            2 => Self::Normal,
+            3 => Self::Low,
+            4 => Self::Idle,
             _ => Self::Normal,
         }
     }
@@ -205,9 +221,10 @@ impl TaskPriority {
     pub const fn try_from_u8(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::High),
-            1 => Some(Self::Normal),
-            2 => Some(Self::Low),
-            3 => Some(Self::Idle),
+            1 => Some(Self::KernelIo),
+            2 => Some(Self::Normal),
+            3 => Some(Self::Low),
+            4 => Some(Self::Idle),
             _ => None,
         }
     }

@@ -278,6 +278,48 @@ impl NetStack {
             .map(|c| c.ipv4_addr)
     }
 
+    /// Pick the local source IPv4 address to use when sending to `dst`.
+    ///
+    /// Performs a route lookup for `dst`, then returns the address
+    /// configured on the egress device.  This is the correct outbound
+    /// source-address selection per RFC 1122 §3.3.4.2 / RFC 6724 (default
+    /// rule "prefer same outgoing interface as the chosen route"). It
+    /// fixes a long-standing bug where `first_ipv4()` returned
+    /// `127.0.0.1` for any external destination because the loopback
+    /// interface is registered before the NIC and shows up first in the
+    /// iface list — every outbound TCP SYN ended up with
+    /// `src_ip = 127.0.0.1`, which QEMU's SLIRP gateway (and any real
+    /// router) drops on the floor with no response, surfacing as
+    /// `curl: network timeout`.
+    ///
+    /// Falls back to:
+    /// - The route's egress device IP if found (normal path).
+    /// - The first non-loopback configured IPv4 if no route matches.
+    /// - The first configured IPv4 (including loopback) as a last
+    ///   resort — `dst.is_loopback()` callers go this path naturally.
+    pub fn source_ip_for(&self, dst: Ipv4Addr) -> Option<Ipv4Addr> {
+        if let Some((dev, _next_hop)) = super::route::ROUTE_TABLE.lookup(dst)
+            && let Some(ip) = self.our_ip(dev)
+            && !ip.is_unspecified()
+        {
+            return Some(ip);
+        }
+        let inner = self.inner.lock();
+        if let Some(ip) = inner
+            .ifaces
+            .iter()
+            .find(|c| c.up && !c.ipv4_addr.is_unspecified() && !c.ipv4_addr.is_loopback())
+            .map(|c| c.ipv4_addr)
+        {
+            return Some(ip);
+        }
+        inner
+            .ifaces
+            .iter()
+            .find(|c| c.up && !c.ipv4_addr.is_unspecified())
+            .map(|c| c.ipv4_addr)
+    }
+
     /// Return the first configured interface's full config.
     ///
     /// Convenience for DHCP info queries.

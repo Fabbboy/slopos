@@ -254,6 +254,17 @@ fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
         slopos_sched::runtime::kernel_thread_spawner_handle(),
     );
     klog_debug!("OSTD: kernel-thread spawner registered (sched/runtime)");
+
+    // Phase-1 KernelIoToken yield backend: `KernelIo` kthreads
+    // (NAPI, net-timer, …) call `yield_with_deadline(&token, …)`,
+    // which routes through this fn pointer. Installed alongside the
+    // spawner so any subsequent `spawn_kernel_io!` invocation has a
+    // working yield path.
+    slopos_ostd::sync::kernel_io_task::register_yield_backend(
+        &ctx.bsp_token(),
+        slopos_sched::runtime::kernel_io_yield_backend(),
+    );
+    klog_debug!("OSTD: KernelIoToken yield backend registered (sched/runtime)");
 }
 
 fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {

@@ -52,7 +52,11 @@ use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
-const NUM_PRIORITY_LEVELS: usize = 4;
+/// One slot per [`TaskPriority`] variant: `High`, `KernelIo`,
+/// `Normal`, `Low`, `Idle`. Bumped from 4→5 when `KernelIo` landed
+/// in Phase 1 of the scheduler refactor. The repr value of each
+/// variant is the index into [`PriorityRunQueue::ready_queues`].
+const NUM_PRIORITY_LEVELS: usize = 5;
 
 /// Role tag for the per-CPU `ReadyQueue` intrusive list. Defined in
 /// OSTD so the kernel `TaskInner<K, U>` can `impl LinkProvider` against

@@ -51,6 +51,7 @@ pub(crate) fn task_state(state: u8) -> (&'static str, Color32) {
 pub(crate) fn priority_label(priority: u8) -> &'static str {
     match TaskPriority::from_u8(priority) {
         TaskPriority::High => "Hi",
+        TaskPriority::KernelIo => "KIO",
         TaskPriority::Normal => "Norm",
         TaskPriority::Low => "Low",
         TaskPriority::Idle => "Idle",

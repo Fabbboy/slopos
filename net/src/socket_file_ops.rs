@@ -96,10 +96,23 @@ impl FileOps for SocketFileOps {
         let writable = socket::socket_poll_writable(socket_idx) as u16;
         let mut revents = 0u16;
 
-        if (events & POLLIN) != 0 && (readable & 1) != 0 {
+        // `readable` / `writable` are u16 bitmaps already keyed on the
+        // POSIX POLLIN/POLLOUT/POLLERR/POLLHUP values from
+        // `slopos-abi::syscall::posix` (POLLIN=0x01, POLLOUT=0x04,
+        // POLLERR=0x08, POLLHUP=0x10). The mask must be those values,
+        // NOT `1` — the old `& 1` test silently dropped POLLOUT
+        // (0x04 & 0x01 == 0) for every connected TCP socket, so
+        // `poll(POLLOUT)` from `connect_timeout`, `write_ready`,
+        // async-runtime readiness etc. returned 0 even when the
+        // kernel side had already flipped POLLOUT on. We then sat in
+        // the poll loop until the peer eventually closed and the
+        // state-machine started raising POLLHUP — which std
+        // misreports as a connect failure with "no error set after
+        // POLLHUP".
+        if (events & POLLIN) != 0 && (readable & POLLIN) != 0 {
             revents |= POLLIN;
         }
-        if (events & POLLOUT) != 0 && (writable & 1) != 0 {
+        if (events & POLLOUT) != 0 && (writable & POLLOUT) != 0 {
             revents |= POLLOUT;
         }
 

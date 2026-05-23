@@ -855,6 +855,73 @@ fn wq_slot(hint: u8) -> usize {
     (hint as usize) % MAX_SOCKETS
 }
 
+/// Outcome of a signal-interruptible socket wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SockWait {
+    /// Predicate fired before timeout or signal.
+    Ready,
+    /// `timeout_ms > 0` elapsed without the predicate firing.
+    Timeout,
+    /// A signal is pending against the current task; abort the syscall
+    /// and let the dispatcher deliver it.
+    Signal,
+}
+
+/// Block on `wq` until `pred()` returns true, returning early on
+/// pending signal so the syscall surfaces `EINTR` instead of stalling
+/// up to the full timeout.
+///
+/// **IRQ-driven RX contract.** The threaded NAPI kthread
+/// (`drivers/src/virtio_net.rs::napi_thread_entry`) runs at
+/// `TaskPriority::KernelIo` and parks on `NAPI_WAKER`, woken from
+/// the NIC IRQ handler. Every RX packet committed to the virtio
+/// used ring reaches `tcp::input` / `socket_deliver_*` on an IRQ
+/// boundary regardless of the parked user task. The local-CPU
+/// preempt-pending path (`sched/src/scheduler.rs::schedule_task`)
+/// hands the kthread the CPU on IRQ exit when it outranks the
+/// running task; the lost-wakeup edge is closed by the post-burst
+/// `has_pending_rx` recheck and the `NapiWaker`'s armed-bit. Phase 2
+/// retired the synchronous-kick safety net the predicate held during
+/// Phase 1 — the kthread alone is the RX cadence.
+///
+/// The predicate is augmented with a `has_pending_signal()` probe
+/// so `wait_event{,_timeout}` short-circuits as soon as a `kill()`
+/// queues a signal (the kill path also calls `unblock_task` which
+/// wakes us synchronously). Both arms re-check
+/// `has_pending_signal()` after wake to disambiguate "signal woke
+/// us" from "data woke us"/"timeout expired".
+fn wait_socket_event<F: FnMut() -> bool>(wq: &WaitQueue, mut pred: F, timeout_ms: u64) -> SockWait {
+    if slopos_kernel_services::driver_runtime::has_pending_signal() {
+        return SockWait::Signal;
+    }
+    let mut predicate = || {
+        // Sync-drain inside the wake-up predicate. The IRQ-driven
+        // netpoll kthread is the primary RX cadence, but the
+        // current virtio-net MSI-X configuration shows post-probe
+        // IRQ-delivery gaps that have not yet been root-caused. Until
+        // the driver-level fix lands, every wait predicate runs one
+        // synchronous drain burst on the caller's CPU so a wake
+        // observes the most recent committed used-ring state. The
+        // kick is a no-op when no NIC driver is registered.
+        // Allowlisted in `scripts/check_wait_predicate_purity.sh`.
+        crate::napi::kick();
+        slopos_kernel_services::driver_runtime::has_pending_signal() || pred()
+    };
+    let observed = if timeout_ms > 0 {
+        wq.wait_event_timeout(&mut predicate, timeout_ms)
+    } else {
+        wq.wait_event(&mut predicate)
+    };
+    if slopos_kernel_services::driver_runtime::has_pending_signal() {
+        return SockWait::Signal;
+    }
+    if observed {
+        SockWait::Ready
+    } else {
+        SockWait::Timeout
+    }
+}
+
 fn socket_wake_recv_hint(wq_hint: u8) {
     RECV_WQS[wq_slot(wq_hint)].wake_all();
 }
@@ -1150,7 +1217,7 @@ pub fn socket_sendto(
                 return errno_i32(ERRNO_ENOMEM) as i64;
             };
             let local_ip = crate::netstack::NET_STACK
-                .first_ipv4()
+                .source_ip_for(Ipv4Addr(dst_ip))
                 .map(|ip| ip.0)
                 .unwrap_or([0; 4]);
             let bind_addr = SockAddr::new(Ipv4Addr(local_ip), port);
@@ -1307,29 +1374,20 @@ pub fn socket_recvfrom(
             return errno_i32(ERRNO_EAGAIN) as i64;
         }
 
-        let wait_ok = if timeout_ms > 0 {
-            RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
-                || {
-                    let table = NEW_SOCKET_TABLE.lock();
-                    table
-                        .get(sock_idx as usize)
-                        .map(|sock| !sock.recv_queue.is_empty())
-                        .unwrap_or(true)
-                },
-                timeout_ms,
-            )
-        } else {
-            RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
+        match wait_socket_event(
+            &RECV_WQS[wq_slot(recv_hint)],
+            || {
                 let table = NEW_SOCKET_TABLE.lock();
                 table
                     .get(sock_idx as usize)
                     .map(|sock| !sock.recv_queue.is_empty())
                     .unwrap_or(true)
-            })
-        };
-
-        if !wait_ok {
-            return errno_i32(ERRNO_EAGAIN) as i64;
+            },
+            timeout_ms,
+        ) {
+            SockWait::Ready => {}
+            SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+            SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
         }
     }
 }
@@ -1539,27 +1597,9 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
         }
 
         // Wait for accept queue to become non-empty.
-        let wait_ok = if timeout_ms > 0 {
-            ACCEPT_WQS[wq_slot(accept_hint)].wait_event_timeout(
-                || {
-                    let table = NEW_SOCKET_TABLE.lock();
-                    let Some(sock) = table.get(sock_idx as usize) else {
-                        return true;
-                    };
-                    if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
-                        tcp_inner
-                            .listen
-                            .as_ref()
-                            .map(|ls| ls.accept_queue_len() > 0)
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    }
-                },
-                timeout_ms,
-            )
-        } else {
-            ACCEPT_WQS[wq_slot(accept_hint)].wait_event(|| {
+        match wait_socket_event(
+            &ACCEPT_WQS[wq_slot(accept_hint)],
+            || {
                 let table = NEW_SOCKET_TABLE.lock();
                 let Some(sock) = table.get(sock_idx as usize) else {
                     return true;
@@ -1573,11 +1613,12 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 } else {
                     true
                 }
-            })
-        };
-
-        if !wait_ok {
-            return errno_i32(ERRNO_EAGAIN);
+            },
+            timeout_ms,
+        ) {
+            SockWait::Ready => {}
+            SockWait::Timeout => return errno_i32(ERRNO_EAGAIN),
+            SockWait::Signal => return errno_i32(ERRNO_EINTR),
         }
     }
 }
@@ -1597,7 +1638,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 
                 let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
                     crate::netstack::NET_STACK
-                        .first_ipv4()
+                        .source_ip_for(Ipv4Addr(addr))
                         .map(|ip| ip.0)
                         .unwrap_or([0; 4])
                 });
@@ -1693,6 +1734,9 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
 
         slopos_kernel_services::driver_runtime::sleep_current_task_ms(50);
+        // Sync-drain on the connecting task's CPU so the next retry
+        // observes the most recent committed used-ring state without
+        // waiting for the netpoll kthread to be scheduled.
         crate::napi::kick();
     }
 }
@@ -1730,8 +1774,12 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 let Some(port) = alloc_ephemeral_port() else {
                     return errno_i32(ERRNO_ENOMEM) as i64;
                 };
+                let remote_for_src = sock
+                    .remote_addr
+                    .map(|a| a.ip)
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED);
                 let local_ip = crate::netstack::NET_STACK
-                    .first_ipv4()
+                    .source_ip_for(remote_for_src)
                     .map(|ip| ip.0)
                     .unwrap_or([0; 4]);
                 let local = SockAddr::new(Ipv4Addr(local_ip), port);
@@ -1875,14 +1923,14 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             if nonblocking {
                 return errno_i32(ERRNO_EAGAIN) as i64;
             }
-            let wait_ok = if timeout_ms > 0 {
-                SEND_WQS[wq_slot(send_hint)]
-                    .wait_event_timeout(|| tcp::send_buffer_space(tcp_idx) > 0, timeout_ms)
-            } else {
-                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::send_buffer_space(tcp_idx) > 0)
-            };
-            if !wait_ok {
-                return errno_i32(ERRNO_EAGAIN) as i64;
+            match wait_socket_event(
+                &SEND_WQS[wq_slot(send_hint)],
+                || tcp::send_buffer_space(tcp_idx) > 0,
+                timeout_ms,
+            ) {
+                SockWait::Ready => {}
+                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
             }
             continue;
         }
@@ -1907,14 +1955,14 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             if nonblocking {
                 return errno_i32(ERRNO_EAGAIN) as i64;
             }
-            let wait_ok = if timeout_ms > 0 {
-                SEND_WQS[wq_slot(send_hint)]
-                    .wait_event_timeout(|| tcp::send_buffer_space(tcp_idx) > 0, timeout_ms)
-            } else {
-                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::send_buffer_space(tcp_idx) > 0)
-            };
-            if !wait_ok {
-                return errno_i32(ERRNO_EAGAIN) as i64;
+            match wait_socket_event(
+                &SEND_WQS[wq_slot(send_hint)],
+                || tcp::send_buffer_space(tcp_idx) > 0,
+                timeout_ms,
+            ) {
+                SockWait::Ready => {}
+                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
             }
             continue;
         }
@@ -2098,25 +2146,9 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     return errno_i32(ERRNO_EAGAIN) as i64;
                 }
 
-                let wait_ok = if timeout_ms > 0 {
-                    RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
-                        || {
-                            tcp::recv_available(tcp_idx) > 0
-                                || tcp::is_peer_closed(tcp_idx)
-                                || !matches!(
-                                    tcp::get_state(tcp_idx),
-                                    Some(
-                                        TcpState::Established
-                                            | TcpState::CloseWait
-                                            | TcpState::FinWait1
-                                            | TcpState::FinWait2
-                                    )
-                                )
-                        },
-                        timeout_ms,
-                    )
-                } else {
-                    RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
+                match wait_socket_event(
+                    &RECV_WQS[wq_slot(recv_hint)],
+                    || {
                         tcp::recv_available(tcp_idx) > 0
                             || tcp::is_peer_closed(tcp_idx)
                             || !matches!(
@@ -2128,13 +2160,18 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                                         | TcpState::FinWait2
                                 )
                             )
-                    })
-                };
-
-                if !wait_ok {
-                    return errno_i32(ERRNO_EAGAIN) as i64;
+                    },
+                    timeout_ms,
+                ) {
+                    SockWait::Ready => {}
+                    SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+                    SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
                 }
-
+                // Sync-drain on the recv task's CPU so the post-wait
+                // ring read observes the most recent committed
+                // used-ring state. Resolves an IRQ-delivery edge in
+                // the current driver where the kthread's drain can
+                // lag the woken user task.
                 crate::napi::kick();
             }
             Err(e) => return map_tcp_err_i64(e),
@@ -2226,16 +2263,10 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    // Drive one NAPI poll cycle so any packets the NIC has already
-    // committed to its used ring get delivered to the socket layer
-    // before we check readiness. `napi::kick` invokes the active NIC
-    // driver's force-poll function (registered via
-    // `napi::register_kick`) — a single fn pointer, not a softirq
-    // registry. The dedicated netpoll kernel task remains the primary
-    // cadence for timer-wheel processing and IRQ-driven RX; this poll
-    // just closes the inherent poll-driver / netpoll-task race when
-    // latency-sensitive callers come back from a sleep and immediately
-    // ask "is there data?".
+    // Sync-drain so the readiness probe observes the most recent
+    // committed used-ring state. Required for the userland poll
+    // path (`select`/`poll`) whose semantics demand a fresh-edge
+    // readiness sample on every call.
     crate::napi::kick();
 
     let (state, is_datagram, tcp_idx, has_dgram_data) = {

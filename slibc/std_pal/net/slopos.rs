@@ -196,9 +196,15 @@ pub mod netc {
 
     pub const EAI_SYSTEM: c_int = -11;
 
+    // SlopOS uses Linux errno values (slopos-abi::syscall::errno_defs).
+    // The BSD-style values that the template-copied PAL had (EISCONN=56,
+    // EINPROGRESS=36) caused `Socket::connect`'s EISCONN fast-path and
+    // `Socket::connect_timeout`'s EINPROGRESS poll arm to mis-fire,
+    // surfacing as connect-fails with a raw errno that std could not
+    // interpret. Keep these in lock-step with `errno_defs.rs`.
     pub const EINTR: c_int = 4;
-    pub const EISCONN: c_int = 56;
-    pub const EINPROGRESS: c_int = 36;
+    pub const EISCONN: c_int = 106;
+    pub const EINPROGRESS: c_int = 115;
 
     pub const F_GETFL: c_int = 3;
     pub const F_SETFL: c_int = 4;

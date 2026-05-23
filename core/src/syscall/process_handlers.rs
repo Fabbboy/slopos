@@ -101,6 +101,14 @@ define_syscall!(syscall_spawn_path
     }
 
     let priority = TaskPriority::try_from_u8(priority_raw).ok_or(Errno::EINVAL)?;
+    // KernelIo is reserved for kernel kthreads (NAPI, net-timer, …).
+    // User space must not be able to spawn at that tier or it would
+    // starve every other user task. The kernel-side spawn surface is
+    // `slopos_ostd::task::spawn_kernel_io`, which takes a typed
+    // `KernelIoToken` witness — there is no syscall analogue.
+    if matches!(priority, TaskPriority::KernelIo) {
+        return Err(Errno::EINVAL);
+    }
     let flags = flags_raw;
     let argc = argc_raw as usize;
 

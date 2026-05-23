@@ -119,6 +119,20 @@ impl Virtqueue {
         avail.write_volatile_at::<u16>(AVAIL_IDX_OFFSET, avail_idx.wrapping_add(1));
     }
 
+    /// Lock-free peek: `true` if the device has committed at least one
+    /// used-ring entry the driver hasn't consumed yet. Pairs with
+    /// `try_pop_used` — same comparison, no mutation. Callers use it
+    /// post-burst to detect the lost-wakeup window where the IRQ
+    /// arrives between the last drain and `wait` re-park.
+    #[inline]
+    pub fn has_pending(&self) -> bool {
+        if self.size == 0 {
+            return false;
+        }
+        virtio_rmb();
+        self.read_used_idx() != self.last_used_idx
+    }
+
     /// Try to pop one entry from the used ring without waiting.
     /// Returns `None` if no new entries are available.
     pub fn try_pop_used(&mut self) -> Option<VirtqUsedElem> {

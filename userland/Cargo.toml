@@ -72,6 +72,14 @@ path = "src/bin/tests/io_capture_test.rs"
 name = "heap_allocator_test"
 path = "src/bin/tests/heap_allocator_test.rs"
 
+[[bin]]
+name = "curl_recv_repro_test"
+path = "src/bin/tests/curl_recv_repro_test.rs"
+
+[[bin]]
+name = "curl_e2e_test"
+path = "src/bin/tests/curl_e2e_test.rs"
+
 [features]
 default = []
 testbins = []

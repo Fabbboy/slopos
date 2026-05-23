@@ -14,3 +14,8 @@ crate::utest!(
 );
 crate::utest!(name = utest_fork, bin = "/bin/fork_test");
 crate::utest!(name = utest_io_capture, bin = "/bin/io_capture_test");
+crate::utest!(
+    name = utest_curl_recv_repro,
+    bin = "/bin/curl_recv_repro_test"
+);
+crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");

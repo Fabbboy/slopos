@@ -64,6 +64,15 @@ impl AncillaryQueue {
         self.entries.push(fd).is_ok()
     }
 
+    /// Number of fds currently queued. Used by the atomic-publish path
+    /// in `unix_sendmsg` to capacity-check the ancillary queue *before*
+    /// committing any fds, so a multi-fd send never publishes a
+    /// partial set to the peer.
+    #[inline]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Drain all entries.  The returned `KVec` owns the fds; the
     /// caller forwards each to userspace or releases on overflow.
     pub(super) fn drain(&mut self) -> KVec<InFlightFd> {

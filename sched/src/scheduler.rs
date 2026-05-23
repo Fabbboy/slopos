@@ -13,6 +13,88 @@ use slopos_kernel_services::platform;
 // ---------------------------------------------------------------------------
 // NMI watchdog: per-CPU alive timestamp (updated every timer tick)
 // ---------------------------------------------------------------------------
+use core::sync::atomic::AtomicBool;
+
+/// Per-CPU flag set when the idle path armed the LAPIC timer in
+/// one-shot mode for the next sleep-queue deadline. The first
+/// timer ISR after that consults the flag, restores periodic mode
+/// via `platform::timer_restore_periodic`, and clears it. This
+/// converges back to the 100 Hz baseline whenever any tick fires
+/// (whether the one-shot we armed or any unrelated IRQ that
+/// raced it).
+static ONESHOT_ARMED: [AtomicBool; slopos_arch::MAX_CPUS] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; slopos_arch::MAX_CPUS]
+};
+
+/// Periodic LAPIC tick interval. Mirrors the constant in
+/// `boot/src/boot_drivers.rs::LAPIC_TIMER_PERIOD_MS`. Used by the
+/// tickless-idle path to skip arming a one-shot when the next
+/// deadline is already at or past the periodic boundary.
+const LAPIC_TIMER_PERIOD_MS: u32 = 10;
+
+/// Convert sleep-queue tick delta to a millisecond deadline,
+/// rounding up so we never wake one tick early and busy-loop.
+#[inline]
+fn ticks_to_ms_ceil(delta_ticks: u64) -> u32 {
+    let freq = platform::timer_frequency() as u64;
+    if freq == 0 {
+        return 0;
+    }
+    // ceil((delta * 1000) / freq)
+    let ms = (delta_ticks.saturating_mul(1000) + (freq - 1)) / freq;
+    if ms > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        ms as u32
+    }
+}
+
+/// Idle-loop entry helper: peek the soonest sleep-queue deadline
+/// and, if it falls inside the current periodic tick window, arm
+/// the LAPIC in one-shot mode for it. The next ISR — whether the
+/// one we armed or any unrelated IRQ — restores periodic mode in
+/// `scheduler_timer_tick`. Idempotent: callable from every idle
+/// iteration with no harm if the deadline hasn't changed.
+///
+/// This is what lets a `KernelIo` task that sleeps for 1 ms
+/// actually wake at 1 ms instead of waiting for the next 10 ms
+/// periodic boundary.
+pub fn arm_tickless_idle_if_due() {
+    let now = platform::timer_ticks();
+    let Some(deadline) = sleep_queue_next_deadline_ticks(now) else {
+        return;
+    };
+    let delta = deadline.wrapping_sub(now);
+    let ms_until = ticks_to_ms_ceil(delta);
+    if ms_until == 0 || ms_until >= LAPIC_TIMER_PERIOD_MS {
+        // Either already due (next periodic tick will catch it) or
+        // farther out than one periodic period — nothing to gain.
+        return;
+    }
+    if platform::timer_program_next_wakeup_ms(ms_until) {
+        let cpu_id = slopos_arch::pcr::get_current_cpu();
+        if cpu_id < slopos_arch::MAX_CPUS {
+            ONESHOT_ARMED[cpu_id].store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Tick-time helper: if this CPU's idle loop previously armed a
+/// LAPIC one-shot, restore periodic mode. Called unconditionally
+/// at the head of `scheduler_timer_tick`; cheap fast-path when
+/// the flag is clear.
+#[inline]
+fn restore_periodic_if_armed() {
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    if cpu_id >= slopos_arch::MAX_CPUS {
+        return;
+    }
+    if ONESHOT_ARMED[cpu_id].swap(false, Ordering::AcqRel) {
+        platform::timer_restore_periodic();
+    }
+}
+
 static WATCHDOG_TICKS: [AtomicU64; slopos_arch::MAX_CPUS] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; slopos_arch::MAX_CPUS]
@@ -40,7 +122,7 @@ pub use super::runtime::{
     scheduler_register_idle_wakeup_callback,
 };
 pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
-use super::sleep::{reset_sleep_queue, wake_due_sleepers};
+use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_exit_info_ref,
@@ -482,6 +564,24 @@ fn mark_preempt_if_ready(cpu_id: usize) {
     }
 }
 
+/// True if `new` has strictly higher priority (numerically lower) than
+/// the task currently running on `cpu`. Idle/null current always
+/// counts as lower-priority so a wake onto an idle CPU triggers an
+/// immediate reschedule on the next IRQ return.
+fn newcomer_outranks_current(cpu: usize, new: *mut Task) -> bool {
+    let Some(new_prio) = task_priority(new) else {
+        return false;
+    };
+    let current = scheduler_get_current_task_for(cpu);
+    if current.is_null() {
+        return true; // CPU idle (or about to be)
+    }
+    let Some(current_prio) = task_priority(current) else {
+        return true;
+    };
+    (new_prio.as_u8()) < (current_prio.as_u8())
+}
+
 pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
@@ -504,6 +604,19 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 
         if result != Some(0) {
             return -1;
+        }
+        // Self-CPU reschedule: the remote-CPU path below sends an IPI;
+        // for the local path we set the per-CPU preempt-pending flag so
+        // `scheduler_handoff_on_trap_exit` (called from the trap-exit
+        // path / idle loop) dispatches the new task before HLT
+        // re-engages. Without this, a wake landing inside an ISR
+        // while the CPU was idle would enqueue the task but the idle
+        // loop would re-enter HLT until the next periodic tick.
+        // Specifically required for `KernelIo` tasks waking from
+        // their 1 ms sleep — they need to run on deadline regardless
+        // of whether anything else is happening on the CPU.
+        if newcomer_outranks_current(current_cpu, task) {
+            scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
         0
     } else {
@@ -555,6 +668,12 @@ pub fn schedule_new_task(task: *mut Task) -> c_int {
 
         if result != Some(0) {
             return -1;
+        }
+        // Same self-CPU reschedule contract as `schedule_task`: a
+        // newly created task at a higher priority than the running
+        // task must trigger a preempt on the next trap-exit.
+        if newcomer_outranks_current(current_cpu, task) {
+            scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
         0
     } else {
@@ -1286,6 +1405,14 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
+    // If the idle loop on this CPU armed a LAPIC one-shot, restore
+    // periodic mode now. Runs unconditionally so that even an IRQ
+    // unrelated to the timer (e.g. a NIC RX IRQ that fires before
+    // our one-shot fires) re-arms periodic — `scheduler_timer_tick`
+    // is the natural funnel because every IRQ that pulls work into
+    // this CPU eventually reaches a tick or trap-exit boundary.
+    restore_periodic_if_armed();
+
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // NMI watchdog: record that this CPU is alive before touching any lock.

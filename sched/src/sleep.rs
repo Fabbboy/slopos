@@ -151,6 +151,43 @@ impl SleepQueue {
         }
         INVALID_TASK_ID
     }
+
+    /// Earliest still-unfired wake deadline (tick units), or `None`
+    /// if no tasks are sleeping. Used by the tickless-idle path
+    /// (`sched/src/runtime.rs`) to program a one-shot LAPIC timer
+    /// for the next deadline before HLT, so a 1 ms kernel-task
+    /// sleep does not wait for the next 10 ms periodic tick to
+    /// be serviced.
+    ///
+    /// O(active_high_water). Caller-side fast path: callers should
+    /// observe [`SLEEP_ACTIVE_COUNT`] without the lock first; only
+    /// take the lock if non-zero.
+    fn earliest_deadline(&self, now_tick: u64) -> Option<u64> {
+        if self.active_count == 0 {
+            return None;
+        }
+        let scan = self.scan_bound();
+        let mut best: Option<u64> = None;
+        for entry in self.entries[..scan].iter() {
+            if !entry.active {
+                continue;
+            }
+            let candidate = entry.wake_tick;
+            best = match best {
+                None => Some(candidate),
+                Some(b) => {
+                    // Closest-to-now: smaller distance forward
+                    // wins; deadlines already in the past compare
+                    // as wrapping-near-zero by `wrapping_sub`,
+                    // which is what we want.
+                    let d_b = b.wrapping_sub(now_tick);
+                    let d_c = candidate.wrapping_sub(now_tick);
+                    if d_c < d_b { Some(candidate) } else { Some(b) }
+                }
+            };
+        }
+        best
+    }
 }
 
 static SLEEP_QUEUE: SpinLock<SleepQueue> = SpinLock::new(SleepQueue::new(), LOCK_LEVEL_REGISTRY);
@@ -250,6 +287,22 @@ fn wake_sleeping_task(task_id: u32) {
 /// `wake_sleeping_task` (which takes `TASK_MANAGER` transitively).
 /// Scans are bounded by the queue's internal `active_high_water` so
 /// even the slow path is O(peak sleepers), not O(capacity).
+/// Lock-free snapshot of the soonest pending wake deadline (or
+/// `None` when no tasks are sleeping). Returns the deadline in
+/// LAPIC tick units (same domain as
+/// `slopos_kernel_services::platform::timer_ticks()`).
+///
+/// O(1) when the fast path observes [`SLEEP_ACTIVE_COUNT`] == 0;
+/// otherwise O(active_high_water) under the queue lock. The
+/// idle-loop tickless-arm path consults this every time it would
+/// otherwise HLT.
+pub fn sleep_queue_next_deadline_ticks(now_tick: u64) -> Option<u64> {
+    if SLEEP_ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    SLEEP_QUEUE.lock().earliest_deadline(now_tick)
+}
+
 pub fn wake_due_sleepers(now_tick: u64) {
     if SLEEP_ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
         return;

@@ -62,15 +62,25 @@ impl LoopbackDev {
 
 impl NetDevice for LoopbackDev {
     fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
-        let mut inner = self.inner.lock();
-        if inner.queue.len() >= LOOPBACK_QUEUE_CAPACITY {
-            inner.stats.tx_dropped += 1;
-            return Err(NetError::NoBufferSpace);
+        {
+            let mut inner = self.inner.lock();
+            if inner.queue.len() >= LOOPBACK_QUEUE_CAPACITY {
+                inner.stats.tx_dropped += 1;
+                return Err(NetError::NoBufferSpace);
+            }
+            let len = pkt.len();
+            let _ = inner.queue.push_back(pkt);
+            inner.stats.tx_packets += 1;
+            inner.stats.tx_bytes += len as u64;
         }
-        let len = pkt.len();
-        let _ = inner.queue.push_back(pkt);
-        inner.stats.tx_packets += 1;
-        inner.stats.tx_bytes += len as u64;
+        // Wake the netpoll kthread so it drains the loopback queue
+        // back through `poll_loopback` → `ingress::net_rx`. Required
+        // because the loopback device has no IRQ — without this
+        // wake, packets sent to 127.0.0.0/8 would sit in the queue
+        // until some unrelated NIC RX IRQ wakes the kthread.
+        // Safe no-op when no driver has registered (loopback-only
+        // boot fixtures, kernel-side tests pre-virtio-net probe).
+        crate::napi::wake_napi();
         Ok(())
     }
 

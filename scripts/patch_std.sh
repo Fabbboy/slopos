@@ -241,11 +241,35 @@ if ! grep -q 'target_os = "slopos"' "$TL_MOD" 2>/dev/null; then
     echo "  Patched thread_local/mod.rs"
 fi
 
-# 3g. io/error/mod.rs — add slopos to the generic errno arm
+# 3g. io/error — install a real SlopOS errno decoder.
+#
+# The upstream fallback (io/error/generic.rs) maps every errno to
+# `ErrorKind::Uncategorized`, which makes `e.kind()` useless in
+# userland (curl, nc, std tests). We install a dedicated slopos.rs
+# decoder mirroring sys/io/error/unix.rs's shape but keyed on the
+# numeric errnos defined in slopos-abi::syscall::errno_defs.
 IO_ERROR="$STD_SYS/io/error/mod.rs"
-if ! grep -q 'target_os = "slopos"' "$IO_ERROR" 2>/dev/null; then
-    sed -i 's/target_os = "vexos",/target_os = "vexos",\n        target_os = "slopos",/' "$IO_ERROR"
-    echo "  Patched io/error/mod.rs"
+IO_ERROR_SLOPOS="$STD_SYS/io/error/slopos.rs"
+
+cp "$STD_PAL_SRC/io_error/slopos.rs" "$IO_ERROR_SLOPOS"
+echo "  Copied io/error/slopos.rs"
+
+# Strip any previous (legacy) patch that merely added slopos to the
+# generic fallback arm — leaving it in place would dead-code the new
+# dedicated arm because cfg_select! picks the first matching branch.
+if grep -q '^[[:space:]]*target_os = "slopos",$' "$IO_ERROR" 2>/dev/null; then
+    sed -i '/^[[:space:]]*target_os = "slopos",$/d' "$IO_ERROR"
+    echo "  Removed legacy slopos entry from generic fallback in io/error/mod.rs"
+fi
+
+# Insert a dedicated slopos arm. Anchor before the existing motor
+# arm so it lands at the top of the cfg_select! and wins.
+if ! grep -q '^[[:space:]]*target_os = "slopos" => {' "$IO_ERROR" 2>/dev/null; then
+    sed -i '/^[[:space:]]*target_os = "motor" => {$/i\    target_os = "slopos" => {\
+        mod slopos;\
+        pub use slopos::*;\
+    }' "$IO_ERROR"
+    echo "  Patched io/error/mod.rs with dedicated slopos arm"
 fi
 
 # 3h. sys/exit.rs — route slopos exit() to PAL instead of the intrinsics::abort() fallback.
@@ -416,7 +440,8 @@ check_patched "random/mod.rs"                  "$STD_SYS/random/mod.rs"         
 check_patched "fs/mod.rs"                      "$STD_SYS/fs/mod.rs"                         'target_os = "slopos"'
 check_patched "process/mod.rs"                 "$STD_SYS/process/mod.rs"                    'target_os = "slopos"'
 check_patched "thread_local/mod.rs"            "$STD_SYS/thread_local/mod.rs"               'target_os = "slopos"'
-check_patched "io/error/mod.rs"                "$STD_SYS/io/error/mod.rs"                   'target_os = "slopos"'
+check_patched "io/error/mod.rs"                "$STD_SYS/io/error/mod.rs"                   'target_os = "slopos" => {'
+check_patched "io/error/slopos.rs"             "$STD_SYS/io/error/slopos.rs"                'fn decode_error_kind'
 check_patched "exit.rs"                        "$STD_SYS/exit.rs"                           'target_os = "slopos"'
 check_patched "env_consts.rs"                  "$STD_SYS/env_consts.rs"                     'target_os = "slopos"'
 check_patched "sync/mutex/mod.rs"              "$STD_SYS/sync/mutex/mod.rs"                 'target_os = "slopos"'
@@ -442,6 +467,24 @@ if [ "$failed" -ne 0 ]; then
     echo "ERROR: one or more std patches failed to apply."
     echo "       The sysroot at $SYSROOT is in a half-patched state."
     exit 1
+fi
+
+# Cache invalidation: when patch_std.sh adds a new file (e.g. the
+# io/error/slopos.rs decoder) cargo's -Zbuild-std fingerprint may
+# still hit a stale libstd-*.rlib because the package-level mtime
+# (library/std/Cargo.toml) did not move. Touch it whenever any
+# patched file is newer than the rlib equivalent so the next
+# `cargo build` rebuilds std from source.
+STD_CARGO_TOML="$SYSROOT/lib/rustlib/src/rust/library/std/Cargo.toml"
+if [ -f "$STD_CARGO_TOML" ]; then
+    # `-quit` ensures find emits at most one path before exiting, so the
+    # pipeline does not SIGPIPE under `set -o pipefail`.
+    newest_patched_ts=$(find "$STD_SYS" "$STD_OS" \
+        -newer "$STD_CARGO_TOML" -print -quit 2>/dev/null)
+    if [ -n "$newest_patched_ts" ]; then
+        touch "$STD_CARGO_TOML"
+        echo "  Bumped library/std/Cargo.toml mtime to invalidate build-std cache"
+    fi
 fi
 
 echo ""

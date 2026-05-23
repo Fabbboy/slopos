@@ -8,6 +8,20 @@ slopos_service_core::define_service! {
         timer_sleep_ms(ms: u32);
         timer_enable_irq();
         timer_disable_irq();
+        /// Arm a **one-shot** LAPIC timer to fire after `ms`
+        /// milliseconds. Returns `true` on success. Used by the
+        /// tickless-idle path before HLT so kernel-IO tasks wake
+        /// on their sleep deadline rather than the next periodic
+        /// boundary. The next ISR (whether the one we armed or any
+        /// unrelated IRQ) restores periodic mode via
+        /// [`timer_restore_periodic`], so the system converges
+        /// back to the 100 Hz baseline whenever a tick fires.
+        timer_program_next_wakeup_ms(ms: u32) -> bool;
+        /// Re-arm the LAPIC timer in periodic mode at the default
+        /// preempt-tick interval. Idempotent. Called from the
+        /// scheduler timer ISR after a one-shot fires (and
+        /// defensively on every tick).
+        timer_restore_periodic();
 
         console_putc(c: u8);
         @no_wrapper console_puts(s: &[u8]);

@@ -318,88 +318,15 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     0
 }
 
-/// Send data on a connected AF_UNIX socket.
+/// Send data on a connected AF_UNIX socket (no SCM_RIGHTS ancillary).
+///
+/// Thin wrapper around [`unix_sendmsg`] — the `write(2)` syscall path
+/// and every caller that never carries fds reach the same atomic
+/// data+fd publish primitive as `sendmsg(2)`. Keeping a single
+/// implementation means there is exactly one place where the data
+/// FIFO + ancillary queue + peer-wake ordering invariants live.
 pub fn unix_send(handle: SocketHandle, data: &[u8]) -> i32 {
-    if data.is_empty() {
-        return 0;
-    }
-    let Some(wq_idx) = handle.slot_for_wq() else {
-        return -9;
-    };
-    let slot_gen = handle.generation();
-
-    loop {
-        let result = {
-            let mut state = UNIX_STATE.lock();
-            let Some(i) = validate_socket_handle(&state, handle) else {
-                return -107; // ENOTCONN
-            };
-            let nonblocking = state.slots[i].nonblocking;
-
-            // Extract pair/side/peer from Connected variant; reject otherwise.
-            let (pair_handle, side, peer_idx) = match state.slots[i].state {
-                SlotState::Connected {
-                    pair,
-                    side,
-                    peer,
-                    peer_closed,
-                } => {
-                    if peer_closed {
-                        return -32; // EPIPE
-                    }
-                    (pair, side, peer.raw_slot())
-                }
-                _ => return -107,
-            };
-
-            let pair = match state.pairs.get_mut(pair_handle) {
-                Some(p) => p,
-                None => return -32, // EPIPE — pair already freed
-            };
-            let buf = pair.send_fifo(side);
-            if buf.has_space() {
-                Ok((buf.write(data), peer_idx))
-            } else {
-                Err(nonblocking)
-            }
-        };
-
-        match result {
-            Ok((n, peer)) => {
-                if peer < MAX_UNIX_SOCKETS {
-                    SOCKET_WQS[peer].wake_all();
-                }
-                return n as i32;
-            }
-            Err(true) => return -11, // EAGAIN
-            Err(false) => {
-                SOCKET_WQS[wq_idx].wait_event(|| {
-                    let state = UNIX_STATE.lock();
-                    let slot = &state.slots[wq_idx];
-                    if slot.generation != slot_gen {
-                        return true; // slot reused
-                    }
-                    match slot.state {
-                        SlotState::Connected {
-                            pair,
-                            side,
-                            peer_closed,
-                            ..
-                        } => {
-                            if peer_closed {
-                                return true;
-                            }
-                            match state.pairs.get(pair) {
-                                Some(p) => p.send_fifo_ref(side).has_space(),
-                                None => true,
-                            }
-                        }
-                        _ => true, // state diverged — bail out
-                    }
-                });
-            }
-        }
-    }
+    unix_sendmsg(handle, data, &mut [], 0)
 }
 
 /// Receive data from a connected AF_UNIX socket.
@@ -482,59 +409,212 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
     }
 }
 
-/// Send data on a connected AF_UNIX socket, with optional in-flight fds (SCM_RIGHTS).
+/// Send data on a connected AF_UNIX socket with optional in-flight fds (SCM_RIGHTS).
+///
+/// # Atomicity contract
+///
+/// Data bytes and ancillary fds become visible to the peer **together**:
+/// the peer's next `unix_recvmsg` either sees both or neither. This
+/// matches Linux (`unix_scm_to_skb` attaches `scm->fp` to the skb
+/// *before* `__skb_queue_tail` and *before* `sk_data_ready`), FreeBSD
+/// (`unp_internalize` chains the `MT_CONTROL` mbuf into the data mbuf
+/// chain before `sbappendaddr_locked`), and Asterinas (a single
+/// `RangedAuxiliaryData` entry stamped with the data's byte range,
+/// all committed under one mutex). Without this guarantee, the peer
+/// can observe data bytes whose companion fds are still in transit
+/// and a Wayland-style decoder ends up with `buffer_fd: None` for
+/// messages that require an SCM_RIGHTS fd (e.g. `SurfaceAttach`).
+///
+/// The pre-refactor implementation took `UNIX_STATE` in two disjoint
+/// critical sections (data write — unlock — wake — re-lock — fd push
+/// — unlock — wake). The lazy-wake scheduler made that benign; the
+/// preempt-on-enqueue path in `sched::scheduler::schedule_task`
+/// (Phase 1.2) makes the peer drain the data FIFO between the two
+/// critical sections.
+///
+/// # Single-critical-section shape
+///
+/// 1. Lock `UNIX_STATE`, validate the slot, resolve `(pair, side, peer)`.
+/// 2. Capacity-check both publish targets:
+///    - data FIFO: any space if `data` is non-empty — partial writes
+///      are valid, mirroring Linux's per-skb behaviour where the
+///      first skb takes as much data as fits + all fds and the
+///      caller retries the remainder.
+///    - ancillary queue: `current_len + fd_count <= MAX_INFLIGHT_FDS`
+///      so a multi-fd send never publishes a partial set.
+/// 3. Push all fds first, then write data — fds-before-data ordering
+///    in the same critical section means a racing peer that reads
+///    the data after unlock-then-wake always sees the companion fds
+///    already queued.
+/// 4. Unlock once, `wake_all` once.
+///
+/// # Failure modes (no partial publish)
+///
+/// - Ancillary queue would overflow → release the caller's fds,
+///   return `ENOMEM`. The peer observes neither data nor fds.
+/// - Data FIFO is full, non-blocking → release fds, return `EAGAIN`.
+/// - Data FIFO is full, blocking → wait on the sender's wait queue;
+///   fds stay in the caller's `inflight_fds` array (not yet
+///   committed) and the next iteration runs the full capacity check
+///   + atomic publish again.
+/// - Slot reused / peer closed → release fds, return
+///   `EBADF`/`ENOTCONN`/`EPIPE`.
 pub fn unix_sendmsg(
     handle: SocketHandle,
     data: &[u8],
     inflight_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
     fd_count: usize,
 ) -> i32 {
-    let bytes_sent = if !data.is_empty() {
-        let rc = unix_send(handle, data);
-        if rc < 0 {
-            return rc;
-        }
-        rc
-    } else {
-        0
+    let Some(wq_idx) = handle.slot_for_wq() else {
+        release_inflight(inflight_fds, fd_count);
+        return -9; // EBADF
     };
+    let slot_gen = handle.generation();
 
-    if fd_count > 0 {
-        let mut state = UNIX_STATE.lock();
-        let Some(i) = validate_socket_handle(&state, handle) else {
-            return -107;
-        };
-        let (pair_handle, side, peer_idx) = match state.slots[i].state {
-            SlotState::Connected {
-                pair, side, peer, ..
-            } => (pair, side, peer.raw_slot()),
-            _ => return -107,
-        };
-        let pair = match state.pairs.get_mut(pair_handle) {
-            Some(p) => p,
-            None => return -32, // EPIPE
-        };
-        let anc = pair.send_anc(side);
+    loop {
+        let result = {
+            let mut state = UNIX_STATE.lock();
+            let Some(i) = validate_socket_handle(&state, handle) else {
+                drop(state);
+                release_inflight(inflight_fds, fd_count);
+                return -107; // ENOTCONN
+            };
+            let nonblocking = state.slots[i].nonblocking;
 
-        for j in 0..fd_count {
-            let (h, ops) = inflight_fds[j];
-            if !anc.push(InFlightFd { handle: h, ops }) {
-                // Queue full — release remaining fds and return error
-                for k in j..fd_count {
-                    inflight_fds[k].1.release(inflight_fds[k].0);
+            let (pair_handle, side, peer_idx) = match state.slots[i].state {
+                SlotState::Connected {
+                    pair,
+                    side,
+                    peer,
+                    peer_closed,
+                } => {
+                    if peer_closed {
+                        drop(state);
+                        release_inflight(inflight_fds, fd_count);
+                        return -32; // EPIPE
+                    }
+                    (pair, side, peer.raw_slot())
                 }
-                return -12; // ENOMEM (queue full)
-            }
-            inflight_fds[j] = (0, inflight_fds[j].1);
-        }
+                _ => {
+                    drop(state);
+                    release_inflight(inflight_fds, fd_count);
+                    return -107;
+                }
+            };
 
-        drop(state);
-        if peer_idx < MAX_UNIX_SOCKETS {
-            SOCKET_WQS[peer_idx].wake_all();
+            let pair = match state.pairs.get_mut(pair_handle) {
+                Some(p) => p,
+                None => {
+                    drop(state);
+                    release_inflight(inflight_fds, fd_count);
+                    return -32; // EPIPE — pair already freed
+                }
+            };
+
+            // Ancillary capacity check first: all-or-nothing fds.
+            if fd_count > 0 && pair.send_anc(side).len() + fd_count > pair::MAX_INFLIGHT_FDS {
+                drop(state);
+                release_inflight(inflight_fds, fd_count);
+                return -12; // ENOMEM
+            }
+
+            // Data capacity check. Empty data trivially fits;
+            // otherwise any free byte in the FIFO is enough for a
+            // partial write (Linux per-skb semantics).
+            let data_has_space = data.is_empty() || pair.send_fifo(side).has_space();
+            if !data_has_space {
+                Err(nonblocking)
+            } else {
+                // Commit. Push fds first so a peer that races us
+                // post-unlock always sees the companion fds before
+                // any data byte. We hold `UNIX_STATE` across both
+                // operations, so the peer cannot observe an
+                // intermediate state — but the in-CS ordering also
+                // closes the lock-free `unix_poll_events` window
+                // where readers snapshot `recv_fifo_ref().is_empty()`
+                // outside the state lock.
+                if fd_count > 0 {
+                    let anc = pair.send_anc(side);
+                    for j in 0..fd_count {
+                        let (h, ops) = inflight_fds[j];
+                        let pushed = anc.push(InFlightFd { handle: h, ops });
+                        // Capacity was checked above; pushes must succeed.
+                        debug_assert!(pushed, "anc.push must succeed after capacity check");
+                        inflight_fds[j] = (0, inflight_fds[j].1);
+                    }
+                }
+                let n = if data.is_empty() {
+                    0
+                } else {
+                    pair.send_fifo(side).write(data) as i32
+                };
+                Ok((n, peer_idx, fd_count))
+            }
+        };
+
+        match result {
+            Ok((n, peer, committed_fds)) => {
+                if (n > 0 || committed_fds > 0) && peer < MAX_UNIX_SOCKETS {
+                    SOCKET_WQS[peer].wake_all();
+                }
+                return n;
+            }
+            Err(true) => {
+                // Non-blocking with no data space; capacity check
+                // failed in the same iteration so no fds were
+                // committed.
+                release_inflight(inflight_fds, fd_count);
+                return -11; // EAGAIN
+            }
+            Err(false) => {
+                // Block until peer drains, slot reuses, or peer
+                // closes. fds remain in the caller's array — the
+                // next iteration runs the full capacity check +
+                // atomic publish again.
+                SOCKET_WQS[wq_idx].wait_event(|| {
+                    let state = UNIX_STATE.lock();
+                    let slot = &state.slots[wq_idx];
+                    if slot.generation != slot_gen {
+                        return true; // slot reused
+                    }
+                    match slot.state {
+                        SlotState::Connected {
+                            pair,
+                            side,
+                            peer_closed,
+                            ..
+                        } => {
+                            if peer_closed {
+                                return true;
+                            }
+                            match state.pairs.get(pair) {
+                                Some(p) => p.send_fifo_ref(side).has_space(),
+                                None => true,
+                            }
+                        }
+                        _ => true, // state diverged — bail out
+                    }
+                });
+            }
         }
     }
+}
 
-    bytes_sent
+/// Release every still-owned fd in `inflight_fds[..fd_count]`.
+/// Called on every error-return path of [`unix_sendmsg`] so a
+/// failed send never leaks the fd refs the kernel duplicated from
+/// the sender's process fd table in the sendmsg syscall handler.
+#[inline]
+fn release_inflight(
+    inflight_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    fd_count: usize,
+) {
+    for j in 0..fd_count {
+        if inflight_fds[j].0 != 0 {
+            inflight_fds[j].1.release(inflight_fds[j].0);
+            inflight_fds[j] = (0, inflight_fds[j].1);
+        }
+    }
 }
 
 /// Receive data from a connected AF_UNIX socket, with optional in-flight fds.

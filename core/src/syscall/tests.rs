@@ -37,7 +37,7 @@ use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::Task;
-use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
+use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
 
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
@@ -2202,7 +2202,7 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
     let mut frame_stale = zero_frame();
     frame_stale.regs_mut().rdi = user_page; // arg0 = path_ptr
     frame_stale.regs_mut().rsi = path.len() as u64; // arg1 = path_len
-    frame_stale.regs_mut().rdx = 1; // arg2 = priority
+    frame_stale.regs_mut().rdx = 2; // arg2 = priority (Normal; KernelIo=1 is kernel-only)
     frame_stale.regs_mut().r10 = 0; // arg3 = flags
     frame_stale.regs_mut().r8 = 0xDEAD_BEEF_CAFE_BABEu64; // arg4 = garbage argv_ptr
     frame_stale.regs_mut().r9 = 42; // arg5 = garbage argc
@@ -2220,7 +2220,7 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
     let mut frame_clean = zero_frame();
     frame_clean.regs_mut().rdi = user_page; // arg0 = path_ptr
     frame_clean.regs_mut().rsi = path.len() as u64; // arg1 = path_len
-    frame_clean.regs_mut().rdx = 1; // arg2 = priority
+    frame_clean.regs_mut().rdx = 2; // arg2 = priority (Normal; KernelIo=1 is kernel-only)
     frame_clean.regs_mut().r10 = 0; // arg3 = flags
     frame_clean.regs_mut().r8 = 0; // arg4 = no argv
     frame_clean.regs_mut().r9 = 0; // arg5 = no argc
@@ -3648,4 +3648,238 @@ slopos_testing::stest!(
 slopos_testing::stest!(
     name = test_poll_fused_register_first_catches_wakeup,
     suite = poll_wakeup_race
+);
+
+// =============================================================================
+// AF_UNIX SCM_RIGHTS atomicity tests
+// =============================================================================
+//
+// `unix_sendmsg` must publish data bytes and ancillary fds together:
+// the peer's `unix_recvmsg` either sees both or neither. Without the
+// single-critical-section publish, the preempt-on-enqueue scheduler
+// (Phase 1.2) makes the peer drain the data FIFO before the sender
+// commits the fds — surfacing as a Wayland-style decoder receiving
+// `SurfaceAttach { buffer_fd: None }`.
+
+/// Build a connected AF_UNIX pair and return the raw socket handles
+/// (not the fd-table-installed `i32`s). Tests that work below the fd
+/// layer use this so they can call `unix_sendmsg`/`unix_recvmsg`
+/// directly.
+fn unix_create_connected_pair_raw() -> Option<(
+    slopos_net::unix_socket::SocketHandle,
+    slopos_net::unix_socket::SocketHandle,
+)> {
+    use slopos_net::unix_socket;
+
+    let path = b"/scm-rights/sock";
+
+    let srv = unix_socket::unix_create()?;
+    if unix_socket::unix_bind(srv, path) != 0 {
+        unix_socket::unix_close(srv);
+        return None;
+    }
+    if unix_socket::unix_listen(srv, 4) != 0 {
+        unix_socket::unix_close(srv);
+        return None;
+    }
+    unix_socket::unix_set_nonblocking(srv, true);
+
+    let cli = unix_socket::unix_create()?;
+    if unix_socket::unix_connect(cli, path) != 0 {
+        unix_socket::unix_close(cli);
+        unix_socket::unix_close(srv);
+        return None;
+    }
+
+    let accepted = match unix_socket::unix_accept(srv) {
+        Ok(h) => h,
+        Err(_) => {
+            unix_socket::unix_close(cli);
+            unix_socket::unix_close(srv);
+            return None;
+        }
+    };
+    unix_socket::unix_close(srv);
+    // Both halves of the pair are non-blocking so tests that probe
+    // empty FIFOs return EAGAIN instead of parking the test
+    // thread on the per-slot wait queue (no scheduler context).
+    unix_socket::unix_set_nonblocking(accepted, true);
+    unix_socket::unix_set_nonblocking(cli, true);
+    Some((accepted, cli))
+}
+
+/// SCM_RIGHTS atomicity: one `unix_sendmsg` with both data and an fd
+/// must deliver both to the peer's next `unix_recvmsg` — never just
+/// the data with the fd trailing in a separate ancillary state. This
+/// is the regression that caused `SurfaceAttach` decode to see
+/// `buffer_fd: None` and windows to not render.
+pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    use slopos_net::unix_socket;
+
+    let (srv, cli) = match unix_create_connected_pair_raw() {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+
+    // Build a memfd to use as the in-flight fd. `memfd_create`
+    // returns `(handle, ops)`; we hand both to `unix_sendmsg`.
+    let (mfd_handle, mfd_ops) = match slopos_mm::memfd::memfd_create(0) {
+        Some(h) => h,
+        None => {
+            unix_socket::unix_close(srv);
+            unix_socket::unix_close(cli);
+            return fail!("memfd_create failed");
+        }
+    };
+
+    let payload = b"ATOM";
+    let mut inflight = [(mfd_handle, mfd_ops); 1];
+
+    let n = unix_socket::unix_sendmsg(srv, payload, &mut inflight, 1);
+    assert_test!(
+        n == payload.len() as i32,
+        "unix_sendmsg returned {} (expected {})",
+        n,
+        payload.len()
+    );
+    assert_test!(
+        inflight[0].0 == 0,
+        "unix_sendmsg must consume the fd on success (handle should be zeroed)"
+    );
+
+    let mut buf = [0u8; 16];
+    let mut out_fds = [(0usize, slopos_mm::memfd::dummy_file_ops()); 1];
+    let (bytes_read, n_fds) = unix_socket::unix_recvmsg(cli, &mut buf, &mut out_fds, 1);
+
+    assert_eq_test!(bytes_read, payload.len() as i32, "recvmsg byte count");
+    assert_eq_test!(n_fds, 1, "recvmsg must deliver the companion fd");
+    assert_test!(
+        out_fds[0].0 == mfd_handle,
+        "recvmsg fd handle mismatch: got {}, expected {}",
+        out_fds[0].0,
+        mfd_handle
+    );
+    assert_test!(&buf[..payload.len()] == payload, "recvmsg payload mismatch");
+
+    // Release the recovered fd and close sockets.
+    out_fds[0].1.release(out_fds[0].0);
+    unix_socket::unix_close(srv);
+    unix_socket::unix_close(cli);
+    pass!()
+}
+
+/// Ancillary queue overflow: a `sendmsg` whose fd_count would push
+/// the per-direction anc queue past `MAX_INFLIGHT_FDS` must reject
+/// with ENOMEM and release every fd from the caller's array — no
+/// partial-publish to the peer.
+pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    use slopos_net::unix_socket;
+
+    let (srv, cli) = match unix_create_connected_pair_raw() {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+
+    // Fill the anc queue up to capacity with 8 separate memfds.
+    const CAP: usize = 8;
+    let mut handles: [usize; CAP] = [0; CAP];
+    for slot in handles.iter_mut() {
+        let (h, _ops) = match slopos_mm::memfd::memfd_create(0) {
+            Some(p) => p,
+            None => return fail!("memfd_create failed during fill"),
+        };
+        *slot = h;
+    }
+
+    for &h in handles.iter() {
+        let mut one = [(h, slopos_mm::memfd::dummy_file_ops()); 1];
+        let n = unix_socket::unix_sendmsg(srv, &[], &mut one, 1);
+        assert_test!(n >= 0, "fill push returned {}", n);
+    }
+
+    // Capacity should now be at the cap. One more fd → ENOMEM.
+    let (overflow_h, overflow_ops) = match slopos_mm::memfd::memfd_create(0) {
+        Some(p) => p,
+        None => return fail!("memfd_create failed for overflow"),
+    };
+    let mut overflow_in = [(overflow_h, overflow_ops); 1];
+    let rc = unix_socket::unix_sendmsg(srv, b"X", &mut overflow_in, 1);
+    assert_test!(rc == -12, "expected ENOMEM (-12), got {}", rc);
+
+    // Peer should see exactly the 8 originally-sent fds, no overflow.
+    // The overflow `b"X"` must NOT be in the data FIFO since the
+    // sendmsg returned ENOMEM before committing anything.
+    //
+    // Drain anc with an empty data slice (skips `unix_recv` so we
+    // don't trip EAGAIN from the empty non-blocking FIFO). Then
+    // explicitly probe the data FIFO with a small read.
+    let mut out = [(0usize, slopos_mm::memfd::dummy_file_ops()); 16];
+    let (anc_drain_bytes, n_fds) = unix_socket::unix_recvmsg(cli, &mut [], &mut out, 16);
+    assert_eq_test!(n_fds, CAP, "peer must see all 8 fds, no overflow");
+    assert_eq_test!(anc_drain_bytes, 0, "anc-drain returns zero data");
+
+    let mut probe_buf = [0u8; 4];
+    let probe = unix_socket::unix_recv(cli, &mut probe_buf);
+    assert_test!(
+        probe == 0 || probe == -11,
+        "data FIFO must be empty (got {}); overflow 'X' leaked",
+        probe
+    );
+
+    // Release everything.
+    for i in 0..n_fds {
+        out[i].1.release(out[i].0);
+    }
+    unix_socket::unix_close(srv);
+    unix_socket::unix_close(cli);
+    pass!()
+}
+
+/// Non-blocking sender + full data FIFO: when the data fifo cannot
+/// fit any bytes (impossible by construction — `unix_create_connected_pair`
+/// gives a fresh empty FIFO), the proxy here is to set the sender
+/// non-blocking and force EAGAIN by sending after the peer is gone.
+/// The harder property to verify is "no fd leak on error" — we
+/// monitor the memfd via its registry pre/post send.
+pub fn test_unix_scm_rights_error_releases_fd() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    use slopos_net::unix_socket;
+
+    // Build a pair, close the peer immediately → next send sees
+    // EPIPE because peer_closed is set.
+    let (srv, cli) = match unix_create_connected_pair_raw() {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+    unix_socket::unix_close(cli);
+
+    let (h, ops) = match slopos_mm::memfd::memfd_create(0) {
+        Some(p) => p,
+        None => return fail!("memfd_create failed"),
+    };
+    let mut inflight = [(h, ops); 1];
+    let rc = unix_socket::unix_sendmsg(srv, b"DEAD", &mut inflight, 1);
+    assert_test!(rc == -32, "expected EPIPE (-32), got {}", rc);
+    assert_test!(
+        inflight[0].0 == 0,
+        "failed sendmsg must release the fd reference (handle should be zeroed)"
+    );
+
+    unix_socket::unix_close(srv);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_unix_scm_rights_atomic_delivery,
+    suite = unix_scm_rights
+);
+slopos_testing::stest!(
+    name = test_unix_scm_rights_anc_queue_full_no_partial,
+    suite = unix_scm_rights
+);
+slopos_testing::stest!(
+    name = test_unix_scm_rights_error_releases_fd,
+    suite = unix_scm_rights
 );

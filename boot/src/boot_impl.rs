@@ -41,6 +41,16 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     timer_sleep_ms: |ms| hpet::delay_ms(ms),
     timer_enable_irq: || apic::timer::unmask(),
     timer_disable_irq: || apic::timer::mask(),
+    timer_program_next_wakeup_ms: |ms| {
+        apic::timer::set_oneshot_ms(slopos_arch::arch::idt::LAPIC_TIMER_VECTOR, ms)
+    },
+    timer_restore_periodic: || {
+        const LAPIC_TIMER_PERIOD_MS: u32 = 10;
+        let _ = apic::timer::set_periodic_ms(
+            slopos_arch::arch::idt::LAPIC_TIMER_VECTOR,
+            LAPIC_TIMER_PERIOD_MS,
+        );
+    },
     console_putc: |c| serial::serial_putc_com1(c),
     console_puts: |s| {
         for &c in s {

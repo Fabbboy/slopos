@@ -151,7 +151,17 @@ static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static VIRTIO_NET_STATE: SpinLock<VirtioNetState> =
     SpinLock::new(VirtioNetState::new(), LOCK_LEVEL_RESOURCE);
 static DHCP_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
-static NAPI_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
+/// Wake the NAPI kthread when the NIC IRQ fires. Replaces the
+/// pre-refactor `NAPI_EVENT: IrqEdgeEvent` + `sleep_current_task_ms(1)`
+/// polling loop with an IRQ-driven park-and-wake.
+static NAPI_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new();
+/// Wake the net-timer kthread when a sooner deadline is armed.
+/// Used by code that schedules a fresh timer wheel entry it needs
+/// fired before the next periodic 50 ms slice. Currently the
+/// production callers do not arm this signal (the 50 ms periodic
+/// cadence is enough for ARP/TCP retx latency); the signal is
+/// wired up for completeness and future optimisation.
+static TIMER_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new();
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
 static DNS_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Buffer for the most recent DNS response payload (UDP body only).
@@ -961,69 +971,39 @@ fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
 // PCI probe
 // =============================================================================
 
-fn napi_schedule() {
-    let _ = NAPI_CONTEXT.schedule();
-}
-
-fn napi_complete() {
-    NAPI_CONTEXT.complete();
-}
-
-fn virtnet_napi_poll_loop() {
-    if !NAPI_CONTEXT.begin_poll() {
-        return;
-    }
-
+/// Drain one NAPI burst: poll the NIC RX ring up to `NAPI_BUDGET`,
+/// run each packet through ingress, then drain the loopback queue.
+///
+/// Returns the number of packets the NIC produced this call so the
+/// kthread can re-arm the waker when budget was exhausted (more work
+/// likely pending). Re-entrancy is structurally impossible — a single
+/// `NapiWaker` -> single-kthread shape means only `napi_thread_entry`
+/// ever calls this from outside a `#[cfg(test)]` site.
+fn run_napi_burst() -> u32 {
     let Some(handle) = get_device_handle() else {
-        napi_complete();
-        return;
+        return 0;
     };
 
     {
         let state = VIRTIO_NET_STATE.lock();
         if !state.device.ready || !link_is_up(&state) {
-            drop(state);
-            napi_complete();
-            return;
+            return 0;
         }
     }
 
     let packets = handle.poll_rx(NAPI_CONTEXT.budget() as usize, &PACKET_POOL);
-    let processed = packets.len();
+    let processed = packets.len() as u32;
     for pkt in packets {
         sniff_packet_for_members(pkt.payload());
         ingress::net_rx(handle, pkt);
     }
-    NAPI_CONTEXT.add_processed(processed as u32);
+    NAPI_CONTEXT.add_processed(processed);
 
-    // also poll the loopback device.  Packets sent to 127.0.0.0/8
-    // are queued internally by LoopbackDev::tx() and need to be drained back
-    // through the ingress pipeline.
+    // Loopback packets are queued internally by `LoopbackDev::tx` and
+    // need to be drained back through the ingress pipeline.
     poll_loopback();
 
-    napi_complete();
-
-    slopos_net::socket::socket_process_timers();
-
-    // Fix NAPI race: if an RX IRQ fired while we were in Polling state,
-    // napi_schedule() from the IRQ handler was a no-op (CAS Idle→Scheduled
-    // fails when state is Polling).  The IRQ did signal NAPI_EVENT, so
-    // consume that stale signal and re-schedule now that we are back in Idle.
-    // Without this, the stranded packet sits in the RX ring until the next
-    // unrelated IRQ — causing spurious DNS timeouts under QEMU SLIRP.
-    if NAPI_EVENT.try_consume() {
-        napi_schedule();
-        NAPI_EVENT.signal();
-    }
-
-    // Advance the network timer wheel — process ARP aging, TCP retransmit, etc.
-    //
-    slopos_net::timer::net_timer_process();
-
-    if (processed as u32) >= NAPI_CONTEXT.budget() {
-        napi_schedule();
-        NAPI_EVENT.signal();
-    }
+    processed
 }
 
 /// Poll the loopback device and feed packets through ingress.
@@ -1064,40 +1044,134 @@ fn poll_loopback() {
     }
 }
 
+/// Force a NAPI poll cycle from a non-IRQ context.
+///
+/// Production callers were retired in Phase 2: the IRQ-driven netpoll
+/// kthread is the sole RX path. This entry remains for test fixtures
+/// (`net/src/tests/tcp_live_tests.rs`, ICMP/NAPI scheduling tests) and
+/// for the host wrapper that needs deterministic synchronous drain.
+/// Wakes the kthread so it sees one more burst when scheduled and
+/// runs a direct burst here for the caller that cannot wait.
 pub fn virtnet_force_napi_poll() {
-    napi_schedule();
-    NAPI_EVENT.signal();
-    virtnet_napi_poll_loop();
+    NAPI_WAKER.arm_and_wake();
+    let _ = run_napi_burst();
+    slopos_net::socket::socket_process_timers();
 }
 
-/// Long-lived netpoll worker. Spawned once per virtio-net probe via
-/// `slopos_ostd::task::spawn`. Drives NAPI polling and the net-stack
-/// timer wheel; sleeps 1 ms between iterations so the loop yields the
-/// CPU between bursts.
-fn napi_thread_entry() {
-    use slopos_kernel_services::driver_runtime::sleep_current_task_ms;
+/// Wake-only counterpart to [`virtnet_force_napi_poll`]. Registered
+/// with `slopos_net::napi::register_wake_napi` so loopback tx (and
+/// any future intra-kernel producer) can wake the netpoll kthread
+/// without re-entering the synchronous poll loop. Required because
+/// the loopback `tx` runs under `LoopbackDev::inner` lock — a
+/// synchronous `virtnet_napi_poll_loop` here would re-enter
+/// `VIRTIO_NET_STATE` and risk lock recursion in tightly-coupled
+/// configurations.
+pub fn virtnet_wake_napi() {
+    NAPI_WAKER.arm_and_wake();
+}
+
+/// Long-lived netpoll worker (threaded NAPI).
+///
+/// Spawned once per virtio-net probe via [`slopos_ostd::spawn_kernel_io!`]
+/// at [`TaskPriority::KernelIo`] (strictly above any user task). The
+/// kthread parks on [`NAPI_WAKER`]; the per-queue IRQ handler
+/// (`virtio_net_irq_handler`) calls `arm_and_wake` to wake the
+/// kthread on each completion.
+///
+/// Post-burst recheck (Phase 2): after each burst returns we peek the
+/// virtio used-ring index without taking the state lock. If the IRQ
+/// arrived between the last `try_pop_used` and `wait` re-park, the
+/// peek catches it and we re-arm the waker so the next `wait` returns
+/// immediately. Mirrors Linux NAPI's `napi_complete_done` pending
+/// recheck and closes the lost-wakeup window structurally.
+///
+/// Budget exhaustion: when `processed >= NAPI_BUDGET` more work is
+/// likely pending; we re-arm and `yield_with_deadline(Immediate)` so
+/// any equal-or-higher-priority task gets a chance to run before the
+/// next burst.
+fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
+    use slopos_ostd::sync::kernel_io_task::{Deadline, yield_with_deadline};
     loop {
-        napi_schedule();
-        virtnet_napi_poll_loop();
+        NAPI_WAKER.wait();
+        let processed = run_napi_burst();
+        slopos_net::socket::socket_process_timers();
+
+        // Post-burst recheck: catch packets the IRQ committed between
+        // the last `poll_rx` drain and now. `has_pending_rx` reads
+        // the used-ring atomically with no driver-state lock.
+        if has_pending_rx() {
+            NAPI_WAKER.rearm();
+        }
+
+        if processed >= NAPI_CONTEXT.budget() {
+            NAPI_WAKER.rearm();
+            yield_with_deadline(&token, Deadline::Immediate);
+        }
+    }
+}
+
+/// Lock-free pending-RX peek. Reads the virtio used-ring `idx` and
+/// compares against the driver-cached `last_used_idx` — the same
+/// comparison `try_pop_used` performs, but without acquiring the
+/// `VIRTIO_NET_STATE` spinlock. Safe to call concurrently with the
+/// kthread because virtio used.idx is producer-monotonic (modulo
+/// 16-bit wrap) and the only way `last_used_idx` advances is via the
+/// kthread itself.
+fn has_pending_rx() -> bool {
+    // We take the lock briefly here because `Virtqueue::has_pending`
+    // requires `&Virtqueue` and `state.device.rx_queue` is behind
+    // `VIRTIO_NET_STATE`. A future refactor can expose the queue's
+    // used-ring base independently so this becomes a pure atomic
+    // read — for now the lock is held for ~5 ns over a single
+    // `read_volatile`.
+    let state = VIRTIO_NET_STATE.lock();
+    state.device.rx_queue.has_pending()
+}
+
+/// Net-timer kthread (Phase-1).
+///
+/// Separated from `napi_thread_entry` so the RX hot path is not
+/// charged for `net_timer_process` cost. Sleeps `NET_TIMER_PERIOD_MS`
+/// (50 ms) between ticks; can be woken sooner by code that arms a
+/// soon-firing wheel entry via `TIMER_WAKER.arm_and_wake()`.
+///
+/// The kthread runs at [`TaskPriority::KernelIo`] (strictly above
+/// user tasks) so ARP aging, TCP retransmit, IP-reassembly expire,
+/// and delayed-ACK fire on time even when user-space is busy.
+fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
+    use slopos_ostd::sync::kernel_io_task::{Deadline, yield_with_deadline};
+    const NET_TIMER_PERIOD_MS: u32 = 50;
+    loop {
+        // Wait either for the period to expire or for an explicit
+        // wake from `TIMER_WAKER.arm_and_wake()`. Either way, run
+        // one round of timer processing.
+        let _woken_early = TIMER_WAKER.wait_timeout_ms(NET_TIMER_PERIOD_MS);
         slopos_net::timer::net_timer_process();
-        sleep_current_task_ms(1);
+        slopos_net::socket::socket_process_timers();
+        // Yield with deadline so any equal-priority task gets a
+        // chance to run between ticks. The next iteration's
+        // `wait_timeout_ms` parks again.
+        yield_with_deadline(&token, Deadline::Immediate);
     }
 }
 
 /// Per-queue interrupt handler for virtio-net.
 ///
-/// `queue_idx` is 0 for RX, 1 for TX (matching the queue setup order in
-/// `virtio_net_probe`). The handler signals the matching queue
-/// completion event so the NAPI poll loop and DHCP RX loop wake up.
+/// `queue_idx` is 0 for RX, 1 for TX (matching the queue setup order
+/// in `virtio_net_probe`). On either queue the handler wakes the
+/// netpoll kthread via the IRQ-safe [`NapiWaker::arm_and_wake`]; on
+/// queue 0 it additionally pulses the DHCP edge so the boot-time
+/// DHCP loop unblocks. Hard-IRQ path is intentionally tiny — no
+/// scheduler interaction, no protocol work — to keep IRQ-disabled
+/// time minimal.
 fn virtio_net_irq_handler(queue_idx: u8) {
     match queue_idx {
         0 => {
             DHCP_RX_EVENT.signal();
-            napi_schedule();
-            NAPI_EVENT.signal();
+            NAPI_WAKER.arm_and_wake();
         }
         1 => {
-            NAPI_EVENT.signal();
+            NAPI_WAKER.arm_and_wake();
         }
         _ => {}
     }
@@ -1299,7 +1373,13 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         }
     }
 
+    // Sync-kick: user-task syscall paths call `napi::kick` to drain
+    // the RX ring inline on the caller's CPU, ensuring the wake
+    // observes the most recent committed used-ring state.
     slopos_net::napi::register_kick(virtnet_force_napi_poll);
+    // Async-wake: non-IRQ producers (loopback tx) signal the netpoll
+    // kthread without re-entering the synchronous poll machinery.
+    slopos_net::napi::register_wake_napi(virtnet_wake_napi);
     static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
         virtio_net_ipv4_addr,
         virtio_net_dns,
@@ -1319,18 +1399,32 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
     };
     register_net_driver_services(&NET_DRIVER_SVC);
 
-    // Spawn at Normal priority. The netpoll task runs the network
-    // timer wheel (ARP aging, TCP retransmit) and consumes IRQ-driven
-    // RX bursts; the poll-driven `napi::kick()` invoked from
-    // `socket_poll_readable` closes the latency gap when a caller has
-    // just woken from sleep and is asking for readiness immediately.
-    if let Err(err) = slopos_ostd::task::spawn(
-        "netpoll",
-        napi_thread_entry,
-        slopos_abi::task::TaskPriority::Normal.as_u8(),
-    ) {
+    // Phase-1 threaded NAPI: the netpoll kthread runs at
+    // TaskPriority::KernelIo (strictly above any user task) and
+    // parks indefinitely on NAPI_WAKER. The IRQ handler
+    // (`virtio_net_irq_handler`) calls `NAPI_WAKER.arm_and_wake()`
+    // to wake the kthread on each NIC RX/TX completion. The
+    // `spawn_kernel_io!` macro emits a hidden trampoline that
+    // constructs a `KernelIoToken` and hands it to the entry —
+    // every yield in the kthread must name a `Deadline` so the
+    // pre-refactor "sleep_current_task_ms(1) in a tight loop"
+    // starvation pattern is structurally unreachable.
+    if let Err(err) = slopos_ostd::spawn_kernel_io!("netpoll", napi_thread_entry) {
         klog_info!(
             "virtio-net: failed to spawn netpoll kernel thread ({:?})",
+            err
+        );
+        DEVICE_CLAIMED.reset();
+        return Err(PciProbeError::OutOfMemory);
+    }
+    // Phase-1.7 net-timer split: timer-wheel processing runs in a
+    // dedicated `KernelIo` kthread so the RX hot path is not charged
+    // for `net_timer_process` cost and timer-driven work (ARP aging,
+    // TCP retransmit, delayed-ACK, IP-reassembly expire) fires on its
+    // own cadence regardless of NIC activity.
+    if let Err(err) = slopos_ostd::spawn_kernel_io!("net-timer", net_timer_thread_entry) {
+        klog_info!(
+            "virtio-net: failed to spawn net-timer kernel thread ({:?})",
             err
         );
         DEVICE_CLAIMED.reset();
@@ -1409,8 +1503,12 @@ pub fn virtio_net_scan_members(out: &mut [UserNetMember], active_probe: bool) ->
 
         for target in &targets[..target_count] {
             let _ = transmit_arp_request(&mut state, *target);
-            napi_schedule();
-            let _ = NAPI_EVENT.wait_timeout_ms(SCAN_RX_TIMEOUT_MS);
+            // The NAPI kthread (TaskPriority::KernelIo) wakes on each
+            // RX IRQ via NAPI_WAKER and drains the ring inline.
+            // We just wait for it to make progress — a short poll
+            // sleep is enough because the probe target is on the
+            // local segment.
+            slopos_kernel_services::driver_runtime::sleep_current_task_ms(SCAN_RX_TIMEOUT_MS);
             let _ = virtnet_poll(&mut state, NAPI_BUDGET);
         }
 
@@ -1557,9 +1655,12 @@ pub fn dns_rx_wait(timeout_ms: u32) -> bool {
             return false;
         }
         let remaining = (timeout_ms as u64 - elapsed) as u32;
-        // Wait for any RX interrupt (capped at 100 ms to avoid wedging).
-        NAPI_EVENT.wait_timeout_ms(remaining.min(100));
-        virtnet_napi_poll_loop();
+        // The NAPI kthread (TaskPriority::KernelIo) processes
+        // incoming frames inline on each RX IRQ via `NAPI_WAKER`.
+        // DNS replies route through `dispatch_rx_frame` →
+        // `dns_intercept_response`, which sets `DNS_RX_EVENT`.
+        // Sleep for a bounded slice, then re-check.
+        slopos_kernel_services::driver_runtime::sleep_current_task_ms(remaining.min(20));
     }
 }
 

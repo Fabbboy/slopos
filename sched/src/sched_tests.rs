@@ -4091,3 +4091,76 @@ slopos_testing::stest!(
     name = test_generation_unchanged_when_no_waiters,
     suite = sched_core
 );
+
+// =============================================================================
+// Phase-1 scheduler-refactor regression tests
+// =============================================================================
+
+/// `TaskPriority::KernelIo` is numerically 1 (between `High`=0 and
+/// `Normal`=2) and the renumber landed cleanly across the enum's
+/// total decoder, strict decoder, and dispatch index.
+fn test_kernel_io_priority_renumber() -> TestResult {
+    if TaskPriority::High.as_u8() != 0 {
+        return TestResult::Fail;
+    }
+    if TaskPriority::KernelIo.as_u8() != 1 {
+        return TestResult::Fail;
+    }
+    if TaskPriority::Normal.as_u8() != 2 {
+        return TestResult::Fail;
+    }
+    if TaskPriority::Low.as_u8() != 3 {
+        return TestResult::Fail;
+    }
+    if TaskPriority::Idle.as_u8() != 4 {
+        return TestResult::Fail;
+    }
+    // Total decoder round-trips every variant.
+    for v in 0..=4u8 {
+        if TaskPriority::from_u8(v).as_u8() != v {
+            return TestResult::Fail;
+        }
+    }
+    // Out-of-range coerces to Normal in the total decoder.
+    if TaskPriority::from_u8(255) != TaskPriority::Normal {
+        return TestResult::Fail;
+    }
+    // Strict decoder rejects out-of-range.
+    if TaskPriority::try_from_u8(5).is_some() {
+        return TestResult::Fail;
+    }
+    if TaskPriority::try_from_u8(1) != Some(TaskPriority::KernelIo) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// `SleepQueue::earliest_deadline` returns `None` on the lock-free
+/// fast path when no tasks are sleeping. Drives the
+/// tickless-idle path: when there are no deadlines, the idle loop
+/// must skip arming a one-shot LAPIC.
+fn test_sleep_queue_next_deadline_none_when_empty() -> TestResult {
+    let _fix = SchedFixture::new();
+    let now = slopos_kernel_services::platform::timer_ticks();
+    match super::sleep::sleep_queue_next_deadline_ticks(now) {
+        None => TestResult::Pass,
+        Some(_) => TestResult::Fail,
+    }
+}
+
+/// `KernelIoToken::__new_for_trampoline_only` is documented as the
+/// only way to construct a witness. The constructor compiles and
+/// returns. (The macro path is exercised in production by every
+/// `spawn_kernel_io!` invocation; this test pins the inner ABI.)
+fn test_kernel_io_token_constructs() -> TestResult {
+    let _t =
+        slopos_ostd::sync::kernel_io_task::KernelIoToken::<'static>::__new_for_trampoline_only();
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_kernel_io_priority_renumber, suite = sched_core);
+slopos_testing::stest!(
+    name = test_sleep_queue_next_deadline_none_when_empty,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_kernel_io_token_constructs, suite = sched_core);

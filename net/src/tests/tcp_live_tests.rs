@@ -111,6 +111,59 @@ fn test_arp_resolve_gateway() -> TestResult {
     fail!("ARP for gateway {} did not resolve in 2s", gw_ip)
 }
 
+/// Regression test for the curl-times-out bug.
+///
+/// Before the fix, `socket_connect` (and `socket_send` for UDP/ICMP)
+/// picked the local source IP via `NET_STACK.first_ipv4()`, which
+/// returns the first iface in registration order. The loopback iface
+/// is registered before any NIC, so external connections went out
+/// with `src_ip = 127.0.0.1` — QEMU SLIRP's TCP forwarder ignores
+/// replies to 127.0.0.1, surfacing as a 5 s recv timeout in curl
+/// after the std-side `decode_error_kind` patch translated EAGAIN to
+/// `ErrorKind::TimedOut`. After the fix, `source_ip_for(dst)` does
+/// a route lookup and returns the egress device's IP — the NIC's
+/// DHCP-assigned address for external traffic.
+fn test_source_ip_for_external_uses_nic() -> TestResult {
+    let external = Ipv4Addr(GATEWAY_IP);
+    let src = match NET_STACK.source_ip_for(external) {
+        Some(ip) => ip,
+        None => return fail!("source_ip_for({}) returned None", external),
+    };
+    klog_info!(
+        "tcp_live: source_ip_for({}) -> {} (must NOT be 127.x)",
+        external,
+        src
+    );
+    assert_test!(
+        !src.is_loopback(),
+        "source_ip_for(external dst) returned loopback {} — outbound TCP would send with src=127.0.0.1 and never receive replies",
+        src
+    );
+    assert_test!(
+        !src.is_unspecified(),
+        "source_ip_for(external dst) returned 0.0.0.0 — DHCP did not configure the NIC"
+    );
+    pass!()
+}
+
+/// Loopback destinations must still resolve through the loopback
+/// interface, not the NIC. Confirms `source_ip_for` is route-aware
+/// rather than blanket-blacklisting loopback.
+fn test_source_ip_for_loopback_uses_loopback() -> TestResult {
+    let lo = Ipv4Addr([127, 0, 0, 1]);
+    let src = match NET_STACK.source_ip_for(lo) {
+        Some(ip) => ip,
+        None => return fail!("source_ip_for(127.0.0.1) returned None"),
+    };
+    klog_info!("tcp_live: source_ip_for({}) -> {}", lo, src);
+    assert_test!(
+        src.is_loopback(),
+        "source_ip_for(loopback dst) returned {} — loopback traffic should use 127.0.0.0/8 source",
+        src
+    );
+    pass!()
+}
+
 fn test_tcp_syn_transmit() -> TestResult {
     let our_ip = match NET_STACK.first_ipv4() {
         Some(ip) => ip.0,
@@ -164,6 +217,14 @@ fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
 slopos_testing::stest!(name = test_route_table_has_default, suite = tcp_live);
 slopos_testing::stest!(name = test_netstack_has_ipv4, suite = tcp_live);
 slopos_testing::stest!(name = test_arp_resolve_gateway, suite = tcp_live);
+slopos_testing::stest!(
+    name = test_source_ip_for_external_uses_nic,
+    suite = tcp_live
+);
+slopos_testing::stest!(
+    name = test_source_ip_for_loopback_uses_loopback,
+    suite = tcp_live
+);
 slopos_testing::stest!(name = test_tcp_syn_transmit, suite = tcp_live);
 slopos_testing::stest!(
     name = test_tcp_nonblocking_connect_returns_einprogress,

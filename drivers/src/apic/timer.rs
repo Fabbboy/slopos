@@ -143,6 +143,40 @@ pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
     true
 }
 
+/// Configure the LAPIC timer in **one-shot** mode firing the IDT
+/// `vector` after `ms` milliseconds, then naturally going idle.
+/// Used by the tickless-idle path: before the per-CPU idle loop
+/// HLTs, it consults the next sleep-queue deadline and arms a
+/// one-shot for that deadline so a sleeping kernel task wakes on
+/// time instead of waiting for the next periodic tick.
+///
+/// On every periodic-or-oneshot timer ISR, the scheduler restores
+/// periodic mode via [`set_periodic_ms`] (see
+/// `sched/src/scheduler.rs::scheduler_timer_tick`) so the system
+/// converges back to the 100 Hz baseline whenever a tick fires.
+///
+/// Returns `false` if not calibrated, the count is out of u32
+/// range, or the LAPIC is not enabled.
+pub fn set_oneshot_ms(vector: u8, ms: u32) -> bool {
+    if !is_enabled() {
+        return false;
+    }
+    let freq = LAPIC_TIMER_FREQ_HZ.load(Ordering::Acquire);
+    if freq == 0 || ms == 0 {
+        return false;
+    }
+    let count = (freq as u128 * ms as u128 / 1000) as u64;
+    if count == 0 || count > u32::MAX as u64 {
+        return false;
+    }
+
+    timer_set_divisor(LAPIC_TIMER_DIV_16);
+    let lvt = (vector as u32) | LAPIC_TIMER_ONESHOT;
+    write_register(LAPIC_LVT_TIMER, lvt);
+    write_register(LAPIC_TIMER_ICR, count as u32);
+    true
+}
+
 /// Return the calibrated LAPIC timer frequency in Hz.
 ///
 /// Returns `0` if calibration has not been performed yet.

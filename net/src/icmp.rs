@@ -191,7 +191,7 @@ pub fn send_echo_request(
     payload: &[u8],
 ) -> Result<usize, NetError> {
     let src_ip = crate::netstack::NET_STACK
-        .first_ipv4()
+        .source_ip_for(crate::types::Ipv4Addr(dst_ip))
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
     send_echo(

@@ -72,6 +72,8 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin fork_test \
         --bin io_capture_test \
         --bin heap_allocator_test \
+        --bin curl_recv_repro_test \
+        --bin curl_e2e_test \
         --features testbins \
         --no-default-features \
         --release
@@ -85,6 +87,12 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/heap_allocator_test" ]; then
         cp "$RELEASE_DIR/heap_allocator_test" "$BUILD_DIR/heap_allocator_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/curl_recv_repro_test" ]; then
+        cp "$RELEASE_DIR/curl_recv_repro_test" "$BUILD_DIR/curl_recv_repro_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/curl_e2e_test" ]; then
+        cp "$RELEASE_DIR/curl_e2e_test" "$BUILD_DIR/curl_e2e_test.elf"
+    fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf"
 fi

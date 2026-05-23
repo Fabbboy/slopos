@@ -25,6 +25,7 @@ pub mod ingress;
 pub mod ipv4;
 pub mod loopback;
 pub mod napi;
+pub mod napi_waker;
 pub mod neighbor;
 pub mod netstack;
 pub mod reassembly;

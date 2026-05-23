@@ -15,6 +15,7 @@ pub mod cpu_local;
 pub mod init_flag;
 pub mod init_in_place;
 pub mod intrusive;
+pub mod kernel_io_task;
 pub mod kernel_sync;
 pub mod lock_graph;
 pub mod lock_tracking;

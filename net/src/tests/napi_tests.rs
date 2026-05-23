@@ -5,7 +5,7 @@ use slopos_ostd::sync::WaitQueue;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, pass};
 
-use crate::napi::{NapiContext, NapiState};
+use crate::napi::NapiContext;
 use crate::socket;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader};
 use crate::tests::socket_tests;
@@ -56,19 +56,30 @@ fn connect_and_establish() -> Option<(u32, tcp::ConnId)> {
 
 pub fn test_napi_budget_limiting() -> TestResult {
     let ctx = NapiContext::new(4);
-    assert_test!(ctx.schedule(), "napi schedule transitions from idle");
-    assert_test!(
-        ctx.state() == NapiState::Scheduled,
-        "napi enters scheduled state"
-    );
-    assert_test!(ctx.begin_poll(), "napi enters polling state");
-    ctx.add_processed(4);
-    assert_test!(ctx.processed() == 4, "napi processed count tracked");
-    ctx.complete();
-    assert_test!(
-        ctx.state() == NapiState::Idle,
-        "napi completes back to idle"
-    );
+    assert_test!(ctx.budget() == 4, "napi budget stored");
+    assert_test!(ctx.processed() == 0, "napi processed starts at zero");
+    ctx.add_processed(3);
+    assert_test!(ctx.processed() == 3, "napi processed advances");
+    ctx.add_processed(1);
+    assert_test!(ctx.processed() == 4, "napi processed accumulates to budget");
+    pass!()
+}
+
+/// Phase-2 regression: `NapiWaker::rearm` makes the next `wait`
+/// short-circuit without parking. Models the post-burst recheck
+/// where the IRQ races the kthread's re-park; an unrearmed `wait`
+/// in that window would lose the wake-up.
+pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
+    use crate::napi_waker::NapiWaker;
+    static WAKER: NapiWaker = NapiWaker::new();
+    WAKER.rearm();
+    // The wait predicate consumes the armed flag on success; if
+    // rearm worked, the wait returns without blocking.
+    WAKER.wait();
+    // Second wait would block forever — instead, arm and wake from
+    // here (mimicking IRQ) and verify the same.
+    WAKER.arm_and_wake();
+    WAKER.wait();
     pass!()
 }
 
@@ -197,6 +208,7 @@ pub fn test_regression_existing() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_napi_budget_limiting, suite = napi);
+slopos_testing::stest!(name = test_napi_waker_rearm_short_circuits, suite = napi);
 slopos_testing::stest!(name = test_tx_fire_and_forget, suite = napi);
 slopos_testing::stest!(name = test_waitqueue_basic, suite = napi);
 slopos_testing::stest!(name = test_blocking_recv, suite = napi);

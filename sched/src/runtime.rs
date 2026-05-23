@@ -148,6 +148,52 @@ pub fn kernel_thread_spawner_handle() -> &'static &'static dyn KernelThreadSpawn
     &KERNEL_THREAD_SPAWNER_DYN
 }
 
+// ---------------------------------------------------------------------------
+// KernelIoToken yield backend
+// ---------------------------------------------------------------------------
+//
+// `slopos_ostd::sync::kernel_io_task::yield_with_deadline` defers to a
+// boot-registered backend so the trusted core does not pull in the
+// scheduler crate. Here we install the production implementation
+// mapping the deadline cases to the existing sched primitives.
+
+/// Map a [`Deadline`] onto the scheduler's existing yield / block
+/// primitives.
+fn kernel_io_yield_impl(deadline: slopos_ostd::sync::kernel_io_task::Deadline) {
+    use slopos_ostd::sync::kernel_io_task::Deadline;
+    match deadline {
+        Deadline::Immediate => r#yield(),
+        Deadline::AtMs(ms) => {
+            // `block_current_task_with_timeout` parks the current task
+            // (state -> Blocked) and arms a sleep-queue deadline; the
+            // task wakes when `ms` ms elapse or some `unblock_task`
+            // wakes us first. This is the right primitive for
+            // "yield until at most `ms` ms from now".
+            super::sleep::block_current_task_with_timeout(ms);
+        }
+        Deadline::Indefinite => {
+            // Conventionally the caller drives `Indefinite` through a
+            // `WaitQueue::wait_event*` predicate. The fallback here
+            // parks for a long time so a forgotten wake doesn't
+            // permanently wedge the task; the scheduler will see a
+            // sleep deadline far in the future.
+            super::sleep::block_current_task_with_timeout(u32::MAX);
+        }
+    }
+}
+
+/// Stable BSS singleton for the [`YieldBackend`] registration.
+static KERNEL_IO_YIELD_BACKEND: slopos_ostd::sync::kernel_io_task::YieldBackend =
+    kernel_io_yield_impl;
+
+/// Returns the `YieldBackend` fn pointer for boot to install via
+/// `register_yield_backend(token, ...)`. Mirrors the spawner-handle
+/// shape so the boot wire path stays uniform.
+#[inline]
+pub fn kernel_io_yield_backend() -> slopos_ostd::sync::kernel_io_task::YieldBackend {
+    KERNEL_IO_YIELD_BACKEND
+}
+
 extern "C" fn unified_idle_loop(_: *mut c_void) {
     loop {
         let mut any_work = false;
@@ -173,6 +219,11 @@ extern "C" fn unified_idle_loop(_: *mut c_void) {
             slopos_ostd::sync::rcu_process_callbacks();
         }
         slopos_ostd::sync::rcu_note_qs();
+        // Tickless-idle: arm a one-shot LAPIC if the next sleep-queue
+        // deadline falls inside the current periodic tick window. The
+        // next timer ISR restores periodic mode. See
+        // `sched::scheduler::arm_tickless_idle_if_due`.
+        crate::scheduler::arm_tickless_idle_if_due();
         slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
     }
 }
@@ -375,10 +426,18 @@ fn deferred_start_ap_timer(cpu_id: usize) {
 // NMI watchdog: cross-CPU deadlock detection
 // ---------------------------------------------------------------------------
 
-/// Per-CPU watchdog threshold in timer ticks. 50 ticks at 100Hz = 500ms.
-/// The global timer counter is incremented by ALL CPUs, so the actual
-/// threshold used is `WATCHDOG_PER_CPU_THRESHOLD * num_online_cpus`.
-const WATCHDOG_PER_CPU_THRESHOLD: u64 = 50;
+/// Per-CPU watchdog threshold in timer ticks. 250 ticks at 100Hz / 4 CPUs
+/// = 2.5s wall time before a CPU is presumed deadlocked. The global timer
+/// counter is incremented by ALL CPUs, so the actual threshold used is
+/// `WATCHDOG_PER_CPU_THRESHOLD * num_online_cpus`.
+///
+/// The previous 500ms threshold tripped on the legitimate path
+/// `notify_font_changed -> redraw_all` which holds `VCONSOLE_STATE.lock()`
+/// (IRQ-disabling SpinLock) across a full-screen framebuffer redraw —
+/// 8.3M pixels at 4K resolution takes ~700ms on TCG. Raising the
+/// threshold past worst-case legitimate sections; deadlock detection
+/// stays sharp because a real deadlock holds forever.
+const WATCHDOG_PER_CPU_THRESHOLD: u64 = 250;
 
 /// Grace period after boot before the watchdog activates.  The global
 /// counter must reach this value before any checks run, giving all CPUs
@@ -445,6 +504,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
             slopos_ostd::sync::rcu_note_qs();
+            crate::scheduler::arm_tickless_idle_if_due();
             slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
             continue;
         }
@@ -462,6 +522,11 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         // idle_time is now incremented per-tick in scheduler_timer_tick(),
         // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.
         slopos_ostd::sync::rcu_note_qs();
+
+        // Tickless-idle: arm one-shot LAPIC for the soonest pending
+        // sleep-queue deadline if it falls inside the next periodic
+        // tick. See `sched::scheduler::arm_tickless_idle_if_due`.
+        crate::scheduler::arm_tickless_idle_if_due();
 
         slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
     }
