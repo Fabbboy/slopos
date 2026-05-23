@@ -101,6 +101,15 @@ pub const LOCK_LEVEL_REGISTRY: u8 = 2;
 pub const LOCK_LEVEL_ALLOCATOR: u8 = 3;
 pub const LOCK_LEVEL_SCHEDULER: u8 = 4;
 
+/// Sentinel level for synthetic Epoch classes pushed by
+/// `crate::sync::epoch::Epoch::enter`. Held-stack entries with this
+/// level are not real locks — they exist solely so that `push_lock`
+/// can detect an attempt to acquire a `SpinLock` (or any other tracked
+/// lock) while an epoch read-side critical section is live. Such an
+/// acquisition would risk holding the lock across a wake site and
+/// regress the atomic-publish invariant.
+pub const LOCK_LEVEL_EPOCH: u8 = 0xFE;
+
 // ===========================================================================
 // Per-class flags
 // ===========================================================================
@@ -413,6 +422,22 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
         return;
     }
 
+    // Epoch-scope check: any held entry with level `LOCK_LEVEL_EPOCH`
+    // means an `Epoch::enter` is live on this CPU. Acquiring a real
+    // lock inside the scope would risk holding it across a wake site
+    // (the atomic-publish hazard from the SCM_RIGHTS regression).
+    // Fire before the regular cycle/duplicate scan so the diagnostic
+    // points at the Epoch rather than at a downstream cycle edge.
+    for i in 0..(stack.depth as usize) {
+        let held = stack.entries[i];
+        let held_lvl = CLASSES.0[held.class_idx as usize]
+            .level
+            .load(Ordering::Relaxed);
+        if held_lvl == LOCK_LEVEL_EPOCH {
+            report_epoch_violation(class_idx, lock_addr, &stack.entries[..i + 1]);
+        }
+    }
+
     // Slow path: validate the new acquisition against every held lock.
     for i in 0..(stack.depth as usize) {
         let held = stack.entries[i];
@@ -503,6 +528,60 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
             return;
         }
     }
+}
+
+/// Record that an Epoch read-side critical section opened on the
+/// current CPU.
+///
+/// Pushes a synthetic class entry tagged [`LOCK_LEVEL_EPOCH`] onto the
+/// per-CPU held-lock stack. `push_lock` consults this entry on every
+/// subsequent acquisition and panics if any tracked lock would be
+/// taken while the synthetic class is live.
+///
+/// # Safety
+/// Caller must hold a `PreemptGuard` for the lifetime of the synthetic
+/// entry (the embedded `RcuReadGuard` in `EpochGuard` provides this).
+/// `epoch_addr` must be the address of a `pub static` Epoch — class
+/// identity is the address, so stack-allocated `Epoch` instances would
+/// pollute the class table.
+#[inline]
+pub unsafe fn push_epoch(epoch_addr: *const ()) {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    if GRAPH_OVERFLOW.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let class_idx = match register_class(epoch_addr, LOCK_LEVEL_EPOCH) {
+        Some(idx) => idx,
+        None => {
+            GRAPH_OVERFLOW.store(true, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    let cpu = get_current_cpu();
+    // SAFETY: per-CPU slot, preemption disabled by caller (the embedded
+    // `PreemptGuard` in `EpochGuard`'s `RcuReadGuard`).
+    let stack = unsafe { &mut *HELD[cpu].0.0.get() };
+
+    let new_chain_key = iterate_chain_key(stack.curr_chain_key, class_idx);
+    push_held(stack, class_idx, epoch_addr, noop_poison, new_chain_key);
+}
+
+/// Record that an Epoch read-side critical section closed.
+///
+/// # Safety
+/// Must be paired LIFO with the matching [`push_epoch`]. Preemption
+/// must still be disabled (the `PreemptGuard` outlives this call by
+/// construction in `EpochGuard::drop`).
+#[inline]
+pub unsafe fn pop_epoch(epoch_addr: *const ()) {
+    // Pop uses the same address-keyed walk as `pop_lock`; the
+    // synthetic entry was pushed with `lock_addr = epoch_addr`.
+    // SAFETY: caller honours the LIFO + preempt-disabled contract.
+    unsafe { pop_lock(epoch_addr) }
 }
 
 /// Walk the panicking CPU's held-lock stack, calling each entry's
@@ -783,6 +862,23 @@ fn report_cycle(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
     panic!(
         "LOCK DEPENDENCY CYCLE: acquiring class {} (lock @ {:#x}, level {}) would close a cycle through held class (lock @ {:#x}, level {})",
         new_class, new_addr as usize, new_lvl, held_addr as usize, held_lvl,
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn report_epoch_violation(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
+    if PANIC_BYPASS.load(Ordering::Relaxed) {
+        return;
+    }
+    let new_lvl = CLASSES.0[new_class as usize].level.load(Ordering::Relaxed);
+    let epoch_addr = held
+        .last()
+        .map(|h| h.lock_addr)
+        .unwrap_or(core::ptr::null());
+    panic!(
+        "LOCK INSIDE EPOCH: acquiring class {} (lock @ {:#x}, level {}) while Epoch @ {:#x} is held — sleeping or holding a lock across a wake site inside an epoch breaks the atomic-publish invariant",
+        new_class, new_addr as usize, new_lvl, epoch_addr as usize,
     );
 }
 

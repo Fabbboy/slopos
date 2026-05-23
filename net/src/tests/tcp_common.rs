@@ -325,21 +325,26 @@ pub fn drain_transmit(id: ConnId) -> KVec<(TcpOutSegment, KVec<u8>)> {
 // State-access macros
 // -----------------------------------------------------------------------------
 
-/// Access the `DataState` of a PCB inside the shard lock.
+/// Access the `DataState` of a PCB inside its per-slot lock.
 /// Panics if the PCB doesn't exist or isn't in the `Data` state.
 ///
 /// Usage: `with_data_state!(conn.id, |d| assert_eq!(d.snd_nxt.raw(), ...));`
 ///
-/// Note: the body executes directly in the caller's scope (not a closure),
-/// so `return` and `?` propagate to the enclosing function — test assertion
-/// macros like `assert_test!` work correctly.
+/// The body executes in the caller's scope (the macro expands to a
+/// guard-binding block, not a closure), so `return` and `?` propagate
+/// to the enclosing function — test assertion macros like
+/// `assert_test!` keep working unchanged.
 #[macro_export]
 macro_rules! with_data_state {
     ($id:expr, |$d:ident| $body:expr) => {{
         let __wds_id: crate::tcp::ConnId = $id;
-        let __wds_guard = crate::tcp::table::TCP_SHARDS[__wds_id.shard()].lock();
-        let __wds_pcb = __wds_guard.get(__wds_id.slot()).expect("PCB should exist");
-        match &__wds_pcb.state {
+        assert!(
+            !__wds_id.is_listener(),
+            "with_data_state! requires a non-listener ConnId"
+        );
+        let __wds_guard = crate::tcp::table::TCP_PCB_SLOTS[__wds_id.linear_slot()].lock();
+        let __wds_slot = __wds_guard.as_ref().expect("PCB should exist");
+        match &__wds_slot.pcb.state {
             crate::tcp::PcbState::Data($d) => $body,
             other => panic!("expected Data state, got {}", other.name()),
         }

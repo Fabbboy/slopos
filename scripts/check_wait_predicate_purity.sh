@@ -57,6 +57,18 @@ PATTERNS=(
     "sleep_current_task_ms"
 )
 
+# Patterns whose appearance inside an `Epoch::enter` / `NET_EPOCH.enter`
+# scope is forbidden. Acquiring a SpinLock or sleeping while an epoch
+# guard is live regresses the atomic-publish invariant — lockdep panics
+# at runtime, but this fast-feedback grep keeps the source-level pattern
+# out of code review entirely.
+EPOCH_PATTERNS=(
+    "\\.lock\\(\\)"
+    "sleep_current_task_ms"
+    "yield_with_deadline"
+    "\\.wait\\(\\)"
+)
+
 is_allowlisted() {
     local file="$1"
     for entry in "${ALLOWLIST[@]}"; do
@@ -126,4 +138,58 @@ if [[ "$found_violations" -gt 0 ]]; then
     exit 1
 fi
 
-echo "check_wait_predicate_purity: OK — no wait-predicate violations"
+# ------------------------------------------------------------------------------
+# Pass 2: Epoch-scope ban.
+# Same 20-line lookback heuristic. A `.lock()` / `sleep` / `wait`
+# appearing inside an `Epoch::enter` / `NET_EPOCH.enter` scope is
+# forbidden — it risks holding a real lock or yielding across an RCU
+# grace period and regresses the atomic-publish invariant.
+# Runtime lockdep (slopos-ostd/src/sync/lock_graph.rs) is the load-bearing
+# enforcement; this gate catches the source pattern earlier.
+# ------------------------------------------------------------------------------
+
+epoch_violations=0
+for pat in "${EPOCH_PATTERNS[@]}"; do
+    while IFS= read -r hit; do
+        [[ -z "$hit" ]] && continue
+        file="${hit%%:*}"
+        rest="${hit#*:}"
+        lineno="${rest%%:*}"
+
+        in_kernel=0
+        for dir in "${KERNEL_DIRS[@]}"; do
+            if [[ "$file" == "$dir"/* ]]; then
+                in_kernel=1
+                break
+            fi
+        done
+        [[ "$in_kernel" -eq 0 ]] && continue
+
+        # `Epoch::enter` lives in slopos-ostd itself; the type's own
+        # source file is exempt.
+        if [[ "$file" == "slopos-ostd/src/sync/epoch.rs" ]]; then
+            continue
+        fi
+
+        start=$((lineno > 20 ? lineno - 20 : 1))
+        context=$(sed -n "${start},${lineno}p" "$file")
+        if echo "$context" | grep -qE '(NET_EPOCH|[A-Z_]*EPOCH)\.enter\(\)|Epoch::enter|\.enter\(\)\s*;'; then
+            echo "  VIOLATION: $file:$lineno: \`$pat\` inside an Epoch::enter scope"
+            echo "    20-line context:"
+            sed -n "${start},${lineno}p" "$file" | sed 's/^/      /'
+            epoch_violations=$((epoch_violations + 1))
+        fi
+    done < <(grep -rEn "$pat" "${KERNEL_DIRS[@]}" --include="*.rs" 2>/dev/null || true)
+done
+
+if [[ "$epoch_violations" -gt 0 ]]; then
+    echo ""
+    echo "FAIL: $epoch_violations Epoch-scope violation(s) found."
+    echo "      Holding a SpinLock or yielding inside an Epoch::enter scope"
+    echo "      delays RCU grace periods globally and risks the atomic-publish"
+    echo "      hazard that broke SCM_RIGHTS in unix_sendmsg. Restructure so"
+    echo "      the Epoch guard scope ends before the lock acquire / yield."
+    exit 1
+fi
+
+echo "check_wait_predicate_purity: OK — no wait-predicate or Epoch-scope violations"

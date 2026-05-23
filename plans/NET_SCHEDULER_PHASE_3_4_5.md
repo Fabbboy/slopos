@@ -1,14 +1,14 @@
 ---
 name: SlopOS Net/Scheduler Refactor — Phases 3, 4, 5
 description: Lock-free TCP demux (Phase 3) + typed KernelEvent substrate (Phase 4) + Rust-typed XDP (Phase 5). Continuation of the Phase 1+2 RX/scheduler rip-and-replace.
-status: ready (Phase 1+2 + unix_socket atomicity fix shipped)
+status: Phase 3 shipped. Phases 4 + 5 ready.
 parent_plan: (not committed) — original five-phase plan lived at `~/.claude/plans/fully-implleme-tlong-term-refactored-rocket.md`
 working_directory: /home/lon60/repos/slopos
 ---
 
 # SlopOS Net/Scheduler Refactor — Phases 3, 4, 5
 
-> **Status:** Phase 1 (threaded NAPI + scheduler invariants + tickless idle + `KernelIoToken`) shipped. Phase 2 (state-machine retirement + lost-wakeup recheck via `Virtqueue::has_pending`) shipped. The single-critical-section `unix_sendmsg` atomicity fix for SCM_RIGHTS shipped on top (made window rendering work again).
+> **Status:** Phase 1 (threaded NAPI + scheduler invariants + tickless idle + `KernelIoToken`) shipped. Phase 2 (state-machine retirement + lost-wakeup recheck via `Virtqueue::has_pending`) shipped. The single-critical-section `unix_sendmsg` atomicity fix for SCM_RIGHTS shipped on top (made window rendering work again). **Phase 3 (this commit) shipped: typed `Epoch` primitive over RCU, lock-free TCP demux read path under `NET_EPOCH`, per-slot PCB locks (64 + 16 listener), lockdep-backed enforcement of the "no SpinLock inside an Epoch scope" rule, 9 new tests, 2447 total passing.** Phase 4 + 5 unchanged.
 
 > **Target:** finish the network/scheduler rip-and-replace by retiring the last per-packet RX serialisation point (Phase 3), unifying the 33+ ad-hoc wait queues into one typed event substrate (Phase 4), and replacing BPF-style packet filtering with safe-Rust filters monomorphised by `rustc` (Phase 5).
 
@@ -64,6 +64,8 @@ These are the same rules the Phase 1+2 work followed; future agents should not d
 
 ## 2. Phase 3 — Epoch primitive + lock-free TCP demux
 
+> **Status: SHIPPED.** All sub-tasks below landed in a single bundled commit. The TCP RX dispatch is now wait-free under `NET_EPOCH`; per-slot PCB locks replaced the per-shard lock; lockdep enforces the structural ban on acquiring a tracked lock inside an Epoch read-side region. `just test` reports 2447 / 2447 passing. Notes inline in each subsection record what was shipped vs. the original spec.
+
 **Goal.** Make `tcp::table::find` (`net/src/tcp/table.rs`) lock-free on the read side. Today every RX packet that reaches `tcp::input` takes `TCP_SHARDS[h].lock()` plus `TCP_LISTENERS.lock()` — a per-packet SpinLock acquire that serialises all RX even when there's no logical contention. With Phase 1's threaded NAPI delivering bursts and Phase 2's lost-wakeup recheck driving the kthread harder, the per-packet shard lock is the next bottleneck.
 
 **Acceptance signal.**
@@ -73,6 +75,9 @@ These are the same rules the Phase 1+2 work followed; future agents should not d
 - New tests (see § 2.5) pass.
 
 ### 2.1 Epoch primitive — `slopos-ostd/src/sync/epoch.rs` (new)
+
+> **Shipped.** `slopos-ostd/src/sync/epoch.rs` (≈110 lines) declares `Epoch`, `EpochGuard<'e>`, `defer_kbox<T>`, and `wait()`. `EpochGuard` carries an embedded `RcuReadGuard` (which already holds a `PreemptGuard`) and a lockdep-tracked synthetic class. `pub static NET_EPOCH: Epoch = Epoch::new();` lives in `net/src/tcp/table.rs` rather than OSTD (per § 1 — OSTD ships only the type). Re-exported from `slopos_ostd::sync` for ergonomics. `Epoch::wait()` delegates to `synchronize_rcu()`; `defer_kbox` wraps `rcu_call_typed`. `PreemptGuard` was not modified — SlopOS already routes sleep-while-preempt-disabled through scheduler-side checks; no additional panic was needed.
+
 
 FreeBSD `epoch(9)` shape, backed by SlopOS's existing RCU infrastructure. `slopos-ostd/src/sync/rcu.rs` already provides `synchronize_rcu`, `call_rcu`, `RcuCell<T>`, and quiescent-state reporting at LAPIC tick / context switch / idle / `RCU_QS_IPI_VECTOR=0xFB` — Phase 3 layers a *scoped* epoch on top so that a stalled net-stack reclaim cannot delay a VFS reclaim cycle and vice versa.
 
@@ -98,6 +103,16 @@ pub static NET_EPOCH: Epoch = Epoch::new();
 `defer` is `unsafe` because the caller asserts the deferred closure doesn't capture references that may be invalidated before the epoch completes. (`call_rcu` has the same shape.)
 
 ### 2.2 TCP table refactor — `net/src/tcp/table.rs`
+
+> **Shipped.** `net/src/tcp/table.rs` rewritten from scratch. The `TcpShard`/`ListenerTable` struct grouping was retired in favour of a split layout:
+> - `TcpShardIndex { tuples: [Option<TcpTuple>; 4] }` and `ListenerIndex { entries: [Option<ListenerKey>; 16] }` — small, immutable, `RcuCell`-published.
+> - `pub static TCP_PCB_SLOTS: [SpinLock<Option<PcbSlot>>; 64]` and `pub static TCP_LISTENER_SLOTS: [SpinLock<Option<Pcb>>; 16]` — per-slot mutation locks (max contention reduction; user chose "world-class long-term solution").
+> - Private `TCP_SHARDS_WRITE: [SpinLock<()>; 16]` and `TCP_LISTENERS_WRITE: SpinLock<()>` serialise the install/release index update.
+>
+> Read-side `find` enters `NET_EPOCH`, loads `TCP_SHARDS_INDEX[shard].load()` and `TCP_LISTENERS_INDEX.load()`, and returns a `ConnId` — zero `SpinLock` acquires. `port_in_use` and `active_count` are similarly lock-free. `install_established` / `install_listener` take the matching `*_WRITE` lock briefly, install the PCB under its per-slot lock, then `RcuCell::replace` publishes the new `KBox<TcpShardIndex>` (displaced box deferred via `rcu_call_typed`). `release` mirrors the dance.
+>
+> New closure accessors `with_pcb`, `with_pcb_mut`, `with_pcb_and_bufs`, `with_bufs` hide the listener/shard split from callers and route each `ConnId` to exactly one per-slot lock. `with_pcb_and_bufs` receives `&mut Option<TcpBufferPair>` so the closure can allocate / free the lazy buffer in-place without re-acquiring the lock. `ConnId::is_well_formed()` was added to reject malformed ids (e.g. `ConnId(999)` used by negative-path tests) up-front instead of panicking on an array index — caught by `test_tcp_close_not_found`.
+
 
 Split `TcpShard` (today: 4 PCBs + 4 buffer pairs all inline) into two pieces:
 
@@ -133,6 +148,13 @@ pub fn find(tuple: &TcpTuple) -> Option<ConnId> {
 
 ### 2.3 Extend the predicate-purity gate
 
+> **Shipped — two layers, per the research consult.** The original plan suggested only a shell-script grep extension; the actual implementation chose a Linux-`PROVE_LOCKING`-style runtime enforcement as the load-bearing layer, with the grep kept as advisory fast feedback.
+>
+> **Layer 1 (load-bearing) — `slopos-ostd/src/sync/lock_graph.rs`.** Added `LOCK_LEVEL_EPOCH = 0xFE` sentinel, `push_epoch(epoch_addr)` / `pop_epoch(epoch_addr)` API, and a scan inside `push_lock` that fires `report_epoch_violation` (panic) when any held class on the per-CPU stack has level `LOCK_LEVEL_EPOCH`. Zero release cost — gated by `TRACKING_ENABLED` like the rest of the lockdep machinery. Catches macros, indirect calls, cross-function, multi-line — anything the source-level grep can be fooled by.
+>
+> **Layer 2 (advisory) — `scripts/check_wait_predicate_purity.sh`.** Second pass added: detects `.lock()`, `sleep_current_task_ms`, `yield_with_deadline`, `.wait()` inside the 20-line lookback window for `Epoch::enter` / `NET_EPOCH.enter`. Empty allowlist. `slopos-ostd/src/sync/epoch.rs` self-exempt (it implements the type). Wired automatically via `just check-framekernel`.
+
+
 `scripts/check_wait_predicate_purity.sh` (added in Phase 1) needs one more ban: **acquiring a `SpinLock` over an `EpochGuard` is forbidden**. Sleeping inside an epoch via `SpinLock`-on-`PreemptGuard` is the new AB-BA. Add a grep for `Epoch::enter` followed (within ~30 lines, same scope) by `.lock()` on any `SpinLock` static, and fail the build.
 
 ### 2.4 Critical files
@@ -145,6 +167,20 @@ pub fn find(tuple: &TcpTuple) -> Option<ConnId> {
 - `scripts/check_wait_predicate_purity.sh` — add the SpinLock-over-EpochGuard ban
 
 ### 2.5 Verification
+
+> **Shipped.** All listed regression suites pass: `just test` reports 2447 / 2447 (2446 passed + 1 skipped, 0 failed). New test file `net/src/tests/tcp_demux_concurrent_tests.rs` adds 9 stest cases under suite `tcp_demux`:
+> - `test_demux_find_after_install_returns_some`
+> - `test_demux_find_after_release_returns_none`
+> - `test_demux_find_unknown_tuple_returns_none`
+> - `test_demux_listener_fallback`
+> - `test_demux_install_release_cycle_consistency` (32-iteration hammer)
+> - `test_demux_active_count_matches_installs`
+> - `test_demux_port_in_use_lock_free`
+> - `test_epoch_defer_runs_after_grace_period` (the reclaim contract test using a `DropProbe` + `AtomicUsize` counter)
+> - `test_epoch_enter_allows_rcucell_load`
+>
+> `just check-framekernel` green: `check_unsafe_outside_ostd`, `check_alloc_dep`, `check_stack_sizes` (≤ 2 KiB), the extended `check_wait_predicate_purity` (now includes Epoch-scope rule), `cargo fmt --check`, and `just check-miri`. `just check-test-count` reports `2447 tests planned across all phases (>= baseline 2401)`. Multi-threaded stress testing was scoped to single-CPU deterministic interleavings (`stest!` harness is single-threaded); future work can add `spawn_kernel_io!`-driven stress if NAPI burst contention regresses.
+
 
 - All existing TCP tests (`net/src/tests/tcp_*`, `tcp_keepalive_tests`, `tcp_live_tests`) green.
 - New `stest!` `tcp::demux_lockfree_under_load` — N readers concurrently call `tcp::input`, one writer install/releases PCBs. Readers must never observe an inconsistent state (returned `ConnId` always corresponds to a live PCB or `None`).

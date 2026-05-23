@@ -1323,10 +1323,7 @@ pub fn test_so_rcvbuf_affects_window() -> TestResult {
 
     tcp::set_rcvbuf(id, 4096);
 
-    let window = {
-        let shard = tcp::table::TCP_SHARDS[id.shard()].lock();
-        shard.bufs(id.slot()).unwrap().recv.window()
-    };
+    let window = tcp::table::with_bufs(id, |b| b.recv.window()).expect("buffer exists");
     assert_test!(window <= 4096, "recv window capped by SO_RCVBUF");
     pass!()
 }

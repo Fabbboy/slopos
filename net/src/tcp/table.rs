@@ -1,44 +1,51 @@
-//! Sharded TCP connection table with per-shard locking.
+//! Lock-free demux + per-slot mutation for the TCP connection table.
 //!
-//! Replaces both the old single-lock `PcbTable` and the shadow
-//! `TcpDemuxTable` with one unified structure: 16 hash-indexed shards
-//! for established/transient connections, plus a separate small table
-//! for LISTEN sockets.
+//! ## Read side — wait-free under [`NET_EPOCH`]
 //!
-//! ## Sharding
+//! `find` enters [`NET_EPOCH`] and loads two [`RcuCell`]s — the
+//! per-shard tuple index and the listener-key index. No `SpinLock` is
+//! touched on the dispatch path; multiple readers and a concurrent
+//! writer never serialise.
 //!
-//! Established connections (SYN_SENT, SYN_RECV, DATA, TIME_WAIT) live
-//! in [`TCP_SHARDS`]: an array of 16 independently-locked [`TcpShard`]s.
-//! The incoming 4-tuple is hashed (FNV-1a) to pick a shard; within that
-//! shard, 8 slots are scanned linearly (cache-friendly, no probe chains).
+//! ## Write side — per-slot locks + write-serialised index publish
 //!
-//! Listeners (LISTEN state) live in a separate [`TCP_LISTENERS`] table
-//! keyed by local 2-tuple.  Linear scan of ≤16 entries is fine for the
-//! handful of listening sockets a kernel serves.
+//! Established connections live in 16 shards × 4 slots = 64
+//! independently-locked [`PcbSlot`]s. Mutation of a PCB / buffer takes
+//! exactly one [`TCP_PCB_SLOTS`] entry; an install or release also
+//! takes the matching [`TCP_SHARDS_WRITE`] lock for the brief window
+//! during which the published index is updated via
+//! [`RcuCell::replace`]. The displaced index `KBox` is deferred via
+//! the cell's built-in `rcu_call_typed` reclamation.
 //!
-//! ## Lock ordering
+//! Listeners follow the same pattern: a single
+//! [`TCP_LISTENERS_INDEX`] cell + 16 per-listener slots
+//! ([`TCP_LISTENER_SLOTS`]).
 //!
-//! All shard and listener locks are `LOCK_LEVEL_RESOURCE` (1).
-//! **Never hold two RESOURCE locks simultaneously** — unlock one before
-//! locking another.  Timer scheduling (RESOURCE → REGISTRY) is ascending.
+//! ## Lock-order rules
 //!
-//! ## Lazy buffers
+//! All real locks are [`LOCK_LEVEL_RESOURCE`]. The only co-acquire
+//! pattern is `TCP_*_WRITE → TCP_*_SLOTS[i]`, taken in this order
+//! during install/release. Mutation-only call sites
+//! (`tcp::input_process_*`, `tcp::send`, `tcp::recv`, timers) take a
+//! single per-slot lock; no nested acquire.
 //!
-//! Each shard stores buffers as `[Option<TcpBufferPair>; SLOTS_PER_SHARD]`
-//! parallel to the PCB slots.  Only Data-phase connections allocate a
-//! buffer (`Some`); all other states keep `None`.  Zero `unsafe`.
+//! Calling any tracked `SpinLock::lock` while a [`NET_EPOCH`] guard
+//! is live is detected by [`slopos_ostd::sync::lock_graph`] and
+//! panics — keep epoch read-side regions structurally short and pure-
+//! RCU-read.
 //!
 //! ## ConnId encoding
 //!
 //! ```text
 //! Bit 31:      1 = listener, 0 = shard
 //! Bits [11:8]: shard index (0..15) — only when bit 31 = 0
-//! Bits  [7:0]: slot index within shard (0..7) or listener table (0..15)
+//! Bits  [7:0]: slot index within shard (0..3) or listener table (0..15)
 //! ```
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::KBox;
+use slopos_ostd::sync::{Epoch, LOCK_LEVEL_RESOURCE, RcuCell, SpinLock};
 
 use super::buffer::TcpBufferPair;
 use super::pcb::{Pcb, PcbState};
@@ -49,27 +56,25 @@ use crate::timer::NET_TIMER_WHEEL;
 // Constants
 // =============================================================================
 
-/// Number of independently-locked shards for established connections.
+/// Number of independently-hashed shards for established connections.
 pub const NUM_SHARDS: usize = 16;
 
-/// Slots per shard.  16 × 4 = 64 total established-connection capacity.
-///
-/// Kept at 4 (not 8) so the static buffer memory matches the pre-sharding
-/// footprint (~4.1 MB).  Doubling to 8 would push BSS past the point
-/// where the scheduler's task-creation tests run out of kernel memory.
+/// Slots per shard. 16 × 4 = 64 total established-connection capacity.
 pub const SLOTS_PER_SHARD: usize = 4;
 
 /// Maximum number of LISTEN sockets.
 pub const MAX_LISTENERS: usize = 16;
 
+/// Total per-slot PCB lock count across all shards.
+pub const TOTAL_PCB_SLOTS: usize = NUM_SHARDS * SLOTS_PER_SHARD;
+
 // =============================================================================
 // ConnId — type-safe connection handle
 // =============================================================================
 
-/// Type-safe handle to a connection slot.
-///
-/// Encodes whether the connection is in a shard (established) or in the
-/// listener table, plus the shard/slot indices.
+/// Type-safe handle to a connection slot. Encodes whether the
+/// connection is in a shard or in the listener table, plus the
+/// shard/slot indices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ConnId(pub u32);
@@ -92,7 +97,7 @@ impl ConnId {
         Self(Self::LISTENER_BIT | (slot as u32))
     }
 
-    /// Whether this id refers to a listener table entry.
+    /// Whether this id refers to a listener-table entry.
     #[inline]
     pub fn is_listener(self) -> bool {
         self.0 & Self::LISTENER_BIT != 0
@@ -109,15 +114,33 @@ impl ConnId {
     pub fn slot(self) -> usize {
         (self.0 & 0xFF) as usize
     }
+
+    /// Linear index into [`TCP_PCB_SLOTS`] (only valid when `!is_listener()`).
+    #[inline]
+    pub fn linear_slot(self) -> usize {
+        self.shard() * SLOTS_PER_SHARD + self.slot()
+    }
+
+    /// True if the encoded shard/slot indices fall inside the static
+    /// table dimensions. Out-of-range ids (e.g. user-supplied integers
+    /// for negative-path tests) are rejected up-front by the
+    /// `with_pcb*` accessors rather than panicking on an array index.
+    #[inline]
+    pub fn is_well_formed(self) -> bool {
+        if self.is_listener() {
+            self.slot() < MAX_LISTENERS
+        } else {
+            self.shard() < NUM_SHARDS && self.slot() < SLOTS_PER_SHARD
+        }
+    }
 }
 
 // =============================================================================
-// Hash function
+// Hash function — FNV-1a → masked to NUM_SHARDS
 // =============================================================================
 
-/// FNV-1a hash of a TCP 4-tuple, masked to [`NUM_SHARDS`].
 pub(super) fn tcp_hash(tuple: &TcpTuple) -> usize {
-    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    let mut h: u64 = 0xcbf29ce484222325;
     let fnv_prime: u64 = 0x100000001b3;
     for &b in tuple
         .local_ip
@@ -133,198 +156,94 @@ pub(super) fn tcp_hash(tuple: &TcpTuple) -> usize {
 }
 
 // =============================================================================
-// TcpShard — one hash bucket for established connections
+// RCU-published indices
 // =============================================================================
 
-/// A shard of the established-connection table.
-///
-/// Contains parallel PCB and buffer arrays (same index), a la the old
-/// `PcbTable` but much smaller (8 slots).
-pub struct TcpShard {
-    pcbs: [Option<Pcb>; SLOTS_PER_SHARD],
-    buffers: [Option<TcpBufferPair>; SLOTS_PER_SHARD],
+/// Immutable per-shard tuple table. Cloned + mutated + RCU-published on
+/// every install/release. Small (≈48 bytes) — cheap to deep-copy.
+#[derive(Clone, Default)]
+pub struct TcpShardIndex {
+    pub tuples: [Option<TcpTuple>; SLOTS_PER_SHARD],
 }
 
-impl TcpShard {
-    const fn new() -> Self {
-        const NONE_PCB: Option<Pcb> = None;
-        const NONE_BUF: Option<TcpBufferPair> = None;
+impl TcpShardIndex {
+    pub const fn empty() -> Self {
         Self {
-            pcbs: [NONE_PCB; SLOTS_PER_SHARD],
-            buffers: [NONE_BUF; SLOTS_PER_SHARD],
+            tuples: [const { None }; SLOTS_PER_SHARD],
         }
     }
 
-    /// Find a PCB by exact 4-tuple match within this shard.
-    pub fn find_exact(&self, tuple: &TcpTuple) -> Option<usize> {
-        for (i, slot) in self.pcbs.iter().enumerate() {
-            if let Some(pcb) = slot {
-                if pcb.tuple.local_ip == tuple.local_ip
-                    && pcb.tuple.local_port == tuple.local_port
-                    && pcb.tuple.remote_ip == tuple.remote_ip
-                    && pcb.tuple.remote_port == tuple.remote_port
-                {
-                    return Some(i);
-                }
-            }
-        }
-        None
-    }
-
-    /// Install a PCB into the first free slot.
-    pub fn install(
-        &mut self,
-        tuple: TcpTuple,
-        state: PcbState,
-        init: impl FnOnce(&mut Pcb),
-    ) -> Option<usize> {
-        for (i, slot) in self.pcbs.iter_mut().enumerate() {
-            if slot.is_none() {
-                let pcb = slot.insert(Pcb::new(tuple, state));
-                init(pcb);
+    /// Find the slot whose stored tuple equals `t`.
+    #[inline]
+    fn find_exact(&self, t: &TcpTuple) -> Option<usize> {
+        for (i, slot) in self.tuples.iter().enumerate() {
+            if slot.as_ref() == Some(t) {
                 return Some(i);
             }
         }
         None
     }
 
-    /// Release the PCB at `slot`.  Cancels timers, drops buffer.
-    pub fn release(&mut self, slot: usize) {
-        if let Some(pcb) = self.pcbs[slot].as_ref() {
-            cancel_pcb_timers(pcb);
-        }
-        self.pcbs[slot] = None;
-        self.buffers[slot] = None;
+    /// First empty slot index, or `None` if full.
+    #[inline]
+    fn first_free(&self) -> Option<usize> {
+        self.tuples.iter().position(|s| s.is_none())
     }
 
-    pub fn get(&self, slot: usize) -> Option<&Pcb> {
-        self.pcbs.get(slot)?.as_ref()
-    }
-
-    pub fn get_mut(&mut self, slot: usize) -> Option<&mut Pcb> {
-        self.pcbs.get_mut(slot)?.as_mut()
-    }
-
-    pub fn get_with_bufs(&mut self, slot: usize) -> Option<(&mut Pcb, &mut TcpBufferPair)> {
-        let Self { pcbs, buffers } = self;
-        let pcb = pcbs.get_mut(slot)?.as_mut()?;
-        let bufs = buffers.get_mut(slot)?.as_mut()?;
-        Some((pcb, bufs))
-    }
-
-    pub fn get_pcb_and_opt_bufs(
-        &mut self,
-        slot: usize,
-    ) -> Option<(&mut Pcb, Option<&mut TcpBufferPair>)> {
-        let Self { pcbs, buffers } = self;
-        let pcb = pcbs.get_mut(slot)?.as_mut()?;
-        let bufs = buffers.get_mut(slot).and_then(|b| b.as_mut());
-        Some((pcb, bufs))
-    }
-
-    pub fn bufs(&self, slot: usize) -> Option<&TcpBufferPair> {
-        self.buffers.get(slot)?.as_ref()
-    }
-
-    pub fn bufs_mut(&mut self, slot: usize) -> Option<&mut TcpBufferPair> {
-        self.buffers.get_mut(slot)?.as_mut()
-    }
-
-    pub fn alloc_buffer_for(&mut self, slot: usize) -> Result<(), slopos_ostd::AllocError> {
-        debug_assert!(
-            self.buffers[slot].is_none(),
-            "alloc_buffer_for: slot {} already has a buffer",
-            slot
-        );
-        self.buffers[slot] = Some(TcpBufferPair::new(super::buffer::TCP_BUFFER_SIZE)?);
-        Ok(())
-    }
-
-    pub fn free_buffer_for(&mut self, slot: usize) {
-        self.buffers[slot] = None;
-    }
-
-    pub fn has_buffer(&self, slot: usize) -> bool {
-        self.buffers.get(slot).is_some_and(|b| b.is_some())
-    }
-
-    /// Check whether any PCB in this shard binds the given local address.
-    pub fn port_in_use(&self, local_ip: [u8; 4], local_port: u16) -> bool {
-        self.pcbs.iter().any(|slot| {
-            let Some(pcb) = slot else { return false };
-            pcb.tuple.local_port == local_port
-                && (pcb.tuple.local_ip == [0; 4]
-                    || local_ip == [0; 4]
-                    || pcb.tuple.local_ip == local_ip)
+    /// True if any tuple binds `(local_ip, local_port)`. Wildcards
+    /// honoured both ways (caller-supplied `local_ip == [0;4]` and
+    /// stored `tuple.local_ip == [0;4]`).
+    #[inline]
+    fn port_in_use(&self, local_ip: [u8; 4], local_port: u16) -> bool {
+        self.tuples.iter().any(|slot| {
+            let Some(t) = slot else { return false };
+            t.local_port == local_port
+                && (t.local_ip == [0; 4] || local_ip == [0; 4] || t.local_ip == local_ip)
         })
     }
 
-    pub fn active_count(&self) -> usize {
-        self.pcbs.iter().filter(|s| s.is_some()).count()
-    }
-
-    /// Iterate live PCBs with their buffers.
-    pub fn iter_mut_with_bufs(
-        &mut self,
-    ) -> impl Iterator<Item = (usize, &mut Pcb, &mut TcpBufferPair)> {
-        let Self { pcbs, buffers } = self;
-        pcbs.iter_mut()
-            .zip(buffers.iter_mut())
-            .enumerate()
-            .filter_map(|(i, (slot, buf))| {
-                let pcb = slot.as_mut()?;
-                let bufs = buf.as_mut()?;
-                Some((i, pcb, bufs))
-            })
-    }
-
-    /// Clear all slots and buffers, cancelling timers.
-    pub fn clear(&mut self) {
-        for (slot, buf) in self.pcbs.iter_mut().zip(self.buffers.iter_mut()) {
-            if let Some(pcb) = slot.as_ref() {
-                cancel_pcb_timers(pcb);
-            }
-            *slot = None;
-            *buf = None;
-        }
+    #[inline]
+    fn active_count(&self) -> usize {
+        self.tuples.iter().filter(|s| s.is_some()).count()
     }
 }
 
-// =============================================================================
-// ListenerTable — small table for LISTEN sockets
-// =============================================================================
-
-/// Storage for LISTEN-state PCBs, keyed by local 2-tuple.
-///
-/// Listeners don't hash to shards (their remote is wildcard), so they
-/// live in a separate small table with linear scan.
-pub struct ListenerTable {
-    slots: [Option<Pcb>; MAX_LISTENERS],
+/// Listener key — local address binding only (LISTEN sockets do not
+/// hash by 4-tuple because their remote is wildcard).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenerKey {
+    pub local_ip: [u8; 4],
+    pub local_port: u16,
 }
 
-impl ListenerTable {
-    const fn new() -> Self {
-        const NONE: Option<Pcb> = None;
+/// Immutable listener-key table. Cloned + mutated + RCU-published on
+/// every listener install/release.
+#[derive(Clone, Default)]
+pub struct ListenerIndex {
+    pub entries: [Option<ListenerKey>; MAX_LISTENERS],
+}
+
+impl ListenerIndex {
+    pub const fn empty() -> Self {
         Self {
-            slots: [NONE; MAX_LISTENERS],
+            entries: [const { None }; MAX_LISTENERS],
         }
     }
 
-    /// Find a listener matching `(local_ip, local_port)`.
-    /// Tries exact IP first, then wildcard (0.0.0.0).
-    pub fn find_by_port(&self, local_ip: [u8; 4], local_port: u16) -> Option<usize> {
-        // Exact IP match.
-        for (i, slot) in self.slots.iter().enumerate() {
-            if let Some(pcb) = slot {
-                if pcb.tuple.local_port == local_port && pcb.tuple.local_ip == local_ip {
+    /// Match `(local_ip, local_port)` against the index. Exact-IP first,
+    /// then wildcard (0.0.0.0).
+    #[inline]
+    fn find_by_port(&self, local_ip: [u8; 4], local_port: u16) -> Option<usize> {
+        for (i, slot) in self.entries.iter().enumerate() {
+            if let Some(k) = slot {
+                if k.local_port == local_port && k.local_ip == local_ip {
                     return Some(i);
                 }
             }
         }
-        // Wildcard match.
-        for (i, slot) in self.slots.iter().enumerate() {
-            if let Some(pcb) = slot {
-                if pcb.tuple.local_port == local_port && pcb.tuple.local_ip == [0; 4] {
+        for (i, slot) in self.entries.iter().enumerate() {
+            if let Some(k) = slot {
+                if k.local_port == local_port && k.local_ip == [0; 4] {
                     return Some(i);
                 }
             }
@@ -332,116 +251,100 @@ impl ListenerTable {
         None
     }
 
-    /// Install a listener into the first free slot.
-    pub fn install(
-        &mut self,
-        tuple: TcpTuple,
-        state: PcbState,
-        init: impl FnOnce(&mut Pcb),
-    ) -> Option<usize> {
-        for (i, slot) in self.slots.iter_mut().enumerate() {
-            if slot.is_none() {
-                let pcb = slot.insert(Pcb::new(tuple, state));
-                init(pcb);
-                return Some(i);
-            }
-        }
-        None
+    #[inline]
+    fn first_free(&self) -> Option<usize> {
+        self.entries.iter().position(|s| s.is_none())
     }
 
-    pub fn release(&mut self, slot: usize) {
-        if let Some(pcb) = self.slots[slot].as_ref() {
-            cancel_pcb_timers(pcb);
-        }
-        self.slots[slot] = None;
-    }
-
-    pub fn get(&self, slot: usize) -> Option<&Pcb> {
-        self.slots.get(slot)?.as_ref()
-    }
-
-    pub fn get_mut(&mut self, slot: usize) -> Option<&mut Pcb> {
-        self.slots.get_mut(slot)?.as_mut()
-    }
-
-    pub fn port_in_use(&self, local_ip: [u8; 4], local_port: u16) -> bool {
-        self.slots.iter().any(|slot| {
-            let Some(pcb) = slot else { return false };
-            pcb.tuple.local_port == local_port
-                && (pcb.tuple.local_ip == [0; 4]
-                    || local_ip == [0; 4]
-                    || pcb.tuple.local_ip == local_ip)
+    #[inline]
+    fn port_in_use(&self, local_ip: [u8; 4], local_port: u16) -> bool {
+        self.entries.iter().any(|slot| {
+            let Some(k) = slot else { return false };
+            k.local_port == local_port
+                && (k.local_ip == [0; 4] || local_ip == [0; 4] || k.local_ip == local_ip)
         })
     }
 
-    pub fn active_count(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
+    #[inline]
+    fn active_count(&self) -> usize {
+        self.entries.iter().filter(|s| s.is_some()).count()
     }
+}
 
-    pub fn clear(&mut self) {
-        for slot in self.slots.iter_mut() {
-            if let Some(pcb) = slot.as_ref() {
-                cancel_pcb_timers(pcb);
-            }
-            *slot = None;
-        }
-    }
+// =============================================================================
+// Per-slot mutation state
+// =============================================================================
 
-    /// Find a listener by socket index (for unregister on socket close).
-    pub fn find_by_socket_idx(&self, sock_idx: u32) -> Option<usize> {
-        for (i, slot) in self.slots.iter().enumerate() {
-            if let Some(pcb) = slot {
-                if pcb.socket_id.map(|s| s.0) == Some(sock_idx) {
-                    return Some(i);
-                }
-            }
-        }
-        None
-    }
+/// PCB + its lazy receive/send buffer. Only Data-phase connections
+/// carry a `Some(buffer)`; all other states keep it `None`.
+pub struct PcbSlot {
+    pub pcb: Pcb,
+    pub buffer: Option<TcpBufferPair>,
 }
 
 // =============================================================================
 // Statics
 // =============================================================================
 
-/// 16 independently-locked shards for established connections.
-pub static TCP_SHARDS: [SpinLock<TcpShard>; NUM_SHARDS] = {
-    const SHARD: SpinLock<TcpShard> = SpinLock::new(TcpShard::new(), LOCK_LEVEL_RESOURCE);
-    [SHARD; NUM_SHARDS]
+/// Net-stack epoch. Held across `find` / `port_in_use` /
+/// `active_count` lookups so RCU grace periods are scoped to the net
+/// stack rather than a kernel-wide implicit read-side.
+pub static NET_EPOCH: Epoch = Epoch::new();
+
+/// RCU-published per-shard tuple indices. Empty after boot; populated
+/// by the first install into each shard.
+pub static TCP_SHARDS_INDEX: [RcuCell<TcpShardIndex>; NUM_SHARDS] =
+    [const { RcuCell::empty() }; NUM_SHARDS];
+
+/// RCU-published listener-key index.
+pub static TCP_LISTENERS_INDEX: RcuCell<ListenerIndex> = RcuCell::empty();
+
+/// Per-slot PCB locks. Index = `shard * SLOTS_PER_SHARD + slot`.
+pub static TCP_PCB_SLOTS: [SpinLock<Option<PcbSlot>>; TOTAL_PCB_SLOTS] = {
+    const SLOT: SpinLock<Option<PcbSlot>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+    [SLOT; TOTAL_PCB_SLOTS]
 };
 
-/// Listener table (LISTEN-state PCBs only).
-pub static TCP_LISTENERS: SpinLock<ListenerTable> =
-    SpinLock::new(ListenerTable::new(), LOCK_LEVEL_RESOURCE);
+/// Per-listener-slot locks.
+pub static TCP_LISTENER_SLOTS: [SpinLock<Option<Pcb>>; MAX_LISTENERS] = {
+    const SLOT: SpinLock<Option<Pcb>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+    [SLOT; MAX_LISTENERS]
+};
+
+/// Per-shard write-serialisation locks. Held only during the
+/// "pick-slot → install/clear PCB → publish new index" critical
+/// section. Mutation-only paths (input/send/recv/timers) do not
+/// acquire this.
+static TCP_SHARDS_WRITE: [SpinLock<()>; NUM_SHARDS] = {
+    const WL: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_RESOURCE);
+    [WL; NUM_SHARDS]
+};
+
+/// Listener-side write-serialisation lock.
+static TCP_LISTENERS_WRITE: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_RESOURCE);
 
 /// Global ephemeral port counter (RFC 6335 range 49152–65535).
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
 
 // =============================================================================
-// Module-level API — encapsulates shard dispatch
+// Read path — wait-free under NET_EPOCH
 // =============================================================================
 
-/// Find a connection by 4-tuple.
-///
-/// First checks the hash-indexed shard for an exact match, then falls
-/// back to the listener table for a local-port wildcard match.
-///
-/// **Lock protocol:** locks one shard, releases, then locks listeners.
-/// Never holds two RESOURCE locks simultaneously.
+/// Find a connection by 4-tuple. Exact shard match first; listener
+/// fallback second. No `SpinLock` is acquired on this path — the read
+/// is one `Epoch::enter` + two `RcuCell::load`s.
 pub fn find(tuple: &TcpTuple) -> Option<ConnId> {
-    // Phase 1: exact match in the appropriate shard.
+    let _g = NET_EPOCH.enter();
+
     let shard_idx = tcp_hash(tuple);
-    {
-        let shard = TCP_SHARDS[shard_idx].lock();
-        if let Some(slot) = shard.find_exact(tuple) {
+    if let Some(idx) = TCP_SHARDS_INDEX[shard_idx].load() {
+        if let Some(slot) = idx.find_exact(tuple) {
             return Some(ConnId::new_shard(shard_idx, slot));
         }
     }
 
-    // Phase 2: listener wildcard match.
-    {
-        let listeners = TCP_LISTENERS.lock();
-        if let Some(slot) = listeners.find_by_port(tuple.local_ip, tuple.local_port) {
+    if let Some(idx) = TCP_LISTENERS_INDEX.load() {
+        if let Some(slot) = idx.find_by_port(tuple.local_ip, tuple.local_port) {
             return Some(ConnId::new_listener(slot));
         }
     }
@@ -449,74 +352,39 @@ pub fn find(tuple: &TcpTuple) -> Option<ConnId> {
     None
 }
 
-/// Install an established connection (SYN_SENT, SYN_RECV, etc.) into
-/// the appropriate shard.
-pub fn install_established(
-    tuple: TcpTuple,
-    state: PcbState,
-    init: impl FnOnce(&mut Pcb),
-) -> Result<ConnId, TcpError> {
-    let shard_idx = tcp_hash(&tuple);
-    let mut shard = TCP_SHARDS[shard_idx].lock();
-    match shard.install(tuple, state, init) {
-        Some(slot) => Ok(ConnId::new_shard(shard_idx, slot)),
-        None => Err(TcpError::TableFull),
-    }
-}
-
-/// Install a LISTEN socket into the listener table.
-pub fn install_listener(
-    tuple: TcpTuple,
-    state: PcbState,
-    init: impl FnOnce(&mut Pcb),
-) -> Result<ConnId, TcpError> {
-    let mut listeners = TCP_LISTENERS.lock();
-    match listeners.install(tuple, state, init) {
-        Some(slot) => Ok(ConnId::new_listener(slot)),
-        None => Err(TcpError::TableFull),
-    }
-}
-
-/// Release a connection by id.
-pub fn release(id: ConnId) {
-    if id.is_listener() {
-        TCP_LISTENERS.lock().release(id.slot());
-    } else {
-        TCP_SHARDS[id.shard()].lock().release(id.slot());
-    }
-}
-
-/// Read-only closure access to a PCB.
-pub fn with_pcb<T>(id: ConnId, f: impl FnOnce(&Pcb) -> T) -> Option<T> {
-    if id.is_listener() {
-        TCP_LISTENERS.lock().get(id.slot()).map(f)
-    } else {
-        TCP_SHARDS[id.shard()].lock().get(id.slot()).map(f)
-    }
-}
-
-/// Mutable closure access to a PCB.
-pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
-    if id.is_listener() {
-        TCP_LISTENERS.lock().get_mut(id.slot()).map(f)
-    } else {
-        TCP_SHARDS[id.shard()].lock().get_mut(id.slot()).map(f)
-    }
-}
-
-/// Check whether a `(local_ip, local_port)` is bound by any PCB.
-///
-/// Scans all shards + listener table.  Used by `tcp::listen`.
+/// True if any PCB binds `(local_ip, local_port)`. Lock-free.
 pub fn port_in_use(local_ip: [u8; 4], local_port: u16) -> bool {
-    for shard_lock in TCP_SHARDS.iter() {
-        if shard_lock.lock().port_in_use(local_ip, local_port) {
-            return true;
+    let _g = NET_EPOCH.enter();
+    for cell in TCP_SHARDS_INDEX.iter() {
+        if let Some(idx) = cell.load() {
+            if idx.port_in_use(local_ip, local_port) {
+                return true;
+            }
         }
     }
-    TCP_LISTENERS.lock().port_in_use(local_ip, local_port)
+    if let Some(idx) = TCP_LISTENERS_INDEX.load() {
+        return idx.port_in_use(local_ip, local_port);
+    }
+    false
 }
 
-/// Allocate an ephemeral port (49152–65535, RFC 6335).
+/// Number of active connections across all shards + listeners. Lock-free.
+pub fn active_count() -> usize {
+    let _g = NET_EPOCH.enter();
+    let mut count = 0;
+    for cell in TCP_SHARDS_INDEX.iter() {
+        if let Some(idx) = cell.load() {
+            count += idx.active_count();
+        }
+    }
+    if let Some(idx) = TCP_LISTENERS_INDEX.load() {
+        count += idx.active_count();
+    }
+    count
+}
+
+/// Allocate an ephemeral port (RFC 6335 49152–65535) that is not
+/// currently bound by any PCB. Uses the lock-free `port_in_use`.
 pub fn alloc_ephemeral_port() -> Option<u16> {
     for _ in 0..16384u32 {
         let p = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
@@ -531,22 +399,261 @@ pub fn alloc_ephemeral_port() -> Option<u16> {
     None
 }
 
-/// Count all active connections across shards + listeners.
-pub fn active_count() -> usize {
-    let mut count = 0;
-    for shard_lock in TCP_SHARDS.iter() {
-        count += shard_lock.lock().active_count();
-    }
-    count += TCP_LISTENERS.lock().active_count();
-    count
+// =============================================================================
+// Write path — install / release
+// =============================================================================
+
+fn load_shard_index(shard_idx: usize) -> TcpShardIndex {
+    TCP_SHARDS_INDEX[shard_idx]
+        .load()
+        .map(|g| (*g).clone())
+        .unwrap_or_default()
 }
 
-/// Clear all connections (test helper).
-pub fn clear_all() {
-    for shard_lock in TCP_SHARDS.iter() {
-        shard_lock.lock().clear();
+fn load_listener_index() -> ListenerIndex {
+    TCP_LISTENERS_INDEX
+        .load()
+        .map(|g| (*g).clone())
+        .unwrap_or_default()
+}
+
+/// Install an established/transient connection (SYN_SENT / SYN_RECV /
+/// Data / TimeWait) into its shard.
+pub fn install_established(
+    tuple: TcpTuple,
+    state: PcbState,
+    init: impl FnOnce(&mut Pcb),
+) -> Result<ConnId, TcpError> {
+    let shard_idx = tcp_hash(&tuple);
+    let _w = TCP_SHARDS_WRITE[shard_idx].lock();
+
+    let mut idx = load_shard_index(shard_idx);
+    let free_slot = idx.first_free().ok_or(TcpError::TableFull)?;
+
+    // Install PCB in the per-slot lock. Held briefly; no nested
+    // acquire while it's live other than the outer write lock.
+    {
+        let mut slot = TCP_PCB_SLOTS[shard_idx * SLOTS_PER_SHARD + free_slot].lock();
+        debug_assert!(
+            slot.is_none(),
+            "tcp::table: free slot in index but per-slot lock occupied"
+        );
+        let mut pcb = Pcb::new(tuple, state);
+        init(&mut pcb);
+        *slot = Some(PcbSlot { pcb, buffer: None });
     }
-    TCP_LISTENERS.lock().clear();
+
+    // Publish the new index. `RcuCell::replace` schedules the displaced
+    // box for deferred drop via `rcu_call_typed` — readers in-flight on
+    // the old version complete safely.
+    idx.tuples[free_slot] = Some(tuple);
+    let new_box = KBox::try_new(idx)?;
+    TCP_SHARDS_INDEX[shard_idx].replace(new_box);
+
+    Ok(ConnId::new_shard(shard_idx, free_slot))
+}
+
+/// Install a LISTEN socket.
+pub fn install_listener(
+    tuple: TcpTuple,
+    state: PcbState,
+    init: impl FnOnce(&mut Pcb),
+) -> Result<ConnId, TcpError> {
+    let _w = TCP_LISTENERS_WRITE.lock();
+
+    let mut idx = load_listener_index();
+    let free_slot = idx.first_free().ok_or(TcpError::TableFull)?;
+
+    {
+        let mut slot = TCP_LISTENER_SLOTS[free_slot].lock();
+        debug_assert!(
+            slot.is_none(),
+            "tcp::table: free listener slot in index but per-slot lock occupied"
+        );
+        let mut pcb = Pcb::new(tuple, state);
+        init(&mut pcb);
+        *slot = Some(pcb);
+    }
+
+    idx.entries[free_slot] = Some(ListenerKey {
+        local_ip: tuple.local_ip,
+        local_port: tuple.local_port,
+    });
+    let new_box = KBox::try_new(idx)?;
+    TCP_LISTENERS_INDEX.replace(new_box);
+
+    Ok(ConnId::new_listener(free_slot))
+}
+
+/// Release a connection by id. Idempotent on a stale id (no-op if the
+/// slot is already empty). Returns early on a malformed id (e.g. a
+/// hand-crafted ConnId from a negative-path test).
+pub fn release(id: ConnId) {
+    if !id.is_well_formed() {
+        return;
+    }
+    if id.is_listener() {
+        let _w = TCP_LISTENERS_WRITE.lock();
+        let mut idx = load_listener_index();
+        idx.entries[id.slot()] = None;
+        if let Ok(new_box) = KBox::try_new(idx) {
+            TCP_LISTENERS_INDEX.replace(new_box);
+        }
+        let mut slot = TCP_LISTENER_SLOTS[id.slot()].lock();
+        if let Some(pcb) = slot.as_ref() {
+            cancel_pcb_timers(pcb);
+        }
+        *slot = None;
+        return;
+    }
+
+    let shard_idx = id.shard();
+    let _w = TCP_SHARDS_WRITE[shard_idx].lock();
+    let mut idx = load_shard_index(shard_idx);
+    idx.tuples[id.slot()] = None;
+    if let Ok(new_box) = KBox::try_new(idx) {
+        TCP_SHARDS_INDEX[shard_idx].replace(new_box);
+    }
+    let mut slot = TCP_PCB_SLOTS[id.linear_slot()].lock();
+    if let Some(s) = slot.as_ref() {
+        cancel_pcb_timers(&s.pcb);
+    }
+    *slot = None;
+}
+
+// =============================================================================
+// Per-slot accessors
+// =============================================================================
+
+/// Read-only closure access to a PCB.
+pub fn with_pcb<T>(id: ConnId, f: impl FnOnce(&Pcb) -> T) -> Option<T> {
+    if !id.is_well_formed() {
+        return None;
+    }
+    if id.is_listener() {
+        let guard = TCP_LISTENER_SLOTS[id.slot()].lock();
+        guard.as_ref().map(f)
+    } else {
+        let guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
+        guard.as_ref().map(|s| f(&s.pcb))
+    }
+}
+
+/// Mutable closure access to a PCB.
+pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
+    if !id.is_well_formed() {
+        return None;
+    }
+    if id.is_listener() {
+        let mut guard = TCP_LISTENER_SLOTS[id.slot()].lock();
+        guard.as_mut().map(f)
+    } else {
+        let mut guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
+        guard.as_mut().map(|s| f(&mut s.pcb))
+    }
+}
+
+/// Closure access to a PCB *and* its lazy buffer slot. The buffer
+/// slot is given by mutable reference so the closure can allocate
+/// (`*buf = Some(TcpBufferPair::new(..)?)`) or free (`*buf = None`)
+/// without re-acquiring the per-slot lock. Listeners receive a
+/// transient `&mut None` — writing through it has no observable
+/// effect since listeners never carry a buffer.
+pub fn with_pcb_and_bufs<T>(
+    id: ConnId,
+    f: impl FnOnce(&mut Pcb, &mut Option<TcpBufferPair>) -> T,
+) -> Option<T> {
+    if !id.is_well_formed() {
+        return None;
+    }
+    if id.is_listener() {
+        let mut guard = TCP_LISTENER_SLOTS[id.slot()].lock();
+        guard.as_mut().map(|pcb| {
+            let mut none_buf: Option<TcpBufferPair> = None;
+            f(pcb, &mut none_buf)
+        })
+    } else {
+        let mut guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
+        guard.as_mut().map(|s| f(&mut s.pcb, &mut s.buffer))
+    }
+}
+
+/// Convenience: read-only peek at the lazy buffer's send/recv state
+/// (e.g. for `recv_available`, `send_buffer_space`).
+pub fn with_bufs<T>(id: ConnId, f: impl FnOnce(&TcpBufferPair) -> T) -> Option<T> {
+    if id.is_listener() || !id.is_well_formed() {
+        return None;
+    }
+    let guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
+    guard.as_ref().and_then(|s| s.buffer.as_ref().map(f))
+}
+
+/// True if `id` is established and currently has a buffer allocated.
+pub fn has_buffer(id: ConnId) -> bool {
+    if id.is_listener() || !id.is_well_formed() {
+        return false;
+    }
+    let guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
+    guard.as_ref().is_some_and(|s| s.buffer.is_some())
+}
+
+// =============================================================================
+// Iteration helpers (timers / housekeeping)
+// =============================================================================
+
+/// Snapshot the currently-live shard ConnIds from the published
+/// indices. Lock-free (one `Epoch::enter` + `NUM_SHARDS` RCU loads).
+/// Returned ConnIds may become stale before the caller acts on them —
+/// per-slot lock acquires in the caller's loop body must tolerate a
+/// vacant slot.
+pub fn snapshot_shard_conn_ids(out: &mut [Option<ConnId>; TOTAL_PCB_SLOTS]) -> usize {
+    let _g = NET_EPOCH.enter();
+    let mut n = 0;
+    for (shard_idx, cell) in TCP_SHARDS_INDEX.iter().enumerate() {
+        if let Some(idx) = cell.load() {
+            for (slot, entry) in idx.tuples.iter().enumerate() {
+                if entry.is_some() && n < out.len() {
+                    out[n] = Some(ConnId::new_shard(shard_idx, slot));
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+// =============================================================================
+// Test helpers
+// =============================================================================
+
+/// Clear every PCB slot and reset the index cells. Test-only.
+pub fn clear_all() {
+    for shard_idx in 0..NUM_SHARDS {
+        let _w = TCP_SHARDS_WRITE[shard_idx].lock();
+        for s in 0..SLOTS_PER_SHARD {
+            let mut guard = TCP_PCB_SLOTS[shard_idx * SLOTS_PER_SHARD + s].lock();
+            if let Some(slot) = guard.as_ref() {
+                cancel_pcb_timers(&slot.pcb);
+            }
+            *guard = None;
+        }
+        if let Ok(new_box) = KBox::try_new(TcpShardIndex::empty()) {
+            TCP_SHARDS_INDEX[shard_idx].replace(new_box);
+        }
+    }
+    {
+        let _w = TCP_LISTENERS_WRITE.lock();
+        for s in 0..MAX_LISTENERS {
+            let mut guard = TCP_LISTENER_SLOTS[s].lock();
+            if let Some(pcb) = guard.as_ref() {
+                cancel_pcb_timers(pcb);
+            }
+            *guard = None;
+        }
+        if let Ok(new_box) = KBox::try_new(ListenerIndex::empty()) {
+            TCP_LISTENERS_INDEX.replace(new_box);
+        }
+    }
     NEXT_EPHEMERAL_PORT.store(49152, Ordering::Relaxed);
 }
 
@@ -554,7 +661,6 @@ pub fn clear_all() {
 // Helpers
 // =============================================================================
 
-/// Cancel every outstanding timer token on a PCB.
 fn cancel_pcb_timers(pcb: &Pcb) {
     match &pcb.state {
         PcbState::Listen(_) => {}
@@ -586,10 +692,3 @@ fn cancel_pcb_timers(pcb: &Pcb) {
         }
     }
 }
-
-// =============================================================================
-// Backward-compat shim (removed items)
-// =============================================================================
-
-// PCB_TABLE, PcbTable, MAX_CONNECTIONS — removed in Phase 6b.
-// All callers now use TCP_SHARDS / TCP_LISTENERS / module-level functions.
