@@ -19,9 +19,15 @@ const INTERVAL_ADVANCE_MS: u64 = KEEPALIVE_INTERVAL_MS + 1;
 
 /// Start each keepalive test on the mock clock so every keepalive deadline is
 /// expressed in mock time and a later `MockClock::advance` can cross it.
-fn keepalive_setup() {
+///
+/// Returns the [`MockClockGuard`](crate::clock::MockClockGuard) that restores
+/// real time on drop; callers bind it for the whole test body
+/// (`let _clock = keepalive_setup();`) so the pinned clock cannot leak into a
+/// later test or the userland phase.
+#[must_use = "bind the returned MockClockGuard for the test body, else the clock is restored immediately"]
+fn keepalive_setup() -> crate::clock::MockClockGuard {
     reset();
-    crate::clock::MockClock::install_at(1);
+    crate::clock::MockClockGuard::install_at(1)
 }
 
 fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, ConnId), &'static str> {
@@ -122,7 +128,7 @@ fn inject_inbound_data(tcp_id: ConnId, payload: &[u8]) {
 }
 
 pub fn test_keepalive_fires_after_idle() -> TestResult {
-    keepalive_setup();
+    let _clock = keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
@@ -162,7 +168,7 @@ pub fn test_keepalive_fires_after_idle() -> TestResult {
 }
 
 pub fn test_keepalive_reset_on_data() -> TestResult {
-    keepalive_setup();
+    let _clock = keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
@@ -220,7 +226,7 @@ pub fn test_keepalive_reset_on_data() -> TestResult {
 }
 
 pub fn test_keepalive_max_probes_rst() -> TestResult {
-    keepalive_setup();
+    let _clock = keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
@@ -271,7 +277,7 @@ pub fn test_keepalive_max_probes_rst() -> TestResult {
 }
 
 pub fn test_keepalive_disabled_no_timer() -> TestResult {
-    keepalive_setup();
+    let _clock = keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(false) {
         Ok(v) => v,
@@ -295,7 +301,7 @@ pub fn test_keepalive_disabled_no_timer() -> TestResult {
 }
 
 pub fn test_keepalive_cancelled_on_close() -> TestResult {
-    keepalive_setup();
+    let _clock = keepalive_setup();
 
     let (sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,

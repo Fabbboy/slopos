@@ -59,7 +59,7 @@ pub fn now_ms() -> u64 {
 // -----------------------------------------------------------------------------
 
 #[cfg(feature = "test-hooks")]
-pub use mock::{MOCK_CLOCK, MockClock};
+pub use mock::{MOCK_CLOCK, MockClock, MockClockGuard};
 
 #[cfg(feature = "test-hooks")]
 mod mock {
@@ -115,6 +115,41 @@ mod mock {
     impl super::Clock for MockClock {
         fn now_ms(&self) -> u64 {
             current_ms()
+        }
+    }
+
+    /// RAII guard that pins the mock clock for a test's lifetime and
+    /// restores it to inactive (real wall time) on drop.
+    ///
+    /// `MOCK_CLOCK` is a *process-global* override of the single clock the
+    /// production net stack reads (TCP RTO/retransmit, the `NetTimerWheel`,
+    /// ARP aging, reassembly GC).  A test that pins it and returns without
+    /// clearing leaks a frozen value into every later test and, worse, into
+    /// the userland test phase — where net time would sit frozen ~1 s while
+    /// real uptime climbs, so no net timer ever fires (connections then stall
+    /// until a real-time deadline or the harness poll cap).  Holding this
+    /// guard makes the restore automatic, *including* the early return the
+    /// `assert_*!` macros take on failure, which a trailing `clear()` call
+    /// would skip.
+    ///
+    /// Bind it to a named local for the whole test body (`let _clock = …`).
+    /// Never `let _ = …` or call it as a bare statement: both drop the guard
+    /// immediately and reactivate the leak.
+    #[must_use = "the clock is restored when the guard drops; bind it to a named local for the test body"]
+    pub struct MockClockGuard;
+
+    impl MockClockGuard {
+        /// Activate the mock clock at `v` (see [`MockClock::install_at`]) and
+        /// return a guard that clears it on drop.
+        pub fn install_at(v: u64) -> Self {
+            MockClock::install_at(v);
+            MockClockGuard
+        }
+    }
+
+    impl Drop for MockClockGuard {
+        fn drop(&mut self) {
+            MockClock::clear();
         }
     }
 }

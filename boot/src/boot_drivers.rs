@@ -365,6 +365,22 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let mut summary = TestRunSummary::default();
     let rc = tests_run_all(&test_config, &mut summary);
 
+    // Safety net for the net mock clock (`net::clock::MOCK_CLOCK`): a test-only
+    // override of the unified monotonic-ms source the *production* net stack
+    // reads — TCP RTO/retransmit deadlines, the `NetTimerWheel`, ARP aging,
+    // reassembly GC. Kernel-phase timer/keepalive/timestamp tests pin it; each
+    // now restores it on drop via `net::clock::MockClockGuard`, so it should
+    // already be inactive here. This unconditional clear is defense in depth:
+    // if a future mock-clock test forgets the guard, a frozen value must not
+    // leak into the userland test phase (which drives the real network path —
+    // `connect`, `recv`, `ifconfig`). With net time frozen ~1 s while real
+    // uptime climbs, no net timer ever fires: dropped/delayed segments are
+    // never retransmitted and connections stall until a real-time deadline or
+    // the harness poll cap, manifesting as nondeterministic connect/recv
+    // hangs. 0 = pass through to real `uptime_ms`.
+    #[cfg(feature = "test-hooks")]
+    slopos_net::clock::MockClock::clear();
+
     // LUF (Lazy Unmap Flush) counters aggregated over all CPUs — proves
     // that cross-CPU coherence is actually flowing through the ring
     // and the drain IPI, not silently short-circuiting. Non-zero

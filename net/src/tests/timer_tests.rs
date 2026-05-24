@@ -13,7 +13,7 @@ use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
-use crate::clock::MockClock;
+use crate::clock::{MockClock, MockClockGuard};
 use crate::timer::{FiredTimer, MAX_TIMERS_PER_PROCESS, NetTimerWheel, TimerKind, TimerToken};
 
 /// Arbitrary non-zero base so the mock clock is active (zero = passthrough).
@@ -23,14 +23,20 @@ const BASE_MS: u64 = 1_000;
 // Helpers
 // =============================================================================
 
-/// Pin the mock clock to [`BASE_MS`] and return a fresh heap-allocated wheel.
+/// Pin the mock clock to [`BASE_MS`] and return a fresh heap-allocated wheel
+/// alongside the [`MockClockGuard`] that restores real time on drop.
 ///
 /// Installing the clock first means every `schedule(delay_ms, …)` records an
 /// absolute deadline of `BASE_MS + delay_ms`, so tests advance the clock past
 /// `BASE_MS + delay_ms` to fire a timer.
-fn fresh_wheel() -> KBox<NetTimerWheel> {
-    MockClock::install_at(BASE_MS);
-    KBox::try_init(NetTimerWheel::init()).expect("alloc")
+///
+/// Callers bind both halves — `let (wheel, _clock) = fresh_wheel();` — so the
+/// guard lives for the whole test body and the pinned clock cannot leak into a
+/// later test or the userland phase.
+fn fresh_wheel() -> (KBox<NetTimerWheel>, MockClockGuard) {
+    let clock = MockClockGuard::install_at(BASE_MS);
+    let wheel = KBox::try_init(NetTimerWheel::init()).expect("alloc");
+    (wheel, clock)
 }
 
 /// Count how many fired timers match the given kind.
@@ -48,7 +54,7 @@ fn find_by_key(fired: &[FiredTimer], key: u32) -> Option<&FiredTimer> {
 // =============================================================================
 
 pub fn test_timer_schedule_and_fire() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     // Deadline = BASE_MS + 5.
     let _token = wheel.schedule(5, TimerKind::ArpExpire, 42);
@@ -78,7 +84,7 @@ pub fn test_timer_schedule_and_fire() -> TestResult {
 }
 
 pub fn test_timer_fires_correct_kind_and_key() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     wheel.schedule(2, TimerKind::ArpRetransmit, 100);
     wheel.schedule(3, TimerKind::TcpRetransmit, 200);
@@ -122,7 +128,7 @@ pub fn test_timer_fires_correct_kind_and_key() -> TestResult {
 }
 
 pub fn test_timer_delay_zero_fires_immediately() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     // delay=0 → deadline == now, so it is due on the very next process_due().
     wheel.schedule(0, TimerKind::TcpDelayedAck, 7);
@@ -138,7 +144,7 @@ pub fn test_timer_delay_zero_fires_immediately() -> TestResult {
 // =============================================================================
 
 pub fn test_timer_cancel_before_deadline() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     let token = wheel.schedule(5, TimerKind::ArpExpire, 42);
     assert_test!(wheel.cancel(token), "cancel returns true for pending timer");
@@ -155,7 +161,7 @@ pub fn test_timer_cancel_before_deadline() -> TestResult {
 }
 
 pub fn test_timer_cancel_already_fired() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     let token = wheel.schedule(1, TimerKind::ArpRetransmit, 99);
     MockClock::advance(1);
@@ -170,7 +176,7 @@ pub fn test_timer_cancel_already_fired() -> TestResult {
 }
 
 pub fn test_timer_cancel_invalid_token() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
     assert_test!(
         !wheel.cancel(TimerToken::INVALID),
         "cancel(INVALID) returns false"
@@ -179,7 +185,7 @@ pub fn test_timer_cancel_invalid_token() -> TestResult {
 }
 
 pub fn test_timer_cancel_one_of_many() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     let t1 = wheel.schedule(3, TimerKind::ArpExpire, 10);
     let _t2 = wheel.schedule(3, TimerKind::TcpRetransmit, 20);
@@ -198,7 +204,7 @@ pub fn test_timer_cancel_one_of_many() -> TestResult {
 }
 
 pub fn test_timer_double_cancel() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     let token = wheel.schedule(5, TimerKind::ArpExpire, 42);
     assert_test!(wheel.cancel(token), "first cancel succeeds");
@@ -212,7 +218,7 @@ pub fn test_timer_double_cancel() -> TestResult {
 // =============================================================================
 
 pub fn test_timer_max_per_process_bound() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     // 64 timers all due at the same deadline.
     let count = 64usize;
@@ -253,7 +259,7 @@ pub fn test_timer_max_per_process_bound() -> TestResult {
 }
 
 pub fn test_timer_max_per_process_bound_exact() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     for i in 0..MAX_TIMERS_PER_PROCESS {
         wheel.schedule(1, TimerKind::TcpRetransmit, i as u32);
@@ -276,7 +282,7 @@ pub fn test_timer_max_per_process_bound_exact() -> TestResult {
 // =============================================================================
 
 pub fn test_timer_empty_wheel_process() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     MockClock::advance(100);
     assert_test!(
@@ -292,7 +298,7 @@ pub fn test_timer_empty_wheel_process() -> TestResult {
 /// `NUM_SLOTS` ticks out).  Three timers at 3/5/7 ms all fire after one +10 ms
 /// jump.
 pub fn test_timer_fast_forward_fires_all() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     wheel.schedule(3, TimerKind::ArpExpire, 1);
     wheel.schedule(5, TimerKind::TcpRetransmit, 2);
@@ -309,7 +315,7 @@ pub fn test_timer_fast_forward_fires_all() -> TestResult {
 /// Regression for the deleted `advance_to` snap-drop bug: a deadline far beyond
 /// any former 256-tick window must still fire after one jump.
 pub fn test_timer_large_delay_not_dropped() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     // 5000 ms — well past the old 256-"tick" catch-up cap.
     wheel.schedule(5000, TimerKind::ReassemblyTimeout, 77);
@@ -328,7 +334,7 @@ pub fn test_timer_large_delay_not_dropped() -> TestResult {
 }
 
 pub fn test_timer_multiple_same_deadline() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     for i in 0..5 {
         wheel.schedule(10, TimerKind::TcpKeepalive, i);
@@ -347,7 +353,7 @@ pub fn test_timer_multiple_same_deadline() -> TestResult {
 }
 
 pub fn test_timer_pending_count_with_cancels() -> TestResult {
-    let wheel = fresh_wheel();
+    let (wheel, _clock) = fresh_wheel();
 
     let t1 = wheel.schedule(5, TimerKind::ArpExpire, 1);
     let _t2 = wheel.schedule(5, TimerKind::ArpRetransmit, 2);

@@ -57,7 +57,7 @@ fn is_reset(id: tcp::ConnId) -> bool {
 pub fn test_active_open_ts_negotiation() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(100);
+    let _clock = tcp::clock::MockClockGuard::install_at(100);
 
     let conn = establish_connection_with_ts();
     let (enabled, recent) = ts_state(conn.id);
@@ -69,7 +69,7 @@ pub fn test_active_open_ts_negotiation() -> TestResult {
 pub fn test_ts_declined_by_peer() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(100);
+    let _clock = tcp::clock::MockClockGuard::install_at(100);
 
     let conn = establish_connection();
     let (enabled, _) = ts_state(conn.id);
@@ -92,7 +92,7 @@ pub fn test_ts_declined_by_peer() -> TestResult {
 pub fn test_data_segments_carry_tsopt() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(500);
+    let _clock = tcp::clock::MockClockGuard::install_at(500);
 
     let conn = establish_connection_with_ts();
 
@@ -112,7 +112,7 @@ pub fn test_data_segments_carry_tsopt() -> TestResult {
 pub fn test_paws_rejects_old_duplicate() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(100);
+    let _clock = tcp::clock::MockClockGuard::install_at(100);
 
     let conn = establish_connection_with_ts();
     let peer_seq = conn.peer_iss + 1;
@@ -155,7 +155,7 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
 pub fn test_paws_allows_rst() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(100);
+    let _clock = tcp::clock::MockClockGuard::install_at(100);
 
     let conn = establish_connection_with_ts();
     let peer_seq = conn.peer_iss + 1;
@@ -198,7 +198,7 @@ pub fn test_paws_allows_rst() -> TestResult {
 pub fn test_rttm_samples_every_ack() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(1000);
+    let _clock = tcp::clock::MockClockGuard::install_at(1000);
 
     let conn = establish_connection_with_ts();
 
@@ -233,7 +233,7 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
 pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
-    tcp::clock::MockClock::install_at(1000);
+    let _clock = tcp::clock::MockClockGuard::install_at(1000);
 
     let conn = establish_connection();
     let (enabled, _) = ts_state(conn.id);
