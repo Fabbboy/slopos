@@ -1225,7 +1225,15 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     slopos_sched::task::task_set_fs_base(parent_ptr, 0x0000_1111_2222_3000);
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
-    let child_id = match task_clone(parent_ptr, flags, 0, 0, 0, 0x0000_5555_6666_7000) {
+    let child_id = match task_clone(
+        parent_ptr,
+        core::ptr::null(),
+        flags,
+        0,
+        0,
+        0,
+        0x0000_5555_6666_7000,
+    ) {
         Ok(id) => {
             task_set_state(id, TaskStatus::Blocked);
             id
@@ -1273,7 +1281,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
     assert_not_null!(parent_ptr, "parent task lookup failed");
 
     let thread_flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
-    let thread_id = match task_clone(parent_ptr, thread_flags, 0, 0, 0, 0) {
+    let thread_id = match task_clone(parent_ptr, core::ptr::null(), thread_flags, 0, 0, 0, 0) {
         Ok(id) => {
             task_set_state(id, TaskStatus::Blocked);
             id
@@ -1818,6 +1826,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
 
     let child_no_settls = match task_clone(
         task_ptr,
+        core::ptr::null(),
         CLONE_VM | CLONE_SIGHAND | CLONE_THREAD,
         0,
         0,

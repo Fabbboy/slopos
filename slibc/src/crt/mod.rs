@@ -58,6 +58,10 @@ pub unsafe fn init_from_stack() {
 
         let envp_offset = 1 + (raw_argc as usize) + 1;
         (*ENVP.get()).0 = stack_ptr.add(envp_offset) as *const *const c_char;
+
+        // Capture the PT_TLS template so spawned threads can build valid TLS
+        // blocks (the kernel only sets up the main thread's TLS image).
+        crate::thread::tls::capture_tls_template_from_stack(stack_ptr as *const usize);
     }
 }
 
@@ -85,6 +89,46 @@ pub unsafe extern "C" fn __libc_start_main(
 
     let ret = main(argc, argv, envp_ptr);
     crate::process::exit(ret)
+}
+
+/// Canonical stack-based C-runtime entry. A naked `_start` passes the raw
+/// initial stack pointer (`&argc`); this parses argc/argv/envp, captures the
+/// program's `PT_TLS` template (via `AT_PHDR`), sets up the main thread's TLS,
+/// initializes stdio, then calls `main` and exits. This is the standard
+/// `_start -> __libc_start_main` shape; TLS is fully live before `main` runs.
+///
+/// # Safety
+/// `stack_base` must point at the kernel-prepared entry stack (`argc` at
+/// `[stack_base]`, then `argv`, `envp`, and the auxv).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __slibc_start(stack_base: *const usize) -> ! {
+    unsafe extern "C" {
+        fn main(argc: isize, argv: *const *const u8) -> isize;
+    }
+
+    let raw_argc = *stack_base as isize;
+    let argc = if !(0..=1024).contains(&raw_argc) {
+        0
+    } else {
+        raw_argc
+    };
+    let argv = stack_base.add(1) as *const *const c_char;
+    let envp = stack_base.add(1 + (argc as usize) + 1) as *const *const c_char;
+
+    *ARGC.get() = argc;
+    (*ARGV.get()).0 = argv;
+    (*ENVP.get()).0 = envp;
+    crate::env::environ = envp as *mut *mut u8;
+
+    // TLS before anything that touches a thread-local: capture the template
+    // from AT_PHDR, then build + install the main thread's TLS block. `errno`
+    // uses its static fallback until this completes.
+    crate::thread::tls::capture_tls_template_from_stack(stack_base);
+    crate::thread::tls::tls_init_main_thread();
+    crate::stdio::streams::stdio_init();
+
+    let ret = main(argc, argv as *const *const u8);
+    crate::process::exit(ret as i32)
 }
 
 /// # Safety

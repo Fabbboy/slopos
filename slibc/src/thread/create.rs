@@ -117,13 +117,16 @@ pub unsafe extern "C" fn pthread_create(
         }
     };
 
-    let tcb_ptr = malloc::alloc(mem::size_of::<Tcb>()) as *mut Tcb;
+    // Build a full per-thread TLS block (TLS image + TCB) so the new thread's
+    // `.tbss` thread-locals are zero-initialized. `tcb_ptr` is the thread
+    // pointer; `tls_base` is the raw allocation to free on failure.
+    let (tls_base, tcb_ptr) = super::tls::alloc_thread_tls();
     if tcb_ptr.is_null() {
         let _ = Sys::munmap(stack_base, stack_size);
         return crate::errno::ENOMEM.raw();
     }
 
-    ptr::write_bytes(tcb_ptr, 0, 1);
+    // `alloc_thread_tls` already zeroed the TCB.
     (*tcb_ptr).self_ptr = tcb_ptr;
     (*tcb_ptr).stack_base = stack_base;
     (*tcb_ptr).stack_size = stack_size;
@@ -146,7 +149,7 @@ pub unsafe extern "C" fn pthread_create(
 
     if ret < 0 {
         let err = (-ret) as i32;
-        malloc::dealloc(tcb_ptr as *mut c_void);
+        malloc::dealloc(tls_base as *mut c_void);
         let _ = Sys::munmap(stack_base, stack_size);
         errno::errno_set(err);
         return err;

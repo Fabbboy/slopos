@@ -14,23 +14,19 @@ pub use slopos_slibc as slibc;
 
 pub fn init() {}
 
-unsafe extern "C" {
-    fn main(argc: isize, argv: *const *const u8) -> isize;
-}
-
+/// Process entry. Hands the raw initial stack pointer (`&argc`) to the C
+/// runtime, which parses argc/argv/envp, sets up TLS from the program's
+/// `PT_TLS` (discovered via `AT_PHDR`), and calls `main`. The standard
+/// `_start -> __libc_start_main` contract; nothing here touches TLS.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         "xor rbp, rbp",
-        "mov rdi, [rsp]",
-        "lea rsi, [rsp + 8]",
+        "mov rdi, rsp",
         "and rsp, -16",
-        "call {entry}",
-        "mov rdi, rax",
-        "mov rax, 1",
-        "syscall",
+        "call {start}",
         "ud2",
-        entry = sym main,
+        start = sym slopos_slibc::crt::__slibc_start,
     );
 }

@@ -543,6 +543,7 @@ define_syscall!(syscall_clone
 {
     match slopos_sched::task::task_clone(
         ctx.task_ptr(),
+        ctx.user_ctx_ptr() as *const UserContext,
         flags,
         child_stack,
         parent_tidptr,

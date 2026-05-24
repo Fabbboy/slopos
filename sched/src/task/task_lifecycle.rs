@@ -290,37 +290,6 @@ fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool
     })
 }
 
-/// Build a user-mode InterruptFrame from a saved TaskContext.
-///
-/// Sets rax=0 (fork/clone child return value) and ensures cs/ss have
-/// ring-3 selectors.
-fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch::InterruptFrame {
-    slopos_arch::InterruptFrame {
-        r15: ctx.r15,
-        r14: ctx.r14,
-        r13: ctx.r13,
-        r12: ctx.r12,
-        r11: ctx.r11,
-        r10: ctx.r10,
-        r9: ctx.r9,
-        r8: ctx.r8,
-        rbp: ctx.rbp,
-        rdi: ctx.rdi,
-        rsi: ctx.rsi,
-        rdx: ctx.rdx,
-        rcx: ctx.rcx,
-        rbx: ctx.rbx,
-        rax: 0,
-        vector: 0,
-        error_code: 0,
-        rip: ctx.rip,
-        cs: if (ctx.cs & 0x3) == 0x3 { ctx.cs } else { 0x23 },
-        rflags: ctx.rflags,
-        rsp: user_rsp,
-        ss: if (ctx.ss & 0x3) == 0x3 { ctx.ss } else { 0x1B },
-    }
-}
-
 /// Bytes reserved at the top of every user task's per-task kernel stack
 /// for handling interrupts/exceptions that arrive from user mode.
 ///
@@ -1073,6 +1042,7 @@ pub fn task_fork(
 
 pub fn task_clone(
     parent_task: *mut Task,
+    parent_user_ctx: *const slopos_ostd::user::context::UserContext,
     flags: u64,
     child_stack: u64,
     parent_tidptr: u64,
@@ -1187,19 +1157,32 @@ pub fn task_clone(
     child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    // OSTD user-mode entry: seed `child.user_ctx` from the inherited
-    // task context (with `force_rax=0` for clone's child return), and
-    // set up the kernel stack so `switch_registers` rets into
-    // `user_task_first_run`.
+    // OSTD user-mode entry: seed `child.user_ctx` from the parent's
+    // live syscall-time `UserContext` — the registers captured at the
+    // `clone` trap, whose `rip` is the instruction after the syscall.
+    // The child resumes there with `rax = 0` so the libc clone shim
+    // takes its child branch and runs the new thread's start routine.
+    // Seeding from the legacy `context` instead would resume the child
+    // at a stale rip (e.g. the ELF entry), re-running `main`. This
+    // mirrors `task_fork`; `task_clone_from` already copied the
+    // parent's `user_ctx` as the fallback when no live snapshot is
+    // supplied.
     {
-        let ctx = &child.context;
-        let user_rsp = if child_stack != 0 {
-            child_stack
-        } else {
-            ctx.rsp
+        let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_borrow_ref::<
+            slopos_ostd::user::context::UserContext,
+        >(parent_user_ctx);
+        let mut regs = match parent_ctx_opt {
+            Some(parent_ctx) => *parent_ctx.regs(),
+            None => *child.user_ctx.regs(),
         };
-        let iframe = interrupt_frame_from_context(ctx, user_rsp);
-        crate::task::init_user_ctx_from_parent_frame(&mut child.user_ctx, &iframe, 0);
+        regs.rax = 0;
+        if child_stack != 0 {
+            regs.rsp = child_stack;
+        }
+        if flags & CLONE_SETTLS != 0 {
+            regs.fs_base = tls;
+        }
+        child.user_ctx.set_regs(regs);
         // SAFETY: child kernel stack was just allocated and is writable.
         child.switch_ctx = build_user_task_entry_frame(child.kernel_stack_top);
     }

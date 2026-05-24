@@ -16,7 +16,7 @@ use crate::dual_paging::{
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
-use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PROCESS_TLS_BASE_VA};
+use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging::{PageTable, ProcessPageDir};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
@@ -1026,14 +1026,13 @@ fn load_segments_and_tls(
 ) -> Result<crate::elf::ElfExecInfo, ElfError> {
     let header = validator.header();
 
+    // TLS geometry is recorded for diagnostics only; the kernel no longer
+    // builds a TLS block. The C library discovers PT_TLS via AT_PHDR and owns
+    // all TLS construction (main thread and spawned threads alike).
     let tls_segment = validator.find_tls_segment()?;
-    let tls_offset = validator.find_tls_offset()?;
-    let (tls_vaddr, tls_filesz, tls_memsz, tls_align, tls_offset) = match tls_segment {
-        Some((vaddr, filesz, memsz, align)) => {
-            let offset = tls_offset.ok_or(ElfError::InvalidSegmentOffset)?;
-            (vaddr, filesz, memsz, align, Some(offset))
-        }
-        None => (0, 0, 0, 0, None),
+    let (tls_vaddr, tls_filesz, tls_memsz, tls_align) = match tls_segment {
+        Some((vaddr, filesz, memsz, align)) => (vaddr, filesz, memsz, align),
+        None => (0, 0, 0, 0),
     };
 
     let mut guard = PROCESS_VMS[slot].lock();
@@ -1086,22 +1085,9 @@ fn load_segments_and_tls(
         mapped_pages = mapped_pages.saturating_add(pages);
     }
 
-    let (tls_tp, tls_pages) = {
-        let vm_space_ref = guard
-            .vm_space
-            .as_mut()
-            .expect("load_segments_and_tls: vm_space present for tls");
-        setup_tls_block(
-            page_dir,
-            vm_space_ref,
-            data,
-            tls_offset,
-            tls_filesz,
-            tls_memsz,
-            tls_align,
-        )?
-    };
-    mapped_pages = mapped_pages.saturating_add(tls_pages);
+    // No kernel-built TLS block: the .tdata init image is already mapped as
+    // part of the loaded program segments, and libc copies it per-thread.
+    let tls_tp = 0u64;
 
     if needs_reloc {
         let vm_space_ref = guard
@@ -1118,6 +1104,13 @@ fn load_segments_and_tls(
 
     let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);
     let phdr_user_addr = compute_phdr_user_addr(header, segments, min_vaddr, code_base);
+    // The program headers MUST be mapped in the user address space so libc can
+    // walk AT_PHDR -> PT_TLS. A zero here means the linker left the phdrs out of
+    // every PT_LOAD; refuse the exec loudly rather than ship a process whose TLS
+    // can never be set up (which would fault on the first thread-local access).
+    if phdr_user_addr == 0 {
+        return Err(ElfError::InvalidPhdrOffset);
+    }
 
     guard.total_pages = guard.total_pages.saturating_add(mapped_pages);
     drop(guard);
@@ -1191,81 +1184,6 @@ fn unmap_existing_code_region(
     let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
     unmap_user_range(vm_space, code_base, data_start);
     let _ = page_dir;
-}
-
-fn setup_tls_block(
-    page_dir: *mut ProcessPageDir,
-    vm_space: &mut KArc<VmSpace>,
-    elf_data: &[u8],
-    tls_offset: Option<u64>,
-    tls_filesz: u64,
-    tls_memsz: u64,
-    tls_align: u64,
-) -> Result<(u64, u32), ElfError> {
-    if page_dir.is_null() {
-        return Err(ElfError::NullPointer);
-    }
-    if tls_filesz > tls_memsz {
-        return Err(ElfError::FileSizeExceedsMemSize);
-    }
-    if tls_align != 0 && !tls_align.is_power_of_two() {
-        return Err(ElfError::InvalidAlignment);
-    }
-
-    let align = tls_align.max(8);
-    let tls_size_aligned = if tls_memsz == 0 {
-        0
-    } else {
-        tls_memsz
-            .checked_add(align - 1)
-            .ok_or(ElfError::SegmentSizeOverflow)?
-            & !(align - 1)
-    };
-    let tcb_size = core::mem::size_of::<u64>() as u64;
-    let total_size = tls_size_aligned
-        .checked_add(tcb_size)
-        .ok_or(ElfError::SegmentSizeOverflow)?;
-    let total_size_aligned = align_up(total_size as usize, PAGE_SIZE_4KB as usize) as u64;
-
-    let tls_base = PROCESS_TLS_BASE_VA;
-    let tls_end = tls_base
-        .checked_add(total_size_aligned)
-        .ok_or(ElfError::SegmentSizeOverflow)?;
-
-    unmap_user_range(vm_space, tls_base, tls_end);
-
-    let mut tls_pages = 0u32;
-    if map_user_range(
-        vm_space,
-        tls_base,
-        tls_end,
-        PageFlags::USER_RW.bits(),
-        &mut tls_pages,
-    ) != 0
-    {
-        return Err(ElfError::NullPointer);
-    }
-    let _ = page_dir;
-
-    if tls_filesz > 0 {
-        let offset = tls_offset.ok_or(ElfError::InvalidSegmentOffset)?;
-        let src_end = offset
-            .checked_add(tls_filesz)
-            .ok_or(ElfError::InvalidSegmentOffset)?;
-        if src_end > elf_data.len() as u64 {
-            return Err(ElfError::InvalidSegmentOffset);
-        }
-        let src = &elf_data[offset as usize..src_end as usize];
-        write_user_bytes(vm_space, tls_base, src)?;
-    }
-
-    if tls_memsz > tls_filesz {
-        zero_user_bytes(vm_space, tls_base + tls_filesz, tls_memsz - tls_filesz)?;
-    }
-
-    let tp = tls_base + tls_size_aligned;
-    write_user_u64(vm_space, tp, tp)?;
-    Ok((tp, tls_pages))
 }
 
 /// Read a `u8` from the user-VA space identified by `vm_space`.
@@ -1349,34 +1267,6 @@ fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Res
         written += chunk;
     }
     Ok(())
-}
-
-fn zero_user_bytes(vm_space: &KArc<VmSpace>, start_addr: u64, len: u64) -> Result<(), ElfError> {
-    let mut zeroed = 0u64;
-    while zeroed < len {
-        let va = start_addr
-            .checked_add(zeroed)
-            .ok_or(ElfError::SegmentSizeOverflow)?;
-        let page_va = va & !(PAGE_SIZE_4KB - 1);
-        let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
-        let page_remaining = PAGE_SIZE_4KB - page_off as u64;
-        let chunk = core::cmp::min(len - zeroed, page_remaining) as usize;
-
-        let phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
-        if phys.is_null() {
-            return Err(ElfError::NullPointer);
-        }
-        let virt = phys.to_virt();
-        if !hhdm_fill_bytes(virt, page_off, chunk, 0) {
-            return Err(ElfError::NullPointer);
-        }
-        zeroed = zeroed.saturating_add(chunk as u64);
-    }
-    Ok(())
-}
-
-fn write_user_u64(vm_space: &KArc<VmSpace>, dst_addr: u64, value: u64) -> Result<(), ElfError> {
-    write_user_bytes(vm_space, dst_addr, &value.to_le_bytes())
 }
 
 fn load_segment_pages(

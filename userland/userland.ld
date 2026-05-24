@@ -7,7 +7,11 @@ USER_CODE_BASE = 0x0000000000400000;
 
 SECTIONS
 {
-  . = USER_CODE_BASE;
+  /* Reserve room for the ELF header + program headers at the start of the
+   * first PT_LOAD so the loader can map them and expose a valid AT_PHDR
+   * (libc walks AT_PHDR -> PT_TLS to set up thread-local storage). Without
+   * this, the phdrs fall outside every loadable segment and AT_PHDR is 0. */
+  . = USER_CODE_BASE + SIZEOF_HEADERS;
 
   .text : {
     *(.text .text.*)
