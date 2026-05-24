@@ -12,8 +12,7 @@ const MAX_FRAGMENTS_PER_GROUP: usize = 16;
 const MAX_FRAGMENT_DATA: usize = 1500;
 const MAX_REASSEMBLED_DATA: usize = MAX_FRAGMENTS_PER_GROUP * MAX_FRAGMENT_DATA;
 
-const TICKS_PER_SEC: u64 = 100;
-const REASSEMBLY_TIMEOUT_TICKS: u64 = 60 * TICKS_PER_SEC;
+const REASSEMBLY_TIMEOUT_MS: u64 = 60 * 1_000;
 
 static NEXT_GROUP_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -297,7 +296,7 @@ impl ReassemblyTable {
     fn init_group(&mut self, idx: usize, key: ReassemblyKey) {
         let group_id = alloc_group_id();
         let token = NET_TIMER_WHEEL.schedule(
-            REASSEMBLY_TIMEOUT_TICKS,
+            REASSEMBLY_TIMEOUT_MS,
             TimerKind::ReassemblyTimeout,
             group_id,
         );

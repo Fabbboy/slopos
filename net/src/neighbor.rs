@@ -53,16 +53,14 @@ const MAX_PENDING_PKTS: usize = 4;
 /// Maximum ARP retransmissions before transitioning to `Failed`.
 const MAX_RETRIES: u8 = 3;
 
-/// Ticks until a `Reachable` entry ages to `Stale` (~30 s at 100 Hz).
-///
-/// The kernel timer fires at ~100 Hz (10 ms per tick), so 3000 ticks ≈ 30 s.
-pub const REACHABLE_TIME_TICKS: u64 = 3000;
+/// Milliseconds until a `Reachable` entry ages to `Stale` (30 s).
+pub const REACHABLE_TIME_MS: u64 = 30_000;
 
-/// Ticks before re-probing a `Stale` entry that is used (~5 s at 100 Hz).
-pub const STALE_PROBE_TIME_TICKS: u64 = 500;
+/// Milliseconds before re-probing a `Stale` entry that is used (5 s).
+pub const STALE_PROBE_TIME_MS: u64 = 5_000;
 
-/// Ticks between ARP retransmissions for `Incomplete` entries (~1 s at 100 Hz).
-pub const RETRANSMIT_TIME_TICKS: u64 = 100;
+/// Milliseconds between ARP retransmissions for `Incomplete` entries (1 s).
+pub const RETRANSMIT_TIME_MS: u64 = 1_000;
 
 // =============================================================================
 // 2B.1 — NeighborState
@@ -82,7 +80,7 @@ pub enum NeighborState {
     },
     /// ARP reply received; the MAC address is fresh and confirmed.
     Reachable { mac: MacAddr, confirmed_tick: u64 },
-    /// The entry has aged past [`REACHABLE_TIME_TICKS`].  The MAC is still
+    /// The entry has aged past [`REACHABLE_TIME_MS`].  The MAC is still
     /// usable but will trigger a re-probe on next use.
     Stale { mac: MacAddr, last_used_tick: u64 },
     /// No ARP reply after [`MAX_RETRIES`] retransmissions.  Packets destined
@@ -279,11 +277,8 @@ impl NeighborCache {
             };
 
             // Schedule ArpExpire timer.
-            let token = NET_TIMER_WHEEL.schedule(
-                REACHABLE_TIME_TICKS,
-                TimerKind::ArpExpire,
-                entry.entry_id,
-            );
+            let token =
+                NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry.entry_id);
             entry.timer_token = Some(token);
 
             if pending.is_empty() {
@@ -305,8 +300,7 @@ impl NeighborCache {
                 Self::evict_one(&mut inner);
             }
 
-            let token =
-                NET_TIMER_WHEEL.schedule(REACHABLE_TIME_TICKS, TimerKind::ArpExpire, entry_id);
+            let token = NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry_id);
 
             let _ = inner.entries.push(NeighborEntry {
                 dev,
@@ -372,7 +366,7 @@ impl NeighborCache {
                         NET_TIMER_WHEEL.cancel(token);
                     }
                     let token = NET_TIMER_WHEEL.schedule(
-                        STALE_PROBE_TIME_TICKS,
+                        STALE_PROBE_TIME_MS,
                         TimerKind::ArpRetransmit,
                         entry.entry_id,
                     );
@@ -414,7 +408,7 @@ impl NeighborCache {
             }
 
             let token =
-                NET_TIMER_WHEEL.schedule(RETRANSMIT_TIME_TICKS, TimerKind::ArpRetransmit, entry_id);
+                NET_TIMER_WHEEL.schedule(RETRANSMIT_TIME_MS, TimerKind::ArpRetransmit, entry_id);
 
             let mut pending = KVec::with_capacity(MAX_PENDING_PKTS).expect("neighbor: alloc");
             let _ = pending.push(pkt);
@@ -491,7 +485,7 @@ impl NeighborCache {
 
                     // Reschedule retransmit timer.
                     let token = NET_TIMER_WHEEL.schedule(
-                        RETRANSMIT_TIME_TICKS,
+                        RETRANSMIT_TIME_MS,
                         TimerKind::ArpRetransmit,
                         entry_id,
                     );

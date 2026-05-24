@@ -49,10 +49,10 @@ pub const SYN_QUEUE_MAX: usize = 128;
 /// before giving up.
 pub const SYN_RETRIES_MAX: u8 = 5;
 
-/// Base SYN-ACK retransmit delay in timer ticks (~1 second at 100Hz).
+/// Base SYN-ACK retransmit delay in milliseconds (1 second).
 ///
 /// Each subsequent retry doubles this value (exponential backoff).
-pub const SYN_ACK_BASE_DELAY_TICKS: u64 = 100;
+pub const SYN_ACK_BASE_DELAY_MS: u64 = 1_000;
 
 /// Minimum listen backlog.
 pub const BACKLOG_MIN: usize = 1;
@@ -292,7 +292,7 @@ impl TcpListenState {
 
         // Schedule initial SYN-ACK retransmit timer.
         let timer_token =
-            NET_TIMER_WHEEL.schedule(SYN_ACK_BASE_DELAY_TICKS, TimerKind::TcpRetransmit, key);
+            NET_TIMER_WHEEL.schedule(SYN_ACK_BASE_DELAY_MS, TimerKind::TcpRetransmit, key);
 
         let effective_mss = if peer_mss == 0 { DEFAULT_MSS } else { peer_mss };
 
@@ -432,7 +432,7 @@ impl TcpListenState {
 
         // Schedule next retransmit with exponential backoff.
         // retries=1 → 1s, retries=2 → 2s, retries=3 → 4s, retries=4 → 8s, retries=5 → 16s
-        let delay = SYN_ACK_BASE_DELAY_TICKS * (1u64 << (entry.retries as u64 - 1));
+        let delay = SYN_ACK_BASE_DELAY_MS * (1u64 << (entry.retries as u64 - 1));
         entry.timer_token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpRetransmit, key);
 
         klog_debug!(

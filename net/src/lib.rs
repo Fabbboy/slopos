@@ -23,6 +23,7 @@ pub mod types;
 
 pub mod arp;
 pub mod checksum;
+pub mod clock;
 pub mod dhcp;
 pub mod dns;
 pub mod icmp;

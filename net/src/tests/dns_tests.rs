@@ -3,7 +3,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
-use crate::dns::{self, DnsResolveError};
+use crate::dns;
 
 // =============================================================================
 // 5F.T1 — DNS name encoding
@@ -287,64 +287,137 @@ pub fn test_dns_t5_cache() -> TestResult {
 }
 
 // =============================================================================
-// 5F.T6 — Resolver integration (live DNS via QEMU user-net)
+// 5F.T6 — Resolver state machine: retry then success
 // =============================================================================
 
-pub fn test_dns_t6_resolver_integration() -> TestResult {
-    // Skip if network is not ready
-    if !crate::net_driver_service::net_driver()
-        .map(|d| (d.virtio_net_is_ready)())
-        .unwrap_or(false)
-    {
-        return pass!();
-    }
+/// Build a minimal valid DNS A-record response for transaction `id`.
+///
+/// Layout matches `test_dns_t4_response_parsing`: header + question
+/// (`example.com A IN`) + one answer (compression pointer, A, IN, TTL, RDATA).
+/// Returns the packet and its length.
+fn build_a_reply(id: u16, addr: [u8; 4], ttl: u32) -> ([u8; 128], usize) {
+    let mut packet = [0u8; 128];
+    packet[0..2].copy_from_slice(&id.to_be_bytes());
+    packet[2..4].copy_from_slice(&0x8180u16.to_be_bytes()); // QR=1, RD=1, RA=1, RCODE=0
+    packet[4..6].copy_from_slice(&1u16.to_be_bytes()); // QDCOUNT=1
+    packet[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT=1
+    let mut pos = 12;
 
-    // QEMU user-net provides DNS at 10.0.2.3 and can resolve real hostnames.
-    // Under SMP/TCG, the SLIRP DNS proxy may be too slow to respond within
-    // the resolver timeout.  Transient/timeout failures are environment
-    // issues, not code bugs — skip the test in that case.
-    let addr = match dns::dns_resolve(b"dns.google") {
-        Ok(addr) => addr,
-        Err(
-            DnsResolveError::Timeout
-            | DnsResolveError::TransmitFailed
-            | DnsResolveError::NoDnsServer,
-        ) => {
-            return TestResult::Skipped;
-        }
-        Err(_) => return TestResult::Fail,
-    };
-    // dns.google resolves to 8.8.8.8 or 8.8.4.4
-    assert_test!(addr[0] == 8 && addr[1] == 8, "dns.google starts with 8.8");
+    let name_wire: &[u8] = &[
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+    ];
+    packet[pos..pos + 13].copy_from_slice(name_wire);
+    pos += 13;
+    packet[pos..pos + 2].copy_from_slice(&1u16.to_be_bytes()); // QTYPE=A
+    pos += 2;
+    packet[pos..pos + 2].copy_from_slice(&1u16.to_be_bytes()); // QCLASS=IN
+    pos += 2;
 
-    // IP literal passthrough
-    let literal = dns::dns_resolve(b"10.0.2.3");
-    assert_test!(literal.is_ok(), "IP literal passthrough");
-    assert_eq_test!(literal.unwrap(), [10, 0, 2, 3], "literal address");
+    packet[pos] = 0xC0; // compression pointer to the question name at offset 12
+    packet[pos + 1] = 0x0C;
+    pos += 2;
+    packet[pos..pos + 2].copy_from_slice(&1u16.to_be_bytes()); // TYPE=A
+    pos += 2;
+    packet[pos..pos + 2].copy_from_slice(&1u16.to_be_bytes()); // CLASS=IN
+    pos += 2;
+    packet[pos..pos + 4].copy_from_slice(&ttl.to_be_bytes()); // TTL
+    pos += 4;
+    packet[pos..pos + 2].copy_from_slice(&4u16.to_be_bytes()); // RDLENGTH=4
+    pos += 2;
+    packet[pos..pos + 4].copy_from_slice(&addr);
+    pos += 4;
+
+    (packet, pos)
+}
+
+pub fn test_dns_t6_resolver_retry_then_success() -> TestResult {
+    use dns::{DnsOutcome, DnsResolver, DnsStep};
+
+    let mut r = DnsResolver::new(b"example.com").expect("resolver builds");
+
+    // First attempt: Start emits a query.
+    assert_eq_test!(
+        r.step(DnsOutcome::Start),
+        DnsStep::Query { timeout_ms: 3000 },
+        "Start emits first query"
+    );
+    let id1 = r.query_id();
+
+    // Attempt 1 times out → a retry query with a fresh transaction ID.
+    assert_eq_test!(
+        r.step(DnsOutcome::Timeout),
+        DnsStep::Query { timeout_ms: 3000 },
+        "timeout triggers a retry query"
+    );
+    let id2 = r.query_id();
+    assert_test!(id2 != id1, "retry uses a fresh transaction ID");
+
+    // A valid reply for the live query ID resolves.
+    let (reply, len) = build_a_reply(id2, [93, 184, 216, 34], 300);
+    assert_eq_test!(
+        r.step(DnsOutcome::Reply(&reply[..len])),
+        DnsStep::Resolved {
+            addr: [93, 184, 216, 34],
+            ttl: 300
+        },
+        "valid reply resolves to the A record"
+    );
 
     pass!()
 }
 
 // =============================================================================
-// 5F.T7 — Resolver timeout
+// 5F.T7 — Resolver state machine: timeout exhaustion + error precedence
 // =============================================================================
 
-pub fn test_dns_t7_resolver_timeout() -> TestResult {
-    // Skip if network is not ready
-    if !crate::net_driver_service::net_driver()
-        .map(|d| (d.virtio_net_is_ready)())
-        .unwrap_or(false)
-    {
-        return pass!();
-    }
+pub fn test_dns_t7_resolver_exhaustion() -> TestResult {
+    use dns::{DnsOutcome, DnsResolveError, DnsResolver, DnsStep};
 
-    // Flush cache to ensure we actually query
-    dns::dns_cache_flush();
+    // Three consecutive timeouts exhaust the retry budget and surface Timeout.
+    let mut r = DnsResolver::new(b"this-does-not-exist.invalid").expect("resolver builds");
+    assert_eq_test!(
+        r.step(DnsOutcome::Start),
+        DnsStep::Query { timeout_ms: 3000 },
+        "attempt 1"
+    );
+    assert_eq_test!(
+        r.step(DnsOutcome::Timeout),
+        DnsStep::Query { timeout_ms: 3000 },
+        "attempt 2 after timeout"
+    );
+    assert_eq_test!(
+        r.step(DnsOutcome::Timeout),
+        DnsStep::Query { timeout_ms: 3000 },
+        "attempt 3 after timeout"
+    );
+    assert_eq_test!(
+        r.step(DnsOutcome::Timeout),
+        DnsStep::Failed(DnsResolveError::Timeout),
+        "exhausted retries surface the last transient error"
+    );
 
-    // Try to resolve a hostname that should not exist
-    // Using .invalid TLD (RFC 6761) — guaranteed to not resolve
-    let result = dns::dns_resolve(b"this-does-not-exist.invalid");
-    assert_test!(result.is_err(), "non-existent hostname returns error");
+    // Error precedence: the final attempt's failure wins. Transmit-fail, then
+    // timeout, then a garbage reply (parse failure) → Failed(ParseFailed).
+    let mut r = DnsResolver::new(b"example.com").expect("resolver builds");
+    assert!(matches!(r.step(DnsOutcome::Start), DnsStep::Query { .. }));
+    assert!(matches!(
+        r.step(DnsOutcome::TransmitFailed),
+        DnsStep::Query { .. }
+    ));
+    assert!(matches!(r.step(DnsOutcome::Timeout), DnsStep::Query { .. }));
+    let garbage = [0u8; 4];
+    assert_eq_test!(
+        r.step(DnsOutcome::Reply(&garbage)),
+        DnsStep::Failed(DnsResolveError::ParseFailed),
+        "last failure (parse) wins over earlier transient errors"
+    );
+
+    // An unencodable hostname is rejected at construction, not after a query.
+    assert_eq_test!(
+        DnsResolver::new(b"example..com").err(),
+        Some(DnsResolveError::InvalidHostname),
+        "double-dot hostname rejected as InvalidHostname"
+    );
 
     pass!()
 }
@@ -396,6 +469,6 @@ slopos_testing::stest!(name = test_dns_t2_query_construction, suite = dns);
 slopos_testing::stest!(name = test_dns_t3_name_decoding, suite = dns);
 slopos_testing::stest!(name = test_dns_t4_response_parsing, suite = dns);
 slopos_testing::stest!(name = test_dns_t5_cache, suite = dns);
-slopos_testing::stest!(name = test_dns_t6_resolver_integration, suite = dns);
-slopos_testing::stest!(name = test_dns_t7_resolver_timeout, suite = dns);
+slopos_testing::stest!(name = test_dns_t6_resolver_retry_then_success, suite = dns);
+slopos_testing::stest!(name = test_dns_t7_resolver_exhaustion, suite = dns);
 slopos_testing::stest!(name = test_dns_t8_regression_network_stack, suite = dns);

@@ -1,18 +1,25 @@
-//! Monotonic clock abstraction used by the TCP state machine.
+//! Unified monotonic clock for the networking stack.
 //!
-//! Production code reads `now_ms()` which returns [`slopos_kernel_services::clock::uptime_ms`].
-//! Under `#[cfg(feature = "test-hooks")]` the same call routes through a global
-//! mock clock: when the mock is inactive (value zero) it falls back to real
-//! wall time so live tests are unaffected, otherwise it returns the value set
-//! by the test.  This lets unit tests drive retransmit / TIME_WAIT / keepalive
-//! behavior deterministically without plumbing a clock generic through every
-//! TCP function.
+//! Every time-dependent net subsystem — the TCP state machine *and* the
+//! [`NetTimerWheel`](crate::timer::NetTimerWheel) — reads "now" in
+//! milliseconds from [`now_ms`].  Production resolves it to
+//! [`slopos_kernel_services::clock::uptime_ms`] (HPET-backed monotonic
+//! uptime).  Under `#[cfg(feature = "test-hooks")]` the same call routes
+//! through a global mock clock: when the mock is inactive (value zero) it
+//! falls back to real wall time so live tests are unaffected, otherwise it
+//! returns the value set by the test.
+//!
+//! This single source of truth is what lets a test fast-forward the *entire*
+//! net stack — retransmit, TIME_WAIT, keepalive, ARP aging, reassembly GC —
+//! with one [`MockClock::advance`] instead of spinning a tick counter.  There
+//! is no second tick-based time domain: the timer wheel keys deadlines off
+//! these same milliseconds.
 
 /// Abstract source of monotonic milliseconds.
 ///
 /// Only exists so that alternate clocks can be constructed in tests without
-/// touching the global state; the production TCP state machine reads
-/// [`now_ms`] directly and ignores this trait.
+/// touching the global state; production code reads [`now_ms`] directly and
+/// ignores this trait.
 pub trait Clock {
     fn now_ms(&self) -> u64;
 }

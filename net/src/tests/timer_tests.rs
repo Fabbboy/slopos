@@ -1,23 +1,35 @@
 //! Tests for the data-driven timer wheel.
 //!
-//! Covers: schedule + tick dispatch, cancellation, MAX_TIMERS_PER_TICK bound,
-//! advance_to catch-up, and edge cases (empty wheel, cancelled cleanup).
+//! Covers: schedule + `process_due` dispatch, cancellation, the
+//! `MAX_TIMERS_PER_PROCESS` bound, instant fast-forward across a large clock
+//! jump (the property that replaced the old capped `advance_to`), and edge
+//! cases (empty wheel, cancelled cleanup).
+//!
+//! The wheel reads "now" from the unified [`crate::clock`] source, so each test
+//! pins the mock clock to a known base, schedules relative to it, then advances
+//! the clock to cross deadlines — no per-tick stepping.
 
 use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
-use crate::timer::{FiredTimer, MAX_TIMERS_PER_TICK, NetTimerWheel, TimerKind, TimerToken};
+use crate::clock::MockClock;
+use crate::timer::{FiredTimer, MAX_TIMERS_PER_PROCESS, NetTimerWheel, TimerKind, TimerToken};
+
+/// Arbitrary non-zero base so the mock clock is active (zero = passthrough).
+const BASE_MS: u64 = 1_000;
 
 // =============================================================================
 // Helpers
 // =============================================================================
 
-/// Create a fresh wheel for each test (avoids shared state between tests).
+/// Pin the mock clock to [`BASE_MS`] and return a fresh heap-allocated wheel.
 ///
-/// Returns a heap-allocated wheel via `KBox::try_init(NetTimerWheel::init())`
-/// so the 18 KiB slot array never materialises on the caller's stack.
+/// Installing the clock first means every `schedule(delay_ms, …)` records an
+/// absolute deadline of `BASE_MS + delay_ms`, so tests advance the clock past
+/// `BASE_MS + delay_ms` to fire a timer.
 fn fresh_wheel() -> KBox<NetTimerWheel> {
+    MockClock::install_at(BASE_MS);
     KBox::try_init(NetTimerWheel::init()).expect("alloc")
 }
 
@@ -32,31 +44,34 @@ fn find_by_key(fired: &[FiredTimer], key: u32) -> Option<&FiredTimer> {
 }
 
 // =============================================================================
-// 2.T5 — Schedule a timer, advance past deadline, verify dispatch
+// Schedule + dispatch
 // =============================================================================
 
 pub fn test_timer_schedule_and_fire() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Schedule a timer 5 ticks from now.
+    // Deadline = BASE_MS + 5.
     let _token = wheel.schedule(5, TimerKind::ArpExpire, 42);
-
     assert_eq_test!(wheel.pending_count(), 1, "one timer pending after schedule");
 
-    // Advance 4 ticks — timer should NOT fire yet.
-    for _ in 0..4 {
-        let fired = wheel.tick();
-        assert_test!(fired.is_empty(), "timer should not fire before deadline");
-    }
+    // Clock at BASE_MS + 4 — not yet due.
+    MockClock::advance(4);
+    assert_test!(
+        wheel.process_due().is_empty(),
+        "timer should not fire before deadline"
+    );
+    assert_eq_test!(
+        wheel.pending_count(),
+        1,
+        "timer still pending before deadline"
+    );
 
-    assert_eq_test!(wheel.pending_count(), 1, "timer still pending at tick 4");
-
-    // Advance to tick 5 — timer should fire.
-    let fired = wheel.tick();
+    // Clock at BASE_MS + 5 — due.
+    MockClock::advance(1);
+    let fired = wheel.process_due();
     assert_eq_test!(fired.len(), 1, "exactly one timer fires at deadline");
     assert_eq_test!(fired[0].kind, TimerKind::ArpExpire, "correct TimerKind");
     assert_eq_test!(fired[0].key, 42, "correct key");
-
     assert_eq_test!(wheel.pending_count(), 0, "no timers pending after fire");
 
     pass!()
@@ -65,30 +80,30 @@ pub fn test_timer_schedule_and_fire() -> TestResult {
 pub fn test_timer_fires_correct_kind_and_key() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Schedule multiple timers at different delays.
     wheel.schedule(2, TimerKind::ArpRetransmit, 100);
     wheel.schedule(3, TimerKind::TcpRetransmit, 200);
     wheel.schedule(3, TimerKind::TcpTimeWait, 300);
-
     assert_eq_test!(wheel.pending_count(), 3, "three timers pending");
 
-    // Tick 1: nothing.
-    let fired = wheel.tick();
-    assert_test!(fired.is_empty(), "nothing at tick 1");
+    // BASE_MS + 1: nothing due.
+    MockClock::advance(1);
+    assert_test!(wheel.process_due().is_empty(), "nothing at +1ms");
 
-    // Tick 2: ArpRetransmit fires.
-    let fired = wheel.tick();
-    assert_eq_test!(fired.len(), 1, "one timer at tick 2");
+    // BASE_MS + 2: ArpRetransmit fires.
+    MockClock::advance(1);
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 1, "one timer at +2ms");
     assert_eq_test!(
         fired[0].kind,
         TimerKind::ArpRetransmit,
-        "ArpRetransmit at tick 2"
+        "ArpRetransmit at +2ms"
     );
-    assert_eq_test!(fired[0].key, 100, "key 100 at tick 2");
+    assert_eq_test!(fired[0].key, 100, "key 100 at +2ms");
 
-    // Tick 3: TcpRetransmit and TcpTimeWait fire.
-    let fired = wheel.tick();
-    assert_eq_test!(fired.len(), 2, "two timers at tick 3");
+    // BASE_MS + 3: TcpRetransmit and TcpTimeWait fire.
+    MockClock::advance(1);
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 2, "two timers at +3ms");
     assert_eq_test!(
         count_kind(&fired, TimerKind::TcpRetransmit),
         1,
@@ -101,74 +116,39 @@ pub fn test_timer_fires_correct_kind_and_key() -> TestResult {
     );
     assert_test!(find_by_key(&fired, 200).is_some(), "key 200 present");
     assert_test!(find_by_key(&fired, 300).is_some(), "key 300 present");
-
     assert_eq_test!(wheel.pending_count(), 0, "all timers consumed");
 
     pass!()
 }
 
-pub fn test_timer_delay_zero_fires_next_tick() -> TestResult {
+pub fn test_timer_delay_zero_fires_immediately() -> TestResult {
     let wheel = fresh_wheel();
 
-    // delay=0 means fire on the very next tick() call.
+    // delay=0 → deadline == now, so it is due on the very next process_due().
     wheel.schedule(0, TimerKind::TcpDelayedAck, 7);
-
-    // Current tick is 0.  delay=0 → deadline=0.  But tick() advances to 1
-    // first, so deadline 0 <= current 1.  The slot is (0 % 256) = 0.
-    // After tick() advances current_tick to 1, slot 1 is checked.
-    // Actually, deadline=0 lands in slot 0, and tick() advances to 1 and
-    // checks slot 1.  So let me think about this.
-    //
-    // Actually: current_tick starts at 0.  schedule(0, ...) sets deadline = 0 + 0 = 0,
-    // slot = 0 % 256 = 0.  tick() advances current_tick to 1 and checks slot 1 % 256 = 1.
-    // The timer is in slot 0, not slot 1.  So it won't fire on tick 1.
-    //
-    // It will fire when current_tick reaches 256 (next wrap around slot 0).
-    // That's... not ideal.  delay=0 should fire immediately.
-    //
-    // For delay=1 (fire on next tick): deadline = 0 + 1 = 1, slot = 1.
-    // tick() advances to 1, checks slot 1.  Fires correctly.
-    //
-    // So delay=0 with current_tick=0 means "fire at the same slot we're
-    // currently on", which is slot 0, but tick() moves PAST slot 0 to slot 1.
-    // The entry in slot 0 will fire on tick 256 when slot 0 is revisited.
-    //
-    // This is actually correct behavior for a timer wheel — delay=0 means
-    // "fire the next time slot 0 comes around", which takes 256 ticks.
-    //
-    // For practical purposes, use delay=1 for "fire ASAP".
-    // Let's adjust the test accordingly.
-
-    // Schedule with delay=1 for "fire on next tick".
-    let wheel2 = fresh_wheel();
-    wheel2.schedule(1, TimerKind::TcpDelayedAck, 8);
-
-    let fired = wheel2.tick();
-    assert_eq_test!(fired.len(), 1, "delay=1 fires on next tick");
-    assert_eq_test!(fired[0].key, 8, "correct key");
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 1, "delay=0 fires on next process_due");
+    assert_eq_test!(fired[0].key, 7, "correct key");
 
     pass!()
 }
 
 // =============================================================================
-// 2.T6 — Timer cancellation
+// Cancellation
 // =============================================================================
 
 pub fn test_timer_cancel_before_deadline() -> TestResult {
     let wheel = fresh_wheel();
 
     let token = wheel.schedule(5, TimerKind::ArpExpire, 42);
+    assert_test!(wheel.cancel(token), "cancel returns true for pending timer");
 
-    // Cancel before deadline.
-    let cancelled = wheel.cancel(token);
-    assert_test!(cancelled, "cancel returns true for pending timer");
-
-    // Advance past deadline — timer should NOT fire.
-    for _ in 0..10 {
-        let fired = wheel.tick();
-        assert_test!(fired.is_empty(), "cancelled timer does not fire");
-    }
-
+    // Advance well past the deadline — cancelled timer must not fire.
+    MockClock::advance(100);
+    assert_test!(
+        wheel.process_due().is_empty(),
+        "cancelled timer does not fire"
+    );
     assert_eq_test!(wheel.pending_count(), 0, "cancelled timer cleaned up");
 
     pass!()
@@ -178,25 +158,23 @@ pub fn test_timer_cancel_already_fired() -> TestResult {
     let wheel = fresh_wheel();
 
     let token = wheel.schedule(1, TimerKind::ArpRetransmit, 99);
+    MockClock::advance(1);
+    assert_eq_test!(wheel.process_due().len(), 1, "timer fires");
 
-    // Advance past deadline — fires.
-    let fired = wheel.tick();
-    assert_eq_test!(fired.len(), 1, "timer fires");
-
-    // Try to cancel after fire — should return false.
-    let cancelled = wheel.cancel(token);
-    assert_test!(!cancelled, "cancel returns false for already-fired timer");
+    assert_test!(
+        !wheel.cancel(token),
+        "cancel returns false for already-fired timer"
+    );
 
     pass!()
 }
 
 pub fn test_timer_cancel_invalid_token() -> TestResult {
     let wheel = fresh_wheel();
-
-    // Cancel with INVALID token — should return false.
-    let cancelled = wheel.cancel(TimerToken::INVALID);
-    assert_test!(!cancelled, "cancel(INVALID) returns false");
-
+    assert_test!(
+        !wheel.cancel(TimerToken::INVALID),
+        "cancel(INVALID) returns false"
+    );
     pass!()
 }
 
@@ -207,23 +185,14 @@ pub fn test_timer_cancel_one_of_many() -> TestResult {
     let _t2 = wheel.schedule(3, TimerKind::TcpRetransmit, 20);
     let t3 = wheel.schedule(3, TimerKind::TcpTimeWait, 30);
 
-    // Cancel t1 and t3, leaving t2.
     assert_test!(wheel.cancel(t1), "cancel t1");
     assert_test!(wheel.cancel(t3), "cancel t3");
 
-    // Advance to tick 3.
-    for _ in 0..3 {
-        let fired = wheel.tick();
-        if wheel.current_tick() < 3 {
-            // Ticks 1 and 2: nothing should fire (timers are at tick 3).
-            assert_test!(fired.is_empty(), "no fire before deadline");
-        } else {
-            // Tick 3: only t2 should fire.
-            assert_eq_test!(fired.len(), 1, "only one timer fires");
-            assert_eq_test!(fired[0].kind, TimerKind::TcpRetransmit, "correct kind");
-            assert_eq_test!(fired[0].key, 20, "correct key");
-        }
-    }
+    MockClock::advance(3);
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 1, "only one timer fires");
+    assert_eq_test!(fired[0].kind, TimerKind::TcpRetransmit, "correct kind");
+    assert_eq_test!(fired[0].key, 20, "correct key");
 
     pass!()
 }
@@ -232,7 +201,6 @@ pub fn test_timer_double_cancel() -> TestResult {
     let wheel = fresh_wheel();
 
     let token = wheel.schedule(5, TimerKind::ArpExpire, 42);
-
     assert_test!(wheel.cancel(token), "first cancel succeeds");
     assert_test!(!wheel.cancel(token), "second cancel returns false");
 
@@ -240,95 +208,62 @@ pub fn test_timer_double_cancel() -> TestResult {
 }
 
 // =============================================================================
-// 2.T7 — MAX_TIMERS_PER_TICK bound
+// MAX_TIMERS_PER_PROCESS bound
 // =============================================================================
 
-pub fn test_timer_max_per_tick_bound() -> TestResult {
+pub fn test_timer_max_per_process_bound() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Schedule 64 timers all for the same tick (delay=1).
+    // 64 timers all due at the same deadline.
     let count = 64usize;
     for i in 0..count {
         wheel.schedule(1, TimerKind::ArpExpire, i as u32);
     }
-
     assert_eq_test!(
         wheel.pending_count(),
         count,
-        "64 timers pending before tick"
+        "64 timers pending before fire"
     );
 
-    // First tick: only MAX_TIMERS_PER_TICK (32) should fire.
-    let fired = wheel.tick();
+    MockClock::advance(1);
+
+    // First call fires the bound; the rest are deferred to the next call.
+    let fired = wheel.process_due();
     assert_eq_test!(
         fired.len(),
-        MAX_TIMERS_PER_TICK,
-        "exactly MAX_TIMERS_PER_TICK fire on first tick"
+        MAX_TIMERS_PER_PROCESS,
+        "exactly MAX_TIMERS_PER_PROCESS fire on first call"
     );
-
-    // Remaining 32 are still pending (deferred).
-    let remaining = count - MAX_TIMERS_PER_TICK;
     assert_eq_test!(
         wheel.pending_count(),
-        remaining,
+        count - MAX_TIMERS_PER_PROCESS,
         "remaining timers deferred"
     );
 
-    // Second tick: the deferred timers should fire (their deadline_tick <= current_tick).
-    // But we need to advance again.  Since their deadline_tick was 1 and
-    // current_tick is now 2, and they're in slot 1, slot 2 is checked next.
-    // The deferred entries are still in slot 1.  They'll fire when slot 1
-    // comes around again (at tick 257).
-    //
-    // Actually, let's re-examine: all 64 timers have deadline_tick = 1 and are
-    // in slot 1.  tick() advances to 1, checks slot 1, fires 32, defers 32.
-    // Next tick() advances to 2, checks slot 2 — no entries there.
-    // The deferred 32 are still in slot 1.
-    //
-    // This means deferred entries don't fire on the very next tick — they fire
-    // when their slot comes around again (256 ticks later) or when we happen
-    // to check slot 1 again.
-    //
-    // For the test, we need to verify the bound behavior and that deferred
-    // entries eventually fire.  Let's advance 256 more ticks to wrap around.
-    //
-    // Actually, let me re-examine the implementation.  The deferred entries
-    // stay in their original slot.  When the wheel wraps around and checks
-    // that slot again, their deadline_tick (1) <= current_tick (257), so they
-    // fire.
-    //
-    // For a tighter test, let's just verify the bound on the first tick.
-
-    // Advance many ticks to eventually fire the deferred entries.
-    let mut total_fired = fired.len();
-    for _ in 0..256 {
-        let fired = wheel.tick();
-        total_fired += fired.len();
-    }
-
-    assert_eq_test!(total_fired, count, "all 64 timers eventually fire");
+    // No clock advance needed — they are already due.
+    let fired2 = wheel.process_due();
     assert_eq_test!(
-        wheel.pending_count(),
-        0,
-        "no timers remain after full cycle"
+        fired2.len(),
+        count - MAX_TIMERS_PER_PROCESS,
+        "deferred timers fire on the next call"
     );
+    assert_eq_test!(wheel.pending_count(), 0, "no timers remain");
 
     pass!()
 }
 
-pub fn test_timer_max_per_tick_bound_exact() -> TestResult {
+pub fn test_timer_max_per_process_bound_exact() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Schedule exactly MAX_TIMERS_PER_TICK timers for tick 1.
-    for i in 0..MAX_TIMERS_PER_TICK {
+    for i in 0..MAX_TIMERS_PER_PROCESS {
         wheel.schedule(1, TimerKind::TcpRetransmit, i as u32);
     }
 
-    // All should fire on one tick — no deferral needed.
-    let fired = wheel.tick();
+    MockClock::advance(1);
+    let fired = wheel.process_due();
     assert_eq_test!(
         fired.len(),
-        MAX_TIMERS_PER_TICK,
+        MAX_TIMERS_PER_PROCESS,
         "exactly MAX fires when count == MAX"
     );
     assert_eq_test!(wheel.pending_count(), 0, "no deferral when at bound");
@@ -337,91 +272,76 @@ pub fn test_timer_max_per_tick_bound_exact() -> TestResult {
 }
 
 // =============================================================================
-// Additional edge case tests
+// Edge cases + fast-forward
 // =============================================================================
 
-pub fn test_timer_empty_wheel_tick() -> TestResult {
+pub fn test_timer_empty_wheel_process() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Ticking an empty wheel should return empty, not panic.
-    for _ in 0..10 {
-        let fired = wheel.tick();
-        assert_test!(fired.is_empty(), "empty wheel produces no fired timers");
-    }
-
-    assert_eq_test!(wheel.current_tick(), 10, "current_tick advances");
+    MockClock::advance(100);
+    assert_test!(
+        wheel.process_due().is_empty(),
+        "empty wheel produces no fired timers"
+    );
 
     pass!()
 }
 
-pub fn test_timer_advance_to_catchup() -> TestResult {
+/// A single large clock jump fires every timer due by then — the property that
+/// the old capped/snapping `advance_to` got wrong (it dropped timers more than
+/// `NUM_SLOTS` ticks out).  Three timers at 3/5/7 ms all fire after one +10 ms
+/// jump.
+pub fn test_timer_fast_forward_fires_all() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Schedule timers at ticks 3, 5, 7.
     wheel.schedule(3, TimerKind::ArpExpire, 1);
     wheel.schedule(5, TimerKind::TcpRetransmit, 2);
     wheel.schedule(7, TimerKind::TcpTimeWait, 3);
 
-    // advance_to(10) should catch up and fire all three.
-    let fired = wheel.advance_to(10);
-    assert_eq_test!(fired.len(), 3, "all three timers fire during catch-up");
-    assert_eq_test!(wheel.current_tick(), 10, "current_tick advances to target");
+    MockClock::advance(10);
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 3, "all three timers fire after one big jump");
+    assert_eq_test!(wheel.pending_count(), 0, "wheel drained");
 
     pass!()
 }
 
-pub fn test_timer_advance_to_noop() -> TestResult {
+/// Regression for the deleted `advance_to` snap-drop bug: a deadline far beyond
+/// any former 256-tick window must still fire after one jump.
+pub fn test_timer_large_delay_not_dropped() -> TestResult {
     let wheel = fresh_wheel();
 
-    // advance_to(0) when current_tick is 0 — nothing to do.
-    let fired = wheel.advance_to(0);
-    assert_test!(fired.is_empty(), "advance_to(0) is a no-op");
-    assert_eq_test!(wheel.current_tick(), 0, "tick unchanged");
-
-    pass!()
-}
-
-pub fn test_timer_long_delay() -> TestResult {
-    let wheel = fresh_wheel();
-
-    // Schedule a timer 500 ticks from now (> 256 slots, requires wrap).
-    wheel.schedule(500, TimerKind::ReassemblyTimeout, 77);
-
-    // It should be in slot (500 % 256) = 244.
+    // 5000 ms — well past the old 256-"tick" catch-up cap.
+    wheel.schedule(5000, TimerKind::ReassemblyTimeout, 77);
     assert_eq_test!(wheel.pending_count(), 1, "timer is pending");
 
-    // Advance 499 ticks — should not fire.
-    let fired = wheel.advance_to(499);
-    // The timer fires when current_tick reaches 500, at slot 244.
-    // But advance_to only processes up to NUM_SLOTS (256) ticks at once.
-    // After advance_to(499), current_tick = 256 (capped), then the remaining
-    // ticks are not processed yet.
-    // Actually, advance_to caps at NUM_SLOTS per call.  So advance_to(499)
-    // processes 256 ticks, and current_tick becomes 256.
+    MockClock::advance(4999);
+    assert_test!(wheel.process_due().is_empty(), "not due 1 ms early");
 
-    // Let's advance further.
-    let fired2 = wheel.advance_to(500);
-    let total: usize = fired.len() + fired2.len();
-    assert_eq_test!(total, 1, "long-delay timer fires at correct tick");
-
+    MockClock::advance(1);
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 1, "large-delay timer fires at its deadline");
+    assert_eq_test!(fired[0].key, 77, "correct key");
     assert_eq_test!(wheel.pending_count(), 0, "timer consumed");
 
     pass!()
 }
 
-pub fn test_timer_multiple_schedule_same_slot() -> TestResult {
+pub fn test_timer_multiple_same_deadline() -> TestResult {
     let wheel = fresh_wheel();
 
-    // Schedule 5 timers for the same tick.
     for i in 0..5 {
         wheel.schedule(10, TimerKind::TcpKeepalive, i);
     }
+    assert_eq_test!(
+        wheel.pending_count(),
+        5,
+        "5 timers pending at same deadline"
+    );
 
-    assert_eq_test!(wheel.pending_count(), 5, "5 timers pending in same slot");
-
-    // Advance to tick 10.
-    let fired = wheel.advance_to(10);
-    assert_eq_test!(fired.len(), 5, "all 5 fire at the same tick");
+    MockClock::advance(10);
+    let fired = wheel.process_due();
+    assert_eq_test!(fired.len(), 5, "all 5 fire at the same deadline");
 
     pass!()
 }
@@ -432,7 +352,6 @@ pub fn test_timer_pending_count_with_cancels() -> TestResult {
     let t1 = wheel.schedule(5, TimerKind::ArpExpire, 1);
     let _t2 = wheel.schedule(5, TimerKind::ArpRetransmit, 2);
     let t3 = wheel.schedule(5, TimerKind::TcpTimeWait, 3);
-
     assert_eq_test!(wheel.pending_count(), 3, "3 pending");
 
     wheel.cancel(t1);
@@ -448,23 +367,21 @@ pub fn test_timer_pending_count_with_cancels() -> TestResult {
 // Test suite registration
 // =============================================================================
 
-// 2.T5 — Schedule + tick dispatch
 slopos_testing::stest!(name = test_timer_schedule_and_fire, suite = timer);
 slopos_testing::stest!(name = test_timer_fires_correct_kind_and_key, suite = timer);
-slopos_testing::stest!(name = test_timer_delay_zero_fires_next_tick, suite = timer);
-// 2.T6 — Cancellation
+slopos_testing::stest!(
+    name = test_timer_delay_zero_fires_immediately,
+    suite = timer
+);
 slopos_testing::stest!(name = test_timer_cancel_before_deadline, suite = timer);
 slopos_testing::stest!(name = test_timer_cancel_already_fired, suite = timer);
 slopos_testing::stest!(name = test_timer_cancel_invalid_token, suite = timer);
 slopos_testing::stest!(name = test_timer_cancel_one_of_many, suite = timer);
 slopos_testing::stest!(name = test_timer_double_cancel, suite = timer);
-// 2.T7 — MAX_TIMERS_PER_TICK bound
-slopos_testing::stest!(name = test_timer_max_per_tick_bound, suite = timer);
-slopos_testing::stest!(name = test_timer_max_per_tick_bound_exact, suite = timer);
-// Edge cases
-slopos_testing::stest!(name = test_timer_empty_wheel_tick, suite = timer);
-slopos_testing::stest!(name = test_timer_advance_to_catchup, suite = timer);
-slopos_testing::stest!(name = test_timer_advance_to_noop, suite = timer);
-slopos_testing::stest!(name = test_timer_long_delay, suite = timer);
-slopos_testing::stest!(name = test_timer_multiple_schedule_same_slot, suite = timer);
+slopos_testing::stest!(name = test_timer_max_per_process_bound, suite = timer);
+slopos_testing::stest!(name = test_timer_max_per_process_bound_exact, suite = timer);
+slopos_testing::stest!(name = test_timer_empty_wheel_process, suite = timer);
+slopos_testing::stest!(name = test_timer_fast_forward_fires_all, suite = timer);
+slopos_testing::stest!(name = test_timer_large_delay_not_dropped, suite = timer);
+slopos_testing::stest!(name = test_timer_multiple_same_deadline, suite = timer);
 slopos_testing::stest!(name = test_timer_pending_count_with_cancels, suite = timer);

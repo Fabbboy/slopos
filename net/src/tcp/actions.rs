@@ -197,7 +197,7 @@ pub enum TimerOp {
     Schedule {
         kind: TimerKind,
         key: u32,
-        delay_ticks: u64,
+        delay_ms: u64,
     },
     Cancel {
         token: TimerToken,

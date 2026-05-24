@@ -9,8 +9,20 @@ use crate::tests::tcp_common::reset_all as reset;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind};
 use crate::with_data_state;
 
-const MAX_IDLE_WAIT_TICKS: u64 = 900_000;
-const MAX_INTERVAL_WAIT_TICKS: u64 = 20_000;
+// Keepalive periods (mirrors the private production constants in tcp/mod.rs).
+// Advancing the unified mock clock by just past a period crosses the next
+// keepalive deadline so the timer wheel fires it in a single `process_due()`.
+const KEEPALIVE_IDLE_MS: u64 = 7_200 * 1_000;
+const KEEPALIVE_INTERVAL_MS: u64 = 75 * 1_000;
+const IDLE_ADVANCE_MS: u64 = KEEPALIVE_IDLE_MS + 1;
+const INTERVAL_ADVANCE_MS: u64 = KEEPALIVE_INTERVAL_MS + 1;
+
+/// Start each keepalive test on the mock clock so every keepalive deadline is
+/// expressed in mock time and a later `MockClock::advance` can cross it.
+fn keepalive_setup() {
+    reset();
+    crate::clock::MockClock::install_at(1);
+}
 
 fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, ConnId), &'static str> {
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0);
@@ -62,22 +74,25 @@ fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, ConnId), &'sta
     Ok((sock, tcp_id))
 }
 
+/// Advance the unified clock by `advance_ms`, fire every now-due timer, and
+/// return this connection's keepalive outcome if one fired: `Some(Some(seg))`
+/// for a probe, `Some(None)` if the connection was released, `None` if no
+/// keepalive for this connection was due.
 fn dispatch_next_keepalive_for_conn(
     tcp_id: ConnId,
-    max_ticks: u64,
+    advance_ms: u64,
 ) -> Option<Option<TcpOutSegment>> {
     let key = tcp_id.0;
-    for _ in 0..max_ticks {
-        let fired = NET_TIMER_WHEEL.tick();
-        for timer in fired {
-            if timer.kind != TimerKind::TcpKeepalive {
-                continue;
-            }
+    crate::clock::MockClock::advance(advance_ms);
+    let fired = NET_TIMER_WHEEL.process_due();
+    for timer in fired {
+        if timer.kind != TimerKind::TcpKeepalive {
+            continue;
+        }
 
-            let probe = tcp::on_keepalive(timer.key);
-            if timer.key == key {
-                return Some(probe);
-            }
+        let probe = tcp::on_keepalive(timer.key);
+        if timer.key == key {
+            return Some(probe);
         }
     }
 
@@ -107,7 +122,7 @@ fn inject_inbound_data(tcp_id: ConnId, payload: &[u8]) {
 }
 
 pub fn test_keepalive_fires_after_idle() -> TestResult {
-    reset();
+    keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
@@ -124,7 +139,7 @@ pub fn test_keepalive_fires_after_idle() -> TestResult {
         assert_eq_test!(d.keepalive_probes_sent, 0, "no probes before idle expiry");
     });
 
-    let fired = dispatch_next_keepalive_for_conn(tcp_id, MAX_IDLE_WAIT_TICKS);
+    let fired = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
     assert_test!(fired.is_some(), "keepalive timer should fire after idle");
     assert_test!(
         fired.unwrap().is_some(),
@@ -147,14 +162,14 @@ pub fn test_keepalive_fires_after_idle() -> TestResult {
 }
 
 pub fn test_keepalive_reset_on_data() -> TestResult {
-    reset();
+    keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
         Err(e) => return fail!("{}", e),
     };
 
-    let first_fire = dispatch_next_keepalive_for_conn(tcp_id, MAX_IDLE_WAIT_TICKS);
+    let first_fire = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
     assert_test!(first_fire.is_some(), "first idle keepalive should fire");
     assert_test!(first_fire.unwrap().is_some(), "first keepalive emits probe");
     with_data_state!(tcp_id, |d| {
@@ -178,13 +193,13 @@ pub fn test_keepalive_reset_on_data() -> TestResult {
         );
     });
 
-    let old_deadline_fire = dispatch_next_keepalive_for_conn(tcp_id, MAX_INTERVAL_WAIT_TICKS);
+    let old_deadline_fire = dispatch_next_keepalive_for_conn(tcp_id, INTERVAL_ADVANCE_MS);
     assert_test!(
         old_deadline_fire.is_none(),
         "old keepalive deadline should not fire after reset"
     );
 
-    let new_deadline_fire = dispatch_next_keepalive_for_conn(tcp_id, MAX_IDLE_WAIT_TICKS);
+    let new_deadline_fire = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
     assert_test!(
         new_deadline_fire.is_some(),
         "keepalive should fire again after new idle period"
@@ -205,7 +220,7 @@ pub fn test_keepalive_reset_on_data() -> TestResult {
 }
 
 pub fn test_keepalive_max_probes_rst() -> TestResult {
-    reset();
+    keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
@@ -217,9 +232,9 @@ pub fn test_keepalive_max_probes_rst() -> TestResult {
 
     for _ in 0..12 {
         let max_wait = if keepalive_fires == 0 {
-            MAX_IDLE_WAIT_TICKS
+            IDLE_ADVANCE_MS
         } else {
-            MAX_INTERVAL_WAIT_TICKS
+            INTERVAL_ADVANCE_MS
         };
 
         let fired = match dispatch_next_keepalive_for_conn(tcp_id, max_wait) {
@@ -256,7 +271,7 @@ pub fn test_keepalive_max_probes_rst() -> TestResult {
 }
 
 pub fn test_keepalive_disabled_no_timer() -> TestResult {
-    reset();
+    keepalive_setup();
 
     let (_sock, tcp_id) = match connect_and_establish(false) {
         Ok(v) => v,
@@ -280,7 +295,7 @@ pub fn test_keepalive_disabled_no_timer() -> TestResult {
 }
 
 pub fn test_keepalive_cancelled_on_close() -> TestResult {
-    reset();
+    keepalive_setup();
 
     let (sock, tcp_id) = match connect_and_establish(true) {
         Ok(v) => v,
@@ -296,7 +311,7 @@ pub fn test_keepalive_cancelled_on_close() -> TestResult {
 
     assert_eq_test!(socket::socket_close(sock), 0, "socket_close succeeds");
 
-    let fired_after_close = dispatch_next_keepalive_for_conn(tcp_id, MAX_IDLE_WAIT_TICKS);
+    let fired_after_close = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
     assert_test!(
         fired_after_close.is_none(),
         "no keepalive dispatch occurs after close cancels timer"

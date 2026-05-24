@@ -12,7 +12,7 @@ pub mod actions;
 pub mod buffer;
 pub mod challenge_ack;
 pub mod checksum;
-pub mod clock;
+pub use crate::clock;
 pub mod cong;
 pub mod header;
 pub mod isn;
@@ -74,9 +74,10 @@ pub const MAX_RETRANSMITS: u8 = 8;
 /// FIN_WAIT_2 timeout in milliseconds (60 s, matches Linux `tcp_fin_timeout`).
 pub const FIN_WAIT2_TIMEOUT_MS: u64 = 60_000;
 
-const TICKS_PER_SEC: u64 = 100;
-const TCP_KEEPALIVE_IDLE_TICKS: u64 = 7_200 * TICKS_PER_SEC;
-const TCP_KEEPALIVE_INTERVAL_TICKS: u64 = 75 * TICKS_PER_SEC;
+/// Keepalive idle period before the first probe (RFC 1122 default 2 h).
+const TCP_KEEPALIVE_IDLE_MS: u64 = 7_200 * 1_000;
+/// Interval between keepalive probes once probing has started (75 s).
+const TCP_KEEPALIVE_INTERVAL_MS: u64 = 75 * 1_000;
 const TCP_KEEPALIVE_PROBES_MAX: u8 = 9;
 
 // Re-export ISN generator (used internally).
@@ -218,9 +219,9 @@ fn input_process_established(
                     TimerOp::Schedule {
                         kind,
                         key: _,
-                        delay_ticks,
+                        delay_ms,
                     } => {
-                        let token = NET_TIMER_WHEEL.schedule(delay_ticks, kind, id.0);
+                        let token = NET_TIMER_WHEEL.schedule(delay_ms, kind, id.0);
                         match kind {
                             TimerKind::TcpRetransmit => {
                                 set_retransmit_token(pcb, Some(token));
@@ -879,9 +880,8 @@ pub fn poll_transmit(
                     if bufs.send.rto_deadline_ms == 0 {
                         bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
                         if d.retransmit_token.is_none() {
-                            let delay_ticks = (rto_ms / 10).max(1);
                             let token = NET_TIMER_WHEEL.schedule(
-                                delay_ticks,
+                                rto_ms.max(1),
                                 TimerKind::TcpRetransmit,
                                 id.0,
                             );
@@ -931,8 +931,7 @@ pub fn poll_transmit(
         if bufs.send.rto_deadline_ms == 0 {
             bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
             if d.retransmit_token.is_none() {
-                let delay_ticks = (rto_ms / 10).max(1);
-                let token = NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, id.0);
+                let token = NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, id.0);
                 d.retransmit_token = Some(token);
             }
         }
@@ -988,11 +987,10 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
         d.rtt.back_off();
 
         let rto_ms = d.rtt.rto_ms() as u64;
-        let delay_ticks = (rto_ms / 10).max(1);
-        let token = NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, conn_id);
+        let token = NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, conn_id);
         d.retransmit_token = Some(token);
 
-        let now_ms = slopos_kernel_services::clock::uptime_ms();
+        let now_ms = clock::now_ms();
         bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
         pcb.assert_invariants();
         klog_debug!("tcp: retransmit fired id={} rto_ms={}", conn_id, rto_ms);
@@ -1039,11 +1037,8 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
         probe_seg.timestamp = d.ts_option(clock::now_ms());
 
         d.keepalive_probes_sent = d.keepalive_probes_sent.saturating_add(1);
-        let token = NET_TIMER_WHEEL.schedule(
-            TCP_KEEPALIVE_INTERVAL_TICKS,
-            TimerKind::TcpKeepalive,
-            conn_id,
-        );
+        let token =
+            NET_TIMER_WHEEL.schedule(TCP_KEEPALIVE_INTERVAL_MS, TimerKind::TcpKeepalive, conn_id);
         d.keepalive_token = Some(token);
         Outcome::Probe(probe_seg)
     });

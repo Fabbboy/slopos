@@ -604,24 +604,144 @@ pub fn dns_cache_flush() {
 // Resolver
 // =============================================================================
 
+/// I/O-free DNS resolver state machine.
+///
+/// `DnsResolver` owns the retry/timeout/parse orchestration that used to be
+/// welded into [`dns_resolve`] alongside the transport calls.  A driver pumps
+/// it: each [`step`](DnsResolver::step) reports the outcome of the previous
+/// action ([`DnsOutcome`]) and gets back the next action ([`DnsStep`]).  This
+/// makes the bug-prone parts — retry counting, error precedence, response
+/// parsing, ID matching — testable by feeding canned reply bytes, with no
+/// transport, NAPI kthread, scheduler, or clock involved.
+pub struct DnsResolver {
+    /// Query rounds still allowed (including the one currently outstanding).
+    attempts_remaining: usize,
+    /// DNS transaction ID of the outstanding query.
+    cur_id: u16,
+    /// Most recent transient failure, returned if all attempts are exhausted.
+    last_error: DnsResolveError,
+    /// Pre-built query packet; only the 2-byte ID changes between attempts.
+    query_buf: slopos_ostd::KVec<u8>,
+    /// Length of the valid query in `query_buf`.
+    query_len: usize,
+}
+
+/// Outcome of the previous [`DnsStep::Query`], reported back to
+/// [`DnsResolver::step`].
+pub enum DnsOutcome<'a> {
+    /// No prior attempt — kick off the first query.
+    Start,
+    /// The query could not be transmitted.
+    TransmitFailed,
+    /// No reply arrived within the timeout.
+    Timeout,
+    /// A reply was received; these are its bytes.
+    Reply(&'a [u8]),
+}
+
+/// The next action the driver should take on behalf of a [`DnsResolver`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsStep {
+    /// Transmit the current query (see [`DnsResolver::query_bytes`]) and wait up
+    /// to `timeout_ms` for a reply, then call `step` again with the outcome.
+    Query { timeout_ms: u32 },
+    /// Resolution succeeded.  The driver should cache `(addr, ttl)`.
+    Resolved { addr: [u8; 4], ttl: u32 },
+    /// Resolution failed permanently.
+    Failed(DnsResolveError),
+}
+
+impl DnsResolver {
+    /// Build a resolver for `hostname`, allocating and encoding the first
+    /// query.  Returns [`DnsResolveError::InvalidHostname`] if the name cannot
+    /// be encoded, or [`DnsResolveError::NoDnsServer`] on allocation failure
+    /// (matching the legacy error mapping).
+    pub fn new(hostname: &[u8]) -> Result<Self, DnsResolveError> {
+        let mut query_buf =
+            slopos_ostd::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
+        let cur_id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
+        let query_len = dns_build_query(cur_id, hostname, DnsType::A, query_buf.as_mut())
+            .ok_or(DnsResolveError::InvalidHostname)?;
+        Ok(Self {
+            attempts_remaining: DNS_MAX_RETRIES,
+            cur_id,
+            last_error: DnsResolveError::Timeout,
+            query_buf,
+            query_len,
+        })
+    }
+
+    /// The wire bytes of the current query (transaction ID already patched in).
+    pub fn query_bytes(&self) -> &[u8] {
+        &self.query_buf[..self.query_len]
+    }
+
+    /// The transaction ID of the current query (used to derive the source port).
+    pub fn query_id(&self) -> u16 {
+        self.cur_id
+    }
+
+    /// Patch a fresh transaction ID into the pre-built query for a retry.
+    fn refresh_id(&mut self) {
+        self.cur_id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
+        self.query_buf.as_mut()[0..2].copy_from_slice(&self.cur_id.to_be_bytes());
+    }
+
+    /// Advance the state machine given the outcome of the previous action.
+    pub fn step(&mut self, outcome: DnsOutcome<'_>) -> DnsStep {
+        match outcome {
+            DnsOutcome::Start => {
+                // First query was built by `new()`; transmit it as-is.
+                return DnsStep::Query {
+                    timeout_ms: DNS_TIMEOUT_MS,
+                };
+            }
+            DnsOutcome::Reply(bytes) => {
+                if let Some(resp) = dns_parse_response(bytes, self.cur_id) {
+                    return DnsStep::Resolved {
+                        addr: resp.addr,
+                        ttl: resp.ttl,
+                    };
+                }
+                self.last_error = DnsResolveError::ParseFailed;
+            }
+            DnsOutcome::Timeout => self.last_error = DnsResolveError::Timeout,
+            DnsOutcome::TransmitFailed => self.last_error = DnsResolveError::TransmitFailed,
+        }
+
+        // The outstanding attempt concluded without success.
+        self.attempts_remaining -= 1;
+        if self.attempts_remaining == 0 {
+            return DnsStep::Failed(self.last_error);
+        }
+        self.refresh_id();
+        DnsStep::Query {
+            timeout_ms: DNS_TIMEOUT_MS,
+        }
+    }
+}
+
 /// Resolve a hostname to an IPv4 address using the kernel's DNS client.
 ///
-/// 1. Checks the DNS cache
-/// 2. Sends a DNS query to the DHCP-provided DNS server
-/// 3. Waits for a response with timeout
-/// 4. Parses and caches the result
-/// 5. Retries up to [`DNS_MAX_RETRIES`] times
+/// The retry/timeout/parse/cache orchestration lives in the I/O-free
+/// [`DnsResolver`]; this function is the thin transport driver that pumps it
+/// against the live NIC service.
 ///
-/// Returns a structured [`DnsResolveError`] on failure so callers can
-/// distinguish transient issues (timeout, transmit failure) from
-/// permanent ones (invalid hostname, no server).
+/// 1. Short-circuits IP literals and cache hits.
+/// 2. Sends the resolver's query to the DHCP-provided DNS server.
+/// 3. Waits for a response with timeout, feeding outcomes back to the resolver.
+/// 4. Caches and returns the first successful answer.
+///
+/// Returns a structured [`DnsResolveError`] so callers can distinguish
+/// transient issues (timeout, transmit failure) from permanent ones (invalid
+/// hostname, no server).
 pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
-    // Shortcut: if it looks like an IP literal, parse it
+    // Shortcut: if it looks like an IP literal, parse it.
     if let Some(addr) = parse_ip_literal(hostname) {
         return Ok(addr);
     }
 
-    // Check cache first
+    // Check cache first.
     if let Some(addr) = dns_cache_lookup(hostname) {
         klog_debug!(
             "dns: cache hit for {:?} -> {}.{}.{}.{}",
@@ -634,7 +754,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
         return Ok(addr);
     }
 
-    // Get DNS server IP from DHCP lease
+    // Get DNS server IP from DHCP lease.
     let dns_server = crate::net_driver_service::net_driver()
         .and_then(|d| (d.virtio_net_dns)())
         .ok_or(DnsResolveError::NoDnsServer)?;
@@ -643,104 +763,90 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
         return Err(DnsResolveError::NoDnsServer);
     }
 
-    // Get our IP for source address
+    // Get our IP for the source address.
     let src_ip = crate::netstack::NET_STACK
         .first_ipv4()
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
 
-    let mut last_error = DnsResolveError::Timeout;
-
-    // Allocate both buffers once, reuse across retries. 512 + DNS_MAX_RESPONSE
-    // on the stack would push this function past the stack-safety gate.
-    let mut query_buf =
-        slopos_ostd::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
+    // Both buffers live on the heap (KVec): 512 + DNS_MAX_RESPONSE on the stack
+    // would push this function past the stack-safety gate.
+    let mut resolver = DnsResolver::new(hostname)?;
     let mut resp_buf = slopos_ostd::KVec::<u8>::zeroed(DNS_MAX_RESPONSE)
         .map_err(|_| DnsResolveError::NoDnsServer)?;
+    let mut outcome = DnsOutcome::Start;
 
-    for attempt in 0..DNS_MAX_RETRIES {
-        let id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
+    loop {
+        match resolver.step(outcome) {
+            DnsStep::Resolved { addr, ttl } => {
+                klog_debug!(
+                    "dns: resolved {:?} -> {}.{}.{}.{} (ttl={}s)",
+                    core::str::from_utf8(hostname).unwrap_or("?"),
+                    addr[0],
+                    addr[1],
+                    addr[2],
+                    addr[3],
+                    ttl
+                );
+                dns_cache_insert(hostname, addr, ttl);
+                return Ok(addr);
+            }
+            DnsStep::Failed(err) => return Err(err),
+            DnsStep::Query { timeout_ms } => {
+                let src_port = 49152 + (resolver.query_id() % 16384);
 
-        // Build query — hostname encoding failure is permanent, no retry.
-        // Zero between attempts so stale bytes from the prior iteration
-        // don't leak into a new query.
-        query_buf.as_mut().fill(0);
-        let query_len = dns_build_query(id, hostname, DnsType::A, query_buf.as_mut())
-            .ok_or(DnsResolveError::InvalidHostname)?;
+                // Clear any stale RX data.
+                if let Some(d) = crate::net_driver_service::net_driver() {
+                    (d.dns_rx_clear)();
+                }
 
-        // Use an ephemeral source port
-        let src_port = 49152 + (id % 16384);
+                let transmitted = crate::net_driver_service::net_driver()
+                    .map(|d| {
+                        (d.transmit_udp_packet)(
+                            src_ip,
+                            dns_server,
+                            src_port,
+                            DNS_PORT,
+                            resolver.query_bytes(),
+                        )
+                    })
+                    .unwrap_or(false);
+                if !transmitted {
+                    klog_debug!("dns: transmit failed");
+                    outcome = DnsOutcome::TransmitFailed;
+                    continue;
+                }
 
-        // Clear any stale RX data
-        if let Some(d) = crate::net_driver_service::net_driver() {
-            (d.dns_rx_clear)();
+                let got_response = crate::net_driver_service::net_driver()
+                    .map(|d| (d.dns_rx_wait)(timeout_ms))
+                    .unwrap_or(false);
+                if !got_response {
+                    klog_debug!("dns: timeout");
+                    outcome = DnsOutcome::Timeout;
+                    continue;
+                }
+
+                resp_buf.as_mut().fill(0);
+                let resp_len = crate::net_driver_service::net_driver()
+                    .map(|d| (d.dns_rx_read)(resp_buf.as_mut()))
+                    .unwrap_or(0);
+                if resp_len == 0 {
+                    klog_debug!("dns: empty response");
+                    outcome = DnsOutcome::Timeout;
+                    continue;
+                }
+
+                klog_debug!(
+                    "dns: response {} bytes, first 32: {:02x?}",
+                    resp_len,
+                    &resp_buf[..resp_len.min(32)]
+                );
+                // The borrow of `resp_buf` ends when `step` consumes `outcome`
+                // at the top of the next iteration, before it is reused.
+                outcome = DnsOutcome::Reply(&resp_buf[..resp_len]);
+            }
         }
-
-        // Send query
-        let transmitted = crate::net_driver_service::net_driver()
-            .map(|d| {
-                (d.transmit_udp_packet)(
-                    src_ip,
-                    dns_server,
-                    src_port,
-                    DNS_PORT,
-                    &query_buf[..query_len],
-                )
-            })
-            .unwrap_or(false);
-        if !transmitted {
-            klog_debug!("dns: transmit failed (attempt {})", attempt);
-            last_error = DnsResolveError::TransmitFailed;
-            continue;
-        }
-
-        // Wait for response
-        let got_response = crate::net_driver_service::net_driver()
-            .map(|d| (d.dns_rx_wait)(DNS_TIMEOUT_MS))
-            .unwrap_or(false);
-        if !got_response {
-            klog_debug!("dns: timeout (attempt {})", attempt);
-            last_error = DnsResolveError::Timeout;
-            continue;
-        }
-
-        // Read response
-        resp_buf.as_mut().fill(0);
-        let resp_len = crate::net_driver_service::net_driver()
-            .map(|d| (d.dns_rx_read)(resp_buf.as_mut()))
-            .unwrap_or(0);
-        if resp_len == 0 {
-            klog_debug!("dns: empty response (attempt {})", attempt);
-            last_error = DnsResolveError::Timeout;
-            continue;
-        }
-
-        klog_debug!(
-            "dns: response {} bytes, first 32: {:02x?}",
-            resp_len,
-            &resp_buf[..resp_len.min(32)]
-        );
-
-        // Parse response
-        if let Some(response) = dns_parse_response(&resp_buf[..resp_len], id) {
-            klog_debug!(
-                "dns: resolved {:?} -> {}.{}.{}.{} (ttl={}s)",
-                core::str::from_utf8(hostname).unwrap_or("?"),
-                response.addr[0],
-                response.addr[1],
-                response.addr[2],
-                response.addr[3],
-                response.ttl
-            );
-            dns_cache_insert(hostname, response.addr, response.ttl);
-            return Ok(response.addr);
-        }
-
-        klog_debug!("dns: parse failed (attempt {})", attempt);
-        last_error = DnsResolveError::ParseFailed;
     }
-
-    Err(last_error)
 }
 
 /// Try to parse a dotted-decimal IPv4 literal (e.g., `"10.0.2.3"`).

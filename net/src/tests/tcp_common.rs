@@ -474,7 +474,7 @@ pub fn tick_ms(ms: u64) -> usize {
 pub fn dispatch_fired_timers() -> usize {
     use crate::timer::TimerKind;
 
-    let fired = NET_TIMER_WHEEL.tick();
+    let fired = NET_TIMER_WHEEL.process_due();
     let mut count = 0usize;
     for timer in fired {
         match timer.kind {

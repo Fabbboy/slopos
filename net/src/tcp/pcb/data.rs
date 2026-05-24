@@ -380,11 +380,10 @@ impl DataState {
                 // The slot index is filled by the glue layer; we use
                 // a sentinel (0) and the glue substitutes the real
                 // value.  See `tcp::input` in the C.1 cutover.
-                let delay_ticks = ((TIME_WAIT_MS as u64) / 10).max(1);
                 actions.push_timer(TimerOp::Schedule {
                     kind: TimerKind::TcpTimeWait,
                     key: 0,
-                    delay_ticks,
+                    delay_ms: TIME_WAIT_MS,
                 });
                 let _old = mem::replace(&mut pcb.state, PcbState::TimeWait(tw));
             }
@@ -510,11 +509,11 @@ impl DataState {
                 actions.push_timer(TimerOp::Cancel { token });
             }
             if !self.sendmap.is_empty() {
-                let delay_ticks = (self.rtt.rto_ms() as u64 / 10).max(1);
+                let delay_ms = (self.rtt.rto_ms() as u64).max(1);
                 actions.push_timer(TimerOp::Schedule {
                     kind: TimerKind::TcpRetransmit,
                     key: 0,
-                    delay_ticks,
+                    delay_ms,
                 });
             }
             actions.notify |= SocketNotify::SEND_WAKE;
@@ -696,11 +695,10 @@ impl DataState {
                             data.close_phase = ClosePhase::FinWait2;
                             // Schedule FIN_WAIT_2 timeout to release
                             // stale half-closed connections.
-                            let delay_ticks = (super::super::FIN_WAIT2_TIMEOUT_MS / 10).max(1);
                             actions.push_timer(TimerOp::Schedule {
                                 kind: TimerKind::TcpFinWait2,
                                 key: 0,
-                                delay_ticks,
+                                delay_ms: super::super::FIN_WAIT2_TIMEOUT_MS,
                             });
                         }
                     }
@@ -789,23 +787,23 @@ impl DataState {
     // -------------------------------------------------------------------------
 
     /// If keepalive is enabled and no timer is active, return the idle
-    /// tick count to schedule.  Caller is responsible for calling
+    /// delay in milliseconds to schedule.  Caller is responsible for calling
     /// `NET_TIMER_WHEEL.schedule()` with this value.
     pub fn schedule_initial_keepalive(&mut self, keepalive_enabled: bool) -> Option<u64> {
         if keepalive_enabled && self.keepalive_token.is_none() {
-            Some(super::super::TCP_KEEPALIVE_IDLE_TICKS)
+            Some(super::super::TCP_KEEPALIVE_IDLE_MS)
         } else {
             None
         }
     }
 
     /// Reset the keepalive timer on data activity.  Returns the old
-    /// token to cancel and the idle tick count to reschedule, or `None`
-    /// if keepalive was not active.
+    /// token to cancel and the idle delay in milliseconds to reschedule, or
+    /// `None` if keepalive was not active.
     pub fn reset_keepalive_on_activity(&mut self) -> Option<(TimerToken, u64)> {
         if let Some(token) = self.keepalive_token.take() {
             self.keepalive_probes_sent = 0;
-            Some((token, super::super::TCP_KEEPALIVE_IDLE_TICKS))
+            Some((token, super::super::TCP_KEEPALIVE_IDLE_MS))
         } else {
             None
         }
