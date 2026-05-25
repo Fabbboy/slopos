@@ -2,8 +2,6 @@
 .cache/
 builddir/
 third_party/*
-!third_party/limine
-!third_party/limine/
 EFI/
 boot_fat/
 test_efi_dir/
