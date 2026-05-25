@@ -9,7 +9,6 @@ use slopos_mm::user_copy::{
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
-use slopos_ostd::klog_info;
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
 
@@ -155,24 +154,12 @@ define_syscall!(syscall_bind
         }
         SocketFd::Inet(sock_idx) => {
             if addr_len < core::mem::size_of::<SockAddrIn>() {
-                klog_info!(
-                    "DIAG syscall_bind: addr_len={} < sizeof(SockAddrIn)={} -> EINVAL",
-                    addr_len,
-                    core::mem::size_of::<SockAddrIn>()
-                );
                 return Err(Errno::EINVAL);
             }
             let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
-            let rc = socket::socket_bind(sock_idx, sock_addr.addr, port);
-            klog_info!(
-                "DIAG syscall_bind: socket_bind rc={} (addr={:?}:{})",
-                rc,
-                sock_addr.addr,
-                port
-            );
-            rc_i32_to_unit(rc)
+            rc_i32_to_unit(socket::socket_bind(sock_idx, sock_addr.addr, port))
         }
     }
 });
@@ -283,24 +270,12 @@ define_syscall!(syscall_connect
         }
         SocketFd::Inet(sock_idx) => {
             if addr_len < core::mem::size_of::<SockAddrIn>() {
-                klog_info!(
-                    "DIAG syscall_connect: addr_len={} < sizeof(SockAddrIn)={} -> EINVAL",
-                    addr_len,
-                    core::mem::size_of::<SockAddrIn>()
-                );
                 return Err(Errno::EINVAL);
             }
             let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
-            let rc = socket::socket_connect(sock_idx, sock_addr.addr, port);
-            klog_info!(
-                "DIAG syscall_connect: socket_connect rc={} (dst={:?}:{})",
-                rc,
-                sock_addr.addr,
-                port
-            );
-            rc_i32_to_unit(rc)
+            rc_i32_to_unit(socket::socket_connect(sock_idx, sock_addr.addr, port))
         }
     }
 });
