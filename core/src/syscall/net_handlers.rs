@@ -166,14 +166,12 @@ define_syscall!(syscall_bind
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
             let rc = socket::socket_bind(sock_idx, sock_addr.addr, port);
-            if rc < 0 {
-                klog_info!(
-                    "DIAG syscall_bind: socket_bind rc={} (addr={:?}:{})",
-                    rc,
-                    sock_addr.addr,
-                    port
-                );
-            }
+            klog_info!(
+                "DIAG syscall_bind: socket_bind rc={} (addr={:?}:{})",
+                rc,
+                sock_addr.addr,
+                port
+            );
             rc_i32_to_unit(rc)
         }
     }
@@ -296,14 +294,12 @@ define_syscall!(syscall_connect
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
             let rc = socket::socket_connect(sock_idx, sock_addr.addr, port);
-            if rc < 0 {
-                klog_info!(
-                    "DIAG syscall_connect: socket_connect rc={} (dst={:?}:{})",
-                    rc,
-                    sock_addr.addr,
-                    port
-                );
-            }
+            klog_info!(
+                "DIAG syscall_connect: socket_connect rc={} (dst={:?}:{})",
+                rc,
+                sock_addr.addr,
+                port
+            );
             rc_i32_to_unit(rc)
         }
     }
