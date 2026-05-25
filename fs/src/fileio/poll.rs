@@ -1,6 +1,9 @@
 use core::ffi::c_int;
 
-use super::open_file_table::{get_open_file_mut, incref_open_file, release_open_file};
+use super::open_file_table::{
+    get_open_file_mut, incref_open_file, pack_open_file_token, release_open_file,
+    unpack_open_file_token,
+};
 use super::*;
 
 pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize {
@@ -11,8 +14,7 @@ pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize 
                 let Some(fd_entry) = get_fd_entry(inner, fd) else {
                     continue;
                 };
-                let Some(open_file) =
-                    get_open_file_mut(&mut state.open_files, fd_entry.open_file_idx)
+                let Some(open_file) = get_open_file_mut(&mut state.open_files, fd_entry.open_file)
                 else {
                     continue;
                 };
@@ -45,8 +47,7 @@ pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
                 let Some(fd_entry) = get_fd_entry(inner, fd) else {
                     continue;
                 };
-                let Some(open_file) =
-                    get_open_file_mut(&mut state.open_files, fd_entry.open_file_idx)
+                let Some(open_file) = get_open_file_mut(&mut state.open_files, fd_entry.open_file)
                 else {
                     continue;
                 };
@@ -72,9 +73,9 @@ pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollReg
         let Some(fd_entry) = get_fd_entry(inner, fd) else {
             return PollRegInfo::NONE;
         };
-        let open_file_idx = fd_entry.open_file_idx;
+        let open_file_handle = fd_entry.open_file;
         with_open_files(|state| {
-            let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_idx) else {
+            let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_handle) else {
                 return PollRegInfo::NONE;
             };
             let Some(ops) = open_file.ops else {
@@ -86,7 +87,7 @@ pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollReg
                 _ => false,
             };
             PollRegInfo {
-                open_file_idx,
+                open_file: open_file_handle,
                 registered,
             }
         })
@@ -99,7 +100,7 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
         return;
     }
     with_open_files(|state| {
-        let Some(open_file) = get_open_file_mut(&mut state.open_files, reg.open_file_idx) else {
+        let Some(open_file) = get_open_file_mut(&mut state.open_files, reg.open_file) else {
             return;
         };
         if let Some(ops) = open_file.ops {
@@ -118,19 +119,19 @@ pub fn file_poll_fused(
     let invalid = FusedPollResult {
         revents: POLLNVAL,
         registered: false,
-        open_file_idx: 0,
+        open_file_token: 0,
     };
     with_pid_slot(process_id, |inner| {
-        let ofi = match get_fd_entry(inner, fd) {
-            Some(fd_entry) => fd_entry.open_file_idx,
+        let open_file_handle = match get_fd_entry(inner, fd) {
+            Some(fd_entry) => fd_entry.open_file,
             None => return invalid,
         };
         with_open_files(|state| {
-            let result = match get_open_file_mut(&mut state.open_files, ofi) {
+            let result = match get_open_file_mut(&mut state.open_files, open_file_handle) {
                 Some(open_file) => match open_file.ops {
                     Some(ops) => {
                         let mut r = ops.poll_fused(open_file.handle, events);
-                        r.open_file_idx = ofi as u32;
+                        r.open_file_token = pack_open_file_token(open_file_handle);
                         r
                     }
                     None => invalid,
@@ -142,7 +143,7 @@ pub fn file_poll_fused(
             // a wait queue, preventing the open file from being freed if
             // a concurrent close drops the last FD-level reference.
             if result.registered {
-                incref_open_file(&mut state.open_files, ofi);
+                incref_open_file(&mut state.open_files, open_file_handle);
             }
             result
         })
@@ -153,12 +154,12 @@ pub fn file_poll_fused(
 /// Unregister from a wait queue after fused poll.
 pub fn file_poll_unfused(process_id: u32, fd: c_int) {
     let _ = with_pid_slot(process_id, |inner| {
-        let ofi = match get_fd_entry(inner, fd) {
-            Some(fd_entry) => fd_entry.open_file_idx,
+        let open_file_handle = match get_fd_entry(inner, fd) {
+            Some(fd_entry) => fd_entry.open_file,
             None => return,
         };
         with_open_files(|state| {
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, ofi) {
+            if let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_handle) {
                 if let Some(ops) = open_file.ops {
                     ops.poll_unwait(open_file.handle);
                 }
@@ -167,28 +168,29 @@ pub fn file_poll_unfused(process_id: u32, fd: c_int) {
     });
 }
 
-/// Unregister from a wait queue using the open-file-table index directly.
-pub fn file_poll_unfused_by_idx(open_file_idx: u32) {
+/// Unregister from a wait queue using the open-file token directly.
+pub fn file_poll_unfused_by_idx(open_file_token: u64) {
+    let open_file_handle = unpack_open_file_token(open_file_token);
     with_open_files(|state| {
-        let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_idx as u16) else {
+        let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_handle) else {
             return;
         };
         if let Some(ops) = open_file.ops {
             ops.poll_unwait(open_file.handle);
         }
         // Drop the extra reference that file_poll_fused() took.
-        release_open_file(&mut state.open_files, open_file_idx as u16);
+        release_open_file(&mut state.open_files, open_file_handle);
     });
 }
 
 pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
     with_pid_slot(process_id, |inner| {
-        let ofi = match get_fd_entry(inner, fd) {
-            Some(fd_entry) => fd_entry.open_file_idx,
+        let open_file_handle = match get_fd_entry(inner, fd) {
+            Some(fd_entry) => fd_entry.open_file,
             None => return POLLNVAL,
         };
         with_open_files(|state| {
-            get_open_file_mut(&mut state.open_files, ofi)
+            get_open_file_mut(&mut state.open_files, open_file_handle)
                 .and_then(|open_file| {
                     open_file
                         .ops

@@ -35,8 +35,9 @@ fn pipe_dup_reader(h: PipeHandle) -> Option<usize> {
     if h == PipeHandle::INVALID {
         return None;
     }
-    let mut slot = pipe::lock_slot(h)?;
-    slot.readers = slot.readers.saturating_add(1);
+    pipe::with_pipe_mut(h, |slot| {
+        slot.readers = slot.readers.saturating_add(1);
+    })?;
     Some(h.as_usize())
 }
 
@@ -44,8 +45,9 @@ fn pipe_dup_writer(h: PipeHandle) -> Option<usize> {
     if h == PipeHandle::INVALID {
         return None;
     }
-    let mut slot = pipe::lock_slot(h)?;
-    slot.writers = slot.writers.saturating_add(1);
+    pipe::with_pipe_mut(h, |slot| {
+        slot.writers = slot.writers.saturating_add(1);
+    })?;
     Some(h.as_usize())
 }
 
@@ -54,19 +56,16 @@ fn pipe_release_reader(h: PipeHandle) {
         return;
     }
     let mut wake_writers = false;
-    let should_free = {
-        if let Some(mut slot) = pipe::lock_slot(h) {
-            if slot.readers > 0 {
-                slot.readers -= 1;
-                if slot.readers == 0 {
-                    wake_writers = true;
-                }
+    let should_free = pipe::with_pipe_mut(h, |slot| {
+        if slot.readers > 0 {
+            slot.readers -= 1;
+            if slot.readers == 0 {
+                wake_writers = true;
             }
-            slot.readers == 0 && slot.writers == 0
-        } else {
-            false
         }
-    };
+        slot.readers == 0 && slot.writers == 0
+    })
+    .unwrap_or(false);
     if should_free {
         pipe::free_slot(h);
     }
@@ -80,19 +79,16 @@ fn pipe_release_writer(h: PipeHandle) {
         return;
     }
     let mut wake_readers = false;
-    let should_free = {
-        if let Some(mut slot) = pipe::lock_slot(h) {
-            if slot.writers > 0 {
-                slot.writers -= 1;
-                if slot.writers == 0 {
-                    wake_readers = true;
-                }
+    let should_free = pipe::with_pipe_mut(h, |slot| {
+        if slot.writers > 0 {
+            slot.writers -= 1;
+            if slot.writers == 0 {
+                wake_readers = true;
             }
-            slot.readers == 0 && slot.writers == 0
-        } else {
-            false
         }
-    };
+        slot.readers == 0 && slot.writers == 0
+    })
+    .unwrap_or(false);
     if should_free {
         pipe::free_slot(h);
     }
@@ -120,22 +116,20 @@ impl FileOps for PipeReadOps {
         let mut remaining = buf.len();
 
         loop {
-            // Snapshot under the slot lock: try to consume data and
+            // Snapshot under the table lock: try to consume data and
             // observe writer count.
-            let (consumed, no_writers, slot_gone) = {
-                match pipe::lock_slot(h) {
-                    Some(mut slot) => {
-                        let consumed = if remaining > 0 && slot.len > 0 {
-                            let chunk = remaining.min(local.len());
-                            slot.read_into(&mut local[..chunk])
-                        } else {
-                            0
-                        };
-                        (consumed, slot.writers == 0, false)
-                    }
-                    None => (0, true, true),
-                }
-            };
+            let (consumed, no_writers, slot_gone) = pipe::with_pipe_mut(h, |slot| {
+                let consumed = if remaining > 0 && slot.len > 0 {
+                    let chunk = remaining.min(local.len());
+                    slot.read_into(&mut local[..chunk])
+                } else {
+                    0
+                };
+                (consumed, slot.writers == 0)
+            })
+            .map_or((0, true, true), |(consumed, no_writers)| {
+                (consumed, no_writers, false)
+            });
 
             if slot_gone {
                 return if total > 0 {
@@ -183,13 +177,11 @@ impl FileOps for PipeReadOps {
             // ad-hoc state CAS. The closure re-checks data/EOF under
             // the slot lock so the wake-up condition is observed
             // atomically with respect to the producer's slot store.
-            BUS.subscribe(read_ev(h))
-                .wait_event(|| match pipe::lock_slot(h) {
-                    Some(slot) => slot.len > 0 || slot.writers == 0,
-                    // Slot evaporated under us — fall out of the wait so
-                    // the next iteration's lock_slot returns EBADF.
-                    None => true,
-                });
+            BUS.subscribe(read_ev(h)).wait_event(|| {
+                // Slot evaporated under us → fall out of the wait so the
+                // next iteration's lookup reports EBADF.
+                pipe::with_pipe(h, |slot| slot.len > 0 || slot.writers == 0).unwrap_or(true)
+            });
         }
     }
 
@@ -209,23 +201,18 @@ impl FileOps for PipeReadOps {
         let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness (Linux pattern).
         let registered = BUS.subscribe_current(read_ev(h));
-        let revents = match pipe::lock_slot(h) {
-            Some(slot) => slot.revents(true, false, events),
-            None => POLLERR,
-        };
+        let revents =
+            pipe::with_pipe(h, |slot| slot.revents(true, false, events)).unwrap_or(POLLERR);
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
-            open_file_idx: 0,
+            open_file_token: 0,
         }
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let h = PipeHandle::from_usize(handle);
-        match pipe::lock_slot(h) {
-            Some(slot) => slot.revents(true, false, events),
-            None => POLLERR,
-        }
+        pipe::with_pipe(h, |slot| slot.revents(true, false, events)).unwrap_or(POLLERR)
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
@@ -263,17 +250,21 @@ impl FileOps for PipeWriteOps {
         // can make forward progress in either case (push more bytes,
         // or report EPIPE). Used by both the pre-stage block (buffer
         // full) and the post-stage block (buffer filled mid-write).
-        let drain_or_close = || match pipe::lock_slot(h) {
-            Some(slot) => slot.len < pipe::PIPE_BUFFER_SIZE || slot.readers == 0,
-            None => true,
+        let drain_or_close = || {
+            pipe::with_pipe(h, |slot| {
+                slot.len < pipe::PIPE_BUFFER_SIZE || slot.readers == 0
+            })
+            .unwrap_or(true)
         };
 
         loop {
-            // Snapshot under the slot lock.
-            let (can_write, no_readers, slot_gone) = match pipe::lock_slot(h) {
-                Some(slot) => (slot.len < pipe::PIPE_BUFFER_SIZE, slot.readers == 0, false),
-                None => (false, true, true),
-            };
+            // Snapshot under the table lock.
+            let (can_write, no_readers, slot_gone) = pipe::with_pipe(h, |slot| {
+                (slot.len < pipe::PIPE_BUFFER_SIZE, slot.readers == 0)
+            })
+            .map_or((false, true, true), |(can_write, no_readers)| {
+                (can_write, no_readers, false)
+            });
 
             if slot_gone {
                 return if total > 0 {
@@ -349,29 +340,49 @@ impl FileOps for PipeWriteOps {
             // expressible. This release-before-wake here is defence
             // in depth: producers must not retain the data lock across
             // a wake call.
-            let written;
-            let no_readers_after;
-            {
-                let Some(mut slot) = pipe::lock_slot(h) else {
-                    return if total > 0 {
-                        total as isize
-                    } else {
-                        Errno::EBADF.as_isize()
-                    };
-                };
-
+            enum PushOutcome {
+                Wrote {
+                    written: usize,
+                    no_readers_after: bool,
+                },
+                NoReaders,
+                Gone,
+            }
+            let outcome = pipe::with_pipe_mut(h, |slot| {
                 if slot.readers == 0 {
+                    return PushOutcome::NoReaders;
+                }
+                let written = slot.write_from(&local[..staged]);
+                PushOutcome::Wrote {
+                    written,
+                    no_readers_after: slot.readers == 0,
+                }
+            })
+            .unwrap_or(PushOutcome::Gone);
+
+            let (written, no_readers_after) = match outcome {
+                PushOutcome::Wrote {
+                    written,
+                    no_readers_after,
+                } => {
+                    total += written;
+                    (written, no_readers_after)
+                }
+                PushOutcome::NoReaders => {
                     return if total > 0 {
                         total as isize
                     } else {
                         Errno::EPIPE.as_isize()
                     };
                 }
-
-                written = slot.write_from(&local[..staged]);
-                total += written;
-                no_readers_after = slot.readers == 0;
-            }
+                PushOutcome::Gone => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EBADF.as_isize()
+                    };
+                }
+            };
             if written > 0 && !no_readers_after {
                 BUS.publish_one(read_ev(h));
             }
@@ -407,23 +418,18 @@ impl FileOps for PipeWriteOps {
         let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness (Linux pattern).
         let registered = BUS.subscribe_current(write_ev(h));
-        let revents = match pipe::lock_slot(h) {
-            Some(slot) => slot.revents(false, true, events),
-            None => POLLERR | POLLHUP,
-        };
+        let revents = pipe::with_pipe(h, |slot| slot.revents(false, true, events))
+            .unwrap_or(POLLERR | POLLHUP);
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
-            open_file_idx: 0,
+            open_file_token: 0,
         }
     }
 
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let h = PipeHandle::from_usize(handle);
-        match pipe::lock_slot(h) {
-            Some(slot) => slot.revents(false, true, events),
-            None => POLLERR | POLLHUP,
-        }
+        pipe::with_pipe(h, |slot| slot.revents(false, true, events)).unwrap_or(POLLERR | POLLHUP)
     }
 
     fn poll_wait(&self, handle: usize) -> bool {

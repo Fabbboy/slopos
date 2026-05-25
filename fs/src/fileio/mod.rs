@@ -9,6 +9,7 @@ use slopos_abi::fs::{
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
+use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::sync::{
     InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard,
 };
@@ -114,45 +115,33 @@ pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
 
 #[derive(Clone, Copy)]
 pub struct PollRegInfo {
-    pub open_file_idx: u16,
+    pub(super) open_file: Handle<OpenFile>,
     pub registered: bool,
 }
 
 impl PollRegInfo {
+    /// A registration that resolves to nothing. The sentinel slot index
+    /// is out of range, so the handle never matches a live open file.
     pub const NONE: Self = Self {
-        open_file_idx: u16::MAX,
+        open_file: Handle::from_parts(u32::MAX, 0),
         registered: false,
     };
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct OpenFileEntry {
+/// One open file description. Liveness and slot-reuse generation are
+/// owned by the [`HandleTable`] that stores it, so this struct carries
+/// neither a `valid` flag nor a generation counter.
+pub(super) struct OpenFile {
     pub(super) ops: Option<&'static dyn FileOps>,
     pub(super) handle: usize,
     pub(super) position: u64,
     pub(super) status_flags: OpenMode,
     pub(super) refcount: u16,
-    pub(super) generation: u16,
-    pub(super) valid: bool,
-}
-
-impl OpenFileEntry {
-    const fn new() -> Self {
-        Self {
-            ops: None,
-            handle: 0,
-            position: 0,
-            status_flags: OpenMode::EMPTY,
-            refcount: 0,
-            generation: 0,
-            valid: false,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct FdEntry {
-    pub(super) open_file_idx: u16,
+    pub(super) open_file: Handle<OpenFile>,
     pub(super) cloexec: bool,
     pub(super) valid: bool,
 }
@@ -160,7 +149,8 @@ pub(super) struct FdEntry {
 impl FdEntry {
     const fn new() -> Self {
         Self {
-            open_file_idx: 0,
+            // Placeholder handle; only meaningful when `valid` is set.
+            open_file: Handle::from_parts(0, 0),
             cloexec: false,
             valid: false,
         }
@@ -224,7 +214,7 @@ impl ExternalOpsState {
 
 pub(super) struct OpenFilesState {
     pub(super) initialized: bool,
-    pub(super) open_files: [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
+    pub(super) open_files: HandleTable<OpenFile>,
     pub(super) external_ops: ExternalOpsState,
 }
 
@@ -232,7 +222,7 @@ impl OpenFilesState {
     const fn uninitialized() -> Self {
         Self {
             initialized: false,
-            open_files: [const { OpenFileEntry::new() }; FILEIO_MAX_OPEN_FILE_ENTRIES],
+            open_files: HandleTable::new(),
             external_ops: ExternalOpsState::new(),
         }
     }
@@ -265,9 +255,7 @@ pub(super) fn with_open_files<R>(f: impl FnOnce(&mut OpenFilesState) -> R) -> R 
     let mut guard = OPEN_FILES_STATE.lock();
     if !guard.initialized {
         FILEIO_INIT.init_once();
-        for entry in guard.open_files.iter_mut() {
-            *entry = OpenFileEntry::new();
-        }
+        // The table starts empty (`HandleTable::new`); nothing to reset.
         guard.initialized = true;
     }
     f(&mut *guard)
@@ -345,7 +333,7 @@ pub(super) struct FdSnapshot {
     pub(super) handle: usize,
     pub(super) position: u64,
     pub(super) status_flags: OpenMode,
-    pub(super) open_file_idx: u16,
+    pub(super) open_file: Handle<OpenFile>,
 }
 
 pub(super) fn snapshot_fd(inner: &FileTableSlotInner, fd: c_int) -> Option<FdSnapshot> {
@@ -356,18 +344,15 @@ pub(super) fn snapshot_fd(inner: &FileTableSlotInner, fd: c_int) -> Option<FdSna
     if !entry.valid {
         return None;
     }
-    let ofi = entry.open_file_idx;
+    let open_file = entry.open_file;
     with_open_files(|state| {
-        let ofe = &state.open_files[ofi as usize];
-        if !ofe.valid {
-            return None;
-        }
+        let ofe = state.open_files.get(open_file).ok()?;
         Some(FdSnapshot {
             ops: ofe.ops,
             handle: ofe.handle,
             position: ofe.position,
             status_flags: ofe.status_flags,
-            open_file_idx: ofi,
+            open_file,
         })
     })
 }
@@ -551,7 +536,7 @@ impl FileOps for LocalTtyOps {
                 return slopos_abi::file_ops::FusedPollResult {
                     revents: 0,
                     registered: false,
-                    open_file_idx: 0,
+                    open_file_token: 0,
                 };
             }
         };
@@ -560,7 +545,7 @@ impl FileOps for LocalTtyOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
-            open_file_idx: 0,
+            open_file_token: 0,
         }
     }
 

@@ -21,9 +21,10 @@ use super::scheduler::{
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_exit_info_is_set,
-    task_find_by_id, task_get_info, task_id_of, task_is_blocked, task_is_terminated,
-    task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count, task_set_state,
-    task_set_state_with_reason, task_slot_index, task_status, task_terminate, task_waiter_count,
+    task_find_by_id, task_get_info, task_handle, task_id_of, task_is_blocked, task_is_terminated,
+    task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count, task_resolve_handle,
+    task_set_state, task_set_state_with_reason, task_slot_index, task_status, task_terminate,
+    task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -284,6 +285,91 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
     );
 
     TestResult::Pass
+}
+
+/// Test: a `Handle<Task>` is generation-checked. The core safety
+/// invariant — proven on every iteration below — is that a stale handle
+/// NEVER resolves to a *different* task than the one it was minted for:
+/// `task_resolve_handle` returns either null or a pointer to that same
+/// task, never a use-after-reuse alias of a recycled slot's new
+/// occupant. When a freshly created task demonstrably reclaims the
+/// original slot (matching `slot_index`), the stale handle must resolve
+/// to null because the slot's generation has advanced.
+pub fn test_task_handle_stale_after_reuse() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let id1 = task_create(
+        b"HandleA\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if id1 == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(h1) = task_handle(id1) else {
+        let _ = task_terminate(id1);
+        reap_zombies();
+        return TestResult::Fail;
+    };
+    // The live handle resolves to the same task as the id lookup.
+    if task_resolve_handle(h1).is_null() || task_resolve_handle(h1) != task_find_by_id(id1) {
+        let _ = task_terminate(id1);
+        reap_zombies();
+        return TestResult::Fail;
+    }
+
+    // Terminate and reap so the slot becomes a reuse candidate.
+    let _ = task_terminate(id1);
+    reap_zombies();
+
+    // Drive slot reuse: create tasks until one reclaims h1's slot.
+    let mut created: slopos_ostd::KVec<u32> = match slopos_ostd::KVec::with_capacity(96) {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
+    let mut result = TestResult::Pass;
+    for _ in 0..96 {
+        let id = task_create(
+            b"HandleB\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            break;
+        }
+        let _ = created.push(id);
+
+        // Safety invariant: the stale handle must never alias a *different*
+        // task. It may resolve to null, or (until the slot is recycled) to
+        // the original id1 task — but never to another task.
+        let stale = task_resolve_handle(h1);
+        if !stale.is_null() && task_id_of(stale) != Some(id1) {
+            result = TestResult::Fail;
+            break;
+        }
+
+        if let Some(h) = task_handle(id) {
+            if h.slot() == h1.slot() {
+                // The new task reclaimed h1's slot with a fresh
+                // generation: the stale handle must now be dead, and the
+                // new handle must resolve.
+                if !task_resolve_handle(h1).is_null() || task_resolve_handle(h).is_null() {
+                    result = TestResult::Fail;
+                }
+                break;
+            }
+        }
+    }
+
+    for c in created.iter() {
+        let _ = task_terminate(*c);
+    }
+    reap_zombies();
+    result
 }
 
 /// Test: `KernelStack::allocate` returns a handle whose `top > base`
@@ -2389,6 +2475,33 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression: the tickless-idle path must not panic when the soonest
+/// sleep deadline is already in the past. Between a sleeper's deadline
+/// passing and the next periodic tick removing it, the idle loop can
+/// observe `deadline <= now`, whose `wrapping_sub(now)` lands near
+/// `u64::MAX`. Feeding that delta to the tick→ms conversion previously
+/// overflowed (`saturating_mul(1000)` pinned to `u64::MAX`, then a
+/// non-saturating `+ (freq - 1)`). The idle path must treat a past
+/// deadline as already-due and skip arming a one-shot.
+pub fn test_tickless_idle_past_deadline_no_overflow() -> TestResult {
+    let _fixture = SchedFixture::new();
+    super::sleep::reset_sleep_queue();
+
+    // `wake_tick = 1` is in the past once the timer has advanced beyond
+    // boot, so the idle path's `wrapping_sub` produces a ~`u64::MAX`
+    // delta — the exact input that used to overflow `ticks_to_ms_ceil`.
+    if !super::sleep::test_insert_sleep_entry(424_242, 1) {
+        super::sleep::reset_sleep_queue();
+        return TestResult::Fail;
+    }
+
+    // Must return without panicking (no add-with-overflow).
+    scheduler::arm_tickless_idle_if_due();
+
+    super::sleep::reset_sleep_queue();
+    TestResult::Pass
+}
+
 // =============================================================================
 // REGRESSION: task_wait_for race-window robustness (harmonic-cascade Phase 1H)
 //
@@ -3766,6 +3879,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_pool_grow_on_demand, suite = sched_core);
 slopos_testing::stest!(name = test_rapid_create_destroy_cycle, suite = sched_core);
+slopos_testing::stest!(
+    name = test_task_handle_stale_after_reuse,
+    suite = sched_core
+);
 slopos_testing::stest!(name = test_kstack_basic_alloc, suite = sched_core);
 slopos_testing::stest!(name = test_kstack_slot_reuse, suite = sched_core);
 slopos_testing::stest!(name = test_kstack_rejects_invalid_size, suite = sched_core);
@@ -3845,6 +3962,10 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_sleep_wake_race_regression, suite = sched_core);
+slopos_testing::stest!(
+    name = test_tickless_idle_past_deadline_no_overflow,
+    suite = sched_core
+);
 slopos_testing::stest!(name = test_task_wait_exit_race_1000, suite = sched_core);
 slopos_testing::stest!(
     name = test_task_wait_exit_race_with_work,

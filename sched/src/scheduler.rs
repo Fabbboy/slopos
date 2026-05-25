@@ -43,8 +43,11 @@ fn ticks_to_ms_ceil(delta_ticks: u64) -> u32 {
     if freq == 0 {
         return 0;
     }
-    // ceil((delta * 1000) / freq)
-    let ms = (delta_ticks.saturating_mul(1000) + (freq - 1)) / freq;
+    // ceil((delta * 1000) / freq). Both the multiply and the round-up
+    // add saturate: a caller that passes an enormous delta (e.g. the
+    // wraparound result of an already-past deadline) must not overflow
+    // here — it simply pins to the `u32::MAX` clamp below.
+    let ms = delta_ticks.saturating_mul(1000).saturating_add(freq - 1) / freq;
     if ms > u32::MAX as u64 {
         u32::MAX
     } else {
@@ -68,6 +71,15 @@ pub fn arm_tickless_idle_if_due() {
         return;
     };
     let delta = deadline.wrapping_sub(now);
+    // The soonest deadline may already be due: between a sleeper's
+    // deadline passing and the next periodic tick removing it, the idle
+    // loop can observe a `deadline <= now`, whose `wrapping_sub` lands in
+    // the upper (past) half of the tick space. Such a deadline needs no
+    // one-shot — the next periodic tick wakes it — so skip arming rather
+    // than convert a near-`u64::MAX` delta to milliseconds.
+    if delta == 0 || delta >= (1u64 << 63) {
+        return;
+    }
     let ms_until = ticks_to_ms_ceil(delta);
     if ms_until == 0 || ms_until >= LAPIC_TIMER_PERIOD_MS {
         // Either already due (next periodic tick will catch it) or

@@ -49,7 +49,7 @@ fn install_fd_entry(
             }
         }
 
-        let Some(open_file_idx) =
+        let Some(open_file) =
             alloc_open_file_entry(&mut state.open_files, ops, handle, flags, position)
         else {
             return Err(Errno::ENFILE);
@@ -58,14 +58,14 @@ fn install_fd_entry(
         if ops.kind() == FileKind::Socket {
             let mode_bits = flags & (OpenMode::READ | OpenMode::WRITE);
             flags = mode_bits;
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_idx) {
-                open_file.status_flags = flags;
+            if let Some(slot) = get_open_file_mut(&mut state.open_files, open_file) {
+                slot.status_flags = flags;
                 let _ = ops.set_status_flags(handle, flags.bits());
             }
         }
 
         inner.descriptors[slot_idx] = FdEntry {
-            open_file_idx,
+            open_file,
             cloexec: (flags.bits() & O_CLOEXEC as u32) != 0,
             valid: true,
         };
@@ -166,15 +166,13 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
 }
 
-trait OpenFileEntryGuard {
+trait OpenFileGuard {
     fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool;
 }
 
-impl OpenFileEntryGuard for OpenFileEntry {
+impl OpenFileGuard for OpenFile {
     fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool {
-        self.valid
-            && self.ops.map(core::ptr::from_ref) == Some(core::ptr::from_ref(ops))
-            && self.handle == handle
+        self.ops.map(core::ptr::from_ref) == Some(core::ptr::from_ref(ops)) && self.handle == handle
     }
 }
 
@@ -202,7 +200,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
     let rc = ops.read(snap.handle, buf, used_offset, snap.status_flags.bits());
     if rc > 0 && seekable {
         with_open_files(|state| {
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file_idx)
+            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
                 && open_file.seekable_position_matches(ops, snap.handle)
             {
                 open_file.position = open_file.position.saturating_add(rc as u64);
@@ -236,7 +234,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
     let rc = ops.write(snap.handle, buf, used_offset, snap.status_flags.bits());
     if rc > 0 && seekable {
         with_open_files(|state| {
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file_idx)
+            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
                 && open_file.seekable_position_matches(ops, snap.handle)
             {
                 open_file.position = open_file.position.saturating_add(rc as u64);
@@ -251,7 +249,7 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
         let Some(fd_entry) = get_fd_entry(inner, fd) else {
             return Errno::EBADF.raw() as _;
         };
-        let ofi = fd_entry.open_file_idx;
+        let ofi = fd_entry.open_file;
         with_open_files(|state| {
             release_open_file(&mut state.open_files, ofi);
         });
@@ -297,7 +295,7 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
     }
 
     with_open_files(|state| {
-        if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file_idx)
+        if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
             && open_file.seekable_position_matches(ops, snap.handle)
         {
             open_file.position = new_pos as u64;
@@ -482,24 +480,24 @@ pub fn file_pipe_create(
             return Err(Errno::ENFILE);
         };
 
-        {
-            let Some(mut slot) = pipe::lock_slot(pipe_handle) else {
-                release_open_file(&mut state.open_files, read_open_idx);
-                release_open_file(&mut state.open_files, write_open_idx);
-                reset_fd_entry(&mut inner.descriptors[read_idx]);
-                return Err(Errno::ENOMEM);
-            };
+        let primed = pipe::with_pipe_mut(pipe_handle, |slot| {
             slot.readers = 1;
             slot.writers = 1;
+        });
+        if primed.is_none() {
+            release_open_file(&mut state.open_files, read_open_idx);
+            release_open_file(&mut state.open_files, write_open_idx);
+            reset_fd_entry(&mut inner.descriptors[read_idx]);
+            return Err(Errno::ENOMEM);
         }
 
         inner.descriptors[read_idx] = FdEntry {
-            open_file_idx: read_open_idx,
+            open_file: read_open_idx,
             cloexec,
             valid: true,
         };
         inner.descriptors[write_idx] = FdEntry {
-            open_file_idx: write_open_idx,
+            open_file: write_open_idx,
             cloexec,
             valid: true,
         };
@@ -531,7 +529,7 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        let src_open_idx = src.open_file_idx;
+        let src_open_idx = src.open_file;
 
         let increfed =
             with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
@@ -545,7 +543,7 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
         };
 
         inner.descriptors[new_idx] = FdEntry {
-            open_file_idx: src_open_idx,
+            open_file: src_open_idx,
             cloexec: false,
             valid: true,
         };
@@ -574,7 +572,7 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        let src_open_idx = src.open_file_idx;
+        let src_open_idx = src.open_file;
         let increfed =
             with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
         if !increfed {
@@ -582,11 +580,11 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
         }
 
         if inner.descriptors[new_fd as usize].valid {
-            let old_open_idx = inner.descriptors[new_fd as usize].open_file_idx;
+            let old_open_idx = inner.descriptors[new_fd as usize].open_file;
             with_open_files(|state| release_open_file(&mut state.open_files, old_open_idx));
         }
         inner.descriptors[new_fd as usize] = FdEntry {
-            open_file_idx: src_open_idx,
+            open_file: src_open_idx,
             cloexec: false,
             valid: true,
         };
@@ -607,7 +605,7 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        let src_open_idx = src.open_file_idx;
+        let src_open_idx = src.open_file;
         let increfed =
             with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
         if !increfed {
@@ -615,11 +613,11 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
         }
 
         if inner.descriptors[new_fd as usize].valid {
-            let old_open_idx = inner.descriptors[new_fd as usize].open_file_idx;
+            let old_open_idx = inner.descriptors[new_fd as usize].open_file;
             with_open_files(|state| release_open_file(&mut state.open_files, old_open_idx));
         }
         inner.descriptors[new_fd as usize] = FdEntry {
-            open_file_idx: src_open_idx,
+            open_file: src_open_idx,
             cloexec: (flags & FD_CLOEXEC as u32) != 0,
             valid: true,
         };
@@ -674,7 +672,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             let Some(fd_entry) = get_fd_entry(inner, fd) else {
                 return Errno::EBADF.raw() as i64;
             };
-            let ofi = fd_entry.open_file_idx;
+            let ofi = fd_entry.open_file;
             with_open_files(|state| {
                 let Some(open_file) = get_open_file_mut(&mut state.open_files, ofi) else {
                     return Errno::EBADF.raw() as i64;

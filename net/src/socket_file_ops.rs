@@ -86,7 +86,7 @@ impl FileOps for SocketFileOps {
         slopos_abi::file_ops::FusedPollResult {
             revents,
             registered,
-            open_file_idx: 0,
+            open_file_token: 0,
         }
     }
 

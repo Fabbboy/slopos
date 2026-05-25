@@ -2,6 +2,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_ostd::handle::Handle;
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
@@ -235,6 +236,10 @@ pub(super) struct TaskManagerInner {
     pub(super) tasks: KernelSync<KVec<Option<KBox<Task>>>>,
     pub(super) num_tasks: u32,
     pub(super) next_task_id: u32,
+    /// Monotonic source of per-slot generations. Each slot reservation
+    /// draws a fresh value, so a [`Handle`] minted for a prior occupant
+    /// of a recycled slot resolves to a typed staleness error.
+    pub(super) next_generation: u64,
     pub(super) total_context_switches: u64,
     pub(super) total_yields: u64,
     pub(super) tasks_created: u32,
@@ -248,6 +253,7 @@ impl TaskManagerInner {
             tasks: KernelSync::new(KVec::new()),
             num_tasks: 0,
             next_task_id: 1,
+            next_generation: 1,
             total_context_switches: 0,
             total_yields: 0,
             tasks_created: 0,
@@ -447,6 +453,49 @@ pub fn task_find_by_id(task_id: u32) -> *mut Task {
     })
 }
 
+/// The current generation-checked [`Handle`] for `task_id`, if a live
+/// task carries it.
+///
+/// The handle pairs the pool slot index with the slot's generation;
+/// held across time, it lets [`task_resolve_handle`] detect — without
+/// re-searching by id — whether the slot still belongs to the same task
+/// or has been recycled.
+pub fn task_handle(task_id: u32) -> Option<Handle<Task>> {
+    if task_id == INVALID_TASK_ID {
+        return None;
+    }
+    with_task_manager(|mgr| {
+        mgr.iter_tasks()
+            .find(|t| t.task_id == task_id)
+            .map(|t| Handle::from_parts(t.slot_index, t.generation))
+    })
+}
+
+/// Resolve a [`Handle<Task>`] to its pool-slot pointer, generation-checked.
+///
+/// **Lock-free**, on the same invariants as [`task_find_by_id`]: the pool
+/// spine never reallocates, and `slot_index` / `generation` / `task_id`
+/// are naturally-aligned atomic-width reads. Returns null if the slot is
+/// empty or its generation no longer matches the handle — a stale handle
+/// is a typed miss, never a use-after-reuse on a recycled slot.
+pub fn task_resolve_handle(handle: Handle<Task>) -> *mut Task {
+    let slot = handle.slot() as usize;
+    TASK_MANAGER.read_atomic_field(|mgr| {
+        let bound = pool_high_water().min(mgr.tasks.len());
+        if slot >= bound {
+            return ptr::null_mut();
+        }
+        match mgr.tasks[slot].as_deref() {
+            Some(kbox)
+                if kbox.task_id != INVALID_TASK_ID && kbox.generation == handle.generation() =>
+            {
+                kbox as *const Task as *mut Task
+            }
+            _ => ptr::null_mut(),
+        }
+    })
+}
+
 /// Find a live task whose active address space matches `cr3`.
 ///
 /// This is primarily used by exception paths that need to recover the faulting
@@ -627,6 +676,9 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
 
         let idx = chosen_idx.expect("tier 1/2/3 must produce a slot");
 
+        let generation = mgr.next_generation;
+        mgr.next_generation = mgr.next_generation.wrapping_add(1);
+
         let slot_ptr: *mut Task = {
             let kbox = mgr.tasks[idx]
                 .as_deref_mut()
@@ -635,6 +687,9 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             // concurrent caller can reserve the same slot.
             kbox.set_status(TaskStatus::Blocked);
             kbox.slot_index = idx as u32;
+            // Stamp a fresh generation so any handle to a prior occupant
+            // of this recycled slot now resolves as stale.
+            kbox.generation = generation;
             kbox as *mut Task
         };
 

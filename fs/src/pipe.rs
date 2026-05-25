@@ -1,116 +1,123 @@
-//! Kernel pipe implementation with per-pipe locking.
+//! Kernel pipe implementation.
 //!
-//! # Locking
+//! # Storage
 //!
-//! Each pipe slot has its own [`SpinLock`], so operations on independent
-//! pipes never contend. A separate [`PIPE_ALLOC`] lock protects only the
-//! allocation bitmap (touched on pipe create/destroy only).
+//! Pipes live in a single [`HandleTable`] behind one [`SpinLock`]. Each
+//! pipe is a [`Pipe`] owning a heap ring buffer; the table mints a
+//! generation-checked handle per pipe, so a handle left over from a closed
+//! pipe whose slot was recycled resolves to a typed error (and the caller
+//! reports `EBADF`) rather than aliasing the recycled pipe.
+//!
+//! A single table lock (rather than one lock per pipe) keeps the moving of
+//! a non-`Copy` [`Pipe`] in and out of shared storage in safe Rust. Pipe
+//! operations are short — a ring-buffer memcpy performed while the lock is
+//! held, with the lock always released before any wait or wake — and the
+//! table is capped at [`MAX_PIPES`] entries, so contention is negligible.
+//!
+//! # Blocking and wakeups
 //!
 //! Blocking and wakeups go through the kernel event bus keyed by
-//! `KernelEvent::PipeRead` / `KernelEvent::PipeWrite`, so wakers and sleepers
-//! never hold a pipe lock and a wait-queue lock simultaneously.
-
-use core::sync::atomic::{AtomicU32, Ordering};
+//! `KernelEvent::PipeRead` / `KernelEvent::PipeWrite`. The accessors below
+//! never let a table guard escape their closure, so a sleeper or waker
+//! never holds the table lock across a wait-queue operation.
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard};
+use slopos_ostd::KVec;
+use slopos_ostd::handle::{Handle, HandleTable};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 pub(crate) use slopos_abi::event::MAX_PIPES;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
 
-/// Bits used for the slot index in the handle encoding.
+/// Bits reserved for the slot index in the packed handle encoding.
 const SLOT_BITS: u32 = 8;
-const SLOT_MASK: usize = (1 << SLOT_BITS) - 1; // 0xFF — supports up to 256 slots
+const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1; // 0xFF — covers MAX_PIPES (≤ 256) slots
 
 // ---------------------------------------------------------------------------
-// PipeHandle — type-safe handle for pipe kernel objects
+// PipeHandle — packed, FD-facing handle for pipe kernel objects
 // ---------------------------------------------------------------------------
 
-/// Opaque handle identifying a kernel pipe slot.
+/// Opaque handle identifying a kernel pipe.
 ///
-/// Encodes a slot index and a generation counter so that stale handles
-/// (from a closed pipe whose slot was recycled) are reliably rejected.
-/// The encoding is `(generation << SLOT_BITS) | slot_index`.
+/// The file layer stores a pipe reference inside a single `usize`
+/// (`OpenFile::handle`) shared by every file backend, so the pipe handle
+/// must pack into that width. The encoding is
+/// `(generation << SLOT_BITS) | slot_index`: the low 8 bits hold the slot
+/// (which also keys the event bus), and the upper 56 bits hold the
+/// generation. That is a far larger generation space than a pipe can
+/// exhaust, so a recycled slot is always detectable as stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[repr(transparent)]
-pub struct PipeHandle(u32);
+pub struct PipeHandle(u64);
 
 impl PipeHandle {
     /// Sentinel value representing no pipe.
-    pub const INVALID: Self = Self(u32::MAX);
+    pub const INVALID: Self = Self(u64::MAX);
 
-    pub(crate) fn new(slot: usize, generation: u32) -> Self {
-        Self(((generation as usize) << SLOT_BITS | (slot & SLOT_MASK)) as u32)
+    /// Pack an internal [`Handle`] into the FD-facing encoding.
+    pub(crate) fn pack(h: Handle<Pipe>) -> Self {
+        let generation = h.generation() & (u64::MAX >> SLOT_BITS);
+        Self((generation << SLOT_BITS) | (h.slot() as u64 & SLOT_MASK))
     }
 
+    /// Rebuild the internal [`Handle`], or `None` if this is the sentinel
+    /// or names an out-of-range slot.
+    pub(crate) fn to_internal(self) -> Option<Handle<Pipe>> {
+        if self == Self::INVALID {
+            return None;
+        }
+        let slot = (self.0 & SLOT_MASK) as u32;
+        if slot as usize >= MAX_PIPES {
+            return None;
+        }
+        Some(Handle::from_parts(slot, self.0 >> SLOT_BITS))
+    }
+
+    /// The slot index — also the event-bus key for this pipe.
     pub(crate) fn slot(self) -> usize {
-        (self.0 as usize) & SLOT_MASK
+        (self.0 & SLOT_MASK) as usize
     }
 
-    pub(crate) fn generation(self) -> u32 {
-        ((self.0 as usize) >> SLOT_BITS) as u32
-    }
-
-    /// Convert to usize for storage in OpenFileEntry.handle.
+    /// Convert to `usize` for storage in `OpenFile::handle`.
     pub fn as_usize(self) -> usize {
         self.0 as usize
     }
 
-    /// Reconstruct from usize stored in OpenFileEntry.handle.
+    /// Reconstruct from a `usize` stored in `OpenFile::handle`.
     pub fn from_usize(v: usize) -> Self {
-        Self(v as u32)
+        Self(v as u64)
     }
 }
 
-/// Global generation counter for pipe slot allocation.
-static PIPE_GENERATION: AtomicU32 = AtomicU32::new(1);
-
-pub(crate) struct PipeSlot {
-    pub(crate) valid: bool,
+/// A single kernel pipe: a heap-backed ring buffer plus reader/writer
+/// reference counts.
+pub(crate) struct Pipe {
     read_pos: usize,
     write_pos: usize,
     pub(crate) len: usize,
     pub(crate) readers: u16,
     pub(crate) writers: u16,
-    pub(crate) generation: u32,
-    buffer: [u8; PIPE_BUFFER_SIZE],
+    buffer: KVec<u8>,
 }
 
-impl PipeSlot {
-    pub(crate) const fn new() -> Self {
+impl Pipe {
+    fn new(buffer: KVec<u8>) -> Self {
         Self {
-            valid: false,
             read_pos: 0,
             write_pos: 0,
             len: 0,
             readers: 0,
             writers: 0,
-            generation: 0,
-            buffer: [0; PIPE_BUFFER_SIZE],
+            buffer,
         }
     }
 
-    /// Reset a PipeSlot in place. Field-by-field zero so neither a
-    /// fresh `PipeSlot` rvalue (4 KiB) nor a raw-pointer write_bytes
-    /// touches the caller's stack — `[u8; PIPE_BUFFER_SIZE]::fill` is
-    /// an in-place memset.
-    pub(crate) fn reset(&mut self) {
-        self.valid = false;
-        self.read_pos = 0;
-        self.write_pos = 0;
-        self.len = 0;
-        self.readers = 0;
-        self.writers = 0;
-        self.generation = 0;
-        self.buffer.fill(0);
-    }
-
-    /// Atomically read and consume bytes from the pipe buffer.
+    /// Read and consume bytes from the pipe buffer.
     ///
-    /// Data is consumed from the ring buffer in a single operation while
-    /// the caller holds the per-pipe lock. The consumed bytes are copied
-    /// into the kernel staging buffer `out`; the caller is responsible for
-    /// transferring them to userspace *after* releasing the lock.
+    /// Data is consumed from the ring buffer while the caller holds the
+    /// table lock. The consumed bytes are copied into the kernel staging
+    /// buffer `out`; the caller transfers them to userspace *after*
+    /// releasing the lock.
     pub(crate) fn read_into(&mut self, out: &mut [u8]) -> usize {
         let mut copied = 0usize;
         while copied < out.len() && self.len > 0 {
@@ -161,79 +168,56 @@ impl PipeSlot {
 }
 
 // ---------------------------------------------------------------------------
-// Per-pipe locks — each pipe has its own SpinLock.
+// Pipe table — one HandleTable behind one lock.
 // ---------------------------------------------------------------------------
 
-/// Per-pipe locks. Each slot is independently locked.
-pub(crate) static PIPE_SLOTS: [SpinLock<PipeSlot>; MAX_PIPES] =
-    [const { SpinLock::new(PipeSlot::new(), LOCK_LEVEL_RESOURCE) }; MAX_PIPES];
+/// All live pipes. A growable [`HandleTable`] capped at [`MAX_PIPES`] live
+/// entries by [`alloc_slot`]; the cap keeps slot indices within the
+/// [`SLOT_BITS`]-wide field of [`PipeHandle`] and the event-bus key.
+static PIPE_TABLE: SpinLock<HandleTable<Pipe>> =
+    SpinLock::new(HandleTable::new(), LOCK_LEVEL_RESOURCE);
 
-/// Allocation bitmap — only locked during pipe create/destroy.
-struct PipeAllocBitmap {
-    used: [bool; MAX_PIPES],
-}
-
-impl PipeAllocBitmap {
-    const fn new() -> Self {
-        Self {
-            used: [false; MAX_PIPES],
-        }
-    }
-}
-
-static PIPE_ALLOC: SpinLock<PipeAllocBitmap> =
-    SpinLock::new(PipeAllocBitmap::new(), LOCK_LEVEL_REGISTRY);
-
-/// Allocate a new pipe slot. Returns a [`PipeHandle`] encoding the slot
-/// index and a monotonic generation counter for stale-handle detection.
+/// Allocate a new pipe, returning its packed [`PipeHandle`].
 ///
-/// Takes the allocation bitmap lock briefly to find a free slot, then
-/// locks the individual pipe slot to initialize it.
+/// The ring buffer is allocated before the table lock is taken so the
+/// locked region stays allocation-light. Returns `None` if the pipe table
+/// is full or the buffer allocation fails.
 pub(crate) fn alloc_slot() -> Option<PipeHandle> {
-    let mut alloc = PIPE_ALLOC.lock();
-    for (idx, used) in alloc.used.iter_mut().enumerate() {
-        if !*used {
-            *used = true;
-            drop(alloc); // Release alloc lock before taking pipe lock.
-            let gn = PIPE_GENERATION.fetch_add(1, Ordering::Relaxed);
-            let mut slot = PIPE_SLOTS[idx].lock();
-            slot.reset();
-            slot.valid = true;
-            slot.generation = gn;
-            return Some(PipeHandle::new(idx, gn));
-        }
-    }
-    None
-}
-
-/// Lock a pipe slot by handle, returning a guard if the slot is valid
-/// and the generation matches (stale-handle detection).
-///
-/// This is the primary accessor for pipe operations.
-#[inline]
-pub(crate) fn lock_slot(handle: PipeHandle) -> Option<SpinLockGuard<'static, PipeSlot>> {
-    let idx = handle.slot();
-    if idx >= MAX_PIPES {
+    let buffer = KVec::<u8>::zeroed(PIPE_BUFFER_SIZE).ok()?;
+    let pipe = Pipe::new(buffer);
+    let mut table = PIPE_TABLE.lock();
+    if table.len() >= MAX_PIPES {
         return None;
     }
-    let guard = PIPE_SLOTS[idx].lock();
-    if !guard.valid || guard.generation != handle.generation() {
-        return None;
-    }
-    Some(guard)
+    let handle = table.insert(pipe).ok()?;
+    Some(PipeHandle::pack(handle))
 }
 
-/// Free a pipe slot. Marks it as unused in the allocation bitmap.
+/// Run `f` with shared access to the pipe named by `handle`. Returns
+/// `None` if the handle is stale, recycled, or invalid.
+pub(crate) fn with_pipe<R>(handle: PipeHandle, f: impl FnOnce(&Pipe) -> R) -> Option<R> {
+    let internal = handle.to_internal()?;
+    let table = PIPE_TABLE.lock();
+    let pipe = table.get(internal).ok()?;
+    Some(f(pipe))
+}
+
+/// Run `f` with mutable access to the pipe named by `handle`. Returns
+/// `None` if the handle is stale, recycled, or invalid. The table lock is
+/// always released when `f` returns, so callers must perform any wait or
+/// wake outside this closure.
+pub(crate) fn with_pipe_mut<R>(handle: PipeHandle, f: impl FnOnce(&mut Pipe) -> R) -> Option<R> {
+    let internal = handle.to_internal()?;
+    let mut table = PIPE_TABLE.lock();
+    let pipe = table.get_mut(internal).ok()?;
+    Some(f(pipe))
+}
+
+/// Free a pipe, dropping its ring buffer and bumping the slot generation
+/// so any surviving handle to that slot becomes stale.
 pub(crate) fn free_slot(handle: PipeHandle) {
-    let idx = handle.slot();
-    if idx >= MAX_PIPES {
-        return;
+    if let Some(internal) = handle.to_internal() {
+        let mut table = PIPE_TABLE.lock();
+        let _ = table.remove(internal);
     }
-    // Invalidate the slot first, then release the alloc bitmap.
-    {
-        let mut slot = PIPE_SLOTS[idx].lock();
-        slot.valid = false;
-    }
-    let mut alloc = PIPE_ALLOC.lock();
-    alloc.used[idx] = false;
 }

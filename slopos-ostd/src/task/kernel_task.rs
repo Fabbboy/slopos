@@ -243,6 +243,13 @@ pub struct TaskInner<K, U> {
     pub test_reports: Option<KBox<TestReportRing>>,
     /// Index of this Task's slot in the `TASK_MANAGER` pool spine.
     pub slot_index: u32,
+    /// Slot-reuse generation, paired with `slot_index` to form this
+    /// task's [`crate::handle::Handle`]. A fresh value is stamped each
+    /// time the slot is reserved for a new task, so a handle minted for a
+    /// previous occupant resolves to a typed staleness error once the
+    /// slot has been recycled — never a use-after-reuse on a stale
+    /// pointer. `0` marks an unallocated slot.
+    pub generation: u64,
     pub parent_task_id: u32,
     /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
     /// switching to user mode, and read back on context save.
@@ -324,6 +331,7 @@ impl<K, U> TaskInner<K, U> {
             unsafe_stack: None,
             test_reports: None,
             slot_index: u32::MAX,
+            generation: 0,
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
             tgid: INVALID_TASK_ID,

@@ -30,6 +30,7 @@ pub mod dev;
 pub mod dma;
 pub mod early_console;
 pub mod ffi;
+pub mod handle;
 pub mod io;
 pub mod irq;
 pub mod kdiag;
@@ -81,6 +82,7 @@ pub use slopos_abi::alignment::{
 
 pub use atomic_bitmap::AtomicBitmap;
 pub use bitmap::{Bitmap, words_for};
+pub use handle::{Handle, HandleError, HandleTable};
 pub use kdiag::{
     KDIAG_STACK_TRACE_DEPTH, kdiag_dump_interrupt_frame, kdiag_stack_word_at, kdiag_timestamp,
 };

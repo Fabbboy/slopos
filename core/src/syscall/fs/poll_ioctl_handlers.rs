@@ -252,7 +252,7 @@ define_syscall!(syscall_poll
     struct PollScratch {
         cached_revents: [u16; SELECT_MAX_FDS],
         poll_fds: [UserPollFd; SELECT_MAX_FDS],
-        registered_ofis: [u32; SELECT_MAX_FDS],
+        registered_ofis: [u64; SELECT_MAX_FDS],
     }
     let mut scratch_box = slopos_ostd::KBox::<PollScratch>::zeroed().map_err(|_| Errno::ENOMEM)?;
     let scratch: &mut PollScratch = &mut *scratch_box;
@@ -283,13 +283,13 @@ define_syscall!(syscall_poll
                     ready_count += 1;
                 }
                 if result.registered && reg_count < registered_ofis.len() {
-                    registered_ofis[reg_count] = result.open_file_idx;
+                    registered_ofis[reg_count] = result.open_file_token;
                     reg_count += 1;
                 }
             }
         }
 
-        let cleanup = |reg_count: usize, ofis: &[u32]| {
+        let cleanup = |reg_count: usize, ofis: &[u64]| {
             for &ofi in &ofis[..reg_count] {
                 file_poll_unfused_by_idx(ofi);
             }
@@ -371,7 +371,7 @@ define_syscall!(syscall_select
         read_out: [u8; FDSET_BYTES],
         write_out: [u8; FDSET_BYTES],
         except_out: [u8; FDSET_BYTES],
-        registered_ofis: [u32; SELECT_MAX_FDS],
+        registered_ofis: [u64; SELECT_MAX_FDS],
     }
     let mut scratch_box = slopos_ostd::KBox::<SelectScratch>::zeroed().map_err(|_| Errno::ENOMEM)?;
     let scratch: &mut SelectScratch = &mut *scratch_box;
@@ -493,12 +493,12 @@ define_syscall!(syscall_select
                 ready += 1;
             }
             if result.registered && reg_count < registered_ofis.len() {
-                registered_ofis[reg_count] = result.open_file_idx;
+                registered_ofis[reg_count] = result.open_file_token;
                 reg_count += 1;
             }
         }
 
-        let cleanup = |reg_count: usize, ofis: &[u32]| {
+        let cleanup = |reg_count: usize, ofis: &[u64]| {
             for &ofi in &ofis[..reg_count] {
                 file_poll_unfused_by_idx(ofi);
             }

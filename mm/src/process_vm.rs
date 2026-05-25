@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 use core::ptr;
 use slopos_ostd::KVec;
+use slopos_ostd::handle::{Handle, HandleError};
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
 
@@ -34,11 +35,20 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 /// rewrites every user-mapping callsite onto `vm_space.cursor_mut()`
 /// and flips the reader; the legacy `page_dir` deletes after the
 /// migration completes.
-struct ProcessVmInner {
+/// Per-process VM slot. Exposed as an opaque marker so other crates can
+/// name [`Handle<ProcessVm>`]; all fields stay private to this module.
+pub struct ProcessVm {
     process_id: u32,
+    /// Slot-reuse generation. A fresh, globally-unique value is stamped
+    /// each time this slot is bound to a process; it is the generation
+    /// half of the slot's [`Handle`]. A handle minted for a previous
+    /// occupant fails to resolve once the slot has been rebound, so a
+    /// stale address-space reference becomes a typed `HandleError`
+    /// rather than silently aliasing the new occupant.
+    generation: u64,
     /// Wrapped in `KernelSync` because `*mut ProcessPageDir` is `!Send`
     /// by default; the actual page-dir is heap-allocated and shared
-    /// only through the per-slot `SpinLock<ProcessVmInner>` (so
+    /// only through the per-slot `SpinLock<ProcessVm>` (so
     /// concurrent access is serialised at the lock).
     page_dir: KernelSync<*mut ProcessPageDir>,
     /// Framekernel-correct address-space handle. `None` only between
@@ -56,10 +66,11 @@ struct ProcessVmInner {
     flags: u32,
 }
 
-impl ProcessVmInner {
+impl ProcessVm {
     const fn new() -> Self {
         Self {
             process_id: INVALID_PROCESS_ID,
+            generation: 0,
             page_dir: KernelSync::new(ptr::null_mut()),
             vm_space: None,
             vma_map: VmaMap::new(),
@@ -99,6 +110,10 @@ impl ProcessVmInner {
 struct VmSlotAlloc {
     num_processes: u32,
     next_process_id: u32,
+    /// Monotonic source of per-slot generations. Each slot binding draws
+    /// a fresh value so a handle never collides with a later occupant of
+    /// the same slot.
+    next_generation: u64,
 }
 
 impl VmSlotAlloc {
@@ -106,15 +121,22 @@ impl VmSlotAlloc {
         Self {
             num_processes: 0,
             next_process_id: 1,
+            next_generation: 1,
         }
+    }
+
+    /// Draw a fresh, never-reused generation value.
+    fn alloc_generation(&mut self) -> u64 {
+        let g = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        g
     }
 }
 
 /// Per-process VM locks.  Each slot is independently lockable so that
 /// independent processes never contend on each other's VM operations.
-static PROCESS_VMS: [SpinLock<ProcessVmInner>; MAX_PROCESSES] = {
-    const INIT: SpinLock<ProcessVmInner> =
-        SpinLock::new(ProcessVmInner::new(), LOCK_LEVEL_RESOURCE);
+static PROCESS_VMS: [SpinLock<ProcessVm>; MAX_PROCESSES] = {
+    const INIT: SpinLock<ProcessVm> = SpinLock::new(ProcessVm::new(), LOCK_LEVEL_RESOURCE);
     [INIT; MAX_PROCESSES]
 };
 
@@ -235,7 +257,7 @@ fn unmap_user_range(vm_space: &mut KArc<VmSpace>, start_addr: u64, end_addr: u64
     }
 }
 
-/// Lock-free read of a naturally-aligned field of `ProcessVmInner`.
+/// Lock-free read of a naturally-aligned field of `ProcessVm`.
 /// Thin wrapper over OSTD's `SpinLock::read_atomic_field` so the single
 /// `unsafe` reborrow lives in the lock implementation, not here.
 ///
@@ -245,20 +267,17 @@ fn unmap_user_range(vm_space: &mut KArc<VmSpace>, start_addr: u64, end_addr: u64
 /// so a plain load is tear-free on x86-64. Callers MUST re-acquire the
 /// per-slot lock before reading any composite (multi-word) field.
 #[inline]
-fn slot_read_lock_free<R>(
-    slot: &SpinLock<ProcessVmInner>,
-    f: impl FnOnce(&ProcessVmInner) -> R,
-) -> R {
+fn slot_read_lock_free<R>(slot: &SpinLock<ProcessVm>, f: impl FnOnce(&ProcessVm) -> R) -> R {
     slot.read_atomic_field(f)
 }
 
 #[inline]
-fn slot_pid_lock_free(slot: &SpinLock<ProcessVmInner>) -> u32 {
+fn slot_pid_lock_free(slot: &SpinLock<ProcessVm>) -> u32 {
     slot_read_lock_free(slot, |inner| inner.process_id)
 }
 
 #[inline]
-fn slot_page_dir_lock_free(slot: &SpinLock<ProcessVmInner>) -> *mut ProcessPageDir {
+fn slot_page_dir_lock_free(slot: &SpinLock<ProcessVm>) -> *mut ProcessPageDir {
     slot_read_lock_free(slot, |inner| *inner.page_dir)
 }
 
@@ -273,6 +292,48 @@ fn find_slot_for_pid(process_id: u32) -> Option<usize> {
         }
     }
     None
+}
+
+/// The generation-checked handle for `process_id`'s VM slot, if bound.
+///
+/// A `Handle<ProcessVm>` pairs the slot index with the slot's generation.
+/// Held across time, it lets [`process_vm_with_handle`] detect — without
+/// re-searching by pid — whether the slot still belongs to the same
+/// process or has been recycled for another. The page-table / address
+/// space a process owns lives inside this slot, so this is the
+/// slot-reuse-safe reference to it.
+pub fn process_vm_handle(process_id: u32) -> Option<Handle<ProcessVm>> {
+    let slot = find_slot_for_pid(process_id)?;
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process_id {
+        return None;
+    }
+    Some(Handle::from_parts(slot as u32, guard.generation))
+}
+
+/// Run `f` with mutable access to the `ProcessVm` named by `handle`.
+///
+/// Validates the slot index and generation: a handle whose slot was
+/// rebound to a different process resolves to [`HandleError::Stale`]; an
+/// unbound slot to [`HandleError::NoEntry`]; an out-of-range slot to
+/// [`HandleError::OutOfBounds`]. The slot-reuse-safe counterpart to the
+/// pid-keyed accessors — a stale reference is a typed error, never UB.
+pub fn process_vm_with_handle<R>(
+    handle: Handle<ProcessVm>,
+    f: impl FnOnce(&mut ProcessVm) -> R,
+) -> Result<R, HandleError> {
+    let slot = handle.slot() as usize;
+    if slot >= MAX_PROCESSES {
+        return Err(HandleError::OutOfBounds);
+    }
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id == INVALID_PROCESS_ID {
+        return Err(HandleError::NoEntry);
+    }
+    if guard.generation != handle.generation() {
+        return Err(HandleError::Stale);
+    }
+    Ok(f(&mut guard))
 }
 
 /// Lock-free page-directory lookup.  The page_dir pointer is only cleared
@@ -521,7 +582,7 @@ pub fn process_vm_sync_kernel_mappings(process_id: u32) {
 ///
 /// After insertion, adjacent VMAs with compatible metadata are merged
 /// automatically inside `VmaMap::insert`.
-fn add_vma_to_inner(inner: &mut ProcessVmInner, start: u64, end: u64, region: VmaRegion) -> c_int {
+fn add_vma_to_inner(inner: &mut ProcessVm, start: u64, end: u64, region: VmaRegion) -> c_int {
     if !vma_range_valid(start, end) {
         return -1;
     }
@@ -546,7 +607,7 @@ fn prot_to_region(prot: u64) -> VmaRegion {
     }
 }
 
-fn unmap_and_free_range_inner(inner: &mut ProcessVmInner, start: u64, end: u64) -> u32 {
+fn unmap_and_free_range_inner(inner: &mut ProcessVm, start: u64, end: u64) -> u32 {
     if !vma_range_valid(start, end) {
         return 0;
     }
@@ -576,7 +637,7 @@ fn unmap_and_free_range_inner(inner: &mut ProcessVmInner, start: u64, end: u64) 
 /// issue the one authoritative `flush_all_for_process` shootdown
 /// here to drop stale TLB entries on every CPU before any frame
 /// is reused.
-fn teardown_inner_mappings(inner: &mut ProcessVmInner) {
+fn teardown_inner_mappings(inner: &mut ProcessVm) {
     let pid = inner.process_id;
     if pid != INVALID_PROCESS_ID {
         tlb::flush_all_for_process(pid);
@@ -1373,7 +1434,7 @@ pub fn create_process_vm() -> u32 {
     let layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
 
     // Phase 1: allocate a slot under the global lock.
-    let (slot, process_id) = {
+    let (slot, process_id, generation) = {
         let mut alloc = VM_SLOT_ALLOC.lock();
         if alloc.num_processes >= MAX_PROCESSES as u32 {
             klog_info!("create_process_vm: Maximum processes reached");
@@ -1398,7 +1459,8 @@ pub fn create_process_vm() -> u32 {
         let process_id = alloc.next_process_id;
         alloc.next_process_id += 1;
         alloc.num_processes += 1;
-        (slot, process_id)
+        let generation = alloc.alloc_generation();
+        (slot, process_id, generation)
     };
 
     // Phase 2: allocate physical resources (no locks held).
@@ -1441,7 +1503,7 @@ pub fn create_process_vm() -> u32 {
     // legacy ProcessPageDir (transitional dual-allocation). Both PML4
     // frames are independent — the OSTD one gets its own kernel-half
     // copy from the registered KERNEL_MASTER_PML4 via `VmSpace::new`.
-    // The OSTD handle is stashed in `ProcessVmInner.vm_space` but no
+    // The OSTD handle is stashed in `ProcessVm.vm_space` but no
     // user-side mapping flows through it yet; the consumer-migration
     // pass that's still pending rewrites every map / unmap / activate
     // callsite. On `VmSpace::new` failure we roll back exactly as the
@@ -1479,6 +1541,7 @@ pub fn create_process_vm() -> u32 {
     {
         let mut proc = PROCESS_VMS[slot].lock();
         proc.process_id = process_id;
+        proc.generation = generation;
         proc.page_dir = KernelSync::new(page_dir_ptr);
         proc.vm_space = Some(vm_space_arc);
         proc.vma_map.clear();
@@ -1965,7 +2028,7 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
 // =============================================================================
 
 /// Find a free gap in the process address space within the mmap region.
-fn find_mmap_gap_inner(inner: &ProcessVmInner, size: u64) -> u64 {
+fn find_mmap_gap_inner(inner: &ProcessVm, size: u64) -> u64 {
     use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
 
     if size == 0 {
@@ -2536,7 +2599,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     };
 
     // Phase 1: allocate child slot under global lock.
-    let (child_slot, child_id) = {
+    let (child_slot, child_id, child_generation) = {
         let mut alloc = VM_SLOT_ALLOC.lock();
         if alloc.num_processes >= MAX_PROCESSES as u32 {
             klog_info!("process_vm_clone_cow: Maximum processes reached");
@@ -2560,7 +2623,8 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         let child_id = alloc.next_process_id;
         alloc.next_process_id += 1;
         alloc.num_processes += 1;
-        (child_slot, child_id)
+        let child_generation = alloc.alloc_generation();
+        (child_slot, child_id, child_generation)
     };
 
     // Phase 2: allocate physical resources (no locks held).
@@ -2639,6 +2703,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     {
         let mut child = PROCESS_VMS[child_slot].lock();
         child.process_id = child_id;
+        child.generation = child_generation;
         child.page_dir = KernelSync::new(child_page_dir);
         child.vm_space = Some(child_vm_space_arc);
         child.vma_map.clear();

@@ -458,8 +458,10 @@ pub fn test_heap_fragmentation_behind_head() -> TestResult {
 
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_page_dir,
+    process_vm_handle, process_vm_with_handle,
 };
 use slopos_abi::task::INVALID_PROCESS_ID;
+use slopos_ostd::handle::HandleError;
 
 pub fn test_process_vm_slot_reuse() -> TestResult {
     init_process_vm();
@@ -575,6 +577,61 @@ pub fn test_process_vm_counter_reset() -> TestResult {
             final_active,
             initial_active
         );
+    }
+    pass!()
+}
+
+/// A `Handle<ProcessVm>` from a destroyed process must not resolve to a
+/// process that later reuses the same slot: it returns a typed
+/// `HandleError`, never silently aliasing the new occupant.
+pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
+    init_process_vm();
+
+    let p1 = create_process_vm();
+    if p1 == INVALID_PROCESS_ID {
+        return fail!("create p1");
+    }
+    let Some(h1) = process_vm_handle(p1) else {
+        destroy_process_vm(p1);
+        return fail!("handle for live p1");
+    };
+    // A live handle resolves.
+    if process_vm_with_handle(h1, |_| ()).is_err() {
+        destroy_process_vm(p1);
+        return fail!("live handle should resolve");
+    }
+
+    // Destroy p1: the handle now resolves to NoEntry (slot vacated).
+    destroy_process_vm(p1);
+    if process_vm_with_handle(h1, |_| ()) != Err(HandleError::NoEntry) {
+        return fail!("destroyed-slot handle should be NoEntry");
+    }
+
+    // Create p2; with p1 gone, p2 reclaims p1's slot but with a fresh
+    // generation. The stale handle must now report Stale, and p2's own
+    // handle must resolve.
+    let p2 = create_process_vm();
+    if p2 == INVALID_PROCESS_ID {
+        return fail!("create p2");
+    }
+    let Some(h2) = process_vm_handle(p2) else {
+        destroy_process_vm(p2);
+        return fail!("handle for live p2");
+    };
+
+    let stale = process_vm_with_handle(h1, |_| ());
+    let live = process_vm_with_handle(h2, |_| ());
+    destroy_process_vm(p2);
+
+    if h1.slot() == h2.slot() && stale != Err(HandleError::Stale) {
+        return fail!("reused-slot stale handle should be Stale, got {:?}", stale);
+    }
+    // If the slot was not reused, the stale handle is still not live.
+    if h1.slot() != h2.slot() && stale.is_ok() {
+        return fail!("stale handle must not resolve");
+    }
+    if live.is_err() {
+        return fail!("p2 handle should resolve");
     }
     pass!()
 }
@@ -1593,6 +1650,7 @@ use slopos_testing::stest;
 
 stest!(name = test_process_vm_slot_reuse, suite = vm);
 stest!(name = test_process_vm_counter_reset, suite = vm);
+stest!(name = test_process_vm_handle_stale_after_reuse, suite = vm);
 
 stest!(name = test_heap_free_list_search, suite = heap);
 stest!(name = test_heap_fragmentation_behind_head, suite = heap);

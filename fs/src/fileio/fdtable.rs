@@ -2,13 +2,14 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::syscall_services::tty;
+use slopos_ostd::handle::HandleTable;
 
 use super::open_file_table::{alloc_open_file_entry, incref_open_file, release_open_file};
 use super::*;
 
 fn bootstrap_console_fds(
     inner: &mut FileTableSlotInner,
-    open_files: &mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
+    open_files: &mut HandleTable<OpenFile>,
     external_ops: &ExternalOpsState,
 ) {
     let tty_ops = effective_tty_ops(external_ops);
@@ -51,29 +52,26 @@ fn bootstrap_console_fds(
     };
 
     inner.descriptors[0] = FdEntry {
-        open_file_idx: stdin_idx,
+        open_file: stdin_idx,
         cloexec: false,
         valid: true,
     };
     inner.descriptors[1] = FdEntry {
-        open_file_idx: stdout_idx,
+        open_file: stdout_idx,
         cloexec: false,
         valid: true,
     };
     inner.descriptors[2] = FdEntry {
-        open_file_idx: stderr_idx,
+        open_file: stderr_idx,
         cloexec: false,
         valid: true,
     };
 }
 
-fn reset_inner_descriptors(
-    inner: &mut FileTableSlotInner,
-    open_files: &mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
-) {
+fn reset_inner_descriptors(inner: &mut FileTableSlotInner, open_files: &mut HandleTable<OpenFile>) {
     for fd in inner.descriptors.iter_mut() {
         if fd.valid {
-            release_open_file(open_files, fd.open_file_idx);
+            release_open_file(open_files, fd.open_file);
         }
         reset_fd_entry(fd);
     }
@@ -186,11 +184,11 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
             if !src_fd.valid {
                 continue;
             }
-            if !incref_open_file(&mut state.open_files, src_fd.open_file_idx) {
+            if !incref_open_file(&mut state.open_files, src_fd.open_file) {
                 // Roll back any increfs done so far.
                 for prev in &dst_inner.descriptors[..i] {
                     if prev.valid {
-                        release_open_file(&mut state.open_files, prev.open_file_idx);
+                        release_open_file(&mut state.open_files, prev.open_file);
                     }
                 }
                 for entry in dst_inner.descriptors.iter_mut() {
@@ -226,7 +224,7 @@ pub fn fileio_close_on_exec(process_id: u32) {
     with_open_files(|state| {
         for fd in inner.descriptors.iter_mut() {
             if fd.valid && fd.cloexec {
-                release_open_file(&mut state.open_files, fd.open_file_idx);
+                release_open_file(&mut state.open_files, fd.open_file);
                 reset_fd_entry(fd);
             }
         }

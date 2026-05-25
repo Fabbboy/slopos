@@ -15,10 +15,12 @@ pub struct FusedPollResult {
     pub revents: u16,
     /// `true` if the caller was registered on a wait queue for wakeup.
     pub registered: bool,
-    /// The open-file-table index at the time of registration.
-    /// Used by cleanup to target the correct open file even if the FD
-    /// was closed and reassigned between registration and cleanup.
-    pub open_file_idx: u32,
+    /// Opaque token identifying the open file at the time of registration,
+    /// set by the file layer. Used by cleanup to target the correct open
+    /// file even if the FD was closed and reassigned between registration
+    /// and cleanup — the token carries a generation so a recycled slot is
+    /// detected rather than silently re-targeted.
+    pub open_file_token: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +91,7 @@ pub trait FileOps: Send + Sync {
         FusedPollResult {
             revents,
             registered,
-            open_file_idx: 0,
+            open_file_token: 0,
         }
     }
 
