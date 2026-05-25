@@ -67,6 +67,14 @@ impl Superblock {
         if sb.magic != EXT2_MAGIC {
             return Err(Ext2Error::InvalidSuperblock);
         }
+        // Reject degenerate geometry before any divisor reaches block_group()/
+        // local_index() (types.rs divides inode numbers by inodes_per_group) or
+        // groups_count() (divides blocks_count by blocks_per_group). A malformed
+        // image with a zero divisor would otherwise fault on the first inode
+        // lookup.
+        if sb.inodes_per_group == 0 || sb.blocks_per_group == 0 || sb.inodes_count == 0 {
+            return Err(Ext2Error::InvalidSuperblock);
+        }
         Ok(sb)
     }
 

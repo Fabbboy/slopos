@@ -431,6 +431,26 @@ pub fn test_ext2_unsupported_block_size() -> TestResult {
     }
 }
 
+// A malformed image with inodes_per_group == 0 must be rejected at parse time,
+// before the value reaches the inode-number division in block_group()/local_index().
+pub fn test_ext2_zero_inodes_per_group_rejected() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        // inodes_per_group lives at superblock offset 40 (le32).
+        sb[40..44].copy_from_slice(&0u32.to_le_bytes());
+    });
+
+    let result = Ext2Fs::init_internal(&device);
+    match result {
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        _ => TestResult::Fail,
+    }
+}
+
 pub fn test_ext2_directory_format_error() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
@@ -648,6 +668,7 @@ slopos_testing::stest!(name = test_vfs_unlink);
 slopos_testing::stest!(name = test_vfs_storage_contention_stress_baseline);
 slopos_testing::stest!(name = test_ext2_invalid_superblock_magic);
 slopos_testing::stest!(name = test_ext2_unsupported_block_size);
+slopos_testing::stest!(name = test_ext2_zero_inodes_per_group_rejected);
 slopos_testing::stest!(name = test_ext2_directory_format_error);
 slopos_testing::stest!(name = test_ext2_invalid_inode);
 slopos_testing::stest!(name = test_ext2_read_file_not_regular);

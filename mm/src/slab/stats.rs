@@ -10,6 +10,7 @@ use core::sync::atomic::Ordering;
 
 use super::KERNEL_SLAB;
 use super::SIZE_CLASSES;
+use super::allocator::SlabClassStats;
 use super::page::{LARGE_ALLOC_COUNT, SLAB_PAGE_COUNT};
 use crate::paging_defs::PAGE_SIZE_4KB;
 
@@ -38,34 +39,39 @@ pub fn snapshot() -> HeapStats {
     let mut free_objects: u64 = 0;
     let mut slab_allocated_bytes: u64 = 0;
 
-    macro_rules! fold {
-        ($slab:ident, $class_idx:expr) => {{
-            let ac = KERNEL_SLAB.$slab.stats.alloc_count.load(Ordering::Relaxed);
-            let fc = KERNEL_SLAB.$slab.stats.free_count.load(Ordering::Relaxed);
-            let total = KERNEL_SLAB
-                .$slab
-                .stats
-                .total_objects
-                .load(Ordering::Relaxed) as u64;
-            let free = KERNEL_SLAB.$slab.stats.free_objects.load(Ordering::Relaxed) as u64;
-            alloc_count = alloc_count.saturating_add(ac);
-            free_count = free_count.saturating_add(fc);
-            total_objects = total_objects.saturating_add(total);
-            free_objects = free_objects.saturating_add(free);
-            let in_use = total.saturating_sub(free);
-            let class_bytes = SIZE_CLASSES[$class_idx] as u64;
-            slab_allocated_bytes =
-                slab_allocated_bytes.saturating_add(in_use.saturating_mul(class_bytes));
-        }};
+    // Fold the eight per-class counters with a single loop body rather than
+    // eight inlined macro expansions: in a debug build the per-expansion
+    // temporaries are not coalesced, which pushed this frame past the 2 KiB
+    // stack-frame ceiling that check_stack_sizes.sh enforces. One reused loop
+    // body keeps the frame tiny. The slabs are distinct const-generic types but
+    // share a `SlabClassStats`, so an array of `&SlabClassStats` is uniform.
+    let class_stats: [&SlabClassStats; SIZE_CLASSES.len()] = [
+        &KERNEL_SLAB.slab16.stats,
+        &KERNEL_SLAB.slab32.stats,
+        &KERNEL_SLAB.slab64.stats,
+        &KERNEL_SLAB.slab128.stats,
+        &KERNEL_SLAB.slab256.stats,
+        &KERNEL_SLAB.slab512.stats,
+        &KERNEL_SLAB.slab1024.stats,
+        &KERNEL_SLAB.slab2048.stats,
+    ];
+    let mut idx = 0;
+    while idx < class_stats.len() {
+        let stats = class_stats[idx];
+        let ac = stats.alloc_count.load(Ordering::Relaxed);
+        let fc = stats.free_count.load(Ordering::Relaxed);
+        let total = stats.total_objects.load(Ordering::Relaxed) as u64;
+        let free = stats.free_objects.load(Ordering::Relaxed) as u64;
+        alloc_count = alloc_count.saturating_add(ac);
+        free_count = free_count.saturating_add(fc);
+        total_objects = total_objects.saturating_add(total);
+        free_objects = free_objects.saturating_add(free);
+        let in_use = total.saturating_sub(free);
+        let class_bytes = SIZE_CLASSES[idx] as u64;
+        slab_allocated_bytes =
+            slab_allocated_bytes.saturating_add(in_use.saturating_mul(class_bytes));
+        idx += 1;
     }
-    fold!(slab16, 0);
-    fold!(slab32, 1);
-    fold!(slab64, 2);
-    fold!(slab128, 3);
-    fold!(slab256, 4);
-    fold!(slab512, 5);
-    fold!(slab1024, 6);
-    fold!(slab2048, 7);
 
     let slab_pages = SLAB_PAGE_COUNT.load(Ordering::Relaxed) as u64;
     let large_count = LARGE_ALLOC_COUNT.load(Ordering::Relaxed) as u64;

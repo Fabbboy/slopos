@@ -1,7 +1,9 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-Date: 2026-03-17
+Date: 2026-03-17 (original); last reviewed 2026-05-25.
 Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspection), plus NVD CVE lookups via `curl` + `jq`.
+
+> **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility or audit-trail obligations, so this ledger tracks **open findings only**. When a finding is resolved it is **removed** from this file (not retained as a `fixed` historical record). Internal IDs stay stable for findings that remain open, so gaps in the numbering are expected.
 
 ## Scoring Method
 
@@ -16,64 +18,19 @@ Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspe
 python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 ```
 
-## Candidate SlopOS Findings (for remediation)
+## Open SlopOS Findings (for remediation)
 
 These are **candidate CVE-style records** for internal tracking. They are not official CVE assignments.
 
-### SLOPOS-2026-0001
-- Title: Unchecked user pointer write in `syscall_input_poll`
-- Evidence: `core/src/syscall/ui_handlers.rs:135`, `core/src/syscall/ui_handlers.rs:146`, `drivers/src/input_event.rs:341`
-- Impact: `event_ptr` comes from userspace and is dereferenced directly (`*event_ptr = event`) without `UserPtr` / `copy_to_user`, enabling arbitrary kernel memory write or kernel panic.
-- CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`
-- Base score: `8.4` (High)
-
-### SLOPOS-2026-0002
-- Title: Unchecked user pointer write in `syscall_input_poll_batch`
-- Evidence: `core/src/syscall/ui_handlers.rs:154`, `core/src/syscall/ui_handlers.rs:165`, `drivers/src/input_event.rs:326`, `drivers/src/input_event.rs:341`
-- Impact: unvalidated `buffer_ptr` is passed to `input_drain_batch`, which writes `InputEvent` entries using raw pointer arithmetic and `write(event)`.
-- CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`
-- Base score: `8.4` (High)
-
-### SLOPOS-2026-0003
-- Title: Unchecked output pointer write in compositor window enumeration
-- Evidence: `core/src/syscall/ui_handlers.rs:270`, `core/src/syscall/ui_handlers.rs:274`, `video/src/compositor_context.rs:516`, `video/src/compositor_context.rs:560`
-- Impact: `out_buffer` is user-controlled and written directly in kernel context. This path is compositor-gated, but still provides arbitrary write if compositor context is compromised.
-- CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H`
-- Base score: `6.7` (Medium)
-
-### SLOPOS-2026-0004
-- Title: Unchecked user pointer read in `syscall_surface_set_title`
-- Evidence: `core/src/syscall/ui_handlers.rs:122`, `core/src/syscall/ui_handlers.rs:130`, `video/src/compositor_context.rs:716`
-- Impact: `title_ptr` is dereferenced via `from_raw_parts` without user pointer validation. Can trigger kernel faults and may permit kernel memory disclosure depending on mapping/readability.
-- CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H`
-- Base score: `7.7` (High)
-
-### SLOPOS-2026-0005
-- Title: ext2 superblock sanity gaps allow divide-by-zero panic
-- Evidence: `fs/src/ext2.rs:191`, `fs/src/ext2.rs:748`, `fs/src/ext2.rs:964`, `fs/src/ext2.rs:973`, `fs/src/ext2.rs:1002`, `fs/src/ext2.rs:1067`, `fs/src/ext2.rs:1068`
-- Impact: attacker-controlled ext2 metadata (`inodes_per_group`, `blocks_per_group`) is not validated for zero before division/mod operations, causing kernel panic on malformed filesystem images.
-- CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`
-- Base score: `5.5` (Medium)
-
 ### SLOPOS-2026-0006
 - Title: ext2 inode/group descriptor size trust can panic on out-of-bounds slicing
-- Evidence: `fs/src/ext2.rs:205`, `fs/src/ext2.rs:574`, `fs/src/ext2.rs:591`, `fs/src/ext2.rs:761`, `fs/src/ext2.rs:1072`, `fs/src/ext2.rs:1087`
-- Impact: untrusted on-disk `inode_size` and derived offsets are used in slice indexing without validating `within + size <= block_size`, enabling malformed-image-triggered OOB panic (DoS).
+- Status: open
+- Confidence: 70 (evidence 35, exploitability 15 — depends on whether SlopOS mounts untrusted images, reproducibility 20) — below the 80 threshold for a guaranteed CVSS-scored issue; the score below is an estimate carried from the original triage.
+- Evidence: untrusted on-disk `inode_size` / derived offsets used in slice indexing without validating `within + size <= block_size`. `fs/src/ext2/ondisk.rs` (`Inode::parse`, `GroupDesc::parse`, `effective_inode_size` clamps `inode_size == 0` up to 128 but does not bound it from above against `block_size`) and the inode-table offset math in `fs/src/ext2/inode.rs` / `fs/src/ext2/mod.rs`.
+- Impact: malformed-image-triggered out-of-bounds slice index. Because `fs/` is `#![forbid(unsafe_code)]`, this is a bounded-slice **panic** (DoS), never memory unsafety/UB.
 - CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H`
 - Base score: `6.1` (Medium)
-
-### SLOPOS-2026-0007
-- Title: Predictable TCP Initial Sequence Number enables off-path injection
-- Status: fixed (2026-04-11)
-- Fix commit: (filled on merge of P2 branch)
-- Confidence: 90 (evidence 40, exploitability 25, reproducibility 25)
-- Evidence (pre-fix): `net/src/tcp.rs:966-972` — `static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x4F50_534C); pub(crate) fn generate_isn() -> u32 { ISN_COUNTER.fetch_add(64000, Ordering::Relaxed) }`.
-- Impact: Every new TCP connection's ISN was the previous ISN plus exactly `64000`. An off-path attacker who observed or caused one connection saw all future ISNs for every 4-tuple on the host, enabling TCP injection against established connections (RST, data injection on cleartext streams).
-- Repro (pre-fix): `assert_eq!(tcp::generate_isn().wrapping_sub(tcp::generate_isn()) as i32, -64000i32)`.
-- CVSS vector: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L`
-- Base score: `7.3` (High)
-- Remediation: P2.5 landed `net/src/tcp/isn.rs`, which replaces the counter with an FNV mix of the 4-tuple against a per-boot secret seeded from `slopos_utils::clock::monotonic_ns()` plus a 4 µs clock drift (RFC 6528 §3.1 spirit). Regression tests `test_tcp_isn_stable_per_tuple_within_boot`, `test_tcp_isn_varies_by_tuple`, and `test_tcp_isn_not_monotonic_counter` pin the new behavior in `net/src/tests/tcp_tests.rs`.
-- Follow-up: a real keyed hash (SipHash-2-4 or ChaCha20 PRF) remains a P5+ improvement once SlopOS ships a crypto primitive net/ can depend on.
+- Remediation (proposed): validate `effective_inode_size() as u32 <= block_size` and bound each `within + size` against the containing block before slicing.
 
 ## Relevant NVD CVE Analogs (fetched)
 
@@ -83,28 +40,15 @@ Retrieved using NVD API pattern:
 curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<CVE-ID>" | jq
 ```
 
-Sample command requested and executed:
-
-```bash
-curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2020-0001" | jq
-```
-
 Selected analogs:
 
 | CVE | Vector | Score | Severity | Why relevant |
 |---|---|---:|---|---|
-| CVE-2010-3904 | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H | 7.8 | HIGH | Unchecked user pointer / kernel memory corruption class |
-| CVE-2022-0185 | CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H | 8.4 | HIGH | Local unprivileged kernel heap corruption class |
-| CVE-2023-32233 | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H | 7.8 | HIGH | Kernel privilege escalation boundary failure class |
 | CVE-2025-37785 | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H | 7.1 | HIGH | Filesystem metadata parsing / ext* class |
 | CVE-2024-26817 | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H | 5.5 | MEDIUM | Kernel allocation/validation hardening analog |
 | CVE-2025-38665 | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H | 5.5 | MEDIUM | Local kernel DoS through insufficient validation |
 | CVE-2025-39838 | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H | 5.5 | MEDIUM | Null/invalid pointer handling in kernel path |
-| CVE-2016-5195 | CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H | 7.0 | HIGH | Local memory write integrity break analog |
 
 ## Priority Remediation Plan
 
-1. Replace all raw syscall pointer dereferences in UI/input paths with `UserPtr`/`UserBytes` + `copy_from_user`/`copy_to_user`.
-2. Add ext2 superblock invariant checks at init (`inodes_per_group > 0`, `blocks_per_group > 0`, `inode_size` bounds).
-3. Guard all ext2 slice constructions with explicit bounds checks before indexing.
-4. Add regression tests for malformed userspace pointers and malformed ext2 images.
+1. Guard all ext2 slice constructions with explicit bounds checks before indexing, including `effective_inode_size() <= block_size` (SLOPOS-2026-0006).

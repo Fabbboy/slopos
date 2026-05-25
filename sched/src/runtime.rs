@@ -322,9 +322,9 @@ extern "C" fn scheduler_loop_entry(cpu_id: usize, idle_task: *mut ()) -> ! {
 
 pub fn enter_scheduler(cpu_id: usize) -> ! {
     // Called exactly once per CPU at boot (BSP from `kernel_main_impl`,
-    // APs from `ap_entry_rust`). No re-entry guard: per CLAUDE.md
-    // "trust internal contracts" — re-entry is a caller bug to fix at
-    // the call site, not a runtime condition to defend against.
+    // APs from `ap_entry_rust`). No re-entry guard — by the "trust internal
+    // contracts" convention, re-entry is a caller bug to fix at the call site,
+    // not a runtime condition to defend against.
     // (Historical note: a prior `is_enabled()`-keyed guard caused a
     // halt-forever bug because the kernel-test fixture's preconditions
     // tripped the guard; the fixture is now hermetic so the guard's

@@ -29,8 +29,7 @@
 //!   wake that raced between WQ-unlock and the recheck. Lifted from
 //!   Asterinas's `Waker::has_woken` pattern, this is an **auxiliary**
 //!   signal — the WQ-lock-pair barrier remains the ground-truth
-//!   synchronization edge. See `docs/scheduler/wait_protocol.md` for
-//!   the proof.
+//!   synchronization edge.
 //! - [`queue_ptr`](Self::queue_load): a back-pointer to the owning
 //!   `WaitQueue` (stored as `*mut c_void` to avoid a circular type
 //!   dependency between this module and `wait_queue.rs`). Set under the

@@ -1,8 +1,8 @@
 //! Single-publisher / multi-observer atomic cell.
 //!
-//! See `docs/scheduler/wait_protocol.md` for the full wait/wake/block
-//! protocol — this cell is the "durable exit value" primitive paired with
-//! the per-task `WaitQueue` to close the two-atomic observation race.
+//! Part of the scheduler's wait/wake/block protocol: this cell is the
+//! "durable exit value" primitive paired with the per-task `WaitQueue` to
+//! close the two-atomic observation race.
 //!
 //! [`AtomicCell<T>`] is the durable-publish primitive used by the
 //! scheduler's wait/wake protocol: a producer publishes a value

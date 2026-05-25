@@ -1,8 +1,8 @@
 //! Initial Sequence Number generator — RFC 6528 in spirit.
 //!
-//! Replaces the old `ISN_COUNTER.fetch_add(64000)` scheme (tracked as
-//! `SLOPOS-2026-0007` in the CVSS ledger) with a per-tuple hash that is
-//! unpredictable to off-path attackers:
+//! Replaces the old `ISN_COUNTER.fetch_add(64000)` scheme — which made every
+//! connection's ISN predictable from one observation, enabling off-path TCP
+//! injection — with a per-tuple hash that is unpredictable to off-path attackers:
 //!
 //! ```text
 //!     ISN = FNV-mix(4-tuple || boot_secret) + (monotonic_ns / 4µs)

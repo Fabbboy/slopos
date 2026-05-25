@@ -224,8 +224,8 @@ pub fn test_neighbor_failed_drops_packets() -> TestResult {
     );
 
     // Note: W/L currency adjustment is intentionally NOT tested here.
-    // Per AGENTS.md: "Internal subsystems (drivers, boot sequences) must not
-    // adjust the W/L balance directly." The scheduler reads the balance on
+    // By kernel convention, internal subsystems (drivers, boot sequences) must
+    // not adjust the W/L balance directly. The scheduler reads the balance on
     // context switches. Neighbor cache failures surface through the return
     // type, not through direct W/L calls.
 

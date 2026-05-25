@@ -4016,7 +4016,7 @@ slopos_testing::stest!(
 // - Lock-free `has_waiters()` (callers that want to skip a `wake_*`
 //   when no one is queued do this at the call site rather than baked
 //   into `wake_*` itself — the in-place fast path is unsound on
-//   weakly-ordered architectures; see `wait_protocol.md` §6.3).
+//   weakly-ordered architectures).
 // - `WaitNode::has_woken` auxiliary atomic, exercised indirectly via
 //   the wake-empty-queue tests and via the wider scheduler integration.
 // - `WaitNode` Drop with null queue back-pointer is a no-op (the

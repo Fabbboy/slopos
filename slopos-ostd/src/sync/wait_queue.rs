@@ -1,8 +1,8 @@
 //! Wait queue primitive for blocking/waking kernel tasks.
 //!
-//! See `docs/scheduler/wait_protocol.md` for the full wait/wake/block
-//! protocol — the lock-pair full-barrier proof, the cookbook for adding
-//! a new wait subsystem, and the migration outlook to async.
+//! Implements the scheduler's wait/wake/block protocol — the lock-pair
+//! full-barrier discipline that closes the two-atomic observation race
+//! between a waiter's block and a waker's wake.
 //!
 //! Provides an unbounded intrusive linked list of [`WaitNode`]s; each
 //! waiter contributes its own node and the list links them together
@@ -1194,9 +1194,8 @@ impl Drop for WaitNode {
             // (a static array element, an inline field of a `TaskInner`
             // kept alive by `TaskRefGuard`, etc.) into the back-pointer.
             // The WaitQueue is required by its API contract to outlive
-            // every WaitNode that has been linked into it (see
-            // `wait_node.rs` module doc + `docs/scheduler/wait_protocol.md`
-            // §4.4 for the lifetime invariant).
+            // every WaitNode that has been linked into it (see the
+            // `wait_node.rs` module doc for the lifetime invariant).
             let queue = unsafe { &*(q as *const WaitQueue) };
             let nn = NonNull::from(&*self);
             // SAFETY: the back-pointer was set under the queue's WQ

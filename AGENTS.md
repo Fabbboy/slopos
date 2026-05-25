@@ -109,16 +109,16 @@ All agents must run a recurring vulnerability review loop for newly written and 
 5. Use `scripts/cvss_calc.py` to compute CVSS v3.1 vectors/scores consistently across agents.
 
 ### CVSS file lifecycle requirements
-1. Maintain `CVSS.md` as the single living ledger.
+1. Maintain `CVSS.md` as the single living ledger of **open findings only** (pre-alpha policy).
 2. Every entry must include:
    - Stable internal ID (e.g., `SLOPOS-YYYY-NNNN`)
-   - Status: `open`, `fixed`, or `needs-retest`
+   - Status: `open` or `needs-retest`
    - Confidence score and reasoning
    - CVSS vector + score (only if confidence >= 80)
    - Exact evidence paths/lines
-3. When an issue is fixed:
-   - Do not delete it.
-   - Mark it `fixed`, include fix date and commit hash (if available), and keep historical traceability.
+3. When an issue is fixed (pre-alpha policy):
+   - **Remove it** from `CVSS.md`. SlopOS is pre-alpha with no audit-trail obligation, so resolved findings are deleted rather than retained as historical `fixed` records.
+   - Internal IDs stay stable for findings that remain open; gaps in the numbering are expected.
 4. When new guaranteed issues are found, append them with incremented IDs.
 
 ### Repro/examples (required when possible)

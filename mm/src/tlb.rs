@@ -143,7 +143,7 @@ pub fn has_pcid() -> bool {
 // initiator's "push request + clear ACK" and the handler's "take request +
 // set ACK" critical sections. That serialisation is the entire trick.
 //
-// Why the previous design hung (see CVSS audit + `builddir/hang_repro/`):
+// Why the previous design hung:
 //
 //   1. CPU 0 sets cpu_state[2].ack=false, sends IPI to 2
 //   2. CPU 1 concurrently sets cpu_state[2].ack=false (still false), sends IPI
