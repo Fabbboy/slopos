@@ -1653,24 +1653,12 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                     return errno_i32(ERRNO_EISCONN);
                 }
 
-                let src_for = crate::netstack::NET_STACK
-                    .source_ip_for(Ipv4Addr(addr))
-                    .map(|ip| ip.0);
-                let first = crate::netstack::NET_STACK.first_ipv4().map(|ip| ip.0);
-                let route = crate::route::ROUTE_TABLE.lookup(Ipv4Addr(addr)).is_some();
-                let local_ip = sock
-                    .local_addr
-                    .map(|a| a.ip.0)
-                    .unwrap_or_else(|| src_for.unwrap_or([0; 4]));
-                klog_info!(
-                    "DIAG connect: dst={:?}:{} local_ip={:?} source_ip_for={:?} first_ipv4={:?} have_route={}",
-                    addr,
-                    port,
-                    local_ip,
-                    src_for,
-                    first,
-                    route
-                );
+                let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
+                    crate::netstack::NET_STACK
+                        .source_ip_for(Ipv4Addr(addr))
+                        .map(|ip| ip.0)
+                        .unwrap_or([0; 4])
+                });
 
                 match tcp::connect(local_ip, addr, port) {
                     Ok((tcp_idx, syn)) => {
@@ -1688,7 +1676,21 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                         (tcp_idx, nb, syn)
                     }
                     Err(e) => {
-                        klog_info!("DIAG connect: tcp::connect failed err={:?}", e);
+                        let src_for = crate::netstack::NET_STACK
+                            .source_ip_for(Ipv4Addr(addr))
+                            .map(|ip| ip.0);
+                        let first = crate::netstack::NET_STACK.first_ipv4().map(|ip| ip.0);
+                        let route = crate::route::ROUTE_TABLE.lookup(Ipv4Addr(addr)).is_some();
+                        klog_info!(
+                            "DIAG connect: tcp::connect failed err={:?} dst={:?}:{} local_ip={:?} source_ip_for={:?} first_ipv4={:?} have_route={}",
+                            e,
+                            addr,
+                            port,
+                            local_ip,
+                            src_for,
+                            first,
+                            route
+                        );
                         return map_tcp_err(e);
                     }
                 }
@@ -1710,7 +1712,16 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     // so the NAPI RX path can call socket_notify_tcp_activity without deadlocking.
     let send_rc = socket_send_tcp_segment(&syn_seg, &[]);
     if send_rc != 0 {
-        klog_info!("DIAG connect: SYN send failed send_rc={}", send_rc);
+        let route = crate::route::ROUTE_TABLE
+            .lookup(Ipv4Addr(syn_seg.tuple.remote_ip))
+            .is_some();
+        klog_info!(
+            "DIAG connect: SYN send failed send_rc={} src={:?} dst={:?} have_route={}",
+            send_rc,
+            syn_seg.tuple.local_ip,
+            syn_seg.tuple.remote_ip,
+            route
+        );
         let _ = tcp::abort(tcp_idx);
         return send_rc;
     }
@@ -2139,14 +2150,14 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
             sock.options.recv_timeout.unwrap_or(0),
         )
     };
-    klog_info!(
-        "DIAG recv: sock_idx={} state={:?} tcp_idx_present={}",
-        sock_idx,
-        state,
-        tcp_idx.is_some()
-    );
-
     if !matches!(state, SocketState::Connected | SocketState::Connecting) {
+        if !matches!(state, SocketState::Unbound) {
+            klog_info!(
+                "DIAG recv: unexpected state={:?} -> ENOTCONN (sock_idx={})",
+                state,
+                sock_idx
+            );
+        }
         return errno_i32(ERRNO_ENOTCONN) as i64;
     }
 
