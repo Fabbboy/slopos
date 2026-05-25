@@ -278,6 +278,33 @@ unsafe impl AnyFrameMeta for PageCacheMeta {
 }
 const _: () = assert_meta_fits::<PageCacheMeta>();
 
+/// Network packet-buffer frame metadata. One slot per pre-allocated
+/// packet buffer; the buffer's bytes live in the frame and are reached
+/// through [`Frame::<PacketMeta>::as_bytes`] / [`as_bytes_mut`].
+///
+/// The single `reserved` field is currently unused by the network
+/// stack — it exists so the typed-metadata shape parallels
+/// [`PageCacheMeta`] and a future RX-offload path can stamp a cached
+/// length or flags without taking the pool lock. Atomic so that future
+/// use needs no metadata re-versioning; sized well within the
+/// [`MAX_META_SIZE`] cap (`AtomicU64` = 8 bytes).
+#[derive(Default)]
+pub struct PacketMeta {
+    /// Reserved for network-layer use; left zero today.
+    pub reserved: AtomicU64,
+}
+
+// SAFETY: payload is a single atomic with no cross-field invariant
+// beyond `AtomicU64`'s own contract. `on_drop` returns the underlying
+// physical frame to the registered allocator so a `Frame<PacketMeta>`
+// does not leak the page on its last Drop.
+unsafe impl AnyFrameMeta for PacketMeta {
+    fn on_drop(&mut self, paddr: Paddr) {
+        return_frame_to_allocator(paddr);
+    }
+}
+const _: () = assert_meta_fits::<PacketMeta>();
+
 /// Helper: dealloc `paddr` (one page) via the registered allocator.
 /// No-op when no allocator is registered (test scaffolding can drop
 /// frames before `register_frame_allocator` runs without panicking).
@@ -1095,6 +1122,67 @@ impl<S: init_state::InitState> Frame<PageCacheMeta, S> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Frame<PacketMeta> convenience surface.
+//
+// Mirrors the Frame<PageCacheMeta> shape: `alloc` pairs the registered
+// frame allocator with `from_unused`; `as_bytes`/`as_bytes_mut` expose
+// the frame's bytes through the HHDM mapping. The `&mut self` on
+// `as_bytes_mut` makes exclusive access compiler-enforced — the packet
+// pool lends each frame to exactly one PacketBuf at a time, so the
+// borrow checker (not an informal convention) guarantees there is no
+// second mutable view of the page bytes.
+// ---------------------------------------------------------------------------
+
+impl Frame<PacketMeta, init_state::Zeroed> {
+    /// Allocate a single zeroed page and install a fresh
+    /// [`PacketMeta`] into its slot. Returns `None` if no allocator is
+    /// registered or the buddy returned no page.
+    pub fn alloc() -> Option<Self> {
+        let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
+        let opts = FrameAllocOptions::single().zeroed();
+        let paddr = alloc.alloc(opts)?;
+        match Self::from_unused(paddr, PacketMeta::default()) {
+            Ok(frame) => Some(frame),
+            Err(_) => {
+                alloc.dealloc(paddr, 1);
+                None
+            }
+        }
+    }
+}
+
+impl<S: init_state::InitState> Frame<PacketMeta, S> {
+    /// Kernel HHDM virtual address pointing at this frame's contents.
+    #[inline]
+    pub fn virt_addr_u64(&self) -> u64 {
+        crate::mm::phys::phys_to_virt(self.paddr()) as u64
+    }
+
+    /// Read-only byte view of the full 4 KiB frame through the HHDM
+    /// mapping. The borrow's lifetime is the caller's borrow of `self`.
+    pub fn as_bytes(&self) -> &[u8] {
+        let p = self.virt_addr_u64() as *const u8;
+        // SAFETY: the slot is `TYPED` and ref_count >= 1 for `&self`,
+        // so the HHDM mapping is live for the returned borrow's
+        // lifetime. The 4 KiB range fits a single physical frame.
+        unsafe { core::slice::from_raw_parts(p, crate::mm::page_table::PAGE_SIZE_4KB as usize) }
+    }
+
+    /// Mutable byte view of the full 4 KiB frame through the HHDM
+    /// mapping. Requires `&mut self` to enforce exclusive access at the
+    /// source level.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        let p = self.virt_addr_u64() as *mut u8;
+        // SAFETY: `&mut self` guarantees this is the only outstanding
+        // borrow of the frame through *this* handle, and the packet
+        // pool holds one `Frame<PacketMeta>` handle per paddr (no
+        // `from_in_use` calls on `PacketMeta`), so no second handle
+        // exists either. The HHDM mapping is live.
+        unsafe { core::slice::from_raw_parts_mut(p, crate::mm::page_table::PAGE_SIZE_4KB as usize) }
+    }
+}
+
 impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
     fn drop(&mut self) {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as
@@ -1197,6 +1285,7 @@ mod tests {
         assert!(PageTableMeta::SIZE <= MAX_META_SIZE);
         assert!(AnonymousMeta::SIZE <= MAX_META_SIZE);
         assert!(PageCacheMeta::SIZE <= MAX_META_SIZE);
+        assert!(PacketMeta::SIZE <= MAX_META_SIZE);
     }
 
     #[test]
@@ -1204,5 +1293,11 @@ mod tests {
         let m = PageCacheMeta::default();
         assert_eq!(m.dirty.load(Ordering::Acquire), 0);
         assert_eq!(m.owner_key.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn packet_meta_atomics_default_to_zero() {
+        let m = PacketMeta::default();
+        assert_eq!(m.reserved.load(Ordering::Acquire), 0);
     }
 }

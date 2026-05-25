@@ -1,197 +1,175 @@
-//! Pre-allocated packet buffer pool with lock-free allocation.
+//! Pre-allocated packet buffer pool.
 //!
-//! Provides O(1) alloc/release from any context (including interrupts) via
-//! a Treiber stack with ABA-safe tagged pointers.  The backing storage is a
-//! static 512 KiB array in BSS, 64-byte aligned for cache-line friendliness.
+//! Provides O(1) alloc/release of fixed-size packet buffers. Each slot
+//! is backed by a typed [`Frame<PacketMeta>`] page from the kernel
+//! frame allocator; a buffer's bytes are reached through the frame's
+//! `as_bytes`/`as_bytes_mut` HHDM views, so byte access is
+//! borrow-checker-enforced rather than relying on raw-pointer aliasing.
 //!
 //! # Design rationale
 //!
-//! Linux uses `kmem_cache` (slab) for `sk_buff` allocation because per-packet
-//! `kmalloc` is too slow and causes heap fragmentation under load.  A fixed pool
-//! gives O(1) alloc/free, predictable memory usage, and cache-friendly layout.
-//! The lock-free Treiber stack avoids disabling interrupts on the alloc/release
-//! hot path, using a version-tagged CAS to prevent ABA races.
+//! Linux uses `kmem_cache` (slab) for `sk_buff` allocation because
+//! per-packet `kmalloc` is too slow and fragments the heap under load.
+//! A fixed pool gives O(1) alloc/free and predictable memory use. The
+//! frames are allocated once at [`init`](PacketPool::init) and recycled
+//! for the kernel's lifetime; the free-list lives behind a leaf
+//! `SpinLock` (the lock disables IRQs while held and acquires no other
+//! lock, so it is safe to take from any context and can never head a
+//! lock-ordering cycle).
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use slopos_ostd::sync::KernelSync;
+use slopos_ostd::KVec;
+use slopos_ostd::mm::frame::{Frame, PacketMeta};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-/// Size of each packet buffer slot in bytes.
+/// Usable size of each packet buffer in bytes.
 ///
-/// Covers maximum Ethernet frame (1518) plus headroom (128) with room to spare.
+/// Covers the maximum Ethernet frame (1518) plus headroom (128) with
+/// room to spare. The backing frame is a full 4 KiB page; only the
+/// first `BUF_SIZE` bytes are exposed to the network stack.
 pub const BUF_SIZE: usize = 2048;
 
 /// Number of pre-allocated buffer slots.
+///
+/// Each slot is backed by one 4 KiB frame, so the pool reserves
+/// `POOL_SIZE * 4 KiB` of physical memory. Tunable: lower it for a
+/// smaller footprint, raise it for more in-flight buffers.
 pub const POOL_SIZE: usize = 256;
 
-/// Cache-line alignment for each slot (documentation constant).
-pub const CACHE_LINE_ALIGN: usize = 64;
-
-/// Sentinel value: end of freelist / pool exhausted.
-const FREELIST_EMPTY: u16 = u16::MAX;
-
 // =============================================================================
-// Static backing storage
+// Pool state
 // =============================================================================
 
-/// Raw buffer storage — 256 slots × 2048 bytes, 64-byte aligned.
-///
-/// Lives in BSS (zero-initialized, 512 KiB).  Interior mutability via
-/// `UnsafeCell` is sound because the pool's allocation discipline guarantees
-/// that each slot is owned by at most one [`PacketBuf`](super::packetbuf::PacketBuf)
-/// at any time. `KernelSync` wraps the `UnsafeCell` to give the surrounding
-/// struct an auto-derived `Sync` impl.
-#[repr(C, align(64))]
-struct PoolStorage {
-    slots: KernelSync<UnsafeCell<[[u8; BUF_SIZE]; POOL_SIZE]>>,
+/// Mutable pool state, guarded by [`PacketPool::inner`].
+struct PoolInner {
+    /// Per-slot frame storage. `slots[i]` is `Some` while the frame for
+    /// slot `i` is resident in the pool, and `None` while that frame is
+    /// lent to a live [`PacketBuf`](super::packetbuf::PacketBuf). The
+    /// length is however many frames [`init`](PacketPool::init) managed
+    /// to allocate (`<= POOL_SIZE`).
+    slots: KVec<Option<Frame<PacketMeta>>>,
+    /// Free-list of slot indices: `i` is present iff `slots[i]` is
+    /// resident and not currently lent out.
+    free: KVec<u16>,
 }
 
-static POOL_STORAGE: PoolStorage = PoolStorage {
-    slots: KernelSync::new(UnsafeCell::new([[0u8; BUF_SIZE]; POOL_SIZE])),
-};
-
-// =============================================================================
-// Pool metadata
-// =============================================================================
-
-/// Lock-free packet buffer pool.
+/// Pre-allocated packet buffer pool.
 ///
-/// Uses a Treiber stack (atomic CAS on a tagged head pointer) for O(1)
-/// allocation and deallocation from any context, including interrupt handlers.
-///
-/// The head is a packed `u32`: bits `[15:0]` = slot index (or [`FREELIST_EMPTY`]),
-/// bits `[31:16]` = version counter (ABA prevention).  The version wraps at
-/// 65 536 which is sufficient for a hobby OS.
+/// `alloc`/`release` operate on bare `u16` slot handles; `acquire`/
+/// `restore` additionally move the backing [`Frame<PacketMeta>`] in and
+/// out, so a [`PacketBuf`](super::packetbuf::PacketBuf) can own its
+/// frame by value and mutate the bytes under a genuine `&mut`.
 pub struct PacketPool {
-    /// Tagged head pointer: `(version << 16) | index`.
-    head: AtomicU32,
-    /// Per-slot next-free pointer, forming the intrusive freelist.
-    next: [AtomicU16; POOL_SIZE],
-    /// Number of currently available (free) slots.
-    count: AtomicUsize,
-    /// Whether [`init`](PacketPool::init) has been called.
+    /// `None` until [`init`](Self::init) populates it.
+    inner: SpinLock<Option<PoolInner>>,
+    /// Whether [`init`](Self::init) has run.
     initialized: AtomicBool,
+    /// Number of free slots — equals `inner.free.len()` while
+    /// initialized. Held as a standalone atomic so [`available`] is a
+    /// lock-free read.
+    count: AtomicUsize,
 }
-
-// SAFETY: All fields use atomic types — no unsynchronized shared mutation.
 
 /// The global packet pool singleton.
 ///
-/// Call [`PacketPool::init`] once at kernel boot before any networking code runs.
+/// Call [`PacketPool::init`] once before any networking code runs.
 pub static PACKET_POOL: PacketPool = PacketPool {
-    head: AtomicU32::new(FREELIST_EMPTY as u32),
-    next: [const { AtomicU16::new(0) }; POOL_SIZE],
-    count: AtomicUsize::new(0),
+    inner: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
     initialized: AtomicBool::new(false),
+    count: AtomicUsize::new(0),
 };
 
 impl PacketPool {
-    /// Initialize the pool's freelist.
+    /// Allocate the pool's backing frames and build the free-list.
     ///
-    /// Builds a linked list of free slots: `0 → 1 → 2 → … → 255 → ∅`.
-    /// Must be called exactly once before networking starts.  Subsequent calls
-    /// are harmless no-ops.
+    /// Idempotent — subsequent calls are no-ops. Allocates up to
+    /// [`POOL_SIZE`] frames from the kernel frame allocator; if the
+    /// allocator is short, the pool is built with however many frames
+    /// were available rather than panicking.
     pub fn init(&self) {
         if self.initialized.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        // Build freelist: each slot points to the next; last slot points to EMPTY.
+        let mut slots: KVec<Option<Frame<PacketMeta>>> =
+            KVec::with_capacity(POOL_SIZE).expect("packet pool: slots alloc");
+        let mut free: KVec<u16> =
+            KVec::with_capacity(POOL_SIZE).expect("packet pool: free-list alloc");
+
         for i in 0..POOL_SIZE {
-            let next = if i + 1 < POOL_SIZE {
-                (i + 1) as u16
-            } else {
-                FREELIST_EMPTY
-            };
-            self.next[i].store(next, Ordering::Relaxed);
+            match Frame::<PacketMeta>::alloc() {
+                Some(frame) => {
+                    slots.push(Some(frame)).expect("packet pool: push slot");
+                    free.push(i as u16).expect("packet pool: push free index");
+                }
+                // Allocator exhausted — keep the slots already built.
+                None => break,
+            }
         }
 
-        // Head = slot 0, version 0.  Release ordering makes all prior stores
-        // (the next[] chain) visible to any thread that observes this write.
-        self.head.store(0, Ordering::Release);
-        self.count.store(POOL_SIZE, Ordering::Release);
+        let available = free.len();
+        *self.inner.lock() = Some(PoolInner { slots, free });
+        self.count.store(available, Ordering::Release);
     }
 
-    /// Allocate a buffer slot.
-    ///
-    /// Returns `Some(slot_index)` on success, `None` if the pool is exhausted.
-    /// O(1) amortized.  Safe from interrupt context (lock-free CAS loop).
+    /// Reserve a free slot, returning its index. The backing frame stays
+    /// resident in the pool (use [`acquire`](Self::acquire) to take
+    /// ownership of the frame too). Returns `None` if the pool is
+    /// exhausted or not yet initialized.
     pub fn alloc(&self) -> Option<u16> {
-        loop {
-            let old = self.head.load(Ordering::Acquire);
-            let idx = (old & 0xFFFF) as u16;
-            if idx == FREELIST_EMPTY {
-                return None;
-            }
-            let ver = old >> 16;
-            let next_idx = self.next[idx as usize].load(Ordering::Relaxed);
-            let new = (ver.wrapping_add(1) << 16) | (next_idx as u32);
-            if self
-                .head
-                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.count.fetch_sub(1, Ordering::Relaxed);
-                return Some(idx);
-            }
-            core::hint::spin_loop();
-        }
+        let mut guard = self.inner.lock();
+        let inner = guard.as_mut()?;
+        let slot = inner.free.pop()?;
+        self.count.fetch_sub(1, Ordering::Relaxed);
+        Some(slot)
     }
 
-    /// Return a buffer slot to the pool.
-    ///
-    /// Called by [`PacketBuf::drop`](super::packetbuf::PacketBuf).  The slot must
-    /// have been previously allocated from this pool.  O(1), lock-free.
-    ///
-    /// The caller must not access the slot's data after calling `release`.
+    /// Return a slot index reserved by [`alloc`](Self::alloc) to the
+    /// free-list. The slot's frame must still be resident.
     pub fn release(&self, slot: u16) {
-        debug_assert!(
-            (slot as usize) < POOL_SIZE,
-            "release: slot index {} out of bounds",
-            slot
-        );
-        loop {
-            let old = self.head.load(Ordering::Acquire);
-            let old_idx = (old & 0xFFFF) as u16;
-            let ver = old >> 16;
-            self.next[slot as usize].store(old_idx, Ordering::Relaxed);
-            let new = (ver.wrapping_add(1) << 16) | (slot as u32);
-            if self
-                .head
-                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.count.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            core::hint::spin_loop();
+        let mut guard = self.inner.lock();
+        if let Some(inner) = guard.as_mut() {
+            inner.free.push(slot).expect("packet pool: release push");
+            self.count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Number of free buffer slots (diagnostic, racy under concurrent access).
+    /// Reserve a free slot *and* take ownership of its backing frame.
+    ///
+    /// Returns the slot index plus the moved-out [`Frame<PacketMeta>`],
+    /// or `None` if the pool is exhausted / not yet initialized. The
+    /// frame is returned to the pool by [`restore`](Self::restore).
+    pub(crate) fn acquire(&self) -> Option<(u16, Frame<PacketMeta>)> {
+        let mut guard = self.inner.lock();
+        let inner = guard.as_mut()?;
+        let slot = inner.free.pop()?;
+        let frame = inner.slots[slot as usize].take()?;
+        self.count.fetch_sub(1, Ordering::Relaxed);
+        Some((slot, frame))
+    }
+
+    /// Return a frame taken via [`acquire`](Self::acquire) to its slot
+    /// and mark the slot free again.
+    pub(crate) fn restore(&self, slot: u16, frame: Frame<PacketMeta>) {
+        let mut guard = self.inner.lock();
+        if let Some(inner) = guard.as_mut() {
+            inner.slots[slot as usize] = Some(frame);
+            inner.free.push(slot).expect("packet pool: restore push");
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Number of free buffer slots (diagnostic; racy under concurrent
+    /// access).
     #[inline]
     pub fn available(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Whether the pool has been initialized.
+    /// Whether [`init`](Self::init) has been called.
     #[inline]
     pub fn is_initialized(&self) -> bool {
         self.initialized.load(Ordering::Acquire)
-    }
-
-    /// Raw pointer to the first byte of slot `slot`.
-    ///
-    /// The returned pointer is valid for `BUF_SIZE` bytes.  The caller must
-    /// own the slot (allocated and not yet released) and ensure no aliasing
-    /// mutable references exist before dereferencing.
-    #[inline]
-    pub(crate) fn slot_data(&self, slot: u16) -> *mut u8 {
-        debug_assert!((slot as usize) < POOL_SIZE);
-        // Pointer arithmetic is in-bounds because slot < POOL_SIZE
-        // and each slot is BUF_SIZE bytes.
-        let base = POOL_STORAGE.slots.get().get() as *mut u8;
-        slopos_ostd::util::ptr_buf::ptr_add(base, slot as usize * BUF_SIZE)
     }
 }

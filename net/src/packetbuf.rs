@@ -26,8 +26,9 @@
 
 use core::fmt;
 use slopos_ostd::KVec;
+use slopos_ostd::mm::frame::{Frame, PacketMeta};
 
-use super::pool::{BUF_SIZE, PACKET_POOL, PacketPool};
+use super::pool::{BUF_SIZE, PACKET_POOL};
 use super::types::{Ipv4Addr, NetError};
 
 /// Reserved headroom in each pooled buffer (bytes).
@@ -42,10 +43,14 @@ pub const HEADROOM: u16 = 128;
 
 /// Internal storage backing for a [`PacketBuf`].
 enum PacketBufInner {
-    /// Backed by the global [`PacketPool`] — the fast-path allocation.
+    /// Backed by the global [`PacketPool`](super::pool::PacketPool) —
+    /// the fast-path allocation. Owns its frame by value; `Drop`
+    /// returns the frame to the pool. `frame` is `Option` only so it
+    /// can be moved out in `Drop`; it is `Some` for the whole of a live
+    /// buffer's lifetime.
     Pooled {
-        pool: &'static PacketPool,
         slot: u16,
+        frame: Option<Frame<PacketMeta>>,
     },
     /// Heap-allocated fallback for oversized reassembly buffers.
     Oversized { data: KVec<u8> },
@@ -77,10 +82,12 @@ pub struct PacketBuf {
 
 impl Drop for PacketBuf {
     fn drop(&mut self) {
-        if let PacketBufInner::Pooled { pool, slot } = &self.inner {
-            pool.release(*slot);
+        if let PacketBufInner::Pooled { slot, frame } = &mut self.inner {
+            if let Some(f) = frame.take() {
+                PACKET_POOL.restore(*slot, f);
+            }
         }
-        // Oversized: the Vec<u8> is dropped implicitly.
+        // Oversized: the KVec<u8> is dropped implicitly.
     }
 }
 
@@ -122,11 +129,11 @@ impl PacketBuf {
     ///
     /// Returns `None` if the pool is exhausted.
     pub fn alloc() -> Option<Self> {
-        let slot = PACKET_POOL.alloc()?;
+        let (slot, frame) = PACKET_POOL.acquire()?;
         Some(Self {
             inner: PacketBufInner::Pooled {
-                pool: &PACKET_POOL,
                 slot,
+                frame: Some(frame),
             },
             head: HEADROOM,
             tail: HEADROOM,
@@ -147,14 +154,13 @@ impl PacketBuf {
         if data.len() > BUF_SIZE {
             return None;
         }
-        let slot = PACKET_POOL.alloc()?;
-        // We own this slot exclusively after alloc().
-        let dst = PACKET_POOL.slot_data(slot);
-        slopos_ostd::util::ptr_buf::copy_bytes(dst, data.as_ptr(), data.len());
+        let (slot, mut frame) = PACKET_POOL.acquire()?;
+        // We own this frame exclusively after acquire().
+        frame.as_bytes_mut()[..data.len()].copy_from_slice(data);
         Some(Self {
             inner: PacketBufInner::Pooled {
-                pool: &PACKET_POOL,
                 slot,
+                frame: Some(frame),
             },
             head: 0,
             tail: data.len() as u16,
@@ -196,26 +202,28 @@ impl PacketBuf {
         }
     }
 
-    /// Shared reference to the entire backing buffer.
+    /// Shared reference to the usable region of the backing buffer.
     #[inline]
     fn data(&self) -> &[u8] {
         match &self.inner {
-            PacketBufInner::Pooled { pool, slot } => {
-                // We own this slot — exclusive access guaranteed by
-                // move-only semantics (no Clone).
-                slopos_ostd::util::ptr_buf::borrow_buf(pool.slot_data(*slot), BUF_SIZE)
+            PacketBufInner::Pooled { frame, .. } => {
+                // The pool lends each frame to exactly one PacketBuf, so
+                // this handle is the only view of the bytes. The frame
+                // is a full 4 KiB page; expose only the usable region.
+                &frame.as_ref().expect("pooled frame present").as_bytes()[..BUF_SIZE]
             }
             PacketBufInner::Oversized { data } => data.as_slice(),
         }
     }
 
-    /// Mutable reference to the entire backing buffer.
+    /// Mutable reference to the usable region of the backing buffer.
     #[inline]
     fn data_mut(&mut self) -> &mut [u8] {
         match &mut self.inner {
-            PacketBufInner::Pooled { pool, slot } => {
-                // We own this slot and hold &mut self — exclusive access.
-                slopos_ostd::util::ptr_buf::borrow_buf_mut(pool.slot_data(*slot), BUF_SIZE)
+            PacketBufInner::Pooled { frame, .. } => {
+                // `&mut self` plus the one-handle-per-slot pool invariant
+                // make this the only mutable view of the page bytes.
+                &mut frame.as_mut().expect("pooled frame present").as_bytes_mut()[..BUF_SIZE]
             }
             PacketBufInner::Oversized { data } => data.as_mut_slice(),
         }
