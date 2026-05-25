@@ -20,6 +20,10 @@ impl FileOps for UnixSocketFileOps {
         FileKind::Socket
     }
 
+    fn is_unix_socket(&self) -> bool {
+        true
+    }
+
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
         let h = SocketHandle::from_usize(handle);
         let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {

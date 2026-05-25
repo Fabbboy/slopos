@@ -1,5 +1,5 @@
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::FileKind;
 use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::syscall::SOL_SOCKET;
 use slopos_abi::unix::SockAddrUn;
@@ -52,14 +52,6 @@ enum SocketFd {
     Inet(u32),
 }
 
-/// Check whether a `&'static dyn FileOps` points to the unix socket ops
-/// singleton by comparing the data pointer of the trait object.
-fn is_unix_socket_ops(ops: &'static dyn FileOps) -> bool {
-    let data = ops as *const dyn FileOps as *const () as usize;
-    let unix_data = &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS as *const _ as *const () as usize;
-    data == unix_data
-}
-
 /// Retrieve the socket handle for `fd`, distinguishing AF_UNIX from AF_INET.
 fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, Errno> {
     let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(process_id, fd) else {
@@ -68,7 +60,7 @@ fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, Errno> {
     if ops.kind() != FileKind::Socket {
         return Err(Errno::ENOTSOCK);
     }
-    if is_unix_socket_ops(ops) {
+    if ops.is_unix_socket() {
         Ok(SocketFd::Unix(SocketHandle::from_usize(handle)))
     } else {
         Ok(SocketFd::Inet(handle as u32))

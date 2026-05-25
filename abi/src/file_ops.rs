@@ -40,6 +40,17 @@ pub enum FileKind {
 pub trait FileOps: Send + Sync {
     fn kind(&self) -> FileKind;
 
+    /// Distinguishes an `AF_UNIX` socket from an `AF_INET` socket.
+    ///
+    /// Both report [`FileKind::Socket`], so callers that must route to the
+    /// right socket subsystem use this instead of comparing the (zero-sized,
+    /// address-unstable) ops singletons by pointer — the compiler is free to
+    /// place distinct ZST statics at the same address, so a pointer compare
+    /// is unsound and silently misroutes depending on codegen layout.
+    fn is_unix_socket(&self) -> bool {
+        false
+    }
+
     /// Read data from this file into `buf`.
     ///
     /// Returns bytes read on success, or a negative errno.
