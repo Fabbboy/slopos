@@ -220,6 +220,39 @@ debug-monitor:
     @echo "Connecting to QEMU monitor — type 'quit' or Ctrl-D to detach…"
     socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
 
+# ── Deterministic record/replay debugging (TCG, single-CPU, reverse-debuggable) ──
+# Record a failing test run once, then replay it under GDB with reverse-continue
+# and reverse watchpoints — the practical way to find "who corrupted this byte?"
+# for load-dependent kernel bugs. Requires TCG + smp=1 (icount constraints), so
+# this cannot capture SMP-only races. See docs/debugging.md.
+
+# Kernel tests incompatible with the deterministic icount environment (they
+# assert wall-clock timer calibration, which instruction-counted time breaks)
+# or flaky under slow single-CPU TCG. Skipped so the "tests" boot step passes
+# and recording reaches the userland phase where the corruption manifests.
+rr_skip := "slopos_core::syscall::tests::test_kill_process_group_semantics,slopos_drivers::tests::apic_timer_tests::test_lapic_timer_tick_rate_reasonable,slopos_drivers::tests::hpet_tests::test_hpet_delay_accuracy"
+
+[doc("Record a deterministic test run to builddir/replay.bin (TCG, smp=1)")]
+rr-record:
+    TEST_CMDLINE="{{test_cmdline}} tests.skip={{rr_skip}}" just _iso-tests
+    scripts/qemu_rr.sh record "{{iso_tests}}" "{{fs_image_tests}}"
+
+[doc("Replay builddir/replay.bin under interactive GDB (gdbstub halted on :1234)")]
+rr-replay:
+    @test -f {{build_dir}}/replay.bin || { echo "no recording — run 'just rr-record' first" >&2; exit 1; }
+    scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
+    sleep 2
+    -gdb -q -x scripts/gdb/slopos.gdb
+    -pkill -f 'rr=replay'
+
+[doc("Batch reverse-debug: run to fault; pass WATCH=<VA> to reverse-find its writer")]
+rr-gdb WATCH='0':
+    @test -f {{build_dir}}/replay.bin || { echo "no recording — run 'just rr-record' first" >&2; exit 1; }
+    scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
+    sleep 2
+    -gdb -q -batch -ex 'set $watch_va = {{WATCH}}' -x scripts/gdb/find_corruptor.gdb 2>&1 | tee {{build_dir}}/rr-session.log
+    -pkill -f 'rr=replay'
+
 # Build the Go-based host-side test wrapper. Idempotent: Go's build cache
 # makes warm rebuilds ~50ms. Output is a single static binary that all
 # `test*` recipes below invoke.
