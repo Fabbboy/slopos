@@ -6,6 +6,14 @@ pub enum BlockDeviceError {
     InvalidBuffer,
 }
 
+/// Stable, enumeration-order identity for a block device. `disk0` is the
+/// first device claimed during PCI probe (by convention the root filesystem
+/// image); `disk1` the second (a scratch device for destructive tests), etc.
+/// Assigned by the driver at probe time and used to look a device up in the
+/// driver's registry without naming a raw bus address.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockDeviceIndex(pub u16);
+
 pub trait BlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;

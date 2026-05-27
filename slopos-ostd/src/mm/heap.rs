@@ -900,6 +900,34 @@ impl<T> KArc<T> {
     pub fn try_new(value: T) -> Result<Self, AllocError> {
         Arc::try_new(value).map(|inner| Self { inner })
     }
+
+    /// Heap-allocate and initialise a `T` in place from an
+    /// [`Init<T, E>`] recipe. The `T` rvalue never materialises on the
+    /// caller's stack — the recipe writes fields directly into the
+    /// freshly-allocated `Arc` slot. Mirrors [`KBox::try_init`]; use it
+    /// for large `T` that would otherwise blow the stack-frame gate.
+    pub fn try_init<E>(init: impl Init<T, E>) -> Result<Self, E>
+    where
+        E: From<AllocError>,
+    {
+        let mut uninit: Arc<core::mem::MaybeUninit<T>> =
+            Arc::try_new_uninit().map_err(|_| E::from(AllocError))?;
+        // SAFETY: `uninit` is freshly allocated and unique, so `get_mut`
+        // yields exclusive access to the `MaybeUninit<T>` slot, which is
+        // sized and aligned for `T` by construction (upholding **Inv. 10**).
+        // `init.__init` writes a valid `T` into the slot on `Ok(())`; on
+        // `Err` we return early and drop the still-uninit `Arc`, freeing
+        // the allocation without running `T`'s drop glue.
+        unsafe {
+            let slot: *mut T = Arc::get_mut(&mut uninit)
+                .expect("freshly-allocated Arc is uniquely owned")
+                .as_mut_ptr();
+            init.__init(slot)?;
+            Ok(Self {
+                inner: uninit.assume_init(),
+            })
+        }
+    }
 }
 
 impl<T: ?Sized> KArc<T> {

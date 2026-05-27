@@ -1,8 +1,12 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{klog_debug, klog_info};
+use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex};
+use slopos_ostd::KArc;
+use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::{klog_debug, klog_info, write_field, write_init_field};
 
 use crate::pci::{PciDeviceInfo, PciProbeError};
 use crate::virtio::{
@@ -62,38 +66,284 @@ struct VirtioBlkState {
 }
 
 impl VirtioBlkState {
-    const fn new() -> Self {
-        Self {
-            device: VirtioBlkDevice::new(),
-            caps: VirtioMmioCaps::empty(),
-            msix_state: None,
-        }
+    /// In-place recipe for the empty (pre-probe) state. Written field by
+    /// field into the heap slot so the ~280-byte aggregate never lands on
+    /// the prober's stack (the 2 KiB frame gate).
+    fn init_empty() -> impl Init<Self, AllocError> {
+        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_field!(slot, device, VirtioBlkDevice::new());
+            write_field!(slot, caps, VirtioMmioCaps::empty());
+            write_field!(slot, msix_state, None);
+            Ok(())
+        })
     }
 }
 
-static DEVICE_CLAIMED: InitFlag = InitFlag::new();
-static VIRTIO_BLK_STATE: SpinLock<VirtioBlkState> =
-    SpinLock::new(VirtioBlkState::new(), LOCK_LEVEL_RESOURCE);
-static BLK_QUEUE_EVENT: CompletionEvent = CompletionEvent::new();
-static BLK_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Owned per-device state for one claimed virtio-blk device.
+///
+/// Lives on the heap inside a [`KArc`] so its address is stable: the
+/// per-device IRQ closure and the registry both hold clones, and the
+/// closure signals `queue_event` from interrupt context. Replacing the
+/// former global statics (`VIRTIO_BLK_STATE` / `BLK_QUEUE_EVENT` /
+/// `BLK_REQUEST_IN_FLIGHT`) with per-device fields is what makes
+/// multi-device ownership — and thus exclusive write claims — possible.
+struct VirtioBlkInner {
+    /// Device + caps + MSI-X state. `LOCK_LEVEL_RESOURCE`.
+    state: SpinLock<VirtioBlkState>,
+    /// Single-request serialization (one in-flight request per device).
+    request_in_flight: AtomicBool,
+    /// Completion signalled by this device's own IRQ handler.
+    queue_event: CompletionEvent,
+}
 
-struct RequestGuard;
+impl VirtioBlkInner {
+    /// In-place recipe for a fresh, empty device. Built via
+    /// [`KArc::try_init`] so neither the `VirtioBlkState` nor the
+    /// surrounding `KArc` inner ever materialises on the caller's stack.
+    fn init_empty() -> impl Init<Self, AllocError> {
+        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
+            write_init_field!(
+                slot,
+                state,
+                SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioBlkState::init_empty())
+            )?;
+            write_field!(slot, request_in_flight, AtomicBool::new(false));
+            write_field!(slot, queue_event, CompletionEvent::new());
+            Ok(())
+        })
+    }
 
-impl RequestGuard {
-    fn acquire(flag: &AtomicBool) -> Self {
+    fn is_ready(&self) -> bool {
+        self.state.lock().device.ready
+    }
+
+    fn capacity_bytes(&self) -> u64 {
+        self.state.lock().device.capacity_sectors * SECTOR_SIZE
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn msix_state(&self) -> Option<VirtioMsixState> {
+        self.state.lock().msix_state.clone()
+    }
+
+    fn do_request(&self, sector: u64, buffer: &mut [u8], write: bool) -> bool {
+        let _request_guard = RequestGuard::acquire(&self.request_in_flight);
+
+        {
+            let state = self.state.lock();
+            if !state.device.queue.is_ready() {
+                return false;
+            }
+        }
+
+        let buffers = match RequestBuffers::allocate() {
+            Some(b) => b,
+            None => return false,
+        };
+
+        let req_phys = buffers.req_page.phys_u64();
+        let status_offset = size_of::<VirtioBlkReqHeader>();
+        let status_phys = req_phys + status_offset as u64;
+        let bounce_phys = buffers.bounce_page.phys_u64();
+        let len = buffer.len();
+
+        if write && !buffers.bounce_page.write_slice(0, buffer) {
+            return false;
+        }
+
+        let header = VirtioBlkReqHeader {
+            type_: if write {
+                VIRTIO_BLK_T_OUT
+            } else {
+                VIRTIO_BLK_T_IN
+            },
+            reserved: 0,
+            sector,
+        };
+        if !buffers.req_page.write_at::<VirtioBlkReqHeader>(0, &header) {
+            return false;
+        }
+        if !buffers
+            .req_page
+            .write_volatile_at::<u8>(status_offset, 0xFF)
+        {
+            return false;
+        }
+
+        {
+            let mut state = self.state.lock();
+            self.queue_event.reset();
+
+            state.device.queue.write_desc(
+                0,
+                VirtqDesc {
+                    addr: req_phys,
+                    len: size_of::<VirtioBlkReqHeader>() as u32,
+                    flags: VIRTQ_DESC_F_NEXT,
+                    next: 1,
+                },
+            );
+
+            state.device.queue.write_desc(
+                1,
+                VirtqDesc {
+                    addr: bounce_phys,
+                    len: len as u32,
+                    flags: if write {
+                        VIRTQ_DESC_F_NEXT
+                    } else {
+                        VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
+                    },
+                    next: 2,
+                },
+            );
+
+            state.device.queue.write_desc(
+                2,
+                VirtqDesc {
+                    addr: status_phys,
+                    len: 1,
+                    flags: VIRTQ_DESC_F_WRITE,
+                    next: 0,
+                },
+            );
+
+            state.device.queue.submit(0);
+            queue::notify_queue(
+                &state.caps.notify_cfg,
+                state.caps.notify_off_multiplier,
+                &state.device.queue,
+                0,
+            );
+        }
+
+        if !self.queue_event.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
+            klog_info!("virtio-blk: request timeout");
+            return false;
+        }
+
+        {
+            let mut state = self.state.lock();
+            if !state.device.queue.advance_used() {
+                klog_info!("virtio-blk: signaled without used completion");
+                return false;
+            }
+        }
+
+        let status = buffers
+            .req_page
+            .read_volatile_at::<u8>(status_offset)
+            .unwrap_or(0xFF);
+        let success = status == VIRTIO_BLK_S_OK;
+
+        if success && !write && !buffers.bounce_page.read_slice(0, buffer) {
+            return false;
+        }
+
+        success
+    }
+
+    fn read_offset(&self, offset: u64, buffer: &mut [u8]) -> bool {
+        if buffer.is_empty() {
+            return true;
+        }
+        if !self.is_ready() {
+            return false;
+        }
+
+        let start_sector = offset / SECTOR_SIZE;
+        let sector_offset = (offset % SECTOR_SIZE) as usize;
+
+        let mut sector_buf = [0u8; 512];
+        let sectors_needed = (sector_offset + buffer.len() + 511) / 512;
+
+        let mut buf_pos = 0usize;
+        for i in 0..sectors_needed {
+            let sector = start_sector + i as u64;
+            if !self.do_request(sector, &mut sector_buf, false) {
+                return false;
+            }
+
+            let src_start = if i == 0 { sector_offset } else { 0 };
+            let src_end = 512.min(src_start + (buffer.len() - buf_pos));
+            let copy_len = src_end - src_start;
+
+            buffer[buf_pos..buf_pos + copy_len].copy_from_slice(&sector_buf[src_start..src_end]);
+            buf_pos += copy_len;
+
+            if buf_pos >= buffer.len() {
+                break;
+            }
+        }
+
+        true
+    }
+
+    fn write_offset(&self, offset: u64, buffer: &[u8]) -> bool {
+        if buffer.is_empty() {
+            return true;
+        }
+        if !self.is_ready() {
+            return false;
+        }
+
+        let start_sector = offset / SECTOR_SIZE;
+        let sector_offset = (offset % SECTOR_SIZE) as usize;
+
+        let mut sector_buf = [0u8; 512];
+        let sectors_needed = (sector_offset + buffer.len() + 511) / 512;
+
+        let mut buf_pos = 0usize;
+        for i in 0..sectors_needed {
+            let sector = start_sector + i as u64;
+
+            let dst_start = if i == 0 { sector_offset } else { 0 };
+            let dst_end = 512.min(dst_start + (buffer.len() - buf_pos));
+            let copy_len = dst_end - dst_start;
+
+            // Read-modify-write for partial sectors so we never clobber the
+            // bytes outside [dst_start, dst_end).
+            if (dst_start != 0 || dst_end != 512)
+                && !self.do_request(sector, &mut sector_buf, false)
+            {
+                return false;
+            }
+
+            sector_buf[dst_start..dst_end].copy_from_slice(&buffer[buf_pos..buf_pos + copy_len]);
+
+            if !self.do_request(sector, &mut sector_buf, true) {
+                return false;
+            }
+
+            buf_pos += copy_len;
+            if buf_pos >= buffer.len() {
+                break;
+            }
+        }
+
+        true
+    }
+}
+
+struct RequestGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> RequestGuard<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Self {
         while flag
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             core::hint::spin_loop();
         }
-        Self
+        Self { flag }
     }
 }
 
-impl Drop for RequestGuard {
+impl Drop for RequestGuard<'_> {
     fn drop(&mut self) {
-        BLK_REQUEST_IN_FLIGHT.store(false, Ordering::Release);
+        self.flag.store(false, Ordering::Release);
     }
 }
 
@@ -113,6 +363,241 @@ impl RequestBuffers {
     }
 }
 
+// ============================================================================
+// Device registry + capability handles
+//
+// The registry owns every claimed virtio-blk device and is the ONLY way to
+// reach one: there is no ambient "write any LBA" free function. Code obtains
+// a device by index, then either reads through a borrowed handle or acquires
+// an EXCLUSIVE write capability ([`open_writer`]) — modelled on Linux's
+// `bd_writers` / FreeBSD GEOM exclusive-access counts. A second writer claim
+// is rejected, so a buggy caller (or a test) cannot silently write a device
+// the filesystem already owns.
+// ============================================================================
+
+const MAX_BLK_DEVICES: usize = 8;
+const SLOT_BITS: u32 = 8;
+const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
+
+/// Opaque, unforgeable handle to a registered virtio-blk device. Encodes a
+/// slot index plus a generation counter (mirroring `MemfdHandle`) so a stale
+/// handle fails validation instead of aliasing a different device. The only
+/// constructor is private to this module.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct DevHandle(u32);
+
+impl DevHandle {
+    fn new(slot: usize, generation: u32) -> Self {
+        DevHandle((generation << SLOT_BITS) | (slot as u32 & SLOT_MASK))
+    }
+    fn slot(self) -> usize {
+        (self.0 & SLOT_MASK) as usize
+    }
+    fn generation(self) -> u32 {
+        self.0 >> SLOT_BITS
+    }
+}
+
+/// Error from acquiring an exclusive write capability on a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlkClaimError {
+    /// The handle does not refer to a live device (freed/never existed).
+    Stale,
+    /// Another holder already owns the exclusive write capability.
+    AlreadyClaimed,
+}
+
+struct DevSlot {
+    inner: Option<KArc<VirtioBlkInner>>,
+    generation: u32,
+    index: u16,
+    write_claimed: bool,
+}
+
+impl DevSlot {
+    const fn empty() -> Self {
+        Self {
+            inner: None,
+            generation: 0,
+            index: 0,
+            write_claimed: false,
+        }
+    }
+}
+
+struct BlkRegistry {
+    slots: [DevSlot; MAX_BLK_DEVICES],
+    next_generation: u32,
+    probe_order_next: u16,
+}
+
+impl BlkRegistry {
+    const fn new() -> Self {
+        const EMPTY: DevSlot = DevSlot::empty();
+        Self {
+            slots: [EMPTY; MAX_BLK_DEVICES],
+            // Generation 0 is reserved as "none" so a zeroed handle is invalid.
+            next_generation: 1,
+            probe_order_next: 0,
+        }
+    }
+}
+
+static BLK_REGISTRY: SpinLock<BlkRegistry> = SpinLock::new(BlkRegistry::new(), LOCK_LEVEL_REGISTRY);
+
+/// Validate a handle against the live registry, returning its slot index.
+fn validate(reg: &BlkRegistry, handle: DevHandle) -> Option<usize> {
+    let slot = handle.slot();
+    if slot >= MAX_BLK_DEVICES || handle.generation() == 0 {
+        return None;
+    }
+    let s = &reg.slots[slot];
+    if s.inner.is_some() && s.generation == handle.generation() {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
+/// Register a freshly-probed device. Assigns the next probe-order index
+/// (disk0, disk1, …) and a fresh generation. Called once per device from
+/// `virtio_blk_probe` while the PCI `ENUM_STATE` lock is held; the only
+/// nesting is `ENUM_STATE -> BLK_REGISTRY` (never the reverse), so no cycle.
+fn register_device(inner: KArc<VirtioBlkInner>) -> Option<(DevHandle, BlockDeviceIndex)> {
+    let mut reg = BLK_REGISTRY.lock();
+    let free = (0..MAX_BLK_DEVICES).find(|&s| reg.slots[s].inner.is_none())?;
+    let generation = reg.next_generation;
+    let index = reg.probe_order_next;
+    reg.next_generation = reg.next_generation.wrapping_add(1);
+    if reg.next_generation == 0 {
+        reg.next_generation = 1;
+    }
+    reg.probe_order_next += 1;
+    reg.slots[free] = DevSlot {
+        inner: Some(inner),
+        generation,
+        index,
+        write_claimed: false,
+    };
+    Some((DevHandle::new(free, generation), BlockDeviceIndex(index)))
+}
+
+/// Clone the device's owned state out from under the registry lock, so the
+/// (potentially blocking) I/O path never runs while holding the registry.
+fn clone_inner(handle: DevHandle) -> Option<KArc<VirtioBlkInner>> {
+    let reg = BLK_REGISTRY.lock();
+    let slot = validate(&reg, handle)?;
+    reg.slots[slot].inner.clone()
+}
+
+/// Number of claimed virtio-blk devices.
+pub fn blk_device_count() -> usize {
+    let reg = BLK_REGISTRY.lock();
+    reg.slots.iter().filter(|s| s.inner.is_some()).count()
+}
+
+/// Look a device up by stable probe-order index (disk0 = first probed).
+pub fn blk_device_by_index(index: BlockDeviceIndex) -> Option<DevHandle> {
+    let reg = BLK_REGISTRY.lock();
+    (0..MAX_BLK_DEVICES).find_map(|slot| {
+        let s = &reg.slots[slot];
+        if s.inner.is_some() && s.index == index.0 {
+            Some(DevHandle::new(slot, s.generation))
+        } else {
+            None
+        }
+    })
+}
+
+/// Read-only block access through a borrowed handle (no exclusivity needed).
+pub fn blk_read(handle: DevHandle, offset: u64, buffer: &mut [u8]) -> bool {
+    clone_inner(handle).is_some_and(|inner| inner.read_offset(offset, buffer))
+}
+
+/// Whether the device is probed and ready.
+pub fn blk_is_ready(handle: DevHandle) -> bool {
+    clone_inner(handle).is_some_and(|inner| inner.is_ready())
+}
+
+/// Device capacity in bytes (0 if the handle is stale).
+pub fn blk_capacity(handle: DevHandle) -> u64 {
+    clone_inner(handle).map_or(0, |inner| inner.capacity_bytes())
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn blk_msix_state(handle: DevHandle) -> Option<VirtioMsixState> {
+    clone_inner(handle).and_then(|inner| inner.msix_state())
+}
+
+/// Acquire the EXCLUSIVE write capability for a device. Returns an owned
+/// [`BlockWriteToken`]; a second `open_writer` on the same device returns
+/// [`BlkClaimError::AlreadyClaimed`] until the first token is dropped.
+pub fn open_writer(handle: DevHandle) -> Result<BlockWriteToken, BlkClaimError> {
+    let mut reg = BLK_REGISTRY.lock();
+    let slot = validate(&reg, handle).ok_or(BlkClaimError::Stale)?;
+    if reg.slots[slot].write_claimed {
+        return Err(BlkClaimError::AlreadyClaimed);
+    }
+    reg.slots[slot].write_claimed = true;
+    let inner = reg.slots[slot]
+        .inner
+        .as_ref()
+        .expect("validated slot has inner")
+        .clone();
+    Ok(BlockWriteToken { handle, inner })
+}
+
+/// Owned, exclusive read+write capability for one block device. Implements
+/// [`BlockDevice`] so the filesystem holds it as its sole writable handle.
+/// Dropping it releases the exclusive write claim.
+pub struct BlockWriteToken {
+    handle: DevHandle,
+    inner: KArc<VirtioBlkInner>,
+}
+
+impl BlockWriteToken {
+    /// Raw read through the owned device.
+    pub fn read(&self, offset: u64, buffer: &mut [u8]) -> bool {
+        self.inner.read_offset(offset, buffer)
+    }
+    /// Raw write through the owned device.
+    pub fn write(&self, offset: u64, buffer: &[u8]) -> bool {
+        self.inner.write_offset(offset, buffer)
+    }
+}
+
+impl BlockDevice for BlockWriteToken {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        if self.inner.read_offset(offset, buffer) {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::InvalidBuffer)
+        }
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        if self.inner.write_offset(offset, buffer) {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::InvalidBuffer)
+        }
+    }
+
+    fn capacity(&self) -> u64 {
+        self.inner.capacity_bytes()
+    }
+}
+
+impl Drop for BlockWriteToken {
+    fn drop(&mut self) {
+        let mut reg = BLK_REGISTRY.lock();
+        if let Some(slot) = validate(&reg, self.handle) {
+            reg.slots[slot].write_claimed = false;
+        }
+    }
+}
+
 fn virtio_blk_matches(info: &PciDeviceInfo) -> bool {
     if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
@@ -129,138 +614,7 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     lo | (hi << 32)
 }
 
-fn do_request(sector: u64, buffer: &mut [u8], write: bool) -> bool {
-    let _request_guard = RequestGuard::acquire(&BLK_REQUEST_IN_FLIGHT);
-
-    {
-        let state = VIRTIO_BLK_STATE.lock();
-        if !state.device.queue.is_ready() {
-            return false;
-        }
-    }
-
-    let buffers = match RequestBuffers::allocate() {
-        Some(b) => b,
-        None => return false,
-    };
-
-    let req_phys = buffers.req_page.phys_u64();
-    let status_offset = size_of::<VirtioBlkReqHeader>();
-    let status_phys = req_phys + status_offset as u64;
-    let bounce_phys = buffers.bounce_page.phys_u64();
-    let len = buffer.len();
-
-    if write && !buffers.bounce_page.write_slice(0, buffer) {
-        return false;
-    }
-
-    let header = VirtioBlkReqHeader {
-        type_: if write {
-            VIRTIO_BLK_T_OUT
-        } else {
-            VIRTIO_BLK_T_IN
-        },
-        reserved: 0,
-        sector,
-    };
-    if !buffers.req_page.write_at::<VirtioBlkReqHeader>(0, &header) {
-        return false;
-    }
-    if !buffers
-        .req_page
-        .write_volatile_at::<u8>(status_offset, 0xFF)
-    {
-        return false;
-    }
-
-    {
-        let mut state = VIRTIO_BLK_STATE.lock();
-        BLK_QUEUE_EVENT.reset();
-
-        state.device.queue.write_desc(
-            0,
-            VirtqDesc {
-                addr: req_phys,
-                len: size_of::<VirtioBlkReqHeader>() as u32,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: 1,
-            },
-        );
-
-        state.device.queue.write_desc(
-            1,
-            VirtqDesc {
-                addr: bounce_phys,
-                len: len as u32,
-                flags: if write {
-                    VIRTQ_DESC_F_NEXT
-                } else {
-                    VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
-                },
-                next: 2,
-            },
-        );
-
-        state.device.queue.write_desc(
-            2,
-            VirtqDesc {
-                addr: status_phys,
-                len: 1,
-                flags: VIRTQ_DESC_F_WRITE,
-                next: 0,
-            },
-        );
-
-        state.device.queue.submit(0);
-        queue::notify_queue(
-            &state.caps.notify_cfg,
-            state.caps.notify_off_multiplier,
-            &state.device.queue,
-            0,
-        );
-    }
-
-    if !BLK_QUEUE_EVENT.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
-        klog_info!("virtio-blk: request timeout");
-        return false;
-    }
-
-    {
-        let mut state = VIRTIO_BLK_STATE.lock();
-        if !state.device.queue.advance_used() {
-            klog_info!("virtio-blk: signaled without used completion");
-            return false;
-        }
-    }
-
-    let status = buffers
-        .req_page
-        .read_volatile_at::<u8>(status_offset)
-        .unwrap_or(0xFF);
-    let success = status == VIRTIO_BLK_S_OK;
-
-    if success && !write && !buffers.bounce_page.read_slice(0, buffer) {
-        return false;
-    }
-
-    success
-}
-
-/// Per-queue interrupt handler for virtio-blk.
-///
-/// Invoked by the OSTD IRQ dispatch layer when the device fires an
-/// MSI-X (per-queue) or MSI (shared) vector. The handler signals the
-/// queue completion event consumed by [`do_request`].
-fn virtio_blk_irq_handler(_queue_idx: u8) {
-    BLK_QUEUE_EVENT.signal();
-}
-
 fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
-    if !DEVICE_CLAIMED.claim() {
-        klog_debug!("virtio-blk: already claimed");
-        return Err(PciProbeError::Mismatch);
-    }
-
     klog_info!(
         "virtio-blk: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -283,29 +637,36 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
 
     if !caps.has_common_cfg() {
         klog_info!("virtio-blk: missing common cfg");
-        DEVICE_CLAIMED.reset();
         return Err(PciProbeError::Unsupported);
     }
 
     let feat_result = negotiate_features(&caps, virtio::VIRTIO_F_VERSION_1, 0);
     if !feat_result.success {
         klog_info!("virtio-blk: features negotiation failed");
-        DEVICE_CLAIMED.reset();
         return Err(PciProbeError::DeviceFault);
     }
 
+    // Allocate the per-device state up front (empty) so the IRQ closure can
+    // capture a KArc clone and signal THIS device's completion event.
+    let inner = match KArc::try_init(VirtioBlkInner::init_empty()) {
+        Ok(i) => i,
+        Err(_) => return Err(PciProbeError::OutOfMemory),
+    };
+
     // --- MSI-X / MSI interrupt setup ---
     // VirtIO modern on q35 always has MSI-X; MSI is the minimum fallback.
-    // setup_interrupts allocates IDT vectors via OSTD's IrqAllocator, registers
-    // a closure that calls virtio_blk_irq_handler with the queue index, and
-    // programs the device's MSI-X/MSI capability.
-    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 1, virtio_blk_irq_handler)
-        .unwrap_or_else(|msg| {
-            panic!(
-                "virtio-blk: {}:{}.{} {}",
-                info.bus, info.device, info.function, msg
-            )
-        });
+    // The handler is a per-device closure that signals this device's own
+    // CompletionEvent — no global IRQ sink.
+    let inner_for_irq = inner.clone();
+    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 1, move |_q: u8| {
+        inner_for_irq.queue_event.signal();
+    })
+    .unwrap_or_else(|msg| {
+        panic!(
+            "virtio-blk: {}:{}.{} {}",
+            info.bus, info.device, info.function, msg
+        )
+    });
     let q0_msix_entry = msix_state
         .as_ref()
         .map_or(VIRTIO_MSI_NO_VECTOR, |s| s.queue_msix_entry(0));
@@ -314,7 +675,6 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         Some(q) => q,
         None => {
             klog_info!("virtio-blk: queue setup failed");
-            DEVICE_CLAIMED.reset();
             return Err(PciProbeError::OutOfMemory);
         }
     };
@@ -323,21 +683,28 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
 
     let capacity_sectors = read_capacity(&caps);
 
-    let dev = VirtioBlkDevice {
-        queue,
-        capacity_sectors,
-        ready: true,
-    };
-
     {
-        let mut state = VIRTIO_BLK_STATE.lock();
-        state.device = dev;
+        let mut state = inner.state.lock();
+        state.device = VirtioBlkDevice {
+            queue,
+            capacity_sectors,
+            ready: true,
+        };
         state.caps = caps;
         state.msix_state = msix_state;
     }
 
+    let (_, index) = match register_device(inner) {
+        Some(t) => t,
+        None => {
+            klog_info!("virtio-blk: device registry full");
+            return Err(PciProbeError::OutOfMemory);
+        }
+    };
+
     klog_info!(
-        "virtio-blk: ready, capacity {} sectors ({} MB), irq {:?}",
+        "virtio-blk: disk{} ready, capacity {} sectors ({} MB), irq {:?}",
+        index.0,
         capacity_sectors,
         (capacity_sectors * SECTOR_SIZE) / (1024 * 1024),
         irq_mode,
@@ -354,108 +721,48 @@ crate::pci_driver! {
     };
 }
 
+// ============================================================================
+// Legacy ambient free functions (disk0 only).
+//
+// TODO(blockdev-ownership Layer 1): these route to disk0 to keep the FS and
+// existing tests working during the capability migration. They will be
+// deleted once the filesystem and tests acquire devices via the registry.
+// ============================================================================
+
+fn disk0() -> Option<KArc<VirtioBlkInner>> {
+    let reg = BLK_REGISTRY.lock();
+    (0..MAX_BLK_DEVICES).find_map(|slot| {
+        let s = &reg.slots[slot];
+        if s.inner.is_some() && s.index == 0 {
+            s.inner.clone()
+        } else {
+            None
+        }
+    })
+}
+
 pub fn virtio_blk_is_ready() -> bool {
-    VIRTIO_BLK_STATE.lock().device.ready
+    disk0().is_some_and(|inner| inner.is_ready())
 }
 
 pub fn virtio_blk_capacity() -> u64 {
-    let state = VIRTIO_BLK_STATE.lock();
-    state.device.capacity_sectors * SECTOR_SIZE
+    disk0().map_or(0, |inner| inner.capacity_bytes())
 }
 
 pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
-    if buffer.is_empty() {
-        return true;
-    }
-
-    if !virtio_blk_is_ready() {
-        return false;
-    }
-
-    let start_sector = offset / SECTOR_SIZE;
-    let sector_offset = (offset % SECTOR_SIZE) as usize;
-
-    let mut sector_buf = [0u8; 512];
-    let sectors_needed = (sector_offset + buffer.len() + 511) / 512;
-
-    let mut buf_pos = 0usize;
-    for i in 0..sectors_needed {
-        let sector = start_sector + i as u64;
-        let ok = do_request(sector, &mut sector_buf, false);
-        if !ok {
-            return false;
-        }
-
-        let src_start = if i == 0 { sector_offset } else { 0 };
-        let src_end = 512.min(src_start + (buffer.len() - buf_pos));
-        let copy_len = src_end - src_start;
-
-        buffer[buf_pos..buf_pos + copy_len].copy_from_slice(&sector_buf[src_start..src_end]);
-        buf_pos += copy_len;
-
-        if buf_pos >= buffer.len() {
-            break;
-        }
-    }
-
-    true
+    disk0().is_some_and(|inner| inner.read_offset(offset, buffer))
 }
 
 pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
-    if buffer.is_empty() {
-        return true;
-    }
-
-    if !virtio_blk_is_ready() {
-        return false;
-    }
-
-    let start_sector = offset / SECTOR_SIZE;
-    let sector_offset = (offset % SECTOR_SIZE) as usize;
-
-    let mut sector_buf = [0u8; 512];
-    let sectors_needed = (sector_offset + buffer.len() + 511) / 512;
-
-    let mut buf_pos = 0usize;
-    for i in 0..sectors_needed {
-        let sector = start_sector + i as u64;
-
-        let dst_start = if i == 0 { sector_offset } else { 0 };
-        let dst_end = 512.min(dst_start + (buffer.len() - buf_pos));
-        let copy_len = dst_end - dst_start;
-
-        if dst_start != 0 || dst_end != 512 {
-            let ok = do_request(sector, &mut sector_buf, false);
-            if !ok {
-                return false;
-            }
-        }
-
-        sector_buf[dst_start..dst_end].copy_from_slice(&buffer[buf_pos..buf_pos + copy_len]);
-
-        let ok = do_request(sector, &mut sector_buf, true);
-        if !ok {
-            return false;
-        }
-
-        buf_pos += copy_len;
-        if buf_pos >= buffer.len() {
-            break;
-        }
-    }
-
-    true
+    disk0().is_some_and(|inner| inner.write_offset(offset, buffer))
 }
 
 // =============================================================================
 // Test-only accessors
 // =============================================================================
 
-/// Return a snapshot of the MSI-X state for the claimed VirtIO-blk device.
-///
-/// Only available in test builds (`test-hooks` feature).  Returns `None` if the
-/// device was not probed or MSI-X was not configured (i.e. MSI fallback).
+/// Return a snapshot of disk0's MSI-X state for test builds.
 #[cfg(feature = "test-hooks")]
 pub fn virtio_blk_msix_state() -> Option<VirtioMsixState> {
-    VIRTIO_BLK_STATE.lock().msix_state.clone()
+    disk0().and_then(|inner| inner.msix_state())
 }

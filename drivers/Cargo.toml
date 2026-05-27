@@ -23,6 +23,7 @@ slopos-abi = { workspace = true }
 slopos-acpi = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
+slopos-fs = { workspace = true }
 slopos-font = { workspace = true, features = ["kernel"] }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
