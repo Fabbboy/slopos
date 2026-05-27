@@ -461,10 +461,12 @@ fn validate(reg: &BlkRegistry, handle: DevHandle) -> Option<usize> {
 }
 
 /// Register a freshly-probed device. Assigns the next probe-order index
-/// (disk0, disk1, …) and a fresh generation. Called once per device from
-/// `virtio_blk_probe` while the PCI `ENUM_STATE` lock is held; the only
-/// nesting is `ENUM_STATE -> BLK_REGISTRY` (never the reverse), so no cycle.
-fn register_device(inner: KArc<VirtioBlkInner>) -> Option<(DevHandle, BlockDeviceIndex)> {
+/// (disk0, disk1, …) and a fresh generation, returning the index. Called
+/// once per device from `virtio_blk_probe` while the PCI `ENUM_STATE` lock
+/// is held; the only nesting is `ENUM_STATE -> BLK_REGISTRY` (never the
+/// reverse), so no cycle. Callers reach the device afterwards via
+/// [`blk_device_by_index`].
+fn register_device(inner: KArc<VirtioBlkInner>) -> Option<BlockDeviceIndex> {
     let mut reg = BLK_REGISTRY.lock();
     let free = (0..MAX_BLK_DEVICES).find(|&s| reg.slots[s].inner.is_none())?;
     let generation = reg.next_generation;
@@ -473,14 +475,14 @@ fn register_device(inner: KArc<VirtioBlkInner>) -> Option<(DevHandle, BlockDevic
     if reg.next_generation == 0 {
         reg.next_generation = 1;
     }
-    reg.probe_order_next += 1;
+    reg.probe_order_next = reg.probe_order_next.wrapping_add(1);
     reg.slots[free] = DevSlot {
         inner: Some(inner),
         generation,
         index,
         write_claimed: false,
     };
-    Some((DevHandle::new(free, generation), BlockDeviceIndex(index)))
+    Some(BlockDeviceIndex(index))
 }
 
 /// Clone the device's owned state out from under the registry lock, so the
@@ -539,12 +541,13 @@ pub fn open_writer(handle: DevHandle) -> Result<BlockWriteToken, BlkClaimError> 
     if reg.slots[slot].write_claimed {
         return Err(BlkClaimError::AlreadyClaimed);
     }
+    // `validate` already proved `inner.is_some()` under this same guard, so
+    // this is provably `Some`; match defensively rather than panic on a
+    // registry path.
+    let Some(inner) = reg.slots[slot].inner.clone() else {
+        return Err(BlkClaimError::Stale);
+    };
     reg.slots[slot].write_claimed = true;
-    let inner = reg.slots[slot]
-        .inner
-        .as_ref()
-        .expect("validated slot has inner")
-        .clone();
     Ok(BlockWriteToken { handle, inner })
 }
 
@@ -554,17 +557,6 @@ pub fn open_writer(handle: DevHandle) -> Result<BlockWriteToken, BlkClaimError> 
 pub struct BlockWriteToken {
     handle: DevHandle,
     inner: KArc<VirtioBlkInner>,
-}
-
-impl BlockWriteToken {
-    /// Raw read through the owned device.
-    pub fn read(&self, offset: u64, buffer: &mut [u8]) -> bool {
-        self.inner.read_offset(offset, buffer)
-    }
-    /// Raw write through the owned device.
-    pub fn write(&self, offset: u64, buffer: &[u8]) -> bool {
-        self.inner.write_offset(offset, buffer)
-    }
 }
 
 impl BlockDevice for BlockWriteToken {
@@ -694,8 +686,8 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         state.msix_state = msix_state;
     }
 
-    let (_, index) = match register_device(inner) {
-        Some(t) => t,
+    let index = match register_device(inner) {
+        Some(i) => i,
         None => {
             klog_info!("virtio-blk: device registry full");
             return Err(PciProbeError::OutOfMemory);

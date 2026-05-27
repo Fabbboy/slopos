@@ -889,9 +889,8 @@ impl<'a, T> IntoIterator for &'a mut KVec<T> {
 ///
 /// As with [`KBox::try_new`] the rvalue passed to [`KArc::try_new`] does
 /// briefly land on the caller's stack; large `T` should be constructed
-/// via a future `KArc::try_init` (not yet wired — no kernel call site
-/// requires it) so the `T` is written directly into the Arc's heap
-/// allocation without a stack materialisation step.
+/// via [`KArc::try_init`], which writes the `T` directly into the Arc's
+/// heap allocation without a stack materialisation step.
 pub struct KArc<T: ?Sized> {
     inner: Arc<T>,
 }
