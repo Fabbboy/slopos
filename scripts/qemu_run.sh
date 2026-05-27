@@ -153,6 +153,11 @@ DISPLAY_ARGS=(-display none)
 SERIAL_ARGS=(-serial stdio)
 USB_ARGS=()
 EXTRA_ARGS=()
+# Disposable scratch block device (virtio-disk1) attached only for the test
+# harness. Destructive block-device tests target THIS device, never the live
+# root-fs image (virtio-disk0) — so a buggy test cannot corrupt an on-disk
+# binary (the nightly-2026-05-25 io_capture incident). Recreated blank each run.
+SCRATCH_ARGS=()
 
 case "$MODE" in
     test)
@@ -166,6 +171,15 @@ case "$MODE" in
         # backend is wired to COM1.
         DISPLAY_ARGS=(-display none)
         EXTRA_ARGS=(-device "isa-debug-exit,iobase=0xf4,iosize=0x01" -no-reboot)
+        SCRATCH_IMG="${SCRATCH_IMG:-${REPO_ROOT}/builddir/scratch-disk.img}"
+        mkdir -p "$(dirname "$SCRATCH_IMG")"
+        # Fresh, blank 8 MiB raw scratch each run (no filesystem; raw-sector tests only).
+        rm -f "$SCRATCH_IMG"
+        truncate -s 8M "$SCRATCH_IMG"
+        SCRATCH_ARGS=(
+            -drive "file=$SCRATCH_IMG,if=none,id=virtio-disk1,format=raw"
+            -device "virtio-blk-pci,drive=virtio-disk1,disable-legacy=on"
+        )
         ;;
     interactive|logged)
         if [ "$QEMU_ENABLE_ISA_EXIT" != "0" ]; then
@@ -264,6 +278,7 @@ QEMU_ARGS=(
     -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
     -object "iothread,id=iot0"
     -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
+    "${SCRATCH_ARGS[@]}"
     -netdev "user,id=slopnet0,dns=1.1.1.1${NET_HOSTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"

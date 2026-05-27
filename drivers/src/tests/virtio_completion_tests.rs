@@ -7,11 +7,19 @@
 //! - Integration tests through live virtio-blk after probe
 
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
+
+use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
 
 use crate::hpet;
 use crate::virtio::{CompletionEvent, IrqEdgeEvent};
 use crate::virtio_blk;
+use crate::virtio_blk::BlkClaimError;
+
+/// The disposable scratch block device (virtio-disk1), attached only for the
+/// test harness. Destructive block tests target THIS index, never disk0 (the
+/// live root-fs image).
+const SCRATCH: BlockDeviceIndex = BlockDeviceIndex(1);
 
 // =============================================================================
 // 1. IrqEdgeEvent unit tests (pure logic — no hardware)
@@ -245,17 +253,20 @@ pub fn test_virtio_blk_consecutive_reads() -> TestResult {
 }
 
 pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
-    assert_test!(
-        virtio_blk::virtio_blk_is_ready(),
-        "virtio-blk must be ready"
-    );
+    // Destructive round-trip against the DISPOSABLE scratch device (disk1),
+    // never the live root-fs image (disk0). The scratch disk is attached only
+    // for the test harness and recreated blank each run, and we acquire an
+    // EXCLUSIVE write capability for it — so this test cannot corrupt an
+    // on-disk binary (the nightly-2026-05-25 io_capture incident) nor race
+    // the filesystem. No save/restore is needed: the device is throwaway.
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
 
-    // DESTRUCTIVE round-trip against the live filesystem image: the target
-    // sector backs real on-disk data (sector 8192 is a /bin binary's data
-    // block on the test image). We must save the original bytes and restore
-    // them afterwards — otherwise this test silently overwrites that file's
-    // code on disk, and any later test that exec()s it crashes with a wild
-    // instruction (this exact bug corrupted /bin/io_capture_test).
     let offset = 8192u64 * 512;
     let pattern: [u8; 512] = {
         let mut p = [0u8; 512];
@@ -265,25 +276,72 @@ pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
         p
     };
 
-    let mut original = [0u8; 512];
     assert_test!(
-        virtio_blk::virtio_blk_read(offset, &mut original),
-        "save original sector before destructive write"
+        token.write_at(offset, &pattern).is_ok(),
+        "write should succeed via CompletionEvent I/O"
+    );
+    let mut readback = [0u8; 512];
+    assert_test!(
+        token.read_at(offset, &mut readback).is_ok(),
+        "readback should succeed via CompletionEvent I/O"
+    );
+    assert_test!(
+        readback == pattern,
+        "readback data should match written pattern"
+    );
+    pass!()
+}
+
+/// The exclusive-write capability FSM: a device admits at most one live
+/// [`BlockWriteToken`]; dropping it releases the claim. This is the invariant
+/// that makes "two writers to the same device" — the root of the io_capture
+/// corruption — structurally impossible (cf. Linux `bd_writers`).
+pub fn test_block_device_exclusive_write_claim() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("first open_writer should succeed: {:?}", e),
+    };
+
+    // A second claim while the first token is live is rejected.
+    assert_test!(
+        matches!(
+            virtio_blk::open_writer(handle),
+            Err(BlkClaimError::AlreadyClaimed)
+        ),
+        "second open_writer must return AlreadyClaimed while a token is live"
     );
 
-    let ok_write = virtio_blk::virtio_blk_write(offset, &pattern);
-    let mut readback = [0u8; 512];
-    let ok_read = ok_write && virtio_blk::virtio_blk_read(offset, &mut readback);
-    let matched = ok_read && readback == pattern;
+    // Dropping the token releases the claim; it can be re-acquired.
+    drop(token);
+    assert_test!(
+        virtio_blk::open_writer(handle).is_ok(),
+        "exclusive claim must be re-acquirable after the token is dropped"
+    );
+    pass!()
+}
 
-    // Always restore the original bytes — even on a failed round-trip — so the
-    // on-disk filesystem is left exactly as we found it.
-    let ok_restore = virtio_blk::virtio_blk_write(offset, &original);
-
-    assert_test!(ok_write, "write should succeed via CompletionEvent I/O");
-    assert_test!(ok_read, "readback should succeed via CompletionEvent I/O");
-    assert_test!(matched, "readback data should match written pattern");
-    assert_test!(ok_restore, "restore original sector after destructive test");
+/// Device lookup by stable probe-order index, and registry bounds.
+pub fn test_block_device_lookup_bounds() -> TestResult {
+    assert_test!(
+        virtio_blk::blk_device_by_index(BlockDeviceIndex(0)).is_some(),
+        "disk0 (root fs) must be present"
+    );
+    assert_test!(
+        virtio_blk::blk_device_by_index(SCRATCH).is_some(),
+        "disk1 (scratch) must be present in the test harness"
+    );
+    assert_test!(
+        virtio_blk::blk_device_by_index(BlockDeviceIndex(99)).is_none(),
+        "an out-of-range index must resolve to None"
+    );
+    assert_test!(
+        virtio_blk::blk_device_count() >= 2,
+        "at least the root-fs and scratch devices must be claimed"
+    );
     pass!()
 }
 
@@ -365,5 +423,13 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_virtio_blk_write_readback_interrupt_driven,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_block_device_exclusive_write_claim,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_block_device_lookup_bounds,
     suite = virtio_completion
 );
