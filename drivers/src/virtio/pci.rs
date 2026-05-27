@@ -183,11 +183,11 @@ pub fn set_driver_ok(caps: &VirtioMmioCaps) {
 /// Returns `None` if the device has no MSI-X capability, the table cannot be
 /// mapped, or vector allocation fails.  Partial allocations are cleaned up
 /// automatically.
-pub fn try_setup_msix(
+pub fn try_setup_msix<H: Fn(u8) + Clone + Send + Sync + 'static>(
     info: &PciDeviceInfo,
     caps: &VirtioMmioCaps,
     num_queues: u8,
-    handler: fn(queue_idx: u8),
+    handler: H,
 ) -> Option<VirtioMsixState> {
     let cap_offset = info.msix_cap_offset?;
     let nq = (num_queues as usize).min(MAX_MSIX_QUEUES);
@@ -250,7 +250,7 @@ pub fn try_setup_msix(
         }
 
         let queue_idx = i as u8;
-        let h = handler;
+        let h = handler.clone();
         let handle = match line.register_callback(move |_ctx| {
             h(queue_idx);
         }) {
@@ -302,9 +302,9 @@ pub fn try_setup_msix(
 ///
 /// Returns the allocated capability + vector pair, or `None` if the device
 /// has no MSI capability or vector allocation fails.
-pub fn try_setup_msi(
+pub fn try_setup_msi<H: Fn(u8) + Clone + Send + Sync + 'static>(
     info: &PciDeviceInfo,
-    handler: fn(queue_idx: u8),
+    handler: H,
 ) -> Option<(MsiCapability, u8)> {
     let cap_offset = info.msi_cap_offset?;
     let cap = msi::msi_read_capability(info.bus, info.device, info.function, cap_offset);
@@ -354,14 +354,14 @@ pub fn try_setup_msi(
 /// Returns `Err` if neither mechanism is available — VirtIO modern devices
 /// on QEMU q35 always have MSI-X, so this indicates a configuration or
 /// hardware problem.
-pub fn setup_interrupts(
+pub fn setup_interrupts<H: Fn(u8) + Clone + Send + Sync + 'static>(
     info: &PciDeviceInfo,
     caps: &VirtioMmioCaps,
     num_queues: u8,
-    handler: fn(queue_idx: u8),
+    handler: H,
 ) -> Result<(InterruptMode, Option<VirtioMsixState>), &'static str> {
     // Prefer MSI-X — per-queue vectors.
-    if let Some(msix_state) = try_setup_msix(info, caps, num_queues, handler) {
+    if let Some(msix_state) = try_setup_msix(info, caps, num_queues, handler.clone()) {
         return Ok((
             InterruptMode::Msix {
                 num_queues: msix_state.num_queues,
