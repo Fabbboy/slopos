@@ -224,13 +224,14 @@ pub fn test_hpet_period_fs_matches_full_name() -> TestResult {
 // =============================================================================
 
 pub fn test_virtio_blk_read_interrupt_driven() -> TestResult {
-    assert_test!(
-        virtio_blk::virtio_blk_is_ready(),
-        "virtio-blk must be ready"
-    );
+    // Reads target disk0 (the root-fs image), which carries the ext2 superblock.
+    let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) else {
+        return fail!("root-fs block device (disk0) not present");
+    };
+    assert_test!(virtio_blk::blk_is_ready(disk0), "virtio-blk must be ready");
 
     let mut buf = [0u8; 512];
-    let ok = virtio_blk::virtio_blk_read(1024, &mut buf);
+    let ok = virtio_blk::blk_read(disk0, 1024, &mut buf);
     assert_test!(ok, "superblock read should succeed via CompletionEvent I/O");
     let magic = u16::from_le_bytes([buf[0x38], buf[0x39]]);
     assert_eq_test!(magic, 0xEF53, "ext2 superblock magic mismatch");
@@ -238,15 +239,15 @@ pub fn test_virtio_blk_read_interrupt_driven() -> TestResult {
 }
 
 pub fn test_virtio_blk_consecutive_reads() -> TestResult {
-    assert_test!(
-        virtio_blk::virtio_blk_is_ready(),
-        "virtio-blk must be ready"
-    );
+    let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) else {
+        return fail!("root-fs block device (disk0) not present");
+    };
+    assert_test!(virtio_blk::blk_is_ready(disk0), "virtio-blk must be ready");
 
     let mut buf1 = [0u8; 512];
     let mut buf2 = [0u8; 512];
-    let ok1 = virtio_blk::virtio_blk_read(0, &mut buf1);
-    let ok2 = virtio_blk::virtio_blk_read(512, &mut buf2);
+    let ok1 = virtio_blk::blk_read(disk0, 0, &mut buf1);
+    let ok2 = virtio_blk::blk_read(disk0, 512, &mut buf2);
     assert_test!(ok1, "first consecutive read should succeed");
     assert_test!(ok2, "second consecutive read should succeed");
     pass!()

@@ -10,6 +10,8 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use slopos_fs::blockdev::BlockDeviceIndex;
+
 use crate::pci::{pci_config_read16, pci_get_device, pci_get_device_count};
 use crate::virtio_blk;
 use crate::virtio_net;
@@ -17,6 +19,11 @@ use crate::virtio_net;
 /// MSI vector range: 48–223 (allocated by `msi_alloc_vector`).
 const MSI_VECTOR_BASE: u8 = 48;
 const MSI_VECTOR_MAX: u8 = 223;
+
+/// Handle to disk0 (the root-fs virtio-blk device) via the capability registry.
+fn disk0() -> Option<virtio_blk::DevHandle> {
+    virtio_blk::blk_device_by_index(BlockDeviceIndex(0))
+}
 
 // =============================================================================
 // Helpers
@@ -49,7 +56,7 @@ fn msix_control_bits(dev: &crate::pci::PciDeviceInfo, cap_offset: u16) -> (bool,
 /// VirtIO-blk must be ready after probe.
 pub fn test_virtio_blk_ready() -> TestResult {
     assert_test!(
-        virtio_blk::virtio_blk_is_ready(),
+        disk0().is_some_and(virtio_blk::blk_is_ready),
         "virtio-blk should be ready after probe"
     );
     pass!()
@@ -57,7 +64,7 @@ pub fn test_virtio_blk_ready() -> TestResult {
 
 /// VirtIO-blk must have MSI-X state (not MSI fallback) on QEMU q35.
 pub fn test_virtio_blk_has_msix_state() -> TestResult {
-    let state = match virtio_blk::virtio_blk_msix_state() {
+    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None — unexpected on q35"),
     };
@@ -70,7 +77,7 @@ pub fn test_virtio_blk_has_msix_state() -> TestResult {
 
 /// VirtIO-blk queue 0 vector must be in the valid IDT MSI range.
 pub fn test_virtio_blk_vector_in_range() -> TestResult {
-    let state = match virtio_blk::virtio_blk_msix_state() {
+    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -89,7 +96,7 @@ pub fn test_virtio_blk_vector_in_range() -> TestResult {
 /// The MSI-X table entry for queue 0 must contain the correct vector in its
 /// Message Data field (bits 7:0).
 pub fn test_virtio_blk_table_entry_matches_vector() -> TestResult {
-    let state = match virtio_blk::virtio_blk_msix_state() {
+    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -109,7 +116,7 @@ pub fn test_virtio_blk_table_entry_matches_vector() -> TestResult {
 
 /// The MSI-X table entry for queue 0 must target APIC ID 0 (BSP).
 pub fn test_virtio_blk_table_entry_targets_bsp() -> TestResult {
-    let state = match virtio_blk::virtio_blk_msix_state() {
+    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -129,7 +136,7 @@ pub fn test_virtio_blk_table_entry_targets_bsp() -> TestResult {
 
 /// The MSI-X table entry for queue 0 must be unmasked (vector control bit 0 = 0).
 pub fn test_virtio_blk_entry_unmasked() -> TestResult {
-    let state = match virtio_blk::virtio_blk_msix_state() {
+    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -314,7 +321,7 @@ pub fn test_virtio_net_msix_enabled_in_config() -> TestResult {
 
 /// VirtIO-blk and VirtIO-net must not share any MSI-X vectors.
 pub fn test_blk_and_net_vectors_disjoint() -> TestResult {
-    let blk = match virtio_blk::virtio_blk_msix_state() {
+    let blk = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -369,7 +376,7 @@ pub fn test_msix_preferred_over_msi_on_q35() -> TestResult {
 
     // Both should have MSI-X state (not MSI fallback)
     assert_test!(
-        virtio_blk::virtio_blk_msix_state().is_some(),
+        disk0().and_then(virtio_blk::blk_msix_state).is_some(),
         "virtio-blk should use MSI-X, not MSI fallback"
     );
     assert_test!(

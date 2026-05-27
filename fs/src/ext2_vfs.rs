@@ -1,6 +1,7 @@
-use crate::blockdev::{CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
+use crate::blockdev::BlockDevice;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
+use slopos_ostd::KBox;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, PreemptMutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
@@ -10,7 +11,11 @@ const EXT2_ROOT_INODE: u32 = 2;
 // ============================================================================
 
 struct CachedExt2 {
-    device: CallbackBlockDevice,
+    /// The filesystem's sole writable handle to its backing block device —
+    /// an owned capability (e.g. a virtio-blk `BlockWriteToken`) boxed behind
+    /// `dyn BlockDevice`. Held for the kernel's lifetime, so no other code can
+    /// acquire a second writer to this device (Layer 1: ownership = exclusion).
+    device: KBox<dyn BlockDevice + Send + Sync>,
     superblock: Ext2Superblock,
     block_size: u32,
     inode_size: u16,
@@ -29,7 +34,7 @@ impl StaticExt2Vfs {
         let mut guard = CACHED_EXT2.lock();
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
         let mut fs = Ext2Fs::from_parts(
-            &cached.device,
+            &*cached.device,
             cached.superblock,
             cached.block_size,
             cached.inode_size,
@@ -162,18 +167,13 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 
 pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
 
-pub fn ext2_vfs_init_with_callbacks(
-    read_fn: ReadFn,
-    write_fn: WriteFn,
-    capacity_fn: CapacityFn,
-) -> VfsResult<()> {
+pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<()> {
     if !EXT2_VFS_INIT.init_once() {
         return Ok(());
     }
 
-    // Validate the filesystem by doing a full init
-    let device = CallbackBlockDevice::new(read_fn, write_fn, capacity_fn);
-    let fs = Ext2Fs::init_internal(&device).map_err(ext2_error_to_vfs)?;
+    // Validate the filesystem by doing a full init against the owned device.
+    let fs = Ext2Fs::init_internal(&*device).map_err(ext2_error_to_vfs)?;
     let superblock = fs.superblock();
     let block_size = fs.block_size();
     let inode_size = superblock.inode_size;

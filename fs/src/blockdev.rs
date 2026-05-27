@@ -89,44 +89,7 @@ impl BlockDevice for MemoryBlockDevice {
     }
 }
 
-pub type ReadFn = fn(u64, &mut [u8]) -> bool;
-pub type WriteFn = fn(u64, &[u8]) -> bool;
-pub type CapacityFn = fn() -> u64;
-
-pub struct CallbackBlockDevice {
-    read_fn: ReadFn,
-    write_fn: WriteFn,
-    capacity_fn: CapacityFn,
-}
-
-impl CallbackBlockDevice {
-    pub fn new(read_fn: ReadFn, write_fn: WriteFn, capacity_fn: CapacityFn) -> Self {
-        Self {
-            read_fn,
-            write_fn,
-            capacity_fn,
-        }
-    }
-}
-
-impl BlockDevice for CallbackBlockDevice {
-    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
-        if (self.read_fn)(offset, buffer) {
-            Ok(())
-        } else {
-            Err(BlockDeviceError::InvalidBuffer)
-        }
-    }
-
-    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
-        if (self.write_fn)(offset, buffer) {
-            Ok(())
-        } else {
-            Err(BlockDeviceError::InvalidBuffer)
-        }
-    }
-
-    fn capacity(&self) -> u64 {
-        (self.capacity_fn)()
-    }
-}
+// `CallbackBlockDevice` (bare fn-pointer adapter) was removed with the ambient
+// virtio-blk read/write free functions: the filesystem now holds an owned
+// `dyn BlockDevice` capability (a virtio-blk `BlockWriteToken`) instead of
+// fn pointers into a global device. See `ext2_vfs::ext2_vfs_init_with_device`.

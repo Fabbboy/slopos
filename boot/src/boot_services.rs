@@ -23,27 +23,38 @@ fn boot_step_register_scheduler_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_info!("OSTD: scheduler registered (PriorityScheduler)");
 }
 use slopos_drivers::virtio_blk;
+use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
 use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
 use slopos_fs::vfs::{mount, unmount};
-use slopos_fs::{
-    ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,
-};
+use slopos_fs::{ext2_vfs_init_with_device, ext2_vfs_is_initialized, vfs_init_builtin_filesystems};
+use slopos_ostd::KBox;
 
 fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     slopos_fs::fileio_register_tty_ops(&slopos_drivers::tty_file_ops::TTY_FILE_OPS);
     slopos_fs::fileio_register_socket_ops(&slopos_net::socket_file_ops::SOCKET_FILE_OPS);
 
-    if virtio_blk::virtio_blk_is_ready() {
-        if ext2_vfs_init_with_callbacks(
-            virtio_blk::virtio_blk_read,
-            virtio_blk::virtio_blk_write,
-            virtio_blk::virtio_blk_capacity,
-        )
-        .is_ok()
-        {
-            klog_info!("FS: ext2 initialized from virtio-blk");
-        } else {
-            klog_info!("FS: virtio-blk found but ext2 init failed");
+    // Mount the root filesystem from disk0 (the first-probed virtio-blk device,
+    // the boot image). The FS acquires an EXCLUSIVE write capability for it and
+    // holds that token for the kernel's lifetime, so nothing else can open a
+    // second writer to the root device (Layer 1: ownership = exclusion).
+    if let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) {
+        if virtio_blk::blk_is_ready(disk0) {
+            match virtio_blk::open_writer(disk0) {
+                Ok(token) => match KBox::try_new(token) {
+                    Ok(boxed) => {
+                        let device: KBox<dyn BlockDevice + Send + Sync> = boxed;
+                        if ext2_vfs_init_with_device(device).is_ok() {
+                            klog_info!("FS: ext2 initialized from virtio-blk disk0");
+                        } else {
+                            klog_info!("FS: virtio-blk disk0 found but ext2 init failed");
+                        }
+                    }
+                    Err(_) => klog_info!("FS: failed to allocate block-device handle for disk0"),
+                },
+                Err(e) => {
+                    klog_info!("FS: could not claim disk0 write capability: {:?}", e)
+                }
+            }
         }
     }
 

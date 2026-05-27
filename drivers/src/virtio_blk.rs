@@ -713,48 +713,8 @@ crate::pci_driver! {
     };
 }
 
-// ============================================================================
-// Legacy ambient free functions (disk0 only).
-//
-// TODO(blockdev-ownership Layer 1): these route to disk0 to keep the FS and
-// existing tests working during the capability migration. They will be
-// deleted once the filesystem and tests acquire devices via the registry.
-// ============================================================================
-
-fn disk0() -> Option<KArc<VirtioBlkInner>> {
-    let reg = BLK_REGISTRY.lock();
-    (0..MAX_BLK_DEVICES).find_map(|slot| {
-        let s = &reg.slots[slot];
-        if s.inner.is_some() && s.index == 0 {
-            s.inner.clone()
-        } else {
-            None
-        }
-    })
-}
-
-pub fn virtio_blk_is_ready() -> bool {
-    disk0().is_some_and(|inner| inner.is_ready())
-}
-
-pub fn virtio_blk_capacity() -> u64 {
-    disk0().map_or(0, |inner| inner.capacity_bytes())
-}
-
-pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
-    disk0().is_some_and(|inner| inner.read_offset(offset, buffer))
-}
-
-pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
-    disk0().is_some_and(|inner| inner.write_offset(offset, buffer))
-}
-
-// =============================================================================
-// Test-only accessors
-// =============================================================================
-
-/// Return a snapshot of disk0's MSI-X state for test builds.
-#[cfg(feature = "test-hooks")]
-pub fn virtio_blk_msix_state() -> Option<VirtioMsixState> {
-    disk0().and_then(|inner| inner.msix_state())
-}
+// All block access now flows through the capability registry above
+// (`blk_device_by_index` + `open_writer`/`blk_read`/`blk_is_ready` /
+// `blk_capacity` / `blk_msix_state`). There is no ambient "read/write any
+// LBA on the global device" free function: that surface was the root of the
+// io_capture on-disk corruption and has been removed.
