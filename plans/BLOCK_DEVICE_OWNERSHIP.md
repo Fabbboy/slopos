@@ -1,6 +1,6 @@
 # Block-Device Ownership & Capability Redesign
 
-Status: **in progress** (started 2026-05-27)
+Status: **complete** (2026-05-27) — all layers shipped or resolved; 2466/2466 green.
 
 ## Why
 
@@ -134,14 +134,19 @@ Acceptance: tampering with a verified block is detected on read.
   re-enter the cache during eviction (reentrancy), and it only catches an
   FS-internal arithmetic bug for which there is no known instance (2460 tests
   green). Low marginal value vs. churn.
-- **Integrity backstop (checksums/verity) — OPTIONAL / deferred.** A read-time
-  block checksum or rootfs verity hash is the *correctly targeted* defense for
-  the residual threats (a wrong in-range write OR out-of-band/disk corruption):
-  it makes such corruption **loud at read time** rather than a silent wild
-  instruction — and would have flagged the original io_capture corruption
-  immediately. It is a non-standard on-disk-format change (stock ext2 has no
-  per-block data checksums), so it is deferred as separate, opt-in hardening
-  rather than bundled into this ownership work.
+- **Integrity backstop (read-time verity) — DONE.** dm-verity/fs-verity-style
+  read-time block-integrity verification (`fs/src/verity.rs`). A build-time
+  trailer (`scripts/gen_verity.py`, appended by `build_fs_image.sh`) carries a
+  per-block CRC-32 array + a root CRC at the END of the image; the kernel wraps
+  the FS device in a `VerifiedBlockDevice` decorator at mount (auto-detected)
+  that verifies each fully-read, not-yet-written block and fails the read with
+  `BlockDeviceError::IntegrityFailure` on mismatch — making corruption loud at
+  read time instead of a silent wild instruction (the io_capture failure mode).
+  Writes "re-bless" blocks (FS owns its mutable blocks), matching dm-verity's
+  read-only-content model. CRC-32 (integrity, not crypto authenticity; crypto
+  hash + cmdline-anchored root is a localized future swap). Block size derived
+  from the ext2 superblock so it cannot silently desync. Tested: crc vectors,
+  clean read, corruption→IntegrityFailure, re-bless, partial-skip, multi-block.
 
 ## Progress log
 
@@ -151,8 +156,11 @@ Acceptance: tampering with a verified block is detected on read.
   removal + FS capability; init flag/cache lockstep review fix). 2460/2460 green;
   rootfs verified untouched by the destructive test. Both keystone and migration
   reviewed by subagents (no memory-safety bugs; HIGH/MEDIUM findings fixed).
-- 2026-05-27: Layer 3 design pass concluded the affine-Extent token is the wrong
-  tool (gates types; the real residual is a runtime value) and rejected it;
-  integrity checksums identified as the correctly-targeted (but invasive,
-  optional) defense for the residual. **The io_capture bug class is structurally
-  closed by Layers 1/4/5.**
+- 2026-05-27: Layer 3 design pass rejected the affine-Extent token as the wrong
+  tool (gates types; the real residual is a runtime value). **io_capture bug
+  class structurally closed by Layers 1/4/5.**
+- 2026-05-27: Integrity backstop (read-time verity) implemented + subagent-
+  reviewed (Medium block-size-coupling finding fixed; load-bearing CRC/coverage
+  arithmetic + lock ordering verified correct). 2466/2466 green with verity ON.
+  **All planned layers are now done (Layer 2 subsumed, Layer 3 rejected with
+  rationale, everything else shipped).**
