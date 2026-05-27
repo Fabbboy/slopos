@@ -12,6 +12,7 @@ pub mod fileio;
 pub mod pipe;
 pub mod pipe_file_ops;
 pub mod ramfs;
+pub mod verity;
 pub mod vfs;
 pub mod vfs_file_ops;
 

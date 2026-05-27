@@ -76,3 +76,13 @@ if [ -d "$FONTS_DIR" ]; then
         echo "Installed font: /usr/share/fonts/$fname"
     done
 fi
+
+# Append a block-integrity (verity) trailer so the kernel detects on-disk
+# corruption of read-only content at read time (fs/src/verity.rs). Must be the
+# LAST step — it hashes the finished image. Optional: the kernel mounts
+# unverified if the trailer is absent.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "${SCRIPT_DIR}/gen_verity.py" "$IMAGE_PATH"
+else
+    echo "gen_verity: python3 not found — image will mount WITHOUT integrity verification" >&2
+fi

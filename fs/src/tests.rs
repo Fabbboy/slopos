@@ -659,6 +659,122 @@ fn test_ext2_aaa_init() -> TestResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Block-integrity (verity) tests — see fs/src/verity.rs
+// ---------------------------------------------------------------------------
+
+/// Build an in-memory image with a verity trailer (`n` blocks of `bs` bytes)
+/// and wrap it in a `VerifiedBlockDevice`. If `corrupt_block` is set, that
+/// block's data is flipped AFTER its hash is recorded, so the stored hash no
+/// longer matches the on-disk bytes (simulating corruption/drift).
+fn build_verity_device(
+    bs: usize,
+    n: usize,
+    corrupt_block: Option<usize>,
+) -> Option<slopos_ostd::KBox<dyn BlockDevice + Send + Sync>> {
+    use crate::verity::crc32;
+    let total = n * bs + n * 4 + 32;
+    let dev = MemoryBlockDevice::allocate(total)?;
+    dev.with_buffer_mut(|img| {
+        for i in 0..n {
+            for j in 0..bs {
+                img[i * bs + j] = ((i.wrapping_mul(31).wrapping_add(j)) & 0xFF) as u8;
+            }
+        }
+        let arr_off = n * bs;
+        for i in 0..n {
+            let h = crc32(&img[i * bs..(i + 1) * bs]).to_le_bytes();
+            img[arr_off + i * 4..arr_off + i * 4 + 4].copy_from_slice(&h);
+        }
+        if let Some(c) = corrupt_block {
+            img[c * bs] ^= 0xFF;
+        }
+        let root = crc32(&img[arr_off..arr_off + n * 4]);
+        let h = n * bs + n * 4;
+        img[h..h + 4].copy_from_slice(&0x5356_5254u32.to_le_bytes());
+        img[h + 4..h + 8].copy_from_slice(&1u32.to_le_bytes());
+        img[h + 8..h + 12].copy_from_slice(&1u32.to_le_bytes());
+        img[h + 12..h + 16].copy_from_slice(&(bs as u32).to_le_bytes());
+        img[h + 16..h + 24].copy_from_slice(&(n as u64).to_le_bytes());
+        img[h + 24..h + 28].copy_from_slice(&root.to_le_bytes());
+        img[h + 28..h + 32].copy_from_slice(&0u32.to_le_bytes());
+    });
+    let boxed: slopos_ostd::KBox<dyn BlockDevice + Send + Sync> =
+        slopos_ostd::KBox::try_new(dev).ok()?;
+    Some(crate::verity::build_verified(boxed))
+}
+
+/// CRC-32 must match the standard (zlib) algorithm `gen_verity.py` uses,
+/// otherwise every verified read would fail.
+fn test_verity_crc32_known_vectors() -> TestResult {
+    use crate::verity::crc32;
+    if crc32(&[]) == 0 && crc32(b"123456789") == 0xCBF4_3926 {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// A clean (untampered) image verifies on read.
+fn test_verity_clean_read_passes() -> TestResult {
+    let bs = 512usize;
+    let Some(dev) = build_verity_device(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    let mut buf = [0u8; 512];
+    // Every block reads back successfully through the verifier.
+    for b in 0..4u64 {
+        if dev.read_at(b * bs as u64, &mut buf).is_err() {
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// A corrupted block fails the read loudly with `IntegrityFailure` instead of
+/// returning bad bytes — the structural defense against the io_capture class.
+fn test_verity_corruption_detected() -> TestResult {
+    let bs = 512usize;
+    let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
+        return TestResult::Fail;
+    };
+    let mut buf = [0u8; 512];
+    // Block 0 and 1 are clean → ok; block 2 is corrupted → IntegrityFailure.
+    if dev.read_at(0, &mut buf).is_err() || dev.read_at(bs as u64, &mut buf).is_err() {
+        return TestResult::Fail;
+    }
+    match dev.read_at(2 * bs as u64, &mut buf) {
+        Err(BlockDeviceError::IntegrityFailure) => TestResult::Pass,
+        _ => TestResult::Fail,
+    }
+}
+
+/// After a block is written, it is "re-blessed" (the FS owns its mutable
+/// blocks) and no longer verified — so a subsequent read of a corrupted-but-
+/// written block does not fail.
+fn test_verity_written_block_skips_verification() -> TestResult {
+    let bs = 512usize;
+    let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
+        return TestResult::Fail;
+    };
+    // Write block 2 (marks it written / re-blesses it).
+    let payload = [0xABu8; 512];
+    if dev.write_at(2 * bs as u64, &payload).is_err() {
+        return TestResult::Fail;
+    }
+    // Now reading block 2 must NOT fail integrity (it's owned/mutable).
+    let mut buf = [0u8; 512];
+    if dev.read_at(2 * bs as u64, &mut buf).is_err() {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_verity_crc32_known_vectors);
+slopos_testing::stest!(name = test_verity_clean_read_passes);
+slopos_testing::stest!(name = test_verity_corruption_detected);
+slopos_testing::stest!(name = test_verity_written_block_skips_verification);
+
 slopos_testing::stest!(name = test_ext2_aaa_init);
 slopos_testing::stest!(name = test_vfs_initialized);
 slopos_testing::stest!(name = test_vfs_root_stat);

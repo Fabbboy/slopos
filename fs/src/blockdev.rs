@@ -4,6 +4,10 @@ use slopos_ostd::KVec;
 pub enum BlockDeviceError {
     OutOfBounds,
     InvalidBuffer,
+    /// A block read back with contents that do not match its trusted
+    /// build-time integrity hash (see [`crate::verity`]). The read is failed
+    /// loudly rather than returning corrupt bytes.
+    IntegrityFailure,
 }
 
 /// Stable, enumeration-order identity for a block device. `disk0` is the

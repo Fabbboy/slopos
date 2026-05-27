@@ -175,6 +175,11 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
         return Err(VfsError::AlreadyExists);
     }
 
+    // Wrap the device in a read-time integrity verifier if the image carries a
+    // verity trailer (no-op otherwise). Corruption of a not-yet-written block
+    // then fails the read loudly instead of returning bad bytes.
+    let device = crate::verity::build_verified(device);
+
     // Validate the filesystem against the owned device. On failure, roll the
     // one-shot flag back so it stays in lockstep with `CACHED_EXT2`
     // (`is_set()` ⟺ a filesystem is actually mounted) and a later attempt can
