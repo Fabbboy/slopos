@@ -94,7 +94,7 @@ impl FileDesc {
             )
         })?;
         unsafe {
-            cursor.advance_unchecked(ret as usize);
+            cursor.advance(ret as usize);
         }
         Ok(())
     }

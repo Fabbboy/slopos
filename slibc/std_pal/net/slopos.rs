@@ -556,7 +556,7 @@ impl Socket {
             )
         })?;
         unsafe {
-            buf.advance_unchecked(ret as usize);
+            buf.advance(ret as usize);
         }
         Ok(())
     }
@@ -738,6 +738,24 @@ impl Socket {
     pub fn nodelay(&self) -> io::Result<bool> {
         let raw: c_int = unsafe {
             getsockopt(self, c::IPPROTO_TCP, c::TCP_NODELAY)?
+        };
+        Ok(raw != 0)
+    }
+
+    pub fn set_keepalive(&self, keepalive: bool) -> io::Result<()> {
+        unsafe {
+            setsockopt(
+                self,
+                c::SOL_SOCKET,
+                c::SO_KEEPALIVE,
+                keepalive as c_int,
+            )
+        }
+    }
+
+    pub fn keepalive(&self) -> io::Result<bool> {
+        let raw: c_int = unsafe {
+            getsockopt(self, c::SOL_SOCKET, c::SO_KEEPALIVE)?
         };
         Ok(raw != 0)
     }

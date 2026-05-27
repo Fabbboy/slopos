@@ -37,8 +37,8 @@ The 154 lib unit tests + ~330 integration tests cover, among others:
 ## How to run
 
 ```
-rustup component add miri --toolchain nightly-2026-03-22
-cargo +nightly-2026-03-22 miri setup     # one-time, ~5–10 min (builds Miri's std)
+rustup component add miri --toolchain nightly-2026-05-25
+cargo +nightly-2026-05-25 miri setup     # one-time, ~5–10 min (builds Miri's std)
 just check-miri
 ```
 

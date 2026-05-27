@@ -147,9 +147,9 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
         match spec {
             b'd' | b'i' => {
                 let val: i64 = match length {
-                    Length::LongLong | Length::SizeT | Length::PtrdiffT => ap.arg::<i64>(),
-                    Length::Long => ap.arg::<i64>(),
-                    Length::Default => ap.arg::<i32>() as i64,
+                    Length::LongLong | Length::SizeT | Length::PtrdiffT => ap.next_arg::<i64>(),
+                    Length::Long => ap.next_arg::<i64>(),
+                    Length::Default => ap.next_arg::<i32>() as i64,
                 };
 
                 let negative = val < 0;
@@ -211,9 +211,9 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
 
             b'u' | b'o' | b'x' | b'X' => {
                 let val: u64 = match length {
-                    Length::LongLong | Length::SizeT | Length::PtrdiffT => ap.arg::<u64>(),
-                    Length::Long => ap.arg::<u64>(),
-                    Length::Default => ap.arg::<u32>() as u64,
+                    Length::LongLong | Length::SizeT | Length::PtrdiffT => ap.next_arg::<u64>(),
+                    Length::Long => ap.next_arg::<u64>(),
+                    Length::Default => ap.next_arg::<u32>() as u64,
                 };
 
                 let (base, digits): (u64, &[u8; 16]) = match spec {
@@ -278,7 +278,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             }
 
             b's' => {
-                let s_ptr: *const u8 = ap.arg::<*const u8>();
+                let s_ptr: *const u8 = ap.next_arg::<*const u8>();
                 let null_str = b"(null)\0";
                 let actual = if s_ptr.is_null() {
                     null_str.as_ptr()
@@ -315,7 +315,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             }
 
             b'c' => {
-                let c = ap.arg::<i32>() as u8;
+                let c = ap.next_arg::<i32>() as u8;
                 let pad = if width > 1 { width - 1 } else { 0 };
 
                 if flags & FLAG_LEFT == 0 {
@@ -328,7 +328,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             }
 
             b'p' => {
-                let ptr_val = ap.arg::<usize>() as u64;
+                let ptr_val = ap.next_arg::<usize>() as u64;
                 let mut num_buf = [0u8; 22];
                 let num_len = write_unsigned(ptr_val, 16, DIGITS_LOWER, &mut num_buf);
                 let num_start = 22 - num_len;

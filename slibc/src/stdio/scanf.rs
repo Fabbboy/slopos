@@ -83,12 +83,12 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                 }
 
                 if length_long {
-                    let ptr = ap.arg::<*mut i64>();
+                    let ptr = ap.next_arg::<*mut i64>();
                     if !ptr.is_null() {
                         *ptr = val;
                     }
                 } else {
-                    let ptr = ap.arg::<*mut i32>();
+                    let ptr = ap.next_arg::<*mut i32>();
                     if !ptr.is_null() {
                         *ptr = val as i32;
                     }
@@ -118,12 +118,12 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                 }
 
                 if length_long {
-                    let ptr = ap.arg::<*mut u64>();
+                    let ptr = ap.next_arg::<*mut u64>();
                     if !ptr.is_null() {
                         *ptr = val;
                     }
                 } else {
-                    let ptr = ap.arg::<*mut u32>();
+                    let ptr = ap.next_arg::<*mut u32>();
                     if !ptr.is_null() {
                         *ptr = val as u32;
                     }
@@ -168,12 +168,12 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                 }
 
                 if length_long {
-                    let ptr = ap.arg::<*mut u64>();
+                    let ptr = ap.next_arg::<*mut u64>();
                     if !ptr.is_null() {
                         *ptr = val;
                     }
                 } else {
-                    let ptr = ap.arg::<*mut u32>();
+                    let ptr = ap.next_arg::<*mut u32>();
                     if !ptr.is_null() {
                         *ptr = val as u32;
                     }
@@ -192,7 +192,7 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                     return matched;
                 }
 
-                let dst = ap.arg::<*mut u8>();
+                let dst = ap.next_arg::<*mut u8>();
                 if dst.is_null() {
                     return matched;
                 }
@@ -215,7 +215,7 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                     return matched;
                 }
 
-                let ptr = ap.arg::<*mut u8>();
+                let ptr = ap.next_arg::<*mut u8>();
                 if !ptr.is_null() {
                     *ptr = *ip;
                 }
@@ -344,12 +344,12 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                 }
 
                 if length_long {
-                    let ptr = ap.arg::<*mut i64>();
+                    let ptr = ap.next_arg::<*mut i64>();
                     if !ptr.is_null() {
                         *ptr = val;
                     }
                 } else {
-                    let ptr = ap.arg::<*mut i32>();
+                    let ptr = ap.next_arg::<*mut i32>();
                     if !ptr.is_null() {
                         *ptr = val as i32;
                     }
@@ -393,12 +393,12 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                 }
 
                 if length_long {
-                    let ptr = ap.arg::<*mut u64>();
+                    let ptr = ap.next_arg::<*mut u64>();
                     if !ptr.is_null() {
                         *ptr = val;
                     }
                 } else {
-                    let ptr = ap.arg::<*mut u32>();
+                    let ptr = ap.next_arg::<*mut u32>();
                     if !ptr.is_null() {
                         *ptr = val as u32;
                     }
@@ -418,7 +418,7 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     }
                 }
 
-                let dst = ap.arg::<*mut u8>();
+                let dst = ap.next_arg::<*mut u8>();
                 if dst.is_null() {
                     return matched;
                 }
@@ -458,7 +458,7 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     }
                     return matched;
                 }
-                let ptr = ap.arg::<*mut u8>();
+                let ptr = ap.next_arg::<*mut u8>();
                 if !ptr.is_null() {
                     *ptr = c as u8;
                 }

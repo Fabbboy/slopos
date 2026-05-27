@@ -59,7 +59,7 @@ impl Pipe {
         if ret < 0 {
             Err(io::Error::from_raw_os_error(-ret as i32))
         } else {
-            unsafe { cursor.advance_unchecked(ret as usize) };
+            unsafe { cursor.advance(ret as usize) };
             Ok(())
         }
     }

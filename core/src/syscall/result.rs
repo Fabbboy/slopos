@@ -6,7 +6,7 @@
 //! `rax`; handlers never call `ctx.ok()` / `ctx.err()` again.
 
 use core::convert::Infallible;
-use core::ops::{ControlFlow, FromResidual, Try};
+use core::ops::{ControlFlow, FromResidual, Residual, Try};
 
 use slopos_abi::Errno;
 
@@ -129,6 +129,10 @@ impl Try for SyscallResult {
             other => ControlFlow::Break(other),
         }
     }
+}
+
+impl Residual<u64> for SyscallResult {
+    type TryType = SyscallResult;
 }
 
 impl FromResidual<SyscallResult> for SyscallResult {

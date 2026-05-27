@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::env::{CommandEnv, CommandEnvs};
+use super::env::{CommandEnv, CommandEnvs, CommandResolvedEnvs};
 pub use crate::ffi::OsString as EnvKey;
 use crate::ffi::{OsStr, OsString};
 use crate::num::NonZero;
@@ -134,6 +134,10 @@ impl Command {
 
     pub fn get_envs(&self) -> CommandEnvs<'_> {
         self.env.iter()
+    }
+
+    pub fn get_resolved_envs(&self) -> CommandResolvedEnvs {
+        CommandResolvedEnvs::new(self.env.capture())
     }
 
     pub fn get_env_clear(&self) -> bool {
