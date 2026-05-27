@@ -250,6 +250,12 @@ pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
         "virtio-blk must be ready"
     );
 
+    // DESTRUCTIVE round-trip against the live filesystem image: the target
+    // sector backs real on-disk data (sector 8192 is a /bin binary's data
+    // block on the test image). We must save the original bytes and restore
+    // them afterwards — otherwise this test silently overwrites that file's
+    // code on disk, and any later test that exec()s it crashes with a wild
+    // instruction (this exact bug corrupted /bin/io_capture_test).
     let offset = 8192u64 * 512;
     let pattern: [u8; 512] = {
         let mut p = [0u8; 512];
@@ -259,16 +265,25 @@ pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
         p
     };
 
-    let ok_write = virtio_blk::virtio_blk_write(offset, &pattern);
-    assert_test!(ok_write, "write should succeed via CompletionEvent I/O");
-
-    let mut readback = [0u8; 512];
-    let ok_read = virtio_blk::virtio_blk_read(offset, &mut readback);
-    assert_test!(ok_read, "readback should succeed via CompletionEvent I/O");
+    let mut original = [0u8; 512];
     assert_test!(
-        readback == pattern,
-        "readback data should match written pattern"
+        virtio_blk::virtio_blk_read(offset, &mut original),
+        "save original sector before destructive write"
     );
+
+    let ok_write = virtio_blk::virtio_blk_write(offset, &pattern);
+    let mut readback = [0u8; 512];
+    let ok_read = ok_write && virtio_blk::virtio_blk_read(offset, &mut readback);
+    let matched = ok_read && readback == pattern;
+
+    // Always restore the original bytes — even on a failed round-trip — so the
+    // on-disk filesystem is left exactly as we found it.
+    let ok_restore = virtio_blk::virtio_blk_write(offset, &original);
+
+    assert_test!(ok_write, "write should succeed via CompletionEvent I/O");
+    assert_test!(ok_read, "readback should succeed via CompletionEvent I/O");
+    assert_test!(matched, "readback data should match written pattern");
+    assert_test!(ok_restore, "restore original sector after destructive test");
     pass!()
 }
 
