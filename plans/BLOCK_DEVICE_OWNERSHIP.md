@@ -110,15 +110,49 @@ Acceptance: tampering with a verified block is detected on read.
   LBA" path to gate: `open_writer`→`BlockWriteToken` *is* the capability, minted
   only from a registry `DevHandle`. A separate `unsafe trait` gate would have no
   consumer. Re-open only if a raw recovery/mkfs path is reintroduced.
-- **Layer 3 (affine Extent tokens) — TODO.** `BlockDevice::write_at` still takes
-  a raw `u64` offset; wrap in allocator-minted `Extent` tokens so a literal LBA
-  is not an expressible write target.
-- **Integrity backstop (checksums/verity) — TODO.**
+- **Layer 3 (affine Extent tokens) — REJECTED as over-engineering (design pass).**
+  An affine `Extent` token minted by the block allocator was designed and
+  rejected, because:
+  1. After Layer 1 a raw LBA is *already* not an expressible **device** write
+     target (no ambient `write_at`). The only residual exposure is the FS
+     computing a *wrong* `BlockNum` for its **own** device — a wrong runtime
+     *value*, not a fabricated literal. A compile-time affine token gates the
+     *type* but you would hand it the same wrong number, so it would not catch
+     the realistic bug.
+  2. The ext2 `BlockCache` is **write-back**: the allocator mints a block, then
+     the actual `device.write_at` happens later at LRU-eviction/flush time,
+     fully decoupled from the mint. A token would have to be laundered through
+     the cache, where it degenerates to "the `BlockNum` the cache already holds."
+  3. Filesystem metadata (superblock, block/inode bitmaps, inode tables, group
+     descriptors, indirect blocks) is written through the same `write_at` but is
+     **never** allocator-minted — so the token model needs a second "trusted
+     metadata minter," re-introducing the ambient authority Layer 3 set out to
+     remove.
+  The targeted residual (a wrong in-range `BlockNum`) is best caught at runtime,
+  not in the type system — see Integrity. The lighter "assert the flush target
+  is allocated in the bitmap" variant was also deferred: the bitmap read would
+  re-enter the cache during eviction (reentrancy), and it only catches an
+  FS-internal arithmetic bug for which there is no known instance (2460 tests
+  green). Low marginal value vs. churn.
+- **Integrity backstop (checksums/verity) — OPTIONAL / deferred.** A read-time
+  block checksum or rootfs verity hash is the *correctly targeted* defense for
+  the residual threats (a wrong in-range write OR out-of-band/disk corruption):
+  it makes such corruption **loud at read time** rather than a silent wild
+  instruction — and would have flagged the original io_capture corruption
+  immediately. It is a non-standard on-disk-format change (stock ext2 has no
+  per-block data checksums), so it is deferred as separate, opt-in hardening
+  rather than bundled into this ownership work.
 
 ## Progress log
 
 - 2026-05-27: plan written; band-aid + nightly bump + debug tooling committed.
 - 2026-05-27: Layers 1/4/5 landed (commits: IRQ-handler generalize; registry
   keystone; review fixups; scratch device + test migration + FSM tests; ambient
-  removal + FS capability). 2460/2460 green; rootfs verified untouched by the
-  destructive test. Keystone reviewed by subagent (no memory-safety bugs).
+  removal + FS capability; init flag/cache lockstep review fix). 2460/2460 green;
+  rootfs verified untouched by the destructive test. Both keystone and migration
+  reviewed by subagents (no memory-safety bugs; HIGH/MEDIUM findings fixed).
+- 2026-05-27: Layer 3 design pass concluded the affine-Extent token is the wrong
+  tool (gates types; the real residual is a runtime value) and rejected it;
+  integrity checksums identified as the correctly-targeted (but invasive,
+  optional) defense for the residual. **The io_capture bug class is structurally
+  closed by Layers 1/4/5.**
