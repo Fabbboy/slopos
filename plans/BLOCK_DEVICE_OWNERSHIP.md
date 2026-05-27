@@ -96,6 +96,29 @@ Acceptance: tampering with a verified block is detected on read.
    class").
 4. Commit on `develop` (`<area>: <imperative>`), update this doc's status.
 
+## Status by layer
+
+- **Layer 1 (own the device) — DONE.** Ambient `virtio_blk_read/write/...` free
+  fns + `CallbackBlockDevice` deleted; FS holds an owned `KBox<dyn BlockDevice>`
+  (disk0 `BlockWriteToken`) claimed via `open_writer`.
+- **Layer 5 (registry + generation handles) — DONE.** `BLK_REGISTRY` + opaque
+  `DevHandle` (slot+generation); `open_writer` exclusive-write claim.
+- **Layer 4 (test scratch device) — DONE.** Disposable virtio-disk1 in the test
+  harness; destructive tests target it via a capability; rootfs untouched
+  (verified). Exclusion-FSM tests added.
+- **Layer 2 (RawSectorCap) — SUBSUMED.** There is no longer any raw "write any
+  LBA" path to gate: `open_writer`→`BlockWriteToken` *is* the capability, minted
+  only from a registry `DevHandle`. A separate `unsafe trait` gate would have no
+  consumer. Re-open only if a raw recovery/mkfs path is reintroduced.
+- **Layer 3 (affine Extent tokens) — TODO.** `BlockDevice::write_at` still takes
+  a raw `u64` offset; wrap in allocator-minted `Extent` tokens so a literal LBA
+  is not an expressible write target.
+- **Integrity backstop (checksums/verity) — TODO.**
+
 ## Progress log
 
 - 2026-05-27: plan written; band-aid + nightly bump + debug tooling committed.
+- 2026-05-27: Layers 1/4/5 landed (commits: IRQ-handler generalize; registry
+  keystone; review fixups; scratch device + test migration + FSM tests; ambient
+  removal + FS capability). 2460/2460 green; rootfs verified untouched by the
+  destructive test. Keystone reviewed by subagent (no memory-safety bugs).

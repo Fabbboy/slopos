@@ -168,15 +168,28 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
 
 pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<()> {
+    // Atomically claim the one-shot init. A second call returns an error rather
+    // than silently dropping the caller's capability token (which would release
+    // the exclusive write claim) while falsely reporting success.
     if !EXT2_VFS_INIT.init_once() {
-        return Ok(());
+        return Err(VfsError::AlreadyExists);
     }
 
-    // Validate the filesystem by doing a full init against the owned device.
-    let fs = Ext2Fs::init_internal(&*device).map_err(ext2_error_to_vfs)?;
-    let superblock = fs.superblock();
-    let block_size = fs.block_size();
-    let inode_size = superblock.inode_size;
+    // Validate the filesystem against the owned device. On failure, roll the
+    // one-shot flag back so it stays in lockstep with `CACHED_EXT2`
+    // (`is_set()` ⟺ a filesystem is actually mounted) and a later attempt can
+    // retry. The owned `device` drops here, releasing its (failed) claim.
+    let (superblock, block_size, inode_size) = match Ext2Fs::init_internal(&*device) {
+        Ok(fs) => {
+            let superblock = fs.superblock();
+            let inode_size = superblock.inode_size;
+            (superblock, fs.block_size(), inode_size)
+        }
+        Err(e) => {
+            EXT2_VFS_INIT.reset();
+            return Err(ext2_error_to_vfs(e));
+        }
+    };
 
     let mut guard = CACHED_EXT2.lock();
     *guard = Some(CachedExt2 {
