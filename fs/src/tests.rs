@@ -770,10 +770,43 @@ fn test_verity_written_block_skips_verification() -> TestResult {
     TestResult::Pass
 }
 
+/// Only blocks FULLY contained in a read are verified. A sub-block read of a
+/// corrupted block must NOT fail (it never fully covers the block) — this is
+/// the property the sub-block superblock read relies on.
+fn test_verity_partial_read_skips() -> TestResult {
+    let bs = 512usize;
+    let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
+        return TestResult::Fail;
+    };
+    // 256 bytes starting 128 into block 2: never fully covers block 2.
+    let mut buf = [0u8; 256];
+    match dev.read_at(2 * bs as u64 + 128, &mut buf) {
+        Ok(()) => TestResult::Pass,
+        _ => TestResult::Fail,
+    }
+}
+
+/// A multi-block read spanning a clean→corrupt boundary catches the corrupt
+/// block mid-buffer (verifies the loop iterates over every covered block).
+fn test_verity_multiblock_span_detects() -> TestResult {
+    let bs = 512usize;
+    let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
+        return TestResult::Fail;
+    };
+    // Blocks 1..=3 in one read; block 2 is corrupt.
+    let mut buf = [0u8; 512 * 3];
+    match dev.read_at(bs as u64, &mut buf) {
+        Err(BlockDeviceError::IntegrityFailure) => TestResult::Pass,
+        _ => TestResult::Fail,
+    }
+}
+
 slopos_testing::stest!(name = test_verity_crc32_known_vectors);
 slopos_testing::stest!(name = test_verity_clean_read_passes);
 slopos_testing::stest!(name = test_verity_corruption_detected);
 slopos_testing::stest!(name = test_verity_written_block_skips_verification);
+slopos_testing::stest!(name = test_verity_partial_read_skips);
+slopos_testing::stest!(name = test_verity_multiblock_span_detects);
 
 slopos_testing::stest!(name = test_ext2_aaa_init);
 slopos_testing::stest!(name = test_vfs_initialized);
