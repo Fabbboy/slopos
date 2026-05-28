@@ -1,14 +1,15 @@
 ---
 name: SlopOS Framekernel Architecture Plan
-description: Four-phase rip-and-replace plan to redesign SlopOS as an async-first framekernel with a Verus-verified OSTD critical path
+description: Three-phase rip-and-replace plan to redesign SlopOS as a framekernel with a Verus-verified OSTD critical path and an io_uring-style async edge
 status: phase-3-ready
 authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, Hubris, seL4, CortenMM
 ---
 
 # SlopOS Framekernel Architecture Plan
 
-> **Status**: **Phase 1 & 2 complete.** `slopos-ostd` owns every line of kernel `unsafe`; all 17 non-OSTD kernel crates are `#![forbid(unsafe_code)]`; TCB ratio 0.722 % (target ≤1 %). Tagged `framekernel-phase-1`; `framekernel-phase-2` close commit pending. **Phase 3 (async-first task model) is next.** Per-subphase implementation notes live in `git log`.
-> **Target**: Redesign SlopOS as an **async-first framekernel** with a small, partially formally-verified trusted core (`slopos-ostd`). Pre-alpha rip-and-replace; no backwards compatibility constraints.
+> **Status**: **Phase 1 & 2 complete.** `slopos-ostd` owns every line of kernel `unsafe`; all 17 non-OSTD kernel crates are `#![forbid(unsafe_code)]`; TCB ratio 0.722 % (target ≤1 %). Tagged `framekernel-phase-1`; `framekernel-phase-2` close commit pending. **Phase 3 (Verus-verified OSTD + io_uring-style async edge) is next.** Per-subphase implementation notes live in `git log`.
+> **Target**: Redesign SlopOS as a framekernel with a small, formally-verified trusted core (`slopos-ostd`) and an io_uring-style async edge — sync kernel core, async lives in userspace on top of shared-memory rings. Pre-alpha rip-and-replace; no backwards compatibility constraints.
+> **Note on prior Phase 3 / Phase 4 drafts.** An earlier revision of this document proposed an *async-first task model* (`Pin<Box<dyn Future>>` tasks, cooperative executor, async TLB shootdown) as Phase 3, with Verus verification deferred to Phase 4. After a deep research review — see § 9 *Out of Scope* — that direction was retired: every comparable production kernel (Asterinas, Theseus, Hubris, seL4, Linux RFL, Tock, Redox, Fuchsia, MINIX, QNX, Maestro) declined the same design point, and Verus does not yet verify `async fn`. The current Phase 3 fuses the previous Phase-4 verification work with an io_uring-style userspace async surface, which is the *sync core, async edge* shape used by every winning system in 2026.
 > **Scope**: Whole-kernel architecture. Affects every subsystem.
 > **Working directory**: `/home/nil0ft/repos/slopos`
 > **Headline KPI**: TCB ratio (lines of `unsafe` divided by total kernel LoC). Target ≤1% by end of Phase 2.
@@ -23,11 +24,10 @@ authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, H
 4. [Cross-Phase Conventions](#4-cross-phase-conventions)
 5. [Phase 1 — OSTD Foundation](#5-phase-1--ostd-foundation)
 6. [Phase 2 — Safe-Rust Kernel Services](#6-phase-2--safe-rust-kernel-services)
-7. [Phase 3 — Async-First Task Model](#7-phase-3--async-first-task-model)
-8. [Phase 4 — Verus Verification of OSTD Critical Path](#8-phase-4--verus-verification-of-ostd-critical-path)
-9. [Out of Scope / Deferred](#9-out-of-scope--deferred)
-10. [Risk Register](#10-risk-register)
-11. [References](#11-references)
+7. [Phase 3 — Verus-Verified OSTD + io_uring-Style Async Edge](#7-phase-3--verus-verified-ostd--io_uring-style-async-edge)
+8. [Out of Scope / Deferred](#8-out-of-scope--deferred)
+9. [Risk Register](#9-risk-register)
+10. [References](#10-references)
 
 ---
 
@@ -35,14 +35,13 @@ authors: research synthesis from Asterinas (USENIX ATC '25), Theseus, RedLeaf, H
 
 SlopOS today is ~155K LoC of kernel Rust with ~1,426 `unsafe` occurrences (0.92%) clustered in seven subsystems. Drivers are already 0.19% unsafe — exemplary. The codebase already has proto-OSTD primitives (`slopos-alloc`, `IrqMutex`, `OwnedPageFrame`, `MmioRegion`, `UserPtr<T>`) and build-time gates (`check_alloc_dep.sh`, `check_stack_sizes.sh` at 2 KiB) that are stricter than Linux mainline.
 
-This plan does four things, in strict serial order:
+This plan does three things, in strict serial order:
 
 1. **Phase 1 — OSTD Foundation**: carve a single `slopos-ostd` crate that owns *every* line of `unsafe` in the kernel. Forbid `unsafe` everywhere else. Build the typed primitives (`Frame<M>`, `UFrame`, `USegment`, `VmSpace::cursor`, `IoMem`, `IoPort`, `DmaCoherent`, `IrqLine`, `UserContext`). Existing kernel is migrated to consume OSTD at parity.
 2. **Phase 2 — Safe-Rust Kernel Services**: rip and replace `mm/`, `core/`, `fs/`, `drivers/`, `net/` with safe-Rust services on top of OSTD. Page allocator, slab, scheduler, syscall dispatch all become injectable trait impls *outside* the TCB. Achieve `#![forbid(unsafe_code)]` on every non-OSTD kernel crate.
-3. **Phase 3 — Async-First Task Model**: tasks become `Pin<Box<dyn Future>>`. Cooperative scheduling primary, preemptive backstop. Every blocking syscall becomes `async fn`. Async TLB shootdown. **This is the differentiator** — no production Rust kernel has done it.
-4. **Phase 4 — Verus Verification of OSTD Critical Path**: machine-checked proofs of `Frame<M>` ref-count, slab/`HeapSlot` lifetimes, and `VmSpace::cursor` invariants. Pinned Verus toolchain. CI-gated proof regressions.
+3. **Phase 3 — Verus-Verified OSTD + io_uring-Style Async Edge**: machine-checked proofs of `Frame<M>` ref-count, slab/`HeapSlot` lifetimes, and `VmSpace::cursor` invariants on a pinned Verus toolchain (CI-gated). Then a submission/completion-ring surface (`ring_setup` / `ring_enter`) backed by the existing sync `EventBus` / `WaitQueue` plumbing, so userspace gets first-class async without bringing async into the kernel. **This is the differentiator** — no other kernel today claims small TCB + verified + Linux-ABI + Rust simultaneously.
 
-Phases are strictly serial. Phase 1 → 2 is structural. Phase 3 invalidates proofs done before it, which is why Phase 4 is last.
+Phases are strictly serial. Phase 1 → 2 is structural. Phase 3 puts the OSTD critical path under Verus while it is still small enough to verify, then layers the userspace async story on a sync substrate that is now machine-checked.
 
 ---
 
@@ -59,12 +58,12 @@ These decisions are **load-bearing**. Changing one means re-planning. Document e
 | **AD-5** | `Frame<M: AnyFrameMeta>` carries typed per-page metadata. Page cache, slab, page table attach `M` without enlarging TCB. | Keeps OSTD flat as features grow. |
 | **AD-6** | IOMMU default-deny. DMA mappings only over `UFrame`/`USegment`. | Inv. 6 (peripheral cannot tamper with sensitive memory). |
 | **AD-7** | Scheduler, page allocator, slab are **injectable traits** implemented *outside* OSTD. | Linux's scheduler grew from 1.6K to 27K LoC over two decades; if it's in the TCB, the TCB drifts. |
-| **AD-8** | **Async-first**. Tasks are futures. Cooperative executor primary; preemptive only as backstop. | The unique research contribution. |
-| **AD-9** | OSTD itself is sync. Async lives in Phase-2 services *on top of* OSTD primitives. | Keeps the trusted core small and verifiable. |
-| **AD-10** | Verus is the verifier. Pinned fork (vostd-style). | Best-fit for systems Rust; Asterinas's choice; precedent matters. |
+| **AD-8** | **Sync kernel, async edge.** Kernel internals are synchronous; async lives in userspace on top of shared-memory submission/completion rings (`ring_setup` / `ring_enter`). No `async fn` in any kernel crate, including services. | Sync core, async edge is the architecture every winning production system uses today (Linux + io_uring, Postgres + asyncpg, Redis + async clients, Seastar). Every comparable Rust/C/C++ kernel declined whole-kernel async. Keeps Verus tractable. |
+| **AD-9** | OSTD itself is sync. All kernel crates are sync. | Keeps the trusted core small and verifiable; matches AD-8. |
+| **AD-10** | Verus is the verifier. Pinned upstream `main`-branch commit (avoid the experimental `async` branch). | Best-fit for systems Rust; Asterinas's choice (vostd); precedent matters. Sync OSTD lands in stable Verus today; async OSTD would not. |
 | **AD-11** | Generation-counter handles for fds, pipes, page tables, tasks. | Hubris's idea. Stale references → typed errors, never UB. |
 | **AD-12** | Target: ≤1.5% TCB ratio after Phase 1, ≤1% after Phase 2. | Asterinas: 14%. We start small enough to do better. |
-| **AD-13** | x86_64 only through Phase 4. ARM64/RISC-V deferred. | Single arch keeps OSTD surface tractable. |
+| **AD-13** | x86_64 only through Phase 3. ARM64/RISC-V deferred. | Single arch keeps OSTD surface tractable through verification. |
 | **AD-14** | No CHERI/MTE integration in this plan. Design pointer types so they *can* carry tags later. | Hardware availability gates. Don't gate the project on it. |
 | **AD-15** | No user-visible capability system in this plan. Phase 5+ candidate. | Smaller research delta; keep focus. |
 
@@ -82,8 +81,8 @@ These decisions are **load-bearing**. Changing one means re-planning. Document e
 | **`VmSpace`** | Per-process virtual address space. Replaces today's `ProcessPageDir` exposure. Mutation via `cursor`. |
 | **Cursor** | Walking handle over a virtual range that can map/unmap `UFrame`s. Safe substitute for raw page-table edits. |
 | **Inv. N** | One of the 10 framekernel soundness invariants from Asterinas paper §4.3. Reproduced in Section 5.M. |
-| **Cooperative executor** | The Phase-3 async runtime. Polls futures; yields between them. |
-| **Preemptive backstop** | Phase-3 timer-driven preemption that runs when a future doesn't yield voluntarily. |
+| **Ring surface** | Phase-3 io_uring-equivalent submission/completion ring exposed to userspace. Two syscalls (`ring_setup`, `ring_enter`). Kernel side is sync. |
+| **SQE / CQE** | Submission Queue Entry / Completion Queue Entry — the wire format userspace and the kernel agree on across the ring's shared memory. |
 | **KernMiri** | Asterinas's fork of Miri with kernel-context shims. Used for dynamic UB detection in OSTD. |
 | **Verus** | SMT-backed Rust verifier. Used for static proof of OSTD critical-path invariants. |
 | **TCB ratio** | `(unsafe LoC in slopos-ostd) / (total kernel LoC)`. Tracked per PR. |
@@ -204,252 +203,164 @@ Driving rule: anything that can be a safe-Rust trait impl outside OSTD *should* 
 
 ---
 
-## 7. Phase 3 — Async-First Task Model
+## 7. Phase 3 — Verus-Verified OSTD + io_uring-Style Async Edge
 
-> **Goal**: tasks are `Pin<Box<dyn Future>>`. Cooperative executor primary; preemptive backstop for blocking syscalls and runaway compute. Every blocking syscall handler is `async fn`.
-> **Duration estimate**: 10–14 weeks.
+> **Goal**: machine-check the OSTD critical-path invariants (`Frame<M>` ref-count, slab/`HeapSlot` lifetimes, `VmSpace::cursor`) on a pinned Verus toolchain, and expose an io_uring-equivalent submission/completion-ring surface to userspace so user-mode async is a first-class story without bringing async into the kernel.
+> **Duration estimate**: 5–7 months total (3–4 months Verus, 2–3 months ring surface; they overlap once 3A.5 lands).
 > **Depends on**: Phase 2 complete.
-> **Phase ends with**: SlopOS is the first production-bound async-first Rust kernel.
-> **OSTD itself stays sync** (per AD-9). Async lives in services on top.
+> **Phase ends with**: SlopOS is the *smallest verified-TCB Linux-ABI Rust kernel that exists*, with a userspace async story matching Linux io_uring's shape but backed by an OSTD whose load-bearing invariants check on Verus.
+> **OSTD stays sync.** All kernel crates stay sync. Async lives entirely in userspace, talking to the kernel through shared-memory rings backed by the existing `EventBus` / `WaitQueue` plumbing.
 
 ### Phase 3 Background
 
-This is the differentiator. No production Rust kernel today is async-first; Theseus dabbled, Drone-OS is the closest production attempt. The pitch: cooperative scheduling is dramatically cheaper than preemptive when it works (no register save, no kernel stack handoff), and Rust's `Future`/`Pin` types are a more natural fit for kernel state machines (waiting on I/O, locks, IPI completions) than blocking-thread primitives.
+An earlier draft of this phase proposed making the kernel itself async-first (tasks as `Pin<Box<dyn Future>>`, cooperative executor, every blocking syscall `async fn`, async TLB shootdown). After deep research that direction was retired — see § 8 *Out of Scope* — for reasons documented there: every comparable production kernel (Asterinas, Theseus, Hubris, seL4, Linux RFL, Tock, Redox, Fuchsia, MINIX, QNX, Maestro) has declined the same design point, the cancellation-safety and debuggability gaps are language-level and not fixable inside the plan window, Verus does not yet verify `async fn` (the `async` branch landed Apr 2026 in `verus-lang/verus#1993` but explicitly does not support trait async, which OSTD's `Scheduler` / `RunQueue` / `FileOps` / `WaitQueueBackend` / `FrameAlloc` traits all are), and "async-first general-purpose SMP kernel" has no production precedent across forty years and three systems languages (Linux + C, Hubris + Rust, seL4 + C all picked sync; on ARM, where TLB shootdown is cheap, Hubris *still* chose sync).
 
-Hard problems we have to solve:
-1. **IRQ handlers stay sync** (no allocation, bounded time). They post completions to async tasks via `WaitQueue`/`Notify`.
-2. **TLB shootdowns** — the canonical "sync IPI in the middle of an async syscall" case. Phase 3 designs an async TLB shootdown primitive.
-3. **Preemptive backstop** — long-running futures that don't yield are pre-empted at safe points (timer tick + `await` boundary check).
-4. **Async syscall completion** — user task is suspended on a future; the executor resumes it when the future is ready, and *then* returns to user mode.
+What replaces it is the architecture every winning system on Earth already uses: **sync core, async edge**. Linux + io_uring. PostgreSQL + asyncpg. Redis + async clients. ScyllaDB + Seastar. The kernel's job is to expose async-shaped *primitives* so userspace can build async on top — not to *be* async. This phase delivers exactly that, and uses the now-unblocked time to put the OSTD critical path under Verus while the sync surface is still small enough to verify.
 
-### 3A: Task as Future
+The two sub-goals are independent in design — they touch different files — and the order below reflects risk: Verus first, because it sets the long-term verified-TCB story that every other claim leans on; ring surface second, because it builds on top of OSTD primitives that won't move once verified.
 
-- [ ] **3A.1** Define `sched/src/async_runtime.rs`:
-  ```rust
-  pub struct AsyncTask {
-      future: Pin<Box<dyn Future<Output = TaskExit> + Send>>,
-      task: slopos_ostd::task::Task,  // OSTD-owned bare task
-      state: AsyncTaskState,
-      waker: Waker,
-  }
-  pub enum AsyncTaskState { Ready, Running, Pending, Done(TaskExit) }
-  pub enum TaskExit { Normal(i32), Killed(Signal), Panic(KString) }
-  ```
-- [ ] **3A.2** `pub fn spawn<F: Future<Output = TaskExit> + Send + 'static>(f: F) -> AsyncTaskHandle`. Spawns a kernel-side async task.
-- [ ] **3A.3** Implement a `Waker` impl that posts the task back to the scheduler's runqueue. Standard `RawWakerVTable` boilerplate.
-- [ ] **3A.4** OSTD's `Task` (1I.4) is unchanged — it's the *bare* underlying primitive. `AsyncTask` is a Phase-2-services concept layered on top (AD-9).
+### 3A: Verus toolchain pinning + verification crate scaffolding
 
-### 3B: Cooperative executor + preemptive backstop
+- [ ] **3A.1** Choose a Verus commit (latest stable on the main branch as of phase start; avoid the experimental `async` branch). Pin its SHA in a new file `verification/verus.toml`.
+- [ ] **3A.2** Add a `verification/` workspace member: `README.md`, `Cargo.toml`, `proofs/` directory, `STATUS.md` (initially empty).
+- [ ] **3A.3** Wire `just verify` to run Verus over every file in `verification/proofs/` against the pinned toolchain. Reuse `scripts/check_framekernel.sh` plumbing so verify failures behave like other framekernel-gate failures.
+- [ ] **3A.4** Document the Verus upgrade procedure in `verification/README.md`: once per quarter at most, only when a needed feature lands, and only on a `verify/<sha>` topic branch first. If Verus stops shipping, fall back to Kani for bounded checking (per R4).
+- [ ] **3A.5** CI gate: any PR touching `slopos-ostd/` must pass `just verify`. Proof regressions block merge.
 
-- [ ] **3B.1** `sched/src/executor.rs`: `pub struct Executor { /* per-CPU runqueue of AsyncTasks */ }`.
-- [ ] **3B.2** Executor main loop: dequeue ready task, poll its future, if `Pending` move to wait set, if `Ready` re-enqueue, if `Done` deallocate. Per-CPU.
-- [ ] **3B.3** Preemptive backstop: timer tick checks `current_task.runtime > QUANTUM`. If so, set a yield flag. The executor checks the flag at every `await` boundary (transparent to user code) and yields if set.
-- [ ] **3B.4** For futures that don't `.await` (CPU-bound), the timer tick triggers a forced yield by injecting a software interrupt that the executor catches as a `YieldRequest`. This is the *only* case that uses preemption; the common case stays cooperative.
-- [ ] **3B.5** User-mode preemption is unchanged: a timer tick during user-mode execution returns to the kernel via the standard IRQ path, which then yields the executor.
-- [ ] **3B.6** Replace `PriorityScheduler` (from 2C) with the async executor. Keep the priority logic.
-- [ ] **3B.7** Verify: context-switch micro-benchmark improves vs. Phase 2 (cooperative is cheaper than preemptive).
+### 3B: `Frame<M>` reference-count proof
 
-### 3C: Async syscall surface
+The Asterinas paper found a real UB here via KernMiri (paper Fig. 9). Verus-prove it can't recur on SlopOS's port.
 
-Every syscall handler that *could* block becomes `async fn`.
+- [ ] **3B.1** Write `verification/proofs/frame_refcount.rs`: a Verus-annotated mirror of `slopos_ostd::mm::frame::{Frame, MetaSlot, Drop}`.
+- [ ] **3B.2** State invariants (`requires` / `ensures` / `invariant`):
+  - "If `frame.ref_count() > 0`, the underlying physical frame is allocated and not on the free list."
+  - "`Drop` decrements `ref_count`; on transition to 0, releases the frame to the parent allocator exactly once."
+  - "Concurrent `Frame::clone` and `Frame::drop` cannot produce a use-after-free."
+- [ ] **3B.3** Iterate annotations until SMT closes the proof.
+- [ ] **3B.4** Replace `slopos-ostd`'s `Frame<M>` source with the Verus-annotated version (Verus emits a non-Verus build for the kernel). `just build` + `just test` must still pass.
+- [ ] **3B.5** `verification/STATUS.md`: mark `slopos_ostd::mm::frame` as **verified** against the pinned Verus SHA.
 
-- [ ] **3C.1** Update the `define_syscall!` macro (from 2D.3) to support `async fn` handlers:
-  ```rust
-  define_syscall!(async read(fd: Fd, buf: UserSlice<u8>, len: usize) -> isize {
-      let pipe = pipe_table.get(fd)?;
-      let n = pipe.read(buf).await?;
-      Ok(n as isize)
-  });
-  ```
-- [ ] **3C.2** Syscall dispatch: when handler is async, the dispatcher polls the future. If `Ready`, return to user mode immediately. If `Pending`, suspend the user task; resume when the future wakes.
-- [ ] **3C.3** Migrate every blocking syscall: `read`, `write`, `recvmsg`, `sendmsg`, `ppoll`, `futex_wait`, `nanosleep`, `wait4`, `accept`, `connect`, `pause`, `sigsuspend`, blocking `ioctl`s. Each is one 3C.3.{a..z}.
-- [ ] **3C.4** Non-blocking syscalls (`getpid`, `getuid`, `brk`, `mmap` of anonymous memory, etc.) stay sync. The macro accepts both forms.
+### 3C: Slab / `HeapSlot` lifetime proof
 
-### 3D: Async sync primitives
+Closes Inv. 9 + Inv. 10.
 
-Replace the OSTD `WaitQueue` (which is sync) with async equivalents living in services.
+- [ ] **3C.1** Write `verification/proofs/slab_lifetime.rs` for `slopos_ostd::mm::heap::{Slab, HeapSlot}`.
+- [ ] **3C.2** State invariants:
+  - Inv. 9: a `HeapSlot` or any object derived from it cannot outlive its parent `Slab`.
+  - Inv. 10: `HeapSlot::into_box::<T>(val)` succeeds only when `slot.size >= size_of::<T>()` and `slot.align >= align_of::<T>()`.
+- [ ] **3C.3** Prove. Replace the source. `just build` + `just test` clean.
+- [ ] **3C.4** `verification/STATUS.md` updated.
 
-- [ ] **3D.1** `sched/src/async_primitives/wait_queue.rs`: `pub struct AsyncWaitQueue { ... }`, `pub fn wait(&self) -> WaitFuture<'_>`. Wakes via stored `Waker`s.
-- [ ] **3D.2** `AsyncMutex<T>` — `lock(&self) -> LockFuture<'_>`. Internally a queue of `Waker`s.
-- [ ] **3D.3** `AsyncRwLock<T>` — same idea, two queues.
-- [ ] **3D.4** `AsyncChannel<T>` — bounded MPSC for kernel inter-task messaging.
-- [ ] **3D.5** `Notify` — a single-shot wake signal. IRQ handlers post to `Notify`s; async tasks await them.
-- [ ] **3D.6** Convert today's pipe wait-queue logic (per agent memory: `core/src/syscall/tests.rs` pipe blocking path) to `AsyncWaitQueue`.
+### 3D: `VmSpace::cursor` proof
 
-### 3E: Async TLB shootdown
+The hardest of the three. CortenMM (SOSP '25 Best Paper) is the prior art on verified concurrent paging; lean on its open-source proofs.
 
-The hardest single primitive in Phase 3. Today (`mm/src/tlb.rs`) sends sync IPIs and spin-waits for ACK.
+- [ ] **3D.1** Read the CortenMM paper + open-source proofs (`http://web.cs.ucla.edu/~tamir/papers/sosp25.pdf`). Notes file `verification/notes/cortenmm.md`.
+- [ ] **3D.2** Adapt CortenMM-style invariants to `slopos_ostd::mm::vm_space::Cursor`:
+  - "Cursor operations preserve page-table well-formedness (no dangling intermediate frames; every entry points at a valid PTE for the cursor's lifetime)."
+  - "Concurrent cursors over non-overlapping virtual ranges do not interfere (range-disjoint transactionality)."
+  - "Mapping a `UFrame` increments its `ref_count` exactly once; unmapping decrements exactly once. Inv. 4 + Inv. 5 hold across the operation."
+- [ ] **3D.3** Prove. Concurrent cursors likely require RCU-style or epoch-style proof obligations. Falling back to a coarser lock-per-`VmSpace` proof is acceptable if the fine-grained one doesn't close — document the gap.
+- [ ] **3D.4** Replace source. `just build` + `just test` clean.
+- [ ] **3D.5** `verification/STATUS.md` updated.
 
-- [ ] **3E.1** Design doc as `plans/ASYNC_TLB_SHOOTDOWN.md` before any code. Cover: how the issuing CPU yields while waiting for ACKs; how late-arriving ACKs are handled; how cross-CPU ordering is preserved.
-- [ ] **3E.2** `mm/src/tlb.rs::shootdown(...)` becomes `async fn shootdown(...)`. Returns a future that completes when all targeted CPUs have ACKed.
-- [ ] **3E.3** IPI handler on receiving CPU stays sync (it must — it's in IRQ context). On completion, it posts to a per-CPU `Notify`. The issuing CPU's future awaits all the `Notify`s.
-- [ ] **3E.4** Issuing-CPU yield: the future yields to the executor while awaiting ACKs, freeing the CPU to run other tasks. Today, the issuing CPU spin-waits — wasted cycles.
-- [ ] **3E.5** Verify with stress test: 100 concurrent munmaps across 4 CPUs. Check that throughput improves vs. Phase 2.
+### 3E: Public proof status
 
-### 3F: Pipe / poll / futex / signal rewrite
+- [ ] **3E.1** `verification/STATUS.md`: which OSTD modules are **verified**, which are **audited only**, which are **unaudited**. Per-module: proof file link, spec summary, pinned Verus SHA.
+- [ ] **3E.2** Status badge in `README.md`: *"OSTD critical path: 3/3 proofs check on Verus &lt;SHA&gt;"*.
+- [ ] **3E.3** Public claim, defensible from primary sources: **SlopOS is the smallest verified-TCB Linux-ABI Rust kernel.** No other kernel today meets all four adjectives (small TCB, verified, Linux-ABI, Rust).
 
-Take advantage of async to clean up code that's currently a manual state machine.
+### 3F: io_uring-style ring surface — design
 
-- [ ] **3F.1** Pipe (from agent memory: `fs/src/fileio.rs` per-pipe wait queues): becomes `AsyncWaitQueue` directly. Block-on-empty-read = `wait_queue.wait().await`. Removes the `SendTaskHandle` newtype trick (no longer needed; futures are naturally Send).
-- [ ] **3F.2** `ppoll` (per agent memory, syscall 112): becomes a future that races multiple FD readiness futures. Use a `select_all`-style combinator.
-- [ ] **3F.3** `futex_wait`: `async fn` that suspends on the futex's `AsyncWaitQueue`. `futex_wake` posts to the queue. Existing semantics preserved.
-- [ ] **3F.4** Signal delivery: today's blocking syscalls poll `signal_pending`. Now signals wake the awaiting future via the executor.
+Now Verus is set; the kernel's verified-sync substrate is the platform the userspace async story sits on.
 
-### 3G: Performance verification
+- [ ] **3F.1** Design doc as `plans/SLOPRING.md` *before* any code. Cover:
+  - SQ/CQ ring layout (head/tail indices, slot format, ABI-stable opcodes).
+  - Memory: rings live in a per-process `Frame<RingMeta>` shared between kernel and userspace via `VmSpace::cursor` — mapped read/write to user, read/write to kernel; ownership stays with the process.
+  - Submission model: userspace writes SQEs, calls `ring_enter(ring_fd, to_submit, ...)` (one new syscall). Kernel snapshots head, processes SQEs, posts CQEs, advances tail. **All sync from the kernel's perspective.**
+  - Completion model: kernel posts CQEs synchronously when the underlying sync op completes; for ops that block (read on empty pipe, accept on empty queue), the kernel arms an `EventBus` wait on behalf of the SQE and the CQE is posted from the existing `WaitQueue` wake path. Userspace polls or `ring_wait`s on the CQ.
+  - Cancellation: opcode `OP_CANCEL`. The kernel walks its in-flight table, removes the matching `WaitQueue` registration, posts a CQE with `-ECANCELED`. No async-fn cancellation hazard — the kernel side is straight-line sync. Async cancellation belongs in userspace, where stuck futures degrade one process and not the whole kernel.
+  - Backpressure: SQ-full → user retries; CQ-full → kernel drops with `IORING_CQ_OVERFLOW` flag (matches Linux semantics).
+- [ ] **3F.2** Justify each opcode in terms of an existing sync syscall path. `OP_READ` reuses `fs_read`; `OP_WRITE` reuses `fs_write`; `OP_RECVMSG` reuses `unix_recvmsg` / `socket_recvmsg`; `OP_SEND` reuses `socket_send` / `unix_send`; `OP_ACCEPT` reuses `socket_accept` / `unix_accept`; `OP_POLL_ADD` reuses `file_poll_register_fd`; `OP_TIMEOUT` reuses the sleep-queue path; `OP_NOP` for benchmarks. **No new blocking primitives.**
+- [ ] **3F.3** Document the threat model: SQEs are user-controlled bytes; every field is validated; the ring memory is a `UFrame<RingMeta>` (Inv. 4 + Inv. 5 hold by construction); no kernel reference into the ring outlives a single `ring_enter` invocation.
 
-- [ ] **3G.1** Build and run a perf suite (process create/exec, page fault, mmap, pipe BW, TCP loopback latency — Asterinas paper Table 7 categories). Phase 2 § 2J, which would have built this runner, was dropped, so Phase 3 stands it up fresh.
-- [ ] **3G.2** **Expected wins**: context-switch latency, pipe BW (less stack handoff), `ppoll` (no per-FD spin), TLB shootdown (issuing CPU doesn't waste cycles).
-- [ ] **3G.3** **Expected costs**: future polling overhead (small but real); compare cooperative-yield path against direct return.
-- [ ] **3G.4** Geomean target: improved over Phase 2 by ≥5%, no regressions >10% on any single bench.
-- [ ] **3G.5** Document in `plans/PHASE3_PERF_REPORT.md`.
+### 3G: io_uring-style ring surface — implementation
 
-### 3H: Paper draft
+- [ ] **3G.1** New crate `ring/` (kernel-side) carrying `#![forbid(unsafe_code)]`. Hosts the SQ/CQ snapshot, opcode dispatch, in-flight table. Allocations via `slopos-ostd` discipline.
+- [ ] **3G.2** Two new syscalls in `abi/src/syscall/numbers.rs`: `ring_setup(entries: u32, flags: u32) -> RingFd` and `ring_enter(ring_fd, to_submit: u32, min_complete: u32, flags: u32) -> i32`. Implemented via `define_syscall!` — both **sync**. Threaded through the existing dispatch path; no executor turn.
+- [ ] **3G.3** Per-ring kernel state stored in the `HandleTable` shape from Phase 2H (generation-counter handles, so stale ring FDs return a typed error, never UB).
+- [ ] **3G.4** Opcodes implemented. Each is one subtask (3G.4.{a..i}): `OP_READ`, `OP_WRITE`, `OP_RECVMSG`, `OP_SEND`, `OP_ACCEPT`, `OP_POLL_ADD`, `OP_TIMEOUT`, `OP_CANCEL`, `OP_NOP`.
+- [ ] **3G.5** `min_complete > 0`: kernel waits on the CQ's internal `WaitQueue` (existing `BUS.subscribe(...).wait_event(...)` machinery) until `>= min_complete` CQEs are posted or signal pending → `EINTR`. The waiter is the user task; no kernel-side future.
+- [ ] **3G.6** Test crate `ring/tests/`: KTAP-grammar tests for opcode parity (each opcode produces the same observable result as the equivalent sync syscall under identical input), backpressure, cancellation, ring-FD inheritance across `fork`, kill-during-`ring_enter` signal handling.
 
-Force the design to be coherent by writing it up.
+### 3H: Userspace async edge
 
-- [ ] **3H.1** Draft `papers/async-first-framekernel.md` (≤4000 words). Sections: motivation, framekernel discipline, async-first task model, TLB shootdown case study, performance.
-- [ ] **3H.2** Internal review. The point isn't to publish (yet); the point is that any design that can't be explained in a paper is probably wrong.
+The ring surface is useless without a userspace runtime that consumes it. This sub-phase builds the smallest credible one.
+
+- [ ] **3H.1** New userland crate `slibc-ring/` (under `userland/` or a new top-level): `pub struct Ring`, `pub fn setup(entries) -> Ring`, `Ring::submit(sqe) -> SubmissionToken`, `Ring::wait_completion()`, `Ring::poll_completion()`. Mirrors `liburing`'s shape.
+- [ ] **3H.2** A `slopfut` async runtime (or vendored embassy-style executor — pick at 3H.1 time) that drives `Ring` completions onto futures. **This is userland** (`#![forbid(unsafe_code)]` does not apply — userland is outside the kernel discipline per `CLAUDE.md`).
+- [ ] **3H.3** Port one real app to use it: `userland/src/apps/nc/` (already exists and already non-trivial) — its `recv` / `send` loop becomes `Ring`-driven. Demonstrates the edge end-to-end.
+- [ ] **3H.4** Cancellation semantics in userspace: dropping a future submits an `OP_CANCEL` SQE for the in-flight op. This is where async cancellation belongs.
 
 ### 3I: Phase 3 close
 
-- [ ] **3I.1** All blocking syscalls are `async fn`.
-- [ ] **3I.2** OSTD remains sync (`rg async slopos-ostd/` returns zero matches except in docs).
-- [ ] **3I.3** Perf within 3G.4 targets.
-- [ ] **3I.4** Paper draft exists.
-- [ ] **3I.5** `just check-framekernel` zero failures; `just test` full pass.
-- [ ] **3I.6** Tag commit `framekernel-phase-3`. Phase-3 close PR.
-- [ ] **3I.7** Status → `phase-4-ready`.
+- [ ] **3I.1** Three Verus proofs check on the pinned commit. `verification/STATUS.md` accurate. CI gate live.
+- [ ] **3I.2** `ring_setup` / `ring_enter` shipped, opcode parity verified by the test suite, `nc` runs against `Ring`.
+- [ ] **3I.3** OSTD remains sync (`rg "async fn" slopos-ostd/` returns zero matches; same check across every kernel crate).
+- [ ] **3I.4** `just check-framekernel` zero failures; `just verify` zero failures; `just test` full pass at parity.
+- [ ] **3I.5** Tag commit `framekernel-phase-3`. Phase-3 close PR.
+- [ ] **3I.6** Status → `phase-4-ready` (Phase 4 to be planned later; out of this document's scope — see § 8 for the candidate list).
 
 ### Phase 3 Exit Criteria
 
-1. Every blocking kernel syscall is `async fn`.
-2. OSTD itself contains no async (verified by grep).
-3. Async TLB shootdown working under stress test.
-4. Cooperative scheduling is the primary path; preemption is documented as a backstop.
-5. Performance ≥5% geomean improvement over Phase 2.
-6. Paper draft exists and is internally coherent.
+1. Three Verus proofs (`Frame<M>` ref-count, slab/`HeapSlot` lifetimes, `VmSpace::cursor` invariants) check on the pinned Verus toolchain. CI-gated.
+2. OSTD itself contains no `async fn` (verified by grep across every kernel crate).
+3. `ring_setup` and `ring_enter` syscalls implemented; nine opcodes shipped; opcode parity with the underlying sync syscalls verified by the test suite.
+4. At least one userland application (`nc`) ported to the ring surface and passing its existing test fixtures.
+5. `verification/STATUS.md` published; README badge updated; "smallest verified-TCB Linux-ABI Rust kernel" claim defensible from primary sources.
+6. Total proof effort ≤ 2 person-quarters; total ring-surface effort ≤ 2 person-quarters.
 
 ---
 
-## 8. Phase 4 — Verus Verification of OSTD Critical Path
-
-> **Goal**: machine-checked proofs of the load-bearing OSTD invariants. Not whole-OSTD verification — the *critical path* only.
-> **Duration estimate**: 8–12 weeks (2 person-quarters).
-> **Depends on**: Phase 3 complete (proofs invalidated by async refactor; do them last).
-> **Phase ends with**: SlopOS has a credible "small, partially formally proven, async-first" TCB story.
-
-### Phase 4 Background
-
-Asterinas is heading here with vostd; CortenMM (SOSP '25 Best Paper) is the precedent for verified concurrent paging. We do *not* attempt whole-OSTD verification — that's seL4-decade-of-effort territory. We pick three invariants whose machine-checked proofs maximally strengthen the soundness story.
-
-### 4A: Verus toolchain pinning
-
-- [ ] **4A.1** Choose a Verus commit (latest stable as of phase start). Pin in a new file `verification/verus.toml` with the SHA.
-- [ ] **4A.2** Add `verification/` directory: README, `Cargo.toml` for verification crate, `proofs/` subdirectory.
-- [ ] **4A.3** Document upgrade procedure: when do we bump Verus? Default: once per quarter, only when a needed feature lands.
-- [ ] **4A.4** Add `just verify` recipe that runs Verus over every file in `verification/proofs/`.
-- [ ] **4A.5** CI: `just verify` runs on every PR that touches `slopos-ostd/`. Proof regressions block merge.
-
-### 4B: `Frame<M>` ref-count proof
-
-The Asterinas paper found a real UB here via KernMiri (Figure 9). Verus prove it can't recur.
-
-- [ ] **4B.1** Write `verification/proofs/frame_refcount.rs`: a Verus-annotated copy of `slopos_ostd::mm::frame::{Frame, MetaSlot, Drop}`.
-- [ ] **4B.2** State invariants (Verus `requires` / `ensures` / `invariant`):
-  - "If `frame.ref_count() > 0`, then the underlying physical frame is allocated."
-  - "Drop decrements ref count; on transition to 0, releases the physical frame exactly once."
-  - "Concurrent `Frame::clone` and `Frame::drop` cannot produce a use-after-free."
-- [ ] **4B.3** Prove with Verus. Iterate on annotations until SMT closes the proof.
-- [ ] **4B.4** Replace the `slopos-ostd` source with the Verus-annotated version (Verus generates a non-Verus build for the kernel).
-- [ ] **4B.5** Verify: `just verify` passes; `just build` and `just test` pass with the verified version.
-
-### 4C: Slab / `HeapSlot` lifetime proof
-
-Inv. 9 + Inv. 10.
-
-- [ ] **4C.1** Write `verification/proofs/slab_lifetime.rs` for `slopos_ostd::mm::heap::{Slab, HeapSlot}`.
-- [ ] **4C.2** Invariants:
-  - "Inv. 9: `HeapSlot` cannot outlive its parent `Slab`."
-  - "Inv. 10: `HeapSlot::into_box::<T>(val)` succeeds only if `slot.size >= size_of::<T>()` and `slot.align >= align_of::<T>()`."
-- [ ] **4C.3** Prove. Replace source. Verify build + tests.
-
-### 4D: `VmSpace::cursor` proof
-
-The hardest of the three. CortenMM's open-source proofs are the prior art; lean on them.
-
-- [ ] **4D.1** Read CortenMM paper + open-source proofs (`http://web.cs.ucla.edu/~tamir/papers/sosp25.pdf`).
-- [ ] **4D.2** Adapt CortenMM-style invariants to `slopos-ostd::mm::vm_space::Cursor`:
-  - "Cursor operations preserve page-table well-formedness (no dangling intermediate frames; all entries point to valid PTEs)."
-  - "Concurrent cursors in non-overlapping ranges do not interfere (transactional)."
-  - "Mapping a `UFrame` increments its ref count; unmapping decrements."
-- [ ] **4D.3** Prove. The hard part is concurrent cursors — may require RCU-style proof obligations.
-- [ ] **4D.4** Verify build + tests.
-
-### 4E: CI integration
-
-- [ ] **4E.1** GitHub Actions (or whatever CI we use) runs `just verify` on every PR touching `slopos-ostd/`.
-- [ ] **4E.2** Verus output published as a CI artifact (HTML report).
-- [ ] **4E.3** Status badge in `README.md`: "OSTD critical path: 3/3 proofs check on Verus <SHA>".
-
-### 4F: Public proof status
-
-- [ ] **4F.1** `verification/STATUS.md`: which OSTD modules are *verified*, which are *audited only*, which are *unaudited*.
-- [ ] **4F.2** For each verified module, link the proof file and the spec.
-- [ ] **4F.3** Public claim: SlopOS has the smallest formally-verified TCB of any production-bound async-first Rust kernel. Defensible — no other kernel meets all three adjectives.
-
-### 4G: Phase 4 close
-
-- [ ] **4G.1** Three proofs check on the pinned Verus commit.
-- [ ] **4G.2** Total proof effort log ≤2 person-quarters.
-- [ ] **4G.3** `just check-framekernel` + `just verify` zero failures. `just test` passes.
-- [ ] **4G.4** Tag commit `framekernel-phase-4`. Phase-4 close PR.
-- [ ] **4G.5** Status → `complete`.
-
-### Phase 4 Exit Criteria
-
-1. Three Verus proofs check on the pinned commit: `Frame<M>` ref-count, slab/`HeapSlot` lifetimes, `VmSpace::cursor` invariants.
-2. CI gate on `just verify` for any PR touching OSTD.
-3. Public proof status page.
-4. Total proof effort ≤2 person-quarters.
-
----
-
-## 9. Out of Scope / Deferred
+## 8. Out of Scope / Deferred
 
 These are deliberately *not* in the four-phase plan. Listed here so future agents know they were considered.
 
 | Item | Why deferred |
 |---|---|
-| **CHERI/Morello pointer tagging** | Hardware availability too thin in 2026. Design OSTD pointer types so they *can* carry tags later (newtype around `*mut T`, never a bare pointer). Revisit 2027–2028. |
-| **ARM MTE integration** | Cheaper than CHERI; can be added in a Phase 5 once x86_64 is solid. |
-| **ARM64 / RISC-V port** | Single arch keeps OSTD surface tractable through verification. Phase 5+. |
-| **User-visible capability system** (seL4-style) | Smaller research delta than async-first; doable inside the framekernel later. |
+| **Whole-kernel async-first task model** (`Pin<Box<dyn Future>>` tasks, cooperative executor, every blocking syscall `async fn`, async TLB shootdown) | Researched in depth and retired. No production kernel across forty years and three systems languages picked this design (Asterinas, Theseus, Hubris, seL4, Linux RFL, Tock, Redox, Fuchsia, MINIX, QNX, Maestro all chose sync, including ARM-only Hubris where TLB shootdown is cheap). Cancellation safety is unsolved as a default property in any language. Verus does not yet verify `async fn` in stable releases (the `async` branch is experimental and explicitly does not support trait async). `Pin<dyn Future + Send>` lies about CPU-pinned state — `&CpuLocal<T>` borrows across `.await` are silent UB on a work-stealing executor. Future-size bloat (2–10× hand-rolled coroutines per Withoutboats) can regress kernel-heap RSS at 10K blocked tasks. Debuggability cliff: no `gdb`-of-futures, no kernel-resident `tokio-console`. The replacement is **sync core, async edge** (current Phase 3) — what Linux io_uring, Postgres + asyncpg, Redis, ScyllaDB / Seastar, and every winning production system in 2026 actually use. Source notes: `git log` around the Phase-3 replan + Hubris `doc/ipc.adoc` ("Why synchronous?"), Asterinas `ostd/src/task/mod.rs` (`FnOnce()`-based Task), Neon `docs/pageserver-thread-mgmt.md`, `verus-lang/verus#1993`, Jens Axboe `kernel.dk/io_uring.pdf`. |
+| **CHERI / Morello pointer tagging** | Hardware availability too thin in 2026. Design OSTD pointer types so they *can* carry tags later (newtype around `*mut T`, never a bare pointer). Revisit 2027–2028. |
+| **ARM MTE integration** | Cheaper than CHERI; can be added in a later phase once x86_64 is solid. |
+| **ARM64 / RISC-V port** | Single arch keeps OSTD surface tractable through verification. Candidate for the next major plan after Phase 3. |
+| **User-visible capability system** (seL4-style) | Smaller research delta than async-first; doable inside the framekernel later. Generation-counter handles (AD-11) are already half of this. |
 | **Live evolution** (Theseus-style) | Hard, narrow real-world value. Skip unless a customer demands it. |
 | **Multikernel / per-core OS replicas** (Barrelfish) | Adds enormous complexity for unclear win. |
-| **Whole-OSTD Verus verification** | Decade of effort. Critical-path verification (Phase 4) gets 80% of the credibility for 2% of the cost. |
+| **Whole-OSTD Verus verification** | Decade of effort. Critical-path verification (Phase 3) gets 80% of the credibility for 2% of the cost. |
 | **Formal proof of the Verus toolchain itself** | Out of any sane scope. |
 | **TEE / SGX / TDX integration** | Asterinas-flavored use case; can layer on top later. |
+| **Linux-ABI breadth + real-workload parity** (nginx / redis / sqlite under SlopOS, additional syscalls like `ppoll`, `signalfd`, `eventfd`, `accept4`, `*at` family, full signal/`wait4`/`exec` semantics under contention) | Belongs in the post-Phase-3 plan. Phase 3 keeps the kernel's syscall surface stable so Verus has a small target; ABI breadth lands once the verified substrate is in place. |
 
 ---
 
-## 10. Risk Register
+## 9. Risk Register
 
 | ID | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| R1 | `VmSpace::cursor` API design wrong on first try; have to rewrite mid-Phase-1 | Medium | High | 1D builds a throwaway prototype before final API. Budget 2 weeks for this. |
-| R2 | KernMiri shims drift from real hardware behavior; UB findings false-positive | Low | Medium | 1K.2 chooses simpler stock-Miri-with-shims path; review shims against real hardware annually. |
-| R3 | Async TLB shootdown design fundamentally infeasible | Medium | High | 3E.1 mandates a design doc *before* code. If doc fails review, fall back to sync TLB shootdown (lose differentiator partial credit but don't block phase). |
-| R4 | Verus pinned fork rots faster than maintained; can't upgrade Rust | Medium | Medium | 4A.3 budgets quarterly Verus bumps. If Verus stops shipping, fall back to Kani for bounded checking. |
-| R5 | Performance regression budget blown in Phase 2 | Medium | High | 4.4 sets explicit ±10% bound. If exceeded, profile, fix; don't carry the regression forward. |
-| R6 | Async refactor in Phase 3 breaks too much; can't reach parity | Medium | Critical | 3 has "fall back to sync per primitive" escape hatches throughout. Pipes, poll, futex are independent — async-ify them one at a time. |
-| R7 | Generation-counter handles add latency to hot paths (FD lookup) | Low | Medium | 2H ships with benchmarks. If lookup latency >2× current, redesign as inline atomic compare. |
-| R8 | OSTD module structure (1A.2) needs reshuffling mid-Phase-1 | Low | Low | Cheap to refactor early. Don't be afraid to rename. |
-| R9 | Forbid-unsafe gate (1L.1) catches false positives in cfg-gated code | Medium | Low | 1L.1 has cfg-aware lookback (already in `check_alloc_dep.sh`); copy that pattern. |
-| R10 | Phase 1 takes >10 weeks; team morale | Low | Medium | Subtask granularity is intentional — every checked box is visible progress. |
+| R1 | `VmSpace::cursor` API design wrong on first try; have to rewrite mid-Phase-1 | Medium | High | 1D builds a throwaway prototype before final API. Budget 2 weeks for this. (Closed — Phase 1 complete.) |
+| R2 | KernMiri shims drift from real hardware behavior; UB findings false-positive | Low | Medium | 1K.2 chose simpler stock-Miri-with-shims path; review shims against real hardware annually. |
+| R4 | Verus pinned commit rots faster than maintained; can't upgrade Rust | Medium | Medium | 3A.4 budgets quarterly Verus bumps. If Verus stops shipping, fall back to Kani for bounded checking. |
+| R5 | Performance regression budget blown in Phase 2 | Medium | High | § 4.4 sets explicit ±10% bound. (Closed — Phase 2 complete; no pre-Phase-1 baseline existed to gate against, see § 6 / 2J.) |
+| R7 | Generation-counter handles add latency to hot paths (FD lookup) | Low | Medium | 2H shipped with benchmarks; lookup latency within budget. (Closed.) |
+| R8 | OSTD module structure (1A.2) needs reshuffling mid-Phase-1 | Low | Low | Cheap to refactor early. Don't be afraid to rename. (Closed — Phase 1 complete.) |
+| R9 | Forbid-unsafe gate (1L.1) catches false positives in cfg-gated code | Medium | Low | 1L.1 has cfg-aware lookback (already in `check_alloc_dep.sh`); copy that pattern. (Closed — gates live in CI since Phase 1.) |
+| R10 | Phase 1 takes >10 weeks; team morale | Low | Medium | Subtask granularity is intentional — every checked box is visible progress. (Closed.) |
+| R11 | `VmSpace::cursor` Verus proof (3D) doesn't close on the fine-grained concurrent model | Medium | Medium | 3D.3 allows a coarser lock-per-`VmSpace` fallback proof. Document the gap in `verification/STATUS.md`. Re-attempt the fine-grained version on each Verus bump (3A.4). |
+| R12 | io_uring opcode parity drifts from underlying sync syscalls (3G.4) | Medium | Medium | 3G.6 mandates a parity test per opcode that exercises the *same* code path as the equivalent sync syscall and diffs the observable result. CI-gated; opcode addition without a parity test is a build failure. |
+| R13 | `ring/` crate brings in soft pressure to add `async fn` later ("just one async helper") | Medium | High | AD-8 + AD-9 forbid `async fn` in any kernel crate, including `ring/`. The existing `check_unsafe_outside_ostd.sh` pattern is extended in 3A.5 with a sibling `check_no_kernel_async.sh` that fails the build on any `async fn` in a kernel crate. |
 
 ---
 
-## 11. References
+## 10. References
 
 ### Primary papers
 
