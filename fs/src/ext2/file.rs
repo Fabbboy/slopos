@@ -34,7 +34,7 @@ pub fn read_file(
 
         let phys = blockmap::map_block(inode, fb, ptrs_per_block, cache, device)?;
         if phys.is_valid() {
-            let blk = cache.get(phys, device)?;
+            let blk = cache.get_data(phys, device)?;
             buffer[read_total..read_total + to_copy]
                 .copy_from_slice(&blk.data()[block_off..block_off + to_copy]);
         } else {
@@ -82,7 +82,7 @@ pub fn write_file(
             block_size,
         )?;
 
-        let mut blk = cache.get(phys, device)?;
+        let mut blk = cache.get_data(phys, device)?;
         blk.data_mut()[block_off..block_off + to_copy]
             .copy_from_slice(&buffer[written..written + to_copy]);
 

@@ -25,7 +25,9 @@ extern crate std;
 pub use blockdev::*;
 pub use devfs::DevFs;
 pub use ext2::*;
-pub use ext2_vfs::{ext2_vfs_init_with_device, ext2_vfs_is_initialized};
+pub use ext2_vfs::{
+    ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_shutdown_sync, ext2_vfs_sync,
+};
 pub use fileio::*;
 pub use ramfs::RamFs;
 pub use vfs::{

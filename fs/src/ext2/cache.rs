@@ -8,18 +8,31 @@ use crate::blockdev::BlockDevice;
 
 const CACHE_ENTRIES: usize = 128;
 
+/// Whether a cached block holds file *data* or filesystem *metadata*
+/// (bitmaps, group descriptors, inode tables, directory blocks, indirect
+/// pointer blocks). The distinction drives ordered writeback: in the
+/// crash-consistency model the FS aims for (ext2 `data=ordered`), data blocks
+/// must reach stable storage *before* the metadata that references them, so a
+/// crash can never expose a freshly-allocated inode/dir-entry pointing at
+/// stale or uninitialised disk contents.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BlockKind {
+    Data,
+    Metadata,
+}
+
 /// One cache slot. The 4 KiB backing storage lives in
 /// `frame: Frame<PageCacheMeta>` (HHDM-mapped, returned to the buddy
 /// allocator when the slot drops). The dirty bit and the owner-key
 /// backref are stored on the frame's typed metadata. `pinned`, `lru`,
-/// and `valid` are host-side bookkeeping that does not need to
-/// survive eviction.
+/// `valid`, and `kind` are host-side bookkeeping.
 struct CacheEntry {
     block: BlockNum,
     frame: Frame<PageCacheMeta>,
     pinned: u16,
     lru: u64,
     valid: bool,
+    kind: BlockKind,
 }
 
 impl CacheEntry {
@@ -31,16 +44,38 @@ impl CacheEntry {
             pinned: 0,
             lru: 0,
             valid: false,
+            kind: BlockKind::Metadata,
         })
     }
 }
 
-/// LRU-ordered, fixed-capacity block cache backed by
-/// [`Frame<PageCacheMeta>`] pages from the buddy allocator. Each
-/// slot's metadata carries the dirty bit and an owner-backref key
-/// (the on-disk [`BlockNum`]) so background writeback or future
-/// inode-keyed lookup paths can sample the state without touching
-/// the cache's outer lock.
+/// LRU-ordered, fixed-capacity, **write-back** block cache backed by
+/// [`Frame<PageCacheMeta>`] pages from the buddy allocator.
+///
+/// # Lifecycle (gold-standard, persistent)
+///
+/// Unlike a per-operation scratch cache, one `BlockCache` is created at mount
+/// time and **lives for the lifetime of the mounted filesystem**, owned by the
+/// long-lived FS state (`ext2_vfs::CachedExt2`) and borrowed `&mut` by the
+/// thin, per-call [`super::Ext2Fs`] handle. This is what makes it a real
+/// buffer cache:
+///
+///   * dirty blocks accumulate across operations and are written back lazily
+///     (on eviction, on explicit [`Self::flush_all`]/sync, or by the
+///     background flusher) rather than synchronously per call;
+///   * reads hit warm blocks across calls instead of re-reading the device;
+///   * because the cache is never dropped, a forgotten flush can no longer
+///     *lose* data — the bytes remain authoritative in the cache until
+///     persisted. (The original data-loss bug was a *per-call* cache being
+///     dropped unflushed.)
+///
+/// # Durability
+///
+/// `write_at` only guarantees the device *accepted* the bytes; on a write-back
+/// device they may sit in a volatile cache. The FS issues
+/// [`BlockDevice::flush`] barriers around ordered phases (see
+/// `Ext2Fs::sync`). This cache never issues device flushes itself — it only
+/// tracks dirtiness and orders its own writeback passes by [`BlockKind`].
 pub struct BlockCache {
     entries: KVec<CacheEntry>,
     index: KBTreeMap<BlockNum, usize>,
@@ -73,12 +108,34 @@ impl BlockCache {
         })
     }
 
-    /// Get a block from the cache, reading from the device if not
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    /// Get a metadata block from the cache, reading from the device if not
     /// cached. The returned [`CachedBlock`] guard pins the slot.
     pub fn get<'a>(
         &'a mut self,
         block: BlockNum,
         device: &dyn BlockDevice,
+    ) -> Result<CachedBlock<'a>, Ext2Error> {
+        self.get_kind(block, device, BlockKind::Metadata)
+    }
+
+    /// Get a file-data block from the cache (see [`BlockKind`]).
+    pub fn get_data<'a>(
+        &'a mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+    ) -> Result<CachedBlock<'a>, Ext2Error> {
+        self.get_kind(block, device, BlockKind::Data)
+    }
+
+    fn get_kind<'a>(
+        &'a mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+        kind: BlockKind,
     ) -> Result<CachedBlock<'a>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
             self.lru_clock += 1;
@@ -100,6 +157,7 @@ impl BlockCache {
         self.lru_clock += 1;
         let entry = &mut self.entries[slot];
         entry.block = block;
+        entry.kind = kind;
         entry.frame.set_owner_key(block.raw() as u64);
         entry.frame.set_dirty(false);
         entry.pinned = 1;
@@ -110,17 +168,36 @@ impl BlockCache {
         Ok(CachedBlock { cache: self, slot })
     }
 
-    /// Get a block and zero-fill it (for newly allocated blocks — no
+    /// Get a metadata block and zero-fill it (for newly allocated blocks — no
     /// disk read).
     pub fn get_zero(
         &mut self,
         block: BlockNum,
         device: &dyn BlockDevice,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
+        self.get_zero_kind(block, device, BlockKind::Metadata)
+    }
+
+    /// Get a file-data block and zero-fill it (newly allocated data block).
+    pub fn get_zero_data(
+        &mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+    ) -> Result<CachedBlock<'_>, Ext2Error> {
+        self.get_zero_kind(block, device, BlockKind::Data)
+    }
+
+    fn get_zero_kind(
+        &mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+        kind: BlockKind,
+    ) -> Result<CachedBlock<'_>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
             let bs = self.block_size as usize;
             self.entries[slot].frame.as_bytes_mut()[..bs].fill(0);
             self.entries[slot].frame.set_dirty(true);
+            self.entries[slot].kind = kind;
             self.lru_clock += 1;
             self.entries[slot].lru = self.lru_clock;
             self.entries[slot].pinned += 1;
@@ -134,6 +211,7 @@ impl BlockCache {
         let entry = &mut self.entries[slot];
         entry.frame.as_bytes_mut()[..bs].fill(0);
         entry.block = block;
+        entry.kind = kind;
         entry.frame.set_owner_key(block.raw() as u64);
         entry.frame.set_dirty(true);
         entry.pinned = 1;
@@ -164,19 +242,61 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Flush all dirty blocks to disk.
-    pub fn flush_all(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+    /// Write back every dirty block of one [`BlockKind`].
+    ///
+    /// Unlike a fail-fast loop, this attempts *every* dirty slot of the kind
+    /// even if one device write fails, so a transient error on one block does
+    /// not silently strand the rest in the volatile cache. The first error
+    /// encountered is returned after the full pass; successfully written blocks
+    /// are marked clean, failed ones stay dirty (and will be retried on the
+    /// next flush). Returns the number of blocks actually written on success.
+    pub fn flush_kind(
+        &mut self,
+        kind: BlockKind,
+        device: &dyn BlockDevice,
+    ) -> Result<usize, Ext2Error> {
+        let bs = self.block_size as usize;
+        let mut first_err: Option<Ext2Error> = None;
+        let mut written = 0usize;
         for entry in &mut self.entries {
-            if entry.valid && entry.frame.dirty() {
-                let offset = entry.block.to_disk_offset(self.block_size);
-                let bs = self.block_size as usize;
-                device
-                    .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
-                    .map_err(|_| Ext2Error::DeviceError)?;
-                entry.frame.set_dirty(false);
+            if !(entry.valid && entry.kind == kind && entry.frame.dirty()) {
+                continue;
+            }
+            let offset = entry.block.to_disk_offset(self.block_size);
+            match device.write_at(offset.raw(), &entry.frame.as_bytes()[..bs]) {
+                Ok(()) => {
+                    entry.frame.set_dirty(false);
+                    written += 1;
+                }
+                Err(_) => {
+                    if first_err.is_none() {
+                        first_err = Some(Ext2Error::DeviceError);
+                    }
+                }
             }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(written),
+        }
+    }
+
+    /// Flush all dirty blocks (data first, then metadata) without device
+    /// barriers. Callers that need durability ordering (`Ext2Fs::sync`)
+    /// interleave [`BlockDevice::flush`] between the phases instead of relying
+    /// on this. Returns the total number of blocks written.
+    pub fn flush_all(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
+        let data = self.flush_kind(BlockKind::Data, device)?;
+        let meta = self.flush_kind(BlockKind::Metadata, device)?;
+        Ok(data + meta)
+    }
+
+    /// Number of dirty (not-yet-written-back) blocks currently held.
+    pub fn dirty_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.valid && e.frame.dirty())
+            .count()
     }
 
     /// Invalidate a cached block (evict without writing).
@@ -210,7 +330,9 @@ impl BlockCache {
 
         let slot = best_slot.ok_or(Ext2Error::DeviceError)?;
 
-        // Flush the victim if dirty.
+        // Flush the victim if dirty. Eviction is a cache-replacement event, not
+        // a durability point, so no device barrier is issued here — the
+        // FS-level `sync` provides ordering/barriers when it matters.
         let victim = &self.entries[slot];
         if victim.frame.dirty() {
             let offset = victim.block.to_disk_offset(self.block_size);

@@ -26,7 +26,18 @@ pub const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
+/// Flush the device's volatile write-back cache to non-volatile media. Only
+/// valid once `VIRTIO_BLK_F_FLUSH` has been negotiated.
+const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_S_OK: u8 = 0;
+
+/// `VIRTIO_BLK_F_FLUSH` (device feature bit 9): the device has a write-back
+/// cache and honours `VIRTIO_BLK_T_FLUSH` requests. Without this, a write that
+/// the device ACKs may still sit in a volatile cache and be lost on power
+/// failure, so durability barriers are impossible. We request it as an
+/// *optional* feature and degrade to "no device cache to flush" if the backend
+/// does not offer it.
+const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 
 const SECTOR_SIZE: u64 = 512;
 const REQUEST_TIMEOUT_MS: u32 = 5000;
@@ -44,6 +55,9 @@ struct VirtioBlkDevice {
     queue: Virtqueue,
     capacity_sectors: u64,
     ready: bool,
+    /// `VIRTIO_BLK_F_FLUSH` was negotiated — the device honours
+    /// `VIRTIO_BLK_T_FLUSH` and a flush is required for true durability.
+    flush_supported: bool,
 }
 
 impl VirtioBlkDevice {
@@ -52,6 +66,7 @@ impl VirtioBlkDevice {
             queue: Virtqueue::new(),
             capacity_sectors: 0,
             ready: false,
+            flush_supported: false,
         }
     }
 }
@@ -241,6 +256,110 @@ impl VirtioBlkInner {
         }
 
         success
+    }
+
+    /// Issue a `VIRTIO_BLK_T_FLUSH` and block until the device acknowledges it,
+    /// forcing every previously-ACKed write out of the device's volatile cache
+    /// onto non-volatile media. This is the durability barrier the filesystem
+    /// relies on between ordered phases and at `sync`/shutdown.
+    ///
+    /// If `VIRTIO_BLK_F_FLUSH` was not negotiated the device has no volatile
+    /// cache to flush (writes are already durable on ACK), so this is a
+    /// successful no-op. The request is a 2-descriptor chain — header + status,
+    /// no data phase — distinct from `do_request`'s 3-descriptor layout.
+    fn do_flush(&self) -> bool {
+        let _request_guard = RequestGuard::acquire(&self.request_in_flight);
+
+        {
+            let state = self.state.lock();
+            if !state.device.queue.is_ready() {
+                return false;
+            }
+            if !state.device.flush_supported {
+                // No write-back cache advertised: ACKed writes are already
+                // durable, so a flush is vacuously satisfied.
+                return true;
+            }
+        }
+
+        let buffers = match RequestBuffers::allocate() {
+            Some(b) => b,
+            None => return false,
+        };
+
+        let req_phys = buffers.req_page.phys_u64();
+        let status_offset = size_of::<VirtioBlkReqHeader>();
+        let status_phys = req_phys + status_offset as u64;
+
+        let header = VirtioBlkReqHeader {
+            type_: VIRTIO_BLK_T_FLUSH,
+            reserved: 0,
+            // The flush sector field must be zero per the virtio spec.
+            sector: 0,
+        };
+        if !buffers.req_page.write_at::<VirtioBlkReqHeader>(0, &header) {
+            return false;
+        }
+        if !buffers
+            .req_page
+            .write_volatile_at::<u8>(status_offset, 0xFF)
+        {
+            return false;
+        }
+
+        {
+            let mut state = self.state.lock();
+            self.queue_event.reset();
+
+            state.device.queue.write_desc(
+                0,
+                VirtqDesc {
+                    addr: req_phys,
+                    len: size_of::<VirtioBlkReqHeader>() as u32,
+                    flags: VIRTQ_DESC_F_NEXT,
+                    next: 1,
+                },
+            );
+
+            // No data descriptor for a flush — the status byte follows the
+            // header directly.
+            state.device.queue.write_desc(
+                1,
+                VirtqDesc {
+                    addr: status_phys,
+                    len: 1,
+                    flags: VIRTQ_DESC_F_WRITE,
+                    next: 0,
+                },
+            );
+
+            state.device.queue.submit(0);
+            queue::notify_queue(
+                &state.caps.notify_cfg,
+                state.caps.notify_off_multiplier,
+                &state.device.queue,
+                0,
+            );
+        }
+
+        if !self.queue_event.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
+            klog_info!("virtio-blk: flush timeout");
+            return false;
+        }
+
+        {
+            let mut state = self.state.lock();
+            if !state.device.queue.advance_used() {
+                klog_info!("virtio-blk: flush signaled without used completion");
+                return false;
+            }
+        }
+
+        let status = buffers
+            .req_page
+            .read_volatile_at::<u8>(status_offset)
+            .unwrap_or(0xFF);
+        status == VIRTIO_BLK_S_OK
     }
 
     fn read_offset(&self, offset: u64, buffer: &mut [u8]) -> bool {
@@ -579,6 +698,14 @@ impl BlockDevice for BlockWriteToken {
     fn capacity(&self) -> u64 {
         self.inner.capacity_bytes()
     }
+
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        if self.inner.do_flush() {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::InvalidBuffer)
+        }
+    }
 }
 
 impl Drop for BlockWriteToken {
@@ -632,11 +759,12 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         return Err(PciProbeError::Unsupported);
     }
 
-    let feat_result = negotiate_features(&caps, virtio::VIRTIO_F_VERSION_1, 0);
+    let feat_result = negotiate_features(&caps, virtio::VIRTIO_F_VERSION_1, VIRTIO_BLK_F_FLUSH);
     if !feat_result.success {
         klog_info!("virtio-blk: features negotiation failed");
         return Err(PciProbeError::DeviceFault);
     }
+    let flush_supported = feat_result.driver_features & VIRTIO_BLK_F_FLUSH != 0;
 
     // Allocate the per-device state up front (empty) so the IRQ closure can
     // capture a KArc clone and signal THIS device's completion event.
@@ -681,6 +809,7 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
             queue,
             capacity_sectors,
             ready: true,
+            flush_supported,
         };
         state.caps = caps;
         state.msix_state = msix_state;
@@ -695,10 +824,11 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
     };
 
     klog_info!(
-        "virtio-blk: disk{} ready, capacity {} sectors ({} MB), irq {:?}",
+        "virtio-blk: disk{} ready, capacity {} sectors ({} MB), flush={}, irq {:?}",
         index.0,
         capacity_sectors,
         (capacity_sectors * SECTOR_SIZE) / (1024 * 1024),
+        flush_supported,
         irq_mode,
     );
 

@@ -3,11 +3,32 @@ use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
+use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs};
 use crate::vfs::{
     vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_stat,
     vfs_unlink,
 };
+
+/// Test helper: mount an in-memory image over an owned, stack-local
+/// [`BlockCache`] and bind a [`Ext2Fs`] handle. Mirrors how the production VFS
+/// bridge borrows a persistent cache, but here the cache is owned by the test
+/// frame. `$device` must outlive `$fs`. Returns `TestResult::Fail` early if the
+/// superblock is invalid.
+macro_rules! mount_ext2 {
+    ($device:expr, $cache:ident, $fs:ident) => {
+        let (sb, bs, is) = match Ext2Fs::mount_params(&$device) {
+            Ok(v) => v,
+            Err(_) => return TestResult::Fail,
+        };
+        let mut $cache = match BlockCache::new(bs) {
+            Ok(c) => c,
+            Err(_) => return TestResult::Fail,
+        };
+        #[allow(unused_mut)]
+        let mut $fs = Ext2Fs::new(&$device, &mut $cache, sb, bs, is);
+    };
+}
 
 pub fn test_vfs_initialized() -> TestResult {
     klog_info!("VFS_TEST: check initialized");
@@ -407,7 +428,7 @@ pub fn test_ext2_invalid_superblock_magic() -> TestResult {
         sb[57] = 0;
     });
 
-    let result = Ext2Fs::init_internal(&device);
+    let result = Ext2Fs::mount_params(&device);
     match result {
         Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -424,7 +445,7 @@ pub fn test_ext2_unsupported_block_size() -> TestResult {
         sb[24..28].copy_from_slice(&8u32.to_le_bytes());
     });
 
-    let result = Ext2Fs::init_internal(&device);
+    let result = Ext2Fs::mount_params(&device);
     match result {
         Err(Ext2Error::UnsupportedBlockSize) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -444,7 +465,7 @@ pub fn test_ext2_zero_inodes_per_group_rejected() -> TestResult {
         sb[40..44].copy_from_slice(&0u32.to_le_bytes());
     });
 
-    let result = Ext2Fs::init_internal(&device);
+    let result = Ext2Fs::mount_params(&device);
     match result {
         Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -462,10 +483,7 @@ pub fn test_ext2_directory_format_error() -> TestResult {
         dir_block[5] = 0;
     });
 
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let result = fs.for_each_dir_entry(2, |_| true);
     match result {
@@ -478,10 +496,7 @@ pub fn test_ext2_invalid_inode() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let result = fs.read_inode(9999);
     match result {
@@ -494,10 +509,7 @@ pub fn test_ext2_read_file_not_regular() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let mut buf = [0u8; 32];
     let result = fs.read_file(2, 0, &mut buf);
@@ -509,7 +521,7 @@ pub fn test_ext2_read_file_not_regular() -> TestResult {
 
 pub fn test_ext2_device_read_error() -> TestResult {
     let device = FailingBlockDevice::new(4096).with_read_fail();
-    let result = Ext2Fs::init_internal(&device);
+    let result = Ext2Fs::mount_params(&device);
     match result {
         Err(Ext2Error::DeviceError) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -521,13 +533,23 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
         return TestResult::Pass;
     };
     let failing = WriteFailingDevice::new(device);
-    let mut fs = match Ext2Fs::init_internal(&failing) {
-        Ok(fs) => fs,
+    let (sb, bs, is) = match Ext2Fs::mount_params(&failing) {
+        Ok(v) => v,
         Err(_) => return TestResult::Pass,
     };
+    let mut cache = match BlockCache::new(bs) {
+        Ok(c) => c,
+        Err(_) => return TestResult::Fail,
+    };
+    let mut fs = Ext2Fs::new(&failing, &mut cache, sb, bs, is);
 
-    let result = fs.create_directory(2, b"faildir");
-    match result {
+    // With write-back caching, the metadata mutations from `create_directory`
+    // land in the cache and the operation itself succeeds — the device error
+    // surfaces only when those dirty blocks are written back at `sync`.
+    if fs.create_directory(2, b"faildir").is_err() {
+        return TestResult::Fail;
+    }
+    match fs.sync() {
         Err(Ext2Error::DeviceError) => TestResult::Pass,
         _ => TestResult::Fail,
     }
@@ -544,10 +566,7 @@ pub fn test_ext2_read_block_out_of_bounds() -> TestResult {
     let Some(device) = build_ext2_image(spec) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let inode = match fs.resolve_path(b"/boot.bin") {
         Ok(inode) => inode,
@@ -573,10 +592,7 @@ pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
     let Some(device) = build_ext2_image(spec) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let inode = match fs.resolve_path(b"/boot.bin") {
         Ok(inode) => inode,
@@ -595,14 +611,154 @@ pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
+// Regression + durability: `sync` must persist a write to the backing device
+// such that a brand-new handle with its OWN cache reads it back. Overwrites a
+// pre-existing file inode (no allocation) so the test isolates cache-writeback,
+// not the on-disk layout of the hand-built minimal image.
+pub fn test_ext2_write_persists_across_handles() -> TestResult {
+    let spec = Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"persist.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    };
+    let Some(device) = build_ext2_image(spec) else {
+        return TestResult::Pass;
+    };
+
+    let payload = b"persisted-bytes";
+    {
+        mount_ext2!(device, _c1, fs);
+        let ino = match fs.resolve_path(b"/persist.txt") {
+            Ok(ino) => ino,
+            Err(_) => return TestResult::Fail,
+        };
+        if fs.write_file(ino, 0, payload).is_err() {
+            return TestResult::Fail;
+        }
+        // Durability barrier: ordered writeback to the device.
+        if fs.sync().is_err() {
+            return TestResult::Fail;
+        }
+    }
+
+    // Fresh handle, fresh cache: must see the persisted bytes on disk.
+    mount_ext2!(device, _c2, fs2);
+    let ino = match fs2.resolve_path(b"/persist.txt") {
+        Ok(ino) => ino,
+        Err(_) => return TestResult::Fail,
+    };
+    let mut buf = [0u8; 32];
+    let read_len = match fs2.read_file(ino, 0, &mut buf) {
+        Ok(len) => len,
+        Err(_) => return TestResult::Fail,
+    };
+    if read_len != payload.len() || &buf[..read_len] != payload {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// Write-back semantics: a write only DIRTIES the cache; the device is not
+// touched until `sync`. We prove this by writing through one handle WITHOUT
+// syncing, then confirming a fresh handle (own cache) does NOT see the change.
+pub fn test_ext2_writeback_is_deferred_until_sync() -> TestResult {
+    let spec = Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"defer.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    };
+    let Some(device) = build_ext2_image(spec) else {
+        return TestResult::Pass;
+    };
+
+    {
+        mount_ext2!(device, _c1, fs);
+        let ino = match fs.resolve_path(b"/defer.txt") {
+            Ok(ino) => ino,
+            Err(_) => return TestResult::Fail,
+        };
+        if fs.write_file(ino, 0, b"NEW").is_err() {
+            return TestResult::Fail;
+        }
+        // The write must be visible as dirty in the cache...
+        if fs.dirty_count() == 0 {
+            return TestResult::Fail;
+        }
+        // ...but we deliberately drop the handle WITHOUT syncing. Because the
+        // cache is stack-local to this scope it is discarded — modelling a
+        // crash before writeback. (In production the cache is persistent, so
+        // the data would survive in-memory; here we test the device path.)
+    }
+
+    // Fresh handle reading the device must still see the OLD bytes.
+    mount_ext2!(device, _c2, fs2);
+    let ino = match fs2.resolve_path(b"/defer.txt") {
+        Ok(ino) => ino,
+        Err(_) => return TestResult::Fail,
+    };
+    let mut buf = [0u8; 8];
+    let n = match fs2.read_file(ino, 0, &mut buf) {
+        Ok(n) => n,
+        Err(_) => return TestResult::Fail,
+    };
+    if &buf[..n] != b"old" {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// Cross-call cache reuse: two operations on the SAME persistent cache see each
+// other's writes immediately (write-back coherency), and a clean read leaves
+// no dirty blocks.
+pub fn test_ext2_cache_reuse_within_handle() -> TestResult {
+    let spec = Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"reuse.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    };
+    let Some(device) = build_ext2_image(spec) else {
+        return TestResult::Pass;
+    };
+    mount_ext2!(device, _cache, fs);
+
+    let ino = match fs.resolve_path(b"/reuse.txt") {
+        Ok(ino) => ino,
+        Err(_) => return TestResult::Fail,
+    };
+    let payload = b"coherent";
+    if fs.write_file(ino, 0, payload).is_err() {
+        return TestResult::Fail;
+    }
+    // Read back through the SAME cache before any sync — must observe the write.
+    let mut buf = [0u8; 16];
+    let n = match fs.read_file(ino, 0, &mut buf) {
+        Ok(n) => n,
+        Err(_) => return TestResult::Fail,
+    };
+    if &buf[..n.min(payload.len())] != payload {
+        return TestResult::Fail;
+    }
+    // After sync, the cache is clean.
+    if fs.sync().is_err() {
+        return TestResult::Fail;
+    }
+    if fs.dirty_count() != 0 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 pub fn test_ext2_path_resolution_not_found() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let result = fs.resolve_path(b"/nope/file.txt");
     match result {
@@ -615,10 +771,7 @@ pub fn test_ext2_remove_path_not_file() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
-    let mut fs = match Ext2Fs::init_internal(&device) {
-        Ok(fs) => fs,
-        Err(_) => return TestResult::Fail,
-    };
+    mount_ext2!(device, _cache, fs);
 
     let result = fs.remove_path(b"/");
     match result {
@@ -825,5 +978,8 @@ slopos_testing::stest!(name = test_ext2_device_read_error);
 slopos_testing::stest!(name = test_ext2_device_write_error_on_metadata);
 slopos_testing::stest!(name = test_ext2_read_block_out_of_bounds);
 slopos_testing::stest!(name = test_ext2_read_file_data_roundtrip);
+slopos_testing::stest!(name = test_ext2_write_persists_across_handles);
+slopos_testing::stest!(name = test_ext2_writeback_is_deferred_until_sync);
+slopos_testing::stest!(name = test_ext2_cache_reuse_within_handle);
 slopos_testing::stest!(name = test_ext2_path_resolution_not_found);
 slopos_testing::stest!(name = test_ext2_remove_path_not_file);

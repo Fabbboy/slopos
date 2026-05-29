@@ -9,6 +9,7 @@ use slopos_ostd::sync::StateFlag;
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
 static SERIAL_DRAINED: StateFlag = StateFlag::new();
+static FS_SYNCED: StateFlag = StateFlag::new();
 
 use slopos_drivers::apic;
 use slopos_drivers::hpet;
@@ -21,6 +22,13 @@ use slopos_sched::task::task_shutdown_all;
 
 fn serial_flush() {
     ostd_power::drain_serial_tx(|| cpu::pause(), 1024);
+}
+fn flush_filesystems_for_shutdown() {
+    if !FS_SYNCED.enter() {
+        return;
+    }
+    klog_info!("Kernel shutdown: flushing filesystem caches");
+    slopos_fs::ext2_vfs_shutdown_sync();
 }
 fn ensure_kernel_page_dir() {
     // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
@@ -59,6 +67,13 @@ pub fn kernel_drain_serial_output() {
 }
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
     ensure_kernel_page_dir();
+    // Flush filesystem write-back caches to disk while interrupts are STILL
+    // ENABLED — the virtio-blk completion path needs IRQs + the scheduler to
+    // post the used-buffer event. Doing this before `disable_interrupts` is
+    // load-bearing for durability; once interrupts are off a device flush
+    // would only time out. Best-effort, runs once, no-op if ext2 unmounted.
+    flush_filesystems_for_shutdown();
+
     cpu::disable_interrupts();
 
     if !SHUTDOWN_IN_PROGRESS.enter() {

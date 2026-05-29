@@ -22,6 +22,21 @@ pub trait BlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
     fn capacity(&self) -> u64;
+
+    /// Force every previously-acknowledged write out of any volatile device
+    /// cache onto non-volatile media — a durability barrier.
+    ///
+    /// On a write-back device, `write_at` returning `Ok` only means the bytes
+    /// reached the device's (possibly volatile) cache; a power failure can
+    /// still lose them. The filesystem calls `flush` to order metadata after
+    /// the data it references and to make `sync`/shutdown durable.
+    ///
+    /// The default is a no-op for devices that are inherently durable on write
+    /// (e.g. [`MemoryBlockDevice`], or a virtio-blk backend that did not
+    /// negotiate `VIRTIO_BLK_F_FLUSH`).
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        Ok(())
+    }
 }
 
 pub struct MemoryBlockDevice {

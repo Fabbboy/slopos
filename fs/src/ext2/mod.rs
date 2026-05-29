@@ -53,18 +53,28 @@ pub type Ext2Inode = Inode;
 pub struct Ext2Fs<'a> {
     device: &'a dyn BlockDevice,
     superblock: Superblock,
-    cache: BlockCache,
+    /// Borrowed handle to the long-lived, persistent buffer cache. The cache
+    /// is owned by the mounted-filesystem state (`ext2_vfs::CachedExt2`) and
+    /// survives across operations; this struct is a cheap, allocation-free
+    /// per-call view over it.
+    cache: &'a mut BlockCache,
     block_size: u32,
     inode_size: u16,
     ptrs_per_block: u32,
+    /// Set when an operation changed the in-memory superblock free-counts so
+    /// the on-disk superblock is now stale. Persisted in ordered fashion by
+    /// [`Self::sync`]; never written mid-operation (see the ordered-writeback
+    /// rationale on `sync`).
+    superblock_dirty: bool,
 }
 
 impl<'a> Ext2Fs<'a> {
-    pub fn init(device: &'a dyn BlockDevice) -> Result<Self, Ext2Error> {
-        Self::init_internal(device)
-    }
-
-    pub(crate) fn init_internal(device: &'a dyn BlockDevice) -> Result<Self, Ext2Error> {
+    /// Read and validate the on-disk superblock *without* a cache.
+    ///
+    /// Used at mount time to learn the geometry (`block_size`) required to size
+    /// the persistent [`BlockCache`] before it exists, and by tests. Returns
+    /// `(superblock, block_size, inode_size)`.
+    pub fn mount_params(device: &dyn BlockDevice) -> Result<(Superblock, u32, u16), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         device
             .read_at(1024, &mut sb_buf)
@@ -72,31 +82,29 @@ impl<'a> Ext2Fs<'a> {
         let superblock = Superblock::parse(&sb_buf)?;
         let block_size = superblock.block_size()?;
         let inode_size = superblock.effective_inode_size();
-
-        Ok(Self {
-            device,
-            superblock,
-            cache: BlockCache::new(block_size)?,
-            block_size,
-            inode_size,
-            ptrs_per_block: block_size / 4,
-        })
+        Ok((superblock, block_size, inode_size))
     }
 
-    pub(crate) fn from_parts(
+    /// Construct a thin FS handle over an externally-owned, persistent
+    /// [`BlockCache`]. **Performs no allocation** — the heavy cache lives in
+    /// the long-lived FS state and is merely borrowed here, so building one of
+    /// these per VFS call is free.
+    pub fn new(
         device: &'a dyn BlockDevice,
+        cache: &'a mut BlockCache,
         superblock: Superblock,
         block_size: u32,
         inode_size: u16,
-    ) -> Result<Self, Ext2Error> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             device,
             superblock,
-            cache: BlockCache::new(block_size)?,
+            cache,
             block_size,
             inode_size,
             ptrs_per_block: block_size / 4,
-        })
+            superblock_dirty: false,
+        }
     }
 
     pub fn superblock(&self) -> Superblock {
@@ -105,6 +113,51 @@ impl<'a> Ext2Fs<'a> {
 
     pub fn block_size(&self) -> u32 {
         self.block_size
+    }
+
+    /// Number of dirty (unwritten) blocks currently held by the shared cache.
+    pub fn dirty_count(&self) -> usize {
+        self.cache.dirty_count()
+    }
+
+    /// Flush all dirty cached blocks and the superblock to the backing device
+    /// with **ordered durability barriers**.
+    ///
+    /// Ordering follows the ext2 `data=ordered` discipline (minus a metadata
+    /// journal — see the crate-level notes):
+    ///   1. write back all dirty *data* blocks;
+    ///   2. [`BlockDevice::flush`] barrier — data durable before any metadata
+    ///      that references it;
+    ///   3. write back all dirty *metadata* blocks (bitmaps, group descriptors,
+    ///      inode tables, directory blocks, indirect blocks);
+    ///   4. barrier — metadata durable before the superblock accounting for it;
+    ///   5. write the superblock free-counts if dirty;
+    ///   6. final barrier.
+    ///
+    /// A crash between phases can leave recoverable free-count drift (fsck
+    /// territory) but never a directory entry / inode pointing at
+    /// uninitialised on-disk data.
+    pub fn sync(&mut self) -> Result<(), Ext2Error> {
+        self.cache.flush_kind(cache::BlockKind::Data, self.device)?;
+        self.device_barrier()?;
+        self.cache
+            .flush_kind(cache::BlockKind::Metadata, self.device)?;
+        self.device_barrier()?;
+        if self.superblock_dirty {
+            self.write_superblock()?;
+            self.device_barrier()?;
+            self.superblock_dirty = false;
+        }
+        Ok(())
+    }
+
+    /// Backwards-compatible durability call: alias for [`Self::sync`].
+    pub fn flush(&mut self) -> Result<(), Ext2Error> {
+        self.sync()
+    }
+
+    fn device_barrier(&self) -> Result<(), Ext2Error> {
+        self.device.flush().map_err(|_| Ext2Error::DeviceError)
     }
 
     // ---- Inode I/O ----
@@ -162,7 +215,7 @@ impl<'a> Ext2Fs<'a> {
             &inode,
             offset as u64,
             buffer,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
@@ -172,17 +225,23 @@ impl<'a> Ext2Fs<'a> {
     pub fn write_file(&mut self, ino: u32, offset: u32, buffer: &[u8]) -> Result<usize, Ext2Error> {
         let ino_num = InodeNum(ino);
         let mut inode = self.read_inode_num(ino_num)?;
+        let free_before = self.superblock.free_blocks_count;
         let result = file::write_file(
             &mut inode,
             offset as u64,
             buffer,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
             &mut self.superblock,
         );
         self.write_inode_num(ino_num, &inode)?;
+        // A write that allocated blocks changed the superblock free-count;
+        // mark it for ordered persistence by `sync` (never written mid-op).
+        if self.superblock.free_blocks_count != free_before {
+            self.superblock_dirty = true;
+        }
         result
     }
 
@@ -195,7 +254,7 @@ impl<'a> Ext2Fs<'a> {
         let inode = self.read_inode_num(InodeNum(ino))?;
         dir::for_each_entry(
             &inode,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
@@ -220,7 +279,7 @@ impl<'a> Ext2Fs<'a> {
                 let mut parent = None;
                 dir::for_each_entry(
                     &inode,
-                    &mut self.cache,
+                    &mut *self.cache,
                     self.device,
                     self.ptrs_per_block,
                     self.block_size,
@@ -238,7 +297,7 @@ impl<'a> Ext2Fs<'a> {
                 current = dir::lookup_child(
                     &inode,
                     component,
-                    &mut self.cache,
+                    &mut *self.cache,
                     self.device,
                     self.ptrs_per_block,
                     self.block_size,
@@ -277,7 +336,7 @@ impl<'a> Ext2Fs<'a> {
         let new_ino = ext2_alloc::allocate_inode(
             parent_num.block_group(self.superblock.inodes_per_group),
             &mut self.superblock,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.block_size,
         )?;
@@ -304,7 +363,7 @@ impl<'a> Ext2Fs<'a> {
         if is_dir {
             let first_block = ext2_alloc::allocate_block(
                 &mut self.superblock,
-                &mut self.cache,
+                &mut *self.cache,
                 self.device,
                 self.block_size,
             )?;
@@ -336,7 +395,7 @@ impl<'a> Ext2Fs<'a> {
             new_ino,
             name,
             ft,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
@@ -347,7 +406,11 @@ impl<'a> Ext2Fs<'a> {
             parent.links_count += 1;
         }
         self.write_inode_num(parent_num, &parent)?;
-        self.write_superblock()?;
+        // Superblock free-counts changed (inode + maybe a dir data block were
+        // allocated). Defer the on-disk superblock write to `sync` so it lands
+        // *after* the bitmap/inode-table blocks it accounts for (ordered
+        // writeback); the in-memory superblock is already updated.
+        self.superblock_dirty = true;
 
         Ok(new_ino)
     }
@@ -362,7 +425,7 @@ impl<'a> Ext2Fs<'a> {
         let target_num = dir::lookup_child(
             &parent_inode,
             name,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
@@ -376,7 +439,7 @@ impl<'a> Ext2Fs<'a> {
         dir::remove_dir_entry(
             &parent_inode,
             name,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
@@ -387,7 +450,7 @@ impl<'a> Ext2Fs<'a> {
         ext2_alloc::free_inode(
             target_num,
             &mut self.superblock,
-            &mut self.cache,
+            &mut *self.cache,
             self.device,
             self.block_size,
         )?;
@@ -412,7 +475,9 @@ impl<'a> Ext2Fs<'a> {
         // Re-read parent in case dir ops mutated the cached block
         parent_inode = self.read_inode_num(parent_num)?;
         self.write_inode_num(parent_num, &parent_inode)?;
-        self.write_superblock()?;
+        // Freed inode + data blocks changed the superblock free-counts; defer
+        // the on-disk write to ordered `sync`.
+        self.superblock_dirty = true;
 
         Ok(())
     }
@@ -441,7 +506,7 @@ impl<'a> Ext2Fs<'a> {
                 ext2_alloc::free_block(
                     *blk,
                     &mut self.superblock,
-                    &mut self.cache,
+                    &mut *self.cache,
                     self.device,
                     self.block_size,
                 )?;
@@ -476,7 +541,7 @@ impl<'a> Ext2Fs<'a> {
                     ext2_alloc::free_block(
                         p,
                         &mut self.superblock,
-                        &mut self.cache,
+                        &mut *self.cache,
                         self.device,
                         self.block_size,
                     )?;
@@ -485,7 +550,7 @@ impl<'a> Ext2Fs<'a> {
             ext2_alloc::free_block(
                 indirect,
                 &mut self.superblock,
-                &mut self.cache,
+                &mut *self.cache,
                 self.device,
                 self.block_size,
             )?;

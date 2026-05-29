@@ -171,6 +171,12 @@ impl BlockDevice for VerifiedBlockDevice {
     fn capacity(&self) -> u64 {
         self.inner.capacity()
     }
+
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        // Verity has no durability state of its own; forward the barrier to the
+        // backing device. The `written` bitset is in-memory metadata only.
+        self.inner.flush()
+    }
 }
 
 // ---------------------------------------------------------------------------

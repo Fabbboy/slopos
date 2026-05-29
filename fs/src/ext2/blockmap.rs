@@ -119,7 +119,7 @@ pub fn ensure_data_block(
             return Ok((inode.block[idx], false));
         }
         let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
-        drop(cache.get_zero(new_block, device)?);
+        drop(cache.get_zero_data(new_block, device)?);
         inode.block[idx] = new_block;
         return Ok((new_block, true));
     }
@@ -159,7 +159,7 @@ pub fn ensure_data_block(
     }
 
     let new_data = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
-    drop(cache.get_zero(new_data, device)?);
+    drop(cache.get_zero_data(new_data, device)?);
     let mut parent = cache.get(current_indirect, device)?;
     write_ptr(parent.data_mut(), data_idx, new_data);
 
