@@ -29,6 +29,10 @@ BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 "$SCRIPT_DIR/ensure_toolchain.sh"
 if [[ "$BUILD_STD" == *"std"* ]]; then
     "$SCRIPT_DIR/patch_std.sh"
+    # Purge any stale build-std artifacts if the patches changed since the
+    # cached libstd was compiled. Content-addressed and reliable — see the
+    # script header for why the old mtime heuristic was insufficient.
+    "$SCRIPT_DIR/std_cache_guard.sh" "$CARGO_TARGET_DIR" "x86_64-slos-userland"
 fi
 
 mkdir -p "$BUILD_DIR"
@@ -74,6 +78,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin heap_allocator_test \
         --bin curl_recv_repro_test \
         --bin curl_e2e_test \
+        --bin cd_test \
         --features testbins \
         --no-default-features \
         --release
@@ -93,6 +98,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/curl_e2e_test" ]; then
         cp "$RELEASE_DIR/curl_e2e_test" "$BUILD_DIR/curl_e2e_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/cd_test" ]; then
+        cp "$RELEASE_DIR/cd_test" "$BUILD_DIR/cd_test.elf"
+    fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf"
 fi

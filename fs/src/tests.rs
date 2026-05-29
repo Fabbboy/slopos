@@ -100,6 +100,61 @@ pub fn test_vfs_list() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression: every directory that shows up in `ls /` must be `cd`-able.
+///
+/// `ls` reports directory entries via `readdir` (which only reads the *parent*
+/// directory block), while `cd` resolves the child path and `stat`s the child
+/// inode. This test mirrors that exact sequence — list `/`, then `vfs_stat`
+/// each listed directory by its full path — so a divergence between "listed"
+/// and "resolvable" is caught here instead of only surfacing interactively.
+pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
+    use slopos_abi::fs::FS_TYPE_DIRECTORY;
+
+    klog_info!("VFS_TEST: cd into every listed directory");
+
+    let mut entries = [UserFsEntry::new(); 32];
+    let count = match vfs_list(b"/", &mut entries) {
+        Ok(count) => count,
+        Err(_) => return TestResult::Fail,
+    };
+
+    let mut dirs_seen = 0u32;
+    for entry in entries.iter().take(count) {
+        if entry.type_ != FS_TYPE_DIRECTORY {
+            continue;
+        }
+        let name = entry.name_str();
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        // Build "/<name>" exactly as the shell does for an absolute `cd`.
+        let mut path = [0u8; 256];
+        path[0] = b'/';
+        let nb = name.as_bytes();
+        if nb.len() + 1 >= path.len() {
+            continue;
+        }
+        path[1..1 + nb.len()].copy_from_slice(nb);
+        let path = &path[..1 + nb.len()];
+
+        match vfs_stat(path) {
+            Ok((kind, _)) if kind == FS_TYPE_DIRECTORY => {}
+            _ => {
+                klog_info!("VFS_TEST: cd target not resolvable: {}", name);
+                return TestResult::Fail;
+            }
+        }
+        dirs_seen += 1;
+    }
+
+    if dirs_seen == 0 {
+        // No subdirectories to exercise (e.g. ramfs root): nothing to assert.
+        return TestResult::Skipped;
+    }
+    TestResult::Pass
+}
+
 pub fn test_vfs_unlink() -> TestResult {
     klog_info!("VFS_TEST: unlink file");
     if vfs_unlink(b"/vfs_test/hello.txt").is_err() {
@@ -966,6 +1021,7 @@ slopos_testing::stest!(name = test_vfs_initialized);
 slopos_testing::stest!(name = test_vfs_root_stat);
 slopos_testing::stest!(name = test_vfs_file_roundtrip);
 slopos_testing::stest!(name = test_vfs_list);
+slopos_testing::stest!(name = test_vfs_cd_into_listed_dirs);
 slopos_testing::stest!(name = test_vfs_unlink);
 slopos_testing::stest!(name = test_vfs_storage_contention_stress_baseline);
 slopos_testing::stest!(name = test_ext2_invalid_superblock_magic);

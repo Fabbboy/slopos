@@ -19,3 +19,4 @@ crate::utest!(
     bin = "/bin/curl_recv_repro_test"
 );
 crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");
+crate::utest!(name = utest_cd, bin = "/bin/cd_test");

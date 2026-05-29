@@ -80,6 +80,10 @@ path = "src/bin/tests/curl_recv_repro_test.rs"
 name = "curl_e2e_test"
 path = "src/bin/tests/curl_e2e_test.rs"
 
+[[bin]]
+name = "cd_test"
+path = "src/bin/tests/cd_test.rs"
+
 [features]
 default = []
 testbins = []

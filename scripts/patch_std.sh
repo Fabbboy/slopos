@@ -411,6 +411,36 @@ if ! grep -q 'target_os = "slopos"' "$STD_OS/mod.rs" 2>/dev/null; then
     patch_os_fd
 fi
 
+# 3l. Path/cwd routing (sys/paths) — wire std::env::{current_dir,
+# set_current_dir, temp_dir} through SlopOS getcwd/chdir.
+#
+# Upstream std relocated `getcwd`/`chdir` out of sys::pal::<os>::os into the
+# dedicated sys::paths module. A target without a `paths` arm silently falls
+# back to `unsupported`, which is exactly why `set_current_dir` used to always
+# fail on SlopOS even though the kernel chdir/getcwd syscalls work. We model
+# the slopos arm on wasi's: getcwd/chdir/temp_dir from our module, the rest
+# (current_exe, split/join_paths, home_dir) from the unsupported stub.
+if [ -f "$STD_PAL_SRC/paths/slopos.rs" ]; then
+    cp "$STD_PAL_SRC/paths/slopos.rs" "$STD_SYS/paths/slopos.rs"
+    echo "  Copied paths/slopos.rs"
+fi
+
+PATHS_MOD="$STD_SYS/paths/mod.rs"
+if [ -f "$PATHS_MOD" ] && ! grep -q 'target_os = "slopos"' "$PATHS_MOD" 2>/dev/null; then
+    sed -i '/^[[:space:]]*_ => {/{
+i\    target_os = "slopos" => {\
+        mod slopos;\
+        #[expect(dead_code)]\
+        mod unsupported;\
+        mod imp {\
+            pub use super::slopos::{getcwd, chdir, temp_dir};\
+            pub use super::unsupported::{current_exe, SplitPaths, split_paths, JoinPathsError, join_paths, home_dir};\
+        }\
+    }
+}' "$PATHS_MOD"
+    echo "  Patched paths/mod.rs"
+fi
+
 # Post-patch verification.  Each new patch section above needs a
 # matching check_patched row so drift fails the build loudly instead
 # of leaving the sysroot half-patched.
@@ -462,6 +492,10 @@ check_patched "os/mod.rs"                      "$STD_OS/mod.rs"                 
 check_patched "os/fd/raw.rs"                   "$STD_OS/fd/raw.rs"                          'target_os = "slopos"'
 check_patched "os/fd/owned.rs"                 "$STD_OS/fd/owned.rs"                        'target_os = "slopos"'
 
+# Path/cwd surfaces (std::env::{current_dir,set_current_dir,temp_dir})
+check_patched "paths/mod.rs"                   "$STD_SYS/paths/mod.rs"                      'target_os = "slopos"'
+check_patched "paths/slopos.rs"                "$STD_SYS/paths/slopos.rs"                   'pub fn chdir'
+
 if [ "$failed" -ne 0 ]; then
     echo ""
     echo "ERROR: one or more std patches failed to apply."
@@ -469,23 +503,41 @@ if [ "$failed" -ne 0 ]; then
     exit 1
 fi
 
-# Cache invalidation: when patch_std.sh adds a new file (e.g. the
-# io/error/slopos.rs decoder) cargo's -Zbuild-std fingerprint may
-# still hit a stale libstd-*.rlib because the package-level mtime
-# (library/std/Cargo.toml) did not move. Touch it whenever any
-# patched file is newer than the rlib equivalent so the next
-# `cargo build` rebuilds std from source.
-STD_CARGO_TOML="$SYSROOT/lib/rustlib/src/rust/library/std/Cargo.toml"
-if [ -f "$STD_CARGO_TOML" ]; then
-    # `-quit` ensures find emits at most one path before exiting, so the
-    # pipeline does not SIGPIPE under `set -o pipefail`.
-    newest_patched_ts=$(find "$STD_SYS" "$STD_OS" \
-        -newer "$STD_CARGO_TOML" -print -quit 2>/dev/null)
-    if [ -n "$newest_patched_ts" ]; then
-        touch "$STD_CARGO_TOML"
-        echo "  Bumped library/std/Cargo.toml mtime to invalidate build-std cache"
+# Reliable build-std cache invalidation.
+#
+# `-Zbuild-std` caches a compiled `libstd-<fingerprint>.rlib` keyed on the std
+# source files cargo knew about during the *previous* build. When a patch adds
+# a NEW module file (e.g. paths/slopos.rs) that the old dep-info never listed,
+# cargo concludes std is unchanged and silently reuses the stale rlib — so the
+# new code is missing at link time even though the sysroot source is correct.
+#
+# The old mtime heuristic (touch Cargo.toml when a patched file looks newer)
+# was racy and unreliable. Instead we write a deterministic *content stamp*
+# describing the exact patched-std state: a hash over this script (captures the
+# sed routing logic) plus every PAL source file (captures the copied content).
+# The build scripts compare this stamp against a per-target-dir copy and purge
+# stale build-std artifacts whenever it changes (see scripts/std_cache_guard.sh).
+# This stamp is the single source of truth for "what std currently is".
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    else
+        shasum -a 256 | cut -d' ' -f1
     fi
-fi
+}
+
+PATCH_STAMP="$STD_SYS/.slopos_patch_stamp"
+stamp_hash="$(
+    {
+        cat "${BASH_SOURCE[0]}"
+        find "$STD_PAL_SRC" -type f -name '*.rs' | LC_ALL=C sort | while IFS= read -r f; do
+            printf '\n--- %s ---\n' "${f#"$STD_PAL_SRC"/}"
+            cat "$f"
+        done
+    } | sha256
+)"
+echo "$stamp_hash" > "$PATCH_STAMP"
+echo "  Wrote patch stamp ($stamp_hash) to $PATCH_STAMP"
 
 echo ""
 echo "SlopOS std patches applied successfully (verified)."
