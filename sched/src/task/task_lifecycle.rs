@@ -737,6 +737,12 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     crate::futex::futex_remove_task(task_ptr);
 
+    // Release any waitpid wait-reference this task held on its target. A task
+    // SIGKILL'd while parked in `task_wait_for` never unwinds its own stack,
+    // so the incref it took on the target must be dropped here or the target's
+    // zombie slot would be pinned forever (reap_zombies gates on refcnt==0).
+    scheduler::release_wait_ref(resolved_id);
+
     let clear_tid = task.clear_child_tid;
     if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
         if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {

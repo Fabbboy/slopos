@@ -37,8 +37,8 @@ mod slot;
 
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
-use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_ostd::{KVec, KVecDeque};
+use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::{KBTreeMap, KVec, KVecDeque};
 
 use pair::{InFlightFd, PairSide, PairTable};
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
@@ -575,7 +575,11 @@ pub fn unix_sendmsg(
                 // Block until peer drains, slot reuses, or peer
                 // closes. fds remain in the caller's array — the
                 // next iteration runs the full capacity check +
-                // atomic publish again.
+                // atomic publish again. Hand the fds to the per-task
+                // custodian for the duration of the park so a kill
+                // while blocked cannot leak them (see `inflight_park`).
+                let task_id = slopos_kernel_services::driver_runtime::current_task_id();
+                inflight_park(task_id, inflight_fds, fd_count);
                 BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     let slot = &state.slots[wq_idx];
@@ -600,6 +604,7 @@ pub fn unix_sendmsg(
                         _ => true, // state diverged — bail out
                     }
                 });
+                inflight_unpark(task_id);
             }
         }
     }
@@ -618,6 +623,86 @@ fn release_inflight(
         if inflight_fds[j].0 != 0 {
             inflight_fds[j].1.release(inflight_fds[j].0);
             inflight_fds[j] = (0, inflight_fds[j].1);
+        }
+    }
+}
+
+// ── In-flight SCM_RIGHTS fd custody across a blocking send ──────────────────
+//
+// `unix_sendmsg` owns fd references (duplicated from the sender's fd table by
+// the sendmsg syscall handler) until it either commits them to the peer or
+// releases them via `release_inflight`. On the blocking path it holds them
+// across a `wait_event` park. SlopOS tears a blocked task down asynchronously
+// — its `schedule()` never returns, so neither the loop's `release_inflight`
+// nor any stack cleanup runs — which would leak those fd refs if the sender is
+// SIGKILL'd while parked.
+//
+// To stay leak-free we hand the fds to this per-task custodian for *exactly*
+// the duration of the park (`inflight_park` before the wait, `inflight_unpark`
+// after it wakes). Only a *blocked* task can be async-abandoned; a running
+// task killed between operations still completes its current stack path
+// (releasing or committing normally) before exiting at the syscall boundary.
+// So covering the park window is sufficient and complete. If the sender dies
+// while parked, `unix_inflight_cleanup_task` (a task-termination hook) releases
+// the custodied refs — mirroring the poll/futex/waitpid teardown hooks.
+//
+// `inflight_park` only *copies* the (handle, ops) pairs (it does not zero the
+// caller's array): on a normal wake `inflight_unpark` drops the custody copy
+// without releasing, leaving the array to drive the usual commit/release path;
+// on kill the array is abandoned and the hook releases via the custody copy.
+// The two never both release — a killed task never runs `inflight_unpark`/the
+// array path, and a surviving task empties the custody on `inflight_unpark`.
+type InflightFd = (usize, &'static dyn slopos_abi::file_ops::FileOps);
+
+static SENDMSG_INFLIGHT: SpinLock<KBTreeMap<u32, KVec<InflightFd>>> =
+    SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
+
+fn inflight_park(task_id: u32, inflight_fds: &[InflightFd], fd_count: usize) {
+    if task_id == 0 || fd_count == 0 {
+        return;
+    }
+    let Ok(mut held) = KVec::with_capacity(fd_count) else {
+        return;
+    };
+    for &fd in &inflight_fds[..fd_count] {
+        if fd.0 != 0 {
+            let _ = held.push(fd);
+        }
+    }
+    if held.is_empty() {
+        return;
+    }
+    let mut map = SENDMSG_INFLIGHT.lock();
+    if let Some(stale) = map.insert(task_id, held) {
+        // A prior un-released custody for this task would be a bug (a task can
+        // only be parked in one send at a time); release it rather than leak.
+        for &fd in stale.iter() {
+            if fd.0 != 0 {
+                fd.1.release(fd.0);
+            }
+        }
+    }
+}
+
+fn inflight_unpark(task_id: u32) {
+    if task_id == 0 {
+        return;
+    }
+    // Drop the custody copy WITHOUT releasing: the caller's array still owns
+    // these refs on the normal wake path and will commit or release them.
+    let _ = SENDMSG_INFLIGHT.lock().remove(&task_id);
+}
+
+/// Task-termination hook: release any in-flight SCM_RIGHTS fd refs a task was
+/// holding across a blocking `unix_sendmsg` when it died. Registered via
+/// `register_task_resource_cleanup_hook` at boot. No-op for tasks holding none.
+pub fn unix_inflight_cleanup_task(task_id: u32) {
+    let held = { SENDMSG_INFLIGHT.lock().remove(&task_id) };
+    if let Some(held) = held {
+        for &fd in held.iter() {
+            if fd.0 != 0 {
+                fd.1.release(fd.0);
+            }
         }
     }
 }

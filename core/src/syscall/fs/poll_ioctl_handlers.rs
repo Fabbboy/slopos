@@ -235,7 +235,7 @@ fn poll_to_select_mask(
 
 define_syscall!(syscall_poll
     (ctx, base_ptr: u64, nfds: u64, timeout_ms_raw: i64)
-    requires(let pid: process_id)
+    requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
     let nfds = nfds as usize;
@@ -337,12 +337,23 @@ define_syscall!(syscall_poll
         };
 
         if reg_count > 0 {
+            // Record this iteration's registrations against the task so they
+            // are released even if the task is killed while blocked (the
+            // post-block `cleanup` below is skipped on SIGKILL). Cleared on
+            // the normal wake path right after `cleanup`.
+            slopos_fs::fileio::file_poll_track_registrations(
+                task_id,
+                &registered_ofis[..reg_count],
+            );
             slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
         cleanup(reg_count, registered_ofis);
+        if reg_count > 0 {
+            slopos_fs::fileio::file_poll_clear_registrations(task_id);
+        }
 
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return Err(Errno::EINTR);
@@ -352,7 +363,7 @@ define_syscall!(syscall_poll
 
 define_syscall!(syscall_select
     (ctx, nfds_raw: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64, tv_ptr: u64)
-    requires(let pid: process_id)
+    requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
     let nfds = nfds_raw as usize;
@@ -534,12 +545,21 @@ define_syscall!(syscall_select
         };
 
         if reg_count > 0 {
+            // See syscall_poll: track registrations so a SIGKILL while blocked
+            // can't leak the per-fd poll incref.
+            slopos_fs::fileio::file_poll_track_registrations(
+                task_id,
+                &registered_ofis[..reg_count],
+            );
             slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         } else {
             slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
         cleanup(reg_count, registered_ofis);
+        if reg_count > 0 {
+            slopos_fs::fileio::file_poll_clear_registrations(task_id);
+        }
 
         if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return Err(Errno::EINTR);

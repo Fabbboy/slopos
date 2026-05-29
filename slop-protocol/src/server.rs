@@ -22,7 +22,12 @@ use slopos_abi::net::AF_UNIX;
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 use slopos_slibc::pal::{Pal, Sys};
 
-const MAX_CLIENTS: usize = 32;
+/// Maximum number of simultaneous client connections the server tracks.
+///
+/// Exposed so owners (e.g. the compositor) can size their own per-client
+/// scratch buffers — such as the index array passed to
+/// [`Server::take_disconnected`] — to match the server's capacity.
+pub const MAX_CLIENTS: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Per-client write buffer (matches libwayland-server's 4 KB design)
@@ -107,7 +112,17 @@ pub struct ClientConn {
 
 pub struct Server {
     listen_fd: i32,
-    pub clients: alloc::boxed::Box<[Option<ClientConn>; MAX_CLIENTS]>,
+    // Each client is heap-allocated (`Box<ClientConn>`) so the slot array is
+    // a tiny 32-pointer table whose `Option` niche is the single, unambiguous
+    // `Box` null pointer (None == null). Storing the 4 KB+ `ClientConn`
+    // *inline* gave `Option<ClientConn>` two competing niches (the inner
+    // `read_buf: Box` null and the `active: bool` 2..=255 range); rustc then
+    // const-initialised `[None; N]` with a `memset(0x02)` (the bool niche)
+    // while *reading* the discriminant through the `Box` niche, so every
+    // freshly-`bind()`-ed slot read back as `Some(garbage)`. Boxing the
+    // client collapses that to one canonical `Option<Box<T>>` niche and
+    // mirrors libwayland-server, which heap-allocates every `wl_client`.
+    pub clients: alloc::boxed::Box<[Option<alloc::boxed::Box<ClientConn>>; MAX_CLIENTS]>,
     pub client_count: usize,
 }
 
@@ -121,7 +136,7 @@ impl Server {
         // Ensure non-blocking for accept().
         crate::connection::set_nonblock(listen_fd);
 
-        const NONE: Option<ClientConn> = None;
+        const NONE: Option<alloc::boxed::Box<ClientConn>> = None;
         Ok(Self {
             listen_fd,
             clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
@@ -146,7 +161,7 @@ impl Server {
         // Non-blocking so accept() returns EAGAIN instead of blocking
         crate::connection::set_nonblock(fd);
 
-        const NONE: Option<ClientConn> = None;
+        const NONE: Option<alloc::boxed::Box<ClientConn>> = None;
         Ok(Self {
             listen_fd: fd,
             clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
@@ -181,11 +196,11 @@ impl Server {
 
         // Connection::new sets O_NONBLOCK automatically.
         let conn = Connection::new(client_fd);
-        self.clients[idx] = Some(ClientConn {
+        self.clients[idx] = Some(alloc::boxed::Box::new(ClientConn {
             conn,
             active: true,
             write_buf: WriteBuf::new(),
-        });
+        }));
         self.client_count += 1;
         Ok(Some(idx))
     }
@@ -206,9 +221,13 @@ impl Server {
     /// Actual socket I/O happens in [`flush_clients`], called once per frame.
     ///
     /// If the write buffer is full, an emergency non-blocking flush is
-    /// attempted.  The client is disconnected only if both the buffer and
-    /// the kernel socket buffer are saturated — matching libwayland-server's
-    /// overflow policy.
+    /// attempted.  If both the buffer and the kernel socket buffer are
+    /// saturated (client truly unresponsive) the client is *flagged*
+    /// disconnected and `Err(Disconnected)` is returned — matching
+    /// libwayland-server's overflow policy.  The connection slot is **not**
+    /// freed here: reclaiming it (and tearing down any owner-side state keyed
+    /// on this client) is the responsibility of the single teardown funnel,
+    /// driven via [`take_disconnected`].  See that method for the rationale.
     pub fn queue_event(&mut self, client: usize, event: &Event) -> Result<(), ProtocolError> {
         // Encode the payload into a scratch buffer (no length header — WriteBuf
         // adds its own framing, identical to Connection's wire format).
@@ -229,14 +248,9 @@ impl Server {
         // Buffer full — emergency flush to make room.
         match c.write_buf.flush(c.conn.fd()) {
             Ok(_) => {}
-            Err(ProtocolError::Disconnected) => {
-                let idx = client;
-                self.disconnect(idx);
-                return Err(ProtocolError::Disconnected);
-            }
             Err(_) => {
-                let idx = client;
-                self.disconnect(idx);
+                // Broken pipe / EOF / IO: peer is gone.  Flag, don't free.
+                self.mark_disconnected(client);
                 return Err(ProtocolError::Disconnected);
             }
         }
@@ -251,28 +265,28 @@ impl Server {
         }
 
         // Buffer AND kernel socket both full — client is genuinely stuck.
-        self.disconnect(client);
+        self.mark_disconnected(client);
         Err(ProtocolError::Disconnected)
     }
 
     /// Non-blocking flush of all clients' write buffers.
     ///
-    /// Call once per frame.  Clients whose flush hits a hard error
-    /// (broken pipe, EOF) are disconnected.  `EAGAIN` is benign — data
-    /// stays buffered for the next frame.
+    /// Call once per frame.  Clients whose flush hits a hard error (broken
+    /// pipe, EOF) are *flagged* disconnected — the common signal that a GUI
+    /// client was killed, since the compositor continuously sends it input
+    /// and frame events.  `EAGAIN` is benign — data stays buffered for the
+    /// next frame.  Flagged clients are reclaimed by the owner via
+    /// [`take_disconnected`]; the slot is not freed here.
     pub fn flush_clients(&mut self) {
         for i in 0..MAX_CLIENTS {
-            let should_disconnect = match self.clients.get_mut(i) {
+            let died = match self.clients.get_mut(i) {
                 Some(Some(c)) if c.active && !c.write_buf.is_empty() => {
-                    match c.write_buf.flush(c.conn.fd()) {
-                        Ok(_) => false,
-                        Err(_) => true,
-                    }
+                    c.write_buf.flush(c.conn.fd()).is_err()
                 }
                 _ => false,
             };
-            if should_disconnect {
-                self.disconnect(i);
+            if died {
+                self.mark_disconnected(i);
             }
         }
     }
@@ -285,8 +299,9 @@ impl Server {
     /// Probe a client for disconnection without consuming any messages.
     ///
     /// Performs a non-blocking `recv()` into the connection's read buffer.
-    /// If EOF is detected, marks the client as disconnected and returns
-    /// `true`.  Any data received is buffered for the next `recv_request`.
+    /// If EOF is detected, flags the client disconnected and returns `true`.
+    /// Any data received is buffered for the next `recv_request`.  The slot
+    /// is reclaimed by the owner via [`take_disconnected`].
     pub fn probe_disconnected(&mut self, client: usize) -> bool {
         match self.clients.get_mut(client) {
             Some(Some(c)) if c.active => {
@@ -299,6 +314,48 @@ impl Server {
             }
             _ => false,
         }
+    }
+
+    /// Flag a client as disconnected without freeing its slot.
+    ///
+    /// This is the *detection* half of the single teardown funnel.  Every
+    /// path that observes a dead peer (broken pipe on flush, write-buffer
+    /// overflow, recv EOF) routes here, leaving the connection slot
+    /// allocated but inactive.  The owner reclaims it — and tears down any
+    /// state keyed on the client index — through [`take_disconnected`].
+    /// Mirrors how libwayland-server splits disconnect *detection* (event
+    /// loop sees `EPOLLHUP`) from disconnect *teardown* (`wl_client_destroy`
+    /// walks and destroys the client's resources).
+    fn mark_disconnected(&mut self, client: usize) {
+        if let Some(Some(c)) = self.clients.get_mut(client) {
+            c.active = false;
+        }
+    }
+
+    /// Collect the indices of every client flagged disconnected but not yet
+    /// reclaimed, writing them into `out` and returning the count.
+    ///
+    /// The slots stay allocated: the caller is expected to run per-client
+    /// teardown (e.g. destroy the client's surfaces) and then call
+    /// [`disconnect`] for each returned index.  This is the choke point that
+    /// makes connection teardown a single funnel — a slot transitions to
+    /// freed *only* after the owner has been given the chance to clean up,
+    /// so owner-side state can never be orphaned by an internally-detected
+    /// disconnect.
+    pub fn take_disconnected(&mut self, out: &mut [usize]) -> usize {
+        let mut n = 0;
+        for (i, slot) in self.clients.iter().enumerate() {
+            if n >= out.len() {
+                break;
+            }
+            if let Some(c) = slot {
+                if !c.active {
+                    out[n] = i;
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Disconnect and clean up a client slot.
@@ -358,7 +415,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Client connections are dropped via Box<[Option<ClientConn>]>,
+        // Client connections are dropped via Box<[Option<Box<ClientConn>>]>,
         // each Connection::drop closes its FD. But the listen FD is
         // owned directly and must be closed explicitly.
         let _ = Sys::close(self.listen_fd);

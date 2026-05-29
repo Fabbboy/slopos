@@ -4,8 +4,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_arch::cpu;
+use slopos_ostd::KBTreeMap;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::sync::PreemptGuard;
+use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::klog_info;
@@ -1191,15 +1193,8 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     if !current.is_null() && task_id_of(current) == Some(task_id) {
         return -1; // self-wait rejected
     }
+    let waiter_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
 
-    let _ref_guard = super::task::TaskRefGuard::new(target);
-
-    // `_ref_guard` keeps `target`'s slot alive across the potential
-    // yield, so its id and exit_info cell stay valid for the duration of
-    // the wait. Memory ordering: the producer's `try_set` is Release;
-    // `is_set` (Acquire, evaluated under the event-bus queue's SpinLock)
-    // is the matching consumer. The SpinLock pair on both sides supplies
-    // the bidirectional full barrier.
     let Some(target_id) = task_id_of(target) else {
         return 0;
     };
@@ -1207,16 +1202,85 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return 0;
     };
 
-    // The `task_is_exited` fallback covers the case where the
-    // target's status flips to Zombie/Terminated via a path that has
-    // not (yet) published exit_info — defensive, but cheap. The exit-cell
-    // re-check also makes a colliding `ChildExit` bucket harmless.
+    // Hold a reference on `target` for the whole wait so its slot — and the
+    // `exit_cell` we read in the predicate below — cannot be recycled while
+    // we are parked. Memory ordering: the producer's `try_set` is Release;
+    // `is_set` (Acquire, evaluated under the event-bus queue's SpinLock) is
+    // the matching consumer; the SpinLock pair supplies the full barrier.
+    //
+    // The reference is recorded in WAIT_REFS keyed by this waiter so it is
+    // released exactly once — either here on the normal wake path
+    // (`wait_ref_release`), or by `release_wait_ref` from the task-teardown
+    // path if this waiter is SIGKILL'd while parked. SlopOS tears a blocked
+    // task down asynchronously (its kernel stack, and any RAII guard on it,
+    // is never unwound on async kill), so a plain stack `TaskRefGuard` would
+    // leak its incref and pin the target's zombie slot forever
+    // (`reap_zombies` gates on refcnt==0). Tying the release to the task's
+    // kernel-object lifecycle — the map entry IS the reference, and the
+    // atomic `remove` elects the single releaser — mirrors `futex_remove_task`
+    // and is the correct pattern under this kill model.
+    wait_ref_acquire(waiter_id, target);
+
+    // The `task_is_exited` fallback covers the case where the target's status
+    // flips to Zombie/Terminated via a path that has not (yet) published
+    // exit_info — defensive, but cheap. The exit-cell re-check also makes a
+    // colliding `ChildExit` bucket harmless.
     let _ = BUS
         .subscribe(KernelEvent::ChildExit {
             task: TaskSlot(target_id),
         })
         .wait_event(|| exit_cell.is_set() || task_is_exited(target));
+
+    wait_ref_release(waiter_id);
     0
+}
+
+// ── waitpid wait-reference tracking (kill-safe) ─────────────────────────────
+//
+// `task_wait_for` increfs its target for the duration of the wait. Because a
+// blocked task that is killed never unwinds its own stack, that incref cannot
+// be released by a stack guard — it must be released from the task-teardown
+// path. WAIT_REFS records the held reference per waiting task; whoever removes
+// the entry (normal wake or kill teardown) performs the lone `dec_ref`.
+static WAIT_REFS: SpinLock<KBTreeMap<u32, KernelSync<*mut Task>>> =
+    SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
+
+fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
+    if waiter_id == INVALID_TASK_ID || target.is_null() {
+        return;
+    }
+    let _ = task_inc_ref(target);
+    let stale = {
+        let mut map = WAIT_REFS.lock();
+        map.insert(waiter_id, KernelSync::new(target))
+    };
+    // A task can only be parked in one wait at a time; a pre-existing entry
+    // would be a bug, but release it defensively rather than leak.
+    if let Some(prev) = stale {
+        let prev = *prev;
+        if !prev.is_null() {
+            let _ = super::task::task_dec_ref(prev);
+        }
+    }
+}
+
+fn wait_ref_release(waiter_id: u32) {
+    let entry = { WAIT_REFS.lock().remove(&waiter_id) };
+    if let Some(target) = entry {
+        let target = *target;
+        if !target.is_null() {
+            let _ = super::task::task_dec_ref(target);
+        }
+    }
+}
+
+/// Release the wait reference (if any) held by a task being torn down.
+///
+/// Called from `mark_task_terminated` so a waiter SIGKILL'd while parked in
+/// `task_wait_for` still drops the incref it holds on its target. No-op for
+/// tasks that hold none. Mirrors `futex_remove_task`.
+pub fn release_wait_ref(waiter_id: u32) {
+    wait_ref_release(waiter_id);
 }
 
 pub fn unblock_task(task: *mut Task) -> c_int {

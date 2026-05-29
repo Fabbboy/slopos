@@ -1,5 +1,8 @@
 use core::ffi::c_int;
 
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::{KBTreeMap, KVec};
+
 use super::open_file_table::{
     get_open_file_mut, incref_open_file, pack_open_file_token, release_open_file,
     unpack_open_file_token,
@@ -181,6 +184,74 @@ pub fn file_poll_unfused_by_idx(open_file_token: u64) {
         // Drop the extra reference that file_poll_fused() took.
         release_open_file(&mut state.open_files, open_file_handle);
     });
+}
+
+// ── Poll-registration leak guard (task-lifecycle teardown) ──────────────────
+//
+// `file_poll_fused` takes an extra `incref_open_file` per registered fd to
+// keep the OpenFile (and its backend) alive while the caller is parked on a
+// wait queue. Normally `syscall_poll` / `syscall_select` release those refs
+// via `file_poll_unfused_by_idx` the moment the task wakes. But a task that is
+// SIGKILL'd *while blocked* never resumes its syscall, so that release is
+// skipped and the extra refs leak — the OpenFile's refcount never reaches
+// zero, so `ops.release()` (e.g. `unix_close`, which signals peer EOF) never
+// runs and the backend lingers forever (manifesting as a compositor window
+// that survives the death of its client).
+//
+// The fix mirrors `futex_remove_task`: every outstanding poll registration is
+// recorded per-task here, and the registered cleanup hook
+// (`fileio_poll_cleanup_task`) releases them during task termination — which
+// runs *before* the fd table is torn down, so the entry-ref release that
+// follows can drive the refcount to zero and fire the backend release. This
+// ties poll-reference cleanup to the task's kernel-object lifecycle rather
+// than to cooperative syscall return.
+static POLL_REGISTRATIONS: SpinLock<KBTreeMap<u32, KVec<u64>>> =
+    SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
+
+/// Record the set of open-file tokens `task_id` registered for poll, replacing
+/// any previously-recorded set. Called immediately before the task blocks.
+pub fn file_poll_track_registrations(task_id: u32, tokens: &[u64]) {
+    let mut map = POLL_REGISTRATIONS.lock();
+    match map.get_mut(&task_id) {
+        Some(existing) => {
+            existing.clear();
+            let _ = existing.extend_from_slice(tokens);
+        }
+        None => {
+            if let Ok(mut v) = KVec::with_capacity(tokens.len()) {
+                let _ = v.extend_from_slice(tokens);
+                let _ = map.insert(task_id, v);
+            }
+        }
+    }
+}
+
+/// Clear `task_id`'s recorded registrations after the task has released them
+/// itself (the normal poll/select wake path). The (now-empty) entry is kept so
+/// its capacity is reused on the next poll iteration.
+pub fn file_poll_clear_registrations(task_id: u32) {
+    let mut map = POLL_REGISTRATIONS.lock();
+    if let Some(existing) = map.get_mut(&task_id) {
+        existing.clear();
+    }
+}
+
+/// Task-resource cleanup hook: release any poll-registration refs a dying task
+/// never got to release. Registered via `register_task_resource_cleanup_hook`
+/// at fs init. Safe to call for any task (no-op if it had none).
+pub fn fileio_poll_cleanup_task(task_id: u32) {
+    // Take the token list out under the tracker lock, then drop the lock
+    // before reaching into the open-files table (RESOURCE) to keep the two
+    // locks from ever being held simultaneously.
+    let tokens = {
+        let mut map = POLL_REGISTRATIONS.lock();
+        map.remove(&task_id)
+    };
+    if let Some(tokens) = tokens {
+        for &token in tokens.iter() {
+            file_poll_unfused_by_idx(token);
+        }
+    }
 }
 
 pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {

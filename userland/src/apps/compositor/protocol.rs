@@ -7,7 +7,7 @@ use core::num::NonZeroU32;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
-use slopos_protocol::server::Server;
+use slopos_protocol::server::{MAX_CLIENTS, Server};
 use slopos_protocol::types::{
     Event, MAX_STRING_LEN, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId, ToplevelId, caps,
 };
@@ -958,25 +958,30 @@ impl ProtocolBridge {
 
     // ── Client cleanup ─────────────────────────────────────────────────────
 
-    /// Detect client disconnections that may have been missed.
+    /// Detect and reap client disconnections.
     ///
-    /// Disconnections are primarily detected by `process_requests()`
-    /// when `recv` returns `Disconnected`.  This method handles the
-    /// edge case where a client disconnects between `process_requests`
-    /// calls without sending any data.
+    /// Two detection sources converge here, both routed through the single
+    /// teardown funnel ([`cleanup_client`]):
     ///
-    /// Uses `probe_disconnected()` which does a non-blocking recv into
-    /// the read buffer — any data that arrives is preserved for the
-    /// next `process_requests()` call.  No framed messages are consumed.
+    /// 1. `probe_disconnected()` does a non-blocking recv into the read
+    ///    buffer to catch a client that closed without sending data (no
+    ///    framed messages are consumed; any bytes are preserved for the
+    ///    next `process_requests`).  On EOF it flags the client dead.
+    /// 2. The Server independently flags clients dead when a flush hits a
+    ///    broken pipe or a write buffer overflows — the usual signal that a
+    ///    GUI client was *killed*, since the compositor continuously sends
+    ///    it input and frame events.
+    ///
+    /// `take_disconnected()` returns every flagged-but-unreaped client from
+    /// both sources; we destroy each one's surfaces and free its slot.
+    /// Because a connection slot is freed *only* on this path, an active
+    /// surface always implies a live owning connection — a killed client can
+    /// never leave a ghost window behind.
     pub fn cleanup_disconnected(&mut self) {
-        for idx in 0..32 {
-            if !self.server.is_connected(idx) {
-                continue;
-            }
-            if self.server.probe_disconnected(idx) {
-                self.cleanup_client(idx);
-            }
+        for idx in 0..MAX_CLIENTS {
+            self.server.probe_disconnected(idx);
         }
+        self.reap_disconnected_clients();
     }
 
     /// Build poll FDs for the listen socket + all connected clients.
@@ -987,11 +992,21 @@ impl ProtocolBridge {
     /// Flush all per-client write buffers to their sockets (non-blocking).
     ///
     /// Call once per frame.  EAGAIN is absorbed — data stays buffered for
-    /// the next frame.  Hard errors disconnect the client.
+    /// the next frame.  A hard error flags the client dead inside the Server;
+    /// we immediately drain those through the teardown funnel so a killed
+    /// client's window is gone within the same frame.
     pub fn flush_all(&mut self) {
         self.server.flush_clients();
+        self.reap_disconnected_clients();
     }
 
+    /// The single client-teardown funnel.
+    ///
+    /// Destroys every surface owned by `client_idx`, then frees the Server
+    /// connection slot.  This is the only place a connection slot is freed,
+    /// mirroring libwayland-server's `wl_client_destroy`: detection is split
+    /// across many call sites, but teardown — surfaces first, then the
+    /// connection — happens in exactly one place.
     fn cleanup_client(&mut self, client_idx: usize) {
         for i in 0..MAX_SURFACES {
             if self.surfaces[i].active && self.surfaces[i].client_idx == client_idx {
@@ -999,6 +1014,18 @@ impl ProtocolBridge {
             }
         }
         self.server.disconnect(client_idx);
+    }
+
+    /// Drain every client the Server has flagged disconnected and run each
+    /// through the teardown funnel.  Called after both detection passes
+    /// (`probe_disconnected` in `cleanup_disconnected`, flush errors in
+    /// `flush_all`).
+    fn reap_disconnected_clients(&mut self) {
+        let mut dead = [0usize; MAX_CLIENTS];
+        let n = self.server.take_disconnected(&mut dead);
+        for &idx in &dead[..n] {
+            self.cleanup_client(idx);
+        }
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
