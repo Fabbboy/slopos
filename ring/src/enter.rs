@@ -1,10 +1,12 @@
 //! `ring_setup` / `ring_enter` implementation (SLOPRING § 6, § 7, § 8).
 //!
 //! Both are **synchronous** kernel functions. `ring_enter`'s submit and
-//! CQE-post bookkeeping run under the registry lock (the per-ring
-//! serialization, SLOPRING § 6.3); the harvest *block* runs outside it,
-//! registering the *calling task* on each in-flight fd's resource queue
-//! (the poll/select shape, caller-as-waiter — SLOPRING § 7.1).
+//! CQE-post bookkeeping run under the per-ring serialization lock
+//! (SLOPRING § 6.3); the harvest *block* runs outside it, registering
+//! the *calling task* on each in-flight fd's resource queue (the
+//! poll/select shape, caller-as-waiter — SLOPRING § 7.1). The global
+//! registry-table lock is held only briefly inside `registry::with_ring`
+//! to clone the ring handle, never across the fileio probe or the block.
 
 use core::ffi::c_int;
 
@@ -181,7 +183,7 @@ pub fn ring_enter(
         return eno(Errno::EBADF);
     }
 
-    // ---- Submit phase (under the registry / per-ring lock) ----
+    // ---- Submit phase (under the per-ring lock only) ----
     let submit_result = registry::with_ring(raw_handle, |ring| submit(pid, ring, to_submit));
     let n_submitted = match submit_result {
         Ok(n) => n,

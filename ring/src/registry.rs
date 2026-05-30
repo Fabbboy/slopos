@@ -10,6 +10,7 @@
 //! entered from a process other than its creator (defence in depth on
 //! top of the close-on-fork fd policy, SLOPRING § 14).
 
+use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleError, HandleTable};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
@@ -27,23 +28,38 @@ const MAX_RINGS: usize = 256;
 const SLOT_BITS: u32 = 12;
 const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 
-static REGISTRY: SpinLock<Option<HandleTable<Ring>>> = SpinLock::new(None, LOCK_LEVEL_REGISTRY);
+/// One registry slot: a reference-counted, individually-locked ring
+/// (SLOPRING § 6.3, § 9). The per-ring [`SpinLock`] is the per-ring
+/// serialization lock; the [`KArc`] keeps the ring alive for a
+/// `with_ring` caller even if a concurrent `close` removes it from the
+/// table (no UAF). Lock level [`LOCK_LEVEL_REGISTRY`] — same rank as the
+/// table lock, which is legal because the table lock is always dropped
+/// before any per-ring lock is taken, so the dependency graph stays
+/// acyclic (the cycle detector is level-advisory, edge-based).
+type RingSlot = KArc<SpinLock<Ring>>;
+
+/// The global registry-table lock. Held only briefly: to insert, to
+/// remove, or to look up and **clone** a [`RingSlot`] handle. It is
+/// never held while a per-ring lock is held — that decoupling is what
+/// keeps the close path (`FILEIO_SLOT → REGISTRY`) from forming a cycle
+/// with the enter path (per-ring lock → `FILEIO_SLOT`).
+static REGISTRY: SpinLock<Option<HandleTable<RingSlot>>> = SpinLock::new(None, LOCK_LEVEL_REGISTRY);
 
 /// Pack a [`Handle<Ring>`] into the `usize` stored in the fd's open-file
 /// handle field. Lossless for slot < 4096 and generation < 2^52.
-fn pack(h: Handle<Ring>) -> usize {
+fn pack(h: Handle<RingSlot>) -> usize {
     (((h.generation() & ((1 << 52) - 1)) << SLOT_BITS) | (h.slot() as u64 & SLOT_MASK)) as usize
 }
 
 /// Inverse of [`pack`].
-fn unpack(raw: usize) -> Handle<Ring> {
+fn unpack(raw: usize) -> Handle<RingSlot> {
     let raw = raw as u64;
     let slot = (raw & SLOT_MASK) as u32;
     let generation = raw >> SLOT_BITS;
     Handle::from_parts(slot, generation)
 }
 
-fn with_registry<R>(f: impl FnOnce(&mut HandleTable<Ring>) -> R) -> R {
+fn with_registry<R>(f: impl FnOnce(&mut HandleTable<RingSlot>) -> R) -> R {
     let mut guard = REGISTRY.lock();
     let table = guard.get_or_insert_with(|| {
         HandleTable::with_fixed_capacity(MAX_RINGS).expect("ring registry alloc")
@@ -51,30 +67,47 @@ fn with_registry<R>(f: impl FnOnce(&mut HandleTable<Ring>) -> R) -> R {
     f(table)
 }
 
+/// Look up and **clone** the [`RingSlot`] for a packed fd handle. The
+/// table lock is dropped on return (the clone — a refcount bump — keeps
+/// the ring alive). Callers then take the per-ring lock outside the
+/// table lock, which is the load-bearing decoupling.
+fn slot_for(raw_handle: usize) -> Result<RingSlot, HandleError> {
+    let h = unpack(raw_handle);
+    with_registry(|t| t.get(h).map(|a| a.clone()))
+}
+
 /// Insert a fresh ring; returns the packed fd-handle value, or `None`
-/// if the registry is full.
+/// if the registry is full or the per-ring allocation fails.
 pub fn insert(ring: Ring) -> Option<usize> {
-    with_registry(|t| t.insert(ring).ok().map(pack))
+    let slot = KArc::try_new(SpinLock::new(ring, LOCK_LEVEL_REGISTRY)).ok()?;
+    with_registry(|t| t.insert(slot).ok().map(pack))
 }
 
 /// Run `f` with a mutable borrow of the ring named by the packed fd
-/// handle, holding the registry lock for the duration. Returns
+/// handle, holding **only the per-ring lock** for the closure. Returns
 /// `Err(HandleError)` for a stale / out-of-range / foreign handle.
 ///
-/// The closure runs **under the registry lock**, which doubles as the
-/// per-ring serialization lock (SLOPRING § 6.3) for the submit and
-/// CQE-post bookkeeping — two threads racing `ring_enter` on one fd are
-/// serialized here. The harvest *block* must run outside this lock; the
-/// caller drops it before sleeping (see `enter.rs`).
+/// The closure runs under the per-ring serialization lock (SLOPRING
+/// § 6.3) for the submit and CQE-post bookkeeping — two threads racing
+/// `ring_enter` on one fd are serialized here, while distinct rings
+/// proceed concurrently. The global registry-table lock is acquired
+/// only to clone the ring's [`RingSlot`] handle and is **released
+/// before** the per-ring lock is taken, so no `REGISTRY → per-ring`
+/// edge exists. The harvest *block* must still run outside the per-ring
+/// lock; the caller drops it before sleeping (see `enter.rs`).
 pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result<R, HandleError> {
-    let h = unpack(raw_handle);
-    with_registry(|t| t.get_mut(h).map(f))
+    let slot = slot_for(raw_handle)?;
+    let mut ring = slot.lock();
+    Ok(f(&mut ring))
 }
 
-/// Remove and drop a ring (last fd closed — SLOPRING § 14). The ring's
-/// `Drop` releases the kernel's `RingMeta` frame refs; any user PTE
-/// still mapped holds its own ref, so frames survive until the mapping
-/// is torn down too. Safe to call on a stale handle (no-op).
+/// Remove a ring from the table (last fd closed — SLOPRING § 14). This
+/// drops only the **table's** [`KArc`] reference; the [`Ring`] is freed
+/// when the last clone drops — so a concurrent `with_ring` that already
+/// cloned the slot keeps the ring alive until it finishes (no UAF). The
+/// ring's `Drop` then releases the kernel's `RingMeta` frame refs; any
+/// user PTE still mapped holds its own ref, so frames survive until the
+/// mapping is torn down too. Safe to call on a stale handle (no-op).
 pub fn remove(raw_handle: usize) {
     let h = unpack(raw_handle);
     with_registry(|t| {
@@ -83,10 +116,14 @@ pub fn remove(raw_handle: usize) {
 }
 
 /// `true` iff the packed handle resolves to a live ring owned by
-/// `pid`. Used by `ring_enter` to reject foreign / stale rings.
+/// `pid`. Used by `ring_enter` to reject foreign / stale rings. Clones
+/// the slot under the table lock, releases it, then reads `owner_pid`
+/// under the per-ring lock — never holding both at once.
 pub fn owner_is(raw_handle: usize, pid: u32) -> bool {
-    let h = unpack(raw_handle);
-    with_registry(|t| matches!(t.get(h), Ok(r) if r.owner_pid == pid))
+    match slot_for(raw_handle) {
+        Ok(slot) => slot.lock().owner_pid == pid,
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
