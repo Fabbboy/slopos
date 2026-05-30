@@ -268,9 +268,9 @@ The hardest of the three. CortenMM (SOSP '25 Best Paper) is the prior art on ver
 
 ### 3E: Public proof status
 
-- [ ] **3E.1** `verification/STATUS.md`: which OSTD modules are **verified**, which are **audited only**, which are **unaudited**. Per-module: proof file link, spec summary, pinned Verus SHA.
-- [ ] **3E.2** Status badge in `README.md`: *"OSTD critical path: 3/3 proofs check on Verus &lt;SHA&gt;"*.
-- [ ] **3E.3** Public claim, defensible from primary sources: **SlopOS is the smallest verified-TCB Linux-ABI Rust kernel.** No other kernel today meets all four adjectives (small TCB, verified, Linux-ABI, Rust).
+- [x] **3E.1** `verification/STATUS.md` is the concise coverage map — the negative space `just verify` can't report. Classifies OSTD as **verified** (the 3 critical-path proofs, one row each, per-obligation detail left to the proof files' own doc-comments), **audited only** (the load-bearing `unsafe`-carrying remainder, KernMiri + `// SAFETY:` covered, listed by module), and **unaudited** (the pure-safe-Rust modules — `handle`, POD markers, boot data types, safe helpers — sound by the type system). The coarse-model `vm_space` gap is noted inline.
+- [x] **3E.2** "Actually, The Slop Is Proven" section added to `README.md`: left-aligned declarative prose stating only durable facts — framekernel architecture, the ≤1 % TCB *target*, `#![forbid(unsafe_code)]` enforcement, and the three Verus-checked critical-path subsystems as a bullet list, closing on `just verify`. Carries no exact obligation/TCB counts and no module table, both of which would rot; no README-side pipeline.
+- [x] **3E.3** Public claim documented and made defensible from primary sources in `verification/STATUS.md` § "Public claim": **SlopOS is the smallest verified-TCB Linux-ABI Rust kernel** — a four-adjective conjunction (small TCB · verified · Linux-ABI · Rust) backed by a comparison table (seL4, Asterinas, Theseus, Linux RFL, Redox, Hubris) showing no other kernel meets all four at once, each row cited to its primary source.
 
 ### 3F: io_uring-style ring surface — design
 

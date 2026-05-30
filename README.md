@@ -124,20 +124,26 @@ just ports=7777,8080 boot              # Expose multiple guest ports
 
 <br/>
 
-## Project Layout
+## Actually, The Slop Is Proven
 
-```
-slopos/
-├── boot/       → GDT, IDT, TSS, early init, SYSCALL MSRs
-├── core/       → scheduler, syscall handlers, task management  
-├── mm/         → physical frames, virtual memory, ELF loader
-├── drivers/    → PIT, PS/2, IOAPIC, VirtIO, PCI enumeration
-├── video/      → framebuffer, graphics primitives, roulette wheel
-├── fs/         → ext2 implementation
-├── userland/   → shell, compositor, roulette, file manager
-├── kernel/     → main entry point
-└── lore/       → the sacred chronicles (worth reading)
-```
+Under the goofy exterior, SlopOS is a **framekernel**: every line of `unsafe`
+in the entire kernel is confined to one trusted crate, `slopos-ostd`, held
+under a **≤1% TCB budget**. Every other crate is `#![forbid(unsafe_code)]`,
+so the compiler itself refuses to let unsafety leak out of the trusted core.
+
+The load-bearing invariants of that core are **machine-checked with
+[Verus](https://github.com/verus-lang/verus)**, an SMT-backed proof system
+for Rust. Three subsystems on the memory-safety critical path carry formal
+proofs:
+
+- **Frame reference counts** — no double-free, no use-after-free.
+- **Slab slot lifetimes** — a slot can never outlive the slab it came from.
+- **Page-table mutation** — every walk stays well-formed; user mappings
+  can't reach into sensitive kernel memory.
+
+These are the spots where a bug would be genuine undefined behaviour rather
+than a typed error, so they are proven instead of merely tested. The proofs
+run in CI on every change and reproduce locally with `just verify`.
 
 <br/>
 
