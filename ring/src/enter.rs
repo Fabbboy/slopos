@@ -30,8 +30,12 @@ const PAGE_SIZE: u64 = 4096;
 /// Cap a single harvest re-poll sleep so a wakeup we missed is bounded.
 const MAX_SLEEP_MS: u32 = 50;
 
+/// Negated-errno return value. `Errno::raw()` is *already* negative
+/// (`-EAGAIN` etc.), so this returns it as-is — negating it would yield a
+/// positive value that the syscall layer's `rc < 0` check and userland's
+/// `res < 0` CQE check would both read as success.
 fn eno(e: Errno) -> i32 {
-    -(e.raw() as i32)
+    e.raw()
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +81,7 @@ pub fn ring_setup(
     params.region_addr = user_addr;
     // Re-write region_addr into the shared header so userland can read
     // it from the mapping too.
-    if region.copy_in(0, &params_header_bytes(&params)).is_err() {
+    if region.copy_in(0, &params.to_bytes()).is_err() {
         // best effort; user out-copy below is authoritative
     }
 
@@ -132,9 +136,7 @@ fn write_initial_region(
     params: &slopos_abi::ring::RingParams,
 ) -> Result<(), ()> {
     // Header.
-    region
-        .copy_in(0, &params_header_bytes(params))
-        .map_err(|_| ())?;
+    region.copy_in(0, &params.to_bytes()).map_err(|_| ())?;
     // Masks.
     region
         .store_u32_release(layout.sq_off_mask as usize, layout.sq_entries - 1)
@@ -157,41 +159,6 @@ fn write_initial_region(
         .store_u32_release(layout.cq_off_tail as usize, 0)
         .map_err(|_| ())?;
     Ok(())
-}
-
-/// Serialize a `RingParams` into its 64-byte-prefixed header bytes. The
-/// header lives at region offset 0 within the first page.
-fn params_header_bytes(
-    p: &slopos_abi::ring::RingParams,
-) -> [u8; core::mem::size_of::<slopos_abi::ring::RingParams>()] {
-    // `RingParams` is `#[repr(C)]` plain integers; build the byte image
-    // field-by-field to avoid any reference-to-untyped-frame concern
-    // (we only ever copy bytes into the UFrame).
-    let mut b = [0u8; core::mem::size_of::<slopos_abi::ring::RingParams>()];
-    let mut o = 0usize;
-    let put32 = |b: &mut [u8], o: &mut usize, v: u32| {
-        b[*o..*o + 4].copy_from_slice(&v.to_le_bytes());
-        *o += 4;
-    };
-    put32(&mut b, &mut o, p.sq_entries);
-    put32(&mut b, &mut o, p.cq_entries);
-    put32(&mut b, &mut o, p.flags);
-    put32(&mut b, &mut o, p._pad0);
-    put32(&mut b, &mut o, p.sq_off_head);
-    put32(&mut b, &mut o, p.sq_off_tail);
-    put32(&mut b, &mut o, p.sq_off_mask);
-    put32(&mut b, &mut o, p.sq_off_dropped);
-    put32(&mut b, &mut o, p.sq_off_array);
-    put32(&mut b, &mut o, p.cq_off_head);
-    put32(&mut b, &mut o, p.cq_off_tail);
-    put32(&mut b, &mut o, p.cq_off_mask);
-    put32(&mut b, &mut o, p.cq_off_overflow);
-    put32(&mut b, &mut o, p.cq_off_array);
-    put32(&mut b, &mut o, p._pad1);
-    b[o..o + 8].copy_from_slice(&p.region_addr.to_le_bytes());
-    o += 8;
-    b[o..o + 8].copy_from_slice(&p.region_bytes.to_le_bytes());
-    b
 }
 
 // ---------------------------------------------------------------------------

@@ -111,7 +111,7 @@ impl Ring {
         let cqe = Cqe {
             user_data,
             res,
-            // No multi-shot in 3G — F_MORE stays clear (reserved bit).
+            // No multi-shot support yet — F_MORE stays clear (reserved bit).
             flags: 0,
         };
         self.region

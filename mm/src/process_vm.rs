@@ -677,7 +677,7 @@ fn unmap_and_free_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, 
 /// neither "free" (the ring object owns the lifecycle) nor "nofree"
 /// (the PTE genuinely held a ref that must be released). Returns the
 /// number of pages unmapped.
-fn unmap_ring_range_dir(vm_space: &mut KArc<VmSpace>, _pid: u32, start: u64, end: u64) -> u32 {
+fn unmap_ring_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, end: u64) -> u32 {
     if !vma_range_valid(start, end) {
         return 0;
     }
@@ -690,6 +690,14 @@ fn unmap_ring_range_dir(vm_space: &mut KArc<VmSpace>, _pid: u32, start: u64, end
             unmapped += 1;
         }
         addr += PAGE_SIZE_4KB;
+    }
+    // The OSTD cursor-unmap only issues a *local* INVLPG; a ring region is
+    // routinely re-created at the same VA (each `Ring::setup` reuses the
+    // lowest mmap gap), so a task migrated to another CPU could otherwise
+    // read the prior ring's stale translation. Shoot down every CPU in the
+    // process's cpumask, exactly as the shared-memfd unmap path does.
+    if unmapped > 0 && pid != INVALID_PROCESS_ID {
+        tlb::flush_all_for_process(pid);
     }
     unmapped
 }

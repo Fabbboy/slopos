@@ -275,7 +275,23 @@ pub struct RingParams {
 
 const _: () = assert!(core::mem::size_of::<RingParams>() % 8 == 0);
 
+// The kernel copies `RingParams::to_bytes()` straight into the user's
+// `&mut RingParams` out-pointer, and userland reads it back as a
+// `#[repr(C)]` struct. For that to be sound the wire image MUST equal
+// the in-memory layout — including the 4 bytes of implicit padding the
+// compiler inserts before the first `u64` to 8-align it. These offsets
+// are asserted so any field reorder that shifts them fails the build
+// (a 4-byte skip here once mapped nc's ring to 0x300000000000).
+const _: () = assert!(core::mem::size_of::<RingParams>() == 80);
+const _: () = assert!(core::mem::offset_of!(RingParams, region_addr) == 64);
+const _: () = assert!(core::mem::offset_of!(RingParams, region_bytes) == 72);
+
 impl RingParams {
+    /// Length of the canonical little-endian byte image — exactly the
+    /// `#[repr(C)]` size, so a `to_bytes()` buffer can be reinterpreted
+    /// as a `RingParams` directly.
+    pub const SERIALIZED_LEN: usize = core::mem::size_of::<Self>();
+
     /// Zeroed params (every field 0). The kernel fills this in
     /// `ring_setup`.
     pub const ZERO: Self = Self {
@@ -297,6 +313,88 @@ impl RingParams {
         region_addr: 0,
         region_bytes: 0,
     };
+
+    /// Encode into the canonical little-endian byte image. Every field
+    /// is written at its true `offset_of!` position, so the image is
+    /// byte-identical to the `#[repr(C)]` memory layout (padding bytes
+    /// stay zero). The kernel copies this verbatim to the user
+    /// out-pointer; userland reinterprets the bytes as a `RingParams`,
+    /// so the two layouts cannot disagree.
+    pub fn to_bytes(&self) -> [u8; Self::SERIALIZED_LEN] {
+        let mut b = [0u8; Self::SERIALIZED_LEN];
+        macro_rules! put {
+            ($field:ident) => {{
+                const OFF: usize = core::mem::offset_of!(RingParams, $field);
+                let v = self.$field.to_le_bytes();
+                b[OFF..OFF + v.len()].copy_from_slice(&v);
+            }};
+        }
+        put!(sq_entries);
+        put!(cq_entries);
+        put!(flags);
+        put!(_pad0);
+        put!(sq_off_head);
+        put!(sq_off_tail);
+        put!(sq_off_mask);
+        put!(sq_off_dropped);
+        put!(sq_off_array);
+        put!(cq_off_head);
+        put!(cq_off_tail);
+        put!(cq_off_mask);
+        put!(cq_off_overflow);
+        put!(cq_off_array);
+        put!(_pad1);
+        put!(region_addr);
+        put!(region_bytes);
+        b
+    }
+
+    /// Decode the canonical little-endian byte image produced by
+    /// [`RingParams::to_bytes`]. Reads each field from its true
+    /// `offset_of!` position, so it is the exact inverse regardless of
+    /// any padding the compiler inserts.
+    pub fn from_bytes(b: &[u8; Self::SERIALIZED_LEN]) -> Self {
+        macro_rules! get32 {
+            ($field:ident) => {{
+                const OFF: usize = core::mem::offset_of!(RingParams, $field);
+                u32::from_le_bytes([b[OFF], b[OFF + 1], b[OFF + 2], b[OFF + 3]])
+            }};
+        }
+        macro_rules! get64 {
+            ($field:ident) => {{
+                const OFF: usize = core::mem::offset_of!(RingParams, $field);
+                u64::from_le_bytes([
+                    b[OFF],
+                    b[OFF + 1],
+                    b[OFF + 2],
+                    b[OFF + 3],
+                    b[OFF + 4],
+                    b[OFF + 5],
+                    b[OFF + 6],
+                    b[OFF + 7],
+                ])
+            }};
+        }
+        Self {
+            sq_entries: get32!(sq_entries),
+            cq_entries: get32!(cq_entries),
+            flags: get32!(flags),
+            _pad0: get32!(_pad0),
+            sq_off_head: get32!(sq_off_head),
+            sq_off_tail: get32!(sq_off_tail),
+            sq_off_mask: get32!(sq_off_mask),
+            sq_off_dropped: get32!(sq_off_dropped),
+            sq_off_array: get32!(sq_off_array),
+            cq_off_head: get32!(cq_off_head),
+            cq_off_tail: get32!(cq_off_tail),
+            cq_off_mask: get32!(cq_off_mask),
+            cq_off_overflow: get32!(cq_off_overflow),
+            cq_off_array: get32!(cq_off_array),
+            _pad1: get32!(_pad1),
+            region_addr: get64!(region_addr),
+            region_bytes: get64!(region_bytes),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,5 +583,62 @@ mod tests {
         assert_eq!(p.sq_off_array, l.sqe_array_off);
         assert_eq!(p.cq_off_array, l.cqe_array_off);
         assert_eq!(p.flags, SLOPRING_FEAT_SINGLE_MMAP);
+    }
+
+    /// Regression guard: `to_bytes()` must place `region_addr` at the
+    /// struct's true offset (64), not at the naive 15-`u32` offset (60).
+    /// The 4-byte skip mapped nc's ring to `region_bytes << 32`
+    /// (0x300000000000 for a 16-entry ring) and page-faulted on first
+    /// touch.
+    #[test]
+    fn region_addr_serialized_at_struct_offset() {
+        assert_eq!(core::mem::offset_of!(RingParams, region_addr), 64);
+        assert_eq!(core::mem::offset_of!(RingParams, region_bytes), 72);
+
+        let mut p = RingParams::ZERO;
+        p.region_addr = 0xAABB_CCDD_1122_3344;
+        p.region_bytes = 0x3000;
+        let b = p.to_bytes();
+        assert_eq!(&b[64..72], &0xAABB_CCDD_1122_3344u64.to_le_bytes());
+        assert_eq!(&b[72..80], &0x3000u64.to_le_bytes());
+        // The buggy serializer wrote region_addr at 60; bytes 60..64 are
+        // `_pad1`'s tail and must be zero for ZERO params.
+        assert_eq!(&b[60..64], &[0u8; 4]);
+    }
+
+    /// `to_bytes()` / `from_bytes()` round-trip every field exactly.
+    /// Because `to_bytes()` writes each field at its `offset_of!`
+    /// position, the byte image is identical to the `#[repr(C)]` memory
+    /// layout — the invariant that lets userland reinterpret the kernel's
+    /// out-copy as a `RingParams` struct (verified by the offset asserts
+    /// above and `region_addr_serialized_at_struct_offset`).
+    #[test]
+    fn params_to_from_bytes_round_trip() {
+        let mut p = RingLayout::new(16).to_params();
+        p.region_addr = 0x4000_0000;
+        assert_eq!(RingParams::from_bytes(&p.to_bytes()), p);
+
+        // A fully-populated value (distinct bytes in every field) also
+        // round-trips, catching any field that to/from disagree on.
+        let p2 = RingParams {
+            sq_entries: 0x0102_0304,
+            cq_entries: 0x0506_0708,
+            flags: 0x090a_0b0c,
+            _pad0: 0x0d0e_0f10,
+            sq_off_head: 0x1112_1314,
+            sq_off_tail: 0x1516_1718,
+            sq_off_mask: 0x191a_1b1c,
+            sq_off_dropped: 0x1d1e_1f20,
+            sq_off_array: 0x2122_2324,
+            cq_off_head: 0x2526_2728,
+            cq_off_tail: 0x292a_2b2c,
+            cq_off_mask: 0x2d2e_2f30,
+            cq_off_overflow: 0x3132_3334,
+            cq_off_array: 0x3536_3738,
+            _pad1: 0x393a_3b3c,
+            region_addr: 0x4142_4344_4546_4748,
+            region_bytes: 0x494a_4b4c_4d4e_4f50,
+        };
+        assert_eq!(RingParams::from_bytes(&p2.to_bytes()), p2);
     }
 }

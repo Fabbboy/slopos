@@ -11,8 +11,10 @@
 //! gets back a [`CompletionFuture`]. Polling the future drains the ring's
 //! CQ (via a blocking `ring_enter`, so deferred completions progress —
 //! SLOPRING § 7.1) and resolves when the matching cookie arrives.
-//! Dropping an unresolved future submits an `OP_CANCEL` for its op —
-//! async cancellation belongs in userland.
+//! Cancellation is explicit: [`RingExecutor::cancel`] submits an
+//! `OP_CANCEL` for an unresolved future's op. (A `CompletionFuture` holds
+//! no handle to its executor, so it cannot self-cancel on drop — async
+//! cancellation is a deliberate call, not a destructor side effect.)
 
 use std::collections::HashMap;
 
@@ -111,6 +113,12 @@ impl RingExecutor {
     /// resolves. Drives the ring with a blocking `ring_enter` so deferred
     /// completions make progress (SLOPRING § 7.1/§ 8.3).
     pub fn block_on(&mut self, fut: &mut CompletionFuture) -> Result<i32, RingError> {
+        // Already resolved (e.g. a prior `poll` consumed its CQE)? Return
+        // the cached result instead of blocking forever on a completion
+        // that will never be re-posted.
+        if let Some(res) = fut.resolved {
+            return Ok(res);
+        }
         loop {
             // First, see if its completion already arrived.
             self.drain_cq();

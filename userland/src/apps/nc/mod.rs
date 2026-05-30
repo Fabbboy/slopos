@@ -4,6 +4,7 @@
 //! Supports UDP client and listen modes with half-duplex I/O, TCP client and
 //! listen (with `-k` keep-listening), and defaults to TCP.
 
+pub(super) mod ring_io;
 pub mod tcp;
 pub mod udp;
 

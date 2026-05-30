@@ -13,36 +13,6 @@ use slopos_mm::user_ptr::UserBytes as MmUserBytes;
 
 use crate::syscall::args::RawFd;
 
-/// Serialize a `RingParams` into its `#[repr(C)]` little-endian byte
-/// image (field-by-field, no reference into untyped memory).
-fn params_to_bytes(p: &RingParams) -> [u8; core::mem::size_of::<RingParams>()] {
-    let mut b = [0u8; core::mem::size_of::<RingParams>()];
-    let mut o = 0usize;
-    let mut put32 = |o: &mut usize, v: u32| {
-        b[*o..*o + 4].copy_from_slice(&v.to_le_bytes());
-        *o += 4;
-    };
-    put32(&mut o, p.sq_entries);
-    put32(&mut o, p.cq_entries);
-    put32(&mut o, p.flags);
-    put32(&mut o, p._pad0);
-    put32(&mut o, p.sq_off_head);
-    put32(&mut o, p.sq_off_tail);
-    put32(&mut o, p.sq_off_mask);
-    put32(&mut o, p.sq_off_dropped);
-    put32(&mut o, p.sq_off_array);
-    put32(&mut o, p.cq_off_head);
-    put32(&mut o, p.cq_off_tail);
-    put32(&mut o, p.cq_off_mask);
-    put32(&mut o, p.cq_off_overflow);
-    put32(&mut o, p.cq_off_array);
-    put32(&mut o, p._pad1);
-    b[o..o + 8].copy_from_slice(&p.region_addr.to_le_bytes());
-    o += 8;
-    b[o..o + 8].copy_from_slice(&p.region_bytes.to_le_bytes());
-    b
-}
-
 define_syscall!(syscall_ring_setup
     (ctx, entries: u32, params_ptr: u64)
     requires(let process_id: process_id)
@@ -58,7 +28,7 @@ define_syscall!(syscall_ring_setup
         .map_err(|_| Errno::EFAULT)?;
 
     let fd = slopos_ring::ring_setup(process_id, entries, |params| {
-        let bytes = params_to_bytes(params);
+        let bytes = params.to_bytes();
         let dst = MmUserBytes::try_new(params_ptr, bytes.len()).map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(dst, &bytes).map_err(|_| Errno::EFAULT)?;
         Ok(())

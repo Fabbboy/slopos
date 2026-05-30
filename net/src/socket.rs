@@ -2395,6 +2395,16 @@ pub fn socket_set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32 {
     0
 }
 
+/// Read a socket's stored non-blocking flag. Returns `None` for a stale /
+/// out-of-range index. Used by the SlopRing `OP_ACCEPT` glue to restore
+/// the listener's original mode after a forced-nonblocking probe.
+pub fn socket_is_nonblocking(sock_idx: u32) -> Option<bool> {
+    let table = NEW_SOCKET_TABLE.lock();
+    table
+        .get(sock_idx as usize)
+        .map(|sock| sock.is_nonblocking())
+}
+
 pub fn socket_set_timeouts(sock_idx: u32, recv_timeout_ms: u64, send_timeout_ms: u64) -> i32 {
     let mut table = NEW_SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {

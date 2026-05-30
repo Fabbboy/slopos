@@ -940,6 +940,15 @@ pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
     0
 }
 
+/// Read a Unix socket's stored non-blocking flag. Returns `None` for a
+/// stale handle. Used by the SlopRing `OP_ACCEPT` glue to restore the
+/// listener's original mode after a forced-nonblocking probe.
+pub fn unix_is_nonblocking(handle: SocketHandle) -> Option<bool> {
+    let state = UNIX_STATE.lock();
+    let i = validate_socket_handle(&state, handle)?;
+    Some(state.slots[i].nonblocking)
+}
+
 /// Return the bound path for a Unix socket, if any.
 pub fn unix_get_local_path(handle: SocketHandle) -> Option<[u8; UNIX_PATH_MAX]> {
     let state = UNIX_STATE.lock();

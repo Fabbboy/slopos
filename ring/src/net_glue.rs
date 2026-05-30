@@ -29,10 +29,13 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
 
     if ops.is_unix_socket() {
         let listener = SocketHandle::from_usize(handle);
-        // Force nonblocking across the accept, restore after.
+        // Force nonblocking across the accept, then restore the listener's
+        // *original* stored flag (not hard-coded blocking — that would
+        // clobber a listener the caller deliberately set nonblocking).
+        let was_nonblock = unix_socket::unix_is_nonblocking(listener).unwrap_or(false);
         let _ = unix_socket::unix_set_nonblocking(listener, true);
         let result = unix_socket::unix_accept(listener);
-        let _ = unix_socket::unix_set_nonblocking(listener, false);
+        let _ = unix_socket::unix_set_nonblocking(listener, was_nonblock);
         match result {
             Ok(accepted) => {
                 let new_fd = slopos_fs::fileio_open_fd_with_ops(
@@ -53,10 +56,12 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
         }
     } else {
         let sock_idx = handle as u32;
+        // Restore the listener's *original* stored flag after the probe.
+        let was_nonblock = socket::socket_is_nonblocking(sock_idx).unwrap_or(false);
         let _ = socket::socket_set_nonblocking(sock_idx, true);
         let accepted =
             socket::socket_accept(sock_idx, core::ptr::null_mut(), core::ptr::null_mut());
-        let _ = socket::socket_set_nonblocking(sock_idx, false);
+        let _ = socket::socket_set_nonblocking(sock_idx, was_nonblock);
         if accepted < 0 {
             let e = Errno::from_raw(accepted).unwrap_or(Errno::EINVAL);
             return if e == Errno::EAGAIN { Ok(None) } else { Err(e) };

@@ -302,7 +302,9 @@ fn cancel_missing_returns_enoent() -> TestResult {
         .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
         .unwrap();
     let cqe = Cqe::from_bytes(&bytes);
-    let enoent = -(slopos_abi::Errno::ENOENT.raw() as i32);
+    // `Errno::raw()` is already negative; the CQE carries the negated
+    // errno (`-ENOENT`) verbatim, matching the userland `res < 0` check.
+    let enoent = slopos_abi::Errno::ENOENT.raw();
     if cqe.user_data == 0xc1 && cqe.res == enoent {
         TestResult::Pass
     } else {

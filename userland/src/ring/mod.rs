@@ -184,3 +184,19 @@ impl Ring {
         }
     }
 }
+
+impl Drop for Ring {
+    /// Release the ring: unmap the shared region, then close the ring fd
+    /// (which drops the kernel-side `Ring` and its `Frame<RingMeta>`
+    /// refs). Without this, every `Ring::setup` would leak a mapping +
+    /// an fd for the process's lifetime.
+    fn drop(&mut self) {
+        let bytes = self.params.region_bytes;
+        if self.base != 0 && bytes != 0 {
+            let _ = crate::syscall::memory::munmap(self.base, bytes);
+        }
+        if self.fd >= 0 {
+            let _ = crate::syscall::memory::close(self.fd);
+        }
+    }
+}

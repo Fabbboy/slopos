@@ -33,7 +33,11 @@ pub enum Outcome {
     WouldBlock,
 }
 
-const EAGAIN: i32 = -(Errno::EAGAIN.raw() as i32);
+/// The would-block sentinel the fs/net probes return. `Errno::raw()` is
+/// *already* negative (`-11`), so this is `-EAGAIN` directly — negating
+/// it would yield `+11` and silently misclassify every would-block as an
+/// inline completion (the bug that made `OP_READ`/`OP_WRITE` never defer).
+const EAGAIN: i32 = Errno::EAGAIN.raw();
 
 /// `true` iff `res` is the `-EAGAIN` would-block sentinel.
 fn is_eagain(res: i64) -> bool {
@@ -68,8 +72,8 @@ pub fn probe(pid: u32, sqe: &Sqe) -> Outcome {
         OP_POLL_ADD => probe_poll(pid, sqe),
         // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the
         // ring object, not an fd). Reaching here is a logic error.
-        OP_TIMEOUT | OP_CANCEL => Outcome::Inline(-(Errno::EINVAL.raw() as i32)),
-        _ => Outcome::Inline(-(Errno::EINVAL.raw() as i32)),
+        OP_TIMEOUT | OP_CANCEL => Outcome::Inline(Errno::EINVAL.raw()),
+        _ => Outcome::Inline(Errno::EINVAL.raw()),
     }
 }
 
@@ -95,10 +99,10 @@ pub fn reprobe(pid: u32, row: &InFlight) -> Outcome {
 
 fn probe_read(pid: u32, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
-        return Outcome::Inline(-(Errno::EBADF.raw() as i32));
+        return Outcome::Inline(Errno::EBADF.raw());
     }
     let Some(mut buf) = UserWriteBuf::new(sqe.addr, sqe.len as usize) else {
-        return Outcome::Inline(-(Errno::EFAULT.raw() as i32));
+        return Outcome::Inline(Errno::EFAULT.raw());
     };
     let rc = file_read_fd_nonblock(pid, sqe.fd as c_int, &mut buf);
     if is_eagain(rc as i64) {
@@ -110,10 +114,10 @@ fn probe_read(pid: u32, sqe: &Sqe) -> Outcome {
 
 fn probe_write(pid: u32, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
-        return Outcome::Inline(-(Errno::EBADF.raw() as i32));
+        return Outcome::Inline(Errno::EBADF.raw());
     }
     let Some(buf) = UserReadBuf::new(sqe.addr, sqe.len as usize) else {
-        return Outcome::Inline(-(Errno::EFAULT.raw() as i32));
+        return Outcome::Inline(Errno::EFAULT.raw());
     };
     let rc = file_write_fd_nonblock(pid, sqe.fd as c_int, &buf);
     if is_eagain(rc as i64) {
@@ -125,25 +129,25 @@ fn probe_write(pid: u32, sqe: &Sqe) -> Outcome {
 
 fn probe_accept(pid: u32, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
-        return Outcome::Inline(-(Errno::EBADF.raw() as i32));
+        return Outcome::Inline(Errno::EBADF.raw());
     }
     match crate::net_glue::accept_nonblock(pid, sqe.fd) {
         Ok(Some(new_fd)) => Outcome::Inline(new_fd),
         Ok(None) => Outcome::WouldBlock,
-        Err(e) => Outcome::Inline(-(e.raw() as i32)),
+        Err(e) => Outcome::Inline(e.raw()),
     }
 }
 
 fn probe_poll(pid: u32, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
-        return Outcome::Inline(-(Errno::EBADF.raw() as i32));
+        return Outcome::Inline(Errno::EBADF.raw());
     }
     // Non-registering readiness probe — the same bits poll(2) would
     // report. `file_poll_fd` returns POLLNVAL for a bad fd.
     let want = (sqe.op_flags as u16) & (POLLIN | POLLOUT | POLLERR | POLLHUP);
     let revents = slopos_fs::fileio::file_poll_fd(pid, sqe.fd as c_int, want);
     if revents & POLLNVAL != 0 {
-        return Outcome::Inline(-(Errno::EBADF.raw() as i32));
+        return Outcome::Inline(Errno::EBADF.raw());
     }
     let ready = revents & (want | POLLERR | POLLHUP);
     if ready != 0 {

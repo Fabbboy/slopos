@@ -1,13 +1,11 @@
-use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::syscall::{UserPollFd, fs, net};
+use crate::syscall::net;
 use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
-use slopos_abi::syscall::POLLIN;
 
-use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg};
+use super::{NcConfig, verbose_addr, verbose_msg};
 
 /// Build a kernel `SockAddrIn` from a high-level `SocketAddrV4`.
 fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
@@ -27,28 +25,20 @@ fn from_sockaddr(sa: &SockAddrIn) -> ([u8; 4], u16) {
 /// Owned raw socket fd.  Closes via `net::shutdown` + drop of the underlying
 /// `OwnedFd` returned by `net::socket()`.  We store the raw i32 alongside the
 /// owning handle so that poll can borrow it without moving the fd.
-struct TcpConn {
+pub(super) struct TcpConn {
     fd: crate::syscall::OwnedFd,
 }
 
 impl TcpConn {
-    fn raw(&self) -> i32 {
+    pub(super) fn raw(&self) -> i32 {
         self.fd.raw()
     }
 
-    fn send(&self, data: &[u8]) -> Result<usize, ()> {
-        net::send(self.raw(), data, 0).map_err(|_| ())
-    }
-
-    fn recv(&self, buf: &mut [u8]) -> Result<usize, ()> {
-        net::recv(self.raw(), buf, 0).map_err(|_| ())
-    }
-
-    fn shutdown_write(&self) {
+    pub(super) fn shutdown_write(&self) {
         let _ = net::shutdown(self.raw(), slopos_abi::syscall::SHUT_WR);
     }
 
-    fn shutdown_both(&self) {
+    pub(super) fn shutdown_both(&self) {
         let _ = net::shutdown(self.raw(), slopos_abi::syscall::SHUT_RDWR);
     }
 
@@ -109,109 +99,18 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     run_conn_loop(config, &conn)
 }
 
-/// Shared poll/IO loop for an established TCP connection.  Used by both the
-/// client path and each accepted connection in listen mode.
+/// Established-connection I/O loop for the client path — Ring-driven.
+/// Delegates to the SlopRing [`Session`](super::ring_io) so stdin +
+/// socket are multiplexed through `OP_READ`/`OP_WRITE` and harvested via a
+/// blocking `ring_enter`. The `connect` that produced `conn` stayed a
+/// regular syscall (SLOPRING § 12).
 fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
-    let mut read_buf = [0u8; 64];
-    let mut line_buf = [0u8; 1024];
-    let mut line_pos = 0usize;
-    let mut recv_buf = [0u8; 2048];
-    let mut stdin_closed = false;
-    let clock_start = Instant::now();
-    let mut last_activity_ms = 0u64;
-
-    loop {
-        let mut pfds = [
-            UserPollFd {
-                fd: 0,
-                events: if stdin_closed { 0 } else { POLLIN },
-                revents: 0,
-            },
-            UserPollFd {
-                fd: conn.raw(),
-                events: POLLIN,
-                revents: 0,
-            },
-        ];
-
-        let _ = fs::poll(&mut pfds, 100);
-
-        if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
-            match fs::read_slice(0, &mut read_buf) {
-                Ok(0) => {
-                    stdin_closed = true;
-                    verbose_msg(config, "stdin EOF");
-                    conn.shutdown_write();
-                }
-                Ok(n) => {
-                    for i in 0..n {
-                        match super::process_raw_stdin_char(
-                            read_buf[i],
-                            &mut line_buf,
-                            &mut line_pos,
-                        ) {
-                            StdinResult::SendLine(len) => {
-                                match conn.send(&line_buf[..len]) {
-                                    Ok(sent) => {
-                                        verbose_bytes(config, "sent ", sent);
-                                        last_activity_ms = clock_start.elapsed().as_millis() as u64;
-                                    }
-                                    Err(_) => {
-                                        eprintln!("nc: send failed (broken pipe)");
-                                        conn.shutdown_both();
-                                        return 1;
-                                    }
-                                }
-                                line_pos = 0;
-                            }
-                            StdinResult::Quit => {
-                                conn.shutdown_both();
-                                return 0;
-                            }
-                            StdinResult::Continue => {}
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-
-        if (pfds[1].revents & POLLIN) != 0 {
-            match conn.recv(&mut recv_buf) {
-                Ok(0) => {
-                    verbose_msg(config, "connection closed by remote");
-                    conn.shutdown_both();
-                    return 0;
-                }
-                Ok(received) => {
-                    {
-                        let mut out = std::io::stdout().lock();
-                        let _ = out.write_all(&recv_buf[..received]);
-                        if recv_buf[received - 1] != b'\n' {
-                            let _ = out.write_all(b"\n");
-                        }
-                        let _ = out.flush();
-                    }
-                    verbose_bytes(config, "received ", received);
-                    last_activity_ms = clock_start.elapsed().as_millis() as u64;
-                }
-                Err(_) => {}
-            }
-        }
-
-        if (pfds[1].revents & (slopos_abi::syscall::POLLHUP | slopos_abi::syscall::POLLERR)) != 0 {
-            verbose_msg(config, "connection closed");
+    match super::ring_io::Session::new(config, conn, false) {
+        Some(session) => session.run().unwrap_or(0),
+        None => {
+            eprintln!("nc: ring setup failed");
             conn.shutdown_both();
-            return 0;
-        }
-
-        if config.timeout_ms > 0 {
-            let now = clock_start.elapsed().as_millis() as u64;
-            if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                eprintln!("nc: timeout");
-                conn.shutdown_both();
-                return 1;
-            }
+            1
         }
     }
 }
@@ -296,111 +195,17 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     }
 }
 
-/// Poll/IO loop for a single accepted connection in listen mode.
-///
+/// I/O loop for a single accepted connection in listen mode — Ring-driven.
 /// Returns `Some(code)` to exit immediately, or `None` to allow the listen
-/// loop to continue accepting connections (when `keep_listen` is set).
+/// loop to keep accepting (`keep_listen`). The `accept` that produced
+/// `client` stayed a regular syscall (SLOPRING § 12).
 fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
-    let mut read_buf = [0u8; 64];
-    let mut line_buf = [0u8; 1024];
-    let mut line_pos = 0usize;
-    let mut recv_buf = [0u8; 2048];
-    let mut stdin_closed = false;
-    let clock_start = Instant::now();
-    let mut last_activity_ms = clock_start.elapsed().as_millis() as u64;
-
-    loop {
-        let mut pfds = [
-            UserPollFd {
-                fd: 0,
-                events: if stdin_closed { 0 } else { POLLIN },
-                revents: 0,
-            },
-            UserPollFd {
-                fd: client.raw(),
-                events: POLLIN,
-                revents: 0,
-            },
-        ];
-
-        let _ = fs::poll(&mut pfds, 100);
-
-        if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
-            match fs::read_slice(0, &mut read_buf) {
-                Ok(0) => {
-                    stdin_closed = true;
-                    verbose_msg(config, "stdin EOF");
-                    client.shutdown_write();
-                }
-                Ok(n) => {
-                    for i in 0..n {
-                        match super::process_raw_stdin_char(
-                            read_buf[i],
-                            &mut line_buf,
-                            &mut line_pos,
-                        ) {
-                            StdinResult::SendLine(len) => {
-                                match client.send(&line_buf[..len]) {
-                                    Ok(sent) => {
-                                        verbose_bytes(config, "sent ", sent);
-                                        last_activity_ms = clock_start.elapsed().as_millis() as u64;
-                                    }
-                                    Err(_) => {
-                                        eprintln!("nc: send failed (broken pipe)");
-                                        client.shutdown_both();
-                                        return Some(1);
-                                    }
-                                }
-                                line_pos = 0;
-                            }
-                            StdinResult::Quit => {
-                                client.shutdown_both();
-                                return Some(0);
-                            }
-                            StdinResult::Continue => {}
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-
-        if (pfds[1].revents & POLLIN) != 0 {
-            match client.recv(&mut recv_buf) {
-                Ok(0) => {
-                    verbose_msg(config, "connection closed by remote");
-                    client.shutdown_both();
-                    return None;
-                }
-                Ok(received) => {
-                    {
-                        let mut out = std::io::stdout().lock();
-                        let _ = out.write_all(&recv_buf[..received]);
-                        if recv_buf[received - 1] != b'\n' {
-                            let _ = out.write_all(b"\n");
-                        }
-                        let _ = out.flush();
-                    }
-                    verbose_bytes(config, "received ", received);
-                    last_activity_ms = clock_start.elapsed().as_millis() as u64;
-                }
-                Err(_) => {}
-            }
-        }
-
-        if (pfds[1].revents & (slopos_abi::syscall::POLLHUP | slopos_abi::syscall::POLLERR)) != 0 {
-            verbose_msg(config, "connection closed");
+    match super::ring_io::Session::new(config, client, true) {
+        Some(session) => session.run(),
+        None => {
+            eprintln!("nc: ring setup failed");
             client.shutdown_both();
-            return None;
-        }
-
-        if config.timeout_ms > 0 {
-            let now = clock_start.elapsed().as_millis() as u64;
-            if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                eprintln!("nc: timeout");
-                client.shutdown_both();
-                return None;
-            }
+            Some(1)
         }
     }
 }
