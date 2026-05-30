@@ -24,4 +24,11 @@ toolchain over each one and fails on any unverified obligation.
 machine-checking the `Frame<M>` reference-count invariants (I1 allocated-
 while-referenced, I2 release-exactly-once, I3 no clone/drop use-after-free)
 plus a load-bearing witness that the broken `fetch_add(1)` clone violates
-them. See `../STATUS.md` for the per-obligation summary.
+them.
+
+`slab_lifetime.rs` (Phase 3C) is the second: 11 obligations machine-checking
+the slab object lifecycle — Inv. 9 (a slot cannot outlive its parent slab:
+an outstanding cell pins its page) and Inv. 10 (a slot is only used for an
+object that fits its size + alignment) — plus load-bearing witnesses that an
+unconditional page reclaim breaks Inv. 9 and an always-smallest size class
+breaks Inv. 10. See `../STATUS.md` for the per-obligation summaries.

@@ -147,6 +147,14 @@ impl KernelHeapBackend for KernelSlab {
         if !self.is_live() || size == 0 || size > MAX_ALLOC_SIZE {
             return None;
         }
+        // VERIFIED (Inv. 10): the 16-byte round-up plus `class_of`'s scan
+        // over SIZE_CLASSES always selects a class whose `object_size >=
+        // size`, so the returned cell fits any object the caller builds in
+        // it. `verification/proofs/slab_lifetime.rs::inv10_into_box_fits`
+        // machine-checks this size half (and proves an always-smallest
+        // chooser would overflow); the 16-byte cell alignment covers the
+        // align half for `align_of::<T>() <= 16` (larger alignments route
+        // through the cookie path in `slopos_ostd::mm::heap`).
         let rounded = (size + 15) & !15;
         match Self::class_of(rounded) {
             Some(0) => self.slab16.alloc_one(),

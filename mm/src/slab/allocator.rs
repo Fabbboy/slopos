@@ -12,6 +12,18 @@
 //! the slab page header's `next: RawLink<SlabHeader>` field — no extra
 //! heap allocation, which is required because the slab IS the heap and
 //! cannot recurse into itself during init.
+//!
+//! ## Verification (Inv. 9)
+//!
+//! Once [`SlabAllocator::grow_one`] claims a page from the buddy it links
+//! it on the class's partial list and never returns it — there is no
+//! `free_kernel_page` on the steady-state alloc/dealloc path, so a cell
+//! handed out by [`SlabAllocator::alloc_one`] can never outlive its page.
+//! `verification/proofs/slab_lifetime.rs` machine-checks the stronger
+//! general rule (a page may only be reclaimed with zero outstanding cells)
+//! and proves the broken "reclaim with live cells" violates Inv. 9 — so the
+//! never-free discipline here is the conservative instance of a verified
+//! guard. See `verification/STATUS.md`.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
