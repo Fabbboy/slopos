@@ -77,5 +77,6 @@ four at once:
 Sources: Asterinas (USENIX ATC '25, arXiv:2506.03876 — ~14 % TCB, vostd
 ongoing); seL4 (SOSP '09 — verified C, no Linux ABI); Theseus (OSDI '20 —
 ~62 % TCB, unverified). SlopOS TCB ratio is measured live by
-`scripts/tcb_ratio.sh`; the Linux-ABI syscall surface is in `abi/`. Full
+`scripts/tcb_ratio.sh` over the `kernel` binary's actual dependency closure
+(`scripts/kernel_crates.sh`); the Linux-ABI syscall surface is in `abi/`. Full
 citation list in the plan's § 10 *References*.

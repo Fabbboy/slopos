@@ -19,8 +19,11 @@
 #     (//, ///, //!, /*). The count is line-based, not token-based; a
 #     line with multiple `unsafe` keywords counts once.
 #   - "kernel LoC": non-blank, non-comment lines across every kernel
-#     crate. Userland-side crates (userland, slibc, slop-protocol,
-#     ktesting, appkit) and the workspace-root tooling are excluded.
+#     crate, where the kernel-crate set is derived from the `kernel`
+#     binary's normal-dependency closure (scripts/kernel_crates.sh) rather
+#     than a hand-maintained list. Userland-side crates (userland, slibc,
+#     slop-protocol, appkit) and the workspace tooling fall out
+#     automatically because the kernel image does not link them.
 #
 # Phase 1 target: ≤ 1.5 %.  Phase 2 target: ≤ 1.0 %.
 
@@ -51,12 +54,19 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Kernel crate directories. Keep in sync with the workspace.
-KERNEL_CRATES=(
-    abi acpi boot core drivers font fs gfx hermetic karch
-    kernel kernel-services mm net service-core
-    slopos-ostd slopos-ostd-derive video windowing
-)
+# Kernel crate directories — the TCB-ratio denominator. Derived from
+# ground truth (the `kernel` binary's normal-dependency closure) by
+# scripts/kernel_crates.sh, never hand-maintained, so a new kernel crate
+# is counted automatically and a userland-only crate is never miscounted.
+KERNEL_CRATES=()
+while IFS= read -r crate; do
+    [ -n "$crate" ] && KERNEL_CRATES+=("$crate")
+done < <("$SCRIPT_DIR/kernel_crates.sh")
+
+if [ "${#KERNEL_CRATES[@]}" -eq 0 ]; then
+    echo "tcb_ratio: kernel_crates.sh produced no crates — cannot measure" >&2
+    exit 2
+fi
 
 # ---- Unsafe-token count (slopos-ostd only) --------------------------------
 
