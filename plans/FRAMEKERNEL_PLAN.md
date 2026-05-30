@@ -221,11 +221,13 @@ The two sub-goals are independent in design — they touch different files — a
 
 ### 3A: Verus toolchain pinning + verification crate scaffolding
 
-- [ ] **3A.1** Choose a Verus commit (latest stable on the main branch as of phase start; avoid the experimental `async` branch). Pin its SHA in a new file `verification/verus.toml`.
-- [ ] **3A.2** Add a `verification/` workspace member: `README.md`, `Cargo.toml`, `proofs/` directory, `STATUS.md` (initially empty).
-- [ ] **3A.3** Wire `just verify` to run Verus over every file in `verification/proofs/` against the pinned toolchain. Reuse `scripts/check_framekernel.sh` plumbing so verify failures behave like other framekernel-gate failures.
-- [ ] **3A.4** Document the Verus upgrade procedure in `verification/README.md`: once per quarter at most, only when a needed feature lands, and only on a `verify/<sha>` topic branch first. If Verus stops shipping, fall back to Kani for bounded checking (per R4).
-- [ ] **3A.5** CI gate: any PR touching `slopos-ostd/` must pass `just verify`. Proof regressions block merge.
+> **Status**: ✅ complete. Verus pinned to stable release `0.2026.05.24.ecee80a` (commit `ecee80a2139923d503338e6989f79fb690ec7847`, Rust 1.95.0 host toolchain) in `verification/verus.toml`; `verification/` is a workspace member; `just verify` runs the pinned verifier over `verification/proofs/` (green no-op until 3B authors the first proof); CI `verify` job + `check_no_kernel_async.sh` (R13) gate live. Validated end-to-end against a real obligation.
+
+- [x] **3A.1** Verus commit pinned in `verification/verus.toml` — latest stable on `main` (`release/0.2026.05.24.ecee80a`, commit `ecee80a…`); the experimental `async` branch was deliberately avoided (AD-10). The pin file also records the asset URL + sha256 and the Rust 1.95.0 host toolchain Verus links against. `scripts/ensure_verus.sh` parses it, downloads + sha-verifies the release asset (same integrity pattern as `ensure_limine.sh`), and installs the host toolchain (`rustc-dev` + `llvm-tools`) on demand.
+- [x] **3A.2** `verification/` workspace member added: `Cargo.toml` (doc-only `src/lib.rs` so it's a first-class member; the proofs themselves are standalone Verus files, not cargo targets), `README.md`, `STATUS.md` (scaffold table of the three 3B–3D proof targets marked **planned**), `proofs/` (with conventions README), `notes/`.
+- [x] **3A.3** `just verify` (`scripts/verify.sh`) runs `verus --crate-type=lib` over every `*.rs` in `verification/proofs/`, fails the gate on any unverified obligation, and is a green no-op when no proofs exist yet. Helper modules (`_*.rs`) are skipped as entry points. Folded into the composite `just check-framekernel` gate alongside the other framekernel-discipline checks.
+- [x] **3A.4** Upgrade procedure documented in `verification/README.md` (≤ once/quarter, only for a needed feature, only on a `verify/<sha>` topic branch; never weaken an invariant to make a bump green; Kani fallback if Verus stops shipping, per R4).
+- [x] **3A.5** CI gate: a dedicated `verify` job runs `just verify` (with a cached `third_party/verus`); `scripts/check_no_kernel_async.sh` (R13 sibling of `check_unsafe_outside_ostd.sh`, forbids `async fn` in any kernel crate) wired into both the per-PR framekernel gates and `check-framekernel`.
 
 ### 3B: `Frame<M>` reference-count proof
 

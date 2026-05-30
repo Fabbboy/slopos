@@ -81,9 +81,10 @@ jobs:
       - name: Build kernel
         run: just build
 
-      - name: Framekernel gates (unsafe surface + TCB ratio)
+      - name: Framekernel gates (unsafe surface + async surface + TCB ratio)
         run: |
           scripts/check_unsafe_outside_ostd.sh
+          scripts/check_no_kernel_async.sh
           scripts/tcb_ratio.sh --max 1.5
 
       - name: Run tests
@@ -134,3 +135,33 @@ jobs:
 
       - name: Run KernMiri suite
         run: just check-miri
+
+  verify:
+    name: Verus (OSTD critical-path proofs)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unzip
+
+      - name: Cache pinned Verus toolchain
+        uses: actions/cache@v5
+        with:
+          path: third_party/verus
+          key: verus-${{ runner.os }}-${{ hashFiles('verification/verus.toml') }}
+
+      - name: Run Verus proofs
+        # Any PR touching slopos-ostd/ must pass `just verify`. It
+        # resolves + pins Verus via scripts/ensure_verus.sh, then checks
+        # every proof under verification/proofs/. It is a green no-op
+        # until the first proof lands.
+        run: just verify

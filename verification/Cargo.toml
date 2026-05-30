@@ -1,0 +1,28 @@
+[package]
+name = "slopos-verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# This crate is the home of the OSTD critical-path Verus proofs. The
+# *proofs themselves* live in `proofs/` and are standalone Verus
+# crates-of-one run by the pinned Verus toolchain via `just verify`
+# (scripts/verify.sh) — they are deliberately NOT cargo build targets,
+# because they `use vstd::prelude::*`, which only resolves under the Verus
+# toolchain, not the kernel's nightly.
+#
+# The cargo package exists only so `verification/` is a first-class
+# workspace member: `cargo metadata`, `cargo fmt`, and editor tooling all
+# see it. Its single library target is a documentation-only `lib.rs` that
+# compiles under stable host cargo with zero dependencies.
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]

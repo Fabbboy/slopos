@@ -311,19 +311,33 @@ check-miri:
 tcb-ratio:
     scripts/tcb_ratio.sh
 
+[doc("Download + pin the Verus toolchain (verification/verus.toml) under third_party/verus")]
+ensure-verus:
+    scripts/ensure_verus.sh >/dev/null
+
+[doc("Machine-check the OSTD critical-path proofs under verification/proofs/ on the pinned Verus toolchain. Pass a proof stem to verify one file.")]
+verify FILTER='':
+    scripts/verify.sh "{{FILTER}}"
+
+[doc("Fail the build on any `async fn` in a kernel crate (AD-8/AD-9/R13). OSTD + all kernel services stay sync; async lives in userspace.")]
+check-no-kernel-async:
+    scripts/check_no_kernel_async.sh
+
 # Run every framekernel-discipline gate in one shot. Requires a prior
 # `just build` so check_stack_sizes.sh has a kernel.elf to inspect.
 # A kernel-aware `cargo clippy -- -D warnings` gate is not included
 # here yet — SlopOS has no clippy config in tree and the custom
 # `no_std` target needs plumbing; track as a Phase 2 chore.
-[doc("Run every framekernel-discipline gate: unsafe / alloc / stack / fmt / KernMiri (requires a prior `just build`)")]
+[doc("Run every framekernel-discipline gate: unsafe / async / alloc / stack / fmt / KernMiri / Verus (requires a prior `just build`)")]
 check-framekernel:
     scripts/check_unsafe_outside_ostd.sh
+    scripts/check_no_kernel_async.sh
     scripts/check_alloc_dep.sh
     scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
     scripts/check_wait_predicate_purity.sh
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri
+    just verify
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 

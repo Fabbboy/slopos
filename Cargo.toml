@@ -24,7 +24,8 @@ members = [
   "slop-protocol",
   "slopos-ostd",
   "slopos-ostd-derive",
-  "hermetic"
+  "hermetic",
+  "verification"
 ]
 resolver = "2"
 

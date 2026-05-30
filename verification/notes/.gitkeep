@@ -1,0 +1,5 @@
+Background notes for the OSTD proofs live here.
+
+cortenmm.md will capture the CortenMM (SOSP '25) invariant adaptation for
+the VmSpace::cursor proof. Not authored yet — only the verification
+toolchain pin + harness are in place so far.

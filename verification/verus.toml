@@ -1,0 +1,42 @@
+# Pinned Verus toolchain for the SlopOS OSTD critical-path proofs.
+#
+# This file is the single source of truth for which Verus build the
+# `just verify` gate runs against. Bumping it is a deliberate, gated act:
+# only on a `verify/<sha>` topic branch, at most once per quarter, and
+# only when a needed feature lands. See verification/README.md § "Upgrading
+# the pinned Verus toolchain" for the procedure.
+#
+# AD-10: Verus is the verifier; pin an upstream *stable release* on the
+# `main` branch. We deliberately avoid the experimental `async` branch —
+# OSTD is sync (AD-8 / AD-9), and the `async` branch explicitly does not
+# support trait async, which OSTD's traits all are.
+
+[verus]
+# Human-readable release tag (github.com/verus-lang/verus releases).
+release = "release/0.2026.05.24.ecee80a"
+
+# Upstream git commit the release was cut from. This is the immutable
+# anchor the proofs are verified against.
+commit = "ecee80a2139923d503338e6989f79fb690ec7847"
+
+# Short release name (matches the asset file stem).
+version = "0.2026.05.24.ecee80a"
+
+# Rust toolchain Verus itself requires (from verus' rust-toolchain.toml at
+# the pinned commit). `ensure_verus.sh` installs this via rustup with the
+# `rustc-dev` + `llvm-tools` components Verus links against. This is *not*
+# the kernel toolchain (see rust-toolchain.toml at the repo root); it is
+# only used to run the verifier over verification/proofs/.
+rust_toolchain = "1.95.0"
+
+[asset]
+# Prebuilt release asset (x86_64 Linux only — AD-13 keeps us single-arch).
+# Other hosts must build Verus from the pinned commit;
+# see verification/README.md.
+platform = "x86-linux"
+url = "https://github.com/verus-lang/verus/releases/download/release/0.2026.05.24.ecee80a/verus-0.2026.05.24.ecee80a-x86-linux.zip"
+
+# SHA-256 of the release asset (GitHub release assets are immutable, so
+# this is a stable integrity anchor — same pattern as
+# scripts/ensure_limine.sh). Set empty to skip verification.
+sha256 = "323a44c0d787ce9a788665e1c6922360c44a72d1b9696359ec4f7bf5fbbc63e6"
