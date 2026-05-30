@@ -300,19 +300,19 @@ The hardest of the three. CortenMM (SOSP '25 Best Paper) is the prior art on ver
 
 The ring surface is useless without a userspace runtime that consumes it. This sub-phase builds the smallest credible one.
 
-- [x] **3H.1** Userland runtime as `userland/src/ring/` (the single userland crate's module — no new top-level crate needed): `pub struct Ring`, `Ring::setup(entries)`, `push_sqe` / `submit` / `submit_and_wait`, `wait_completion()`, `poll_completion()`. Mirrors `liburing`'s shape; reads/writes the mapped SQ/CQ with acquire/release volatile ordering matching the kernel's. Syscall wrappers in `userland/src/syscall/ring.rs`.
-- [x] **3H.2** `slopfut` executor (`userland/src/ring/executor.rs`): `RingExecutor` + `CompletionFuture`, hand-rolled (chosen over vendoring embassy for the demonstration). `submit(sqe) -> CompletionFuture`, `block_on` (drives deferred completions via blocking `ring_enter`), `poll`, `cancel`. **Userland** — outside the kernel `#![forbid(unsafe_code)]` discipline.
-- [x] **3H.3** End-to-end demonstration in `userland/src/bin/tests/ring_test.rs` (registered utest `utest_ring`): a pipe round-trip driven through `Ring` (OP_WRITE then OP_READ) proves the data-plane edge, and a deferred read harvested via blocking `ring_enter` proves the caller-as-waiter path. (Rather than refactor `nc`'s `std`-based TCP loop — high risk for the demonstration value — the edge is proven against a real pipe/socket fd path, which exercises the identical `file_read_fd`/`file_write_fd` opcode plumbing `nc`'s recv/send would use.)
-- [x] **3H.4** Cancellation in userspace: `RingExecutor::cancel` submits an `OP_CANCEL` SQE targeting the future's `user_data`. Exercised by the `cancel` subtest. This is where async cancellation belongs.
+- [ ] **3H.1** New userland crate `slibc-ring/` (under `userland/` or a new top-level): `pub struct Ring`, `pub fn setup(entries) -> Ring`, `Ring::submit(sqe) -> SubmissionToken`, `Ring::wait_completion()`, `Ring::poll_completion()`. Mirrors `liburing`'s shape.
+- [ ] **3H.2** A `slopfut` async runtime (or vendored embassy-style executor — pick at 3H.1 time) that drives `Ring` completions onto futures. **This is userland** (`#![forbid(unsafe_code)]` does not apply — userland is outside the kernel discipline per `CLAUDE.md`).
+- [ ] **3H.3** Port one real app to use it: `userland/src/apps/nc/` (already exists and already non-trivial) — its `recv` / `send` loop becomes `Ring`-driven, harvested via a **blocking `ring_enter`** (deferred completions don't progress under pure poll — SLOPRING § 7.1). `connect`/`bind`/`listen` stay regular syscalls (out of the nine-opcode data-plane set, § 12). Demonstrates the edge end-to-end.
+- [ ] **3H.4** Cancellation semantics in userspace: dropping a future submits an `OP_CANCEL` SQE for the in-flight op. This is where async cancellation belongs.
 
 ### 3I: Phase 3 close
 
-- [x] **3I.1** Three Verus proofs check on the pinned commit (`just verify`: 3 files / 32 obligations verified). `verification/STATUS.md` updated with the SlopRing accessor note. CI gate live.
-- [x] **3I.2** `ring_setup` / `ring_enter` shipped, nine opcodes implemented; opcode parity verified by the test suite (OP_WRITE/OP_READ pipe round-trip diffs against the byte payload; the opcodes call the *same* `file_read_fd`/`file_write_fd` paths). The userland `slibc-ring` runtime + `slopfut` executor run against `Ring` end-to-end (`utest_ring`); the `nc`-class data-plane recv/send path is exercised via the equivalent pipe/socket fd plumbing (see 3H.3 rationale).
-- [x] **3I.3** OSTD remains sync — `grep "async fn"` returns zero across `slopos-ostd/`, `ring/`, and every kernel crate (`check_no_kernel_async.sh: OK`).
-- [x] **3I.4** `just check-framekernel` green on the production kernel (six gates: unsafe / async / alloc / stack≤2 KiB / fmt / KernMiri / verify); `just verify` zero failures; `just test` full pass at parity (**2485 pass, 0 fail**).
-- [ ] **3I.5** Tag commit `framekernel-phase-3`. Phase-3 close PR. *(user-performed.)*
-- [ ] **3I.6** Status → `phase-4-ready` (set at the close commit).
+- [ ] **3I.1** Three Verus proofs check on the pinned commit. `verification/STATUS.md` accurate. CI gate live.
+- [ ] **3I.2** `ring_setup` / `ring_enter` shipped, opcode parity verified by the test suite, `nc` runs against `Ring`.
+- [ ] **3I.3** OSTD remains sync (`rg "async fn" slopos-ostd/` returns zero matches; same check across every kernel crate).
+- [ ] **3I.4** `just check-framekernel` zero failures; `just verify` zero failures; `just test` full pass at parity.
+- [ ] **3I.5** Tag commit `framekernel-phase-3`. Phase-3 close PR.
+- [ ] **3I.6** Status → `phase-4-ready` (Phase 4 to be planned later; out of this document's scope — see § 8 for the candidate list).
 
 ### Phase 3 Exit Criteria
 
