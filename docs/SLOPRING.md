@@ -3,14 +3,22 @@ name: SlopRing — io_uring-Style Submission/Completion Ring Surface
 description: Design for SlopOS's userspace async edge — a shared-memory SQ/CQ ring backed by the existing sync EventBus / WaitQueue substrate. Kernel side is sync; async lives in userspace.
 status: design (Phase 3F) — no code yet; implementation is Phase 3G/3H
 authors: Phase 3F design pass, grounded in the post-Phase-2 SlopOS sync substrate
-phase: plans/FRAMEKERNEL_PLAN.md Phase 3F (§ 7, subtasks 3F.1 / 3F.2 / 3F.3)
+phase: Framekernel Phase 3F (design subtasks 3F.1 / 3F.2 / 3F.3)
 location: docs/SLOPRING.md (durable ABI/design spec; lives in docs/, not plans/)
 ---
 
+<!--
+  This spec is self-contained: it does not depend on any (ephemeral) plan file.
+  The stable identifiers it uses — AD-N (architectural decisions), Inv. N (the
+  ten OSTD soundness invariants), and R-N (risk-register IDs) — are framekernel
+  terminology defined once in the framekernel architecture record; they are
+  named here only as concept labels, never as a path into a plan document.
+-->
+
 # SlopRing — io_uring-Style Submission/Completion Ring Surface
 
-> **This is the Phase 3F design document.** It exists *before any code* (per
-> `plans/FRAMEKERNEL_PLAN.md` 3F.1). It closes subtasks **3F.1** (ring layout +
+> **This is the Phase 3F design document.** It exists *before any code* (the
+> framekernel Phase-3F mandate: spec first). It closes subtasks **3F.1** (ring layout +
 > submission/completion/cancellation/backpressure model), **3F.2** (per-opcode
 > justification against an existing sync syscall path), and **3F.3** (threat
 > model). Implementation lives in **3G** (`ring/` kernel crate, two syscalls,
@@ -74,7 +82,8 @@ location: docs/SLOPRING.md (durable ABI/design spec; lives in docs/, not plans/)
 ### Non-Goals (this phase)
 
 - **Not** an async kernel. SlopRing is the *opposite* of the retired
-  async-first Phase 3 draft (see `plans/FRAMEKERNEL_PLAN.md` § 8).
+  async-first Phase 3 draft (retired in the framekernel architecture record's
+  *Out of Scope* discussion).
 - **Not** full Linux io_uring feature parity. No `IORING_SETUP_SQPOLL` kernel
   poll thread, no fixed files/buffers, no `IORING_SETUP_IOPOLL`, no linked SQEs,
   no `IORING_OP_*` breadth beyond the nine opcodes in § 12. Those are
@@ -368,7 +377,7 @@ Rust reference into ring memory, only byte-copy through the `UFrame` /
 ### 5.3 No `&T` over the ring — the central soundness rule (Inv. 4 + AD-3)
 
 This is the single most important memory rule and the one the Theseus bug class
-(`plans/FRAMEKERNEL_PLAN.md` AD-3) is about. Userspace can mutate ring bytes
+(framekernel decision **AD-3**) is about. Userspace can mutate ring bytes
 *concurrently* with the kernel reading them (it shares the mapping and may have
 another thread running). Therefore the kernel **must not** hold a `&Sqe` or
 `&mut Cqe` — a live Rust reference asserts the pointee is immutable (or
@@ -431,7 +440,7 @@ bumped to `≥ 159` in 3G.2.
   at and all offsets) out to the user `params` pointer via `UserPtr`.
 - Returns the ring fd (`>= 0`) or a negated errno.
 
-**On the `flags` argument.** The plan's `plans/FRAMEKERNEL_PLAN.md` 3G.2 sketch writes
+**On the `flags` argument.** The framekernel 3G.2 subtask sketch writes
 the signature as `ring_setup(entries, flags)`. SlopOS is pre-alpha with no ABI
 compatibility obligation, so 3G defines the honest signature `ring_setup(entries:
 u32, params: *mut RingParams) -> i32` directly in `numbers.rs` rather than
@@ -759,7 +768,7 @@ only an interest registration and a table row to remove.
 concern: dropping a future in the 3H runtime submits an `OP_CANCEL` for its
 in-flight op (3H.4). A stuck op degrades exactly one process, never the kernel —
 precisely the property the retired async-first design could not guarantee
-(`plans/FRAMEKERNEL_PLAN.md` § 8: "cancellation safety is unsolved as a default
+(the retired async-first design's unsolved problem: "cancellation safety is unsolved as a default
 property in any language"). SlopRing sidesteps it: the kernel's cancel is
 deleting a table row, which is always safe.
 
@@ -842,7 +851,7 @@ both the opcode and the sync syscall and diffs the result.
    for AF_INET it forwards the validated user VA. "Same function" is true; the
    argument marshalling is not uniform.
 
-Nine opcodes (the plan's 3G.4.{a..i}):
+Nine opcodes (framekernel subtasks 3G.4.{a..i}):
 
 | Opcode | Sync entry point reused | SQE fields | Blocks on (`KernelEvent`) | CQE `res` |
 |---|---|---|---|---|
@@ -1044,7 +1053,7 @@ machinery instead of inventing its own:
   intra-process `dup` of a ring fd is allowed (it is what makes the per-ring lock
   of § 6.3 mandatory) but multi-threaded use is then the app's responsibility.
   The alternative — "child fd resolves but must re-map" — is **rejected**: it is a
-  second producer on one SQ. The plan's 3G.6 "ring-FD inheritance across fork"
+  second producer on one SQ. The 3G.6 "ring-FD inheritance across fork"
   test asserts the child's ring fd is closed.
 - **`exec`**: address space is replaced, so the ring mapping is torn down with
   the old `VmSpace`; the ring object is dropped when its last fd closes (exec
@@ -1080,7 +1089,7 @@ machinery instead of inventing its own:
   signal-delivery point regardless of opcode family. A `kill()` makes the
   predicate true; `ring_enter` returns `n_submitted` if any SQE was consumed,
   else `-EINTR` (§ 6.2 — never discard a submission, or userspace double-submits),
-  with all already-posted CQEs valid in the CQ. The plan's 3G.6
+  with all already-posted CQEs valid in the CQ. The 3G.6
   "kill-during-`ring_enter`" test pins both the `-EINTR` and the
   submit-count-preservation.
 
@@ -1167,8 +1176,12 @@ Recorded so implementation doesn't re-litigate settled-enough-to-defer points:
 - `liburing` — https://github.com/axboe/liburing (the userland shape `slibc-ring` mirrors, 3H.1).
 - Linux `io_uring(7)` / `io_uring_setup(2)` / `io_uring_enter(2)` man pages (semantics SlopRing matches: `EINTR`, `ECANCELED`, CQ overflow).
 
-### SlopOS substrate (grounding this design)
-- `plans/FRAMEKERNEL_PLAN.md` § 7 (Phase 3F/3G/3H subtask list), § 8 (why not async-first), AD-8/AD-9/AD-11, Inv. 4/5, R12/R13.
+### SlopOS substrate (grounding this design — all durable source, no plan files)
+- Framekernel terminology used here (concept labels, not document paths):
+  **AD-8/AD-9** (sync kernel, async edge), **AD-3** (no `&T`/`&mut T` over
+  user/MMIO/DMA memory), **AD-11** (generation-counter handles), **Inv. 4/5**
+  (sensitive memory untouchable by clients / user programs), **R12** (opcode
+  parity), **R13** (no `async fn` in any kernel crate).
 - `slopos-ostd/src/sync/event_bus.rs`, `wait_queue.rs` — the blocking substrate (§ 3).
 - `slopos-ostd/src/mm/frame.rs`, `uframe.rs`, `vm_space.rs` — `Frame<M>`/`UFrame`/`cursor` (§ 5); the 3B/3D verified primitives.
 - `slopos-ostd/src/handle.rs` — generation-counter `Handle`/`HandleTable` (§ 9, § 13.5; AD-11 / Phase 2H).

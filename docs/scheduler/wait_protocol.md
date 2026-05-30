@@ -6,7 +6,9 @@
 >
 > **Scope.** The synchronous, preemptive wait/wake/block protocol introduced by
 > the harmonic-cascade refactor (Phases 1–6, branch `sched/fix-self-wakeup-deadlock`).
-> The async successor lives in `plans/FRAMEKERNEL_PLAN.md` Phase 3 — see §8.
+> This is the kernel's *permanent* model: the framekernel architecture keeps the
+> kernel synchronous and pushes async to a userspace edge (see § 8 and the
+> SlopRing spec, `docs/SLOPRING.md`).
 
 ## 1. Background — the race that motivated the redesign
 
@@ -51,9 +53,9 @@ The harmonic-cascade fix synthesises the Linux + Theseus + Redox design:
    so the two-atomic-pair race is structurally unrepresentable. `WillBlock`
    ceases to exist.
 
-The retired `plans/SAFE_BY_DESIGN.md` and the active
-`plans/ok-lets-fully-implement-harmonic-cascade.md` are the authoritative
-historical record.
+The harmonic-cascade refactor (since merged) is the authoritative historical
+record for how this design arose; the source files listed under *Cross-references*
+are the live source of truth.
 
 ## 2. The three primitives
 
@@ -549,27 +551,20 @@ task on its next pass. The "log + coerce" path is gone for good.
 first running the `Blocked → Ready` CAS, or a state transition raced the
 runqueue insert. Both are bugs the assertion exists to surface.
 
-## 8. Migration to async (FRAMEKERNEL Phase 3)
+## 8. Relationship to async (sync core, async edge)
 
-`plans/FRAMEKERNEL_PLAN.md` Phase 3 (§7, lines 1269–1392) replaces tasks
-with `Pin<Box<dyn Future>>` and the synchronous executor with a cooperative
-async runtime. The harmonic-cascade primitives map directly onto async
-equivalents:
-
-| Sync (today) | Async (Phase 3) |
-|---|---|
-| `WaitQueue` | `AsyncWaitQueue` / `Notify` (Tokio-style; `wait()` returns a `WaitFuture<'_>`) |
-| `AtomicCell<Option<ExitInfo>>` | `OnceCell<ExitInfo>` future; `.await` resolves on first publish |
-| Fused `TaskState` | The executor's `Wake` trait state; the same `(status, reason, epoch)` semantics survive but the dispatcher disappears in favour of the executor |
-| `mark_current_blocked` + `yield_blocked_task` | `Future::poll` returning `Poll::Pending` after registering a `Waker`; the waker is the `unblock_task` analogue |
-| `wait_event(closure)` | `loop { if cond { break } else { notify.notified().await } }` |
-
-The current sync/preemptive design is the synchronous predecessor; flipping
-to async is a primitive-substitution exercise, not a redesign. The
-race-freedom argument transfers verbatim: Tokio's `Notify` uses the same
-intrusive-list-under-Mutex discipline as our `WaitQueue` (the Mutex plays
-the role of the SpinLock), and `OnceCell` is the durable-publish analogue of
-`AtomicCell`.
+An earlier framekernel draft proposed replacing tasks with
+`Pin<Box<dyn Future>>` and the synchronous executor with a cooperative async
+runtime. **That direction was retired.** The framekernel architecture instead
+keeps the kernel strictly synchronous (this protocol is permanent) and exposes
+async to *userspace* through an io_uring-style submission/completion ring
+surface — specified in `docs/SLOPRING.md`. The wait/wake primitives documented
+here are exactly what that ring's blocking-op completion path reuses unchanged:
+the ring's `ring_enter(min_complete>0)` registers the calling task on the
+relevant `WaitQueue`s and blocks via the same `block_current_task_with_timeout`
+path, so there is **no** async runtime inside the kernel and **no**
+primitive-substitution migration planned. The race-freedom argument in § 3 is
+the permanent one.
 
 ## 9. Out-of-scope / known limits
 
@@ -578,12 +573,13 @@ the role of the SpinLock), and `OnceCell` is the durable-publish analogue of
   boot bug is fixed, the existing race-stress tests should run unmodified.
 - **1-hour soak run** on KVM is not yet performed. Phase 7C deferred this to
   Phase 8 ("hardening and verification").
-- **Verus formalisation** of the lock-pair barrier proof (FRAMEKERNEL
-  Phase 4) is the ultimate race-freedom proof. The argument in §3 is a
-  textual proof; a machine-checked one is future work.
+- **Verus formalisation** of the lock-pair barrier proof is the ultimate
+  race-freedom proof. The argument in §3 is a textual proof; a machine-checked
+  one is future work. (The framekernel verification effort machine-checks the
+  OSTD critical path — `Frame` refcount, slab lifetimes, `VmSpace::cursor` —
+  under Verus; see `verification/STATUS.md`.)
 - The `cpu_hint` field of `TaskState` (bits 16..32) is reserved but unused.
-  It is the affinity-aware-wakeup hook for the bounded work-stealer that
-  lands in FRAMEKERNEL Phase 7.
+  It is the affinity-aware-wakeup hook for a future bounded work-stealer.
 - `BlockReason` is informational only — it does not gate any CAS. The
   scheduler's correctness arguments are status-only. Tracers and the future
   signal-aware unblock path consume it.
@@ -601,6 +597,5 @@ the role of the SpinLock), and `OnceCell` is the durable-publish analogue of
   `core/src/scheduler/futex.rs`.
 - Race-stress tests: `core/src/scheduler/sched_tests.rs::test_task_wait_exit_race_1000`
   and `::test_task_wait_exit_race_with_work`.
-- Historical record: `plans/ok-lets-fully-implement-harmonic-cascade.md`,
-  retired `plans/SAFE_BY_DESIGN.md`.
-- Async successor: `plans/FRAMEKERNEL_PLAN.md` §7 (Phase 3).
+- Async edge (userspace, not a kernel async runtime): `docs/SLOPRING.md`
+  (io_uring-style ring surface that reuses these wait/wake primitives).
