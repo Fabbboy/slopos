@@ -1,9 +1,10 @@
 # KernMiri — dynamic UB detection on `slopos-ostd`
 
-This directory anchors SlopOS's KernMiri harness — the Phase 1B deliverable
-from `plans/FRAMEKERNEL_PLAN.md`. It's a thin layer of `cfg(target_os =
-"none")` host stubs inside `slopos-ostd/` plus a `just check-miri` recipe;
-there is no fork of Miri and no separate harness crate.
+This directory anchors SlopOS's KernMiri harness — dynamic undefined-behaviour
+detection for the trusted core (`slopos-ostd`). It's a thin layer of
+`cfg(target_os = "none")` host stubs inside `slopos-ostd/` plus a
+`just check-miri` recipe; there is no fork of Miri and no separate harness
+crate.
 
 ## What this is
 
@@ -169,9 +170,10 @@ bugs — net negative.
 
 ## Where `MIRI_FINDINGS.md` is
 
-There isn't one. Per user direction during Phase 1B, any UB Miri
-surfaces is **fixed inline in `slopos-ostd/` source** and reported in
-the PR description. The findings during this phase were:
+There isn't one. By project convention, any UB Miri surfaces is **fixed
+inline in `slopos-ostd/` source** and reported in the PR description rather
+than accumulated in a findings file. The findings recorded when the harness
+was first built were:
 
 1. **Real UB**: `slopos-ostd/src/util/ptr_buf.rs::borrow_at_mut` could
    construct an unaligned `&mut [T]` if a caller passed a misaligned
@@ -190,4 +192,3 @@ the PR description. The findings during this phase were:
 
 - Asterinas KernMiri paper: <https://arxiv.org/abs/2506.03876>
 - Miri repo: <https://github.com/rust-lang/miri>
-- The plan: `plans/FRAMEKERNEL_PLAN.md` § B.
