@@ -11,6 +11,30 @@
 //! field gates exclusive access to `storage`; `ref_count` pairs
 //! Release-on-decrement with an Acquire fence on the last-ref path
 //! so the final dropper sees every prior write to the slot.
+//!
+//! # Verification
+//!
+//! The reference-count state machine in this module ([`MetaSlot`],
+//! [`Frame::from_unused`], [`Frame::from_in_use`], and [`Drop for Frame`])
+//! is machine-checked under Verus. `verification/proofs/frame_refcount.rs`
+//! mirrors the atomic-bounded transitions as an abstract state machine and
+//! proves the three reference-count invariants hold across every concurrent
+//! interleaving:
+//!
+//!   * (I1) `ref_count > 0` ⇒ the frame is allocated and off the
+//!     allocator free list;
+//!   * (I2) the last `Drop` releases the frame to the allocator exactly
+//!     once (no double-free);
+//!   * (I3) concurrent [`Frame::from_in_use`] (clone) and `Drop` cannot
+//!     use-after-free.
+//!
+//! The proof also encodes the *broken* unconditional `fetch_add(1)` clone
+//! — the Asterinas paper Fig. 9 UB — and shows it violates (I1), proving
+//! the conditional `fetch_update` in [`Frame::from_in_use`] is load-bearing.
+//! Verified against the pinned Verus toolchain recorded in
+//! `verification/verus.toml`; run `just verify` to re-check. Any change to
+//! the atomic protocol below must keep `frame_refcount.rs` in sync (see
+//! `verification/STATUS.md`).
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -537,6 +561,12 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
         // window and revive a slot whose `on_drop`/`drop_in_place` is
         // already running, leaving the slot with the wrong vtable or a
         // half-destroyed `M`. The CAS-loop refuses to bump from 0.
+        //
+        // VERIFIED: `verification/proofs/frame_refcount.rs` proves this
+        // conditional bump preserves the slot invariant on every reachable
+        // state, and that the unconditional `fetch_add(1)` alternative
+        // (the Asterinas Fig. 9 UB) violates it. This refusal-to-revive is
+        // the single line the use-after-free proof (I3) leans on.
         slot.ref_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
                 if prev == 0 { None } else { Some(prev + 1) }

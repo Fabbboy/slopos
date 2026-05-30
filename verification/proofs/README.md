@@ -20,5 +20,8 @@ toolchain over each one and fails on any unverified obligation.
   into `slopos-ostd` (Verus emits a normal build for the kernel) so
   `just build` + `just test` still pass.
 
-No proofs exist yet — only the toolchain pin + harness are in place. The
-first proof to land is `Frame<M>` reference counting.
+`frame_refcount.rs` (Phase 3B) is the first proof to land: 9 obligations
+machine-checking the `Frame<M>` reference-count invariants (I1 allocated-
+while-referenced, I2 release-exactly-once, I3 no clone/drop use-after-free)
+plus a load-bearing witness that the broken `fetch_add(1)` clone violates
+them. See `../STATUS.md` for the per-obligation summary.
