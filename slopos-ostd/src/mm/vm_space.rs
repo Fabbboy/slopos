@@ -24,6 +24,39 @@
 //! tell whether the address space has been mutated since a captured
 //! snapshot.
 //!
+//! # Verification
+//!
+//! The page-table mutation path in this module ([`CursorMut::map`],
+//! [`CursorMut::unmap`], [`CursorMut::protect`]) is machine-checked under
+//! Verus. `verification/proofs/vm_space_cursor.rs` mirrors the
+//! cursor operations as an abstract page-table-path state machine and
+//! proves three obligations hold across every sequence of
+//! cursor calls (the lock-per-`VmSpace` model — `CursorMut<'a>` holds
+//! `&'a mut VmSpace`, so the borrow checker serializes all mutators on one
+//! address space):
+//!
+//!   * (WF) cursor operations preserve page-table well-formedness — a
+//!     present leaf implies its whole intermediate chain (PT, PD, PDPT) is
+//!     present and valid, so no walk ever dereferences a dangling table
+//!     (CortenMM SOSP '25 Fig. 12, specialised to the 4-level x86_64 walk);
+//!   * (REF) [`CursorMut::map`] leaks exactly one `UFrame` ref into the
+//!     leaf PTE and [`CursorMut::unmap`] reclaims exactly one — no
+//!     double-leak (Overlap-guarded) and no double-free (not-present
+//!     guarded);
+//!   * (Inv. 4 + Inv. 5) a present user leaf is always an insensitive
+//!     `UFrame` — the `map::<S, M: AnyUFrameMeta>(UFrame<M>, ..)` argument
+//!     type is the carrier.
+//!
+//! The proof also encodes two *broken* variants — a second leak over a
+//! present leaf (Overlap guard removed) and a sensitive-frame map (raw
+//! `Frame` instead of `UFrame`) — and shows each violates the invariant,
+//! proving the Overlap guard and the `UFrame` boundary are load-bearing.
+//! The coarse lock-per-`VmSpace` model is a deliberate choice; see
+//! `verification/notes/cortenmm.md` and `verification/STATUS.md` for the
+//! gap vs. CortenMM's fine-grained per-PT-page locking. Verified against
+//! the pinned Verus toolchain in `verification/verus.toml`; run
+//! `just verify` to re-check.
+//!
 //! [`FrameAlloc`]: crate::mm::frame::FrameAlloc
 
 use core::ops::Range;
@@ -779,11 +812,21 @@ impl<'a> CursorMut<'a> {
 
         let pte = entry_in_table(leaf_table_phys, leaf_index);
         if pte.is_present() {
+            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
+            // this Overlap guard is load-bearing for (REF) —
+            // `broken_double_leak_violates_refcount` shows that leaking a
+            // second ref over a present leaf drives `pte_refs` past 1,
+            // stranding a ref. Do not remove without re-proving.
             return Err(MapError::Overlap);
         }
 
         // Leak the UFrame's ref into the PTE: the frame's ref count
         // stays at 1, conceptually owned by the leaf entry.
+        // VERIFIED: the `frame: UFrame<M>` argument type is the Inv. 4 +
+        // Inv. 5 carrier — `vm_space_cursor.rs::broken_map_sensitive_
+        // violates_inv45` proves accepting a raw `Frame` here would let a
+        // sensitive frame land in a user PTE. (REF) `map` leaks exactly
+        // one ref; `unmap` reclaims exactly one.
         let inner = frame.into_frame();
         let paddr = inner.paddr();
         let _slot = inner.into_raw();
@@ -871,6 +914,11 @@ impl<'a> CursorMut<'a> {
         }
 
         // Reclaim the leaked UFrame ref.
+        // VERIFIED: `verification/proofs/vm_space_cursor.rs` (REF) proves
+        // `unmap` of a present leaf reclaims exactly one ref
+        // (`ref_map_unmap_exactly_once`) and that the not-present guard
+        // above prevents a double-free; `ref_map_then_unmap_roundtrips`
+        // shows the leak/reclaim pair returns the count to zero.
         // SAFETY: at `map` time we leaked exactly one ref to this
         // slot via `Frame::into_raw`; clearing the PTE here removes
         // the only path that held that ref. `from_raw_at` re-wraps

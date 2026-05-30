@@ -17,13 +17,14 @@ Per-module verification status for the OSTD critical path.
 |---|---|---|---|
 | `slopos_ostd::mm::frame` (`Frame<M>` ref-count) | `proofs/frame_refcount.rs` | Frame ref-count soundness; `Drop` releases once; no clone/drop UAF | **verified** |
 | `slopos_ostd::mm::slab` (`Slab` / `HeapSlot`) | `proofs/slab_lifetime.rs` | Inv. 9 (slot ⊄ outlives slab), Inv. 10 (size/align fit) | **verified** |
-| `slopos_ostd::mm::vm_space` (`Cursor`) | `proofs/vm_space_cursor.rs` | PT well-formedness; range-disjoint cursors; Inv. 4 + Inv. 5 across map/unmap | **planned** |
+| `slopos_ostd::mm::vm_space` (`Cursor`) | `proofs/vm_space_cursor.rs` | PT well-formedness; range-disjoint cursors; Inv. 4 + Inv. 5 across map/unmap | **verified** |
 
-> `proofs/frame_refcount.rs` (Phase 3B, 9 obligations) and
-> `proofs/slab_lifetime.rs` (Phase 3C, 11 obligations) are **verified** —
-> 20 obligations check on the pinned Verus SHA via `just verify`. The last
-> row becomes **verified** as `proofs/vm_space_cursor.rs` lands (Phase 3D).
-> `just verify` machine-checks both proofs on every run.
+> `proofs/frame_refcount.rs` (Phase 3B, 9 obligations),
+> `proofs/slab_lifetime.rs` (Phase 3C, 11 obligations), and
+> `proofs/vm_space_cursor.rs` (Phase 3D, 12 obligations) are all
+> **verified** — 32 obligations check on the pinned Verus SHA via
+> `just verify`. The OSTD critical path is **3/3 proofs**. `just verify`
+> machine-checks every proof on every run.
 
 ### `slopos_ostd::mm::frame` — proof summary (Phase 3B)
 
@@ -90,6 +91,73 @@ encodes an always-smallest (16-byte) chooser and proves it lets a
 in-range request.
 
 11 obligations, verified on Verus `0.2026.05.24.ecee80a`.
+
+### `slopos_ostd::mm::vm_space` — proof summary (Phase 3D)
+
+`proofs/vm_space_cursor.rs` is a Verus-annotated mirror of the page-table
+mutation path in `vm_space.rs`: the `CursorMut::map` / `unmap` / `protect`
+operations that walk the 4-level x86_64 page table
+(`page_table.rs::walk_to_leaf`) and the `Frame<M>` ref-count leak/reclaim
+discipline backing a leaf mapping. CortenMM (SOSP '25 Best Paper) is the
+reference design for verified concurrent paging; `notes/cortenmm.md`
+records the mapping — CortenMM's transactional `AddrSpace::lock(r) ->
+RCursor` is exactly SlopOS's `VmSpace::cursor_mut(range) -> CursorMut`.
+
+**Concurrency model — coarse lock-per-`VmSpace` (Phase 3D.3 fallback).**
+Where CortenMM uses per-PT-page locks + an RCU monitor and proves
+fine-grained mutual exclusion (its property P1), SlopOS uses the **Rust
+borrow checker**: `CursorMut<'a>` holds `&'a mut VmSpace`, so at most one
+mutator exists per address space at any instant, statically, with **no SMT
+obligation**. This is the coarse model Phase 3D.3 explicitly sanctions
+when the fine-grained one is not needed. It is strictly more conservative
+than CortenMM's range-disjoint parallelism (it serializes even disjoint
+ranges on one space), so it forbids strictly more concurrency: a
+**scalability** gap, not a **soundness** one. CortenMM's hardest
+obligation (P1, fine-grained mutual exclusion + RCU stale-retry) therefore
+**does not arise** in SlopOS. What the proof discharges is CortenMM's P2 —
+page-table well-formedness and the functional correctness of map/unmap
+under the serialized op stream the exclusive borrow produces.
+
+Each cursor critical section is modelled as one `Step` against an abstract
+`PtPath` (the PML4 -> PDPT -> PD -> PT -> leaf chain plus the leaf PTE's
+leaked-ref count). An inductive invariant (`pt_inv`) survives every step
+and is lifted to every trace via `invariant_holds_on_every_trace`. The
+§3D.2 obligations land as named corollaries:
+
+- **(WF)** `wf_no_dangling_intermediate` — a present leaf implies its whole
+  intermediate chain (PT, PD, PDPT) is present and valid, so no walk
+  dereferences a dangling table. CortenMM Fig. 12 for the 4-level walk.
+- **(REF)** `ref_leaf_holds_at_most_one` + `ref_map_unmap_exactly_once` +
+  `ref_map_then_unmap_roundtrips` — the leaf PTE holds at most one leaked
+  `UFrame` ref; `map` into an empty leaf leaks exactly one; `unmap` of a
+  present leaf reclaims exactly one; the round trip returns to zero. No
+  double-leak, no double-free.
+- **(Inv. 4 + Inv. 5)** `inv45_leaf_is_uframe` — a present user leaf is
+  always an insensitive `UFrame`; the `map::<S, M: AnyUFrameMeta>(UFrame<M>,
+  ..)` argument type is the carrier.
+- **(DIS)** `disjoint_vmspaces_independent` — two live cursors necessarily
+  hold `&mut` to distinct `VmSpace`s, so their states are independent
+  values and stepping one cannot mutate the other. The coarse-model
+  discharge of CortenMM's §3.3 range-disjoint semantics.
+
+Both guards are *load-bearing*, not vacuous:
+`broken_double_leak_violates_refcount` proves removing the `Overlap` guard
+lets `map` leak a second ref into a present leaf (stranding one on the next
+`unmap`), and `broken_map_sensitive_violates_inv45` proves accepting a raw
+`Frame` instead of a `UFrame` lets a sensitive frame land in a user PTE —
+while the shipped Overlap-guarded, `UFrame`-typed `map` preserves the
+invariant on every state. Source cross-referenced (`vm_space.rs`
+`# Verification` module-doc; `VERIFIED:` notes on the `map` Overlap guard,
+the `UFrame` leak, and the `unmap` reclaim).
+
+**Gap recorded (Phase 3D.3 / R11).** SlopOS serializes all cursor
+mutations on one `VmSpace`, including those over disjoint ranges, where
+CortenMM would run them in parallel. The fine-grained, in-one-space
+range-disjoint parallel proof would require per-PT-page locking SlopOS does
+not have; re-attempt on each Verus bump (3A.4) if SlopOS ever grows it.
+Until then the coarse model is the honest and sufficient one.
+
+12 obligations, verified on Verus `0.2026.05.24.ecee80a`.
 
 ## Everything else
 

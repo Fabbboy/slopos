@@ -31,4 +31,18 @@ the slab object lifecycle — Inv. 9 (a slot cannot outlive its parent slab:
 an outstanding cell pins its page) and Inv. 10 (a slot is only used for an
 object that fits its size + alignment) — plus load-bearing witnesses that an
 unconditional page reclaim breaks Inv. 9 and an always-smallest size class
-breaks Inv. 10. See `../STATUS.md` for the per-obligation summaries.
+breaks Inv. 10.
+
+`vm_space_cursor.rs` (Phase 3D) is the third: 12 obligations machine-checking
+the `VmSpace::cursor` page-table mutation path — (WF) page-table
+well-formedness (no dangling intermediate frames; CortenMM SOSP '25 Fig. 12
+for the 4-level x86_64 walk), (REF) `map` leaks one `UFrame` ref and `unmap`
+reclaims one exactly, and (Inv. 4 + Inv. 5) a present user leaf is always an
+insensitive `UFrame` — plus load-bearing witnesses that removing the
+`Overlap` guard double-leaks and that accepting a raw `Frame` lets a
+sensitive frame reach a user PTE. The proof uses the coarse
+lock-per-`VmSpace` model (the Phase-3D.3 fallback: `CursorMut` holds
+`&mut VmSpace`, so the borrow checker serializes mutators); see
+`../notes/cortenmm.md` for the design mapping and the gap vs. CortenMM's
+fine-grained per-PT-page locking. See `../STATUS.md` for the per-obligation
+summaries.
