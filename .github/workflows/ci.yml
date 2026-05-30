@@ -85,7 +85,7 @@ jobs:
         run: |
           scripts/check_unsafe_outside_ostd.sh
           scripts/check_no_kernel_async.sh
-          scripts/tcb_ratio.sh --max 1.5
+          scripts/tcb_ratio.sh --max 1.0
 
       - name: Run tests
         run: |

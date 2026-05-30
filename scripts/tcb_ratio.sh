@@ -10,7 +10,7 @@
 #
 # Usage:
 #   scripts/tcb_ratio.sh                # informational
-#   scripts/tcb_ratio.sh --max 1.5      # gate at 1.5 %
+#   scripts/tcb_ratio.sh --max 1.0      # gate at 1.0 % (Phase 2 bound)
 #
 # Definitions:
 #   - "unsafe tokens": lines under slopos-ostd/src/ containing the
