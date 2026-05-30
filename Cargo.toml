@@ -14,6 +14,7 @@ members = [
   "kernel-services",
   "mm",
   "net",
+  "ring",
   "sched",
   "service-core",
   "ktesting",
@@ -64,6 +65,7 @@ slopos-ostd-derive = { path = "slopos-ostd-derive" }
   slopos-kernel-services = { path = "kernel-services" }
 slopos-mm = { path = "mm" }
 slopos-net = { path = "net" }
+slopos-ring = { path = "ring" }
 slopos-sched = { path = "sched" }
 slopos-slibc = { path = "slibc" }
 slopos-userland = { path = "userland" }

@@ -1,7 +1,7 @@
 ---
 name: SlopRing — io_uring-Style Submission/Completion Ring Surface
 description: Design for SlopOS's userspace async edge — a shared-memory SQ/CQ ring backed by the existing sync EventBus / WaitQueue substrate. Kernel side is sync; async lives in userspace.
-status: design (Phase 3F) — no code yet; implementation is Phase 3G/3H
+status: implemented (Phase 3G/3H complete) — ring/ kernel crate, two syscalls, nine opcodes, userland slibc-ring runtime + slopfut executor all shipped and tested. This document remains the durable ABI/behaviour contract.
 authors: Phase 3F design pass, grounded in the post-Phase-2 SlopOS sync substrate
 phase: Framekernel Phase 3F (design subtasks 3F.1 / 3F.2 / 3F.3)
 location: docs/SLOPRING.md (durable ABI/design spec; lives in docs/, not plans/)

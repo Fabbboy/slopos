@@ -748,7 +748,27 @@ pub const SYSCALL_TEST_REPORT: u64 = 155;
 /// * Negative errno on failure
 pub const SYSCALL_RUN_USERLAND_TESTS: u64 = 156;
 
-pub const SYSCALL_TABLE_SIZE: usize = 158;
+/// SlopRing: create a submission/completion ring (SLOPRING § 6.1).
+///
+/// `ring_setup(entries: u32, params: *mut RingParams) -> i32`.
+/// Allocates the shared `Frame<RingMeta>` region, maps it into the
+/// caller's address space, opens a `FileKind::Ring` fd, and writes the
+/// populated [`crate::ring::RingParams`] to the user out-pointer.
+/// Returns the ring fd (`>= 0`) or a negated errno. Synchronous.
+pub const SYSCALL_RING_SETUP: u64 = 157;
+
+/// SlopRing: submit and/or harvest ring completions (SLOPRING § 6.2).
+///
+/// `ring_enter(ring_fd: i32, to_submit: u32, min_complete: u32, flags: u32) -> i32`.
+/// The doorbell + harvest call. Processes up to `to_submit` SQEs, then
+/// (when `min_complete > 0`) blocks the *calling task* on the in-flight
+/// resource queues until `min_complete` CQEs are available, a signal
+/// arrives, or a deadline elapses. Returns the submission count (or a
+/// negated errno). Synchronous; no `async fn` anywhere on the kernel
+/// side.
+pub const SYSCALL_RING_ENTER: u64 = 158;
+
+pub const SYSCALL_TABLE_SIZE: usize = 159;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

@@ -50,6 +50,15 @@ and the top-level support modules carrying contained `unsafe` (`memory`,
 `string`, `ring_buffer`, `bitmap`, `atomic_bitmap`, `stacktrace`,
 `panic_recovery`, `early_console`).
 
+The Phase-3G SlopRing accessor (`mm::uframe::{load_u32_acquire,
+store_u32_release, copy_out_volatile, copy_in_volatile}`) is the only new
+OSTD `unsafe` added since the proofs landed: ~6 lines of `read_volatile`/
+`write_volatile` + acquire/release fences, each with a `// SAFETY:` note
+naming Inv. 4/5, KernMiri-covered (`tests/uframe_round_trip.rs`). The
+`ring/` kernel crate that consumes it is `#![forbid(unsafe_code)]` and so
+needs no audit — it reaches ring memory only through this verified-by-Miri
+byte-copy surface (AD-3 / Inv. 4/5).
+
 ### Unaudited
 
 Pure safe Rust within OSTD — no `unsafe`, no Inv. obligation, sound by the

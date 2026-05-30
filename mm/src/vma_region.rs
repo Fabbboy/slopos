@@ -25,6 +25,15 @@ pub enum RegionBacking {
     /// Shared memfd — pages belong to the MemfdObject, not the process.
     /// Must not be freed on munmap; only mapcount decrement.
     SharedMemfd { handle: MemfdHandle },
+    /// SlopRing shared region (SLOPRING § 5.1). Pages are owned by the
+    /// kernel-side ring object as `Frame<RingMeta>`s; the user PTE holds
+    /// an independent `from_in_use` ref. Frames are freed only when both
+    /// the ring object *and* every user PTE have dropped their ref
+    /// (refcount → 0), so the mapping outliving the fd cannot UAF. This
+    /// VMA exists only to *reserve* the virtual range; lifetime is the
+    /// frame refcount. Not inherited across fork (the ring fd is
+    /// close-on-fork — SLOPRING § 14).
+    Ring,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +134,15 @@ impl VmaRegion {
 
     pub fn is_shared(&self) -> bool {
         matches!(self.backing, RegionBacking::SharedMemfd { .. })
+    }
+
+    /// `true` iff this region is a SlopRing shared mapping. Like
+    /// `is_shared()`, its PTEs must be unmapped *without* the
+    /// anonymous-frame free path on teardown — the ring object owns the
+    /// frame lifecycle through `RingMeta` refcounts (the `from_in_use`
+    /// PTE ref is reclaimed, not double-freed).
+    pub fn is_ring(&self) -> bool {
+        matches!(self.backing, RegionBacking::Ring)
     }
 
     pub fn memfd_handle(&self) -> MemfdHandle {

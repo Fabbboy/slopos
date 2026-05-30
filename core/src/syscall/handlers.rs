@@ -32,6 +32,7 @@ pub use crate::syscall::process_handlers::{
     syscall_getppid, syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid,
     syscall_spawn_path, syscall_terminate_task, syscall_vhangup, syscall_waitpid,
 };
+pub use crate::syscall::ring_handlers::{syscall_ring_enter, syscall_ring_setup};
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
@@ -198,6 +199,10 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     // Userland test harness
     [SYSCALL_TEST_REPORT] => syscall_test_report, "test_report";
     [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
+
+    // SlopRing (io_uring-style submission/completion ring — SLOPRING)
+    [SYSCALL_RING_SETUP] => syscall_ring_setup, "ring_setup";
+    [SYSCALL_RING_ENTER] => syscall_ring_enter, "ring_enter";
 };
 
 pub fn syscall_lookup(sysno: u64) -> Option<&'static SyscallEntry> {

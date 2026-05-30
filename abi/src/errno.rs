@@ -138,6 +138,7 @@ define_errnos! {
     ENAMETOOLONG    =  36;
     ENOSYS          =  38;
     ENOTEMPTY       =  39;
+    ETIME           =  62;
     ENOTSOCK        =  88;
     EDESTADDRREQ    =  89;
     EPROTONOSUPPORT =  93;
@@ -154,7 +155,9 @@ define_errnos! {
     ETIMEDOUT       = 110;
     ECONNREFUSED    = 111;
     EHOSTUNREACH    = 113;
+    EALREADY        = 114;
     EINPROGRESS     = 115;
+    ECANCELED       = 125;
     /// Kernel-internal: restartable syscall.  **Must never reach userland.**
     ERESTARTSYS     = 512;
 }

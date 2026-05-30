@@ -329,6 +329,38 @@ unsafe impl AnyFrameMeta for PacketMeta {
 }
 const _: () = assert_meta_fits::<PacketMeta>();
 
+/// Frame metadata for a SlopRing shared-memory region page (SLOPRING
+/// § 5.2). A ring's SQ/CQ live in `Frame<RingMeta>`s mapped read+write
+/// into both the kernel (HHDM) and the owning process (`cursor_mut`,
+/// exactly the `process_vm_mmap_shared` path). `RingMeta` is *dual*:
+/// `AnyFrameMeta` (so it owns a real frame, freed on last `Drop`) **and**
+/// `AnyUFrameMeta` (so the kernel may only reach the bytes through the
+/// `UFrame` byte-copy / volatile interface, never a `&Sqe` / `&mut Cqe`
+/// — AD-3 / Inv. 4/5). Modelled on [`AnonymousMeta`], the existing
+/// `AnyUFrameMeta` exemplar — *not* on `PacketMeta`/`PageCacheMeta`,
+/// which are `AnyFrameMeta`-only kernel-owned types.
+///
+/// The payload carries the owning ring's generation-handle bits so a
+/// stray mapping can be traced back to its ring; it is one `AtomicU64`
+/// (8 B), well within [`MAX_META_SIZE`].
+#[derive(Default)]
+pub struct RingMeta {
+    /// Generation-handle bits of the owning ring object. Atomic so the
+    /// owner can stamp/clear it without holding the frame's slot lock.
+    pub ring_handle_bits: AtomicU64,
+}
+
+// SAFETY: payload is a single atomic with no cross-field invariant
+// beyond `AtomicU64`'s own contract. `on_drop` returns the underlying
+// physical frame to the registered allocator so a `Frame<RingMeta>`
+// does not leak the page on its last Drop.
+unsafe impl AnyFrameMeta for RingMeta {
+    fn on_drop(&mut self, paddr: Paddr) {
+        return_frame_to_allocator(paddr);
+    }
+}
+const _: () = assert_meta_fits::<RingMeta>();
+
 /// Helper: dealloc `paddr` (one page) via the registered allocator.
 /// No-op when no allocator is registered (test scaffolding can drop
 /// frames before `register_frame_allocator` runs without panicking).

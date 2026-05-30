@@ -1,0 +1,28 @@
+[package]
+name = "slopos-ring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SlopRing: io_uring-style submission/completion ring (kernel side). See docs/SLOPRING.md."
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+test = false
+doctest = false
+
+[features]
+default = []
+test-hooks = []
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-ostd = { workspace = true }
+slopos-kernel-services = { workspace = true }
+slopos-mm = { workspace = true }
+slopos-fs = { workspace = true }
+slopos-net = { workspace = true }
+slopos-testing = { workspace = true }

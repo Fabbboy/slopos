@@ -670,6 +670,30 @@ fn unmap_and_free_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, 
     freed
 }
 
+/// Unmap a SlopRing mapping range. Each page's PTE holds an
+/// independent `from_in_use` ref on the `RingMeta` frame; dropping the
+/// PTE ref here (via the typed ring cursor-unmap) leaves the frame
+/// alive as long as the ring object still holds its ref, so this is
+/// neither "free" (the ring object owns the lifecycle) nor "nofree"
+/// (the PTE genuinely held a ref that must be released). Returns the
+/// number of pages unmapped.
+fn unmap_ring_range_dir(vm_space: &mut KArc<VmSpace>, _pid: u32, start: u64, end: u64) -> u32 {
+    if !vma_range_valid(start, end) {
+        return 0;
+    }
+    let mut unmapped = 0u32;
+    let mut addr = start;
+    while addr < end {
+        if let Ok(true) =
+            crate::dual_paging::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr))
+        {
+            unmapped += 1;
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    unmapped
+}
+
 /// Unmap pages WITHOUT freeing the physical frames. Used for shared
 /// memfd mappings where the memfd object owns the page lifecycle.
 /// Returns the number of pages unmapped (for total_pages accounting).
@@ -2089,6 +2113,76 @@ pub fn process_vm_mmap_shared(
     )
 }
 
+/// Map a SlopRing region into `process_id` (SLOPRING § 5.1). `paddrs`
+/// lists the contiguous-or-not `RingMeta` frame physical addresses (one
+/// per 4 KiB page, in region order) the ring object already owns. Each
+/// page is mapped read+write into a freshly-found mmap gap; the PTE
+/// takes an independent `from_in_use` ref on the `RingMeta` frame (so a
+/// mapping that outlives the ring fd cannot UAF — the frame survives
+/// until both refs drop).
+///
+/// Returns the user virtual base address on success, or `0` on failure
+/// (no gap, or a cursor map error — partial maps are rolled back).
+pub fn process_vm_map_ring(process_id: u32, paddrs: &[PhysAddr]) -> u64 {
+    use crate::dual_paging::{ostd_map_ring_4kb_user, ostd_unmap_ring_4kb_user};
+
+    if paddrs.is_empty() {
+        return 0;
+    }
+    let size = (paddrs.len() as u64) * PAGE_SIZE_4KB;
+
+    let slot = match find_slot_for_pid(process_id) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process_id {
+        return 0;
+    }
+
+    let start_addr = find_mmap_gap_inner(&proc, size);
+    if start_addr == 0 {
+        klog_info!("process_vm_map_ring: no free region for {} bytes", size);
+        return 0;
+    }
+    let end_addr = start_addr + size;
+
+    let region = VmaRegion {
+        protection: Protection::RW,
+        backing: RegionBacking::Ring,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::General,
+    };
+
+    let inner = &mut *proc;
+    let vm_space = inner
+        .vm_space
+        .as_mut()
+        .expect("process_vm_map_ring: vm_space present for live pid");
+
+    // Ring pages are always mapped read+write to user.
+    let pte_flags = PageFlags::USER_RW.bits();
+
+    for (i, pa) in paddrs.iter().enumerate() {
+        let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
+        if let Err(err) = ostd_map_ring_4kb_user(vm_space, VirtAddr::new(vaddr), *pa, pte_flags) {
+            klog_info!("process_vm_map_ring: cursor map failed: {:?}", err);
+            for j in 0..i {
+                let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
+                let _ = ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(rv));
+            }
+            return 0;
+        }
+    }
+
+    inner.vma_map.insert(start_addr, end_addr, region);
+    inner.total_pages += paddrs.len() as u32;
+
+    start_addr
+}
+
 fn process_vm_mmap_inner(
     process_id: u32,
     addr_hint: u64,
@@ -2193,7 +2287,9 @@ fn process_vm_mmap_inner(
         inner
             .vma_map
             .remove_range(addr_hint, end_addr, |overlap_start, overlap_end, region| {
-                let freed = if region.is_shared() {
+                let freed = if region.is_ring() {
+                    unmap_ring_range_dir(&mut vm_space_taken, pid, overlap_start, overlap_end)
+                } else if region.is_shared() {
                     unmap_range_nofree_dir(&mut vm_space_taken, pid, overlap_start, overlap_end)
                 } else {
                     unmap_and_free_range_dir(&mut vm_space_taken, pid, overlap_start, overlap_end)
@@ -2335,7 +2431,11 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
     inner
         .vma_map
         .remove_range(addr, end, |overlap_start, overlap_end, region| {
-            let freed = if region.is_shared() {
+            let freed = if region.is_ring() {
+                // SlopRing: release the PTE's RingMeta ref; the ring
+                // object retains its own ref so the frame survives.
+                unmap_ring_range_dir(&mut vm_space_taken, process_id, overlap_start, overlap_end)
+            } else if region.is_shared() {
                 // Shared: unmap PTEs but do NOT free physical pages
                 unmap_range_nofree_dir(&mut vm_space_taken, process_id, overlap_start, overlap_end)
             } else {
@@ -2466,6 +2566,14 @@ fn clone_cow_snapshot_parent(
     for (vma_start, vma_end, region) in vmas_iter.iter() {
         let vma_start = *vma_start;
         let vma_end = *vma_end;
+        // SlopRing regions are not inherited (close-on-fork, SLOPRING
+        // § 14): capture an empty snapshot and never mark them COW. The
+        // child-side walk skips `is_ring()` VMAs entirely.
+        if region.is_ring() {
+            vmas.push((vma_start, vma_end, region.clone(), KVec::new()))
+                .expect("clone_cow: vmas alloc");
+            continue;
+        }
         let mut snapshot: KVec<ClonePageSnapshot> = KVec::new();
         let is_shared = region.is_shared();
         let mut addr = vma_start;
@@ -2720,6 +2828,13 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
             let vma_start = *vma_start;
             let vma_end = *vma_end;
+            // SlopRing regions are NOT inherited: the child's ring fd is
+            // close-on-fork (SLOPRING § 14), and the SQ/CQ is SPSC, so a
+            // second producer in the child is forbidden by construction.
+            // Skip the VMA entirely — the child gets no ring mapping.
+            if parent_region.is_ring() {
+                continue;
+            }
             let is_shared_vma = parent_region.is_shared();
 
             let child_region = if is_shared_vma {

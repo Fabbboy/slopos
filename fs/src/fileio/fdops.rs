@@ -177,6 +177,25 @@ impl OpenFileGuard for OpenFile {
 }
 
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
+    file_read_fd_inner(process_id, fd, buf, false)
+}
+
+/// SlopRing non-blocking probe variant of [`file_read_fd`] (SLOPRING
+/// § 12). Runs the **exact same** `FileOps::read` path — so observable
+/// results match the blocking syscall (R12 parity) — but forces the
+/// `O_NONBLOCK` flag so the path returns `-EAGAIN` instead of parking on
+/// a `WaitQueue`. Used by `OP_READ` / consuming reads; the ring's
+/// harvest phase (not this call) is what blocks.
+pub fn file_read_fd_nonblock(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
+    file_read_fd_inner(process_id, fd, buf, true)
+}
+
+fn file_read_fd_inner(
+    process_id: u32,
+    fd: c_int,
+    buf: &mut dyn IoBufWrite,
+    force_nonblock: bool,
+) -> ssize_t {
     let snap = {
         let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
@@ -197,7 +216,17 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
 
     let seekable = ops.seekable();
     let used_offset = if seekable { snap.position } else { 0 };
-    let rc = ops.read(snap.handle, buf, used_offset, snap.status_flags.bits());
+    let mut flag_bits = snap.status_flags.bits();
+    let mut socket_guard = None;
+    if force_nonblock {
+        flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
+        // Sockets ignore the per-call flag and consult their *stored*
+        // nonblocking state (SLOPRING § 12 reality 1), so toggle it
+        // across the probe and restore it on drop.
+        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle, snap.status_flags.bits());
+    }
+    let rc = ops.read(snap.handle, buf, used_offset, flag_bits);
+    drop(socket_guard);
     if rc > 0 && seekable {
         with_open_files(|state| {
             if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
@@ -211,6 +240,21 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
+    file_write_fd_inner(process_id, fd, buf, false)
+}
+
+/// SlopRing non-blocking probe variant of [`file_write_fd`] — see
+/// [`file_read_fd_nonblock`].
+pub fn file_write_fd_nonblock(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
+    file_write_fd_inner(process_id, fd, buf, true)
+}
+
+fn file_write_fd_inner(
+    process_id: u32,
+    fd: c_int,
+    buf: &dyn IoBufRead,
+    force_nonblock: bool,
+) -> ssize_t {
     let snap = {
         let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
@@ -231,7 +275,14 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
 
     let seekable = ops.seekable();
     let used_offset = if seekable { snap.position } else { 0 };
-    let rc = ops.write(snap.handle, buf, used_offset, snap.status_flags.bits());
+    let mut flag_bits = snap.status_flags.bits();
+    let mut socket_guard = None;
+    if force_nonblock {
+        flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
+        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle, snap.status_flags.bits());
+    }
+    let rc = ops.write(snap.handle, buf, used_offset, flag_bits);
+    drop(socket_guard);
     if rc > 0 && seekable {
         with_open_files(|state| {
             if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
@@ -242,6 +293,41 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
         });
     }
     rc
+}
+
+/// RAII guard that forces a socket fd's *stored* nonblocking flag on for
+/// the duration of a SlopRing probe, then restores it. For non-socket
+/// fds (pipes/ttys/regular) it is a no-op — those honour the per-call
+/// `O_NONBLOCK` flag directly. (SLOPRING § 12 reality 1.)
+struct ForcedNonblockGuard {
+    ops: &'static dyn FileOps,
+    handle: usize,
+    /// The status-flag bits to restore on drop.
+    restore_bits: u32,
+}
+
+impl ForcedNonblockGuard {
+    fn engage(ops: &'static dyn FileOps, handle: usize, orig_bits: u32) -> Option<Self> {
+        if ops.kind() != FileKind::Socket {
+            return None;
+        }
+        // Set nonblocking for the probe; restore the *original* status
+        // bits on drop. The socket subsystem owns the bit; we round-trip
+        // it through `set_status_flags` (the same path `fcntl(F_SETFL)`
+        // uses), so no socket-internal invariant is bypassed.
+        ops.set_status_flags(handle, slopos_abi::syscall::O_NONBLOCK as u32);
+        Some(Self {
+            ops,
+            handle,
+            restore_bits: orig_bits,
+        })
+    }
+}
+
+impl Drop for ForcedNonblockGuard {
+    fn drop(&mut self) {
+        self.ops.set_status_flags(self.handle, self.restore_bits);
+    }
 }
 
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {

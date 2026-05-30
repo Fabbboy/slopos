@@ -84,6 +84,10 @@ path = "src/bin/tests/curl_e2e_test.rs"
 name = "cd_test"
 path = "src/bin/tests/cd_test.rs"
 
+[[bin]]
+name = "ring_test"
+path = "src/bin/tests/ring_test.rs"
+
 [features]
 default = []
 testbins = []

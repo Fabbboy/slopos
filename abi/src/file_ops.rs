@@ -32,6 +32,9 @@ pub enum FileKind {
     PipeWrite = 3,
     Tty = 4,
     Memfd = 5,
+    /// SlopRing submission/completion ring (SLOPRING § 3). The fd's
+    /// `handle` resolves a ring object in the per-process ring registry.
+    Ring = 6,
 }
 
 /// Per-resource-type operations for open file descriptions.

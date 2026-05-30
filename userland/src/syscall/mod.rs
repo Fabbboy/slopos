@@ -36,6 +36,7 @@ pub mod net;
 pub mod numbers;
 pub mod process;
 pub mod raw;
+pub mod ring;
 pub mod roulette;
 pub mod tty;
 pub mod window;

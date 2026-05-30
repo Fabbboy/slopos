@@ -20,7 +20,7 @@
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
+use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, RingMeta};
 use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
 use slopos_ostd::mm::page_size::Size4Kb;
 use slopos_ostd::mm::page_table::PteFlags;
@@ -137,6 +137,44 @@ pub fn ostd_unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result
     let mut cursor = vs.cursor_mut(range)?;
     Ok(cursor
         .unmap::<Size4Kb, AnonymousMeta>()
+        .map(|opt| opt.is_some())?)
+}
+
+/// Map a 4 KiB SlopRing page (`Frame<RingMeta>`) into `vm_space` at
+/// `va`. The `RingMeta` slot at `pa` must already be live (the ring
+/// object holds the first ref); this bumps it via `from_in_use` and
+/// leaks that second ref into the user PTE (SLOPRING § 5.1). Because
+/// the frame's refcount now reflects both the ring object and the PTE,
+/// the page is freed only once *both* drop their ref — so a mapping
+/// that outlives the ring fd cannot UAF.
+pub fn ostd_map_ring_4kb_user(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+    pa: PhysAddr,
+    flags: u64,
+) -> Result<(), MapError> {
+    let prop = page_flags_to_property(flags);
+    let frame = UFrame::<RingMeta>::from_in_use(Paddr::new(pa.as_u64()))
+        .map_err(|_| MapError::PathCorrupt)?;
+    let vs = vm_space_get_mut(vm_space);
+    let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let mut cursor = vs.cursor_mut(range)?;
+    cursor.map::<Size4Kb, RingMeta>(frame, prop)
+}
+
+/// Unmap a 4 KiB SlopRing page from `vm_space` at `va`. The returned
+/// `UFrame<RingMeta>` is dropped immediately, releasing the PTE's ref;
+/// the underlying frame survives until the ring object also drops its
+/// ref (and vice-versa). Returns `Ok(true)` if a leaf was present.
+pub fn ostd_unmap_ring_4kb_user(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+) -> Result<bool, MapError> {
+    let vs = vm_space_get_mut(vm_space);
+    let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let mut cursor = vs.cursor_mut(range)?;
+    Ok(cursor
+        .unmap::<Size4Kb, RingMeta>()
         .map(|opt| opt.is_some())?)
 }
 

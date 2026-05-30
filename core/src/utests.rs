@@ -20,3 +20,4 @@ crate::utest!(
 );
 crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");
 crate::utest!(name = utest_cd, bin = "/bin/cd_test");
+crate::utest!(name = utest_ring, bin = "/bin/ring_test");

@@ -137,6 +137,59 @@ fn round_trip_derive_pod() {
 }
 
 #[test]
+fn volatile_u32_index_round_trip() {
+    let _g = setup();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x5000), AnonymousMeta::default()).unwrap();
+    // Aligned u32 store/load round-trips through the volatile/acquire
+    // accessors used for the SQ/CQ head/tail indices.
+    f.store_u32_release(0, 0xabad_1dea).unwrap();
+    assert_eq!(f.load_u32_acquire(0).unwrap(), 0xabad_1dea);
+    f.store_u32_release(64, 7).unwrap();
+    assert_eq!(f.load_u32_acquire(64).unwrap(), 7);
+}
+
+#[test]
+fn volatile_u32_rejects_misaligned_and_oob() {
+    let _g = setup();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x4000), AnonymousMeta::default()).unwrap();
+    assert_eq!(f.load_u32_acquire(1).unwrap_err(), UFrameError::Misaligned);
+    assert_eq!(
+        f.store_u32_release(2, 0).unwrap_err(),
+        UFrameError::Misaligned
+    );
+    assert_eq!(
+        f.load_u32_acquire(4096).unwrap_err(),
+        UFrameError::OutOfBounds
+    );
+}
+
+#[test]
+fn volatile_byte_copy_round_trip() {
+    let _g = setup();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x3000), AnonymousMeta::default()).unwrap();
+    // Mirror an SQE snapshot in / CQE post out: a 64-byte body copied
+    // through the volatile accessors must round-trip byte-identically.
+    let src: [u8; 64] = core::array::from_fn(|i| (i as u8).wrapping_mul(3));
+    f.copy_in_volatile(128, &src).unwrap();
+    let mut dst = [0u8; 64];
+    f.copy_out_volatile(128, &mut dst).unwrap();
+    assert_eq!(src, dst);
+    // Bounds are enforced exactly like the non-volatile path.
+    let mut overflow = [0u8; 8];
+    assert_eq!(
+        f.copy_out_volatile(4090, &mut overflow),
+        Err(UFrameError::OutOfBounds)
+    );
+    assert_eq!(
+        f.copy_in_volatile(4096, &[0u8; 1]),
+        Err(UFrameError::OutOfBounds)
+    );
+}
+
+#[test]
 fn usegment_round_trip_crosses_page_boundary() {
     let _g = setup();
     let seg = USegment::<AnonymousMeta>::from_unused_run(Paddr::new(0x6000), 2).unwrap();

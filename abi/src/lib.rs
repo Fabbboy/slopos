@@ -28,6 +28,7 @@ pub mod input;
 pub mod io;
 pub mod net;
 pub mod pixel;
+pub mod ring;
 pub mod signal;
 pub mod surface;
 pub mod syscall;
