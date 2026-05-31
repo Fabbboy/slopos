@@ -66,8 +66,13 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64) -> InFlight {
 pub fn probe(pid: u32, sqe: &Sqe) -> Outcome {
     match sqe.opcode {
         OP_NOP => Outcome::Inline(0),
-        OP_READ | OP_RECVMSG => probe_read(pid, sqe),
-        OP_WRITE | OP_SEND => probe_write(pid, sqe),
+        OP_READ => probe_read(pid, sqe),
+        OP_WRITE => probe_write(pid, sqe),
+        // OP_SEND / OP_RECVMSG are socket-typed: they route through the
+        // socket send/recvmsg paths, not the generic file write/read
+        // (SLOPRING § 12). Separate arms from OP_WRITE/OP_READ.
+        OP_SEND => crate::net_glue::send_nonblock(pid, sqe.fd, sqe.addr, sqe.len, sqe.op_flags),
+        OP_RECVMSG => crate::net_glue::recvmsg_nonblock(pid, sqe.fd, sqe.addr, sqe.op_flags),
         OP_ACCEPT => probe_accept(pid, sqe),
         OP_POLL_ADD => probe_poll(pid, sqe),
         // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the

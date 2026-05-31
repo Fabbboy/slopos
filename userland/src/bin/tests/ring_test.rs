@@ -15,7 +15,7 @@
 use slopos_userland as _;
 
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
-use slopos_abi::ring::{OP_NOP, OP_READ, OP_WRITE, Sqe};
+use slopos_abi::ring::{OP_NOP, OP_READ, OP_RECVMSG, OP_SEND, OP_WRITE, Sqe};
 use slopos_userland::ring::{Ring, RingExecutor};
 use slopos_userland::syscall::{fs, net};
 
@@ -223,6 +223,65 @@ fn test_socket_dispatch() -> bool {
     }
 }
 
+/// OP_SEND routes through the *socket send* path (not the generic
+/// `file_write_fd`): an OP_SEND on a freshly-created, *unconnected* TCP
+/// socket must complete inline with a socket-layer negative errno (e.g.
+/// -ENOTCONN/-EPIPE), never blocking, never mis-dispatched. A pipe/regular
+/// fd would not yield this socket-layer errno, so a negative result here
+/// proves the ring drove the socket-send routing distinctly from OP_WRITE.
+fn test_send_socket_dispatch() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    let payload = b"slopring-send";
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND;
+    sqe.fd = sock.raw();
+    sqe.addr = payload.as_ptr() as u64;
+    sqe.len = payload.len() as u32;
+    sqe.user_data = 0x5e4d;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => cqe.user_data == 0x5e4d && cqe.res < 0,
+        None => false,
+    }
+}
+
+/// OP_RECVMSG parses the user `MsgHdr` at `sqe.addr` and validates it:
+/// a null `addr` must complete inline with -EFAULT (proving the msghdr
+/// parse + user-pointer validation runs, distinct from OP_READ which
+/// treats `addr` as a raw data buffer).
+fn test_recvmsg_efault() -> bool {
+    // A valid socket so the op reaches msghdr parsing (not ENOTSOCK).
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_RECVMSG;
+    sqe.fd = sock.raw();
+    sqe.addr = 0; // null MsgHdr* → EFAULT
+    sqe.user_data = 0xfa01;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    // -EFAULT == -14. The msghdr validation rejects the null pointer
+    // before any recv, so this completes inline with exactly -EFAULT.
+    match ring.poll_completion() {
+        Some(cqe) => cqe.user_data == 0xfa01 && cqe.res == -14,
+        None => false,
+    }
+}
+
 /// The subtests. Each returns `true` on success.
 const CASES: &[(&str, fn() -> bool)] = &[
     ("setup", test_setup),
@@ -231,6 +290,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("deferred_read", test_deferred_read),
     ("cancel", test_cancel),
     ("socket_dispatch", test_socket_dispatch),
+    ("send_socket_dispatch", test_send_socket_dispatch),
+    ("recvmsg_efault", test_recvmsg_efault),
 ];
 
 fn main() {

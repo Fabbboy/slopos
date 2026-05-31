@@ -81,7 +81,17 @@ impl FileOps for SocketFileOps {
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         // Register FIRST, then check readiness (Linux pattern).
-        let registered = self.poll_wait(handle);
+        let socket_idx = handle as u32;
+        // Always subscribe RECV (POLLIN / POLLHUP / POLLERR wakeups).
+        let mut registered = socket::socket_poll_enqueue_recv(socket_idx);
+        // Also subscribe SEND when POLLOUT is requested, so a deferred
+        // write/send that hit -EAGAIN on a full TX buffer is woken when
+        // the buffer drains (TX-drain publishes sock_send_ev). The
+        // harvest re-probes readiness, so a spurious wakeup (already
+        // writable) is harmless.
+        if (events & POLLOUT) != 0 {
+            registered |= socket::socket_poll_enqueue_send(socket_idx);
+        }
         let revents = self.poll_events(handle, events);
         slopos_abi::file_ops::FusedPollResult {
             revents,
@@ -129,7 +139,12 @@ impl FileOps for SocketFileOps {
     }
 
     fn poll_unwait(&self, handle: usize) {
+        // Dequeue BOTH recv and send. `poll_unwait` carries no `events`
+        // mask, and dequeuing an event we never subscribed to is a safe
+        // no-op (the wait-queue remove scans for the current task and
+        // does nothing when it is absent).
         socket::socket_poll_dequeue_recv(handle as u32);
+        socket::socket_poll_dequeue_send(handle as u32);
     }
 
     fn set_status_flags(&self, handle: usize, flags: u32) -> i32 {

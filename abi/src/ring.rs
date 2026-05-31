@@ -57,6 +57,22 @@ pub const OP_MAX: u8 = OP_CANCEL;
 pub const SLOPRING_CQE_F_MORE: u32 = 1 << 0;
 
 // ---------------------------------------------------------------------------
+// CQ flags word (the shared `cq_off_flags` u32).
+// ---------------------------------------------------------------------------
+
+/// Set by the kernel in the shared CQ-flags word when at least one CQE
+/// was dropped because the CQ was full (`cq_off_overflow` counts how
+/// many). Mirrors Linux io_uring's `IORING_SQ_CQ_OVERFLOW`. Userland
+/// reads it to detect a missed completion and recover.
+///
+/// This is a **sticky one-way latch**: once any CQE is dropped the bit
+/// stays set for the ring's lifetime and is cleared only at the next
+/// `ring_setup`. The kernel never clears it (the dropped completions are
+/// unrecoverable, so re-arming the flag would hide a real data loss).
+/// `cq_off_overflow` carries the running drop count.
+pub const SLOPRING_CQ_OVERFLOW: u32 = 1 << 1;
+
+// ---------------------------------------------------------------------------
 // SQE op_flags (SLOPRING § 10).
 // ---------------------------------------------------------------------------
 
@@ -266,7 +282,10 @@ pub struct RingParams {
     /// Offset of the CQE array.
     pub cq_off_array: u32,
 
-    pub _pad1: u32,
+    /// Offset of the CQ flags word (a u32 holding [`SLOPRING_CQ_OVERFLOW`]
+    /// and any future CQ-state bits). Repurposed from the former `_pad1`
+    /// reserved field, so the struct offsets below are unchanged.
+    pub cq_off_flags: u32,
     /// User VA the region was mapped at (filled by `ring_setup`).
     pub region_addr: u64,
     /// Total mapping length in bytes (so userland mmaps exactly this).
@@ -309,7 +328,7 @@ impl RingParams {
         cq_off_mask: 0,
         cq_off_overflow: 0,
         cq_off_array: 0,
-        _pad1: 0,
+        cq_off_flags: 0,
         region_addr: 0,
         region_bytes: 0,
     };
@@ -343,7 +362,7 @@ impl RingParams {
         put!(cq_off_mask);
         put!(cq_off_overflow);
         put!(cq_off_array);
-        put!(_pad1);
+        put!(cq_off_flags);
         put!(region_addr);
         put!(region_bytes);
         b
@@ -390,7 +409,7 @@ impl RingParams {
             cq_off_mask: get32!(cq_off_mask),
             cq_off_overflow: get32!(cq_off_overflow),
             cq_off_array: get32!(cq_off_array),
-            _pad1: get32!(_pad1),
+            cq_off_flags: get32!(cq_off_flags),
             region_addr: get64!(region_addr),
             region_bytes: get64!(region_bytes),
         }
@@ -424,6 +443,7 @@ pub struct RingLayout {
     pub cq_off_tail: u32,
     pub cq_off_mask: u32,
     pub cq_off_overflow: u32,
+    pub cq_off_flags: u32,
     pub sqe_array_off: u32,
     pub cqe_array_off: u32,
     pub region_bytes: u32,
@@ -456,6 +476,11 @@ impl RingLayout {
         let cq_off_tail = cq_ctrl + U32;
         let cq_off_mask = cq_ctrl + 2 * U32;
         let cq_off_overflow = cq_ctrl + 3 * U32;
+        // CQ flags word: the 5th u32, carved from the currently-unused
+        // padding between the CQ control block and the page-aligned SQE
+        // array (which begins at `align_up(cq_ctrl + 4 * U32, 4096)`), so
+        // this costs no extra region bytes.
+        let cq_off_flags = cq_ctrl + 4 * U32;
 
         // SQE array: sq_entries * 64. Page-aligned so that — since 64
         // divides 4096 — no SQE ever straddles a page boundary. The ring
@@ -484,6 +509,7 @@ impl RingLayout {
             cq_off_tail,
             cq_off_mask,
             cq_off_overflow,
+            cq_off_flags,
             sqe_array_off,
             cqe_array_off,
             region_bytes,
@@ -517,7 +543,7 @@ impl RingLayout {
             cq_off_mask: self.cq_off_mask,
             cq_off_overflow: self.cq_off_overflow,
             cq_off_array: self.cqe_array_off,
-            _pad1: 0,
+            cq_off_flags: self.cq_off_flags,
             region_addr: 0,
             region_bytes: self.region_bytes as u64,
         }
@@ -602,7 +628,8 @@ mod tests {
         assert_eq!(&b[64..72], &0xAABB_CCDD_1122_3344u64.to_le_bytes());
         assert_eq!(&b[72..80], &0x3000u64.to_le_bytes());
         // The buggy serializer wrote region_addr at 60; bytes 60..64 are
-        // `_pad1`'s tail and must be zero for ZERO params.
+        // the implicit padding after `cq_off_flags` (offset 56) and must
+        // be zero for ZERO params.
         assert_eq!(&b[60..64], &[0u8; 4]);
     }
 
@@ -635,10 +662,31 @@ mod tests {
             cq_off_mask: 0x2d2e_2f30,
             cq_off_overflow: 0x3132_3334,
             cq_off_array: 0x3536_3738,
-            _pad1: 0x393a_3b3c,
+            cq_off_flags: 0x393a_3b3c,
             region_addr: 0x4142_4344_4546_4748,
             region_bytes: 0x494a_4b4c_4d4e_4f50,
         };
         assert_eq!(RingParams::from_bytes(&p2.to_bytes()), p2);
+    }
+
+    /// The CQ-flags word lives in the free padding before the
+    /// page-aligned SQE array (no region growth), and `cq_off_flags`
+    /// round-trips through `to_bytes`/`from_bytes` carrying the
+    /// `SLOPRING_CQ_OVERFLOW` bit pattern intact.
+    #[test]
+    fn cq_off_flags_in_padding_and_round_trips() {
+        let l = RingLayout::new(64);
+        // Flags word sits just past the four CQ control u32s …
+        assert_eq!(l.cq_off_flags, l.cq_off_overflow + 4);
+        // … and entirely before the (page-aligned) SQE array, so it
+        // consumes only otherwise-unused padding.
+        assert!(l.cq_off_flags + 4 <= l.sqe_array_off);
+        assert_eq!(l.to_params().cq_off_flags, l.cq_off_flags);
+
+        let mut p = l.to_params();
+        p.cq_off_flags = SLOPRING_CQ_OVERFLOW;
+        let round = RingParams::from_bytes(&p.to_bytes());
+        assert_eq!(round.cq_off_flags, SLOPRING_CQ_OVERFLOW);
+        assert_eq!(round, p);
     }
 }

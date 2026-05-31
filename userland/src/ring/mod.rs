@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use slopos_abi::ring::{Cqe, RingParams, Sqe};
+use slopos_abi::ring::{Cqe, RingParams, SLOPRING_CQ_OVERFLOW, Sqe};
 
 use crate::syscall::ring::{ring_enter, ring_setup};
 
@@ -64,6 +64,27 @@ impl Ring {
     /// Number of SQ slots.
     pub fn sq_entries(&self) -> u32 {
         self.params.sq_entries
+    }
+
+    /// `true` if the kernel has dropped at least one completion because
+    /// the CQ was full (the shared `SLOPRING_CQ_OVERFLOW` flag). Userland
+    /// should harvest aggressively and treat in-flight ops as possibly
+    /// lost when this is set. The companion count is
+    /// [`Ring::cq_overflow_count`].
+    ///
+    /// This is a **sticky one-way latch**: once set it stays set for the
+    /// ring's lifetime and is cleared only by creating a fresh ring
+    /// (`ring_setup`). The dropped completions are unrecoverable, so the
+    /// flag is a permanent "this ring lost data" signal, not a transient
+    /// edge. Use [`Ring::cq_overflow_count`] for the running drop count.
+    pub fn cq_overflow(&self) -> bool {
+        (self.load_acq(self.params.cq_off_flags) & SLOPRING_CQ_OVERFLOW) != 0
+    }
+
+    /// Number of completions the kernel dropped on a full CQ (the shared
+    /// `cq_off_overflow` counter, monotonically increasing modulo 2^32).
+    pub fn cq_overflow_count(&self) -> u32 {
+        self.load_acq(self.params.cq_off_overflow)
     }
 
     // -- raw index access (volatile, ordered) --

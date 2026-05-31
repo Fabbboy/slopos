@@ -682,6 +682,7 @@ fn recvmsg_writeback_cmsg(
         return Ok(());
     }
 
+    debug_assert!(n_fds <= SCM_MAX_FDS);
     let mut fd_nums = [0i32; SCM_MAX_FDS];
     for j in 0..n_fds {
         let (handle, ops) = received_fds[j];
@@ -691,31 +692,50 @@ fn recvmsg_writeback_cmsg(
             for k in (j + 1)..n_fds {
                 received_fds[k].1.release(received_fds[k].0);
             }
+            // Roll back the fds installed so far (a partial install with
+            // no surviving cmsg writeback would orphan them).
+            for &fd in fd_nums.iter().take(j) {
+                let _ = slopos_fs::fileio::file_close_fd(process_id, fd);
+            }
             return Err(Errno::ENOMEM);
         }
         fd_nums[j] = new_fd;
     }
 
-    let cmsg = CmsgHdr {
-        cmsg_len: needed as u32,
-        cmsg_level: SOL_SOCKET as u32,
-        cmsg_type: SCM_RIGHTS,
-    };
-    let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
-    copy_to_user(cmsg_ptr, &cmsg).map_err(|_| Errno::EFAULT)?;
+    // From here the fds are installed in the caller's table. If any copy
+    // back to user memory faults, close every installed fd before
+    // returning the error — otherwise the caller never learns the fd
+    // numbers and the fds are orphaned (fd-table-exhaustion DoS).
+    let writeback = || -> Result<(), Errno> {
+        let cmsg = CmsgHdr {
+            cmsg_len: needed as u32,
+            cmsg_level: SOL_SOCKET as u32,
+            cmsg_type: SCM_RIGHTS,
+        };
+        let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
+        copy_to_user(cmsg_ptr, &cmsg).map_err(|_| Errno::EFAULT)?;
 
-    let fd_bytes = &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
-    let fd_out = MmUserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4)
-        .map_err(|_| Errno::EFAULT)?;
-    copy_bytes_to_user(fd_out, fd_bytes).map_err(|_| Errno::EFAULT)?;
+        let fd_bytes = &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
+        let fd_out = MmUserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(fd_out, fd_bytes).map_err(|_| Errno::EFAULT)?;
 
-    let updated_msg = MsgHdr {
-        iov_base: msg.iov_base,
-        iov_len: msg.iov_len,
-        control: msg.control,
-        control_len: needed as u64,
+        let updated_msg = MsgHdr {
+            iov_base: msg.iov_base,
+            iov_len: msg.iov_len,
+            control: msg.control,
+            control_len: needed as u64,
+        };
+        copy_to_user(msg_ptr.inner(), &updated_msg).map_err(|_| Errno::EFAULT)?;
+        Ok(())
     };
-    copy_to_user(msg_ptr.inner(), &updated_msg).map_err(|_| Errno::EFAULT)?;
+
+    if let Err(e) = writeback() {
+        for &fd in fd_nums.iter().take(n_fds) {
+            let _ = slopos_fs::fileio::file_close_fd(process_id, fd);
+        }
+        return Err(e);
+    }
     Ok(())
 }
 

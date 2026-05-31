@@ -2332,6 +2332,14 @@ pub fn socket_poll_dequeue_recv(sock_idx: u32) {
     BUS.unsubscribe_current(sock_recv_ev(sock_idx));
 }
 
+pub fn socket_poll_enqueue_send(sock_idx: u32) -> bool {
+    BUS.subscribe_current(sock_send_ev(sock_idx))
+}
+
+pub fn socket_poll_dequeue_send(sock_idx: u32) {
+    BUS.unsubscribe_current(sock_send_ev(sock_idx));
+}
+
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
     let (is_datagram, tcp_idx, state) = {
         let mut table = NEW_SOCKET_TABLE.lock();

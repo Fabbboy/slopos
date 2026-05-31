@@ -9,7 +9,8 @@
 //! process fd table — see `userland/` for those.
 
 use slopos_abi::ring::{
-    Cqe, OP_CANCEL, OP_NOP, OP_READ, RingLayout, SLOPRING_ASYNC_CANCEL_ALL, Sqe,
+    Cqe, OP_CANCEL, OP_NOP, OP_READ, RingLayout, SLOPRING_ASYNC_CANCEL_ALL, SLOPRING_CQ_OVERFLOW,
+    Sqe,
 };
 use slopos_testing::{TestResult, stest};
 
@@ -38,6 +39,9 @@ fn make_ring(entries: u32) -> Ring {
         .unwrap();
     region
         .store_u32_release(layout.sq_off_tail as usize, 0)
+        .unwrap();
+    region
+        .store_u32_release(layout.cq_off_flags as usize, 0)
         .unwrap();
     Ring {
         region,
@@ -165,6 +169,14 @@ fn cqe_overflow_counts_when_full() -> TestResult {
     let mut ring = make_ring(1);
     assert_post(&mut ring, 1, true);
     assert_post(&mut ring, 2, true);
+    // Flag is clear while the CQ is not yet overflowing.
+    let flags_before = ring
+        .region
+        .load_u32_acquire(ring.layout.cq_off_flags as usize)
+        .unwrap_or(SLOPRING_CQ_OVERFLOW);
+    if (flags_before & SLOPRING_CQ_OVERFLOW) != 0 {
+        return slopos_testing::fail!("CQ-overflow flag set before any drop");
+    }
     // CQ is now full (2/2); next post overflows.
     let posted = ring.post_cqe(3, 0).unwrap_or(true);
     if posted {
@@ -172,6 +184,14 @@ fn cqe_overflow_counts_when_full() -> TestResult {
     }
     if ring.cq_overflow != 1 {
         return slopos_testing::fail!("cq_overflow not incremented");
+    }
+    // The drop must raise the shared CQ-overflow flag so userland sees it.
+    let flags_after = ring
+        .region
+        .load_u32_acquire(ring.layout.cq_off_flags as usize)
+        .unwrap_or(0);
+    if (flags_after & SLOPRING_CQ_OVERFLOW) == 0 {
+        return slopos_testing::fail!("CQ-overflow flag not set after drop");
     }
     TestResult::Pass
 }

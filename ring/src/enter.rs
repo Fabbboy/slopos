@@ -160,6 +160,10 @@ fn write_initial_region(
     region
         .store_u32_release(layout.cq_off_tail as usize, 0)
         .map_err(|_| ())?;
+    // CQ flags word starts clear (no overflow yet).
+    region
+        .store_u32_release(layout.cq_off_flags as usize, 0)
+        .map_err(|_| ())?;
     Ok(())
 }
 

@@ -6,7 +6,7 @@
 //! which are the source of truth for control decisions and mirrored
 //! into the shared page on each advance.
 
-use slopos_abi::ring::{Cqe, RingLayout};
+use slopos_abi::ring::{Cqe, RingLayout, SLOPRING_CQ_OVERFLOW};
 
 use crate::region::{RegionError, RingRegion};
 
@@ -103,6 +103,13 @@ impl Ring {
         let cq_head = self.read_cq_head()?;
         if self.cq_full(cq_head) {
             self.cq_overflow = self.cq_overflow.wrapping_add(1);
+            // Raise the sticky CQ-overflow flag *before* publishing the
+            // counter, so a userland reader that sees a bumped count never
+            // observes the flag still clear. post_cqe is the single writer
+            // per ring (it runs under the per-ring lock), so a plain store
+            // of the latched bit is correct — no load+OR+store needed.
+            self.region
+                .store_u32_release(self.layout.cq_off_flags as usize, SLOPRING_CQ_OVERFLOW)?;
             self.region
                 .store_u32_release(self.layout.cq_off_overflow as usize, self.cq_overflow)?;
             return Ok(false);
