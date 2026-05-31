@@ -14,8 +14,10 @@ members = [
   "kernel-services",
   "mm",
   "net",
+  "pidfd",
   "ring",
   "sched",
+  "signalfd",
   "service-core",
   "ktesting",
   "slibc",
@@ -25,6 +27,7 @@ members = [
   "slop-protocol",
   "slopos-ostd",
   "slopos-ostd-derive",
+  "slopos-rt",
   "hermetic",
   "verification"
 ]
@@ -61,12 +64,15 @@ slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
 slopos-ostd = { path = "slopos-ostd" }
 slopos-ostd-derive = { path = "slopos-ostd-derive" }
+slopos-rt = { path = "slopos-rt" }
   slopos-testing = { path = "ktesting" }
   slopos-kernel-services = { path = "kernel-services" }
 slopos-mm = { path = "mm" }
 slopos-net = { path = "net" }
+slopos-pidfd = { path = "pidfd" }
 slopos-ring = { path = "ring" }
 slopos-sched = { path = "sched" }
+slopos-signalfd = { path = "signalfd" }
 slopos-slibc = { path = "slibc" }
 slopos-userland = { path = "userland" }
 slopos-protocol = { path = "slop-protocol" }

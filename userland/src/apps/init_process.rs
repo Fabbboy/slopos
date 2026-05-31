@@ -3,6 +3,7 @@ use slopos_font::atlas::GlyphAtlas;
 
 use crate::program_registry;
 use crate::readiness::ReadinessGate;
+use crate::ring::{Ring, slopfut};
 use crate::syscall::{UserSysInfo, core as sys_core, process, tty};
 
 fn upgrade_console_font() {
@@ -71,14 +72,39 @@ pub fn init_user_main() {
 
     let gate = ReadinessGate::create();
     let compositor_tid = spawn_service("compositor");
-    if let Some(gate) = gate {
-        gate.wait();
-    }
 
-    spawn_service("shell");
+    // Root supervision loop on the slopfut runtime: await the compositor's
+    // readiness byte (the gate read folded in per §1.1), spawn the shell,
+    // then await the compositor's exit via a pidfd (`Child::wait`) instead
+    // of a blocking `waitpid`. A small ring suffices — peak in-flight is one
+    // gate read followed by one pidfd poll.
+    match Ring::setup(8) {
+        Ok(ring) => {
+            slopfut::block_on(ring, async {
+                if let Some(gate) = gate {
+                    gate.wait_async().await;
+                }
 
-    if compositor_tid > 0 {
-        process::waitpid(compositor_tid as u32);
+                spawn_service("shell");
+
+                if compositor_tid > 0 {
+                    let _ = slopfut::process::Child::from_pid(compositor_tid as u32)
+                        .wait()
+                        .await;
+                }
+            });
+        }
+        Err(_) => {
+            // Ring unavailable: fall back to the synchronous boot path so
+            // init never silently stalls.
+            if let Some(gate) = gate {
+                gate.wait();
+            }
+            spawn_service("shell");
+            if compositor_tid > 0 {
+                process::waitpid(compositor_tid as u32);
+            }
+        }
     }
 
     loop {

@@ -24,6 +24,11 @@ pub const MAX_UNIX_SOCKETS: usize = 32;
 /// is benign for a keyed futex.
 pub const CHILD_EXIT_BUCKETS: usize = 64;
 
+/// Hash-bucket count for signal-pending wait queues. Same collision rationale
+/// as [`CHILD_EXIT_BUCKETS`]: a signalfd poller woken on an unrelated task's
+/// signal re-checks its own `(pending & mask)` and re-blocks if spurious.
+pub const SIGNAL_PENDING_BUCKETS: usize = 64;
+
 /// Network-socket table slot (TCP / UDP / ICMP), in `0..MAX_SOCKETS`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -76,4 +81,9 @@ pub enum KernelEvent {
     UnixSocket { sock: UnixSocketSlot },
     /// A task exited; its waiters (e.g. `waitpid`) should re-check.
     ChildExit { task: TaskSlot },
+    /// A signal was raised on a task; a `signalfd` poller registered on that
+    /// task should re-check its subscribed mask. Published from every
+    /// signal-raise site so a signal becomes an in-band ring/poll event
+    /// instead of an out-of-band interrupt.
+    SignalPending { task: TaskSlot },
 }

@@ -25,10 +25,22 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus
 use crate::task::kernel_task::TaskInner;
 
 /// The child-exit event for a task id. Parents blocked in `waitpid`-style
-/// waits park on this; the task's exit path publishes it.
+/// waits park on this; the task's exit path publishes it. Public so the
+/// `slopos-pidfd` crate can subscribe a pidfd poller to the same event.
 #[inline]
-fn child_exit_event(task_id: u32) -> KernelEvent {
+pub fn child_exit_event(task_id: u32) -> KernelEvent {
     KernelEvent::ChildExit {
+        task: TaskSlot(task_id),
+    }
+}
+
+/// The signal-pending event for a task id. A `signalfd` poller subscribes
+/// here (via the fd's `poll_wait`); every signal-raise site publishes it so a
+/// raised signal becomes an in-band ring/poll wakeup instead of relying on the
+/// out-of-band interrupt path.
+#[inline]
+pub fn signal_pending_event(task_id: u32) -> KernelEvent {
+    KernelEvent::SignalPending {
         task: TaskSlot(task_id),
     }
 }
@@ -626,6 +638,23 @@ pub fn task_signal_pending<K, U>(task: *const TaskInner<K, U>) -> u64 {
     }
 }
 
+/// Clear `mask` from `task->signal_pending` with `AcqRel`; returns the
+/// previous bitmask. Used by `signalfd` `read` to consume (drain) the
+/// signals it reports, mirroring how `deliver_pending_signal` clears a bit
+/// once it has handled a signal.
+#[inline]
+pub fn task_signal_pending_clear<K, U>(task: *const TaskInner<K, U>, mask: u64) -> u64 {
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `signal_pending` is `AtomicU64`.
+    unsafe {
+        (*task)
+            .signal_pending
+            .fetch_and(!mask, core::sync::atomic::Ordering::AcqRel)
+    }
+}
+
 /// Number of tasks blocked waiting for this task to exit.
 #[inline]
 pub fn task_waiter_count<K, U>(task: *const TaskInner<K, U>) -> usize {
@@ -880,6 +909,20 @@ pub fn task_signal_pending_or<K, U>(task: *const TaskInner<K, U>, mask: u64) -> 
             .signal_pending
             .fetch_or(mask, core::sync::atomic::Ordering::AcqRel)
     }
+}
+
+/// Raise `mask` on `task`'s pending set **and** wake any `signalfd` poller
+/// registered on it (publishes [`signal_pending_event`]). This is the
+/// signal-raise chokepoint for in-band (signalfd / ring) delivery: a masked
+/// signal stays pending (so it does not interrupt a wait with EINTR) yet a
+/// poller subscribed to its `SignalPending` queue is still woken to drain it.
+/// Returns the previous pending bitmask.
+pub fn task_signal_raise<K, U>(task: *const TaskInner<K, U>, mask: u64) -> u64 {
+    let prev = task_signal_pending_or(task, mask);
+    if let Some(id) = task_id_of(task) {
+        BUS.publish(signal_pending_event(id));
+    }
+    prev
 }
 
 /// Read `task->load_block_reason()` via the existing `&self` method.

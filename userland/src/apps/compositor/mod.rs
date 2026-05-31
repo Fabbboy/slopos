@@ -9,10 +9,12 @@ mod renderer;
 mod surface_cache;
 
 use crate::gfx::{DamageRect, DamageTracker};
+use crate::ring::{Ring, slopfut};
 use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, tty, window};
 use crate::theme::*;
-use std::thread;
-use std::time::{Duration, Instant};
+use slopos_abi::syscall::POLLIN;
+use slopos_protocol::server::MAX_CLIENTS;
+use std::time::Instant;
 
 use hover::HoverRegistry;
 use input::InputHandler;
@@ -359,68 +361,24 @@ impl WindowManager {
     fn needs_redraw(&self) -> bool {
         self.first_frame || self.input.needs_full_redraw || self.output_damage.is_dirty()
     }
-}
 
-pub fn compositor_user_main() {
-    tty::write(b"COMPOSITOR: starting\n");
-    let mut wm = WindowManager::new();
-    let mut fb_info = DisplayInfo::default();
-
-    if window::fb_info(&mut fb_info) < 0 {
-        tty::write(b"COMPOSITOR: fb_info failed\n");
-        loop {
-            sys_core::yield_now();
-        }
-    }
-    tty::write(b"COMPOSITOR: fb_info ok\n");
-
-    let mut output = match CompositorOutput::new(&fb_info) {
-        Some(out) => out,
-        None => {
-            tty::write(b"COMPOSITOR: output alloc failed\n");
-            loop {
-                sys_core::yield_now();
-            }
-        }
-    };
-    tty::write(b"COMPOSITOR: output allocated\n");
-
-    wm.renderer
-        .set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
-
-    // Tell the protocol bridge the display dimensions so it can send
-    // OutputInfo to new clients on accept.
-    if let Some(ref mut proto) = wm.protocol {
-        proto.set_display_info(
-            output.width,
-            output.height,
-            fb_info.format as u32,
-            output.pitch as u32,
-        );
-    }
-
-    let pixel_format = fb_info.format;
-    let mut readiness = crate::readiness::ReadinessNotifier::acquire();
-
-    const TARGET_FRAME_MS: u64 = 16;
-    let mut frame_count: u32 = 0;
-    let mut metrics = FrameMetrics::new();
-    let time_origin = Instant::now();
-
-    loop {
-        let frame_start = Instant::now();
-
-        if let Some(ref mut proto) = wm.protocol {
-            proto.accept_clients();
-            proto.process_requests();
-        }
-
-        // Signal readiness after the first accept pass so any
-        // connections queued during init are already handled.
-        if let Some(n) = readiness.take() {
-            n.signal_ready();
-        }
-
+    /// Run one frame: gather input, refresh window state, render+present if
+    /// dirty, emit frame_done events, then reap disconnected clients and
+    /// flush per-client write buffers. The accept path and frame pacing live
+    /// in the async driver; this is the synchronous per-frame work the timer
+    /// arm invokes. Logic is identical to the legacy per-frame body.
+    fn render_frame(
+        &mut self,
+        output: &mut CompositorOutput,
+        fb_info: &DisplayInfo,
+        pixel_format: slopos_abi::PixelFormat,
+        frame_count: &mut u32,
+        metrics: &mut FrameMetrics,
+        time_origin: Instant,
+        frame_start: Instant,
+        target_frame_ms: u64,
+    ) {
+        let wm = self;
         wm.input.update_from_raw_events();
         wm.refresh_windows();
         // Snapshot focus *before* any input processing so we can detect
@@ -626,14 +584,14 @@ pub fn compositor_user_main() {
             };
 
             let flip_result = output.present(damage_slice);
-            if frame_count < 3 {
+            if *frame_count < 3 {
                 if flip_result {
                     tty::write(b"COMPOSITOR: fb_flip ok\n");
                 } else {
                     tty::write(b"COMPOSITOR: fb_flip FAILED\n");
                 }
             }
-            frame_count = frame_count.saturating_add(1);
+            *frame_count = frame_count.saturating_add(1);
             if flip_result {
                 let present_time = time_origin.elapsed().as_millis() as u64;
 
@@ -664,50 +622,256 @@ pub fn compositor_user_main() {
                 mode,
                 damage_slice,
             );
-            metrics.record(mode, copied, frame_time, TARGET_FRAME_MS, flip_result);
+            metrics.record(mode, copied, frame_time, target_frame_ms, flip_result);
 
             wm.input.needs_full_redraw = false;
             wm.first_frame = false;
         }
 
-        // Accept connections + flush/cleanup BEFORE the frame-timing poll.
-        // This is critical: after signal_ready(), the shell may connect during
-        // the first frame's rendering. Without this, the connection sits in
-        // the backlog until the NEXT loop iteration's accept_clients() at the
-        // top — which may be > 10s if the first frame is slow (desktop render).
+        // Reap disconnected clients + flush queued events once per frame.
+        // The accept path is driven by the async accept-readiness stream, so
+        // this no longer re-accepts; it keeps the per-frame cleanup/flush that
+        // surfaces write-buffer-overflow disconnects and drains the events
+        // queued during this frame's input forwarding + frame_done emission.
         if let Some(ref mut proto) = wm.protocol {
-            proto.accept_clients();
             proto.cleanup_disconnected();
             proto.flush_all();
         }
+    }
+}
 
-        let frame_elapsed = frame_start.elapsed();
-        let target_frame = Duration::from_millis(TARGET_FRAME_MS);
-        if frame_elapsed < target_frame {
-            let remaining_ms = (target_frame - frame_elapsed).as_millis() as i64;
+pub fn compositor_user_main() {
+    tty::write(b"COMPOSITOR: starting\n");
+    let mut wm = WindowManager::new();
+    let mut fb_info = DisplayInfo::default();
 
-            // Instead of sleeping, poll for protocol activity.
-            // This wakes the compositor when client data arrives,
-            // matching the Wayland event-driven dispatch pattern.
-            if let Some(ref mut proto) = wm.protocol {
-                let mut poll_fds = [slopos_abi::syscall::types::UserPollFd::default(); 33];
-                let poll_count = proto.server_poll_fds(&mut poll_fds);
-
-                if poll_count > 0 {
-                    let result =
-                        crate::syscall::fs::poll(&mut poll_fds[..poll_count], remaining_ms);
-
-                    // If data arrived, process requests immediately
-                    if result.unwrap_or(0) > 0 {
-                        proto.accept_clients();
-                        proto.process_requests();
-                    }
-                }
-            } else {
-                thread::sleep(target_frame - frame_elapsed);
-            }
+    if window::fb_info(&mut fb_info) < 0 {
+        tty::write(b"COMPOSITOR: fb_info failed\n");
+        loop {
+            sys_core::yield_now();
         }
     }
+    tty::write(b"COMPOSITOR: fb_info ok\n");
+
+    let output = match CompositorOutput::new(&fb_info) {
+        Some(out) => out,
+        None => {
+            tty::write(b"COMPOSITOR: output alloc failed\n");
+            loop {
+                sys_core::yield_now();
+            }
+        }
+    };
+    tty::write(b"COMPOSITOR: output allocated\n");
+
+    wm.renderer
+        .set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
+
+    // Tell the protocol bridge the display dimensions so it can send
+    // OutputInfo to new clients on accept.
+    if let Some(ref mut proto) = wm.protocol {
+        proto.set_display_info(
+            output.width,
+            output.height,
+            fb_info.format as u32,
+            output.pitch as u32,
+        );
+    }
+
+    let pixel_format = fb_info.format;
+    let readiness = crate::readiness::ReadinessNotifier::acquire();
+
+    // Drive the compositor as an async root on a single ring. `block_on`
+    // never nests here: `compositor_user_main` is the top-level process entry,
+    // not invoked from another async context. The ring is sized for the peak
+    // armed-row count: one accept-readiness stream + one per connected client
+    // (MAX_CLIENTS) + the frame timer ⇒ 64 entries is comfortable headroom.
+    let ring = Ring::setup(64).expect("COMPOSITOR: ring setup failed");
+    slopfut::block_on(
+        ring,
+        compositor_async(wm, output, fb_info, pixel_format, readiness),
+    );
+}
+
+const TARGET_FRAME_MS: u64 = 16;
+
+/// Maximum new connections drained from the listen backlog in one accept wake.
+const ACCEPT_BATCH: usize = MAX_CLIENTS;
+
+/// Async compositor driver (tokio-style accept-loop + task-per-client + a
+/// frame-timer arm, all on the single-threaded `!Send` executor — shared
+/// state via `Rc<RefCell<…>>` is sound because borrows are short and never
+/// held across an `.await`).
+///
+/// - The frame-timer arm (this root future) owns the framebuffer locals and
+///   ticks the render/commit cadence every [`TARGET_FRAME_MS`].
+/// - The accept task arms `poll_add_multishot(listen_fd, POLLIN)`; each yield
+///   drains the backlog via the existing sync accept path and spawns a
+///   per-client task. Listen-socket readiness — not the synchronous ring
+///   `accept_multishot` — is used so the existing `Server::accept()` stays the
+///   sole client-slot allocator (slop-protocol unchanged); fds are never
+///   accepted out from under it.
+/// - Each per-client task arms `poll_add_multishot(client_fd, POLLIN)` and on
+///   each yield drains that client's requests with the EXISTING sync
+///   `Server::recv_request` (via `ProtocolBridge::process_client`). On
+///   disconnect it exits, dropping its stream → `OP_CANCEL` retires the armed
+///   row, so connect→disconnect→reconnect never leaks rows in the 64-slot ring.
+///
+/// Accept-before-frame ordering is preserved structurally: the accept task is
+/// woken by listen-socket readiness independently of the frame timer, so a new
+/// client is accepted and serviced as soon as it connects, never gated on a
+/// full frame.
+async fn compositor_async(
+    wm: WindowManager,
+    mut output: CompositorOutput,
+    fb_info: DisplayInfo,
+    pixel_format: slopos_abi::PixelFormat,
+    mut readiness: Option<crate::readiness::ReadinessNotifier>,
+) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let wm = Rc::new(RefCell::new(wm));
+
+    // Initial accept pass + request drain BEFORE signalling readiness, exactly
+    // as the legacy top-of-loop did: connections queued during init are
+    // greeted and serviced, and a per-client task is spawned for each, before
+    // init is told the compositor is up.
+    let listen_fd = {
+        let mut w = wm.borrow_mut();
+        let listen_fd = w.protocol.as_ref().map(|p| p.listen_fd());
+        if let Some(ref mut proto) = w.protocol {
+            let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
+            let n = proto.accept_and_collect(&mut accepted);
+            proto.process_requests();
+            drop(w);
+            for &(idx, fd, generation) in &accepted[..n] {
+                spawn_client_task(wm.clone(), idx, fd, generation);
+            }
+        } else {
+            drop(w);
+        }
+        listen_fd
+    };
+
+    // Signal readiness now that the first accept pass is done (boot-critical:
+    // init blocks on this byte before launching the shell).
+    if let Some(n) = readiness.take() {
+        n.signal_ready();
+    }
+
+    // Accept task: a multishot listen-readiness stream. Each yield drains the
+    // full backlog and spawns a per-client task per new connection. Runs
+    // concurrently with the frame timer, so newly-connected clients are
+    // serviced without waiting for a frame.
+    if let Some(listen_fd) = listen_fd {
+        let wm_accept = wm.clone();
+        slopfut::spawn(async move {
+            let mut stream = slopfut::poll_add_multishot(listen_fd, POLLIN);
+            while stream.next().await.is_some() {
+                let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
+                let n = {
+                    let mut w = wm_accept.borrow_mut();
+                    match w.protocol {
+                        Some(ref mut proto) => proto.accept_and_collect(&mut accepted),
+                        None => 0,
+                    }
+                };
+                for &(idx, fd, generation) in &accepted[..n] {
+                    spawn_client_task(wm_accept.clone(), idx, fd, generation);
+                }
+            }
+        });
+    }
+
+    // Frame-timer arm: tick the render/commit cadence. The full per-frame
+    // work (input, refresh, render, present, frame_done, cleanup, flush) runs
+    // synchronously under a short `borrow_mut` that is dropped before the next
+    // timer await — so per-client/accept tasks observe no overlapping borrow.
+    let mut frame_count: u32 = 0;
+    let mut metrics = FrameMetrics::new();
+    let time_origin = Instant::now();
+    loop {
+        let frame_start = Instant::now();
+        wm.borrow_mut().render_frame(
+            &mut output,
+            &fb_info,
+            pixel_format,
+            &mut frame_count,
+            &mut metrics,
+            time_origin,
+            frame_start,
+            TARGET_FRAME_MS,
+        );
+        slopfut::time::sleep_ms(TARGET_FRAME_MS).await;
+    }
+}
+
+/// Spawn a per-client task that services `idx` (socket `fd`, connection
+/// generation `generation`) until it disconnects. Loops over
+/// `poll_add_multishot(fd, POLLIN)` yields, draining the client's requests with
+/// the existing sync recv path on each readiness. Exits — dropping its stream →
+/// `OP_CANCEL` — when the client disconnects (recv reports it, or the poll
+/// terminates on `POLLHUP`/`POLLERR`).
+fn spawn_client_task(
+    wm: std::rc::Rc<std::cell::RefCell<WindowManager>>,
+    idx: usize,
+    fd: i32,
+    generation: u64,
+) {
+    if fd < 0 {
+        return;
+    }
+    // Identity = (fd, generation). The slot index *and* the fd number are both
+    // recycled by the kernel/Server across disconnect→reconnect, so a successor
+    // client can inherit our exact slot+fd; only the monotonic generation
+    // distinguishes it. A stale task whose `(fd, generation)` no longer matches
+    // exits without touching the successor.
+    let owns = move |proto: &ProtocolBridge| {
+        proto.client_fd(idx) == Some(fd) && proto.client_gen(idx) == Some(generation)
+    };
+    slopfut::spawn(async move {
+        let mut stream = slopfut::poll_add_multishot(fd, POLLIN);
+        loop {
+            match stream.next().await {
+                Some(_revents) => {
+                    let still_connected = {
+                        let mut w = wm.borrow_mut();
+                        match w.protocol {
+                            Some(ref mut proto) if owns(proto) => proto.process_client(idx),
+                            _ => false,
+                        }
+                    };
+                    if !still_connected {
+                        break;
+                    }
+                }
+                None => {
+                    // Terminal CQE (POLLHUP/POLLERR / cancel). The kernel
+                    // coalesces POLLHUP with a final POLLIN on peer close, and
+                    // the multishot terminal CQE surfaces as `None` *without*
+                    // yielding that last data edge — so drain once before
+                    // teardown to recover a trailing request burst the client
+                    // sent immediately before closing (the legacy sync loop
+                    // drained every client each frame before cleanup).
+                    let mut w = wm.borrow_mut();
+                    if let Some(ref mut proto) = w.protocol {
+                        if owns(proto) {
+                            // `process_client` drains to EOF and, on the
+                            // Disconnected path, already runs the teardown
+                            // funnel and returns false — so only disconnect
+                            // here if it drained without seeing the close.
+                            if proto.process_client(idx) {
+                                proto.disconnect_client(idx);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // `stream` drops here → its armed ring row is cancelled (`OP_CANCEL`).
+    });
 }
 
 /// Return the title of the focused window as a `&str`, or `""` if none.

@@ -12,8 +12,10 @@ use core::ffi::c_int;
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
-    OP_CANCEL, OP_NOP, OP_TIMEOUT, RingLayout, SLOPRING_ASYNC_CANCEL_ALL, SLOPRING_MAX_ENTRIES, Sqe,
+    OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_TIMEOUT, RingLayout, SLOPRING_ASYNC_CANCEL_ALL,
+    SLOPRING_CQE_F_MORE, SLOPRING_MAX_ENTRIES, SLOPRING_SQE_MULTISHOT, Sqe,
 };
+use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
 
 use slopos_fs::fileio::{
     file_poll_clear_registrations, file_poll_fused, file_poll_track_registrations,
@@ -25,7 +27,7 @@ use slopos_ostd::KVec;
 
 use crate::opcode::{self, Outcome};
 use crate::region::RingRegion;
-use crate::ring_obj::{Ring, heapless_vec::InFlightVec};
+use crate::ring_obj::{InFlight, Ring, heapless_vec::InFlightVec};
 use crate::{file_ops, registry};
 
 const PAGE_SIZE: u64 = 4096;
@@ -249,12 +251,12 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
             // block; the harvest posts -ETIME on expiry (SLOPRING § 12).
             let deadline = get_time_ms().wrapping_add(sqe.off / 1_000_000); // ns → ms
             if !ring.inflight.push(opcode::inflight_from(sqe, deadline)) {
-                let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN));
+                let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             }
             return;
         }
         OP_NOP => {
-            let _ = ring.post_cqe(sqe.user_data, 0);
+            let _ = ring.post_cqe(sqe.user_data, 0, 0);
             return;
         }
         _ => {}
@@ -270,21 +272,45 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
             }
         };
         if ring.cq_full(cq_head) {
-            let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN));
+            let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             return;
         }
     }
 
+    // A multishot row is armed and lives entirely in the harvest: even if
+    // it is ready *now*, record it in-flight and let `harvest_step` do the
+    // first post, so the F_MORE bookkeeping + drain loop live in one place
+    // (§1.2). A non-multishot ready op completes inline as before.
+    let is_multishot =
+        sqe.sqe_flags2 & SLOPRING_SQE_MULTISHOT != 0 && multishot_supported(sqe.opcode);
+    if is_multishot {
+        if !ring.inflight.push(opcode::inflight_from(sqe, 0)) {
+            let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
+        }
+        return;
+    }
+
     match opcode::probe(pid, sqe) {
         Outcome::Inline(res) => {
-            let _ = ring.post_cqe(sqe.user_data, res);
+            let _ = ring.post_cqe(sqe.user_data, res, 0);
         }
         Outcome::WouldBlock => {
             if !ring.inflight.push(opcode::inflight_from(sqe, 0)) {
-                let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN));
+                let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             }
         }
     }
+}
+
+/// Opcodes that honour `SLOPRING_SQE_MULTISHOT` (SLOPRING § 1.1):
+/// OP_ACCEPT / OP_RECVMSG (consuming, self-limiting) and OP_POLL_ADD
+/// (non-consuming, edge-tracked). Any other opcode ignores the flag and
+/// runs oneshot.
+fn multishot_supported(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        slopos_abi::ring::OP_ACCEPT | slopos_abi::ring::OP_RECVMSG | OP_POLL_ADD
+    )
 }
 
 /// Test hook: drive `process_sqe` against a fabricated ring without a
@@ -292,6 +318,13 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
 #[cfg(feature = "test-hooks")]
 pub fn process_sqe_for_test(pid: u32, ring: &mut Ring, sqe: &Sqe) {
     process_sqe(pid, ring, sqe);
+}
+
+/// Test hook: drive one `harvest_step` pass against a fabricated ring.
+/// Returns whether `min_complete` CQEs are now available.
+#[cfg(feature = "test-hooks")]
+pub fn harvest_step_for_test(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
+    harvest_step(pid, ring, min_complete)
 }
 
 /// `OP_CANCEL`: walk the in-flight table for the target `user_data`
@@ -306,7 +339,9 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
             break;
         };
         if let Some(row) = ring.inflight.remove_at(i) {
-            let _ = ring.post_cqe(row.user_data, eno(Errno::ECANCELED));
+            // Multishot rows cancel identically: one terminal -ECANCELED
+            // with F_MORE clear (SLOPRING §1.3 trigger 4).
+            let _ = ring.post_cqe(row.user_data, eno(Errno::ECANCELED), 0);
             found += 1;
         }
         if !cancel_all {
@@ -314,7 +349,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
         }
     }
     let res = if found > 0 { 0 } else { eno(Errno::ENOENT) };
-    let _ = ring.post_cqe(sqe.user_data, res);
+    let _ = ring.post_cqe(sqe.user_data, res, 0);
 }
 
 /// Complete phase: block the calling task on the in-flight set until
@@ -427,6 +462,11 @@ fn sleep_budget(deadline: Option<u64>) -> u32 {
 /// One harvest iteration under the ring lock: re-probe every in-flight
 /// row, post ready CQEs (removing the row), honour timeout deadlines,
 /// and report whether `min_complete` CQEs are now available.
+///
+/// Runs under the per-ring lock (held by `registry::with_ring`): the
+/// `inflight.snapshot()` below and every reprobe + CQE post observe one
+/// atomic instant, with no concurrent submit/cancel mutating the table
+/// or the indices mid-pass.
 fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
     let now = get_time_ms();
     // Re-probe each row; collect indices to remove + CQEs to post.
@@ -437,12 +477,22 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
             if row.deadline_ms != 0 && now >= row.deadline_ms {
                 if let Some(i) = ring.inflight.find_user_data(row.user_data) {
                     if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, eno(Errno::ETIME));
+                        let _ = ring.post_cqe(r.user_data, eno(Errno::ETIME), 0);
                     }
                 }
             }
             continue;
         }
+
+        if row.is_multishot {
+            if row.opcode == OP_POLL_ADD {
+                harvest_poll_multishot(pid, ring, row);
+            } else {
+                harvest_consuming_multishot(pid, ring, row);
+            }
+            continue;
+        }
+
         // Ownership ops (OP_ACCEPT / consuming reads) must reserve a CQE
         // slot *before* the side effect even on the deferred path — a
         // reprobe that installs an fd into a full CQ would orphan it
@@ -458,7 +508,7 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
             Outcome::Inline(res) => {
                 if let Some(i) = ring.inflight.find_user_data(row.user_data) {
                     if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, res);
+                        let _ = ring.post_cqe(r.user_data, res, 0);
                     }
                 }
             }
@@ -468,6 +518,99 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
 
     let cq_head = ring.read_cq_head().unwrap_or(0);
     ring.available_cqes(cq_head) >= min_complete
+}
+
+/// Drain an armed consuming-multishot row (OP_ACCEPT / OP_RECVMSG) within
+/// one harvest pass (SLOPRING §1.2). Each successful reprobe consumes one
+/// connection / datagram and posts an interim CQE carrying `F_MORE`,
+/// keeping the row armed; the loop terminates when the resource drains
+/// (`WouldBlock`) — the self-limit that prevents a CQ flood — or on a real
+/// error / EOF, which posts a terminal CQE (F_MORE clear) and removes the
+/// row. The ownership-op CQE-slot reserve (SLOPRING § 11) is re-checked
+/// before *each* post, so a full CQ leaves the row armed for the next
+/// harvest rather than consuming-without-a-slot.
+fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
+    let ownership = opcode::is_ownership_op(row.opcode);
+    loop {
+        // Re-check the live row still exists (a concurrent cancel could
+        // have removed it) and reserve a CQE slot before the side effect.
+        if ring.inflight.find_user_data(row.user_data).is_none() {
+            return;
+        }
+        if ownership {
+            let cq_head = ring.read_cq_head().unwrap_or(0);
+            if ring.cq_full(cq_head) {
+                // No slot: leave armed, retry next harvest (no data lost —
+                // the reprobe has not yet consumed anything this iteration).
+                return;
+            }
+        }
+        match opcode::reprobe(pid, row) {
+            Outcome::Inline(res) if res >= 0 => {
+                // A connection / datagram was consumed.
+                //   res == 0 on a stream recvmsg is orderly EOF — terminal,
+                //   never silently re-arm (the CVE-2026-23473 lesson).
+                if res == 0 && row.opcode == slopos_abi::ring::OP_RECVMSG {
+                    remove_and_post(ring, row.user_data, 0, 0);
+                    return;
+                }
+                let _ = ring.post_cqe(row.user_data, res, SLOPRING_CQE_F_MORE);
+                // Keep armed; loop to drain the next pending item.
+            }
+            Outcome::Inline(res) => {
+                // res < 0: a real error → terminal CQE, F_MORE clear.
+                remove_and_post(ring, row.user_data, res, 0);
+                return;
+            }
+            Outcome::WouldBlock => {
+                // Drained: leave armed, post nothing (no flood).
+                return;
+            }
+        }
+    }
+}
+
+/// Re-arm an armed OP_POLL_ADD multishot row via the readiness-transition
+/// edge (SLOPRING §1.2). A CQE fires only when the masked-ready bitset
+/// *changes* (not-ready→ready, or the ready bits differ from the last
+/// post), which suppresses the level flood the caller-as-waiter model
+/// would otherwise produce. `POLLERR`/`POLLHUP` post one terminal CQE
+/// (F_MORE clear) and retire the row.
+fn harvest_poll_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
+    let revents = opcode::probe_poll_revents(pid, row);
+    if revents & POLLNVAL != 0 {
+        // Bad fd — terminate the armed row.
+        remove_and_post(ring, row.user_data, eno(Errno::EBADF), 0);
+        return;
+    }
+    // Error / hangup is terminal: one final CQE, then retire (mirrors
+    // Linux multishot poll termination on error).
+    if revents & (POLLERR | POLLHUP) != 0 {
+        let ready = revents & (opcode::poll_want(row.op_flags) | POLLERR | POLLHUP);
+        remove_and_post(ring, row.user_data, ready as i32, 0);
+        return;
+    }
+    let want = opcode::poll_want(row.op_flags);
+    let ready = revents & want;
+    if ready != 0 && ready != row.last_revents {
+        // EDGE: the ready bitset transitioned — post one interim CQE and
+        // stay armed, recording the new ready set on the *live* row.
+        ring.inflight.set_last_revents(row.user_data, ready);
+        let _ = ring.post_cqe(row.user_data, ready as i32, SLOPRING_CQE_F_MORE);
+    } else if ready == 0 {
+        // Went not-ready: clear the cache so the next ready transition
+        // re-fires (this is the synthesized edge).
+        ring.inflight.set_last_revents(row.user_data, 0);
+    }
+}
+
+/// Remove the live row matching `user_data` and post its terminal CQE.
+fn remove_and_post(ring: &mut Ring, user_data: u64, res: i32, cqe_flags: u32) {
+    if let Some(i) = ring.inflight.find_user_data(user_data) {
+        if let Some(r) = ring.inflight.remove_at(i) {
+            let _ = ring.post_cqe(r.user_data, res, cqe_flags);
+        }
+    }
 }
 
 /// Register the calling task on each fd's resource queue via the

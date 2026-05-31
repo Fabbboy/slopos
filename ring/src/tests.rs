@@ -9,8 +9,9 @@
 //! process fd table — see `userland/` for those.
 
 use slopos_abi::ring::{
-    Cqe, OP_CANCEL, OP_NOP, OP_READ, RingLayout, SLOPRING_ASYNC_CANCEL_ALL, SLOPRING_CQ_OVERFLOW,
-    Sqe,
+    Cqe, OP_ACCEPT, OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_READ, RingLayout, SLOPRING_ASYNC_CANCEL_ALL,
+    SLOPRING_CQ_OVERFLOW, SLOPRING_CQE_BUFFER_MASK, SLOPRING_CQE_BUFFER_SHIFT,
+    SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_testing::{TestResult, stest};
 
@@ -66,6 +67,8 @@ fn inflight(user_data: u64, opcode: u8) -> InFlight {
         op_flags: 0,
         off: 0,
         deadline_ms: 0,
+        is_multishot: false,
+        last_revents: 0,
     }
 }
 
@@ -104,7 +107,11 @@ fn region_sqe_byte_round_trip() -> TestResult {
         op_flags: 1,
         user_data: 0xfeed_face_dead_beef,
         addr2: 0x5000,
-        _resv: [0, 0],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
     let bytes = sqe.to_bytes();
     if r.copy_in(128, &bytes).is_err() {
@@ -144,7 +151,7 @@ stest!(name = region_rejects_straddle, suite = slopring);
 
 fn cqe_post_advances_tail() -> TestResult {
     let mut ring = make_ring(4);
-    let posted = ring.post_cqe(0x1234, 42).unwrap_or(false);
+    let posted = ring.post_cqe(0x1234, 42, 0).unwrap_or(false);
     if !posted {
         return slopos_testing::fail!("post_cqe returned full on empty CQ");
     }
@@ -178,7 +185,7 @@ fn cqe_overflow_counts_when_full() -> TestResult {
         return slopos_testing::fail!("CQ-overflow flag set before any drop");
     }
     // CQ is now full (2/2); next post overflows.
-    let posted = ring.post_cqe(3, 0).unwrap_or(true);
+    let posted = ring.post_cqe(3, 0, 0).unwrap_or(true);
     if posted {
         return slopos_testing::fail!("expected CQ-full drop");
     }
@@ -198,7 +205,7 @@ fn cqe_overflow_counts_when_full() -> TestResult {
 stest!(name = cqe_overflow_counts_when_full, suite = slopring);
 
 fn assert_post(ring: &mut Ring, ud: u64, want: bool) {
-    let got = ring.post_cqe(ud, 0).unwrap_or(!want);
+    let got = ring.post_cqe(ud, 0, 0).unwrap_or(!want);
     assert_eq!(got, want, "post_cqe({ud}) expected {want}");
 }
 
@@ -281,7 +288,11 @@ fn cancel_pending_posts_ecanceled() -> TestResult {
         op_flags: 0,
         user_data: 0xc0,
         addr2: 0,
-        _resv: [0, 0],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
     crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
     // The cancelled op's row is gone.
@@ -310,7 +321,11 @@ fn cancel_missing_returns_enoent() -> TestResult {
         op_flags: 0,
         user_data: 0xc1,
         addr2: 0,
-        _resv: [0, 0],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
     crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
     // One CQE posted: the cancel result (-ENOENT).
@@ -350,7 +365,11 @@ fn cancel_all_removes_every_match() -> TestResult {
         op_flags: SLOPRING_ASYNC_CANCEL_ALL,
         user_data: 0xc2,
         addr2: 0,
-        _resv: [0, 0],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
     crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
     if ring.inflight.find_user_data(0x77).is_some() {
@@ -381,7 +400,11 @@ fn nop_completes_inline() -> TestResult {
         op_flags: 0,
         user_data: 0x9999,
         addr2: 0,
-        _resv: [0, 0],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
     crate::enter::process_sqe_for_test(0, &mut ring, &nop);
     if ring.cq_tail != 1 {
@@ -417,3 +440,133 @@ fn layout_arrays_page_aligned() -> TestResult {
     TestResult::Pass
 }
 stest!(name = layout_arrays_page_aligned, suite = slopring);
+
+// ---------------------------------------------------------------------------
+// Multishot (ABI v2) — F_MORE / edge-cache / cancel / buffer bits.
+// ---------------------------------------------------------------------------
+
+/// A CQE posted with `SLOPRING_CQE_F_MORE` carries that bit verbatim into
+/// the shared CQ — the interim-completion marker the userland reactor uses
+/// to keep an armed multishot slot alive.
+fn post_cqe_carries_f_more() -> TestResult {
+    let mut ring = make_ring(4);
+    if !ring.post_cqe(0x55, 7, SLOPRING_CQE_F_MORE).unwrap_or(false) {
+        return slopos_testing::fail!("post_cqe(F_MORE) reported full on empty CQ");
+    }
+    let mut bytes = [0u8; 16];
+    ring.region
+        .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
+        .unwrap();
+    let cqe = Cqe::from_bytes(&bytes);
+    if cqe.user_data == 0x55 && cqe.res == 7 && (cqe.flags & SLOPRING_CQE_F_MORE) != 0 {
+        TestResult::Pass
+    } else {
+        slopos_testing::fail!("interim CQE missing F_MORE: {:?}", cqe)
+    }
+}
+stest!(name = post_cqe_carries_f_more, suite = slopring);
+
+/// `set_last_revents` mutates the *live* in-flight row (the OP_POLL_ADD
+/// edge cache), so the harvest's snapshot-walk decision is reflected back
+/// onto the persistent row.
+fn set_last_revents_updates_live_row() -> TestResult {
+    let mut t = InFlightVec::with_capacity(4);
+    let mut row = inflight(0x1234, OP_POLL_ADD);
+    row.is_multishot = true;
+    t.push(row);
+    t.set_last_revents(0x1234, 0x0001);
+    // Re-fetch via snapshot (the harvest's read path).
+    let snap = t.snapshot();
+    let found = snap.iter().find(|r| r.user_data == 0x1234);
+    match found {
+        Some(r) if r.last_revents == 0x0001 && r.is_multishot => TestResult::Pass,
+        other => slopos_testing::fail!("last_revents not updated on live row: {:?}", other),
+    }
+}
+stest!(name = set_last_revents_updates_live_row, suite = slopring);
+
+/// Cancelling an armed multishot row posts exactly one terminal CQE with
+/// `-ECANCELED` and **F_MORE clear** (SLOPRING §1.3 trigger 4), and
+/// removes the row.
+fn multishot_cancel_clears_more() -> TestResult {
+    let mut ring = make_ring(8);
+    let mut row = inflight(0xabcd, OP_ACCEPT);
+    row.is_multishot = true;
+    ring.inflight.push(row);
+    let cancel = Sqe {
+        opcode: OP_CANCEL,
+        flags: 0,
+        _pad0: 0,
+        fd: -1,
+        off: 0,
+        addr: 0xabcd,
+        len: 0,
+        op_flags: 0,
+        user_data: 0xc9,
+        addr2: 0,
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
+    };
+    crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
+    if ring.inflight.find_user_data(0xabcd).is_some() {
+        return slopos_testing::fail!("cancelled multishot row not removed");
+    }
+    // CQE 0 = the cancelled op (-ECANCELED, F_MORE clear).
+    let mut bytes = [0u8; 16];
+    ring.region
+        .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
+        .unwrap();
+    let cqe = Cqe::from_bytes(&bytes);
+    let ecanceled = slopos_abi::Errno::ECANCELED.raw();
+    if cqe.user_data == 0xabcd && cqe.res == ecanceled && (cqe.flags & SLOPRING_CQE_F_MORE) == 0 {
+        TestResult::Pass
+    } else {
+        slopos_testing::fail!("multishot cancel CQE mismatch: {:?}", cqe)
+    }
+}
+stest!(name = multishot_cancel_clears_more, suite = slopring);
+
+/// ABI v2: `SLOPRING_SQE_MULTISHOT` survives the SQE byte round-trip in
+/// `sqe_flags2`, and `inflight_from` reads it back as `is_multishot`.
+fn sqe_multishot_flag_round_trips() -> TestResult {
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_ACCEPT;
+    sqe.fd = 4;
+    sqe.sqe_flags2 = SLOPRING_SQE_MULTISHOT;
+    sqe.user_data = 0xfeed;
+    let round = Sqe::from_bytes(&sqe.to_bytes());
+    if round != sqe {
+        return slopos_testing::fail!("SQE v2 round-trip mismatch");
+    }
+    let row = crate::opcode::inflight_from(&round, 0);
+    if row.is_multishot && row.last_revents == 0 {
+        TestResult::Pass
+    } else {
+        slopos_testing::fail!("inflight_from did not arm multishot")
+    }
+}
+stest!(name = sqe_multishot_flag_round_trips, suite = slopring);
+
+/// CQE provided-buffer bits pack a buffer id into the high 16 bits
+/// alongside `F_BUFFER`; the shift/mask recover it. Freezes the Phase-4
+/// ABI in-kernel.
+fn cqe_buffer_bits_pack() -> TestResult {
+    let bid: u32 = 0x1357;
+    let flags = SLOPRING_CQE_F_BUFFER | (bid << SLOPRING_CQE_BUFFER_SHIFT);
+    let c = Cqe {
+        user_data: 0xaa,
+        res: 3,
+        flags,
+    };
+    let round = Cqe::from_bytes(&c.to_bytes());
+    let got_bid = (round.flags & SLOPRING_CQE_BUFFER_MASK) >> SLOPRING_CQE_BUFFER_SHIFT;
+    if round == c && (round.flags & SLOPRING_CQE_F_BUFFER) != 0 && got_bid == bid {
+        TestResult::Pass
+    } else {
+        slopos_testing::fail!("CQE buffer-bit pack/unpack mismatch: {:?}", round)
+    }
+}
+stest!(name = cqe_buffer_bits_pack, suite = slopring);

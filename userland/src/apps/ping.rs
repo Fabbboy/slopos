@@ -1,9 +1,10 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::syscall::{SockAddrIn, UserPollFd, fs, net, process};
+use crate::ring::{Ring, slopfut};
+use crate::syscall::{SockAddrIn, fs, net, process};
 use slopos_abi::signal::SIGPIPE;
-use slopos_abi::syscall::{LocalFlags, POLLIN};
+use slopos_abi::syscall::LocalFlags;
 
 struct PingConfig {
     count: Option<u32>,
@@ -140,6 +141,34 @@ const ICMP_TYPE_ECHO_REQUEST: u8 = 8;
 const ICMP_TYPE_ECHO_REPLY: u8 = 0;
 const DRAIN_TIMEOUT_MS: i64 = 200;
 
+/// Pure computation of the next `select` deadline (ms) from the loop's
+/// three timing cases. Extracted so the state machine is host-testable
+/// without a socket or clock:
+///   - draining (Ctrl-C pressed): fixed `DRAIN_TIMEOUT_MS`;
+///   - all packets sent: the per-reply timeout;
+///   - still sending: time remaining until the next send (>= 1ms, or 0 if
+///     the send is already due).
+///
+/// `remaining_to_next_send_ms` is `None` when `next_send` is already in the
+/// past (send due now), `Some(ms)` otherwise.
+fn compute_timeout_ms(
+    stop_requested: bool,
+    all_sent: bool,
+    reply_timeout_ms: i64,
+    remaining_to_next_send_ms: Option<i64>,
+) -> i64 {
+    if stop_requested {
+        DRAIN_TIMEOUT_MS
+    } else if all_sent {
+        reply_timeout_ms
+    } else {
+        match remaining_to_next_send_ms {
+            Some(remaining) => remaining.max(1),
+            None => 0,
+        }
+    }
+}
+
 fn build_icmp_request(
     ident: u16,
     sequence: u16,
@@ -205,48 +234,180 @@ fn send_ping(
     }
 }
 
-fn try_receive(fd: i32, clock_start: &Instant, stats: &mut PingStats, verbose: bool) {
-    let mut recv_buf = [0u8; 1600];
-    let mut src = SockAddrIn::default();
-    match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src)) {
-        Ok(received) if received >= ICMP_HEADER_LEN => {
-            if let Some((icmp_type, _id, reply_seq, sent_ts)) =
-                parse_icmp_reply(&recv_buf[..received])
-            {
-                if icmp_type != ICMP_TYPE_ECHO_REPLY {
-                    return;
-                }
-                let now_ms = clock_start.elapsed().as_millis() as u64;
-                let rtt_ms = match sent_ts {
-                    Some(ts) if ts <= now_ms => (now_ms - ts) as f64,
-                    _ => 0.0,
-                };
-                stats.record_rtt(rtt_ms);
+/// Process a datagram the reactor already received: the source address
+/// rides in `src` (from `RecvFromResult.src` — no second syscall), and the
+/// data region is `data`. Records the RTT and prints the reply line.
+fn handle_reply(data: &[u8], src: &SockAddrIn, clock_start: &Instant, stats: &mut PingStats) {
+    let received = data.len();
+    if received < ICMP_HEADER_LEN {
+        return;
+    }
+    if let Some((icmp_type, _id, reply_seq, sent_ts)) = parse_icmp_reply(data) {
+        if icmp_type != ICMP_TYPE_ECHO_REPLY {
+            return;
+        }
+        let now_ms = clock_start.elapsed().as_millis() as u64;
+        let rtt_ms = match sent_ts {
+            Some(ts) if ts <= now_ms => (now_ms - ts) as f64,
+            _ => 0.0,
+        };
+        stats.record_rtt(rtt_ms);
 
-                println!(
-                    "{} bytes from {}: icmp_seq={} time={:.3} ms",
-                    received,
-                    Ipv4Addr::from(src.addr),
-                    reply_seq,
-                    rtt_ms
-                );
-            }
-        }
-        Ok(_) => {}
-        Err(_) => {
-            if verbose {
-                eprintln!("ping: recvfrom failed");
-            }
-        }
+        println!(
+            "{} bytes from {}: icmp_seq={} time={:.3} ms",
+            received,
+            Ipv4Addr::from(src.addr),
+            reply_seq,
+            rtt_ms
+        );
     }
 }
 
-fn stdin_has_ctrl_c() -> bool {
-    let mut read_buf = [0u8; 32];
-    if let Ok(n) = fs::read_slice(0, &mut read_buf) {
-        return read_buf[..n].contains(&0x03);
+/// `true` if a stdin read burst contained Ctrl-C (0x03).
+fn burst_has_ctrl_c(buf: &[u8]) -> bool {
+    buf.contains(&0x03)
+}
+
+/// socket recv buffer capacity (max ICMP reply we care about).
+const RECV_CAP: usize = 1600;
+/// stdin read buffer capacity (one keystroke burst; we only scan for ^C).
+const STDIN_CAP: usize = 32;
+
+/// The async send/receive loop. Races stdin / `OP_RECVFROM` / timer, acts
+/// on whichever fires, and breaks on the same termination conditions as the
+/// old `poll`-driven loop (Ctrl-C drain done, all sent + drained/timed out).
+async fn run_loop(
+    config: &PingConfig,
+    sock_fd: i32,
+    target: &SockAddrIn,
+    ident: u16,
+    clock_start: &Instant,
+    stats: &mut PingStats,
+) {
+    type DynBuf = core::pin::Pin<Box<dyn core::future::Future<Output = slopfut::BufResult>>>;
+
+    let mut sequence: u16 = 0;
+    let mut stop_requested = false;
+    let mut stdin_open = true;
+    let mut next_send = *clock_start;
+
+    // Buffers ping-pong between the loop and the in-flight reads, mirroring
+    // the nc template: the winner returns its buffer; a cancelled loser
+    // keeps its buffer in the reactor, so the loser gets a fresh one.
+    let mut stdin_buf = vec![0u8; STDIN_CAP];
+    let mut recv_buf = vec![0u8; RECV_CAP];
+
+    loop {
+        let now = Instant::now();
+        let all_sent = config.count.map_or(false, |limit| stats.sent >= limit);
+
+        if !stop_requested && !all_sent && now >= next_send {
+            if !send_ping(
+                sock_fd,
+                target,
+                ident,
+                sequence,
+                clock_start,
+                config.payload_size,
+                stats,
+            ) {
+                break;
+            }
+            sequence = sequence.wrapping_add(1);
+            next_send = Instant::now() + config.interval;
+        }
+
+        let remaining_to_next_send_ms = next_send
+            .checked_duration_since(Instant::now())
+            .map(|d| d.as_millis() as i64);
+        let timeout_ms = compute_timeout_ms(
+            stop_requested,
+            all_sent,
+            config.timeout_ms,
+            remaining_to_next_send_ms,
+        );
+
+        // `Either`-style winner discrimination: A = stdin, B = recvfrom,
+        // C/B = timer (depending on whether stdin is in the race).
+        let mut timed_out = false;
+        if stop_requested || !stdin_open {
+            // No stdin branch: either draining after Ctrl-C, or stdin has
+            // closed — only the socket + timer race.
+            let f_recv =
+                slopfut::recvfrom(sock_fd, core::mem::take(&mut recv_buf), RECV_CAP as u32);
+            let f_timer = slopfut::time::sleep_ms(timeout_ms.max(0) as u64);
+            match slopfut::select2(f_recv, Box::pin(f_timer)).await {
+                slopfut::Either2::A(rf) => {
+                    if rf.res < 0 {
+                        if config.verbose {
+                            eprintln!("ping: recvfrom failed");
+                        }
+                        break;
+                    }
+                    let received = (rf.res as usize).min(rf.buf.len());
+                    handle_reply(&rf.buf[..received], &rf.src, clock_start, stats);
+                    recv_buf = rf.buf;
+                }
+                slopfut::Either2::B(_) => {
+                    recv_buf = vec![0u8; RECV_CAP];
+                    timed_out = true;
+                }
+            }
+        } else {
+            let f_stdin: DynBuf = Box::pin(slopfut::read(
+                0,
+                core::mem::take(&mut stdin_buf),
+                STDIN_CAP as u32,
+            ));
+            let f_recv =
+                slopfut::recvfrom(sock_fd, core::mem::take(&mut recv_buf), RECV_CAP as u32);
+            let f_timer = Box::pin(slopfut::time::sleep_ms(timeout_ms.max(0) as u64));
+            match slopfut::select3(f_stdin, f_recv, f_timer).await {
+                slopfut::Either3::A(br) => {
+                    recv_buf = vec![0u8; RECV_CAP];
+                    if br.res <= 0 {
+                        // stdin EOF/error: stop racing it (don't busy re-arm a
+                        // read that completes immediately every turn).
+                        stdin_open = false;
+                        stdin_buf = br.buf;
+                        continue;
+                    }
+                    let n = (br.res as usize).min(br.buf.len());
+                    if burst_has_ctrl_c(&br.buf[..n]) {
+                        print!("^C\n");
+                        stop_requested = true;
+                    }
+                    stdin_buf = br.buf;
+                    continue;
+                }
+                slopfut::Either3::B(rf) => {
+                    stdin_buf = vec![0u8; STDIN_CAP];
+                    if rf.res < 0 {
+                        if config.verbose {
+                            eprintln!("ping: recvfrom failed");
+                        }
+                        break;
+                    }
+                    let received = (rf.res as usize).min(rf.buf.len());
+                    handle_reply(&rf.buf[..received], &rf.src, clock_start, stats);
+                    recv_buf = rf.buf;
+                }
+                slopfut::Either3::C(_) => {
+                    stdin_buf = vec![0u8; STDIN_CAP];
+                    recv_buf = vec![0u8; RECV_CAP];
+                    timed_out = true;
+                }
+            }
+        }
+
+        if stop_requested && (timed_out || stats.received >= stats.sent) {
+            break;
+        }
+
+        if all_sent && (stats.received >= stats.sent || timed_out) {
+            break;
+        }
     }
-    false
 }
 
 pub fn ping_main(args: Vec<String>) -> ! {
@@ -320,88 +481,30 @@ pub fn ping_main(args: Vec<String>) -> ! {
         total_rtt_ms: 0.0,
     };
 
-    let mut sequence: u16 = 0;
     let clock_start = Instant::now();
-    let mut stop_requested = false;
-    let mut next_send = clock_start;
 
-    loop {
-        let now = Instant::now();
-        let all_sent = config.count.map_or(false, |limit| stats.sent >= limit);
-
-        if !stop_requested && !all_sent && now >= next_send {
-            if !send_ping(
-                fd.raw(),
-                &target,
-                ident,
-                sequence,
-                &clock_start,
-                config.payload_size,
-                &mut stats,
-            ) {
-                break;
+    // The send/receive loop now rides the slopfut runtime: the dual
+    // `poll([stdin, socket], t)` is replaced by `select3` over a stdin
+    // `OP_READ`, an `OP_RECVFROM` (whose result carries the ICMP reply's
+    // source address — no second recvfrom syscall), and an `OP_TIMEOUT`
+    // bounding the wait to the next send / reply deadline. Once Ctrl-C is
+    // pressed (drain state) the stdin branch is dropped via `select2`.
+    let sock_fd = fd.raw();
+    // 16 SQ slots comfortably covers the loop's peak in-flight (stdin read +
+    // recvfrom + timer); ring setup failure means no loop at all.
+    match Ring::setup(16) {
+        Ok(ring) => {
+            slopfut::block_on(
+                ring,
+                run_loop(&config, sock_fd, &target, ident, &clock_start, &mut stats),
+            );
+        }
+        Err(_) => {
+            eprintln!("ping: ring setup failed");
+            if let Some(ref t) = saved_termios {
+                let _ = fs::tcsetattr(0, t);
             }
-            sequence = sequence.wrapping_add(1);
-            next_send = Instant::now() + config.interval;
-        }
-
-        let timeout_ms = if stop_requested {
-            DRAIN_TIMEOUT_MS
-        } else if all_sent {
-            config.timeout_ms
-        } else {
-            let now = Instant::now();
-            match next_send.checked_duration_since(now) {
-                Some(remaining) => (remaining.as_millis() as i64).max(1),
-                None => 0,
-            }
-        };
-
-        let (stdin_ready, socket_ready, timed_out) = if stop_requested {
-            let mut pfd = [UserPollFd {
-                fd: fd.raw(),
-                events: POLLIN,
-                revents: 0,
-            }];
-            let p = fs::poll(&mut pfd, timeout_ms).unwrap_or(0);
-            (false, (pfd[0].revents & POLLIN) != 0, p == 0)
-        } else {
-            let mut pfds = [
-                UserPollFd {
-                    fd: 0,
-                    events: POLLIN,
-                    revents: 0,
-                },
-                UserPollFd {
-                    fd: fd.raw(),
-                    events: POLLIN,
-                    revents: 0,
-                },
-            ];
-            let p = fs::poll(&mut pfds, timeout_ms).unwrap_or(0);
-            (
-                (pfds[0].revents & POLLIN) != 0,
-                (pfds[1].revents & POLLIN) != 0,
-                p == 0,
-            )
-        };
-
-        if socket_ready {
-            try_receive(fd.raw(), &clock_start, &mut stats, config.verbose);
-        }
-
-        if !stop_requested && stdin_ready && stdin_has_ctrl_c() {
-            print!("^C\n");
-            stop_requested = true;
-            continue;
-        }
-
-        if stop_requested && (timed_out || stats.received >= stats.sent) {
-            break;
-        }
-
-        if all_sent && (stats.received >= stats.sent || timed_out) {
-            break;
+            std::process::exit(2);
         }
     }
 

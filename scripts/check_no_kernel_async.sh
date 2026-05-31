@@ -23,7 +23,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Userland-side crates are exempt (their whole job is to host async).
-USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|verification)/'
+# slopos-rt = the userland async runtime; userland-side, identical role to
+# userland/appkit which are already exempt.
+USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|slopos-rt|verification)/'
 
 file_list="$(
     cd "$REPO_ROOT"

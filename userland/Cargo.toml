@@ -88,6 +88,30 @@ path = "src/bin/tests/cd_test.rs"
 name = "ring_test"
 path = "src/bin/tests/ring_test.rs"
 
+[[bin]]
+name = "pidfd_e2e_test"
+path = "src/bin/tests/pidfd_e2e_test.rs"
+
+[[bin]]
+name = "signalfd_test"
+path = "src/bin/tests/signalfd_test.rs"
+
+[[bin]]
+name = "slopfut_test"
+path = "src/bin/tests/slopfut_test.rs"
+
+[[bin]]
+name = "multishot_test"
+path = "src/bin/tests/multishot_test.rs"
+
+[[bin]]
+name = "tls_independence_test"
+path = "src/bin/tests/tls_independence_test.rs"
+
+[[bin]]
+name = "percore_reactor_test"
+path = "src/bin/tests/percore_reactor_test.rs"
+
 [features]
 default = []
 testbins = []
@@ -98,5 +122,6 @@ slopos-appkit = { workspace = true }
 slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-protocol = { workspace = true }
+slopos-rt = { workspace = true }
 slopos-slibc = { workspace = true }
 slopos-windowing = { workspace = true }

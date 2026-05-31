@@ -1,6 +1,60 @@
 # SlopOS Known Issues
 
-Last updated: 2026-01-31
+Last updated: 2026-05-31
+
+---
+
+## Userland threads do not distribute across CPUs (thread-per-core placement)
+
+**Status**: Open  
+**Severity**: Low (no production consumer; userland is effectively single-threaded today)  
+**Component**: `sched/src/scheduler.rs`, `sched/src/per_cpu.rs`
+
+### Description
+
+Userland OS threads never run on application processors (APs) even when given a non-zero CPU
+affinity — they stay on the BSP (CPU 0). The kernel IS fully SMP (per-CPU runqueues, AP schedulers
+online, and APs *can* run userland: CR3 / FS_BASE / GS / IST / TSS / SYSCALL are all set up per-AP),
+and placement honors affinity at task *creation* and at *wake*. The gap is two-fold; the second half
+is the hard one:
+
+1. **No re-placement of a runnable thread.** Affinity is not consulted at the post-slice re-enqueue
+   (`run_ready_task_from_idle` re-queues to the current CPU) nor by `set_cpu_affinity` (it only stamps
+   the mask). A CPU-bound thread pinned to an AP re-queues to CPU 0 forever. This half is a small fix.
+2. **No cross-core re-dispatch of a `ring_enter`-parked thread woken cross-core.** The deeper blocker:
+   once a worker parks in `ring_enter` on a non-zero CPU and is woken by a cross-core fd write (the
+   slopfut cross-core channel's wakeup self-pipe), it is not re-dispatched on its CPU and the
+   round-trip hangs. A strict single-CPU non-zero pin can also dead-end a wake (`select_target_cpu`
+   returns `None` when no permitted CPU is momentarily schedulable → the wake is silently dropped).
+
+Discovered implementing Phase-6 Tier B. A placement-only fix made all 4 workers migrate to distinct
+CPUs, but the cross-core round-trip then hung on #2, so the fix was reverted. The Tier-B
+per-thread-reactor + cross-core-channel infrastructure works fully **co-located** (all reactors on
+CPU 0); `percore_reactor_test` validates that.
+
+### Impact
+
+Thread-per-core is logically complete (N independent reactors + a `Send` cross-core channel) but not
+physically distributed: all reactors time-slice on CPU 0. No current consumer needs distribution
+(production userland is single-threaded), so impact is low today.
+
+### Fix (dedicated effort — both halves needed together)
+
+1. Re-enqueue honors affinity: route an affinity-disallowed re-enqueue through `schedule_task` (after
+   `on_cpu` clears).
+2. `set_cpu_affinity` re-places a Ready task on a now-disallowed CPU.
+3. `select_target_cpu`: affinity-permitted online-CPU fallback instead of `None`.
+4. **Cross-core ring-wakeup re-dispatch** (load-bearing): a `ring_enter`-blocked task woken via a
+   cross-core fd write must be re-dispatched on an affinity-permitted CPU and its reactor roused
+   there. This is why the naive placement fix is insufficient alone.
+
+### Related Files
+
+- `sched/src/scheduler.rs` — `run_ready_task_from_idle`, `schedule_task`, `unblock_task`
+- `sched/src/per_cpu.rs` — `select_target_cpu`, `affinity_allows_cpu`, `enqueue_local`
+- `core/src/syscall/process_handlers.rs` — `syscall_set_cpu_affinity`
+- `slopos-rt/src/slopfut/{reactor,cross_core}.rs` — the cross-core wakeup-fd path
+- `userland/src/bin/tests/percore_reactor_test.rs` — the co-located validation
 
 ---
 

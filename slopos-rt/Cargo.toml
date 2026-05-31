@@ -1,0 +1,21 @@
+[package]
+name = "slopos-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "slopos-rt - SlopOS userland async runtime (SlopRing + slopfut)"
+
+[lints]
+workspace = true
+
+[lib]
+name = "slopos_rt"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-slibc = { workspace = true }

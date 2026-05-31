@@ -51,7 +51,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Crate-name allowlist — everything userland-side, plus the trusted
 # core and its proc-macro support. Matches the leading directory
 # component of the path (relative to REPO_ROOT).
-USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|slopos-ostd|slopos-ostd-derive)/'
+# slopos-rt = the userland async runtime; userland-side, identical role to
+# userland/appkit which are already exempt and already carry unsafe.
+USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
 
 # Explicit file-level allowlist. Each entry is a repo-relative path.
 SOURCE_WHITELIST=(

@@ -230,12 +230,26 @@ pub mod os {\
     echo "  Patched env_consts.rs"
 fi
 
-# 3f. thread_local — slopos needs the no_threads storage (no real TLS)
-#     and a no-op guard::enable() (hermit/xous arm).
+# 3f. thread_local — slopos uses the compiler-native (#[thread_local])
+#     storage backed by FS_BASE variant-II per-thread TLS, so it does NOT
+#     join the no_threads arm. The userland target json sets
+#     has-thread-local:true + tls-model:local-exec, so by NOT routing slopos
+#     into the no_threads storage arm, cfg_select! falls through to the
+#     `target_thread_local => native` arm automatically — one real per-thread
+#     cell per OS thread, which is what slibc's pthread/CLONE_SETTLS path wires.
+#     We still add slopos to the guard hermit/xous no-op arm: std runs the
+#     native thread-local destructors itself, so guard::enable() is a no-op.
 TL_MOD="$STD_SYS/thread_local/mod.rs"
+# Self-heal: strip any stale slopos line from the no_threads storage arm
+# (the first cfg_select! arm, which ends at `mod no_threads;`). Older
+# revisions of this script routed slopos there; leaving it in place would
+# collapse every OS thread onto one process-global cell and silently mask the
+# native (FS_BASE) arm — mirrors the io/error legacy-strip below.
+if sed -n '0,/mod no_threads;/p' "$TL_MOD" | grep -q 'target_os = "slopos"'; then
+    sed -i '0,/mod no_threads;/{/^[[:space:]]*target_os = "slopos",$/d}' "$TL_MOD"
+    echo "  Removed stale slopos entry from no_threads storage arm in thread_local/mod.rs"
+fi
 if ! grep -q 'target_os = "slopos"' "$TL_MOD" 2>/dev/null; then
-    # Add slopos to the no_threads arm (first vexos occurrence = main cfg_select)
-    sed -i '0,/target_os = "vexos",/{s/target_os = "vexos",/target_os = "vexos",\n        target_os = "slopos",/}' "$TL_MOD"
     # Add slopos to the guard hermit/xous no-op arm (hermit immediately followed by xous)
     sed -i '/target_os = "hermit",/{n;s/target_os = "xous",/target_os = "xous",\n            target_os = "slopos",/}' "$TL_MOD"
     echo "  Patched thread_local/mod.rs"
@@ -469,7 +483,28 @@ check_patched "pipe/mod.rs"                    "$STD_SYS/pipe/mod.rs"           
 check_patched "random/mod.rs"                  "$STD_SYS/random/mod.rs"                     'target_os = "slopos"'
 check_patched "fs/mod.rs"                      "$STD_SYS/fs/mod.rs"                         'target_os = "slopos"'
 check_patched "process/mod.rs"                 "$STD_SYS/process/mod.rs"                    'target_os = "slopos"'
-check_patched "thread_local/mod.rs"            "$STD_SYS/thread_local/mod.rs"               'target_os = "slopos"'
+# thread_local: slopos must ride the guard no-op enable() arm (native TLS runs
+# its own destructors) and must NOT be in the no_threads storage arm — that
+# would route every OS thread to one process-global cell. Verify both
+# directions so a regression that re-adds slopos to no_threads fails loudly.
+check_thread_local_native() {
+    local file="$STD_SYS/thread_local/mod.rs"
+    # Positive: slopos must still be present (in the guard no-op enable() arm).
+    if ! grep -q 'target_os = "slopos"' "$file" 2>/dev/null; then
+        echo "  MISSING PATCH: thread_local/mod.rs guard no-op enable() arm (slopos)"
+        echo "    file  : $file"
+        failed=1
+    fi
+    # Negative: the first cfg_select! arm (the no_threads storage arm, which
+    # ends at `mod no_threads;`) must NOT mention slopos.
+    if sed -n '0,/mod no_threads;/p' "$file" | grep -q 'target_os = "slopos"'; then
+        echo "  STALE PATCH: thread_local/mod.rs routes slopos into the no_threads storage arm"
+        echo "    file  : $file"
+        echo "    expected slopos to fall through to the native (FS_BASE) arm"
+        failed=1
+    fi
+}
+check_thread_local_native
 check_patched "io/error/mod.rs"                "$STD_SYS/io/error/mod.rs"                   'target_os = "slopos" => {'
 check_patched "io/error/slopos.rs"             "$STD_SYS/io/error/slopos.rs"                'fn decode_error_kind'
 check_patched "exit.rs"                        "$STD_SYS/exit.rs"                           'target_os = "slopos"'

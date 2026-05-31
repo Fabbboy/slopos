@@ -1,8 +1,9 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream};
-use std::time::Duration;
+use std::os::fd::AsRawFd;
 
 use crate::net::ResolveError;
+use crate::ring::{Ring, slopfut};
 use crate::syscall::process;
 
 const MAX_HEADERS: usize = 8;
@@ -625,24 +626,49 @@ impl ChunkDecoder {
     }
 }
 
-fn receive_http_response(
-    stream: &mut TcpStream,
+/// Drive the HTTP response read off the slopfut runtime: the blocking
+/// `stream.read` becomes an owning `OP_READ` (`slopfut::read`) wrapped in a
+/// `time::timeout` deadline (the read timeout the synchronous path set on
+/// the socket). The body-decode logic is unchanged.
+const RECV_CAP: u32 = 4096;
+
+async fn receive_http_response_async(
+    sock_fd: i32,
     verbose: bool,
 ) -> Result<(ParsedResponseHeaders, Vec<u8>), CurlError> {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
-        .map_err(|_| CurlError::RecvFailed)?;
-
-    let mut recv_buf = [0u8; 4096];
     let mut raw: Vec<u8> = Vec::new();
     let mut decoded_body = Vec::new();
     let mut headers: Option<ParsedResponseHeaders> = None;
     let mut header_end = 0usize;
     let mut body_kind = BodyKind::UntilClose;
     let mut chunk_decoder = ChunkDecoder::new();
+    let mut read_buf = vec![0u8; RECV_CAP as usize];
 
     loop {
-        match stream.read(&mut recv_buf) {
+        // `OP_READ` keeps would-block in-flight, so the only way a read
+        // never resolves is a stalled peer; `time::timeout` bounds it to the
+        // same deadline the old `set_read_timeout` enforced.
+        let br = match slopfut::time::timeout(
+            IO_TIMEOUT_MS as u64,
+            slopfut::read(sock_fd, core::mem::take(&mut read_buf), RECV_CAP),
+        )
+        .await
+        {
+            Ok(br) => br,
+            Err(_) => return Err(CurlError::Timeout),
+        };
+        read_buf = br.buf;
+        // Map the ring completion onto the old `io::Result<usize>` shape:
+        // res == 0 → EOF, res > 0 → n bytes, res < 0 → recv error.
+        let read_result: io::Result<usize> = if br.res < 0 {
+            Err(io::Error::from(io::ErrorKind::Other))
+        } else {
+            Ok(br.res as usize)
+        };
+        // Slice the freshly-read bytes into a temporary borrow named
+        // `recv_buf` so the body-decode arms below are unchanged.
+        let recv_buf = &read_buf;
+        match read_result {
             Ok(0) => {
                 if headers.is_none() {
                     return Err(CurlError::InvalidResponse);
@@ -764,12 +790,6 @@ fn receive_http_response(
                     }
                 }
             }
-            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                return Err(CurlError::Timeout);
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                return Err(CurlError::Timeout);
-            }
             Err(_) => return Err(CurlError::RecvFailed),
         }
     }
@@ -839,7 +859,14 @@ fn execute_request(
         return Err(CurlError::SendFailed);
     }
 
-    let result = receive_http_response(&mut stream, config.verbose);
+    // Receive on the slopfut runtime. The socket fd is borrowed for the
+    // duration of `block_on` (the stream outlives it), so no ownership of the
+    // TcpStream is transferred — only its raw fd is handed to `OP_READ`.
+    let sock_fd = stream.as_raw_fd();
+    let result = match Ring::setup(8) {
+        Ok(ring) => slopfut::block_on(ring, receive_http_response_async(sock_fd, config.verbose)),
+        Err(_) => Err(CurlError::RecvFailed),
+    };
     let _ = stream.shutdown(Shutdown::Both);
     result
 }

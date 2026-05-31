@@ -10,10 +10,12 @@ pub mod fs;
 pub mod handlers;
 pub mod memory_handlers;
 pub mod net_handlers;
+pub mod pidfd_handlers;
 pub mod process_handlers;
 pub mod result;
 pub mod ring_handlers;
 pub mod signal;
+pub mod signalfd_handlers;
 pub mod test_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod tests;

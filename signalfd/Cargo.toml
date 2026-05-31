@@ -1,0 +1,21 @@
+[package]
+name = "slopos-signalfd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "signalfd: a FileKind::Signalfd that turns pending signals into in-band ring/poll events. See SYSCALL_SIGNALFD."
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+test = false
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-ostd = { workspace = true }
+slopos-fs = { workspace = true }
+slopos-sched = { workspace = true }

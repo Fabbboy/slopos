@@ -8,7 +8,7 @@ use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
 use super::{NcConfig, verbose_addr, verbose_msg};
 
 /// Build a kernel `SockAddrIn` from a high-level `SocketAddrV4`.
-fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
+pub(super) fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
     SockAddrIn {
         family: AF_INET,
         port: addr.port().to_be(),
@@ -30,6 +30,13 @@ pub(super) struct TcpConn {
 }
 
 impl TcpConn {
+    /// Wrap an already-connected socket fd (used by the UDP-client path,
+    /// which `connect()`s a datagram socket and then drives it through the
+    /// same async [`Session`](super::ring_io) as TCP).
+    pub(super) fn from_fd(fd: crate::syscall::OwnedFd) -> Self {
+        Self { fd }
+    }
+
     pub(super) fn raw(&self) -> i32 {
         self.fd.raw()
     }
@@ -105,14 +112,9 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
 /// blocking `ring_enter`. The `connect` that produced `conn` stayed a
 /// regular syscall (SLOPRING § 12).
 fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
-    match super::ring_io::Session::new(config, conn, false) {
-        Some(session) => session.run().unwrap_or(0),
-        None => {
-            eprintln!("nc: ring setup failed");
-            conn.shutdown_both();
-            1
-        }
-    }
+    super::ring_io::Session::new(config, conn, false)
+        .run()
+        .unwrap_or(0)
 }
 
 pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
@@ -200,12 +202,5 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
 /// loop to keep accepting (`keep_listen`). The `accept` that produced
 /// `client` stayed a regular syscall (SLOPRING § 12).
 fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
-    match super::ring_io::Session::new(config, client, true) {
-        Some(session) => session.run(),
-        None => {
-            eprintln!("nc: ring setup failed");
-            client.shutdown_both();
-            Some(1)
-        }
-    }
+    super::ring_io::Session::new(config, client, true).run()
 }

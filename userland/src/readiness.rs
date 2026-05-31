@@ -52,6 +52,19 @@ impl ReadinessGate {
             slopos_slibc::ffi::read(self.read_fd, buf.as_mut_ptr() as *mut core::ffi::c_void, 1);
         let _ = slopos_slibc::ffi::close(self.read_fd);
     }
+
+    /// Async analogue of [`wait`](Self::wait): close the parent's copy of
+    /// the notifier write end (so a dead child's EOF surfaces), then await
+    /// the single readiness byte as an `OP_READ` on the slopfut runtime.
+    ///
+    /// Folds the gate's blocking read into init's `block_on` root future
+    /// (Phase 5a §1.1/§1.7) — the byte arrives as a ring completion rather
+    /// than a synchronous `read(2)`.
+    pub async fn wait_async(self) {
+        let _ = slopos_slibc::ffi::close(NOTIFIER_FD);
+        let _ = crate::ring::slopfut::read(self.read_fd, vec![0u8; 1], 1).await;
+        let _ = slopos_slibc::ffi::close(self.read_fd);
+    }
 }
 
 /// Child side: signals the parent that initialization is complete.

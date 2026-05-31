@@ -25,6 +25,7 @@ use crate::syscall::net_handlers::{
     syscall_resolve, syscall_send, syscall_sendmsg, syscall_sendto, syscall_setsockopt,
     syscall_shutdown, syscall_socket,
 };
+pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
     syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
@@ -32,10 +33,13 @@ pub use crate::syscall::process_handlers::{
     syscall_getppid, syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid,
     syscall_spawn_path, syscall_terminate_task, syscall_vhangup, syscall_waitpid,
 };
-pub use crate::syscall::ring_handlers::{syscall_ring_enter, syscall_ring_setup};
+pub use crate::syscall::ring_handlers::{
+    syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
+};
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
+pub use crate::syscall::signalfd_handlers::syscall_signalfd;
 pub use crate::syscall::test_handlers::{syscall_run_userland_tests, syscall_test_report};
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_fb_flip, syscall_fb_info,
@@ -203,6 +207,13 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     // SlopRing (io_uring-style submission/completion ring — SLOPRING)
     [SYSCALL_RING_SETUP] => syscall_ring_setup, "ring_setup";
     [SYSCALL_RING_ENTER] => syscall_ring_enter, "ring_enter";
+    [SYSCALL_RING_REGISTER] => syscall_ring_register, "ring_register";
+
+    // pidfd: process-exit fd (poll/OP_POLL_ADD-able, reap with waitpid)
+    [SYSCALL_PIDFD_OPEN] => syscall_pidfd_open, "pidfd_open";
+
+    // signalfd: pending signals as in-band ring/poll events
+    [SYSCALL_SIGNALFD] => syscall_signalfd, "signalfd";
 };
 
 pub fn syscall_lookup(sysno: u64) -> Option<&'static SyscallEntry> {

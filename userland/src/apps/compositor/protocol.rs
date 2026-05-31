@@ -128,6 +128,13 @@ pub struct ProtocolBridge {
     display_pitch: u32,
     /// Monotonic serial counter for configure events.
     configure_serial: u32,
+    /// Per-slot connection generation. Bumped each time a slot is (re)used by
+    /// `accept_and_collect`. Disambiguates a slot+fd that the kernel/Server
+    /// recycle for a successor client from the original owner, so a stale
+    /// per-client task cannot drive or tear down the wrong connection.
+    client_gen: [u64; MAX_CLIENTS],
+    /// Monotonic source for `client_gen` values (never reused).
+    next_gen: u64,
 }
 
 impl ProtocolBridge {
@@ -155,6 +162,8 @@ impl ProtocolBridge {
             display_format: 0,
             display_pitch: 0,
             configure_serial: 0,
+            client_gen: [0u64; MAX_CLIENTS],
+            next_gen: 1,
         })
     }
 
@@ -166,56 +175,129 @@ impl ProtocolBridge {
         self.display_pitch = pitch;
     }
 
+    /// Queue the per-accept greeting (Hello + OutputInfo) to a freshly
+    /// accepted client. Shared by the synchronous and async accept paths.
+    fn greet_client(&mut self, idx: usize) {
+        let _ = self.server.queue_event(
+            idx,
+            &Event::Hello {
+                version: PROTOCOL_VERSION,
+                capabilities: caps::TOPLEVEL | caps::CLIPBOARD | caps::INTERACTIVE_MOVE_RESIZE,
+            },
+        );
+        let _ = self.server.queue_event(
+            idx,
+            &Event::OutputInfo {
+                width: self.display_width,
+                height: self.display_height,
+                format: self.display_format,
+                pitch: self.display_pitch,
+                scale: 1,
+            },
+        );
+    }
+
     /// Non-blocking accept loop for new clients.
     pub fn accept_clients(&mut self) {
         // Accept up to 4 connections per frame to avoid stalling the loop
         for _ in 0..4 {
             match self.server.accept() {
-                Ok(Some(idx)) => {
-                    let _ = self.server.queue_event(
-                        idx,
-                        &Event::Hello {
-                            version: PROTOCOL_VERSION,
-                            capabilities: caps::TOPLEVEL
-                                | caps::CLIPBOARD
-                                | caps::INTERACTIVE_MOVE_RESIZE,
-                        },
-                    );
-                    let _ = self.server.queue_event(
-                        idx,
-                        &Event::OutputInfo {
-                            width: self.display_width,
-                            height: self.display_height,
-                            format: self.display_format,
-                            pitch: self.display_pitch,
-                            scale: 1,
-                        },
-                    );
-                }
+                Ok(Some(idx)) => self.greet_client(idx),
                 Ok(None) => break,
                 Err(_) => break,
             }
         }
     }
 
+    /// The listening socket's FD — used to arm an async accept-readiness
+    /// stream (`poll_add_multishot(listen_fd, POLLIN)`).
+    pub fn listen_fd(&self) -> i32 {
+        self.server.listen_fd()
+    }
+
+    /// A connected client's socket FD, or `None` if the slot is empty —
+    /// used to arm a per-client readiness stream
+    /// (`poll_add_multishot(client_fd, POLLIN)`).
+    pub fn client_fd(&self, idx: usize) -> Option<i32> {
+        self.server
+            .clients
+            .get(idx)
+            .and_then(|slot| slot.as_ref().filter(|c| c.active).map(|c| c.conn.fd()))
+    }
+
+    /// A connected client slot's current generation, or `None` if the slot is
+    /// empty. Paired with [`client_fd`] it uniquely identifies one connection:
+    /// the kernel/Server recycle slot indices *and* fd numbers across
+    /// disconnect→reconnect, but `client_gen` is monotonic and never reused, so
+    /// a successor occupying the same slot+fd always carries a different value.
+    pub fn client_gen(&self, idx: usize) -> Option<u64> {
+        if self.server.is_connected(idx) {
+            self.client_gen.get(idx).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Async accept path: drain every pending connection (greeting each like
+    /// [`accept_clients`]) and record the new `(client_idx, client_fd,
+    /// client_gen)` triples into `out`, returning the count. The caller spawns
+    /// a per-client task per returned triple. Unlike [`accept_clients`] this
+    /// drains the full backlog (it is driven by listen-socket readiness, not a
+    /// per-frame budget) so a burst of connects is serviced in one wake.
+    ///
+    /// Each new client is stamped with a fresh generation here, atomically with
+    /// the accept (no `await` between), so the triple the caller captures is
+    /// the identity of *this* connection for the lifetime of its task.
+    pub fn accept_and_collect(&mut self, out: &mut [(usize, i32, u64)]) -> usize {
+        let mut n = 0;
+        while n < out.len() {
+            match self.server.accept() {
+                Ok(Some(idx)) => {
+                    self.greet_client(idx);
+                    let generation = self.next_gen;
+                    self.next_gen = self.next_gen.wrapping_add(1);
+                    if idx < MAX_CLIENTS {
+                        self.client_gen[idx] = generation;
+                    }
+                    let fd = self.client_fd(idx).unwrap_or(-1);
+                    out[n] = (idx, fd, generation);
+                    n += 1;
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        n
+    }
+
     /// Process all pending requests from all clients.
     pub fn process_requests(&mut self) {
         for client_idx in 0..32 {
-            if !self.server.is_connected(client_idx) {
-                continue;
-            }
-            loop {
-                match self.server.recv_request(client_idx) {
-                    Ok(Some(req)) => self.handle_request(client_idx, req),
-                    Ok(None) => break,
-                    Err(ProtocolError::Disconnected) => {
-                        self.cleanup_client(client_idx);
-                        break;
-                    }
-                    Err(_) => break,
+            self.process_client(client_idx);
+        }
+    }
+
+    /// Drain one client's pending requests (the per-client async path calls
+    /// this on each readiness yield). Returns `true` while the client stays
+    /// connected; `false` once it disconnects — at which point the client is
+    /// already torn down via [`cleanup_client`], so the caller's per-client
+    /// task should exit (dropping its readiness stream → `OP_CANCEL`).
+    pub fn process_client(&mut self, client_idx: usize) -> bool {
+        if !self.server.is_connected(client_idx) {
+            return false;
+        }
+        loop {
+            match self.server.recv_request(client_idx) {
+                Ok(Some(req)) => self.handle_request(client_idx, req),
+                Ok(None) => break,
+                Err(ProtocolError::Disconnected) => {
+                    self.cleanup_client(client_idx);
+                    return false;
                 }
+                Err(_) => break,
             }
         }
+        true
     }
 
     fn handle_request(&mut self, client_idx: usize, req: Request) {
@@ -998,6 +1080,19 @@ impl ProtocolBridge {
     pub fn flush_all(&mut self) {
         self.server.flush_clients();
         self.reap_disconnected_clients();
+    }
+
+    /// Tear down a client by index through the single teardown funnel.
+    ///
+    /// The per-client async task calls this when its readiness stream
+    /// terminates (`POLLHUP`/`POLLERR`) without a prior `recv_request`
+    /// disconnect — e.g. a client that closes without ever sending. A no-op
+    /// if the slot is already free, so it is safe to call unconditionally on
+    /// task exit.
+    pub fn disconnect_client(&mut self, client_idx: usize) {
+        if self.server.is_connected(client_idx) {
+            self.cleanup_client(client_idx);
+        }
     }
 
     /// The single client-teardown funnel.

@@ -43,18 +43,49 @@ pub const OP_POLL_ADD: u8 = 6;
 pub const OP_TIMEOUT: u8 = 7;
 /// Cancel an in-flight op by `user_data` — in-flight-table walk.
 pub const OP_CANCEL: u8 = 8;
+/// `recvfrom(fd, buf, len, src*)` — `socket_recvfrom`. Like `OP_RECVMSG`
+/// but returns the datagram's *source* `SockAddrIn` in `addr2` (closes
+/// the nc UDP-listen gap). `addr` = data buf VA, `len` = buf len,
+/// `addr2` = user VA of a `SockAddrIn` out-struct.
+pub const OP_RECVFROM: u8 = 9;
+/// `openat(path, flags)` — `file_open_for_process`. Non-blocking file
+/// open (SlopOS fs opens are immediate). `addr` = path ptr, `len` = path
+/// len, `op_flags` = open flags. Installs an fd (ownership op).
+pub const OP_OPENAT: u8 = 10;
+/// `close(fd)` — `file_close_fd`. `fd` = fd to close. Completes inline.
+pub const OP_CLOSE: u8 = 11;
 
 /// Largest opcode value (inclusive). Used by the kernel to reject
 /// out-of-range opcodes with `-EINVAL`.
-pub const OP_MAX: u8 = OP_CANCEL;
+pub const OP_MAX: u8 = OP_CLOSE;
 
 // ---------------------------------------------------------------------------
 // CQE flags (SLOPRING § 4.5).
 // ---------------------------------------------------------------------------
 
-/// Reserved multi-shot continuation bit (unused today; reserved so
-/// multi-shot opcodes land later without ABI churn).
+/// Multishot continuation bit: this CQE is an *interim* completion of an
+/// armed multishot row (OP_ACCEPT/OP_RECVMSG/OP_POLL_ADD) — more CQEs for
+/// the same `user_data` are expected. Cleared on the terminal CQE
+/// (error / EOF / cancel), which retires the row.
 pub const SLOPRING_CQE_F_MORE: u32 = 1 << 0;
+
+/// Provided-buffer id is valid in the high 16 bits of `flags`
+/// ([`SLOPRING_CQE_BUFFER_SHIFT`]). Phase 4 (provided buffer rings);
+/// never set in Phase 3.
+pub const SLOPRING_CQE_F_BUFFER: u32 = 1 << 1;
+
+/// Incremental provided-buffer consumption: the kernel filled part of a
+/// provided buffer and will hand back the rest in a later CQE. Phase 4;
+/// never set in Phase 3.
+pub const SLOPRING_CQE_F_BUF_MORE: u32 = 1 << 2;
+
+/// Bit shift of the provided-buffer id within `Cqe.flags` (the buffer id
+/// occupies the high 16 bits, mirroring Linux io_uring's
+/// `IORING_CQE_BUFFER_SHIFT`). Phase 4.
+pub const SLOPRING_CQE_BUFFER_SHIFT: u32 = 16;
+
+/// Mask selecting the provided-buffer id bits in `Cqe.flags`. Phase 4.
+pub const SLOPRING_CQE_BUFFER_MASK: u32 = 0xFFFF_0000;
 
 // ---------------------------------------------------------------------------
 // CQ flags word (the shared `cq_off_flags` u32).
@@ -81,11 +112,35 @@ pub const SLOPRING_CQ_OVERFLOW: u32 = 1 << 1;
 pub const SLOPRING_ASYNC_CANCEL_ALL: u32 = 1 << 0;
 
 // ---------------------------------------------------------------------------
+// SQE behaviour flags — `Sqe.sqe_flags2` (ABI v2, SLOPRING § 10).
+// ---------------------------------------------------------------------------
+
+/// `Sqe.sqe_flags2`: arm this op as **multishot** — the kernel keeps the
+/// row in flight and posts a CQE (each carrying [`SLOPRING_CQE_F_MORE`])
+/// every time the resource yields, until a terminal event (error / EOF /
+/// cancel). Honoured for OP_ACCEPT / OP_RECVMSG / OP_POLL_ADD.
+pub const SLOPRING_SQE_MULTISHOT: u16 = 1 << 0;
+
+/// `Sqe.flags`: the kernel picks a provided buffer from `Sqe.buf_group`
+/// and reports its id in [`SLOPRING_CQE_F_BUFFER`]. Phase 4 (provided
+/// buffer rings); reserved (rejected) in Phase 3.
+pub const SLOPRING_SQE_BUFFER_SELECT: u8 = 1 << 0;
+
+// ---------------------------------------------------------------------------
 // RingParams flags (SLOPRING § 4.3).
 // ---------------------------------------------------------------------------
 
 /// The whole ring region is a single mapping (the only mode today).
 pub const SLOPRING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
+
+/// The kernel honours [`SLOPRING_SQE_MULTISHOT`] on OP_ACCEPT /
+/// OP_RECVMSG / OP_POLL_ADD. Userland gates multishot submission on this
+/// bit so a new userland on an old kernel degrades gracefully.
+pub const SLOPRING_FEAT_MULTISHOT: u32 = 1 << 1;
+
+/// The kernel implements `ring_register` provided/fixed buffers. Phase 4;
+/// off in Phase 3 (the `ring_register` syscall returns `-ENOSYS`).
+pub const SLOPRING_FEAT_REG_BUFFERS: u32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
 // `ring_enter` flags (SLOPRING § 6.2). Reserved (0) today.
@@ -122,12 +177,29 @@ pub struct Sqe {
     pub user_data: u64,
     /// Secondary VA (e.g. accept's `socklen*` out-ptr).
     pub addr2: u64,
-    /// Reserved, must be zero.
-    pub _resv: [u64; 2],
+    /// Op-behaviour flags ([`SLOPRING_SQE_MULTISHOT`], …). Offset 48.
+    pub sqe_flags2: u16,
+    /// Provided-buffer group id (Phase 4; 0 today). Offset 50.
+    pub buf_group: u16,
+    /// Registered/fixed-buffer index (Phase 4; 0 today). Offset 52.
+    pub buf_index: u16,
+    /// Reserved, must be zero. Offset 54.
+    pub _resv0: u16,
+    /// Reserved, must be zero. Offset 56.
+    pub _resv1: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<Sqe>() == 64);
 const _: () = assert!(core::mem::align_of::<Sqe>() == 8);
+// ABI v2 carved named fields out of the former `_resv: [u64; 2]` (offset
+// 48–63) without changing the 64-byte size. Pin their offsets so any
+// future reorder that shifts them fails the build (the serializer below
+// hand-writes each field at these literal offsets).
+const _: () = assert!(core::mem::offset_of!(Sqe, sqe_flags2) == 48);
+const _: () = assert!(core::mem::offset_of!(Sqe, buf_group) == 50);
+const _: () = assert!(core::mem::offset_of!(Sqe, buf_index) == 52);
+const _: () = assert!(core::mem::offset_of!(Sqe, _resv0) == 54);
+const _: () = assert!(core::mem::offset_of!(Sqe, _resv1) == 56);
 
 impl Sqe {
     /// A zeroed SQE (all fields 0, fd 0). Convenience for userland
@@ -143,7 +215,11 @@ impl Sqe {
         op_flags: 0,
         user_data: 0,
         addr2: 0,
-        _resv: [0; 2],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
 
     /// Decode a 64-byte little-endian record into an `Sqe`. The kernel
@@ -151,6 +227,7 @@ impl Sqe {
     /// calls this to parse the private copy (never a `&Sqe` over ring
     /// memory — AD-3). `bytes.len()` must be at least 64.
     pub fn from_bytes(bytes: &[u8; 64]) -> Self {
+        let r16 = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
         let r32 =
             |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
         let r64 = |o: usize| {
@@ -176,7 +253,11 @@ impl Sqe {
             op_flags: r32(28),
             user_data: r64(32),
             addr2: r64(40),
-            _resv: [r64(48), r64(56)],
+            sqe_flags2: r16(48),
+            buf_group: r16(50),
+            buf_index: r16(52),
+            _resv0: r16(54),
+            _resv1: r64(56),
         }
     }
 
@@ -193,8 +274,11 @@ impl Sqe {
         b[28..32].copy_from_slice(&self.op_flags.to_le_bytes());
         b[32..40].copy_from_slice(&self.user_data.to_le_bytes());
         b[40..48].copy_from_slice(&self.addr2.to_le_bytes());
-        b[48..56].copy_from_slice(&self._resv[0].to_le_bytes());
-        b[56..64].copy_from_slice(&self._resv[1].to_le_bytes());
+        b[48..50].copy_from_slice(&self.sqe_flags2.to_le_bytes());
+        b[50..52].copy_from_slice(&self.buf_group.to_le_bytes());
+        b[52..54].copy_from_slice(&self.buf_index.to_le_bytes());
+        b[54..56].copy_from_slice(&self._resv0.to_le_bytes());
+        b[56..64].copy_from_slice(&self._resv1.to_le_bytes());
         b
     }
 }
@@ -531,7 +615,7 @@ impl RingLayout {
         RingParams {
             sq_entries: self.sq_entries,
             cq_entries: self.cq_entries,
-            flags: SLOPRING_FEAT_SINGLE_MMAP,
+            flags: SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT,
             _pad0: 0,
             sq_off_head: self.sq_off_head,
             sq_off_tail: self.sq_off_tail,
@@ -558,7 +642,7 @@ mod tests {
     fn sqe_round_trips() {
         let s = Sqe {
             opcode: OP_READ,
-            flags: 0,
+            flags: SLOPRING_SQE_BUFFER_SELECT,
             _pad0: 0,
             fd: 7,
             off: 0x1234_5678_9abc_def0,
@@ -567,9 +651,54 @@ mod tests {
             op_flags: 3,
             user_data: 0xcafe_f00d_0bad_b002,
             addr2: 0x5000,
-            _resv: [0, 0],
+            sqe_flags2: SLOPRING_SQE_MULTISHOT,
+            buf_group: 0xabcd,
+            buf_index: 0x1234,
+            _resv0: 0,
+            _resv1: 0,
         };
         assert_eq!(Sqe::from_bytes(&s.to_bytes()), s);
+    }
+
+    /// ABI v2: the carved fields live at their pinned offsets and survive
+    /// the byte round-trip — `sqe_flags2`@48, `buf_group`@50,
+    /// `buf_index`@52 — keeping `Sqe` exactly 64 bytes.
+    #[test]
+    fn sqe_v2_layout_round_trips() {
+        assert_eq!(core::mem::size_of::<Sqe>(), 64);
+        assert_eq!(core::mem::offset_of!(Sqe, sqe_flags2), 48);
+        assert_eq!(core::mem::offset_of!(Sqe, buf_group), 50);
+        assert_eq!(core::mem::offset_of!(Sqe, buf_index), 52);
+
+        let mut s = Sqe::ZERO;
+        s.sqe_flags2 = 0x0102;
+        s.buf_group = 0x0304;
+        s.buf_index = 0x0506;
+        let b = s.to_bytes();
+        assert_eq!(&b[48..50], &0x0102u16.to_le_bytes());
+        assert_eq!(&b[50..52], &0x0304u16.to_le_bytes());
+        assert_eq!(&b[52..54], &0x0506u16.to_le_bytes());
+        assert_eq!(Sqe::from_bytes(&b), s);
+    }
+
+    /// CQE provided-buffer bits: a buffer id packs into the high 16 bits
+    /// alongside `F_BUFFER`, and the shift/mask recover it exactly.
+    #[test]
+    fn cqe_buffer_bits() {
+        let bid: u32 = 0xBEEF;
+        let flags = SLOPRING_CQE_F_BUFFER | (bid << SLOPRING_CQE_BUFFER_SHIFT);
+        let c = Cqe {
+            user_data: 0xfeed,
+            res: 17,
+            flags,
+        };
+        let round = Cqe::from_bytes(&c.to_bytes());
+        assert_eq!(round, c);
+        assert_ne!(round.flags & SLOPRING_CQE_F_BUFFER, 0);
+        assert_eq!(
+            (round.flags & SLOPRING_CQE_BUFFER_MASK) >> SLOPRING_CQE_BUFFER_SHIFT,
+            bid
+        );
     }
 
     #[test]
@@ -608,7 +737,7 @@ mod tests {
         assert_eq!(p.cq_entries, 64);
         assert_eq!(p.sq_off_array, l.sqe_array_off);
         assert_eq!(p.cq_off_array, l.cqe_array_off);
-        assert_eq!(p.flags, SLOPRING_FEAT_SINGLE_MMAP);
+        assert_eq!(p.flags, SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT);
     }
 
     /// Regression guard: `to_bytes()` must place `region_addr` at the

@@ -80,6 +80,12 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin curl_e2e_test \
         --bin cd_test \
         --bin ring_test \
+        --bin pidfd_e2e_test \
+        --bin signalfd_test \
+        --bin slopfut_test \
+        --bin multishot_test \
+        --bin tls_independence_test \
+        --bin percore_reactor_test \
         --features testbins \
         --no-default-features \
         --release
@@ -105,6 +111,24 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/ring_test" ]; then
         cp "$RELEASE_DIR/ring_test" "$BUILD_DIR/ring_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/pidfd_e2e_test" ]; then
+        cp "$RELEASE_DIR/pidfd_e2e_test" "$BUILD_DIR/pidfd_e2e_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/signalfd_test" ]; then
+        cp "$RELEASE_DIR/signalfd_test" "$BUILD_DIR/signalfd_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/slopfut_test" ]; then
+        cp "$RELEASE_DIR/slopfut_test" "$BUILD_DIR/slopfut_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/multishot_test" ]; then
+        cp "$RELEASE_DIR/multishot_test" "$BUILD_DIR/multishot_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/tls_independence_test" ]; then
+        cp "$RELEASE_DIR/tls_independence_test" "$BUILD_DIR/tls_independence_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/percore_reactor_test" ]; then
+        cp "$RELEASE_DIR/percore_reactor_test" "$BUILD_DIR/percore_reactor_test.elf"
+    fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf"
 fi

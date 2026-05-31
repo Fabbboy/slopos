@@ -64,6 +64,15 @@ pub fn get_current_cpu() -> u32 {
     unsafe { syscall0(SYSCALL_GET_CURRENT_CPU) as u32 }
 }
 
+/// Pin `target` (0 = the calling task) to the CPUs in `affinity`, a bitmask
+/// where bit `n` permits CPU `n`. Pass `1 << cpu` to pin to a single CPU.
+/// The placement takes effect at the next reschedule; returns 0 on success
+/// or a negative errno.
+#[inline(always)]
+pub fn set_cpu_affinity(target: u32, affinity: u32) -> i64 {
+    unsafe { syscall2(SYSCALL_SET_CPU_AFFINITY, target as u64, affinity as u64) as i64 }
+}
+
 /// Fill a buffer with cryptographically secure random bytes.
 /// Returns the number of bytes written.
 #[inline(always)]

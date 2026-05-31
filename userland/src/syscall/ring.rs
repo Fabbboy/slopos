@@ -3,7 +3,7 @@
 
 use super::raw::{syscall2, syscall4};
 use slopos_abi::ring::RingParams;
-use slopos_abi::syscall::{SYSCALL_RING_ENTER, SYSCALL_RING_SETUP};
+use slopos_abi::syscall::{SYSCALL_RING_ENTER, SYSCALL_RING_REGISTER, SYSCALL_RING_SETUP};
 
 /// `ring_setup(entries, params*)` — create a ring (SLOPRING § 6.1).
 /// Returns the ring fd (`>= 0`) or a negated errno. `params` is filled
@@ -25,6 +25,25 @@ pub fn ring_enter(ring_fd: i32, to_submit: u32, min_complete: u32, flags: u32) -
             to_submit as u64,
             min_complete as u64,
             flags as u64,
+        ) as i32
+    }
+}
+
+/// `ring_register(ring_fd, op, arg, nr_args)` — register provided/fixed
+/// buffers with a ring (SLOPRING § 13, ABI v2). Returns 0 on success or a
+/// negated errno. Phase 3 ships the ABI only: every `op` returns
+/// `-ENOSYS` (Phase 4 implements the provided/fixed buffer paths). The
+/// shared `syscall4` wrapper already clobbers XMM/YMM, so user FP/SIMD
+/// state cannot be corrupted across the boundary.
+#[inline(always)]
+pub fn ring_register(ring_fd: i32, op: u32, arg: u64, nr_args: u32) -> i32 {
+    unsafe {
+        syscall4(
+            SYSCALL_RING_REGISTER,
+            ring_fd as u64,
+            op as u64,
+            arg,
+            nr_args as u64,
         ) as i32
     }
 }

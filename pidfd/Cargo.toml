@@ -1,0 +1,21 @@
+[package]
+name = "slopos-pidfd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "pidfd: a process-exit fd (FileKind::Pidfd) that polls ready when a task exits. See SYSCALL_PIDFD_OPEN."
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+test = false
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-ostd = { workspace = true }
+slopos-fs = { workspace = true }
+slopos-sched = { workspace = true }

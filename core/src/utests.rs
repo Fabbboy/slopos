@@ -21,3 +21,15 @@ crate::utest!(
 crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");
 crate::utest!(name = utest_cd, bin = "/bin/cd_test");
 crate::utest!(name = utest_ring, bin = "/bin/ring_test");
+crate::utest!(name = utest_pidfd, bin = "/bin/pidfd_e2e_test");
+crate::utest!(name = utest_signalfd, bin = "/bin/signalfd_test");
+crate::utest!(name = utest_slopfut, bin = "/bin/slopfut_test");
+crate::utest!(name = utest_multishot, bin = "/bin/multishot_test");
+crate::utest!(
+    name = utest_tls_independence,
+    bin = "/bin/tls_independence_test"
+);
+crate::utest!(
+    name = utest_percore_reactor,
+    bin = "/bin/percore_reactor_test"
+);

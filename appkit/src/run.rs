@@ -1,6 +1,9 @@
 use slopos_abi::Canvas;
+use slopos_abi::syscall::posix::POLLIN;
 use slopos_gfx::RenderSurface;
 use slopos_protocol::types::Event as ProtocolEvent;
+use slopos_rt::Ring;
+use slopos_rt::slopfut;
 
 use slopos_windowing::Event;
 use slopos_windowing::connection;
@@ -17,7 +20,16 @@ use super::traits::{FocusPolicy, Widget};
 use super::tree;
 
 /// Run a widget-framework-driven application.
-pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
+///
+/// Sets up one ring and drives the event loop as an async root via
+/// [`slopfut::block_on`]; the wait/wake step races the compositor socket,
+/// the cross-thread wakeup pipe, and (when bounded) a timer.
+pub fn run_app<A: App>(app: A, width: u32, height: u32) -> ! {
+    let ring = Ring::setup(16).expect("appkit: ring setup failed");
+    slopfut::block_on(ring, run_app_async(app, width, height))
+}
+
+async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let handle = connection::connect().expect("compositor not running");
     let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
     win.set_title(app.title());
@@ -211,8 +223,39 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
-        if timeout_ms != 0 {
-            handle.wait_events(timeout_ms);
+        // Race the compositor socket, the cross-thread wakeup pipe, and (for a
+        // bounded wait) a timer — the async equivalent of `wait_events`.
+        //   timeout_ms == 0 — non-blocking: return immediately, no await.
+        //   timeout_ms  < 0 — wait indefinitely: race only the two poll_adds.
+        //   timeout_ms  > 0 — bounded wait: add a timer arm.
+        if timeout_ms < 0 {
+            match slopfut::select2(
+                slopfut::poll_add(handle.compositor_fd(), POLLIN),
+                slopfut::poll_add(handle.wakeup_read_fd(), POLLIN),
+            )
+            .await
+            {
+                slopfut::Either2::A(_) => {}
+                slopfut::Either2::B(_) => handle.drain_wakeup(),
+            }
+        } else if timeout_ms > 0 {
+            // `sleep_ms` is an `async fn` (not `Unpin`); `Box::pin` makes it
+            // usable by the by-reference `select3`. It takes milliseconds and
+            // does the ms→ns conversion internally, so feed `timeout_ms`
+            // directly — no manual multiply.
+            let timer: core::pin::Pin<Box<dyn core::future::Future<Output = ()>>> =
+                Box::pin(slopfut::time::sleep_ms(timeout_ms as u64));
+            match slopfut::select3(
+                slopfut::poll_add(handle.compositor_fd(), POLLIN),
+                slopfut::poll_add(handle.wakeup_read_fd(), POLLIN),
+                timer,
+            )
+            .await
+            {
+                slopfut::Either3::A(_) => {}
+                slopfut::Either3::B(_) => handle.drain_wakeup(),
+                slopfut::Either3::C(_) => {}
+            }
         }
     }
 }

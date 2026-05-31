@@ -70,6 +70,9 @@ pub trait Pal {
     ) -> Result<i32, Errno>;
     fn futex_wait(addr: *const u32, val: u32, timeout_ms: u64) -> Result<(), Errno>;
     fn futex_wake(addr: *const u32, count: u32) -> Result<i32, Errno>;
+    fn get_cpu_count() -> Result<u32, Errno>;
+    fn get_current_cpu() -> Result<u32, Errno>;
+    fn set_cpu_affinity(target: u32, affinity: u32) -> Result<(), Errno>;
     fn arch_prctl_set_fs(base: u64) -> Result<(), Errno>;
     fn arch_prctl_get_fs() -> Result<u64, Errno>;
 

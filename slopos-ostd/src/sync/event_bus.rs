@@ -19,7 +19,9 @@
 //! same contract a bare `WaitQueue::wake_all` carries — the bus only changes
 //! how the queue is named, not the ordering rules.
 
-use slopos_abi::event::{CHILD_EXIT_BUCKETS, KernelEvent, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS};
+use slopos_abi::event::{
+    CHILD_EXIT_BUCKETS, KernelEvent, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS, SIGNAL_PENDING_BUCKETS,
+};
 use slopos_abi::net::MAX_SOCKETS;
 
 use crate::sync::wait_queue::WaitQueue;
@@ -35,6 +37,7 @@ pub struct EventBus {
     tty_output: [WaitQueue; MAX_TTYS],
     unix_socket: [WaitQueue; MAX_UNIX_SOCKETS],
     child_exit: [WaitQueue; CHILD_EXIT_BUCKETS],
+    signal_pending: [WaitQueue; SIGNAL_PENDING_BUCKETS],
 }
 
 /// The kernel-wide event bus.
@@ -52,6 +55,7 @@ pub static BUS: EventBus = EventBus {
     tty_output: [const { WaitQueue::new() }; MAX_TTYS],
     unix_socket: [const { WaitQueue::new() }; MAX_UNIX_SOCKETS],
     child_exit: [const { WaitQueue::new() }; CHILD_EXIT_BUCKETS],
+    signal_pending: [const { WaitQueue::new() }; SIGNAL_PENDING_BUCKETS],
 };
 
 impl EventBus {
@@ -77,6 +81,9 @@ impl EventBus {
             }
             KernelEvent::ChildExit { task } => {
                 &self.child_exit[(task.0 as usize) % CHILD_EXIT_BUCKETS]
+            }
+            KernelEvent::SignalPending { task } => {
+                &self.signal_pending[(task.0 as usize) % SIGNAL_PENDING_BUCKETS]
             }
         }
     }

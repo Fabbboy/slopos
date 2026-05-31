@@ -768,7 +768,45 @@ pub const SYSCALL_RING_SETUP: u64 = 157;
 /// side.
 pub const SYSCALL_RING_ENTER: u64 = 158;
 
-pub const SYSCALL_TABLE_SIZE: usize = 159;
+/// Open a process-exit fd (pidfd) for a target task.
+///
+/// `pidfd_open(pid: u32) -> i32`. Returns a `FileKind::Pidfd` fd that
+/// becomes `POLLIN`-ready once the target task exits — pollable via
+/// `poll(2)` / SlopRing `OP_POLL_ADD`, so a waiter need not busy-poll
+/// `waitpid`. The fd is not readable (`read` → `-EINVAL`); reap the exit
+/// status with the existing `waitpid` syscall once it signals. The target
+/// must be a child of the caller (`-EPERM` otherwise, `-ESRCH` if absent).
+pub const SYSCALL_PIDFD_OPEN: u64 = 159;
+
+/// Create a signal fd watching a mask of signals.
+///
+/// `signalfd(mask: u64, flags: u32) -> i32`. Returns a `FileKind::Signalfd`
+/// fd that becomes `POLLIN`-ready when any signal in `mask` is pending for
+/// the calling task, and whose `read` drains one `SignalfdSiginfo`. Paired
+/// with blocking those signals (`rt_sigprocmask`) so they queue as in-band
+/// ring/poll events rather than interrupting waits with `EINTR`.
+pub const SYSCALL_SIGNALFD: u64 = 160;
+
+/// SlopRing: register provided/fixed buffers with a ring (SLOPRING § 13,
+/// ABI v2). `ring_register(ring_fd: i32, op: u32, arg: u64, nr_args: u32)`.
+/// Phase 3 ships the ABI + handler stub only: every `op` returns
+/// `-ENOSYS`. Phase 4 implements [`RING_REGISTER_PBUF_RING`] (provided
+/// buffer rings) and [`RING_REGISTER_BUFFERS`] (fixed/registered
+/// buffers) behind [`super::super::ring::SLOPRING_FEAT_REG_BUFFERS`].
+pub const SYSCALL_RING_REGISTER: u64 = 161;
+
+/// `ring_register` op: register a provided-buffer ring (Phase 4).
+pub const RING_REGISTER_PBUF_RING: u32 = 1;
+/// `ring_register` op: register fixed/registered buffers (Phase 4).
+pub const RING_REGISTER_BUFFERS: u32 = 2;
+/// `ring_register` op: unregister a provided-buffer ring (Phase 4).
+pub const RING_UNREGISTER_PBUF_RING: u32 = 3;
+
+pub const SYSCALL_TABLE_SIZE: usize = 162;
+
+const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_RING_REGISTER as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

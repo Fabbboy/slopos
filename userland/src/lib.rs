@@ -5,7 +5,7 @@ pub mod gfx;
 pub mod net;
 pub mod program_registry;
 pub mod readiness;
-pub mod ring;
+pub use slopos_rt as ring;
 pub mod runtime;
 pub mod syscall;
 pub mod theme;

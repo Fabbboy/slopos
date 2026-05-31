@@ -46,6 +46,36 @@ pub type SigSet = u64;
 /// Empty signal set (no signals).
 pub const SIG_EMPTY: SigSet = 0;
 
+/// One drained signal, returned by `read()` on a `FileKind::Signalfd`
+/// (the SlopOS analogue of Linux `struct signalfd_siginfo`, trimmed to the
+/// fields SlopOS tracks). 16 bytes, `#[repr(C)]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignalfdSiginfo {
+    /// The signal number (1-based) that was drained.
+    pub ssi_signo: u32,
+    /// Signal-specific code (0 — SlopOS does not track si_code yet).
+    pub ssi_code: i32,
+    /// Sending task id, when known (0 otherwise).
+    pub ssi_pid: u32,
+    pub _pad: u32,
+}
+
+impl SignalfdSiginfo {
+    pub const SERIALIZED_LEN: usize = 16;
+
+    /// Fixed-width little-endian byte image for the `read()` copy-out.
+    pub fn to_bytes(&self) -> [u8; Self::SERIALIZED_LEN] {
+        let mut b = [0u8; Self::SERIALIZED_LEN];
+        b[0..4].copy_from_slice(&self.ssi_signo.to_le_bytes());
+        b[4..8].copy_from_slice(&self.ssi_code.to_le_bytes());
+        b[8..12].copy_from_slice(&self.ssi_pid.to_le_bytes());
+        b
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<SignalfdSiginfo>() == SignalfdSiginfo::SERIALIZED_LEN);
+
 /// Convert a signal number (1-based) to its bitmask.
 #[inline]
 pub const fn sig_bit(signum: u8) -> SigSet {

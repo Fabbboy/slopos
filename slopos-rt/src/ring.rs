@@ -16,11 +16,7 @@ use core::sync::atomic::{Ordering, fence};
 
 use slopos_abi::ring::{Cqe, RingParams, SLOPRING_CQ_OVERFLOW, Sqe};
 
-use crate::syscall::ring::{ring_enter, ring_setup};
-
-pub mod executor;
-
-pub use executor::{CompletionFuture, RingExecutor};
+use crate::sys::ring::{ring_enter, ring_setup};
 
 /// Errors the runtime surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,10 +210,10 @@ impl Drop for Ring {
     fn drop(&mut self) {
         let bytes = self.params.region_bytes;
         if self.base != 0 && bytes != 0 {
-            let _ = crate::syscall::memory::munmap(self.base, bytes);
+            let _ = crate::sys::memory::munmap(self.base, bytes);
         }
         if self.fd >= 0 {
-            let _ = crate::syscall::memory::close(self.fd);
+            let _ = crate::sys::memory::close(self.fd);
         }
     }
 }

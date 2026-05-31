@@ -156,6 +156,30 @@ pub unsafe extern "C" fn slopos_futex_wake(addr: *const u32, count: u32) -> i32 
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_get_cpu_count() -> i32 {
+    match Sys::get_cpu_count() {
+        Ok(n) => n as i32,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_get_current_cpu() -> i32 {
+    match Sys::get_current_cpu() {
+        Ok(n) => n as i32,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_set_cpu_affinity(target: u32, affinity: u32) -> i32 {
+    match Sys::set_cpu_affinity(target, affinity) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_clock_gettime(clk_id: u64, sec: *mut i64, nsec: *mut i64) -> i32 {
     let mut raw = [0u8; 16];
     match Sys::clock_gettime(clk_id, raw.as_mut_ptr()) {

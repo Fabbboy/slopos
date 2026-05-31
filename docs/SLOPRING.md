@@ -1,7 +1,7 @@
 ---
 name: SlopRing — io_uring-Style Submission/Completion Ring Surface
 description: Design for SlopOS's userspace async edge — a shared-memory SQ/CQ ring backed by the existing sync EventBus / WaitQueue substrate. Kernel side is sync; async lives in userspace.
-status: implemented (Phase 3G/3H complete) — ring/ kernel crate, two syscalls, nine opcodes, userland slibc-ring runtime + slopfut executor all shipped and tested. This document remains the durable ABI/behaviour contract.
+status: implemented (Phase 3G/3H complete; Phase 4 added OP_RECVFROM/OP_OPENAT/OP_CLOSE) — ring/ kernel crate, two syscalls, twelve opcodes, userland slibc-ring runtime + slopfut executor all shipped and tested. This document remains the durable ABI/behaviour contract.
 authors: Phase 3F design pass, grounded in the post-Phase-2 SlopOS sync substrate
 phase: Framekernel Phase 3F (design subtasks 3F.1 / 3F.2 / 3F.3)
 location: docs/SLOPRING.md (durable ABI/design spec; lives in docs/, not plans/)
@@ -864,6 +864,22 @@ Nine opcodes (framekernel subtasks 3G.4.{a..i}):
 | **`OP_POLL_ADD`** | `file_poll_register_fd` to register + `file_poll_fused`/per-fd readiness probe to read (`fs/src/fileio/poll.rs`) | `fd`, `op_flags` (poll mask, e.g. `POLLIN`) | the fd's readiness queue (`PipeRead`/`SocketRecv`/`TtyInput`/`UnixSocket`) | readiness bitmask, or `-errno` |
 | **`OP_TIMEOUT`** | the harvest-block deadline (`block_current_task_with_timeout`, `sched`) | `off` (timeout, ns) | no `KernelEvent`; sets the harvest block's deadline (note below) | `-ETIME` on expiry, `0` if cancelled-by-completion |
 | **`OP_CANCEL`** | in-flight table walk (§ 10) | `addr` (target `user_data`/op-handle), `op_flags` | never (synchronous walk) | `0` / `-ENOENT` / `-EALREADY` |
+| **`OP_RECVFROM`** | `socket_recvfrom` (`net/src/socket.rs`) | `fd`, `addr`/`len` (user dst buf), `addr2` (out `SockAddrIn*`) | `SocketRecv` (AF_INET datagram) | bytes received (source addr written to `addr2`), or `-errno` |
+| **`OP_OPENAT`** | `file_open_for_process` (`fs/src/fileio/fdops.rs`) | `addr`/`len` (path), `op_flags` (open flags) | never (fs opens are immediate) | new fd, or `-errno` |
+| **`OP_CLOSE`** | `file_close_fd` (`fs/src/fileio/fdops.rs`) | `fd` | never (synchronous) | `0` / `-EBADF` |
+
+Phase 4 added `OP_RECVFROM` (= 9), `OP_OPENAT` (= 10), `OP_CLOSE` (= 11)
+on top of the original nine. `OP_RECVFROM` is the headline: it mirrors
+`OP_RECVMSG` but returns the datagram's *source* `SockAddrIn` in the
+`addr2` out-struct, closing the nc UDP-listen gap (AF_INET datagram only —
+an AF_UNIX fd has no datagram source addr, so it returns `-ENOTSOCK` like
+`recvfrom(2)`). It is a consuming op (reserve-before-side-effect, § 11);
+null `addr` (with non-zero `len`) or null `addr2` → `-EFAULT` inline.
+`OP_OPENAT` installs an fd (ownership op) and `OP_CLOSE` releases one;
+both complete inline because SlopOS fs open/close never block.
+`OP_CONNECT` remains deferred (async non-blocking connect needs
+handshake-state handling; blocking `connect` is acceptable for one-shot
+setup).
 
 Notes on parity-preserving details:
 

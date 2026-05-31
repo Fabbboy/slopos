@@ -121,6 +121,16 @@ impl Protocol {
         self.compositor_fd
     }
 
+    /// The read end of the self-pipe written by [`UiSender::post`].
+    ///
+    /// Stable for the lifetime of this connection. Exposed so an async
+    /// consumer can await readiness on it directly (the sync fallback uses
+    /// it internally in [`wait_events`]).
+    #[inline]
+    pub fn wakeup_read_fd(&self) -> i32 {
+        self.wakeup_read_fd
+    }
+
     /// Get exclusive access to the protocol client.
     ///
     /// Panics on reentrant borrow (a logic bug in single-threaded code).
@@ -231,9 +241,16 @@ impl Protocol {
 
         // Drain the wakeup pipe so it doesn't fire again next iteration.
         if fds[1].revents & POLLIN != 0 {
-            let mut drain = [0u8; 64];
-            while crate::sys::read(self.wakeup_read_fd, &mut drain) > 0 {}
+            self.drain_wakeup();
         }
+    }
+
+    /// Drain the self-pipe so a pending wakeup doesn't fire again next
+    /// iteration. Reads one chunk at a time until the (non-blocking) pipe
+    /// is empty. Call after the wakeup fd reports readable.
+    pub fn drain_wakeup(&self) {
+        let mut drain = [0u8; 64];
+        while crate::sys::read(self.wakeup_read_fd, &mut drain) > 0 {}
     }
 }
 

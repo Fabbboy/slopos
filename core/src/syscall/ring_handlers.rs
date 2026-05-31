@@ -65,3 +65,22 @@ define_syscall!(syscall_ring_enter
     }
     Ok(rc as u64)
 });
+
+define_syscall!(syscall_ring_register
+    (ctx, ring_fd: RawFd, _op: u32, _arg: u64, _nr_args: u32)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    // ABI v2 reserves provided/fixed buffer registration (SLOPRING § 13).
+    // Phase 3 ships the syscall + opcode constants only; every op is a
+    // stub returning -ENOSYS so Phase 4 is purely additive
+    // (SLOPRING_FEAT_REG_BUFFERS stays off). Validate ownership first so a
+    // foreign / non-ring fd fails with -EBADF, not -ENOSYS.
+    let (kind, _handle) =
+        slopos_fs::fileio::fileio_get_open_file_handle(process_id, ring_fd.raw())
+            .ok_or(Errno::EBADF)?;
+    if kind != slopos_abi::file_ops::FileKind::Ring {
+        return Err(Errno::EBADF);
+    }
+    Err(Errno::ENOSYS)
+});

@@ -33,6 +33,15 @@ pub struct InFlight {
     pub off: u64,
     /// For `OP_TIMEOUT`: absolute deadline in ms (`get_time_ms` clock).
     pub deadline_ms: u64,
+    /// Armed-multishot flag (carries [`slopos_abi::ring::SLOPRING_SQE_MULTISHOT`]
+    /// for the row). When set, the harvest keeps the row in flight and
+    /// posts an interim `F_MORE` CQE on each yield instead of removing it.
+    pub is_multishot: bool,
+    /// OP_POLL_ADD multishot edge cache: the last masked-ready `revents`
+    /// posted (0 = re-armed, fd currently not-ready). A CQE fires only
+    /// when the ready bitset *transitions*, suppressing the level flood
+    /// SlopRing's caller-as-waiter model would otherwise produce.
+    pub last_revents: u16,
 }
 
 /// One ring object — created by `ring_setup`, dropped when its last fd
@@ -95,11 +104,19 @@ impl Ring {
             .store_u32_release(self.layout.cq_off_tail as usize, self.cq_tail)
     }
 
-    /// Post a completion. If the CQ has a free slot, write the CQE and
-    /// advance `cq_tail`; otherwise increment the overflow counter and
-    /// return `false` (the caller decides whether that is acceptable —
-    /// ownership ops reserve a slot first, SLOPRING § 11).
-    pub fn post_cqe(&mut self, user_data: u64, res: i32) -> Result<bool, RegionError> {
+    /// Post a completion with explicit CQE `flags`. If the CQ has a free
+    /// slot, write the CQE and advance `cq_tail`; otherwise increment the
+    /// overflow counter and return `false` (the caller decides whether
+    /// that is acceptable — ownership ops reserve a slot first,
+    /// SLOPRING § 11). `cqe_flags` carries
+    /// [`slopos_abi::ring::SLOPRING_CQE_F_MORE`] for armed multishot
+    /// interim completions (0 for oneshot / terminal CQEs).
+    pub fn post_cqe(
+        &mut self,
+        user_data: u64,
+        res: i32,
+        cqe_flags: u32,
+    ) -> Result<bool, RegionError> {
         let cq_head = self.read_cq_head()?;
         if self.cq_full(cq_head) {
             self.cq_overflow = self.cq_overflow.wrapping_add(1);
@@ -118,8 +135,9 @@ impl Ring {
         let cqe = Cqe {
             user_data,
             res,
-            // No multi-shot support yet — F_MORE stays clear (reserved bit).
-            flags: 0,
+            // F_MORE (and, in Phase 4, the provided-buffer bits) are set by
+            // the caller for armed multishot interim completions.
+            flags: cqe_flags,
         };
         self.region
             .copy_in(self.layout.cqe_off(idx) as usize, &cqe.to_bytes())?;
@@ -194,6 +212,17 @@ pub mod heapless_vec {
         /// Find the index of the first row matching `user_data`.
         pub fn find_user_data(&self, user_data: u64) -> Option<usize> {
             self.rows.iter().position(|r| r.user_data == user_data)
+        }
+
+        /// Update the OP_POLL_ADD multishot edge cache (`last_revents`) of
+        /// the live row matching `user_data`. The harvest walks a
+        /// `snapshot()` clone, so the edge-transition decision must write
+        /// back to the *live* row through here — a write to the snapshot
+        /// row would be lost.
+        pub fn set_last_revents(&mut self, user_data: u64, v: u16) {
+            if let Some(i) = self.rows.iter().position(|r| r.user_data == user_data) {
+                self.rows[i].last_revents = v;
+            }
         }
 
         /// Iterate the rows.

@@ -14,9 +14,11 @@
 
 use slopos_userland as _;
 
-use slopos_abi::net::{AF_INET, SOCK_STREAM};
-use slopos_abi::ring::{OP_NOP, OP_READ, OP_RECVMSG, OP_SEND, OP_WRITE, Sqe};
-use slopos_userland::ring::{Ring, RingExecutor};
+use slopos_abi::net::{AF_INET, SOCK_DGRAM, SOCK_STREAM};
+use slopos_abi::ring::{
+    OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_WRITE, Sqe,
+};
+use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
 
 /// ring_setup returns a usable ring with the expected geometry, and the
@@ -117,7 +119,11 @@ fn test_write_read_pipe() -> bool {
 }
 
 /// A read on an empty pipe blocks (deferred), then resolves once data is
-/// written — harvested via the blocking executor (SLOPRING § 7.1).
+/// written — driven by the `slopfut` executor (SLOPRING § 7.1). The read
+/// and a concurrent write are raced via `select2`: the read defers
+/// (-EAGAIN, recorded in-flight) while the write lands inline and makes the
+/// pipe readable, so the deferred read completes in the same blocking
+/// harvest. Exercises real `async`/`await` + ownership-passing buffers.
 fn test_deferred_read() -> bool {
     let Ok((rd, wr)) = fs::pipe() else {
         return false;
@@ -125,39 +131,37 @@ fn test_deferred_read() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
     };
-    let mut exec = RingExecutor::new(ring);
-
-    // Submit a read on the (currently empty) pipe — it will block.
-    let mut buf = [0u8; 16];
-    let mut rsqe = Sqe::ZERO;
-    rsqe.opcode = OP_READ;
-    rsqe.fd = rd.raw();
-    rsqe.addr = buf.as_mut_ptr() as u64;
-    rsqe.len = buf.len() as u32;
-    let mut fut = match exec.submit(rsqe) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
-    // Nothing should be ready yet (empty pipe).
-    if exec.poll(&mut fut).is_some() {
-        return false;
-    }
-
-    // Now write data; the blocking harvest must resolve the read.
+    let rd_fd = rd.raw();
+    let wr_fd = wr.raw();
     let msg = b"deferred!";
-    if fs::write_slice(wr.raw(), msg).is_err() {
-        return false;
-    }
-    let res = match exec.block_on(&mut fut) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-    res == msg.len() as i32 && &buf[..msg.len()] == msg
+
+    let result = slopfut::block_on(ring, async move {
+        match slopfut::select2(
+            slopfut::read(rd_fd, vec![0u8; 16], 16),
+            slopfut::write(wr_fd, msg.to_vec()),
+        )
+        .await
+        {
+            // The reader resolved: the deferred read was harvested.
+            slopfut::Either2::A(rd) => rd,
+            // The writer "won" but the reader is what we assert on; fall
+            // through with a sentinel so the test fails loudly.
+            slopfut::Either2::B(_) => slopfut::BufResult {
+                res: -1,
+                buf: Vec::new(),
+            },
+        }
+    });
+    // Keep both pipe ends alive until after the ring teardown.
+    drop(wr);
+    drop(rd);
+    result.res == msg.len() as i32 && &result.buf[..msg.len()] == msg
 }
 
-/// Cancelling an unresolved future submits OP_CANCEL and the op resolves
-/// (either -ECANCELED for the op or the cancel result is accepted).
+/// Dropping an unresolved op future fires `OP_CANCEL` for it. A read on an
+/// empty pipe is raced against a short timer; the timer wins, the read
+/// future is dropped, and its `Drop` cancels the in-flight read — proving
+/// drop-based cancellation works and `block_on` returns rather than hangs.
 fn test_cancel() -> bool {
     let Ok((rd, _wr)) = fs::pipe() else {
         return false;
@@ -165,20 +169,24 @@ fn test_cancel() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
     };
-    let mut exec = RingExecutor::new(ring);
+    let rd_fd = rd.raw();
 
-    let mut buf = [0u8; 16];
-    let mut rsqe = Sqe::ZERO;
-    rsqe.opcode = OP_READ;
-    rsqe.fd = rd.raw();
-    rsqe.addr = buf.as_mut_ptr() as u64;
-    rsqe.len = buf.len() as u32;
-    let fut = match exec.submit(rsqe) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    // The read blocks (empty pipe). Cancel it.
-    exec.cancel(&fut).is_ok()
+    let timer_won = slopfut::block_on(ring, async move {
+        match slopfut::select2(
+            slopfut::read(rd_fd, vec![0u8; 16], 16),
+            slopfut::timeout(50_000_000), // 50 ms
+        )
+        .await
+        {
+            // Empty pipe: the read must not win.
+            slopfut::Either2::A(_) => false,
+            // Timer fired; the losing read future is dropped + cancelled.
+            slopfut::Either2::B(_) => true,
+        }
+    });
+    drop(_wr);
+    drop(rd);
+    timer_won
 }
 
 /// The ring dispatches OP_WRITE / OP_READ to the *socket* FileOps path
@@ -282,6 +290,203 @@ fn test_recvmsg_efault() -> bool {
     }
 }
 
+/// OP_RECVFROM with a null `addr2` (the source-addr out-pointer) must
+/// complete inline with -EFAULT, before any recv — proving the
+/// mandatory-out-pointer check runs (distinct from OP_READ/OP_RECVMSG,
+/// which have no source-addr out-pointer). A valid UDP socket so the op
+/// reaches the addr2 check rather than ENOTSOCK.
+fn test_recvfrom_null_addr2_efault() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    let mut data = [0u8; 32];
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_RECVFROM;
+    sqe.fd = sock.raw();
+    sqe.addr = data.as_mut_ptr() as u64;
+    sqe.len = data.len() as u32;
+    sqe.addr2 = 0; // null source-addr out-ptr → EFAULT
+    sqe.user_data = 0xc0fe;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    // -EFAULT == -14, posted inline before any recv.
+    match ring.poll_completion() {
+        Some(cqe) => cqe.user_data == 0xc0fe && cqe.res == -14,
+        None => false,
+    }
+}
+
+/// OP_RECVFROM on a fresh, *unbound* UDP socket with no datagram queued
+/// has nothing to receive, so the non-blocking probe returns -EAGAIN and
+/// the op is recorded in-flight (deferred) rather than completing inline.
+/// A pure poll therefore observes *no* CQE (deferred completions land
+/// only inside a blocking `ring_enter` — SLOPRING § 7.1). This proves the
+/// would-block routing without needing a real peer (in-process UDP
+/// loopback does not deliver in the test env). `addr2` is valid so the op
+/// passes the EFAULT check and reaches the recv probe.
+fn test_recvfrom_eagain_deferred() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
+        return false;
+    };
+    // Bind so the UDP socket is a valid receiver (no peer ever sends).
+    if net::bind_any(sock.raw(), 0).is_err() {
+        return false;
+    }
+    if net::set_nonblocking(sock.raw()).is_err() {
+        return false;
+    }
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    let mut data = [0u8; 32];
+    let mut src = slopos_abi::net::SockAddrIn::default();
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_RECVFROM;
+    sqe.fd = sock.raw();
+    sqe.addr = data.as_mut_ptr() as u64;
+    sqe.len = data.len() as u32;
+    sqe.addr2 = &mut src as *mut _ as u64;
+    sqe.user_data = 0xbeef;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    // No data: the probe returns -EAGAIN, so the op is deferred (recorded
+    // in-flight) and a pure poll sees nothing. The op's CQE would land
+    // only on a blocking harvest after a peer sends.
+    ring.poll_completion().is_none()
+}
+
+/// OP_OPENAT creates a file inline (fs opens never block), returning an
+/// fd >= 0; OP_CLOSE on that fd then returns 0. Opening a missing path
+/// (no O_CREAT) completes inline with a negated errno (fd < 0). Drives
+/// all three through the raw ring, proving the open/close routing and the
+/// fd install + reserve-before-side-effect (ownership op) path.
+fn test_openat_close() -> bool {
+    use slopos_abi::fs::{O_CREAT, O_RDWR};
+
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    // 1. OP_OPENAT (create) → fd >= 0.
+    let path = b"/tmp_ring_openat_test\0";
+    let mut osqe = Sqe::ZERO;
+    osqe.opcode = OP_OPENAT;
+    osqe.fd = -1;
+    osqe.addr = path.as_ptr() as u64;
+    osqe.len = path.len() as u32;
+    osqe.op_flags = O_CREAT | O_RDWR;
+    osqe.user_data = 0x0bad0e0;
+    if ring.push_sqe(&osqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    let new_fd = match ring.poll_completion() {
+        Some(cqe) if cqe.user_data == 0x0bad0e0 => cqe.res,
+        _ => return false,
+    };
+    if new_fd < 0 {
+        return false;
+    }
+
+    // 2. OP_CLOSE the new fd → 0.
+    let mut csqe = Sqe::ZERO;
+    csqe.opcode = OP_CLOSE;
+    csqe.fd = new_fd;
+    csqe.user_data = 0xc105e;
+    if ring.push_sqe(&csqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    let close_ok = matches!(
+        ring.poll_completion(),
+        Some(cqe) if cqe.user_data == 0xc105e && cqe.res == 0
+    );
+    if !close_ok {
+        return false;
+    }
+
+    // 3. OP_OPENAT on a missing path without O_CREAT → negated errno.
+    let missing = b"/no_such_ring_openat_file\0";
+    let mut msqe = Sqe::ZERO;
+    msqe.opcode = OP_OPENAT;
+    msqe.fd = -1;
+    msqe.addr = missing.as_ptr() as u64;
+    msqe.len = missing.len() as u32;
+    msqe.op_flags = O_RDWR;
+    msqe.user_data = 0x4044;
+    if ring.push_sqe(&msqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    matches!(
+        ring.poll_completion(),
+        Some(cqe) if cqe.user_data == 0x4044 && cqe.res < 0
+    )
+}
+
+/// The `slopfut` runtime constructors for the new ops resolve correctly:
+/// `openat` opens a file inline (fd >= 0) and `close` then returns 0.
+/// Exercises the async wrappers + the ownership-passing path buffer.
+fn test_slopfut_openat_close() -> bool {
+    use slopos_abi::fs::{O_CREAT, O_RDWR};
+
+    let Ok(ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    slopfut::block_on(ring, async {
+        let fd = slopfut::openat(b"/tmp_ring_slopfut_test", O_CREAT | O_RDWR).await;
+        if fd < 0 {
+            return false;
+        }
+        let close_res = slopfut::close(fd).await;
+        close_res == 0
+    })
+}
+
+/// `select3` over two reads + a timer with ownership-passing buffers —
+/// nc's exact loop shape. Pipe A is fed data so its read wins; pipe B's
+/// read and the timer lose and are dropped (cancelled). Verifies the
+/// winner's buffer comes back with the data, proving the multiplexing +
+/// buffer ping-pong the nc port relies on.
+fn test_select3_pingpong() -> bool {
+    let Ok((rd_a, wr_a)) = fs::pipe() else {
+        return false;
+    };
+    let Ok((rd_b, _wr_b)) = fs::pipe() else {
+        return false;
+    };
+    let Ok(ring) = Ring::setup(8) else {
+        return false;
+    };
+    let (a, b, wa) = (rd_a.raw(), rd_b.raw(), wr_a.raw());
+    let msg = b"abc";
+
+    let ok = slopfut::block_on(ring, async move {
+        // Make pipe A readable, then race A-read / B-read / timer.
+        let w = slopfut::write(wa, msg.to_vec()).await;
+        if w.res != msg.len() as i32 {
+            return false;
+        }
+        match slopfut::select3(
+            slopfut::read(a, vec![0u8; 8], 8),
+            slopfut::read(b, vec![0u8; 8], 8),
+            slopfut::timeout(2_000_000_000),
+        )
+        .await
+        {
+            slopfut::Either3::A(br) => br.res == msg.len() as i32 && &br.buf[..msg.len()] == msg,
+            _ => false,
+        }
+    });
+    drop((rd_a, wr_a, rd_b, _wr_b));
+    ok
+}
+
 /// The subtests. Each returns `true` on success.
 const CASES: &[(&str, fn() -> bool)] = &[
     ("setup", test_setup),
@@ -289,9 +494,17 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("write_read_pipe", test_write_read_pipe),
     ("deferred_read", test_deferred_read),
     ("cancel", test_cancel),
+    ("select3_pingpong", test_select3_pingpong),
     ("socket_dispatch", test_socket_dispatch),
     ("send_socket_dispatch", test_send_socket_dispatch),
     ("recvmsg_efault", test_recvmsg_efault),
+    (
+        "recvfrom_null_addr2_efault",
+        test_recvfrom_null_addr2_efault,
+    ),
+    ("recvfrom_eagain_deferred", test_recvfrom_eagain_deferred),
+    ("openat_close", test_openat_close),
+    ("slopfut_openat_close", test_slopfut_openat_close),
 ];
 
 fn main() {

@@ -15,13 +15,16 @@ use core::ffi::c_int;
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
-    OP_ACCEPT, OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_READ, OP_RECVMSG, OP_SEND, OP_TIMEOUT, OP_WRITE,
-    Sqe,
+    OP_ACCEPT, OP_CANCEL, OP_CLOSE, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM,
+    OP_RECVMSG, OP_SEND, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT};
 
-use slopos_fs::fileio::{file_read_fd_nonblock, file_write_fd_nonblock};
+use slopos_fs::fileio::{
+    file_close_fd, file_open_for_process, file_read_fd_nonblock, file_write_fd_nonblock,
+};
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
+use slopos_mm::user_ptr::UserBytes;
 
 use crate::ring_obj::InFlight;
 
@@ -56,6 +59,8 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64) -> InFlight {
         op_flags: sqe.op_flags,
         off: sqe.off,
         deadline_ms,
+        is_multishot: sqe.sqe_flags2 & SLOPRING_SQE_MULTISHOT != 0,
+        last_revents: 0,
     }
 }
 
@@ -73,6 +78,11 @@ pub fn probe(pid: u32, sqe: &Sqe) -> Outcome {
         // (SLOPRING § 12). Separate arms from OP_WRITE/OP_READ.
         OP_SEND => crate::net_glue::send_nonblock(pid, sqe.fd, sqe.addr, sqe.len, sqe.op_flags),
         OP_RECVMSG => crate::net_glue::recvmsg_nonblock(pid, sqe.fd, sqe.addr, sqe.op_flags),
+        OP_RECVFROM => {
+            crate::net_glue::recvfrom_nonblock(pid, sqe.fd, sqe.addr, sqe.len, sqe.addr2)
+        }
+        OP_OPENAT => probe_openat(pid, sqe),
+        OP_CLOSE => probe_close(pid, sqe),
         OP_ACCEPT => probe_accept(pid, sqe),
         OP_POLL_ADD => probe_poll(pid, sqe),
         // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the
@@ -97,7 +107,11 @@ pub fn reprobe(pid: u32, row: &InFlight) -> Outcome {
         op_flags: row.op_flags,
         user_data: row.user_data,
         addr2: row.addr2,
-        _resv: [0, 0],
+        sqe_flags2: 0,
+        buf_group: 0,
+        buf_index: 0,
+        _resv0: 0,
+        _resv1: 0,
     };
     probe(pid, &sqe)
 }
@@ -132,6 +146,48 @@ fn probe_write(pid: u32, sqe: &Sqe) -> Outcome {
     }
 }
 
+/// `OP_OPENAT`: non-blocking file open (SLOPRING § 12). SlopOS fs opens
+/// are immediate (no disk blocking), so this always completes inline.
+/// Mirrors `syscall_fs_open` / `file_open_for_process`: copy the path
+/// from `addr`/`len`, open with `op_flags`, return the new fd (`>= 0`) or
+/// a negated errno. It is an ownership op (installs an fd), so the caller
+/// reserves a CQE slot first. Null `addr` → `-EFAULT` inline.
+fn probe_openat(pid: u32, sqe: &Sqe) -> Outcome {
+    if sqe.addr == 0 {
+        return Outcome::Inline(Errno::EFAULT.raw());
+    }
+    let path_len = (sqe.len as usize).min(slopos_abi::fs::USER_PATH_MAX);
+    if path_len == 0 {
+        return Outcome::Inline(Errno::EINVAL.raw());
+    }
+    let user = match UserBytes::try_new(sqe.addr, path_len) {
+        Ok(u) => u,
+        Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
+    };
+    let mut buf = [0u8; slopos_abi::fs::USER_PATH_MAX];
+    let copied = match slopos_mm::user_copy::copy_bytes_from_user(user, &mut buf[..path_len]) {
+        Ok(n) => n,
+        Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
+    };
+    // Trim at the first NUL so a NUL-terminated user path opens the right
+    // file (mirrors the syscall layer's `UserCStr` decode).
+    let path = match buf[..copied].iter().position(|&b| b == 0) {
+        Some(n) => &buf[..n],
+        None => &buf[..copied],
+    };
+    Outcome::Inline(file_open_for_process(pid, path, sqe.op_flags))
+}
+
+/// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Inline; mirrors
+/// `syscall_fs_close` / `file_close_fd`. Returns `0` or a negated errno
+/// (`-EBADF` for a bad fd).
+fn probe_close(pid: u32, sqe: &Sqe) -> Outcome {
+    if sqe.fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    Outcome::Inline(file_close_fd(pid, sqe.fd as c_int))
+}
+
 fn probe_accept(pid: u32, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
         return Outcome::Inline(Errno::EBADF.raw());
@@ -147,9 +203,7 @@ fn probe_poll(pid: u32, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
         return Outcome::Inline(Errno::EBADF.raw());
     }
-    // Non-registering readiness probe — the same bits poll(2) would
-    // report. `file_poll_fd` returns POLLNVAL for a bad fd.
-    let want = (sqe.op_flags as u16) & (POLLIN | POLLOUT | POLLERR | POLLHUP);
+    let want = poll_want(sqe.op_flags);
     let revents = slopos_fs::fileio::file_poll_fd(pid, sqe.fd as c_int, want);
     if revents & POLLNVAL != 0 {
         return Outcome::Inline(Errno::EBADF.raw());
@@ -162,10 +216,35 @@ fn probe_poll(pid: u32, sqe: &Sqe) -> Outcome {
     }
 }
 
+/// The poll mask an `op_flags` word requests (the bits OP_POLL_ADD wants
+/// to be told about), error/hangup bits always included.
+pub fn poll_want(op_flags: u32) -> u16 {
+    (op_flags as u16) & (POLLIN | POLLOUT | POLLERR | POLLHUP)
+}
+
+/// Level readiness probe for an OP_POLL_ADD row — the raw `revents` the
+/// same `poll(2)` query would report (`file_poll_fd` returns `POLLNVAL`
+/// for a bad fd). Factored out of [`probe_poll`] so the multishot harvest
+/// can diff the masked-ready set against `InFlight::last_revents` and post
+/// only on a transition (the anti-flood edge), and so it can detect
+/// `POLLERR`/`POLLHUP` to terminate the armed row. Returns the raw
+/// `revents` bitset; the caller applies its own mask.
+pub fn probe_poll_revents(pid: u32, row: &InFlight) -> u16 {
+    if row.fd < 0 {
+        return POLLNVAL;
+    }
+    let want = poll_want(row.op_flags);
+    slopos_fs::fileio::file_poll_fd(pid, row.fd as c_int, want)
+}
+
 /// Does this opcode transfer ownership / consume bytes on success, so
 /// it must reserve a CQE slot *before* running (SLOPRING § 11)?
 pub fn is_ownership_op(opcode: u8) -> bool {
-    // OP_ACCEPT installs an fd; OP_READ/OP_RECVMSG consume kernel buffer
-    // bytes. Dropping their CQE would orphan an fd / destroy data.
-    matches!(opcode, OP_ACCEPT | OP_READ | OP_RECVMSG)
+    // OP_ACCEPT / OP_OPENAT install an fd; OP_READ / OP_RECVMSG /
+    // OP_RECVFROM consume kernel buffer bytes (a datagram, for RECVFROM).
+    // Dropping their CQE would orphan an fd / destroy consumed data.
+    matches!(
+        opcode,
+        OP_ACCEPT | OP_OPENAT | OP_READ | OP_RECVMSG | OP_RECVFROM
+    )
 }

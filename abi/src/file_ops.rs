@@ -35,6 +35,16 @@ pub enum FileKind {
     /// SlopRing submission/completion ring (SLOPRING § 3). The fd's
     /// `handle` resolves a ring object in the per-process ring registry.
     Ring = 6,
+    /// Process-exit fd (pidfd). The fd's `handle` is a target task id; the
+    /// fd becomes `POLLIN`-ready once that task exits. Created by
+    /// `pidfd_open(2)`; pollable via `poll(2)` / `OP_POLL_ADD`, then reaped
+    /// with `waitpid`. Read/write are meaningless (`-EINVAL`).
+    Pidfd = 7,
+    /// Signal fd. Becomes `POLLIN`-ready when a signal in its subscribed mask
+    /// is pending for the owner task; `read` drains one `SignalfdSiginfo`.
+    /// Created by `signalfd(2)`. Lets a reactor block its signals and harvest
+    /// them as in-band ring/poll events instead of out-of-band interrupts.
+    Signalfd = 8,
 }
 
 /// Per-resource-type operations for open file descriptions.

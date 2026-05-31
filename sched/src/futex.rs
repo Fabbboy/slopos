@@ -8,9 +8,9 @@
 //! small fixed-capacity list of waiting tasks.
 
 use core::ptr;
-use core::sync::atomic::Ordering;
 
 use slopos_abi::task::BlockReason;
+use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::scheduler::{
@@ -116,11 +116,18 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
     let blocked = {
         let mut bucket = FUTEX_TABLE[bucket_idx].lock();
 
-        // OSTD's `borrow_user_atomic_u32` folds the one interior
-        // `unsafe`; the syscall handler validated that uaddr is a
-        // 4-byte-aligned, mapped user address in the current process.
-        let current_val =
-            slopos_ostd::util::ptr_buf::borrow_user_atomic_u32(uaddr as u64).load(Ordering::SeqCst);
+        // Read the futex word through the SMAP-safe, fault-recoverable
+        // user-copy path. A raw kernel load of the user page faults under
+        // CR4.SMAP (no STAC window); `copy_from_user` opens the kernel's sole
+        // AC window around the read. Under the bucket lock + IRQs-off a single
+        // aligned 4-byte copy is equivalent to an atomic load for the compare.
+        let current_val = match UserPtr::<u32>::try_new(uaddr)
+            .ok()
+            .and_then(|p| slopos_mm::user_copy::copy_from_user::<u32>(p).ok())
+        {
+            Some(v) => v,
+            None => return slopos_abi::syscall::ERRNO_EFAULT as i64,
+        };
 
         if current_val != expected {
             return slopos_abi::syscall::ERRNO_EAGAIN as i64;

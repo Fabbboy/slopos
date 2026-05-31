@@ -28,6 +28,7 @@ own doc-comments — not duplicated here.
 | `slopos_ostd::mm::frame` | `proofs/frame_refcount.rs` | `Frame<M>` ref-count: no double-free, no use-after-free, `ref_count > 0` ⇒ allocated (I1–I3) |
 | `slopos_ostd::mm::slab` | `proofs/slab_lifetime.rs` | `HeapSlot` lifetime: a slot can't outlive its slab (Inv. 9); a cell fits any in-range type (Inv. 10) |
 | `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap, user leaves are insensitive `UFrame`s (Inv. 4 + 5) |
+| `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
 
 > `mm::vm_space` uses the coarse lock-per-`VmSpace` model (`CursorMut<'a>`
 > holds `&'a mut VmSpace`, so the borrow checker serializes all mutators —
@@ -35,6 +36,18 @@ own doc-comments — not duplicated here.
 > CortenMM's range-disjoint parallelism, not a *soundness* one; see
 > `notes/cortenmm.md`. Re-attempt the fine-grained proof on each Verus bump
 > if SlopOS ever grows per-PT-page locking.
+
+> `slopos_ring` verifies the **index/state-machine LOGIC only** — the
+> abstract SQ/CQ cursor arithmetic, overflow accounting, in-flight cap,
+> submit/consume bounds, and the masked-index / `locate` in-bounds algebra.
+> The kernel is modelled as a single sequential `Step` machine, sound because
+> every ring mutation runs under the per-ring SpinLock; the user-owned
+> cursors (`sq_tail`, `cq_head`) are modelled as adversarial-monotone inputs.
+> The volatile `UFrame` accessors beneath it and the kernel/userland
+> release/acquire memory-ordering protocol are **NOT** machine-checked: they
+> remain audited-only and KernMiri-covered (see the Phase-3G paragraph
+> below). The proof covers the kernel's half of the protocol, not a malicious
+> user racing the shared cells at the memory level.
 
 ### Audited only
 
@@ -57,7 +70,14 @@ OSTD `unsafe` added since the proofs landed: ~6 lines of `read_volatile`/
 naming Inv. 4/5, KernMiri-covered (`tests/uframe_round_trip.rs`). The
 `ring/` kernel crate that consumes it is `#![forbid(unsafe_code)]` and so
 needs no audit — it reaches ring memory only through this verified-by-Miri
-byte-copy surface (AD-3 / Inv. 4/5).
+byte-copy surface (AD-3 / Inv. 4/5). The Phase-7 SlopRing proofs
+(`proofs/ring_cursor.rs`, `proofs/ring_layout.rs`) machine-check the ring's
+index/state-machine **logic only** (cursor bounds, overflow accounting,
+in-flight cap, in-bounds masking); the four `mm::uframe` accessors above and
+the release/acquire memory-ordering protocol they sit on top of **remain
+audited-only / KernMiri-covered, NOT machine-checked** — Verus has no
+weak-memory model, so that boundary is excluded from the proof rather than
+verified.
 
 ### Unaudited
 

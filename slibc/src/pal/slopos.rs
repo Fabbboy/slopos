@@ -350,6 +350,24 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn get_cpu_count() -> Result<u32, Errno> {
+        let ret = unsafe { syscall0(SYSCALL_GET_CPU_COUNT) };
+        let val = to_result(ret)?;
+        Ok(val as u32)
+    }
+
+    fn get_current_cpu() -> Result<u32, Errno> {
+        let ret = unsafe { syscall0(SYSCALL_GET_CURRENT_CPU) };
+        let val = to_result(ret)?;
+        Ok(val as u32)
+    }
+
+    fn set_cpu_affinity(target: u32, affinity: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_SET_CPU_AFFINITY, target as u64, affinity as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn arch_prctl_set_fs(base: u64) -> Result<(), Errno> {
         let ret = unsafe { syscall2(SYSCALL_ARCH_PRCTL, ARCH_SET_FS, base) };
         to_result(ret)?;

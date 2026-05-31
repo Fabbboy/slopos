@@ -12,6 +12,7 @@
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::net::{AF_INET, SockAddrIn};
 use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET};
 
 use slopos_mm::user_copy::{
@@ -314,6 +315,103 @@ pub fn recvmsg_nonblock(pid: u32, fd: i32, addr: u64, _op_flags: u32) -> Outcome
         }
         Outcome::Inline(copied as i32)
     }
+}
+
+/// `OP_RECVFROM`: AF_INET datagram recv that returns the source address
+/// (SLOPRING § 12, the nc UDP-listen gap). Mirrors the blocking
+/// `recvfrom` syscall (`syscall_recvfrom` / `socket_recvfrom`): recv into
+/// a kernel scratch (forced nonblocking), copy the data out to the user
+/// buffer at `addr`, and write the source `SockAddrIn` to the validated
+/// user out-pointer at `addr2`. `-EAGAIN` defers; every other result
+/// (success bytes or a negative errno) completes inline. This is a
+/// *consuming* op — the caller reserves a CQE slot before dispatch
+/// (SLOPRING § 11), so a successful recv never drops its CQE and loses
+/// the datagram. Null `addr` (with non-zero `len`) or null `addr2` →
+/// `-EFAULT` before any recv (the source addr is mandatory, like
+/// `recvfrom(2)`'s `src_addr` when requested).
+pub fn recvfrom_nonblock(pid: u32, fd: i32, addr: u64, len: u32, addr2: u64) -> Outcome {
+    if fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    // The source-addr out-pointer is mandatory for OP_RECVFROM (it is the
+    // entire point of the op); a null one is a caller error → EFAULT.
+    if addr2 == 0 {
+        return Outcome::Inline(Errno::EFAULT.raw());
+    }
+    let (handle, ops) = match socket_handle_for(pid, fd) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    // socket_recvfrom is AF_INET (UDP/ICMP) only — an AF_UNIX fd has no
+    // datagram source address, matching `syscall_recvfrom`'s ENOTSOCK.
+    if ops.is_unix_socket() {
+        return Outcome::Inline(Errno::ENOTSOCK.raw());
+    }
+
+    let len = (len as usize).min(STAGING_CAP);
+    if addr == 0 && len != 0 {
+        return Outcome::Inline(Errno::EFAULT.raw());
+    }
+
+    let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(STAGING_CAP) {
+        Ok(v) => v,
+        Err(_) => return Outcome::Inline(Errno::ENOMEM.raw()),
+    };
+
+    let idx = handle as u32;
+    let mut src_ip = [0u8; 4];
+    let mut src_port = 0u16;
+    let rc = with_inet_forced_nonblock(idx, || {
+        socket::socket_recvfrom(
+            idx,
+            if len == 0 {
+                core::ptr::null_mut()
+            } else {
+                scratch.as_mut_ptr()
+            },
+            len,
+            &mut src_ip as *mut [u8; 4],
+            &mut src_port as *mut u16,
+        )
+    });
+    if rc == EAGAIN as i64 {
+        return Outcome::WouldBlock;
+    }
+    if rc < 0 {
+        return Outcome::Inline(rc as i32);
+    }
+
+    // The datagram is consumed from the socket by this point. If a copy to
+    // the user buffer or out-addr faults the bytes are lost (UDP has no
+    // un-consume) — this matches `syscall_recvfrom`, which also reports
+    // EFAULT after consuming.
+    let copied = rc as usize;
+    if copied > 0 && addr != 0 {
+        let user_out = match UserBytes::try_new(addr, copied) {
+            Ok(u) => u,
+            Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
+        };
+        if copy_bytes_to_user(user_out, &scratch[..copied]).is_err() {
+            return Outcome::Inline(Errno::EFAULT.raw());
+        }
+    }
+
+    // Write the source SockAddrIn to the validated user out-pointer.
+    let src = SockAddrIn {
+        family: AF_INET,
+        port: src_port.to_be(),
+        addr: src_ip,
+        _pad: [0; 8],
+    };
+    let src_ptr = match UserPtr::<SockAddrIn>::try_new(addr2) {
+        Ok(p) => p,
+        Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
+    };
+    if copy_to_user(src_ptr, &src).is_err() {
+        return Outcome::Inline(Errno::EFAULT.raw());
+    }
+
+    Outcome::Inline(copied as i32)
 }
 
 /// Install the received SCM_RIGHTS fds into the caller's fd table and
