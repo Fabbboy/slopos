@@ -13,7 +13,8 @@ use core::ffi::c_int;
 use slopos_abi::Errno;
 use slopos_abi::ring::{
     OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_TIMEOUT, RingLayout, SLOPRING_ASYNC_CANCEL_ALL,
-    SLOPRING_CQE_F_MORE, SLOPRING_MAX_ENTRIES, SLOPRING_SQE_MULTISHOT, Sqe,
+    SLOPRING_CQE_F_MORE, SLOPRING_MAX_ENTRIES, SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT,
+    Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
 
@@ -25,6 +26,7 @@ use slopos_kernel_services::driver_runtime::{block_current_task_with_timeout, ha
 use slopos_kernel_services::platform::get_time_ms;
 use slopos_ostd::KVec;
 
+use crate::buffers::BufSel;
 use crate::opcode::{self, Outcome};
 use crate::region::RingRegion;
 use crate::ring_obj::{InFlight, Ring, heapless_vec::InFlightVec};
@@ -63,6 +65,15 @@ pub fn ring_setup(
     let layout = RingLayout::new(entries);
     let n_pages = (layout.region_bytes as u64).div_ceil(PAGE_SIZE) as usize;
 
+    // Heap-box the buffer registry first (nothing else allocated yet, so a
+    // failure here is a clean -ENOMEM). Keeping it off `Ring`'s inline body
+    // is what holds the `KArc<SpinLock<Ring>>` allocation under the 2 KiB
+    // stack ceiling (Inv. 5').
+    let buffers = match slopos_ostd::KBox::try_new(crate::buffers::BufferRegistry::new()) {
+        Ok(b) => b,
+        Err(_) => return eno(Errno::ENOMEM),
+    };
+
     // Allocate the RingMeta region.
     let region = match RingRegion::alloc(n_pages) {
         Ok(r) => r,
@@ -100,6 +111,7 @@ pub fn ring_setup(
         user_addr,
         owner_pid: pid,
         cq_overflow: 0,
+        buffers,
     };
 
     // Register it, get the packed fd-handle.
@@ -277,6 +289,8 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
         }
     }
 
+    let sel = opcode::buf_sel(sqe);
+
     // A multishot row is armed and lives entirely in the harvest: even if
     // it is ready *now*, record it in-flight and let `harvest_step` do the
     // first post, so the F_MORE bookkeeping + drain loop live in one place
@@ -284,21 +298,61 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
     let is_multishot =
         sqe.sqe_flags2 & SLOPRING_SQE_MULTISHOT != 0 && multishot_supported(sqe.opcode);
     if is_multishot {
+        // Multishot + a registered/provided buffer is not supported this phase
+        // (one buffer cannot safely back an unbounded stream without per-yield
+        // rotation) — reject rather than silently dropping the selection.
+        if sel.is_some() {
+            let _ = ring.post_cqe(sqe.user_data, eno(Errno::EINVAL), 0);
+            return;
+        }
         if !ring.inflight.push(opcode::inflight_from(sqe, 0)) {
             let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
         }
         return;
     }
 
-    match opcode::probe(pid, sqe) {
+    // Reserve a registered fixed buffer for the op's whole in-flight window so
+    // a second op cannot race it and `unregister` sees it busy (the UAF /
+    // orphan-reaping guard). Provided-ring buffers reserve nothing — they are
+    // consumed atomically when a fill actually lands.
+    if let Some(BufSel::Fixed { index }) = sel
+        && let Err(e) = ring.buffers.check_out_fixed(index)
+    {
+        let _ = ring.post_cqe(sqe.user_data, eno(e), 0);
+        return;
+    }
+
+    match opcode::probe(pid, sqe, &mut *ring.buffers) {
         Outcome::Inline(res) => {
             let _ = ring.post_cqe(sqe.user_data, res, 0);
+            release_fixed(ring, sel);
+        }
+        Outcome::InlineBuf(res, cqe_flags) => {
+            let _ = ring.post_cqe(sqe.user_data, res, cqe_flags);
+            release_fixed(ring, sel);
         }
         Outcome::WouldBlock => {
             if !ring.inflight.push(opcode::inflight_from(sqe, 0)) {
+                release_fixed(ring, sel);
                 let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             }
         }
+    }
+}
+
+/// Release a fixed-buffer reservation if `sel` named one (the op completed or
+/// failed to enqueue — its buffer is no longer held).
+fn release_fixed(ring: &mut Ring, sel: Option<BufSel>) {
+    if let Some(BufSel::Fixed { index }) = sel {
+        ring.buffers.check_in_fixed(index);
+    }
+}
+
+/// Release the fixed-buffer reservation a completed/cancelled in-flight `row`
+/// held (the terminal-CQE half of the check-out/in lifecycle).
+fn release_fixed_row(ring: &mut Ring, row: &InFlight) {
+    if row.buf_flags & SLOPRING_SQE_FIXED_BUFFER != 0 {
+        ring.buffers.check_in_fixed(row.buf_index);
     }
 }
 
@@ -342,6 +396,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
             // Multishot rows cancel identically: one terminal -ECANCELED
             // with F_MORE clear (SLOPRING §1.3 trigger 4).
             let _ = ring.post_cqe(row.user_data, eno(Errno::ECANCELED), 0);
+            release_fixed_row(ring, &row);
             found += 1;
         }
         if !cancel_all {
@@ -504,11 +559,20 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
                 continue;
             }
         }
-        match opcode::reprobe(pid, row) {
+        match opcode::reprobe(pid, row, &mut *ring.buffers) {
             Outcome::Inline(res) => {
                 if let Some(i) = ring.inflight.find_user_data(row.user_data) {
                     if let Some(r) = ring.inflight.remove_at(i) {
                         let _ = ring.post_cqe(r.user_data, res, 0);
+                        release_fixed_row(ring, &r);
+                    }
+                }
+            }
+            Outcome::InlineBuf(res, cqe_flags) => {
+                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
+                    if let Some(r) = ring.inflight.remove_at(i) {
+                        let _ = ring.post_cqe(r.user_data, res, cqe_flags);
+                        release_fixed_row(ring, &r);
                     }
                 }
             }
@@ -545,27 +609,30 @@ fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
                 return;
             }
         }
-        match opcode::reprobe(pid, row) {
-            Outcome::Inline(res) if res >= 0 => {
-                // A connection / datagram was consumed.
-                //   res == 0 on a stream recvmsg is orderly EOF — terminal,
-                //   never silently re-arm (the CVE-2026-23473 lesson).
-                if res == 0 && row.opcode == slopos_abi::ring::OP_RECVMSG {
-                    remove_and_post(ring, row.user_data, 0, 0);
-                    return;
-                }
-                let _ = ring.post_cqe(row.user_data, res, SLOPRING_CQE_F_MORE);
-                // Keep armed; loop to drain the next pending item.
-            }
-            Outcome::Inline(res) => {
-                // res < 0: a real error → terminal CQE, F_MORE clear.
-                remove_and_post(ring, row.user_data, res, 0);
-                return;
-            }
+        // A multishot row never carries a registered/provided buffer
+        // (rejected at submit), so reprobe's InlineBuf and Inline collapse to
+        // one signed result; WouldBlock means drained.
+        let res = match opcode::reprobe(pid, row, &mut *ring.buffers) {
+            Outcome::Inline(res) | Outcome::InlineBuf(res, _) => res,
             Outcome::WouldBlock => {
                 // Drained: leave armed, post nothing (no flood).
                 return;
             }
+        };
+        if res >= 0 {
+            // A connection / datagram was consumed.
+            //   res == 0 on a stream recvmsg is orderly EOF — terminal, never
+            //   silently re-arm (the CVE-2026-23473 lesson).
+            if res == 0 && row.opcode == slopos_abi::ring::OP_RECVMSG {
+                remove_and_post(ring, row.user_data, 0, 0);
+                return;
+            }
+            let _ = ring.post_cqe(row.user_data, res, SLOPRING_CQE_F_MORE);
+            // Keep armed; loop to drain the next pending item.
+        } else {
+            // res < 0: a real error → terminal CQE, F_MORE clear.
+            remove_and_post(ring, row.user_data, res, 0);
+            return;
         }
     }
 }

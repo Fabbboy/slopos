@@ -16,7 +16,8 @@ use core::ffi::c_int;
 use slopos_abi::Errno;
 use slopos_abi::ring::{
     OP_ACCEPT, OP_CANCEL, OP_CLOSE, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM,
-    OP_RECVMSG, OP_SEND, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_MULTISHOT, Sqe,
+    OP_RECVMSG, OP_SEND, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_BUFFER_SELECT,
+    SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT};
 
@@ -26,14 +27,34 @@ use slopos_fs::fileio::{
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::UserBytes;
 
+use crate::buffers::{BufSel, BufferRegistry};
 use crate::ring_obj::InFlight;
 
 /// What a probe yielded.
 pub enum Outcome {
     /// Ready (or failed) now — post this `res` as the CQE.
     Inline(i32),
+    /// Ready now, and carrying provided-buffer CQE bits to OR into the
+    /// completion (`SLOPRING_CQE_F_BUFFER | bid << SHIFT`).
+    InlineBuf(i32, u32),
     /// Would block — record an in-flight row and harvest later.
     WouldBlock,
+}
+
+/// Decode the buffer selection an SQE requests (mutually exclusive flags). The
+/// fixed-buffer flag takes precedence; `None` is the inline path.
+pub fn buf_sel(sqe: &Sqe) -> Option<BufSel> {
+    if sqe.flags & SLOPRING_SQE_FIXED_BUFFER != 0 {
+        Some(BufSel::Fixed {
+            index: sqe.buf_index,
+        })
+    } else if sqe.flags & SLOPRING_SQE_BUFFER_SELECT != 0 {
+        Some(BufSel::Provided {
+            group: sqe.buf_group,
+        })
+    } else {
+        None
+    }
 }
 
 /// The would-block sentinel the fs/net probes return. `Errno::raw()` is
@@ -61,6 +82,9 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64) -> InFlight {
         deadline_ms,
         is_multishot: sqe.sqe_flags2 & SLOPRING_SQE_MULTISHOT != 0,
         last_revents: 0,
+        buf_group: sqe.buf_group,
+        buf_index: sqe.buf_index,
+        buf_flags: sqe.flags,
     }
 }
 
@@ -68,23 +92,42 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64) -> InFlight {
 /// dispatch — never blocks. `OP_CANCEL` / `OP_TIMEOUT` are handled by
 /// the caller (they touch ring state), so this returns `Inline(EINVAL)`
 /// for them if it ever sees them (defence in depth).
-pub fn probe(pid: u32, sqe: &Sqe) -> Outcome {
+pub fn probe(pid: u32, sqe: &Sqe, buffers: &mut BufferRegistry) -> Outcome {
+    let sel = buf_sel(sqe);
     match sqe.opcode {
-        OP_NOP => Outcome::Inline(0),
-        OP_READ => probe_read(pid, sqe),
-        OP_WRITE => probe_write(pid, sqe),
+        OP_NOP => reject_buf(sel).unwrap_or(Outcome::Inline(0)),
+        OP_READ => reject_buf(sel).unwrap_or_else(|| probe_read(pid, sqe)),
+        OP_WRITE => reject_buf(sel).unwrap_or_else(|| probe_write(pid, sqe)),
         // OP_SEND / OP_RECVMSG are socket-typed: they route through the
         // socket send/recvmsg paths, not the generic file write/read
-        // (SLOPRING § 12). Separate arms from OP_WRITE/OP_READ.
-        OP_SEND => crate::net_glue::send_nonblock(pid, sqe.fd, sqe.addr, sqe.len, sqe.op_flags),
-        OP_RECVMSG => crate::net_glue::recvmsg_nonblock(pid, sqe.fd, sqe.addr, sqe.op_flags),
-        OP_RECVFROM => {
+        // (SLOPRING § 12). Separate arms from OP_WRITE/OP_READ. With a buffer
+        // selection they use the registered/provided buffer (zero staging
+        // alloc); `sel == None` keeps the inline path byte-for-byte.
+        OP_SEND => match sel {
+            None => crate::net_glue::send_nonblock(pid, sqe.fd, sqe.addr, sqe.len, sqe.op_flags),
+            Some(BufSel::Fixed { index }) => {
+                crate::net_glue::send_fixed(pid, sqe.fd, index, sqe.len, sqe.op_flags, buffers)
+            }
+            // A provided ring is kernel-picks-on-fill, which only makes sense
+            // for recv; send must name its data (a fixed buffer).
+            Some(BufSel::Provided { .. }) => Outcome::Inline(Errno::EINVAL.raw()),
+        },
+        OP_RECVMSG => match sel {
+            None => crate::net_glue::recvmsg_nonblock(pid, sqe.fd, sqe.addr, sqe.op_flags),
+            Some(BufSel::Fixed { index }) => {
+                crate::net_glue::recvmsg_fixed(pid, sqe.fd, index, sqe.op_flags, buffers)
+            }
+            Some(BufSel::Provided { group }) => {
+                crate::net_glue::recvmsg_provided(pid, sqe.fd, group, sqe.op_flags, buffers)
+            }
+        },
+        OP_RECVFROM => reject_buf(sel).unwrap_or_else(|| {
             crate::net_glue::recvfrom_nonblock(pid, sqe.fd, sqe.addr, sqe.len, sqe.addr2)
-        }
-        OP_OPENAT => probe_openat(pid, sqe),
-        OP_CLOSE => probe_close(pid, sqe),
-        OP_ACCEPT => probe_accept(pid, sqe),
-        OP_POLL_ADD => probe_poll(pid, sqe),
+        }),
+        OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(pid, sqe)),
+        OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(pid, sqe)),
+        OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| probe_accept(pid, sqe)),
+        OP_POLL_ADD => reject_buf(sel).unwrap_or_else(|| probe_poll(pid, sqe)),
         // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the
         // ring object, not an fd). Reaching here is a logic error.
         OP_TIMEOUT | OP_CANCEL => Outcome::Inline(Errno::EINVAL.raw()),
@@ -92,13 +135,23 @@ pub fn probe(pid: u32, sqe: &Sqe) -> Outcome {
     }
 }
 
+/// A buffer selection on an opcode that does not support one is `-EINVAL`;
+/// `None` lets the caller run the opcode's normal (inline) path.
+fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
+    sel.map(|_| Outcome::Inline(Errno::EINVAL.raw()))
+}
+
 /// Re-probe an in-flight row at harvest time. Same dispatch as `probe`,
 /// reconstructed from the stored row (re-validating the user buffer via
 /// a fresh `UserReadBuf`/`UserWriteBuf` each time — SLOPRING § 9).
-pub fn reprobe(pid: u32, row: &InFlight) -> Outcome {
+pub fn reprobe(pid: u32, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
     let sqe = Sqe {
         opcode: row.opcode,
-        flags: 0,
+        // Carry the buffer-selection flags + indices so the deferred reprobe
+        // re-applies the same registered/provided buffer (dropping them — the
+        // original code's `flags: 0, buf_*: 0` — silently lost the selection
+        // on the would-block path).
+        flags: row.buf_flags,
         _pad0: 0,
         fd: row.fd,
         off: row.off,
@@ -108,12 +161,12 @@ pub fn reprobe(pid: u32, row: &InFlight) -> Outcome {
         user_data: row.user_data,
         addr2: row.addr2,
         sqe_flags2: 0,
-        buf_group: 0,
-        buf_index: 0,
+        buf_group: row.buf_group,
+        buf_index: row.buf_index,
         _resv0: 0,
         _resv1: 0,
     };
-    probe(pid, &sqe)
+    probe(pid, &sqe, buffers)
 }
 
 fn probe_read(pid: u32, sqe: &Sqe) -> Outcome {

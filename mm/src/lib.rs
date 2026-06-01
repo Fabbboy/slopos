@@ -24,6 +24,7 @@ pub mod page_fault;
 pub mod paging;
 pub mod paging_defs;
 pub mod pat;
+pub mod pinned_user_buffer;
 pub mod process_vm;
 pub mod slab;
 pub mod stack_region;

@@ -58,6 +58,61 @@ physically distributed: all reactors time-slice on CPU 0. No current consumer ne
 
 ---
 
+## SlopRing: zero-copy is single-direct-copy (not DMA) + OP_CONNECT missing
+
+**Status**: Open  
+**Severity**: Low (perf frontier + one functional gap — registered/provided buffers now work)  
+**Component**: `ring/`, `net/`, `drivers/src/virtio_net.rs`, `abi/src/ring.rs`
+
+### Done (no longer stubbed)
+
+**Registered fixed buffers + provided buffer rings landed** (full io_uring-parity buffer
+surface). `ring_register` implements `RING_REGISTER_BUFFERS` / `RING_UNREGISTER_BUFFERS`
+(fixed buffers, `Sqe.buf_index`) and `RING_REGISTER_PBUF_RING` / `RING_UNREGISTER_PBUF_RING`
+(provided rings, `Sqe.buf_group` + `SLOPRING_SQE_BUFFER_SELECT`, `bid` reported in
+`SLOPRING_CQE_F_BUFFER`); `SLOPRING_FEAT_REG_BUFFERS` is advertised. Backed by a sound
+**`mm/src/pinned_user_buffer.rs::PinnedUserBuffer`** (pins anonymous user pages via an
+`AnonymousMeta` refcount, accessed volatilely — `ring/` stays `#![forbid(unsafe_code)]`,
+zero new `unsafe`). The per-op 4 KiB `KVec` allocation, the per-op page-table walk, and the
+SMAP user-copy are eliminated on the selected path; `buf_group == 0` + no fixed flag keeps the
+inline path byte-for-byte. UAF-safe check-out/check-in reclaim mirrors the reactor's
+orphan-slot reaping; the index/cursor bounds are machine-checked in
+`verification/proofs/ring_bufpool.rs`.
+
+### Remaining frontier
+
+1. **Single-direct-copy (one kernel staging hop remains).** The selected path still stages the
+   payload through the ring's reusable kernel scratch (one volatile copy) because the net
+   primitives (`socket_send`/`unix_send`/`socket_recv`) require a kernel `&[u8]` and §5.3/AD-3
+   forbid a kernel reference over the user-writable pinned pages. Eliminating that hop — a true
+   single copy straight between the pinned pages and the TCP/UDP/unix socket buffer — needs a
+   volatile `VmReader`/`VmWriter` (in `slopos-ostd`) threaded through the net stack's
+   buffer-fill paths (`tcp/buffer.rs::enqueue`, the udp/unix equivalents, and the recv side). It
+   is a wide, careful change to the core net data path; the dominant per-op costs (alloc,
+   page-walk, SMAP) are *already* gone, so this is a copy-count refinement, not a correctness
+   gap.
+2. **Phase D — true NIC-DMA zero-copy.** `PinnedUserBuffer::io_slices()` already yields coalesced
+   `(paddr, len)` runs; virtio TX (`drivers/src/virtio_net.rs`) supports scatter-gather, so a TX
+   descriptor chain `[header] + [pinned user page paddrs]` would let the NIC DMA the payload
+   directly (0 CPU copies on send). Needs a zero-copy-send notification CQE
+   (`SLOPRING_CQE_F_NOTIF`, pin held until the TX used-ring reclaim) and is sound only for
+   UDP/raw and `MSG_ZEROCOPY`-style TCP (retransmit ownership).
+3. **`OP_CONNECT`** — not implemented (`OP_MAX == OP_CLOSE`). `connect(2)` is still a synchronous
+   syscall. Low impact (one-shot). Fix: a thin probe adapter over the non-blocking sync connect,
+   bump `OP_MAX`, expose a slopfut `connect` future.
+
+### Related Files
+
+- `mm/src/pinned_user_buffer.rs` — the sound pinned-user-buffer primitive (volatile copy only)
+- `ring/src/buffers.rs` — the per-ring registered/provided buffer registry
+- `ring/src/net_glue.rs` — `*_inline` (byte-for-byte) vs `*_pinned` paths; the staging hop to remove
+- `net/src/tcp/buffer.rs`, `net/src/socket.rs`, `net/src/unix_socket/mod.rs` — the volatile-reader
+  integration points for single-direct-copy
+- `drivers/src/virtio_net.rs` — scatter-gather TX for Phase-D DMA
+- `abi/src/ring.rs` — `OP_MAX` (for `OP_CONNECT`); `SLOPRING_CQE_F_NOTIF` (to add for Phase D)
+
+---
+
 ## Performance: Compositor Frame Rate During Task Termination
 
 **Status**: Open - Minor  

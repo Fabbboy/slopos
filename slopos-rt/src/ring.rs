@@ -14,9 +14,13 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use slopos_abi::ring::{Cqe, RingParams, SLOPRING_CQ_OVERFLOW, Sqe};
+use slopos_abi::ring::{BufIovec, Cqe, RegisterBufRingCmd, RingParams, SLOPRING_CQ_OVERFLOW, Sqe};
+use slopos_abi::syscall::numbers::{
+    RING_REGISTER_BUFFERS, RING_REGISTER_PBUF_RING, RING_UNREGISTER_BUFFERS,
+    RING_UNREGISTER_PBUF_RING,
+};
 
-use crate::sys::ring::{ring_enter, ring_setup};
+use crate::sys::ring::{ring_enter, ring_register, ring_setup};
 
 /// Errors the runtime surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +59,43 @@ impl Ring {
     /// The ring fd.
     pub fn fd(&self) -> i32 {
         self.fd
+    }
+
+    /// Register fixed buffers (`RING_REGISTER_BUFFERS`). Each [`BufIovec`] is
+    /// pinned by the kernel and thereafter referenced by its array index via
+    /// `Sqe.buf_index` + `SLOPRING_SQE_FIXED_BUFFER`. The `iovecs` slice is the
+    /// wire image (a `#[repr(C)]` `BufIovec` array). Returns 0 or a negated
+    /// errno. The caller must keep the underlying buffers alive + unmodified
+    /// while any op references them.
+    pub fn register_buffers(&self, iovecs: &[BufIovec]) -> i32 {
+        ring_register(
+            self.fd,
+            RING_REGISTER_BUFFERS,
+            iovecs.as_ptr() as u64,
+            iovecs.len() as u32,
+        )
+    }
+
+    /// Unregister the fixed-buffer set (`RING_UNREGISTER_BUFFERS`).
+    pub fn unregister_buffers(&self) -> i32 {
+        ring_register(self.fd, RING_UNREGISTER_BUFFERS, 0, 0)
+    }
+
+    /// Register a provided buffer ring for `cmd.buf_group`
+    /// (`RING_REGISTER_PBUF_RING`). Returns 0 or a negated errno.
+    pub fn register_buf_ring(&self, cmd: &RegisterBufRingCmd) -> i32 {
+        ring_register(
+            self.fd,
+            RING_REGISTER_PBUF_RING,
+            cmd as *const RegisterBufRingCmd as u64,
+            1,
+        )
+    }
+
+    /// Unregister the provided buffer ring for `group`
+    /// (`RING_UNREGISTER_PBUF_RING`).
+    pub fn unregister_buf_ring(&self, group: u16) -> i32 {
+        ring_register(self.fd, RING_UNREGISTER_PBUF_RING, group as u64, 0)
     }
 
     /// Number of SQ slots.

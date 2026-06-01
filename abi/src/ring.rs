@@ -70,21 +70,21 @@ pub const OP_MAX: u8 = OP_CLOSE;
 pub const SLOPRING_CQE_F_MORE: u32 = 1 << 0;
 
 /// Provided-buffer id is valid in the high 16 bits of `flags`
-/// ([`SLOPRING_CQE_BUFFER_SHIFT`]). Phase 4 (provided buffer rings);
-/// never set in Phase 3.
+/// ([`SLOPRING_CQE_BUFFER_SHIFT`]). Set on a completion that filled a
+/// kernel-picked provided buffer (`SLOPRING_SQE_BUFFER_SELECT`).
 pub const SLOPRING_CQE_F_BUFFER: u32 = 1 << 1;
 
 /// Incremental provided-buffer consumption: the kernel filled part of a
-/// provided buffer and will hand back the rest in a later CQE. Phase 4;
-/// never set in Phase 3.
+/// provided buffer and will hand back the rest in a later CQE. Reserved for
+/// incremental recv; not yet emitted.
 pub const SLOPRING_CQE_F_BUF_MORE: u32 = 1 << 2;
 
 /// Bit shift of the provided-buffer id within `Cqe.flags` (the buffer id
 /// occupies the high 16 bits, mirroring Linux io_uring's
-/// `IORING_CQE_BUFFER_SHIFT`). Phase 4.
+/// `IORING_CQE_BUFFER_SHIFT`).
 pub const SLOPRING_CQE_BUFFER_SHIFT: u32 = 16;
 
-/// Mask selecting the provided-buffer id bits in `Cqe.flags`. Phase 4.
+/// Mask selecting the provided-buffer id bits in `Cqe.flags`.
 pub const SLOPRING_CQE_BUFFER_MASK: u32 = 0xFFFF_0000;
 
 // ---------------------------------------------------------------------------
@@ -121,10 +121,48 @@ pub const SLOPRING_ASYNC_CANCEL_ALL: u32 = 1 << 0;
 /// cancel). Honoured for OP_ACCEPT / OP_RECVMSG / OP_POLL_ADD.
 pub const SLOPRING_SQE_MULTISHOT: u16 = 1 << 0;
 
-/// `Sqe.flags`: the kernel picks a provided buffer from `Sqe.buf_group`
-/// and reports its id in [`SLOPRING_CQE_F_BUFFER`]. Phase 4 (provided
-/// buffer rings); reserved (rejected) in Phase 3.
+/// `Sqe.flags`: the kernel picks a provided buffer from `Sqe.buf_group`'s
+/// registered buffer ring and reports its id in [`SLOPRING_CQE_F_BUFFER`]
+/// (the io_uring `IOSQE_BUFFER_SELECT` analogue — recv-family ops only).
 pub const SLOPRING_SQE_BUFFER_SELECT: u8 = 1 << 0;
+
+/// `Sqe.flags`: the op's data buffer is the **registered fixed buffer** named
+/// by `Sqe.buf_index` (the io_uring `IOSQE_FIXED_BUFFER` / `READ_FIXED`
+/// analogue), not the user VA in `Sqe.addr`. Pre-pinned at
+/// `ring_register(RING_REGISTER_BUFFERS)`, so the op skips the per-op
+/// page-table walk + staging copy. Mutually exclusive with
+/// [`SLOPRING_SQE_BUFFER_SELECT`].
+pub const SLOPRING_SQE_FIXED_BUFFER: u8 = 1 << 1;
+
+// ---------------------------------------------------------------------------
+// Registered / provided buffer limits + flags (SLOPRING § 13, ABI v2).
+// ---------------------------------------------------------------------------
+
+/// Maximum registered fixed buffers in one `RING_REGISTER_BUFFERS` set
+/// (mirrors io_uring's default `IORING_MAX_REG_BUFFERS` order of magnitude).
+pub const SLOPRING_MAX_FIXED_BUFFERS: u32 = 1024;
+
+/// Per-registered-buffer byte ceiling (1 GiB, io_uring parity). Also the
+/// pin ceiling enforced kernel-side.
+pub const SLOPRING_MAX_REG_BUF_BYTES: u64 = 1 << 30;
+
+/// Maximum provided-buffer groups per ring (`buf_group` is `1..=this`; group
+/// `0` means "no provided buffer / inline path").
+pub const SLOPRING_MAX_BUF_GROUPS: u16 = 64;
+
+/// Maximum entries in one provided buffer ring (power of two; matches Linux
+/// io_uring's `IOU_PBUF_RING` cap so a `u16` tail/head never wraps mid-ring).
+pub const SLOPRING_PBUF_RING_MAX_ENTRIES: u32 = 32768;
+
+/// `RegisterBufRingCmd.flags`: incremental buffer consumption — the kernel
+/// fills part of a provided buffer and hands the remainder back in a later
+/// CQE carrying [`SLOPRING_CQE_F_BUF_MORE`] (io_uring `IOU_PBUF_RING_INC`).
+pub const SLOPRING_PBUF_RING_INC: u16 = 1 << 0;
+
+/// Byte offset of the user-owned producer `tail` (`u16`) within a registered
+/// provided buffer ring. Overlaps `bufs[0].resv`, exactly like Linux's
+/// `io_uring_buf_ring` union, so `bufs[0]` is still a usable buffer slot.
+pub const SLOPRING_PBUF_RING_TAIL_OFFSET: usize = 14;
 
 // ---------------------------------------------------------------------------
 // RingParams flags (SLOPRING § 4.3).
@@ -138,8 +176,9 @@ pub const SLOPRING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
 /// bit so a new userland on an old kernel degrades gracefully.
 pub const SLOPRING_FEAT_MULTISHOT: u32 = 1 << 1;
 
-/// The kernel implements `ring_register` provided/fixed buffers. Phase 4;
-/// off in Phase 3 (the `ring_register` syscall returns `-ENOSYS`).
+/// The kernel implements `ring_register` provided/fixed buffers. Userland
+/// gates registered-buffer use on this bit so a new userland on an old kernel
+/// degrades gracefully.
 pub const SLOPRING_FEAT_REG_BUFFERS: u32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
@@ -179,9 +218,11 @@ pub struct Sqe {
     pub addr2: u64,
     /// Op-behaviour flags ([`SLOPRING_SQE_MULTISHOT`], …). Offset 48.
     pub sqe_flags2: u16,
-    /// Provided-buffer group id (Phase 4; 0 today). Offset 50.
+    /// Provided-buffer group id (with [`SLOPRING_SQE_BUFFER_SELECT`]); 0 for
+    /// the inline path. Offset 50.
     pub buf_group: u16,
-    /// Registered/fixed-buffer index (Phase 4; 0 today). Offset 52.
+    /// Registered/fixed-buffer index (with [`SLOPRING_SQE_FIXED_BUFFER`]).
+    /// Offset 52.
     pub buf_index: u16,
     /// Reserved, must be zero. Offset 54.
     pub _resv0: u16,
@@ -320,6 +361,138 @@ impl Cqe {
             ]),
             res: i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             flags: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registered / provided buffer ABI structs (ABI v2). Each is hand-serialized
+// at pinned `offset_of!` positions (same discipline as `RingParams`/`Sqe`), so
+// the wire image equals the `#[repr(C)]` layout and the kernel marshals a
+// private snapshot — never a `&T` over user memory.
+// ---------------------------------------------------------------------------
+
+/// One registered fixed buffer (a user iovec). A `RING_REGISTER_BUFFERS` call
+/// passes `nr_args` of these at the `arg` user pointer; each is pinned and
+/// referenced thereafter by its array index via `Sqe.buf_index`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufIovec {
+    /// User VA of the buffer (anonymous memory only).
+    pub addr: u64,
+    /// Byte length (`<= SLOPRING_MAX_REG_BUF_BYTES`).
+    pub len: u32,
+    pub _pad: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<BufIovec>() == 16);
+const _: () = assert!(core::mem::offset_of!(BufIovec, addr) == 0);
+const _: () = assert!(core::mem::offset_of!(BufIovec, len) == 8);
+
+impl BufIovec {
+    pub const SERIALIZED_LEN: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&self.addr.to_le_bytes());
+        b[8..12].copy_from_slice(&self.len.to_le_bytes());
+        b[12..16].copy_from_slice(&self._pad.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8; 16]) -> Self {
+        Self {
+            addr: u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            len: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+            _pad: u32::from_le_bytes([b[12], b[13], b[14], b[15]]),
+        }
+    }
+}
+
+/// `ring_register(RING_REGISTER_PBUF_RING)` argument: register a provided
+/// buffer ring for `buf_group`. The ring at `ring_addr` is `ring_entries`
+/// [`IouringBuf`] slots whose producer `tail` lives at
+/// `ring_addr + SLOPRING_PBUF_RING_TAIL_OFFSET`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterBufRingCmd {
+    /// User VA of the provided buffer ring (anonymous memory only).
+    pub ring_addr: u64,
+    /// Ring slot count (power of two, `<= SLOPRING_PBUF_RING_MAX_ENTRIES`).
+    pub ring_entries: u32,
+    /// Target group id (`1..=SLOPRING_MAX_BUF_GROUPS`).
+    pub buf_group: u16,
+    /// [`SLOPRING_PBUF_RING_INC`], or 0.
+    pub flags: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<RegisterBufRingCmd>() == 16);
+const _: () = assert!(core::mem::offset_of!(RegisterBufRingCmd, ring_addr) == 0);
+const _: () = assert!(core::mem::offset_of!(RegisterBufRingCmd, ring_entries) == 8);
+const _: () = assert!(core::mem::offset_of!(RegisterBufRingCmd, buf_group) == 12);
+const _: () = assert!(core::mem::offset_of!(RegisterBufRingCmd, flags) == 14);
+
+impl RegisterBufRingCmd {
+    pub const SERIALIZED_LEN: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&self.ring_addr.to_le_bytes());
+        b[8..12].copy_from_slice(&self.ring_entries.to_le_bytes());
+        b[12..14].copy_from_slice(&self.buf_group.to_le_bytes());
+        b[14..16].copy_from_slice(&self.flags.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8; 16]) -> Self {
+        Self {
+            ring_addr: u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            ring_entries: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+            buf_group: u16::from_le_bytes([b[12], b[13]]),
+            flags: u16::from_le_bytes([b[14], b[15]]),
+        }
+    }
+}
+
+/// One provided buffer ring slot, byte-identical to Linux's
+/// `struct io_uring_buf`. Userland publishes `{addr, len, bid}`; the kernel
+/// echoes the chosen `bid` in the CQE ([`SLOPRING_CQE_F_BUFFER`]). `resv` of
+/// slot 0 doubles as the ring `tail` (see [`SLOPRING_PBUF_RING_TAIL_OFFSET`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IouringBuf {
+    pub addr: u64,
+    pub len: u32,
+    pub bid: u16,
+    pub resv: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<IouringBuf>() == 16);
+const _: () = assert!(core::mem::offset_of!(IouringBuf, addr) == 0);
+const _: () = assert!(core::mem::offset_of!(IouringBuf, len) == 8);
+const _: () = assert!(core::mem::offset_of!(IouringBuf, bid) == 12);
+const _: () = assert!(core::mem::offset_of!(IouringBuf, resv) == 14);
+// The ring `tail` overlaps `bufs[0].resv` (Linux io_uring_buf_ring union).
+const _: () = assert!(core::mem::offset_of!(IouringBuf, resv) == SLOPRING_PBUF_RING_TAIL_OFFSET);
+
+impl IouringBuf {
+    pub const SERIALIZED_LEN: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&self.addr.to_le_bytes());
+        b[8..12].copy_from_slice(&self.len.to_le_bytes());
+        b[12..14].copy_from_slice(&self.bid.to_le_bytes());
+        b[14..16].copy_from_slice(&self.resv.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8; 16]) -> Self {
+        Self {
+            addr: u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            len: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+            bid: u16::from_le_bytes([b[12], b[13]]),
+            resv: u16::from_le_bytes([b[14], b[15]]),
         }
     }
 }
@@ -615,7 +788,7 @@ impl RingLayout {
         RingParams {
             sq_entries: self.sq_entries,
             cq_entries: self.cq_entries,
-            flags: SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT,
+            flags: SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT | SLOPRING_FEAT_REG_BUFFERS,
             _pad0: 0,
             sq_off_head: self.sq_off_head,
             sq_off_tail: self.sq_off_tail,
@@ -737,7 +910,61 @@ mod tests {
         assert_eq!(p.cq_entries, 64);
         assert_eq!(p.sq_off_array, l.sqe_array_off);
         assert_eq!(p.cq_off_array, l.cqe_array_off);
-        assert_eq!(p.flags, SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT);
+        assert_eq!(
+            p.flags,
+            SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT | SLOPRING_FEAT_REG_BUFFERS
+        );
+    }
+
+    #[test]
+    fn buf_iovec_round_trips() {
+        let v = BufIovec {
+            addr: 0x1122_3344_5566_7788,
+            len: 0x9abc_def0,
+            _pad: 0,
+        };
+        assert_eq!(BufIovec::from_bytes(&v.to_bytes()), v);
+        assert_eq!(core::mem::offset_of!(BufIovec, addr), 0);
+        assert_eq!(core::mem::offset_of!(BufIovec, len), 8);
+    }
+
+    #[test]
+    fn register_buf_ring_cmd_round_trips() {
+        let c = RegisterBufRingCmd {
+            ring_addr: 0xdead_beef_0bad_f00d,
+            ring_entries: 4096,
+            buf_group: 7,
+            flags: SLOPRING_PBUF_RING_INC,
+        };
+        assert_eq!(RegisterBufRingCmd::from_bytes(&c.to_bytes()), c);
+        let b = c.to_bytes();
+        assert_eq!(&b[12..14], &7u16.to_le_bytes());
+    }
+
+    /// The provided-ring `tail` overlaps `bufs[0].resv` exactly like Linux's
+    /// `io_uring_buf_ring` union: a `u16` written at byte 14 of slot 0 is the
+    /// producer tail, and slot 0 is still a usable buffer.
+    #[test]
+    fn iouring_buf_tail_overlaps_resv() {
+        assert_eq!(
+            core::mem::offset_of!(IouringBuf, resv),
+            SLOPRING_PBUF_RING_TAIL_OFFSET
+        );
+        let buf = IouringBuf {
+            addr: 0x4000,
+            len: 256,
+            bid: 3,
+            resv: 0x0102, // doubles as `tail` for slot 0
+        };
+        let bytes = buf.to_bytes();
+        assert_eq!(
+            u16::from_le_bytes([
+                bytes[SLOPRING_PBUF_RING_TAIL_OFFSET],
+                bytes[SLOPRING_PBUF_RING_TAIL_OFFSET + 1]
+            ]),
+            0x0102
+        );
+        assert_eq!(IouringBuf::from_bytes(&bytes), buf);
     }
 
     /// Regression guard: `to_bytes()` must place `region_addr` at the

@@ -16,7 +16,8 @@ use slopos_userland as _;
 
 use slopos_abi::net::{AF_INET, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::ring::{
-    OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_WRITE, Sqe,
+    BufIovec, OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_WRITE,
+    RegisterBufRingCmd, SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, Sqe,
 };
 use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
@@ -488,6 +489,154 @@ fn test_select3_pingpong() -> bool {
 }
 
 /// The subtests. Each returns `true` on success.
+/// Registering a fixed-buffer set succeeds; a double-register is rejected
+/// (-EEXIST), unregister succeeds, and a zero-count register is -EINVAL. Proves
+/// the `RING_REGISTER_BUFFERS` / `RING_UNREGISTER_BUFFERS` plumbing + pinning.
+fn test_register_fixed_buffers() -> bool {
+    let Ok(ring) = Ring::setup(8) else {
+        return false;
+    };
+    // The registered buffer is the process's own (anonymous) memory; touch it
+    // so its page is faulted in before the kernel pins it.
+    let mut buf = [0u8; 256];
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    // Double register without unregister → -EEXIST.
+    if ring.register_buffers(&iovecs) >= 0 {
+        return false;
+    }
+    if ring.unregister_buffers() != 0 {
+        return false;
+    }
+    // Zero-count registration → -EINVAL.
+    if ring.register_buffers(&[]) >= 0 {
+        return false;
+    }
+    true
+}
+
+/// `OP_SEND` from a registered fixed buffer routes through the socket-send path
+/// after staging the pinned buffer: on an unconnected TCP socket it completes
+/// inline with a socket-layer errno (e.g. -ENOTCONN). A negative `res` proves
+/// the fixed buffer (buf_index) resolved + the send path ran from it — no user
+/// `addr` was supplied.
+fn test_fixed_send_dispatch() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let payload = b"slopring-fixed-send";
+    let mut buf = [0u8; 64];
+    buf[..payload.len()].copy_from_slice(payload);
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_FIXED_BUFFER;
+    sqe.buf_index = 0;
+    sqe.len = payload.len() as u32;
+    sqe.user_data = 0xF1;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => cqe.user_data == 0xF1 && cqe.res < 0,
+        None => false,
+    }
+}
+
+/// A fixed-buffer op naming an out-of-range `buf_index` is rejected inline with
+/// -EINVAL (the kernel's `check_out_fixed` bounds check — the property the
+/// Verus `ring_bufpool` obligation pins) before any socket side effect.
+fn test_fixed_buffer_oob() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let mut buf = [0u8; 64];
+    buf[0] = 1;
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_FIXED_BUFFER;
+    sqe.buf_index = 5; // only one buffer registered
+    sqe.len = 8;
+    sqe.user_data = 0x00B;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => cqe.user_data == 0x00B && cqe.res == -22, // -EINVAL
+        None => false,
+    }
+}
+
+/// Registering a provided buffer ring succeeds; a recv with `BUFFER_SELECT`
+/// over an *empty* ring completes inline with -ENOBUFS (the kernel peeked the
+/// group, found no published buffer), and the ring then unregisters. Proves the
+/// `RING_REGISTER_PBUF_RING` plumbing + the provided-ring selection path.
+fn test_pbuf_ring_select_enobufs() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    // A 4-slot provided ring (4 × 16 bytes), empty (producer tail == 0).
+    let ringbuf = [0u8; 4 * 16];
+    let cmd = RegisterBufRingCmd {
+        ring_addr: ringbuf.as_ptr() as u64,
+        ring_entries: 4,
+        buf_group: 1,
+        flags: 0,
+    };
+    if ring.register_buf_ring(&cmd) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_RECVMSG;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_BUFFER_SELECT;
+    sqe.buf_group = 1;
+    sqe.user_data = 0xB0;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    let recv_ok = match ring.poll_completion() {
+        Some(cqe) => cqe.user_data == 0xB0 && cqe.res == -105, // -ENOBUFS (empty ring)
+        None => false,
+    };
+    recv_ok && ring.unregister_buf_ring(1) == 0
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("setup", test_setup),
     ("nop", test_nop),
@@ -505,6 +654,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("recvfrom_eagain_deferred", test_recvfrom_eagain_deferred),
     ("openat_close", test_openat_close),
     ("slopfut_openat_close", test_slopfut_openat_close),
+    ("register_fixed_buffers", test_register_fixed_buffers),
+    ("fixed_send_dispatch", test_fixed_send_dispatch),
+    ("fixed_buffer_oob", test_fixed_buffer_oob),
+    ("pbuf_ring_select_enobufs", test_pbuf_ring_select_enobufs),
 ];
 
 fn main() {

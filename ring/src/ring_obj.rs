@@ -42,6 +42,13 @@ pub struct InFlight {
     /// when the ready bitset *transitions*, suppressing the level flood
     /// SlopRing's caller-as-waiter model would otherwise produce.
     pub last_revents: u16,
+    /// Provided-buffer group id (`SLOPRING_SQE_BUFFER_SELECT`), 0 if unused.
+    pub buf_group: u16,
+    /// Registered fixed-buffer index (`SLOPRING_SQE_FIXED_BUFFER`).
+    pub buf_index: u16,
+    /// The `Sqe.flags` buffer-selection bits, carried so the deferred reprobe
+    /// re-applies the same selection (the inline path's bug was dropping it).
+    pub buf_flags: u8,
 }
 
 /// One ring object — created by `ring_setup`, dropped when its last fd
@@ -66,6 +73,11 @@ pub struct Ring {
     pub owner_pid: u32,
     /// Count of CQEs dropped on overflow (mirrors shared `cq_overflow`).
     pub cq_overflow: u32,
+    /// Registered / provided buffer registry (ABI v2 zero-copy path). Shares
+    /// the per-ring lock, so a probe under `with_ring` has exclusive access.
+    /// Heap-boxed so `Ring` stays small enough to construct within the 2 KiB
+    /// stack ceiling when the `KArc<SpinLock<Ring>>` is allocated (Inv. 5').
+    pub buffers: slopos_ostd::KBox<crate::buffers::BufferRegistry>,
 }
 
 impl Ring {
@@ -135,8 +147,8 @@ impl Ring {
         let cqe = Cqe {
             user_data,
             res,
-            // F_MORE (and, in Phase 4, the provided-buffer bits) are set by
-            // the caller for armed multishot interim completions.
+            // F_MORE (armed multishot interim completions) and the
+            // provided-buffer id bits are set by the caller.
             flags: cqe_flags,
         };
         self.region

@@ -789,18 +789,20 @@ pub const SYSCALL_SIGNALFD: u64 = 160;
 
 /// SlopRing: register provided/fixed buffers with a ring (SLOPRING § 13,
 /// ABI v2). `ring_register(ring_fd: i32, op: u32, arg: u64, nr_args: u32)`.
-/// Phase 3 ships the ABI + handler stub only: every `op` returns
-/// `-ENOSYS`. Phase 4 implements [`RING_REGISTER_PBUF_RING`] (provided
-/// buffer rings) and [`RING_REGISTER_BUFFERS`] (fixed/registered
-/// buffers) behind [`super::super::ring::SLOPRING_FEAT_REG_BUFFERS`].
+/// [`RING_REGISTER_PBUF_RING`] (provided buffer rings) and
+/// [`RING_REGISTER_BUFFERS`] (fixed/registered buffers) are implemented behind
+/// [`super::super::ring::SLOPRING_FEAT_REG_BUFFERS`]; an unknown `op` returns
+/// `-ENOSYS`.
 pub const SYSCALL_RING_REGISTER: u64 = 161;
 
-/// `ring_register` op: register a provided-buffer ring (Phase 4).
+/// `ring_register` op: register a provided-buffer ring.
 pub const RING_REGISTER_PBUF_RING: u32 = 1;
-/// `ring_register` op: register fixed/registered buffers (Phase 4).
+/// `ring_register` op: register fixed/registered buffers.
 pub const RING_REGISTER_BUFFERS: u32 = 2;
-/// `ring_register` op: unregister a provided-buffer ring (Phase 4).
+/// `ring_register` op: unregister a provided-buffer ring.
 pub const RING_UNREGISTER_PBUF_RING: u32 = 3;
+/// `ring_register` op: unregister the fixed/registered buffer set.
+pub const RING_UNREGISTER_BUFFERS: u32 = 4;
 
 pub const SYSCALL_TABLE_SIZE: usize = 162;
 

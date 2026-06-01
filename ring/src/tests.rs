@@ -8,13 +8,18 @@
 //! result) is a userland test because it needs a mapped ring and a
 //! process fd table — see `userland/` for those.
 
+use slopos_abi::Errno;
 use slopos_abi::ring::{
-    Cqe, OP_ACCEPT, OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_READ, RingLayout, SLOPRING_ASYNC_CANCEL_ALL,
-    SLOPRING_CQ_OVERFLOW, SLOPRING_CQE_BUFFER_MASK, SLOPRING_CQE_BUFFER_SHIFT,
-    SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_SQE_MULTISHOT, Sqe,
+    Cqe, IouringBuf, OP_ACCEPT, OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_READ, RingLayout,
+    SLOPRING_ASYNC_CANCEL_ALL, SLOPRING_CQ_OVERFLOW, SLOPRING_CQE_BUFFER_MASK,
+    SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_SQE_MULTISHOT,
+    Sqe,
 };
+use slopos_mm::pinned_user_buffer::PinnedUserBuffer;
+use slopos_ostd::KVec;
 use slopos_testing::{TestResult, stest};
 
+use crate::buffers::BufferRegistry;
 use crate::region::RingRegion;
 use crate::ring_obj::{InFlight, Ring, heapless_vec::InFlightVec};
 
@@ -53,6 +58,8 @@ fn make_ring(entries: u32) -> Ring {
         user_addr: 0,
         owner_pid: 0,
         cq_overflow: 0,
+        buffers: slopos_ostd::KBox::try_new(crate::buffers::BufferRegistry::new())
+            .expect("ring test: buffer registry alloc"),
     }
 }
 
@@ -69,6 +76,9 @@ fn inflight(user_data: u64, opcode: u8) -> InFlight {
         deadline_ms: 0,
         is_multishot: false,
         last_revents: 0,
+        buf_group: 0,
+        buf_index: 0,
+        buf_flags: 0,
     }
 }
 
@@ -570,3 +580,153 @@ fn cqe_buffer_bits_pack() -> TestResult {
     }
 }
 stest!(name = cqe_buffer_bits_pack, suite = slopring);
+
+// ---------------------------------------------------------------------------
+// Registered / provided buffer registry (ABI v2). These exercise the
+// buffer-selection bookkeeping headless — fabricated pins over kernel frames,
+// no live process VM — covering the check-out reservation lifecycle, the
+// volatile stage/publish round-trip, and the provided-ring peek/commit cursor.
+// ---------------------------------------------------------------------------
+
+/// Fixed-buffer reservation lifecycle: in-range checkout succeeds, a second
+/// checkout of the same index is `-EBUSY`, an out-of-range index is `-EINVAL`,
+/// unregister while a buffer is held is `-EBUSY`, and after check-in the index
+/// is reusable and the set unregisters.
+fn bufpool_fixed_checkout_lifecycle() -> TestResult {
+    let mut reg = BufferRegistry::new();
+    let mut pins: KVec<PinnedUserBuffer> = KVec::new();
+    for _ in 0..4 {
+        let Some(p) = PinnedUserBuffer::alloc_for_test(256) else {
+            return slopos_testing::fail!("pin alloc failed");
+        };
+        if pins.push(p).is_err() {
+            return slopos_testing::fail!("pin push failed");
+        }
+    }
+    reg.register_fixed_for_test(pins);
+
+    if reg.check_out_fixed(0).is_err() {
+        return slopos_testing::fail!("checkout 0 should succeed");
+    }
+    if reg.check_out_fixed(0) != Err(Errno::EBUSY) {
+        return slopos_testing::fail!("double checkout should be EBUSY");
+    }
+    if reg.check_out_fixed(4) != Err(Errno::EINVAL) {
+        return slopos_testing::fail!("out-of-range index should be EINVAL");
+    }
+    if reg.unregister_fixed() != Err(Errno::EBUSY) {
+        return slopos_testing::fail!("unregister while busy should be EBUSY");
+    }
+    reg.check_in_fixed(0);
+    if reg.check_out_fixed(0).is_err() {
+        return slopos_testing::fail!("recheckout after check-in should succeed");
+    }
+    reg.check_in_fixed(0);
+    if reg.unregister_fixed().is_err() {
+        return slopos_testing::fail!("idle unregister should succeed");
+    }
+    if reg.unregister_fixed() != Err(Errno::EINVAL) {
+        return slopos_testing::fail!("unregister with no set should be EINVAL");
+    }
+    TestResult::Pass
+}
+stest!(name = bufpool_fixed_checkout_lifecycle, suite = slopring);
+
+/// Volatile stage/publish round-trip through the reusable scratch: a pattern
+/// written into a fixed pin reads back via `stage_fixed_out`, and a pattern
+/// staged into the scratch reaches the pin via `publish_fixed_in`.
+fn bufpool_fixed_stage_roundtrip() -> TestResult {
+    let mut reg = BufferRegistry::new();
+    let mut pins: KVec<PinnedUserBuffer> = KVec::new();
+    let Some(p) = PinnedUserBuffer::alloc_for_test(64) else {
+        return slopos_testing::fail!("pin alloc failed");
+    };
+    let pattern_a = [0xABu8; 16];
+    if p.copy_in(0, &pattern_a).is_err() {
+        return slopos_testing::fail!("seed copy_in failed");
+    }
+    if pins.push(p).is_err() {
+        return slopos_testing::fail!("pin push failed");
+    }
+    reg.register_fixed_for_test(pins);
+
+    match reg.stage_fixed_out(0, 16) {
+        Ok(s) => {
+            if s != &pattern_a[..] {
+                return slopos_testing::fail!("stage_fixed_out mismatch");
+            }
+        }
+        Err(_) => return slopos_testing::fail!("stage_fixed_out err"),
+    }
+
+    // Stage a fresh pattern into the scratch, publish it into the pin, read back.
+    {
+        let s = match reg.recv_scratch(16) {
+            Ok(s) => s,
+            Err(_) => return slopos_testing::fail!("recv_scratch err"),
+        };
+        for b in s.iter_mut() {
+            *b = 0xCD;
+        }
+    }
+    if reg.publish_fixed_in(0, 16).is_err() {
+        return slopos_testing::fail!("publish_fixed_in err");
+    }
+    match reg.stage_fixed_out(0, 16) {
+        Ok(s) => {
+            if s.iter().any(|&b| b != 0xCD) {
+                return slopos_testing::fail!("publish readback mismatch");
+            }
+        }
+        Err(_) => return slopos_testing::fail!("stage readback err"),
+    }
+    TestResult::Pass
+}
+stest!(name = bufpool_fixed_stage_roundtrip, suite = slopring);
+
+/// Provided-ring peek/commit cursor: two published buffers are peeked in order
+/// (reporting their bids), the producer `tail` overlapping `bufs[0].resv` is
+/// honoured, an exhausted ring peeks `None`, and an unknown group is `-EINVAL`.
+fn bufpool_provided_peek_commit() -> TestResult {
+    let mut reg = BufferRegistry::new();
+    let Some(ring) = PinnedUserBuffer::alloc_for_test(4 * 16) else {
+        return slopos_testing::fail!("ring alloc failed");
+    };
+    // Slot 0's `resv` doubles as the producer `tail` (== 2 published buffers).
+    let e0 = IouringBuf {
+        addr: 0x1000,
+        len: 64,
+        bid: 10,
+        resv: 2,
+    };
+    let e1 = IouringBuf {
+        addr: 0x2000,
+        len: 64,
+        bid: 11,
+        resv: 0,
+    };
+    if ring.copy_in(0, &e0.to_bytes()).is_err() || ring.copy_in(16, &e1.to_bytes()).is_err() {
+        return slopos_testing::fail!("ring seed failed");
+    }
+    reg.register_provided_for_test(1, ring, 4);
+
+    match reg.peek_provided(1) {
+        Ok(Some(b)) if b.bid == 10 && b.addr == 0x1000 => {}
+        other => return slopos_testing::fail!("peek slot 0 wrong: {:?}", other),
+    }
+    reg.commit_provided(1);
+    match reg.peek_provided(1) {
+        Ok(Some(b)) if b.bid == 11 && b.addr == 0x2000 => {}
+        other => return slopos_testing::fail!("peek slot 1 wrong: {:?}", other),
+    }
+    reg.commit_provided(1);
+    match reg.peek_provided(1) {
+        Ok(None) => {}
+        other => return slopos_testing::fail!("exhausted ring should peek None: {:?}", other),
+    }
+    if !matches!(reg.peek_provided(2), Err(Errno::EINVAL)) {
+        return slopos_testing::fail!("unknown group should be EINVAL");
+    }
+    TestResult::Pass
+}
+stest!(name = bufpool_provided_peek_commit, suite = slopring);

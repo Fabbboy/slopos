@@ -13,6 +13,7 @@
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::net::{AF_INET, SockAddrIn};
+use slopos_abi::ring::{SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER};
 use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET};
 
 use slopos_mm::user_copy::{
@@ -23,6 +24,7 @@ use slopos_mm::user_ptr::{UserBytes, UserPtr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{socket, unix_socket, unix_socket_file_ops};
 
+use crate::buffers::BufferRegistry;
 use crate::opcode::Outcome;
 
 /// Staging-buffer cap for AF_UNIX user↔kernel marshalling, matching the
@@ -508,4 +510,173 @@ fn recvmsg_writeback_cmsg(
         return Err(e);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Registered / provided buffer fast paths (ABI v2). These never allocate a
+// per-op staging `KVec`, never run `copy_*_user` (SMAP), and never re-validate
+// a user pointer — the buffer was pinned + validated once at registration. The
+// payload is staged through the ring's reusable scratch via one volatile copy
+// against the pinned pages. `buf_group == 0` and no fixed-buffer flag keep the
+// inline `*_nonblock` paths above byte-for-byte unchanged.
+// ---------------------------------------------------------------------------
+
+/// `OP_SEND` from registered fixed buffer `index` (`SLOPRING_SQE_FIXED_BUFFER`).
+pub fn send_fixed(
+    pid: u32,
+    fd: i32,
+    index: u16,
+    len: u32,
+    _op_flags: u32,
+    reg: &mut BufferRegistry,
+) -> Outcome {
+    if fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    let (handle, ops) = match socket_handle_for(pid, fd) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let data = match reg.stage_fixed_out(index, len as usize) {
+        Ok(d) => d,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    if ops.is_unix_socket() {
+        let sh = SocketHandle::from_usize(handle);
+        let rc = with_unix_forced_nonblock(sh, || unix_socket::unix_send(sh, data));
+        outcome_from_rc(rc)
+    } else {
+        let idx = handle as u32;
+        let ptr = if data.is_empty() {
+            core::ptr::null()
+        } else {
+            data.as_ptr()
+        };
+        let n = data.len();
+        let rc = with_inet_forced_nonblock(idx, || socket::socket_send(idx, ptr, n));
+        if rc == EAGAIN as i64 {
+            Outcome::WouldBlock
+        } else {
+            Outcome::Inline(rc as i32)
+        }
+    }
+}
+
+/// `OP_RECVMSG` into registered fixed buffer `index`. Data-plane only: any
+/// SCM_RIGHTS fds that arrive are released (registered buffers carry bulk data,
+/// not descriptors). The recv'd bytes land in the fixed buffer, not `iov_base`.
+pub fn recvmsg_fixed(
+    pid: u32,
+    fd: i32,
+    index: u16,
+    _op_flags: u32,
+    reg: &mut BufferRegistry,
+) -> Outcome {
+    if fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    let (handle, ops) = match socket_handle_for(pid, fd) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let cap = match reg.fixed_len_of(index) {
+        Ok(c) => c.min(STAGING_CAP),
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let rc: i32 = {
+        let scratch = match reg.recv_scratch(cap) {
+            Ok(s) => s,
+            Err(e) => return Outcome::Inline(e.raw()),
+        };
+        let n = scratch.len();
+        if ops.is_unix_socket() {
+            let sh = SocketHandle::from_usize(handle);
+            let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
+                [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+            let (read, n_fds) = with_unix_forced_nonblock(sh, || {
+                unix_socket::unix_recvmsg(sh, scratch, &mut fds, SCM_MAX_FDS)
+            });
+            for slot in fds.iter().take(n_fds) {
+                slot.1.release(slot.0);
+            }
+            read
+        } else {
+            let idx = handle as u32;
+            with_inet_forced_nonblock(idx, || socket::socket_recv(idx, scratch.as_mut_ptr(), n))
+                as i32
+        }
+    };
+    if rc == EAGAIN {
+        return Outcome::WouldBlock;
+    }
+    if rc < 0 {
+        return Outcome::Inline(rc);
+    }
+    if let Err(e) = reg.publish_fixed_in(index, rc as usize) {
+        return Outcome::Inline(e.raw());
+    }
+    Outcome::Inline(rc)
+}
+
+/// `OP_RECVMSG` into a kernel-picked provided buffer from `group`
+/// (`SLOPRING_SQE_BUFFER_SELECT`). Peeks the next published buffer, recvs into
+/// it, reports the chosen `bid` in the CQE (`SLOPRING_CQE_F_BUFFER`). The buffer
+/// is consumed off the ring only once data actually lands (a would-block leaves
+/// the ring untouched), and the ring head advances atomically with the fill.
+pub fn recvmsg_provided(
+    pid: u32,
+    fd: i32,
+    group: u16,
+    _op_flags: u32,
+    reg: &mut BufferRegistry,
+) -> Outcome {
+    if fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    let (handle, ops) = match socket_handle_for(pid, fd) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let buf = match reg.peek_provided(group) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Outcome::Inline(Errno::ENOBUFS.raw()),
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let cap = (buf.len as usize).min(STAGING_CAP);
+    let rc: i32 = {
+        let scratch = match reg.recv_scratch(cap) {
+            Ok(s) => s,
+            Err(e) => return Outcome::Inline(e.raw()),
+        };
+        let n = scratch.len();
+        if ops.is_unix_socket() {
+            let sh = SocketHandle::from_usize(handle);
+            let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
+                [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+            let (read, n_fds) = with_unix_forced_nonblock(sh, || {
+                unix_socket::unix_recvmsg(sh, scratch, &mut fds, SCM_MAX_FDS)
+            });
+            for slot in fds.iter().take(n_fds) {
+                slot.1.release(slot.0);
+            }
+            read
+        } else {
+            let idx = handle as u32;
+            with_inet_forced_nonblock(idx, || socket::socket_recv(idx, scratch.as_mut_ptr(), n))
+                as i32
+        }
+    };
+    if rc == EAGAIN {
+        return Outcome::WouldBlock; // ring untouched — buffer not consumed
+    }
+    if rc < 0 {
+        return Outcome::Inline(rc);
+    }
+    let flags = SLOPRING_CQE_F_BUFFER | ((buf.bid as u32) << SLOPRING_CQE_BUFFER_SHIFT);
+    match reg.publish_provided_in(pid, group, buf.addr, rc as usize) {
+        Ok(()) => Outcome::InlineBuf(rc, flags),
+        // Data already consumed from the socket; the buffer is spent. Report
+        // the bid with -EFAULT (consume-then-fault, like recvfrom).
+        Err(_) => Outcome::InlineBuf(Errno::EFAULT.raw(), flags),
+    }
 }

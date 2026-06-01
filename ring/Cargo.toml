@@ -16,7 +16,9 @@ doctest = false
 
 [features]
 default = []
-test-hooks = []
+# Ring stests fabricate PinnedUserBuffers via mm's test-only constructor, so
+# the ring test surface pulls in mm's test surface.
+test-hooks = ["slopos-mm/test-hooks"]
 
 [dependencies]
 slopos-abi = { workspace = true }
