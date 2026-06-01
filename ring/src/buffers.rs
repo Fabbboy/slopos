@@ -27,11 +27,7 @@ use slopos_abi::ring::{
 };
 use slopos_mm::pinned_user_buffer::{PinError, PinnedUserBuffer};
 use slopos_ostd::KVec;
-
-/// Reusable staging cap, matching the 4 KiB bound the inline `net_glue` path
-/// stages through, so the registered path's transfer size is byte-for-byte
-/// comparable to the inline path's.
-pub const STAGING_CAP: usize = 4096;
+use slopos_ostd::mm::{VmReader, VmWriter};
 
 /// Which registered buffer an SQE selects. `None` (neither flag set) is the
 /// inline path — unchanged. Built in `opcode.rs` from the SQE flags.
@@ -151,8 +147,6 @@ impl ProvidedBufRing {
 pub struct BufferRegistry {
     fixed: Option<FixedBufferSet>,
     provided: KVec<ProvidedBufRing>,
-    /// Reusable staging buffer (allocated once, on first registered-buffer op).
-    scratch: KVec<u8>,
 }
 
 impl BufferRegistry {
@@ -160,15 +154,7 @@ impl BufferRegistry {
         Self {
             fixed: None,
             provided: KVec::new(),
-            scratch: KVec::new(),
         }
-    }
-
-    fn ensure_scratch(&mut self) -> Result<(), Errno> {
-        if self.scratch.len() < STAGING_CAP {
-            self.scratch = KVec::zeroed(STAGING_CAP).map_err(|_| Errno::ENOMEM)?;
-        }
-        Ok(())
     }
 
     /// `true` iff any registered buffer (fixed or provided) exists — used to
@@ -249,39 +235,28 @@ impl BufferRegistry {
         (index as usize) < self.fixed_len()
     }
 
-    /// Stage fixed buffer `index`'s first `len` bytes (capped at
-    /// [`STAGING_CAP`]) into the reusable scratch via one volatile copy, and
-    /// return the staged slice for the net primitive. No allocation, no SMAP.
-    pub fn stage_fixed_out(&mut self, index: u16, len: usize) -> Result<&[u8], Errno> {
-        self.ensure_scratch()?;
+    /// A volatile [`VmReader`] over fixed buffer `index`'s first `len` bytes
+    /// (capped at the pin length) — the single-direct-copy send source. The net
+    /// leaf pulls bytes straight from the pinned pages into the socket buffer
+    /// with no intermediate kernel scratch.
+    pub fn fixed_reader(&self, index: u16, len: usize) -> Result<VmReader<'_>, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
-        let n = len.min(pin.len()).min(STAGING_CAP);
-        pin.copy_out(0, &mut self.scratch[..n])
-            .map_err(|_| Errno::EFAULT)?;
-        Ok(&self.scratch[..n])
+        let n = len.min(pin.len());
+        pin.reader(0, n).ok_or(Errno::EFAULT)
     }
 
-    /// Borrow the reusable scratch (first `cap` bytes, capped at
-    /// [`STAGING_CAP`]) as a recv sink for the net primitive.
-    pub fn recv_scratch(&mut self, cap: usize) -> Result<&mut [u8], Errno> {
-        self.ensure_scratch()?;
-        let n = cap.min(STAGING_CAP);
-        Ok(&mut self.scratch[..n])
-    }
-
-    /// Publish `n` recv'd bytes from the scratch into fixed buffer `index` via
-    /// one volatile copy.
-    pub fn publish_fixed_in(&self, index: u16, n: usize) -> Result<(), Errno> {
+    /// A volatile [`VmWriter`] over the whole of fixed buffer `index` — the
+    /// single-direct-copy recv sink. The net leaf fills the pinned pages
+    /// directly from the socket buffer with no intermediate kernel scratch.
+    pub fn fixed_writer(&self, index: u16) -> Result<VmWriter<'_>, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
-        let n = n.min(pin.len());
-        pin.copy_in(0, &self.scratch[..n])
-            .map_err(|_| Errno::EFAULT)?;
-        Ok(())
+        let cap = pin.len();
+        pin.writer(0, cap).ok_or(Errno::EFAULT)
     }
 
-    /// Cap on a fixed buffer's usable length (for clamping recv `cap`).
+    /// Cap on a fixed buffer's usable length.
     pub fn fixed_len_of(&self, index: u16) -> Result<usize, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         Ok(set.pins.get(index as usize).ok_or(Errno::EINVAL)?.len())
@@ -350,27 +325,15 @@ impl BufferRegistry {
         }
     }
 
-    /// Deliver `n` recv'd scratch bytes into the peeked provided buffer at user
-    /// `addr` and consume it off the ring. The buffer is committed
-    /// unconditionally (the socket data was already consumed, so the slot is
-    /// spent) — a copy fault still consumes it, reporting `-EFAULT`, like
-    /// `recvfrom`'s consume-then-fault. Pins `addr` transiently (no per-op
-    /// reservation needed: a provided buffer is touched only within this call).
-    pub fn publish_provided_in(
-        &mut self,
-        pid: u32,
-        group: u16,
-        addr: u64,
-        n: usize,
-    ) -> Result<(), Errno> {
-        self.commit_provided(group);
-        if n == 0 {
-            return Ok(());
-        }
-        let pin = PinnedUserBuffer::pin(pid, addr, n).map_err(pin_errno)?;
-        pin.copy_in(0, &self.scratch[..n])
-            .map_err(|_| Errno::EFAULT)?;
-        Ok(())
+    /// Transiently pin a kernel-picked provided buffer at user `addr` for the
+    /// duration of one recv op (no per-op reservation: a provided buffer is
+    /// touched only within the op). The caller builds a [`VmWriter`] over the
+    /// returned pin, fills it directly from the socket, then [`commit_provided`]
+    /// on success — the single-direct-copy provided-buffer recv path.
+    ///
+    /// [`commit_provided`]: Self::commit_provided
+    pub fn provided_pin(pid: u32, addr: u64, len: usize) -> Result<PinnedUserBuffer, Errno> {
+        PinnedUserBuffer::pin(pid, addr, len).map_err(pin_errno)
     }
 
     // ----- test-only injection (no live process VM) ------------------------

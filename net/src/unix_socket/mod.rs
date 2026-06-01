@@ -414,6 +414,89 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
     }
 }
 
+/// Single-direct-copy [`unix_recv`]: drain the recv FIFO straight into the
+/// pinned user pages (via `writer`) with one volatile copy per byte — no kernel
+/// scratch. Mirrors `unix_recv`'s EOF / blocking / wake semantics; the byte
+/// count is what the writer accepted.
+pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWriter<'_>) -> i32 {
+    if !writer.has_remain() {
+        return 0;
+    }
+    let Some(wq_idx) = handle.slot_for_wq() else {
+        return -9;
+    };
+    let slot_gen = handle.generation();
+
+    loop {
+        let result = {
+            let mut state = UNIX_STATE.lock();
+            let Some(i) = validate_socket_handle(&state, handle) else {
+                return -107;
+            };
+            let nonblocking = state.slots[i].nonblocking;
+
+            let (pair_handle, side, peer_idx, peer_closed) = match state.slots[i].state {
+                SlotState::Connected {
+                    pair,
+                    side,
+                    peer,
+                    peer_closed,
+                } => (pair, side, peer.raw_slot(), peer_closed),
+                _ => return -107,
+            };
+
+            let pair = match state.pairs.get_mut(pair_handle) {
+                Some(p) => p,
+                None => return if peer_closed { 0 } else { -107 },
+            };
+            let rbuf = pair.recv_fifo(side);
+            if !rbuf.is_empty() {
+                Ok((rbuf.read_into(writer), peer_idx))
+            } else if peer_closed {
+                Ok((0, peer_idx)) // EOF
+            } else {
+                Err(nonblocking)
+            }
+        };
+
+        match result {
+            Ok((n, peer)) => {
+                if n > 0 && peer < MAX_UNIX_SOCKETS {
+                    BUS.publish(unix_ev(peer));
+                }
+                return n as i32;
+            }
+            Err(true) => return -11, // EAGAIN
+            Err(false) => {
+                BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
+                    let state = UNIX_STATE.lock();
+                    let slot = &state.slots[wq_idx];
+                    if slot.generation != slot_gen {
+                        return true;
+                    }
+                    match slot.state {
+                        SlotState::Connected {
+                            pair,
+                            side,
+                            peer_closed,
+                            ..
+                        } => {
+                            if peer_closed {
+                                return true;
+                            }
+                            match state.pairs.get(pair) {
+                                Some(p) => !p.recv_fifo_ref(side).is_empty(),
+                                None => true,
+                            }
+                        }
+                        _ => true,
+                    }
+                });
+            }
+        }
+    }
+}
+
 /// Send data on a connected AF_UNIX socket with optional in-flight fds (SCM_RIGHTS).
 ///
 /// # Atomicity contract
@@ -610,6 +693,59 @@ pub fn unix_sendmsg(
     }
 }
 
+/// Single-direct-copy `unix_send` (no fds): append the data pulled straight
+/// from the pinned user pages (via `reader`) into the peer FIFO with one
+/// volatile copy per byte — no kernel scratch. This is the non-blocking
+/// data-only subset of [`unix_sendmsg`] that the SlopRing fixed-buffer send
+/// path uses (it forces the socket non-blocking, so a full FIFO returns
+/// `-EAGAIN` rather than parking). Returns bytes written, `-EAGAIN`, or an
+/// errno.
+pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmReader<'_>) -> i32 {
+    let (n, peer_idx) = {
+        let mut state = UNIX_STATE.lock();
+        let Some(i) = validate_socket_handle(&state, handle) else {
+            return -107; // ENOTCONN
+        };
+
+        let (pair_handle, side, peer_idx) = match state.slots[i].state {
+            SlotState::Connected {
+                pair,
+                side,
+                peer,
+                peer_closed,
+            } => {
+                if peer_closed {
+                    return -32; // EPIPE
+                }
+                (pair, side, peer.raw_slot())
+            }
+            _ => return -107,
+        };
+
+        let pair = match state.pairs.get_mut(pair_handle) {
+            Some(p) => p,
+            None => return -32, // EPIPE — pair already freed
+        };
+
+        let empty = !reader.has_remain();
+        let data_has_space = empty || pair.send_fifo(side).has_space();
+        if !data_has_space {
+            return -11; // EAGAIN (forced-nonblock path)
+        }
+        let n = if empty {
+            0
+        } else {
+            pair.send_fifo(side).write_from(reader) as i32
+        };
+        (n, peer_idx)
+    };
+
+    if n > 0 && peer_idx < MAX_UNIX_SOCKETS {
+        BUS.publish(unix_ev(peer_idx));
+    }
+    n
+}
+
 /// Release every still-owned fd in `inflight_fds[..fd_count]`.
 /// Called on every error-return path of [`unix_sendmsg`] so a
 /// failed send never leaks the fd refs the kernel duplicated from
@@ -715,6 +851,41 @@ pub fn unix_recvmsg(
     max_fds: usize,
 ) -> (i32, usize) {
     let bytes_read = unix_recv(handle, buf);
+
+    let mut received_fds = 0usize;
+    {
+        let mut state = UNIX_STATE.lock();
+        if let Some(i) = validate_socket_handle(&state, handle) {
+            if let SlotState::Connected { pair, side, .. } = state.slots[i].state {
+                if let Some(pair_ref) = state.pairs.get_mut(pair) {
+                    let anc = pair_ref.recv_anc(side);
+                    for fd in anc.drain() {
+                        if received_fds < max_fds {
+                            out_fds[received_fds] = (fd.handle, fd.ops);
+                            received_fds += 1;
+                        } else {
+                            fd.ops.release(fd.handle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (bytes_read, received_fds)
+}
+
+/// Single-direct-copy [`unix_recvmsg`]: the data is drained straight into the
+/// pinned user pages (via `writer`) by [`unix_recv_into`] with no kernel
+/// scratch; any SCM_RIGHTS fds are drained into `out_fds` exactly as
+/// `unix_recvmsg` does. Returns `(bytes_read, n_fds)`.
+pub fn unix_recvmsg_into(
+    handle: SocketHandle,
+    writer: &mut slopos_ostd::mm::VmWriter<'_>,
+    out_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    max_fds: usize,
+) -> (i32, usize) {
+    let bytes_read = unix_recv_into(handle, writer);
 
     let mut received_fds = 0usize;
     {

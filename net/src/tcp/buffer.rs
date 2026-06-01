@@ -78,6 +78,19 @@ impl TcpSendState {
         self.buf.write(&data[..n])
     }
 
+    /// Single-direct-copy [`enqueue`](Self::enqueue): pull up to
+    /// `min(free_space, reader.remain())` bytes straight from the pinned user
+    /// pages into the send ring with one volatile copy (no kernel scratch). The
+    /// `free_space` cap honours `SO_SNDBUF` exactly like `enqueue`. Returns the
+    /// number of bytes buffered.
+    pub fn enqueue_from(&mut self, reader: &mut slopos_ostd::mm::VmReader<'_>) -> usize {
+        let avail = self.free_space();
+        if avail == 0 {
+            return 0;
+        }
+        self.buf.write_from(reader, avail)
+    }
+
     pub fn unsent_len(&self) -> usize {
         self.buf.len().saturating_sub(self.inflight)
     }
@@ -186,6 +199,14 @@ impl TcpRecvState {
 
     pub fn dequeue(&mut self, out: &mut [u8]) -> usize {
         self.buf.read(out)
+    }
+
+    /// Single-direct-copy [`dequeue`](Self::dequeue): drain up to
+    /// `min(available, writer.remain())` bytes straight from the recv ring into
+    /// the pinned user pages with one volatile copy (no kernel scratch). Returns
+    /// the number of bytes drained.
+    pub fn dequeue_into(&mut self, writer: &mut slopos_ostd::mm::VmWriter<'_>) -> usize {
+        self.buf.read_into(writer)
     }
 
     pub fn available(&self) -> usize {

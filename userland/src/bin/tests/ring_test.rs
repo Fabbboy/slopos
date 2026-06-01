@@ -14,10 +14,11 @@
 
 use slopos_userland as _;
 
-use slopos_abi::net::{AF_INET, SOCK_DGRAM, SOCK_STREAM};
+use slopos_abi::net::{AF_INET, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::ring::{
-    BufIovec, OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_WRITE,
-    RegisterBufRingCmd, SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, Sqe,
+    BufIovec, OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_SEND_ZC,
+    OP_WRITE, RegisterBufRingCmd, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
+    SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, Sqe,
 };
 use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
@@ -563,6 +564,103 @@ fn test_fixed_send_dispatch() -> bool {
     }
 }
 
+/// `OP_SEND_ZC` without the fixed-buffer flag is rejected inline with a single
+/// error CQE (no `F_MORE`/`F_NOTIF`): zero-copy send must name its pinned data
+/// via a registered fixed buffer. Deterministic — no networking.
+fn test_send_zc_requires_fixed_buffer() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND_ZC;
+    sqe.fd = sock.raw();
+    sqe.flags = 0; // no SLOPRING_SQE_FIXED_BUFFER → -EINVAL
+    sqe.len = 0;
+    sqe.user_data = 0x5C0;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    // Exactly one CQE: a negative errno, with neither notification bit set.
+    let Some(cqe) = ring.poll_completion() else {
+        return false;
+    };
+    if cqe.user_data != 0x5C0
+        || cqe.res >= 0
+        || (cqe.flags & SLOPRING_CQE_F_MORE) != 0
+        || (cqe.flags & SLOPRING_CQE_F_NOTIF) != 0
+    {
+        return false;
+    }
+    ring.poll_completion().is_none() // no spurious second CQE
+}
+
+/// End-to-end `OP_SEND_ZC` two-CQE protocol over a connected UDP socket: a
+/// successful zero-copy send posts a result CQE carrying `SLOPRING_CQE_F_MORE`
+/// ("notification to follow") and then a terminal CQE carrying
+/// `SLOPRING_CQE_F_NOTIF` (registered buffer reusable) — mirroring io_uring's
+/// `IORING_OP_SEND_ZC`. The datagram only needs to be *queued* to the NIC (the
+/// SLIRP backend processes virtio TX); delivery is irrelevant to the protocol.
+fn test_udp_send_zc_two_cqe() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    // Connect to the SLIRP gateway (UDP connect just sets the default dest +
+    // Connected state; no handshake), so the send resolves a destination.
+    let dst = SockAddrIn {
+        family: AF_INET,
+        port: 9999u16.to_be(),
+        addr: [10, 0, 2, 2],
+        _pad: [0; 8],
+    };
+    if net::connect(sock.raw(), &dst).is_err() {
+        return false;
+    }
+    let payload = b"slopring-zc";
+    let mut buf = [0u8; 64];
+    buf[..payload.len()].copy_from_slice(payload);
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND_ZC;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_FIXED_BUFFER;
+    sqe.buf_index = 0;
+    sqe.len = payload.len() as u32;
+    sqe.user_data = 0x5C1;
+    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    // First CQE: the send result, carrying F_MORE and not yet F_NOTIF.
+    let Some(cqe1) = ring.poll_completion() else {
+        return false;
+    };
+    if cqe1.user_data != 0x5C1 || cqe1.res < 0 {
+        return false; // a failed send would be a single error CQE — regression
+    }
+    if (cqe1.flags & SLOPRING_CQE_F_MORE) == 0 || (cqe1.flags & SLOPRING_CQE_F_NOTIF) != 0 {
+        return false;
+    }
+    // Terminal CQE: F_NOTIF set, F_MORE clear (buffer reusable).
+    let Some(cqe2) = ring.poll_completion() else {
+        return false;
+    };
+    cqe2.user_data == 0x5C1
+        && (cqe2.flags & SLOPRING_CQE_F_NOTIF) != 0
+        && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
+}
+
 /// A fixed-buffer op naming an out-of-range `buf_index` is rejected inline with
 /// -EINVAL (the kernel's `check_out_fixed` bounds check — the property the
 /// Verus `ring_bufpool` obligation pins) before any socket side effect.
@@ -656,6 +754,11 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("slopfut_openat_close", test_slopfut_openat_close),
     ("register_fixed_buffers", test_register_fixed_buffers),
     ("fixed_send_dispatch", test_fixed_send_dispatch),
+    (
+        "send_zc_requires_fixed_buffer",
+        test_send_zc_requires_fixed_buffer,
+    ),
+    ("udp_send_zc_two_cqe", test_udp_send_zc_two_cqe),
     ("fixed_buffer_oob", test_fixed_buffer_oob),
     ("pbuf_ring_select_enobufs", test_pbuf_ring_select_enobufs),
 ];

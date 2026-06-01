@@ -16,7 +16,7 @@ use core::ffi::c_int;
 use slopos_abi::Errno;
 use slopos_abi::ring::{
     OP_ACCEPT, OP_CANCEL, OP_CLOSE, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM,
-    OP_RECVMSG, OP_SEND, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_BUFFER_SELECT,
+    OP_RECVMSG, OP_SEND, OP_SEND_ZC, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_BUFFER_SELECT,
     SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT};
@@ -39,6 +39,14 @@ pub enum Outcome {
     InlineBuf(i32, u32),
     /// Would block — record an in-flight row and harvest later.
     WouldBlock,
+    /// Zero-copy send completed (`OP_SEND_ZC`): post **two** CQEs for this
+    /// `user_data` — a result CQE carrying `res` + `SLOPRING_CQE_F_MORE`
+    /// ("notification to follow"), then a terminal CQE carrying
+    /// `SLOPRING_CQE_F_NOTIF` once the send buffer is reusable (the io_uring
+    /// `SEND_ZC` two-CQE model). On the single-direct-copy backend the buffer
+    /// is reusable the instant the copy completes, so the notification is
+    /// posted immediately after the result (io_uring's `COPIED` fallback).
+    InlineNotif(i32),
 }
 
 /// Decode the buffer selection an SQE requests (mutually exclusive flags). The
@@ -111,6 +119,16 @@ pub fn probe(pid: u32, sqe: &Sqe, buffers: &mut BufferRegistry) -> Outcome {
             // A provided ring is kernel-picks-on-fill, which only makes sense
             // for recv; send must name its data (a fixed buffer).
             Some(BufSel::Provided { .. }) => Outcome::Inline(Errno::EINVAL.raw()),
+        },
+        // OP_SEND_ZC: zero-copy send from a registered fixed buffer. Requires
+        // the fixed-buffer flag (it must name its pinned data); the inline /
+        // provided selections are rejected. On success it posts the two-CQE
+        // notification protocol (result + F_NOTIF) — see `send_zc_fixed`.
+        OP_SEND_ZC => match sel {
+            Some(BufSel::Fixed { index }) => {
+                crate::net_glue::send_zc_fixed(pid, sqe.fd, index, sqe.len, sqe.op_flags, buffers)
+            }
+            None | Some(BufSel::Provided { .. }) => Outcome::Inline(Errno::EINVAL.raw()),
         },
         OP_RECVMSG => match sel {
             None => crate::net_glue::recvmsg_nonblock(pid, sqe.fd, sqe.addr, sqe.op_flags),

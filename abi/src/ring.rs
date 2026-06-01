@@ -55,9 +55,19 @@ pub const OP_OPENAT: u8 = 10;
 /// `close(fd)` — `file_close_fd`. `fd` = fd to close. Completes inline.
 pub const OP_CLOSE: u8 = 11;
 
+/// Zero-copy send from a **registered fixed buffer** (`SLOPRING_SQE_FIXED_BUFFER`
+/// + `Sqe.buf_index`) — the io_uring `IORING_OP_SEND_ZC` analogue. The NIC DMAs
+/// the payload straight from the pinned user pages (no CPU copy); the pin is
+/// held until the TX is reclaimed, then a second, terminal CQE carrying
+/// [`SLOPRING_CQE_F_NOTIF`] (the first CQE carries [`SLOPRING_CQE_F_MORE`])
+/// signals the buffer is reusable. Sound for UDP/raw datagrams (single
+/// transmit); other families fall back to the single-copy `OP_SEND` path
+/// (SLOPRING § 13).
+pub const OP_SEND_ZC: u8 = 12;
+
 /// Largest opcode value (inclusive). Used by the kernel to reject
 /// out-of-range opcodes with `-EINVAL`.
-pub const OP_MAX: u8 = OP_CLOSE;
+pub const OP_MAX: u8 = OP_SEND_ZC;
 
 // ---------------------------------------------------------------------------
 // CQE flags (SLOPRING § 4.5).
@@ -78,6 +88,13 @@ pub const SLOPRING_CQE_F_BUFFER: u32 = 1 << 1;
 /// provided buffer and will hand back the rest in a later CQE. Reserved for
 /// incremental recv; not yet emitted.
 pub const SLOPRING_CQE_F_BUF_MORE: u32 = 1 << 2;
+
+/// Zero-copy-send notification: this is the **terminal** CQE of an `OP_SEND_ZC`
+/// whose first (result) CQE carried [`SLOPRING_CQE_F_MORE`]. It is posted once
+/// the kernel has released its last reference to the pinned send buffer (the
+/// NIC reclaimed the TX descriptor), telling userland the buffer is safe to
+/// reuse — the io_uring `IORING_CQE_F_NOTIF` analogue (MSG_ZEROCOPY model).
+pub const SLOPRING_CQE_F_NOTIF: u32 = 1 << 3;
 
 /// Bit shift of the provided-buffer id within `Cqe.flags` (the buffer id
 /// occupies the high 16 bits, mirroring Linux io_uring's

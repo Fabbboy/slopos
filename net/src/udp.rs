@@ -266,6 +266,52 @@ pub fn udp_sendto(
     Ok(payload.len())
 }
 
+/// Single-direct-copy `udp_sendto`: the datagram payload is volatile-copied
+/// **once**, straight from the pinned user pages (via `reader`) into the packet
+/// buffer — no kernel staging scratch. Everything else (headers, checksum over
+/// the in-packet payload) matches [`udp_sendto`]. The payload length is
+/// `reader.remain()`.
+pub fn udp_sendto_from(
+    local_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    local_port: u16,
+    dst_port: u16,
+    reader: &mut slopos_ostd::mm::VmReader<'_>,
+) -> Result<usize, NetError> {
+    let payload_len = reader.remain();
+    if payload_len > 1472 {
+        return Err(NetError::InvalidArgument);
+    }
+
+    let mut pkt = PacketBuf::alloc().ok_or(NetError::NoBufferSpace)?;
+    let copied = pkt.append_from(reader, payload_len)?;
+
+    let udp_len = 8 + copied;
+    {
+        let udp_hdr = pkt.push_header(8)?;
+        udp_hdr[0..2].copy_from_slice(&local_port.to_be_bytes());
+        udp_hdr[2..4].copy_from_slice(&dst_port.to_be_bytes());
+        udp_hdr[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        udp_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
+    }
+
+    pkt.prepend_ipv4(local_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
+
+    let src_mac = crate::net_driver_service::net_driver()
+        .and_then(|d| (d.virtio_net_mac)())
+        .unwrap_or([0; 6]);
+    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
+    pkt.set_ipv4_offsets();
+
+    let udp_checksum = pkt.compute_udp_checksum(Ipv4Addr(local_ip), Ipv4Addr(dst_ip));
+    let udp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
+    let frame = pkt.payload_mut();
+    frame[udp_start + 6..udp_start + 8].copy_from_slice(&udp_checksum.to_be_bytes());
+
+    super::ipv4::send(Ipv4Addr(dst_ip), pkt).map_err(|_| NetError::NetworkUnreachable)?;
+    Ok(copied)
+}
+
 pub fn udp_recvfrom() -> Result<(), NetError> {
     Err(NetError::WouldBlock)
 }

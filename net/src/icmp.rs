@@ -258,6 +258,56 @@ fn send_echo(
     Ok(payload.len())
 }
 
+/// Single-direct-copy [`send_echo_request`]: the echo payload is volatile-copied
+/// **once**, straight from the pinned user pages (via `reader`) into the packet
+/// buffer — no kernel staging scratch. The checksum is computed over the
+/// in-packet bytes. Payload length is `reader.remain()`.
+pub fn send_echo_request_from(
+    dst_ip: [u8; 4],
+    identifier: u16,
+    sequence: u16,
+    reader: &mut slopos_ostd::mm::VmReader<'_>,
+) -> Result<usize, NetError> {
+    let src_ip = crate::netstack::NET_STACK
+        .source_ip_for(crate::types::Ipv4Addr(dst_ip))
+        .map(|ip| ip.0)
+        .unwrap_or([0; 4]);
+
+    let payload_len = reader.remain();
+    if payload_len > 1472 {
+        return Err(NetError::InvalidArgument);
+    }
+
+    let mut pkt = PacketBuf::alloc().ok_or(NetError::NoBufferSpace)?;
+    let copied = pkt.append_from(reader, payload_len)?;
+
+    let icmp_len = ICMP_HEADER_LEN + copied;
+    {
+        let icmp_hdr = pkt.push_header(ICMP_HEADER_LEN)?;
+        icmp_hdr[0] = ICMP_TYPE_ECHO_REQUEST;
+        icmp_hdr[1] = 0;
+        icmp_hdr[2..4].copy_from_slice(&0u16.to_be_bytes());
+        icmp_hdr[4..6].copy_from_slice(&identifier.to_be_bytes());
+        icmp_hdr[6..8].copy_from_slice(&sequence.to_be_bytes());
+    }
+
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), icmp_len)?;
+
+    let src_mac = crate::net_driver_service::net_driver()
+        .and_then(|d| (d.virtio_net_mac)())
+        .unwrap_or([0; 6]);
+    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
+    pkt.set_ipv4_offsets();
+
+    let icmp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
+    let frame = pkt.payload_mut();
+    let checksum = icmp_checksum(&frame[icmp_start..]);
+    frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&checksum.to_be_bytes());
+
+    super::ipv4::send(Ipv4Addr(dst_ip), pkt).map_err(|_| NetError::NetworkUnreachable)?;
+    Ok(copied)
+}
+
 pub fn icmp_bind(sock_idx: u32, identifier: u16, reuse_addr: bool) -> Result<(), NetError> {
     ICMP_DEMUX.lock().register(identifier, sock_idx, reuse_addr)
 }

@@ -220,6 +220,61 @@ impl<const N: usize> RingBuffer<u8, N> {
         to_read
     }
 
+    /// Fill the buffer directly from a volatile [`VmReader`](crate::mm::VmReader)
+    /// over pinned user pages — the SlopRing single-direct-copy path. Up to
+    /// `min(max, free_space, reader.remain())` bytes are volatile-copied
+    /// straight from the pinned pages into this ring's backing array, with no
+    /// intermediate kernel scratch. `max` lets a caller honour a soft cap below
+    /// the raw capacity (e.g. `SO_SNDBUF`). Returns the number of bytes written.
+    pub fn write_from(
+        &mut self,
+        reader: &mut crate::mm::vmcursor::VmReader<'_>,
+        max: usize,
+    ) -> usize {
+        let to_write = (N - self.count).min(reader.remain()).min(max);
+        if to_write == 0 {
+            return 0;
+        }
+
+        let first = to_write.min(N - self.head);
+        let mut written = reader.read(&mut self.data[self.head..self.head + first]);
+        if written == first {
+            let second = to_write - first;
+            if second > 0 {
+                written += reader.read(&mut self.data[..second]);
+            }
+        }
+
+        self.head = Self::wrap(self.head + written);
+        self.count += written;
+        written
+    }
+
+    /// Drain the buffer directly into a volatile [`VmWriter`](crate::mm::VmWriter)
+    /// over pinned user pages — the SlopRing single-direct-copy path. Up to
+    /// `min(len, writer.remain())` bytes are volatile-copied straight from this
+    /// ring's backing array into the pinned pages. Returns the number of bytes
+    /// read out.
+    pub fn read_into(&mut self, writer: &mut crate::mm::vmcursor::VmWriter<'_>) -> usize {
+        let to_read = self.count.min(writer.remain());
+        if to_read == 0 {
+            return 0;
+        }
+
+        let first = to_read.min(N - self.tail);
+        let mut read = writer.write(&self.data[self.tail..self.tail + first]);
+        if read == first {
+            let second = to_read - first;
+            if second > 0 {
+                read += writer.write(&self.data[..second]);
+            }
+        }
+
+        self.tail = Self::wrap(self.tail + read);
+        self.count -= read;
+        read
+    }
+
     /// Peek at buffered data starting `offset` bytes from the tail,
     /// copying into `out`. Does not advance the tail.
     /// Returns the number of bytes copied.

@@ -12,7 +12,8 @@ use slopos_ostd::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciProbeError};
 use crate::virtio::{
-    self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
+    self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
+    VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
         set_driver_ok, setup_interrupts,
@@ -456,6 +457,75 @@ fn virtnet_clean_tx(state: &mut VirtioNetState) -> usize {
         cleaned += 1;
     }
     cleaned
+}
+
+/// Build a scatter-gather TX descriptor chain for a zero-copy send: a header
+/// descriptor (`hdr_pa`/`hdr_len`, device-readable) followed by one descriptor
+/// per coalesced pinned-payload run, linked via `VIRTQ_DESC_F_NEXT`. So the NIC
+/// DMAs the payload straight from the pinned user pages — no kernel copy.
+///
+/// `slots` supplies the descriptor-table indices to occupy; its length must be
+/// `1 + runs.len()` (head + one per run). Returns `(slot, desc)` pairs the
+/// caller writes via `write_desc`; the head is `slots[0]`. Pure (no device
+/// state), so it is unit-testable without a NIC (SLOPRING § 13).
+#[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+fn build_tx_chain(
+    slots: &[u16],
+    hdr_pa: u64,
+    hdr_len: u32,
+    runs: &[(u64, u32)],
+) -> Option<KVec<(u16, VirtqDesc)>> {
+    // Need exactly one slot for the header plus one per payload run, and at
+    // least one payload run (an empty datagram uses the inline copy path).
+    if runs.is_empty() || slots.len() != runs.len() + 1 {
+        return None;
+    }
+    let mut out = KVec::with_capacity(slots.len()).ok()?;
+    // Header descriptor → first payload run.
+    out.push((
+        slots[0],
+        VirtqDesc {
+            addr: hdr_pa,
+            len: hdr_len,
+            flags: VIRTQ_DESC_F_NEXT,
+            next: slots[1],
+        },
+    ))
+    .ok()?;
+    // One descriptor per coalesced pinned run; the last terminates the chain.
+    for (i, &(pa, len)) in runs.iter().enumerate() {
+        let is_last = i + 1 == runs.len();
+        out.push((
+            slots[i + 1],
+            VirtqDesc {
+                addr: pa,
+                len,
+                flags: if is_last { 0 } else { VIRTQ_DESC_F_NEXT },
+                next: if is_last { 0 } else { slots[i + 2] },
+            },
+        ))
+        .ok()?;
+    }
+    Some(out)
+}
+
+/// Test-only view into [`build_tx_chain`] for the SG-chain stest (no NIC): runs
+/// the pure builder and flattens each descriptor to
+/// `(slot, addr, len, flags, next)` so the harness can assert the link
+/// structure without touching `VirtqDesc` internals.
+#[cfg(feature = "test-hooks")]
+pub fn build_tx_chain_for_test(
+    slots: &[u16],
+    hdr_pa: u64,
+    hdr_len: u32,
+    runs: &[(u64, u32)],
+) -> Option<KVec<(u16, u64, u32, u16, u16)>> {
+    let chain = build_tx_chain(slots, hdr_pa, hdr_len, runs)?;
+    let mut out = KVec::with_capacity(chain.len()).ok()?;
+    for &(slot, ref d) in chain.iter() {
+        out.push((slot, d.addr, d.len, d.flags, d.next)).ok()?;
+    }
+    Some(out)
 }
 
 fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -> bool {

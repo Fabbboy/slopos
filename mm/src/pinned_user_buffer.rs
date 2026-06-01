@@ -27,6 +27,7 @@ use slopos_abi::addr::VirtAddr;
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
 use slopos_ostd::mm::uframe::{UFrame, UFrameError};
+use slopos_ostd::mm::vmcursor::{VmReader, VmWriter};
 
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: u64 = (PAGE_SIZE as u64) - 1;
@@ -169,6 +170,28 @@ impl PinnedUserBuffer {
             pos += chunk;
         }
         Ok(())
+    }
+
+    /// A volatile [`VmReader`] over `self[off .. off + len]` — the
+    /// single-direct-copy send path. The net leaf pulls bytes straight from the
+    /// pinned pages into the socket buffer with no kernel scratch hop. `None` if
+    /// the range is out of bounds.
+    pub fn reader(&self, off: usize, len: usize) -> Option<VmReader<'_>> {
+        if off.checked_add(len)? > self.len {
+            return None;
+        }
+        VmReader::new(self.frames.as_slice(), self.base_off + off, len)
+    }
+
+    /// A volatile [`VmWriter`] over `self[off .. off + len]` — the
+    /// single-direct-copy recv path. The net leaf pushes bytes straight from the
+    /// socket buffer into the pinned pages with no kernel scratch hop. `None` if
+    /// the range is out of bounds.
+    pub fn writer(&self, off: usize, len: usize) -> Option<VmWriter<'_>> {
+        if off.checked_add(len)? > self.len {
+            return None;
+        }
+        VmWriter::new(self.frames.as_slice(), self.base_off + off, len)
     }
 
     /// Test-only: fabricate a pin over freshly-allocated kernel frames (no

@@ -537,28 +537,72 @@ pub fn send_fixed(
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    let data = match reg.stage_fixed_out(index, len as usize) {
-        Ok(d) => d,
+    // Single-direct-copy: build a volatile reader over the pinned buffer and
+    // have the net leaf pull straight from the pinned pages into the socket
+    // buffer — no kernel scratch hop.
+    let mut reader = match reg.fixed_reader(index, len as usize) {
+        Ok(r) => r,
         Err(e) => return Outcome::Inline(e.raw()),
     };
     if ops.is_unix_socket() {
         let sh = SocketHandle::from_usize(handle);
-        let rc = with_unix_forced_nonblock(sh, || unix_socket::unix_send(sh, data));
+        let rc = with_unix_forced_nonblock(sh, || unix_socket::unix_send_from(sh, &mut reader));
         outcome_from_rc(rc)
     } else {
         let idx = handle as u32;
-        let ptr = if data.is_empty() {
-            core::ptr::null()
-        } else {
-            data.as_ptr()
-        };
-        let n = data.len();
-        let rc = with_inet_forced_nonblock(idx, || socket::socket_send(idx, ptr, n));
+        let rc = with_inet_forced_nonblock(idx, || socket::socket_send_pinned(idx, &mut reader));
         if rc == EAGAIN as i64 {
             Outcome::WouldBlock
         } else {
             Outcome::Inline(rc as i32)
         }
+    }
+}
+
+/// `OP_SEND_ZC` from registered fixed buffer `index`: the io_uring zero-copy
+/// send. The data path is the same single-direct-copy `socket_send_pinned` /
+/// `unix_send_from` leaf as [`send_fixed`] (one volatile copy straight from the
+/// pinned pages into the socket buffer — the true NIC-DMA 0-copy submit is a
+/// follow-up). The difference is the **completion contract**: on a
+/// successful send the op posts the two-CQE notification protocol
+/// ([`Outcome::InlineNotif`]) — a result CQE with `SLOPRING_CQE_F_MORE` then a
+/// terminal CQE with `SLOPRING_CQE_F_NOTIF` telling userland the registered
+/// buffer is reusable. On the single-copy backend the buffer is reusable the
+/// instant the copy returns, so the notification follows immediately (io_uring's
+/// `COPIED` fallback). A real error (`rc < 0`) posts a single CQE (no
+/// notification, matching io_uring); a would-block defers like `send_fixed`.
+pub fn send_zc_fixed(
+    pid: u32,
+    fd: i32,
+    index: u16,
+    len: u32,
+    _op_flags: u32,
+    reg: &mut BufferRegistry,
+) -> Outcome {
+    if fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    let (handle, ops) = match socket_handle_for(pid, fd) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let mut reader = match reg.fixed_reader(index, len as usize) {
+        Ok(r) => r,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let rc: i32 = if ops.is_unix_socket() {
+        let sh = SocketHandle::from_usize(handle);
+        with_unix_forced_nonblock(sh, || unix_socket::unix_send_from(sh, &mut reader))
+    } else {
+        let idx = handle as u32;
+        with_inet_forced_nonblock(idx, || socket::socket_send_pinned(idx, &mut reader)) as i32
+    };
+    if rc == EAGAIN {
+        Outcome::WouldBlock
+    } else if rc < 0 {
+        Outcome::Inline(rc) // failed before the buffer was used → single CQE
+    } else {
+        Outcome::InlineNotif(rc) // sent → result (F_MORE) then F_NOTIF
     }
 }
 
@@ -579,41 +623,32 @@ pub fn recvmsg_fixed(
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    let cap = match reg.fixed_len_of(index) {
-        Ok(c) => c.min(STAGING_CAP),
+    // Single-direct-copy: fill the pinned buffer straight from the socket via a
+    // volatile writer — no kernel scratch, no separate publish copy.
+    let mut writer = match reg.fixed_writer(index) {
+        Ok(w) => w,
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    let rc: i32 = {
-        let scratch = match reg.recv_scratch(cap) {
-            Ok(s) => s,
-            Err(e) => return Outcome::Inline(e.raw()),
-        };
-        let n = scratch.len();
-        if ops.is_unix_socket() {
-            let sh = SocketHandle::from_usize(handle);
-            let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
-                [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
-            let (read, n_fds) = with_unix_forced_nonblock(sh, || {
-                unix_socket::unix_recvmsg(sh, scratch, &mut fds, SCM_MAX_FDS)
-            });
-            for slot in fds.iter().take(n_fds) {
-                slot.1.release(slot.0);
-            }
-            read
-        } else {
-            let idx = handle as u32;
-            with_inet_forced_nonblock(idx, || socket::socket_recv(idx, scratch.as_mut_ptr(), n))
-                as i32
+    let rc: i32 = if ops.is_unix_socket() {
+        let sh = SocketHandle::from_usize(handle);
+        let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
+            [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+        let (read, n_fds) = with_unix_forced_nonblock(sh, || {
+            unix_socket::unix_recvmsg_into(sh, &mut writer, &mut fds, SCM_MAX_FDS)
+        });
+        for slot in fds.iter().take(n_fds) {
+            slot.1.release(slot.0);
         }
+        read
+    } else {
+        let idx = handle as u32;
+        with_inet_forced_nonblock(idx, || socket::socket_recv_pinned(idx, &mut writer)) as i32
     };
     if rc == EAGAIN {
         return Outcome::WouldBlock;
     }
     if rc < 0 {
         return Outcome::Inline(rc);
-    }
-    if let Err(e) = reg.publish_fixed_in(index, rc as usize) {
-        return Outcome::Inline(e.raw());
     }
     Outcome::Inline(rc)
 }
@@ -642,41 +677,41 @@ pub fn recvmsg_provided(
         Ok(None) => return Outcome::Inline(Errno::ENOBUFS.raw()),
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    let cap = (buf.len as usize).min(STAGING_CAP);
-    let rc: i32 = {
-        let scratch = match reg.recv_scratch(cap) {
-            Ok(s) => s,
-            Err(e) => return Outcome::Inline(e.raw()),
-        };
-        let n = scratch.len();
-        if ops.is_unix_socket() {
-            let sh = SocketHandle::from_usize(handle);
-            let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
-                [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
-            let (read, n_fds) = with_unix_forced_nonblock(sh, || {
-                unix_socket::unix_recvmsg(sh, scratch, &mut fds, SCM_MAX_FDS)
-            });
-            for slot in fds.iter().take(n_fds) {
-                slot.1.release(slot.0);
-            }
-            read
-        } else {
-            let idx = handle as u32;
-            with_inet_forced_nonblock(idx, || socket::socket_recv(idx, scratch.as_mut_ptr(), n))
-                as i32
+    // Single-direct-copy: transiently pin the kernel-picked buffer and fill it
+    // straight from the socket via a volatile writer — no kernel scratch. The
+    // pin is validated *before* any socket consume, so a bad buffer can't lose
+    // data (unlike the old consume-then-publish-fault path).
+    let pin = match BufferRegistry::provided_pin(pid, buf.addr, buf.len as usize) {
+        Ok(p) => p,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
+    let mut writer = match pin.writer(0, buf.len as usize) {
+        Some(w) => w,
+        None => return Outcome::Inline(Errno::EFAULT.raw()),
+    };
+    let rc: i32 = if ops.is_unix_socket() {
+        let sh = SocketHandle::from_usize(handle);
+        let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
+            [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+        let (read, n_fds) = with_unix_forced_nonblock(sh, || {
+            unix_socket::unix_recvmsg_into(sh, &mut writer, &mut fds, SCM_MAX_FDS)
+        });
+        for slot in fds.iter().take(n_fds) {
+            slot.1.release(slot.0);
         }
+        read
+    } else {
+        let idx = handle as u32;
+        with_inet_forced_nonblock(idx, || socket::socket_recv_pinned(idx, &mut writer)) as i32
     };
     if rc == EAGAIN {
         return Outcome::WouldBlock; // ring untouched — buffer not consumed
     }
     if rc < 0 {
-        return Outcome::Inline(rc);
+        return Outcome::Inline(rc); // ring untouched — no data landed
     }
+    // Data landed directly in the pinned buffer; consume it off the ring.
+    reg.commit_provided(group);
     let flags = SLOPRING_CQE_F_BUFFER | ((buf.bid as u32) << SLOPRING_CQE_BUFFER_SHIFT);
-    match reg.publish_provided_in(pid, group, buf.addr, rc as usize) {
-        Ok(()) => Outcome::InlineBuf(rc, flags),
-        // Data already consumed from the socket; the buffer is spent. Report
-        // the bid with -EFAULT (consume-then-fault, like recvfrom).
-        Err(_) => Outcome::InlineBuf(Errno::EFAULT.raw(), flags),
-    }
+    Outcome::InlineBuf(rc, flags)
 }

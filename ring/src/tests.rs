@@ -12,8 +12,8 @@ use slopos_abi::Errno;
 use slopos_abi::ring::{
     Cqe, IouringBuf, OP_ACCEPT, OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_READ, RingLayout,
     SLOPRING_ASYNC_CANCEL_ALL, SLOPRING_CQ_OVERFLOW, SLOPRING_CQE_BUFFER_MASK,
-    SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_SQE_MULTISHOT,
-    Sqe,
+    SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
+    SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_mm::pinned_user_buffer::PinnedUserBuffer;
 use slopos_ostd::KVec;
@@ -581,6 +581,46 @@ fn cqe_buffer_bits_pack() -> TestResult {
 }
 stest!(name = cqe_buffer_bits_pack, suite = slopring);
 
+/// The zero-copy-send notification flag (`SLOPRING_CQE_F_NOTIF`) is bit 3,
+/// distinct from `F_MORE` (bit 0) and `F_BUFFER` (bit 1), and round-trips
+/// through the wire `Cqe` encoding — the terminal CQE of an `OP_SEND_ZC` two-CQE
+/// completion (first carries `F_MORE`, then this carries `F_NOTIF`).
+fn cqe_notif_bit_pack() -> TestResult {
+    // Distinct, non-overlapping flag bits.
+    if SLOPRING_CQE_F_NOTIF == SLOPRING_CQE_F_MORE
+        || SLOPRING_CQE_F_NOTIF == SLOPRING_CQE_F_BUFFER
+        || SLOPRING_CQE_F_NOTIF != (1 << 3)
+    {
+        return slopos_testing::fail!("F_NOTIF must be a distinct bit 3");
+    }
+    // Result CQE: F_MORE set, F_NOTIF clear.
+    let result = Cqe {
+        user_data: 0xC0DE,
+        res: 42,
+        flags: SLOPRING_CQE_F_MORE,
+    };
+    // Terminal notification CQE: F_NOTIF set, F_MORE clear.
+    let notif = Cqe {
+        user_data: 0xC0DE,
+        res: 0,
+        flags: SLOPRING_CQE_F_NOTIF,
+    };
+    let rr = Cqe::from_bytes(&result.to_bytes());
+    let rn = Cqe::from_bytes(&notif.to_bytes());
+    if rr == result
+        && (rr.flags & SLOPRING_CQE_F_MORE) != 0
+        && (rr.flags & SLOPRING_CQE_F_NOTIF) == 0
+        && rn == notif
+        && (rn.flags & SLOPRING_CQE_F_NOTIF) != 0
+        && (rn.flags & SLOPRING_CQE_F_MORE) == 0
+    {
+        TestResult::Pass
+    } else {
+        slopos_testing::fail!("F_NOTIF pack/unpack mismatch: {:?} / {:?}", rr, rn)
+    }
+}
+stest!(name = cqe_notif_bit_pack, suite = slopring);
+
 // ---------------------------------------------------------------------------
 // Registered / provided buffer registry (ABI v2). These exercise the
 // buffer-selection bookkeeping headless — fabricated pins over kernel frames,
@@ -632,10 +672,12 @@ fn bufpool_fixed_checkout_lifecycle() -> TestResult {
 }
 stest!(name = bufpool_fixed_checkout_lifecycle, suite = slopring);
 
-/// Volatile stage/publish round-trip through the reusable scratch: a pattern
-/// written into a fixed pin reads back via `stage_fixed_out`, and a pattern
-/// staged into the scratch reaches the pin via `publish_fixed_in`.
-fn bufpool_fixed_stage_roundtrip() -> TestResult {
+/// Single-direct-copy cursor round-trip: a pattern seeded into a fixed pin
+/// reads back through a `VmReader` (`fixed_reader`, the send source), and a
+/// fresh pattern written through a `VmWriter` (`fixed_writer`, the recv sink)
+/// lands in the pin and reads back. Exercises the scratch-free path the net
+/// leaves use, without a live socket.
+fn bufpool_fixed_cursor_roundtrip() -> TestResult {
     let mut reg = BufferRegistry::new();
     let mut pins: KVec<PinnedUserBuffer> = KVec::new();
     let Some(p) = PinnedUserBuffer::alloc_for_test(64) else {
@@ -650,39 +692,56 @@ fn bufpool_fixed_stage_roundtrip() -> TestResult {
     }
     reg.register_fixed_for_test(pins);
 
-    match reg.stage_fixed_out(0, 16) {
-        Ok(s) => {
-            if s != &pattern_a[..] {
-                return slopos_testing::fail!("stage_fixed_out mismatch");
-            }
+    // Read the seeded pattern out through a VmReader (the send source).
+    {
+        let mut reader = match reg.fixed_reader(0, 16) {
+            Ok(r) => r,
+            Err(_) => return slopos_testing::fail!("fixed_reader err"),
+        };
+        if reader.remain() != 16 {
+            return slopos_testing::fail!("fixed_reader remain != 16");
         }
-        Err(_) => return slopos_testing::fail!("stage_fixed_out err"),
+        let mut out = [0u8; 16];
+        if reader.read(&mut out) != 16 {
+            return slopos_testing::fail!("fixed_reader short read");
+        }
+        if out != pattern_a {
+            return slopos_testing::fail!("fixed_reader content mismatch");
+        }
     }
 
-    // Stage a fresh pattern into the scratch, publish it into the pin, read back.
+    // Write a fresh pattern into the pin through a VmWriter (the recv sink).
     {
-        let s = match reg.recv_scratch(16) {
-            Ok(s) => s,
-            Err(_) => return slopos_testing::fail!("recv_scratch err"),
+        let mut writer = match reg.fixed_writer(0) {
+            Ok(w) => w,
+            Err(_) => return slopos_testing::fail!("fixed_writer err"),
         };
-        for b in s.iter_mut() {
-            *b = 0xCD;
+        let src = [0xCDu8; 16];
+        if writer.write(&src) != 16 {
+            return slopos_testing::fail!("fixed_writer short write");
         }
     }
-    if reg.publish_fixed_in(0, 16).is_err() {
-        return slopos_testing::fail!("publish_fixed_in err");
-    }
-    match reg.stage_fixed_out(0, 16) {
-        Ok(s) => {
-            if s.iter().any(|&b| b != 0xCD) {
-                return slopos_testing::fail!("publish readback mismatch");
-            }
+
+    // Read it back through a fresh reader.
+    {
+        let mut reader = match reg.fixed_reader(0, 16) {
+            Ok(r) => r,
+            Err(_) => return slopos_testing::fail!("readback fixed_reader err"),
+        };
+        let mut out = [0u8; 16];
+        reader.read(&mut out);
+        if out.iter().any(|&b| b != 0xCD) {
+            return slopos_testing::fail!("writer readback mismatch");
         }
-        Err(_) => return slopos_testing::fail!("stage readback err"),
+    }
+
+    // Out-of-range / no-set error paths.
+    if reg.fixed_reader(7, 16).is_ok() {
+        return slopos_testing::fail!("fixed_reader OOB should err");
     }
     TestResult::Pass
 }
-stest!(name = bufpool_fixed_stage_roundtrip, suite = slopring);
+stest!(name = bufpool_fixed_cursor_roundtrip, suite = slopring);
 
 /// Provided-ring peek/commit cursor: two published buffers are peeked in order
 /// (reporting their bids), the producer `tail` overlapping `bufs[0].resv` is

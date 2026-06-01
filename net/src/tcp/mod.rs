@@ -799,6 +799,34 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
     }
 }
 
+/// Single-direct-copy [`send`]: buffer the payload by pulling it straight from
+/// the pinned user pages (via `reader`) into the send ring with one volatile
+/// copy — no kernel scratch. Returns the number of bytes buffered.
+pub fn send_from(
+    id: ConnId,
+    reader: &mut slopos_ostd::mm::VmReader<'_>,
+) -> Result<usize, TcpError> {
+    if id.is_listener() {
+        return Err(TcpError::InvalidState);
+    }
+    let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<usize, TcpError> {
+        match &pcb.state {
+            PcbState::Data(d)
+                if matches!(
+                    d.close_phase,
+                    ClosePhase::Established | ClosePhase::CloseWait
+                ) => {}
+            _ => return Err(TcpError::InvalidState),
+        }
+        let bufs = buf.as_mut().expect("Data state must have a buffer");
+        Ok(bufs.send.enqueue_from(reader))
+    });
+    match result {
+        None => Err(TcpError::NotFound),
+        Some(r) => r,
+    }
+}
+
 /// Read data from a connection's receive buffer.
 pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
     if id.is_listener() {
@@ -809,6 +837,41 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
             return Err(TcpError::InvalidState);
         };
         let read = bufs.recv.dequeue(out);
+        if read == 0 && bufs.recv.available() == 0 {
+            if let PcbState::Data(d) = &pcb.state {
+                if d.reset_received {
+                    return Err(TcpError::ConnectionReset);
+                }
+            }
+        }
+        let recv_window = bufs.recv.window();
+        if let PcbState::Data(d) = &mut pcb.state {
+            d.rcv_wnd = recv_window;
+        }
+        Ok(read)
+    });
+    match result {
+        None => Err(TcpError::NotFound),
+        Some(r) => r,
+    }
+}
+
+/// Single-direct-copy [`recv`]: drain received bytes straight into the pinned
+/// user pages (via `writer`) with one volatile copy — no kernel scratch.
+/// Mirrors [`recv`]'s EOF / reset / window-update semantics; the byte count is
+/// what the writer accepted.
+pub fn recv_into(
+    id: ConnId,
+    writer: &mut slopos_ostd::mm::VmWriter<'_>,
+) -> Result<usize, TcpError> {
+    if id.is_listener() {
+        return Err(TcpError::InvalidState);
+    }
+    let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<usize, TcpError> {
+        let Some(bufs) = buf.as_mut() else {
+            return Err(TcpError::InvalidState);
+        };
+        let read = bufs.recv.dequeue_into(writer);
         if read == 0 && bufs.recv.available() == 0 {
             if let PcbState::Data(d) = &pcb.state {
                 if d.reset_received {

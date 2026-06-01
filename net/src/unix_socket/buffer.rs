@@ -49,6 +49,43 @@ impl UnixFifo {
         n
     }
 
+    /// Single-direct-copy [`write`](Self::write): append bytes pulled straight
+    /// from the pinned user pages (via `reader`) into the FIFO. Because the FIFO
+    /// is a (non-contiguous) `KVecDeque`, each byte is volatile-read directly
+    /// into the deque — there is no bulk kernel scratch (the only temporary is a
+    /// one-byte register), matching the per-byte `push_back` shape of `write`.
+    /// Returns bytes written.
+    pub(super) fn write_from(&mut self, reader: &mut slopos_ostd::mm::VmReader<'_>) -> usize {
+        let mut written = 0;
+        while reader.has_remain() && self.has_space() {
+            let mut byte = [0u8; 1];
+            if reader.read(&mut byte) != 1 {
+                break;
+            }
+            self.inner.push_back(byte[0]).expect("pre-reserved");
+            written += 1;
+        }
+        written
+    }
+
+    /// Single-direct-copy [`read`](Self::read): drain bytes from the front
+    /// straight into the pinned user pages (via `writer`), one volatile byte at
+    /// a time (no bulk kernel scratch). A byte is popped only while the writer
+    /// has room, so none is ever lost. Returns bytes read.
+    pub(super) fn read_into(&mut self, writer: &mut slopos_ostd::mm::VmWriter<'_>) -> usize {
+        let mut read = 0;
+        while writer.has_remain() {
+            let Some(b) = self.inner.pop_front() else {
+                break;
+            };
+            if writer.write(&[b]) != 1 {
+                break;
+            }
+            read += 1;
+        }
+        read
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }

@@ -2,6 +2,7 @@ use core::fmt;
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::{VmReader, VmWriter};
 use slopos_ostd::write_field;
 use slopos_ostd::{Bitmap, words_for};
 
@@ -1733,25 +1734,46 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     }
 }
 
-pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
-    if data.is_null() && len != 0 {
-        return errno_i32(ERRNO_EFAULT) as i64;
-    }
+/// The resolved transport target of a send, after validation + UDP/ICMP
+/// auto-bind. Shared by the slice path ([`socket_send`]) and the
+/// single-direct-copy pinned path ([`socket_send_pinned`]) so the load-bearing
+/// auto-bind / ephemeral-port-rollback / state-check logic exists once.
+enum SendTarget {
+    Udp {
+        local: SockAddr,
+        remote: SockAddr,
+    },
+    Icmp {
+        remote_ip: [u8; 4],
+        identifier: u16,
+        sequence: u16,
+    },
+    Tcp {
+        tcp_idx: tcp::ConnId,
+        nonblocking: bool,
+        timeout_ms: u64,
+    },
+}
 
+/// Validate the socket, perform UDP/ICMP auto-bind (with ephemeral-port
+/// rollback on bind failure), and resolve the transport target. `payload_len`
+/// is the would-be datagram length (for the UDP datagram-size check). On any
+/// error returns the negated errno already widened to `i64`.
+fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, i64> {
     let (is_udp, is_icmp) = {
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
-            return errno_i32(ERRNO_ENOTSOCK) as i64;
+            return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
         if sock.is_write_shutdown() {
-            return errno_i32(ERRNO_EPIPE) as i64;
+            return Err(errno_i32(ERRNO_EPIPE) as i64);
         }
         (socket_is_udp(sock), socket_is_icmp(sock))
     };
 
     if is_udp || is_icmp {
-        if len > UDP_DGRAM_MAX_PAYLOAD {
-            return errno_i32(ERRNO_EINVAL) as i64;
+        if payload_len > UDP_DGRAM_MAX_PAYLOAD {
+            return Err(errno_i32(ERRNO_EINVAL) as i64);
         }
 
         let mut auto_bind_udp: Option<(SockAddr, bool)> = None;
@@ -1759,12 +1781,12 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         let (local, remote, state, identifier) = {
             let mut table = NEW_SOCKET_TABLE.lock();
             let Some(sock) = table.get_mut(sock_idx as usize) else {
-                return errno_i32(ERRNO_ENOTSOCK) as i64;
+                return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
             };
 
             if sock.local_addr.is_none() || sock.local_addr.map(|a| a.port.0 == 0).unwrap_or(true) {
                 let Some(port) = alloc_ephemeral_port() else {
-                    return errno_i32(ERRNO_ENOMEM) as i64;
+                    return Err(errno_i32(ERRNO_ENOMEM) as i64);
                 };
                 let remote_for_src = sock
                     .remote_addr
@@ -1791,11 +1813,11 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
 
             let local = match sock.local_addr {
                 Some(v) => v,
-                None => return errno_i32(ERRNO_ENOTCONN) as i64,
+                None => return Err(errno_i32(ERRNO_ENOTCONN) as i64),
             };
             let remote = match sock.remote_addr {
                 Some(v) => v,
-                None => return errno_i32(ERRNO_ENOTCONN) as i64,
+                None => return Err(errno_i32(ERRNO_ENOTCONN) as i64),
             };
             let identifier = if let SocketInner::Icmp(icmp) = &mut sock.inner {
                 if icmp.identifier == 0 {
@@ -1822,7 +1844,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 sock.state = SocketState::Unbound;
             }
             EPHEMERAL_PORTS.lock().release(bind_addr.port);
-            return map_net_err(err) as i64;
+            return Err(map_net_err(err) as i64);
         }
 
         if let Some((identifier, reuse_addr)) = auto_bind_icmp
@@ -1844,43 +1866,27 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 }
             }
             EPHEMERAL_PORTS.lock().release(Port(identifier));
-            return map_net_err(err) as i64;
+            return Err(map_net_err(err) as i64);
         }
 
         if state != SocketState::Connected {
-            return errno_i32(ERRNO_ENOTCONN) as i64;
+            return Err(errno_i32(ERRNO_ENOTCONN) as i64);
         }
-
-        let payload = if len == 0 {
-            &[][..]
-        } else {
-            slopos_ostd::util::ptr_buf::borrow_buf(data, len)
-        };
 
         if is_udp {
-            return match crate::udp::udp_sendto(
-                local.ip.0,
-                remote.ip.0,
-                local.port.0,
-                remote.port.0,
-                payload,
-            ) {
-                Ok(n) => n as i64,
-                Err(err) => map_net_err(err) as i64,
-            };
+            return Ok(SendTarget::Udp { local, remote });
         }
-
-        return match crate::icmp::send_echo_request(remote.ip.0, identifier, remote.port.0, payload)
-        {
-            Ok(n) => n as i64,
-            Err(err) => map_net_err(err) as i64,
-        };
+        return Ok(SendTarget::Icmp {
+            remote_ip: remote.ip.0,
+            identifier,
+            sequence: remote.port.0,
+        });
     }
 
     let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
-            return errno_i32(ERRNO_ENOTSOCK) as i64;
+            return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
         sync_socket_state(sock);
         (
@@ -1892,18 +1898,51 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
     };
 
     if !matches!(state, SocketState::Connected) {
-        return errno_i32(ERRNO_ENOTCONN) as i64;
+        return Err(errno_i32(ERRNO_ENOTCONN) as i64);
     }
     let Some(tcp_idx) = tcp_idx else {
-        return errno_i32(ERRNO_ENOTCONN) as i64;
+        return Err(errno_i32(ERRNO_ENOTCONN) as i64);
     };
+    Ok(SendTarget::Tcp {
+        tcp_idx,
+        nonblocking,
+        timeout_ms,
+    })
+}
 
-    let payload = if len == 0 {
-        &[][..]
-    } else {
-        slopos_ostd::util::ptr_buf::borrow_buf(data, len)
+/// Drain all currently-transmittable segments for `tcp_idx` to the wire.
+/// Returns `0` on success, or a negative errno (`i64`) on a segment-send or
+/// scratch-alloc failure. Shared by the slice and pinned TCP send paths.
+fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
+    // Heap-allocate the per-segment scratch so the 1460 B buffer
+    // doesn't pad this function's frame above the stack-sizes gate.
+    let mut tx_payload_box = match slopos_ostd::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
+        Ok(b) => b,
+        Err(_) => return errno_i32(ERRNO_ENOMEM) as i64,
     };
+    let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
+    let now_ms = slopos_kernel_services::clock::uptime_ms();
+    loop {
+        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
+            break;
+        };
+        let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
+        if rc != 0 {
+            return rc as i64;
+        }
+    }
+    0
+}
 
+/// TCP send loop, slice source: buffer `payload` (blocking on send-buffer space
+/// per the socket's nonblock/timeout), then drain segments to the wire.
+fn socket_send_tcp_slice(
+    sock_idx: u32,
+    tcp_idx: tcp::ConnId,
+    nonblocking: bool,
+    timeout_ms: u64,
+    payload: &[u8],
+) -> i64 {
     let mut total_wrote = 0usize;
     while total_wrote < payload.len() {
         let space = tcp::send_buffer_space(tcp_idx);
@@ -1960,42 +1999,194 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         total_wrote += wrote;
     }
 
-    // Heap-allocate the per-segment scratch so the 1460 B buffer
-    // doesn't pad this function's frame above the stack-sizes gate.
-    let mut tx_payload_box = match slopos_ostd::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
-        Ok(b) => b,
-        Err(_) => return errno_i32(ERRNO_ENOMEM) as i64,
-    };
-    let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
-    let now_ms = slopos_kernel_services::clock::uptime_ms();
-    loop {
-        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
-            break;
-        };
-        let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
-        if rc != 0 {
-            return rc as i64;
-        }
+    let drain = tcp_drain_segments(tcp_idx);
+    if drain != 0 {
+        return drain;
     }
-
     total_wrote as i64
 }
 
-pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
-    if buf.is_null() && len != 0 {
+/// TCP send loop, single-direct-copy source: the same blocking/space/drain
+/// shape as [`socket_send_tcp_slice`], but each enqueue pulls bytes straight
+/// from the pinned user pages (via `reader`) into the send ring with one
+/// volatile copy — no kernel scratch.
+fn socket_send_tcp_pinned(
+    sock_idx: u32,
+    tcp_idx: tcp::ConnId,
+    nonblocking: bool,
+    timeout_ms: u64,
+    reader: &mut VmReader<'_>,
+) -> i64 {
+    let mut total_wrote = 0usize;
+    while reader.has_remain() {
+        let space = tcp::send_buffer_space(tcp_idx);
+        if space == 0 {
+            if total_wrote > 0 {
+                break;
+            }
+            if nonblocking {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+            match wait_socket_event(
+                sock_send_ev(sock_idx),
+                || tcp::send_buffer_space(tcp_idx) > 0,
+                timeout_ms,
+            ) {
+                SockWait::Ready => {}
+                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
+            }
+            continue;
+        }
+
+        let wrote = match tcp::send_from(tcp_idx, reader) {
+            Ok(n) => n,
+            Err(e) => {
+                if total_wrote > 0 {
+                    break;
+                }
+                return map_tcp_err_i64(e);
+            }
+        };
+
+        if wrote == 0 {
+            if total_wrote > 0 {
+                break;
+            }
+            if nonblocking {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+            match wait_socket_event(
+                sock_send_ev(sock_idx),
+                || tcp::send_buffer_space(tcp_idx) > 0,
+                timeout_ms,
+            ) {
+                SockWait::Ready => {}
+                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
+            }
+            continue;
+        }
+        total_wrote += wrote;
+    }
+
+    let drain = tcp_drain_segments(tcp_idx);
+    if drain != 0 {
+        return drain;
+    }
+    total_wrote as i64
+}
+
+pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
+    if data.is_null() && len != 0 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
-    let out = if len == 0 {
-        &mut [][..]
-    } else {
-        slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
+    let target = match socket_send_resolve(sock_idx, len) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
+    let payload = if len == 0 {
+        &[][..]
+    } else {
+        slopos_ostd::util::ptr_buf::borrow_buf(data, len)
+    };
+
+    match target {
+        SendTarget::Udp { local, remote } => {
+            match crate::udp::udp_sendto(
+                local.ip.0,
+                remote.ip.0,
+                local.port.0,
+                remote.port.0,
+                payload,
+            ) {
+                Ok(n) => n as i64,
+                Err(err) => map_net_err(err) as i64,
+            }
+        }
+        SendTarget::Icmp {
+            remote_ip,
+            identifier,
+            sequence,
+        } => match crate::icmp::send_echo_request(remote_ip, identifier, sequence, payload) {
+            Ok(n) => n as i64,
+            Err(err) => map_net_err(err) as i64,
+        },
+        SendTarget::Tcp {
+            tcp_idx,
+            nonblocking,
+            timeout_ms,
+        } => socket_send_tcp_slice(sock_idx, tcp_idx, nonblocking, timeout_ms, payload),
+    }
+}
+
+/// Single-direct-copy `socket_send` (SlopRing registered/provided buffers): the
+/// payload is volatile-copied **once**, straight from the pinned user pages
+/// (via `reader`) into the socket buffer — no kernel staging scratch. Shares
+/// [`socket_send_resolve`] with the slice path so auto-bind / state handling is
+/// identical.
+pub fn socket_send_pinned(sock_idx: u32, reader: &mut VmReader<'_>) -> i64 {
+    let target = match socket_send_resolve(sock_idx, reader.remain()) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+
+    match target {
+        SendTarget::Udp { local, remote } => {
+            match crate::udp::udp_sendto_from(
+                local.ip.0,
+                remote.ip.0,
+                local.port.0,
+                remote.port.0,
+                reader,
+            ) {
+                Ok(n) => n as i64,
+                Err(err) => map_net_err(err) as i64,
+            }
+        }
+        SendTarget::Icmp {
+            remote_ip,
+            identifier,
+            sequence,
+        } => match crate::icmp::send_echo_request_from(remote_ip, identifier, sequence, reader) {
+            Ok(n) => n as i64,
+            Err(err) => map_net_err(err) as i64,
+        },
+        SendTarget::Tcp {
+            tcp_idx,
+            nonblocking,
+            timeout_ms,
+        } => socket_send_tcp_pinned(sock_idx, tcp_idx, nonblocking, timeout_ms, reader),
+    }
+}
+
+/// The resolved transport kind of a recv, after validation. Shared by the
+/// slice path ([`socket_recv`]) and the single-direct-copy pinned path
+/// ([`socket_recv_pinned`]).
+enum RecvKind {
+    /// `SHUT_RD` — return EOF (0) for both families.
+    Eof,
+    Udp {
+        peer_filter: Option<SockAddr>,
+        nonblocking: bool,
+        timeout_ms: u64,
+    },
+    Tcp {
+        tcp_idx: tcp::ConnId,
+        nonblocking: bool,
+        timeout_ms: u64,
+    },
+}
+
+/// Validate the socket and resolve the recv kind (no data movement). On error
+/// returns the negated errno widened to `i64`.
+fn socket_recv_resolve(sock_idx: u32) -> Result<RecvKind, i64> {
     let (is_udp, is_icmp, is_shut_rd) = {
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
-            return errno_i32(ERRNO_ENOTSOCK) as i64;
+            return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
         (
             socket_is_udp(sock),
@@ -2005,15 +2196,14 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     };
 
     if is_shut_rd {
-        // SHUT_RD: return EOF (0) for both UDP and TCP.
-        return 0;
+        return Ok(RecvKind::Eof);
     }
 
     if is_udp || is_icmp {
         let (nonblocking, timeout_ms, peer_filter) = {
             let table = NEW_SOCKET_TABLE.lock();
             let Some(sock) = table.get(sock_idx as usize) else {
-                return errno_i32(ERRNO_ENOTSOCK) as i64;
+                return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
             };
             let peer = if sock.state == SocketState::Connected {
                 sock.remote_addr
@@ -2026,69 +2216,17 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 peer,
             )
         };
-
-        loop {
-            let packet = {
-                let mut table = NEW_SOCKET_TABLE.lock();
-                let Some(sock) = table.get_mut(sock_idx as usize) else {
-                    return errno_i32(ERRNO_ENOTSOCK) as i64;
-                };
-
-                let mut found = None;
-                while let Some((pkt, src)) = sock.recv_queue.pop() {
-                    if let Some(peer) = peer_filter
-                        && src != peer
-                    {
-                        continue;
-                    }
-                    found = Some((pkt, src));
-                    break;
-                }
-                found
-            };
-
-            if let Some((pkt, _src)) = packet {
-                let payload = pkt.payload();
-                let copy_len = cmp::min(out.len(), payload.len());
-                out[..copy_len].copy_from_slice(&payload[..copy_len]);
-                return copy_len as i64;
-            }
-
-            if nonblocking {
-                return errno_i32(ERRNO_EAGAIN) as i64;
-            }
-
-            let wait_ok = if timeout_ms > 0 {
-                BUS.subscribe(sock_recv_ev(sock_idx)).wait_event_timeout(
-                    || {
-                        let table = NEW_SOCKET_TABLE.lock();
-                        table
-                            .get(sock_idx as usize)
-                            .map(|sock| !sock.recv_queue.is_empty())
-                            .unwrap_or(true)
-                    },
-                    timeout_ms,
-                )
-            } else {
-                BUS.subscribe(sock_recv_ev(sock_idx)).wait_event(|| {
-                    let table = NEW_SOCKET_TABLE.lock();
-                    table
-                        .get(sock_idx as usize)
-                        .map(|sock| !sock.recv_queue.is_empty())
-                        .unwrap_or(true)
-                })
-            };
-
-            if !wait_ok {
-                return errno_i32(ERRNO_EAGAIN) as i64;
-            }
-        }
+        return Ok(RecvKind::Udp {
+            peer_filter,
+            nonblocking,
+            timeout_ms,
+        });
     }
 
     let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
-            return errno_i32(ERRNO_ENOTSOCK) as i64;
+            return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
         sync_socket_state(sock);
         (
@@ -2100,15 +2238,98 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     };
 
     if !matches!(state, SocketState::Connected | SocketState::Connecting) {
-        return errno_i32(ERRNO_ENOTCONN) as i64;
+        return Err(errno_i32(ERRNO_ENOTCONN) as i64);
     }
-
     let Some(tcp_idx) = tcp_idx else {
-        return errno_i32(ERRNO_ENOTCONN) as i64;
+        return Err(errno_i32(ERRNO_ENOTCONN) as i64);
     };
+    Ok(RecvKind::Tcp {
+        tcp_idx,
+        nonblocking,
+        timeout_ms,
+    })
+}
 
+/// UDP/ICMP datagram recv loop. `deliver` copies the matched datagram payload
+/// into the caller's sink (a kernel slice, or — for the single-direct-copy
+/// path — straight into the pinned user pages via a `VmWriter`) and returns the
+/// number of bytes delivered.
+fn udp_recv_loop(
+    sock_idx: u32,
+    peer_filter: Option<SockAddr>,
+    nonblocking: bool,
+    timeout_ms: u64,
+    mut deliver: impl FnMut(&[u8]) -> usize,
+) -> i64 {
     loop {
-        match tcp::recv(tcp_idx, out) {
+        let packet = {
+            let mut table = NEW_SOCKET_TABLE.lock();
+            let Some(sock) = table.get_mut(sock_idx as usize) else {
+                return errno_i32(ERRNO_ENOTSOCK) as i64;
+            };
+
+            let mut found = None;
+            while let Some((pkt, src)) = sock.recv_queue.pop() {
+                if let Some(peer) = peer_filter
+                    && src != peer
+                {
+                    continue;
+                }
+                found = Some((pkt, src));
+                break;
+            }
+            found
+        };
+
+        if let Some((pkt, _src)) = packet {
+            let payload = pkt.payload();
+            return deliver(payload) as i64;
+        }
+
+        if nonblocking {
+            return errno_i32(ERRNO_EAGAIN) as i64;
+        }
+
+        let wait_ok = if timeout_ms > 0 {
+            BUS.subscribe(sock_recv_ev(sock_idx)).wait_event_timeout(
+                || {
+                    let table = NEW_SOCKET_TABLE.lock();
+                    table
+                        .get(sock_idx as usize)
+                        .map(|sock| !sock.recv_queue.is_empty())
+                        .unwrap_or(true)
+                },
+                timeout_ms,
+            )
+        } else {
+            BUS.subscribe(sock_recv_ev(sock_idx)).wait_event(|| {
+                let table = NEW_SOCKET_TABLE.lock();
+                table
+                    .get(sock_idx as usize)
+                    .map(|sock| !sock.recv_queue.is_empty())
+                    .unwrap_or(true)
+            })
+        };
+
+        if !wait_ok {
+            return errno_i32(ERRNO_EAGAIN) as i64;
+        }
+    }
+}
+
+/// TCP stream recv loop. `recv_once` performs one drain attempt from the recv
+/// ring into the caller's sink (`tcp::recv` for a kernel slice, or
+/// `tcp::recv_into` straight into pinned user pages); the loop owns the
+/// EOF / nonblock / wait / napi-kick policy, identical for both sinks.
+fn tcp_recv_loop(
+    sock_idx: u32,
+    tcp_idx: tcp::ConnId,
+    nonblocking: bool,
+    timeout_ms: u64,
+    mut recv_once: impl FnMut() -> Result<usize, TcpError>,
+) -> i64 {
+    loop {
+        match recv_once() {
             Ok(n) => {
                 if n > 0 {
                     return n as i64;
@@ -2165,6 +2386,64 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
             }
             Err(e) => return map_tcp_err_i64(e),
         }
+    }
+}
+
+pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
+    if buf.is_null() && len != 0 {
+        return errno_i32(ERRNO_EFAULT) as i64;
+    }
+
+    let out = if len == 0 {
+        &mut [][..]
+    } else {
+        slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
+    };
+
+    match socket_recv_resolve(sock_idx) {
+        Err(e) => e,
+        Ok(RecvKind::Eof) => 0,
+        Ok(RecvKind::Udp {
+            peer_filter,
+            nonblocking,
+            timeout_ms,
+        }) => udp_recv_loop(sock_idx, peer_filter, nonblocking, timeout_ms, |payload| {
+            let copy_len = cmp::min(out.len(), payload.len());
+            out[..copy_len].copy_from_slice(&payload[..copy_len]);
+            copy_len
+        }),
+        Ok(RecvKind::Tcp {
+            tcp_idx,
+            nonblocking,
+            timeout_ms,
+        }) => tcp_recv_loop(sock_idx, tcp_idx, nonblocking, timeout_ms, || {
+            tcp::recv(tcp_idx, out)
+        }),
+    }
+}
+
+/// Single-direct-copy `socket_recv` (SlopRing registered/provided buffers): the
+/// received bytes are volatile-copied **once**, straight from the socket buffer
+/// into the pinned user pages (via `writer`) — no kernel staging scratch.
+/// Shares [`socket_recv_resolve`] and the recv loops with the slice path.
+pub fn socket_recv_pinned(sock_idx: u32, writer: &mut VmWriter<'_>) -> i64 {
+    match socket_recv_resolve(sock_idx) {
+        Err(e) => e,
+        Ok(RecvKind::Eof) => 0,
+        Ok(RecvKind::Udp {
+            peer_filter,
+            nonblocking,
+            timeout_ms,
+        }) => udp_recv_loop(sock_idx, peer_filter, nonblocking, timeout_ms, |payload| {
+            writer.write(payload)
+        }),
+        Ok(RecvKind::Tcp {
+            tcp_idx,
+            nonblocking,
+            timeout_ms,
+        }) => tcp_recv_loop(sock_idx, tcp_idx, nonblocking, timeout_ms, || {
+            tcp::recv_into(tcp_idx, writer)
+        }),
     }
 }
 

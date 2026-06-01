@@ -313,6 +313,29 @@ impl PacketBuf {
         self.tail = new_tail as u16;
         Ok(())
     }
+
+    /// Append up to `len` bytes pulled directly from a volatile
+    /// [`VmReader`](slopos_ostd::mm::VmReader) over pinned user pages (the
+    /// SlopRing single-direct-copy path) at the tail end of the active region.
+    /// The bytes are volatile-copied straight into the packet buffer with no
+    /// intermediate kernel scratch. Returns the number of bytes appended (which
+    /// may be short only if the reader runs dry). Fails with
+    /// [`NoBufferSpace`](NetError::NoBufferSpace) if the tailroom cannot hold
+    /// `len`.
+    pub fn append_from(
+        &mut self,
+        reader: &mut slopos_ostd::mm::VmReader<'_>,
+        len: usize,
+    ) -> Result<usize, NetError> {
+        let new_tail = self.tail as usize + len;
+        if new_tail > self.capacity() {
+            return Err(NetError::NoBufferSpace);
+        }
+        let t = self.tail as usize;
+        let got = reader.read(&mut self.data_mut()[t..new_tail]);
+        self.tail = (t + got) as u16;
+        Ok(got)
+    }
 }
 
 // =============================================================================

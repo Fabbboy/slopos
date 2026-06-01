@@ -13,8 +13,8 @@ use core::ffi::c_int;
 use slopos_abi::Errno;
 use slopos_abi::ring::{
     OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_TIMEOUT, RingLayout, SLOPRING_ASYNC_CANCEL_ALL,
-    SLOPRING_CQE_F_MORE, SLOPRING_MAX_ENTRIES, SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT,
-    Sqe,
+    SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF, SLOPRING_MAX_ENTRIES, SLOPRING_SQE_FIXED_BUFFER,
+    SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
 
@@ -337,6 +337,16 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
                 let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             }
         }
+        Outcome::InlineNotif(res) => {
+            // Zero-copy send (OP_SEND_ZC): the result CQE carries F_MORE
+            // ("notification to follow"), then a terminal F_NOTIF CQE signals
+            // the registered buffer is reusable. On the single-direct-copy
+            // backend the buffer is reusable the instant the copy returns, so
+            // the notification follows immediately (io_uring COPIED fallback).
+            let _ = ring.post_cqe(sqe.user_data, res, SLOPRING_CQE_F_MORE);
+            let _ = ring.post_cqe(sqe.user_data, 0, SLOPRING_CQE_F_NOTIF);
+            release_fixed(ring, sel);
+        }
     }
 }
 
@@ -576,6 +586,17 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
                     }
                 }
             }
+            Outcome::InlineNotif(res) => {
+                // A deferred OP_SEND_ZC that became sendable: post the two-CQE
+                // result (F_MORE) + notification (F_NOTIF), then retire the row.
+                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
+                    if let Some(r) = ring.inflight.remove_at(i) {
+                        let _ = ring.post_cqe(r.user_data, res, SLOPRING_CQE_F_MORE);
+                        let _ = ring.post_cqe(r.user_data, 0, SLOPRING_CQE_F_NOTIF);
+                        release_fixed_row(ring, &r);
+                    }
+                }
+            }
             Outcome::WouldBlock => {}
         }
     }
@@ -613,7 +634,9 @@ fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
         // (rejected at submit), so reprobe's InlineBuf and Inline collapse to
         // one signed result; WouldBlock means drained.
         let res = match opcode::reprobe(pid, row, &mut *ring.buffers) {
-            Outcome::Inline(res) | Outcome::InlineBuf(res, _) => res,
+            // A multishot row never carries OP_SEND_ZC (not multishot-supported),
+            // so InlineNotif is unreachable here; collapse it for exhaustiveness.
+            Outcome::Inline(res) | Outcome::InlineBuf(res, _) | Outcome::InlineNotif(res) => res,
             Outcome::WouldBlock => {
                 // Drained: leave armed, post nothing (no flood).
                 return;

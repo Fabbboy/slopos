@@ -14,6 +14,7 @@ pub mod slab;
 pub mod tlb;
 pub mod uframe;
 pub mod vm_space;
+pub mod vmcursor;
 
 pub use dma::{
     DmaCoherent, DmaCoherentMeta, DmaDirection, DmaError, DmaStream, DmaStreamMeta, IommuMapper,
@@ -33,3 +34,4 @@ pub use io_mem::{
 };
 pub use pod::Pod;
 pub use slab::Slab;
+pub use vmcursor::{VmReader, VmWriter};
