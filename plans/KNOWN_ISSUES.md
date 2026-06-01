@@ -58,10 +58,10 @@ physically distributed: all reactors time-slice on CPU 0. No current consumer ne
 
 ---
 
-## SlopRing: NIC-DMA zero-copy send (Phase D) + OP_CONNECT missing
+## SlopRing: Phase E — `OP_CONNECT` + TCP `MSG_ZEROCOPY` (Phase D NIC-DMA send: done)
 
 **Status**: Open  
-**Severity**: Low (perf frontier + one functional gap — single-direct-copy + registered/provided buffers now work)  
+**Severity**: Low (Phase E follow-ups — `OP_CONNECT` and TCP `MSG_ZEROCOPY`; registered/provided buffers, single-direct-copy, and Phase D true NIC-DMA 0-copy send for UDP/ICMP all work)  
 **Component**: `ring/`, `net/`, `drivers/src/virtio_net.rs`, `abi/src/ring.rs`
 
 ### Done (no longer stubbed)
@@ -96,11 +96,12 @@ TCP/UDP/unix socket buffer (no staging hop):
 `PacketBuf::append_from`, also 2 → 1.)
 
 These counts are the **socket-layer** copy (pin ↔ socket buffer) — exactly the staging hop
-Goal 1 names. On the **send** side there is still one *further*, pre-existing copy that the
-inline path also pays: the virtio driver copies the socket buffer (`PacketBuf` / the TCP send
-ring's segment) into a kernel DMA page before the NIC reads it (`virtio_net::tx` →
-`tx_page.write_slice`). That driver copy is **not** eliminated here — eliminating it (so the
-NIC DMAs the payload straight from the pinned pages, 0 CPU copies) is the Phase-D work below.
+Goal 1 names. On the **send** side there is one *further*, pre-existing copy: the virtio driver
+copies the socket buffer (`PacketBuf` / the TCP send ring's segment) into a kernel DMA page
+before the NIC reads it (`virtio_net::tx` → `tx_page.write_slice`). That driver copy is
+**eliminated on the zero-copy NIC-DMA send path** (UDP/ICMP) — the NIC DMAs the payload straight
+from the pinned pages for 0 CPU copies — which **landed as Phase D** (see below). The inline
+(`*_nonblock`) path, the copy fallback, and TCP still pay it.
 
 `buf_group == 0` + no fixed flag keeps the inline (`*_nonblock`) path byte-for-byte. The
 cursor's offset/advance/no-cross-frame-slice bounds are machine-checked in
@@ -116,54 +117,61 @@ fixed-buffer flag (must name its pinned data); the inline/provided selections ar
 `-EINVAL`. **Backend today is the single-direct-copy leaf** (`socket_send_pinned` /
 `unix_send_from` — one volatile copy from the pinned pages into the socket buffer), so the
 buffer is reusable the instant the copy returns and the notification follows immediately —
-exactly io_uring's `COPIED` fallback. **Tested end-to-end, no enabler:** a userland connected-UDP
+exactly io_uring's `COPIED` fallback. **Tested end-to-end:** a userland connected-UDP
 `OP_SEND_ZC` reaps both CQEs (`udp_send_zc_two_cqe`) and the dispatch rejection is asserted
 (`send_zc_requires_fixed_buffer`); the wire flags round-trip in `cqe_notif_bit_pack`.
 
-### Remaining frontier
+### Done (continued) — Phase D: true NIC-DMA 0-CPU-copy send
 
-1. **Phase D — true NIC-DMA 0-CPU-copy send (the perf optimization on top of `OP_SEND_ZC`).**
-   The opcode + two-CQE protocol above are live; the remaining work removes the payload copies
-   entirely — today the payload is copied pinned-pages → socket buffer (Goal 1's single copy)
-   and then socket buffer → DMA page (the driver's `tx_page.write_slice`); Phase D makes the NIC
-   DMA the payload straight from the pinned pages (the SG chain carries the headers in a small
-   kernel page and points the remaining descriptors at the pinned-page paddrs), so **0** CPU
-   copies of the payload. **Groundwork landed + unit-tested:** `slopos-ostd` `TxReclaimToken`
-   (the lock-free driver→ring reclaim signal that fits the harvest/re-poll model — drivers
-   cannot depend on `ring` nor post a CQE from NAPI context, host tests) and
-   `drivers/src/virtio_net.rs::build_tx_chain` (the SG descriptor chain
-   `[header] --F_NEXT--> pinned io_slices() runs`, stest `test_build_tx_chain_links_runs`).
-   The driver requests `VIRTIO_NET_F_CSUM` as an optional feature, so when the device offers it
-   the payload checksum can be offloaded rather than CPU-computed. **Still to wire:**
-   `NetDevice::tx_zerocopy` (+ `DeviceHandle` wrapper) + the live virtio SG submit + a
-   `TxSlot` that holds the header page/token until `virtnet_clean_tx` reclaims it and signals the
-   token; switch `send_zc_fixed` from the copy leaf to a **deferred** notif (the harvest posts
-   `F_NOTIF` once the token flips, then `check_in_fixed`) driven by a header-only
-   `udp_sendto_zerocopy` (csum-offload pseudo-header seed). Sound for **UDP/raw** (single
-   transmit). **TCP `MSG_ZEROCOPY`** is the deepest follow-up — the send path must hold the pinned
-   pages until ACK (retransmit ownership) and read from the pin on retransmit, a send-queue
-   rework (`Inline | Zerocopy` chunks) with its own proof.
+**Phase D landed.** `OP_SEND_ZC` on a connected **UDP** or **ICMP** socket now DMAs the payload
+straight from the pinned user pages — **0 CPU copies of the payload** (was 2: pinned pages →
+socket buffer, then socket buffer → DMA page). The SG descriptor chain carries the headers in a
+small kernel page (`build_tx_chain`) and points the remaining descriptors at the pinned-page
+paddrs (`PinnedUserBuffer::io_slices_len`); the NIC reads the payload directly. The terminal
+`F_NOTIF` is now genuinely **deferred**: `send_zc_fixed` records the send in a `BufferRegistry`
+deferred side table (`Outcome::DeferredNotif`), the driver's `virtnet_clean_tx` signals a
+`TxReclaimToken` when the NIC returns the TX descriptor, and the ring's harvest — which **drives
+the device TX reclaim itself** (`poll_tx_all`, so it does not depend on a TX-completion interrupt
+firing while the waiter is parked) — observes the flip, posts `F_NOTIF`, and checks the buffer
+back in. The destination MAC is a non-queuing
+neighbor-cache peek; a cold-ARP / non-UDP-ICMP / no-offload destination falls back to the
+single-direct-copy leaf (which posts both CQEs immediately — io_uring's `COPIED` fallback).
 
-   > **Testability note:** the deferred-notif DMA path *is* in-harness testable — QEMU's SLIRP
-   > backend returns TX descriptors to the used ring (so the reclaim → `F_NOTIF` fires) and a
-   > `-object filter-dump,queue=tx` pcap would let a host-side `memcmp` confirm the payload bytes
-   > were DMA'd from the pinned pages. The pcap host-assertion (a Go/tshark enabler in
-   > `tools/run_tests`) is the only piece deferred for cost; the two-CQE reclaim itself needs no
-   > enabler.
+UDP offloads the checksum to the device (`VIRTIO_NET_F_CSUM`, pseudo-header seed +
+`csum_start`/`csum_offset`), so the CPU touches **0** payload bytes; ICMP (no virtio ICMP
+offload) computes its checksum with a single volatile read over the pinned pages (still no
+staging copy). **The teardown-mid-DMA use-after-free** — the registry pin dropping on ring-fd
+close / process exit while the NIC still reads the pages — is closed by
+`PinnedUserBuffer::keepalive_frames`: the driver's TX slot holds an **independent** owning ref
+on every pinned page until reclaim (the `checked_out`/`unregister` guard only blocks the
+explicit unregister *syscall*, not `Drop`).
 
-2. **`OP_CONNECT`** — not implemented. `connect(2)` is still a synchronous syscall. Low impact
+**Tested:** deterministic deferred-notif lifecycle (`send_zc_deferred_notif_lifecycle`, ring
+stest), `io_slices_len` truncation + keepalive (`test_pinned_io_slices_len_and_keepalive`, mm
+stest), the csum-offload seed math (`udp_csum_offload_seed_matches_full`, net stest), and the
+end-to-end two-CQE reclaim over real QEMU SLIRP (`udp_send_zc_two_cqe`,
+`udp_send_zc_two_cqe_deferred`, `icmp_send_zc_two_cqe`, userland).
+
+### Remaining frontier (Phase E)
+
+1. **`OP_CONNECT`** — not implemented. `connect(2)` is still a synchronous syscall. Low impact
    (one-shot). Fix: a thin probe adapter over the non-blocking sync connect, bump `OP_MAX`,
    expose a slopfut `connect` future.
+2. **TCP `MSG_ZEROCOPY`** — the deepest piece, extending Phase D's NIC-DMA send to TCP. The send
+   path must hold the pinned pages until ACK (retransmit ownership) and read from the pin on
+   retransmit — a send-queue rework (`Inline | Zerocopy` chunks) with its own proof.
 
 ### Related Files
 
 - `slopos-ostd/src/mm/vmcursor.rs` — the volatile `VmReader`/`VmWriter` cursor (single copy)
-- `slopos-ostd/src/tx_reclaim.rs` — `TxReclaimToken` (driver→ring reclaim signal, Phase D)
-- `mm/src/pinned_user_buffer.rs` — the sound pinned-user-buffer primitive (`reader`/`writer`)
-- `ring/src/buffers.rs` — registry: `fixed_reader`/`fixed_writer`/`provided_pin` (scratch removed)
-- `ring/src/net_glue.rs` — `*_nonblock` inline (byte-for-byte) vs the cursor-threaded fixed/provided paths
-- `net/src/socket.rs`, `net/src/tcp/{buffer,mod}.rs`, `net/src/udp.rs`, `net/src/unix_socket/` — `*_pinned`/`*_from`/`*_into` leaves
-- `drivers/src/virtio_net.rs` — `build_tx_chain` SG builder; live SG submit is Phase-D follow-up
+- `slopos-ostd/src/tx_reclaim.rs` — `TxReclaimToken` (driver→ring deferred-notif reclaim signal)
+- `mm/src/pinned_user_buffer.rs` — pinned-user-buffer primitive: `reader`/`writer`, `io_slices_len` (ZC DMA runs), `keepalive_frames` (teardown-UAF guard)
+- `ring/src/buffers.rs` — registry: `fixed_reader`/`fixed_writer`/`fixed_io_slices`/`fixed_keepalive` + the deferred-notif side table (`push_deferred`/`take_reclaimed`)
+- `ring/src/net_glue.rs` — `send_zc_fixed`: NIC-DMA attempt (`try_send_zc_inet`) then copy-leaf fallback
+- `ring/src/{opcode,enter}.rs` — `Outcome::DeferredNotif`; the harvest deferred-drain → `F_NOTIF` + `check_in_fixed`
+- `net/src/netdev.rs` — `NetDevice::tx_zerocopy` (defaulted) + `tx_zerocopy_by_index` + `CsumOffload`
+- `net/src/socket.rs`, `net/src/udp.rs`, `net/src/icmp.rs` — `socket_send_zerocopy` + `udp_sendto_zerocopy`/`send_echo_request_zerocopy` (header-only ZC leaves)
+- `drivers/src/virtio_net.rs` — `build_tx_chain` SG builder + `tx_zerocopy` live SG submit + `TxChain` reclaim (token signal, keepalive drop)
 - `abi/src/ring.rs` — `OP_SEND_ZC`, `SLOPRING_CQE_F_NOTIF` (landed); `OP_MAX` (for `OP_CONNECT`)
 
 ---

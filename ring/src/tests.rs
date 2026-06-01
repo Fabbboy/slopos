@@ -17,6 +17,7 @@ use slopos_abi::ring::{
 };
 use slopos_mm::pinned_user_buffer::PinnedUserBuffer;
 use slopos_ostd::KVec;
+use slopos_ostd::TxReclaimToken;
 use slopos_testing::{TestResult, stest};
 
 use crate::buffers::BufferRegistry;
@@ -671,6 +672,69 @@ fn bufpool_fixed_checkout_lifecycle() -> TestResult {
     TestResult::Pass
 }
 stest!(name = bufpool_fixed_checkout_lifecycle, suite = slopring);
+
+/// Zero-copy deferred-notification lifecycle (`OP_SEND_ZC`): a deferred
+/// row keeps the fixed buffer checked out until the driver reclaims the NIC TX
+/// descriptor; only then does the harvest post the terminal `F_NOTIF` and check
+/// the buffer back in. Deterministic — drives the reclaim token directly (the
+/// `signal_reclaimed` the driver's `virtnet_clean_tx` calls), no NIC.
+fn send_zc_deferred_notif_lifecycle() -> TestResult {
+    let mut ring = make_ring(8);
+    let mut pins: KVec<PinnedUserBuffer> = KVec::new();
+    let Some(p) = PinnedUserBuffer::alloc_for_test(256) else {
+        return slopos_testing::fail!("pin alloc failed");
+    };
+    if pins.push(p).is_err() {
+        return slopos_testing::fail!("pin push failed");
+    }
+    ring.buffers.register_fixed_for_test(pins);
+
+    // Mirror the submit path: reserve the buffer, then record the deferred row
+    // (as `send_zc_fixed` does after a successful NIC submit).
+    if ring.buffers.check_out_fixed(0).is_err() {
+        return slopos_testing::fail!("checkout failed");
+    }
+    let Some(token) = TxReclaimToken::new() else {
+        return slopos_testing::fail!("token alloc failed");
+    };
+    let snap = token.snapshot();
+    ring.buffers.push_deferred(0xDEF, token.clone(), snap, 0);
+
+    // Before reclaim: the harvest posts nothing and the buffer stays held.
+    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    if ring.cq_tail != 0 {
+        return slopos_testing::fail!(
+            "no CQE should post before reclaim (cq_tail={})",
+            ring.cq_tail
+        );
+    }
+    if ring.buffers.check_out_fixed(0) != Err(Errno::EBUSY) {
+        return slopos_testing::fail!("buffer must stay checked out pre-reclaim");
+    }
+
+    // Driver reclaims (NIC done): the next harvest posts F_NOTIF and checks in.
+    token.signal_reclaimed();
+    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    if ring.cq_tail != 1 {
+        return slopos_testing::fail!("exactly one F_NOTIF expected (cq_tail={})", ring.cq_tail);
+    }
+    let mut bytes = [0u8; 16];
+    ring.region
+        .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
+        .unwrap();
+    let cqe = Cqe::from_bytes(&bytes);
+    if cqe.user_data != 0xDEF
+        || (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
+        || (cqe.flags & SLOPRING_CQE_F_MORE) != 0
+    {
+        return slopos_testing::fail!("terminal CQE must be F_NOTIF only: {:?}", cqe);
+    }
+    if ring.buffers.check_out_fixed(0).is_err() {
+        return slopos_testing::fail!("buffer must be checked in after F_NOTIF");
+    }
+    TestResult::Pass
+}
+stest!(name = send_zc_deferred_notif_lifecycle, suite = slopring);
 
 /// Single-direct-copy cursor round-trip: a pattern seeded into a fixed pin
 /// reads back through a `VmReader` (`fixed_reader`, the send source), and a

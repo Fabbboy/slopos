@@ -137,6 +137,34 @@ pub fn test_page_alloc_refcount() -> TestResult {
     pass!()
 }
 
+/// `io_slices_len` truncates to the send length (not the whole pin) — the
+/// load-bearing zero-copy fix so a short `OP_SEND_ZC` never DMAs stale tail
+/// bytes — and `keepalive_frames` yields one independent owning ref per page
+/// (the driver-side guard against a teardown freeing pages mid-DMA).
+pub fn test_pinned_io_slices_len_and_keepalive() -> TestResult {
+    use crate::pinned_user_buffer::PinnedUserBuffer;
+    let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {
+        return fail!("pin alloc_for_test failed");
+    };
+    let full: u32 = pin.io_slices().iter().map(|s| s.len).sum();
+    assert_test!(full as usize == 8192, "full io_slices must cover the pin");
+    let part: u32 = pin.io_slices_len(100).iter().map(|s| s.len).sum();
+    assert_test!(part == 100, "io_slices_len(100) summed {}", part);
+    let cross: u32 = pin.io_slices_len(5000).iter().map(|s| s.len).sum();
+    assert_test!(cross == 5000, "io_slices_len(5000) summed {}", cross);
+    let capped: u32 = pin.io_slices_len(99999).iter().map(|s| s.len).sum();
+    assert_test!(capped as usize == 8192, "io_slices_len caps at pin length");
+    let Some(keepalive) = pin.keepalive_frames() else {
+        return fail!("keepalive_frames returned None");
+    };
+    assert_test!(
+        keepalive.len() == 2,
+        "keepalive page count {}",
+        keepalive.len()
+    );
+    pass!()
+}
+
 /// Test 6: Stats accuracy check
 pub fn test_page_alloc_stats() -> TestResult {
     let mut total = 0u32;
@@ -1660,6 +1688,10 @@ stest!(name = test_page_alloc_multi_order, suite = page_alloc);
 stest!(name = test_page_alloc_free_cycle, suite = page_alloc);
 stest!(name = test_page_alloc_zeroed, suite = page_alloc);
 stest!(name = test_page_alloc_refcount, suite = page_alloc);
+stest!(
+    name = test_pinned_io_slices_len_and_keepalive,
+    suite = page_alloc
+);
 stest!(name = test_page_alloc_stats, suite = page_alloc);
 stest!(name = test_page_alloc_free_null, suite = page_alloc);
 stest!(name = test_page_alloc_fragmentation, suite = page_alloc);

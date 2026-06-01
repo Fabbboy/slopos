@@ -216,15 +216,24 @@ impl PinnedUserBuffer {
         })
     }
 
-    /// Coalesced contiguous `(paddr, len)` runs over the pinned range, for
-    /// NIC DMA (a TX descriptor can point at each run directly). The
+    /// Coalesced contiguous `(paddr, len)` runs over the whole pinned range,
+    /// for NIC DMA (a TX descriptor can point at each run directly). The
     /// first/last runs honour `base_off` and the tail partial page.
     pub fn io_slices(&self) -> KVec<UIoSlice> {
+        self.io_slices_len(self.len)
+    }
+
+    /// Coalesced contiguous `(paddr, len)` runs over the **first `len` bytes**
+    /// of the pinned range (`len` clamped to the pin length), for a zero-copy
+    /// send of fewer bytes than the registered buffer holds. Walking only the
+    /// send length is load-bearing: coalescing the whole pin would point the
+    /// NIC at stale tail bytes past the datagram.
+    pub fn io_slices_len(&self, len: usize) -> KVec<UIoSlice> {
         let mut out: KVec<UIoSlice> = KVec::new();
         if self.frames.is_empty() {
             return out;
         }
-        let mut remaining = self.len;
+        let mut remaining = len.min(self.len);
         let mut run_start: u64 = 0;
         let mut run_len: u32 = 0;
         let mut next_contig: u64 = 0;
@@ -259,5 +268,23 @@ impl PinnedUserBuffer {
             });
         }
         out
+    }
+
+    /// Take an **independent** owning ref on every backing page, so the pages
+    /// stay pinned even if this `PinnedUserBuffer` (and the registry that owns
+    /// it) is dropped. A NIC TX DMA driven from [`io_slices`](Self::io_slices)
+    /// outlives the ring on a process exit / ring-fd close; the driver holds
+    /// this keepalive in its TX slot and drops it only after the device
+    /// reclaims the descriptor, closing the use-after-free where the pages
+    /// would be recycled mid-DMA. Re-wrapping a live paddr bumps the frame
+    /// slot's ref count (`from_in_use`); the last wrapper to drop frees it.
+    /// `None` if the per-page list cannot be allocated.
+    pub fn keepalive_frames(&self) -> Option<KVec<UFrame<AnonymousMeta>>> {
+        let mut frames = KVec::with_capacity(self.frames.len()).ok()?;
+        for frame in self.frames.iter() {
+            let dup = UFrame::<AnonymousMeta>::wrap_user_paddr(frame.paddr()).ok()?;
+            frames.push(dup).ok()?;
+        }
+        Some(frames)
     }
 }

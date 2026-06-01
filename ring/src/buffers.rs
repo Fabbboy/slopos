@@ -27,6 +27,9 @@ use slopos_abi::ring::{
 };
 use slopos_mm::pinned_user_buffer::{PinError, PinnedUserBuffer};
 use slopos_ostd::KVec;
+use slopos_ostd::TxReclaimToken;
+use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::{VmReader, VmWriter};
 
 /// Which registered buffer an SQE selects. `None` (neither flag set) is the
@@ -142,11 +145,32 @@ impl ProvidedBufRing {
     }
 }
 
+/// One in-flight zero-copy send (`OP_SEND_ZC`) awaiting its deferred
+/// `SLOPRING_CQE_F_NOTIF`. The result CQE is posted at submit; this row keeps
+/// the fixed buffer checked out until the driver reclaims the NIC TX descriptor
+/// (the `token` flips), at which point the harvest posts `F_NOTIF` and checks
+/// the buffer back in. Kept in a side table (not an `InFlight` row) because the
+/// token is not `Copy` and the row must **not** be re-probed (that would
+/// re-send).
+struct DeferredNotif {
+    user_data: u64,
+    token: TxReclaimToken,
+    snapshot: u64,
+    buf_index: u16,
+}
+
 /// The per-ring buffer registry, owned by [`crate::ring_obj::Ring`] (so it
 /// shares the per-ring lock — single writer at a time).
 pub struct BufferRegistry {
     fixed: Option<FixedBufferSet>,
     provided: KVec<ProvidedBufRing>,
+    /// In-flight zero-copy sends awaiting their deferred `F_NOTIF`. Pre-grown to
+    /// the fixed-buffer count at `register_fixed` so [`push_deferred`] never
+    /// reallocates (a buffer index can hold at most one in-flight ZC send — a
+    /// second `check_out_fixed` is rejected — so the table never exceeds it).
+    ///
+    /// [`push_deferred`]: Self::push_deferred
+    deferred: KVec<DeferredNotif>,
 }
 
 impl BufferRegistry {
@@ -154,6 +178,7 @@ impl BufferRegistry {
         Self {
             fixed: None,
             provided: KVec::new(),
+            deferred: KVec::new(),
         }
     }
 
@@ -180,10 +205,15 @@ impl BufferRegistry {
             let pin = PinnedUserBuffer::pin(pid, addr, len as usize).map_err(pin_errno)?;
             pins.push(pin).map_err(|_| Errno::ENOMEM)?;
         }
+        // Pre-grow the deferred-notify side table to the buffer count so
+        // `push_deferred` (after a zero-copy submit that cannot be undone) never
+        // reallocates — at most one in-flight ZC send per buffer index.
+        let deferred = KVec::with_capacity(pins.len()).map_err(|_| Errno::ENOMEM)?;
         self.fixed = Some(FixedBufferSet {
             pins,
             checked_out: BufBitset::new(),
         });
+        self.deferred = deferred;
         Ok(())
     }
 
@@ -260,6 +290,84 @@ impl BufferRegistry {
     pub fn fixed_len_of(&self, index: u16) -> Result<usize, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         Ok(set.pins.get(index as usize).ok_or(Errno::EINVAL)?.len())
+    }
+
+    /// Coalesced physical `(paddr, len)` runs over the first `len` bytes of fixed
+    /// buffer `index` — the scatter-gather payload runs a NIC DMAs straight from
+    /// the pinned pages (`OP_SEND_ZC` zero-copy path).
+    pub fn fixed_io_slices(&self, index: u16, len: usize) -> Result<KVec<(u64, u32)>, Errno> {
+        let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
+        let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
+        let n = len.min(pin.len());
+        let slices = pin.io_slices_len(n);
+        let mut out = KVec::with_capacity(slices.len()).map_err(|_| Errno::ENOMEM)?;
+        for s in slices.iter() {
+            out.push((s.paddr, s.len)).map_err(|_| Errno::ENOMEM)?;
+        }
+        Ok(out)
+    }
+
+    /// An **independent** owning ref on every backing page of fixed buffer
+    /// `index`, handed to the driver so the pinned pages survive a ring/process
+    /// teardown that drops this registry while the NIC is still DMAing them
+    /// (the use-after-free guard; the registry's own pin + `checked_out` guard
+    /// only the explicit unregister syscall). `None` if out of range / alloc.
+    pub fn fixed_keepalive(&self, index: u16) -> Option<KVec<UFrame<AnonymousMeta>>> {
+        let set = self.fixed.as_ref()?;
+        let pin = set.pins.get(index as usize)?;
+        pin.keepalive_frames()
+    }
+
+    /// Record an in-flight zero-copy send awaiting its deferred `F_NOTIF`. The
+    /// fixed buffer stays checked out (held by this entry) until the driver
+    /// reclaims the NIC descriptor and [`take_reclaimed`] retires it. Infallible
+    /// — the table was pre-grown at `register_fixed` (see [`deferred`]).
+    ///
+    /// [`take_reclaimed`]: Self::take_reclaimed
+    /// [`deferred`]: Self::deferred
+    pub fn push_deferred(
+        &mut self,
+        user_data: u64,
+        token: TxReclaimToken,
+        snapshot: u64,
+        buf_index: u16,
+    ) {
+        let _ = self.deferred.push(DeferredNotif {
+            user_data,
+            token,
+            snapshot,
+            buf_index,
+        });
+    }
+
+    /// `true` iff any zero-copy send is in flight awaiting its deferred
+    /// `F_NOTIF` — the harvest uses this to decide whether to drive a device TX
+    /// reclaim before checking the tokens.
+    pub fn has_deferred(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
+    /// Drain every deferred zero-copy send whose driver has reclaimed the NIC TX
+    /// descriptor since submit (`token.is_reclaimed(snapshot)`), returning the
+    /// `(user_data, buf_index)` of each so the caller can post `F_NOTIF` and
+    /// `check_in_fixed` **after** this `&mut self` borrow ends (the harvest
+    /// double-borrow fix).
+    pub fn take_reclaimed(&mut self) -> KVec<(u64, u16)> {
+        let mut out: KVec<(u64, u16)> = KVec::new();
+        let mut i = 0;
+        while i < self.deferred.len() {
+            if self.deferred[i]
+                .token
+                .is_reclaimed(self.deferred[i].snapshot)
+            {
+                let entry = self.deferred.swap_remove(i);
+                let _ = out.push((entry.user_data, entry.buf_index));
+                // swap_remove moved a new element into `i`; re-check it.
+            } else {
+                i += 1;
+            }
+        }
+        out
     }
 
     // ----- provided buffer rings (RING_REGISTER_PBUF_RING) -----------------

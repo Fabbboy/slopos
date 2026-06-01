@@ -47,6 +47,15 @@ pub enum Outcome {
     /// is reusable the instant the copy completes, so the notification is
     /// posted immediately after the result (io_uring's `COPIED` fallback).
     InlineNotif(i32),
+    /// Zero-copy send queued for true NIC DMA (`OP_SEND_ZC`): post the
+    /// result CQE carrying `res` + `SLOPRING_CQE_F_MORE` now, but **defer** the
+    /// terminal `SLOPRING_CQE_F_NOTIF` until the driver reclaims the NIC TX
+    /// descriptor (the buffer is still being DMA'd). The token + buffer
+    /// reservation are already recorded in the registry's deferred side table
+    /// (`send_zc_fixed` pushed them); the harvest posts `F_NOTIF` + checks the
+    /// buffer back in once the token flips. The fixed buffer is **not** released
+    /// here — it stays checked out across the DMA.
+    DeferredNotif(i32),
 }
 
 /// Decode the buffer selection an SQE requests (mutually exclusive flags). The
@@ -125,9 +134,15 @@ pub fn probe(pid: u32, sqe: &Sqe, buffers: &mut BufferRegistry) -> Outcome {
         // provided selections are rejected. On success it posts the two-CQE
         // notification protocol (result + F_NOTIF) — see `send_zc_fixed`.
         OP_SEND_ZC => match sel {
-            Some(BufSel::Fixed { index }) => {
-                crate::net_glue::send_zc_fixed(pid, sqe.fd, index, sqe.len, sqe.op_flags, buffers)
-            }
+            Some(BufSel::Fixed { index }) => crate::net_glue::send_zc_fixed(
+                pid,
+                sqe.fd,
+                index,
+                sqe.len,
+                sqe.user_data,
+                sqe.op_flags,
+                buffers,
+            ),
             None | Some(BufSel::Provided { .. }) => Outcome::Inline(Errno::EINVAL.raw()),
         },
         OP_RECVMSG => match sel {

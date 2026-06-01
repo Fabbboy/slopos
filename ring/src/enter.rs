@@ -338,14 +338,22 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
             }
         }
         Outcome::InlineNotif(res) => {
-            // Zero-copy send (OP_SEND_ZC): the result CQE carries F_MORE
-            // ("notification to follow"), then a terminal F_NOTIF CQE signals
-            // the registered buffer is reusable. On the single-direct-copy
-            // backend the buffer is reusable the instant the copy returns, so
-            // the notification follows immediately (io_uring COPIED fallback).
+            // Zero-copy send (OP_SEND_ZC) on the single-direct-copy backend: the
+            // result CQE carries F_MORE ("notification to follow"), then a
+            // terminal F_NOTIF CQE signals the registered buffer is reusable.
+            // The copy makes the buffer reusable the instant it returns, so the
+            // notification follows immediately (io_uring COPIED fallback).
             let _ = ring.post_cqe(sqe.user_data, res, SLOPRING_CQE_F_MORE);
             let _ = ring.post_cqe(sqe.user_data, 0, SLOPRING_CQE_F_NOTIF);
             release_fixed(ring, sel);
+        }
+        Outcome::DeferredNotif(res) => {
+            // Zero-copy send queued for true NIC DMA: post the result
+            // (F_MORE) now; the terminal F_NOTIF is deferred until the driver
+            // reclaims the TX descriptor (recorded in the registry's deferred
+            // table, drained by the harvest). Do NOT release the fixed buffer —
+            // it stays checked out across the DMA.
+            let _ = ring.post_cqe(sqe.user_data, res, SLOPRING_CQE_F_MORE);
         }
     }
 }
@@ -587,8 +595,9 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
                 }
             }
             Outcome::InlineNotif(res) => {
-                // A deferred OP_SEND_ZC that became sendable: post the two-CQE
-                // result (F_MORE) + notification (F_NOTIF), then retire the row.
+                // A deferred OP_SEND_ZC that became sendable on the copy backend:
+                // post the two-CQE result (F_MORE) + notification (F_NOTIF), then
+                // retire the row.
                 if let Some(i) = ring.inflight.find_user_data(row.user_data) {
                     if let Some(r) = ring.inflight.remove_at(i) {
                         let _ = ring.post_cqe(r.user_data, res, SLOPRING_CQE_F_MORE);
@@ -597,8 +606,33 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
                     }
                 }
             }
+            Outcome::DeferredNotif(res) => {
+                // A would-blocked OP_SEND_ZC that got queued to the NIC on
+                // re-probe: post the result (F_MORE) and retire the in-flight
+                // row, but keep the buffer checked out — the registry's deferred
+                // table now holds it until the reclaim posts F_NOTIF.
+                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
+                    if let Some(r) = ring.inflight.remove_at(i) {
+                        let _ = ring.post_cqe(r.user_data, res, SLOPRING_CQE_F_MORE);
+                    }
+                }
+            }
             Outcome::WouldBlock => {}
         }
+    }
+
+    // Drive a device TX reclaim for any in-flight zero-copy send, then post the
+    // deferred F_NOTIF for each the driver has now reclaimed and check its fixed
+    // buffer back in. The waiter polls its own TX completion (caller-as-waiter),
+    // so a deferred F_NOTIF makes progress without a TX-completion interrupt.
+    // Collected first (so the `&mut buffers` borrow ends) then posted.
+    if ring.buffers.has_deferred() {
+        slopos_net::netdev::DEVICE_REGISTRY.poll_tx_all();
+    }
+    let reclaimed = ring.buffers.take_reclaimed();
+    for (user_data, buf_index) in reclaimed.iter().copied() {
+        let _ = ring.post_cqe(user_data, 0, SLOPRING_CQE_F_NOTIF);
+        ring.buffers.check_in_fixed(buf_index);
     }
 
     let cq_head = ring.read_cq_head().unwrap_or(0);
@@ -635,8 +669,12 @@ fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
         // one signed result; WouldBlock means drained.
         let res = match opcode::reprobe(pid, row, &mut *ring.buffers) {
             // A multishot row never carries OP_SEND_ZC (not multishot-supported),
-            // so InlineNotif is unreachable here; collapse it for exhaustiveness.
-            Outcome::Inline(res) | Outcome::InlineBuf(res, _) | Outcome::InlineNotif(res) => res,
+            // so InlineNotif/DeferredNotif are unreachable here; collapse them
+            // for exhaustiveness.
+            Outcome::Inline(res)
+            | Outcome::InlineBuf(res, _)
+            | Outcome::InlineNotif(res)
+            | Outcome::DeferredNotif(res) => res,
             Outcome::WouldBlock => {
                 // Drained: leave armed, post nothing (no flood).
                 return;

@@ -3,6 +3,7 @@
 
 pub mod tcp_common;
 
+pub mod checksum_tests;
 pub mod dns_tests;
 pub mod icmp_tests;
 pub mod ingress_tests;

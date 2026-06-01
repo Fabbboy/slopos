@@ -1,7 +1,10 @@
 use core::fmt;
 
 use slopos_ostd::KVec;
+use slopos_ostd::TxReclaimToken;
+use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::{VmReader, VmWriter};
 use slopos_ostd::write_field;
 use slopos_ostd::{Bitmap, words_for};
@@ -2159,6 +2162,63 @@ pub fn socket_send_pinned(sock_idx: u32, reader: &mut VmReader<'_>) -> i64 {
             nonblocking,
             timeout_ms,
         } => socket_send_tcp_pinned(sock_idx, tcp_idx, nonblocking, timeout_ms, reader),
+    }
+}
+
+/// Outcome of a zero-copy send attempt (SlopRing `OP_SEND_ZC`).
+pub enum ZcSendOutcome {
+    /// Queued to the NIC for direct DMA from the pinned pages — `usize` payload
+    /// bytes. The `SLOPRING_CQE_F_NOTIF` is **deferred** until the device
+    /// reclaims the TX descriptor (the `TxReclaimToken` flips).
+    Submitted(usize),
+    /// Not a zero-copy candidate (TCP/unix, cold ARP, no TX checksum offload,
+    /// oversized, …) — the caller falls back to the single-direct-copy leaf,
+    /// which queues + drives ARP and delivers the authoritative result/error.
+    NotEligible,
+    /// The device TX ring is full — the ring defers and re-attempts the send.
+    WouldBlock,
+}
+
+/// True NIC-DMA zero-copy `socket_send` (SlopRing `OP_SEND_ZC`). Shares
+/// [`socket_send_resolve`] with the slice / single-copy paths (identical
+/// auto-bind + connected-state handling), then routes connected **UDP** and
+/// **ICMP echo** through the NIC-DMA leaves; every other case (TCP, unix, any
+/// resolve error) is [`ZcSendOutcome::NotEligible`] so the caller uses the
+/// single-copy leaf. `runs` are the coalesced pinned `(paddr, len)` physical
+/// runs (summing to `total_len`); `reader` is the same pinned range as a
+/// volatile cursor (used only by ICMP for its CPU-side checksum);
+/// `keepalive`/`token` are handed to the driver to hold across the DMA.
+pub fn socket_send_zerocopy(
+    sock_idx: u32,
+    runs: &[(u64, u32)],
+    reader: &mut VmReader<'_>,
+    total_len: usize,
+    keepalive: KVec<UFrame<AnonymousMeta>>,
+    token: TxReclaimToken,
+) -> ZcSendOutcome {
+    let target = match socket_send_resolve(sock_idx, total_len) {
+        Ok(t) => t,
+        Err(_) => return ZcSendOutcome::NotEligible,
+    };
+    match target {
+        SendTarget::Udp { local, remote } => crate::udp::udp_sendto_zerocopy(
+            local.ip.0,
+            remote.ip.0,
+            local.port.0,
+            remote.port.0,
+            runs,
+            total_len,
+            keepalive,
+            token,
+        ),
+        SendTarget::Icmp {
+            remote_ip,
+            identifier,
+            sequence,
+        } => crate::icmp::send_echo_request_zerocopy(
+            remote_ip, identifier, sequence, runs, reader, total_len, keepalive, token,
+        ),
+        SendTarget::Tcp { .. } => ZcSendOutcome::NotEligible,
     }
 }
 

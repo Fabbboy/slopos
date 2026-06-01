@@ -21,8 +21,11 @@ use slopos_mm::user_copy::{
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
+use slopos_net::socket::ZcSendOutcome;
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{socket, unix_socket, unix_socket_file_ops};
+
+use slopos_ostd::TxReclaimToken;
 
 use crate::buffers::BufferRegistry;
 use crate::opcode::Outcome;
@@ -560,22 +563,26 @@ pub fn send_fixed(
 }
 
 /// `OP_SEND_ZC` from registered fixed buffer `index`: the io_uring zero-copy
-/// send. The data path is the same single-direct-copy `socket_send_pinned` /
-/// `unix_send_from` leaf as [`send_fixed`] (one volatile copy straight from the
-/// pinned pages into the socket buffer — the true NIC-DMA 0-copy submit is a
-/// follow-up). The difference is the **completion contract**: on a
-/// successful send the op posts the two-CQE notification protocol
-/// ([`Outcome::InlineNotif`]) — a result CQE with `SLOPRING_CQE_F_MORE` then a
-/// terminal CQE with `SLOPRING_CQE_F_NOTIF` telling userland the registered
-/// buffer is reusable. On the single-copy backend the buffer is reusable the
-/// instant the copy returns, so the notification follows immediately (io_uring's
-/// `COPIED` fallback). A real error (`rc < 0`) posts a single CQE (no
-/// notification, matching io_uring); a would-block defers like `send_fixed`.
+/// send (true NIC-DMA).
+///
+/// For a connected **AF_INET UDP/ICMP** socket it first attempts the true
+/// NIC-DMA path ([`try_send_zc_inet`]): the NIC DMAs the payload straight from
+/// the pinned pages (0 CPU copies) and the buffer is **not** reusable until the
+/// device reclaims the descriptor, so it returns [`Outcome::DeferredNotif`] —
+/// the result CQE (`F_MORE`) posts now and the terminal `F_NOTIF` is deferred
+/// until the harvest observes the reclaim token flip. When the destination
+/// isn't a zero-copy candidate (cold ARP, no checksum offload, TCP, …) it falls
+/// back to the **single-direct-copy** leaf (one volatile copy pinned-pages →
+/// socket buffer), whose buffer is reusable the instant the copy returns, so it
+/// posts the two CQEs immediately ([`Outcome::InlineNotif`], io_uring's `COPIED`
+/// fallback). AF_UNIX always uses the copy leaf. A real error (`rc < 0`) posts a
+/// single CQE; a would-block defers.
 pub fn send_zc_fixed(
     pid: u32,
     fd: i32,
     index: u16,
     len: u32,
+    user_data: u64,
     _op_flags: u32,
     reg: &mut BufferRegistry,
 ) -> Outcome {
@@ -586,6 +593,15 @@ pub fn send_zc_fixed(
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
+
+    // AF_INET: try true NIC-DMA zero-copy first; `None` means not a candidate,
+    // fall through to the single-direct-copy leaf below.
+    if !ops.is_unix_socket()
+        && let Some(out) = try_send_zc_inet(handle as u32, index, len, user_data, reg)
+    {
+        return out;
+    }
+
     let mut reader = match reg.fixed_reader(index, len as usize) {
         Ok(r) => r,
         Err(e) => return Outcome::Inline(e.raw()),
@@ -602,7 +618,57 @@ pub fn send_zc_fixed(
     } else if rc < 0 {
         Outcome::Inline(rc) // failed before the buffer was used → single CQE
     } else {
-        Outcome::InlineNotif(rc) // sent → result (F_MORE) then F_NOTIF
+        Outcome::InlineNotif(rc) // sent → result (F_MORE) then F_NOTIF (copied)
+    }
+}
+
+/// Attempt a true NIC-DMA zero-copy send of fixed buffer `index` on AF_INET
+/// socket `idx`. Returns:
+///   * `Some(Outcome::DeferredNotif(n))` — queued to the NIC; the deferred-notif
+///     row is recorded in `reg` (buffer stays checked out until the token flips);
+///   * `Some(Outcome::WouldBlock)`      — device TX ring full, defer + re-probe;
+///   * `None`                            — not a zero-copy candidate (or the
+///     token / keepalive / slices could not be built); caller uses the copy leaf.
+///
+/// Nothing is submitted on the `None` path, so the copy fallback is sound. The
+/// reclaim snapshot is taken **before** the submit (so a fast reclaim is never
+/// missed) and `push_deferred` runs **after** a successful submit (and is
+/// infallible — the table was pre-grown).
+fn try_send_zc_inet(
+    idx: u32,
+    index: u16,
+    len: u32,
+    user_data: u64,
+    reg: &mut BufferRegistry,
+) -> Option<Outcome> {
+    let token = TxReclaimToken::new()?;
+    let snapshot = token.snapshot();
+    let slices = reg.fixed_io_slices(index, len as usize).ok()?;
+    if slices.is_empty() {
+        return None; // empty datagram → copy leaf
+    }
+    let keepalive = reg.fixed_keepalive(index)?;
+    // Scope the reader (it borrows `reg`) so the `&mut reg` for `push_deferred`
+    // is free afterward. ICMP uses the reader for its CPU-side checksum; UDP
+    // ignores it (hardware checksum offload).
+    let outcome = {
+        let mut reader = reg.fixed_reader(index, len as usize).ok()?;
+        socket::socket_send_zerocopy(
+            idx,
+            &slices,
+            &mut reader,
+            len as usize,
+            keepalive,
+            token.clone(),
+        )
+    };
+    match outcome {
+        ZcSendOutcome::Submitted(n) => {
+            reg.push_deferred(user_data, token, snapshot, index);
+            Some(Outcome::DeferredNotif(n as i32))
+        }
+        ZcSendOutcome::WouldBlock => Some(Outcome::WouldBlock),
+        ZcSendOutcome::NotEligible => None,
     }
 }
 

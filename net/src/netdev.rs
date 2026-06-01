@@ -25,12 +25,27 @@
 use core::fmt;
 
 use bitflags::bitflags;
+use slopos_ostd::TxReclaimToken;
+use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec};
 
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;
 use super::types::{DevIndex, MacAddr, NetError};
+
+/// Hardware TX checksum-offload descriptor for a zero-copy send. The device
+/// computes the one's-complement checksum of the frame from `csum_start` to the
+/// end and stores it at `csum_start + csum_offset` (the virtio `NEEDS_CSUM`
+/// model). Offsets are relative to the start of the L2 frame (i.e. *after* any
+/// driver-private header such as the `virtio_net_hdr`). For UDP over IPv4:
+/// `csum_start = 14 + 20 = 34`, `csum_offset = 6`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CsumOffload {
+    pub csum_start: u16,
+    pub csum_offset: u16,
+}
 
 // =============================================================================
 // 1C.1 — NetDevice trait
@@ -55,6 +70,37 @@ pub trait NetDevice: Send + Sync {
     ///
     /// Returns `Err(NoBufferSpace)` if the TX ring is full.
     fn tx(&self, pkt: PacketBuf) -> Result<(), NetError>;
+
+    /// Transmit one packet **zero-copy**: the device DMAs the payload straight
+    /// from the pinned user pages (`runs` = coalesced `(paddr, len)` physical
+    /// runs), prepended by the kernel-built L2/L3/L4 headers in `net_hdr`. The
+    /// driver keeps `keepalive` (independent owning refs on the pinned pages)
+    /// and `token` until the NIC reclaims the descriptor — then it drops the
+    /// keepalive and signals the token so the ring can post `SLOPRING_CQE_F_NOTIF`.
+    ///
+    /// `csum` requests hardware checksum offload (UDP); `None` means the L4
+    /// checksum is already complete in `net_hdr` (ICMP). The default impl
+    /// rejects zero-copy (loopback and devices without DMA SG) so only the
+    /// NIC driver needs to implement it.
+    fn tx_zerocopy(
+        &self,
+        net_hdr: &[u8],
+        runs: &[(u64, u32)],
+        csum: Option<CsumOffload>,
+        keepalive: KVec<UFrame<AnonymousMeta>>,
+        token: TxReclaimToken,
+    ) -> Result<(), NetError> {
+        let _ = (net_hdr, runs, csum, keepalive, token);
+        Err(NetError::OperationNotSupported)
+    }
+
+    /// Reclaim completed TX descriptors from the device's used ring (TX only —
+    /// distinct from `poll_rx`, which is NAPI-single-consumer). Safe to call
+    /// from any context; used by the SlopRing harvest to flip the zero-copy
+    /// reclaim token (post `SLOPRING_CQE_F_NOTIF`) without depending on a TX
+    /// completion interrupt firing while the waiter is parked. Default no-op
+    /// (loopback / devices with no deferred-reclaim notion).
+    fn poll_tx(&self) {}
 
     /// Drain up to `budget` received packets from the RX ring, allocating
     /// [`PacketBuf`] from `pool`.
@@ -465,6 +511,42 @@ impl NetDeviceRegistry {
         match inner.slots.get(index.0) {
             Some(Some(dev)) => dev.tx(pkt),
             _ => Err(NetError::NetworkUnreachable),
+        }
+    }
+
+    /// Zero-copy transmit through a device identified by index (see
+    /// [`NetDevice::tx_zerocopy`]). Mirrors [`tx_by_index`](Self::tx_by_index)'s
+    /// registry-lock shape so the SlopRing `OP_SEND_ZC` path keeps the exact
+    /// lock ordering of the copy path (ring → registry → device state) — no new
+    /// cross-lock edge.
+    pub fn tx_zerocopy_by_index(
+        &self,
+        index: DevIndex,
+        net_hdr: &[u8],
+        runs: &[(u64, u32)],
+        csum: Option<CsumOffload>,
+        keepalive: KVec<UFrame<AnonymousMeta>>,
+        token: TxReclaimToken,
+    ) -> Result<(), NetError> {
+        let inner = self.inner.lock();
+        match inner.slots.get(index.0) {
+            Some(Some(dev)) => dev.tx_zerocopy(net_hdr, runs, csum, keepalive, token),
+            _ => Err(NetError::NetworkUnreachable),
+        }
+    }
+
+    /// Reclaim completed TX descriptors on every registered device (see
+    /// [`NetDevice::poll_tx`]). The SlopRing harvest calls this when it has
+    /// in-flight zero-copy sends so the deferred `SLOPRING_CQE_F_NOTIF` makes
+    /// progress without relying on a TX-completion interrupt — the waiter drives
+    /// its own reclaim (caller-as-waiter). Takes only the registry lock; each
+    /// device's `poll_tx` takes its own state lock.
+    pub fn poll_tx_all(&self) {
+        let inner = self.inner.lock();
+        for slot in inner.slots.iter() {
+            if let Some(dev) = slot {
+                dev.poll_tx();
+            }
         }
     }
 

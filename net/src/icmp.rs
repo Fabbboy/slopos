@@ -308,6 +308,102 @@ pub fn send_echo_request_from(
     Ok(copied)
 }
 
+/// True NIC-DMA zero-copy echo request (SlopRing `OP_SEND_ZC`): the
+/// echo payload is **never** copied into a packet buffer — the NIC DMAs it
+/// straight from the pinned user pages (`runs`). Only the 42-byte header is
+/// built. ICMP has no pseudo-header and QEMU virtio-net does not offload ICMP
+/// checksums, so the checksum is computed over the 8-byte ICMP header + the
+/// payload read **once** via `reader` (a single volatile pass, no staging copy)
+/// and written into the header; the device does no checksum work (`csum=None`).
+///
+/// Eligibility mirrors [`crate::udp::udp_sendto_zerocopy`] (unicast, route,
+/// resolved neighbor, size); a miss returns [`ZcSendOutcome::NotEligible`] so
+/// the caller falls back to the single-copy leaf.
+pub fn send_echo_request_zerocopy(
+    dst_ip: [u8; 4],
+    identifier: u16,
+    sequence: u16,
+    runs: &[(u64, u32)],
+    reader: &mut slopos_ostd::mm::VmReader<'_>,
+    total_len: usize,
+    keepalive: slopos_ostd::KVec<
+        slopos_ostd::mm::uframe::UFrame<slopos_ostd::mm::frame::AnonymousMeta>,
+    >,
+    token: slopos_ostd::TxReclaimToken,
+) -> crate::socket::ZcSendOutcome {
+    use super::netdev::DEVICE_REGISTRY;
+    use crate::socket::ZcSendOutcome;
+
+    if total_len == 0 || total_len > 1472 {
+        return ZcSendOutcome::NotEligible;
+    }
+    let dst = Ipv4Addr(dst_ip);
+    if dst.is_loopback() || dst.is_broadcast() || dst.is_multicast() {
+        return ZcSendOutcome::NotEligible;
+    }
+    let Some((dev, next_hop)) = super::route::ROUTE_TABLE.lookup(dst) else {
+        return ZcSendOutcome::NotEligible;
+    };
+    if next_hop.is_loopback() {
+        return ZcSendOutcome::NotEligible;
+    }
+    let Some(dst_mac) = super::neighbor::NEIGHBOR_CACHE.lookup(dev, next_hop) else {
+        return ZcSendOutcome::NotEligible;
+    };
+    let Some(src_mac) = DEVICE_REGISTRY.mac_by_index(dev) else {
+        return ZcSendOutcome::NotEligible;
+    };
+    let src_ip = crate::netstack::NET_STACK
+        .source_ip_for(Ipv4Addr(dst_ip))
+        .map(|ip| ip.0)
+        .unwrap_or([0; 4]);
+
+    let icmp_len = ICMP_HEADER_LEN + total_len;
+    let ip_total = super::IPV4_HEADER_LEN + icmp_len;
+    let mut hdr = [0u8; super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN + ICMP_HEADER_LEN];
+    // Ethernet (0..14).
+    hdr[0..6].copy_from_slice(&dst_mac.0);
+    hdr[6..12].copy_from_slice(&src_mac.0);
+    hdr[12..14].copy_from_slice(&super::EtherType::Ipv4.to_be_bytes());
+    // IPv4 (14..34).
+    {
+        let ip = &mut hdr[super::ETH_HEADER_LEN..super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN];
+        ip[0] = 0x45;
+        ip[1] = 0;
+        ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
+        ip[4..8].copy_from_slice(&[0; 4]);
+        ip[8] = 64;
+        ip[9] = super::IpProtocol::Icmp.as_u8();
+        ip[10..12].copy_from_slice(&[0; 2]);
+        ip[12..16].copy_from_slice(&src_ip);
+        ip[16..20].copy_from_slice(&dst_ip);
+        let ip_csum = super::checksum::internet_checksum(ip);
+        ip[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+    }
+    // ICMP (34..42): header with checksum=0, then compute over header + payload.
+    let l4 = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
+    {
+        let icmp = &mut hdr[l4..l4 + ICMP_HEADER_LEN];
+        icmp[0] = ICMP_TYPE_ECHO_REQUEST;
+        icmp[1] = 0;
+        icmp[2..4].copy_from_slice(&0u16.to_be_bytes());
+        icmp[4..6].copy_from_slice(&identifier.to_be_bytes());
+        icmp[6..8].copy_from_slice(&sequence.to_be_bytes());
+    }
+    let mut sum = super::checksum::ones_complement_sum(&hdr[l4..l4 + ICMP_HEADER_LEN]);
+    sum = sum.wrapping_add(super::checksum::ones_complement_sum_reader(
+        reader, total_len,
+    ));
+    let icmp_csum = super::checksum::fold(sum);
+    hdr[l4 + 2..l4 + 4].copy_from_slice(&icmp_csum.to_be_bytes());
+
+    match DEVICE_REGISTRY.tx_zerocopy_by_index(dev, &hdr, runs, None, keepalive, token) {
+        Ok(()) => ZcSendOutcome::Submitted(total_len),
+        Err(NetError::NoBufferSpace) => ZcSendOutcome::WouldBlock,
+        Err(_) => ZcSendOutcome::NotEligible,
+    }
+}
+
 pub fn icmp_bind(sock_idx: u32, identifier: u16, reuse_addr: bool) -> Result<(), NetError> {
     ICMP_DEMUX.lock().register(identifier, sock_idx, reuse_addr)
 }

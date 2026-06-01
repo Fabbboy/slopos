@@ -14,7 +14,7 @@
 
 use slopos_userland as _;
 
-use slopos_abi::net::{AF_INET, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
+use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::ring::{
     BufIovec, OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_SEND_ZC,
     OP_WRITE, RegisterBufRingCmd, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
@@ -639,7 +639,11 @@ fn test_udp_send_zc_two_cqe() -> bool {
     sqe.buf_index = 0;
     sqe.len = payload.len() as u32;
     sqe.user_data = 0x5C1;
-    if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
+    // Block for both CQEs: on the deferred NIC-DMA path the F_NOTIF arrives only
+    // after the device reclaims the TX descriptor (a harvest re-poll), so a
+    // bare `submit()` + `poll_completion()` would miss it. `submit_and_wait(2)`
+    // is correct for both the deferred and the copy-fallback paths.
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(2).is_err() {
         return false;
     }
     // First CQE: the send result, carrying F_MORE and not yet F_NOTIF.
@@ -657,6 +661,131 @@ fn test_udp_send_zc_two_cqe() -> bool {
         return false;
     };
     cqe2.user_data == 0x5C1
+        && (cqe2.flags & SLOPRING_CQE_F_NOTIF) != 0
+        && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
+}
+
+/// `OP_SEND_ZC` over a **warmed** connection takes the true NIC-DMA zero-copy
+/// path: the payload is DMA'd straight from the pinned buffer and the
+/// terminal `SLOPRING_CQE_F_NOTIF` is **deferred** until the device reclaims the
+/// TX descriptor (QEMU SLIRP returns it), observed by a harvest re-poll. Warms
+/// the gateway neighbor first so the send resolves a MAC (else it falls back to
+/// the copy path, which still yields the two-CQE protocol). Either way the
+/// blocking `submit_and_wait(2)` collects both CQEs.
+fn test_udp_send_zc_two_cqe_deferred() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
+        return false;
+    };
+    let dst = SockAddrIn {
+        family: AF_INET,
+        port: 9999u16.to_be(),
+        addr: [10, 0, 2, 2],
+        _pad: [0; 8],
+    };
+    if net::connect(sock.raw(), &dst).is_err() {
+        return false;
+    }
+    // Warm the neighbor cache: a normal datagram drives the ARP request; the
+    // reply lands via NAPI so the zero-copy send can resolve the gateway MAC.
+    let _ = net::send(sock.raw(), b"warm", 0);
+
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let payload = b"slopring-zc-deferred";
+    let mut buf = [0u8; 64];
+    buf[..payload.len()].copy_from_slice(payload);
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND_ZC;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_FIXED_BUFFER;
+    sqe.buf_index = 0;
+    sqe.len = payload.len() as u32;
+    sqe.user_data = 0x5C2;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(2).is_err() {
+        return false;
+    }
+    let Some(cqe1) = ring.poll_completion() else {
+        return false;
+    };
+    if cqe1.user_data != 0x5C2 || cqe1.res < 0 {
+        return false;
+    }
+    if (cqe1.flags & SLOPRING_CQE_F_MORE) == 0 || (cqe1.flags & SLOPRING_CQE_F_NOTIF) != 0 {
+        return false;
+    }
+    let Some(cqe2) = ring.poll_completion() else {
+        return false;
+    };
+    cqe2.user_data == 0x5C2
+        && (cqe2.flags & SLOPRING_CQE_F_NOTIF) != 0
+        && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
+}
+
+/// `OP_SEND_ZC` on a connected ICMP socket exercises the ICMP zero-copy leaf:
+/// the echo payload is DMA'd from the pinned buffer while the kernel
+/// computes only the ICMP checksum (no hardware offload for ICMP). The two-CQE
+/// protocol (result `F_MORE` then deferred `F_NOTIF`) must hold.
+fn test_icmp_send_zc_two_cqe() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP) else {
+        return false;
+    };
+    let dst = SockAddrIn {
+        family: AF_INET,
+        port: 0,
+        addr: [10, 0, 2, 2],
+        _pad: [0; 8],
+    };
+    if net::connect(sock.raw(), &dst).is_err() {
+        return false;
+    }
+    let _ = net::send(sock.raw(), b"warm-icmp", 0); // warm the gateway neighbor
+
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let payload = b"slopring-icmp-zc";
+    let mut buf = [0u8; 64];
+    buf[..payload.len()].copy_from_slice(payload);
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND_ZC;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_FIXED_BUFFER;
+    sqe.buf_index = 0;
+    sqe.len = payload.len() as u32;
+    sqe.user_data = 0x1C3;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(2).is_err() {
+        return false;
+    }
+    let Some(cqe1) = ring.poll_completion() else {
+        return false;
+    };
+    if cqe1.user_data != 0x1C3 || cqe1.res < 0 {
+        return false;
+    }
+    if (cqe1.flags & SLOPRING_CQE_F_MORE) == 0 || (cqe1.flags & SLOPRING_CQE_F_NOTIF) != 0 {
+        return false;
+    }
+    let Some(cqe2) = ring.poll_completion() else {
+        return false;
+    };
+    cqe2.user_data == 0x1C3
         && (cqe2.flags & SLOPRING_CQE_F_NOTIF) != 0
         && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
 }
@@ -759,6 +888,11 @@ const CASES: &[(&str, fn() -> bool)] = &[
         test_send_zc_requires_fixed_buffer,
     ),
     ("udp_send_zc_two_cqe", test_udp_send_zc_two_cqe),
+    (
+        "udp_send_zc_two_cqe_deferred",
+        test_udp_send_zc_two_cqe_deferred,
+    ),
+    ("icmp_send_zc_two_cqe", test_icmp_send_zc_two_cqe),
     ("fixed_buffer_oob", test_fixed_buffer_oob),
     ("pbuf_ring_select_enobufs", test_pbuf_ring_select_enobufs),
 ];

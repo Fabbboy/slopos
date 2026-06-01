@@ -312,6 +312,109 @@ pub fn udp_sendto_from(
     Ok(copied)
 }
 
+/// True NIC-DMA zero-copy `udp_sendto` (SlopRing `OP_SEND_ZC`): the
+/// datagram payload is **never** copied — the NIC DMAs it straight from the
+/// pinned user pages (`runs` = coalesced `(paddr, len)` physical runs summing to
+/// `total_len`). Only the 42-byte L2/L3/L4 header is built (in a stack buffer);
+/// the UDP checksum is offloaded to the device via the pseudo-header seed +
+/// `CsumOffload`, so the CPU touches 0 payload bytes.
+///
+/// Eligibility (any miss returns [`ZcSendOutcome::NotEligible`] so the caller
+/// falls back to the single-copy leaf, which queues + drives ARP and computes
+/// the checksum CPU-side): unicast destination, a route, a **resolved** neighbor
+/// MAC (non-queuing cache peek — no ARP issued here), TX checksum offload, and
+/// `total_len <= 1472`. A full TX ring returns [`ZcSendOutcome::WouldBlock`]
+/// (the ring defers and re-attempts). `keepalive`/`token` are handed to the
+/// driver, which holds them until the NIC reclaims the descriptor.
+pub fn udp_sendto_zerocopy(
+    local_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    local_port: u16,
+    dst_port: u16,
+    runs: &[(u64, u32)],
+    total_len: usize,
+    keepalive: slopos_ostd::KVec<
+        slopos_ostd::mm::uframe::UFrame<slopos_ostd::mm::frame::AnonymousMeta>,
+    >,
+    token: slopos_ostd::TxReclaimToken,
+) -> crate::socket::ZcSendOutcome {
+    use super::netdev::{CsumOffload, DEVICE_REGISTRY, NetDeviceFeatures};
+    use crate::socket::ZcSendOutcome;
+
+    if total_len == 0 || total_len > 1472 {
+        return ZcSendOutcome::NotEligible;
+    }
+    let dst = Ipv4Addr(dst_ip);
+    if dst.is_loopback() || dst.is_broadcast() || dst.is_multicast() {
+        return ZcSendOutcome::NotEligible;
+    }
+    let Some((dev, next_hop)) = super::route::ROUTE_TABLE.lookup(dst) else {
+        return ZcSendOutcome::NotEligible;
+    };
+    if next_hop.is_loopback() {
+        return ZcSendOutcome::NotEligible;
+    }
+    let Some(dst_mac) = super::neighbor::NEIGHBOR_CACHE.lookup(dev, next_hop) else {
+        return ZcSendOutcome::NotEligible; // cache miss → copy path queues + ARPs
+    };
+    match DEVICE_REGISTRY.features_by_index(dev) {
+        Some(f) if f.contains(NetDeviceFeatures::CHECKSUM_TX) => {}
+        _ => return ZcSendOutcome::NotEligible,
+    }
+    let Some(src_mac) = DEVICE_REGISTRY.mac_by_index(dev) else {
+        return ZcSendOutcome::NotEligible;
+    };
+
+    let udp_len = 8 + total_len;
+    let ip_total = super::IPV4_HEADER_LEN + udp_len;
+    let mut hdr = [0u8; super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN + 8];
+    // Ethernet (0..14).
+    hdr[0..6].copy_from_slice(&dst_mac.0);
+    hdr[6..12].copy_from_slice(&src_mac.0);
+    hdr[12..14].copy_from_slice(&super::EtherType::Ipv4.to_be_bytes());
+    // IPv4 (14..34).
+    {
+        let ip = &mut hdr[super::ETH_HEADER_LEN..super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN];
+        ip[0] = 0x45;
+        ip[1] = 0;
+        ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
+        ip[4..8].copy_from_slice(&[0; 4]);
+        ip[8] = 64;
+        ip[9] = super::IpProtocol::Udp.as_u8();
+        ip[10..12].copy_from_slice(&[0; 2]);
+        ip[12..16].copy_from_slice(&local_ip);
+        ip[16..20].copy_from_slice(&dst_ip);
+        let ip_csum = super::checksum::internet_checksum(ip);
+        ip[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+    }
+    // UDP (34..42). Checksum field holds the pseudo-header seed; the NIC sums
+    // the DMA'd payload over [csum_start..] and completes it (NEEDS_CSUM).
+    {
+        let l4 = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
+        let udp = &mut hdr[l4..l4 + 8];
+        udp[0..2].copy_from_slice(&local_port.to_be_bytes());
+        udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+        udp[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        let seed = super::checksum::pseudo_header_seed(
+            local_ip,
+            dst_ip,
+            super::IpProtocol::Udp.as_u8(),
+            udp_len,
+        );
+        udp[6..8].copy_from_slice(&seed.to_be_bytes());
+    }
+
+    let csum = CsumOffload {
+        csum_start: (super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN) as u16,
+        csum_offset: 6,
+    };
+    match DEVICE_REGISTRY.tx_zerocopy_by_index(dev, &hdr, runs, Some(csum), keepalive, token) {
+        Ok(()) => ZcSendOutcome::Submitted(total_len),
+        Err(NetError::NoBufferSpace) => ZcSendOutcome::WouldBlock,
+        Err(_) => ZcSendOutcome::NotEligible,
+    }
+}
+
 pub fn udp_recvfrom() -> Result<(), NetError> {
     Err(NetError::WouldBlock)
 }
