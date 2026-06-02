@@ -27,10 +27,10 @@ use slopos_abi::ring::{
 };
 use slopos_mm::pinned_user_buffer::{PinError, PinnedUserBuffer};
 use slopos_ostd::KVec;
-use slopos_ostd::TxReclaimToken;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::{VmReader, VmWriter};
+use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 /// Which registered buffer an SQE selects. `None` (neither flag set) is the
 /// inline path — unchanged. Built in `opcode.rs` from the SQE flags.
@@ -152,10 +152,33 @@ impl ProvidedBufRing {
 /// the buffer back in. Kept in a side table (not an `InFlight` row) because the
 /// token is not `Copy` and the row must **not** be re-probed (that would
 /// re-send).
+/// The driver→ring "buffer reusable" signal a deferred send waits on. UDP/ICMP
+/// use a single-shot generation flip; TCP `MSG_ZEROCOPY` uses a refcounted token
+/// that reaches zero only when the bytes are cumulatively ACKed **and** every
+/// in-flight (re)transmit DMA is reclaimed.
+enum DeferredToken {
+    Tx {
+        token: TxReclaimToken,
+        snapshot: u64,
+    },
+    Notif {
+        token: ZcNotifToken,
+    },
+}
+
+impl DeferredToken {
+    /// Has the buffer become reusable since the send was recorded?
+    fn is_ready(&self) -> bool {
+        match self {
+            DeferredToken::Tx { token, snapshot } => token.is_reclaimed(*snapshot),
+            DeferredToken::Notif { token } => token.is_notifiable(),
+        }
+    }
+}
+
 struct DeferredNotif {
     user_data: u64,
-    token: TxReclaimToken,
-    snapshot: u64,
+    token: DeferredToken,
     buf_index: u16,
 }
 
@@ -318,6 +341,15 @@ impl BufferRegistry {
         pin.keepalive_frames()
     }
 
+    /// In-page byte offset of fixed buffer `index`'s data within its first
+    /// backing page — paired with [`fixed_keepalive`](Self::fixed_keepalive) so
+    /// the TCP `MSG_ZEROCOPY` send queue can re-derive a segment's DMA runs at an
+    /// arbitrary offset on every (re)transmit. `None` if out of range.
+    pub fn fixed_base_off(&self, index: u16) -> Option<usize> {
+        let set = self.fixed.as_ref()?;
+        Some(set.pins.get(index as usize)?.base_off())
+    }
+
     /// Record an in-flight zero-copy send awaiting its deferred `F_NOTIF`. The
     /// fixed buffer stays checked out (held by this entry) until the driver
     /// reclaims the NIC descriptor and [`take_reclaimed`] retires it. Infallible
@@ -334,8 +366,21 @@ impl BufferRegistry {
     ) {
         let _ = self.deferred.push(DeferredNotif {
             user_data,
-            token,
-            snapshot,
+            token: DeferredToken::Tx { token, snapshot },
+            buf_index,
+        });
+    }
+
+    /// Record an in-flight TCP `MSG_ZEROCOPY` send awaiting its deferred
+    /// `F_NOTIF`. Like [`push_deferred`](Self::push_deferred) but keyed on the
+    /// refcounted [`ZcNotifToken`] — the buffer stays checked out until the bytes
+    /// are cumulatively ACKed and every retransmit DMA is reclaimed (the count
+    /// reaches zero). Infallible (the table was pre-grown; one in-flight ZC send
+    /// per buffer index, since the index stays checked out until `F_NOTIF`).
+    pub fn push_deferred_notif(&mut self, user_data: u64, token: ZcNotifToken, buf_index: u16) {
+        let _ = self.deferred.push(DeferredNotif {
+            user_data,
+            token: DeferredToken::Notif { token },
             buf_index,
         });
     }
@@ -356,10 +401,7 @@ impl BufferRegistry {
         let mut out: KVec<(u64, u16)> = KVec::new();
         let mut i = 0;
         while i < self.deferred.len() {
-            if self.deferred[i]
-                .token
-                .is_reclaimed(self.deferred[i].snapshot)
-            {
+            if self.deferred[i].token.is_ready() {
                 let entry = self.deferred.swap_remove(i);
                 let _ = out.push((entry.user_data, entry.buf_index));
                 // swap_remove moved a new element into `i`; re-check it.

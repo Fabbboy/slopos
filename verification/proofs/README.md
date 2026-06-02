@@ -74,6 +74,19 @@ isolates the bit-vector friction in a separate file so it can never block
 `ring_cursor.rs`, and carries an optional STRETCH `layout_disjoint_fits`
 block (delete it if it does not discharge). See `../STATUS.md`.
 
-The narrative obligation total across all five files is 51
-(9 + 11 + 12 + 13 + 6), confirmed by `just verify` on the pinned Verus —
-`verify.sh` auto-sums the exact `N verified` count it reports per file.
+`tcp_zc_pin.rs` machine-checks the TCP `MSG_ZEROCOPY` send-queue pin lifetime:
+~8 obligations over an abstract `SendQ` state machine
+(`Send`/`Transmit`/`Reclaim`/`Ack`/`Teardown`) proving
+INV-TCPZC-PIN-IN-BOUNDS (every in-flight zero-copy segment's read window stays
+inside its pin, so every transmit / retransmit re-DMA / copy-fallback reads only
+its own pinned bytes) and INV-TCPZC-HELD-UNTIL-ACK (a `Transmit`/`Reclaim` never
+drops a segment, and an `Ack` frees a head segment only once fully cumulatively
+ACKed — no free before ACK / mid-retransmit), plus a non-vacuity witness. The
+state-machine **logic only**: the runtime refcounted `ZcNotifToken` weak-memory
+protocol (buffer-reusable `F_NOTIF` signal) is audited-only / KernMiri-covered
+(Verus has no weak-memory model) — see the file header and `../STATUS.md`.
+
+The narrative obligation total is 51 over the original five files
+(9 + 11 + 12 + 13 + 6) plus 8 for `tcp_zc_pin.rs`, confirmed by `just verify` on
+the pinned Verus — `verify.sh` auto-sums the exact `N verified` count it reports
+per file.

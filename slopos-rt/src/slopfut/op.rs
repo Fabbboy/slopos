@@ -19,8 +19,8 @@ use core::task::{Context, Poll};
 
 use slopos_abi::net::SockAddrIn;
 use slopos_abi::ring::{
-    OP_ACCEPT, OP_CLOSE, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM, OP_RECVMSG,
-    OP_TIMEOUT, OP_WRITE, Sqe,
+    OP_ACCEPT, OP_CLOSE, OP_CONNECT, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM,
+    OP_RECVMSG, OP_TIMEOUT, OP_WRITE, Sqe,
 };
 
 use super::reactor::with_reactor;
@@ -298,6 +298,31 @@ pub fn poll_add(fd: i32, mask: u16) -> IntOp {
 /// the new connection fd (`>= 0`) or a negated errno.
 pub fn accept(fd: i32) -> IntOp {
     IntOp(OpFuture::new(op_sqe(OP_ACCEPT, fd, 0, 0, 0), None))
+}
+
+/// Encode a [`SockAddrIn`] into its 16-byte `#[repr(C)]` memory image (the
+/// inverse of [`decode_sockaddr_in`]) so the kernel's `connect` probe reads it
+/// back as a raw struct via `copy_from_user`. `family`/`port` keep their stored
+/// values (the kernel applies `from_be` to the network-order port itself).
+fn encode_sockaddr_in(a: &SockAddrIn) -> Vec<u8> {
+    let mut v = vec![0u8; SOCKADDR_IN_LEN];
+    v[0..2].copy_from_slice(&a.family.to_le_bytes());
+    v[2..4].copy_from_slice(&a.port.to_le_bytes());
+    v[4..8].copy_from_slice(&a.addr);
+    // bytes [8..16] are the struct pad — left zero.
+    v
+}
+
+/// `OP_CONNECT` — connect socket `fd` to `addr` (AF_INET). Resolves to `0` on
+/// success or a negated errno (`-ECONNREFUSED`, `-ETIMEDOUT`, …). The
+/// `SockAddrIn` is copied into an owned buffer carried by the future, so the
+/// kernel-read address stays alive in-flight and the caller's `&SockAddrIn` need
+/// not outlive the await. Single-CQE (no `F_MORE`/`F_NOTIF`); composable in
+/// `select` like the other [`IntOp`] futures.
+pub fn connect(fd: i32, addr: &SockAddrIn) -> IntOp {
+    let buf = encode_sockaddr_in(addr);
+    let sqe = op_sqe(OP_CONNECT, fd, 0, SOCKADDR_IN_LEN as u32, 0);
+    IntOp(OpFuture::new(sqe, Some(buf)))
 }
 
 /// `OP_RECVFROM` — receive a datagram from `fd` (an AF_INET UDP socket),

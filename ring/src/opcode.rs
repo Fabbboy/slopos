@@ -15,8 +15,8 @@ use core::ffi::c_int;
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
-    OP_ACCEPT, OP_CANCEL, OP_CLOSE, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM,
-    OP_RECVMSG, OP_SEND, OP_SEND_ZC, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_BUFFER_SELECT,
+    OP_ACCEPT, OP_CANCEL, OP_CLOSE, OP_CONNECT, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ,
+    OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_SEND_ZC, OP_TIMEOUT, OP_WRITE, SLOPRING_SQE_BUFFER_SELECT,
     SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT};
@@ -160,6 +160,7 @@ pub fn probe(pid: u32, sqe: &Sqe, buffers: &mut BufferRegistry) -> Outcome {
         OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(pid, sqe)),
         OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(pid, sqe)),
         OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| probe_accept(pid, sqe)),
+        OP_CONNECT => reject_buf(sel).unwrap_or_else(|| probe_connect(pid, sqe)),
         OP_POLL_ADD => reject_buf(sel).unwrap_or_else(|| probe_poll(pid, sqe)),
         // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the
         // ring object, not an fd). Reaching here is a logic error.
@@ -281,6 +282,23 @@ fn probe_accept(pid: u32, sqe: &Sqe) -> Outcome {
     match crate::net_glue::accept_nonblock(pid, sqe.fd) {
         Ok(Some(new_fd)) => Outcome::Inline(new_fd),
         Ok(None) => Outcome::WouldBlock,
+        Err(e) => Outcome::Inline(e.raw()),
+    }
+}
+
+/// `OP_CONNECT`: async non-blocking connect (SLOPRING § 12). Mirrors
+/// [`probe_accept`] — a thin re-entrant adapter over the socket connect path.
+/// `addr` is the user VA of a `SockAddrIn`; the glue validates it and runs
+/// [`crate::net_glue::connect_nonblock`], which initiates the handshake once and
+/// polls it on each re-probe. `-EAGAIN` defers (`WouldBlock`); success / error
+/// completes inline. Not an ownership op: it installs no fd and consumes no
+/// bytes, so no CQE slot is pre-reserved.
+fn probe_connect(pid: u32, sqe: &Sqe) -> Outcome {
+    if sqe.fd < 0 {
+        return Outcome::Inline(Errno::EBADF.raw());
+    }
+    match crate::net_glue::connect_nonblock(pid, sqe.fd, sqe.addr, sqe.len) {
+        Ok(rc) => crate::net_glue::outcome_from_rc(rc),
         Err(e) => Outcome::Inline(e.raw()),
     }
 }

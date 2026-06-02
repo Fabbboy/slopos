@@ -65,9 +65,18 @@ pub const OP_CLOSE: u8 = 11;
 /// (SLOPRING § 13).
 pub const OP_SEND_ZC: u8 = 12;
 
+/// `connect(fd, sockaddr)` — async, non-blocking socket connect. `addr` = user
+/// VA of a [`crate::net::SockAddrIn`] input struct, `len` = 16. Single-CQE:
+/// `res = 0` on success or a negated errno (`-ECONNREFUSED`, `-ETIMEDOUT`, …);
+/// no `F_MORE` / `F_NOTIF`. The probe is re-entrant — it initiates the handshake
+/// once and then polls it on each harvest re-probe, deferring (`WouldBlock`)
+/// while the connection is in progress. Not an ownership op (installs no fd,
+/// consumes no bytes). AF_INET only; carries no buffer selection.
+pub const OP_CONNECT: u8 = 13;
+
 /// Largest opcode value (inclusive). Used by the kernel to reject
 /// out-of-range opcodes with `-EINVAL`.
-pub const OP_MAX: u8 = OP_SEND_ZC;
+pub const OP_MAX: u8 = OP_CONNECT;
 
 // ---------------------------------------------------------------------------
 // CQE flags (SLOPRING § 4.5).

@@ -223,6 +223,15 @@ impl PinnedUserBuffer {
         self.io_slices_len(self.len)
     }
 
+    /// In-page byte offset of the pinned range within its first backing page.
+    /// The TCP `MSG_ZEROCOPY` send queue keeps its own keepalive frame refs
+    /// ([`keepalive_frames`](Self::keepalive_frames)) plus this `base_off`, so it
+    /// can re-derive a segment's DMA runs at an arbitrary offset on every
+    /// (re)transmit via [`slopos_ostd::mm::uframe::coalesce_io_runs`].
+    pub fn base_off(&self) -> usize {
+        self.base_off
+    }
+
     /// Coalesced contiguous `(paddr, len)` runs over the **first `len` bytes**
     /// of the pinned range (`len` clamped to the pin length), for a zero-copy
     /// send of fewer bytes than the registered buffer holds. Walking only the
@@ -268,6 +277,19 @@ impl PinnedUserBuffer {
             });
         }
         out
+    }
+
+    /// Coalesced `(paddr, len)` DMA runs for the sub-range `[off, off + len)` of
+    /// the pinned buffer — the offset-aware form the TCP `MSG_ZEROCOPY` send queue
+    /// needs to DMA a segment from the **middle** of a zero-copy send (MSS
+    /// segmentation + selective retransmit at arbitrary offsets). Delegates to the
+    /// canonical [`coalesce_io_runs`](slopos_ostd::mm::uframe::coalesce_io_runs)
+    /// over the pinned frames; returns empty if the range runs past the pin.
+    pub fn io_runs_at(&self, off: usize, len: usize) -> KVec<(u64, u32)> {
+        if off.checked_add(len).is_none_or(|end| end > self.len) {
+            return KVec::new();
+        }
+        slopos_ostd::mm::uframe::coalesce_io_runs(self.frames.as_slice(), self.base_off + off, len)
     }
 
     /// Take an **independent** owning ref on every backing page, so the pages

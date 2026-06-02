@@ -1,13 +1,14 @@
 use core::fmt;
 
 use slopos_ostd::KVec;
-use slopos_ostd::TxReclaimToken;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
 use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::{coalesce_io_runs, copy_out_frames, redup_frames};
 use slopos_ostd::mm::{VmReader, VmWriter};
 use slopos_ostd::write_field;
 use slopos_ostd::{Bitmap, words_for};
+use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use crate::packetbuf::PacketBuf;
 use crate::tcp;
@@ -701,8 +702,8 @@ use slopos_abi::event::{KernelEvent, SocketSlot};
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_ECONNRESET,
-    ERRNO_EDESTADDRREQ, ERRNO_EFAULT, ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EISCONN,
-    ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
+    ERRNO_EDESTADDRREQ, ERRNO_EFAULT, ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO,
+    ERRNO_EISCONN, ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
     ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_ostd::sync::BUS;
@@ -854,6 +855,124 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     }
 }
 
+/// True NIC-DMA transmit of one TCP segment whose payload lives in pinned user
+/// pages (TCP `MSG_ZEROCOPY`). Builds the Eth/IPv4/TCP headers, offloads the TCP
+/// checksum to the device (pseudo-header seed + `csum_start`/`csum_offset`), and
+/// DMAs the payload straight from `z`'s pages — re-DMA-safe across retransmits
+/// (the driver holds an independent refcount on the pages until reclaim; the
+/// send-queue chunk holds the data until ACK). On any ineligibility (cold
+/// neighbor, no checksum offload, too many SG runs, oversize/loopback) or device
+/// rejection it copies the segment's bytes from the pin into `scratch` and sends
+/// them the ordinary way. Returns `0` on success or a negated errno (mirrors
+/// [`socket_send_tcp_segment`]); the caller treats a nonzero result as a drain
+/// stop (the chunk is queued, so the RTO retransmits).
+fn socket_send_tcp_segment_zerocopy(
+    seg: &TcpOutSegment,
+    z: tcp::ZcSource,
+    scratch: &mut [u8],
+) -> i32 {
+    use net::netdev::{CsumOffload, NetDeviceFeatures};
+
+    let len = z.len;
+    let local_ip = seg.tuple.local_ip;
+    let dst_ip = seg.tuple.remote_ip;
+    let dst = Ipv4Addr(dst_ip);
+
+    // Eligibility — none of these consume `z` (so the copy fallback stays valid).
+    let runs = coalesce_io_runs(z.keepalive.as_slice(), z.byte_start, len);
+    let route = if len > 0
+        && len <= TCP_TX_MAX
+        && !dst.is_loopback()
+        && !dst.is_broadcast()
+        && !dst.is_multicast()
+        && !runs.is_empty()
+        && runs.len() <= 3
+    {
+        net::route::ROUTE_TABLE.lookup(dst)
+    } else {
+        None
+    };
+
+    if let Some((dev, next_hop)) = route
+        && !next_hop.is_loopback()
+        && let Some(dst_mac) = net::neighbor::NEIGHBOR_CACHE.lookup(dev, next_hop)
+        && matches!(
+            net::DEVICE_REGISTRY.features_by_index(dev),
+            Some(f) if f.contains(NetDeviceFeatures::CHECKSUM_TX)
+        )
+        && let Some(src_mac) = net::DEVICE_REGISTRY.mac_by_index(dev)
+    {
+        // TCP header + options into a temp; patch the checksum field with the
+        // pseudo-header seed (the device sums [csum_start..end] = TCP header +
+        // DMA'd payload and completes it — NEEDS_CSUM).
+        let mut tcp_hdr = [0u8; 60];
+        if let Some(tcp_hdr_len) = tcp::write_tcp_segment(seg, &[], &mut tcp_hdr) {
+            let tcp_total = tcp_hdr_len + len;
+            let seed = net::checksum::pseudo_header_seed(
+                local_ip,
+                dst_ip,
+                net::IpProtocol::Tcp.as_u8(),
+                tcp_total,
+            );
+            tcp_hdr[16..18].copy_from_slice(&seed.to_be_bytes());
+
+            let ip_total = net::IPV4_HEADER_LEN + tcp_total;
+            let mut hdr = [0u8; net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN + 60];
+            let hlen = net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN + tcp_hdr_len;
+            hdr[0..6].copy_from_slice(&dst_mac.0);
+            hdr[6..12].copy_from_slice(&src_mac.0);
+            hdr[12..14].copy_from_slice(&net::EtherType::Ipv4.to_be_bytes());
+            {
+                let ip = &mut hdr[net::ETH_HEADER_LEN..net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN];
+                ip[0] = 0x45;
+                ip[1] = 0;
+                ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
+                ip[4..8].copy_from_slice(&[0; 4]);
+                ip[8] = 64;
+                ip[9] = net::IpProtocol::Tcp.as_u8();
+                ip[10..12].copy_from_slice(&[0; 2]);
+                ip[12..16].copy_from_slice(&local_ip);
+                ip[16..20].copy_from_slice(&dst_ip);
+                let ip_csum = net::checksum::internet_checksum(ip);
+                ip[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+            }
+            hdr[net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN..hlen]
+                .copy_from_slice(&tcp_hdr[..tcp_hdr_len]);
+
+            let csum = CsumOffload {
+                csum_start: (net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN) as u16,
+                csum_offset: 16,
+            };
+            // Independent keepalive clone for the driver TX slot (survives a
+            // teardown mid-DMA); `z.keepalive` stays owned for the copy fallback.
+            if let Some(driver_ka) = redup_frames(z.keepalive.as_slice()) {
+                match net::DEVICE_REGISTRY.tx_zerocopy_notif_by_index(
+                    dev,
+                    &hdr[..hlen],
+                    &runs,
+                    Some(csum),
+                    driver_ka,
+                    z.token.clone(),
+                ) {
+                    Ok(()) => return 0,
+                    // Device rejected (ring full / oversize): fall through to the
+                    // copy fallback, which sends (or surfaces the device error).
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    // Copy fallback: read the segment straight from the pinned pages and send it
+    // the ordinary way (cold neighbor / ineligible / device rejected).
+    if len > scratch.len()
+        || copy_out_frames(z.keepalive.as_slice(), z.byte_start, &mut scratch[..len]).is_err()
+    {
+        return errno_i32(ERRNO_EIO);
+    }
+    socket_send_tcp_segment(seg, &scratch[..len])
+}
+
 /// Outcome of a signal-interruptible socket wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SockWait {
@@ -939,6 +1058,17 @@ fn socket_is_udp(sock: &Socket) -> bool {
 
 fn socket_is_icmp(sock: &Socket) -> bool {
     matches!(sock.inner, SocketInner::Icmp(_))
+}
+
+/// `true` iff `sock_idx` is an AF_INET TCP socket. Lets the ring's `OP_SEND_ZC`
+/// dispatch route to the TCP `MSG_ZEROCOPY` send-queue path (which holds the
+/// pinned pages across retransmits) instead of the UDP/ICMP one-shot NIC-DMA leaf.
+pub fn socket_is_tcp(sock_idx: u32) -> bool {
+    let table = NEW_SOCKET_TABLE.lock();
+    table
+        .get(sock_idx as usize)
+        .map(|s| matches!(s.inner, SocketInner::Tcp(_)))
+        .unwrap_or(false)
 }
 
 fn socket_notify_tcp_idx_waiters(tcp_idx: tcp::ConnId) {
@@ -1620,6 +1750,63 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
     }
 }
 
+/// How a socket family handles `connect`.
+enum ConnectFamily {
+    /// TCP: a SYN handshake that may complete later.
+    Tcp,
+    /// UDP/ICMP: "connect" just records the peer and completes inline.
+    Datagram,
+    /// Raw/Unix: connect is not supported via this entry point.
+    Unsupported,
+}
+
+fn socket_connect_family(inner: &SocketInner) -> ConnectFamily {
+    match inner {
+        SocketInner::Tcp(_) => ConnectFamily::Tcp,
+        SocketInner::Udp(_) | SocketInner::Icmp(_) => ConnectFamily::Datagram,
+        SocketInner::Raw(_) | SocketInner::Unix(_) => ConnectFamily::Unsupported,
+    }
+}
+
+/// Run the locked half of a fresh TCP connect: resolve the local IP, allocate
+/// the ephemeral port + PCB via [`tcp::connect`], stamp the socket's
+/// local/remote address, conn id, and `Connecting` state, and return the data
+/// the caller needs to emit the SYN **after dropping the table lock** (the RX
+/// path also takes the table lock, so sending under it would deadlock). The
+/// caller owns the `EISCONN`-on-already-connecting guard. Shared by the blocking
+/// [`socket_connect`] and the non-blocking [`socket_connect_nonblock`].
+fn connect_initiate_tcp_locked(
+    sock: &mut Socket,
+    sock_idx: u32,
+    addr: [u8; 4],
+    port: u16,
+) -> Result<(tcp::ConnId, bool, TcpOutSegment), i32> {
+    let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
+        crate::netstack::NET_STACK
+            .source_ip_for(Ipv4Addr(addr))
+            .map(|ip| ip.0)
+            .unwrap_or([0; 4])
+    });
+
+    match tcp::connect(local_ip, addr, port) {
+        Ok((tcp_idx, syn)) => {
+            sock.local_addr = Some(SockAddr::new(
+                Ipv4Addr(syn.tuple.local_ip),
+                Port(syn.tuple.local_port),
+            ));
+            sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
+            if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
+                tcp_inner.conn_id = Some(tcp_idx);
+            }
+            sock.state = SocketState::Connecting;
+            tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
+            let nb = sock.is_nonblocking();
+            Ok((tcp_idx, nb, syn))
+        }
+        Err(e) => Err(map_tcp_err(e)),
+    }
+}
+
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     let (tcp_idx, nonblocking, syn_seg) = {
         let mut table = NEW_SOCKET_TABLE.lock();
@@ -1627,48 +1814,22 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             return errno_i32(ERRNO_ENOTSOCK);
         };
 
-        match &mut sock.inner {
-            SocketInner::Tcp(tcp_inner) => {
+        match socket_connect_family(&sock.inner) {
+            ConnectFamily::Tcp => {
                 if matches!(sock.state, SocketState::Connected | SocketState::Connecting) {
                     return errno_i32(ERRNO_EISCONN);
                 }
-
-                let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
-                    crate::netstack::NET_STACK
-                        .source_ip_for(Ipv4Addr(addr))
-                        .map(|ip| ip.0)
-                        .unwrap_or([0; 4])
-                });
-
-                match tcp::connect(local_ip, addr, port) {
-                    Ok((tcp_idx, syn)) => {
-                        sock.local_addr = Some(SockAddr::new(
-                            Ipv4Addr(syn.tuple.local_ip),
-                            Port(syn.tuple.local_port),
-                        ));
-                        sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
-                        tcp_inner.conn_id = Some(tcp_idx);
-                        sock.state = SocketState::Connecting;
-
-                        tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
-
-                        let nb = sock.is_nonblocking();
-                        (tcp_idx, nb, syn)
-                    }
-                    Err(e) => return map_tcp_err(e),
+                match connect_initiate_tcp_locked(sock, sock_idx, addr, port) {
+                    Ok(v) => v,
+                    Err(rc) => return rc,
                 }
             }
-            SocketInner::Udp(_) => {
+            ConnectFamily::Datagram => {
                 sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
                 sock.state = SocketState::Connected;
                 return 0;
             }
-            SocketInner::Icmp(_) => {
-                sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
-                sock.state = SocketState::Connected;
-                return 0;
-            }
-            SocketInner::Raw(_) | SocketInner::Unix(_) => return errno_i32(ERRNO_EPROTONOSUPPORT),
+            ConnectFamily::Unsupported => return errno_i32(ERRNO_EPROTONOSUPPORT),
         }
     };
     // Table lock released — send the SYN without holding the socket table lock,
@@ -1734,6 +1895,90 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         // observes the most recent committed used-ring state without
         // waiting for the netpoll kthread to be scheduled.
         crate::napi::kick();
+    }
+}
+
+/// Idempotent, non-blocking connect for the ring's async connect probe.
+///
+/// Initiates the connection on the first call (socket `Unbound`/`Bound`) and
+/// polls the handshake on every subsequent re-probe (socket `Connecting`), so it
+/// is safe to call repeatedly without re-sending a SYN or re-allocating a port.
+/// Returns:
+///   * `0` — connected (TCP `Established`, or UDP/ICMP peer recorded);
+///   * `-EAGAIN` — handshake in flight (the ring records an in-flight row and
+///     re-probes); **never `-EINPROGRESS`** — the ring has no `-EINPROGRESS`
+///     handling and would post it as an inline failed completion;
+///   * another negated errno — a real error (`-ECONNREFUSED`, `-ENOTSOCK`, …).
+///
+/// Never blocks: the SYN is emitted once (outside the table lock, like
+/// [`socket_connect`]) and the handshake is observed via [`tcp::get_state`].
+pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
+    enum Action {
+        /// First probe: emit this SYN (after dropping the lock), then defer.
+        Syn(tcp::ConnId, TcpOutSegment),
+        /// Re-probe: poll this connection's handshake state.
+        Poll(tcp::ConnId),
+    }
+
+    let action = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
+            return errno_i32(ERRNO_ENOTSOCK);
+        };
+
+        match socket_connect_family(&sock.inner) {
+            ConnectFamily::Tcp => match sock.state {
+                SocketState::Connected => return errno_i32(ERRNO_EISCONN),
+                SocketState::Connecting => match socket_tcp_conn_id(sock) {
+                    Some(id) => Action::Poll(id),
+                    None => return errno_i32(ERRNO_ECONNREFUSED),
+                },
+                _ => match connect_initiate_tcp_locked(sock, sock_idx, addr, port) {
+                    Ok((tcp_idx, _nb, syn)) => Action::Syn(tcp_idx, syn),
+                    Err(rc) => return rc,
+                },
+            },
+            ConnectFamily::Datagram => {
+                sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
+                sock.state = SocketState::Connected;
+                return 0;
+            }
+            ConnectFamily::Unsupported => return errno_i32(ERRNO_EPROTONOSUPPORT),
+        }
+    };
+
+    // Table lock dropped: emit the SYN / poll handshake state without holding it
+    // (the NAPI RX path takes the same lock).
+    match action {
+        Action::Syn(tcp_idx, syn) => {
+            let rc = socket_send_tcp_segment(&syn, &[]);
+            if rc != 0 {
+                let _ = tcp::abort(tcp_idx);
+                let mut table = NEW_SOCKET_TABLE.lock();
+                if let Some(sock) = table.get_mut(sock_idx as usize) {
+                    sock.state = SocketState::Closed;
+                }
+                return rc;
+            }
+            errno_i32(ERRNO_EAGAIN)
+        }
+        Action::Poll(tcp_idx) => match tcp::get_state(tcp_idx) {
+            Some(TcpState::Established) => {
+                let mut table = NEW_SOCKET_TABLE.lock();
+                if let Some(sock) = table.get_mut(sock_idx as usize) {
+                    sock.state = SocketState::Connected;
+                }
+                0
+            }
+            Some(TcpState::SynSent) => errno_i32(ERRNO_EAGAIN),
+            _ => {
+                let mut table = NEW_SOCKET_TABLE.lock();
+                if let Some(sock) = table.get_mut(sock_idx as usize) {
+                    sock.state = SocketState::Closed;
+                }
+                errno_i32(ERRNO_ECONNREFUSED)
+            }
+        },
     }
 }
 
@@ -1926,10 +2171,15 @@ fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
     let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
     let now_ms = slopos_kernel_services::clock::uptime_ms();
     loop {
-        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
+        let Some((seg, n, zc)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
             break;
         };
-        let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
+        let rc = match zc {
+            None => socket_send_tcp_segment(&seg, &tx_payload[..n]),
+            // Zero-copy segment: DMA straight from the pinned pages (re-DMA on
+            // retransmit), copy-falling-back from them on a cold neighbor.
+            Some(z) => socket_send_tcp_segment_zerocopy(&seg, z, &mut tx_payload[..]),
+        };
         if rc != 0 {
             return rc as i64;
         }
@@ -2219,6 +2469,40 @@ pub fn socket_send_zerocopy(
             remote_ip, identifier, sequence, runs, reader, total_len, keepalive, token,
         ),
         SendTarget::Tcp { .. } => ZcSendOutcome::NotEligible,
+    }
+}
+
+/// TCP `MSG_ZEROCOPY` send (SlopRing `OP_SEND_ZC` on a connected TCP socket).
+/// Unlike the UDP/ICMP one-shot NIC-DMA leaf, this enqueues a zero-copy chunk
+/// onto the send queue (holding the pinned pages `keepalive` — data at the pin's
+/// `base_off` — and the refcounted `token`), then kicks the send pump. The bytes
+/// DMA straight from the pinned pages as the congestion window allows, re-DMA on
+/// retransmit, and the deferred `F_NOTIF` fires once they are cumulatively ACKed
+/// and every in-flight DMA is reclaimed. Returns `Submitted` once queued, or
+/// `NotEligible` (not a connected TCP socket / does not fit SO_SNDBUF) so the
+/// caller uses the single-direct-copy leaf.
+pub fn socket_send_zerocopy_tcp(
+    sock_idx: u32,
+    keepalive: KVec<UFrame<AnonymousMeta>>,
+    base_off: usize,
+    len: usize,
+    token: ZcNotifToken,
+) -> ZcSendOutcome {
+    let target = match socket_send_resolve(sock_idx, len) {
+        Ok(t) => t,
+        Err(_) => return ZcSendOutcome::NotEligible,
+    };
+    let SendTarget::Tcp { tcp_idx, .. } = target else {
+        return ZcSendOutcome::NotEligible;
+    };
+    match tcp::enqueue_zerocopy(tcp_idx, keepalive, base_off, len, token) {
+        Some(n) => {
+            // Kick the pump so the first segments transmit immediately; anything
+            // the window/device defers follows on the ACK clock / RTO.
+            let _ = tcp_drain_segments(tcp_idx);
+            ZcSendOutcome::Submitted(n)
+        }
+        None => ZcSendOutcome::NotEligible,
     }
 }
 
@@ -3099,10 +3383,13 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
     let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
     let now_ms = slopos_kernel_services::clock::uptime_ms();
     loop {
-        let Some((seg, n)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
+        let Some((seg, n, zc)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
             break;
         };
-        let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
+        let rc = match zc {
+            None => socket_send_tcp_segment(&seg, &tx_payload[..n]),
+            Some(z) => socket_send_tcp_segment_zerocopy(&seg, z, &mut tx_payload[..]),
+        };
         if rc != 0 {
             return rc;
         }

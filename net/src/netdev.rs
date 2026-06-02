@@ -25,11 +25,11 @@
 use core::fmt;
 
 use bitflags::bitflags;
-use slopos_ostd::TxReclaimToken;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec};
+use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;
@@ -89,6 +89,26 @@ pub trait NetDevice: Send + Sync {
         csum: Option<CsumOffload>,
         keepalive: KVec<UFrame<AnonymousMeta>>,
         token: TxReclaimToken,
+    ) -> Result<(), NetError> {
+        let _ = (net_hdr, runs, csum, keepalive, token);
+        Err(NetError::OperationNotSupported)
+    }
+
+    /// Like [`tx_zerocopy`](Self::tx_zerocopy) but for a send whose pinned pages
+    /// may be DMA'd **more than once** before they are reusable — the TCP
+    /// `MSG_ZEROCOPY` case, where a segment can be retransmitted. The driver
+    /// holds the refcounted [`ZcNotifToken`] (acquiring a reference per accepted
+    /// descriptor, releasing it on reclaim) instead of flipping a single-shot
+    /// [`TxReclaimToken`]; the send queue retires the chunk's own reference on
+    /// cumulative ACK, and the ring posts `SLOPRING_CQE_F_NOTIF` only when the
+    /// count reaches zero. Default rejects (loopback / no DMA SG).
+    fn tx_zerocopy_notif(
+        &self,
+        net_hdr: &[u8],
+        runs: &[(u64, u32)],
+        csum: Option<CsumOffload>,
+        keepalive: KVec<UFrame<AnonymousMeta>>,
+        token: ZcNotifToken,
     ) -> Result<(), NetError> {
         let _ = (net_hdr, runs, csum, keepalive, token);
         Err(NetError::OperationNotSupported)
@@ -531,6 +551,25 @@ impl NetDeviceRegistry {
         let inner = self.inner.lock();
         match inner.slots.get(index.0) {
             Some(Some(dev)) => dev.tx_zerocopy(net_hdr, runs, csum, keepalive, token),
+            _ => Err(NetError::NetworkUnreachable),
+        }
+    }
+
+    /// Refcount-token zero-copy transmit by index (see
+    /// [`NetDevice::tx_zerocopy_notif`]) — the TCP `MSG_ZEROCOPY` retransmit-safe
+    /// path. Same registry-lock shape as [`tx_zerocopy_by_index`](Self::tx_zerocopy_by_index).
+    pub fn tx_zerocopy_notif_by_index(
+        &self,
+        index: DevIndex,
+        net_hdr: &[u8],
+        runs: &[(u64, u32)],
+        csum: Option<CsumOffload>,
+        keepalive: KVec<UFrame<AnonymousMeta>>,
+        token: ZcNotifToken,
+    ) -> Result<(), NetError> {
+        let inner = self.inner.lock();
+        match inner.slots.get(index.0) {
+            Some(Some(dev)) => dev.tx_zerocopy_notif(net_hdr, runs, csum, keepalive, token),
             _ => Err(NetError::NetworkUnreachable),
         }
     }

@@ -18,7 +18,7 @@
 //! submitting op (ring side) and the driver TX slot can both hold it; the last
 //! holder drops it.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::KArc;
 
@@ -61,6 +61,88 @@ impl TxReclaimToken {
     }
 }
 
+/// Refcounted zero-copy notification token for sends whose pinned pages may be
+/// DMA'd by the NIC **more than once** before they are reusable — the TCP
+/// `MSG_ZEROCOPY` case, where a segment can be (re)transmitted N times and the
+/// buffer is reusable only when the bytes are cumulatively ACKed **and** no NIC
+/// TX descriptor still references the pages.
+///
+/// The single-shot [`TxReclaimToken`] (one DMA, one reclaim) cannot express
+/// that: a retransmit issues a second DMA of the same pages, so a generation
+/// flip on the first reclaim would free the buffer while the second DMA is still
+/// reading it. This token instead holds a **reference count**:
+///
+///  * `new()` starts at `1` — the send-queue chunk's own reference, held until
+///    the bytes are cumulatively ACKed (or the connection is torn down).
+///  * `acquire()` bumps it for each (re)transmit handed to the driver (one per
+///    in-flight NIC TX descriptor).
+///  * `release()` drops a NIC reference when the driver reclaims that TX
+///    descriptor (`virtnet_clean_tx`).
+///  * `mark_acked_and_release()` drops the chunk's own reference on cumulative
+///    ACK / teardown.
+///
+/// Because the chunk holds a reference until ACK, the count stays `>= 1` for the
+/// whole retransmit window and reaches `0` **only** once the bytes are ACKed and
+/// every outstanding DMA has been reclaimed — exactly the `SLOPRING_CQE_F_NOTIF`
+/// "buffer reusable" condition the ring's harvest polls via [`is_notifiable`].
+///
+/// [`is_notifiable`]: ZcNotifToken::is_notifiable
+#[derive(Clone)]
+pub struct ZcNotifToken {
+    /// Live references: the owning chunk (1) plus one per in-flight NIC DMA.
+    refs: KArc<AtomicUsize>,
+}
+
+impl ZcNotifToken {
+    /// Allocate a fresh token owning a single reference (the send-queue chunk).
+    /// `None` if the heap refuses.
+    pub fn new() -> Option<Self> {
+        Some(Self {
+            refs: KArc::try_new(AtomicUsize::new(1)).ok()?,
+        })
+    }
+
+    /// Add a reference for one in-flight NIC DMA (an initial transmit or a
+    /// retransmit handed to the driver). Paired with a later [`release`] from the
+    /// driver's TX reclaim.
+    ///
+    /// [`release`]: ZcNotifToken::release
+    pub fn acquire(&self) {
+        self.refs.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Drop a NIC-DMA reference — the driver reclaimed one TX descriptor that
+    /// referenced the pinned pages. The `Release` orders the driver's prior
+    /// used-ring reads before the ring observes the count via its `Acquire`
+    /// [`is_notifiable`].
+    ///
+    /// [`is_notifiable`]: ZcNotifToken::is_notifiable
+    pub fn release(&self) {
+        // Saturating: the protocol never under-counts, but never underflow.
+        let prev = self.refs.load(Ordering::Acquire);
+        if prev > 0 {
+            self.refs.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    /// Drop the send-queue chunk's own reference, on cumulative ACK or teardown.
+    /// Semantically distinct from [`release`] (it retires the chunk, not a DMA)
+    /// but the same count operation; kept separate so the call sites read clearly
+    /// and so the protocol's "exactly one chunk reference" discipline is
+    /// auditable.
+    ///
+    /// [`release`]: ZcNotifToken::release
+    pub fn mark_acked_and_release(&self) {
+        self.release();
+    }
+
+    /// Ring-side: is the buffer reusable — bytes ACKed (chunk reference dropped)
+    /// and every in-flight DMA reclaimed (count back to zero)?
+    pub fn is_notifiable(&self) -> bool {
+        self.refs.load(Ordering::Acquire) == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +182,51 @@ mod tests {
         assert!(!t.is_reclaimed(at));
         t.signal_reclaimed();
         assert!(t.is_reclaimed(at));
+    }
+
+    #[test]
+    fn notif_token_held_until_ack_and_all_dmas_reclaimed() {
+        let t = ZcNotifToken::new().unwrap();
+        // Fresh chunk: one reference, not notifiable.
+        assert!(!t.is_notifiable());
+        // Two (re)transmits in flight.
+        t.acquire();
+        t.acquire();
+        assert!(!t.is_notifiable());
+        // Both DMAs reclaimed, but the chunk is not yet ACKed → still held.
+        t.release();
+        t.release();
+        assert!(
+            !t.is_notifiable(),
+            "chunk reference must keep it held until ACK"
+        );
+        // Cumulative ACK drops the chunk reference → now notifiable.
+        t.mark_acked_and_release();
+        assert!(t.is_notifiable());
+    }
+
+    #[test]
+    fn notif_token_ack_before_dma_reclaim_waits_for_reclaim() {
+        let t = ZcNotifToken::new().unwrap();
+        t.acquire(); // one DMA in flight
+        // ACK arrives before the in-flight retransmit's TX descriptor is
+        // reclaimed: chunk ref dropped, but the DMA ref keeps it held.
+        t.mark_acked_and_release();
+        assert!(
+            !t.is_notifiable(),
+            "must not free the buffer while the NIC may still DMA it"
+        );
+        t.release(); // driver reclaims the last descriptor
+        assert!(t.is_notifiable());
+    }
+
+    #[test]
+    fn notif_token_clone_shares_count() {
+        let chunk = ZcNotifToken::new().unwrap();
+        let driver = chunk.clone();
+        chunk.acquire();
+        driver.release();
+        chunk.mark_acked_and_release();
+        assert!(driver.is_notifiable(), "the count is shared across clones");
     }
 }

@@ -16,8 +16,8 @@ use slopos_userland as _;
 
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::ring::{
-    BufIovec, OP_CLOSE, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND, OP_SEND_ZC,
-    OP_WRITE, RegisterBufRingCmd, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
+    BufIovec, OP_CLOSE, OP_CONNECT, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND,
+    OP_SEND_ZC, OP_WRITE, RegisterBufRingCmd, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
     SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, Sqe,
 };
 use slopos_userland::ring::{Ring, slopfut};
@@ -864,6 +864,116 @@ fn test_pbuf_ring_select_enobufs() -> bool {
     recv_ok && ring.unregister_buf_ring(1) == 0
 }
 
+/// `OP_CONNECT` validates the user `SockAddrIn` pointer: a null `addr`
+/// completes inline with `-EFAULT` (before any handshake), a single CQE with no
+/// `F_MORE`/`F_NOTIF`. Proves the opcode is wired and validates its input.
+fn test_connect_efault() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_CONNECT;
+    sqe.fd = sock.raw();
+    sqe.addr = 0; // null SockAddrIn* → EFAULT
+    sqe.len = core::mem::size_of::<SockAddrIn>() as u32;
+    sqe.user_data = 0xC0FE;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(1).is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => {
+            cqe.user_data == 0xC0FE
+                && cqe.res == -14
+                && (cqe.flags & SLOPRING_CQE_F_MORE) == 0
+                && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
+        }
+        None => false,
+    }
+}
+
+/// `OP_CONNECT` on a UDP socket completes **inline** with `res == 0`: a UDP
+/// "connect" just records the default peer + `Connected` state (no handshake),
+/// so the async opcode resolves immediately with a single, notification-free
+/// CQE — exercising OP_CONNECT's success path deterministically (no network).
+fn test_connect_udp_inline_success() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let dst = SockAddrIn {
+        family: AF_INET,
+        port: 9999u16.to_be(),
+        addr: [10, 0, 2, 2],
+        _pad: [0; 8],
+    };
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_CONNECT;
+    sqe.fd = sock.raw();
+    sqe.addr = &dst as *const SockAddrIn as u64;
+    sqe.len = core::mem::size_of::<SockAddrIn>() as u32;
+    sqe.user_data = 0xC0DC;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(1).is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => {
+            cqe.user_data == 0xC0DC
+                && cqe.res == 0
+                && (cqe.flags & SLOPRING_CQE_F_MORE) == 0
+                && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
+        }
+        None => false,
+    }
+}
+
+/// `OP_SEND_ZC` with a fixed buffer on an **unconnected** TCP socket yields a
+/// single error CQE (the send fails before the buffer is used: not connected),
+/// with no `F_MORE`/`F_NOTIF`. The TCP `MSG_ZEROCOPY` two-CQE / pin-lifetime
+/// correctness over a real handshake is covered by the kernel stests + the
+/// `tcp_zc_pin` proof — SLIRP has no deterministic outbound TCP peer, so the
+/// userland test asserts only the deterministic shape.
+fn test_tcp_send_zc_shape() -> bool {
+    let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let buf = [0u8; 64];
+    let iovecs = [BufIovec {
+        addr: buf.as_ptr() as u64,
+        len: buf.len() as u32,
+        _pad: 0,
+    }];
+    if ring.register_buffers(&iovecs) != 0 {
+        return false;
+    }
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_SEND_ZC;
+    sqe.fd = sock.raw();
+    sqe.flags = SLOPRING_SQE_FIXED_BUFFER;
+    sqe.buf_index = 0;
+    sqe.len = 16;
+    sqe.user_data = 0x7C90;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(1).is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        // Unconnected TCP: the send fails before the buffer is used → one error
+        // CQE, never a two-CQE notification. (A blocked second CQE would hang;
+        // this asserts the single-CQE error shape.)
+        Some(cqe) => {
+            cqe.user_data == 0x7C90 && cqe.res < 0 && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
+        }
+        None => false,
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("setup", test_setup),
     ("nop", test_nop),
@@ -895,6 +1005,12 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("icmp_send_zc_two_cqe", test_icmp_send_zc_two_cqe),
     ("fixed_buffer_oob", test_fixed_buffer_oob),
     ("pbuf_ring_select_enobufs", test_pbuf_ring_select_enobufs),
+    ("connect_efault", test_connect_efault),
+    (
+        "connect_udp_inline_success",
+        test_connect_udp_inline_success,
+    ),
+    ("tcp_send_zc_shape", test_tcp_send_zc_shape),
 ];
 
 fn main() {

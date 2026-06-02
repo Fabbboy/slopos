@@ -608,6 +608,105 @@ pub struct UIoSliceMut {
 }
 
 // ---------------------------------------------------------------------------
+// Scatter-gather coalescing.
+// ---------------------------------------------------------------------------
+
+/// Coalesce a page chain into contiguous `(paddr, len)` DMA runs for the byte
+/// window `[byte_start, byte_start + len)`, where `byte_start` is an absolute
+/// offset into the chain (a pinned buffer's `base_off + intra_offset`).
+///
+/// This is the canonical NIC scatter-gather builder over pinned [`UFrame`]s. The
+/// registered-buffer path ([`crate::mm`]'s pinned buffers) and the TCP
+/// `MSG_ZEROCOPY` send queue both drive it — the latter directly on its keepalive
+/// frames to re-derive a segment's runs on every (re)transmit at an arbitrary
+/// offset. Walks **only** `len` bytes (never the whole chain), so a partial send
+/// / segment never points the NIC at stale tail bytes; physically adjacent pages
+/// fold into one run. Stops cleanly if the window runs past the chain. The output
+/// `(paddr, len)` tuples are the form NIC TX descriptors consume directly.
+pub fn coalesce_io_runs<M: AnyUFrameMeta>(
+    frames: &[UFrame<M>],
+    byte_start: usize,
+    len: usize,
+) -> KVec<(u64, u32)> {
+    let mut out: KVec<(u64, u32)> = KVec::new();
+    if len == 0 || frames.is_empty() {
+        return out;
+    }
+    let mut remaining = len;
+    let mut page_idx = byte_start / PAGE_SIZE;
+    let mut in_page_off = byte_start % PAGE_SIZE;
+    let mut run_start: u64 = 0;
+    let mut run_len: u32 = 0;
+    let mut next_contig: u64 = 0;
+    while remaining > 0 && page_idx < frames.len() {
+        let page_pa = frames[page_idx].paddr().as_u64();
+        let avail = PAGE_SIZE - in_page_off;
+        let seg = core::cmp::min(avail, remaining);
+        let seg_pa = page_pa + in_page_off as u64;
+        if run_len != 0 && seg_pa == next_contig {
+            run_len += seg as u32;
+        } else {
+            if run_len != 0 {
+                let _ = out.push((run_start, run_len));
+            }
+            run_start = seg_pa;
+            run_len = seg as u32;
+        }
+        next_contig = seg_pa + seg as u64;
+        remaining -= seg;
+        page_idx += 1;
+        in_page_off = 0;
+    }
+    if run_len != 0 {
+        let _ = out.push((run_start, run_len));
+    }
+    out
+}
+
+/// Take an **independent** owning ref on every frame in `frames` (re-wrapping
+/// each paddr bumps the frame-slot ref count), so the clone keeps the pages
+/// pinned even if the original `frames` are dropped. The TCP `MSG_ZEROCOPY` send
+/// queue uses this to hand each in-flight (re)transmit its own driver-slot
+/// keepalive while the send-queue chunk keeps its own ref. `None` if the per-page
+/// list cannot be allocated.
+pub fn redup_frames(frames: &[UFrame<AnonymousMeta>]) -> Option<KVec<UFrame<AnonymousMeta>>> {
+    let mut out = KVec::with_capacity(frames.len()).ok()?;
+    for f in frames.iter() {
+        out.push(UFrame::<AnonymousMeta>::wrap_user_paddr(f.paddr()).ok()?)
+            .ok()?;
+    }
+    Some(out)
+}
+
+/// Volatile byte-copy of `[byte_start, byte_start + dst.len())` out of a page
+/// chain into `dst`, transparently crossing page boundaries. `byte_start` is an
+/// absolute offset into the chain. The volatile reads make a concurrent user
+/// write well-defined; the caller acts only on the snapshot. Used by the TCP
+/// `MSG_ZEROCOPY` send queue for the zero-window 1-byte probe and the
+/// cold-neighbor copy fallback (reading a segment straight from its keepalive
+/// frames). `OutOfBounds` if the window runs past the chain.
+pub fn copy_out_frames<M: AnyUFrameMeta>(
+    frames: &[UFrame<M>],
+    byte_start: usize,
+    dst: &mut [u8],
+) -> Result<(), UFrameError> {
+    let mut abs = byte_start;
+    let mut pos = 0usize;
+    while pos < dst.len() {
+        let page_idx = abs / PAGE_SIZE;
+        if page_idx >= frames.len() {
+            return Err(UFrameError::OutOfBounds);
+        }
+        let page_off = abs % PAGE_SIZE;
+        let chunk = core::cmp::min(PAGE_SIZE - page_off, dst.len() - pos);
+        frames[page_idx].copy_out_volatile(page_off, &mut dst[pos..pos + chunk])?;
+        abs += chunk;
+        pos += chunk;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests (host-side, pure logic).
 // ---------------------------------------------------------------------------
 

@@ -93,4 +93,4 @@ pub use klog::{
 };
 pub use ring_buffer::RingBuffer;
 pub use stacktrace::StacktraceEntry;
-pub use tx_reclaim::TxReclaimToken;
+pub use tx_reclaim::{TxReclaimToken, ZcNotifToken};

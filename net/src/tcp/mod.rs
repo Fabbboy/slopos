@@ -29,9 +29,10 @@ pub mod tuple;
 pub use actions::{Actions, MAX_SEGMENTS, MAX_TIMER_OPS, SocketNotify, TimerOp};
 pub use tuple::{TcpError, TcpTuple};
 
+use buffer::SegmentSource;
 pub use buffer::{
     DELAYED_ACK_MS, DELAYED_ACK_SEGMENTS, TCP_BUFFER_SIZE, TcpBuffer, TcpBufferPair, TcpRecvState,
-    TcpSendState, ZWP_INTERVAL_MS,
+    TcpSendState, ZWP_INTERVAL_MS, ZcSource,
 };
 pub use checksum::{tcp_checksum, verify_checksum};
 pub use header::{
@@ -54,6 +55,9 @@ use self::segment::SegmentBuilder;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
 use slopos_ostd::klog_debug;
+use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::{KVec, ZcNotifToken};
 
 // =============================================================================
 // Non-header constants
@@ -891,121 +895,223 @@ pub fn recv_into(
     }
 }
 
+/// Append a TCP `MSG_ZEROCOPY` chunk to the send queue: the NIC will DMA `len`
+/// bytes straight from the pinned pages `keepalive` (data starting at the pin's
+/// `base_off`), held across retransmits until the bytes are cumulatively ACKed.
+/// `token` is the refcounted notification token (owning the chunk's reference);
+/// the ring posts `F_NOTIF` when it reaches zero. Returns `Some(len)` on success,
+/// or `None` (connection not in a sendable Data state, the chunk does not fit
+/// SO_SNDBUF, or the chunk store cannot grow) so the caller falls back to the
+/// single-direct-copy leaf. On `None` the `keepalive`/`token` are dropped here.
+pub fn enqueue_zerocopy(
+    id: ConnId,
+    keepalive: KVec<UFrame<AnonymousMeta>>,
+    base_off: usize,
+    len: usize,
+    token: ZcNotifToken,
+) -> Option<usize> {
+    if id.is_listener() {
+        return None;
+    }
+    table::with_pcb_and_bufs(id, |pcb, buf| -> Option<usize> {
+        match &pcb.state {
+            PcbState::Data(d)
+                if matches!(
+                    d.close_phase,
+                    ClosePhase::Established | ClosePhase::CloseWait
+                ) => {}
+            _ => return None,
+        }
+        let bufs = buf.as_mut()?;
+        // The copy leaf handles SO_SNDBUF blocking correctly, so a chunk that
+        // does not fit just falls back to it.
+        if bufs.send.zc_free_space() < len {
+            return None;
+        }
+        if bufs
+            .send
+            .enqueue_zerocopy(keepalive, base_off, len as u32, token)
+        {
+            Some(len)
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
+/// Resolve the source of one segment at stream offset `off` (≤ `max_len` bytes,
+/// never crossing a chunk boundary): copy inline bytes into `payload_buf`, or
+/// carry a [`ZcSource`] the caller DMAs straight from the pinned pages.
+/// `#[inline(never)]` so its (re)transmit-source temporaries stay off
+/// `poll_transmit`'s frame (the per-segment stack-size budget). `None` = nothing
+/// buffered there.
+#[inline(never)]
+fn resolve_segment(
+    send: &TcpSendState,
+    off: usize,
+    max_len: usize,
+    payload_buf: &mut [u8],
+) -> Option<(usize, Option<ZcSource>)> {
+    match send.segment_source(off, max_len) {
+        SegmentSource::Empty => None,
+        SegmentSource::Inline { len } => {
+            let copied = send.peek_retransmit(off, &mut payload_buf[..len]);
+            if copied == 0 {
+                None
+            } else {
+                Some((copied, None))
+            }
+        }
+        SegmentSource::Zerocopy {
+            keepalive,
+            byte_start,
+            len,
+            token,
+        } => Some((
+            len,
+            Some(ZcSource {
+                keepalive,
+                byte_start,
+                len,
+                token,
+            }),
+        )),
+    }
+}
+
 /// Generate the next outgoing data segment for a connection.
+///
+/// Returns the segment, its payload byte count, and — when the bytes live in a
+/// zero-copy chunk — a [`ZcSource`] the caller DMAs straight from the pinned
+/// pages (or copies from on a cold neighbor). `None` zero-copy source means the
+/// payload was copied into `payload_buf` (the inline / copy path).
 pub fn poll_transmit(
     id: ConnId,
     payload_buf: &mut [u8],
     now_ms: u64,
-) -> Option<(TcpOutSegment, usize)> {
+) -> Option<(TcpOutSegment, usize, Option<ZcSource>)> {
     if id.is_listener() {
         return None;
     }
-    table::with_pcb_and_bufs(id, |pcb, buf| -> Option<(TcpOutSegment, usize)> {
-        let bufs = buf.as_mut()?;
+    table::with_pcb_and_bufs(
+        id,
+        |pcb, buf| -> Option<(TcpOutSegment, usize, Option<ZcSource>)> {
+            let bufs = buf.as_mut()?;
 
-        let PcbState::Data(d) = &mut pcb.state else {
-            return None;
-        };
-        // Project once through the KBox `DerefMut` so the borrow
-        // checker can split sub-field borrows below.
-        let d: &mut DataState = &mut **d;
-        if !matches!(
-            d.close_phase,
-            ClosePhase::Established | ClosePhase::CloseWait | ClosePhase::FinWait1
-        ) {
-            return None;
-        }
+            let PcbState::Data(d) = &mut pcb.state else {
+                return None;
+            };
+            // Project once through the KBox `DerefMut` so the borrow
+            // checker can split sub-field borrows below.
+            let d: &mut DataState = &mut **d;
+            if !matches!(
+                d.close_phase,
+                ClosePhase::Established | ClosePhase::CloseWait | ClosePhase::FinWait1
+            ) {
+                return None;
+            }
 
-        let tuple = pcb.tuple;
-        let rto_ms = d.rtt.rto_ms() as u64;
-        let peer_mss = d.peer_mss as usize;
-        let snd_wnd = d.snd_wnd as usize;
+            let tuple = pcb.tuple;
+            let rto_ms = d.rtt.rto_ms() as u64;
+            let peer_mss = d.peer_mss as usize;
+            let snd_wnd = d.snd_wnd as usize;
 
-        // Window calculation uses pipe (RFC 6675) — bytes believed to
-        // be in the network — instead of raw inflight.
-        let pipe = d.sendmap.pipe() as usize;
-        let wnd_avail = snd_wnd.saturating_sub(pipe);
-        let cwnd_avail = (d.cc.cwnd() as usize).saturating_sub(pipe);
-        let effective_wnd = core::cmp::min(wnd_avail, cwnd_avail);
+            // Window calculation uses pipe (RFC 6675) — bytes believed to
+            // be in the network — instead of raw inflight.
+            let pipe = d.sendmap.pipe() as usize;
+            let wnd_avail = snd_wnd.saturating_sub(pipe);
+            let cwnd_avail = (d.cc.cwnd() as usize).saturating_sub(pipe);
+            let effective_wnd = core::cmp::min(wnd_avail, cwnd_avail);
 
-        // Priority 1: selective retransmit of Lost entries.
-        if let Some(lost) = d.sendmap.next_lost() {
-            let len = lost.len as usize;
-            if len <= effective_wnd && len <= payload_buf.len() {
-                let offset = d.snd_una.distance_to(lost.seq) as usize;
-                let seq = lost.seq.raw();
-                let payload_len = bufs.send.peek_retransmit(offset, &mut payload_buf[..len]);
-                if payload_len > 0 {
-                    d.sendmap.mark_retransmitted(lost.seq);
-                    let window = bufs.recv.window();
-                    let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
-                    seg.timestamp = d.ts_option(now_ms);
-                    if bufs.send.rto_deadline_ms == 0 {
-                        bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
-                        if d.retransmit_token.is_none() {
-                            let token = NET_TIMER_WHEEL.schedule(
-                                rto_ms.max(1),
-                                TimerKind::TcpRetransmit,
-                                id.0,
-                            );
-                            d.retransmit_token = Some(token);
+            // Priority 1: selective retransmit of Lost entries.
+            if let Some(lost) = d.sendmap.next_lost() {
+                let len = lost.len as usize;
+                if len <= effective_wnd && len <= payload_buf.len() {
+                    let offset = d.snd_una.distance_to(lost.seq) as usize;
+                    let seq = lost.seq.raw();
+                    // Re-DMA on retransmit: a zero-copy segment re-reads the same
+                    // pinned pages; an inline segment re-copies from the ring.
+                    if let Some((seg_len, zc)) =
+                        resolve_segment(&bufs.send, offset, len, payload_buf)
+                    {
+                        d.sendmap.mark_retransmitted(lost.seq);
+                        let window = bufs.recv.window();
+                        let mut seg =
+                            SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+                        seg.timestamp = d.ts_option(now_ms);
+                        if bufs.send.rto_deadline_ms == 0 {
+                            bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
+                            if d.retransmit_token.is_none() {
+                                let token = NET_TIMER_WHEEL.schedule(
+                                    rto_ms.max(1),
+                                    TimerKind::TcpRetransmit,
+                                    id.0,
+                                );
+                                d.retransmit_token = Some(token);
+                            }
                         }
+                        pcb.assert_invariants();
+                        return Some((seg, seg_len, zc));
                     }
-                    pcb.assert_invariants();
-                    return Some((seg, payload_len));
                 }
             }
-        }
 
-        // Priority 2: send new data.
-        if d.sendmap.capacity_remaining() == 0 {
-            return None;
-        }
-
-        let unsent = bufs.send.unsent_len();
-        let mut max_send = core::cmp::min(unsent, peer_mss);
-        max_send = core::cmp::min(max_send, effective_wnd);
-        max_send = core::cmp::min(max_send, payload_buf.len());
-
-        // Nagle (RFC 896): defer sub-MSS segments when data is in flight.
-        if d.nagle_enabled && max_send < peer_mss && pipe > 0 {
-            return None;
-        }
-
-        if max_send == 0 {
-            return None;
-        }
-
-        let seq = d.snd_nxt.raw();
-        let payload_len = bufs.send.peek_unsent(&mut payload_buf[..max_send]);
-        if payload_len == 0 {
-            return None;
-        }
-
-        bufs.send.mark_sent(payload_len);
-        d.snd_nxt = d.snd_nxt.wrapping_add(payload_len as u32);
-
-        // Record sent segment in the send map.
-        let _ = d
-            .sendmap
-            .push_sent(SeqNum::new(seq), payload_len as u32, now_ms);
-
-        // Schedule retransmit timer if none active.
-        if bufs.send.rto_deadline_ms == 0 {
-            bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
-            if d.retransmit_token.is_none() {
-                let token = NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, id.0);
-                d.retransmit_token = Some(token);
+            // Priority 2: send new data.
+            if d.sendmap.capacity_remaining() == 0 {
+                return None;
             }
-        }
 
-        let window = bufs.recv.window();
-        let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
-        seg.timestamp = d.ts_option(now_ms);
-        pcb.assert_invariants();
+            let unsent = bufs.send.unsent_len();
+            let mut max_send = core::cmp::min(unsent, peer_mss);
+            max_send = core::cmp::min(max_send, effective_wnd);
+            max_send = core::cmp::min(max_send, payload_buf.len());
 
-        Some((seg, payload_len))
-    })
+            // Nagle (RFC 896): defer sub-MSS segments when data is in flight.
+            if d.nagle_enabled && max_send < peer_mss && pipe > 0 {
+                return None;
+            }
+
+            if max_send == 0 {
+                return None;
+            }
+
+            let seq = d.snd_nxt.raw();
+            let unsent_off = bufs.send.inflight;
+            // New data: copy from the inline ring, or carry a zero-copy source the
+            // caller DMAs straight from the pinned pages.
+            let Some((payload_len, zc)) =
+                resolve_segment(&bufs.send, unsent_off, max_send, payload_buf)
+            else {
+                return None;
+            };
+
+            bufs.send.mark_sent(payload_len);
+            d.snd_nxt = d.snd_nxt.wrapping_add(payload_len as u32);
+
+            // Record sent segment in the send map.
+            let _ = d
+                .sendmap
+                .push_sent(SeqNum::new(seq), payload_len as u32, now_ms);
+
+            // Schedule retransmit timer if none active.
+            if bufs.send.rto_deadline_ms == 0 {
+                bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
+                if d.retransmit_token.is_none() {
+                    let token =
+                        NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, id.0);
+                    d.retransmit_token = Some(token);
+                }
+            }
+
+            let window = bufs.recv.window();
+            let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+            seg.timestamp = d.ts_option(now_ms);
+            pcb.assert_invariants();
+
+            Some((seg, payload_len, zc))
+        },
+    )
     .flatten()
 }
 

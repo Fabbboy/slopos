@@ -10,14 +10,14 @@
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
-    Cqe, IouringBuf, OP_ACCEPT, OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_READ, RingLayout,
+    Cqe, IouringBuf, OP_ACCEPT, OP_CANCEL, OP_CONNECT, OP_NOP, OP_POLL_ADD, OP_READ, RingLayout,
     SLOPRING_ASYNC_CANCEL_ALL, SLOPRING_CQ_OVERFLOW, SLOPRING_CQE_BUFFER_MASK,
     SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
-    SLOPRING_SQE_MULTISHOT, Sqe,
+    SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_mm::pinned_user_buffer::PinnedUserBuffer;
 use slopos_ostd::KVec;
-use slopos_ostd::TxReclaimToken;
+use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 use slopos_testing::{TestResult, stest};
 
 use crate::buffers::BufferRegistry;
@@ -735,6 +735,161 @@ fn send_zc_deferred_notif_lifecycle() -> TestResult {
     TestResult::Pass
 }
 stest!(name = send_zc_deferred_notif_lifecycle, suite = slopring);
+
+/// TCP `MSG_ZEROCOPY` deferred-notification lifecycle: a refcounted
+/// [`ZcNotifToken`] keeps the fixed buffer checked out across **retransmits**
+/// (each an extra in-flight DMA reference) and is reusable only once the bytes
+/// are cumulatively ACKed **and** every DMA is reclaimed (the count reaches
+/// zero). Deterministic — drives the token's refcount directly (the
+/// `acquire`/`release` the driver does on submit/reclaim, and the
+/// `mark_acked_and_release` the send-queue does on cumulative ACK), no NIC.
+fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
+    let mut ring = make_ring(8);
+    let mut pins: KVec<PinnedUserBuffer> = KVec::new();
+    let Some(p) = PinnedUserBuffer::alloc_for_test(256) else {
+        return slopos_testing::fail!("pin alloc failed");
+    };
+    if pins.push(p).is_err() {
+        return slopos_testing::fail!("pin push failed");
+    }
+    ring.buffers.register_fixed_for_test(pins);
+
+    // Submit: reserve the buffer, the send-queue chunk owns one token reference,
+    // and the first transmit hands the driver an in-flight DMA reference.
+    if ring.buffers.check_out_fixed(0).is_err() {
+        return slopos_testing::fail!("checkout failed");
+    }
+    let Some(token) = ZcNotifToken::new() else {
+        return slopos_testing::fail!("token alloc failed");
+    };
+    token.acquire(); // first transmit DMA in flight (refs = chunk + 1)
+    ring.buffers.push_deferred_notif(0x7C90, token.clone(), 0);
+
+    // Before any reclaim/ACK: nothing posts, the buffer stays held.
+    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    if ring.cq_tail != 0 {
+        return slopos_testing::fail!("no CQE before reclaim (cq_tail={})", ring.cq_tail);
+    }
+    if ring.buffers.check_out_fixed(0) != Err(Errno::EBUSY) {
+        return slopos_testing::fail!("buffer must stay checked out pre-reclaim");
+    }
+
+    // Retransmit: a second DMA goes in flight, then the first is reclaimed. The
+    // pin survives the whole retransmit window.
+    token.acquire(); // retransmit DMA (refs = chunk + 2)
+    token.release(); // first DMA reclaimed (refs = chunk + 1)
+    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    if ring.cq_tail != 0 {
+        return slopos_testing::fail!("no CQE while a DMA is still in flight");
+    }
+    if ring.buffers.check_out_fixed(0) != Err(Errno::EBUSY) {
+        return slopos_testing::fail!("buffer must stay held across the retransmit");
+    }
+
+    // Second DMA reclaimed, but the bytes are not yet ACKed: the chunk reference
+    // still holds the buffer.
+    token.release(); // refs = chunk (1)
+    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    if ring.cq_tail != 0 {
+        return slopos_testing::fail!("chunk reference must hold until cumulative ACK");
+    }
+    if ring.buffers.check_out_fixed(0) != Err(Errno::EBUSY) {
+        return slopos_testing::fail!("buffer must stay held until ACK");
+    }
+
+    // Cumulative ACK drops the chunk reference → count reaches zero → reusable.
+    token.mark_acked_and_release();
+    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    if ring.cq_tail != 1 {
+        return slopos_testing::fail!("exactly one F_NOTIF expected (cq_tail={})", ring.cq_tail);
+    }
+    let mut bytes = [0u8; 16];
+    ring.region
+        .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
+        .unwrap();
+    let cqe = Cqe::from_bytes(&bytes);
+    if (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0 || (cqe.flags & SLOPRING_CQE_F_MORE) != 0 {
+        return slopos_testing::fail!("terminal CQE must be F_NOTIF only: {:?}", cqe);
+    }
+    if ring.buffers.check_out_fixed(0).is_err() {
+        return slopos_testing::fail!("buffer must be checked in after F_NOTIF");
+    }
+    TestResult::Pass
+}
+stest!(
+    name = tcp_zc_pin_held_across_retransmit_and_ack,
+    suite = slopring
+);
+
+/// `OP_CONNECT` dispatch + re-probe idempotency. Drives the opcode through the
+/// submit path without a process fd table (the live handshake — `Established` /
+/// `ECONNREFUSED` — is a userland test, since it needs a mapped ring + a real
+/// socket): a negative fd posts inline `-EBADF`; a buffer selection (fixed or
+/// provided) is rejected `-EINVAL` (connect names no bulk buffer); and re-running
+/// the same SQE yields a byte-stable result (no state drift / panic across the
+/// harvest re-probe). Proves the opcode is wired into `probe()`, the EBADF guard
+/// fires, buffer selections are rejected, and the dispatch is re-entrant.
+fn connect_probe_dispatch_idempotent() -> TestResult {
+    let mut ring = make_ring(8);
+
+    let read_cqe = |ring: &Ring, idx: u32| -> Cqe {
+        let mut bytes = [0u8; 16];
+        ring.region
+            .copy_out(ring.layout.cqe_off(idx) as usize, &mut bytes)
+            .unwrap();
+        Cqe::from_bytes(&bytes)
+    };
+
+    // Negative fd: inline -EBADF, posted before any fd resolution.
+    let mut bad_fd = Sqe::ZERO;
+    bad_fd.opcode = OP_CONNECT;
+    bad_fd.fd = -1;
+    bad_fd.user_data = 0xC0;
+    crate::enter::process_sqe_for_test(0, &mut ring, &bad_fd);
+    if ring.cq_tail != 1 {
+        return slopos_testing::fail!("expected one CQE for fd<0 (cq_tail={})", ring.cq_tail);
+    }
+    let c0 = read_cqe(&ring, 0);
+    if c0.user_data != 0xC0 || c0.res != Errno::EBADF.raw() || c0.flags != 0 {
+        return slopos_testing::fail!("fd<0 must post inline -EBADF, no flags: {:?}", c0);
+    }
+
+    // Re-probe idempotency: the same SQE yields the same stable result.
+    crate::enter::process_sqe_for_test(0, &mut ring, &bad_fd);
+    if ring.cq_tail != 2 {
+        return slopos_testing::fail!("re-run must post a second CQE (cq_tail={})", ring.cq_tail);
+    }
+    let c1 = read_cqe(&ring, 1);
+    if c1.res != c0.res || c1.user_data != c0.user_data || c1.flags != c0.flags {
+        return slopos_testing::fail!("re-probe result drifted: {:?} vs {:?}", c1, c0);
+    }
+
+    // A provided-buffer selection on OP_CONNECT is -EINVAL (connect names no
+    // bulk buffer — addr is its immutable SockAddrIn input).
+    let mut prov = Sqe::ZERO;
+    prov.opcode = OP_CONNECT;
+    prov.fd = 3;
+    prov.flags = SLOPRING_SQE_BUFFER_SELECT;
+    prov.user_data = 0xC1;
+    crate::enter::process_sqe_for_test(0, &mut ring, &prov);
+    if read_cqe(&ring, 2).res != Errno::EINVAL.raw() {
+        return slopos_testing::fail!("provided-buffer OP_CONNECT must be -EINVAL");
+    }
+
+    // A fixed-buffer selection on OP_CONNECT is likewise -EINVAL.
+    let mut fixed = Sqe::ZERO;
+    fixed.opcode = OP_CONNECT;
+    fixed.fd = 3;
+    fixed.flags = SLOPRING_SQE_FIXED_BUFFER;
+    fixed.user_data = 0xC2;
+    crate::enter::process_sqe_for_test(0, &mut ring, &fixed);
+    if read_cqe(&ring, 3).res != Errno::EINVAL.raw() {
+        return slopos_testing::fail!("fixed-buffer OP_CONNECT must be -EINVAL");
+    }
+
+    TestResult::Pass
+}
+stest!(name = connect_probe_dispatch_idempotent, suite = slopring);
 
 /// Single-direct-copy cursor round-trip: a pattern seeded into a fixed pin
 /// reads back through a `VmReader` (`fixed_reader`, the send source), and a

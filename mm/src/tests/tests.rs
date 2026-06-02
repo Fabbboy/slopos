@@ -165,6 +165,48 @@ pub fn test_pinned_io_slices_len_and_keepalive() -> TestResult {
     pass!()
 }
 
+/// Offset-aware DMA-run builder (TCP `MSG_ZEROCOPY` retransmit reads a segment
+/// from the middle of a pin): `io_runs_at(off, len)` returns runs summing to
+/// `len`, starting at the pin's first paddr advanced by `base_off + off`, and
+/// rejects an out-of-range window.
+pub fn test_pinned_io_runs_at_offset() -> TestResult {
+    use crate::pinned_user_buffer::PinnedUserBuffer;
+    let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {
+        return fail!("pin alloc_for_test failed");
+    };
+    // A window wholly inside the first page: one run at base + off.
+    let runs = pin.io_runs_at(100, 200);
+    let total: u32 = runs.iter().map(|(_, l)| *l).sum();
+    assert_test!(
+        total as usize == 200,
+        "io_runs_at(100,200) summed {}",
+        total
+    );
+    assert_test!(!runs.is_empty(), "io_runs_at must yield a run");
+    let first_pa = runs[0].0;
+
+    // The same window at offset 0 starts one base+100 earlier (base_off == 0 for
+    // a test pin), so the offset is reflected in the starting paddr.
+    let runs0 = pin.io_runs_at(0, 200);
+    assert_test!(
+        first_pa == runs0[0].0 + 100,
+        "offset must advance the start paddr by 100 ({} vs {})",
+        first_pa,
+        runs0[0].0
+    );
+
+    // A window crossing the page boundary still sums to len.
+    let cross: u32 = pin.io_runs_at(4000, 200).iter().map(|(_, l)| *l).sum();
+    assert_test!(cross == 200, "cross-page io_runs_at summed {}", cross);
+
+    // Out of range → empty (never points the NIC past the pin).
+    assert_test!(
+        pin.io_runs_at(8000, 1000).is_empty(),
+        "io_runs_at past the pin must be empty"
+    );
+    pass!()
+}
+
 /// Test 6: Stats accuracy check
 pub fn test_page_alloc_stats() -> TestResult {
     let mut total = 0u32;
@@ -1692,6 +1734,7 @@ stest!(
     name = test_pinned_io_slices_len_and_keepalive,
     suite = page_alloc
 );
+stest!(name = test_pinned_io_runs_at_offset, suite = page_alloc);
 stest!(name = test_page_alloc_stats, suite = page_alloc);
 stest!(name = test_page_alloc_free_null, suite = page_alloc);
 stest!(name = test_page_alloc_fragmentation, suite = page_alloc);

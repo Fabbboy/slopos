@@ -25,7 +25,7 @@ use slopos_net::socket::ZcSendOutcome;
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{socket, unix_socket, unix_socket_file_ops};
 
-use slopos_ostd::TxReclaimToken;
+use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use crate::buffers::BufferRegistry;
 use crate::opcode::Outcome;
@@ -121,6 +121,39 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
     }
 }
 
+/// Non-blocking connect on `fd` to the `SockAddrIn` at user VA `addr_va`.
+///
+/// Mirrors [`accept_nonblock`]'s shape but returns the socket-op result code:
+/// `Ok(0)` (connected), `Ok(-EAGAIN)` (in progress — the ring defers), or
+/// `Ok(other_negated_errno)` / `Err(errno)` (a real failure). Idempotent across
+/// re-probes: [`socket::socket_connect_nonblock`] emits the SYN once and then
+/// polls. The user `SockAddrIn` is validated and snapshotted **before** any side
+/// effect so a faulting address fails cleanly and a re-probe re-reads the same
+/// (caller-stable) pointer. AF_INET only this revision; AF_UNIX returns
+/// `-EPROTONOSUPPORT`.
+pub fn connect_nonblock(pid: u32, fd: i32, addr_va: u64, addr_len: u32) -> Result<i32, Errno> {
+    let (handle, ops) = socket_handle_for(pid, fd)?;
+    if ops.is_unix_socket() {
+        return Ok(Errno::EPROTONOSUPPORT.raw());
+    }
+    if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {
+        return Err(Errno::EINVAL);
+    }
+    let ptr = UserPtr::<SockAddrIn>::try_new(addr_va).map_err(|_| Errno::EFAULT)?;
+    let sa: SockAddrIn = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
+    if sa.family != AF_INET {
+        return Err(Errno::EAFNOSUPPORT);
+    }
+    let port = u16::from_be(sa.port);
+    let idx = handle as u32;
+    // socket_connect_nonblock keys off the socket's own state, not the forced
+    // nonblock flag, so the wrapper is a no-op here — kept for symmetry with the
+    // other socket-op glue and so a future blocking-aware path stays correct.
+    Ok(with_inet_forced_nonblock(idx, || {
+        socket::socket_connect_nonblock(idx, sa.addr, port)
+    }))
+}
+
 /// Resolve `fd` to a socket, returning `ENOTSOCK` for any non-socket fd.
 fn socket_handle_for(pid: u32, fd: i32) -> Result<(usize, &'static dyn FileOps), Errno> {
     let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(pid, fd) else {
@@ -135,7 +168,7 @@ fn socket_handle_for(pid: u32, fd: i32) -> Result<(usize, &'static dyn FileOps),
 /// Map a non-blocking socket-op return code into an [`Outcome`]: the
 /// would-block sentinel (`-EAGAIN`) defers, everything else (success or a
 /// real negative errno) completes inline.
-fn outcome_from_rc(rc: i32) -> Outcome {
+pub(crate) fn outcome_from_rc(rc: i32) -> Outcome {
     if rc == EAGAIN {
         Outcome::WouldBlock
     } else {
@@ -595,11 +628,18 @@ pub fn send_zc_fixed(
     };
 
     // AF_INET: try true NIC-DMA zero-copy first; `None` means not a candidate,
-    // fall through to the single-direct-copy leaf below.
-    if !ops.is_unix_socket()
-        && let Some(out) = try_send_zc_inet(handle as u32, index, len, user_data, reg)
-    {
-        return out;
+    // fall through to the single-direct-copy leaf below. TCP holds the pinned
+    // pages across retransmits (send-queue chunk + refcounted token); UDP/ICMP
+    // are one-shot (generation token).
+    if !ops.is_unix_socket() {
+        let idx = handle as u32;
+        if socket::socket_is_tcp(idx) {
+            if let Some(out) = try_send_zc_tcp(idx, index, len, user_data, reg) {
+                return out;
+            }
+        } else if let Some(out) = try_send_zc_inet(idx, index, len, user_data, reg) {
+            return out;
+        }
     }
 
     let mut reader = match reg.fixed_reader(index, len as usize) {
@@ -665,6 +705,38 @@ fn try_send_zc_inet(
     match outcome {
         ZcSendOutcome::Submitted(n) => {
             reg.push_deferred(user_data, token, snapshot, index);
+            Some(Outcome::DeferredNotif(n as i32))
+        }
+        ZcSendOutcome::WouldBlock => Some(Outcome::WouldBlock),
+        ZcSendOutcome::NotEligible => None,
+    }
+}
+
+/// Attempt a TCP `MSG_ZEROCOPY` send of fixed buffer `index` on connected TCP
+/// socket `idx`. Unlike [`try_send_zc_inet`] (UDP/ICMP, one-shot generation
+/// token) this enqueues a send-queue chunk holding the pinned pages across
+/// retransmits, keyed on a refcounted [`ZcNotifToken`]; the deferred `F_NOTIF`
+/// fires once the bytes are cumulatively ACKed and every in-flight DMA is
+/// reclaimed (the count reaches zero). Returns `Some(DeferredNotif)` on success
+/// (buffer stays checked out, deferred-notif row recorded), `Some(WouldBlock)`,
+/// or `None` (not eligible — caller uses the copy leaf). Nothing is left dangling
+/// on `None`: the keepalive / token are dropped inside `socket_send_zerocopy_tcp`.
+fn try_send_zc_tcp(
+    idx: u32,
+    index: u16,
+    len: u32,
+    user_data: u64,
+    reg: &mut BufferRegistry,
+) -> Option<Outcome> {
+    if len == 0 {
+        return None; // empty send → copy leaf
+    }
+    let token = ZcNotifToken::new()?;
+    let keepalive = reg.fixed_keepalive(index)?;
+    let base_off = reg.fixed_base_off(index)?;
+    match socket::socket_send_zerocopy_tcp(idx, keepalive, base_off, len as usize, token.clone()) {
+        ZcSendOutcome::Submitted(n) => {
+            reg.push_deferred_notif(user_data, token, index);
             Some(Outcome::DeferredNotif(n as i32))
         }
         ZcSendOutcome::WouldBlock => Some(Outcome::WouldBlock),

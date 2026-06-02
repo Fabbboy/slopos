@@ -655,7 +655,7 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     let mut tx_buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let result = tcp::poll_transmit(id, &mut *tx_buf, 0);
     assert_test!(result.is_some(), "should have data to transmit");
-    let (seg, payload_len) = result.unwrap();
+    let (seg, payload_len, _) = result.unwrap();
     assert_eq_test!(payload_len, 4, "transmitted payload should be 4 bytes");
     assert_eq_test!(&tx_buf[..4], b"ping", "payload should be 'ping'");
 

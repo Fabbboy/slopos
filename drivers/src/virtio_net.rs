@@ -1,10 +1,10 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
-use slopos_ostd::TxReclaimToken;
 use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::{KBox, KVec};
+use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
@@ -122,15 +122,28 @@ impl VirtioNetDevice {
     }
 }
 
+/// How a zero-copy TX chain tells the ring its pinned pages are reusable.
+///
+/// `Tx` is the single-shot model (UDP/ICMP, one DMA): reclaim flips the
+/// generation counter. `Notif` is the refcounted model (TCP `MSG_ZEROCOPY`,
+/// where the same pages may be DMA'd again on a retransmit): the driver holds
+/// one reference per in-flight descriptor and releases it on reclaim, so the
+/// buffer is reported reusable only once every DMA is reclaimed **and** the send
+/// queue has retired the chunk on cumulative ACK.
+enum TxReclaim {
+    Tx(TxReclaimToken),
+    Notif(ZcNotifToken),
+}
+
 /// One submitted TX chain, keyed by its head descriptor index in `tx_chains`.
-/// A normal copy send is a 1-descriptor chain (`token`/`keepalive` = `None`); a
-/// zero-copy send is `[header] -> pinned runs` and carries the reclaim token +
+/// A normal copy send is a 1-descriptor chain (`reclaim`/`keepalive` = `None`); a
+/// zero-copy send is `[header] -> pinned runs` and carries the reclaim signal +
 /// the page keepalive (independent owning refs on the pinned user pages). On
 /// reclaim the driver signals the token, drops the keepalive, and frees every
 /// descriptor slot in `descs[..desc_count]`.
 struct TxChain {
     hdr_page: OwnedPageFrame,
-    token: Option<TxReclaimToken>,
+    reclaim: Option<TxReclaim>,
     keepalive: Option<KVec<UFrame<AnonymousMeta>>>,
     descs: [u16; MAX_TX_SG_DESCS],
     desc_count: u8,
@@ -264,76 +277,18 @@ impl NetDevice for VirtioNetDev {
         keepalive: KVec<UFrame<AnonymousMeta>>,
         token: TxReclaimToken,
     ) -> Result<(), NetError> {
-        let mut state = VIRTIO_NET_STATE.lock();
-        if !state.device.ready || !link_is_up(&state) {
-            return Err(NetError::NoBufferSpace);
-        }
-        let vhdr_len = size_of::<VirtioNetHdrV1>();
-        // `InvalidArgument` (vs `NoBufferSpace`) means "permanent reject" — the
-        // net leaf maps it to fall-back-to-copy, not retry. A full ring below
-        // returns `NoBufferSpace` so the ring defers + re-attempts.
-        if net_hdr.len() + vhdr_len > PACKET_BUFFER_SIZE {
-            return Err(NetError::InvalidArgument);
-        }
-        if runs.is_empty() || runs.len() + 1 > MAX_TX_SG_DESCS {
-            return Err(NetError::InvalidArgument);
-        }
+        submit_tx_zerocopy(net_hdr, runs, csum, keepalive, TxReclaim::Tx(token))
+    }
 
-        // Header DMA page: virtio_net_hdr (with optional csum offload) at 0,
-        // then the kernel-built L2/L3/L4 headers; the payload stays in the
-        // pinned pages the SG runs point at.
-        let Some(hdr_page) = alloc_tx_page() else {
-            return Err(NetError::NoBufferSpace);
-        };
-        let mut vhdr = VirtioNetHdrV1::default();
-        if let Some(c) = csum {
-            vhdr.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
-            vhdr.csum_start = c.csum_start;
-            vhdr.csum_offset = c.csum_offset;
-        }
-        if !hdr_page.write_at::<VirtioNetHdrV1>(0, &vhdr)
-            || !hdr_page.write_slice(vhdr_len, net_hdr)
-        {
-            return Err(NetError::NoBufferSpace);
-        }
-
-        let _ = virtnet_clean_tx(&mut state);
-        let n = runs.len() + 1;
-        let mut slots = [0u16; MAX_TX_SG_DESCS];
-        if !alloc_tx_slots(&state, n, &mut slots) {
-            return Err(NetError::NoBufferSpace);
-        }
-        let hdr_pa = hdr_page.phys_u64();
-        let hdr_total = (vhdr_len + net_hdr.len()) as u32;
-        let Some(chain) = build_tx_chain(&slots[..n], hdr_pa, hdr_total, runs) else {
-            return Err(NetError::NoBufferSpace);
-        };
-        for &(slot, ref desc) in chain.iter() {
-            state.device.tx_queue.write_desc(slot, *desc);
-        }
-        let head = slots[0];
-        for &s in slots.iter().take(n) {
-            state.tx_busy[s as usize] = true;
-        }
-        let mut descs = [0u16; MAX_TX_SG_DESCS];
-        descs[..n].copy_from_slice(&slots[..n]);
-        state.tx_chains[head as usize] = Some(TxChain {
-            hdr_page,
-            token: Some(token),
-            keepalive: Some(keepalive),
-            descs,
-            desc_count: n as u8,
-        });
-        state.tx_inflight.fetch_add(1, Ordering::Relaxed);
-
-        state.device.tx_queue.submit(head);
-        queue::notify_queue(
-            &state.caps.notify_cfg,
-            state.caps.notify_off_multiplier,
-            &state.device.tx_queue,
-            VIRTIO_NET_QUEUE_TX,
-        );
-        Ok(())
+    fn tx_zerocopy_notif(
+        &self,
+        net_hdr: &[u8],
+        runs: &[(u64, u32)],
+        csum: Option<CsumOffload>,
+        keepalive: KVec<UFrame<AnonymousMeta>>,
+        token: ZcNotifToken,
+    ) -> Result<(), NetError> {
+        submit_tx_zerocopy(net_hdr, runs, csum, keepalive, TxReclaim::Notif(token))
     }
 
     fn poll_tx(&self) {
@@ -569,6 +524,94 @@ fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
 // Virtqueue I/O helpers
 // =============================================================================
 
+/// Shared body of the zero-copy TX submit, parameterised by the reclaim signal.
+/// Builds the header DMA page (with optional csum offload), allocates an SG
+/// descriptor chain (`[header] -> pinned runs`), records the chain + keepalive +
+/// reclaim signal, and kicks the queue. For the refcounted `Notif` signal a
+/// reference is taken at commit — paired with the `release` `virtnet_clean_tx`
+/// does on reclaim — so an in-flight DMA always holds the pages reusable.
+fn submit_tx_zerocopy(
+    net_hdr: &[u8],
+    runs: &[(u64, u32)],
+    csum: Option<CsumOffload>,
+    keepalive: KVec<UFrame<AnonymousMeta>>,
+    reclaim: TxReclaim,
+) -> Result<(), NetError> {
+    let mut state = VIRTIO_NET_STATE.lock();
+    if !state.device.ready || !link_is_up(&state) {
+        return Err(NetError::NoBufferSpace);
+    }
+    let vhdr_len = size_of::<VirtioNetHdrV1>();
+    // `InvalidArgument` (vs `NoBufferSpace`) means "permanent reject" — the
+    // net leaf maps it to fall-back-to-copy, not retry. A full ring below
+    // returns `NoBufferSpace` so the ring defers + re-attempts.
+    if net_hdr.len() + vhdr_len > PACKET_BUFFER_SIZE {
+        return Err(NetError::InvalidArgument);
+    }
+    if runs.is_empty() || runs.len() + 1 > MAX_TX_SG_DESCS {
+        return Err(NetError::InvalidArgument);
+    }
+
+    // Header DMA page: virtio_net_hdr (with optional csum offload) at 0,
+    // then the kernel-built L2/L3/L4 headers; the payload stays in the
+    // pinned pages the SG runs point at.
+    let Some(hdr_page) = alloc_tx_page() else {
+        return Err(NetError::NoBufferSpace);
+    };
+    let mut vhdr = VirtioNetHdrV1::default();
+    if let Some(c) = csum {
+        vhdr.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+        vhdr.csum_start = c.csum_start;
+        vhdr.csum_offset = c.csum_offset;
+    }
+    if !hdr_page.write_at::<VirtioNetHdrV1>(0, &vhdr) || !hdr_page.write_slice(vhdr_len, net_hdr) {
+        return Err(NetError::NoBufferSpace);
+    }
+
+    let _ = virtnet_clean_tx(&mut state);
+    let n = runs.len() + 1;
+    let mut slots = [0u16; MAX_TX_SG_DESCS];
+    if !alloc_tx_slots(&state, n, &mut slots) {
+        return Err(NetError::NoBufferSpace);
+    }
+    let hdr_pa = hdr_page.phys_u64();
+    let hdr_total = (vhdr_len + net_hdr.len()) as u32;
+    let Some(chain) = build_tx_chain(&slots[..n], hdr_pa, hdr_total, runs) else {
+        return Err(NetError::NoBufferSpace);
+    };
+    for &(slot, ref desc) in chain.iter() {
+        state.device.tx_queue.write_desc(slot, *desc);
+    }
+    let head = slots[0];
+    for &s in slots.iter().take(n) {
+        state.tx_busy[s as usize] = true;
+    }
+    let mut descs = [0u16; MAX_TX_SG_DESCS];
+    descs[..n].copy_from_slice(&slots[..n]);
+    // Commit point: for the refcounted TCP token, this in-flight DMA now holds a
+    // reference on the pinned pages (balanced by `release` on reclaim below).
+    if let TxReclaim::Notif(token) = &reclaim {
+        token.acquire();
+    }
+    state.tx_chains[head as usize] = Some(TxChain {
+        hdr_page,
+        reclaim: Some(reclaim),
+        keepalive: Some(keepalive),
+        descs,
+        desc_count: n as u8,
+    });
+    state.tx_inflight.fetch_add(1, Ordering::Relaxed);
+
+    state.device.tx_queue.submit(head);
+    queue::notify_queue(
+        &state.caps.notify_cfg,
+        state.caps.notify_off_multiplier,
+        &state.device.tx_queue,
+        VIRTIO_NET_QUEUE_TX,
+    );
+    Ok(())
+}
+
 fn virtnet_clean_tx(state: &mut VirtioNetState) -> usize {
     let mut cleaned = 0usize;
     while let Some(used) = state.device.tx_queue.try_pop_used() {
@@ -577,15 +620,20 @@ fn virtnet_clean_tx(state: &mut VirtioNetState) -> usize {
         if let Some(chain) = state.tx_chains[head].take() {
             let TxChain {
                 hdr_page,
-                token,
+                reclaim,
                 keepalive,
                 descs,
                 desc_count,
             } = chain;
             // The NIC is done with the pinned pages: signal the ring (so it can
             // post SLOPRING_CQE_F_NOTIF) before releasing the keepalive refs.
-            if let Some(token) = &token {
-                token.signal_reclaimed();
+            // UDP/ICMP flip a single-shot generation; TCP releases one of the
+            // refcounted token's references (the buffer is reusable only once the
+            // count — chunk + all in-flight DMAs — reaches zero).
+            match &reclaim {
+                Some(TxReclaim::Tx(token)) => token.signal_reclaimed(),
+                Some(TxReclaim::Notif(token)) => token.release(),
+                None => {}
             }
             for &d in descs.iter().take(desc_count as usize) {
                 state.tx_busy[(d as usize) % TX_RING_SIZE] = false;
@@ -713,7 +761,7 @@ fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -
     descs[0] = head;
     state.tx_chains[head as usize] = Some(TxChain {
         hdr_page: page,
-        token: None,
+        reclaim: None,
         keepalive: None,
         descs,
         desc_count: 1,

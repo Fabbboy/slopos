@@ -29,6 +29,7 @@ own doc-comments — not duplicated here.
 | `slopos_ostd::mm::slab` | `proofs/slab_lifetime.rs` | `HeapSlot` lifetime: a slot can't outlive its slab (Inv. 9); a cell fits any in-range type (Inv. 10) |
 | `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap, user leaves are insensitive `UFrame`s (Inv. 4 + 5) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
+| `slopos_net::tcp` zero-copy send queue **LOGIC** | `proofs/tcp_zc_pin.rs` | TCP `MSG_ZEROCOPY` pin lifetime: every (re)transmit reads in-bounds of its pin (INV-TCPZC-PIN-IN-BOUNDS); a pin is held across retransmits and freed only on cumulative ACK / teardown, never mid-DMA (INV-TCPZC-HELD-UNTIL-ACK) |
 
 > `mm::vm_space` uses the coarse lock-per-`VmSpace` model (`CursorMut<'a>`
 > holds `&'a mut VmSpace`, so the borrow checker serializes all mutators —
@@ -48,6 +49,16 @@ own doc-comments — not duplicated here.
 > remain audited-only and KernMiri-covered (see the Phase-3G paragraph
 > below). The proof covers the kernel's half of the protocol, not a malicious
 > user racing the shared cells at the memory level.
+
+> `slopos_net::tcp` zero-copy send queue verifies the **send-queue
+> state-machine LOGIC only** — the abstract `SendQ` over
+> `Send`/`Transmit`/`Reclaim`/`Ack`/`Teardown`, proving every in-flight
+> zero-copy segment's read window stays inside its pin and a pin is freed only on
+> cumulative ACK / teardown (never mid-retransmit). The runtime refcounted
+> `ZcNotifToken` (the driver→ring buffer-reusable `F_NOTIF` signal: one reference
+> per in-flight DMA plus the send-queue chunk's, reaching zero only after ACK +
+> all reclaims) is an atomic weak-memory protocol Verus cannot model — it remains
+> audited-only and KernMiri-covered, like the `slopos_ring` accessors above.
 
 ### Audited only
 

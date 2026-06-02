@@ -4,14 +4,16 @@
 //! the TCP state machine, delayed ACK, retransmission, flow control, and
 //! zero-window probing.
 
-use slopos_ostd::KBox;
+use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::{KBox, KVec, ZcNotifToken};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::cong::CongestionControl;
 use crate::tcp::{
     self, ConnId, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
-    TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpState,
+    TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpSendState, TcpState,
 };
 use crate::tests::tcp_common::{self, reset_all as reset};
 use crate::with_data_state;
@@ -68,7 +70,7 @@ pub fn test_ring_buffer_write_read_basic() -> TestResult {
     assert_test!(tcp::has_pending_data(id), "pending after write");
 
     let mut out = [0u8; 16];
-    let (_, r) = tcp::poll_transmit(id, &mut out, 0).unwrap();
+    let (_, r, _) = tcp::poll_transmit(id, &mut out, 0).unwrap();
     assert_eq_test!(r, 5, "read hello");
     assert_test!(&out[..5] == b"hello", "content matches");
     pass!()
@@ -168,17 +170,17 @@ pub fn test_ring_buffer_peek_offset() -> TestResult {
     let _ = tcp::send(id, b"abcdefgh").unwrap();
 
     let mut first = [0u8; 2];
-    let (seg1, n1) = tcp::poll_transmit(id, &mut first, 0).unwrap();
+    let (seg1, n1, _) = tcp::poll_transmit(id, &mut first, 0).unwrap();
     assert_eq_test!(n1, 2, "first chunk len");
     assert_test!(&first == b"ab", "first chunk content");
 
     let mut second = [0u8; 3];
-    let (_, n2) = tcp::poll_transmit(id, &mut second, 1).unwrap();
+    let (_, n2, _) = tcp::poll_transmit(id, &mut second, 1).unwrap();
     assert_eq_test!(n2, 3, "peek len");
     assert_test!(&second == b"cde", "peek offset data");
 
     let mut third = [0u8; 8];
-    let (_, n3) = tcp::poll_transmit(id, &mut third, 2).unwrap();
+    let (_, n3, _) = tcp::poll_transmit(id, &mut third, 2).unwrap();
     assert_eq_test!(n3, 3, "remaining chunk len");
     assert_test!(&third[..3] == b"fgh", "remaining chunk content");
     assert_eq_test!(
@@ -212,7 +214,7 @@ pub fn test_ring_buffer_consume() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcdef").unwrap();
     let mut tx = [0u8; 16];
-    let (seg, n) = tcp::poll_transmit(id, &mut tx, 0).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut tx, 0).unwrap();
     assert_eq_test!(n, 6, "initial send");
 
     let ack = TcpHeader {
@@ -235,7 +237,7 @@ pub fn test_ring_buffer_consume() -> TestResult {
 
     assert_eq_test!(tcp::retransmit_check(1000), Some(id), "trigger retransmit");
     let mut out = [0u8; 8];
-    let (_, r) = tcp::poll_transmit(id, &mut out, 1001).unwrap();
+    let (_, r, _) = tcp::poll_transmit(id, &mut out, 1001).unwrap();
     assert_eq_test!(r, 4, "read remaining");
     assert_test!(&out[..4] == b"cdef", "remaining content");
     pass!()
@@ -296,7 +298,7 @@ pub fn test_send_enqueue_and_peek() -> TestResult {
     assert_test!(tcp::has_pending_data(id), "unsent len");
 
     let mut out = [0u8; 7];
-    let (_, p) = tcp::poll_transmit(id, &mut out, 0).unwrap();
+    let (_, p, _) = tcp::poll_transmit(id, &mut out, 0).unwrap();
     assert_eq_test!(p, 7, "peek unsent");
     assert_test!(&out == b"payload", "peek content");
     pass!()
@@ -307,7 +309,7 @@ pub fn test_send_mark_sent_and_ack() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcdef").unwrap();
     let mut payload = [0u8; 16];
-    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 6, "inflight after mark_sent");
 
     let ack = TcpHeader {
@@ -340,7 +342,7 @@ pub fn test_send_retransmit_timeout() -> TestResult {
     assert_eq_test!(tcp::retransmit_check(1000), Some(id), "RTO fired");
     // After RTO, entries are marked Lost. poll_transmit selectively
     // retransmits them.
-    let (_, n) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
+    let (_, n, _) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
     assert_eq_test!(n, 4, "retransmit of Lost segment");
     assert_test!(&payload[..4] == b"abcd", "retransmit payload");
     pass!()
@@ -364,7 +366,7 @@ pub fn test_send_partial_ack() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, &[3u8; 1000]).unwrap();
     let mut payload: KBox<[u8; 1200]> = KBox::zeroed().expect("alloc");
-    let (seg, n) = tcp::poll_transmit(id, &mut *payload, 0).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut *payload, 0).unwrap();
     assert_eq_test!(n, 1000, "sent full test payload");
 
     let ack = TcpHeader {
@@ -390,7 +392,7 @@ pub fn test_send_partial_ack() -> TestResult {
         Some(id),
         "inflight after partial ack"
     );
-    let (_, retransmit_len) = tcp::poll_transmit(id, &mut *payload, 1001).unwrap();
+    let (_, retransmit_len, _) = tcp::poll_transmit(id, &mut *payload, 1001).unwrap();
     assert_eq_test!(retransmit_len, 500, "remaining bytes retransmit");
     pass!()
 }
@@ -400,7 +402,7 @@ pub fn test_send_ack_stops_rto_timer() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcd").unwrap();
     let mut payload = [0u8; 16];
-    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 4, "sent payload");
 
     let ack = TcpHeader {
@@ -607,7 +609,7 @@ pub fn test_tcp_poll_transmit_basic() -> TestResult {
     let _ = tcp::send(id, b"abcd").unwrap();
     let (snd_nxt, rcv_nxt) = with_data_state!(id, |d| (d.snd_nxt.raw(), d.rcv_nxt.raw()));
     let mut payload = [0u8; 64];
-    let (seg, n) = tcp::poll_transmit(id, &mut payload, 10).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut payload, 10).unwrap();
     assert_eq_test!(n, 4, "payload len");
     assert_test!(&payload[..4] == b"abcd", "payload bytes");
     assert_eq_test!(seg.seq_num, snd_nxt, "segment seq");
@@ -625,9 +627,9 @@ pub fn test_tcp_poll_transmit_mss_segmentation() -> TestResult {
     assert_eq_test!(wrote, data.len(), "enqueue full test payload");
 
     let mut payload: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
-    let (_, first_len) = tcp::poll_transmit(id, &mut *payload, 0).unwrap();
+    let (_, first_len, _) = tcp::poll_transmit(id, &mut *payload, 0).unwrap();
     assert_eq_test!(first_len, DEFAULT_MSS as usize, "first chunk mss-sized");
-    let (_, second_len) = tcp::poll_transmit(id, &mut *payload, 1).unwrap();
+    let (_, second_len, _) = tcp::poll_transmit(id, &mut *payload, 1).unwrap();
     assert_eq_test!(second_len, 100, "second chunk remainder");
     pass!()
 }
@@ -648,7 +650,7 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"hello").unwrap();
     let mut payload = [0u8; 64];
-    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
     assert_eq_test!(n, 5, "sent len");
 
     let ack = TcpHeader {
@@ -777,7 +779,7 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"hello").unwrap();
     let mut payload = [0u8; 16];
-    let (seg, n) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, n, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let ack = TcpHeader {
         src_port: 80,
@@ -824,7 +826,7 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
     let _ = tcp::retransmit_check(1000);
 
     // First poll: retransmits the Lost 1-byte entry.
-    let (_, n0) = tcp::poll_transmit(id, &mut *buf, 1001).unwrap();
+    let (_, n0, _) = tcp::poll_transmit(id, &mut *buf, 1001).unwrap();
     assert_eq_test!(n0, 1, "retransmit of Lost 1-byte entry");
 
     // Fill the buffer well past cwnd.
@@ -837,7 +839,7 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
             d.nagle_enabled = false;
         }
     });
-    let (_, n1) = tcp::poll_transmit(id, &mut *buf, 1002).unwrap();
+    let (_, n1, _) = tcp::poll_transmit(id, &mut *buf, 1002).unwrap();
     assert_eq_test!(n1, 1459, "second segment limited by cwnd - pipe");
 
     // Third poll: cwnd exhausted (pipe = 1 + 1459 = 1460 = cwnd).
@@ -866,7 +868,7 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let mut segs = [(0u32, 0u32); 4];
     for i in 0..4 {
-        let (seg, n) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
+        let (seg, n, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
@@ -919,7 +921,7 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     // poll_transmit selectively retransmits the Lost segment.
     let resent = tcp::poll_transmit(id, &mut *buf, 1);
     assert_test!(resent.is_some(), "retransmit of Lost segment");
-    let (seg, _) = resent.unwrap();
+    let (seg, _, _) = resent.unwrap();
     assert_eq_test!(seg.seq_num, segs[0].0, "retransmit starts at seg 1");
     pass!()
 }
@@ -941,7 +943,7 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let mut segs = [(0u32, 0u32); 4];
     for i in 0..4 {
-        let (seg, n) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
+        let (seg, n, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
@@ -1000,7 +1002,7 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let mut segs = [(0u32, 0u32); 5];
     for i in 0..5 {
-        let (seg, n) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
+        let (seg, n, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
@@ -1252,7 +1254,7 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
     // Send data and get it acked with a forward ACK.
     let _ = tcp::send(id, &[0xBB; 50]).unwrap();
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
-    let (seg, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
+    let (seg, _, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     let ack = tcp_common::make_header(
         tcp_common::REMOTE_PORT,
@@ -1359,7 +1361,7 @@ pub fn test_nagle_sends_when_nothing_inflight() -> TestResult {
     let mut buf = [0u8; 1500];
     let result = tcp::poll_transmit(id, &mut buf, 0);
     assert_test!(result.is_some(), "sends sub-MSS when nothing inflight");
-    let (_, n) = result.unwrap();
+    let (_, n, _) = result.unwrap();
     assert_eq_test!(n, 10, "full 10 bytes sent");
     pass!()
 }
@@ -1396,7 +1398,7 @@ pub fn test_tcp_respects_peer_window() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 512];
-    let (first_seg, first_len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (first_seg, first_len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let shrink = TcpHeader {
         src_port: 80,
@@ -1412,7 +1414,7 @@ pub fn test_tcp_respects_peer_window() -> TestResult {
     let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &shrink, &[], &[], 1);
 
     let _ = tcp::send(id, &[0x11u8; 200]).unwrap();
-    let (_, next_len) = tcp::poll_transmit(id, &mut payload, 2).unwrap();
+    let (_, next_len, _) = tcp::poll_transmit(id, &mut payload, 2).unwrap();
     assert_eq_test!(next_len, 100, "limited by peer window");
     pass!()
 }
@@ -1422,7 +1424,7 @@ pub fn test_tcp_zero_window_blocks_send() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 128];
-    let (seg, len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let zero_wnd = TcpHeader {
         src_port: 80,
@@ -1450,7 +1452,7 @@ pub fn test_tcp_zero_window_probe() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 128];
-    let (seg, len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let zero_wnd = TcpHeader {
         src_port: 80,
@@ -1481,7 +1483,7 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, &[0x33u8; 50]).unwrap();
     let mut payload = [0u8; 256];
-    let (seg, len) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let ack_half_zero = TcpHeader {
         src_port: 80,
@@ -1606,6 +1608,113 @@ pub fn test_tcp_immediate_ack_for_fin() -> TestResult {
     pass!()
 }
 
+/// Allocate `n` zeroed kernel frames wrapped as `UFrame`s — a headless
+/// stand-in for a pinned user buffer's keepalive page list (no process VM).
+fn alloc_test_frames(n: usize) -> Option<KVec<UFrame<AnonymousMeta>>> {
+    let alloc = slopos_ostd::mm::frame_alloc::current_frame_allocator()?;
+    let mut frames = KVec::with_capacity(n).ok()?;
+    for _ in 0..n {
+        let opts = slopos_ostd::mm::FrameAllocOptions::single().zeroed();
+        let pa = alloc.alloc(opts)?;
+        frames
+            .push(UFrame::<AnonymousMeta>::from_unused(pa, AnonymousMeta::default()).ok()?)
+            .ok()?;
+    }
+    Some(frames)
+}
+
+/// TCP `MSG_ZEROCOPY` send-queue chunk lifecycle: a zero-copy chunk accounts for
+/// its bytes (buffered / unsent / inflight), is read back from the pinned pages
+/// on (re)transmit (`peek_retransmit` → volatile pin copy), survives a **partial**
+/// cumulative ACK (the pin stays held), and releases its notification-token
+/// reference only when **fully** cumulatively ACKed.
+pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
+    let mut send = match TcpSendState::new(TCP_BUFFER_SIZE) {
+        Ok(s) => s,
+        Err(_) => return fail!("send state alloc"),
+    };
+    let Some(frames) = alloc_test_frames(1) else {
+        return fail!("frame alloc");
+    };
+    let Some(token) = ZcNotifToken::new() else {
+        return fail!("token alloc");
+    };
+    // Fresh token owns one (chunk) reference: not yet notifiable.
+    assert_test!(!token.is_notifiable(), "fresh token must not be notifiable");
+
+    // Enqueue a 100-byte zero-copy chunk (data at pin base_off 0).
+    assert_test!(
+        send.enqueue_zerocopy(frames, 0, 100, token.clone()),
+        "enqueue_zerocopy"
+    );
+    assert_eq_test!(send.buffered_len(), 100, "buffered after enqueue");
+    assert_eq_test!(send.unsent_len(), 100, "unsent after enqueue");
+
+    // (Re)transmit reads the chunk's bytes straight from the pinned pages
+    // (zeroed test frames), clamped to the chunk; this is the volatile pin read.
+    let mut out = [0xFFu8; 50];
+    let got = send.peek_retransmit(0, &mut out);
+    assert_eq_test!(got, 50, "peek_retransmit read count from pin");
+    assert_test!(
+        out.iter().all(|&b| b == 0),
+        "zero-copy pin reads test frames"
+    );
+
+    send.mark_sent(100);
+    assert_eq_test!(send.inflight(), 100, "inflight after mark_sent");
+
+    // Partial cumulative ACK: the chunk shrinks but its pin stays held.
+    send.process_ack(40);
+    assert_eq_test!(send.buffered_len(), 60, "buffered after partial ack");
+    assert_eq_test!(send.inflight(), 60, "inflight after partial ack");
+    assert_test!(
+        !token.is_notifiable(),
+        "token must stay held across a partial ack"
+    );
+
+    // Full cumulative ACK retires the chunk → its token reference is released.
+    // (With no in-flight DMA references the count hits zero — notifiable.)
+    send.process_ack(60);
+    assert_eq_test!(send.buffered_len(), 0, "buffered after full ack");
+    assert_test!(
+        token.is_notifiable(),
+        "token released only on full cumulative ack"
+    );
+    pass!()
+}
+
+/// A zero-copy chunk after an inline chunk: a segment never straddles the
+/// boundary — `segment_source`/`peek` clamp at the inline chunk's end.
+pub fn test_tcp_zerocopy_no_chunk_straddle() -> TestResult {
+    let mut send = match TcpSendState::new(TCP_BUFFER_SIZE) {
+        Ok(s) => s,
+        Err(_) => return fail!("send state alloc"),
+    };
+    // Inline chunk of 30 bytes, then a zero-copy chunk of 100.
+    assert_eq_test!(send.enqueue(&[7u8; 30]), 30, "inline enqueue");
+    let Some(frames) = alloc_test_frames(1) else {
+        return fail!("frame alloc");
+    };
+    let Some(token) = ZcNotifToken::new() else {
+        return fail!("token alloc");
+    };
+    assert_test!(
+        send.enqueue_zerocopy(frames, 0, 100, token),
+        "zerocopy enqueue"
+    );
+    assert_eq_test!(send.buffered_len(), 130, "buffered = inline + zerocopy");
+
+    // A peek of 80 bytes from offset 0 stops at the inline chunk boundary (30).
+    let mut out = [0u8; 80];
+    let got = send.peek_unsent(&mut out);
+    assert_eq_test!(got, 30, "peek clamps to the inline chunk boundary");
+    assert_test!(
+        out[..30].iter().all(|&b| b == 7),
+        "inline bytes read from the ring"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_ring_buffer_new_empty, suite = tcp_data);
 slopos_testing::stest!(name = test_ring_buffer_write_read_basic, suite = tcp_data);
 slopos_testing::stest!(name = test_ring_buffer_write_full, suite = tcp_data);
@@ -1700,3 +1809,5 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_tcp_delayed_ack_timeout, suite = tcp_data);
 slopos_testing::stest!(name = test_tcp_immediate_ack_for_fin, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_zerocopy_chunk_lifecycle, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_zerocopy_no_chunk_straddle, suite = tcp_data);

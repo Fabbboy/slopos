@@ -37,8 +37,8 @@ pub mod time;
 pub use executor::{JoinHandle, spawn, yield_now};
 pub use op::{
     BufOp, BufResult, IntOp, MultishotStream, RecvFromOp, RecvFromResult, accept, accept_multishot,
-    close, nop, openat, poll_add, poll_add_multishot, read, recvfrom, recvmsg_multishot, timeout,
-    write,
+    close, connect, nop, openat, poll_add, poll_add_multishot, read, recvfrom, recvmsg_multishot,
+    timeout, write,
 };
 pub use select::{Either2, Either3, Select2, Select3, join2, select2, select3};
 

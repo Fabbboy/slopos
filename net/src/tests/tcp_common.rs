@@ -304,7 +304,7 @@ pub fn establish_connection_with_ts() -> EstablishedConn {
 /// nothing to send under the current window.
 pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, KVec<u8>)> {
     let mut buf = [0u8; 1500];
-    tcp::poll_transmit(id, &mut buf, tcp::clock::now_ms()).map(|(seg, len)| {
+    tcp::poll_transmit(id, &mut buf, tcp::clock::now_ms()).map(|(seg, len, _)| {
         let mut payload = KVec::<u8>::with_capacity(len).expect("test alloc");
         payload.extend_from_slice(&buf[..len]).expect("test alloc");
         (seg, payload)
