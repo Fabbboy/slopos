@@ -14,12 +14,13 @@
 
 use slopos_userland as _;
 
-use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
+use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::ring::{
     BufIovec, OP_CLOSE, OP_CONNECT, OP_NOP, OP_OPENAT, OP_READ, OP_RECVFROM, OP_RECVMSG, OP_SEND,
     OP_SEND_ZC, OP_WRITE, RegisterBufRingCmd, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
     SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, Sqe,
 };
+use slopos_abi::unix::SockAddrUn;
 use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
 
@@ -974,6 +975,85 @@ fn test_tcp_send_zc_shape() -> bool {
     }
 }
 
+/// `OP_CONNECT` on an **AF_UNIX** socket, end-to-end: bind + listen a unix
+/// listener, then async-connect a client to its path through the ring. Unix
+/// connect allocates the pair immediately when the backlog has room, so the op
+/// completes inline with `res == 0` and a single notification-free CQE — a fully
+/// deterministic (in-process, no network) exercise of the AF_UNIX OP_CONNECT path.
+fn test_connect_unix_inline_success() -> bool {
+    let path = b"/ring-op-connect-unix";
+    let Ok(listener) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
+        return false;
+    };
+    if net::bind_unix(listener.raw(), path).is_err() {
+        return false;
+    }
+    if net::listen(listener.raw(), 4).is_err() {
+        return false;
+    }
+    let Ok(client) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let mut sa = SockAddrUn::default();
+    sa.family = AF_UNIX;
+    sa.path[..path.len()].copy_from_slice(path);
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_CONNECT;
+    sqe.fd = client.raw();
+    sqe.addr = &sa as *const SockAddrUn as u64;
+    sqe.len = (2 + path.len()) as u32;
+    sqe.user_data = 0xC0DB;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(1).is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => {
+            cqe.user_data == 0xC0DB
+                && cqe.res == 0
+                && (cqe.flags & SLOPRING_CQE_F_MORE) == 0
+                && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
+        }
+        None => false,
+    }
+}
+
+/// `OP_CONNECT` on an AF_UNIX socket to a path with **no listener** completes
+/// inline with `-ECONNREFUSED`, a single notification-free CQE — proving the
+/// unix connect routing + errno mapping through the ring.
+fn test_connect_unix_refused() -> bool {
+    let Ok(sock) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+    let path = b"/ring-op-connect-no-listener";
+    let mut sa = SockAddrUn::default();
+    sa.family = AF_UNIX;
+    sa.path[..path.len()].copy_from_slice(path);
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_CONNECT;
+    sqe.fd = sock.raw();
+    sqe.addr = &sa as *const SockAddrUn as u64;
+    sqe.len = (2 + path.len()) as u32;
+    sqe.user_data = 0xC0DD;
+    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(1).is_err() {
+        return false;
+    }
+    match ring.poll_completion() {
+        Some(cqe) => {
+            cqe.user_data == 0xC0DD
+                && cqe.res == -111
+                && (cqe.flags & SLOPRING_CQE_F_MORE) == 0
+                && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
+        }
+        None => false,
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("setup", test_setup),
     ("nop", test_nop),
@@ -1011,6 +1091,11 @@ const CASES: &[(&str, fn() -> bool)] = &[
         test_connect_udp_inline_success,
     ),
     ("tcp_send_zc_shape", test_tcp_send_zc_shape),
+    (
+        "connect_unix_inline_success",
+        test_connect_unix_inline_success,
+    ),
+    ("connect_unix_refused", test_connect_unix_refused),
 ];
 
 fn main() {

@@ -12,9 +12,10 @@
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
-use slopos_abi::net::{AF_INET, SockAddrIn};
+use slopos_abi::net::{AF_INET, AF_UNIX, SockAddrIn};
 use slopos_abi::ring::{SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER};
 use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET};
+use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
@@ -129,12 +130,37 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
 /// re-probes: [`socket::socket_connect_nonblock`] emits the SYN once and then
 /// polls. The user `SockAddrIn` is validated and snapshotted **before** any side
 /// effect so a faulting address fails cleanly and a re-probe re-reads the same
-/// (caller-stable) pointer. AF_INET only this revision; AF_UNIX returns
-/// `-EPROTONOSUPPORT`.
+/// (caller-stable) pointer. Both AF_INET (`SockAddrIn`) and AF_UNIX
+/// (`SockAddrUn`) are supported.
 pub fn connect_nonblock(pid: u32, fd: i32, addr_va: u64, addr_len: u32) -> Result<i32, Errno> {
     let (handle, ops) = socket_handle_for(pid, fd)?;
     if ops.is_unix_socket() {
-        return Ok(Errno::EPROTONOSUPPORT.raw());
+        // AF_UNIX: copy the SockAddrUn path and run the (already nonblock-aware)
+        // unix_connect under the forced-nonblock guard. Its `-EAGAIN` means the
+        // listener backlog is momentarily full — returned before any side effect,
+        // so it is legitimately deferrable; the ring re-probes until the pair
+        // allocates (or the connect refuses / faults). Mirrors `syscall_connect`'s
+        // AF_UNIX path so observable results match (R12 parity).
+        if (addr_len as usize) < 4 {
+            return Err(Errno::EINVAL);
+        }
+        let ptr = UserPtr::<SockAddrUn>::try_new(addr_va).map_err(|_| Errno::EFAULT)?;
+        let sa: SockAddrUn = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
+        if sa.family != AF_UNIX {
+            return Err(Errno::EAFNOSUPPORT);
+        }
+        let path_len = (addr_len as usize - 2).min(UNIX_PATH_MAX);
+        let actual_len = sa.path[..path_len]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(path_len);
+        if actual_len == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let sh = SocketHandle::from_usize(handle);
+        let rc =
+            with_unix_forced_nonblock(sh, || unix_socket::unix_connect(sh, &sa.path[..actual_len]));
+        return Ok(rc);
     }
     if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {
         return Err(Errno::EINVAL);

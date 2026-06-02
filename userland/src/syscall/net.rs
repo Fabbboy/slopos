@@ -47,6 +47,16 @@ pub fn listen(fd: RawFd, backlog: u32) -> SyscallResult<()> {
     Sys::listen(fd, backlog as i32).map_err(Into::into)
 }
 
+/// Bind an AF_UNIX socket to `path` (a `SockAddrUn`, `addrlen = 2 + path.len()`).
+/// The AF_INET counterpart of [`bind`].
+pub fn bind_unix(fd: RawFd, path: &[u8]) -> SyscallResult<()> {
+    let mut addr = slopos_abi::unix::SockAddrUn::default();
+    addr.family = slopos_abi::net::AF_UNIX;
+    let n = path.len().min(slopos_abi::unix::UNIX_PATH_MAX);
+    addr.path[..n].copy_from_slice(&path[..n]);
+    Sys::bind(fd, &addr as *const _ as *const u8, (2 + n) as u32).map_err(Into::into)
+}
+
 pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<super::OwnedFd> {
     let mut addrlen = core::mem::size_of::<SockAddrIn>() as u32;
     let peer_ptr = peer
