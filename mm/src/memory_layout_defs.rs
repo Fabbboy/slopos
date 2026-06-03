@@ -178,6 +178,17 @@ pub const PROCESS_MMAP_END_VA: u64 = 0x0000_7FFF_FE00_0000;
 /// Exception stack region base virtual address.
 pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_C000_0000;
 
+/// Exception (IST) **safe**-stack region end (exclusive) — the data-stack
+/// region (`USTACK_VA_BASE`) begins here.  Used by
+/// `__safestack_pointer_address` to decide, purely from the running `RSP`,
+/// whether instrumented code is executing on an IST/exception stack (and
+/// must therefore walk the per-CPU exception data stack) or on a task /
+/// kernel / boot stack (walk the per-task data stack).  Only IST safe
+/// stacks live in `[EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_END)`;
+/// PCRs are `.bss` statics in the kernel-image region and task stacks are
+/// in `KSTACK`/`USTACK`, so this range uniquely identifies IST context.
+pub const EXCEPTION_STACK_REGION_END: u64 = USTACK_VA_BASE;
+
 /// Stride between exception stacks (64 KB).
 pub const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x0001_0000;
 
@@ -189,6 +200,69 @@ pub const EXCEPTION_STACK_PAGES: u64 = 8;
 
 /// Exception stack usable size (32 KB).
 pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * PAGE_SIZE_4KB;
+
+// =============================================================================
+// Exception / IST SafeStack DATA-Stack Region (per-CPU)
+// =============================================================================
+//
+// The data-stack analogue of the IST safe-stack region above.  While the
+// IST mechanism gives each exception/IRQ vector a dedicated *safe* stack
+// (RSP), the SafeStack sanitizer needs a matching *data* stack for the
+// handler's address-taken locals (the `[core::fmt::Argument; N]` array a
+// `klog!`/`panic!` builds).  Without it, an exception handler's
+// instrumented code writes those locals onto whichever task happened to be
+// interrupted — the root cause of the recursive-#PF-in-panic crash.
+//
+// One mapped, guard-paged data stack per CPU, shared LIFO across all
+// exception / NMI / MCE / fault-nesting on that CPU (interrupts are masked
+// inside exception handlers, so usage is strictly last-in-first-out and a
+// single per-CPU stack suffices).  `__safestack_pointer_address` selects
+// it (via `gs:[ProcessorControlRegion::ist_unsafe_sp]`) whenever the
+// running `RSP` lies in `EXCEPTION_STACK_REGION`.
+//
+// Layout (above the data-stack/USTACK region, below the top of the
+// high-canonical half):
+//   USTACK_VA_END           = 0xFFFF_FFFF_F000_0000  (per-task data stacks end)
+//   EXC_DSTACK_REGION_BASE   = 0xFFFF_FFFF_F000_0000  (this region starts)
+//   ... MAX_CPUS slots, 128 KB stride ...
+
+/// Base of the per-CPU exception/IST data-stack region.
+pub const EXC_DSTACK_REGION_BASE: u64 = USTACK_VA_END;
+
+/// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable).  Generous
+/// versus the 64 KB bootstrap data stack so the deepest exception →
+/// diagnostic-dump → `panic!` → `core::fmt` chain (plus an NMI nested on
+/// top) cannot exhaust it; the guard page + CI budget gate are the
+/// backstops if that assumption is ever violated.
+pub const EXC_DSTACK_REGION_STRIDE: u64 = 0x0002_0000;
+
+/// Guard page size for the exception data stack (one unmapped 4 KB page at
+/// the slot base; the stack grows down into it on overflow).
+pub const EXC_DSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
+
+/// Usable bytes of one CPU's exception data stack (124 KB).
+pub const EXC_DSTACK_USABLE_SIZE: u64 = EXC_DSTACK_REGION_STRIDE - EXC_DSTACK_GUARD_SIZE;
+
+/// Usable pages of one CPU's exception data stack.
+pub const EXC_DSTACK_PAGES: u64 = EXC_DSTACK_USABLE_SIZE / PAGE_SIZE_4KB;
+
+// Bind the SafeStack resolver's IST-region bounds — which live in
+// `slopos-ostd` (below `mm` in the crate graph, so it cannot import this
+// module) and are consumed as naked-asm `const` operands by
+// `__safestack_pointer_address` — to this canonical layout.  A drift here
+// would silently route an exception handler's address-taken locals onto the
+// wrong data stack, so we fail the build instead.
+const _: () = {
+    assert!(
+        EXCEPTION_STACK_REGION_BASE == slopos_arch::pcr::SAFESTACK_IST_REGION_BASE,
+        "SafeStack IST-region base drifted from EXCEPTION_STACK_REGION_BASE",
+    );
+    assert!(
+        EXCEPTION_STACK_REGION_END - EXCEPTION_STACK_REGION_BASE
+            == slopos_arch::pcr::SAFESTACK_IST_REGION_SPAN,
+        "SafeStack IST-region span drifted from EXCEPTION_STACK_REGION span",
+    );
+};
 
 // =============================================================================
 // Default Process Memory Layout

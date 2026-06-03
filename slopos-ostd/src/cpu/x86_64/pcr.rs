@@ -15,6 +15,7 @@
 //! - `slopos-ostd/src/user/asm/user_return.s` (`__ostd_user_return`)
 //! - `core/context_switch.s` (context_switch_user)
 
+use core::arch::naked_asm;
 use core::cell::SyncUnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -166,6 +167,27 @@ pub struct ProcessorControlRegion {
     /// Per-CPU kernel stack (64KB).
     /// Stack grows down, so kernel_rsp points to end of this array.
     pub kernel_stack: [u8; KERNEL_STACK_SIZE],
+
+    /// Per-CPU SafeStack **data**-stack pointer for IST/exception context.
+    ///
+    /// `__safestack_pointer_address` returns the address of THIS slot
+    /// (instead of `current_task->unsafe_stack_sp`) whenever the running
+    /// `RSP` is inside `EXCEPTION_STACK_REGION`, so instrumented code in
+    /// an exception handler (`klog!`/`panic!`/`core::fmt`) walks a
+    /// dedicated, mapped, guard-paged per-CPU exception data stack rather
+    /// than the interrupted task's small data stack.  Primed to the
+    /// exception data-stack top by `ist_stacks` before interrupts are
+    /// enabled, self-balancing across nested faults, and re-primed by
+    /// `retire_faulted_cpu` (the one exception path that abandons without
+    /// unwinding).  Appended last so every asm-critical PCR offset
+    /// (`<= 184`) and the embedded GDT/TSS layout stay byte-identical.
+    ///
+    /// `SyncUnsafeCell` (like `user_rax_tmp`) gives interior mutability so
+    /// `__safestack_pointer_address` can hand its raw `u64` address to the
+    /// LLVM SafeStack prologue while Rust primes/re-primes it through the
+    /// owning CPU.  The inner `u64` sits at offset 0 of the cell, so
+    /// `offset_of!(PCR, ist_unsafe_sp)` is the address the asm returns.
+    pub ist_unsafe_sp: SyncUnsafeCell<u64>,
 }
 
 // Compile-time offset verification.
@@ -299,6 +321,7 @@ impl ProcessorControlRegion {
             tss: Tss64::new(),
             _stack_guard: [0; 4096],
             kernel_stack: [0; KERNEL_STACK_SIZE],
+            ist_unsafe_sp: SyncUnsafeCell::new(0),
         }
     }
 
@@ -399,7 +422,33 @@ pub mod offsets {
     /// `__ostd_user_return` to spill user RAX without touching the
     /// kernel stack at `kernel_rsp - 8`.
     pub const USER_RAX_TMP: usize = 184;
+    /// Offset of the `ist_unsafe_sp` field — the per-CPU SafeStack
+    /// data-stack pointer used while running on an IST/exception stack.
+    /// Consumed by `__safestack_pointer_address` as a `const` operand.
+    /// Computed (not a literal) because the field is appended after the
+    /// 64 KiB embedded kernel stack to keep the asm-critical offsets
+    /// (`<= 184`) byte-identical.
+    pub const IST_UNSAFE_SP: usize =
+        core::mem::offset_of!(super::ProcessorControlRegion, ist_unsafe_sp);
 }
+
+/// IST/exception safe-stack region bounds used by
+/// [`super::super::super::arch::x86_64::naked::__safestack_pointer_address`]
+/// to decide, purely from the running `RSP`, whether instrumented code is
+/// executing on an IST/exception stack (select the per-CPU `ist_unsafe_sp`
+/// data stack) or in task/kernel/boot context (select the per-task data
+/// stack).
+///
+/// The canonical layout lives in `slopos_mm::memory_layout_defs`
+/// (`EXCEPTION_STACK_REGION_BASE` / `EXCEPTION_STACK_REGION_END`); these are
+/// duplicated here because the SafeStack resolver is in OSTD — below `mm`
+/// in the crate graph — and must supply them as naked-asm `const` operands.
+/// A compile-time razor in `memory_layout_defs.rs` asserts they match, so
+/// the two can never drift.
+pub const SAFESTACK_IST_REGION_BASE: u64 = 0xFFFF_FFFF_C000_0000;
+
+/// Span of [`SAFESTACK_IST_REGION_BASE`] (256 MiB: `C000_0000..D000_0000`).
+pub const SAFESTACK_IST_REGION_SPAN: u64 = 0x1000_0000;
 
 // ==================== STATIC STORAGE ====================
 
@@ -775,6 +824,74 @@ pub fn current_pcr_local() -> Option<&'static ProcessorControlRegion> {
 #[inline]
 pub fn current_pcr_local_mut() -> Option<&'static mut ProcessorControlRegion> {
     get_pcr_mut_via_token(get_current_cpu())
+}
+
+/// Prime/re-prime the current CPU's IST/exception SafeStack data-stack
+/// pointer ([`ProcessorControlRegion::ist_unsafe_sp`]).
+///
+/// Single-writer-per-CPU by construction: invoked once at boot by
+/// `ist_stacks` (before interrupts are enabled, hence before any
+/// instrumented exception handler can run on this CPU), and re-primed by
+/// `retire_faulted_cpu` — the one exception path that `schedule()`s away
+/// without unwinding the IST data stack — so the abandoned depth does not
+/// accumulate across successive fatal user faults. The only other writer
+/// is the LLVM SafeStack prologue, which runs on this same CPU; callers
+/// invoke this with interrupts disabled (boot) or from a divergent
+/// exception path that never resumes the abandoned frames.
+#[inline]
+pub fn set_local_ist_unsafe_sp(top: u64) {
+    if let Some(pcr) = current_pcr_local() {
+        // SAFETY: `ist_unsafe_sp` is a per-CPU slot; this writes only the
+        // owning CPU's PCR (Inv. 8). The cell's inner `u64` is the same
+        // location the SafeStack sanitizer reads/writes on this CPU.
+        unsafe {
+            *pcr.ist_unsafe_sp.get() = top;
+        }
+    }
+}
+
+/// Read the current CPU's IST/exception data-stack pointer. Diagnostics
+/// only (e.g. overflow reporting); the hot path reads it via the naked
+/// `__safestack_pointer_address` asm, never this fn.
+#[inline]
+pub fn local_ist_unsafe_sp() -> u64 {
+    current_pcr_local()
+        // SAFETY: per-CPU read of this CPU's slot; benign for diagnostics.
+        .map(|pcr| unsafe { *pcr.ist_unsafe_sp.get() })
+        .unwrap_or(0)
+}
+
+/// Raw store of `top` into this CPU's `PCR.ist_unsafe_sp`, bypassing the
+/// SafeStack sanitizer.
+///
+/// Used to re-prime the exception data-stack pointer when an exception
+/// handler abandons it without unwinding (`retire_faulted_cpu`'s divergent
+/// `schedule()`). Why naked: that abandoning code runs *on* an IST stack,
+/// so `__safestack_pointer_address` resolves THIS very slot as its own
+/// data-SP — an instrumented setter's SafeStack epilogue would restore the
+/// slot to the setter's entry value and silently undo the re-prime. A naked
+/// fn has no prologue/epilogue, so its store sticks.
+///
+/// Call it DIRECTLY from the abandoning path. Wrapping it in an
+/// instrumented helper re-introduces the same epilogue clobber (the
+/// wrapper, also running on the IST stack, would restore the slot on
+/// return), so there is intentionally no safe wrapper. Clobbers only `rax`.
+///
+/// Distinct from [`set_local_ist_unsafe_sp`], which is correct for *boot*
+/// priming because that runs on the boot/kernel stack — there
+/// `__safestack_pointer_address` resolves the per-task slot, not this one,
+/// so the setter's own frame never touches `ist_unsafe_sp`.
+#[unsafe(naked)]
+pub extern "sysv64" fn reset_ist_unsafe_sp(top: u64) {
+    naked_asm!(
+        // rax = PCR base (self_ref @ offset 0, == this CPU's gs base).
+        "mov rax, gs:[{off_self_ref}]",
+        // PCR.ist_unsafe_sp = top  (top is arg0 = rdi).
+        "mov [rax + {off_ist_sp}], rdi",
+        "ret",
+        off_self_ref = const offsets::SELF_REF,
+        off_ist_sp = const offsets::IST_UNSAFE_SP,
+    )
 }
 
 /// Get the number of initialized PCRs (i.e. CPU count).

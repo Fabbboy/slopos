@@ -29,6 +29,20 @@ use crate::panic::set_panic_cpu_state;
 fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
     if let Some(tid) = task_record_user_fault_exit(task, reason) {
         task_terminate(tid);
+        // This is the one exception path that abandons the per-CPU exception
+        // SafeStack data stack WITHOUT unwinding: `schedule()` switches away
+        // and never returns here, so the depth consumed by this handler
+        // chain would leak and accumulate across successive fatal user
+        // faults (a normal exception restores the slot to its *entry* value,
+        // not to the top, so it never heals the leak). Re-prime the slot to
+        // the data-stack top with a NAKED store — an instrumented setter,
+        // running here on the IST stack, would resolve THIS slot as its own
+        // data-SP and undo the write on return — and call it directly so no
+        // intervening epilogue clobbers it. Any residual leak (e.g. the
+        // post-reprime `schedule()` frame on a switch-away) is bounded and
+        // caught as a clean overflow panic by `exc_dstack_guard_fault`.
+        let dstack_top = crate::ist_stacks::exc_dstack_top_current_cpu();
+        slopos_arch::pcr::reset_ist_unsafe_sp(dstack_top);
         schedule();
     }
     // schedule() returned without switching — park safely on the

@@ -61,6 +61,7 @@ use slopos_arch::arch::idt::{
 use slopos_arch::{MAX_CPUS, get_current_cpu};
 use slopos_mm::kernel_meta::KernelMeta;
 use slopos_mm::memory_layout_defs::{
+    EXC_DSTACK_GUARD_SIZE, EXC_DSTACK_PAGES, EXC_DSTACK_REGION_BASE, EXC_DSTACK_REGION_STRIDE,
     EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
     EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE,
 };
@@ -406,7 +407,94 @@ fn ensure_cpu_stacks_mapped(cpu_id: usize) {
         map_stack_pages(stack, stack_base);
     }
 
+    // The data-stack analogue: one mapped, guard-paged SafeStack DATA stack
+    // for this CPU's exception/IST context, walked by instrumented handler
+    // code via `gs:[ist_unsafe_sp]`.
+    map_exc_dstack_pages(cpu_id);
+
     CPU_IST_MAPPED[cpu_id].store(true, Ordering::Release);
+}
+
+// =============================================================================
+// Exception / IST SafeStack DATA stack (per-CPU)
+// =============================================================================
+
+/// `(guard_start, usable_base, top)` of CPU `cpu_id`'s exception data stack.
+/// The guard page occupies `[guard_start, usable_base)`; the usable stack
+/// `[usable_base, top)` grows down from `top` into the guard on overflow.
+#[inline]
+fn exc_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
+    let region_base = EXC_DSTACK_REGION_BASE + cpu_id as u64 * EXC_DSTACK_REGION_STRIDE;
+    let usable_base = region_base + EXC_DSTACK_GUARD_SIZE;
+    let top = region_base + EXC_DSTACK_REGION_STRIDE;
+    (region_base, usable_base, top)
+}
+
+/// Map the usable pages of CPU `cpu_id`'s exception data stack, leaving the
+/// guard page at the base unmapped.  Mirrors [`map_stack_pages`].
+fn map_exc_dstack_pages(cpu_id: usize) {
+    let (_guard_start, usable_base, _top) = exc_dstack_bounds_for_cpu(cpu_id);
+    for page in 0..EXC_DSTACK_PAGES {
+        let virt_addr = usable_base + page * PAGE_SIZE_4KB;
+        let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
+            panic!(
+                "ist_stacks: failed to allocate exception data-stack page for CPU {}",
+                cpu_id
+            )
+        });
+        let phys_addr = frame.into_phys();
+        if map_page_4kb(
+            VirtAddr::new(virt_addr),
+            phys_addr,
+            PageFlags::KERNEL_RW.bits(),
+        ) != 0
+        {
+            panic!(
+                "ist_stacks: failed to map exception data-stack page for CPU {}",
+                cpu_id
+            );
+        }
+    }
+}
+
+/// Prime the current CPU's `ist_unsafe_sp` to the top of its exception data
+/// stack.  Must run after [`ensure_cpu_stacks_mapped`] (so the pages exist)
+/// and BEFORE any IDT IST selector is installed (so no exception can run on
+/// an IST stack — and thus select this data stack — before it is primed).
+fn prime_exc_dstack(cpu_id: usize) {
+    let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(cpu_id);
+    slopos_arch::pcr::set_local_ist_unsafe_sp(top);
+}
+
+/// Top (exclusive high address) of the current CPU's exception data stack.
+/// Used by `retire_faulted_cpu` to re-prime `ist_unsafe_sp` after a fatal
+/// user fault abandons the IST data stack without unwinding.
+pub fn exc_dstack_top_current_cpu() -> u64 {
+    let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(get_current_cpu());
+    top
+}
+
+/// `(guard_start, usable_base, top)` of the current CPU's exception data
+/// stack.  Exposed for the SafeStack regression tests.
+pub fn exc_dstack_bounds_current_cpu() -> (u64, u64, u64) {
+    exc_dstack_bounds_for_cpu(get_current_cpu())
+}
+
+/// Classify a page-fault address against the exception data-stack guard
+/// pages (sibling of [`ist_guard_fault`]).  Returns the offending CPU id on
+/// a guard-page hit, so the #PF handler can report a clean
+/// "exception data-stack overflow" instead of recursing.
+pub fn exc_dstack_guard_fault(fault_addr: u64) -> Option<usize> {
+    for cpu_id in 0..MAX_CPUS {
+        if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
+            continue;
+        }
+        let (guard_start, usable_base, _top) = exc_dstack_bounds_for_cpu(cpu_id);
+        if fault_addr >= guard_start && fault_addr < usable_base {
+            return Some(cpu_id);
+        }
+    }
+    None
 }
 
 // =============================================================================
@@ -470,6 +558,12 @@ pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
 ) {
     let cpu_id = get_current_cpu();
     ensure_cpu_stacks_mapped(cpu_id);
+
+    // Prime this CPU's exception SafeStack data-stack pointer BEFORE any IST
+    // selector is installed below — once an IST is live, an exception may run
+    // on it and `__safestack_pointer_address` will select `ist_unsafe_sp`,
+    // which must already point at the mapped data-stack top by then.
+    prime_exc_dstack(cpu_id);
 
     for (idx, stack) in IST_CONFIGS.iter().enumerate() {
         let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);

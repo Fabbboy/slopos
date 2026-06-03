@@ -98,6 +98,17 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         return;
     }
 
+    // Exception SafeStack DATA-stack overflow: a per-CPU exception data stack
+    // grew past its guard page. This is the one fault we MUST report without
+    // `format_args!` — the normal diagnostic/panic path builds its Argument
+    // array on the exception data stack, i.e. the very stack that just
+    // overflowed, so it would re-fault. Route to the format-free abort.
+    if ist_stacks::exc_dstack_guard_fault(fault_addr).is_some() {
+        crate::panic::panic_abort_raw(
+            "exception data-stack overflow: a CPU exhausted its per-CPU IST/exception SafeStack data stack",
+        );
+    }
+
     let from_user = in_user(frame_ref);
 
     klog_info!("FATAL: Page fault");

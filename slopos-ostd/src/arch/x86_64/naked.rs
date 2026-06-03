@@ -77,36 +77,77 @@ pub unsafe extern "C" fn ap_entry(_cpu_info: *const ()) -> ! {
 ///
 /// LLVM emits a call to this symbol on every instrumented function's
 /// prologue under `-Zsanitizer=safestack -C llvm-args=-safestack-use-pointer-address`.
-/// The function returns `&current_task->abi.unsafe_stack_sp` — a
-/// heap-stable address inside the running task's allocation. LLVM's
-/// pointer-address mode caches the returned pointer on the safe stack
-/// across multiple loads/stores in a function; embedding the slot
-/// inside the Task struct (rather than a per-CPU PCR field) makes
-/// the cached pointer survive CPU migration by construction.
+/// It returns the address of the *slot* holding the current SafeStack
+/// data-stack pointer; LLVM caches that address on the safe stack across
+/// the function's loads/stores.
 ///
-/// Naked because the function must avoid self-recursion: a non-naked
-/// fn compiled with the sanitizer enabled would itself emit a
-/// prologue that calls `__safestack_pointer_address` before
-/// returning.
+/// **The slot is selected from the running `RSP`, not from the current
+/// task.** The data stack a context needs is a property of *which stack is
+/// executing*, and the CPU reports that in hardware via `RSP`:
+///
+/// - `RSP` inside the IST/exception safe-stack region
+///   (`[SAFESTACK_IST_REGION_BASE, +SPAN)`) → the code is an exception /
+///   IRQ-on-IST / NMI / MCE handler, so return `&PCR.ist_unsafe_sp`, the
+///   per-CPU exception data-stack pointer (a dedicated, mapped,
+///   guard-paged data stack primed by `ist_stacks`).
+/// - otherwise → task / kernel-thread / syscall / IRQ-on-task-stack /
+///   early-boot context, so return `&current_task->abi.unsafe_stack_sp`
+///   exactly as before.
+///
+/// This is the *root* fix for "an exception handler writes its
+/// address-taken locals (the `[core::fmt::Argument; N]` array a
+/// `klog!`/`panic!` builds) onto the interrupted task's small data stack":
+/// the IST mechanism switches the *safe* stack (`RSP`) but not the *data*
+/// stack, so resolving the data stack from `current_task` routes the
+/// handler onto the wrong stack. Deriving it from `RSP` instead makes the
+/// selection correct in every context by construction — no per-boundary
+/// save/restore, nothing that can drift, and (because `RSP` is re-read
+/// every prologue) it is automatically right across context switches,
+/// nesting, and SMP migration.
+///
+/// Naked because the function must avoid self-recursion: a non-naked fn
+/// compiled with the sanitizer enabled would itself emit a prologue that
+/// calls `__safestack_pointer_address` before returning. It clobbers only
+/// `rax` and flags (the pointer-address ABI runs mid-prologue and must not
+/// disturb any other register).
 ///
 /// # Safety
 ///
 /// Only called by LLVM-emitted prologues. The asm assumes:
-/// - `gs:[pcr_offsets::CURRENT_TASK]` holds a valid `*mut Task` (set
-///   by `boot/limine_entry.s` for the BSP and by [`ap_entry`] for
-///   APs, before any instrumented Rust runs on that CPU).
-/// - The `Task` struct embeds `abi: TaskAbi` at offset 0 (enforced
-///   by an `offset_of!` razor inside `slopos-core::scheduler::task_struct`).
+/// - `gs:[SELF_REF]` (offset 0) holds this CPU's PCR base and
+///   `gs:[CURRENT_TASK]` a valid `*mut Task` — both set by
+///   `boot/limine_entry.s` (BSP) / [`ap_entry`] (AP) before any
+///   instrumented Rust runs on that CPU.
+/// - `PCR.ist_unsafe_sp` is primed to the exception data-stack top by
+///   `ist_stacks` before any IST selector is installed (i.e. before any
+///   `RSP` can land in the IST region).
+/// - The `Task` struct embeds `abi: TaskAbi` at offset 0 (offset_of! razor
+///   in `slopos-core::scheduler::task_struct`).
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
     naked_asm!(
-        // rax = current_task (AtomicPtr<()> load on x86-64 is a plain mov).
+        // Select the data-stack slot from the running stack (RSP).
+        "mov rax, rsp",
+        "sub rax, {ist_base}",            // rax = rsp - IST_REGION_BASE
+        "cmp rax, {ist_span}",            // unsigned: rsp in [BASE, BASE+SPAN)?
+        "jb 2f",                          // yes -> IST/exception context
+        // Common path: task / kernel-thread / syscall / IRQ-on-task / boot.
+        // Return &current_task->abi.unsafe_stack_sp.
         "mov rax, gs:[{off_current_task}]",
-        // rax = &current_task->abi.unsafe_stack_sp
         "add rax, {off_sp}",
         "ret",
+        // IST/exception context. Return &PCR.ist_unsafe_sp; PCR base is
+        // gs:[self_ref] (offset 0), which equals the gs base itself.
+        "2:",
+        "mov rax, gs:[{off_self_ref}]",
+        "add rax, {off_ist_sp}",
+        "ret",
+        ist_base = const pcr::SAFESTACK_IST_REGION_BASE,
+        ist_span = const pcr::SAFESTACK_IST_REGION_SPAN,
         off_current_task = const pcr_offsets::CURRENT_TASK,
         off_sp = const TASK_UNSAFE_STACK_SP_OFFSET,
+        off_self_ref = const pcr_offsets::SELF_REF,
+        off_ist_sp = const pcr_offsets::IST_UNSAFE_SP,
     )
 }

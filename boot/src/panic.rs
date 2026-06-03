@@ -43,6 +43,31 @@ fn panic_serial_write(s: &str) {
     serial::write_line(s);
 }
 
+/// Last-resort, **format-free** abort: print a fixed `&'static str` and halt
+/// without ever building a `format_args!` value.
+///
+/// `format_args!`/`write!` materialise a `[core::fmt::Argument; N]` array as
+/// an address-taken local, i.e. on the SafeStack *data* stack. That is fine
+/// for the normal panic path — exception context now runs on its own mapped
+/// per-CPU data stack — but it is precisely wrong for the one case where the
+/// **exception data stack itself overflowed**: the normal panic path would
+/// re-fault on the very stack that is exhausted. This routine writes only
+/// pre-existing `&'static str`s through the serial line (no Argument array,
+/// no stack buffer), so it consumes no data stack and cannot recurse.
+///
+/// Diverges. Interrupts are masked first so a nested IRQ cannot perturb the
+/// halt.
+pub fn panic_abort_raw(msg: &'static str) -> ! {
+    cpu::disable_interrupts();
+    // Best-effort: claim the panic-in-progress flag so a concurrent normal
+    // panic on another CPU does not interleave; ignore the result either way.
+    let _ = PANIC_IN_PROGRESS.enter();
+    panic_serial_write("\n\n=== KERNEL ABORT ===");
+    panic_serial_write(msg);
+    panic_serial_write("System halted.");
+    cpu::halt_loop()
+}
+
 fn panic_dump_backtrace() {
     let rbp = cpu::read_rbp();
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
