@@ -4,8 +4,18 @@ pub mod tests;
 
 use core::mem;
 
+use crate::pal::slopos::signal_restorer_addr;
 use crate::pal::{Pal, Sys};
 use slopos_abi::signal::UserSigaction;
+
+/// True when `handler` is a real function pointer (not `SIG_DFL`/`SIG_IGN`).
+///
+/// The kernel rejects (`EINVAL`) a real handler whose `sa_restorer` is 0,
+/// so libc must inject its own restorer for exactly these handlers.
+#[inline]
+fn is_catchable_handler(handler: u64) -> bool {
+    handler != slopos_abi::signal::SIG_DFL && handler != slopos_abi::signal::SIG_IGN
+}
 
 // ---------------------------------------------------------------------------
 // Signal number constants (re-exported from abi for C consumers)
@@ -54,7 +64,13 @@ pub unsafe extern "C" fn signal(signum: i32, handler: usize) -> usize {
     act.sa_handler = handler as u64;
     act.sa_flags = slopos_abi::signal::SA_RESTART;
     act.sa_mask = 0;
-    act.sa_restorer = 0;
+    // The kernel requires a nonzero restorer for catchable handlers; inject
+    // ours. SIG_DFL/SIG_IGN need no restorer, so leave it 0 for those.
+    act.sa_restorer = if is_catchable_handler(act.sa_handler) {
+        signal_restorer_addr()
+    } else {
+        0
+    };
 
     let mut old_act: UserSigaction = mem::zeroed();
 
@@ -82,7 +98,25 @@ pub unsafe extern "C" fn sigaction(
     act: *const UserSigaction,
     oldact: *mut UserSigaction,
 ) -> i32 {
-    match Sys::rt_sigaction(signum, act as *const u8, oldact as *mut u8, SIGSET_SIZE) {
+    // When installing a catchable handler with no caller-supplied restorer,
+    // substitute libc's trampoline (glibc behavior). A nonzero restorer or a
+    // SIG_DFL/SIG_IGN install passes through untouched. A NULL `act` is a
+    // query-only call and is forwarded as-is.
+    let mut patched: UserSigaction;
+    let act_ptr: *const u8 = if !act.is_null() {
+        let a = &*act;
+        if a.sa_restorer == 0 && is_catchable_handler(a.sa_handler) {
+            patched = *a;
+            patched.sa_restorer = signal_restorer_addr();
+            &patched as *const UserSigaction as *const u8
+        } else {
+            act as *const u8
+        }
+    } else {
+        core::ptr::null()
+    };
+
+    match Sys::rt_sigaction(signum, act_ptr, oldact as *mut u8, SIGSET_SIZE) {
         Ok(()) => 0,
         Err(_) => -1,
     }
