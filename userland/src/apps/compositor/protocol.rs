@@ -629,14 +629,16 @@ impl ProtocolBridge {
             self.clipboard.len = 0;
             return;
         }
-        // `into_raw` transfers ownership to the mapping, which closes the fd on
-        // Drop; an OwnedFd that is never consumed would close it here instead.
-        match CachedShmMapping::map_readonly_fd(fd.into_raw(), len as usize) {
+        // `into_raw` releases the OwnedFd's close-on-drop; on a successful map
+        // the mapping owns the fd, but on failure we must close it ourselves.
+        let raw = fd.into_raw();
+        match CachedShmMapping::map_readonly_fd(raw, len as usize) {
             Some(mapping) => {
                 self.clipboard.source = Some(mapping);
                 self.clipboard.len = len;
             }
             None => {
+                crate::syscall::memory::close(raw);
                 self.clipboard.source = None;
                 self.clipboard.len = 0;
             }
@@ -666,12 +668,19 @@ impl ProtocolBridge {
     ) {
         let Some(fd) = buffer_fd else { return };
         let dst_len = dst_len.min(MAX_CLIPBOARD_BYTES) as usize;
+        let raw = fd.into_raw();
         let mut copied = 0u32;
-        if let Some(mut dst) = CachedShmMapping::map_writable_fd(fd.into_raw(), dst_len) {
-            if let Some(src) = self.clipboard.source.as_ref() {
-                let n = (self.clipboard.len as usize).min(dst_len);
-                dst.as_mut_slice()[..n].copy_from_slice(&src.as_slice()[..n]);
-                copied = n as u32;
+        match CachedShmMapping::map_writable_fd(raw, dst_len) {
+            Some(mut dst) => {
+                if let Some(src) = self.clipboard.source.as_ref() {
+                    let n = (self.clipboard.len as usize).min(dst_len);
+                    dst.as_mut_slice()[..n].copy_from_slice(&src.as_slice()[..n]);
+                    copied = n as u32;
+                }
+                // `dst` (and its fd) is released here.
+            }
+            None => {
+                crate::syscall::memory::close(raw);
             }
         }
         let _ = self
