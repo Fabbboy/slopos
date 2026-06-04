@@ -21,7 +21,7 @@ pub enum TrapExitSource {
 }
 
 #[inline]
-fn trap_running_on_exception_stack() -> bool {
+pub fn trap_running_on_exception_stack() -> bool {
     let rsp = cpu::read_rsp();
     let ist_region_end =
         EXCEPTION_STACK_REGION_BASE + (MAX_CPUS as u64) * 7 * EXCEPTION_STACK_REGION_STRIDE;

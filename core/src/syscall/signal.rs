@@ -9,7 +9,10 @@ use slopos_abi::signal::{
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr as MmUserPtr;
-use slopos_ostd::user::context::UserContext;
+use slopos_ostd::irq::InterruptFrame;
+use slopos_ostd::user::context::{
+    USER_RFLAGS_FORCED, USER_RFLAGS_PERMITTED, UserContext, UserRegs,
+};
 
 use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
@@ -18,6 +21,7 @@ use slopos_sched::task::{
     task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_raise, task_terminate,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
+use slopos_sched::trap::trap_running_on_exception_stack;
 
 fn parse_signum(raw: u64) -> Option<u8> {
     if raw == 0 || raw as usize > NSIG {
@@ -355,10 +359,103 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     SyscallResult::NoReturn
 });
 
-pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return;
-    };
+/// Read/write view over the user-mode register file that signal
+/// delivery mutates. The two delivery sites — the syscall-exit path
+/// ([`UserContext`]) and the IRQ-exit path ([`InterruptFrame`]) — share
+/// [`deliver_pending_signal_core`] through this trait so the frame
+/// layout, RFLAGS masking, and redirect logic stay in lockstep.
+trait UserRegView {
+    /// Snapshot the GPR file as a `UserRegs`, with `rflags_user_subset`
+    /// already masked to the user-permitted bits so the value stored in
+    /// the `SignalFrame` matches across both delivery sites.
+    fn snapshot(&self) -> UserRegs;
+
+    /// Commit a redirected register file (handler entry: new RSP/RIP +
+    /// signum in RDI). Re-applies RFLAGS masking and the user CS/SS
+    /// selectors so a redirect can never escape the sandbox.
+    fn commit_redirect(&mut self, regs: &UserRegs);
+}
+
+impl UserRegView for UserContext {
+    fn snapshot(&self) -> UserRegs {
+        *self.regs()
+    }
+
+    fn commit_redirect(&mut self, regs: &UserRegs) {
+        self.set_regs(*regs);
+    }
+}
+
+/// IRQ-exit register view over the CPU-pushed [`InterruptFrame`]. The
+/// `iretq` that resumes user mode loads RIP/RSP/RFLAGS from this frame,
+/// so redirecting user execution at IRQ exit means mutating it in place.
+struct InterruptFrameRegs<'a> {
+    frame: &'a mut InterruptFrame,
+}
+
+impl UserRegView for InterruptFrameRegs<'_> {
+    fn snapshot(&self) -> UserRegs {
+        let f = &*self.frame;
+        UserRegs {
+            rax: f.rax,
+            rbx: f.rbx,
+            rcx: f.rcx,
+            rdx: f.rdx,
+            rsi: f.rsi,
+            rdi: f.rdi,
+            rbp: f.rbp,
+            rsp: f.rsp,
+            r8: f.r8,
+            r9: f.r9,
+            r10: f.r10,
+            r11: f.r11,
+            r12: f.r12,
+            r13: f.r13,
+            r14: f.r14,
+            r15: f.r15,
+            rip: f.rip,
+            rflags_user_subset: f.rflags & USER_RFLAGS_PERMITTED,
+            fs_base: 0,
+            gs_base: 0,
+            cs: f.cs as u16,
+            ss: f.ss as u16,
+            _pad: [0; 3],
+        }
+    }
+
+    fn commit_redirect(&mut self, regs: &UserRegs) {
+        let f = &mut *self.frame;
+        f.rax = regs.rax;
+        f.rbx = regs.rbx;
+        f.rcx = regs.rcx;
+        f.rdx = regs.rdx;
+        f.rsi = regs.rsi;
+        f.rdi = regs.rdi;
+        f.rbp = regs.rbp;
+        f.rsp = regs.rsp;
+        f.r8 = regs.r8;
+        f.r9 = regs.r9;
+        f.r10 = regs.r10;
+        f.r11 = regs.r11;
+        f.r12 = regs.r12;
+        f.r13 = regs.r13;
+        f.r14 = regs.r14;
+        f.r15 = regs.r15;
+        f.rip = regs.rip;
+        f.rflags = (regs.rflags_user_subset & USER_RFLAGS_PERMITTED) | USER_RFLAGS_FORCED;
+    }
+}
+
+/// Shared signal-delivery core driven by both the syscall-exit and the
+/// IRQ-exit paths. Pulls the lowest deliverable signal, runs its
+/// disposition (ignore / default-terminate / user handler), and on the
+/// handler path writes the restorer + `SignalFrame` to the user stack
+/// and redirects `regs` to the handler.
+///
+/// On ANY `copy_to_user` failure the pending bit is re-armed
+/// (`fetch_or`) so the signal retries at the next delivery point rather
+/// than being silently dropped.
+fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
     let Some(task_ref) = slopos_sched::task::task_borrow_mut(task) else {
         return;
     };
@@ -402,23 +499,30 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
         return;
     }
 
-    let regs_snapshot = *user_ctx.regs();
+    let regs_snapshot = regs.snapshot();
 
     let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
     let frame_addr = regs_snapshot.rsp.wrapping_sub(total_size) & !0xF;
 
     let restorer_ptr = match MmUserPtr::<u64>::try_new(frame_addr) {
         Ok(p) => p,
-        Err(_) => return,
+        Err(_) => {
+            task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+            return;
+        }
     };
     if copy_to_user(restorer_ptr, &action.restorer).is_err() {
+        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
     }
 
     let sigframe_addr = frame_addr.wrapping_add(8);
     let sigframe_ptr = match MmUserPtr::<SignalFrame>::try_new(sigframe_addr) {
         Ok(p) => p,
-        Err(_) => return,
+        Err(_) => {
+            task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+            return;
+        }
     };
 
     let saved_mask = task_ref.signal_blocked;
@@ -446,6 +550,7 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
     };
 
     if copy_to_user(sigframe_ptr, &sigframe).is_err() {
+        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
     }
 
@@ -455,13 +560,53 @@ pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
     }
     task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
 
-    let mut regs = regs_snapshot;
-    regs.rsp = frame_addr;
-    regs.rip = action.handler;
-    regs.rdi = signum as u64;
-    regs.rsi = 0;
-    regs.rdx = 0;
-    user_ctx.set_regs(regs);
+    let mut redirected = regs_snapshot;
+    redirected.rsp = frame_addr;
+    redirected.rip = action.handler;
+    redirected.rdi = signum as u64;
+    redirected.rsi = 0;
+    redirected.rdx = 0;
+    regs.commit_redirect(&redirected);
+}
+
+pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
+    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
+        return;
+    };
+    deliver_pending_signal_core(task, user_ctx);
+}
+
+/// Deliver a pending signal on the IRQ/timer/IPI return-to-user path.
+///
+/// Linux checks `TIF_SIGPENDING` on every return to user, including IRQ
+/// exit; without this a user task spinning in pure userspace (no
+/// syscalls) would never act on a pending signal and would be
+/// unkillable. The `iretq` that resumes the interrupted task loads its
+/// register state from `frame`, so a handler redirect mutates that
+/// frame in place.
+///
+/// Guards (any failing → no-op): non-null frame, frame returning to
+/// user (`cs & 3 == 3`), a current user-mode task, and NOT running on an
+/// IST/exception stack — exception vectors 0-31 run under
+/// `IstPreemptHold` and must never deliver signals here.
+pub fn deliver_pending_signal_on_irq_exit(frame: *mut InterruptFrame) {
+    let Some(frame_ref) = InterruptFrame::from_ptr_mut(frame) else {
+        return;
+    };
+    if (frame_ref.cs & 3) != 3 {
+        return;
+    }
+    if trap_running_on_exception_stack() {
+        return;
+    }
+
+    let task = slopos_sched::scheduler::scheduler_get_current_task() as *mut Task;
+    if task.is_null() {
+        return;
+    }
+
+    let mut view = InterruptFrameRegs { frame: frame_ref };
+    deliver_pending_signal_core(task, &mut view);
 }
 
 #[allow(dead_code)]

@@ -24,6 +24,12 @@ pub struct InterruptFrame {
     pub ss: u64,
 }
 
+// SAFETY: every field is a `u64` — a primitive whose all-zero bit
+// pattern is a valid value. No references, pointers, niche-constrained
+// enums, or `bool` fields. `#[repr(C)]` pins the layout so the impl
+// stays well-formed under field reorder.
+unsafe impl crate::mm::init::Zeroable for InterruptFrame {}
+
 impl InterruptFrame {
     /// Borrow an [`InterruptFrame`] from a pointer published by the
     /// IDT entry trampoline. Returns `None` for null; otherwise wraps

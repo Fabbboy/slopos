@@ -406,6 +406,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         send_eoi();
         scheduler_request_reschedule(RescheduleReason::RescheduleIpi);
         scheduler_handoff_on_trap_exit(TrapExitSource::RescheduleIpi);
+        slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
         return;
     }
 
@@ -426,6 +427,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         send_eoi();
         slopos_sched::scheduler::scheduler_handle_timer_interrupt(frame);
         scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+        slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
         return;
     }
 
@@ -455,6 +457,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
         send_eoi();
         scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+        slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
         return;
     }
 
