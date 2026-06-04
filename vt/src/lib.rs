@@ -1,11 +1,15 @@
 //! VT100/ANSI escape sequence state machine.
 //!
 //! Pure `no_std`, no-alloc parser that produces typed `VtAction` values for
-//! the virtual console renderer.  Parsing is fully separated from rendering
-//! so that the state machine can be tested independently.
+//! terminal renderers (the kernel virtual console and the userland terminal
+//! emulator alike).  Parsing is fully separated from rendering so that the
+//! state machine can be tested independently.
 //!
 //! UTF-8 decoding in ground state, 256-color/truecolor SGR,
 //! bracketed paste mode, additional DEC private modes (DECCKM, DECOM, DECAWM).
+
+#![no_std]
+#![forbid(unsafe_code)]
 
 const MAX_PARAMS: usize = 16;
 
@@ -17,7 +21,7 @@ const REPLACEMENT_CHAR: u32 = 0xFFFD;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
+pub enum Direction {
     Up,
     Down,
     Forward,
@@ -25,14 +29,14 @@ pub(crate) enum Direction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EraseMode {
+pub enum EraseMode {
     ToEnd,
     ToStart,
     All,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SgrAttr {
+pub enum SgrAttr {
     Reset,
     Bold,
     NoBold,
@@ -57,7 +61,7 @@ pub(crate) enum SgrAttr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VtAction {
+pub enum VtAction {
     /// Printable character (Unicode codepoint).
     Print(u32),
     /// Control character (CR, LF, BS, TAB, BEL, VT, FF).
@@ -120,7 +124,7 @@ enum State {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct VtParser {
+pub struct VtParser {
     state: State,
     // CSI parameter accumulation
     params: [u16; MAX_PARAMS],
@@ -137,10 +141,16 @@ pub(crate) struct VtParser {
     utf8_len: u8,
     utf8_expected: u8,
     // DEC mode state
-    pub(crate) bracketed_paste: bool,
-    pub(crate) cursor_key_mode: bool,
-    pub(crate) origin_mode: bool,
-    pub(crate) auto_wrap: bool,
+    pub bracketed_paste: bool,
+    pub cursor_key_mode: bool,
+    pub origin_mode: bool,
+    pub auto_wrap: bool,
+}
+
+impl Default for VtParser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VtParser {
@@ -719,3 +729,6 @@ impl VtParser {
         first
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -23,6 +23,7 @@ members = [
   "slibc",
   "userland",
   "video",
+  "vt",
   "windowing",
   "slop-protocol",
   "slopos-ostd",
@@ -77,6 +78,7 @@ slopos-slibc = { path = "slibc" }
 slopos-userland = { path = "userland" }
 slopos-protocol = { path = "slop-protocol" }
 slopos-video = { path = "video" }
+slopos-vt = { path = "vt" }
 slopos-windowing = { path = "windowing" }
 slopos-hermetic = { path = "hermetic" }
 paste = { version = "1.0", default-features = false }

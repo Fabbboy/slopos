@@ -46,7 +46,13 @@ pub mod pty;
 pub mod session;
 pub mod table;
 pub mod vconsole;
-pub mod vtparser;
+
+/// VT100/ANSI escape sequence parser, re-exported from the standalone
+/// `slopos-vt` crate so the kernel virtual console and the userland terminal
+/// emulator share one state machine.
+pub mod vtparser {
+    pub use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+}
 
 // Decomposed sub-modules
 mod io;

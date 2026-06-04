@@ -30,4 +30,5 @@ slopos-testing = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-net = { workspace = true }
 slopos-ostd = { workspace = true }
+slopos-vt = { workspace = true }
 bitflags = { workspace = true }
