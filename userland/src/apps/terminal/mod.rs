@@ -325,6 +325,11 @@ async fn event_loop(
                         let cols = (w / cw).clamp(1, grid::MAX_COLS as i32) as u16;
                         let rows = (h / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
                         grid.resize(rows, cols);
+                        // Resize rebuilds the buffers (and drops scrollback on
+                        // a width change), so any anchored selection is no
+                        // longer meaningful — clear it rather than copy stale
+                        // coordinates.
+                        selection.clear();
                         push_winsize(master_fd, rows, cols);
                         want_render = true;
                     }

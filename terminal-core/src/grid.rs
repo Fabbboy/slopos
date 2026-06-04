@@ -338,6 +338,11 @@ pub struct TerminalGrid {
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: ScrollbackBuf,
+    /// Count of lines ever evicted into scrollback. This is the absolute line
+    /// number of live screen row 0, giving every line (history + live) a
+    /// stable identity that survives scrolling — selections anchor to it so a
+    /// copy grabs the originally-selected text even after output scrolls.
+    total_scrolled: u64,
     /// VT100 deferred autowrap: a char printed in the last column leaves the
     /// cursor there with the wrap pending; the wrap commits only when the
     /// next printable char arrives. An exactly-full line followed by `\r\n`
@@ -375,6 +380,7 @@ impl TerminalGrid {
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             scrollback: ScrollbackBuf::new(cols as usize),
+            total_scrolled: 0,
             wrap_pending: false,
             dirty: true,
         }
@@ -403,6 +409,65 @@ impl TerminalGrid {
         }
         let live_row = row - sb_lines;
         self.cells.get(live_row, col)
+    }
+
+    /// Absolute line number shown at visible screen `row`, given the current
+    /// scrollback view. Exact inverse of [`visible_cell`](Self::visible_cell)'s
+    /// `sb_lines` / `view_offset` split — the single authority both render
+    /// (highlight) and copy (collect) convert through, so they never disagree.
+    #[inline]
+    pub fn screen_to_abs(&self, row: usize) -> u64 {
+        let sb_lines = self.scrollback.view_offset.min(self.rows as usize);
+        if row < sb_lines {
+            // Scrollback line: `view_offset - row` is its offset-from-bottom.
+            let sb_offset = (self.scrollback.view_offset - row) as u64;
+            self.total_scrolled.wrapping_sub(sb_offset)
+        } else {
+            let live_row = (row - sb_lines) as u64;
+            self.total_scrolled.wrapping_add(live_row)
+        }
+    }
+
+    /// Visible screen row currently showing absolute line `abs`, or `None` when
+    /// `abs` is scrolled off-screen or evicted from the scrollback ring.
+    pub fn abs_to_screen(&self, abs: u64) -> Option<usize> {
+        let rows = self.rows as usize;
+        let view_offset = self.scrollback.view_offset;
+        let sb_lines = view_offset.min(rows);
+        if abs >= self.total_scrolled {
+            // Live line; pushed down by `sb_lines` when scrolled into history.
+            let live_row = (abs - self.total_scrolled) as usize;
+            let screen = live_row + sb_lines;
+            (screen < rows).then_some(screen)
+        } else {
+            // Scrollback line: `k` = offset-from-bottom (>= 1).
+            let k = (self.total_scrolled - abs) as usize;
+            if k > self.scrollback.count || k > view_offset {
+                return None;
+            }
+            let screen = view_offset - k;
+            (screen < sb_lines).then_some(screen)
+        }
+    }
+
+    /// Cell at an absolute `(line, col)`, resolving to the live buffer or the
+    /// scrollback ring independent of the current view. Blank for an evicted
+    /// or out-of-range line — copy degrades gracefully, never panics.
+    pub fn abs_cell(&self, abs_line: u64, col: usize) -> Cell {
+        if abs_line >= self.total_scrolled {
+            let live_row = (abs_line - self.total_scrolled) as usize;
+            if live_row < self.rows as usize {
+                self.cells.get(live_row, col)
+            } else {
+                Cell::blank()
+            }
+        } else {
+            let k = (self.total_scrolled - abs_line) as usize;
+            match self.scrollback.get_row(k) {
+                Some(r) => r.get(col).copied().unwrap_or_else(Cell::blank),
+                None => Cell::blank(),
+            }
+        }
     }
 
     /// True when the user has scrolled into history (cursor must not render).
@@ -1059,6 +1124,9 @@ impl TerminalGrid {
         if full_screen && !self.in_alt_screen {
             self.scrollback.push_row(&self.cells, sr_top, cols);
             self.scrollback.reset_view();
+            // A line just became history: advance the absolute line origin so
+            // selection anchors keep naming the same content.
+            self.total_scrolled = self.total_scrolled.wrapping_add(1);
         }
 
         for row in (sr_top + 1)..=sr_bottom {

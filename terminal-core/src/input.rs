@@ -74,21 +74,41 @@ impl KeyBytes {
     }
 }
 
-/// Pointer-driven cell selection over the rendered grid.
+/// A selection endpoint anchored to a stable content coordinate: an absolute
+/// line number (see [`TerminalGrid::screen_to_abs`]) plus a column. Anchoring
+/// to content rather than a screen cell is what makes a copy survive scrolling
+/// — the anchor keeps naming the same text after output pushes it up or the
+/// user pages through history.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Anchor {
+    pub line: u64,
+    pub col: usize,
+}
+
+impl Anchor {
+    const ZERO: Self = Self { line: 0, col: 0 };
+
+    #[inline]
+    fn key(&self) -> (u64, usize) {
+        (self.line, self.col)
+    }
+}
+
+/// Pointer-driven cell selection over the terminal's content.
 ///
-/// `start`/`end` are linearized cell offsets (`row * cols + col`) captured at
-/// the grid width in effect when the drag began. `active` is false until a
-/// drag produces a non-empty range.
+/// `anchor` is where the drag began, `head` the current drag point — both in
+/// absolute content coordinates. `active` is false until a drag produces a
+/// non-empty range.
 pub struct Selection {
-    pub start: usize,
-    pub end: usize,
+    pub anchor: Anchor,
+    pub head: Anchor,
     pub active: bool,
 }
 
 impl Selection {
     pub const NONE: Self = Self {
-        start: 0,
-        end: 0,
+        anchor: Anchor::ZERO,
+        head: Anchor::ZERO,
         active: false,
     };
 
@@ -97,21 +117,20 @@ impl Selection {
     }
 
     pub fn is_active(&self) -> bool {
-        self.active && self.start != self.end
+        self.active && self.anchor != self.head
     }
 
-    /// Ordered selection as `((r0, c0), (r1, c1))` cell coordinates, or `None`
-    /// when inactive. `c1`/`r1` is the exclusive end (one past the last cell).
-    pub fn ordered_cells(&self, cols: usize) -> Option<((usize, usize), (usize, usize))> {
-        if !self.is_active() || cols == 0 {
+    /// Ordered `(lo, hi)` anchors with `hi` exclusive at cell granularity, or
+    /// `None` when inactive. Ordering is lexicographic on `(line, col)`.
+    pub fn ordered(&self) -> Option<(Anchor, Anchor)> {
+        if !self.is_active() {
             return None;
         }
-        let (lo, hi) = if self.start <= self.end {
-            (self.start, self.end)
+        Some(if self.anchor.key() <= self.head.key() {
+            (self.anchor, self.head)
         } else {
-            (self.end, self.start)
-        };
-        Some(((lo / cols, lo % cols), (hi / cols, hi % cols)))
+            (self.head, self.anchor)
+        })
     }
 }
 
@@ -142,15 +161,31 @@ impl PointerState {
     }
 }
 
-/// Convert a pixel coordinate to a clamped grid cell offset. `cell_w`/`cell_h`
-/// are the font metrics supplied by the caller (the app reads them from its
-/// glyph atlas; the core stays font-agnostic).
-fn pixel_to_cell(px: i32, py: i32, cell_w: i32, cell_h: i32, grid: &TerminalGrid) -> usize {
+/// Convert a pixel coordinate to a clamped `(screen_row, col)` cell. `cell_w`/
+/// `cell_h` are the font metrics supplied by the caller (the app reads them
+/// from its glyph atlas; the core stays font-agnostic).
+fn pixel_to_cell(
+    px: i32,
+    py: i32,
+    cell_w: i32,
+    cell_h: i32,
+    grid: &TerminalGrid,
+) -> (usize, usize) {
     let cw = cell_w.max(1);
     let ch = cell_h.max(1);
     let col = (px / cw).clamp(0, grid.cols as i32 - 1) as usize;
     let row = (py / ch).clamp(0, grid.rows as i32 - 1) as usize;
-    row * grid.cols as usize + col
+    (row, col)
+}
+
+/// Capture the content anchor under a pixel coordinate (screen row resolved to
+/// an absolute line via the grid's current view).
+fn pixel_to_anchor(px: i32, py: i32, cell_w: i32, cell_h: i32, grid: &TerminalGrid) -> Anchor {
+    let (row, col) = pixel_to_cell(px, py, cell_w, cell_h, grid);
+    Anchor {
+        line: grid.screen_to_abs(row),
+        col,
+    }
 }
 
 /// Encode a compositor key event into a master action.
@@ -254,23 +289,23 @@ pub fn update_selection(
     let mut changed = false;
 
     if newly_pressed {
-        let off = pixel_to_cell(ptr.last_x, ptr.last_y, cell_w, cell_h, grid);
-        selection.start = off;
-        selection.end = off;
+        let a = pixel_to_anchor(ptr.last_x, ptr.last_y, cell_w, cell_h, grid);
+        selection.anchor = a;
+        selection.head = a;
         selection.active = true;
         ptr.dragging = true;
         changed = true;
     } else if ptr.dragging && left {
-        let off = pixel_to_cell(ptr.last_x, ptr.last_y, cell_w, cell_h, grid);
-        if off != selection.end {
-            selection.end = off;
+        let h = pixel_to_anchor(ptr.last_x, ptr.last_y, cell_w, cell_h, grid);
+        if h != selection.head {
+            selection.head = h;
             changed = true;
         }
     }
 
     if newly_released && ptr.dragging {
         ptr.dragging = false;
-        if selection.start == selection.end {
+        if selection.anchor == selection.head {
             selection.clear();
             changed = true;
         }
@@ -321,79 +356,75 @@ pub fn sanitize_paste(data: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
-/// Extract the selected text from the live grid into `out`, returning the
-/// number of bytes captured (capped at [`CLIPBOARD_CAP`]). Trailing blanks on
-/// each selected row are trimmed; multi-row selections join with `\n`.
+/// Extract the selected text into `out`, returning the number of bytes
+/// captured (capped at [`CLIPBOARD_CAP`]). Reads by absolute content line via
+/// [`TerminalGrid::abs_cell`], so the text is the originally-selected content
+/// regardless of the current scroll position. Trailing blanks on each row are
+/// trimmed; multi-row selections join with `\n`; lines evicted from scrollback
+/// yield blanks rather than panicking.
 pub fn collect_selection(grid: &TerminalGrid, selection: &Selection, out: &mut [u8]) -> usize {
     let cols = grid.cols as usize;
-    let Some(((r0, c0), (r1, c1))) = selection.ordered_cells(cols) else {
+    let Some((lo, hi)) = selection.ordered() else {
         return 0;
     };
     let cap = out.len().min(CLIPBOARD_CAP);
+
+    // `hi` is exclusive: when it sits at column 0 the final line contributes
+    // nothing, so the last line with content is `hi.line - 1`. `is_active`
+    // guarantees `hi.col > 0` whenever `hi.line == lo.line`.
+    let last_line = if hi.col == 0 {
+        hi.line.wrapping_sub(1)
+    } else {
+        hi.line
+    };
+
     let mut n = 0usize;
-
-    let lo = r0 * cols + c0;
-    let hi = r1 * cols + c1;
-    let mut pos = lo;
-    let mut row_start_n = 0usize;
-    let mut last_nonblank = 0usize;
-    let mut cur_row = r0;
-
-    while pos < hi && n < cap {
-        let row = pos / cols;
-        let col = pos % cols;
-        if row != cur_row {
-            // Row boundary: trim trailing blanks, then emit newline.
-            n = last_nonblank;
-            if n < cap {
-                out[n] = b'\n';
-                n += 1;
+    let mut line = lo.line;
+    let mut first = true;
+    while line <= last_line && n < cap {
+        if !first {
+            out[n] = b'\n';
+            n += 1;
+            if n >= cap {
+                break;
             }
-            row_start_n = n;
-            last_nonblank = n;
-            cur_row = row;
         }
-        if n >= cap {
-            break;
+        first = false;
+
+        let start_col = if line == lo.line { lo.col } else { 0 };
+        let end_col = if line == hi.line { hi.col } else { cols };
+        let mut last_nonblank = n;
+        let mut col = start_col;
+        while col < end_col && n < cap {
+            let cp = grid.abs_cell(line, col).glyph();
+            let byte = if (0x20..=0x7E).contains(&cp) {
+                cp as u8
+            } else if cp == b'\t' as u32 {
+                b'\t'
+            } else {
+                b' '
+            };
+            out[n] = byte;
+            n += 1;
+            if byte != b' ' {
+                last_nonblank = n;
+            }
+            col += 1;
         }
-        let cp = grid.visible_cell(row, col).glyph();
-        let byte = if (0x20..=0x7E).contains(&cp) {
-            cp as u8
-        } else if cp == b'\t' as u32 {
-            b'\t'
-        } else {
-            b' '
-        };
-        out[n] = byte;
-        n += 1;
-        if byte != b' ' {
-            last_nonblank = n;
-        }
-        pos += 1;
-    }
-    // Trim trailing blanks on the final row.
-    if last_nonblank >= row_start_n {
+        // Trim trailing blanks on this row.
         n = last_nonblank;
+        line = line.wrapping_add(1);
     }
     n
 }
 
-/// Whether grid cell `(row, col)` lies within the inclusive selection
-/// rectangle expressed in linearized cell offsets `[r0,c0] .. [r1,c1]`
-/// (`hi` exclusive). The renderer uses this to shade selected cells.
-pub fn cell_in_selection(
-    row: usize,
-    col: usize,
-    r0: usize,
-    c0: usize,
-    r1: usize,
-    c1: usize,
-    cols: usize,
-) -> bool {
-    let pos = row * cols + col;
-    let lo = r0 * cols + c0;
-    let hi = r1 * cols + c1;
-    pos >= lo && pos < hi
+/// Whether absolute cell `(abs_line, col)` lies within the ordered selection
+/// range `[lo, hi)` (lexicographic on `(line, col)`, `hi` exclusive). The
+/// renderer converts each visible row to its absolute line and calls this to
+/// shade selected cells.
+pub fn cell_in_selection(abs_line: u64, col: usize, lo: Anchor, hi: Anchor) -> bool {
+    let pos = (abs_line, col);
+    pos >= lo.key() && pos < hi.key()
 }
 
 #[cfg(test)]
@@ -493,5 +524,187 @@ mod tests {
         // Ctrl bytes, ESC, and DEL must not be typeable from a clipboard.
         let n = sanitize_paste(b"a\x03b\x1b[Ac\x7fd\te", &mut out);
         assert_eq!(&out[..n], b"ab[Acd\te");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::grid::TerminalGrid;
+    use alloc::vec::Vec;
+
+    const CW: i32 = 8;
+    const CH: i32 = 16;
+
+    fn feed(g: &mut TerminalGrid, s: &[u8]) {
+        for &b in s {
+            g.process_byte(b);
+        }
+    }
+
+    /// Simulate a press at screen `(r0,c0)`, drag to `(r1,c1)`, release.
+    fn drag_select(
+        g: &TerminalGrid,
+        sel: &mut Selection,
+        r0: usize,
+        c0: usize,
+        r1: usize,
+        c1: usize,
+    ) {
+        let mut ptr = PointerState::new();
+        ptr.has_focus = true;
+        ptr.button_state = MOUSE_LEFT;
+        ptr.last_x = c0 as i32 * CW;
+        ptr.last_y = r0 as i32 * CH;
+        update_selection(&mut ptr, sel, g, CW, CH);
+        ptr.last_x = c1 as i32 * CW;
+        ptr.last_y = r1 as i32 * CH;
+        update_selection(&mut ptr, sel, g, CW, CH);
+        ptr.button_state = 0;
+        update_selection(&mut ptr, sel, g, CW, CH);
+    }
+
+    fn copied(g: &TerminalGrid, sel: &Selection) -> Vec<u8> {
+        let mut buf = [0u8; 256];
+        let n = collect_selection(g, sel, &mut buf);
+        buf[..n].to_vec()
+    }
+
+    #[test]
+    fn screen_abs_round_trip_at_view_zero() {
+        let mut g = TerminalGrid::new(5, 10);
+        feed(&mut g, b"a\r\nb\r\nc\r\nd");
+        for r in 0..5 {
+            assert_eq!(g.abs_to_screen(g.screen_to_abs(r)), Some(r));
+        }
+        // Row 0 is the absolute origin when not scrolled.
+        assert_eq!(g.screen_to_abs(0), 0);
+    }
+
+    #[test]
+    fn screen_abs_round_trip_while_scrolled() {
+        let mut g = TerminalGrid::new(3, 8);
+        // Force several evictions so there is history to page into.
+        for i in 0..10 {
+            feed(&mut g, alloc::format!("L{i}\r\n").as_bytes());
+        }
+        g.scroll_view_up(2);
+        for r in 0..3 {
+            let abs = g.screen_to_abs(r);
+            assert_eq!(g.abs_to_screen(abs), Some(r), "row {r} must round-trip");
+        }
+    }
+
+    #[test]
+    fn total_scrolled_tracks_evictions() {
+        let mut g = TerminalGrid::new(3, 8);
+        // 3 rows; each newline past the bottom evicts one line. Seven
+        // CRLF-terminated lines push the cursor past the bottom five times
+        // (the trailing CRLF of the last line scrolls once more), so five
+        // lines reach history.
+        for i in 0..7 {
+            feed(&mut g, alloc::format!("L{i}\r\n").as_bytes());
+        }
+        // Origin advanced by exactly the number of lines pushed to history,
+        // and the absolute numbering stays consistent (abs of row 0 == L5).
+        assert_eq!(g.screen_to_abs(0), 5);
+        let mut buf = [0u8; 16];
+        let n = {
+            let cell_line = g.screen_to_abs(0);
+            let mut k = 0;
+            for col in 0..8 {
+                let cp = g.abs_cell(cell_line, col).glyph();
+                if (0x21..=0x7e).contains(&cp) {
+                    buf[k] = cp as u8;
+                    k += 1;
+                }
+            }
+            k
+        };
+        assert_eq!(&buf[..n], b"L5");
+    }
+
+    #[test]
+    fn copy_survives_live_output_scroll() {
+        let mut g = TerminalGrid::new(5, 10);
+        feed(&mut g, b"AAAA\r\nBBBB\r\nCCCC");
+        let mut sel = Selection::NONE;
+        // Select the "AAAA" on screen row 0.
+        drag_select(&g, &mut sel, 0, 0, 0, 4);
+        assert_eq!(copied(&g, &sel), b"AAAA");
+
+        // Flood output so AAAA scrolls off the live region into history.
+        for i in 0..8 {
+            feed(&mut g, alloc::format!("X{i}\r\n").as_bytes());
+        }
+        // The anchored selection still yields the originally-selected text —
+        // NOT whatever now occupies screen row 0.
+        assert_eq!(copied(&g, &sel), b"AAAA");
+    }
+
+    #[test]
+    fn copy_survives_view_scroll() {
+        let mut g = TerminalGrid::new(4, 10);
+        feed(&mut g, b"FIRST\r\nSECOND\r\nTHIRD");
+        let mut sel = Selection::NONE;
+        drag_select(&g, &mut sel, 0, 0, 0, 5);
+        assert_eq!(copied(&g, &sel), b"FIRST");
+
+        // Push FIRST into history, then page the view up to look at it.
+        for i in 0..6 {
+            feed(&mut g, alloc::format!("Y{i}\r\n").as_bytes());
+        }
+        g.scroll_view_up(3);
+        assert_eq!(copied(&g, &sel), b"FIRST");
+    }
+
+    #[test]
+    fn multi_row_selection_joins_and_trims() {
+        let mut g = TerminalGrid::new(5, 10);
+        feed(&mut g, b"hello\r\nworld");
+        let mut sel = Selection::NONE;
+        // Select from row 0 col 0 through row 1 col 5 (end of "world").
+        drag_select(&g, &mut sel, 0, 0, 1, 5);
+        assert_eq!(copied(&g, &sel), b"hello\nworld");
+    }
+
+    #[test]
+    fn capture_stores_absolute_line() {
+        let mut g = TerminalGrid::new(3, 8);
+        for i in 0..6 {
+            feed(&mut g, alloc::format!("L{i}\r\n").as_bytes());
+        }
+        let origin = g.screen_to_abs(0);
+        let mut sel = Selection::NONE;
+        drag_select(&g, &mut sel, 1, 0, 1, 2);
+        // The anchor names the absolute line of screen row 1, not row 1 itself.
+        let (lo, _hi) = sel.ordered().unwrap();
+        assert_eq!(lo.line, origin + 1);
+    }
+
+    #[test]
+    fn evicted_selection_degrades_without_panic() {
+        let mut g = TerminalGrid::new(2, 6);
+        feed(&mut g, b"keep\r\n");
+        let mut sel = Selection::NONE;
+        drag_select(&g, &mut sel, 0, 0, 0, 4);
+        assert_eq!(copied(&g, &sel), b"keep");
+        // Evict far beyond the 1000-line ring so abs 0 is gone.
+        for _ in 0..1100 {
+            feed(&mut g, b"\r\n");
+        }
+        // No panic; the lost line yields blanks (trimmed to nothing).
+        assert!(copied(&g, &sel).is_empty());
+    }
+
+    #[test]
+    fn cell_in_selection_is_half_open() {
+        let lo = Anchor { line: 2, col: 3 };
+        let hi = Anchor { line: 4, col: 1 };
+        assert!(!cell_in_selection(2, 2, lo, hi)); // before lo
+        assert!(cell_in_selection(2, 3, lo, hi)); // at lo (inclusive)
+        assert!(cell_in_selection(3, 9, lo, hi)); // interior line
+        assert!(cell_in_selection(4, 0, lo, hi)); // up to hi.col
+        assert!(!cell_in_selection(4, 1, lo, hi)); // at hi (exclusive)
     }
 }

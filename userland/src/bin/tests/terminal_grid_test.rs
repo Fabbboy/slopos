@@ -12,7 +12,10 @@ use slopos_userland as _;
 
 use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
 use slopos_userland::apps::terminal::grid::TerminalGrid;
-use slopos_userland::apps::terminal::input::{KeyAction, encode_key, sanitize_paste};
+use slopos_userland::apps::terminal::input::{
+    KeyAction, PointerState, Selection, collect_selection, encode_key, sanitize_paste,
+    update_selection,
+};
 
 fn feed(g: &mut TerminalGrid, bytes: &[u8]) {
     for &b in bytes {
@@ -185,8 +188,46 @@ fn test_paste_types_like_keys() -> bool {
     &out[..n] == b"ab[Acd\te"
 }
 
+/// End-to-end through the production (in-kernel target) build: a content-
+/// anchored selection yields the originally-selected text even after output
+/// scrolls it off the live region into scrollback.
+fn test_selection_survives_scroll() -> bool {
+    const CW: i32 = 8;
+    const CH: i32 = 16;
+    let mut g = TerminalGrid::new(5, 10);
+    feed(&mut g, b"ANCHORED\r\nsecond\r\nthird");
+
+    // Drag-select "ANCHORED" on screen row 0.
+    let mut sel = Selection::NONE;
+    let mut ptr = PointerState::new();
+    ptr.has_focus = true;
+    ptr.button_state = 0x01; // MOUSE_LEFT
+    ptr.last_x = 0;
+    ptr.last_y = 0;
+    update_selection(&mut ptr, &mut sel, &g, CW, CH);
+    ptr.last_x = 8 * CW;
+    ptr.last_y = 0;
+    update_selection(&mut ptr, &mut sel, &g, CW, CH);
+    ptr.button_state = 0;
+    update_selection(&mut ptr, &mut sel, &g, CW, CH);
+
+    let mut buf = [0u8; 64];
+    let n = collect_selection(&g, &sel, &mut buf);
+    if &buf[..n] != b"ANCHORED" {
+        return false;
+    }
+
+    // Scroll the live region well past the selected line.
+    for _ in 0..8 {
+        feed(&mut g, b"flood\r\n");
+    }
+    let n = collect_selection(&g, &sel, &mut buf);
+    &buf[..n] == b"ANCHORED"
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
+        ("selection_survives_scroll", test_selection_survives_scroll),
         (
             "exactly_full_line_defers_wrap",
             test_exactly_full_line_defers_wrap,

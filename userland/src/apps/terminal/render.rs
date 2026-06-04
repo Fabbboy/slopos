@@ -62,20 +62,21 @@ pub fn render(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) {
         let h = buf.height() as i32;
         crate::gfx::fill_rect(buf, 0, 0, w, h, WINDOW_BG);
 
-        let sel_range = selection.ordered_cells(cols);
+        let sel_range = selection.ordered();
 
         for row in 0..rows {
+            let abs = grid.screen_to_abs(row);
             for col in 0..cols {
                 let cell = grid.visible_cell(row, col);
                 let mut fg = color_from_rgb(cell.attrs.fg);
                 let mut bg = color_from_rgb(cell.attrs.bg);
 
-                // Selection highlight (only over the live screen, not history).
-                if !grid.viewing_history() {
-                    if let Some(((r0, c0), (r1, c1))) = sel_range {
-                        if cell_in_selection(row, col, r0, c0, r1, c1, cols) {
-                            bg = SELECTION_BG;
-                        }
+                // Selection highlight. Content-anchored, so it tracks the
+                // selected text through scrollback (unlike the cursor, which
+                // is suppressed while viewing history).
+                if let Some((lo, hi)) = sel_range {
+                    if cell_in_selection(abs, col, lo, hi) {
+                        bg = SELECTION_BG;
                     }
                 }
 
