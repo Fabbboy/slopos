@@ -141,15 +141,40 @@ impl Connection {
             control_len: (hdr_size + 4) as u64,
         };
 
-        match Sys::sendmsg(self.fd, &msg_hdr, 0) {
-            Ok(_) => Ok(()),
-            Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
-                self.poll_writable(2000)?;
-                Sys::sendmsg(self.fd, &msg_hdr, 0).map_err(|_| ProtocolError::Io)?;
-                Ok(())
+        // The fd attaches to the FIRST byte of this message via SCM_RIGHTS, so
+        // it rides exactly one sendmsg. But the kernel may accept only part of
+        // the data (a short write), so this first sendmsg can return n < total
+        // — it commits the fd plus n bytes. We MUST then drain the unsent tail
+        // with plain send() (no fd) below; the original code treated any Ok as
+        // complete and dropped the tail, desyncing the receiver's length-
+        // prefixed framing and leaving the fd orphaned in its FdFifo for a
+        // later message to mis-pop (the clipboard cross-process fault).
+        let mut sent = loop {
+            match Sys::sendmsg(self.fd, &msg_hdr, 0) {
+                Ok(n) if n > 0 => break n,
+                Ok(_) => return Err(ProtocolError::Disconnected),
+                Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
+                    self.poll_writable(2000)?;
+                }
+                Err(_) => return Err(ProtocolError::Io),
             }
-            Err(_) => Err(ProtocolError::Io),
+        };
+
+        // Drain any unsent tail with plain send() — the fd is already delivered
+        // with the first chunk, so the remainder is just bytes (mirrors `send`).
+        while sent < total {
+            let ptr = unsafe { buf.as_ptr().add(sent) };
+            let remaining = total - sent;
+            match Sys::send(self.fd, ptr, remaining, 0) {
+                Ok(n) if n > 0 => sent += n,
+                Ok(_) => return Err(ProtocolError::Disconnected),
+                Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
+                    self.poll_writable(2000)?;
+                }
+                Err(_) => return Err(ProtocolError::Io),
+            }
         }
+        Ok(())
     }
 
     // ── Receive ─────────────────────────────────────────────────────────
