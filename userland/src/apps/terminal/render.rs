@@ -11,7 +11,7 @@ use crate::gfx::DrawBuffer;
 use crate::gfx::font;
 
 use super::grid::{Cell, TerminalGrid};
-use super::input::Selection;
+use super::input::{Selection, cell_in_selection};
 use super::surface;
 
 /// Default window background (matches the grid's default cell background).
@@ -95,21 +95,4 @@ pub fn render(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) {
         }
     });
     surface::present();
-}
-
-/// Whether grid cell (row, col) lies within the inclusive selection rectangle
-/// expressed in linearized cell offsets `[r0,c0] .. [r1,c1]`.
-fn cell_in_selection(
-    row: usize,
-    col: usize,
-    r0: usize,
-    c0: usize,
-    r1: usize,
-    c1: usize,
-    cols: usize,
-) -> bool {
-    let pos = row * cols + col;
-    let lo = r0 * cols + c0;
-    let hi = r1 * cols + c1;
-    pos >= lo && pos < hi
 }

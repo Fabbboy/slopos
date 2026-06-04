@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Crate names allowed to own an `alloc` dep line. Userland runs on big
 # stacks; slopos-ostd is the sanctioned allocation surface.
-USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|slopos-ostd)$'
+USERLAND_RE='^(userland|terminal-core|slibc|slop-protocol|ktesting|slopos-ostd)$'
 
 bad=0
 while IFS= read -r -d '' manifest; do
@@ -99,7 +99,7 @@ source_offenders="$(
             -not -path './third_party/*' \
             -not -path './target/*'
     fi \
-      | grep -Ev '^(userland|slibc|slop-protocol|ktesting|slopos-ostd)/' \
+      | grep -Ev '^(userland|terminal-core|slibc|slop-protocol|ktesting|slopos-ostd)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       | while IFS= read -r file; do
             awk '

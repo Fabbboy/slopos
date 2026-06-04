@@ -164,6 +164,16 @@ enum ExitReason {
     Error,
 }
 
+/// Current font cell metrics `(width, height)` in pixels, each at least 1.
+/// The terminal core is font-agnostic, so the app reads its glyph-atlas
+/// metrics here and passes them into the pure selection geometry.
+fn cell_metrics() -> (i32, i32) {
+    (
+        crate::gfx::font::cell_width().max(1),
+        crate::gfx::font::cell_height().max(1),
+    )
+}
+
 /// Push a TIOCSWINSZ to the master so the kernel SIGWINCHes the slave fg pgrp.
 fn push_winsize(master_fd: i32, rows: u16, cols: u16) {
     let ws = slopos_abi::syscall::UserWinsize {
@@ -326,7 +336,8 @@ async fn event_loop(
                     ptr.last_x = x;
                     ptr.last_y = y;
                     ptr.has_focus = true;
-                    if input::update_selection(&mut ptr, &mut selection, grid) {
+                    let (cw, ch) = cell_metrics();
+                    if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
                         want_render = true;
                     }
                 }
@@ -339,7 +350,8 @@ async fn event_loop(
                     } else {
                         ptr.button_state &= !code;
                     }
-                    if input::update_selection(&mut ptr, &mut selection, grid) {
+                    let (cw, ch) = cell_metrics();
+                    if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
                         want_render = true;
                     }
                     // On release with a non-collapsed selection, copy it to

@@ -22,6 +22,7 @@ members = [
   "ktesting",
   "slibc",
   "userland",
+  "terminal-core",
   "video",
   "vt",
   "windowing",
@@ -76,6 +77,7 @@ slopos-sched = { path = "sched" }
 slopos-signalfd = { path = "signalfd" }
 slopos-slibc = { path = "slibc" }
 slopos-userland = { path = "userland" }
+slopos-terminal-core = { path = "terminal-core" }
 slopos-protocol = { path = "slop-protocol" }
 slopos-video = { path = "video" }
 slopos-vt = { path = "vt" }

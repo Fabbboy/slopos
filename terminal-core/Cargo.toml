@@ -1,0 +1,18 @@
+[package]
+name = "slopos-terminal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-vt = { workspace = true }
