@@ -129,14 +129,6 @@ pub struct OutputInfo {
     pub scale: u32,
 }
 
-/// Heap-allocated clipboard payload to avoid bloating the Request/Event
-/// enums to 4 KiB+ per value.
-#[derive(Clone)]
-pub struct ClipboardData {
-    pub data: [u8; 4096],
-    pub len: u16,
-}
-
 /// Maximum byte length for title and app-id strings on the wire.
 pub const MAX_STRING_LEN: usize = 128;
 
@@ -209,8 +201,24 @@ pub enum Request {
     },
 
     // -- Clipboard --------------------------------------------------------
-    ClipboardCopy(alloc::boxed::Box<ClipboardData>),
+    /// Publish a clipboard selection: the bytes live in a memfd passed via
+    /// SCM_RIGHTS, `len` is the valid byte count (the memfd is page-rounded).
+    /// Unbounded — large selections are no longer truncated.
+    ClipboardCopy {
+        len: u32,
+        buffer_fd: Option<OwnedFd>,
+    },
+    /// Ask the compositor for the current clipboard. It replies with
+    /// `Event::PasteReady { len }`; the client then sends `ClipboardRead`.
     ClipboardPaste,
+    /// Provide a destination memfd (via SCM_RIGHTS) for the compositor to copy
+    /// `len` clipboard bytes into; it replies with `Event::PasteResult`. This
+    /// receiver-provides-the-buffer handshake exists because the server→client
+    /// event path cannot carry an fd.
+    ClipboardRead {
+        len: u32,
+        buffer_fd: Option<OwnedFd>,
+    },
 
     // -- Interactive (compositor-driven) -----------------------------------
     /// Start an interactive window move. Serial must match a recent pointer event.
@@ -315,7 +323,15 @@ pub enum Event {
     },
 
     // -- Clipboard --------------------------------------------------------
-    PasteResult(alloc::boxed::Box<ClipboardData>),
+    /// The clipboard holds `len` bytes; the client should send a destination
+    /// memfd of that size via `Request::ClipboardRead`. `len == 0` means empty.
+    PasteReady {
+        len: u32,
+    },
+    /// The destination memfd from `ClipboardRead` now holds `len` valid bytes.
+    PasteResult {
+        len: u32,
+    },
 
     // -- Error ------------------------------------------------------------
     Error {

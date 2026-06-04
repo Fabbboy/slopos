@@ -89,6 +89,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin signal_handler_test \
         --bin spin_signal_test \
         --bin terminal_grid_test \
+        --bin clipboard_test \
         --features testbins \
         --no-default-features \
         --release
@@ -140,6 +141,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/terminal_grid_test" ]; then
         cp "$RELEASE_DIR/terminal_grid_test" "$BUILD_DIR/terminal_grid_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/clipboard_test" ]; then
+        cp "$RELEASE_DIR/clipboard_test" "$BUILD_DIR/clipboard_test.elf"
     fi
 
     echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf"

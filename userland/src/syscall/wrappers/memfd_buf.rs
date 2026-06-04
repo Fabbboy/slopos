@@ -104,6 +104,33 @@ impl CachedShmMapping {
         Some(Self { fd, vaddr, size })
     }
 
+    /// Map a received memfd fd read/write via mmap(MAP_SHARED), e.g. a paste
+    /// destination buffer the compositor copies the clipboard into.
+    pub fn map_writable_fd(fd: i32, size: usize) -> Option<Self> {
+        if fd < 0 || size == 0 {
+            return None;
+        }
+
+        let vaddr = memory::mmap(
+            0,
+            size as u64,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            fd as i64,
+            0,
+        );
+        if vaddr == 0 || (vaddr as i64) < 0 {
+            return None;
+        }
+
+        Some(Self { fd, vaddr, size })
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.vaddr as *mut u8, self.size) }
+    }
+
     #[inline]
     pub fn vaddr(&self) -> u64 {
         self.vaddr

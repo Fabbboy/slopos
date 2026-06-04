@@ -38,16 +38,8 @@ pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
             CompositorEvent::Resize(*width as i32, *height as i32)
         }
         ProtocolEvent::Close { .. } => CompositorEvent::Close,
-        ProtocolEvent::PasteResult(cb) => {
-            let mut out = KeyBytes2 {
-                buf: [0u8; CLIPBOARD_CAP],
-                len: 0,
-            };
-            let n = (cb.len as usize).min(CLIPBOARD_CAP);
-            out.buf[..n].copy_from_slice(&cb.data[..n]);
-            out.len = n;
-            CompositorEvent::Paste(out)
-        }
+        ProtocolEvent::PasteReady { len } => CompositorEvent::PasteReady(*len),
+        ProtocolEvent::PasteResult { len } => CompositorEvent::PasteResult(*len),
         _ => CompositorEvent::Ignored,
     }
 }

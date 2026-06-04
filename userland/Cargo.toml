@@ -128,6 +128,10 @@ path = "src/bin/tests/spin_signal_test.rs"
 name = "terminal_grid_test"
 path = "src/bin/tests/terminal_grid_test.rs"
 
+[[bin]]
+name = "clipboard_test"
+path = "src/bin/tests/clipboard_test.rs"
+
 [features]
 default = []
 testbins = []

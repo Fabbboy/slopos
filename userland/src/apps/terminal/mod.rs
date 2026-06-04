@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use slopos_abi::task::TaskPriority;
 
 use crate::ring::{Ring, slopfut};
-use crate::syscall::{fs, process, tty};
+use crate::syscall::{ShmBuffer, fs, process, tty};
 
 use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, PointerState, Selection};
@@ -268,6 +268,9 @@ async fn event_loop(
     let mut mods: u8 = 0;
     let mut cursor_on = true;
     let mut last_blink = Instant::now();
+    // Destination memfd handed to the compositor between a PasteReady and its
+    // PasteResult (the receiver-provides-the-buffer paste handshake).
+    let mut pending_paste: Option<ShmBuffer> = None;
 
     // Initial paint.
     render::render(grid, &selection, cursor_on);
@@ -365,12 +368,25 @@ async fn event_loop(
                         copy_selection(handle, grid, &selection);
                     }
                 }
-                CompositorEvent::Paste(payload) => {
-                    write_paste(
-                        master_fd,
-                        &payload.buf[..payload.len],
-                        grid.bracketed_paste(),
-                    );
+                CompositorEvent::PasteReady(len) => {
+                    // The compositor told us the clipboard size; hand it a
+                    // destination memfd of that size to copy into. Drop any
+                    // stale pending buffer first.
+                    pending_paste = None;
+                    if len > 0 {
+                        if let Ok(dst) = ShmBuffer::create(len as usize) {
+                            if handle.borrow_client().clipboard_read(dst.fd(), len).is_ok() {
+                                pending_paste = Some(dst);
+                            }
+                        }
+                    }
+                }
+                CompositorEvent::PasteResult(len) => {
+                    // The destination memfd now holds `len` clipboard bytes.
+                    if let Some(dst) = pending_paste.take() {
+                        let n = (len as usize).min(dst.size());
+                        write_paste(master_fd, &dst.as_slice()[..n], grid.bracketed_paste());
+                    }
                 }
                 CompositorEvent::Ignored => {}
             }
@@ -452,16 +468,29 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     }
 }
 
-/// Copy the current selection to the compositor clipboard (4096-byte cap).
+/// Hard ceiling on a single clipboard copy (16 MiB), matching the compositor.
+const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Copy the current selection to the compositor clipboard via a memfd. The
+/// full selection is captured (no truncation): a buffer sized to the selection
+/// is filled by `collect_selection`, then its fd is handed to the compositor.
 fn copy_selection(
     handle: &slopos_windowing::ProtocolHandle,
     grid: &TerminalGrid,
     selection: &Selection,
 ) {
-    let mut buf = [0u8; input::CLIPBOARD_CAP];
-    let n = input::collect_selection(grid, selection, &mut buf);
+    let bound = input::selection_byte_bound(grid, selection).min(MAX_CLIPBOARD_BYTES);
+    if bound == 0 {
+        return;
+    }
+    let Ok(mut shm) = ShmBuffer::create(bound) else {
+        return;
+    };
+    let n = input::collect_selection(grid, selection, shm.as_mut_slice());
     if n > 0 {
-        let _ = handle.borrow_client().clipboard_copy(&buf[..n]);
+        // The compositor dups the fd via SCM_RIGHTS, so dropping `shm` after
+        // the send leaves the clipboard backing alive on the compositor side.
+        let _ = handle.borrow_client().clipboard_copy(shm.fd(), n as u32);
     }
 }
 
@@ -474,7 +503,8 @@ fn write_paste(master_fd: i32, data: &[u8], bracketed: bool) {
     if data.is_empty() {
         return;
     }
-    let mut clean = [0u8; input::CLIPBOARD_CAP];
+    // Sanitizing never grows the payload (it only drops/normalizes bytes).
+    let mut clean = std::vec![0u8; data.len()];
     let n = input::sanitize_paste(data, &mut clean);
     if n == 0 {
         return;

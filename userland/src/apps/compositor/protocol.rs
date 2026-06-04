@@ -9,10 +9,16 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
 use slopos_protocol::server::{MAX_CLIENTS, Server};
 use slopos_protocol::types::{
-    Event, MAX_STRING_LEN, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId, ToplevelId, caps,
+    Event, MAX_STRING_LEN, OwnedFd, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId,
+    ToplevelId, caps,
 };
 
+use crate::syscall::CachedShmMapping;
 use crate::syscall::tty;
+
+/// Hard ceiling on a single clipboard payload (16 MiB). Caps a hostile or
+/// runaway selection size so a copy cannot exhaust memory.
+const MAX_CLIPBOARD_BYTES: u32 = 16 * 1024 * 1024;
 
 const MAX_SURFACES: usize = 32;
 const MAX_PENDING_DAMAGE: usize = 8;
@@ -109,10 +115,12 @@ impl ProtocolSurface {
     }
 }
 
-/// Clipboard state shared across all clients.
+/// Clipboard state shared across all clients: a read-only mapping of the
+/// source memfd received on copy (owns the fd; dropped when replaced) plus the
+/// valid byte count. `None` source means the clipboard is empty.
 struct Clipboard {
-    data: [u8; 4096],
-    data_len: usize,
+    source: Option<CachedShmMapping>,
+    len: u32,
 }
 
 /// Protocol bridge: translates wire protocol messages into local surface state.
@@ -154,8 +162,8 @@ impl ProtocolBridge {
             surfaces: [const { ProtocolSurface::empty() }; MAX_SURFACES],
             next_z_order: 1,
             clipboard: Clipboard {
-                data: [0u8; 4096],
-                data_len: 0,
+                source: None,
+                len: 0,
             },
             display_width: 0,
             display_height: 0,
@@ -380,11 +388,14 @@ impl ProtocolBridge {
             } => {
                 self.handle_interactive_resize(client_idx, toplevel, serial, edges);
             }
-            Request::ClipboardCopy(cb) => {
-                self.handle_clipboard_copy(client_idx, &cb.data, cb.len as usize);
+            Request::ClipboardCopy { len, buffer_fd } => {
+                self.handle_clipboard_copy(buffer_fd, len);
             }
             Request::ClipboardPaste => {
                 self.handle_clipboard_paste(client_idx);
+            }
+            Request::ClipboardRead { len, buffer_fd } => {
+                self.handle_clipboard_read(client_idx, buffer_fd, len);
             }
         }
     }
@@ -606,23 +617,66 @@ impl ProtocolBridge {
 
     // ── Clipboard ──────────────────────────────────────────────────────────
 
-    fn handle_clipboard_copy(&mut self, _client_idx: usize, data: &[u8; 4096], data_len: usize) {
-        let copy_len = data_len.min(4096);
-        self.clipboard.data[..copy_len].copy_from_slice(&data[..copy_len]);
-        self.clipboard.data_len = copy_len;
+    /// Publish a new clipboard: map the received source memfd read-only and
+    /// keep it (replacing — and so closing — any previous source). The mapping
+    /// keeps the memfd backing alive after the client closes its own copy.
+    fn handle_clipboard_copy(&mut self, buffer_fd: Option<OwnedFd>, len: u32) {
+        let Some(fd) = buffer_fd else { return };
+        let len = len.min(MAX_CLIPBOARD_BYTES);
+        if len == 0 {
+            // An empty copy clears the clipboard.
+            self.clipboard.source = None;
+            self.clipboard.len = 0;
+            return;
+        }
+        // `into_raw` transfers ownership to the mapping, which closes the fd on
+        // Drop; an OwnedFd that is never consumed would close it here instead.
+        match CachedShmMapping::map_readonly_fd(fd.into_raw(), len as usize) {
+            Some(mapping) => {
+                self.clipboard.source = Some(mapping);
+                self.clipboard.len = len;
+            }
+            None => {
+                self.clipboard.source = None;
+                self.clipboard.len = 0;
+            }
+        }
     }
 
+    /// Announce the current clipboard size; the client follows up with a
+    /// `ClipboardRead` carrying a destination memfd (the server event path
+    /// cannot itself carry an fd).
     fn handle_clipboard_paste(&mut self, client_idx: usize) {
-        let mut data = [0u8; 4096];
-        let len = self.clipboard.data_len;
-        data[..len].copy_from_slice(&self.clipboard.data[..len]);
         let _ = self.server.queue_event(
             client_idx,
-            &Event::PasteResult(Box::new(slopos_protocol::types::ClipboardData {
-                data,
-                len: len as u16,
-            })),
+            &Event::PasteReady {
+                len: self.clipboard.len,
+            },
         );
+    }
+
+    /// Copy the clipboard into the client-provided destination memfd, then tell
+    /// the client how many bytes are valid. The source mapping is retained so
+    /// the clipboard survives repeated pastes.
+    fn handle_clipboard_read(
+        &mut self,
+        client_idx: usize,
+        buffer_fd: Option<OwnedFd>,
+        dst_len: u32,
+    ) {
+        let Some(fd) = buffer_fd else { return };
+        let dst_len = dst_len.min(MAX_CLIPBOARD_BYTES) as usize;
+        let mut copied = 0u32;
+        if let Some(mut dst) = CachedShmMapping::map_writable_fd(fd.into_raw(), dst_len) {
+            if let Some(src) = self.clipboard.source.as_ref() {
+                let n = (self.clipboard.len as usize).min(dst_len);
+                dst.as_mut_slice()[..n].copy_from_slice(&src.as_slice()[..n]);
+                copied = n as u32;
+            }
+        }
+        let _ = self
+            .server
+            .queue_event(client_idx, &Event::PasteResult { len: copied });
     }
 
     // ── Frame callbacks ────────────────────────────────────────────────────

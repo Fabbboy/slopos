@@ -5,11 +5,10 @@
 //!
 //! All fields are little-endian. No padding, no alignment.
 //! Strings: `[u8 len][utf8 bytes]` (max 128 bytes).
-//! Clipboard: `[u16 len][bytes]` (max 4096 bytes).
+//! Clipboard: `[u32 len]` with the bytes passed out-of-band in a memfd via
+//! SCM_RIGHTS (unbounded; no inline cap).
 
-use crate::types::{
-    ClipboardData, Event, MAX_STRING_LEN, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId,
-};
+use crate::types::{Event, MAX_STRING_LEN, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId};
 
 /// Serialize into a byte buffer. Returns number of bytes written.
 pub trait Encode {
@@ -45,8 +44,10 @@ impl FdFifo<'_> {
         }
     }
 
-    /// Construct an `FdFifo` from a pending fd array and count.
-    pub(crate) fn new<'a>(
+    /// Construct an `FdFifo` from a pending fd array and count. Public so a
+    /// decoder outside `Connection` (e.g. a wire-format test) can drive
+    /// `Decode` directly.
+    pub fn new<'a>(
         fds: &'a mut [i32; super::connection::MAX_PENDING_FDS],
         count: &'a mut u8,
     ) -> FdFifo<'a> {
@@ -71,14 +72,6 @@ fn put_u8(buf: &mut [u8], pos: usize, v: u8) -> Result<usize, ProtocolError> {
     }
     buf[pos] = v;
     Ok(pos + 1)
-}
-
-fn put_u16(buf: &mut [u8], pos: usize, v: u16) -> Result<usize, ProtocolError> {
-    if pos + 2 > buf.len() {
-        return Err(ProtocolError::MessageTooLarge);
-    }
-    buf[pos..pos + 2].copy_from_slice(&v.to_le_bytes());
-    Ok(pos + 2)
 }
 
 fn put_u32(buf: &mut [u8], pos: usize, v: u32) -> Result<usize, ProtocolError> {
@@ -118,14 +111,6 @@ fn get_u8(buf: &[u8], pos: usize) -> Result<(u8, usize), ProtocolError> {
         return Err(ProtocolError::MalformedMessage);
     }
     Ok((buf[pos], pos + 1))
-}
-
-fn get_u16(buf: &[u8], pos: usize) -> Result<(u16, usize), ProtocolError> {
-    if pos + 2 > buf.len() {
-        return Err(ProtocolError::MalformedMessage);
-    }
-    let v = u16::from_le_bytes([buf[pos], buf[pos + 1]]);
-    Ok((v, pos + 2))
 }
 
 fn get_u32(buf: &[u8], pos: usize) -> Result<(u32, usize), ProtocolError> {
@@ -182,6 +167,7 @@ const REQ_CLIPBOARD_COPY: u8 = 13;
 const REQ_CLIPBOARD_PASTE: u8 = 14;
 const REQ_INTERACTIVE_MOVE: u8 = 15;
 const REQ_INTERACTIVE_RESIZE: u8 = 16;
+const REQ_CLIPBOARD_READ: u8 = 17;
 
 // -- Event tag constants --------------------------------------------------
 
@@ -202,6 +188,7 @@ const EVT_KEY: u8 = 13;
 const EVT_MODIFIERS: u8 = 14;
 const EVT_PASTE_RESULT: u8 = 15;
 const EVT_ERROR: u8 = 16;
+const EVT_PASTE_READY: u8 = 17;
 
 // -- Encode for Request ---------------------------------------------------
 
@@ -295,13 +282,17 @@ impl Encode for Request {
                 let p = put_u32(buf, p, surface.raw())?;
                 put_u8(buf, p, *shape)
             }
-            Request::ClipboardCopy(cb) => {
-                let actual = (cb.len as usize).min(cb.data.len());
+            Request::ClipboardCopy { len, .. } => {
+                // The fd travels out-of-band via SCM_RIGHTS; only `len` is on
+                // the wire.
                 let p = put_u8(buf, 0, REQ_CLIPBOARD_COPY)?;
-                let p = put_u16(buf, p, actual as u16)?;
-                put_bytes(buf, p, &cb.data[..actual])
+                put_u32(buf, p, *len)
             }
             Request::ClipboardPaste => put_u8(buf, 0, REQ_CLIPBOARD_PASTE),
+            Request::ClipboardRead { len, .. } => {
+                let p = put_u8(buf, 0, REQ_CLIPBOARD_READ)?;
+                put_u32(buf, p, *len)
+            }
             Request::InteractiveMove { toplevel, serial } => {
                 let p = put_u8(buf, 0, REQ_INTERACTIVE_MOVE)?;
                 let p = put_u32(buf, p, toplevel.raw())?;
@@ -473,22 +464,16 @@ impl Decode for Request {
                 ))
             }
             REQ_CLIPBOARD_COPY => {
-                let (raw_len, p) = get_u16(buf, p)?;
-                let len = (raw_len as usize).min(4096);
-                let mut data = [0u8; 4096];
-                if p + len > buf.len() {
-                    return Err(ProtocolError::MalformedMessage);
-                }
-                data[..len].copy_from_slice(&buf[p..p + len]);
-                Ok((
-                    Request::ClipboardCopy(alloc::boxed::Box::new(ClipboardData {
-                        data,
-                        len: len as u16,
-                    })),
-                    p + len,
-                ))
+                let (len, p) = get_u32(buf, p)?;
+                let buffer_fd = fds.take();
+                Ok((Request::ClipboardCopy { len, buffer_fd }, p))
             }
             REQ_CLIPBOARD_PASTE => Ok((Request::ClipboardPaste, p)),
+            REQ_CLIPBOARD_READ => {
+                let (len, p) = get_u32(buf, p)?;
+                let buffer_fd = fds.take();
+                Ok((Request::ClipboardRead { len, buffer_fd }, p))
+            }
             REQ_INTERACTIVE_MOVE => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (serial, p) = get_u32(buf, p)?;
@@ -635,11 +620,13 @@ impl Encode for Event {
                 let p = put_u8(buf, 0, EVT_MODIFIERS)?;
                 put_u32(buf, p, *mods)
             }
-            Event::PasteResult(cb) => {
-                let actual = (cb.len as usize).min(cb.data.len());
+            Event::PasteReady { len } => {
+                let p = put_u8(buf, 0, EVT_PASTE_READY)?;
+                put_u32(buf, p, *len)
+            }
+            Event::PasteResult { len } => {
                 let p = put_u8(buf, 0, EVT_PASTE_RESULT)?;
-                let p = put_u16(buf, p, actual as u16)?;
-                put_bytes(buf, p, &cb.data[..actual])
+                put_u32(buf, p, *len)
             }
             Event::Error { object_id, code } => {
                 let p = put_u8(buf, 0, EVT_ERROR)?;
@@ -813,21 +800,13 @@ impl Decode for Event {
                 let (mods, p) = get_u32(buf, p)?;
                 Ok((Event::Modifiers { mods }, p))
             }
+            EVT_PASTE_READY => {
+                let (len, p) = get_u32(buf, p)?;
+                Ok((Event::PasteReady { len }, p))
+            }
             EVT_PASTE_RESULT => {
-                let (raw_len, p) = get_u16(buf, p)?;
-                let len = (raw_len as usize).min(4096);
-                let mut data = [0u8; 4096];
-                if p + len > buf.len() {
-                    return Err(ProtocolError::MalformedMessage);
-                }
-                data[..len].copy_from_slice(&buf[p..p + len]);
-                Ok((
-                    Event::PasteResult(alloc::boxed::Box::new(ClipboardData {
-                        data,
-                        len: len as u16,
-                    })),
-                    p + len,
-                ))
+                let (len, p) = get_u32(buf, p)?;
+                Ok((Event::PasteResult { len }, p))
             }
             EVT_ERROR => {
                 let (object_id, p) = get_u32(buf, p)?;

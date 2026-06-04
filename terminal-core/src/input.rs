@@ -27,9 +27,6 @@ const KEY_DELETE: u8 = 0x88;
 
 const MOUSE_LEFT: u8 = 0x01;
 
-/// Maximum bytes copied to / pasted from the clipboard.
-pub const CLIPBOARD_CAP: usize = 4096;
-
 /// Number of scrollback lines a single Shift+PgUp / Shift+PgDn moves.
 const SCROLLBACK_PAGE_LINES: usize = 10;
 
@@ -262,15 +259,13 @@ pub enum CompositorEvent {
         pressed: bool,
         code: u8,
     },
-    /// A pasted clipboard payload arrived (length-prefixed bytes).
-    Paste(KeyBytes2),
+    /// The compositor reports the clipboard holds this many bytes; the app
+    /// should provide a destination memfd of that size (0 = empty, no-op).
+    PasteReady(u32),
+    /// The destination memfd handed to the compositor now holds this many
+    /// valid clipboard bytes, ready to write to the PTY master.
+    PasteResult(u32),
     Ignored,
-}
-
-/// A larger owned buffer for pasted clipboard content.
-pub struct KeyBytes2 {
-    pub buf: [u8; CLIPBOARD_CAP],
-    pub len: usize,
 }
 
 /// Update pointer-driven selection from a button/motion change. Returns true
@@ -356,18 +351,33 @@ pub fn sanitize_paste(data: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
+/// Upper bound on the byte length [`collect_selection`] can produce for this
+/// selection: one byte per cell across every selected line plus a newline per
+/// line. The caller sizes its clipboard memfd to this before collecting.
+pub fn selection_byte_bound(grid: &TerminalGrid, selection: &Selection) -> usize {
+    let cols = grid.cols as usize;
+    match selection.ordered() {
+        Some((lo, hi)) => {
+            let lines = (hi.line - lo.line + 1) as usize;
+            lines.saturating_mul(cols + 1)
+        }
+        None => 0,
+    }
+}
+
 /// Extract the selected text into `out`, returning the number of bytes
-/// captured (capped at [`CLIPBOARD_CAP`]). Reads by absolute content line via
-/// [`TerminalGrid::abs_cell`], so the text is the originally-selected content
-/// regardless of the current scroll position. Trailing blanks on each row are
-/// trimmed; multi-row selections join with `\n`; lines evicted from scrollback
-/// yield blanks rather than panicking.
+/// captured (bounded only by `out.len()` — the caller sizes the buffer to the
+/// selection). Reads by absolute content line via [`TerminalGrid::abs_cell`],
+/// so the text is the originally-selected content regardless of the current
+/// scroll position. Trailing blanks on each row are trimmed; multi-row
+/// selections join with `\n`; lines evicted from scrollback yield blanks
+/// rather than panicking.
 pub fn collect_selection(grid: &TerminalGrid, selection: &Selection, out: &mut [u8]) -> usize {
     let cols = grid.cols as usize;
     let Some((lo, hi)) = selection.ordered() else {
         return 0;
     };
-    let cap = out.len().min(CLIPBOARD_CAP);
+    let cap = out.len();
 
     // `hi` is exclusive: when it sits at column 0 the final line contributes
     // nothing, so the last line with content is `hi.line - 1`. `is_active`

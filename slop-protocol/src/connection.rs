@@ -28,7 +28,7 @@ const READ_BUF_SIZE: usize = 16384;
 const MAX_MSG_SIZE: usize = 8192;
 
 /// Maximum queued fds from recvmsg ancillary data.
-pub(crate) const MAX_PENDING_FDS: usize = 8;
+pub const MAX_PENDING_FDS: usize = 8;
 
 /// Set O_NONBLOCK on a socket FD, preserving any existing flags.
 pub fn set_nonblock(fd: i32) {

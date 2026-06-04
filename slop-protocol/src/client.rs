@@ -222,21 +222,36 @@ impl Client {
 
     // -- Clipboard --------------------------------------------------------
 
-    pub fn clipboard_copy(&mut self, src: &[u8]) -> Result<(), ProtocolError> {
-        let mut data = [0u8; 4096];
-        let copy_len = src.len().min(4096);
-        data[..copy_len].copy_from_slice(&src[..copy_len]);
-        self.conn
-            .send(&Request::ClipboardCopy(alloc::boxed::Box::new(
-                crate::types::ClipboardData {
-                    data,
-                    len: copy_len as u16,
-                },
-            )))
+    /// Publish a clipboard selection backed by `fd` (a memfd holding `len`
+    /// valid bytes). The fd is passed via SCM_RIGHTS; the compositor keeps its
+    /// own reference, so the caller may close its copy after this returns.
+    /// Unbounded — no 4 KiB cap.
+    pub fn clipboard_copy(&mut self, fd: i32, len: u32) -> Result<(), ProtocolError> {
+        self.conn.send_with_fd(
+            &Request::ClipboardCopy {
+                len,
+                buffer_fd: None,
+            },
+            fd,
+        )
     }
 
+    /// Ask the compositor for the current clipboard size. Replies with
+    /// `Event::PasteReady { len }`.
     pub fn clipboard_paste(&mut self) -> Result<(), ProtocolError> {
         self.conn.send(&Request::ClipboardPaste)
+    }
+
+    /// Hand the compositor a destination memfd (`fd`, sized for `len` bytes)
+    /// to copy the clipboard into; it replies with `Event::PasteResult`.
+    pub fn clipboard_read(&mut self, fd: i32, len: u32) -> Result<(), ProtocolError> {
+        self.conn.send_with_fd(
+            &Request::ClipboardRead {
+                len,
+                buffer_fd: None,
+            },
+            fd,
+        )
     }
 
     // -- Interactive (compositor-driven) -----------------------------------
