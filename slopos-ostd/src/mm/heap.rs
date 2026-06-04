@@ -929,6 +929,35 @@ impl<T> KArc<T> {
     }
 }
 
+impl<T> KArc<T> {
+    /// Heap-allocate a `T` whose initialiser receives a [`KWeak<T>`]
+    /// pointing back at the allocation being constructed, enabling a
+    /// self-referential weak link (e.g. a parent/child pair where the
+    /// child holds a weak back-pointer to the parent). Mirrors
+    /// [`alloc::sync::Arc::new_cyclic`].
+    ///
+    /// Allocation carve-out: `alloc::sync` exposes only the infallible
+    /// [`Arc::new_cyclic`] — there is no `try_new_cyclic` to forward to —
+    /// so this constructor inherits `new_cyclic`'s allocation behaviour
+    /// (abort-on-OOM via the global allocator) rather than returning a
+    /// fallible `Result` like [`KArc::try_new`]. The `data_fn` closure is
+    /// the only place a [`KWeak`] to a not-yet-fully-constructed `KArc`
+    /// is observable; it must not [`KWeak::upgrade`] that weak (the strong
+    /// count is still zero), matching the `Arc::new_cyclic` contract.
+    pub fn try_new_cyclic<F>(data_fn: F) -> Self
+    where
+        F: FnOnce(&KWeak<T>) -> T,
+    {
+        let inner = Arc::new_cyclic(|weak| {
+            let kweak = KWeak {
+                inner: weak.clone(),
+            };
+            data_fn(&kweak)
+        });
+        Self { inner }
+    }
+}
+
 impl<T: ?Sized> KArc<T> {
     /// Returns a mutable reference to the inner value, iff this is
     /// the only `KArc` pointing at it. Mirrors [`alloc::sync::Arc::get_mut`].
@@ -946,6 +975,82 @@ impl<T: ?Sized> KArc<T> {
     #[inline]
     pub fn strong_count(this: &Self) -> usize {
         Arc::strong_count(&this.inner)
+    }
+
+    /// Weak reference count. The count is 0 when no [`KWeak`] points at
+    /// the allocation (a lone strong `KArc` reports 0, not 1 — the
+    /// implicit weak that backs the strong count is not exposed). Useful
+    /// for invariant assertions about outstanding weak handles.
+    #[inline]
+    pub fn weak_count(this: &Self) -> usize {
+        Arc::weak_count(&this.inner)
+    }
+
+    /// Create a [`KWeak`] handle that does *not* keep the allocation
+    /// alive. The weak handle [`upgrade`](KWeak::upgrade)s back to a
+    /// strong [`KArc`] only while at least one strong reference survives;
+    /// once the last strong `KArc` drops, every `KWeak` upgrade yields
+    /// `None`. Mirrors [`alloc::sync::Arc::downgrade`].
+    #[inline]
+    pub fn downgrade(this: &Self) -> KWeak<T> {
+        KWeak {
+            inner: Arc::downgrade(&this.inner),
+        }
+    }
+}
+
+/// Kernel-blessed `Weak<T>`. A non-owning handle to a [`KArc`]
+/// allocation: it never keeps the inner value alive, and
+/// [`upgrade`](KWeak::upgrade) returns `None` once the last strong
+/// [`KArc`] has dropped. Used to break ownership cycles and to hold a
+/// reference that must not extend the referent's lifetime (e.g. a poll
+/// registration that observes — but never resurrects — a closed file).
+pub struct KWeak<T: ?Sized> {
+    inner: alloc::sync::Weak<T>,
+}
+
+impl<T> KWeak<T> {
+    /// An empty weak handle that never upgrades to a value. Mirrors
+    /// [`alloc::sync::Weak::new`]; useful as a sentinel / default.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            inner: alloc::sync::Weak::new(),
+        }
+    }
+}
+
+impl<T> Default for KWeak<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: ?Sized> KWeak<T> {
+    /// Attempt to promote this weak handle to a strong [`KArc`],
+    /// bumping the strong count. Returns `None` if the inner value has
+    /// already been dropped (the last strong `KArc` is gone) or if this
+    /// is an empty [`KWeak::new`] handle. Mirrors
+    /// [`alloc::sync::Weak::upgrade`].
+    #[inline]
+    pub fn upgrade(&self) -> Option<KArc<T>> {
+        self.inner.upgrade().map(|inner| KArc { inner })
+    }
+
+    /// Strong reference count of the referent, or 0 if it has been
+    /// dropped / this is an empty handle. Mirrors
+    /// [`alloc::sync::Weak::strong_count`].
+    #[inline]
+    pub fn strong_count(&self) -> usize {
+        self.inner.strong_count()
+    }
+}
+
+impl<T: ?Sized> Clone for KWeak<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 

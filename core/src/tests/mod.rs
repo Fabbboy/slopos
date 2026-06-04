@@ -5,3 +5,4 @@ pub mod event_bus_tests;
 pub mod helpers;
 pub mod irq_tests;
 pub mod msi_tests;
+pub mod ostd_arc_tests;
