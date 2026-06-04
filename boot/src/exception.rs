@@ -109,6 +109,17 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         );
     }
 
+    // Reliable Abort Core emergency-stack overflow: the fatal-fault reporter
+    // itself exhausted its emergency SAFE or DATA stack. The #PF lands here on
+    // a fresh IST page-fault stack (RSP in the IST region → `ist_unsafe_sp`),
+    // so the format-free abort has a usable data stack. Degrade to it rather
+    // than recursing through the (overflowed) reporter.
+    if ist_stacks::emergency_stack_guard_fault(fault_addr).is_some() {
+        crate::panic::panic_abort_raw(
+            "emergency stack overflow: the fatal-fault reporter exhausted its per-CPU emergency stack",
+        );
+    }
+
     let from_user = in_user(frame_ref);
 
     klog_info!("FATAL: Page fault");

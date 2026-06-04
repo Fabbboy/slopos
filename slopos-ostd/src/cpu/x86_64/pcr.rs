@@ -188,6 +188,32 @@ pub struct ProcessorControlRegion {
     /// owning CPU.  The inner `u64` sits at offset 0 of the cell, so
     /// `offset_of!(PCR, ist_unsafe_sp)` is the address the asm returns.
     pub ist_unsafe_sp: SyncUnsafeCell<u64>,
+
+    /// Reliable Abort Core — per-CPU emergency SAFE-stack top (RSP).
+    ///
+    /// The fatal-fault trampoline switches `RSP` here before any panic
+    /// formatting, so a panic from a deep/near-full safe stack still has
+    /// headroom. Primed by `ist_stacks` alongside `ist_unsafe_sp`. Appended
+    /// after `ist_unsafe_sp` so every asm-critical offset (`<= 184`) stays
+    /// byte-identical.
+    pub panic_safe_sp: SyncUnsafeCell<u64>,
+
+    /// Reliable Abort Core — per-CPU emergency DATA-stack top (SafeStack).
+    ///
+    /// The trampoline stores this into the running context's data-SP slot
+    /// (`current_task->unsafe_stack_sp` once RSP has left the IST region) so
+    /// panic-time `core::fmt` runs on a dedicated guard-paged data stack
+    /// instead of overflowing the 16 KiB task data stack.
+    pub panic_unsafe_sp: SyncUnsafeCell<u64>,
+
+    /// Reliable Abort Core — per-CPU fault-in-fault recursion depth.
+    ///
+    /// Bumped on each fatal-panic entry; a value `>= 1` on entry means the
+    /// fatal path itself faulted, so the orchestration degrades to the
+    /// format-free `panic_abort_raw` rather than recursing through the same
+    /// (now-suspect) report. Mirrors Linux `die_nest_count` / Asterinas
+    /// `IN_PANIC`.
+    pub panic_depth: AtomicU32,
 }
 
 // Compile-time offset verification.
@@ -322,6 +348,9 @@ impl ProcessorControlRegion {
             _stack_guard: [0; 4096],
             kernel_stack: [0; KERNEL_STACK_SIZE],
             ist_unsafe_sp: SyncUnsafeCell::new(0),
+            panic_safe_sp: SyncUnsafeCell::new(0),
+            panic_unsafe_sp: SyncUnsafeCell::new(0),
+            panic_depth: AtomicU32::new(0),
         }
     }
 
@@ -430,6 +459,15 @@ pub mod offsets {
     /// (`<= 184`) byte-identical.
     pub const IST_UNSAFE_SP: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, ist_unsafe_sp);
+    /// Offset of the `panic_safe_sp` field — the emergency SAFE-stack top the
+    /// fatal-fault trampoline loads into `RSP`. Computed, consumed as a `const`
+    /// operand by the emergency trampoline asm.
+    pub const PANIC_SAFE_SP: usize =
+        core::mem::offset_of!(super::ProcessorControlRegion, panic_safe_sp);
+    /// Offset of the `panic_unsafe_sp` field — the emergency DATA-stack top the
+    /// trampoline writes into the running data-SP slot. Computed.
+    pub const PANIC_UNSAFE_SP: usize =
+        core::mem::offset_of!(super::ProcessorControlRegion, panic_unsafe_sp);
 }
 
 /// IST/exception safe-stack region bounds used by
@@ -861,6 +899,56 @@ pub fn local_ist_unsafe_sp() -> u64 {
         .unwrap_or(0)
 }
 
+/// Prime this CPU's emergency SAFE-stack top (`PCR.panic_safe_sp`). Called by
+/// `ist_stacks` during per-CPU bringup, before any fatal fault can occur.
+#[inline]
+pub fn set_local_panic_safe_sp(top: u64) {
+    if let Some(pcr) = current_pcr_local() {
+        // SAFETY: per-CPU slot write of the owning CPU's PCR (Inv. 8).
+        unsafe {
+            *pcr.panic_safe_sp.get() = top;
+        }
+    }
+}
+
+/// Prime this CPU's emergency DATA-stack top (`PCR.panic_unsafe_sp`).
+#[inline]
+pub fn set_local_panic_unsafe_sp(top: u64) {
+    if let Some(pcr) = current_pcr_local() {
+        // SAFETY: per-CPU slot write of the owning CPU's PCR (Inv. 8).
+        unsafe {
+            *pcr.panic_unsafe_sp.get() = top;
+        }
+    }
+}
+
+/// Read this CPU's emergency SAFE-stack top (diagnostics / tests).
+#[inline]
+pub fn local_panic_safe_sp() -> u64 {
+    current_pcr_local()
+        .map(|pcr| unsafe { *pcr.panic_safe_sp.get() })
+        .unwrap_or(0)
+}
+
+/// Read this CPU's emergency DATA-stack top (diagnostics / tests).
+#[inline]
+pub fn local_panic_unsafe_sp() -> u64 {
+    current_pcr_local()
+        .map(|pcr| unsafe { *pcr.panic_unsafe_sp.get() })
+        .unwrap_or(0)
+}
+
+/// Enter the fatal-panic path on this CPU, returning the PREVIOUS depth. A
+/// non-zero return means the fatal path itself faulted (recursion) and the
+/// caller must degrade to the format-free abort. Never decremented — a CPU
+/// that enters the fatal path does not leave it.
+#[inline]
+pub fn panic_depth_enter() -> u32 {
+    current_pcr_local()
+        .map(|pcr| pcr.panic_depth.fetch_add(1, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
 /// Raw store of `top` into this CPU's `PCR.ist_unsafe_sp`, bypassing the
 /// SafeStack sanitizer.
 ///
@@ -1114,5 +1202,26 @@ pub fn send_nmi_to_cpu(target_apic_id: u32) {
     if !fn_ptr.is_null() {
         let f: SendNmiToCpuFn = unsafe { core::mem::transmute(fn_ptr) };
         f(target_apic_id);
+    }
+}
+
+pub type SendNmiBroadcastFn = fn();
+
+static SEND_NMI_BROADCAST_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Register the broadcast-NMI send function from the APIC driver (BSP-only).
+pub fn register_send_nmi_broadcast_fn<'brand>(_token: &BspToken<'brand>, f: SendNmiBroadcastFn) {
+    SEND_NMI_BROADCAST_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Broadcast an NMI to all OTHER CPUs (Reliable Abort Core stop-the-world).
+///
+/// No-op if the send function has not been registered yet (e.g. a panic before
+/// APIC init — the single-CPU early-boot case where there are no peers to stop).
+pub fn send_nmi_broadcast() {
+    let fn_ptr = SEND_NMI_BROADCAST_FN.load(Ordering::Acquire);
+    if !fn_ptr.is_null() {
+        let f: SendNmiBroadcastFn = unsafe { core::mem::transmute(fn_ptr) };
+        f();
     }
 }

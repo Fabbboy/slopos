@@ -245,6 +245,27 @@ fn handle_luf_drain_ipi() {
 fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
+    // Reliable Abort Core — panic stop-the-world. If a peer CPU has won the
+    // fatal-panic election, this NMI is its stop broadcast, NOT a watchdog
+    // wedge: stop cleanly and silently so the owner can drive the console
+    // alone. (A self-directed NMI on the owner itself must not self-stop.)
+    if slopos_ostd::panic::panic_owner_claimed()
+        && !slopos_ostd::panic::panic_owner_is(cpu_id as u32)
+    {
+        // Force-ack any TLB shootdowns we owe so a non-panicking initiator
+        // does not spin forever waiting for an ack we will never deliver
+        // (we are about to halt). Set-only — never clears an ack.
+        slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
+        // Release every lock we hold so the owner's console/diagnostics paths
+        // are not blocked behind us.
+        slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
+        // Tell the owner we have stopped, then halt for good. No backtrace, no
+        // panic, no console writes — minimal and format-free.
+        slopos_ostd::panic::mark_cpu_stopped();
+        slopos_arch::cpu::disable_interrupts();
+        slopos_arch::cpu::halt_loop();
+    }
+
     // Use serial logging directly to avoid lock recursion.
     klog_info!(
         "NMI WATCHDOG: CPU {} locked up! RIP={:#x} RSP={:#x} CS={:#x} RBP={:#x}",

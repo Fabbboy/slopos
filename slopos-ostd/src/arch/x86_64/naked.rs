@@ -151,3 +151,55 @@ pub extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
         off_ist_sp = const pcr_offsets::IST_UNSAFE_SP,
     )
 }
+
+/// Fatal-fault entry trampoline (Reliable Abort Core): switch BOTH SafeStack
+/// stacks to this CPU's emergency stacks, then tail-call the diverging reporter
+/// `f`. The safe entry point for the (forbid-unsafe) panic orchestration —
+/// calling this naked `extern "sysv64" fn` needs no `unsafe` at the call site.
+///
+/// Hardware IST switches only `RSP`; the SafeStack DATA stack has no hardware
+/// switch, so both are moved here, in one naked entry, before any instrumented
+/// frame can run on the (possibly near-overflow) interrupted stacks:
+///
+/// 1. `RSP` ← `PCR.panic_safe_sp` (the emergency SAFE stack).
+/// 2. Because that stack is OUTSIDE the IST region, every subsequent
+///    `__safestack_pointer_address` resolves the data-SP to
+///    `current_task->unsafe_stack_sp`; we point THAT at `PCR.panic_unsafe_sp`
+///    (the emergency DATA stack) with a raw store, so panic `core::fmt` runs
+///    with guaranteed headroom on a dedicated guard-paged data stack.
+///
+/// `f` is `-> !`: there is no return, hence no SafeStack epilogue to undo the
+/// data-SP store (the exact hazard that makes a helper-fn or RAII guard wrong
+/// here — see `reset_ist_unsafe_sp`). Naked, because an instrumented prologue
+/// would touch the suspect data stack before the switch. A null `current_task`
+/// is tolerated (the data-SP repoint is skipped). Clobbers rax/rcx/rdx; `f`
+/// (rdi) is preserved across the jump.
+///
+/// # Preconditions (upheld by the panic path)
+/// - interrupts disabled,
+/// - the per-CPU emergency stacks primed by `ist_stacks` at bringup,
+/// - `f` never returns.
+#[unsafe(naked)]
+pub extern "sysv64" fn run_on_emergency_stacks(f: extern "sysv64" fn() -> !) -> ! {
+    naked_asm!(
+        "mov rax, gs:[{off_self_ref}]",          // rax = PCR base
+        "mov rsp, [rax + {off_panic_safe}]",     // RSP = emergency safe-stack top (16-aligned)
+        // SysV requires RSP ≡ 8 (mod 16) at a function's entry (the state a
+        // CALL leaves after pushing its 8-byte return address). We tail-JMP, so
+        // adjust by 8 manually; without this the reporter's first SSE spill
+        // (movaps) lands misaligned and #GPs.
+        "sub rsp, 8",
+        "mov rcx, gs:[{off_current_task}]",      // rcx = current_task ptr
+        "test rcx, rcx",
+        "jz 2f",                                 // null task -> skip data-SP repoint
+        "mov rdx, [rax + {off_panic_unsafe}]",   // rdx = emergency data-stack top
+        "mov [rcx + {off_sp}], rdx",             // current_task->unsafe_stack_sp = emergency top
+        "2:",
+        "jmp rdi",                               // tail-call f (diverges)
+        off_self_ref = const pcr_offsets::SELF_REF,
+        off_panic_safe = const pcr_offsets::PANIC_SAFE_SP,
+        off_current_task = const pcr_offsets::CURRENT_TASK,
+        off_panic_unsafe = const pcr_offsets::PANIC_UNSAFE_SP,
+        off_sp = const TASK_UNSAFE_STACK_SP_OFFSET,
+    )
+}

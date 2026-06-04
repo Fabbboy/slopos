@@ -61,9 +61,12 @@ use slopos_arch::arch::idt::{
 use slopos_arch::{MAX_CPUS, get_current_cpu};
 use slopos_mm::kernel_meta::KernelMeta;
 use slopos_mm::memory_layout_defs::{
-    EXC_DSTACK_GUARD_SIZE, EXC_DSTACK_PAGES, EXC_DSTACK_REGION_BASE, EXC_DSTACK_REGION_STRIDE,
-    EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
-    EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE,
+    EMERGENCY_DSTACK_GUARD_SIZE, EMERGENCY_DSTACK_PAGES, EMERGENCY_DSTACK_REGION_BASE,
+    EMERGENCY_DSTACK_REGION_STRIDE, EMERGENCY_SAFE_STACK_GUARD_SIZE, EMERGENCY_SAFE_STACK_PAGES,
+    EMERGENCY_SAFE_STACK_REGION_BASE, EMERGENCY_SAFE_STACK_REGION_STRIDE, EXC_DSTACK_GUARD_SIZE,
+    EXC_DSTACK_PAGES, EXC_DSTACK_REGION_BASE, EXC_DSTACK_REGION_STRIDE, EXCEPTION_STACK_GUARD_SIZE,
+    EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE,
+    EXCEPTION_STACK_SIZE,
 };
 use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
@@ -412,6 +415,10 @@ fn ensure_cpu_stacks_mapped(cpu_id: usize) {
     // code via `gs:[ist_unsafe_sp]`.
     map_exc_dstack_pages(cpu_id);
 
+    // Reliable Abort Core: this CPU's dedicated emergency SAFE + DATA stacks,
+    // switched to by the fatal-fault trampoline before any panic formatting.
+    map_emergency_stacks_pages(cpu_id);
+
     CPU_IST_MAPPED[cpu_id].store(true, Ordering::Release);
 }
 
@@ -498,6 +505,108 @@ pub fn exc_dstack_guard_fault(fault_addr: u64) -> Option<usize> {
 }
 
 // =============================================================================
+// Reliable Abort Core — per-CPU emergency SAFE + DATA stacks
+// =============================================================================
+
+#[inline]
+fn emergency_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
+    let region_base = EMERGENCY_DSTACK_REGION_BASE + cpu_id as u64 * EMERGENCY_DSTACK_REGION_STRIDE;
+    let usable_base = region_base + EMERGENCY_DSTACK_GUARD_SIZE;
+    let top = region_base + EMERGENCY_DSTACK_REGION_STRIDE;
+    (region_base, usable_base, top)
+}
+
+#[inline]
+fn emergency_safe_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
+    let region_base =
+        EMERGENCY_SAFE_STACK_REGION_BASE + cpu_id as u64 * EMERGENCY_SAFE_STACK_REGION_STRIDE;
+    let usable_base = region_base + EMERGENCY_SAFE_STACK_GUARD_SIZE;
+    let top = region_base + EMERGENCY_SAFE_STACK_REGION_STRIDE;
+    (region_base, usable_base, top)
+}
+
+fn map_one_stack_region(usable_base: u64, pages: u64, what: &str, cpu_id: usize) {
+    for page in 0..pages {
+        let virt_addr = usable_base + page * PAGE_SIZE_4KB;
+        let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
+            panic!(
+                "ist_stacks: failed to alloc {} page for CPU {}",
+                what, cpu_id
+            )
+        });
+        let phys_addr = frame.into_phys();
+        if map_page_4kb(
+            VirtAddr::new(virt_addr),
+            phys_addr,
+            PageFlags::KERNEL_RW.bits(),
+        ) != 0
+        {
+            panic!("ist_stacks: failed to map {} page for CPU {}", what, cpu_id);
+        }
+    }
+}
+
+/// Map the usable pages of CPU `cpu_id`'s emergency SAFE and DATA stacks,
+/// leaving each guard page unmapped (overflow → guard #PF → `panic_abort_raw`).
+fn map_emergency_stacks_pages(cpu_id: usize) {
+    let (_g, safe_base, _t) = emergency_safe_bounds_for_cpu(cpu_id);
+    map_one_stack_region(
+        safe_base,
+        EMERGENCY_SAFE_STACK_PAGES,
+        "emergency safe-stack",
+        cpu_id,
+    );
+    let (_g, data_base, _t) = emergency_dstack_bounds_for_cpu(cpu_id);
+    map_one_stack_region(
+        data_base,
+        EMERGENCY_DSTACK_PAGES,
+        "emergency data-stack",
+        cpu_id,
+    );
+}
+
+/// Prime the current CPU's emergency SAFE + DATA stack tops into the PCR. Must
+/// run after [`ensure_cpu_stacks_mapped`] (pages exist) and before the IDT is
+/// live, mirroring [`prime_exc_dstack`].
+fn prime_emergency_stacks(cpu_id: usize) {
+    let (_g, _u, safe_top) = emergency_safe_bounds_for_cpu(cpu_id);
+    let (_g, _u, data_top) = emergency_dstack_bounds_for_cpu(cpu_id);
+    slopos_arch::pcr::set_local_panic_safe_sp(safe_top);
+    slopos_arch::pcr::set_local_panic_unsafe_sp(data_top);
+}
+
+/// `(guard_start, usable_base, top)` of the current CPU's emergency SAFE stack.
+/// Exposed for the Reliable Abort Core regression tests.
+pub fn emergency_safe_bounds_current_cpu() -> (u64, u64, u64) {
+    emergency_safe_bounds_for_cpu(get_current_cpu())
+}
+
+/// `(guard_start, usable_base, top)` of the current CPU's emergency DATA stack.
+pub fn emergency_dstack_bounds_current_cpu() -> (u64, u64, u64) {
+    emergency_dstack_bounds_for_cpu(get_current_cpu())
+}
+
+/// Classify a page-fault address against the emergency-stack guard pages
+/// (sibling of [`exc_dstack_guard_fault`]). A hit means the fatal-fault report
+/// itself overflowed — the #PF handler must degrade to `panic_abort_raw`.
+pub fn emergency_stack_guard_fault(fault_addr: u64) -> Option<usize> {
+    for cpu_id in 0..MAX_CPUS {
+        if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
+            continue;
+        }
+        let (sg, su, _st) = emergency_safe_bounds_for_cpu(cpu_id);
+        if fault_addr >= sg && fault_addr < su {
+            return Some(cpu_id);
+        }
+        let (dg, du, _dt) = emergency_dstack_bounds_for_cpu(cpu_id);
+        if fault_addr >= dg && fault_addr < du {
+            return Some(cpu_id);
+        }
+    }
+    None
+}
+
+// =============================================================================
 // Public API
 // =============================================================================
 
@@ -564,6 +673,10 @@ pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
     // on it and `__safestack_pointer_address` will select `ist_unsafe_sp`,
     // which must already point at the mapped data-stack top by then.
     prime_exc_dstack(cpu_id);
+
+    // Reliable Abort Core: prime this CPU's emergency SAFE + DATA stack tops so
+    // the fatal-fault trampoline can switch to them from the very first panic.
+    prime_emergency_stacks(cpu_id);
 
     for (idx, stack) in IST_CONFIGS.iter().enumerate() {
         let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);

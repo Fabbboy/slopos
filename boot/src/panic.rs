@@ -1,11 +1,10 @@
 use core::ffi::c_int;
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use slopos_arch::cpu;
 use slopos_drivers::keyboard::poll_wait_enter;
-use slopos_drivers::serial;
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_ostd::panic_recovery;
 use slopos_ostd::stacktrace::{self, StacktraceEntry};
@@ -14,11 +13,28 @@ use slopos_video::panic_screen;
 
 use crate::shutdown::execute_kernel;
 
-static PANIC_IN_PROGRESS: StateFlag = StateFlag::new();
 static PANIC_RIP: AtomicU64 = AtomicU64::new(0);
 static PANIC_RSP: AtomicU64 = AtomicU64::new(0);
 static PANIC_HAS_CPU_STATE: StateFlag = StateFlag::new();
 const PANIC_BACKTRACE_MAX: usize = 16;
+
+/// The panicking `&PanicInfo` re-narrowed to a raw pointer, stashed before the
+/// emergency-stack switch so the reporter (running on the emergency stack) can
+/// format the full location + message. The PanicInfo memory stays live — the
+/// switch only moves `RSP`, it does not unwind the panicking frame.
+static PANIC_INFO_PTR: AtomicUsize = AtomicUsize::new(0);
+/// Original `RSP` captured before the switch (the reporter's own `RSP` is the
+/// emergency stack, so the interrupted stack pointer must be stashed).
+static PANIC_ORIG_RSP: AtomicU64 = AtomicU64::new(0);
+/// Original `RBP` captured before the switch, so the backtrace walks the
+/// interrupted call chain (the panic origin) rather than the reporter's own
+/// frames on the emergency stack.
+static PANIC_ORIG_RBP: AtomicU64 = AtomicU64::new(0);
+
+/// Bounded spin budget the owner waits for peer CPUs to acknowledge the panic
+/// stop before printing (Windows "don't wait for stuck ones" — proceed on
+/// timeout).
+const PEER_STOP_SPIN_BUDGET: u64 = 50_000_000;
 
 /// Set CPU state from an interrupt frame to be included in panic diagnostics.
 #[inline]
@@ -40,7 +56,14 @@ fn take_panic_cpu_state() -> (Option<u64>, Option<u64>) {
 }
 
 fn panic_serial_write(s: &str) {
-    serial::write_line(s);
+    // Write directly to COM1 via the lock-free early console rather than the
+    // `SERIAL` spinlock. A CPU that faulted while holding `SERIAL` would
+    // otherwise self-deadlock the moment it panics, and concurrent peer
+    // panics would contend on the same lock — the cross-CPU wedge observed
+    // alongside the recursive-panic cascade. `early_console` polls the UART
+    // directly, so it is safe from any context.
+    slopos_ostd::early_console::write_bytes(s.as_bytes());
+    slopos_ostd::early_console::write_bytes(b"\n");
 }
 
 /// Last-resort, **format-free** abort: print a fixed `&'static str` and halt
@@ -59,9 +82,9 @@ fn panic_serial_write(s: &str) {
 /// halt.
 pub fn panic_abort_raw(msg: &'static str) -> ! {
     cpu::disable_interrupts();
-    // Best-effort: claim the panic-in-progress flag so a concurrent normal
-    // panic on another CPU does not interleave; ignore the result either way.
-    let _ = PANIC_IN_PROGRESS.enter();
+    // Best-effort: become the panic owner so a concurrent normal panic on
+    // another CPU does not interleave; ignore the result either way.
+    let _ = slopos_ostd::panic::claim_panic_owner(slopos_arch::get_current_cpu() as u32);
     panic_serial_write("\n\n=== KERNEL ABORT ===");
     panic_serial_write(msg);
     panic_serial_write("System halted.");
@@ -69,7 +92,14 @@ pub fn panic_abort_raw(msg: &'static str) -> ! {
 }
 
 fn panic_dump_backtrace() {
-    let rbp = cpu::read_rbp();
+    // Walk from the stashed pre-switch RBP (the interrupted call chain) when
+    // available; fall back to the current RBP on the caught/recovery path.
+    let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
+    let rbp = if stashed != 0 {
+        stashed
+    } else {
+        cpu::read_rbp()
+    };
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
         frame_pointer: 0,
         return_address: 0,
@@ -147,48 +177,81 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         panic_recovery::longjmp_to_recovery(1);
     }
 
+    // --- Fatal (uncaught) path: the Reliable Abort Core. ---
     cpu::disable_interrupts();
 
-    if !PANIC_IN_PROGRESS.enter() {
-        panic_serial_write("\n!!! RECURSIVE PANIC DETECTED - HALTING !!!\n");
-        cpu::halt_loop();
+    // (1) Per-CPU recursion guard. A non-zero prior depth means the fatal path
+    // itself faulted (e.g. the emergency stack overflowed). Do not recurse
+    // through the (now suspect) reporter — degrade to the format-free abort,
+    // which the #PF guard-fault path lands on a fresh IST data stack.
+    if slopos_ostd::panic::panic_depth_enter() >= 1 {
+        panic_abort_raw("recursive fatal fault — emergency reporter re-entered");
     }
 
-    let (extra_rip, extra_rsp) = take_panic_cpu_state();
+    // (2) Single-owner election (Linux panic_cpu). A peer that loses quietly
+    // self-stops so it neither contends on the console nor holds a lock the
+    // owner needs; the owner's NMI broadcast (below) will halt it for good.
+    let cpu_id = slopos_arch::get_current_cpu() as u32;
+    if !slopos_ostd::panic::claim_panic_owner(cpu_id) {
+        loop {
+            cpu::disable_interrupts();
+            cpu::halt_loop();
+        }
+    }
 
-    let current_rsp = cpu::read_rsp();
+    // (3) Stash what the emergency reporter needs. The switch to the emergency
+    // stacks discards RSP-relative locals, so everything travels via statics;
+    // the PanicInfo itself stays live in the (still-mapped) panicking frame.
+    PANIC_INFO_PTR.store(info as *const PanicInfo as usize, Ordering::SeqCst);
+    PANIC_ORIG_RSP.store(cpu::read_rsp(), Ordering::SeqCst);
+    PANIC_ORIG_RBP.store(cpu::read_rbp(), Ordering::SeqCst);
+
+    // (4) Stop the world: NMI all peers (the only delivery that pierces a
+    // wedged IF=0 spin), then wait — bounded — for them to acknowledge before
+    // printing. This is also what dissolves the TLB-shootdown ack wedge.
+    slopos_arch::pcr::send_nmi_broadcast();
+    wait_for_peer_stop();
+
+    // (5) Run the report on this CPU's emergency SAFE + DATA stacks so panic
+    // `core::fmt` has guaranteed headroom and cannot recurse via a guard #PF.
+    slopos_ostd::panic::run_on_emergency_stacks(emergency_report)
+}
+
+/// Bounded wait for peer CPUs to acknowledge the panic-stop NMI. Proceeds on
+/// timeout (Windows model: never block the panic on a stuck CPU).
+fn wait_for_peer_stop() {
+    let expected = (slopos_arch::pcr::get_pcr_count() as u32).saturating_sub(1);
+    if expected == 0 {
+        return;
+    }
+    let mut spins: u64 = 0;
+    while slopos_ostd::panic::stopped_cpu_count() < expected && spins < PEER_STOP_SPIN_BUDGET {
+        spins = spins.wrapping_add(1);
+        cpu::pause();
+    }
+}
+
+/// The fatal-fault report. Runs on this CPU's emergency SAFE + DATA stacks (via
+/// `run_on_emergency_stacks`), so it is the sole console writer (peers stopped)
+/// with guaranteed stack headroom. `extern "sysv64"` + `-> !` to match the
+/// trampoline's bare-fn entry; all state arrives through statics.
+extern "sysv64" fn emergency_report() -> ! {
+    let (extra_rip, extra_rsp) = take_panic_cpu_state();
+    let display_rsp = extra_rsp.unwrap_or_else(|| PANIC_ORIG_RSP.load(Ordering::SeqCst));
     let cr0 = cpu::read_cr0();
     let cr3 = cpu::read_cr3();
     let cr4 = cpu::read_cr4();
 
-    let display_rip = extra_rip;
-    let display_rsp = extra_rsp.unwrap_or(current_rsp);
-
     panic_serial_write("\n\n=== KERNEL PANIC ===");
 
     let mut message_buf = MessageBuffer::new();
-
-    if let Some(location) = info.location() {
-        let _ = write!(
-            message_buf,
-            "{}:{}:{}: ",
-            location.file(),
-            location.line(),
-            location.column()
-        );
-    }
-
-    if let Some(msg) = info.message().as_str() {
-        let _ = write!(message_buf, "{}", msg);
-    } else {
-        let _ = write!(message_buf, "{}", info.message());
-    }
-
+    let info_ptr = PANIC_INFO_PTR.load(Ordering::SeqCst) as *const PanicInfo;
+    slopos_ostd::panic::format_panic_location_message(info_ptr, &mut message_buf);
     let message_str = message_buf.as_str();
     panic_serial_write(message_str);
 
     panic_serial_write("Register snapshot:");
-    if let Some(rip) = display_rip {
+    if let Some(rip) = extra_rip {
         let mut hex_buf = HexBuffer::new();
         panic_serial_write(hex_buf.format_labeled("RIP", rip));
     }
@@ -214,9 +277,6 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     panic_serial_write("===================");
     panic_serial_write("Kernel panic: unrecoverable error");
 
-    // In test mode, exit QEMU immediately with a failure code instead of
-    // waiting for keyboard input. The kernel panic handler already called
-    // tests_mark_panic() before we got here, so just request shutdown.
     #[cfg(feature = "tests")]
     {
         panic_serial_write("TEST MODE: Exiting QEMU with failure code");
@@ -225,7 +285,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     if panic_screen::display_panic_screen(
         Some(message_str),
-        display_rip,
+        extra_rip,
         Some(display_rsp),
         cr0,
         cr3,

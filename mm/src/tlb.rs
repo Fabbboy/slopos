@@ -608,6 +608,15 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
 
         let mut spin_count: u64 = 0;
         while !TLB_STATE.cpu_state[cpu_idx].ack.load(Ordering::Acquire) {
+            // Reliable Abort Core interlock: once any CPU is driving a fatal
+            // panic, abandon the wait. A panicking initiator must not spin on
+            // an ack from a CPU it is about to NMI-stop, and a non-panicking
+            // initiator is unblocked by the stop handler's force-ack. Without
+            // this, the panicking CPU wedges here behind a peer in its own
+            // panic — the exact cross-CPU lockup the abort core dissolves.
+            if slopos_ostd::panic::panic_owner_claimed() {
+                return;
+            }
             spin_count = spin_count.wrapping_add(1);
             #[cfg(debug_assertions)]
             if spin_count == 100_000_000
@@ -633,6 +642,20 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
 
     if !was_enabled {
         cpu::disable_interrupts();
+    }
+}
+
+/// Force this CPU's shootdown ack to `true` so any outstanding initiator stops
+/// waiting on us. Called by the panic-stop NMI handler just before halting,
+/// since a halted CPU can no longer run the IPI handler that would normally
+/// ack. Set-only — it never clears an ack to `false`, preserving the
+/// "ack true→false only under the queue lock" invariant that keeps a second
+/// merged-IPI initiator from spinning forever.
+pub fn force_ack_local_shootdowns(cpu_idx: usize) {
+    if cpu_idx < MAX_CPUS {
+        TLB_STATE.cpu_state[cpu_idx]
+            .ack
+            .store(true, Ordering::Release);
     }
 }
 

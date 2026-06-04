@@ -265,6 +265,71 @@ const _: () = {
 };
 
 // =============================================================================
+// Reliable Abort Core — per-CPU emergency fault stacks
+// =============================================================================
+//
+// The fatal-fault / panic path switches BOTH the SAFE stack (RSP) and the
+// SafeStack DATA stack to dedicated per-CPU emergency stacks before any
+// `core::fmt` runs, so panic formatting cannot overflow a near-full task stack
+// into its guard page (the recursive-#PF that hides the original fault). These
+// are SEPARATE from the IST/EXC_DSTACK stacks so a fault nested on top of the
+// panic (NMI only — IRQs are off) cannot collide with the report in progress.
+//
+// Layout (above the EXC_DSTACK region, still in the kernel higher half):
+//   EXC_DSTACK_REGION_BASE          = 0xFFFF_FFFF_F000_0000
+//   ... MAX_CPUS slots, 128 KB stride ...
+//   EMERGENCY_DSTACK_REGION_BASE    = 0xFFFF_FFFF_F200_0000  (data stacks)
+//   ... MAX_CPUS slots, 128 KB stride ...
+//   EMERGENCY_SAFE_STACK_REGION_BASE= 0xFFFF_FFFF_F400_0000  (safe/RSP stacks)
+//   ... MAX_CPUS slots, 64 KB stride ...
+
+/// Base of the per-CPU emergency DATA-stack region (right above EXC_DSTACK).
+pub const EMERGENCY_DSTACK_REGION_BASE: u64 =
+    EXC_DSTACK_REGION_BASE + (slopos_arch::pcr::MAX_CPUS as u64) * EXC_DSTACK_REGION_STRIDE;
+
+/// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable), matching EXC_DSTACK.
+pub const EMERGENCY_DSTACK_REGION_STRIDE: u64 = 0x0002_0000;
+
+/// Guard page size for the emergency data stack (one unmapped 4 KB page).
+pub const EMERGENCY_DSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
+
+/// Usable bytes of one CPU's emergency data stack (124 KB).
+pub const EMERGENCY_DSTACK_USABLE_SIZE: u64 =
+    EMERGENCY_DSTACK_REGION_STRIDE - EMERGENCY_DSTACK_GUARD_SIZE;
+
+/// Usable pages of one CPU's emergency data stack.
+pub const EMERGENCY_DSTACK_PAGES: u64 = EMERGENCY_DSTACK_USABLE_SIZE / PAGE_SIZE_4KB;
+
+/// Base of the per-CPU emergency SAFE-stack region (right above emergency data).
+pub const EMERGENCY_SAFE_STACK_REGION_BASE: u64 = EMERGENCY_DSTACK_REGION_BASE
+    + (slopos_arch::pcr::MAX_CPUS as u64) * EMERGENCY_DSTACK_REGION_STRIDE;
+
+/// Stride per CPU slot (64 KB: 4 KB guard + 60 KB usable).
+pub const EMERGENCY_SAFE_STACK_REGION_STRIDE: u64 = 0x0001_0000;
+
+/// Guard page size for the emergency safe stack (one unmapped 4 KB page).
+pub const EMERGENCY_SAFE_STACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
+
+/// Usable bytes of one CPU's emergency safe stack (60 KB).
+pub const EMERGENCY_SAFE_STACK_USABLE_SIZE: u64 =
+    EMERGENCY_SAFE_STACK_REGION_STRIDE - EMERGENCY_SAFE_STACK_GUARD_SIZE;
+
+/// Usable pages of one CPU's emergency safe stack.
+pub const EMERGENCY_SAFE_STACK_PAGES: u64 = EMERGENCY_SAFE_STACK_USABLE_SIZE / PAGE_SIZE_4KB;
+
+/// Exclusive top of the whole emergency-stack reservation; must stay within the
+/// kernel higher half. A compile-time guard against the regions running off the
+/// end of the canonical address space as MAX_CPUS grows.
+const _: () = {
+    let top = EMERGENCY_SAFE_STACK_REGION_BASE
+        + (slopos_arch::pcr::MAX_CPUS as u64) * EMERGENCY_SAFE_STACK_REGION_STRIDE;
+    assert!(
+        top > EMERGENCY_DSTACK_REGION_BASE && top <= 0xFFFF_FFFF_FF00_0000,
+        "emergency stack regions overflow the kernel higher half",
+    );
+};
+
+// =============================================================================
 // Default Process Memory Layout
 // =============================================================================
 

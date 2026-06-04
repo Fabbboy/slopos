@@ -717,8 +717,51 @@ pub fn kernel_main_impl() {
         klog_info!("");
     }
 
+    // Reliable Abort Core fatal-path smoke (off by default). When the cmdline
+    // carries `panic.fatal_smoke=on`, deliberately raise an UNCAUGHT panic from
+    // a deep call chain so a `just boot-log` run can confirm the emergency-stack
+    // switch prints a clean "=== KERNEL PANIC ===" instead of recursively
+    // faulting. Halts the machine, so it is never enabled under `just test`.
+    if let Some(cmdline) = crate::limine_protocol::kernel_cmdline_str() {
+        if cmdline.contains("panic.fatal_smoke=on") {
+            boot_info(b"PANIC SMOKE: raising a deliberate deep fatal panic\0");
+            let _ = fatal_smoke_deep(28);
+        }
+    }
+
     enter_scheduler(0);
 }
+
+/// Recurse with a sizeable address-taken buffer per frame (driving the
+/// SafeStack DATA stack deep), then raise an uncaught `panic!` at the bottom —
+/// the original crash's "panic while the data stack is near-full" condition.
+/// With the Reliable Abort Core the panic switches to the emergency stacks and
+/// reports cleanly; without it, formatting would overflow and recurse.
+#[inline(never)]
+fn fatal_smoke_deep(depth: u32) -> u64 {
+    let mut buf = [0u8; 512];
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = (i as u8) ^ (depth as u8);
+    }
+    // `black_box(&buf)` (by reference — no extra copy that would bust the 2 KiB
+    // frame gate) keeps the address-taken buffer from being optimised away, so
+    // each frame really consumes SafeStack data stack.
+    core::hint::black_box(&buf);
+    if depth == 0 {
+        let mut sum = 0u64;
+        for &b in buf.iter() {
+            sum = sum.wrapping_add(b as u64);
+        }
+        panic!("panic.fatal_smoke: deliberate fatal panic from a deep stack (canary={sum})");
+    }
+    let inner = fatal_smoke_deep(depth - 1);
+    let mut acc = inner;
+    for &b in buf.iter() {
+        acc = acc.wrapping_add(b as u64);
+    }
+    acc
+}
+
 pub fn kernel_main_no_multiboot() {
     crate::ffi_boundary::kernel_main();
 }

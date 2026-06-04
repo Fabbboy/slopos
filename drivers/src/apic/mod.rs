@@ -94,6 +94,7 @@ pub fn init<'b>(token: &slopos_ostd::sync::BspToken<'b>) -> i32 {
     slopos_arch::pcr::register_lapic_id_fn(token, get_id);
     slopos_arch::pcr::register_send_ipi_to_cpu_fn(token, send_ipi_to_cpu);
     slopos_arch::pcr::register_send_nmi_fn(token, send_nmi_to);
+    slopos_arch::pcr::register_send_nmi_broadcast_fn(token, send_nmi_all_excluding_self);
 
     let mut apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
     if apic_base_msr & ApicBaseMsr::GLOBAL_ENABLE == 0 {
@@ -381,4 +382,23 @@ pub fn send_nmi_to(target_apic_id: u32) {
         | LAPIC_ICR_LEVEL_ASSERT
         | LAPIC_ICR_TRIGGER_EDGE;
     send_ipi_raw(target_apic_id << 24, icr_low);
+}
+
+/// Broadcast a Non-Maskable Interrupt to all OTHER CPUs in one ICR write.
+///
+/// The Reliable Abort Core's stop-the-world: when a CPU wins the fatal-panic
+/// election it NMIs every peer so they stop touching the console and release
+/// their locks before it prints. NMI (not the maskable halt IPI) is required
+/// because a wedged peer may be spinning with `IF=0` (e.g. inside a TLB
+/// `wait_for_acks`), and only an NMI pierces that. Mirrors Linux
+/// `crash_smp_send_stop` / FreeBSD `stop_cpus_hard`.
+pub fn send_nmi_all_excluding_self() {
+    const ICR_DELIVERY_NMI: u32 = 0b100 << 8;
+    send_ipi_raw(
+        0,
+        ICR_DELIVERY_NMI
+            | LAPIC_ICR_LEVEL_ASSERT
+            | LAPIC_ICR_TRIGGER_EDGE
+            | ICR_DEST_ALL_EXCLUDING_SELF,
+    );
 }

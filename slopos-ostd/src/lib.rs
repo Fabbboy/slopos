@@ -38,6 +38,7 @@ pub mod klog;
 pub mod memory;
 pub mod mm;
 pub mod numfmt;
+pub mod panic;
 pub mod panic_recovery;
 pub mod pci;
 pub mod ring_buffer;
