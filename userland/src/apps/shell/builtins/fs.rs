@@ -11,9 +11,11 @@ use std::fs::{self as stdfs, File, OpenOptions};
 use std::io::{Read, Write};
 
 use crate::syscall::fs as sys_fs;
+use crate::syscall::{POLLIN, UserPollFd};
 
 use super::super::buffers;
 use super::super::display::{COLOR_DIR_BLUE, COLOR_ERROR_RED, shell_write, shell_write_idx};
+use super::super::interrupt;
 use super::super::jobs;
 use super::super::parser::normalize_path;
 use super::super::{
@@ -1143,6 +1145,21 @@ pub fn cmd_tee(argc: i32, argv: &[&[u8]]) -> i32 {
 
     let mut buf = [0u8; SHELL_IO_MAX];
     loop {
+        // Wait for stdin readiness with a short timeout so the loop keeps
+        // pumping terminal input — that is what lets the line discipline
+        // see Ctrl+C and interrupt a tee that is blocked on its stdin.
+        let mut pfds = [UserPollFd {
+            fd: 0,
+            events: POLLIN,
+            revents: 0,
+        }];
+        let ready = sys_fs::poll(&mut pfds, 10).unwrap_or(0);
+        if interrupt::take_pending() {
+            return interrupt::EXIT_INTERRUPTED;
+        }
+        if ready == 0 {
+            continue;
+        }
         let n = match sys_fs::read_slice(0, &mut buf) {
             Ok(0) => break,
             Ok(n) => n,

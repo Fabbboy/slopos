@@ -33,3 +33,9 @@ crate::utest!(
     name = utest_percore_reactor,
     bin = "/bin/percore_reactor_test"
 );
+crate::utest!(
+    name = utest_signal_handler,
+    bin = "/bin/signal_handler_test"
+);
+crate::utest!(name = utest_spin_signal, bin = "/bin/spin_signal_test");
+crate::utest!(name = utest_terminal_grid, bin = "/bin/terminal_grid_test");

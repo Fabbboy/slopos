@@ -372,64 +372,6 @@ fn print_background_job_started(job_id: u16, pid: u32) {
     shell_write(b"\n");
 }
 
-/// Forward compositor keyboard events to the PTY master so the slave's
-/// line discipline handles ISIG signal generation, echo, and canonical
-/// editing.  Also drains PTY master output (echo bytes) to the display.
-///
-/// This replaces the old `drain_compositor_signals()` which bypassed the
-/// TTY and called `kill()` directly — breaking ISIG semantics, preventing
-/// child stdin reads, and only handling Ctrl+C (not Ctrl+Z/Ctrl+\).
-fn forward_compositor_keyboard() {
-    use crate::syscall::{InputEvent, InputEventType};
-
-    let master = super::shell_pty_master();
-    if master < 0 {
-        return;
-    }
-    let master_idx = master as u32;
-
-    // Forward keyboard bytes to PTY master → slave ldisc processes them.
-    let mut events = [InputEvent::default(); 8];
-    let count = super::input::poll_protocol_events(&mut events);
-    for i in 0..count.min(8) {
-        if events[i].event_type == InputEventType::Configure {
-            let new_w = events[i].configure_width() as i32;
-            let new_h = events[i].configure_height() as i32;
-            super::display::shell_console_resize(new_w, new_h);
-        }
-        if events[i].event_type == InputEventType::KeyPress {
-            let ascii = events[i].key_ascii();
-            if ascii != 0 {
-                let _ = process::tty_write(master_idx, &[ascii]);
-            } else {
-                // Non-ASCII keys: convert scancode to VT100 escape sequence.
-                let seq: &[u8] = match events[i].key_scancode() {
-                    0x82 => b"\x1b[A",  // Up
-                    0x83 => b"\x1b[B",  // Down
-                    0x84 => b"\x1b[D",  // Left
-                    0x85 => b"\x1b[C",  // Right
-                    0x86 => b"\x1b[H",  // Home
-                    0x87 => b"\x1b[F",  // End
-                    0x88 => b"\x1b[3~", // Delete
-                    0x80 => b"\x1b[5~", // Page Up
-                    0x81 => b"\x1b[6~", // Page Down
-                    _ => &[],
-                };
-                if !seq.is_empty() {
-                    let _ = process::tty_write(master_idx, seq);
-                }
-            }
-        }
-    }
-
-    // Drain echo/output from the PTY master and display it.
-    let mut echo_buf = [0u8; 256];
-    let n = process::tty_read(master_idx, &mut echo_buf);
-    if n > 0 {
-        super::display::shell_write(&echo_buf[..n as usize]);
-    }
-}
-
 fn execute_registry_spawn(
     cmd: &ParsedCommand,
     tokens: &ParsedTokens,
@@ -548,8 +490,6 @@ fn execute_registry_spawn(
             }];
             let _ = fs::poll(&mut pfds, 10);
 
-            forward_compositor_keyboard();
-
             loop {
                 match fs::read_slice(pipe_fds[0], &mut buf) {
                     Ok(0) => break,
@@ -570,7 +510,6 @@ fn execute_registry_spawn(
                         Err(_) => break,
                     }
                 }
-                forward_compositor_keyboard();
                 exit_status = st;
                 break;
             }
@@ -582,7 +521,6 @@ fn execute_registry_spawn(
             if let Some(st) = process::waitpid_nohang(pid) {
                 break st;
             }
-            forward_compositor_keyboard();
             sys_core::sleep_ms(5);
         }
     };
@@ -732,6 +670,16 @@ fn run_in_child(
     } else {
         let _ = process::setpgid(0, pgid);
     }
+
+    // Forked children take the default job-control signal dispositions
+    // before running the command, so a terminal-generated SIGINT/SIGTSTP
+    // acts on the job instead of inheriting the interactive shell's
+    // handler/ignore state.
+    let _ = process::default_signal(slopos_abi::signal::SIGINT);
+    let _ = process::default_signal(slopos_abi::signal::SIGTTOU);
+    let _ = process::default_signal(slopos_abi::signal::SIGTTIN);
+    let _ = process::default_signal(slopos_abi::signal::SIGTSTP);
+    super::interrupt::mark_forked_child();
 
     if stdin_fd >= 0 {
         if fs::dup2(stdin_fd, 0).is_err() {
@@ -961,9 +909,9 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
 
     let capture_fd = pipes[inter_pipes][0];
     if capture_fd >= 0 {
-        // Non-blocking read + poll so we keep forwarding
-        // compositor keyboard events to the PTY (avoids deadlocking
-        // children that read from the TTY slave).
+        // Non-blocking read + poll so the drain loop returns promptly when
+        // all available data is consumed instead of blocking on a child that
+        // is still running.
         let _ = crate::syscall::fs::set_fd_nonblocking(capture_fd);
         let mut buf = [0u8; 512];
         let mut all_exited = false;
@@ -977,8 +925,6 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 revents: 0,
             }];
             let _ = fs::poll(&mut pfds, 10);
-
-            forward_compositor_keyboard();
 
             loop {
                 match fs::read_slice(capture_fd, &mut buf) {
@@ -1022,7 +968,6 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 Err(_) => break,
             }
         }
-        forward_compositor_keyboard();
         let _ = fs::close_fd_raw(capture_fd);
         leave_foreground();
         return status;
@@ -1035,7 +980,6 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 status = st;
                 break;
             }
-            forward_compositor_keyboard();
             sys_core::sleep_ms(5);
         }
     }
@@ -1044,6 +988,8 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
 }
 
 pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
+    super::interrupt::clear();
+
     let mut pipeline = ParsedPipeline::empty();
     if parse_pipeline(tokens, &mut pipeline).is_err() {
         shell_write(b"syntax error\n");

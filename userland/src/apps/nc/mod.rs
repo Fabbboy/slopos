@@ -31,6 +31,7 @@ enum NcProtocol {
 }
 
 /// Parsed command-line configuration -- built once, never mutated.
+#[derive(Debug)]
 struct NcConfig {
     mode: NcMode,
     protocol: NcProtocol,

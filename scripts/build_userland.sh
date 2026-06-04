@@ -22,7 +22,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell compositor roulette file_manager sysmon nmap ifconfig nc curl ping widget_gallery"
+BINS="init shell terminal compositor roulette file_manager sysmon nmap ifconfig nc curl ping widget_gallery"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied
@@ -86,6 +86,9 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin multishot_test \
         --bin tls_independence_test \
         --bin percore_reactor_test \
+        --bin signal_handler_test \
+        --bin spin_signal_test \
+        --bin terminal_grid_test \
         --features testbins \
         --no-default-features \
         --release
@@ -129,6 +132,15 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/percore_reactor_test" ]; then
         cp "$RELEASE_DIR/percore_reactor_test" "$BUILD_DIR/percore_reactor_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/signal_handler_test" ]; then
+        cp "$RELEASE_DIR/signal_handler_test" "$BUILD_DIR/signal_handler_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/spin_signal_test" ]; then
+        cp "$RELEASE_DIR/spin_signal_test" "$BUILD_DIR/spin_signal_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/terminal_grid_test" ]; then
+        cp "$RELEASE_DIR/terminal_grid_test" "$BUILD_DIR/terminal_grid_test.elf"
+    fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf"
 fi

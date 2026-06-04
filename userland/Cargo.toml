@@ -26,6 +26,10 @@ name = "shell"
 path = "src/bin/shell.rs"
 
 [[bin]]
+name = "terminal"
+path = "src/bin/terminal.rs"
+
+[[bin]]
 name = "file_manager"
 path = "src/bin/file_manager.rs"
 
@@ -112,6 +116,18 @@ path = "src/bin/tests/tls_independence_test.rs"
 name = "percore_reactor_test"
 path = "src/bin/tests/percore_reactor_test.rs"
 
+[[bin]]
+name = "signal_handler_test"
+path = "src/bin/tests/signal_handler_test.rs"
+
+[[bin]]
+name = "spin_signal_test"
+path = "src/bin/tests/spin_signal_test.rs"
+
+[[bin]]
+name = "terminal_grid_test"
+path = "src/bin/tests/terminal_grid_test.rs"
+
 [features]
 default = []
 testbins = []
@@ -124,4 +140,5 @@ slopos-gfx = { workspace = true }
 slopos-protocol = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-slibc = { workspace = true }
+slopos-vt = { workspace = true }
 slopos-windowing = { workspace = true }

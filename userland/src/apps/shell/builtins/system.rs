@@ -2,8 +2,8 @@ use crate::program_registry;
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
 use super::super::display::{
-    COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT,
-    shell_console_clear, shell_write, shell_write_idx,
+    COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT, shell_write,
+    shell_write_idx,
 };
 use super::super::{HALTED, NL, REBOOTING};
 use super::{BUILTINS, BuiltinCategory};
@@ -113,8 +113,7 @@ pub fn cmd_echo(argc: i32, argv: &[&[u8]]) -> i32 {
 }
 
 pub fn cmd_clear(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    shell_write(b"\x1B[2J\x1B[H");
-    shell_console_clear();
+    shell_write(b"\x1b[2J\x1b[H");
     0
 }
 

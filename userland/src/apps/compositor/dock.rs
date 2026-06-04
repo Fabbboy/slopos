@@ -143,12 +143,12 @@ impl LauncherShelf {
     /// matching is used as a fallback when the app_id is unavailable.
     pub fn init_defaults(&mut self) {
         self.entries[0] = make_pinned(
-            b"SlopOS Shell",
-            b"/bin/shell",
-            b"org.slopos.shell",
+            b"Terminal",
+            b"/bin/terminal",
+            b"org.slopos.terminal",
             ICON_SHELL,
             ICON_SHELL_ALPHA,
-            b'S',
+            b'T',
         );
         self.entries[1] = make_pinned(
             b"Files",

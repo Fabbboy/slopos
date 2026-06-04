@@ -421,7 +421,7 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         name: "yes",
         desc: "Repeat a string",
         usage: "yes [string]",
-        detail: "Repeatedly print a string (default 'y') followed\nby a newline. Useful in pipelines (yes | head -5).\nStandalone runs are capped at 100000 iterations.",
+        detail: "Repeatedly print a string (default 'y') followed\nby a newline, until interrupted with Ctrl+C.\nUseful in pipelines (yes | head -5).",
         category: Utility,
         func: utils::cmd_yes,
     },

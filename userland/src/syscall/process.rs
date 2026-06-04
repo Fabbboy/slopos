@@ -2,7 +2,7 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
-use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
+use slopos_abi::signal::{SIG_DFL, SIG_IGN, SigSet, UserSigaction};
 use slopos_abi::task::TaskPriority;
 
 /// Signal restorer trampoline — called when a signal handler returns.
@@ -201,6 +201,28 @@ pub fn kill_pid(pid: i32, signum: u8) -> i32 {
 pub fn ignore_signal(signum: u8) -> i32 {
     let action = UserSigaction {
         sa_handler: SIG_IGN,
+        sa_flags: 0,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGACTION,
+            signum as u64,
+            (&action as *const UserSigaction) as u64,
+            0,
+            core::mem::size_of::<SigSet>() as u64,
+        ) as i32
+    }
+}
+
+/// Restore a signal's default disposition (`SIG_DFL`).  Forked children
+/// call this before running a command so terminal-generated signals act
+/// on the job rather than inheriting the shell's interactive handlers.
+#[inline(always)]
+pub fn default_signal(signum: u8) -> i32 {
+    let action = UserSigaction {
+        sa_handler: SIG_DFL,
         sa_flags: 0,
         sa_restorer: 0,
         sa_mask: 0,

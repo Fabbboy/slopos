@@ -19,6 +19,7 @@ pub fn init() {}
 /// runtime, which parses argc/argv/envp, sets up TLS from the program's
 /// `PT_TLS` (discovered via `AT_PHDR`), and calls `main`. The standard
 /// `_start -> __libc_start_main` contract; nothing here touches TLS.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 extern "C" fn _start() -> ! {

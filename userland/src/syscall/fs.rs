@@ -12,7 +12,10 @@ use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
-use slopos_abi::syscall::{TIOCGPTPEER, TIOCSCTTY, UserPollFd, UserTermios, UserTimeval};
+use slopos_abi::syscall::{
+    TIOCGPTPEER, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios, UserTimeval,
+    UserWinsize,
+};
 use slopos_abi::{UserFsList, UserFsStat};
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -324,6 +327,38 @@ pub fn tcsetattr(fd: RawFd, t: &UserTermios) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
+/// Query the terminal window size (TIOCGWINSZ ioctl).
+#[inline(always)]
+pub fn tiocgwinsz(fd: RawFd) -> SyscallResult<UserWinsize> {
+    let mut ws = UserWinsize::default();
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            TIOCGWINSZ,
+            (&mut ws as *mut UserWinsize) as u64,
+        )
+    };
+    demux(result).map(|_| ws)
+}
+
+/// Set the terminal window size (TIOCSWINSZ ioctl).
+///
+/// The kernel raises SIGWINCH to the slave foreground process group when the
+/// row/col dimensions change.
+#[inline(always)]
+pub fn tiocswinsz(fd: RawFd, ws: &UserWinsize) -> SyscallResult<()> {
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            TIOCSWINSZ,
+            (ws as *const UserWinsize) as u64,
+        )
+    };
+    demux(result).map(|_| ())
+}
+
 /// Set a file descriptor to non-blocking mode via fcntl.
 ///
 /// Works on any FD type (pipes, sockets, files).
@@ -333,6 +368,20 @@ pub fn set_fd_nonblocking(fd: RawFd) -> SyscallResult<()> {
     use slopos_abi::syscall::{F_GETFL, F_SETFL, O_NONBLOCK};
     let current = Sys::fcntl(fd, F_GETFL as i32, 0).map_err(SyscallError::from)?;
     let _ = Sys::fcntl(fd, F_SETFL as i32, (current as u64) | O_NONBLOCK)
+        .map_err(SyscallError::from)?;
+    Ok(())
+}
+
+/// Mark a file descriptor close-on-exec via fcntl.
+///
+/// Spawned children never inherit a `FD_CLOEXEC` descriptor (spawn is
+/// fork+exec in one step), and `exec` strips it from forked children.
+#[inline(always)]
+pub fn set_fd_cloexec(fd: RawFd) -> SyscallResult<()> {
+    use super::error::SyscallError;
+    use slopos_abi::syscall::{F_GETFD, F_SETFD, FD_CLOEXEC};
+    let current = Sys::fcntl(fd, F_GETFD as i32, 0).map_err(SyscallError::from)?;
+    let _ = Sys::fcntl(fd, F_SETFD as i32, (current as u64) | FD_CLOEXEC)
         .map_err(SyscallError::from)?;
     Ok(())
 }

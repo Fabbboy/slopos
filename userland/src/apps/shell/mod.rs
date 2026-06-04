@@ -10,9 +10,9 @@ pub mod env;
 pub mod exec;
 pub mod history;
 pub mod input;
+pub mod interrupt;
 pub mod jobs;
 pub mod parser;
-mod surface;
 
 pub(crate) static NL: &str = "\n";
 pub(crate) static UNKNOWN_CMD: &str = "Unknown command. Type 'help'.\n";
@@ -33,8 +33,6 @@ static CWD: Mutex<[u8; CWD_MAX]> = Mutex::new([0; CWD_MAX]);
 static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
 static SHELL_PID: AtomicU32 = AtomicU32::new(0);
-static SHELL_PTY_MASTER: AtomicI32 = AtomicI32::new(-1);
-static SHELL_PTY_SLAVE: AtomicI32 = AtomicI32::new(-1);
 
 pub fn cwd_bytes() -> [u8; CWD_MAX] {
     *CWD.lock().unwrap()
@@ -65,40 +63,6 @@ pub fn set_last_bg_pid(pid: u32) {
 
 pub fn shell_pid() -> u32 {
     SHELL_PID.load(Ordering::Relaxed)
-}
-
-pub fn set_shell_pty_pair(master_idx: u32, slave_idx: u32) {
-    SHELL_PTY_MASTER.store(master_idx as i32, Ordering::Relaxed);
-    SHELL_PTY_SLAVE.store(slave_idx as i32, Ordering::Relaxed);
-}
-
-pub fn shell_pty_pair() -> Option<(u32, u32)> {
-    let master = SHELL_PTY_MASTER.load(Ordering::Relaxed);
-    let slave = SHELL_PTY_SLAVE.load(Ordering::Relaxed);
-    if master < 0 || slave < 0 {
-        None
-    } else {
-        Some((master as u32, slave as u32))
-    }
-}
-
-/// Return the PTY master TTY index (not a file descriptor), or -1 if unavailable.
-///
-/// This is a kernel-internal TTY slot index used with `tty_write`/`tty_read`,
-/// not a POSIX file descriptor.  See [`SHELL_PTY_MASTER_FD`] for the fd.
-pub fn shell_pty_master() -> i32 {
-    SHELL_PTY_MASTER.load(Ordering::Relaxed)
-}
-
-/// Raw file descriptor for the PTY master device.
-///
-/// Distinct from [`SHELL_PTY_MASTER`] which stores a kernel TTY slot index.
-/// This fd is obtained from `open_tty_fd` and can be used with `read`/`write`/`close`.
-static SHELL_PTY_MASTER_FD: AtomicI32 = AtomicI32::new(-1);
-
-/// Store the raw file descriptor for the PTY master device.
-fn set_shell_pty_master_fd(fd: i32) {
-    SHELL_PTY_MASTER_FD.store(fd, Ordering::Relaxed);
 }
 
 pub(crate) const PROMPT_BUF_MAX: usize = 280;
@@ -241,9 +205,7 @@ fn build_prompt(
 }
 
 fn write_colored_prompt(prompt: &[u8], colors: &[u8]) {
-    use display::{COLOR_DEFAULT, shell_console_commit, shell_console_write_colored};
-
-    let _ = crate::syscall::tty::write(prompt);
+    use display::{COLOR_DEFAULT, shell_write_idx};
 
     let mut i = 0;
     while i < prompt.len() {
@@ -256,9 +218,8 @@ fn write_colored_prompt(prompt: &[u8], colors: &[u8]) {
         while i < prompt.len() && (i >= colors.len() || colors[i] == color) {
             i += 1;
         }
-        shell_console_write_colored(&prompt[start..i], color);
+        shell_write_idx(&prompt[start..i], color);
     }
-    shell_console_commit();
 }
 
 pub struct ShellState {
@@ -272,38 +233,15 @@ pub fn shell_user_main() {
 }
 
 fn shell_interactive_main() {
-    use slopos_abi::signal::SIGINT;
-
-    use crate::syscall::{fs, process};
-    use slopos_windowing::connection;
-
-    let handle = connection::connect().expect("compositor not running");
-    surface::init_handle(handle.clone());
-    input::init_handle(handle);
-
-    display::shell_console_init();
-    display::shell_console_clear();
-
-    surface::set_title("SlopOS Shell");
-    surface::set_app_id("org.slopos.shell");
-    surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
-
+    // fd 0/1/2 are the PTY slave the parent terminal emulator provides.
+    // The shell is a pure slave-side process: all editing rides the raw fd0
+    // escape-sequence reader; all output is ANSI to fd1.
     cwd_set(b"/");
     env::initialize_defaults();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
-    if let Ok((master, slave)) = process::openpty() {
-        set_shell_pty_pair(master, slave);
-        if let Ok(master_fd) = process::open_tty_fd(master) {
-            if let Ok(slave_fd) = fs::ioctl_tiocgptpeer(master_fd.raw()) {
-                set_shell_pty_master_fd(master_fd.into_raw());
-                let _ = fs::dup2(slave_fd.raw(), 0);
-                let _ = fs::dup2(slave_fd.raw(), 1);
-                let _ = fs::dup2(slave_fd.raw(), 2);
-            }
-        }
-    }
+
     exec::initialize_job_control();
-    let _ = process::ignore_signal(SIGINT);
+    interrupt::install();
 
     banner::print_welcome_banner();
 

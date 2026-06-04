@@ -85,7 +85,7 @@ pub fn init_user_main() {
                     gate.wait_async().await;
                 }
 
-                spawn_service("shell");
+                spawn_service("terminal");
 
                 if compositor_tid > 0 {
                     let _ = slopfut::process::Child::from_pid(compositor_tid as u32)
@@ -100,7 +100,7 @@ pub fn init_user_main() {
             if let Some(gate) = gate {
                 gate.wait();
             }
-            spawn_service("shell");
+            spawn_service("terminal");
             if compositor_tid > 0 {
                 process::waitpid(compositor_tid as u32);
             }

@@ -1,4 +1,4 @@
-use slopos_abi::signal::{SIGCONT, SIGINT, SIGKILL};
+use slopos_abi::signal::{SIGCONT, SIGKILL};
 
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
@@ -183,15 +183,4 @@ pub fn cmd_ps(_argc: i32, _argv: &[&[u8]]) -> i32 {
     jobs::write_u64(info.ready_tasks as u64);
     shell_write(b"\n");
     0
-}
-
-pub fn maybe_handle_ctrl_c() -> bool {
-    let fg = exec::foreground_pgid();
-    if fg == 0 {
-        return false;
-    }
-    if let Ok(group) = i32::try_from(fg) {
-        let _ = process::kill_pid(-group, SIGINT);
-    }
-    true
 }

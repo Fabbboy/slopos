@@ -9,4 +9,5 @@ pub mod ping;
 pub mod roulette;
 pub mod shell;
 pub mod sysmon;
+pub mod terminal;
 pub mod widget_gallery;

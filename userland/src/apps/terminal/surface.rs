@@ -1,4 +1,4 @@
-//! Compositor surface wrapper for shell drawing.
+//! Compositor surface wrapper for terminal drawing.
 
 use std::cell::RefCell;
 
@@ -27,13 +27,13 @@ pub fn init(width: i32, height: i32) -> bool {
     HANDLE.with(|h| {
         let h = h.borrow();
         let Some(handle) = h.as_ref() else {
-            let _ = tty::write(b"shell: no protocol handle\n");
+            let _ = tty::write(b"terminal: no protocol handle\n");
             return false;
         };
         let surface = match Surface::new(handle.clone(), width as u32, height as u32) {
             Ok(s) => s,
             Err(_) => {
-                let _ = tty::write(b"shell: surface init failed\n");
+                let _ = tty::write(b"terminal: surface init failed\n");
                 return false;
             }
         };
@@ -46,7 +46,7 @@ pub fn init(width: i32, height: i32) -> bool {
         ) {
             Ok(r) => r,
             Err(_) => {
-                let _ = tty::write(b"shell: renderer init failed\n");
+                let _ = tty::write(b"terminal: renderer init failed\n");
                 return false;
             }
         };
@@ -96,10 +96,6 @@ pub fn set_cursor_shape(shape: u8) {
             }
         });
     });
-}
-
-pub fn bytes_pp() -> u8 {
-    RENDERER.with(|r| r.borrow().as_ref().map_or(4, |r| r.bytes_pp()))
 }
 
 pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {

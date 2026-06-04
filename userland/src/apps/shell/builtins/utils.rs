@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::super::NL;
 use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
+use super::super::interrupt;
 use super::super::jobs::{arg_as_str, parse_u32_arg, write_u64};
 
 fn parse_u64_arg(arg: &[u8]) -> Option<u64> {
@@ -26,7 +27,17 @@ pub fn cmd_sleep(argc: i32, argv: &[&[u8]]) -> i32 {
     if ms == 0 {
         return 0;
     }
-    thread::sleep(Duration::from_millis(ms as u64));
+    // Sleep in short slices so Ctrl+C interrupts the wait promptly.
+    const SLICE_MS: u64 = 50;
+    let mut remaining = ms as u64;
+    while remaining > 0 {
+        let step = remaining.min(SLICE_MS);
+        thread::sleep(Duration::from_millis(step));
+        if interrupt::take_pending() {
+            return interrupt::EXIT_INTERRUPTED;
+        }
+        remaining -= step;
+    }
     0
 }
 
@@ -72,6 +83,9 @@ pub fn cmd_seq(argc: i32, argv: &[&[u8]]) -> i32 {
         if !shell_write(NL.as_bytes()) {
             break;
         }
+        if interrupt::take_pending() {
+            return interrupt::EXIT_INTERRUPTED;
+        }
         if i == end {
             break;
         }
@@ -81,21 +95,21 @@ pub fn cmd_seq(argc: i32, argv: &[&[u8]]) -> i32 {
 }
 
 pub fn cmd_yes(argc: i32, argv: &[&[u8]]) -> i32 {
-    const MAX_ITERATIONS: u32 = 100_000;
-
     let text: &[u8] = if argc >= 2 && !argv[1].is_empty() {
         argv[1]
     } else {
         b"y"
     };
 
-    for _ in 0..MAX_ITERATIONS {
+    loop {
         if !shell_write(text) || !shell_write(NL.as_bytes()) {
-            break;
+            return 0;
+        }
+        if interrupt::take_pending() {
+            return interrupt::EXIT_INTERRUPTED;
         }
         sys_core::yield_now();
     }
-    0
 }
 
 pub fn cmd_random(argc: i32, argv: &[&[u8]]) -> i32 {

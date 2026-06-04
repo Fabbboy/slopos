@@ -41,6 +41,14 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         gui: true,
     },
     ProgramSpec {
+        name: "terminal",
+        path: "/bin/terminal",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "",
+        gui: true,
+    },
+    ProgramSpec {
         name: "roulette",
         path: "/bin/roulette",
         priority: TaskPriority::Normal,

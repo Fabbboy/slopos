@@ -47,6 +47,20 @@ pub fn draw_char<T: Canvas>(
     atlas()?.draw_char(target, x, y, ch as u32, fg, bg)
 }
 
+/// Draw a glyph by Unicode codepoint (non-ASCII codepoints fall back to the
+/// atlas replacement glyph). Used by the terminal emulator which keeps full
+/// `u32` codepoints per cell rather than narrowing to a byte.
+pub fn draw_glyph<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    cp: u32,
+    fg: Color32,
+    bg: Color32,
+) -> Option<DamageRect> {
+    atlas()?.draw_char(target, x, y, cp, fg, bg)
+}
+
 pub fn draw_string<T: Canvas>(
     target: &mut T,
     x: i32,
