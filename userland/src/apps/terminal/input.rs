@@ -7,6 +7,7 @@
 //! drags select a cell rectangle; release copies to the clipboard; paste
 //! arrives as bracketed-paste bytes.
 
+use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
 use slopos_protocol::types::Event as ProtocolEvent;
 
 use super::grid::TerminalGrid;
@@ -38,6 +39,11 @@ pub enum KeyAction {
     /// Scroll the local scrollback view (Shift+PgUp/PgDn).
     ScrollUp(usize),
     ScrollDown(usize),
+    /// Ctrl+Shift+C: copy the pointer selection to the compositor clipboard.
+    CopySelection,
+    /// Ctrl+Shift+V: ask the compositor for the clipboard contents (the
+    /// `PasteResult` reply feeds the paste writer).
+    RequestPaste,
     /// Nothing to do.
     None,
 }
@@ -149,7 +155,21 @@ fn pixel_to_cell(px: i32, py: i32, grid: &TerminalGrid) -> usize {
 /// PageUp/PageDown drive the terminal's own scrollback view (the kernel
 /// keyboard driver already intercepts Shift+PageUp/Down for the in-kernel
 /// vconsole, so only the plain codes ever reach a compositor client).
-pub fn encode_key(ascii: u8, scancode: u8) -> KeyAction {
+///
+/// `mods` is the latest compositor-reported modifier state. Ctrl+Shift chords
+/// are terminal commands (the xterm/GNOME clipboard convention), never PTY
+/// input: the kernel bakes the same control byte for Ctrl+C and Ctrl+Shift+C,
+/// so the modifier state is the only way to tell them apart.
+pub fn encode_key(ascii: u8, scancode: u8, mods: u8) -> KeyAction {
+    const CHORD: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
+    if mods & CHORD == CHORD {
+        match ascii {
+            0x03 => return KeyAction::CopySelection, // Ctrl+Shift+C
+            0x16 => return KeyAction::RequestPaste,  // Ctrl+Shift+V
+            _ => {}
+        }
+    }
+
     if ascii != 0 {
         match ascii {
             KEY_PAGE_UP => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
@@ -192,6 +212,8 @@ pub fn encode_key(ascii: u8, scancode: u8) -> KeyAction {
 /// What a (non-key) compositor event resolved to.
 pub enum CompositorEvent {
     Key(u8, u8),
+    /// Keyboard modifier state changed (bitfield of `MODIFIER_*`).
+    Modifiers(u8),
     /// Configure: new pixel dimensions.
     Resize(i32, i32),
     Close,
@@ -228,6 +250,7 @@ pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
                 CompositorEvent::Ignored
             }
         }
+        ProtocolEvent::Modifiers { mods } => CompositorEvent::Modifiers(*mods as u8),
         ProtocolEvent::PointerMotion { x, y, .. } => CompositorEvent::PointerMotion(*x, *y),
         ProtocolEvent::PointerEnter { x, y, .. } => CompositorEvent::PointerEnter(*x, *y),
         ProtocolEvent::PointerLeave { .. } => CompositorEvent::PointerLeave,
@@ -294,6 +317,47 @@ pub fn update_selection(
     changed
 }
 
+/// Sanitize a clipboard payload so it can only ever act as typed text
+/// (the VTE/kitty paste rule, applied to bracketed and plain pastes alike):
+/// `\r\n` and `\n` normalize to `\r` (a typed Enter), `\t` passes, every
+/// other C0 control and DEL is dropped, bytes above 0x7F pass through for
+/// future UTF-8 text. Returns the sanitized length in `out`.
+///
+/// Dropping ESC outright is what makes bracketed paste injection-proof
+/// (the xterm CVE-2022-45063 class): with no ESC byte in the payload, the
+/// `\x1b[201~` end marker cannot appear — not literally, and not spliced
+/// together from fragments around a stripped inner marker, the bypass that
+/// defeats remove-the-marker filtering.
+pub fn sanitize_paste(data: &[u8], out: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < data.len() && n < out.len() {
+        let b = data[i];
+        match b {
+            b'\r' => {
+                out[n] = b'\r';
+                n += 1;
+                // Swallow the \n of a \r\n pair.
+                if data.get(i + 1) == Some(&b'\n') {
+                    i += 1;
+                }
+            }
+            b'\n' => {
+                out[n] = b'\r';
+                n += 1;
+            }
+            b'\t' | 0x20..=0x7E | 0x80.. => {
+                out[n] = b;
+                n += 1;
+            }
+            // Remaining C0 controls (incl. ESC) and DEL: dropped.
+            _ => {}
+        }
+        i += 1;
+    }
+    n
+}
+
 /// Extract the selected text from the live grid into `out`, returning the
 /// number of bytes captured (capped at [`CLIPBOARD_CAP`]). Trailing blanks on
 /// each selected row are trimmed; multi-row selections join with `\n`.
@@ -349,4 +413,103 @@ pub fn collect_selection(grid: &TerminalGrid, selection: &Selection, out: &mut [
         n = last_nonblank;
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CTRL_SHIFT: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
+
+    fn master_bytes(action: KeyAction) -> Vec<u8> {
+        match action {
+            KeyAction::ToMaster(b) => b.as_bytes().to_vec(),
+            _ => panic!("expected ToMaster"),
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_instead_of_sigint() {
+        assert!(matches!(
+            encode_key(0x03, 0x2E, CTRL_SHIFT),
+            KeyAction::CopySelection
+        ));
+    }
+
+    #[test]
+    fn ctrl_shift_v_requests_paste() {
+        assert!(matches!(
+            encode_key(0x16, 0x2F, CTRL_SHIFT),
+            KeyAction::RequestPaste
+        ));
+    }
+
+    #[test]
+    fn plain_ctrl_c_passes_through_to_ldisc() {
+        assert_eq!(master_bytes(encode_key(0x03, 0x2E, MODIFIER_CTRL)), [0x03]);
+    }
+
+    #[test]
+    fn shift_only_c_is_plain_text() {
+        assert_eq!(master_bytes(encode_key(b'C', 0x2E, MODIFIER_SHIFT)), [b'C']);
+    }
+
+    #[test]
+    fn ctrl_shift_other_keys_still_reach_master() {
+        // Ctrl+Shift+A (0x01) is not a clipboard chord; the ldisc gets it.
+        assert_eq!(master_bytes(encode_key(0x01, 0x1E, CTRL_SHIFT)), [0x01]);
+    }
+
+    #[test]
+    fn baked_navigation_codes_map_to_csi() {
+        assert_eq!(master_bytes(encode_key(KEY_UP, 0, 0)), b"\x1b[A");
+        assert_eq!(master_bytes(encode_key(KEY_DOWN, 0, 0)), b"\x1b[B");
+        assert_eq!(master_bytes(encode_key(KEY_LEFT, 0, 0)), b"\x1b[D");
+        assert_eq!(master_bytes(encode_key(KEY_RIGHT, 0, 0)), b"\x1b[C");
+        assert_eq!(master_bytes(encode_key(KEY_HOME, 0, 0)), b"\x1b[H");
+        assert_eq!(master_bytes(encode_key(KEY_END, 0, 0)), b"\x1b[F");
+        assert_eq!(master_bytes(encode_key(KEY_DELETE, 0, 0)), b"\x1b[3~");
+    }
+
+    #[test]
+    fn page_keys_drive_local_scrollback() {
+        assert!(matches!(
+            encode_key(KEY_PAGE_UP, 0, 0),
+            KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES)
+        ));
+        assert!(matches!(
+            encode_key(KEY_PAGE_DOWN, 0, 0),
+            KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES)
+        ));
+    }
+
+    #[test]
+    fn zero_ascii_falls_back_to_scancode_table() {
+        assert_eq!(master_bytes(encode_key(0, 0x82, 0)), b"\x1b[A");
+        assert_eq!(master_bytes(encode_key(0, 0x80, 0)), b"\x1b[5~");
+        assert!(matches!(encode_key(0, 0x42, 0), KeyAction::None));
+    }
+
+    #[test]
+    fn paste_cannot_inject_bracket_end_marker() {
+        let mut out = [0u8; 64];
+        // Literal end marker: the ESC is dropped, leaving inert text.
+        let n = sanitize_paste(b"safe\x1b[201~rm -rf /\r", &mut out);
+        assert_eq!(&out[..n], b"safe[201~rm -rf /\r");
+        // Splice attack: ESC + (marker) + "[201~" must NOT reassemble a
+        // marker after filtering — no ESC survives, so it cannot.
+        let n = sanitize_paste(b"\x1b\x1b[201~[201~x", &mut out);
+        assert_eq!(&out[..n], b"[201~[201~x");
+        assert!(!out[..n].windows(6).any(|w| w == b"\x1b[201~"));
+    }
+
+    #[test]
+    fn paste_normalizes_newlines_and_drops_controls() {
+        let mut out = [0u8; 64];
+        let n = sanitize_paste(b"one\r\ntwo\nthree", &mut out);
+        assert_eq!(&out[..n], b"one\rtwo\rthree");
+        // Ctrl bytes, ESC, and DEL must not be typeable from a clipboard.
+        let n = sanitize_paste(b"a\x03b\x1b[Ac\x7fd\te", &mut out);
+        assert_eq!(&out[..n], b"ab[Acd\te");
+    }
 }

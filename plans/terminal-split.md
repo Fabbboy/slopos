@@ -60,15 +60,23 @@ New compositor client; entry `terminal_user_main()`, bin
   - Compositor events: `KeyPress` → encoder → `write(master_fd)`. Encoder:
     printable + control bytes (0x03 etc.) pass through; kernel-baked
     0x80-0x88 ascii codes map to CSI (`\x1b[A/B/C/D/H/F`, `\x1b[3~/5~/6~`)
-    — table currently at shell exec.rs:409-419. Shift+PgUp/PgDn are
-    intercepted for local scrollback (xterm convention).
+    — table currently at shell exec.rs:409-419. Plain PgUp/PgDn are
+    intercepted for local scrollback (the kernel keyboard driver already
+    consumes Shift+PgUp/PgDn for the in-kernel vconsole, so the xterm
+    chord never reaches a compositor client). Ctrl+Shift+C/V (tracked via
+    the compositor `Modifiers` events — the kernel bakes the same control
+    byte for Ctrl+C and Ctrl+Shift+C) are clipboard chords, never PTY
+    input.
   - `Configure` → surface resize → recompute cols/rows from
     cell_width/height → `tiocswinsz(master_fd)` (kernel sends SIGWINCH).
   - `CloseRequest` → close master fd (kernel hangup path SIGHUPs the
     session) → exit.
   - Pointer: selection over the rendered grid; `clipboard_copy` on release
-    (4096-byte cap); paste (Ctrl+Shift+V or compositor paste event) →
-    bracketed-paste bytes `\x1b[200~…\x1b[201~` written to master.
+    (4096-byte cap) or via Ctrl+Shift+C; paste via Ctrl+Shift+V
+    (`clipboard_paste` request → `PasteResult` reply) → written to master,
+    wrapped in `\x1b[200~…\x1b[201~` only while the slave app has DECSET
+    2004 enabled (the shell's line editor does; a raw `cat` gets literal
+    bytes).
   - Master readable: read → VT interpreter → dirty-region render → present.
   - Master `Ok(0)`/POLLHUP → shell gone → exit (close window).
 - **VT interpreter**: `slopos-vt` parser + a userland port of vconsole's
@@ -113,7 +121,8 @@ compositor and must keep passing.
   sequences the terminal emits, producing the existing internal 0x80-0x88
   codes so the `match` dispatch body survives. Bracketed paste: emit
   `\x1b[?2004h` on editor entry / `l` on exit; `\x1b[200~…201~` → literal
-  insert. Redraw via `\r` + `\x1b[K` + prompt + buffer + cursor positioning
+  insert. Redraw via `\r` + `\x1b[J` (erase below — handles multi-row
+  wrapped input) + prompt + buffer + cursor positioning
   (`\r` + `\x1b[<n>C`); drop the blink timer (terminal blinks), drop
   mouse/selection/clipboard/pageup paths. Width from `tiocgwinsz(0)` at
   each prompt (re-query after SIGWINCH later — not required now).

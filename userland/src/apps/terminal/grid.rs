@@ -330,6 +330,8 @@ pub struct TerminalGrid {
     alt_screen_cursor_row: u16,
     alt_screen_cursor_col: u16,
     in_alt_screen: bool,
+    /// DECSET/DECRST 2004: the slave-side app asked for paste bracketing.
+    bracketed_paste: bool,
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: ScrollbackBuf,
@@ -366,6 +368,7 @@ impl TerminalGrid {
             alt_screen_cursor_row: 0,
             alt_screen_cursor_col: 0,
             in_alt_screen: false,
+            bracketed_paste: false,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             scrollback: ScrollbackBuf::new(cols as usize),
@@ -403,6 +406,12 @@ impl TerminalGrid {
     #[inline]
     pub fn viewing_history(&self) -> bool {
         self.scrollback.view_offset > 0
+    }
+
+    /// True when the slave-side app enabled bracketed paste (DECSET 2004).
+    #[inline]
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     // -----------------------------------------------------------------------
@@ -826,6 +835,7 @@ impl TerminalGrid {
         match mode {
             25 => self.cursor_visible = true,
             1049 => self.enter_alt_screen(),
+            2004 => self.bracketed_paste = true,
             _ => {}
         }
     }
@@ -834,6 +844,7 @@ impl TerminalGrid {
         match mode {
             25 => self.cursor_visible = false,
             1049 => self.leave_alt_screen(),
+            2004 => self.bracketed_paste = false,
             _ => {}
         }
     }
@@ -1216,5 +1227,53 @@ mod tests {
         assert_eq!(glyph_at(&g, 0, 4), 'o');
         assert_eq!(g.rows, 8);
         assert_eq!(g.cols, 20);
+    }
+
+    #[test]
+    fn alt_screen_saves_and_restores_main() {
+        let mut g = TerminalGrid::new(3, 10);
+        feed(&mut g, b"main\x1b[2;3H");
+        // Enter: alt screen starts blank with the cursor homed.
+        feed(&mut g, b"\x1b[?1049h");
+        assert_eq!(glyph_at(&g, 0, 0), ' ');
+        assert_eq!((g.cursor_row, g.cursor_col), (0, 0));
+        feed(&mut g, b"ALT");
+        assert_eq!(glyph_at(&g, 0, 0), 'A');
+        // Leave: main content AND cursor come back exactly.
+        feed(&mut g, b"\x1b[?1049l");
+        assert_eq!(glyph_at(&g, 0, 0), 'm');
+        assert_eq!(glyph_at(&g, 0, 3), 'n');
+        assert_eq!((g.cursor_row, g.cursor_col), (1, 2));
+    }
+
+    #[test]
+    fn alt_screen_enter_twice_keeps_saved_main() {
+        let mut g = TerminalGrid::new(3, 10);
+        feed(&mut g, b"keep\x1b[?1049h\x1b[?1049hALT\x1b[?1049l");
+        // The second 1049h must not overwrite the saved main screen with
+        // the (blank) alt contents.
+        assert_eq!(glyph_at(&g, 0, 0), 'k');
+    }
+
+    #[test]
+    fn alt_screen_does_not_feed_scrollback() {
+        let mut g = TerminalGrid::new(2, 4);
+        feed(&mut g, b"\x1b[?1049h");
+        // Scroll three lines through the 2-row alt screen.
+        feed(&mut g, b"A1\r\nA2\r\nA3");
+        feed(&mut g, b"\x1b[?1049l");
+        // Nothing from the alt screen may appear in history.
+        g.scroll_view_up(1);
+        assert!(!g.viewing_history());
+    }
+
+    #[test]
+    fn bracketed_paste_mode_tracks_decset_2004() {
+        let mut g = TerminalGrid::new(3, 10);
+        assert!(!g.bracketed_paste());
+        feed(&mut g, b"\x1b[?2004h");
+        assert!(g.bracketed_paste());
+        feed(&mut g, b"\x1b[?2004l");
+        assert!(!g.bracketed_paste());
     }
 }

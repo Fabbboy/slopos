@@ -74,8 +74,8 @@ pub fn init_user_main() {
     let compositor_tid = spawn_service("compositor");
 
     // Root supervision loop on the slopfut runtime: await the compositor's
-    // readiness byte (the gate read folded in per §1.1), spawn the shell,
-    // then await the compositor's exit via a pidfd (`Child::wait`) instead
+    // readiness byte, spawn the shell, then await the compositor's exit via
+    // a pidfd (`Child::wait`) instead
     // of a blocking `waitpid`. A small ring suffices — peak in-flight is one
     // gate read followed by one pidfd poll.
     match Ring::setup(8) {

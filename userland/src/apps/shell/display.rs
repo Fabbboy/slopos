@@ -125,14 +125,23 @@ fn write_u8_decimal(buf: &mut [u8], value: u8) -> usize {
 
 /// Emit `bytes` to fd 1 wrapped in a truecolor SGR run for `color_idx`, then
 /// reset.  COLOR_DEFAULT emits no SGR (terminal's default foreground).
+///
+/// A broken fd 1 (EBADF in a test binary) falls back to the serial console
+/// exactly once per call, carrying the payload — never the SGR escapes.
 fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
     if color_idx == COLOR_DEFAULT {
         return emit_stdout(bytes);
     }
     let mut sgr = [0u8; 24];
     let len = write_sgr_set(&mut sgr, palette_color(color_idx));
-    let ok = emit_stdout(&sgr[..len]) && emit_stdout(bytes);
-    let _ = emit_stdout(b"\x1b[0m");
+    if fs::write_slice(STDOUT_FD, &sgr[..len]).is_err() {
+        let _ = crate::syscall::tty::write(bytes);
+        return false;
+    }
+    let ok = emit_stdout(bytes);
+    if ok {
+        let _ = fs::write_slice(STDOUT_FD, b"\x1b[0m");
+    }
     ok
 }
 

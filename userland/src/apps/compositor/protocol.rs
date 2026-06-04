@@ -864,6 +864,10 @@ impl ProtocolBridge {
                 InputEventType::KeyPress => {
                     if let Some(idx) = kbd_idx {
                         *serial = serial.wrapping_add(1);
+                        // Modifiers first (the wl_keyboard rule): the client
+                        // must judge the key against current modifier state,
+                        // never the previous event's.
+                        self.send_modifiers(idx, modifier_state as u32);
                         self.send_key(
                             idx,
                             *serial,
@@ -872,12 +876,12 @@ impl ProtocolBridge {
                             event.key_ascii() as u32,
                             1,
                         );
-                        self.send_modifiers(idx, modifier_state as u32);
                     }
                 }
                 InputEventType::KeyRelease => {
                     if let Some(idx) = kbd_idx {
                         *serial = serial.wrapping_add(1);
+                        self.send_modifiers(idx, modifier_state as u32);
                         self.send_key(
                             idx,
                             *serial,
@@ -886,7 +890,6 @@ impl ProtocolBridge {
                             event.key_ascii() as u32,
                             0,
                         );
-                        self.send_modifiers(idx, modifier_state as u32);
                     }
                 }
                 _ => {}

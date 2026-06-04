@@ -10,7 +10,9 @@
 
 use slopos_userland as _;
 
+use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
 use slopos_userland::apps::terminal::grid::TerminalGrid;
+use slopos_userland::apps::terminal::input::{KeyAction, encode_key, sanitize_paste};
 
 fn feed(g: &mut TerminalGrid, bytes: &[u8]) {
     for &b in bytes {
@@ -86,6 +88,103 @@ fn test_backspace_cancels_pending_wrap() -> bool {
     glyph(&g, 0, 1) == 'X' && g.cursor_row == 0 && g.cursor_col == 2
 }
 
+/// DECSET 1049 swaps to a blank alt screen; DECRST restores the main
+/// screen's content and cursor exactly.
+fn test_alt_screen_saves_and_restores_main() -> bool {
+    let mut g = TerminalGrid::new(3, 10);
+    feed(&mut g, b"main\x1b[2;3H");
+    feed(&mut g, b"\x1b[?1049h");
+    if glyph(&g, 0, 0) != ' ' || g.cursor_row != 0 || g.cursor_col != 0 {
+        return false;
+    }
+    feed(&mut g, b"ALT");
+    if glyph(&g, 0, 0) != 'A' {
+        return false;
+    }
+    feed(&mut g, b"\x1b[?1049l");
+    glyph(&g, 0, 0) == 'm' && glyph(&g, 0, 3) == 'n' && g.cursor_row == 1 && g.cursor_col == 2
+}
+
+/// Lines scrolled off the alt screen must not enter scrollback history.
+fn test_alt_screen_does_not_feed_scrollback() -> bool {
+    let mut g = TerminalGrid::new(2, 4);
+    feed(&mut g, b"\x1b[?1049hA1\r\nA2\r\nA3\x1b[?1049l");
+    g.scroll_view_up(1);
+    !g.viewing_history()
+}
+
+/// Paste bracketing follows the app's DECSET/DECRST 2004, off by default.
+fn test_bracketed_paste_tracks_decset_2004() -> bool {
+    let mut g = TerminalGrid::new(3, 10);
+    if g.bracketed_paste() {
+        return false;
+    }
+    feed(&mut g, b"\x1b[?2004h");
+    if !g.bracketed_paste() {
+        return false;
+    }
+    feed(&mut g, b"\x1b[?2004l");
+    !g.bracketed_paste()
+}
+
+/// Ctrl+Shift+C is the clipboard-copy chord, never SIGINT; plain Ctrl+C
+/// still reaches the line discipline.
+fn test_ctrl_shift_c_copies_not_sigint() -> bool {
+    if !matches!(
+        encode_key(0x03, 0x2E, MODIFIER_CTRL | MODIFIER_SHIFT),
+        KeyAction::CopySelection
+    ) {
+        return false;
+    }
+    match encode_key(0x03, 0x2E, MODIFIER_CTRL) {
+        KeyAction::ToMaster(b) => b.as_bytes() == [0x03],
+        _ => false,
+    }
+}
+
+/// Ctrl+Shift+V requests a compositor paste; plain Ctrl+V passes through.
+fn test_ctrl_shift_v_requests_paste() -> bool {
+    if !matches!(
+        encode_key(0x16, 0x2F, MODIFIER_CTRL | MODIFIER_SHIFT),
+        KeyAction::RequestPaste
+    ) {
+        return false;
+    }
+    match encode_key(0x16, 0x2F, MODIFIER_CTRL) {
+        KeyAction::ToMaster(b) => b.as_bytes() == [0x16],
+        _ => false,
+    }
+}
+
+/// A clipboard payload must not be able to close the paste bracket and
+/// inject live keystrokes (the xterm CVE-2022-45063 class) — including the
+/// splice attack where stripping an inner marker rejoins an outer ESC with
+/// a trailing `[201~`. No ESC survives sanitizing, so no marker can exist.
+fn test_paste_cannot_inject_bracket_end_marker() -> bool {
+    let mut out = [0u8; 64];
+    let n = sanitize_paste(b"safe\x1b[201~rm -rf /\r", &mut out);
+    if &out[..n] != b"safe[201~rm -rf /\r" {
+        return false;
+    }
+    let n = sanitize_paste(b"\x1b\x1b[201~[201~x", &mut out);
+    if &out[..n] != b"[201~[201~x" {
+        return false;
+    }
+    !out[..n].windows(6).any(|w| w == b"\x1b[201~")
+}
+
+/// Paste types like a keyboard: newlines become Enter (\r), control bytes
+/// (Ctrl+C, ESC, DEL) are dropped.
+fn test_paste_types_like_keys() -> bool {
+    let mut out = [0u8; 64];
+    let n = sanitize_paste(b"one\r\ntwo\nthree", &mut out);
+    if &out[..n] != b"one\rtwo\rthree" {
+        return false;
+    }
+    let n = sanitize_paste(b"a\x03b\x1b[Ac\x7fd\te", &mut out);
+    &out[..n] == b"ab[Acd\te"
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -112,5 +211,30 @@ fn main() {
             "backspace_cancels_pending_wrap",
             test_backspace_cancels_pending_wrap,
         ),
+        (
+            "alt_screen_saves_and_restores_main",
+            test_alt_screen_saves_and_restores_main,
+        ),
+        (
+            "alt_screen_does_not_feed_scrollback",
+            test_alt_screen_does_not_feed_scrollback,
+        ),
+        (
+            "bracketed_paste_tracks_decset_2004",
+            test_bracketed_paste_tracks_decset_2004,
+        ),
+        (
+            "ctrl_shift_c_copies_not_sigint",
+            test_ctrl_shift_c_copies_not_sigint,
+        ),
+        (
+            "ctrl_shift_v_requests_paste",
+            test_ctrl_shift_v_requests_paste,
+        ),
+        (
+            "paste_cannot_inject_bracket_end_marker",
+            test_paste_cannot_inject_bracket_end_marker,
+        ),
+        ("paste_types_like_keys", test_paste_types_like_keys),
     ]);
 }

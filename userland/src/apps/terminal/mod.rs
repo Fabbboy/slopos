@@ -12,7 +12,7 @@
 //! so the protocol client and the master fd are never touched off-thread.
 
 pub mod grid;
-mod input;
+pub mod input;
 mod render;
 mod surface;
 
@@ -255,6 +255,7 @@ async fn event_loop(
 
     let mut selection = Selection::NONE;
     let mut ptr = PointerState::new();
+    let mut mods: u8 = 0;
     let mut cursor_on = true;
     let mut last_blink = Instant::now();
 
@@ -272,7 +273,7 @@ async fn event_loop(
             };
             match input::classify(&evt) {
                 CompositorEvent::Key(ascii, scancode) => {
-                    match input::encode_key(ascii, scancode) {
+                    match input::encode_key(ascii, scancode, mods) {
                         KeyAction::ToMaster(bytes) => {
                             let _ = fs::write_slice(master_fd, bytes.as_bytes());
                             // Any keypress cancels a scrollback view.
@@ -289,8 +290,23 @@ async fn event_loop(
                             grid.scroll_view_down(n);
                             want_render = true;
                         }
+                        KeyAction::CopySelection => {
+                            // Keyboard copy keeps the selection highlighted
+                            // and never touches the master (no SIGINT).
+                            if selection.is_active() {
+                                copy_selection(handle, grid, &selection);
+                            }
+                        }
+                        KeyAction::RequestPaste => {
+                            // The compositor replies with PasteResult, which
+                            // the Paste arm below writes to the master.
+                            let _ = handle.borrow_client().clipboard_paste();
+                        }
                         KeyAction::None => {}
                     }
+                }
+                CompositorEvent::Modifiers(m) => {
+                    mods = m;
                 }
                 CompositorEvent::Resize(w, h) => {
                     if surface::resize(w as u32, h as u32) {
@@ -333,7 +349,11 @@ async fn event_loop(
                     }
                 }
                 CompositorEvent::Paste(payload) => {
-                    write_bracketed_paste(master_fd, &payload.buf[..payload.len]);
+                    write_paste(
+                        master_fd,
+                        &payload.buf[..payload.len],
+                        grid.bracketed_paste(),
+                    );
                 }
                 CompositorEvent::Ignored => {}
             }
@@ -428,12 +448,25 @@ fn copy_selection(
     }
 }
 
-/// Wrap pasted content in bracketed-paste markers and write it to the master.
-fn write_bracketed_paste(master_fd: i32, data: &[u8]) {
+/// Write pasted content to the master, wrapped in bracketed-paste markers
+/// only when the slave-side application enabled DECSET 2004 (the shell's
+/// line editor does; a raw `cat` must not see the markers). The payload is
+/// sanitized first — no control byte survives, so the bracket cannot be
+/// escaped and a clipboard can never type Ctrl+C (see `sanitize_paste`).
+fn write_paste(master_fd: i32, data: &[u8], bracketed: bool) {
     if data.is_empty() {
         return;
     }
-    let _ = fs::write_slice(master_fd, b"\x1b[200~");
-    let _ = fs::write_slice(master_fd, data);
-    let _ = fs::write_slice(master_fd, b"\x1b[201~");
+    let mut clean = [0u8; input::CLIPBOARD_CAP];
+    let n = input::sanitize_paste(data, &mut clean);
+    if n == 0 {
+        return;
+    }
+    if bracketed {
+        let _ = fs::write_slice(master_fd, b"\x1b[200~");
+    }
+    let _ = fs::write_slice(master_fd, &clean[..n]);
+    if bracketed {
+        let _ = fs::write_slice(master_fd, b"\x1b[201~");
+    }
 }
