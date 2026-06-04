@@ -285,6 +285,155 @@ pub fn test_isig_flush_sigtstp() -> TestResult {
     TestResult::Pass
 }
 
+// ===========================================================================
+// ISIG caret echo (ECHO|ECHOCTL parity with Linux n_tty)
+// ===========================================================================
+
+/// VINTR (Ctrl+C) with ECHO|ECHOCTL echoes `^C` to the output, then signals.
+pub fn test_isig_vintr_echoes_caret() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Default termios already has ECHO|ECHOCTL set.
+    let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
+
+    match batch.signal {
+        Some((sig, _)) if sig == SIGINT => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected SIGINT signal, got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+
+    if batch.echo.as_slice() != b"^C" {
+        klog_info!(
+            "TTY_TEST: BUG - expected echo \"^C\", got {:?}",
+            batch.echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// VQUIT (Ctrl+\\) echoes `^\\` and VSUSP (Ctrl+Z) echoes `^Z`.
+pub fn test_isig_vquit_vsusp_echo_caret() -> TestResult {
+    let mut ld = LineDisc::new();
+    let quit = ld.receive_buf(&[InputEvent::normal(0x1C)]);
+    if quit.echo.as_slice() != b"^\\" {
+        klog_info!(
+            "TTY_TEST: BUG - VQUIT expected echo \"^\\\", got {:?}",
+            quit.echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+    match quit.signal {
+        Some((sig, _)) if sig == SIGQUIT => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - VQUIT expected SIGQUIT, got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+
+    let mut ld = LineDisc::new();
+    let susp = ld.receive_buf(&[InputEvent::normal(0x1A)]);
+    if susp.echo.as_slice() != b"^Z" {
+        klog_info!(
+            "TTY_TEST: BUG - VSUSP expected echo \"^Z\", got {:?}",
+            susp.echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+    match susp.signal {
+        Some((sig, _)) if sig == SIGTSTP => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - VSUSP expected SIGTSTP, got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// With ECHOCTL cleared, the signal char does NOT echo a caret.
+pub fn test_isig_no_echo_without_echoctl() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHOCTL;
+    ld.set_termios(&t);
+
+    let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
+
+    match batch.signal {
+        Some((sig, _)) if sig == SIGINT => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected SIGINT even without ECHOCTL, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    if !batch.echo.is_empty() {
+        klog_info!(
+            "TTY_TEST: BUG - no caret should echo without ECHOCTL, got {:?}",
+            batch.echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// NOFLSH interaction is unchanged: the caret still echoes and the signal
+/// is reported as non-flushing.
+pub fn test_isig_caret_echo_with_noflsh() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::NOFLSH;
+    ld.set_termios(&t);
+
+    // Type "abc" so we can confirm NOFLSH preserves the edit buffer.
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+
+    let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
+
+    // Caret still echoes.
+    if batch.echo.as_slice() != b"^C" {
+        klog_info!(
+            "TTY_TEST: BUG - NOFLSH should not suppress caret echo, got {:?}",
+            batch.echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+
+    // Signal reported as non-flushing (flush bool == false).
+    match batch.signal {
+        Some((sig, flush)) if sig == SIGINT => {
+            if flush {
+                klog_info!("TTY_TEST: BUG - NOFLSH should report flush=false");
+                return TestResult::Fail;
+            }
+        }
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected SIGINT with NOFLSH, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Edit buffer preserved (NOFLSH).
+    if ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - NOFLSH should preserve edit buffer on ISIG");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 /// Double Ctrl+D does not accumulate phantom line_count.
 pub fn test_double_eof_no_phantom_accumulation() -> TestResult {
     let mut ld = LineDisc::new();
@@ -523,6 +672,22 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_isig_flush_sigtstp,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_vintr_echoes_caret,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_vquit_vsusp_echo_caret,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_no_echo_without_echoctl,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_isig_caret_echo_with_noflsh,
     suite = tty_test_ldisc_signals
 );
 slopos_testing::stest!(

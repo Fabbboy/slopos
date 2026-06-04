@@ -1719,10 +1719,23 @@ impl LineDisc {
                     result.echo.push(0x07);
                 }
                 InputAction::Signal(sig) => {
-                    result.signal = Some((
-                        sig,
-                        !self.termios.local_flags().contains(LocalFlags::NOFLSH),
-                    ));
+                    let lflag = self.termios.local_flags();
+                    // Linux n_tty parity: when a signal char is typed and
+                    // ECHO|ECHOCTL are set, echo its caret form (^C/^\/^Z)
+                    // before the signal is delivered. The TTY core writes
+                    // `result.echo` ahead of dispatching `result.signal`, so
+                    // the caret reaches the terminal first. Break-condition
+                    // SIGINTs (InputStatus::Break) carry no keypress, so they
+                    // are excluded.
+                    if lflag.contains(LocalFlags::ECHO | LocalFlags::ECHOCTL)
+                        && event.status == InputStatus::Normal
+                    {
+                        let c = event.byte;
+                        if c < 0x20 && c != b'\t' && c != b'\n' {
+                            result.echo.extend(&[b'^', c | 0x40]);
+                        }
+                    }
+                    result.signal = Some((sig, !lflag.contains(LocalFlags::NOFLSH)));
                     break;
                 }
                 InputAction::ReprintLine => {
@@ -1784,7 +1797,17 @@ impl RawDisc {
             ),
             c_lflag: LocalFlags::empty(),
             c_line: N_RAW as u8,
-            c_cc: [0; NCCS],
+            c_cc: {
+                // VMIN=1: a raw read delivers data, blocks (or EAGAIN under
+                // O_NONBLOCK) — never the VMIN=0 polling read whose empty
+                // `Ok(0)` is indistinguishable from EOF. A PTY master's
+                // `read()==0` must mean exactly "peer closed / hung up",
+                // matching Linux master semantics. Explicit tcsetattr can
+                // still opt in to VMIN=0 polling.
+                let mut cc = [0u8; NCCS];
+                cc[CcIndex::Vmin as usize] = 1;
+                cc
+            },
             c_ispeed: 0,
             c_ospeed: 0,
         }

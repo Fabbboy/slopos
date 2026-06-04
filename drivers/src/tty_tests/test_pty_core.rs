@@ -342,6 +342,111 @@ pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
     TestResult::Pass
 }
 
+/// An empty non-blocking master read reports WouldBlock — never `Ok(0)`.
+///
+/// The master's `RawDisc` defaults to VMIN=1 so that `read() == 0` is
+/// reserved for "peer closed / hung up" (true EOF), matching Linux master
+/// semantics. With VMIN=0 the empty read would return the polling-read
+/// `Ok(0)`, which a terminal emulator cannot distinguish from EOF —
+/// it would tear the session down the moment the slave went quiet.
+pub fn test_pty_master_empty_read_would_block_not_eof() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    // Empty + non-blocking: must be WouldBlock, not the EOF-shaped Ok(0).
+    let mut buf = [0u8; 8];
+    let empty = tty::read(master, &mut buf, true);
+    if empty != Err(TtyError::WouldBlock) {
+        klog_info!(
+            "TTY_TEST: BUG - empty nonblock master read returned {:?}, want WouldBlock",
+            empty
+        );
+        let _ = tty::close_ref(master);
+        let _ = tty::close_ref(slave);
+        return TestResult::Fail;
+    }
+
+    // Data still flows: slave output is readable from the master.
+    let _ = tty::write(slave, b"x", false);
+    let got = tty::read(master, &mut buf, true);
+    if !matches!(got, Ok(n) if n >= 1) {
+        klog_info!(
+            "TTY_TEST: BUG - master read after slave write returned {:?}",
+            got
+        );
+        let _ = tty::close_ref(master);
+        let _ = tty::close_ref(slave);
+        return TestResult::Fail;
+    }
+
+    // Slave fully closed: NOW the master read reports EOF via Ok(0).
+    let _ = tty::close_ref(slave);
+    let eof = tty::read(master, &mut buf, true);
+    if eof != Ok(0) {
+        klog_info!(
+            "TTY_TEST: BUG - master read after slave close returned {:?}, want Ok(0)",
+            eof
+        );
+        let _ = tty::close_ref(master);
+        return TestResult::Fail;
+    }
+
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// TIOCSWINSZ on either PTY end updates BOTH views: the window size is a
+/// property of the pair, and the slave-side reader (the shell asking for
+/// its columns) must see the geometry the terminal emulator pushed onto
+/// the master — otherwise line-wrap arithmetic diverges from the render.
+pub fn test_pty_winsize_shared_across_pair() -> TestResult {
+    use slopos_abi::syscall::UserWinsize;
+
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    let ws = UserWinsize {
+        ws_row: 21,
+        ws_col: 64,
+        ws_xpixel: 640,
+        ws_ypixel: 480,
+    };
+    tty::set_winsize(master, &ws).unwrap();
+    let slave_view = tty::get_winsize(slave).unwrap();
+    let master_to_slave = slave_view.ws_row == 21 && slave_view.ws_col == 64;
+
+    let ws2 = UserWinsize {
+        ws_row: 30,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    tty::set_winsize(slave, &ws2).unwrap();
+    let master_view = tty::get_winsize(master).unwrap();
+    let slave_to_master = master_view.ws_row == 30 && master_view.ws_col == 100;
+
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    if !master_to_slave || !slave_to_master {
+        klog_info!(
+            "TTY_TEST: BUG - winsize not shared across pair (m->s ok={}, s->m ok={})",
+            master_to_slave,
+            slave_to_master
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 /// closing master then slave frees both slots.
 pub fn test_pty_close_master_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
@@ -1535,6 +1640,14 @@ slopos_testing::stest!(
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(name = test_non_pty_not_locked, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_pty_master_empty_read_would_block_not_eof,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_winsize_shared_across_pair,
+    suite = tty_test_pty_core
+);
 slopos_testing::stest!(
     name = test_get_lock_non_master_error,
     suite = tty_test_pty_core

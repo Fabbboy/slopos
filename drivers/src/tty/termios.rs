@@ -506,20 +506,62 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
         }
     }
 
+    // The window size is a property of the terminal PAIR: setting it on
+    // either PTY end updates both views (Linux keeps one struct for the
+    // pair), and SIGWINCH targets the SLAVE side's foreground job — the
+    // session lives on the slave, where the shell did TIOCSCTTY.
     let mut deferred = PostLockWork::new();
+    let peer_idx;
+    let mut changed;
     {
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
                 let old = tty.winsize;
                 tty.winsize = *ws;
-                if old.ws_row != ws.ws_row || old.ws_col != ws.ws_col {
-                    deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                changed = old.ws_row != ws.ws_row || old.ws_col != ws.ws_col;
+                match tty.driver {
+                    TtyDriverKind::PtyMaster { ref peer } => {
+                        peer_idx = Some((peer.idx, true));
+                    }
+                    TtyDriverKind::PtySlave { ref peer } => {
+                        peer_idx = Some((peer.idx, false));
+                    }
+                    _ => {
+                        peer_idx = None;
+                        if changed {
+                            deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                        }
+                    }
+                }
+                if peer_idx.is_none() || matches!(peer_idx, Some((_, false))) {
+                    // Slave (or non-PTY) targeted directly: its own session
+                    // carries the foreground job.
+                    if changed && peer_idx.is_some() {
+                        deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                    }
                 }
             }
             None => return Err(TtyError::NotAllocated),
         }
     }
+
+    if let Some((peer, target_is_master)) = peer_idx {
+        let peer_slot = peer.0 as usize;
+        if peer_slot < MAX_TTYS {
+            let mut guard = TTY_SLOTS[peer_slot].lock();
+            if let Some(peer_tty) = guard.as_mut() {
+                let old = peer_tty.winsize;
+                peer_tty.winsize = *ws;
+                changed = changed || old.ws_row != ws.ws_row || old.ws_col != ws.ws_col;
+                if target_is_master && changed {
+                    // The peer is the slave: signal ITS foreground job.
+                    deferred.add_signal(peer_tty.session.fg_pgrp_raw(), SIGWINCH);
+                }
+            }
+        }
+    }
+
     deferred.execute();
     Ok(())
 }

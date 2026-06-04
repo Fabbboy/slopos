@@ -1869,12 +1869,15 @@ pub fn test_packet_mode_1byte_no_data_nonblock() -> TestResult {
 
     tty::set_packet_mode(master, true).unwrap();
 
+    // No data, no pending packet event, non-blocking: WouldBlock, exactly
+    // like Linux. The master's RawDisc carries VMIN=1, so the EOF-shaped
+    // `Ok(0)` is reserved for peer-close/hangup.
     let mut buf = [0u8; 1];
     match tty::read(master, &mut buf, true) {
-        Ok(0) => {}
+        Err(TtyError::WouldBlock) => {}
         other => {
             klog_info!(
-                "TTY_TEST: BUG - packet 1-byte no data nonblock: expected Ok(0), got {:?}",
+                "TTY_TEST: BUG - packet 1-byte no data nonblock: expected WouldBlock, got {:?}",
                 other
             );
             let _ = tty::set_packet_mode(master, false);
