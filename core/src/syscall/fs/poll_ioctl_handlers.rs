@@ -97,9 +97,12 @@ fn ioctl_pty(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64, pid: u3
         }
         TIOCGPTPEER => {
             let peer_tty = tty::open_pty_peer(tty_idx).map_err(|_| ())?;
+            // `file_open_tty_fd` takes ownership of the peer open-ref; a
+            // failed install already released it once, so the error arm
+            // must not close_ref again (double-decrement = premature
+            // close).
             let new_fd = file_open_tty_fd(pid, peer_tty, arg as u32);
             if new_fd < 0 {
-                let _ = tty::close_ref(peer_tty);
                 Err(())
             } else {
                 Ok(new_fd as u64)

@@ -11,21 +11,21 @@ use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
 };
 use crate::syscall::signal::{
-    deliver_pending_signal, syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask,
-    syscall_rt_sigreturn,
+    deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
+    syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::fs::O_RDONLY;
 use slopos_abi::signal::{
-    SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
+    SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGINT, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
-    F_GETFL, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY, O_NONBLOCK, POLLIN,
-    SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL,
-    SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION,
-    SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
-    SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
+    F_GETFL, F_SETFD, FD_CLOEXEC, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY,
+    O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID,
+    SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL,
+    SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT,
+    SYSCALL_SETPGID, SYSCALL_SETSID, SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
@@ -43,8 +43,9 @@ use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
 use slopos_abi::task::BlockReason;
 use slopos_fs::fileio::{
-    file_close_fd, file_fcntl_fd, file_open_for_process, file_pipe_create, file_poll_fd,
-    file_read_fd, file_write_fd, fileio_clone_table_for_process, fileio_destroy_table_for_process,
+    file_close_fd, file_dup_fd, file_dup3_fd, file_fcntl_fd, file_open_for_process,
+    file_open_tty_fd, file_pipe_create, file_poll_fd, file_read_fd, file_seek_fd, file_write_fd,
+    fileio_clone_table_for_process, fileio_clone_table_for_spawn, fileio_destroy_table_for_process,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_sched::scheduler::unblock_task;
@@ -1624,6 +1625,245 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     TestResult::Pass
 }
 
+/// Build a synthetic user-mode `InterruptFrame` carrying the given
+/// RIP/RSP so the IRQ-exit delivery path treats it as a return-to-user
+/// frame (`cs & 3 == 3`). Heap-backed to keep it off the test stack.
+fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
+    let mut frame: KBox<slopos_arch::InterruptFrame> = KBox::zeroed().expect("alloc");
+    frame.rip = rip;
+    frame.rsp = rsp;
+    frame.cs = 0x23; // user code selector (RPL 3)
+    frame.ss = 0x1B; // user data selector (RPL 3)
+    frame.rflags = 0x202; // IF + MBO
+    frame
+}
+
+pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let page = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    // Install a SIGINT handler with a restorer.
+    let action = UserSigaction {
+        sa_handler: 0x4100_0000,
+        sa_flags: 0,
+        sa_restorer: 0x4200_0000,
+        sa_mask: 0,
+    };
+    assert_test!(
+        user_copy_out(pid, page, &action),
+        "failed to write SIGINT action"
+    );
+    let mut install_frame = zero_frame();
+    install_frame.regs_mut().rdi = SIGINT as u64;
+    install_frame.regs_mut().rsi = page;
+    install_frame.regs_mut().rdx = 0;
+    install_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigaction,
+            task_ptr,
+            &mut install_frame,
+        )
+    });
+    assert_eq_test!(install_frame.regs().rax, 0, "SIGINT install failed");
+
+    // Raise SIGINT directly (mirrors what kill() leaves pending).
+    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGINT));
+
+    // The IRQ-exit path resolves the task via scheduler_get_current_task().
+    make_task_current(task_ptr);
+
+    let stack_top = process_vm_get_stack_top(pid);
+    let original_rip = 0x5500_2222;
+    let original_rsp = stack_top.wrapping_sub(0x200);
+    let mut frame = user_irq_frame(original_rip, original_rsp);
+
+    let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
+    let _ = with_user_process_context(pid, || deliver_pending_signal_on_irq_exit(frame_ptr));
+    // Restore the bootstrap current-task so task_terminate below does not
+    // run the is_current Zombie path against the test task.
+    park_bootstrap_on_current_cpu();
+
+    assert_eq_test!(
+        frame.rip,
+        action.sa_handler,
+        "IRQ-exit RIP not redirected to handler"
+    );
+    assert_eq_test!(frame.rdi, SIGINT as u64, "signum not in RDI");
+    assert_eq_test!(frame.rsi, 0, "RSI not zeroed");
+    assert_eq_test!(frame.rdx, 0, "RDX not zeroed");
+
+    // The handler RSP points at the restorer word; the SignalFrame
+    // begins at RSP + 8.
+    let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
+    let expected_frame_addr = original_rsp.wrapping_sub(total_size) & !0xF;
+    assert_eq_test!(frame.rsp, expected_frame_addr, "handler RSP mismatch");
+
+    let restorer_on_stack: u64 = match user_copy_in(pid, frame.rsp) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    assert_eq_test!(
+        restorer_on_stack,
+        action.sa_restorer,
+        "restorer not on stack"
+    );
+
+    let sigframe_addr = frame.rsp.wrapping_add(8);
+    let sigframe: SignalFrame = match user_copy_in(pid, sigframe_addr) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    assert_eq_test!(sigframe.rip, original_rip, "saved RIP mismatch");
+    assert_eq_test!(sigframe.rsp, original_rsp, "saved RSP mismatch");
+    assert_eq_test!(sigframe.signum, SIGINT as u64, "signum mismatch in frame");
+
+    // The handler signal must now be blocked (no SA_NODEFER) and the
+    // pending bit cleared.
+    let blocked = task::task_signal_pending(task_ptr); // pending cleared
+    assert_eq_test!(blocked, 0, "pending SIGINT bit should be cleared");
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_signal_delivery_on_irq_exit_kernel_frame_untouched() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGINT));
+    make_task_current(task_ptr);
+
+    let original_rip = 0xFFFF_8000_0001_0000;
+    let original_rsp = 0xFFFF_8000_0002_0000;
+    let mut frame = user_irq_frame(original_rip, original_rsp);
+    // Kernel-mode return: CS RPL 0.
+    frame.cs = 0x08;
+    frame.ss = 0x10;
+
+    let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
+    deliver_pending_signal_on_irq_exit(frame_ptr);
+    park_bootstrap_on_current_cpu();
+
+    assert_eq_test!(
+        frame.rip,
+        original_rip,
+        "kernel-mode frame RIP must be untouched"
+    );
+    assert_eq_test!(
+        frame.rsp,
+        original_rsp,
+        "kernel-mode frame RSP must be untouched"
+    );
+    // Pending bit must still be set — nothing was delivered.
+    assert_eq_test!(
+        task::task_signal_pending(task_ptr) & sig_bit(SIGINT),
+        sig_bit(SIGINT),
+        "pending SIGINT must remain when frame is kernel-mode"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let page = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    let action = UserSigaction {
+        sa_handler: 0x4100_0000,
+        sa_flags: 0,
+        sa_restorer: 0x4200_0000,
+        sa_mask: 0,
+    };
+    assert_test!(
+        user_copy_out(pid, page, &action),
+        "failed to write SIGINT action"
+    );
+    let mut install_frame = zero_frame();
+    install_frame.regs_mut().rdi = SIGINT as u64;
+    install_frame.regs_mut().rsi = page;
+    install_frame.regs_mut().rdx = 0;
+    install_frame.regs_mut().r10 = core::mem::size_of::<SigSet>() as u64;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigaction,
+            task_ptr,
+            &mut install_frame,
+        )
+    });
+    assert_eq_test!(install_frame.regs().rax, 0, "SIGINT install failed");
+
+    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGINT));
+    make_task_current(task_ptr);
+
+    // RSP points into an unmapped user address: the restorer copy_to_user
+    // fails, so delivery must abort, re-arm the pending bit, and leave the
+    // frame unmodified.
+    let original_rip = 0x5500_3333;
+    let original_rsp = 0x0000_3000_0000_0000; // valid user range, unmapped
+    let mut frame = user_irq_frame(original_rip, original_rsp);
+
+    let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
+    let _ = with_user_process_context(pid, || deliver_pending_signal_on_irq_exit(frame_ptr));
+    park_bootstrap_on_current_cpu();
+
+    assert_eq_test!(
+        frame.rip,
+        original_rip,
+        "frame RIP must be untouched on copy failure"
+    );
+    assert_eq_test!(
+        frame.rsp,
+        original_rsp,
+        "frame RSP must be untouched on copy failure"
+    );
+    assert_eq_test!(
+        task::task_signal_pending(task_ptr) & sig_bit(SIGINT),
+        sig_bit(SIGINT),
+        "pending SIGINT must be re-armed after copy_to_user failure"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2169,6 +2409,77 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     TestResult::Pass
 }
 
+/// Spawn-style fd-table clones must skip close-on-exec descriptors
+/// (spawn is fork+exec in one step), while fork-style clones keep them.
+pub fn test_spawn_clone_skips_cloexec_fds() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+
+    let p1 = task_find_by_id(t1);
+    let p2 = task_find_by_id(t2);
+    assert_not_null!(p1, "task1 lookup failed");
+    assert_not_null!(p2, "task2 lookup failed");
+
+    let pid1 = task_process_id(p1).unwrap_or(0);
+    let pid2 = task_process_id(p2).unwrap_or(0);
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid1, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+    assert_eq_test!(
+        file_fcntl_fd(pid1, write_fd, F_SETFD, FD_CLOEXEC),
+        0,
+        "set cloexec failed"
+    );
+
+    // Spawn-style clone: the cloexec write end must not appear in pid2.
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_clone_table_for_spawn(pid1, pid2),
+        0,
+        "spawn clone failed"
+    );
+    assert_eq_test!(
+        file_close_fd(pid2, read_fd),
+        0,
+        "read end should be inherited by spawn clone"
+    );
+    assert_test!(
+        file_close_fd(pid2, write_fd) != 0,
+        "cloexec write end must not be inherited by spawn clone"
+    );
+
+    // Fork-style clone keeps cloexec descriptors.
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_clone_table_for_process(pid1, pid2),
+        0,
+        "fork clone failed"
+    );
+    assert_eq_test!(
+        file_close_fd(pid2, write_fd),
+        0,
+        "fork clone must keep cloexec descriptors"
+    );
+    assert_eq_test!(file_close_fd(pid2, read_fd), 0, "pid2 close read failed");
+
+    assert_eq_test!(file_close_fd(pid1, write_fd), 0, "pid1 close write failed");
+    assert_eq_test!(file_close_fd(pid1, read_fd), 0, "pid1 close read failed");
+    task_terminate(t1);
+    task_terminate(t2);
+    TestResult::Pass
+}
+
 /// Regression test for the stale-argv spawn bug (compositor spawn failure).
 ///
 /// Before the fix, `spawn_path_with_attrs()` used `syscall4` which left r8/r9
@@ -2452,6 +2763,354 @@ pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
     TestResult::Pass
 }
 
+// ── Resource-lifetime redesign S1: fd-table single-owner semantics ──────────
+
+/// dup must NOT copy the close-on-exec flag: cloexec is per-fd-entry, not
+/// shared on the open file. The source fd keeps its cloexec bit; the new
+/// fd is created without it. (Audit defect D1.)
+pub fn test_dup_does_not_copy_cloexec() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    // Mark the source cloexec.
+    assert_eq_test!(
+        file_fcntl_fd(pid, write_fd, F_SETFD, FD_CLOEXEC),
+        0,
+        "set cloexec failed"
+    );
+
+    let dup_fd = file_dup_fd(pid, write_fd);
+    assert_test!(dup_fd >= 0, "dup failed");
+
+    // Source still cloexec; the dup is not.
+    assert_eq_test!(
+        file_fcntl_fd(pid, write_fd, slopos_abi::syscall::F_GETFD, 0),
+        FD_CLOEXEC as i64,
+        "source fd must retain cloexec"
+    );
+    assert_eq_test!(
+        file_fcntl_fd(pid, dup_fd, slopos_abi::syscall::F_GETFD, 0),
+        0,
+        "dup fd must NOT inherit cloexec"
+    );
+
+    // dup3 with O_CLOEXEC, by contrast, sets it on the target only.
+    let target = 20;
+    assert_eq_test!(
+        file_dup3_fd(pid, read_fd, target, FD_CLOEXEC as u32),
+        target,
+        "dup3 failed"
+    );
+    assert_eq_test!(
+        file_fcntl_fd(pid, target, slopos_abi::syscall::F_GETFD, 0),
+        FD_CLOEXEC as i64,
+        "dup3 with O_CLOEXEC must set cloexec on the new fd"
+    );
+    assert_eq_test!(
+        file_fcntl_fd(pid, read_fd, slopos_abi::syscall::F_GETFD, 0),
+        0,
+        "dup3 must not touch the source cloexec"
+    );
+
+    let _ = file_close_fd(pid, dup_fd);
+    let _ = file_close_fd(pid, target);
+    let _ = file_close_fd(pid, write_fd);
+    let _ = file_close_fd(pid, read_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Closing an fd twice is safe: the first close tears the entry out and
+/// drops it; the second finds an empty slot and returns EBADF — never a
+/// double teardown of the backing object. (Audit defect class D1/D2.)
+pub fn test_close_twice_is_safe() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    assert_eq_test!(
+        file_close_fd(pid, write_fd),
+        0,
+        "first close should succeed"
+    );
+    assert_test!(
+        file_close_fd(pid, write_fd) != 0,
+        "second close of the same fd must fail (EBADF), not double-teardown"
+    );
+
+    let _ = file_close_fd(pid, read_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Closing one of two dup'd write ends must NOT tear down the shared
+/// backing: the peer reader must not observe EOF until the *last* write
+/// alias closes. Exercises single-owner teardown (last KArc drop == one
+/// release). (Audit defect class D1/D2.)
+pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let write_dup = file_dup_fd(pid, write_fd);
+    assert_test!(write_dup >= 0, "dup of write end failed");
+
+    // Close one write alias: the writer count must NOT reach zero, so a
+    // nonblocking read sees EAGAIN (no data, writers still present), not
+    // EOF (0).
+    assert_eq_test!(
+        file_close_fd(pid, write_fd),
+        0,
+        "close one write alias failed"
+    );
+    let mut buf = [0u8; 4];
+    let r = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut buf));
+    assert_eq_test!(
+        r,
+        ERRNO_EAGAIN as isize,
+        "reader must NOT see EOF while a write alias is still open"
+    );
+
+    // Close the last write alias: now the reader observes EOF (0).
+    assert_eq_test!(
+        file_close_fd(pid, write_dup),
+        0,
+        "close last write alias failed"
+    );
+    let eof = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut buf));
+    assert_eq_test!(
+        eof,
+        0,
+        "reader must see EOF after the LAST write alias closes"
+    );
+
+    let _ = file_close_fd(pid, read_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Forcing EMFILE on a tty open must not underflow / tear down the live
+/// tty whose `open_ref` was minted for the attempt. The failed install
+/// releases the minted ref exactly once (single owner), so the caller
+/// must NOT release again — the tty stays alive. Regression for the
+/// double-`close_ref` premature-close root cause (audit defect D2).
+pub fn test_open_tty_fd_emfile_no_underflow() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    // Open a PTY master to get a real, independently-tracked tty index.
+    let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
+    assert_test!(master_fd >= 0, "ptmx open failed");
+    let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
+        let _ = file_close_fd(pid, master_fd);
+        task_terminate(task_id);
+        return TestResult::Fail;
+    };
+
+    // Fill the fd table so the next install hits EMFILE. dup the master
+    // into every remaining slot.
+    loop {
+        let fd = file_dup_fd(pid, master_fd);
+        if fd < 0 {
+            break;
+        }
+    }
+
+    // Baseline the tty's open_count by round-tripping a ref.
+    let before = match slopos_kernel_services::syscall_services::tty::open_ref(master_tty) {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = file_close_fd(pid, master_fd);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let _ = slopos_kernel_services::syscall_services::tty::close_ref(master_tty);
+
+    // Mirror the syscall caller: mint a ref, then attempt the open with a
+    // full table. On EMFILE we must NOT close_ref (install already did).
+    let mint = slopos_kernel_services::syscall_services::tty::open_ref(master_tty).map(|_| ());
+    assert_test!(mint.is_ok(), "open_ref mint failed");
+    let probe = file_open_tty_fd(pid, master_tty, 0);
+    assert_test!(probe < 0, "open should fail with a full fd table");
+
+    // After the failed open the tty must still be alive at the same
+    // baseline open_count (no double-decrement / collapse). Round-trip a
+    // ref again to read the count.
+    let after = match slopos_kernel_services::syscall_services::tty::open_ref(master_tty) {
+        Ok(c) => c,
+        Err(_) => {
+            // open_ref failing means the tty was torn down — the bug.
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let _ = slopos_kernel_services::syscall_services::tty::close_ref(master_tty);
+    assert_eq_test!(
+        after,
+        before,
+        "tty open_count must be unchanged after a failed open (no underflow)"
+    );
+
+    let _ = file_close_fd(pid, master_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// dup'd fds share one open file description, so they share the file
+/// offset (POSIX). Writing through one dup advances the offset seen by
+/// the other. Pins the AtomicU64 shared-position semantics.
+/// Synthetic seekable backing for [`test_dup_shares_offset`]: a 64-byte
+/// "file" whose content at offset `o` is the byte `o`. No filesystem
+/// dependency — the stest phase runs before any disk is mounted, and the
+/// property under test (dup aliases share one offset) lives entirely in
+/// the `OpenFile` layer.
+struct SeekProbeOps;
+
+const SEEK_PROBE_SIZE: u64 = 64;
+
+impl slopos_abi::FileOps for SeekProbeOps {
+    fn kind(&self) -> slopos_abi::FileKind {
+        slopos_abi::FileKind::Regular
+    }
+
+    fn read(
+        &self,
+        _handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBufWrite,
+        offset: u64,
+        _flags: u32,
+    ) -> isize {
+        let mut written = 0usize;
+        while written < buf.len() && offset + (written as u64) < SEEK_PROBE_SIZE {
+            let byte = [(offset + written as u64) as u8];
+            if buf.copy_in(written, &byte).is_err() {
+                break;
+            }
+            written += 1;
+        }
+        written as isize
+    }
+
+    fn write(
+        &self,
+        _handle: usize,
+        buf: &dyn slopos_abi::io::IoBufRead,
+        _offset: u64,
+        _flags: u32,
+    ) -> isize {
+        buf.len() as isize
+    }
+
+    fn release(&self, _handle: usize) {}
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    fn size(&self, _handle: usize) -> Option<u64> {
+        Some(SEEK_PROBE_SIZE)
+    }
+}
+
+static SEEK_PROBE_OPS: SeekProbeOps = SeekProbeOps;
+
+pub fn test_dup_shares_offset() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(pid, &SEEK_PROBE_OPS, 0);
+    assert_test!(fd >= 0, "synthetic open failed");
+
+    let dup = file_dup_fd(pid, fd);
+    assert_test!(dup >= 0, "dup failed");
+
+    // Read through the original; the shared offset advances for both.
+    let mut first = [0u8; 4];
+    let r = file_read_fd(pid, fd, &mut KernelIoBuf::new(&mut first));
+    assert_eq_test!(r as usize, first.len(), "read via original failed");
+    assert_test!(first == [0, 1, 2, 3], "content at offset 0 mismatch");
+
+    // The dup sees the advanced offset: SEEK_CUR(0) reports the position
+    // the original's read left behind.
+    let pos = file_seek_fd(pid, dup, 0, slopos_abi::syscall::SEEK_CUR as u32);
+    assert_eq_test!(
+        pos,
+        first.len() as i64,
+        "dup must observe the shared offset advanced by the original's read"
+    );
+
+    // Continue reading through the DUP: it picks up where the original
+    // stopped (one offset, two fds).
+    let mut second = [0u8; 4];
+    let r = file_read_fd(pid, dup, &mut KernelIoBuf::new(&mut second));
+    assert_eq_test!(r as usize, second.len(), "read via dup failed");
+    assert_test!(second == [4, 5, 6, 7], "dup read must continue the offset");
+
+    // Rewind via the dup; the original observes the rewind (shared).
+    let rewound = file_seek_fd(pid, dup, 0, slopos_abi::syscall::SEEK_SET as u32);
+    assert_eq_test!(rewound, 0, "seek to start via dup failed");
+    let mut again = [0u8; 4];
+    let r = file_read_fd(pid, fd, &mut KernelIoBuf::new(&mut again));
+    assert_eq_test!(r as usize, again.len(), "read after dup-rewind failed");
+    assert_test!(
+        again == [0, 1, 2, 3],
+        "original must observe the rewind done via the dup"
+    );
+
+    let _ = file_close_fd(pid, dup);
+    let _ = file_close_fd(pid, fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_syscall_lookup_invalid_number,
     suite = syscall_valid
@@ -2516,6 +3175,18 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
+    name = test_signal_delivery_on_irq_exit_dispatch,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_signal_delivery_on_irq_exit_kernel_frame_untouched,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_signal_delivery_on_irq_exit_copy_failure_rearms,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
     name = test_sigprocmask_block_then_unblock_delivery,
     suite = syscall_valid
 );
@@ -2538,6 +3209,21 @@ slopos_testing::stest!(
     name = test_exit_current_task_releases_pipe_refs,
     suite = syscall_valid
 );
+slopos_testing::stest!(
+    name = test_spawn_clone_skips_cloexec_fds,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_dup_does_not_copy_cloexec, suite = syscall_valid);
+slopos_testing::stest!(name = test_close_twice_is_safe, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_close_while_dup_keeps_object_alive,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_open_tty_fd_emfile_no_underflow,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_dup_shares_offset, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_process_group_session_syscalls_baseline,
     suite = syscall_valid

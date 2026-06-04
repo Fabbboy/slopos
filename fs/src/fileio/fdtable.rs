@@ -2,79 +2,73 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::syscall_services::tty;
-use slopos_ostd::handle::HandleTable;
+use slopos_ostd::KVec;
 
-use super::open_file_table::{alloc_open_file_entry, incref_open_file, release_open_file};
 use super::*;
 
-fn bootstrap_console_fds(
-    inner: &mut FileTableSlotInner,
-    open_files: &mut HandleTable<OpenFile>,
-    external_ops: &ExternalOpsState,
-) {
-    let tty_ops = effective_tty_ops(external_ops);
-
-    let console_tty = tty::default_console_tty();
-    let stdin_flags = OpenMode::READ;
-    let stdout_flags = OpenMode::WRITE;
-
-    let mut opened_refs = 0u8;
-    for _ in 0..3 {
-        if tty::open_ref(console_tty).is_err() {
-            for _ in 0..opened_refs {
-                let _ = tty::close_ref(console_tty);
-            }
-            return;
-        }
-        opened_refs = opened_refs.saturating_add(1);
+/// Mint one console `OpenFile` for fd `stdin`/`stdout`/`stderr`. Each
+/// owns an independent `tty::open_ref`, released by the `OpenFile`'s
+/// `Drop`. If the ref or the allocation fails, releases the ref it took
+/// (if any) and returns `None`.
+fn open_console_fd(
+    tty_ops: &'static dyn FileOps,
+    console_tty: TtyIndex,
+    flags: OpenMode,
+) -> Option<KArc<OpenFile>> {
+    if tty::open_ref(console_tty).is_err() {
+        return None;
     }
-
-    let Some(stdin_idx) =
-        alloc_open_file_entry(open_files, tty_ops, console_tty.0 as usize, stdin_flags, 0)
-    else {
-        let _ = tty::close_ref(console_tty);
-        let _ = tty::close_ref(console_tty);
-        let _ = tty::close_ref(console_tty);
-        return;
-    };
-    let Some(stdout_idx) =
-        alloc_open_file_entry(open_files, tty_ops, console_tty.0 as usize, stdout_flags, 0)
-    else {
-        release_open_file(open_files, stdin_idx);
-        return;
-    };
-    let Some(stderr_idx) =
-        alloc_open_file_entry(open_files, tty_ops, console_tty.0 as usize, stdout_flags, 0)
-    else {
-        release_open_file(open_files, stdin_idx);
-        release_open_file(open_files, stdout_idx);
-        return;
-    };
-
-    inner.descriptors[0] = FdEntry {
-        open_file: stdin_idx,
-        cloexec: false,
-        valid: true,
-    };
-    inner.descriptors[1] = FdEntry {
-        open_file: stdout_idx,
-        cloexec: false,
-        valid: true,
-    };
-    inner.descriptors[2] = FdEntry {
-        open_file: stderr_idx,
-        cloexec: false,
-        valid: true,
-    };
+    match new_open_file(tty_ops, console_tty.0 as usize, flags, 0) {
+        Some(of) => Some(of),
+        None => {
+            let _ = tty::close_ref(console_tty);
+            None
+        }
+    }
 }
 
-fn reset_inner_descriptors(inner: &mut FileTableSlotInner, open_files: &mut HandleTable<OpenFile>) {
-    for fd in inner.descriptors.iter_mut() {
-        if fd.valid {
-            release_open_file(open_files, fd.open_file);
+fn bootstrap_console_fds(inner: &mut FileTableSlotInner, external_ops: &ExternalOpsState) {
+    let tty_ops = effective_tty_ops(external_ops);
+    let console_tty = tty::default_console_tty();
+
+    // All-or-nothing: if any fails, the already-built `OpenFile`s drop at
+    // scope exit and release their own console refs automatically.
+    let Some(stdin) = open_console_fd(tty_ops, console_tty, OpenMode::READ) else {
+        return;
+    };
+    let Some(stdout) = open_console_fd(tty_ops, console_tty, OpenMode::WRITE) else {
+        return;
+    };
+    let Some(stderr) = open_console_fd(tty_ops, console_tty, OpenMode::WRITE) else {
+        return;
+    };
+
+    inner.descriptors[0] = Some(FdEntry {
+        open_file: stdin,
+        cloexec: false,
+    });
+    inner.descriptors[1] = Some(FdEntry {
+        open_file: stdout,
+        cloexec: false,
+    });
+    inner.descriptors[2] = Some(FdEntry {
+        open_file: stderr,
+        cloexec: false,
+    });
+}
+
+/// Take every descriptor out of `inner` under the caller-held lock and
+/// return them so the caller can drop them *after* releasing the slot
+/// lock (detach-then-drop: the `OpenFile` `Drop` → backing release must
+/// not run while the fileio table lock is held).
+fn drain_descriptors(inner: &mut FileTableSlotInner) -> KVec<FdEntry> {
+    let mut drained: KVec<FdEntry> = KVec::new();
+    for slot in inner.descriptors.iter_mut() {
+        if let Some(entry) = slot.take() {
+            let _ = drained.push(entry);
         }
-        reset_fd_entry(fd);
     }
+    drained
 }
 
 pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
@@ -100,11 +94,10 @@ pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
             let mut inner = slot.inner.lock();
             inner.in_use = true;
             for entry in inner.descriptors.iter_mut() {
-                *entry = FdEntry::new();
+                *entry = None;
             }
-            with_open_files(|state| {
-                bootstrap_console_fds(&mut inner, &mut state.open_files, &state.external_ops);
-            });
+            let external_ops = with_open_files(|state| state.external_ops);
+            bootstrap_console_fds(&mut inner, &external_ops);
             return 0;
         }
     }
@@ -118,19 +111,36 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     let Some(slot) = slot_for_pid(process_id) else {
         return;
     };
-    let mut inner = slot.inner.lock();
-    if !inner.in_use {
-        return;
-    }
-    with_open_files(|state| {
-        reset_inner_descriptors(&mut inner, &mut state.open_files);
-    });
-    inner.in_use = false;
-    drop(inner);
+    let drained = {
+        let mut inner = slot.inner.lock();
+        if !inner.in_use {
+            return;
+        }
+        let drained = drain_descriptors(&mut inner);
+        inner.in_use = false;
+        drained
+    };
     slot.process_id.store(INVALID_PROCESS_ID, Ordering::Release);
+    // Drop the table lock above before dropping the entries here so each
+    // `OpenFile` teardown runs lock-free (detach-then-drop).
+    drop(drained);
 }
 
+/// Fork-style clone: every valid descriptor is duplicated, including
+/// close-on-exec ones (POSIX fork keeps `FD_CLOEXEC` descriptors; only
+/// `exec` strips them).
 pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) -> i32 {
+    clone_table_inner(src_process_id, dst_process_id, false)
+}
+
+/// Spawn-style clone: descriptors marked close-on-exec are skipped.
+/// `spawn` is fork+exec in one step, so a `FD_CLOEXEC` descriptor must
+/// never appear in the spawned image.
+pub fn fileio_clone_table_for_spawn(src_process_id: u32, dst_process_id: u32) -> i32 {
+    clone_table_inner(src_process_id, dst_process_id, true)
+}
+
+fn clone_table_inner(src_process_id: u32, dst_process_id: u32, skip_cloexec: bool) -> i32 {
     if src_process_id == INVALID_PROCESS_ID || dst_process_id == INVALID_PROCESS_ID {
         return -1;
     }
@@ -138,18 +148,33 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
         return 0;
     }
 
-    // Step 1: snapshot src descriptors under its own lock, then drop.
+    // Step 1: snapshot src descriptors into a heap `KVec` (NOT a stack
+    // array — a `[Option<FdEntry>; 32]` on the frame blows the 2 KiB
+    // stack gate). Each clone bumps a `KArc<OpenFile>` strong count
+    // (safe under the lock: a clone never runs teardown), tagged with its
+    // fd number.
     let src_slot = match slot_for_pid(src_process_id) {
         Some(s) => s,
         None => return -1,
     };
-    let snapshot: [FdEntry; FILEIO_MAX_OPEN_FILES] = {
+    let mut snapshot: KVec<(usize, FdEntry)> = KVec::new();
+    {
         let guard = src_slot.inner.lock();
         if !guard.in_use {
             return -1;
         }
-        guard.descriptors
-    };
+        for (i, src_fd) in guard.descriptors.iter().enumerate() {
+            let Some(src_fd) = src_fd else { continue };
+            if skip_cloexec && src_fd.cloexec {
+                continue;
+            }
+            if snapshot.push((i, src_fd.clone())).is_err() {
+                // Allocation failed mid-snapshot: drop the partial clones
+                // (decrement only — src keeps every `OpenFile` alive).
+                return -1;
+            }
+        }
+    }
 
     // Step 2: claim a free slot for the destination.
     let Some(dst_slot) = (|| -> Option<&'static FileTableSlot> {
@@ -169,45 +194,20 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
         }
         None
     })() else {
+        // No free slot: drop the cloned aliases (decrement only).
+        drop(snapshot);
         return -1;
     };
 
-    // Step 3: write snapshot into dst, increfing each open file under
-    // the open-files lock.
-    let mut dst_inner = dst_slot.inner.lock();
-    dst_inner.in_use = true;
-    for entry in dst_inner.descriptors.iter_mut() {
-        *entry = FdEntry::new();
-    }
-    let result = with_open_files(|state| {
-        for (i, src_fd) in snapshot.iter().enumerate() {
-            if !src_fd.valid {
-                continue;
-            }
-            if !incref_open_file(&mut state.open_files, src_fd.open_file) {
-                // Roll back any increfs done so far.
-                for prev in &dst_inner.descriptors[..i] {
-                    if prev.valid {
-                        release_open_file(&mut state.open_files, prev.open_file);
-                    }
-                }
-                for entry in dst_inner.descriptors.iter_mut() {
-                    *entry = FdEntry::new();
-                }
-                return -1;
-            }
-            dst_inner.descriptors[i] = *src_fd;
+    // Step 3: move the cloned snapshot into dst under its lock.
+    {
+        let mut dst_inner = dst_slot.inner.lock();
+        dst_inner.in_use = true;
+        for (fd, entry) in snapshot {
+            dst_inner.descriptors[fd] = Some(entry);
         }
-        0
-    });
-    if result != 0 {
-        dst_inner.in_use = false;
-        drop(dst_inner);
-        dst_slot
-            .process_id
-            .store(INVALID_PROCESS_ID, Ordering::Release);
     }
-    result
+    0
 }
 
 pub fn fileio_close_on_exec(process_id: u32) {
@@ -217,16 +217,21 @@ pub fn fileio_close_on_exec(process_id: u32) {
     let Some(slot) = slot_for_pid(process_id) else {
         return;
     };
-    let mut inner = slot.inner.lock();
-    if !inner.in_use {
-        return;
-    }
-    with_open_files(|state| {
-        for fd in inner.descriptors.iter_mut() {
-            if fd.valid && fd.cloexec {
-                release_open_file(&mut state.open_files, fd.open_file);
-                reset_fd_entry(fd);
+    // Collect the cloexec entries under the lock, clear their slots, drop
+    // the lock, then drop the collected entries (detach-then-drop).
+    let closed = {
+        let mut inner = slot.inner.lock();
+        if !inner.in_use {
+            return;
+        }
+        let mut closed: KVec<FdEntry> = KVec::new();
+        for slot in inner.descriptors.iter_mut() {
+            let take = matches!(slot, Some(e) if e.cloexec);
+            if take && let Some(entry) = slot.take() {
+                let _ = closed.push(entry);
             }
         }
-    });
+        closed
+    };
+    drop(closed);
 }

@@ -1,8 +1,6 @@
 use core::ffi::c_int;
+use core::sync::atomic::Ordering;
 
-use super::open_file_table::{
-    alloc_open_file_entry, get_open_file_mut, incref_open_file, release_open_file,
-};
 use super::*;
 
 use slopos_abi::Errno;
@@ -21,9 +19,18 @@ use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags};
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
 
-/// Install an FD entry in `process_id`'s table. Allocates an
-/// `OpenFileEntry`, picks a free FD slot, and (if the file is a TTY) may
-/// acquire a controlling terminal afterwards.
+/// Install an FD entry in `process_id`'s table.
+///
+/// **Ownership contract:** the caller mints the backing reference (e.g.
+/// `tty::open_ref`, an allocated socket/pipe handle) and hands it here as
+/// `(ops, handle)`. This function constructs the single owning
+/// [`KArc<OpenFile>`] for it, so the backing reference is now owned by
+/// that `OpenFile` and released exactly once when the last alias drops.
+/// On any error path the freshly-built `OpenFile` is dropped (running the
+/// backing release once); if the `OpenFile` allocation itself fails the
+/// caller's minted reference is released explicitly. Callers therefore
+/// must **not** also release the backing reference on their own error arm
+/// — that would be a double release.
 fn install_fd_entry(
     process_id: u32,
     ops: &'static dyn FileOps,
@@ -31,59 +38,61 @@ fn install_fd_entry(
     mut flags: OpenMode,
     call_tty_policy: Option<TtyIndex>,
 ) -> c_int {
+    let mut position = 0u64;
+    if flags.contains(OpenMode::APPEND) {
+        match ops.size(handle) {
+            Some(size) => position = size,
+            None => {
+                ops.release(handle);
+                return Errno::ENXIO.raw();
+            }
+        }
+    }
+
+    if ops.kind() == FileKind::Socket {
+        let mode_bits = flags & (OpenMode::READ | OpenMode::WRITE);
+        flags = mode_bits;
+        let _ = ops.set_status_flags(handle, flags.bits());
+    }
+
+    let cloexec = (flags.bits() & O_CLOEXEC as u32) != 0;
+
+    // Build the single owner up front; from here the backing reference is
+    // owned by `open_file` and released exactly once on its drop.
+    let Some(open_file) = new_open_file(ops, handle, flags, position) else {
+        ops.release(handle);
+        return Errno::ENFILE.raw();
+    };
+
     let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+        // `open_file` drops here → backing released once.
         return Errno::ESRCH.raw();
     };
 
-    let result = with_open_files(|state| {
-        let Some(slot_idx) = find_free_slot(&inner) else {
-            return Err(Errno::EMFILE);
-        };
-
-        let mut position = 0u64;
-        if flags.contains(OpenMode::APPEND) {
-            if let Some(size) = ops.size(handle) {
-                position = size;
-            } else {
-                return Err(Errno::ENXIO);
+    let slot_result = {
+        match find_free_slot(&inner) {
+            Some(slot_idx) => {
+                inner.descriptors[slot_idx] = Some(FdEntry { open_file, cloexec });
+                Ok(slot_idx as c_int)
             }
+            None => Err(open_file),
         }
-
-        let Some(open_file) =
-            alloc_open_file_entry(&mut state.open_files, ops, handle, flags, position)
-        else {
-            return Err(Errno::ENFILE);
-        };
-
-        if ops.kind() == FileKind::Socket {
-            let mode_bits = flags & (OpenMode::READ | OpenMode::WRITE);
-            flags = mode_bits;
-            if let Some(slot) = get_open_file_mut(&mut state.open_files, open_file) {
-                slot.status_flags = flags;
-                let _ = ops.set_status_flags(handle, flags.bits());
-            }
-        }
-
-        inner.descriptors[slot_idx] = FdEntry {
-            open_file,
-            cloexec: (flags.bits() & O_CLOEXEC as u32) != 0,
-            valid: true,
-        };
-        Ok(slot_idx as c_int)
-    });
+    };
 
     drop(inner);
 
-    match result {
+    match slot_result {
         Ok(fd) => {
             if let Some(tty_idx) = call_tty_policy {
                 maybe_acquire_controlling_tty_on_open(tty_idx, flags.bits());
             }
             fd
         }
-        Err(e) => {
-            ops.release(handle);
-            e.raw()
+        Err(open_file) => {
+            // Detach-then-drop: the slot lock is released above, so the
+            // backing teardown runs lock-free here.
+            drop(open_file);
+            Errno::EMFILE.raw()
         }
     }
 }
@@ -166,16 +175,6 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
 }
 
-trait OpenFileGuard {
-    fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool;
-}
-
-impl OpenFileGuard for OpenFile {
-    fn seekable_position_matches(&self, ops: &'static dyn FileOps, handle: usize) -> bool {
-        self.ops.map(core::ptr::from_ref) == Some(core::ptr::from_ref(ops)) && self.handle == handle
-    }
-}
-
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
     file_read_fd_inner(process_id, fd, buf, false)
 }
@@ -201,40 +200,37 @@ fn file_read_fd_inner(
             return Errno::EBADF.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
-            Some(s) if s.status_flags.contains(OpenMode::READ) => s,
+            Some(s) if s.status_flags().contains(OpenMode::READ) => s,
             _ => return Errno::EBADF.raw() as _,
         }
     };
 
-    let Some(ops) = snap.ops else {
-        return Errno::EBADF.raw() as _;
-    };
+    let ops = snap.ops();
 
     if buf.len() == 0 {
         return 0;
     }
 
     let seekable = ops.seekable();
-    let used_offset = if seekable { snap.position } else { 0 };
-    let mut flag_bits = snap.status_flags.bits();
+    let used_offset = if seekable { snap.position() } else { 0 };
+    let mut flag_bits = snap.status_flags().bits();
     let mut socket_guard = None;
     if force_nonblock {
         flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
         // Sockets ignore the per-call flag and consult their *stored*
         // nonblocking state (SLOPRING § 12 reality 1), so toggle it
         // across the probe and restore it on drop.
-        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle, snap.status_flags.bits());
+        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle(), snap.status_flags().bits());
     }
-    let rc = ops.read(snap.handle, buf, used_offset, flag_bits);
+    let rc = ops.read(snap.handle(), buf, used_offset, flag_bits);
     drop(socket_guard);
     if rc > 0 && seekable {
-        with_open_files(|state| {
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
-                && open_file.seekable_position_matches(ops, snap.handle)
-            {
-                open_file.position = open_file.position.saturating_add(rc as u64);
-            }
-        });
+        // The held `KArc<OpenFile>` is the very object the fd points at,
+        // so advancing its shared offset is correct even if a concurrent
+        // close dropped the fd alias mid-read.
+        snap.open_file
+            .position
+            .fetch_add(rc as u64, Ordering::AcqRel);
     }
     rc
 }
@@ -260,37 +256,31 @@ fn file_write_fd_inner(
             return Errno::EBADF.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
-            Some(s) if s.status_flags.contains(OpenMode::WRITE) => s,
+            Some(s) if s.status_flags().contains(OpenMode::WRITE) => s,
             _ => return Errno::EBADF.raw() as _,
         }
     };
 
-    let Some(ops) = snap.ops else {
-        return Errno::EBADF.raw() as _;
-    };
+    let ops = snap.ops();
 
     if buf.len() == 0 {
         return 0;
     }
 
     let seekable = ops.seekable();
-    let used_offset = if seekable { snap.position } else { 0 };
-    let mut flag_bits = snap.status_flags.bits();
+    let used_offset = if seekable { snap.position() } else { 0 };
+    let mut flag_bits = snap.status_flags().bits();
     let mut socket_guard = None;
     if force_nonblock {
         flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
-        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle, snap.status_flags.bits());
+        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle(), snap.status_flags().bits());
     }
-    let rc = ops.write(snap.handle, buf, used_offset, flag_bits);
+    let rc = ops.write(snap.handle(), buf, used_offset, flag_bits);
     drop(socket_guard);
     if rc > 0 && seekable {
-        with_open_files(|state| {
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
-                && open_file.seekable_position_matches(ops, snap.handle)
-            {
-                open_file.position = open_file.position.saturating_add(rc as u64);
-            }
-        });
+        snap.open_file
+            .position
+            .fetch_add(rc as u64, Ordering::AcqRel);
     }
     rc
 }
@@ -331,20 +321,26 @@ impl Drop for ForcedNonblockGuard {
 }
 
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
-    let result = with_pid_slot(process_id, |inner| {
-        let Some(fd_entry) = get_fd_entry(inner, fd) else {
-            return Errno::EBADF.raw() as _;
-        };
-        let ofi = fd_entry.open_file;
-        with_open_files(|state| {
-            release_open_file(&mut state.open_files, ofi);
-        });
-        if let Some(entry) = get_fd_entry(inner, fd) {
-            reset_fd_entry(entry);
+    // Detach-then-drop: take the entry out of the slot under the table
+    // lock, release the lock, then drop the entry so the `OpenFile`
+    // teardown (last alias → backing release) runs lock-free.
+    let taken = with_pid_slot(process_id, |inner| {
+        if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+            return Err(Errno::EBADF);
         }
-        0
+        match inner.descriptors[fd as usize].take() {
+            Some(entry) => Ok(entry),
+            None => Err(Errno::EBADF),
+        }
     });
-    result.unwrap_or(Errno::ESRCH.raw() as _)
+    match taken {
+        Some(Ok(entry)) => {
+            drop(entry);
+            0
+        }
+        Some(Err(e)) => e.raw() as _,
+        None => Errno::ESRCH.raw() as _,
+    }
 }
 
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
@@ -358,21 +354,19 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
         }
     };
 
-    let Some(ops) = snap.ops else {
-        return Errno::EBADF.raw() as i64;
-    };
+    let ops = snap.ops();
     if !ops.seekable() {
         return Errno::ESPIPE.raw() as i64;
     }
 
-    let size = match ops.size(snap.handle) {
+    let size = match ops.size(snap.handle()) {
         Some(v) => v as i64,
         None => return Errno::EBADF.raw() as i64,
     };
 
     let new_pos = match whence as u64 {
         SEEK_SET => offset,
-        SEEK_CUR => (snap.position as i64).saturating_add(offset),
+        SEEK_CUR => (snap.position() as i64).saturating_add(offset),
         SEEK_END => size.saturating_add(offset),
         _ => return Errno::EINVAL.raw() as i64,
     };
@@ -380,13 +374,9 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
         return Errno::EINVAL.raw() as i64;
     }
 
-    with_open_files(|state| {
-        if let Some(open_file) = get_open_file_mut(&mut state.open_files, snap.open_file)
-            && open_file.seekable_position_matches(ops, snap.handle)
-        {
-            open_file.position = new_pos as u64;
-        }
-    });
+    snap.open_file
+        .position
+        .store(new_pos as u64, Ordering::Release);
     new_pos
 }
 
@@ -400,8 +390,8 @@ pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
             None => return usize::MAX,
         }
     };
-    snap.ops
-        .and_then(|ops| ops.size(snap.handle))
+    snap.ops()
+        .size(snap.handle())
         .map(|v| v as usize)
         .unwrap_or(usize::MAX)
 }
@@ -467,7 +457,7 @@ pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
             None => return false,
         }
     };
-    snap.ops.map(|ops| kind_is_tty(ops.kind())).unwrap_or(false)
+    kind_is_tty(snap.ops().kind())
 }
 
 pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
@@ -477,15 +467,19 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
         };
         snapshot_fd(&inner, fd)?
     };
-    let ops = snap.ops?;
-    if ops.kind() == FileKind::Tty {
-        Some(TtyIndex(snap.handle as u8))
+    if snap.ops().kind() == FileKind::Tty {
+        Some(TtyIndex(snap.handle() as u8))
     } else {
         None
     }
 }
 
 /// Open a file descriptor for a TTY device.
+///
+/// **Ownership contract:** the caller mints the `tty::open_ref` (or
+/// equivalent peer-open) for `tty_idx` and this consumes it via
+/// [`install_fd_entry`]. The caller must not release that reference on
+/// its own error arm (the failed install already released it once).
 pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, posix_flags: u32) -> c_int {
     let tty_ops = current_tty_ops();
     let base = OpenMode::READ | OpenMode::WRITE;
@@ -515,11 +509,6 @@ pub fn file_pipe_create(
         None => return Errno::ENOMEM.raw() as _,
     };
 
-    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
-        pipe::free_slot(pipe_handle);
-        return Errno::ESRCH.raw() as _;
-    };
-
     let nonblock = (flags & O_NONBLOCK as u32) != 0;
     let cloexec = (flags & O_CLOEXEC as u32) != 0;
     let read_flags = if nonblock {
@@ -533,63 +522,61 @@ pub fn file_pipe_create(
         OpenMode::WRITE
     };
 
-    let result = with_open_files(|state| {
-        let Some(read_idx) = find_free_slot(&inner) else {
-            return Err(Errno::EMFILE);
-        };
-        inner.descriptors[read_idx].valid = true;
+    // Build the two owning `OpenFile`s up front. Each owns one of the
+    // pipe's two backing references (released by the respective `Drop`);
+    // priming the reader/writer counts ties them to this pair.
+    let Some(read_of) = new_open_file(&PIPE_READ_OPS, pipe_handle.as_usize(), read_flags, 0) else {
+        pipe::free_slot(pipe_handle);
+        return Errno::ENFILE.raw() as _;
+    };
+    let Some(write_of) = new_open_file(&PIPE_WRITE_OPS, pipe_handle.as_usize(), write_flags, 0)
+    else {
+        // `read_of` drops here; its `PIPE_READ_OPS::release` runs against
+        // an unprimed slot (readers/writers still 0) — a no-op teardown —
+        // then free the slot explicitly.
+        drop(read_of);
+        pipe::free_slot(pipe_handle);
+        return Errno::ENFILE.raw() as _;
+    };
 
-        let Some(write_idx) = find_free_slot(&inner) else {
-            reset_fd_entry(&mut inner.descriptors[read_idx]);
-            return Err(Errno::EMFILE);
-        };
+    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+        drop(read_of);
+        drop(write_of);
+        pipe::free_slot(pipe_handle);
+        return Errno::ESRCH.raw() as _;
+    };
 
-        let Some(read_open_idx) = alloc_open_file_entry(
-            &mut state.open_files,
-            &PIPE_READ_OPS,
-            pipe_handle.as_usize(),
-            read_flags,
-            0,
-        ) else {
-            reset_fd_entry(&mut inner.descriptors[read_idx]);
-            return Err(Errno::ENFILE);
+    // Find two free slots and prime the pipe, all under the table lock.
+    // On any failure return `Err(errno)` carrying the still-owned
+    // `OpenFile`s out so they (and the slot) are torn down *after* the
+    // lock drops (detach-then-drop). On success install both entries.
+    let result: Result<(c_int, c_int), Errno> = (|| {
+        let read_idx = find_free_slot(&inner).ok_or(Errno::EMFILE)?;
+        inner.descriptors[read_idx] = Some(FdEntry {
+            open_file: read_of.clone(),
+            cloexec,
+        });
+        let write_idx = match find_free_slot(&inner) {
+            Some(idx) => idx,
+            None => {
+                inner.descriptors[read_idx] = None;
+                return Err(Errno::EMFILE);
+            }
         };
-        let Some(write_open_idx) = alloc_open_file_entry(
-            &mut state.open_files,
-            &PIPE_WRITE_OPS,
-            pipe_handle.as_usize(),
-            write_flags,
-            0,
-        ) else {
-            release_open_file(&mut state.open_files, read_open_idx);
-            reset_fd_entry(&mut inner.descriptors[read_idx]);
-            return Err(Errno::ENFILE);
-        };
-
         let primed = pipe::with_pipe_mut(pipe_handle, |slot| {
             slot.readers = 1;
             slot.writers = 1;
         });
         if primed.is_none() {
-            release_open_file(&mut state.open_files, read_open_idx);
-            release_open_file(&mut state.open_files, write_open_idx);
-            reset_fd_entry(&mut inner.descriptors[read_idx]);
+            inner.descriptors[read_idx] = None;
             return Err(Errno::ENOMEM);
         }
-
-        inner.descriptors[read_idx] = FdEntry {
-            open_file: read_open_idx,
+        inner.descriptors[write_idx] = Some(FdEntry {
+            open_file: write_of.clone(),
             cloexec,
-            valid: true,
-        };
-        inner.descriptors[write_idx] = FdEntry {
-            open_file: write_open_idx,
-            cloexec,
-            valid: true,
-        };
-
+        });
         Ok((read_idx as c_int, write_idx as c_int))
-    });
+    })();
 
     drop(inner);
 
@@ -597,9 +584,17 @@ pub fn file_pipe_create(
         Ok((r, w)) => {
             *out_read_fd = r;
             *out_write_fd = w;
+            // The slots hold clones; drop the originals (decrement only).
+            drop(read_of);
+            drop(write_of);
             0
         }
         Err(e) => {
+            // The pipe was never primed on the failure paths, so dropping
+            // the two owning `OpenFile`s runs no-op backing teardowns; then
+            // reclaim the pipe slot.
+            drop(read_of);
+            drop(write_of);
             pipe::free_slot(pipe_handle);
             e.raw() as _
         }
@@ -615,101 +610,82 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        let src_open_idx = src.open_file;
-
-        let increfed =
-            with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
-        if !increfed {
-            return Errno::EBADF.raw() as _;
-        }
+        // Clone the shared open file (strong++); cloexec is per-fd and
+        // never copied by plain dup.
+        let open_file = src.open_file.clone();
 
         let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
-            with_open_files(|state| release_open_file(&mut state.open_files, src_open_idx));
+            // `open_file` drops here under the lock — decrement only, no
+            // teardown (the source alias keeps it alive).
             return Errno::EMFILE.raw() as _;
         };
 
-        inner.descriptors[new_idx] = FdEntry {
-            open_file: src_open_idx,
+        inner.descriptors[new_idx] = Some(FdEntry {
+            open_file,
             cloexec: false,
-            valid: true,
-        };
+        });
         new_idx as c_int
     })
     .unwrap_or(Errno::ESRCH.raw() as _)
 }
 
 pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
-    if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
-        return Errno::EBADF.raw() as _;
-    }
-    if old_fd == new_fd {
-        let Some(inner) = lock_pid_slot(process_id) else {
-            return Errno::ESRCH.raw() as _;
-        };
-        let valid = snapshot_fd(&inner, old_fd).is_some();
-        return if valid {
-            new_fd
-        } else {
-            Errno::EBADF.raw() as _
-        };
-    }
-
-    with_pid_slot(process_id, |inner| {
-        let Some(src) = get_fd_entry(inner, old_fd) else {
-            return Errno::EBADF.raw() as _;
-        };
-        let src_open_idx = src.open_file;
-        let increfed =
-            with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
-        if !increfed {
-            return Errno::EBADF.raw() as _;
-        }
-
-        if inner.descriptors[new_fd as usize].valid {
-            let old_open_idx = inner.descriptors[new_fd as usize].open_file;
-            with_open_files(|state| release_open_file(&mut state.open_files, old_open_idx));
-        }
-        inner.descriptors[new_fd as usize] = FdEntry {
-            open_file: src_open_idx,
-            cloexec: false,
-            valid: true,
-        };
-        new_fd
-    })
-    .unwrap_or(Errno::ESRCH.raw() as _)
+    dup_into(process_id, old_fd, new_fd, false, false)
 }
 
 pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -> c_int {
     if old_fd == new_fd {
         return Errno::EINVAL.raw() as _;
     }
+    dup_into(
+        process_id,
+        old_fd,
+        new_fd,
+        (flags & FD_CLOEXEC as u32) != 0,
+        true,
+    )
+}
+
+/// Shared implementation of `dup2`/`dup3` into an explicit target fd.
+/// dup2 with `old_fd == new_fd` is a validity check (no-op success);
+/// dup3 forbids it (handled by the caller). `cloexec` is the bit to
+/// install on the new fd. Any pre-existing entry at `new_fd` is detached
+/// under the lock and dropped *after* the lock is released.
+fn dup_into(process_id: u32, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3: bool) -> c_int {
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;
     }
+    if old_fd == new_fd && !is_dup3 {
+        let Some(inner) = lock_pid_slot(process_id) else {
+            return Errno::ESRCH.raw() as _;
+        };
+        return if get_fd_entry(&inner, old_fd).is_some() {
+            new_fd
+        } else {
+            Errno::EBADF.raw() as _
+        };
+    }
 
-    with_pid_slot(process_id, |inner| {
+    let outcome = with_pid_slot(process_id, |inner| {
         let Some(src) = get_fd_entry(inner, old_fd) else {
-            return Errno::EBADF.raw() as _;
+            return Err(Errno::EBADF);
         };
-        let src_open_idx = src.open_file;
-        let increfed =
-            with_open_files(|state| incref_open_file(&mut state.open_files, src_open_idx));
-        if !increfed {
-            return Errno::EBADF.raw() as _;
-        }
+        let open_file = src.open_file.clone();
+        // Detach any occupant of the target slot; it is dropped by the
+        // caller after the lock is released.
+        let displaced = inner.descriptors[new_fd as usize].take();
+        inner.descriptors[new_fd as usize] = Some(FdEntry { open_file, cloexec });
+        Ok(displaced)
+    });
 
-        if inner.descriptors[new_fd as usize].valid {
-            let old_open_idx = inner.descriptors[new_fd as usize].open_file;
-            with_open_files(|state| release_open_file(&mut state.open_files, old_open_idx));
+    match outcome {
+        Some(Ok(displaced)) => {
+            drop(displaced);
+            new_fd
         }
-        inner.descriptors[new_fd as usize] = FdEntry {
-            open_file: src_open_idx,
-            cloexec: (flags & FD_CLOEXEC as u32) != 0,
-            valid: true,
-        };
-        new_fd
-    })
-    .unwrap_or(Errno::ESRCH.raw() as _)
+        Some(Err(e)) => e.raw() as _,
+        None => Errno::ESRCH.raw() as _,
+    }
 }
 
 pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
@@ -719,28 +695,28 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             let Some(inner) = lock_pid_slot(process_id) else {
                 return Errno::ESRCH.raw() as i64;
             };
-            if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
-                return Errno::EBADF.raw() as i64;
+            match get_fd_entry(&inner, fd) {
+                Some(entry) => {
+                    if entry.cloexec {
+                        FD_CLOEXEC as i64
+                    } else {
+                        0
+                    }
+                }
+                None => Errno::EBADF.raw() as i64,
             }
-            let entry = &inner.descriptors[fd as usize];
-            if !entry.valid {
-                return Errno::EBADF.raw() as i64;
-            }
-            if entry.cloexec { FD_CLOEXEC as i64 } else { 0 }
         }
         F_SETFD => {
             let Some(mut inner) = lock_pid_slot(process_id) else {
                 return Errno::ESRCH.raw() as i64;
             };
-            if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
-                return Errno::EBADF.raw() as i64;
+            match get_fd_entry_mut(&mut inner, fd) {
+                Some(entry) => {
+                    entry.cloexec = (arg & FD_CLOEXEC) != 0;
+                    0
+                }
+                None => Errno::EBADF.raw() as i64,
             }
-            let entry = &mut inner.descriptors[fd as usize];
-            if !entry.valid {
-                return Errno::EBADF.raw() as i64;
-            }
-            entry.cloexec = (arg & FD_CLOEXEC) != 0;
-            0
         }
         F_GETFL => {
             let snap = {
@@ -752,37 +728,36 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
                     None => return Errno::EBADF.raw() as i64,
                 }
             };
-            openmode_to_posix_bits(snap.status_flags) as i64
+            openmode_to_posix_bits(snap.status_flags()) as i64
         }
-        F_SETFL => with_pid_slot(process_id, |inner| {
-            let Some(fd_entry) = get_fd_entry(inner, fd) else {
-                return Errno::EBADF.raw() as i64;
-            };
-            let ofi = fd_entry.open_file;
-            with_open_files(|state| {
-                let Some(open_file) = get_open_file_mut(&mut state.open_files, ofi) else {
-                    return Errno::EBADF.raw() as i64;
+        F_SETFL => {
+            let snap = {
+                let Some(inner) = lock_pid_slot(process_id) else {
+                    return Errno::ESRCH.raw() as i64;
                 };
-                let posix_arg = arg as u32;
-                let mode_bits = open_file.status_flags & (OpenMode::READ | OpenMode::WRITE);
-                let mut next_flags = mode_bits;
-                if posix_arg & slopos_abi::fs::O_APPEND != 0 {
-                    next_flags |= OpenMode::APPEND;
+                match snapshot_fd(&inner, fd) {
+                    Some(s) => s,
+                    None => return Errno::EBADF.raw() as i64,
                 }
-                let mut raw = open_file.status_flags.bits() & (O_NOCTTY as u32);
-                if posix_arg & O_NONBLOCK as u32 != 0 {
-                    raw |= O_NONBLOCK as u32;
-                }
-                let next_flags = next_flags.with_raw(raw);
-                open_file.status_flags = next_flags;
-                if let Some(ops) = open_file.ops {
-                    let _ =
-                        ops.set_status_flags(open_file.handle, openmode_to_posix_bits(next_flags));
-                }
-                0
-            })
-        })
-        .unwrap_or(Errno::ESRCH.raw() as i64),
+            };
+            let posix_arg = arg as u32;
+            let current = snap.status_flags();
+            let mode_bits = current & (OpenMode::READ | OpenMode::WRITE);
+            let mut next_flags = mode_bits;
+            if posix_arg & slopos_abi::fs::O_APPEND != 0 {
+                next_flags |= OpenMode::APPEND;
+            }
+            let mut raw = current.bits() & (O_NOCTTY as u32);
+            if posix_arg & O_NONBLOCK as u32 != 0 {
+                raw |= O_NONBLOCK as u32;
+            }
+            let next_flags = next_flags.with_raw(raw);
+            snap.open_file.set_status_flags(next_flags);
+            let _ = snap
+                .ops()
+                .set_status_flags(snap.handle(), openmode_to_posix_bits(next_flags));
+            0
+        }
         _ => Errno::EINVAL.raw() as i64,
     }
 }
@@ -801,10 +776,7 @@ pub fn file_fstat_fd(
             None => return Errno::EBADF.raw() as _,
         }
     };
-    match snap.ops {
-        Some(ops) => ops.stat(snap.handle, out_stat),
-        None => Errno::EBADF.raw() as _,
-    }
+    snap.ops().stat(snap.handle(), out_stat)
 }
 
 pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
@@ -836,7 +808,7 @@ pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind
         let inner = lock_pid_slot(process_id)?;
         snapshot_fd(&inner, fd)?
     };
-    Some((snap.ops?.kind(), snap.handle))
+    Some((snap.ops().kind(), snap.handle()))
 }
 
 /// Get the handle AND FileOps for an open fd.
@@ -848,5 +820,5 @@ pub fn fileio_get_handle_and_ops(
         let inner = lock_pid_slot(process_id)?;
         snapshot_fd(&inner, fd)?
     };
-    Some((snap.handle, snap.ops?))
+    Some((snap.handle(), snap.ops()))
 }

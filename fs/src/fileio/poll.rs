@@ -1,115 +1,131 @@
 use core::ffi::c_int;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBTreeMap, KVec};
+use slopos_ostd::{KArc, KBTreeMap, KVec, KWeak};
 
-use super::open_file_table::{
-    get_open_file_mut, incref_open_file, pack_open_file_token, release_open_file,
-    unpack_open_file_token,
-};
 use super::*;
 
 pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize {
     let mut registered = 0usize;
     let _ = with_pid_slot(process_id, |inner| {
-        with_open_files(|state| {
-            for &(fd, events) in fds {
-                let Some(fd_entry) = get_fd_entry(inner, fd) else {
-                    continue;
-                };
-                let Some(open_file) = get_open_file_mut(&mut state.open_files, fd_entry.open_file)
-                else {
-                    continue;
-                };
-                let Some(ops) = open_file.ops else {
-                    continue;
-                };
-                match ops.kind() {
-                    FileKind::PipeRead if (events & POLLIN) != 0 => {
-                        if ops.poll_wait(open_file.handle) {
-                            registered += 1;
-                        }
+        for &(fd, events) in fds {
+            let Some(open_file) = snapshot_open_file(inner, fd) else {
+                continue;
+            };
+            let ops = open_file.ops;
+            match ops.kind() {
+                FileKind::PipeRead if (events & POLLIN) != 0 => {
+                    if ops.poll_wait(open_file.handle) {
+                        registered += 1;
                     }
-                    FileKind::PipeWrite if (events & POLLOUT) != 0 => {
-                        if ops.poll_wait(open_file.handle) {
-                            registered += 1;
-                        }
-                    }
-                    _ => {}
                 }
+                FileKind::PipeWrite if (events & POLLOUT) != 0 => {
+                    if ops.poll_wait(open_file.handle) {
+                        registered += 1;
+                    }
+                }
+                _ => {}
             }
-        });
+        }
     });
     registered
 }
 
 pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
     let _ = with_pid_slot(process_id, |inner| {
-        with_open_files(|state| {
-            for &(fd, events) in fds {
-                let Some(fd_entry) = get_fd_entry(inner, fd) else {
-                    continue;
-                };
-                let Some(open_file) = get_open_file_mut(&mut state.open_files, fd_entry.open_file)
-                else {
-                    continue;
-                };
-                let Some(ops) = open_file.ops else {
-                    continue;
-                };
-                match ops.kind() {
-                    FileKind::PipeRead if (events & POLLIN) != 0 => {
-                        ops.poll_unwait(open_file.handle)
-                    }
-                    FileKind::PipeWrite if (events & POLLOUT) != 0 => {
-                        ops.poll_unwait(open_file.handle)
-                    }
-                    _ => {}
-                }
+        for &(fd, events) in fds {
+            let Some(open_file) = snapshot_open_file(inner, fd) else {
+                continue;
+            };
+            let ops = open_file.ops;
+            match ops.kind() {
+                FileKind::PipeRead if (events & POLLIN) != 0 => ops.poll_unwait(open_file.handle),
+                FileKind::PipeWrite if (events & POLLOUT) != 0 => ops.poll_unwait(open_file.handle),
+                _ => {}
             }
-        });
+        }
     });
+}
+
+/// Clone the `KArc<OpenFile>` behind `fd` (or `None` if the fd is bad).
+/// A helper for the poll paths that want the open file without going
+/// through the full `FdSnapshot`.
+fn snapshot_open_file(inner: &FileTableSlotInner, fd: c_int) -> Option<KArc<OpenFile>> {
+    Some(get_fd_entry(inner, fd)?.open_file.clone())
 }
 
 pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollRegInfo {
     with_pid_slot(process_id, |inner| {
-        let Some(fd_entry) = get_fd_entry(inner, fd) else {
-            return PollRegInfo::NONE;
+        let Some(open_file) = snapshot_open_file(inner, fd) else {
+            return PollRegInfo::none();
         };
-        let open_file_handle = fd_entry.open_file;
-        with_open_files(|state| {
-            let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_handle) else {
-                return PollRegInfo::NONE;
-            };
-            let Some(ops) = open_file.ops else {
-                return PollRegInfo::NONE;
-            };
-            let registered = match ops.kind() {
-                FileKind::Tty => ops.poll_wait(open_file.handle),
-                FileKind::Socket if (events & POLLIN) != 0 => ops.poll_wait(open_file.handle),
-                _ => false,
-            };
-            PollRegInfo {
-                open_file: open_file_handle,
-                registered,
-            }
-        })
+        let ops = open_file.ops;
+        let registered = match ops.kind() {
+            FileKind::Tty => ops.poll_wait(open_file.handle),
+            FileKind::Socket if (events & POLLIN) != 0 => ops.poll_wait(open_file.handle),
+            _ => false,
+        };
+        PollRegInfo {
+            open_file: KArc::downgrade(&open_file),
+            registered,
+        }
     })
-    .unwrap_or(PollRegInfo::NONE)
+    .unwrap_or_else(PollRegInfo::none)
 }
 
 pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
     if !reg.registered {
         return;
     }
-    with_open_files(|state| {
-        let Some(open_file) = get_open_file_mut(&mut state.open_files, reg.open_file) else {
-            return;
-        };
-        if let Some(ops) = open_file.ops {
-            ops.poll_unwait(open_file.handle);
-        }
-    });
+    // Upgrade-or-skip: if the open file is gone, the backing was torn
+    // down (which already cleared its wait queue), so there is nothing to
+    // unregister and no chance of touching a reused slot.
+    if let Some(open_file) = reg.open_file.upgrade() {
+        open_file.ops.poll_unwait(open_file.handle);
+    }
+}
+
+// ── Poll-registration table (KWeak-keyed opaque tokens) ─────────────────────
+//
+// `file_poll_fused` is the kernel-internal poll ABI used by `poll`/`select`
+// and the SlopRing harvest. The ABI carries an opaque `u64` token
+// (`FusedPollResult::open_file_token`) the caller later hands back to
+// `file_poll_unfused_by_idx` to unregister from the wait queue. The token is
+// now an opaque *registration id* resolving (in this table) to a
+// `KWeak<OpenFile>`: the registration NEVER keeps the open file alive, and a
+// dead registration upgrades to `None` so it can never touch a reused slot or
+// double-release a backing object (the single-owner invariant — there is no
+// extra strong reference for a stale token to drop).
+
+struct PollRegTable {
+    next_id: AtomicU64,
+    entries: SpinLock<KBTreeMap<u64, KWeak<OpenFile>>>,
+}
+
+static POLL_REG_TABLE: PollRegTable = PollRegTable {
+    // Start at 1 so 0 stays a never-registered sentinel (matching the
+    // `open_file_token: 0` default the backends return).
+    next_id: AtomicU64::new(1),
+    entries: SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE),
+};
+
+/// Record a weak handle to `open_file` and return its opaque token.
+fn poll_reg_insert(open_file: &KArc<OpenFile>) -> u64 {
+    let id = POLL_REG_TABLE.next_id.fetch_add(1, Ordering::Relaxed);
+    let mut entries = POLL_REG_TABLE.entries.lock();
+    let _ = entries.insert(id, KArc::downgrade(open_file));
+    id
+}
+
+/// Remove a registration by token, returning the weak handle it held (if
+/// the token was live).
+fn poll_reg_take(token: u64) -> Option<KWeak<OpenFile>> {
+    if token == 0 {
+        return None;
+    }
+    let mut entries = POLL_REG_TABLE.entries.lock();
+    entries.remove(&token)
 }
 
 /// Fused poll: register waiter + check readiness in one call.
@@ -125,31 +141,17 @@ pub fn file_poll_fused(
         open_file_token: 0,
     };
     with_pid_slot(process_id, |inner| {
-        let open_file_handle = match get_fd_entry(inner, fd) {
-            Some(fd_entry) => fd_entry.open_file,
-            None => return invalid,
+        let Some(open_file) = snapshot_open_file(inner, fd) else {
+            return invalid;
         };
-        with_open_files(|state| {
-            let result = match get_open_file_mut(&mut state.open_files, open_file_handle) {
-                Some(open_file) => match open_file.ops {
-                    Some(ops) => {
-                        let mut r = ops.poll_fused(open_file.handle, events);
-                        r.open_file_token = pack_open_file_token(open_file_handle);
-                        r
-                    }
-                    None => invalid,
-                },
-                None => invalid,
-            };
-
-            // Hold an extra reference while the caller is registered on
-            // a wait queue, preventing the open file from being freed if
-            // a concurrent close drops the last FD-level reference.
-            if result.registered {
-                incref_open_file(&mut state.open_files, open_file_handle);
-            }
-            result
-        })
+        let mut r = open_file.ops.poll_fused(open_file.handle, events);
+        // Hand the caller an opaque registration token backed by a weak
+        // reference. The weak does not keep the open file alive; if the
+        // fd is closed before unregister, the token upgrades to None.
+        if r.registered {
+            r.open_file_token = poll_reg_insert(&open_file);
+        }
+        r
     })
     .unwrap_or(invalid)
 }
@@ -157,59 +159,42 @@ pub fn file_poll_fused(
 /// Unregister from a wait queue after fused poll.
 pub fn file_poll_unfused(process_id: u32, fd: c_int) {
     let _ = with_pid_slot(process_id, |inner| {
-        let open_file_handle = match get_fd_entry(inner, fd) {
-            Some(fd_entry) => fd_entry.open_file,
-            None => return,
-        };
-        with_open_files(|state| {
-            if let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_handle) {
-                if let Some(ops) = open_file.ops {
-                    ops.poll_unwait(open_file.handle);
-                }
-            }
-        });
+        if let Some(open_file) = snapshot_open_file(inner, fd) {
+            open_file.ops.poll_unwait(open_file.handle);
+        }
     });
 }
 
-/// Unregister from a wait queue using the open-file token directly.
+/// Unregister from a wait queue using the opaque registration token from
+/// [`file_poll_fused`]. Upgrade-or-skip: a token whose open file was
+/// already dropped is silently discarded — the backing teardown cleared
+/// its own wait queue, and the weak can never resurrect a reused slot.
 pub fn file_poll_unfused_by_idx(open_file_token: u64) {
-    let open_file_handle = unpack_open_file_token(open_file_token);
-    with_open_files(|state| {
-        let Some(open_file) = get_open_file_mut(&mut state.open_files, open_file_handle) else {
-            return;
-        };
-        if let Some(ops) = open_file.ops {
-            ops.poll_unwait(open_file.handle);
-        }
-        // Drop the extra reference that file_poll_fused() took.
-        release_open_file(&mut state.open_files, open_file_handle);
-    });
+    let Some(weak) = poll_reg_take(open_file_token) else {
+        return;
+    };
+    if let Some(open_file) = weak.upgrade() {
+        open_file.ops.poll_unwait(open_file.handle);
+    }
 }
 
 // ── Poll-registration leak guard (task-lifecycle teardown) ──────────────────
 //
-// `file_poll_fused` takes an extra `incref_open_file` per registered fd to
-// keep the OpenFile (and its backend) alive while the caller is parked on a
-// wait queue. Normally `syscall_poll` / `syscall_select` release those refs
-// via `file_poll_unfused_by_idx` the moment the task wakes. But a task that is
-// SIGKILL'd *while blocked* never resumes its syscall, so that release is
-// skipped and the extra refs leak — the OpenFile's refcount never reaches
-// zero, so `ops.release()` (e.g. `unix_close`, which signals peer EOF) never
-// runs and the backend lingers forever (manifesting as a compositor window
-// that survives the death of its client).
-//
-// The fix mirrors `futex_remove_task`: every outstanding poll registration is
-// recorded per-task here, and the registered cleanup hook
-// (`fileio_poll_cleanup_task`) releases them during task termination — which
-// runs *before* the fd table is torn down, so the entry-ref release that
-// follows can drive the refcount to zero and fire the backend release. This
-// ties poll-reference cleanup to the task's kernel-object lifecycle rather
-// than to cooperative syscall return.
+// `poll`/`select`/`ring` register fds on wait queues via `file_poll_fused` and
+// normally unregister via `file_poll_unfused_by_idx` the moment the task wakes.
+// A task that is SIGKILL'd *while blocked* never resumes its syscall, so that
+// unregister is skipped and a stale wait-queue entry would linger. Every
+// outstanding registration token is recorded per-task here; the registered
+// cleanup hook (`fileio_poll_cleanup_task`) drains them during task
+// termination. Because the token only carries a `KWeak`, this is purely
+// wait-queue hygiene — it can never drive a refcount underflow or a premature
+// backing release.
 static POLL_REGISTRATIONS: SpinLock<KBTreeMap<u32, KVec<u64>>> =
     SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
 
-/// Record the set of open-file tokens `task_id` registered for poll, replacing
-/// any previously-recorded set. Called immediately before the task blocks.
+/// Record the set of registration tokens `task_id` holds for poll,
+/// replacing any previously-recorded set. Called immediately before the
+/// task blocks.
 pub fn file_poll_track_registrations(task_id: u32, tokens: &[u64]) {
     let mut map = POLL_REGISTRATIONS.lock();
     match map.get_mut(&task_id) {
@@ -226,9 +211,9 @@ pub fn file_poll_track_registrations(task_id: u32, tokens: &[u64]) {
     }
 }
 
-/// Clear `task_id`'s recorded registrations after the task has released them
-/// itself (the normal poll/select wake path). The (now-empty) entry is kept so
-/// its capacity is reused on the next poll iteration.
+/// Clear `task_id`'s recorded registrations after the task has released
+/// them itself (the normal poll/select wake path). The (now-empty) entry
+/// is kept so its capacity is reused on the next poll iteration.
 pub fn file_poll_clear_registrations(task_id: u32) {
     let mut map = POLL_REGISTRATIONS.lock();
     if let Some(existing) = map.get_mut(&task_id) {
@@ -236,13 +221,13 @@ pub fn file_poll_clear_registrations(task_id: u32) {
     }
 }
 
-/// Task-resource cleanup hook: release any poll-registration refs a dying task
+/// Task-resource cleanup hook: unregister any poll tokens a dying task
 /// never got to release. Registered via `register_task_resource_cleanup_hook`
 /// at fs init. Safe to call for any task (no-op if it had none).
 pub fn fileio_poll_cleanup_task(task_id: u32) {
     // Take the token list out under the tracker lock, then drop the lock
-    // before reaching into the open-files table (RESOURCE) to keep the two
-    // locks from ever being held simultaneously.
+    // before reaching into the registration table (RESOURCE) to keep the
+    // two locks from ever being held simultaneously.
     let tokens = {
         let mut map = POLL_REGISTRATIONS.lock();
         map.remove(&task_id)
@@ -256,19 +241,10 @@ pub fn fileio_poll_cleanup_task(task_id: u32) {
 
 pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
     with_pid_slot(process_id, |inner| {
-        let open_file_handle = match get_fd_entry(inner, fd) {
-            Some(fd_entry) => fd_entry.open_file,
-            None => return POLLNVAL,
+        let Some(open_file) = snapshot_open_file(inner, fd) else {
+            return POLLNVAL;
         };
-        with_open_files(|state| {
-            get_open_file_mut(&mut state.open_files, open_file_handle)
-                .and_then(|open_file| {
-                    open_file
-                        .ops
-                        .map(|ops| ops.poll_events(open_file.handle, events))
-                })
-                .unwrap_or(POLLNVAL)
-        })
+        open_file.ops.poll_events(open_file.handle, events)
     })
     .unwrap_or(POLLNVAL)
 }

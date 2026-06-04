@@ -15,7 +15,7 @@ use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
     TaskStatus,
 };
-use slopos_fs::fileio::{fileio_clone_table_for_process, fileio_destroy_table_for_process};
+use slopos_fs::fileio::{fileio_clone_table_for_spawn, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -178,7 +178,7 @@ pub fn spawn_program_with_attrs(
         // can set up the fd table post-spawn.
         if inherit_fds_from != INVALID_PROCESS_ID {
             fileio_destroy_table_for_process(process_id);
-            let _ = fileio_clone_table_for_process(inherit_fds_from, process_id);
+            let _ = fileio_clone_table_for_spawn(inherit_fds_from, process_id);
         }
 
         // Inherit job-control state (pgid, sid, controlling_tty) from the

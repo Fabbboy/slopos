@@ -1,5 +1,5 @@
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::KernelErrno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -9,7 +9,7 @@ use slopos_abi::fs::{
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
-use slopos_ostd::handle::{Handle, HandleTable};
+use slopos_ostd::KArc;
 use slopos_ostd::sync::{
     InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard,
 };
@@ -23,7 +23,6 @@ use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
 pub(super) const FILEIO_MAX_OPEN_FILES: usize = 32;
-pub(super) const FILEIO_MAX_OPEN_FILE_ENTRIES: usize = 256;
 
 /// Internal open-mode flags for `OpenFileEntry`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,48 +112,72 @@ pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
     posix
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PollRegInfo {
-    pub(super) open_file: Handle<OpenFile>,
+    /// A weak reference to the open file the caller registered a wait on.
+    /// Weak by design: the registration must never keep the file alive,
+    /// and an upgrade that fails (the file closed) means a stale wakeup is
+    /// silently dropped — it can never touch a reused slot.
+    pub(super) open_file: slopos_ostd::KWeak<OpenFile>,
     pub registered: bool,
 }
 
 impl PollRegInfo {
-    /// A registration that resolves to nothing. The sentinel slot index
-    /// is out of range, so the handle never matches a live open file.
-    pub const NONE: Self = Self {
-        open_file: Handle::from_parts(u32::MAX, 0),
-        registered: false,
-    };
-}
-
-/// One open file description. Liveness and slot-reuse generation are
-/// owned by the [`HandleTable`] that stores it, so this struct carries
-/// neither a `valid` flag nor a generation counter.
-pub(super) struct OpenFile {
-    pub(super) ops: Option<&'static dyn FileOps>,
-    pub(super) handle: usize,
-    pub(super) position: u64,
-    pub(super) status_flags: OpenMode,
-    pub(super) refcount: u16,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct FdEntry {
-    pub(super) open_file: Handle<OpenFile>,
-    pub(super) cloexec: bool,
-    pub(super) valid: bool,
-}
-
-impl FdEntry {
-    const fn new() -> Self {
+    /// A registration that resolves to nothing. The empty weak never
+    /// upgrades, so unregister is a no-op.
+    pub fn none() -> Self {
         Self {
-            // Placeholder handle; only meaningful when `valid` is set.
-            open_file: Handle::from_parts(0, 0),
-            cloexec: false,
-            valid: false,
+            open_file: slopos_ostd::KWeak::new(),
+            registered: false,
         }
     }
+}
+
+/// One open file description — POSIX's "open file description". The
+/// fd-table entry holds a [`KArc<OpenFile>`]; its strong count is the
+/// dup/fork alias count, and its `Drop` is the file close (it runs the
+/// backing object's `release` exactly once on last drop). Position and
+/// status flags live in atomics so dup/dup2/fork aliases share them per
+/// POSIX without taking a second lock.
+pub(super) struct OpenFile {
+    pub(super) ops: &'static dyn FileOps,
+    pub(super) handle: usize,
+    pub(super) position: AtomicU64,
+    pub(super) status_flags: AtomicU32,
+}
+
+impl OpenFile {
+    pub(super) fn position(&self) -> u64 {
+        self.position.load(Ordering::Acquire)
+    }
+
+    pub(super) fn status_flags(&self) -> OpenMode {
+        OpenMode(self.status_flags.load(Ordering::Acquire))
+    }
+
+    pub(super) fn set_status_flags(&self, flags: OpenMode) {
+        self.status_flags.store(flags.bits(), Ordering::Release);
+    }
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        // Single-owner teardown: the last strong `KArc<OpenFile>` to drop
+        // runs the backing object's release exactly once. (S1 keeps
+        // `FileOps::release` as the teardown shim; later stages move the
+        // teardown into the backing object's own `Drop`.)
+        self.ops.release(self.handle);
+    }
+}
+
+/// One file-descriptor-number → open-file mapping. `cloexec` is per-fd
+/// (never shared across dup aliases — it lives here, not on the shared
+/// [`OpenFile`]). Cloning an `FdEntry` bumps the `OpenFile` strong count
+/// (a dup/fork alias); dropping one is a close of that alias.
+#[derive(Clone)]
+pub(super) struct FdEntry {
+    pub(super) open_file: KArc<OpenFile>,
+    pub(super) cloexec: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +202,7 @@ pub(super) struct FileTableSlot {
 
 pub(super) struct FileTableSlotInner {
     pub(super) in_use: bool,
-    pub(super) descriptors: [FdEntry; FILEIO_MAX_OPEN_FILES],
+    pub(super) descriptors: [Option<FdEntry>; FILEIO_MAX_OPEN_FILES],
 }
 
 impl FileTableSlot {
@@ -189,7 +212,7 @@ impl FileTableSlot {
             inner: SpinLock::new(
                 FileTableSlotInner {
                     in_use,
-                    descriptors: [FdEntry::new(); FILEIO_MAX_OPEN_FILES],
+                    descriptors: [const { None }; FILEIO_MAX_OPEN_FILES],
                 },
                 LOCK_LEVEL_REGISTRY,
             ),
@@ -212,9 +235,12 @@ impl ExternalOpsState {
     }
 }
 
+/// Shared fileio registry state. Now that liveness lives in each
+/// [`KArc<OpenFile>`]'s strong count, this only carries the registered
+/// external `FileOps` singletons (set once at subsystem init) and the
+/// init latch — there is no longer an open-file table here.
 pub(super) struct OpenFilesState {
     pub(super) initialized: bool,
-    pub(super) open_files: HandleTable<OpenFile>,
     pub(super) external_ops: ExternalOpsState,
 }
 
@@ -222,7 +248,6 @@ impl OpenFilesState {
     const fn uninitialized() -> Self {
         Self {
             initialized: false,
-            open_files: HandleTable::new(),
             external_ops: ExternalOpsState::new(),
         }
     }
@@ -255,7 +280,6 @@ pub(super) fn with_open_files<R>(f: impl FnOnce(&mut OpenFilesState) -> R) -> R 
     let mut guard = OPEN_FILES_STATE.lock();
     if !guard.initialized {
         FILEIO_INIT.init_once();
-        // The table starts empty (`HandleTable::new`); nothing to reset.
         guard.initialized = true;
     }
     f(&mut *guard)
@@ -312,7 +336,7 @@ pub(super) fn pick_pid_slot_locked(pid: u32) -> Option<SpinLockGuard<'static, Fi
             let mut guard = slot.inner.lock();
             guard.in_use = true;
             for entry in guard.descriptors.iter_mut() {
-                *entry = FdEntry::new();
+                *entry = None;
             }
             return Some(guard);
         }
@@ -320,52 +344,54 @@ pub(super) fn pick_pid_slot_locked(pid: u32) -> Option<SpinLockGuard<'static, Fi
     Some(KERNEL_TABLE.inner.lock())
 }
 
-pub(super) fn reset_fd_entry(entry: &mut FdEntry) {
-    *entry = FdEntry::new();
+/// Snapshot of a file descriptor's open-file state. Holds a strong
+/// [`KArc<OpenFile>`] clone captured under the per-process slot lock, so
+/// I/O proceeds after the lock is released — and the open file cannot be
+/// torn down mid-operation even if a concurrent `close` drops the
+/// fd-table alias. Position / status-flags are read from the held
+/// `KArc`'s atomics (they may have advanced since capture, which is the
+/// intended shared-offset POSIX behaviour).
+pub(super) struct FdSnapshot {
+    pub(super) open_file: KArc<OpenFile>,
 }
 
-/// Snapshot of a file descriptor's open-file state. Captured under
-/// the per-process slot lock and the open-files lock, then used after
-/// both are released so I/O proceeds without holding any lock.
-#[derive(Clone, Copy)]
-pub(super) struct FdSnapshot {
-    pub(super) ops: Option<&'static dyn FileOps>,
-    pub(super) handle: usize,
-    pub(super) position: u64,
-    pub(super) status_flags: OpenMode,
-    pub(super) open_file: Handle<OpenFile>,
+impl FdSnapshot {
+    pub(super) fn ops(&self) -> &'static dyn FileOps {
+        self.open_file.ops
+    }
+
+    pub(super) fn handle(&self) -> usize {
+        self.open_file.handle
+    }
+
+    pub(super) fn position(&self) -> u64 {
+        self.open_file.position()
+    }
+
+    pub(super) fn status_flags(&self) -> OpenMode {
+        self.open_file.status_flags()
+    }
 }
 
 pub(super) fn snapshot_fd(inner: &FileTableSlotInner, fd: c_int) -> Option<FdSnapshot> {
-    if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
-        return None;
-    }
-    let entry = &inner.descriptors[fd as usize];
-    if !entry.valid {
-        return None;
-    }
-    let open_file = entry.open_file;
-    with_open_files(|state| {
-        let ofe = state.open_files.get(open_file).ok()?;
-        Some(FdSnapshot {
-            ops: ofe.ops,
-            handle: ofe.handle,
-            position: ofe.position,
-            status_flags: ofe.status_flags,
-            open_file,
-        })
+    let entry = get_fd_entry(inner, fd)?;
+    Some(FdSnapshot {
+        open_file: entry.open_file.clone(),
     })
 }
 
-pub(super) fn get_fd_entry(inner: &mut FileTableSlotInner, fd: c_int) -> Option<&mut FdEntry> {
+pub(super) fn get_fd_entry(inner: &FileTableSlotInner, fd: c_int) -> Option<&FdEntry> {
     if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
         return None;
     }
-    let entry = &mut inner.descriptors[fd as usize];
-    if !entry.valid {
+    inner.descriptors[fd as usize].as_ref()
+}
+
+pub(super) fn get_fd_entry_mut(inner: &mut FileTableSlotInner, fd: c_int) -> Option<&mut FdEntry> {
+    if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
         return None;
     }
-    Some(entry)
+    inner.descriptors[fd as usize].as_mut()
 }
 
 pub(super) fn find_free_slot(inner: &FileTableSlotInner) -> Option<usize> {
@@ -374,11 +400,29 @@ pub(super) fn find_free_slot(inner: &FileTableSlotInner) -> Option<usize> {
 
 pub(super) fn find_free_slot_from(inner: &FileTableSlotInner, min_fd: usize) -> Option<usize> {
     for idx in min_fd..FILEIO_MAX_OPEN_FILES {
-        if !inner.descriptors[idx].valid {
+        if inner.descriptors[idx].is_none() {
             return Some(idx);
         }
     }
     None
+}
+
+/// Build a `KArc<OpenFile>`, materialising the `OpenFile` directly into
+/// the heap allocation (no stack rvalue — the atomics are tiny but this
+/// keeps the construction uniform and honours the stack-frame gate).
+pub(super) fn new_open_file(
+    ops: &'static dyn FileOps,
+    handle: usize,
+    status_flags: OpenMode,
+    position: u64,
+) -> Option<KArc<OpenFile>> {
+    KArc::try_new(OpenFile {
+        ops,
+        handle,
+        position: AtomicU64::new(position),
+        status_flags: AtomicU32::new(status_flags.bits()),
+    })
+    .ok()
 }
 
 pub(super) fn parse_pts_path(path: &[u8]) -> Option<TtyIndex> {
@@ -594,7 +638,6 @@ pub(super) fn kind_is_tty(kind: FileKind) -> bool {
 
 mod fdops;
 mod fdtable;
-pub mod open_file_table;
 mod poll;
 
 pub use fdops::*;

@@ -216,9 +216,12 @@ define_syscall!(syscall_open_tty_fd
     if tty::open_ref(tty_idx).is_err() {
         return Err(Errno::EINVAL);
     }
+    // `file_open_tty_fd` transfers ownership of the `open_ref` minted
+    // above into the new `OpenFile`; on failure the install already
+    // released it exactly once, so the error arm must NOT close_ref again
+    // (a second decrement is the premature-close root cause).
     let fd = file_open_tty_fd(pid, tty_idx, 0);
     if fd < 0 {
-        let _ = tty::close_ref(tty_idx);
         Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL))
     } else {
         Ok(fd as u64)
