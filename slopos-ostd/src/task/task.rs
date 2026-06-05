@@ -50,10 +50,21 @@ impl TaskId {
 
 /// Callee-saved register snapshot for software context switch.
 ///
-/// Layout-compatible with `core::scheduler::SwitchContext`. The
-/// assembly in [`super::switch`] reads/writes these offsets directly via
-/// `offset_of!`, so the field order must not be changed without
-/// updating the asm in lockstep.
+/// The assembly in [`super::switch`] reads/writes the register offsets
+/// (`rbx`..`rip`) directly via `offset_of!`, so that field order must
+/// not be changed without updating the asm in lockstep. `preempt_count`
+/// is appended after the asm-visible registers and is touched only by
+/// safe Rust in [`super::switch::switch_context`].
+///
+/// # Preempt-count ownership
+///
+/// `preempt_count` is logically a property of the *task*, not the CPU,
+/// but is cached in the per-CPU PCR for cheap guard inc/dec. This field
+/// is the task's saved copy: at every context switch the live per-CPU
+/// count is saved here for the outgoing task and the incoming task's
+/// saved count is loaded into the PCR. That keeps a preempt/lock guard's
+/// increment and its matching decrement balanced against the same
+/// logical counter even when the task migrates across CPUs between them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TaskContext {
@@ -66,6 +77,9 @@ pub struct TaskContext {
     pub rsp: u64,
     pub rflags: u64,
     pub rip: u64,
+    /// Saved per-task preemption-disable count (see type docs). Not read
+    /// by the switch asm — swapped with the PCR by `switch_context`.
+    pub preempt_count: u64,
 }
 
 impl TaskContext {
@@ -82,6 +96,7 @@ impl TaskContext {
             rsp: 0,
             rflags: 0x202,
             rip: 0,
+            preempt_count: 0,
         }
     }
 
@@ -101,11 +116,12 @@ impl TaskContext {
             rsp: stack_top - 8,
             rflags: 0x202,
             rip: trampoline,
+            preempt_count: 0,
         }
     }
 }
 
-const _: () = assert!(core::mem::size_of::<TaskContext>() == 72);
+const _: () = assert!(core::mem::size_of::<TaskContext>() == 80);
 const _: () = assert!(offset_of!(TaskContext, rbx) == 0);
 const _: () = assert!(offset_of!(TaskContext, r12) == 8);
 const _: () = assert!(offset_of!(TaskContext, r13) == 16);
@@ -115,6 +131,9 @@ const _: () = assert!(offset_of!(TaskContext, rbp) == 40);
 const _: () = assert!(offset_of!(TaskContext, rsp) == 48);
 const _: () = assert!(offset_of!(TaskContext, rflags) == 56);
 const _: () = assert!(offset_of!(TaskContext, rip) == 64);
+// `preempt_count` lives past the asm-visible register block; the switch
+// asm never touches it, so its offset is not part of the asm contract.
+const _: () = assert!(offset_of!(TaskContext, preempt_count) == 72);
 
 // ---------------------------------------------------------------------------
 // KernelStack.

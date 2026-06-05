@@ -43,6 +43,15 @@ fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
         // caught as a clean overflow panic by `exc_dstack_guard_fault`.
         let dstack_top = crate::ist_stacks::exc_dstack_top_current_cpu();
         slopos_arch::pcr::reset_ist_unsafe_sp(dstack_top);
+        // This handler diverges into `schedule()` and never returns, so the
+        // exception-entry preempt hold taken in the common IST dispatcher
+        // (its RAII guard, one `irq_entry_bump`) would otherwise leak —
+        // leaving the per-CPU preempt count stuck at >=1 for whatever task
+        // is scheduled next, which both suppresses its preemption and trips
+        // the `schedule_internal` "switch with preempt_count != 0" guard.
+        // Release that single hold explicitly so we deschedule at the
+        // running baseline and the count saved into this (Zombie) task is 0.
+        slopos_ostd::cpu::preempt::release_diverging_exception_hold();
         schedule();
     }
     // schedule() returned without switching — park safely on the

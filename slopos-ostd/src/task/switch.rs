@@ -18,6 +18,7 @@ use core::cell::UnsafeCell;
 use core::mem::{MaybeUninit, offset_of};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::cpu::x86_64::pcr;
 use crate::sync::BspToken;
 use crate::task::task::TaskContext;
 
@@ -97,6 +98,51 @@ pub extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *const Tas
         off_rflags = const offset_of!(TaskContext, rflags),
         off_rip = const offset_of!(TaskContext, rip),
     );
+}
+
+/// Context switch with per-task preempt-count save/restore.
+///
+/// `preempt_count` is logically owned by the task but cached in the
+/// per-CPU PCR (see [`TaskContext`]). This is the *only* switch entry
+/// point the scheduler should use: it saves the live per-CPU count into
+/// the outgoing task's context and loads the incoming task's saved count
+/// into the PCR, bracketing the raw [`switch_registers`] register swap.
+/// That makes a preempt/lock guard's increment and its matching
+/// decrement balance against the same logical counter even if the task
+/// migrates to a different CPU while the guard is held.
+///
+/// `prev` may be null for the first switch out of the boot context.
+///
+/// Has a safe signature (mirroring [`switch_registers`]) so the scheduler
+/// crate — which forbids `unsafe` — can call it; the soundness
+/// preconditions are caller obligations documented here rather than
+/// encoded in the type:
+///
+/// - Must be called with interrupts disabled so the count swap and the
+///   register switch are atomic with respect to this CPU.
+/// - The calling CPU must be the sole accessor of both contexts (Inv. 8).
+/// - `next` must point to a valid, initialised [`TaskContext`]; `prev`
+///   must be null or point to a valid, exclusively-owned context.
+pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
+    // SAFETY: the production preempt backend is registered (and the BSP
+    // PCR installed) before the scheduler performs any switch, so
+    // `current_pcr()` resolves this CPU's region.
+    let pcr_ref = unsafe { pcr::current_pcr() };
+    let live = pcr_ref.preempt_count.load(Ordering::Relaxed);
+    if !prev.is_null() {
+        // SAFETY: caller guarantees `prev` is a valid, exclusively-owned
+        // context for the duration of the switch.
+        unsafe {
+            (*prev).preempt_count = live as u64;
+        }
+    }
+    // SAFETY: caller guarantees `next` is a valid context.
+    let restored = unsafe { (*next).preempt_count } as u32;
+    pcr_ref.preempt_count.store(restored, Ordering::Relaxed);
+
+    // `switch_registers` has a safe signature (its preconditions match
+    // ours and are documented on its own item); forward the swap.
+    switch_registers(prev, next);
 }
 
 /// Initialise context from current CPU state (for boot/kernel context).

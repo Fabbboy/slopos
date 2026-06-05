@@ -167,14 +167,17 @@ impl PreemptBackend for PcrPreemptBackend {
 
     #[inline]
     fn leave(&self) {
-        // No reschedule-callback dispatch yet — that wiring lands with
-        // the scheduler migration. Maintaining the count is sufficient
-        // for now; legacy paths still drive scheduling.
-        unsafe {
+        // SAFETY: only the current CPU's PCR atomic field is touched.
+        let prev = unsafe {
             crate::cpu::x86_64::pcr::current_pcr()
                 .preempt_count
-                .fetch_sub(1, Ordering::AcqRel);
-        }
+                .fetch_sub(1, Ordering::AcqRel)
+        };
+        // Always-on (not debug-only): an unmatched backend decrement
+        // wraps the unsigned count to ~u32::MAX silently and primes a
+        // later, context-free `PreemptGuard::drop` underflow. Fail here,
+        // at the actual unbalanced leave, instead.
+        assert!(prev > 0, "preempt_count underflow (backend leave)");
     }
 
     #[inline]
@@ -319,6 +322,20 @@ pub(crate) fn irq_entry_leave_quiet() {
     current_backend().leave_quiet();
 }
 
+/// Release the single exception/IRQ-entry preempt hold when a handler
+/// **diverges** instead of returning, so the [`crate::irq::idt`]
+/// entry-guard's `Drop` never runs to balance its `irq_entry_bump`.
+/// Decrements exactly once via the quiet (no deferred-reschedule) path.
+///
+/// Use *only* on a path that abandons its exception-handler frame via an
+/// unconditional reschedule or halt (e.g. retiring a CPU after a fatal
+/// user fault). On any normal return path the RAII guard performs the
+/// leave and calling this as well would double-decrement.
+#[inline]
+pub fn release_diverging_exception_hold() {
+    irq_entry_leave_quiet();
+}
+
 // ---------------------------------------------------------------------------
 // PreemptGuard / IrqPreemptGuard (PCR-backed).
 //
@@ -407,7 +424,10 @@ impl Drop for PreemptGuard {
         // SAFETY: Only accessing atomic fields on the current CPU's PCR.
         let pcr = unsafe { pcr::current_pcr() };
         let prev = pcr.preempt_count.fetch_sub(1, Ordering::Release);
-        debug_assert!(prev > 0, "preempt_count underflow");
+        // Always-on: a `prev == 0` here is a real accounting bug (an
+        // unbalanced guard, or a count corrupted elsewhere). Panic at the
+        // decrement rather than letting the unsigned wrap propagate.
+        assert!(prev > 0, "preempt_count underflow");
 
         if prev == 1 && pcr.reschedule_pending.swap(0, Ordering::AcqRel) != 0 {
             let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);

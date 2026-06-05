@@ -391,6 +391,8 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
         rsp: ret_addr_slot,
         rflags: 0x02,
         rip: entry,
+        // Fresh task starts at the running baseline (preemption enabled).
+        preempt_count: 0,
     }
 }
 

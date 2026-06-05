@@ -258,9 +258,11 @@ pub fn test_task_flags_preserved() -> TestResult {
 
 pub fn test_switch_context_struct_size() -> TestResult {
     use super::task_struct::SwitchContext;
+    // 80: the asm-visible register block (72 bytes, rbx..rip) plus the
+    // saved per-task `preempt_count` (offset 72) used by switch_context.
     assert_eq_test!(
         core::mem::size_of::<SwitchContext>(),
-        72,
+        80,
         "SwitchContext size wrong"
     );
     TestResult::Pass
@@ -282,6 +284,11 @@ pub fn test_switch_context_offsets() -> TestResult {
     assert_eq_test!(SWITCH_CTX_OFF_RSP, 48);
     assert_eq_test!(SWITCH_CTX_OFF_RFLAGS, 56);
     assert_eq_test!(SWITCH_CTX_OFF_RIP, 64);
+    // Per-task saved preempt count: appended past the asm register block.
+    assert_eq_test!(
+        core::mem::offset_of!(super::task_struct::SwitchContext, preempt_count),
+        72
+    );
     TestResult::Pass
 }
 

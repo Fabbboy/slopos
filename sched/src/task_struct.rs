@@ -73,7 +73,10 @@ pub const SWITCH_CTX_OFF_RIP: usize = 64;
 // ABI razors — the field offsets are already pinned inside OSTD at
 // `slopos-ostd/src/task/task.rs`; these duplicates fail the build at
 // the kernel boundary if the alias ever drifts off the asm contract.
-const _: () = assert!(core::mem::size_of::<SwitchContext>() == 72);
+// Size is 80 (not 72): the asm-visible register block (`rbx`..`rip`,
+// offsets 0..64) is followed by the saved per-task `preempt_count` at
+// offset 72. The switch asm reads only the register offsets below.
+const _: () = assert!(core::mem::size_of::<SwitchContext>() == 80);
 const _: () = assert!(offset_of!(SwitchContext, rsp) == SWITCH_CTX_OFF_RSP);
 const _: () = assert!(offset_of!(SwitchContext, rip) == SWITCH_CTX_OFF_RIP);
 const _: () = assert!(offset_of!(SwitchContext, rsp) == 48);

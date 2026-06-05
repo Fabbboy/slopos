@@ -192,7 +192,7 @@ use slopos_mm::process_vm::{
 use slopos_mm::tlb;
 
 use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
-use slopos_ostd::task::switch::switch_registers;
+use slopos_ostd::task::switch::switch_context;
 
 use super::ffi_boundary::kernel_stack_top;
 
@@ -553,7 +553,9 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     let next_ctx = task_switch_ctx_ptr(idle_task);
     // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
     prepare_switch_to(cpu_id, current, idle_task);
-    switch_registers(prev_ctx, next_ctx);
+    // switch_context swaps the per-task preempt-count with the PCR around
+    // the register switch (migration-safe accounting), then switches.
+    switch_context(prev_ctx, next_ctx);
     // NOTE: code here runs when the TASK resumes (not on idle path).
     // All post-switch cleanup happens in run_ready_task_from_idle
     // after execute_task returns — that IS the idle resumption point.
@@ -824,7 +826,9 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     let next_ctx = task_switch_ctx_ptr(to_task);
     // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
     prepare_switch_to(cpu_id, from_task, to_task);
-    switch_registers(prev_ctx, next_ctx);
+    // switch_context swaps the per-task preempt-count with the PCR around
+    // the register switch (migration-safe accounting), then switches.
+    switch_context(prev_ctx, next_ctx);
 }
 
 pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> bool {
@@ -986,6 +990,16 @@ fn schedule_internal() {
         return;
     }
 
+    // Invariant gate (Linux `__schedule_bug`/`schedule_debug` analogue):
+    // every context switch funnels through here, and a switch may only
+    // happen at the running baseline (preempt_count == 0). Descheduling
+    // with a preempt/lock guard held would make the held
+    // SpinLock/PreemptMutex travel with the blocked task (contenders spin
+    // unpreemptibly) and unbalance the per-task count swap in
+    // `switch_context`. Fail loud at the offending call chain rather than
+    // corrupting the count into a later, context-free underflow panic.
+    assert_switch_preempt_safe();
+
     if current == idle_task {
         let _ = run_ready_task_from_idle(cpu_id, idle_task);
         cpu::restore_flags(irq_flags);
@@ -1070,6 +1084,26 @@ pub fn mark_current_blocked() -> bool {
 fn assert_not_blocking_while_atomic() {
     if PreemptGuard::is_active() {
         panic!("scheduler: blocking wait entered with preemption disabled (spinning lock held?)");
+    }
+}
+
+/// Hard guard at the universal context-switch chokepoint
+/// ([`schedule_internal`]): a switch may only occur at the running
+/// baseline (`preempt_count == 0`). See the call site for the full
+/// rationale. Promotes the historical WaitQueue-only
+/// [`assert_not_blocking_while_atomic`] to *every* deschedule path —
+/// direct `schedule()`/`yield()`, the `sleep`/`block` sleep-queue
+/// primitives, and the trap-exit handoff — so a lock held across any
+/// blocking call panics at the real caller instead of silently
+/// corrupting the per-CPU count.
+#[inline]
+fn assert_switch_preempt_safe() {
+    let count = PreemptGuard::count();
+    if count != 0 {
+        panic!(
+            "scheduler: context switch attempted with preempt_count={count} \
+             (a SpinLock/PreemptMutex/PreemptGuard is held across a blocking or yielding call)"
+        );
     }
 }
 

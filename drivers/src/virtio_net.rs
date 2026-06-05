@@ -1757,48 +1757,64 @@ pub fn virtio_net_scan_members(out: &mut [UserNetMember], active_probe: bool) ->
         return 0;
     }
 
-    let mut state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready || !link_is_up(&state) {
-        return 0;
-    }
+    // Snapshot config, register self, and gather probe targets under a
+    // SHORT lock. The `VIRTIO_NET_STATE` SpinLock disables preemption while
+    // held, so it MUST NOT be held across the probe sleeps below: a task
+    // that deschedules with a preempt-disabling lock held strands the lock
+    // on the blocked task and unbalances the per-CPU preempt count. The
+    // lock is therefore re-acquired in short windows around each sleep.
+    let mut targets = [[0u8; 4]; 3];
+    let mut target_count = 0usize;
+    {
+        let mut state = VIRTIO_NET_STATE.lock();
+        if !state.device.ready || !link_is_up(&state) {
+            return 0;
+        }
 
-    let self_mac = state.device.mac;
-    let self_ipv4 = state.ipv4_addr;
-    if self_ipv4 != [0; 4] {
-        add_or_update_member(&mut state, self_mac, self_ipv4, USER_NET_MEMBER_FLAG_IPV4);
+        let self_mac = state.device.mac;
+        let self_ipv4 = state.ipv4_addr;
+        if self_ipv4 != [0; 4] {
+            add_or_update_member(&mut state, self_mac, self_ipv4, USER_NET_MEMBER_FLAG_IPV4);
+        }
+
+        if active_probe {
+            if state.router != [0; 4] {
+                targets[target_count] = state.router;
+                target_count += 1;
+            }
+
+            // Probe .2 and .3 in the local subnet as simple neighbor discovery
+            for last_octet in [2u8, 3] {
+                if state.ipv4_addr != [0; 4] && target_count < targets.len() {
+                    let mut t = state.ipv4_addr;
+                    t[3] = last_octet;
+                    targets[target_count] = t;
+                    target_count += 1;
+                }
+            }
+        }
     }
 
     if active_probe {
-        let mut targets = [[0u8; 4]; 3];
-        let mut target_count = 0usize;
-
-        if state.router != [0; 4] {
-            targets[target_count] = state.router;
-            target_count += 1;
-        }
-
-        // Probe .2 and .3 in the local subnet as simple neighbor discovery
-        for last_octet in [2u8, 3] {
-            if state.ipv4_addr != [0; 4] && target_count < targets.len() {
-                let mut t = state.ipv4_addr;
-                t[3] = last_octet;
-                targets[target_count] = t;
-                target_count += 1;
+        for target in &targets[..target_count] {
+            // Transmit the ARP under the lock, then release it before sleeping.
+            {
+                let mut state = VIRTIO_NET_STATE.lock();
+                let _ = transmit_arp_request(&mut state, *target);
+            }
+            // The NAPI kthread (TaskPriority::KernelIo) wakes on each RX IRQ
+            // via NAPI_WAKER and drains the ring inline. We wait for it to
+            // make progress with NO lock held so this task can deschedule
+            // safely — a short sleep is enough on the local segment.
+            slopos_kernel_services::driver_runtime::sleep_current_task_ms(SCAN_RX_TIMEOUT_MS);
+            {
+                let mut state = VIRTIO_NET_STATE.lock();
+                let _ = virtnet_poll(&mut state, NAPI_BUDGET);
             }
         }
 
-        for target in &targets[..target_count] {
-            let _ = transmit_arp_request(&mut state, *target);
-            // The NAPI kthread (TaskPriority::KernelIo) wakes on each
-            // RX IRQ via NAPI_WAKER and drains the ring inline.
-            // We just wait for it to make progress — a short poll
-            // sleep is enough because the probe target is on the
-            // local segment.
-            slopos_kernel_services::driver_runtime::sleep_current_task_ms(SCAN_RX_TIMEOUT_MS);
-            let _ = virtnet_poll(&mut state, NAPI_BUDGET);
-        }
-
-        // Drain any remaining rx frames from the above probes
+        // Drain any remaining rx frames from the above probes (no sleep here).
+        let mut state = VIRTIO_NET_STATE.lock();
         for _ in 0..8 {
             if virtnet_poll(&mut state, NAPI_BUDGET) == 0 {
                 break;
@@ -1806,6 +1822,7 @@ pub fn virtio_net_scan_members(out: &mut [UserNetMember], active_probe: bool) ->
         }
     }
 
+    let state = VIRTIO_NET_STATE.lock();
     let copy_count = out.len().min(state.member_count);
     out[..copy_count].copy_from_slice(&state.members[..copy_count]);
     copy_count
@@ -1889,19 +1906,6 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
     }
 
     submit_tx(&mut state, tx_page, (hdr_len + packet.len()) as u32)
-}
-
-pub fn virtio_net_receive(buffer: &mut [u8]) -> Option<usize> {
-    if buffer.is_empty() {
-        return Some(0);
-    }
-
-    let mut state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready || !link_is_up(&state) {
-        return None;
-    }
-
-    poll_one_rx_frame(&mut state, Some(buffer))
 }
 
 // =============================================================================
