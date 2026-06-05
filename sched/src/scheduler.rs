@@ -1058,6 +1058,21 @@ pub fn mark_current_blocked() -> bool {
 /// case, the wake would be silently dropped (we'd be removed from
 /// the runqueue with state `Ready` and nobody to dispatch us).
 ///
+/// Scheduling-while-atomic guard (Linux's `__schedule_bug` / BUG on
+/// `in_atomic()`): a task must never deschedule while preemption is
+/// disabled — the held `SpinLock`/`PreemptMutex` would travel with the
+/// blocked task and every contender would spin unpreemptibly until a
+/// wake that may itself need the lock. Before scheduler-backed waits
+/// landed in the block-device path this failure mode was silent (the
+/// task blocked, the lock stayed held, the system wedged); fail loud
+/// instead so the offending call chain is in the panic backtrace.
+#[inline]
+fn assert_not_blocking_while_atomic() {
+    if PreemptGuard::is_active() {
+        panic!("scheduler: blocking wait entered with preemption disabled (spinning lock held?)");
+    }
+}
+
 /// Defence: at entry, `unschedule_task` strips us from every
 /// runqueue (serialised against any racing wake's `schedule_task`
 /// via the per-CPU `queue_lock`). Then re-load the task state. If
@@ -1081,6 +1096,7 @@ pub fn yield_blocked_task() {
     if task_id_of(current).unwrap_or(INVALID_TASK_ID) == INVALID_TASK_ID {
         return;
     }
+    assert_not_blocking_while_atomic();
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         unschedule_task(current);
         if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
@@ -1116,6 +1132,7 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
     if task_id == INVALID_TASK_ID {
         return;
     }
+    assert_not_blocking_while_atomic();
     super::sleep::arm_blocked_timeout(task_id, timeout_ms);
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         unschedule_task(current);

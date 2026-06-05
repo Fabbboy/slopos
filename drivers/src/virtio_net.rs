@@ -1607,44 +1607,46 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         s.queue_msix_entry(VIRTIO_NET_QUEUE_TX)
     });
 
-    let Some(rx_queue) = queue::setup_queue(
-        &caps.common_cfg,
-        VIRTIO_NET_QUEUE_RX,
-        DEFAULT_QUEUE_SIZE,
-        rx_msix_entry,
-    ) else {
-        klog_info!("virtio-net: rx queue setup failed");
-        DEVICE_CLAIMED.reset();
-        return Err(PciProbeError::OutOfMemory);
-    };
-
-    let Some(tx_queue) = queue::setup_queue(
-        &caps.common_cfg,
-        VIRTIO_NET_QUEUE_TX,
-        DEFAULT_QUEUE_SIZE,
-        tx_msix_entry,
-    ) else {
-        klog_info!("virtio-net: tx queue setup failed");
-        DEVICE_CLAIMED.reset();
-        return Err(PciProbeError::OutOfMemory);
-    };
-
     let negotiated_features = feat_result.driver_features;
     let mac = read_mac(&caps, negotiated_features);
     let mtu = read_mtu(&caps, negotiated_features);
 
-    set_driver_ok(&caps);
-
     {
+        // Queues are set up in place inside the heap-resident state so the
+        // ~200-byte `Virtqueue`s never land on this probe's stack frame
+        // (2 KiB frame gate). Both must be enabled before DRIVER_OK
+        // (VirtIO spec §3.1.1).
         let mut state = VIRTIO_NET_STATE.lock();
-        state.device = VirtioNetDevice {
-            rx_queue,
-            tx_queue,
-            negotiated_features,
-            mac,
-            mtu,
-            ready: true,
-        };
+        if !queue::setup_queue_into(
+            &caps.common_cfg,
+            VIRTIO_NET_QUEUE_RX,
+            DEFAULT_QUEUE_SIZE,
+            rx_msix_entry,
+            &mut state.device.rx_queue,
+        ) {
+            klog_info!("virtio-net: rx queue setup failed");
+            DEVICE_CLAIMED.reset();
+            return Err(PciProbeError::OutOfMemory);
+        }
+
+        if !queue::setup_queue_into(
+            &caps.common_cfg,
+            VIRTIO_NET_QUEUE_TX,
+            DEFAULT_QUEUE_SIZE,
+            tx_msix_entry,
+            &mut state.device.tx_queue,
+        ) {
+            klog_info!("virtio-net: tx queue setup failed");
+            DEVICE_CLAIMED.reset();
+            return Err(PciProbeError::OutOfMemory);
+        }
+
+        set_driver_ok(&caps);
+
+        state.device.negotiated_features = negotiated_features;
+        state.device.mac = mac;
+        state.device.mtu = mtu;
+        state.device.ready = true;
         state.caps = caps;
         state.msix_state = msix_state;
         state.ipv4_addr = [0; 4];

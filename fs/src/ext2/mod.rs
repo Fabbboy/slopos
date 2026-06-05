@@ -111,6 +111,20 @@ impl<'a> Ext2Fs<'a> {
         self.superblock
     }
 
+    /// Whether an operation on this handle (or a prior handle — see
+    /// [`Self::set_superblock_dirty`]) left the on-disk superblock stale.
+    pub fn superblock_dirty(&self) -> bool {
+        self.superblock_dirty
+    }
+
+    /// Seed the superblock-dirty flag when rebuilding a borrowed handle
+    /// from persistent mounted state. The flag must survive across
+    /// handles: a mutating op dirties it in one `with_fs` call and the
+    /// background flusher persists it from a *different* handle later.
+    pub fn set_superblock_dirty(&mut self, dirty: bool) {
+        self.superblock_dirty = dirty;
+    }
+
     pub fn block_size(&self) -> u32 {
         self.block_size
     }

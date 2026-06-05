@@ -8,6 +8,8 @@ pub mod queue;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::sync::WaitQueue;
+use slopos_ostd::sync::wait_queue::WaitOutcome;
 
 // =============================================================================
 // VirtIO PCI Capability Types
@@ -162,7 +164,7 @@ impl VirtioMmioCaps {
 /// Checks `condition` each iteration. On BSP (CPU 0) uses `sti; hlt` to
 /// sleep until the next interrupt; on APs falls back to spin_loop.
 /// Returns `true` if `condition` returned `true`, `false` on timeout.
-fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
+pub(crate) fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
     use crate::hpet;
 
     if condition() {
@@ -205,71 +207,42 @@ fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
 }
 
 // =============================================================================
-// CompletionEvent — scheduler-backed blocking for request/response waits
+// IrqEdgeEvent — scheduler-backed edge-triggered IRQ event
 // =============================================================================
 
-/// Completion event for synchronous I/O waits (single-waiter).
+/// Edge-triggered event signalled from IRQ context, waited on by tasks.
 ///
-/// Uses HPET-based cli/sti/hlt polling. Scheduler-backed blocking
-/// is deferred to a future iteration — the wait-protocol redesign
-/// (Phase 5: Running→Blocked CAS under the wait-queue lock) is in
-/// place, but the CompletionEvent↔scheduler integration has an
-/// unresolved CAS race after task_wait_for wakeups.
-pub struct CompletionEvent {
-    signaled: AtomicBool,
-}
-
-impl CompletionEvent {
-    pub const fn new() -> Self {
-        Self {
-            signaled: AtomicBool::new(false),
-        }
-    }
-
-    #[inline]
-    pub fn signal(&self) {
-        self.signaled.store(true, Ordering::Release);
-    }
-
-    #[inline]
-    pub fn reset(&self) {
-        self.signaled.store(false, Ordering::Release);
-    }
-
-    #[inline]
-    pub fn try_consume(&self) -> bool {
-        self.signaled
-            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
-        hpet_poll_wait(&|| self.try_consume(), timeout_ms)
-    }
-}
-
-// =============================================================================
-// IrqEdgeEvent — fast atomic flag for high-rate edge notifications
-// =============================================================================
-
-/// Lightweight edge-triggered event for high-frequency IRQ notification.
+/// The producer side ([`signal`](Self::signal)) is a `Release` store plus
+/// `WaitQueue::wake_all` — IRQ-safe by the wait-queue contract ("IRQ
+/// context for `wake_*`"). The consumer side parks scheduler-backed via
+/// `wait_event_timeout_until`, so a waiting task deschedules and frees
+/// its CPU instead of HLT-polling; the wait queue's enqueue-then-recheck
+/// protocol closes the lost-wakeup window. The edge is latched in
+/// `signaled`, so a signal that fires while no waiter is parked is
+/// consumed by the next wait (single-token `parking`-style semantics).
 ///
-/// No scheduler interaction in the signal path — keeps the IRQ handler
-/// fast. Safe to wait on while holding an `SpinLock`.
+/// Before the scheduler backend is registered (device probe, early
+/// boot), waits degrade to the HPET cli/sti/hlt poll loop — the only
+/// context where burning the CPU on a wait is acceptable.
 pub struct IrqEdgeEvent {
     signaled: AtomicBool,
+    /// Tasks park here; `signal()` wakes from IRQ context.
+    waiters: WaitQueue,
 }
 
 impl IrqEdgeEvent {
     pub const fn new() -> Self {
         Self {
             signaled: AtomicBool::new(false),
+            waiters: WaitQueue::new(),
         }
     }
 
+    /// **IRQ-safe.** Latch the edge and wake every parked waiter.
     #[inline]
     pub fn signal(&self) {
         self.signaled.store(true, Ordering::Release);
+        let _ = self.waiters.wake_all();
     }
 
     #[inline]
@@ -284,22 +257,22 @@ impl IrqEdgeEvent {
             .is_ok()
     }
 
+    /// Park until the edge fires or `timeout_ms` elapses. Returns `true`
+    /// iff the edge was consumed.
     pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
-        hpet_poll_wait(
-            &|| {
-                if self.signaled.load(Ordering::Acquire) {
-                    self.signaled.store(false, Ordering::Release);
-                    true
-                } else {
-                    false
-                }
-            },
-            timeout_ms,
-        )
+        match self.waiters.wait_event_timeout_until(
+            || if self.try_consume() { Some(()) } else { None },
+            timeout_ms as u64,
+        ) {
+            WaitOutcome::Ready(()) => true,
+            WaitOutcome::Timeout => false,
+            // Pre-scheduler context (probe paths): fall back to polling.
+            WaitOutcome::NoRuntime => hpet_poll_wait(&|| self.try_consume(), timeout_ms),
+        }
     }
 }
 
-/// Legacy alias — use [`CompletionEvent`] or [`IrqEdgeEvent`] for new code.
+/// Legacy alias — use [`IrqEdgeEvent`] for new code.
 pub type QueueEvent = IrqEdgeEvent;
 
 // =============================================================================

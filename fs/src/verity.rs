@@ -152,6 +152,12 @@ impl BlockDevice for VerifiedBlockDevice {
     }
 
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        // The device write blocks (scheduler-backed completion wait), so it
+        // must run OUTSIDE the spinning `written` lock. Marking happens
+        // after, regardless of the result: a failed write leaves the block
+        // content unknown, so its build-time CRC must no longer be enforced
+        // either way.
+        let result = self.inner.write_at(offset, buffer);
         if !buffer.is_empty() && !self.hashes.is_empty() {
             let bs = self.block_size as u64;
             let n = self.hashes.len() as u64;
@@ -165,7 +171,7 @@ impl BlockDevice for VerifiedBlockDevice {
                 b += 1;
             }
         }
-        self.inner.write_at(offset, buffer)
+        result
     }
 
     fn capacity(&self) -> u64 {

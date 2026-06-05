@@ -47,6 +47,9 @@ const AVAIL_RING_OFFSET: usize = 4;
 const USED_IDX_OFFSET: usize = 2;
 const USED_RING_OFFSET: usize = 4;
 
+/// Sentinel for "no descriptor" in the driver-side free chain.
+const DESC_NONE: u16 = u16::MAX;
+
 pub struct Virtqueue {
     pub size: u16,
     pub desc_phys: PhysAddr,
@@ -58,6 +61,13 @@ pub struct Virtqueue {
     pub notify_off: u16,
     pub last_used_idx: u16,
     pub ready: bool,
+    /// Driver-side free chain over descriptor indices. Kept in kernel
+    /// memory rather than threaded through the device-visible `next`
+    /// fields (the classic vring trick) so a misbehaving device can
+    /// never corrupt the allocator's bookkeeping.
+    free_links: [u16; DEFAULT_QUEUE_SIZE as usize],
+    free_head: u16,
+    num_free: u16,
 }
 
 impl Default for Virtqueue {
@@ -79,7 +89,41 @@ impl Virtqueue {
             notify_off: 0,
             last_used_idx: 0,
             ready: false,
+            free_links: [DESC_NONE; DEFAULT_QUEUE_SIZE as usize],
+            free_head: DESC_NONE,
+            num_free: 0,
         }
+    }
+
+    /// Pop one free descriptor index, or `None` when the ring is
+    /// exhausted (e.g. quarantined chains from timed-out requests are
+    /// still owned by the device).
+    pub fn alloc_desc(&mut self) -> Option<u16> {
+        let head = self.free_head;
+        if head == DESC_NONE {
+            return None;
+        }
+        self.free_head = self.free_links[head as usize];
+        self.free_links[head as usize] = DESC_NONE;
+        self.num_free -= 1;
+        Some(head)
+    }
+
+    /// Return a descriptor index to the free chain. Must only be called
+    /// once the device no longer owns the descriptor (its chain head was
+    /// observed on the used ring, or it was never submitted).
+    pub fn free_desc(&mut self, idx: u16) {
+        if idx >= self.size {
+            return;
+        }
+        self.free_links[idx as usize] = self.free_head;
+        self.free_head = idx;
+        self.num_free += 1;
+    }
+
+    /// Number of descriptors available for allocation.
+    pub fn free_count(&self) -> u16 {
+        self.num_free
     }
 
     pub fn is_ready(&self) -> bool {
@@ -152,22 +196,13 @@ impl Virtqueue {
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
         Some(elem)
     }
-
-    /// Advance the used ring index if the device posted new entries.
-    /// Returns `true` if at least one new entry was consumed.
-    pub fn advance_used(&mut self) -> bool {
-        virtio_rmb();
-        let used_idx = self.read_used_idx();
-        if used_idx != self.last_used_idx {
-            self.last_used_idx = used_idx;
-            true
-        } else {
-            false
-        }
-    }
 }
 
-/// Set up a virtqueue on the device.
+/// Set up a virtqueue on the device, writing the driver-side state
+/// directly into `out` (in-place — a `Virtqueue` is ~200 bytes and the
+/// destination lives in heap-allocated device state, so it must never
+/// round-trip through a probe function's stack frame; cf. the 2 KiB
+/// frame gate).
 ///
 /// `msix_vector` is the MSI-X table entry index to assign to this queue.
 /// Pass [`VIRTIO_MSI_NO_VECTOR`] (0xFFFF) when MSI-X is not in use.
@@ -175,35 +210,48 @@ impl Virtqueue {
 /// Per VirtIO spec §4.1.4.3, the `queue_msix_vector` register is written
 /// **before** `queue_enable` so the device sees the vector assignment atomically
 /// with queue activation.
-pub fn setup_queue(
+///
+/// Returns `false` on failure, leaving `out` in the inert empty state.
+pub fn setup_queue_into(
     common_cfg: &MmioRegion,
     queue_index: u16,
     max_size: u16,
     msix_vector: u16,
-) -> Option<Virtqueue> {
+    out: &mut Virtqueue,
+) -> bool {
+    *out = Virtqueue::new();
+
     if !common_cfg.is_mapped() {
-        return None;
+        return false;
     }
 
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_SELECT, queue_index);
 
     let device_max_size = common_cfg.read::<u16>(COMMON_CFG_QUEUE_SIZE);
     if device_max_size == 0 {
-        return None;
+        return false;
     }
 
     let size = device_max_size.min(max_size);
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_SIZE, size);
 
-    let desc_frame = OwnedPageFrame::alloc_zeroed()?;
-    let avail_frame = OwnedPageFrame::alloc_zeroed()?;
-    let used_frame = OwnedPageFrame::alloc_zeroed()?;
+    let Some(desc_frame) = OwnedPageFrame::alloc_zeroed() else {
+        return false;
+    };
+    let Some(avail_frame) = OwnedPageFrame::alloc_zeroed() else {
+        return false;
+    };
+    let Some(used_frame) = OwnedPageFrame::alloc_zeroed() else {
+        return false;
+    };
 
     let desc_phys = PhysAddr::new(desc_frame.phys_u64());
     let avail_phys = PhysAddr::new(avail_frame.phys_u64());
     let used_phys = PhysAddr::new(used_frame.phys_u64());
 
-    let desc_ring = VirtqueueRegion::<VirtqDesc>::new(desc_frame, size as usize)?;
+    let Some(desc_ring) = VirtqueueRegion::<VirtqDesc>::new(desc_frame, size as usize) else {
+        return false;
+    };
 
     common_cfg.write::<u64>(COMMON_CFG_QUEUE_DESC, desc_phys.as_u64());
     common_cfg.write::<u64>(COMMON_CFG_QUEUE_AVAIL, avail_phys.as_u64());
@@ -215,26 +263,32 @@ pub fn setup_queue(
         let readback = common_cfg.read::<u16>(COMMON_CFG_QUEUE_MSIX_VECTOR);
         if readback == VIRTIO_MSI_NO_VECTOR {
             // Device rejected the vector — drop frames and fail.
-            return None;
+            return false;
         }
     }
 
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_ENABLE, 1);
 
-    let notify_off = common_cfg.read::<u16>(COMMON_CFG_QUEUE_NOTIFY_OFF);
+    out.size = size;
+    out.desc_phys = desc_phys;
+    out.avail_phys = avail_phys;
+    out.used_phys = used_phys;
+    out.desc_ring = Some(desc_ring);
+    out.avail_frame = Some(avail_frame);
+    out.used_frame = Some(used_frame);
+    out.notify_off = common_cfg.read::<u16>(COMMON_CFG_QUEUE_NOTIFY_OFF);
+    out.last_used_idx = 0;
 
-    Some(Virtqueue {
-        size,
-        desc_phys,
-        avail_phys,
-        used_phys,
-        desc_ring: Some(desc_ring),
-        avail_frame: Some(avail_frame),
-        used_frame: Some(used_frame),
-        notify_off,
-        last_used_idx: 0,
-        ready: true,
-    })
+    // Build the driver-side free chain in place: every descriptor starts
+    // free, linked in index order.
+    for i in 0..size {
+        out.free_links[i as usize] = if i + 1 < size { i + 1 } else { DESC_NONE };
+    }
+    out.free_head = 0;
+    out.num_free = size;
+
+    out.ready = true;
+    true
 }
 
 pub fn notify_queue(

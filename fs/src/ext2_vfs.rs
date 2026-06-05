@@ -7,7 +7,7 @@ use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_ostd::KBox;
 use slopos_ostd::sync::kernel_io_task::KernelIoToken;
 use slopos_ostd::sync::wait_queue::WaitQueue;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, PreemptMutex};
+use slopos_ostd::sync::{InitFlag, Mutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
 
@@ -33,9 +33,22 @@ struct CachedExt2 {
     inode_size: u16,
     /// The persistent write-back buffer cache, sized to `block_size` at mount.
     cache: BlockCache,
+    /// The on-disk superblock is stale (free-count drift from a mutating
+    /// op). Lives here — not only on the per-call `Ext2Fs` handle — so the
+    /// background flusher's sync sees dirtiness produced by earlier ops.
+    superblock_dirty: bool,
 }
 
-static CACHED_EXT2: PreemptMutex<Option<CachedExt2>> = PreemptMutex::new(None, LOCK_LEVEL_RESOURCE);
+/// The mounted-filesystem lock is a *sleeping* mutex: ext2 operations
+/// perform block-device I/O whose completion waits are scheduler-backed,
+/// so the holder may legitimately deschedule mid-operation. A spinning,
+/// preemption-disabling lock here (the previous `PreemptMutex`) made every
+/// contender burn its CPU unpreemptibly for the full duration of a
+/// multi-barrier sync — and suppressed the holder CPU's timer-tick
+/// scheduling entirely, which is exactly how a stalled flush froze the
+/// whole system. Linux holds sleeping inode/fs mutexes across block I/O
+/// for the same reason.
+static CACHED_EXT2: Mutex<Option<CachedExt2>> = Mutex::new(None);
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
 // ---- Background writeback (flusher) plumbing ----
@@ -56,6 +69,11 @@ const FLUSH_INTERVAL_MS: u64 = 5_000;
 /// dirty blocks a mutating op kicks the flusher immediately rather than waiting
 /// for the periodic tick.
 const FLUSH_EAGER_THRESHOLD: usize = 48;
+/// First retry delay after a failed sync (exponential backoff floor).
+const FLUSH_BACKOFF_MIN_MS: u64 = 50;
+/// Backoff ceiling — a persistently failing device is retried no more often
+/// than the periodic flush cadence.
+const FLUSH_BACKOFF_MAX_MS: u64 = FLUSH_INTERVAL_MS;
 
 pub struct StaticExt2Vfs;
 
@@ -77,8 +95,10 @@ impl StaticExt2Vfs {
             block_size,
             inode_size,
         );
+        fs.set_superblock_dirty(cached.superblock_dirty);
         let result = f(&mut fs).map_err(ext2_error_to_vfs);
         let new_superblock = fs.superblock();
+        let new_superblock_dirty = fs.superblock_dirty();
         let dirty = fs.dirty_count();
         drop(fs);
 
@@ -91,6 +111,7 @@ impl StaticExt2Vfs {
             // success; a failed op must not leak free-count drift into the
             // live superblock.
             cached.superblock = new_superblock;
+            cached.superblock_dirty = new_superblock_dirty;
             note_dirty(dirty);
         }
         // NOTE (crash/failure atomicity): on the error path we leave any blocks
@@ -277,6 +298,7 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
         block_size,
         inode_size: if inode_size == 0 { 128 } else { inode_size },
         cache,
+        superblock_dirty: false,
     });
     drop(guard);
 
@@ -300,6 +322,12 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
     let Some(cached) = guard.as_mut() else {
         return Ok(());
     };
+    // Nothing dirty anywhere: skip the device barriers entirely instead of
+    // issuing no-op flush commands every periodic tick.
+    if cached.cache.dirty_count() == 0 && !cached.superblock_dirty {
+        DIRTY_PENDING.store(0, Ordering::Relaxed);
+        return Ok(());
+    }
     let (superblock, block_size, inode_size) =
         (cached.superblock, cached.block_size, cached.inode_size);
     let mut fs = Ext2Fs::new(
@@ -309,9 +337,12 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
         block_size,
         inode_size,
     );
+    fs.set_superblock_dirty(cached.superblock_dirty);
     let result = fs.sync().map_err(ext2_error_to_vfs);
+    let superblock_dirty = fs.superblock_dirty();
     let dirty = fs.dirty_count();
     drop(fs);
+    cached.superblock_dirty = superblock_dirty;
     DIRTY_PENDING.store(dirty, Ordering::Relaxed);
     result
 }
@@ -343,14 +374,35 @@ fn start_flusher() {
 /// [`ext2_vfs_sync`]. Runs at `TaskPriority::KernelIo` (above user tasks) so
 /// writeback keeps up even under user load. The wait predicate only observes
 /// atomics — no I/O, no locks — keeping it pure.
+///
+/// A failed sync leaves blocks dirty, so `DIRTY_PENDING > 0` would satisfy
+/// the wait predicate immediately and re-run sync back-to-back forever — an
+/// unbounded retry storm against a device that just demonstrated it cannot
+/// complete a write/flush. Persistent failures therefore back off
+/// exponentially ([`FLUSH_BACKOFF_MIN_MS`] → [`FLUSH_BACKOFF_MAX_MS`]),
+/// ignoring dirty-counter wakes until the backoff sleep elapses (cf. Linux
+/// writeback's congestion backoff).
 fn ext2_flusher_entry(_token: KernelIoToken<'static>) {
+    let mut backoff_ms: u64 = 0;
     loop {
-        FLUSH_WQ.wait_event_timeout(
-            || DIRTY_PENDING.load(Ordering::Relaxed) > 0 || FLUSH_SHUTDOWN.load(Ordering::Relaxed),
-            FLUSH_INTERVAL_MS,
-        );
+        if backoff_ms > 0 {
+            FLUSH_WQ.wait_event_timeout(|| FLUSH_SHUTDOWN.load(Ordering::Relaxed), backoff_ms);
+        } else {
+            FLUSH_WQ.wait_event_timeout(
+                || {
+                    DIRTY_PENDING.load(Ordering::Relaxed) > 0
+                        || FLUSH_SHUTDOWN.load(Ordering::Relaxed)
+                },
+                FLUSH_INTERVAL_MS,
+            );
+        }
         let shutting_down = FLUSH_SHUTDOWN.load(Ordering::Relaxed);
-        let _ = ext2_vfs_sync();
+        let result = ext2_vfs_sync();
+        backoff_ms = if result.is_err() {
+            (backoff_ms * 2).clamp(FLUSH_BACKOFF_MIN_MS, FLUSH_BACKOFF_MAX_MS)
+        } else {
+            0
+        };
         if shutting_down {
             break;
         }
