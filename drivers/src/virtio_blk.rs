@@ -288,6 +288,18 @@ impl VirtioBlkInner {
         self.state.lock().device.capacity_sectors * SECTOR_SIZE
     }
 
+    /// Whether `[offset, offset + len)` lies fully within the device.
+    /// Rejects a span that runs past capacity — an out-of-range LBA would
+    /// otherwise be handed to the device (which errors it), and the
+    /// partial-sector read-modify-write paths would touch a sector index
+    /// past the end. `checked_add` also rejects an `offset + len` that
+    /// overflows `u64`.
+    fn span_in_bounds(&self, offset: u64, len: usize) -> bool {
+        offset
+            .checked_add(len as u64)
+            .is_some_and(|end| end <= self.capacity_bytes())
+    }
+
     #[cfg(feature = "test-hooks")]
     fn msix_state(&self) -> Option<VirtioMsixState> {
         self.state.lock().msix_state.clone()
@@ -601,6 +613,9 @@ impl VirtioBlkInner {
         if !self.is_ready() {
             return false;
         }
+        if !self.span_in_bounds(offset, buffer.len()) {
+            return false;
+        }
 
         let mut pos = 0usize;
         let mut cur = offset;
@@ -651,6 +666,9 @@ impl VirtioBlkInner {
             return true;
         }
         if !self.is_ready() {
+            return false;
+        }
+        if !self.span_in_bounds(offset, buffer.len()) {
             return false;
         }
 

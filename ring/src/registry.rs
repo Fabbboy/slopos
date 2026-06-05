@@ -12,7 +12,7 @@
 
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleError, HandleTable};
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, Mutex, SpinLock};
 
 use crate::ring_obj::Ring;
 
@@ -29,14 +29,24 @@ const SLOT_BITS: u32 = 12;
 const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 
 /// One registry slot: a reference-counted, individually-locked ring
-/// (SLOPRING § 6.3, § 9). The per-ring [`SpinLock`] is the per-ring
-/// serialization lock; the [`KArc`] keeps the ring alive for a
-/// `with_ring` caller even if a concurrent `close` removes it from the
-/// table (no UAF). Lock level [`LOCK_LEVEL_REGISTRY`] — same rank as the
-/// table lock, which is legal because the table lock is always dropped
-/// before any per-ring lock is taken, so the dependency graph stays
-/// acyclic (the cycle detector is level-advisory, edge-based).
-type RingSlot = KArc<SpinLock<Ring>>;
+/// (SLOPRING § 6.3, § 9). The per-ring lock is the per-ring serialization
+/// lock; the [`KArc`] keeps the ring alive for a `with_ring` caller even
+/// if a concurrent `close` removes it from the table (no UAF).
+///
+/// It is a **sleeping [`Mutex`]**, not a `SpinLock`, because the submit
+/// and harvest closures run opcode probes inline under it (`ring_enter`'s
+/// `submit` / `harvest_step`), and a probe for a filesystem opcode
+/// (`OP_OPENAT`, `OP_READ`/`OP_WRITE` on a regular fd, …) descends into
+/// the VFS, whose ext2 + block-device I/O completion waits are now
+/// scheduler-backed — the holder legitimately deschedules mid-probe. A
+/// spinning, preemption-disabling lock here would make that a
+/// scheduling-while-atomic violation (the held lock travels with the
+/// blocked task while every contender spins unpreemptibly with IRQs
+/// masked on the BSP — exactly the freeze the block-I/O rework set out to
+/// kill). The lock is only ever taken in task context (`with_ring` /
+/// `owner_is` from the `ring_enter` / `ring_register` syscall paths),
+/// never from an interrupt handler, so sleeping on it is always legal.
+type RingSlot = KArc<Mutex<Ring>>;
 
 /// The global registry-table lock. Held only briefly: to insert, to
 /// remove, or to look up and **clone** a [`RingSlot`] handle. It is
@@ -79,7 +89,7 @@ fn slot_for(raw_handle: usize) -> Result<RingSlot, HandleError> {
 /// Insert a fresh ring; returns the packed fd-handle value, or `None`
 /// if the registry is full or the per-ring allocation fails.
 pub fn insert(ring: Ring) -> Option<usize> {
-    let slot = KArc::try_new(SpinLock::new(ring, LOCK_LEVEL_REGISTRY)).ok()?;
+    let slot = KArc::try_new(Mutex::new(ring)).ok()?;
     with_registry(|t| t.insert(slot).ok().map(pack))
 }
 
