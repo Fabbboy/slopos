@@ -55,7 +55,7 @@ pub mod vtparser {
 }
 
 // Decomposed sub-modules
-mod io;
+pub(crate) mod io;
 mod job_control;
 mod lifecycle;
 mod poll;
@@ -144,6 +144,16 @@ impl Drop for Tty {
 // ---------------------------------------------------------------------------
 // PostLockWork — RAII helper for deferred actions after lock release
 // ---------------------------------------------------------------------------
+
+/// Pending SysRq (Ctrl+T) task dump, marked on any input path (ISR, serial
+/// drain) and fired by the idle-loop input callback in task context.
+pub(crate) static SYSRQ_PENDING: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Mark a SysRq task dump as pending (callable while holding TTY locks).
+pub(crate) fn sysrq_mark_pending() {
+    SYSRQ_PENDING.store(true, core::sync::atomic::Ordering::Release);
+}
 
 /// Accumulates work that must be performed **after** dropping the per-TTY
 /// lock, to avoid deadlock or lock-ordering violations.

@@ -519,6 +519,13 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
         reap_zombies();
 
+        // Belt-and-braces: re-enqueue any task stranded READY with no
+        // runqueue entry (a lost-enqueue race would otherwise freeze it
+        // forever — see `rescue_stranded_ready_tasks`). Runs only when this
+        // CPU is fully idle (nothing to run, nothing to steal), so the
+        // pool walk costs idle time only.
+        crate::scheduler::rescue_stranded_ready_tasks();
+
         // idle_time is now incremented per-tick in scheduler_timer_tick(),
         // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.
         slopos_ostd::sync::rcu_note_qs();

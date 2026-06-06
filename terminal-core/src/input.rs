@@ -459,6 +459,20 @@ mod tests {
         ));
     }
 
+    /// Plain Ctrl+C (no Shift) must reach the PTY master so the ldisc can
+    /// raise SIGINT. Regression lock for the stuck-SHIFT modifier bug: the
+    /// kernel routed modifier *releases* with the raw break code (make |
+    /// 0x80), no tracker cleared the bit, and after the first shifted
+    /// keystroke (e.g. the ':' in a curl URL) every Ctrl+C was
+    /// misclassified as the Ctrl+Shift+C copy chord and silently swallowed.
+    #[test]
+    fn ctrl_only_c_reaches_master_as_sigint_byte() {
+        assert_eq!(
+            master_bytes(encode_key(0x03, 0x2E, MODIFIER_CTRL)),
+            alloc::vec![0x03]
+        );
+    }
+
     #[test]
     fn ctrl_shift_v_requests_paste() {
         assert!(matches!(

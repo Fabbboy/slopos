@@ -6,7 +6,8 @@ use slopos_ostd::KVec;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::scheduler::{
-    is_scheduling_active, schedule, schedule_task, scheduler_get_current_task, unschedule_task,
+    commit_blocked_deschedule, is_scheduling_active, schedule, schedule_task,
+    scheduler_get_current_task,
 };
 use super::task::{
     INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
@@ -385,7 +386,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
 
     // See `block_current_task_with_timeout` for why CAS precedes upsert.
-    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
+    let rc = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
         if task_set_state_from_with_reason(
             task_id,
             TaskStatus::Running,
@@ -403,10 +404,17 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
             );
             return -1;
         }
-        unschedule_task(current);
+        if !commit_blocked_deschedule(current) {
+            return 1; // raced: a wake was consumed; scrub the sleep entry below
+        }
         schedule();
         0
-    })
+    });
+    if rc == 1 {
+        cancel_sleep(task_id);
+        return 0;
+    }
+    rc
 }
 
 /// Block the current task with a timeout.
@@ -468,7 +476,9 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
             );
             return true;
         }
-        unschedule_task(current);
+        if !commit_blocked_deschedule(current) {
+            return false; // raced: a wake was consumed; cancel_sleep below scrubs
+        }
         schedule();
         false
     });

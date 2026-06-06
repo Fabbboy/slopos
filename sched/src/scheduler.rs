@@ -897,6 +897,16 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // If another CPU already claimed it (or state changed), drop this dequeue.
     let next_task_id = task_id_of(next_task).unwrap_or(INVALID_TASK_ID);
     if task_set_state(next_task_id, TaskStatus::Running) != 0 {
+        // Lost the claim — but if the task is *still* Ready we hold its only
+        // queue entry (the intrusive ready-link is single-membership), so
+        // dropping the dequeue would strand it READY in no runqueue forever.
+        // Put it back; a claimed (Running/exited) task is the winner's
+        // responsibility and is correctly dropped.
+        if task_is_ready(next_task) {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                let _ = sched.enqueue_local(next_task);
+            });
+        }
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
@@ -1122,6 +1132,35 @@ fn assert_switch_preempt_safe() {
 /// state-load but before the context-switch still enqueues us
 /// (via its own `schedule_task`), so we are dispatched on a later
 /// scheduler tick — no lost wakeup.
+/// Commit a `Blocked` deschedule: strip `current` from every runqueue, then
+/// re-confirm it is still `Blocked`. Returns `true` if the caller may
+/// proceed to `schedule()`.
+///
+/// This is THE lost-wakeup guard for every blocking primitive: a peer's
+/// `unblock_task` may CAS `Blocked → Ready` and enqueue between the
+/// caller's Blocked-CAS and the `unschedule_task` here — which just
+/// stripped that fresh enqueue. Descheduling anyway would strand the task
+/// READY in no runqueue forever (every later wake no-ops on a Ready task,
+/// and the sleep timer's wake gates on Blocked). On a detected race the
+/// wake is consumed instead: status is forced back to `Running`, any
+/// residual enqueue (a wake that landed after the first unschedule) is
+/// scrubbed, and the caller must NOT deschedule. Every blocking path —
+/// `yield_blocked_task`, `yield_blocked_task_with_timeout`,
+/// `sleep_current_task_ms`, `block_current_task_with_timeout` — funnels
+/// through this one definition; a new blocking primitive must too.
+///
+/// Must be called with IRQs disabled, after the caller committed
+/// `Running → Blocked`.
+pub(crate) fn commit_blocked_deschedule(current: *mut Task) -> bool {
+    unschedule_task(current);
+    if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
+        task_set_status(current, TaskStatus::Running);
+        unschedule_task(current);
+        return false;
+    }
+    true
+}
+
 pub fn yield_blocked_task() {
     let current = scheduler_get_current_task();
     if current.is_null() {
@@ -1132,17 +1171,9 @@ pub fn yield_blocked_task() {
     }
     assert_not_blocking_while_atomic();
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        unschedule_task(current);
-        if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
-            // Wake raced in. Either the wake's `schedule_task` happened
-            // before our `unschedule_task` (we removed the entry) or
-            // after (we left the entry). Force `Running` and scrub the
-            // residual enqueue defensively.
-            task_set_status(current, TaskStatus::Running);
-            unschedule_task(current);
-            return;
+        if commit_blocked_deschedule(current) {
+            schedule();
         }
-        schedule();
     });
 }
 
@@ -1169,13 +1200,9 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
     assert_not_blocking_while_atomic();
     super::sleep::arm_blocked_timeout(task_id, timeout_ms);
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        unschedule_task(current);
-        if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
-            task_set_status(current, TaskStatus::Running);
-            unschedule_task(current);
-            return;
+        if commit_blocked_deschedule(current) {
+            schedule();
         }
-        schedule();
     });
     super::sleep::cancel_sleep(task_id);
 }
@@ -1625,4 +1652,86 @@ pub fn scheduler_timer_tick() {
         sched.increment_preemptions();
     });
     scheduler_request_reschedule(RescheduleReason::TimerTick);
+}
+
+// ---------------------------------------------------------------------------
+// Stranded-READY rescue sweep
+// ---------------------------------------------------------------------------
+
+/// Re-enqueue any task observed READY with no runqueue entry and not on a
+/// CPU — the "stranded Ready" state in which every future `unblock_task`
+/// no-ops (the task is already Ready) and the sleep timer's wake gates on
+/// Blocked, so nothing ever dispatches it again.
+///
+/// The deschedule paths re-check for racing wakes after `unschedule_task`
+/// and the idle dispatcher re-enqueues a still-Ready lost-claim dequeue, so
+/// this sweep should find nothing; it is the belt-and-braces backstop that
+/// turns any residual lost-enqueue race from a permanent interactive freeze
+/// into a one-tick blip — and its klog line is the telemetry that exposes
+/// such a race for root-causing. Called from the idle loop under a tick
+/// cooldown.
+///
+/// A transiently Ready-and-unlinked task (mid-wake between the Ready-CAS
+/// and the enqueue, or mid-dispatch between dequeue and the Running claim)
+/// can in principle be swept up; both interleavings are benign — the
+/// intrusive ready-link is single-membership (`AlreadyLinked` push no-ops)
+/// and a queue entry for a task that has since started Running is dropped
+/// by the dispatch-claim gate.
+pub(crate) fn rescue_stranded_ready_tasks() {
+    // Cooldown: the sweep is a backstop, not a hot path — walking the task
+    // pool (manager lock + scratch alloc) from every idle iteration on every
+    // CPU would cost hundreds of pool walks per second at idle. One sweep
+    // per RESCUE_COOLDOWN_TICKS across all CPUs bounds a genuine strand's
+    // extra latency to ~100ms while keeping the steady-state cost near zero.
+    const RESCUE_COOLDOWN_TICKS: u64 = 10;
+    static LAST_RESCUE_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = slopos_kernel_services::platform::timer_ticks();
+    let last = LAST_RESCUE_TICK.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) < RESCUE_COOLDOWN_TICKS {
+        return;
+    }
+    if LAST_RESCUE_TICK
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // another CPU claimed this window
+    }
+    super::task::task_iterate_active(Some(rescue_check_task), ptr::null_mut());
+}
+
+fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
+    let Some(t) = super::task::task_borrow(task) else {
+        return;
+    };
+    if t.status() != TaskStatus::Ready {
+        return;
+    }
+    // Never touch a task that has not run yet: `task_create` publishes a
+    // transient Ready before the spawn path finishes initialising the task
+    // (entry point, fd table, job control) and re-publishes it. Dispatching
+    // that half-built task would jump to an unloaded entry point. A
+    // genuinely stranded task has run before (its timestamp is set), and
+    // fresh tasks are enqueued by `schedule_new_task` anyway.
+    if t.last_run_timestamp == 0 {
+        return;
+    }
+    if slopos_ostd::task::accessors::task_on_cpu_load(task) {
+        return;
+    }
+    if t.ready_link.is_linked() {
+        return;
+    }
+    klog_info!("SCHED: rescuing stranded READY task {}", t.task_id);
+    // Enqueue LOCALLY — never via `schedule_task`: its remote path
+    // (`push_remote_wake`) links through the task's `next_inbox` field, and
+    // a task that is transiently sitting in another CPU's remote-wake inbox
+    // (Ready, ready_link unlinked — indistinguishable from a strand) would
+    // have its inbox link clobbered, severing every task below it in that
+    // CPU's Treiber stack. `enqueue_local` only touches the single-
+    // membership ready_link, which is safe against every transient state:
+    // a concurrent inbox drain's own enqueue no-ops on `AlreadyLinked`.
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        let _ = sched.enqueue_local(task);
+    });
 }

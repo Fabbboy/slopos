@@ -875,3 +875,27 @@ pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestRe
     };
     ring.drain().unwrap_or_else(|_| KVec::new())
 }
+
+/// SysRq-style debug dump: one klog line per live task slot (id, name,
+/// status, pgid, sid). Triggered from the TTY input path on Ctrl+T so a
+/// wedged interactive session can still be diagnosed from the serial log —
+/// the input ISR path stays alive even when userland input routing is dead.
+pub fn debug_dump_tasks_klog() {
+    klog_info!("SYSRQ: ---- task dump ----");
+    task_iterate_active(Some(dump_one_task), ptr::null_mut());
+    klog_info!("SYSRQ: ---- end task dump ----");
+}
+
+fn dump_one_task(task: *mut Task, _context: *mut c_void) {
+    let Some(t) = super::task_borrow(task) else {
+        return;
+    };
+    klog_info!(
+        "SYSRQ: task {:>3} '{}' status={:?} pgid={} sid={}",
+        t.task_id,
+        bytes_as_str(&t.name),
+        t.status(),
+        t.pgid,
+        t.sid
+    );
+}

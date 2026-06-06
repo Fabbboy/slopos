@@ -939,6 +939,16 @@ impl ProtocolBridge {
                             event.key_ascii() as u32,
                             1,
                         );
+                    } else {
+                        // No protocol surface for the keyboard-focus task:
+                        // the keystroke is LOST here. Mirror it so input
+                        // black holes are visible on the serial log.
+                        let msg = std::format!(
+                            "COMP: key 0x{:02x} dropped (no surface for focus task {})\n",
+                            event.key_ascii(),
+                            keyboard_focus_task
+                        );
+                        let _ = tty::write(msg.as_bytes());
                     }
                 }
                 InputEventType::KeyRelease => {

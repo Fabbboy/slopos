@@ -3,7 +3,7 @@
 
 use slopos_abi::signal::{SIGINT, sig_bit};
 
-use crate::sys::signalfd::{block_signals, signalfd};
+use crate::sys::signalfd::{block_signals, signalfd, unblock_signals};
 
 /// Awaits delivery of signals in a mask via a signalfd. The signals are
 /// blocked on construction so they queue (drainable) instead of interrupting
@@ -14,11 +14,20 @@ pub struct SignalListener {
 
 impl SignalListener {
     /// Listen for the signals in `mask`. Returns `None` if the signalfd could
-    /// not be created.
+    /// not be created — in which case only the bits this call newly blocked
+    /// are unblocked again (a signal the caller had already blocked stays
+    /// blocked), so the signals keep their normal delivery instead of
+    /// queueing forever with no fd to drain them.
     pub fn new(mask: u64) -> Option<Self> {
-        block_signals(mask);
+        let newly_blocked = match block_signals(mask) {
+            Ok(old) => mask & !old,
+            Err(_) => 0,
+        };
         let fd = signalfd(mask, 0);
         if fd < 0 {
+            if newly_blocked != 0 {
+                let _ = unblock_signals(newly_blocked);
+            }
             return None;
         }
         Some(Self { fd })

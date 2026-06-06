@@ -20,7 +20,7 @@ fn test_sigchld_inband() -> bool {
     // Block SIGCHLD: it now queues (signalfd-drainable) instead of EINTR-ing
     // a blocked wait — `(pending & !blocked)` excludes it from poll's EINTR
     // check, while the signalfd (which tests raw `pending`) still reports it.
-    signalfd::block_signals(mask);
+    let _ = signalfd::block_signals(mask);
 
     let sfd = signalfd::signalfd(mask, 0);
     if sfd < 0 {

@@ -228,11 +228,17 @@ pub fn handle_scancode(scancode: u8) {
     state.scancode_buffer.push_overwrite(scancode);
 
     // Modifier keys: update state and route the event (no character to deliver).
+    // Route the MAKE code, not the raw scancode: a release arrives as the
+    // break code (make | 0x80), which no downstream modifier tracker matches
+    // — the compositor's Shift/Ctrl bit would never clear, and a stuck SHIFT
+    // turns every later Ctrl+C into the Ctrl+Shift+C clipboard chord
+    // (silently swallowed, no SIGINT). Press/release already rides the
+    // event type.
     if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
         handle_modifier(&mut state.modifiers, make_code, is_press);
         drop(state);
         input_route_key_event(
-            scancode,
+            make_code,
             0,
             is_press,
             slopos_kernel_services::clock::uptime_ms(),
@@ -249,8 +255,9 @@ pub fn handle_scancode(scancode: u8) {
             0x5B => {
                 state.modifiers.super_left = is_press;
                 drop(state);
+                // make_code, not raw: see the modifier route above.
                 input_route_key_event(
-                    scancode,
+                    make_code,
                     0,
                     is_press,
                     slopos_kernel_services::clock::uptime_ms(),
@@ -260,8 +267,9 @@ pub fn handle_scancode(scancode: u8) {
             0x5C => {
                 state.modifiers.super_right = is_press;
                 drop(state);
+                // make_code, not raw: see the modifier route above.
                 input_route_key_event(
-                    scancode,
+                    make_code,
                     0,
                     is_press,
                     slopos_kernel_services::clock::uptime_ms(),

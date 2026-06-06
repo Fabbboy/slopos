@@ -53,6 +53,12 @@ impl Tty {
     pub(crate) fn drain_hw_input_locked(&mut self) -> Option<(u32, u8)> {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
+        // SysRq (Ctrl+T) on the serial path: runs under the per-TTY lock, so
+        // only mark it pending here — `PostLockWork::execute` fires the dump
+        // after every lock is dropped.
+        if scratch[..count].contains(&SYSRQ_DUMP_BYTE) {
+            super::sysrq_mark_pending();
+        }
         let mut events = [InputEvent::normal(0); 64];
         // Feed raw hardware bytes directly to the line discipline.
         // The ldisc handles all input mapping via c_iflag processing:
@@ -105,10 +111,23 @@ pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {
     push_input_batch(idx, core::slice::from_ref(&event));
 }
 
+/// SysRq trigger byte: Ctrl+T. Checked on the raw input path *before* ldisc
+/// processing, so the dump works even when every userland input consumer is
+/// wedged (the exact situation it exists to diagnose).
+const SYSRQ_DUMP_BYTE: u8 = 0x14;
+
 pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS || events.is_empty() {
         return;
+    }
+
+    if events.iter().any(|e| e.byte == SYSRQ_DUMP_BYTE) {
+        // Mark only — `push_input_batch` runs in keyboard-ISR context, where
+        // the dump's task-pool walk (manager lock + scratch alloc + klog
+        // storm) must not run. The idle-loop input callback fires it from
+        // task context within a tick.
+        super::sysrq_mark_pending();
     }
 
     let mut deferred = PostLockWork::new();
@@ -208,6 +227,25 @@ fn check_read_foreground(tty: &Tty, caller_pgid: u32, caller_sid: u32) -> Result
         ForegroundCheck::Allowed
         | ForegroundCheck::BootstrapAllowed
         | ForegroundCheck::BackgroundWrite => Ok(()),
+    }
+}
+
+/// Surface result of a *same-session* background read, by blocking mode.
+///
+/// A reader that is not (yet) the foreground group is a transient
+/// job-control state: the foreground handoff of a freshly spawned job, or a
+/// later `tcsetpgrp`, resolves it.  A non-blocking probe (the slop-ring
+/// re-probes its in-flight `OP_READ` rows through this path) therefore
+/// parks as `WouldBlock` so the op stays armed and self-heals — surfacing
+/// `BackgroundRead` (-EIO) would poison the async op permanently, and
+/// raising SIGTTIN on every re-probe would spam the process.  A blocking
+/// read keeps the POSIX surface: `BackgroundRead`, which the caller turns
+/// into SIGTTIN (or `HungUp` for ignored/orphaned cases).
+pub(crate) fn background_read_surface(nonblock: bool) -> TtyError {
+    if nonblock {
+        TtyError::WouldBlock
+    } else {
+        TtyError::BackgroundRead
     }
 }
 
@@ -337,6 +375,13 @@ pub fn read_with_attach(
                 match check_read_foreground(tty, caller_pgid, caller_sid) {
                     Err(TtyError::BackgroundRead) => {
                         drop(guard);
+                        // See `background_read_surface`: non-blocking probes
+                        // park as WouldBlock (transient state, self-healing);
+                        // blocking reads keep the POSIX SIGTTIN surface.
+                        // Cross-session denial stays a hard error above.
+                        if background_read_surface(nonblock) == TtyError::WouldBlock {
+                            return Err(TtyError::WouldBlock);
+                        }
                         if is_current_signal_blocked_or_ignored(SIGTTIN)
                             || is_pgrp_orphaned(caller_pgid, caller_sid)
                         {
@@ -872,6 +917,13 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
 /// Properly captures and delivers deferred signals from
 /// `drain_hw_input_locked()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
+    // SysRq (Ctrl+T) marked on an input path: fire the task dump here — the
+    // idle-loop callback runs in task context with no TTY locks held, the
+    // one place every input path (ISR, serial drain, PTY) can safely defer
+    // the pool walk to.
+    if super::SYSRQ_PENDING.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        slopos_kernel_services::driver_runtime::debug_dump_tasks();
+    }
     let mut any_data = false;
     let mut bits = super::table::active_slots_bitmap();
     while bits != 0 {

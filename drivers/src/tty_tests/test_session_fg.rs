@@ -283,6 +283,41 @@ pub fn test_same_session_background_read_sigttin() -> TestResult {
     }
 }
 
+/// A same-session background read surfaces as WouldBlock to a NON-BLOCKING
+/// probe (the slop-ring re-probe path) — the op must stay armed and
+/// self-heal once the foreground handoff lands, never complete with EIO.
+/// Regression test for the "ping after curl ignores Ctrl-C" bug: a freshly
+/// spawned foreground job whose first fd-0 OP_READ probed before the
+/// terminal handoff received -EIO and permanently disabled its stdin/signal
+/// branch.
+pub fn test_background_read_nonblock_parks_as_wouldblock() -> TestResult {
+    match tty::io::background_read_surface(true) {
+        TtyError::WouldBlock => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - nonblock bg read expected WouldBlock, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// A same-session background read keeps the POSIX BackgroundRead surface
+/// (SIGTTIN delivery) for BLOCKING readers.
+pub fn test_background_read_blocking_keeps_sigttin_surface() -> TestResult {
+    match tty::io::background_read_surface(false) {
+        TtyError::BackgroundRead => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - blocking bg read expected BackgroundRead, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
 /// Same-session background write with TOSTOP — BackgroundWrite.
 pub fn test_same_session_background_write_sigttou() -> TestResult {
     let mut s = TtySession::new();
@@ -2096,6 +2131,14 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_same_session_background_read_sigttin,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_background_read_nonblock_parks_as_wouldblock,
+    suite = tty_test_session_fg
+);
+slopos_testing::stest!(
+    name = test_background_read_blocking_keeps_sigttin_surface,
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(

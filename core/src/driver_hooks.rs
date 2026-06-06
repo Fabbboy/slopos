@@ -308,6 +308,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     is_current_signal_blocked_or_ignored: runtime_is_current_signal_blocked_or_ignored,
     is_pgrp_orphaned: runtime_is_pgrp_orphaned,
     has_pending_signal: runtime_has_pending_signal,
+    debug_dump_tasks: slopos_sched::task::debug_dump_tasks_klog,
     irq_init: irq::init,
     irq_set_route: irq::set_irq_route,
     irq_is_masked: irq::is_masked,

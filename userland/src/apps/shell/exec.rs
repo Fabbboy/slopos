@@ -415,10 +415,16 @@ fn execute_registry_spawn(
         let _ = fs::close_fd_raw(pipe_fds[1]);
     }
 
+    // Foreground jobs get their own pgrp AND the kernel-side atomic
+    // foreground handoff: the child's pgrp becomes the terminal's
+    // foreground group before the child is schedulable, so its first
+    // fd-0 read can never lose the race against the parent's
+    // `enter_foreground` below (which is kept as shell-side state
+    // bookkeeping and is an idempotent re-set kernel-side).
     let spawn_flags = if background {
         spec.flags
     } else {
-        spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP
+        spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP | slopos_abi::task::TASK_FLAG_FOREGROUND
     };
 
     // Build null-terminated argv copies for the syscall ABI boundary.
@@ -664,11 +670,28 @@ fn run_in_child(
     pipes: &[[i32; 2]; MAX_PIPE_CMDS],
     pipe_count: usize,
     pgid: u32,
+    foreground: bool,
 ) -> ! {
     if pgid == 0 {
         let _ = process::setpgid(0, 0);
     } else {
         let _ = process::setpgid(0, pgid);
+    }
+
+    // Both-sides foreground handoff (foreground jobs only — a `&` pipeline
+    // must never claim the terminal): the child claims the terminal for its
+    // own pgrp itself, racing the parent's `enter_foreground` so whichever
+    // lands first wins (both set the same value).  Must happen *before*
+    // the default_signal() calls below — at this point SIGTTOU is still
+    // inherited-ignored from the shell, so the not-yet-foreground child's
+    // tcsetpgrp proceeds instead of being denied.
+    if foreground {
+        let fg_pgid = if pgid == 0 {
+            process::getpid() as u32
+        } else {
+            pgid
+        };
+        let _ = fs::tcsetpgrp(0, fg_pgid);
     }
 
     // Forked children take the default job-control signal dispositions
@@ -870,6 +893,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 &pipes,
                 total_pipes,
                 pgid,
+                !pipeline.background,
             );
         }
 

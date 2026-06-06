@@ -2,9 +2,8 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use crate::ring::{Ring, slopfut};
-use crate::syscall::{SockAddrIn, fs, net, process};
-use slopos_abi::signal::SIGPIPE;
-use slopos_abi::syscall::LocalFlags;
+use crate::syscall::{SockAddrIn, net, process};
+use slopos_abi::signal::{SIGINT, SIGPIPE, sig_bit};
 
 struct PingConfig {
     count: Option<u32>,
@@ -263,19 +262,19 @@ fn handle_reply(data: &[u8], src: &SockAddrIn, clock_start: &Instant, stats: &mu
     }
 }
 
-/// `true` if a stdin read burst contained Ctrl-C (0x03).
-fn burst_has_ctrl_c(buf: &[u8]) -> bool {
-    buf.contains(&0x03)
-}
-
 /// socket recv buffer capacity (max ICMP reply we care about).
 const RECV_CAP: usize = 1600;
-/// stdin read buffer capacity (one keystroke burst; we only scan for ^C).
-const STDIN_CAP: usize = 32;
 
-/// The async send/receive loop. Races stdin / `OP_RECVFROM` / timer, acts
-/// on whichever fires, and breaks on the same termination conditions as the
-/// old `poll`-driven loop (Ctrl-C drain done, all sent + drained/timed out).
+/// The async send/receive loop. Races SIGINT / `OP_RECVFROM` / timer, acts
+/// on whichever fires, and breaks once Ctrl-C's drain completes or all
+/// requested packets are sent and drained/timed out.
+///
+/// Ctrl-C arrives as a real SIGINT: the terminal stays in its normal cooked
+/// mode (ISIG on), the line discipline raises SIGINT against the foreground
+/// process group — which the kernel-side spawn handoff guarantees is ping —
+/// and `listener` surfaces it as an in-band ring completion. No raw-mode
+/// termios juggling, no stdin byte-scanning, and no failure mode where a
+/// transient fd-0 error silently disables Ctrl-C for the rest of the run.
 async fn run_loop(
     config: &PingConfig,
     sock_fd: i32,
@@ -283,18 +282,15 @@ async fn run_loop(
     ident: u16,
     clock_start: &Instant,
     stats: &mut PingStats,
+    listener: Option<&slopfut::signal::SignalListener>,
 ) {
-    type DynBuf = core::pin::Pin<Box<dyn core::future::Future<Output = slopfut::BufResult>>>;
-
     let mut sequence: u16 = 0;
     let mut stop_requested = false;
-    let mut stdin_open = true;
     let mut next_send = *clock_start;
 
-    // Buffers ping-pong between the loop and the in-flight reads, mirroring
-    // the nc template: the winner returns its buffer; a cancelled loser
-    // keeps its buffer in the reactor, so the loser gets a fresh one.
-    let mut stdin_buf = vec![0u8; STDIN_CAP];
+    // The recv buffer ping-pongs between the loop and the in-flight read,
+    // mirroring the nc template: the winner returns its buffer; a cancelled
+    // loser keeps its buffer in the reactor, so the loser gets a fresh one.
     let mut recv_buf = vec![0u8; RECV_CAP];
 
     loop {
@@ -327,76 +323,66 @@ async fn run_loop(
             remaining_to_next_send_ms,
         );
 
-        // `Either`-style winner discrimination: A = stdin, B = recvfrom,
-        // C/B = timer (depending on whether stdin is in the race).
-        let mut timed_out = false;
-        if stop_requested || !stdin_open {
-            // No stdin branch: either draining after Ctrl-C, or stdin has
-            // closed — only the socket + timer race.
-            let f_recv =
-                slopfut::recvfrom(sock_fd, core::mem::take(&mut recv_buf), RECV_CAP as u32);
-            let f_timer = slopfut::time::sleep_ms(timeout_ms.max(0) as u64);
-            match slopfut::select2(f_recv, Box::pin(f_timer)).await {
-                slopfut::Either2::A(rf) => {
-                    if rf.res < 0 {
-                        if config.verbose {
-                            eprintln!("ping: recvfrom failed");
-                        }
-                        break;
-                    }
-                    let received = (rf.res as usize).min(rf.buf.len());
-                    handle_reply(&rf.buf[..received], &rf.src, clock_start, stats);
-                    recv_buf = rf.buf;
-                }
-                slopfut::Either2::B(_) => {
-                    recv_buf = vec![0u8; RECV_CAP];
-                    timed_out = true;
-                }
-            }
-        } else {
-            let f_stdin: DynBuf = Box::pin(slopfut::read(
-                0,
-                core::mem::take(&mut stdin_buf),
-                STDIN_CAP as u32,
-            ));
+        // `Either`-style winner discrimination: A = SIGINT, B = recvfrom,
+        // C/B = timer (depending on whether the signal is in the race). The
+        // shared recvfrom/timer interpretation lives in one place below so
+        // the active and drain phases can never silently diverge.
+        enum Turn {
+            Stop,
+            Recv(slopfut::RecvFromResult),
+            Timer,
+        }
+        let turn = if let Some(sig) = listener {
+            // The SIGINT branch stays in the race during the drain too, so a
+            // second Ctrl-C force-quits instead of waiting out the timeout.
+            let f_sig = Box::pin(sig.recv());
             let f_recv =
                 slopfut::recvfrom(sock_fd, core::mem::take(&mut recv_buf), RECV_CAP as u32);
             let f_timer = Box::pin(slopfut::time::sleep_ms(timeout_ms.max(0) as u64));
-            match slopfut::select3(f_stdin, f_recv, f_timer).await {
-                slopfut::Either3::A(br) => {
-                    recv_buf = vec![0u8; RECV_CAP];
-                    if br.res <= 0 {
-                        // stdin EOF/error: stop racing it (don't busy re-arm a
-                        // read that completes immediately every turn).
-                        stdin_open = false;
-                        stdin_buf = br.buf;
-                        continue;
-                    }
-                    let n = (br.res as usize).min(br.buf.len());
-                    if burst_has_ctrl_c(&br.buf[..n]) {
-                        print!("^C\n");
-                        stop_requested = true;
-                    }
-                    stdin_buf = br.buf;
-                    continue;
+            match slopfut::select3(f_sig, f_recv, f_timer).await {
+                slopfut::Either3::A(_) => Turn::Stop,
+                slopfut::Either3::B(rf) => Turn::Recv(rf),
+                slopfut::Either3::C(_) => Turn::Timer,
+            }
+        } else {
+            // No signalfd available — only the socket + timer race.
+            let f_recv =
+                slopfut::recvfrom(sock_fd, core::mem::take(&mut recv_buf), RECV_CAP as u32);
+            let f_timer = Box::pin(slopfut::time::sleep_ms(timeout_ms.max(0) as u64));
+            match slopfut::select2(f_recv, f_timer).await {
+                slopfut::Either2::A(rf) => Turn::Recv(rf),
+                slopfut::Either2::B(_) => Turn::Timer,
+            }
+        };
+
+        let mut timed_out = false;
+        match turn {
+            Turn::Stop => {
+                // The ldisc already echoed "^C" (ECHOCTL); move to a fresh
+                // line. First Ctrl-C switches to the reply-drain state; a
+                // second one force-quits the drain immediately.
+                println!();
+                if stop_requested {
+                    break;
                 }
-                slopfut::Either3::B(rf) => {
-                    stdin_buf = vec![0u8; STDIN_CAP];
-                    if rf.res < 0 {
-                        if config.verbose {
-                            eprintln!("ping: recvfrom failed");
-                        }
-                        break;
+                recv_buf = vec![0u8; RECV_CAP];
+                stop_requested = true;
+                continue;
+            }
+            Turn::Recv(rf) => {
+                if rf.res < 0 {
+                    if config.verbose {
+                        eprintln!("ping: recvfrom failed");
                     }
-                    let received = (rf.res as usize).min(rf.buf.len());
-                    handle_reply(&rf.buf[..received], &rf.src, clock_start, stats);
-                    recv_buf = rf.buf;
+                    break;
                 }
-                slopfut::Either3::C(_) => {
-                    stdin_buf = vec![0u8; STDIN_CAP];
-                    recv_buf = vec![0u8; RECV_CAP];
-                    timed_out = true;
-                }
+                let received = (rf.res as usize).min(rf.buf.len());
+                handle_reply(&rf.buf[..received], &rf.src, clock_start, stats);
+                recv_buf = rf.buf;
+            }
+            Turn::Timer => {
+                recv_buf = vec![0u8; RECV_CAP];
+                timed_out = true;
             }
         }
 
@@ -452,11 +438,15 @@ pub fn ping_main(args: Vec<String>) -> ! {
         std::process::exit(2);
     }
 
-    let saved_termios = fs::tcgetattr(0).ok();
-    if let Some(ref t) = saved_termios {
-        let mut raw = *t;
-        raw.c_lflag &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
-        let _ = fs::tcsetattr(0, &raw);
+    // Ctrl-C handling rides POSIX job control: the terminal keeps its normal
+    // cooked mode (ISIG on), the ldisc raises SIGINT against the foreground
+    // pgrp (ping, guaranteed by the kernel spawn handoff), and the listener
+    // turns that into an awaitable ring completion. If signalfd creation
+    // fails the mask is unblocked again, so Ctrl-C falls back to the default
+    // SIGINT action (terminate) instead of being silently lost.
+    let sigint = slopfut::signal::SignalListener::new(sig_bit(SIGINT));
+    if sigint.is_none() {
+        eprintln!("ping: warning: signalfd unavailable; Ctrl-C will terminate without stats");
     }
 
     println!(
@@ -483,33 +473,34 @@ pub fn ping_main(args: Vec<String>) -> ! {
 
     let clock_start = Instant::now();
 
-    // The send/receive loop now rides the slopfut runtime: the dual
-    // `poll([stdin, socket], t)` is replaced by `select3` over a stdin
-    // `OP_READ`, an `OP_RECVFROM` (whose result carries the ICMP reply's
-    // source address — no second recvfrom syscall), and an `OP_TIMEOUT`
-    // bounding the wait to the next send / reply deadline. Once Ctrl-C is
-    // pressed (drain state) the stdin branch is dropped via `select2`.
+    // The send/receive loop rides the slopfut runtime: `select3` over the
+    // SIGINT listener's signalfd `OP_READ`, an `OP_RECVFROM` (whose result
+    // carries the ICMP reply's source address — no second recvfrom syscall),
+    // and an `OP_TIMEOUT` bounding the wait to the next send / reply
+    // deadline. Once Ctrl-C arrives (drain state) the signal branch is
+    // dropped via `select2`.
     let sock_fd = fd.raw();
-    // 16 SQ slots comfortably covers the loop's peak in-flight (stdin read +
-    // recvfrom + timer); ring setup failure means no loop at all.
+    // 16 SQ slots comfortably covers the loop's peak in-flight (signalfd
+    // read + recvfrom + timer); ring setup failure means no loop at all.
     match Ring::setup(16) {
         Ok(ring) => {
             slopfut::block_on(
                 ring,
-                run_loop(&config, sock_fd, &target, ident, &clock_start, &mut stats),
+                run_loop(
+                    &config,
+                    sock_fd,
+                    &target,
+                    ident,
+                    &clock_start,
+                    &mut stats,
+                    sigint.as_ref(),
+                ),
             );
         }
         Err(_) => {
             eprintln!("ping: ring setup failed");
-            if let Some(ref t) = saved_termios {
-                let _ = fs::tcsetattr(0, t);
-            }
             std::process::exit(2);
         }
-    }
-
-    if let Some(ref t) = saved_termios {
-        let _ = fs::tcsetattr(0, t);
     }
 
     let loss = if stats.sent == 0 {

@@ -253,6 +253,16 @@ pub const TASK_FLAG_FPU_INITIALIZED: u16 = 0x40;
 /// instead of inheriting the parent's pgid.  Eliminates the SMP race
 /// between spawn and the parent's `setpgid` + `tcsetpgrp` calls.
 pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
+/// Make the spawned task's process group the foreground group of its
+/// inherited controlling terminal *before* the task becomes schedulable.
+/// Without this, a freshly spawned job has a window in which it already
+/// runs but is still a background process: its first terminal read loses
+/// the race against the parent's `tcsetpgrp` and fails the foreground
+/// check.  The kernel performs the handoff atomically with the
+/// Ready-publish, so the child observes itself as foreground from its
+/// first instruction.  Only honoured when the child's session matches the
+/// terminal's controlling session.
+pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
 
 // --- Task Exit/Fault Reason ---
 

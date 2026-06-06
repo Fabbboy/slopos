@@ -186,6 +186,7 @@ pub fn spawn_program_with_attrs(
         // This matches fork semantics and is required for proper job control:
         // without it, the child is in its own session and the shell cannot
         // set it as the foreground process group.
+        let mut fg_handoff: Option<(slopos_abi::syscall::TtyIndex, u32, u32)> = None;
         if parent_task_id != INVALID_TASK_ID {
             let parent_ptr = task_find_by_id(parent_task_id);
             if !parent_ptr.is_null() {
@@ -200,8 +201,33 @@ pub fn spawn_program_with_attrs(
                     child.sid = parent.sid;
                     child.controlling_tty = parent.controlling_tty;
                     child.parent_task_id = parent_task_id;
+
+                    if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
+                        && child.pgid != 0
+                        && let Some(ctty) = child.controlling_tty
+                    {
+                        fg_handoff = Some((ctty, child.pgid, child.sid));
+                    }
                 }
             }
+        }
+
+        // Atomic foreground handoff (TASK_FLAG_FOREGROUND): make the child's
+        // process group the controlling terminal's foreground group *before*
+        // the Ready-publish below.  Doing it parent-side after spawn returns
+        // (the old `tcsetpgrp` round-trip) leaves a window where the child is
+        // already schedulable but still a background process — its first
+        // terminal read then fails the foreground check and poisons async
+        // readers.  Session-validated: a child whose session does not own the
+        // terminal must not steal the foreground.
+        if let Some((ctty, child_pgid, child_sid)) = fg_handoff {
+            use slopos_kernel_services::syscall_services::tty;
+            // The checked variant validates the session match and performs
+            // the set under one TTY lock acquisition (no read-then-write
+            // TOCTOU); a child whose session does not own the terminal is
+            // refused. `pgrp_exists_in_session` sees the child: its pgid and
+            // sid were written above and the slot is live (Blocked).
+            let _ = tty::set_foreground_pgrp_checked(ctty, child_pgid, child_sid);
         }
 
         // Publish the task as Ready only after ALL field writes are done.

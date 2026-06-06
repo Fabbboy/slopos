@@ -288,7 +288,24 @@ async fn event_loop(
                 CompositorEvent::Key(ascii, scancode) => {
                     match input::encode_key(ascii, scancode, mods) {
                         KeyAction::ToMaster(bytes) => {
-                            let _ = fs::write_slice(master_fd, bytes.as_bytes());
+                            // The master fd is non-blocking: a failed or short
+                            // write here LOSES the keystroke. Surface it on the
+                            // serial mirror instead of dropping silently.
+                            match fs::write_slice(master_fd, bytes.as_bytes()) {
+                                Ok(n) if n == bytes.as_bytes().len() => {}
+                                Ok(n) => {
+                                    let msg = std::format!(
+                                        "TERM: key write short {}/{}\n",
+                                        n,
+                                        bytes.as_bytes().len()
+                                    );
+                                    let _ = tty::write(msg.as_bytes());
+                                }
+                                Err(e) => {
+                                    let msg = std::format!("TERM: key write failed {e:?}\n");
+                                    let _ = tty::write(msg.as_bytes());
+                                }
+                            }
                             // Any keypress cancels a scrollback view.
                             if grid.viewing_history() {
                                 grid.scroll_view_down(usize::MAX);
