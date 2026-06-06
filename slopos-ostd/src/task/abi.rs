@@ -51,3 +51,11 @@ pub struct TaskAbi {
 /// fails at the kernel's offset razor before the asm can corrupt
 /// memory.
 pub const TASK_UNSAFE_STACK_SP_OFFSET: usize = core::mem::offset_of!(TaskAbi, unsafe_stack_sp);
+
+// Layout razors for the asm contract:
+// - the slot sits at offset 0, so with `Task.abi` at offset 0 the
+//   `__safestack_pointer_address` operand collapses to literal zero;
+// - the asm reads/writes exactly 8 naturally-aligned bytes through it.
+const _: () = assert!(TASK_UNSAFE_STACK_SP_OFFSET == 0);
+const _: () = assert!(core::mem::size_of::<TaskAbi>() == 8);
+const _: () = assert!(core::mem::align_of::<TaskAbi>() == 8);

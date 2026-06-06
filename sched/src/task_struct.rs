@@ -56,31 +56,11 @@ const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 // inside Task.
 const _: () = assert!(offset_of!(Task, abi) == 0);
 
-// =============================================================================
-// SwitchContext offset razors
-// =============================================================================
-
-pub const SWITCH_CTX_OFF_RBX: usize = 0;
-pub const SWITCH_CTX_OFF_R12: usize = 8;
-pub const SWITCH_CTX_OFF_R13: usize = 16;
-pub const SWITCH_CTX_OFF_R14: usize = 24;
-pub const SWITCH_CTX_OFF_R15: usize = 32;
-pub const SWITCH_CTX_OFF_RBP: usize = 40;
-pub const SWITCH_CTX_OFF_RSP: usize = 48;
-pub const SWITCH_CTX_OFF_RFLAGS: usize = 56;
-pub const SWITCH_CTX_OFF_RIP: usize = 64;
-
-// ABI razors — the field offsets are already pinned inside OSTD at
-// `slopos-ostd/src/task/task.rs`; these duplicates fail the build at
-// the kernel boundary if the alias ever drifts off the asm contract.
-// Size is 80 (not 72): the asm-visible register block (`rbx`..`rip`,
-// offsets 0..64) is followed by the saved per-task `preempt_count` at
-// offset 72. The switch asm reads only the register offsets below.
-const _: () = assert!(core::mem::size_of::<SwitchContext>() == 80);
-const _: () = assert!(offset_of!(SwitchContext, rsp) == SWITCH_CTX_OFF_RSP);
-const _: () = assert!(offset_of!(SwitchContext, rip) == SWITCH_CTX_OFF_RIP);
-const _: () = assert!(offset_of!(SwitchContext, rsp) == 48);
-const _: () = assert!(offset_of!(SwitchContext, rip) == 64);
+// SwitchContext layout (size and every field offset) is pinned by
+// `const _` asserts beside the canonical definition in
+// `slopos-ostd/src/task/task.rs`; the switch asm derives its offsets
+// via `offset_of!` at the use site. No duplicate razors here — the
+// alias cannot drift from the type it names.
 
 // =============================================================================
 // FpuState compile-time checks

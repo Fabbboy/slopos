@@ -2,39 +2,21 @@
 //! `__safestack_pointer_address` naked-fn home in OSTD.
 //!
 //! The naked fn itself reads `gs:[...]` so it cannot run under
-//! `cargo test`. The tests cover the layout contract instead:
-//! `TaskAbi` has the documented shape, `TASK_UNSAFE_STACK_SP_OFFSET`
-//! matches `offset_of!(TaskAbi, unsafe_stack_sp)`, and the
-//! `install_*` safe wrappers thread through the BSP-init protocol.
+//! `cargo test`. The `TaskAbi` layout contract (slot at offset 0,
+//! exactly one naturally-aligned u64) is pinned by `const _` asserts
+//! beside the type in `slopos_ostd::task::abi`; the tests here cover
+//! the behavioral surface — the `install_*` safe wrappers thread
+//! through the BSP-init protocol and the slot is a plain writable u64.
 
-use core::mem::{align_of, offset_of, size_of};
 use std::sync::Mutex;
 
 use slopos_ostd::arch::x86_64::safestack::{install_ap_trampoline, install_safestack_runtime};
 use slopos_ostd::sync::{reset_bsp_token_for_tests, run_bsp_init};
-use slopos_ostd::task::abi::{TASK_UNSAFE_STACK_SP_OFFSET, TaskAbi};
+use slopos_ostd::task::abi::TaskAbi;
 
 /// Serialises BSP-token-touching tests because the one-shot mint
 /// guard is process-global.
 static BSP_LOCK: Mutex<()> = Mutex::new(());
-
-#[test]
-fn task_abi_unsafe_stack_sp_at_offset_zero() {
-    // The asm contract: `__safestack_pointer_address` returns
-    // `current_task + TASK_UNSAFE_STACK_SP_OFFSET`. With `TaskAbi`
-    // holding the slot at its offset 0, and `Task` placing `abi` at
-    // its offset 0, the operand collapses to literal zero.
-    assert_eq!(offset_of!(TaskAbi, unsafe_stack_sp), 0);
-    assert_eq!(TASK_UNSAFE_STACK_SP_OFFSET, 0);
-}
-
-#[test]
-fn task_abi_layout_is_repr_c_u64() {
-    // The asm reads/writes 8 bytes through the slot. The struct
-    // must expose exactly that shape — no unexpected padding.
-    assert_eq!(size_of::<TaskAbi>(), 8);
-    assert_eq!(align_of::<TaskAbi>(), 8);
-}
 
 #[test]
 fn install_ap_trampoline_returns_non_null_fn_pointer() {

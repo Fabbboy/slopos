@@ -78,6 +78,9 @@ jobs:
             third_party/ovmf
           cache-on-failure: true
 
+      - name: Host-side unit tests (fast fail — same tests KernMiri interprets, minus UB detection)
+        run: just test-host
+
       - name: Build kernel
         run: just build
 

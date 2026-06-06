@@ -860,16 +860,11 @@ mod tests {
         assert_eq!(Sqe::from_bytes(&s.to_bytes()), s);
     }
 
-    /// ABI v2: the carved fields live at their pinned offsets and survive
-    /// the byte round-trip — `sqe_flags2`@48, `buf_group`@50,
-    /// `buf_index`@52 — keeping `Sqe` exactly 64 bytes.
+    /// ABI v2: the carved fields survive the byte round-trip at their
+    /// pinned offsets — `sqe_flags2`@48, `buf_group`@50, `buf_index`@52
+    /// (offsets themselves are `const _`-asserted beside the struct).
     #[test]
     fn sqe_v2_layout_round_trips() {
-        assert_eq!(core::mem::size_of::<Sqe>(), 64);
-        assert_eq!(core::mem::offset_of!(Sqe, sqe_flags2), 48);
-        assert_eq!(core::mem::offset_of!(Sqe, buf_group), 50);
-        assert_eq!(core::mem::offset_of!(Sqe, buf_index), 52);
-
         let mut s = Sqe::ZERO;
         s.sqe_flags2 = 0x0102;
         s.buf_group = 0x0304;
@@ -951,8 +946,6 @@ mod tests {
             _pad: 0,
         };
         assert_eq!(BufIovec::from_bytes(&v.to_bytes()), v);
-        assert_eq!(core::mem::offset_of!(BufIovec, addr), 0);
-        assert_eq!(core::mem::offset_of!(BufIovec, len), 8);
     }
 
     #[test]
@@ -973,10 +966,6 @@ mod tests {
     /// producer tail, and slot 0 is still a usable buffer.
     #[test]
     fn iouring_buf_tail_overlaps_resv() {
-        assert_eq!(
-            core::mem::offset_of!(IouringBuf, resv),
-            SLOPRING_PBUF_RING_TAIL_OFFSET
-        );
         let buf = IouringBuf {
             addr: 0x4000,
             len: 256,
@@ -1001,9 +990,6 @@ mod tests {
     /// touch.
     #[test]
     fn region_addr_serialized_at_struct_offset() {
-        assert_eq!(core::mem::offset_of!(RingParams, region_addr), 64);
-        assert_eq!(core::mem::offset_of!(RingParams, region_bytes), 72);
-
         let mut p = RingParams::ZERO;
         p.region_addr = 0xAABB_CCDD_1122_3344;
         p.region_bytes = 0x3000;

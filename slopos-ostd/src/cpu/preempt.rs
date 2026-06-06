@@ -517,8 +517,10 @@ mod tests {
 
     fn isolate<R>(f: impl FnOnce() -> R) -> R {
         // The lib unit tests share process state with whatever has
-        // already poked `BACKEND_INSTALLED` / `DEFAULT_BACKEND`. Reset
-        // first so each test starts from a known baseline.
+        // already poked `BACKEND_INSTALLED` / `DEFAULT_BACKEND` —
+        // including `irq::idt`'s tests, which reset and count against
+        // the same backend. Serialise, then reset to a known baseline.
+        let _g = crate::test_support::global_lock::lock_global_test_state();
         reset_for_test();
         let r = f();
         reset_for_test();

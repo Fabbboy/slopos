@@ -253,44 +253,14 @@ pub fn test_task_flags_preserved() -> TestResult {
 }
 
 // =============================================================================
-// SwitchContext Layout Tests
+// SwitchContext Behavior Tests
 // =============================================================================
-
-pub fn test_switch_context_struct_size() -> TestResult {
-    use super::task_struct::SwitchContext;
-    // 80: the asm-visible register block (72 bytes, rbx..rip) plus the
-    // saved per-task `preempt_count` (offset 72) used by switch_context.
-    assert_eq_test!(
-        core::mem::size_of::<SwitchContext>(),
-        80,
-        "SwitchContext size wrong"
-    );
-    TestResult::Pass
-}
-
-pub fn test_switch_context_offsets() -> TestResult {
-    use super::task_struct::{
-        SWITCH_CTX_OFF_R12, SWITCH_CTX_OFF_R13, SWITCH_CTX_OFF_R14, SWITCH_CTX_OFF_R15,
-        SWITCH_CTX_OFF_RBP, SWITCH_CTX_OFF_RBX, SWITCH_CTX_OFF_RFLAGS, SWITCH_CTX_OFF_RIP,
-        SWITCH_CTX_OFF_RSP,
-    };
-
-    assert_eq_test!(SWITCH_CTX_OFF_RBX, 0);
-    assert_eq_test!(SWITCH_CTX_OFF_R12, 8);
-    assert_eq_test!(SWITCH_CTX_OFF_R13, 16);
-    assert_eq_test!(SWITCH_CTX_OFF_R14, 24);
-    assert_eq_test!(SWITCH_CTX_OFF_R15, 32);
-    assert_eq_test!(SWITCH_CTX_OFF_RBP, 40);
-    assert_eq_test!(SWITCH_CTX_OFF_RSP, 48);
-    assert_eq_test!(SWITCH_CTX_OFF_RFLAGS, 56);
-    assert_eq_test!(SWITCH_CTX_OFF_RIP, 64);
-    // Per-task saved preempt count: appended past the asm register block.
-    assert_eq_test!(
-        core::mem::offset_of!(super::task_struct::SwitchContext, preempt_count),
-        72
-    );
-    TestResult::Pass
-}
+// No layout (size/offset) stests here on purpose: SwitchContext is an
+// alias of slopos_ostd::task::TaskContext, whose size and every field
+// offset are pinned by `const _` asserts beside the struct definition
+// (slopos-ostd/src/task/task.rs) in all build configurations. Runtime
+// duplicates of compile-time-enforced facts can only agree or drift
+// stale.
 
 pub fn test_switch_context_zero_init() -> TestResult {
     use super::task_struct::SwitchContext;
@@ -537,8 +507,6 @@ slopos_testing::stest!(name = test_task_find_after_terminate, suite = context);
 slopos_testing::stest!(name = test_task_rapid_create_terminate, suite = context);
 slopos_testing::stest!(name = test_task_process_id_consistency, suite = context);
 slopos_testing::stest!(name = test_task_flags_preserved, suite = context);
-slopos_testing::stest!(name = test_switch_context_struct_size, suite = context);
-slopos_testing::stest!(name = test_switch_context_offsets, suite = context);
 slopos_testing::stest!(name = test_switch_context_zero_init, suite = context);
 slopos_testing::stest!(name = test_switch_context_setup_initial, suite = context);
 slopos_testing::stest!(name = test_task_has_switch_ctx, suite = context);

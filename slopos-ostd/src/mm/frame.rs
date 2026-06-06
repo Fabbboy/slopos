@@ -1335,11 +1335,9 @@ pub trait FrameAlloc: Send + Sync + 'static {
 mod tests {
     use super::*;
 
-    #[test]
-    fn meta_slot_layout() {
-        assert_eq!(core::mem::offset_of!(MetaSlot, ref_count), 0);
-        assert!(core::mem::align_of::<MetaSlot>() >= MAX_META_ALIGN);
-    }
+    // MetaSlot layout (ref_count @ 0, alignment >= MAX_META_ALIGN) is
+    // pinned by the `const _` asserts beside the struct definition; no
+    // runtime duplicate here.
 
     #[test]
     fn meta_size_fits() {

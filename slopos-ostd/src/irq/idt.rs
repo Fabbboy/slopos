@@ -713,6 +713,9 @@ mod tests {
     use crate::cpu::preempt as p;
 
     fn isolate<R>(f: impl FnOnce() -> R) -> R {
+        // Counts against the same process-global preempt backend as
+        // `cpu::preempt`'s tests; serialise, then reset the baseline.
+        let _g = crate::test_support::global_lock::lock_global_test_state();
         p::reset_for_test();
         let r = f();
         p::reset_for_test();

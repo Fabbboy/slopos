@@ -35,6 +35,11 @@ pub struct FpuState {
     pub data: [u8; FPU_STATE_SIZE],
 }
 
+// FPU_STATE_SIZE is a multiple of the 64-byte alignment, so the shell
+// adds no tail padding and the struct size equals the constant that
+// stack/heap layouts are budgeted against.
+const _: () = assert!(core::mem::size_of::<FpuState>() == FPU_STATE_SIZE);
+
 // SAFETY: `FpuState` is `[u8; FPU_STATE_SIZE]` wrapped in a 64-byte
 // alignment shell. The all-zero pattern matches `FpuState::zero()` —
 // XRSTOR with that buffer treats every component header (XSTATE_BV,
@@ -207,10 +212,8 @@ mod tests {
         assert_eq!(core::mem::align_of::<FpuState>(), 64);
     }
 
-    #[test]
-    fn fpu_state_size_matches_constant() {
-        assert_eq!(core::mem::size_of::<FpuState>(), FPU_STATE_SIZE);
-    }
+    // `size_of::<FpuState>() == FPU_STATE_SIZE` is a `const _` assert
+    // beside the struct definition; no runtime duplicate here.
 
     #[test]
     fn fpu_state_new_sets_fcw_and_mxcsr() {

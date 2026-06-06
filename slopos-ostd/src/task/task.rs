@@ -503,10 +503,10 @@ mod tests {
         assert!(b.0 > a.0);
     }
 
-    #[test]
-    fn task_context_size_72() {
-        assert_eq!(core::mem::size_of::<TaskContext>(), 72);
-    }
+    // No runtime size/offset test here on purpose: the `const _`
+    // layout asserts below the struct definition pin size and every
+    // field offset at compile time in all build configurations. A
+    // runtime duplicate can only agree or drift stale.
 
     #[test]
     fn task_context_zero_has_default_rflags() {
@@ -527,6 +527,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "called with no current task")]
     fn current_panics_without_backend() {
+        // Resets the process-global task-runtime backend flag;
+        // serialise with the other global-state test modules.
+        let _g = crate::test_support::global_lock::lock_global_test_state();
         reset_task_runtime_for_test();
         let _ = current();
     }

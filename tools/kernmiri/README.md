@@ -20,7 +20,7 @@ op those algorithms perform and reports UB at the instant it happens.
 
 ## What this catches
 
-The 154 lib unit tests + ~330 integration tests cover, among others:
+The slopos-ostd lib unit tests + integration tests cover, among others:
 
 - **Stacked / Tree Borrows violations** — the bug class that's most likely
   to hide inside the `unsafe` blocks in `slopos-ostd`. Code review and
@@ -125,19 +125,19 @@ kernel build.
 
 ## What runs vs. what's ignored
 
-| Test target | Run under Miri | Ignored under Miri |
-|---|---|---|
-| `--lib` (in-tree `#[cfg(test)]`) | 154 | 2 (`user::copy::fault_range_*`) |
-| `tests/extern_block.rs` | 1 | 5 (`unsafe extern static` resolution) |
-| `tests/kernel_sync.rs` | 13 | 1 (`RefCell::borrow()` counter race) |
-| `tests/user_mode.rs` | 0 | 20 (naked-asm user-mode entry path) |
-| Doctest binary | 10 (`compile_fail` doctests) | 20 (` ```ignore ` doctests) |
-| Everything else | all | 0 |
+Everything runs under Miri except the targets below, whose ignores are
+deliberate (counts shift as the suite grows; the *reasons* are the
+stable part):
 
-Total: **395 pass, 28 integration-test-side ignored, 20 doctest-side
-ignored**.
+| Test target | Ignored under Miri — why |
+|---|---|
+| `--lib` (in-tree `#[cfg(test)]`) | `user::copy::fault_range_*` (real fault-path asm) |
+| `tests/extern_block.rs` | `unsafe extern static` resolution Miri does not model |
+| `tests/kernel_sync.rs` | `RefCell::borrow()` counter race demo |
+| `tests/user_mode.rs` | entire file — naked-asm user-mode entry path |
+| Doctest binary | ` ```ignore ` doctests (see below); `compile_fail` doctests still run |
 
-### About the 20 ignored doctests
+### About the ignored doctests
 
 These are not bugs and not test gaps — they're documentation snippets
 fenced with ` ```ignore `. Each one shows the *syntax* of a macro or
@@ -160,13 +160,12 @@ invocations that need surrounding scaffolding). They are:
 | `sync/cpu_local.rs` | `cpu_local!` macro syntax |
 | `test_support/hermetic/macros.rs` | `hermetic_state!` macro syntax |
 
-The same doctest binary also runs **10 `compile_fail` doctests** that
+The same doctest binary also runs the **`compile_fail` doctests** that
 verify deliberate-misuse patterns are correctly rejected by the
 compiler (e.g., trying to leak a `UFrame`'s mutable view past its
-lifetime). Those count as the "10 passed" alongside the 20 ignored.
-Promoting any of the 20 to `no_run` would require scaffolding
-(user-typed placeholders, boot/init mocks) without catching real
-bugs — net negative.
+lifetime). Promoting any of the ignored doctests to `no_run` would
+require scaffolding (user-typed placeholders, boot/init mocks) without
+catching real bugs — net negative.
 
 ## Where `MIRI_FINDINGS.md` is
 

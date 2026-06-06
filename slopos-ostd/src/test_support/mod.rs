@@ -9,6 +9,7 @@
 pub mod arch;
 pub mod cpu_state;
 pub mod gdt;
+pub mod global_lock;
 pub mod hermetic;
 pub mod page_io;
 pub mod pcr;

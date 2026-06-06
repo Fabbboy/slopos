@@ -520,6 +520,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as StdOrd};
 
     fn isolate<R>(f: impl FnOnce() -> R) -> R {
+        // The allocator bitmap and the BSP mint guard (via
+        // `run_bsp_init_for_test` in some bodies) are process-global;
+        // serialise against the other global-state test modules.
+        let _g = crate::test_support::global_lock::lock_global_test_state();
         reset_for_test();
         let r = f();
         reset_for_test();

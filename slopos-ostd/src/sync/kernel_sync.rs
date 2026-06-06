@@ -193,6 +193,9 @@ pub struct BspToken<'brand> {
     _not_send: PhantomData<*mut ()>,
 }
 
+// The token is a pure capability: a ZST with no runtime cost to pass.
+const _: () = assert!(core::mem::size_of::<BspToken<'static>>() == 0);
+
 impl<'brand> core::fmt::Debug for BspToken<'brand> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BspToken<'_>")
@@ -229,6 +232,9 @@ pub struct ApToken<'brand> {
     _not_send: PhantomData<*mut ()>,
     cpu_id: usize,
 }
+
+// Capability plus its diagnostic slot index — exactly one word.
+const _: () = assert!(core::mem::size_of::<ApToken<'static>>() == core::mem::size_of::<usize>());
 
 impl<'brand> core::fmt::Debug for ApToken<'brand> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -381,6 +387,15 @@ where
 /// OSTD `register_*` hooks. Production builds cannot link this — the
 /// `test-helpers` feature is auto-enabled only for `cargo test -p
 /// slopos-ostd`.
+///
+/// The reset + mint pair is not atomic: callers inside the *lib* test
+/// binary must hold
+/// [`crate::test_support::global_lock::lock_global_test_state`] (the
+/// in-tree pattern is the owning module's `isolate()` helper acquiring
+/// it). Integration-test binaries serialise themselves per-process and
+/// may call this bare. This helper deliberately does not take the lock
+/// itself — it is routinely called *inside* `isolate()` bodies that
+/// already hold it, and the lock is not reentrant.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn run_bsp_init_for_test<R, F>(f: F) -> R
 where
@@ -455,22 +470,24 @@ mod tests {
         assert_eq!(shared.get().get(), 7);
     }
 
-    #[test]
-    fn bsp_token_zero_size() {
-        assert_eq!(core::mem::size_of::<BspToken<'static>>(), 0);
-    }
+    // Token sizes (BspToken ZST, ApToken one word) are pinned by
+    // `const _` asserts beside the type definitions; no runtime
+    // duplicates here.
 
-    #[test]
-    fn ap_token_size_one_usize() {
-        assert_eq!(
-            core::mem::size_of::<ApToken<'static>>(),
-            core::mem::size_of::<usize>()
-        );
+    /// Serialises the token tests: the mint guards are process-global
+    /// one-shots shared with other lib-test modules (e.g. `irq::line`
+    /// minting via `run_bsp_init_for_test`), so reset + mint must not
+    /// interleave across test threads. The guard releases on unwind,
+    /// covering the `should_panic` tests below.
+    fn serial() -> crate::test_support::global_lock::GlobalTestStateGuard {
+        let g = crate::test_support::global_lock::lock_global_test_state();
+        reset_bsp_token_for_tests();
+        g
     }
 
     #[test]
     fn run_bsp_init_passes_token_to_closure() {
-        reset_bsp_token_for_tests();
+        let _g = serial();
         let r = run_bsp_init(|t| {
             assert_eq!(core::mem::size_of_val(t), 0);
             assert!(t.is_bsp());
@@ -482,7 +499,7 @@ mod tests {
 
     #[test]
     fn run_ap_init_carries_cpu_id() {
-        reset_bsp_token_for_tests();
+        let _g = serial();
         let r = run_ap_init(3, |t| {
             assert!(!t.is_bsp());
             assert_eq!(t.cpu_id(), 3);
@@ -494,7 +511,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "BSP token already minted")]
     fn run_bsp_init_double_call_panics() {
-        reset_bsp_token_for_tests();
+        let _g = serial();
         run_bsp_init(|_| {});
         run_bsp_init(|_| {});
     }
@@ -502,7 +519,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "AP 5 token already minted")]
     fn run_ap_init_double_call_panics() {
-        reset_bsp_token_for_tests();
+        let _g = serial();
         run_ap_init(5, |_| {});
         run_ap_init(5, |_| {});
     }
@@ -510,13 +527,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "cpu_id 0 out of range")]
     fn run_ap_init_rejects_cpu_zero() {
-        reset_bsp_token_for_tests();
+        let _g = serial();
         run_ap_init(0, |_| {});
     }
 
     #[test]
     fn cpu_init_witness_dispatch() {
-        reset_bsp_token_for_tests();
+        let _g = serial();
         fn check<W: CpuInitWitness>(w: &W, expected_id: usize, expect_bsp: bool) {
             assert_eq!(w.cpu_id(), expected_id);
             assert_eq!(w.is_bsp(), expect_bsp);
