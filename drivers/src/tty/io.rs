@@ -136,6 +136,12 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     // frame. `KBox::zeroed()` is only invoked in the `if echo_len > 0`
     // arm below — the no-echo hot path stays allocation-free.
     let mut route: Option<(super::driver::DriverId, slopos_ostd::KBox<[u8; 256]>, usize)> = None;
+    // ISIG output-flush request (NOFLSH clear): the slave's undelivered
+    // output lives in the peer master's read buffer; it is discarded after
+    // the slave lock drops (peer lock ordering) and before the caret echo
+    // is routed, so `^C` lands in an empty buffer and is immediately
+    // visible even when a flooding foreground job had filled it.
+    let mut signal_flush_master: Option<usize> = None;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -182,12 +188,47 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             // live.
         }
 
-        if let Some((sig, _)) = batch.signal {
+        if let Some((sig, flush)) = batch.signal {
             deferred.add_signal(tty.session.fg_pgrp_raw(), sig);
+            // A signal char discards the foreground job's pending I/O
+            // unless NOFLSH is set. The line discipline already flushed
+            // its input queues; the output side is flushed below, after
+            // this lock drops. The signal is posted (and its wake fires)
+            // ahead of the output-event wakes in `deferred.execute()`, so
+            // a writer blocked on the flushed queue observes its pending
+            // signal the moment its wait predicate re-runs.
+            if flush {
+                if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+                    signal_flush_master = Some(peer.idx.0 as usize);
+                    deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHWRITE);
+                }
+            }
         }
 
         batch.should_wake
     };
+
+    if let Some(master_slot) = signal_flush_master {
+        if master_slot < MAX_TTYS {
+            {
+                let mut guard = TTY_SLOTS[master_slot].lock();
+                if let Some(master) = guard.as_mut() {
+                    master.ldisc.flush_input();
+                }
+            }
+            // Drop the slave's pending-output accounting alongside the
+            // buffer (TCOFLUSH semantics). PTY-only: synchronous backends
+            // (vconsole, serial) complete output inline, so for them a
+            // reset would be pure counter-corruption risk with nothing to
+            // flush. `InflightGuard::drop` saturates at 0, so racing a
+            // live writer's guard cannot wrap the counter.
+            TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+            // Writers blocked on the full-master predicate in
+            // `wait_for_write_ready` (and poll waiters) re-evaluate now
+            // that the queue is empty.
+            deferred.wake_output_and_poll(master_slot);
+        }
+    }
 
     if let Some((driver_id, out, out_len)) = route {
         let _write_guard = TTY_WRITE_LOCKS[slot].lock();
@@ -647,7 +688,15 @@ fn wait_for_write_ready(
                 return Err(TtyError::WouldBlock);
             }
         } else {
+            // Signal-interruptible like the slave arm above: a foreground
+            // job blocked here while flooding a full master MUST unwind on
+            // Ctrl-C — the wait predicate alone can stay false forever if
+            // the master side stops draining, and delivery only happens at
+            // syscall exit, which this wait would otherwise never reach.
             BUS.subscribe(tty_output_event(master_slot)).wait_event(|| {
+                if has_pending_signal() {
+                    return true;
+                }
                 let guard = TTY_SLOTS[master_slot].lock();
                 match guard.as_ref() {
                     Some(tty) => {
@@ -658,6 +707,9 @@ fn wait_for_write_ready(
                     None => true,
                 }
             });
+            if has_pending_signal() {
+                return Err(TtyError::Restart);
+            }
         }
 
         let guard = TTY_SLOTS[slot].lock();

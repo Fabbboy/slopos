@@ -17,7 +17,9 @@ use crate::syscall::signal::{
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::fs::O_RDONLY;
 use slopos_abi::signal::{
-    SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGINT, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
+    SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGCONT, SIGHUP, SIGINT, SIGSTOP, SIGTERM, SIGTSTP,
+    SIGTTIN, SIGTTOU, SIGUSR1, SIGWINCH, SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit,
+    sig_default_action, sig_default_ignores,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
@@ -36,7 +38,7 @@ use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
-use slopos_sched::task_struct::Task;
+use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
 
 use crate::syscall::handlers::syscall_lookup;
@@ -1986,18 +1988,14 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
 }
 
 pub fn test_sigchld_and_wait_interaction() -> TestResult {
-    // Scope after Phase 1 (harmonic-cascade): SIGCHLD signal delivery
-    // is independent of the wait-wakeup mechanism. The wakeup path
-    // moved from a pool-scan (which cleared `waiting_on` and forced
-    // Ready as a side effect) to a per-task `waiters` WaitQueue
-    // drained under SpinLock by `release_task_dependents`. A task that
-    // is "waiting" only because something stored an id into its
-    // `waiting_on` field — without going through `task_wait_for` —
-    // is no longer registered on the child's waiters queue and so
-    // is intentionally NOT woken by child exit. That wake path is
-    // exercised by the race-stress tests in
-    // `core/src/scheduler/sched_tests.rs` (`test_task_wait_*`); this
-    // test's remaining scope is the SIGCHLD pending-bit propagation.
+    // SIGCHLD signal delivery is independent of the wait-wakeup
+    // mechanism (waitpid wakes via the per-task `waiters` WaitQueue,
+    // exercised by `core/src/scheduler/sched_tests.rs`'s
+    // `test_task_wait_*`). This test's scope is the SIGCHLD
+    // pending-bit propagation through the send-time disposition gate:
+    // SIGCHLD's default is Ignore, so an unblocked default-disposition
+    // parent never accumulates the bit, while a parent that blocked
+    // SIGCHLD (the signalfd pattern) must still see it pend.
     let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
@@ -2005,6 +2003,8 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     let parent_ptr = task_find_by_id(parent_id);
     assert_not_null!(parent_ptr, "parent lookup failed");
 
+    // Unblocked + SIG_DFL: the exit-path raise is dropped at the send
+    // site — no stale pending bit, no spurious wake.
     let child_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
     task_set_state(child_id, TaskStatus::Blocked);
@@ -2012,9 +2012,32 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     assert_eq_test!(task_terminate(child_id), 0, "failed to terminate child");
 
     let pending = task_signal_pending(parent_ptr);
+    assert_eq_test!(
+        pending & sig_bit(SIGCHLD),
+        0,
+        "default-ignored SIGCHLD must be dropped at send, not pend"
+    );
+
+    // Blocked SIGCHLD: the bit must pend so a signalfd drain (or a
+    // later-installed handler) can observe the exit.
+    if let Some(t) = task::task_borrow_mut(parent_ptr) {
+        t.signal_blocked = sig_bit(SIGCHLD);
+    }
+
+    let child2_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child2_id != INVALID_TASK_ID, "second task_fork failed");
+    task_set_state(child2_id, TaskStatus::Blocked);
+
+    assert_eq_test!(
+        task_terminate(child2_id),
+        0,
+        "failed to terminate second child"
+    );
+
+    let pending = task_signal_pending(parent_ptr);
     assert_test!(
         (pending & sig_bit(SIGCHLD)) != 0,
-        "parent missing SIGCHLD pending bit after child exit"
+        "parent missing SIGCHLD pending bit after child exit (SIGCHLD blocked)"
     );
 
     task_terminate(parent_id);
@@ -4577,4 +4600,222 @@ slopos_testing::stest!(
 slopos_testing::stest!(
     name = test_unix_scm_rights_error_releases_fd,
     suite = unix_scm_rights
+);
+
+// =============================================================================
+// Signal default-disposition and send-time drop tests
+// =============================================================================
+
+/// The default-action table: informational signals are ignored, job-control
+/// signals stop/continue, everything else terminates. Regression guard for
+/// the terminal-resize crash: SIGWINCH defaulting to Terminate killed the
+/// shell on every TIOCSWINSZ.
+pub fn test_sig_default_action_table() -> TestResult {
+    assert_test!(
+        matches!(sig_default_action(SIGWINCH), SigDefault::Ignore),
+        "SIGWINCH default must be Ignore"
+    );
+    assert_test!(
+        matches!(sig_default_action(SIGCHLD), SigDefault::Ignore),
+        "SIGCHLD default must be Ignore"
+    );
+    assert_test!(
+        matches!(sig_default_action(SIGCONT), SigDefault::Continue),
+        "SIGCONT default must be Continue"
+    );
+    for sig in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU] {
+        assert_test!(
+            matches!(sig_default_action(sig), SigDefault::Stop),
+            "job-control signal {} default must be Stop",
+            sig
+        );
+    }
+    for sig in [SIGHUP, SIGINT, SIGTERM, SIGUSR1] {
+        assert_test!(
+            matches!(sig_default_action(sig), SigDefault::Terminate),
+            "signal {} default must be Terminate",
+            sig
+        );
+    }
+    // Send-time droppability is strictly the Ignore class: Stop/Continue
+    // stay deliverable so implementing real job control later does not
+    // require revisiting raise sites.
+    assert_test!(
+        sig_default_ignores(SIGWINCH),
+        "SIGWINCH must be send-time droppable"
+    );
+    assert_test!(
+        !sig_default_ignores(SIGTERM),
+        "SIGTERM must not be send-time droppable"
+    );
+    assert_test!(
+        !sig_default_ignores(SIGTSTP),
+        "Stop-class must not be send-time droppable"
+    );
+    assert_test!(
+        !sig_default_ignores(SIGCONT),
+        "Continue-class must not be send-time droppable"
+    );
+    pass!()
+}
+
+/// `task_signal_post` drops unblocked signals whose disposition discards
+/// them, and pends everything else.
+pub fn test_signal_post_disposition_gate() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    // Fresh task: every action is SIG_DFL. A default-ignored SIGWINCH is
+    // dropped at the send site — no pending bit, no wake requested.
+    assert_test!(
+        !task::task_signal_post(task_ptr, SIGWINCH),
+        "default-ignored SIGWINCH must be dropped at send"
+    );
+    assert_eq_test!(
+        task_signal_pending(task_ptr),
+        0,
+        "dropped signal must not pend"
+    );
+
+    // A default-terminate signal pends and requests a wake.
+    assert_test!(
+        task::task_signal_post(task_ptr, SIGTERM),
+        "SIGTERM must pend"
+    );
+    assert_eq_test!(
+        task_signal_pending(task_ptr),
+        sig_bit(SIGTERM),
+        "SIGTERM pending bit expected"
+    );
+    task::task_signal_pending_store(task_ptr, 0);
+
+    // A blocked signal pends regardless of disposition: a signalfd reader
+    // or a later-installed handler may drain it after unblocking.
+    if let Some(t) = task::task_borrow_mut(task_ptr) {
+        t.signal_blocked = sig_bit(SIGWINCH);
+    }
+    assert_test!(
+        task::task_signal_post(task_ptr, SIGWINCH),
+        "blocked SIGWINCH must pend"
+    );
+    assert_eq_test!(
+        task_signal_pending(task_ptr),
+        sig_bit(SIGWINCH),
+        "blocked SIGWINCH pending bit expected"
+    );
+    task::task_signal_pending_store(task_ptr, 0);
+    if let Some(t) = task::task_borrow_mut(task_ptr) {
+        t.signal_blocked = 0;
+    }
+
+    // A real handler overrides the default-ignore drop.
+    if let Some(t) = task::task_borrow_mut(task_ptr) {
+        t.signal_actions[(SIGWINCH - 1) as usize] = SignalAction {
+            handler: 0x4100_0000,
+            mask: 0,
+            flags: 0,
+            restorer: 0x4200_0000,
+        };
+    }
+    assert_test!(
+        task::task_signal_post(task_ptr, SIGWINCH),
+        "handled SIGWINCH must pend"
+    );
+    task::task_signal_pending_store(task_ptr, 0);
+
+    // SIG_IGN drops even a default-terminate signal.
+    if let Some(t) = task::task_borrow_mut(task_ptr) {
+        t.signal_actions[(SIGTERM - 1) as usize] = SignalAction {
+            handler: SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        };
+    }
+    assert_test!(
+        !task::task_signal_post(task_ptr, SIGTERM),
+        "SIG_IGN SIGTERM must be dropped at send"
+    );
+    assert_eq_test!(
+        task_signal_pending(task_ptr),
+        0,
+        "ignored SIGTERM must not pend"
+    );
+
+    task_terminate(task_id);
+    pass!()
+}
+
+/// End-to-end regression for the resize crash: kill(SIGWINCH) against a
+/// default-disposition task succeeds per POSIX, and the target survives —
+/// both via the send-time drop and (for a directly-pended bit) via the
+/// delivery-point discard.
+pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    // kill() reports success even though the disposition discards the
+    // signal at the send site.
+    let mut kill_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    kill_frame.regs_mut().rdi = task_id as u64;
+    kill_frame.regs_mut().rsi = SIGWINCH as u64;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, task_ptr, &mut *kill_frame)
+    });
+    assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGWINCH) must succeed");
+    assert_eq_test!(
+        task_signal_pending(task_ptr),
+        0,
+        "SIGWINCH must be dropped at the send site"
+    );
+
+    // Belt-and-braces: a SIGWINCH bit pended directly (bypassing the send
+    // gate) must be discarded at the delivery point, never terminate.
+    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGWINCH));
+    let original_rip = 0x5000_4321u64;
+    let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    user_frame.regs_mut().rip = original_rip;
+    let _ = with_user_process_context(pid, || {
+        deliver_pending_signal(task_ptr, &mut *user_frame as *mut UserContext)
+    });
+    assert_eq_test!(
+        user_frame.regs().rip,
+        original_rip,
+        "ignored delivery must not redirect RIP"
+    );
+    assert_eq_test!(
+        task_signal_pending(task_ptr),
+        0,
+        "delivery must consume the ignored signal"
+    );
+    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    assert_test!(
+        state != TaskStatus::Zombie && state != TaskStatus::Terminated,
+        "SIGWINCH must not terminate the target"
+    );
+
+    task_terminate(task_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_sig_default_action_table,
+    suite = signal_dispositions
+);
+slopos_testing::stest!(
+    name = test_signal_post_disposition_gate,
+    suite = signal_dispositions
+);
+slopos_testing::stest!(
+    name = test_kill_default_ignored_sigwinch_target_survives,
+    suite = signal_dispositions
 );

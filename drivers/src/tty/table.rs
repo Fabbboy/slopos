@@ -347,6 +347,25 @@ impl InflightGuard {
 impl Drop for InflightGuard {
     #[inline]
     fn drop(&mut self) {
-        TTY_OUTPUT_INFLIGHT[self.slot].fetch_sub(self.count, Ordering::Release);
+        // Underflow-safe decrement: a concurrent flush (`store(0)` in the
+        // signal-flush / TCOFLUSH / TCIOFLUSH paths) can zero the counter
+        // between this guard's `fetch_add` and this `Drop`. A plain
+        // `fetch_sub` would then wrap the `AtomicU32` to ~u32::MAX, wedging
+        // `wait_output_idle()` (tcdrain / TCSETSW / TCSETSF) and poisoning
+        // `output_queued_bytes()` (TIOCOUTQ). Saturate at 0 instead — the
+        // flush already accounts for the discarded output.
+        let mut cur = TTY_OUTPUT_INFLIGHT[self.slot].load(Ordering::Relaxed);
+        loop {
+            let next = cur.saturating_sub(self.count);
+            match TTY_OUTPUT_INFLIGHT[self.slot].compare_exchange_weak(
+                cur,
+                next,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => cur = observed,
+            }
+        }
     }
 }

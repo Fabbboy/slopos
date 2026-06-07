@@ -9,7 +9,7 @@ use crate::irq;
 use slopos_sched::scheduler;
 use slopos_sched::task::{
     self, Task, task_has_deliverable_signal, task_parent_task_id, task_pgid, task_sid,
-    task_signal_blocked, task_signal_handler, task_signal_pending_or,
+    task_signal_blocked, task_signal_handler, task_signal_post,
 };
 
 // ---------------------------------------------------------------------------
@@ -52,8 +52,9 @@ fn signal_group_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let _ = task_signal_pending_or(task, sig_bit(ctx.signum));
-    let _ = scheduler::unblock_task(task);
+    if task_signal_post(task, ctx.signum) {
+        let _ = scheduler::unblock_task(task);
+    }
     ctx.matched = true;
 }
 
@@ -95,8 +96,9 @@ fn signal_session_task(task: *mut Task, context: *mut c_void) {
         return;
     }
 
-    let _ = task_signal_pending_or(task, sig_bit(ctx.signum));
-    let _ = scheduler::unblock_task(task);
+    if task_signal_post(task, ctx.signum) {
+        let _ = scheduler::unblock_task(task);
+    }
     ctx.matched = true;
 }
 

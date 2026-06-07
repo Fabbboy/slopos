@@ -507,6 +507,58 @@ impl TerminalGrid {
             return;
         }
         self.wrap_pending = false;
+
+        // Height shrink anchors the cursor, not the top: when the new bottom
+        // would cut the primary cursor off, the displaced top rows scroll
+        // into history and the screen shifts up so the cursor's line stays
+        // on screen. A top-aligned clip would teleport the physical cursor
+        // away from the line an application (e.g. a shell line editor) is
+        // tracking, corrupting every relative-cursor redraw that follows.
+        // The alt screen has no history; its cursor is clamped below.
+        let primary_cursor_row = if self.in_alt_screen {
+            self.alt_screen_cursor_row
+        } else {
+            self.cursor_row
+        };
+        let shift = if rows < self.rows && primary_cursor_row >= rows {
+            (primary_cursor_row - rows + 1) as usize
+        } else {
+            0
+        };
+        if shift > 0 {
+            let old_rows = self.rows as usize;
+            let old_cols = self.cols as usize;
+            // While in the alt screen, `cells` holds the alt content and the
+            // saved primary screen lives in `alt_cells` (copy-on-enter) —
+            // the shift must follow the primary buffer either way.
+            let primary = if self.in_alt_screen {
+                &self.alt_cells
+            } else {
+                &self.cells
+            };
+            for r in 0..shift {
+                // Pushed at the old width; a simultaneous width change
+                // resets the ring below, matching the existing
+                // width-change-drops-scrollback behavior.
+                self.scrollback.push_row(primary, r, old_cols);
+                self.total_scrolled = self.total_scrolled.wrapping_add(1);
+            }
+            self.scrollback.reset_view();
+            let primary = if self.in_alt_screen {
+                &mut self.alt_cells
+            } else {
+                &mut self.cells
+            };
+            for dst in 0..(old_rows - shift) {
+                primary.row_copy(dst, dst + shift, old_cols);
+            }
+            if self.in_alt_screen {
+                self.alt_screen_cursor_row -= shift as u16;
+            } else {
+                self.cursor_row -= shift as u16;
+            }
+        }
+
         let mut new_cells = CellGrid::empty();
         new_cells.allocate(rows as usize, cols as usize);
         let copy_rows = (self.rows.min(rows)) as usize;
@@ -531,6 +583,13 @@ impl TerminalGrid {
         }
         if self.cursor_row >= self.rows {
             self.cursor_row = self.rows.saturating_sub(1);
+        }
+        // The parked cursor of the inactive screen obeys the same bounds.
+        if self.alt_screen_cursor_col >= self.cols {
+            self.alt_screen_cursor_col = self.cols.saturating_sub(1);
+        }
+        if self.alt_screen_cursor_row >= self.rows {
+            self.alt_screen_cursor_row = self.rows.saturating_sub(1);
         }
         self.dirty = true;
     }
@@ -1298,6 +1357,53 @@ mod tests {
         assert_eq!(glyph_at(&g, 0, 4), 'o');
         assert_eq!(g.rows, 8);
         assert_eq!(g.cols, 20);
+    }
+
+    #[test]
+    fn resize_height_shrink_anchors_cursor_not_top() {
+        let mut g = TerminalGrid::new(5, 10);
+        // Five rows of content, cursor resting on the bottom row.
+        feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
+        assert_eq!(g.cursor_row, 4);
+        g.resize(3, 10);
+        // The cursor's line stays on screen at the new bottom; the two
+        // displaced top rows scrolled into history instead of being clipped.
+        assert_eq!(g.cursor_row, 2);
+        assert_eq!(glyph_at(&g, 0, 0), 'c');
+        assert_eq!(glyph_at(&g, 1, 0), 'd');
+        assert_eq!(glyph_at(&g, 2, 0), 'e');
+        assert_eq!(g.scrollback.count, 2);
+    }
+
+    #[test]
+    fn resize_height_shrink_above_cursor_clips_bottom() {
+        let mut g = TerminalGrid::new(5, 10);
+        feed(&mut g, b"a\r\nb");
+        assert_eq!(g.cursor_row, 1);
+        g.resize(3, 10);
+        // Cursor already fits: plain top-aligned clip, nothing scrolled.
+        assert_eq!(g.cursor_row, 1);
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(glyph_at(&g, 1, 0), 'b');
+        assert_eq!(g.scrollback.count, 0);
+    }
+
+    #[test]
+    fn resize_in_alt_screen_anchors_saved_main_cursor() {
+        let mut g = TerminalGrid::new(5, 10);
+        // Main cursor parked on the bottom row, then enter the alt screen
+        // and move its cursor to the bottom too.
+        feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
+        feed(&mut g, b"\x1b[?1049h\x1b[5;1HALT");
+        g.resize(3, 10);
+        // Alt screen has no history: its cursor clamps.
+        assert_eq!(g.cursor_row, 2);
+        // Leaving alt restores a bottom-anchored main screen whose saved
+        // cursor moved with its content.
+        feed(&mut g, b"\x1b[?1049l");
+        assert_eq!(g.cursor_row, 2);
+        assert_eq!(glyph_at(&g, 2, 0), 'e');
+        assert_eq!(g.scrollback.count, 2);
     }
 
     #[test]
