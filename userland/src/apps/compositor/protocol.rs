@@ -877,96 +877,74 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::Modifiers { mods });
     }
 
-    // ── Input forwarding ───────────────────────────────────────────────────
+    // ── Input forwarding (per-event, called in stream order) ──────────────
 
-    /// Forward raw input events to the appropriate protocol surface.
-    pub fn forward_input_events(
+    /// Forward one key event to the keyboard-focus surface. `pressed`
+    /// distinguishes press/release; modifiers are sent first (the
+    /// wl_keyboard rule: the client must judge the key against current
+    /// modifier state, never the previous event's).
+    pub fn forward_key_event(
         &mut self,
-        events: &[slopos_abi::InputEvent],
-        pointer_focus_task: u32,
         keyboard_focus_task: u32,
-        mouse_x: i32,
-        mouse_y: i32,
+        event: &slopos_abi::InputEvent,
+        pressed: bool,
         modifier_state: u8,
         serial: &mut u32,
     ) {
-        use slopos_abi::InputEventType;
-
-        let ptr_idx = self.task_id_to_surface_idx(pointer_focus_task);
-        let kbd_idx = self.task_id_to_surface_idx(keyboard_focus_task);
-
-        for event in events {
-            let time = event.timestamp_ms as u32;
-            match event.event_type {
-                InputEventType::PointerMotion => {
-                    if let Some(idx) = ptr_idx {
-                        let local_x = mouse_x - self.surfaces[idx].window_x;
-                        let local_y = mouse_y - self.surfaces[idx].window_y;
-                        self.send_pointer_motion(idx, time, local_x, local_y);
-                    }
-                }
-                InputEventType::PointerButtonPress => {
-                    if let Some(idx) = ptr_idx {
-                        *serial = serial.wrapping_add(1);
-                        let button = event.data.data0;
-                        self.send_pointer_button(idx, *serial, time, button, 1);
-                    }
-                }
-                InputEventType::PointerButtonRelease => {
-                    if let Some(idx) = ptr_idx {
-                        *serial = serial.wrapping_add(1);
-                        let button = event.data.data0;
-                        self.send_pointer_button(idx, *serial, time, button, 0);
-                    }
-                }
-                InputEventType::PointerAxis => {
-                    if let Some(idx) = ptr_idx {
-                        self.send_pointer_axis(idx, time, event.axis_id(), event.axis_value_v120());
-                    }
-                }
-                InputEventType::KeyPress => {
-                    if let Some(idx) = kbd_idx {
-                        *serial = serial.wrapping_add(1);
-                        // Modifiers first (the wl_keyboard rule): the client
-                        // must judge the key against current modifier state,
-                        // never the previous event's.
-                        self.send_modifiers(idx, modifier_state as u32);
-                        self.send_key(
-                            idx,
-                            *serial,
-                            time,
-                            event.key_scancode() as u32,
-                            event.key_ascii() as u32,
-                            1,
-                        );
-                    } else {
-                        // No protocol surface for the keyboard-focus task:
-                        // the keystroke is LOST here. Mirror it so input
-                        // black holes are visible on the serial log.
-                        let msg = std::format!(
-                            "COMP: key 0x{:02x} dropped (no surface for focus task {})\n",
-                            event.key_ascii(),
-                            keyboard_focus_task
-                        );
-                        let _ = tty::write(msg.as_bytes());
-                    }
-                }
-                InputEventType::KeyRelease => {
-                    if let Some(idx) = kbd_idx {
-                        *serial = serial.wrapping_add(1);
-                        self.send_modifiers(idx, modifier_state as u32);
-                        self.send_key(
-                            idx,
-                            *serial,
-                            time,
-                            event.key_scancode() as u32,
-                            event.key_ascii() as u32,
-                            0,
-                        );
-                    }
-                }
-                _ => {}
+        let time = event.timestamp_ms as u32;
+        let Some(idx) = self.task_id_to_surface_idx(keyboard_focus_task) else {
+            if pressed {
+                // No protocol surface for the keyboard-focus task: the
+                // keystroke is LOST here. Mirror it so input black holes
+                // are visible on the serial log.
+                let msg = std::format!(
+                    "COMP: key 0x{:02x} dropped (no surface for focus task {})\n",
+                    event.key_ascii(),
+                    keyboard_focus_task
+                );
+                let _ = tty::write(msg.as_bytes());
             }
+            return;
+        };
+        *serial = serial.wrapping_add(1);
+        self.send_modifiers(idx, modifier_state as u32);
+        self.send_key(
+            idx,
+            *serial,
+            time,
+            event.key_scancode() as u32,
+            event.key_ascii() as u32,
+            pressed as u32,
+        );
+    }
+
+    /// Forward one pointer-motion event (global coords) to a surface.
+    pub fn send_pointer_motion_for_task(&mut self, task_id: u32, time: u32, x: i32, y: i32) {
+        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+            let local_x = x - self.surfaces[idx].window_x;
+            let local_y = y - self.surfaces[idx].window_y;
+            self.send_pointer_motion(idx, time, local_x, local_y);
+        }
+    }
+
+    /// Forward one pointer-button event to a surface.
+    pub fn send_pointer_button_for_task(
+        &mut self,
+        task_id: u32,
+        serial: u32,
+        time: u32,
+        button: u32,
+        state: u32,
+    ) {
+        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+            self.send_pointer_button(idx, serial, time, button, state);
+        }
+    }
+
+    /// Forward one pointer-axis (scroll) event to a surface.
+    pub fn send_pointer_axis_for_task(&mut self, task_id: u32, time: u32, axis: u32, value: i32) {
+        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+            self.send_pointer_axis(idx, time, axis, value);
         }
     }
 
