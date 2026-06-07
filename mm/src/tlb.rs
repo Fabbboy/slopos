@@ -584,12 +584,6 @@ fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
     }
 }
 
-#[cfg(debug_assertions)]
-static ACK_SPIN_WARNED: [AtomicBool; MAX_CPUS] = {
-    const INIT: AtomicBool = AtomicBool::new(false);
-    [INIT; MAX_CPUS]
-};
-
 fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) {
     // SYSCALL entry clears IF (SFMASK bit 9) so callers often arrive
     // with interrupts disabled.  Re-enable them for the spin-wait so
@@ -606,7 +600,23 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
             continue;
         }
 
+        // Re-send the shootdown IPI if the ack does not arrive within a
+        // bounded spin. A single IPI delivery is NOT trustworthy: under
+        // interaction load the initiator's LAPIC ICR can stay busy past
+        // `wait_icr_idle`'s poll cap (the send then proceeds but the edge
+        // may be dropped), and a coalescing/timing edge can leave a target
+        // that never runs the handler — the request stays queued, `ack`
+        // stays false, and the initiator spins forever (observed live:
+        // CPU0 wedged in this loop on the munmap path while every peer sat
+        // idle-HLT). Re-sending is idempotent and safe: the request is
+        // still queued, so the handler `take`s it and stamps `ack=true`;
+        // if it was already handled, `take` returns `None` and the store
+        // is a harmless no-op. This converts a lost IPI from an unbounded
+        // hang into a few-millisecond recovery.
+        const RESEND_SPIN: u64 = 1_000_000;
+        const MAX_RESENDS: u64 = 256; // bounded recovery (~sub-second) before declaring the CPU dead
         let mut spin_count: u64 = 0;
+        let mut resends: u64 = 0;
         while !TLB_STATE.cpu_state[cpu_idx].ack.load(Ordering::Acquire) {
             // Reliable Abort Core interlock: once any CPU is driving a fatal
             // panic, abandon the wait. A panicking initiator must not spin on
@@ -618,16 +628,22 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                 return;
             }
             spin_count = spin_count.wrapping_add(1);
-            #[cfg(debug_assertions)]
-            if spin_count == 100_000_000
-                && ACK_SPIN_WARNED[cpu_idx]
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                klog_info!(
-                    "TLB: long ack spin detected for CPU {} (possible shootdown bug)",
-                    cpu_idx
-                );
+            if spin_count >= RESEND_SPIN {
+                spin_count = 0;
+                resends += 1;
+                if resends > MAX_RESENDS {
+                    // The target genuinely never acked across thousands of
+                    // re-sends — surface it as a fault rather than hang the
+                    // initiator (which still holds the VM lock) forever.
+                    klog_warn!(
+                        "TLB: CPU {} never acked shootdown after {} re-sends; giving up",
+                        cpu_idx,
+                        resends
+                    );
+                    break;
+                }
+                // Re-arm: the request is still in the slot if unhandled.
+                send_shootdown_ipi_to_cpu(cpu_idx);
             }
             cpu::pause();
         }

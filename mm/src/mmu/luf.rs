@@ -159,9 +159,14 @@ pub fn nonempty_mask_snapshot() -> u64 {
 #[repr(C, align(64))]
 struct LufDrainRequest {
     target_phys: AtomicU64,
-    /// Counts acks from remote CPUs. Initiator waits for this to reach
-    /// `pending_cpus`.
-    ack: AtomicU64,
+    /// Per-CPU ack bitmask: bit `c` set once CPU `c` has observed this
+    /// request. The initiator waits until every bit in its `remote_mask`
+    /// is set. A bitmask (not a counter) makes IPI re-send idempotent: a
+    /// duplicate ack from an already-acked CPU just re-sets its bit, so a
+    /// lost LUF-drain IPI can be re-armed without over-counting past the
+    /// completion condition (a counter would let a re-send falsely satisfy
+    /// the wait while a slow CPU still held stale TLB).
+    acked_mask: AtomicU64,
     /// Number of IPIs the initiator is expecting an ack for.
     pending_cpus: core::sync::atomic::AtomicU32,
     /// Monotonic sequence stamp — remote handlers copy it on entry so
@@ -174,7 +179,7 @@ impl LufDrainRequest {
     const fn new() -> Self {
         Self {
             target_phys: AtomicU64::new(0),
-            ack: AtomicU64::new(0),
+            acked_mask: AtomicU64::new(0),
             pending_cpus: core::sync::atomic::AtomicU32::new(0),
             sequence: AtomicU64::new(0),
         }
@@ -276,45 +281,85 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
     DRAIN_REQUEST
         .target_phys
         .store(phys.as_u64(), Ordering::Release);
-    DRAIN_REQUEST.ack.store(0, Ordering::Release);
+    DRAIN_REQUEST.acked_mask.store(0, Ordering::Release);
     DRAIN_REQUEST.pending_cpus.store(pending, Ordering::Release);
     DRAIN_REQUEST.sequence.fetch_add(1, Ordering::Release);
 
     core::sync::atomic::fence(Ordering::SeqCst);
 
+    // Pre-ack CPUs we will never receive a real ack from (offline / no
+    // APIC mapping) by setting their bits, then IPI the rest.
+    let mut sendable_mask = 0u64;
     for cpu in 0..64 {
-        if remote_mask & (1u64 << cpu) != 0 {
-            if !slopos_arch::pcr::is_cpu_online(cpu) {
-                // Offline — fake an ack to avoid hanging.
-                DRAIN_REQUEST.ack.fetch_add(1, Ordering::Release);
-                continue;
-            }
-            if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu) {
+        if remote_mask & (1u64 << cpu) == 0 {
+            continue;
+        }
+        let apic = if slopos_arch::pcr::is_cpu_online(cpu) {
+            slopos_arch::pcr::apic_id_from_cpu_index(cpu)
+        } else {
+            None
+        };
+        match apic {
+            Some(apic_id) => {
+                sendable_mask |= 1u64 << cpu;
                 slopos_arch::pcr::send_ipi_to_cpu(
                     apic_id,
                     slopos_arch::arch::idt::LUF_DRAIN_IPI_VECTOR,
                 );
-            } else {
-                // No APIC mapping — fake ack.
-                DRAIN_REQUEST.ack.fetch_add(1, Ordering::Release);
+            }
+            None => {
+                DRAIN_REQUEST
+                    .acked_mask
+                    .fetch_or(1u64 << cpu, Ordering::Release);
             }
         }
     }
 
-    // Spin-wait for all acks. IRQs are enabled (set above before
-    // mutex acquisition) so remote handlers' TLB-shootdown IPIs back
-    // at us, and other initiators' LUF IPIs back at us, both get
+    // Spin-wait until every expected CPU's bit is set. IRQs are enabled
+    // (set above before mutex acquisition) so remote handlers' TLB-shootdown
+    // IPIs back at us, and other initiators' LUF IPIs back at us, both get
     // serviced — closing the three-way LUF↔TLB↔contender deadlock.
+    //
+    // Re-send to any CPU whose ack has not arrived within a bounded spin:
+    // a single LUF-drain IPI is no more trustworthy than a TLB one (lost
+    // under ICR-busy / coalescing), and an unbacked wait here wedges the
+    // initiator while it holds DRAIN_LOCK. Re-send is idempotent thanks to
+    // the per-CPU bitmask.
+    const RESEND_SPIN: u64 = 1_000_000;
+    const MAX_RESENDS: u64 = 256;
     let mut spin: u64 = 0;
-    while DRAIN_REQUEST.ack.load(Ordering::Acquire) < pending as u64 {
+    let mut resends: u64 = 0;
+    loop {
+        let acked = DRAIN_REQUEST.acked_mask.load(Ordering::Acquire);
+        if acked & remote_mask == remote_mask {
+            break;
+        }
         slopos_arch::cpu::pause();
         spin = spin.wrapping_add(1);
-        if spin == 100_000_000 {
-            klog_warn!(
-                "LUF: long drain-by-phys ack spin (phys=0x{:x}, pending={})",
-                phys.as_u64(),
-                pending
-            );
+        if spin >= RESEND_SPIN {
+            spin = 0;
+            resends += 1;
+            if resends > MAX_RESENDS {
+                klog_warn!(
+                    "LUF: drain-by-phys never fully acked (phys=0x{:x}, acked=0x{:x}, want=0x{:x}); giving up",
+                    phys.as_u64(),
+                    acked,
+                    remote_mask
+                );
+                break;
+            }
+            let missing = sendable_mask & !acked;
+            for cpu in 0..64 {
+                if missing & (1u64 << cpu) == 0 {
+                    continue;
+                }
+                if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu) {
+                    slopos_arch::pcr::send_ipi_to_cpu(
+                        apic_id,
+                        slopos_arch::arch::idt::LUF_DRAIN_IPI_VECTOR,
+                    );
+                }
+            }
         }
     }
 
@@ -337,8 +382,12 @@ pub fn handle_drain_ipi(cpu: usize) {
     // Early ACK — the initiator may proceed as soon as we've observed
     // the request; the scan + drain below happens inside this ISR and
     // the IRETQ serialises w.r.t. any subsequent memory accesses on
-    // this CPU.
-    DRAIN_REQUEST.ack.fetch_add(1, Ordering::Release);
+    // this CPU. Setting our own bit is idempotent under IPI re-send.
+    if cpu < 64 {
+        DRAIN_REQUEST
+            .acked_mask
+            .fetch_or(1u64 << cpu, Ordering::Release);
+    }
 
     let Some(state) = state_for(cpu) else {
         return;
