@@ -1,12 +1,36 @@
-# FOLLOWUP — open investigation: lost blocking-wait wake (boot wedge + runtime compositor freeze)
+# FOLLOWUP — open investigations on `fix/tty-signal-pipeline`
 
 Prompt for the next agent. Read this whole file before touching code.
-Branch: `fix/tty-signal-pipeline`. The compositor focus-loss bug from the
-previous FOLLOWUP is FIXED and verified (in-order input dispatch); so are six
-adjacent bugs found while verifying it (see the two fix commits' messages).
-ONE intermittent lost-wake class remains, with two observed faces.
+The compositor focus-loss bug from the previous FOLLOWUP is FIXED; so are
+the kernel ISR/ICR/spawn bugs, and the **resize freeze** (TLB-shootdown
+wedge — fixed by IPI re-send, commit daa9652d). Two items remain.
 
-## TL;DR
+## RESOLVED this session: resize freeze (TLB shootdown wedge)
+
+The "resizing the terminal freezes all of SlopOS" bug is FIXED (commit
+daa9652d) and verified: 60 aggressive grow/shrink cycles stay live where
+the unfixed build froze within a handful. `just debug-bt` on a frozen VM
+showed CPU0 wedged in `tlb::wait_for_acks` on the munmap path
+(`process_vm_munmap → luf::queue_unmap → drain_all → tlb::flush_all`) while
+peers sat idle-HLT, never acking. Root: a single shootdown IPI is not a
+trustworthy delivery (ICR-busy past `wait_icr_idle`'s cap; AB-BA lock cycle
+leaving a target IPI-unreachable). Fix: both shootdown waits (TLB boolean
+ack + LUF drain, the latter converted counter→per-CPU bitmask) re-send the
+IPI on timeout, bounded, idempotent.
+
+**STRUCTURAL FOLLOW-UP (do this to retire the safety net):** the re-send is
+a robust net but it papers over an AB-BA deadlock — `process_vm_munmap`
+holds the cli'd `PROCESS_VMS` SpinLock across the shootdown, and a peer
+spinning cli'd to acquire that same lock cannot service the initiator's
+shootdown IPI. Dissolve it at the source, exactly as `DRAIN_LOCK` was
+already changed SpinLock→PreemptMutex (mm/src/mmu/luf.rs:205): either make
+the `PROCESS_VMS` wait IRQ-serviceable, or collect the unmap ranges, DROP
+the lock, then flush (the "shootdown out from under the VM lock" pattern).
+Then `wait_for_acks` always completes and the give-up path is dead code.
+Confirm by stress-resizing with the give-up `klog_warn` as a tripwire — it
+must never fire.
+
+## TL;DR (remaining lost-wake bug)
 
 A task blocked in a kernel wait intermittently never receives its wake. Two
 reproduced manifestations, almost certainly one root cause:
