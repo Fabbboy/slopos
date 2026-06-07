@@ -1699,6 +1699,36 @@ pub(crate) fn rescue_stranded_ready_tasks() {
     super::task::task_iterate_active(Some(rescue_check_task), ptr::null_mut());
 }
 
+/// Consecutive-sweep strike tracking for never-run READY tasks. A task
+/// freshly published Ready by `task_create` may legitimately be observed
+/// unlinked for a moment while its spawn path finishes building it (the
+/// spawn re-publishes and enqueues microseconds later) — but a never-run
+/// task that stays Ready and unqueued across multiple ~100 ms sweeps has
+/// lost its initial enqueue and will never recover on its own (observed
+/// live: a freshly spawned shell stranded READY with every runqueue
+/// empty, refused by the rescue 1200+ times). Slots are keyed by
+/// `task_id % N`; a collision at worst delays a rescue by one window.
+const RESCUE_STRIKE_SLOTS: usize = 64;
+const RESCUE_STRIKE_THRESHOLD: u8 = 3;
+static RESCUE_STRIKE_IDS: [core::sync::atomic::AtomicU32; RESCUE_STRIKE_SLOTS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RESCUE_STRIKE_SLOTS];
+static RESCUE_STRIKES: [core::sync::atomic::AtomicU8; RESCUE_STRIKE_SLOTS] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; RESCUE_STRIKE_SLOTS];
+
+/// Count one stranded observation of `task_id`; true once the task has
+/// been seen stranded in `RESCUE_STRIKE_THRESHOLD` consecutive sweeps.
+fn rescue_strike(task_id: u32) -> bool {
+    let slot = task_id as usize % RESCUE_STRIKE_SLOTS;
+    if RESCUE_STRIKE_IDS[slot].swap(task_id, Ordering::Relaxed) != task_id {
+        RESCUE_STRIKES[slot].store(1, Ordering::Relaxed);
+        return false;
+    }
+    let strikes = RESCUE_STRIKES[slot]
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    strikes >= RESCUE_STRIKE_THRESHOLD
+}
+
 fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
     let Some(t) = super::task::task_borrow(task) else {
         return;
@@ -1706,19 +1736,21 @@ fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
     if t.status() != TaskStatus::Ready {
         return;
     }
-    // Never touch a task that has not run yet: `task_create` publishes a
-    // transient Ready before the spawn path finishes initialising the task
-    // (entry point, fd table, job control) and re-publishes it. Dispatching
-    // that half-built task would jump to an unloaded entry point. A
-    // genuinely stranded task has run before (its timestamp is set), and
-    // fresh tasks are enqueued by `schedule_new_task` anyway.
-    if t.last_run_timestamp == 0 {
-        return;
-    }
     if slopos_ostd::task::accessors::task_on_cpu_load(task) {
         return;
     }
     if t.ready_link.is_linked() {
+        return;
+    }
+    // A task that has not run yet may be mid-spawn: `task_create`
+    // publishes a transient Ready before the spawn path finishes
+    // initialising it (entry point, fd table, job control) and
+    // re-publishes. Dispatching that half-built task would jump to an
+    // unloaded entry point — so a never-run task is only rescued after
+    // it has been observed stranded (Ready, unqueued, off-CPU) across
+    // several consecutive sweeps, far beyond any spawn path's build
+    // window.
+    if t.last_run_timestamp == 0 && !rescue_strike(t.task_id) {
         return;
     }
     klog_info!("SCHED: rescuing stranded READY task {}", t.task_id);

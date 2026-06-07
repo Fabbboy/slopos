@@ -509,7 +509,21 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             continue;
         }
 
-        if run_ready_task_from_idle(cpu_id, idle_task) {
+        // IRQs must be OFF across the dispatch: `execute_task` →
+        // `switch_context` swaps the per-task preempt_count with the PCR
+        // and switches registers — an IRQ landing inside that window (and
+        // its trap-exit handoff re-entering `schedule()`) interleaves a
+        // second switch with the half-completed swap, corrupting the
+        // count for the incoming task. `schedule_internal` already
+        // brackets its switches with `save_flags_cli`; this idle-loop
+        // dispatch was the one unbracketed path (and the one every fresh
+        // task's first run goes through). When the switch happens, idle's
+        // context saves IF=0 and the flags restore below runs at idle
+        // resumption.
+        let irq_flags = slopos_arch::cpu::save_flags_cli();
+        let dispatched = run_ready_task_from_idle(cpu_id, idle_task);
+        slopos_arch::cpu::restore_flags(irq_flags);
+        if dispatched {
             continue;
         }
 

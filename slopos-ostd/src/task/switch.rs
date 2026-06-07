@@ -124,6 +124,15 @@ pub extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *const Tas
 /// - `next` must point to a valid, initialised [`TaskContext`]; `prev`
 ///   must be null or point to a valid, exclusively-owned context.
 pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
+    // Always-on enforcement of the IRQs-off precondition above: a switch
+    // with interrupts enabled lets an IRQ interleave with the count swap
+    // and the register switch, corrupting the per-task preempt_count in
+    // a way that only surfaces frames later as an unrelated
+    // over/underflow panic. Fail at the violation, not at the symptom.
+    assert!(
+        !crate::cpu::x86_64::interrupts::are_interrupts_enabled(),
+        "switch_context called with interrupts enabled"
+    );
     // SAFETY: the production preempt backend is registered (and the BSP
     // PCR installed) before the scheduler performs any switch, so
     // `current_pcr()` resolves this CPU's region.
