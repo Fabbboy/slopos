@@ -68,23 +68,38 @@ define_syscall!(syscall_input_poll_batch
         "InputEventScratch must be aligned for InputEvent",
     );
 
+    // Drain through a small fixed stack scratch in chunks instead of a
+    // per-call heap allocation: this syscall runs at frame rate from the
+    // compositor, and a transient allocation failure here surfaced as
+    // `-ENOMEM` to a hot input path (whose callers then misread the errno
+    // as a huge event count). 8 events × 32 B = 256 B of stack — well
+    // under the frame gate — and no failure mode left besides EFAULT.
     const MAX_BATCH: usize = 64;
+    const CHUNK: usize = 8;
+    const EVENT_SIZE: usize = core::mem::size_of::<InputEvent>();
     let batch = max_count.min(MAX_BATCH);
-    let mut scratch = slopos_ostd::KVec::<InputEventScratch>::zeroed(batch)
-        .map_err(|_| Errno::ENOMEM)?;
+    let mut scratch = [InputEventScratch([0u8; EVENT_SIZE]); CHUNK];
 
-    let count = input::drain_batch(
-        task_id,
-        scratch.as_mut_ptr() as *mut InputEvent,
-        batch,
-    );
-    if count > 0 {
+    let mut total = 0usize;
+    while total < batch {
+        let want = (batch - total).min(CHUNK);
+        let count = input::drain_batch(task_id, scratch.as_mut_ptr() as *mut InputEvent, want);
+        if count == 0 {
+            break;
+        }
         let src_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes(&scratch[..count]);
-        let user_out = MmUserBytes::try_new(events_out.as_u64(), src_bytes.len())
-            .map_err(|_| Errno::EFAULT)?;
+        let user_out = MmUserBytes::try_new(
+            events_out.as_u64() + (total * EVENT_SIZE) as u64,
+            src_bytes.len(),
+        )
+        .map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(user_out, src_bytes).map_err(|_| Errno::EFAULT)?;
+        total += count;
+        if count < want {
+            break;
+        }
     }
-    Ok(count as u64)
+    Ok(total as u64)
 });
 
 define_syscall!(syscall_clipboard_copy

@@ -1043,7 +1043,14 @@ pub fn task_fork(
     // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU
     // instead of sticking to the parent's CPU.  Wakeups from sleep will
     // later use schedule_task() which preserves cache affinity.
-    scheduler::schedule_new_task(child_task_ptr);
+    //
+    // A failed initial enqueue must be loud: the child would sit READY on
+    // no runqueue until the stranded-READY rescue sweep picks it up.
+    if scheduler::schedule_new_task(child_task_ptr) != 0 {
+        klog_info!(
+            "fork: initial enqueue failed for task {child_task_id}; rescue sweep will recover it"
+        );
+    }
 
     child_task_id
 }
@@ -1272,7 +1279,12 @@ pub fn task_clone(
     child.set_status(TaskStatus::Ready);
 
     // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU.
-    scheduler::schedule_new_task(child_task_ptr);
+    // A failed initial enqueue must be loud (see task_fork above).
+    if scheduler::schedule_new_task(child_task_ptr) != 0 {
+        klog_info!(
+            "clone: initial enqueue failed for task {child_task_id}; rescue sweep will recover it"
+        );
+    }
 
     Ok(child_task_id)
 }

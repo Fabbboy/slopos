@@ -134,6 +134,15 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::Fault);
         }
 
+        // `task_create` publishes the slot Ready; pull it back to Blocked
+        // for the duration of the build. The ELF load below does DISK I/O —
+        // tens of milliseconds during which a Ready-but-half-built task is
+        // visible to every dispatch path (observed live: the stranded-READY
+        // rescue sweep dispatched one mid-load and it page-faulted on its
+        // own unmapped entry point). The Ready re-publication at the end of
+        // this function is the real "schedulable" edge (Linux TASK_NEW).
+        task_set_status(task_info, TaskStatus::Blocked);
+
         // task_create (via reserve_task_slot) returns the task in Blocked
         // state.  It stays Blocked while we write entry_point, rip, rsp,
         // fd table, pgid, etc.  We publish as Ready only at the end.

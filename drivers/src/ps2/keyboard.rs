@@ -15,7 +15,9 @@ struct ModifierState {
     shift_left: bool,
     shift_right: bool,
     ctrl_left: bool,
+    ctrl_right: bool,
     alt_left: bool,
+    alt_right: bool,
     caps_lock: bool,
     super_left: bool,
     super_right: bool,
@@ -27,7 +29,9 @@ impl ModifierState {
             shift_left: false,
             shift_right: false,
             ctrl_left: false,
+            ctrl_right: false,
             alt_left: false,
+            alt_right: false,
             caps_lock: false,
             super_left: false,
             super_right: false,
@@ -36,6 +40,14 @@ impl ModifierState {
 
     fn is_shift(&self) -> bool {
         self.shift_left || self.shift_right
+    }
+
+    fn is_ctrl(&self) -> bool {
+        self.ctrl_left || self.ctrl_right
+    }
+
+    fn is_alt(&self) -> bool {
+        self.alt_left || self.alt_right
     }
 
     fn is_super(&self) -> bool {
@@ -151,7 +163,7 @@ fn translate_scancode(scancode: u8, modifiers: &ModifierState) -> u8 {
         _ => {
             let ch = translate_letter(make_code, modifiers);
             // Ctrl+letter → control code (0x01–0x1A)
-            if modifiers.ctrl_left && ch != 0 {
+            if modifiers.is_ctrl() && ch != 0 {
                 let lower = if (b'A'..=b'Z').contains(&ch) {
                     ch + 0x20
                 } else {
@@ -227,6 +239,16 @@ pub fn handle_scancode(scancode: u8) {
 
     state.scancode_buffer.push_overwrite(scancode);
 
+    // Consume the E0 latch FIRST: every branch below must know whether
+    // this byte was E0-prefixed. The base-modifier route used to run
+    // before this check, so E0 1D (Right Ctrl) was misread as Left Ctrl
+    // AND left the latch set — the next scancode (the `c` of a
+    // Right-Ctrl+C chord) was then eaten by the extended branch. The
+    // same path let the PS/2 "fake shift" prefixes (E0 2A / E0 AA)
+    // corrupt the real shift state.
+    let was_extended = state.extended_code;
+    state.extended_code = false;
+
     // Modifier keys: update state and route the event (no character to deliver).
     // Route the MAKE code, not the raw scancode: a release arrives as the
     // break code (make | 0x80), which no downstream modifier tracker matches
@@ -234,7 +256,7 @@ pub fn handle_scancode(scancode: u8) {
     // turns every later Ctrl+C into the Ctrl+Shift+C clipboard chord
     // (silently swallowed, no SIGINT). Press/release already rides the
     // event type.
-    if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
+    if !was_extended && matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
         handle_modifier(&mut state.modifiers, make_code, is_press);
         drop(state);
         input_route_key_event(
@@ -247,10 +269,12 @@ pub fn handle_scancode(scancode: u8) {
     }
 
     // Extended keys (preceded by 0xE0).
-    if state.extended_code {
-        state.extended_code = false;
-        // Super (Logo/Windows) keys: track press AND release for modifier state.
-        // Left Super = 0x5B, Right Super = 0x5C (PS/2 scan code set 1).
+    if was_extended {
+        // Extended modifiers: track press AND release for modifier state.
+        // Left Super = E0 5B, Right Super = E0 5C, Right Ctrl = E0 1D,
+        // Right Alt = E0 38 (PS/2 scan code set 1). Right Ctrl/Alt route
+        // the same make code as their left twins so downstream trackers
+        // (compositor, terminal) need no left/right distinction.
         match make_code {
             0x5B => {
                 state.modifiers.super_left = is_press;
@@ -274,6 +298,33 @@ pub fn handle_scancode(scancode: u8) {
                     is_press,
                     slopos_kernel_services::clock::uptime_ms(),
                 );
+                return;
+            }
+            0x1D => {
+                state.modifiers.ctrl_right = is_press;
+                drop(state);
+                input_route_key_event(
+                    make_code,
+                    0,
+                    is_press,
+                    slopos_kernel_services::clock::uptime_ms(),
+                );
+                return;
+            }
+            0x38 => {
+                state.modifiers.alt_right = is_press;
+                drop(state);
+                input_route_key_event(
+                    make_code,
+                    0,
+                    is_press,
+                    slopos_kernel_services::clock::uptime_ms(),
+                );
+                return;
+            }
+            // PS/2 "fake shift" wrappers around extended keys: ignore —
+            // they must not touch the real shift state.
+            0x2A | 0x36 => {
                 return;
             }
             _ => {}
@@ -383,10 +434,10 @@ pub fn get_modifier_state() -> u8 {
     if m.is_shift() {
         bits |= 1;
     }
-    if m.ctrl_left {
+    if m.is_ctrl() {
         bits |= 1 << 1;
     }
-    if m.alt_left {
+    if m.is_alt() {
         bits |= 1 << 2;
     }
     if m.is_super() {

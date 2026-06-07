@@ -254,9 +254,20 @@ fn send_ipi_raw(icr_high: u32, icr_low: u32) {
     if !is_available() || !is_enabled() {
         return;
     }
+    // The ICR_HIGH/ICR_LOW write pair must be atomic against IRQ handlers
+    // on this CPU that also send IPIs (scheduler reschedule wakes, other
+    // TLB shootdowns): an interrupting sender between our two writes
+    // overwrites ICR_HIGH, redirecting our IPI to ITS destination — the
+    // intended target never receives it. Observed live as a TLB-shootdown
+    // initiator spinning forever on an ack from a CPU whose IPI had been
+    // redirected (the target's request stayed queued, ack stayed false,
+    // every LAPIC IRR empty). Linux requires IRQs disabled around the
+    // xAPIC ICR sequence for exactly this reason.
+    let irq_flags = slopos_ostd::cpu::x86_64::interrupts::save_flags_cli();
     wait_icr_idle();
     write_register(LAPIC_ICR_HIGH, icr_high);
     write_register(LAPIC_ICR_LOW, icr_low);
+    slopos_ostd::cpu::x86_64::interrupts::restore_flags(irq_flags);
     wait_icr_idle();
 }
 

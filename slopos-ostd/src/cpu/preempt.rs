@@ -429,7 +429,29 @@ impl Drop for PreemptGuard {
         // decrement rather than letting the unsigned wrap propagate.
         assert!(prev > 0, "preempt_count underflow");
 
-        if prev == 1 && pcr.reschedule_pending.swap(0, Ordering::AcqRel) != 0 {
+        // Deferred reschedule fires ONLY at the running, IRQs-enabled
+        // baseline (Linux's `preempt_schedule` discipline: never from a
+        // `preempt_enable()` with IRQs off). With IRQs disabled we are
+        // inside an interrupt/exception handler or an explicit
+        // IRQ-disabled critical section — contexts where a guard drop
+        // hitting 1→0 must NOT context-switch:
+        //
+        // - Inside an IRQ handler (the LAPIC timer / device ISRs take
+        //   SpinLocks; only vectors < 32 carry the IstPreemptHold), a
+        //   nested `schedule()` runs `switch_context`'s count swap from a
+        //   non-baseline context, saving/restoring the per-task
+        //   preempt_count under the wrong logical task. The corruption
+        //   surfaces later as both "switch attempted with
+        //   preempt_count=N" and "preempt_count underflow" panics on
+        //   unrelated tasks.
+        // - The handler's tail already consumes the pending flag at the
+        //   correct boundary (`scheduler_handoff_on_trap_exit`), so the
+        //   reschedule is deferred, not lost. `reschedule_pending` is
+        //   deliberately left set on this path.
+        if prev == 1
+            && crate::cpu::x86_64::interrupts::are_interrupts_enabled()
+            && pcr.reschedule_pending.swap(0, Ordering::AcqRel) != 0
+        {
             let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
             if !fn_ptr.is_null() {
                 // SAFETY: fn_ptr was set via register_reschedule_callback with a valid fn().
