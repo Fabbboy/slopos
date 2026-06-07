@@ -81,7 +81,14 @@ pub fn cmd_seq(argc: i32, argv: &[&[u8]]) -> i32 {
     loop {
         write_u64(i);
         if !shell_write(NL.as_bytes()) {
-            break;
+            // A SIGINT that interrupts the blocking TTY write surfaces as a
+            // failed write (EINTR) — the handler has already marked the
+            // interrupt. Classify before assuming a real I/O error, or ^C
+            // reports a write failure instead of an interrupt.
+            if interrupt::take_pending() {
+                return interrupt::EXIT_INTERRUPTED;
+            }
+            return 1;
         }
         if interrupt::take_pending() {
             return interrupt::EXIT_INTERRUPTED;
@@ -103,7 +110,15 @@ pub fn cmd_yes(argc: i32, argv: &[&[u8]]) -> i32 {
 
     loop {
         if !shell_write(text) || !shell_write(NL.as_bytes()) {
-            return 0;
+            // A SIGINT that interrupts the blocking TTY write surfaces as a
+            // failed write (EINTR) — the handler has already marked the
+            // interrupt. Classify before assuming a real I/O error: the old
+            // code returned 0 here, reporting ^C as a clean exit and leaving
+            // the interrupt flag pending.
+            if interrupt::take_pending() {
+                return interrupt::EXIT_INTERRUPTED;
+            }
+            return 1;
         }
         if interrupt::take_pending() {
             return interrupt::EXIT_INTERRUPTED;

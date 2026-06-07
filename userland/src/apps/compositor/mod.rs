@@ -163,7 +163,13 @@ impl WindowManager {
                 self.add_bounds_damage(&saved_bounds[i]);
             }
         }
+    }
 
+    /// Cursor-trail / shelf / hover damage. Runs AFTER the frame's input
+    /// events have been dispatched (the cursor trail is populated by
+    /// `process_input_events`), unlike the window damage in
+    /// `refresh_windows` which only needs the protocol surface state.
+    fn add_pointer_damage(&mut self) {
         // Add shelf bounds to damage only when its visual output changes:
         // cursor moved (magnification/hover may change) or content changed
         // (app opened/closed). Following the Mutter/wlroots pattern where
@@ -266,6 +272,161 @@ impl WindowManager {
             self.output_damage
                 .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
         }
+    }
+
+    /// Dispatch the frame's raw input events IN STREAM ORDER.
+    ///
+    /// This is the wlroots/Wayland event model: each event is processed at
+    /// the input state accumulated up to that event. Folding the batch into
+    /// final state first (the old model) hit-tested button presses at the
+    /// end-of-batch pointer position — when the press and its subsequent
+    /// drag motion arrived within one 16 ms frame batch, the press was
+    /// tested at post-drag coordinates and landed on the wrong target
+    /// (observed live: a resize-corner grab becoming a content/desktop
+    /// click, the latter leaving keyboard focus pointing at nothing).
+    fn process_input_events(&mut self, fb_width: i32, fb_height: i32, shelf_height: i32) {
+        use slopos_abi::InputEventType;
+
+        // Take the protocol bridge out so it can be passed mutably into
+        // InputHandler methods without borrowing all of `self`.
+        let mut proto_box = self.protocol.take();
+
+        for i in 0..self.input.raw_event_count {
+            let event = self.input.raw_event_buf[i];
+            let time = event.timestamp_ms as u32;
+            match event.event_type {
+                InputEventType::PointerMotion => {
+                    self.input.apply_motion(&event);
+                    self.input.apply_grab_motion(proto_box.as_deref_mut());
+                    self.sync_pointer_focus(proto_box.as_deref_mut());
+                    if self.protocol_pointer_focus != 0 {
+                        if let Some(p) = proto_box.as_deref_mut() {
+                            p.send_pointer_motion_for_task(
+                                self.protocol_pointer_focus,
+                                time,
+                                self.input.mouse_x,
+                                self.input.mouse_y,
+                            );
+                        }
+                    }
+                }
+                InputEventType::PointerButtonPress => {
+                    let button = event.data.data0 as u8;
+                    self.input.on_button_press(
+                        button,
+                        fb_width,
+                        fb_height,
+                        shelf_height,
+                        &self.windows,
+                        self.window_count,
+                        &self.shelf,
+                        proto_box.as_deref_mut(),
+                    );
+                    if self.protocol_pointer_focus != 0 {
+                        if let Some(p) = proto_box.as_deref_mut() {
+                            self.protocol_serial = self.protocol_serial.wrapping_add(1);
+                            p.send_pointer_button_for_task(
+                                self.protocol_pointer_focus,
+                                self.protocol_serial,
+                                time,
+                                event.data.data0,
+                                1,
+                            );
+                        }
+                    }
+                }
+                InputEventType::PointerButtonRelease => {
+                    let button = event.data.data0 as u8;
+                    self.input
+                        .on_button_release(button, proto_box.as_deref_mut());
+                    if self.protocol_pointer_focus != 0 {
+                        if let Some(p) = proto_box.as_deref_mut() {
+                            self.protocol_serial = self.protocol_serial.wrapping_add(1);
+                            p.send_pointer_button_for_task(
+                                self.protocol_pointer_focus,
+                                self.protocol_serial,
+                                time,
+                                event.data.data0,
+                                0,
+                            );
+                        }
+                    }
+                }
+                InputEventType::PointerAxis => {
+                    if self.protocol_pointer_focus != 0 {
+                        if let Some(p) = proto_box.as_deref_mut() {
+                            p.send_pointer_axis_for_task(
+                                self.protocol_pointer_focus,
+                                time,
+                                event.axis_id(),
+                                event.axis_value_v120(),
+                            );
+                        }
+                    }
+                }
+                InputEventType::KeyPress | InputEventType::KeyRelease => {
+                    let pressed = event.event_type == InputEventType::KeyPress;
+                    self.input
+                        .update_modifier_from_scancode(event.key_scancode(), pressed);
+                    // Route to the keyboard focus AS OF THIS EVENT: a click
+                    // earlier in the batch already retargeted focused_task.
+                    let kbd_focus = self.input.focused_task();
+                    let mods = self.input.modifier_state();
+                    if let Some(p) = proto_box.as_deref_mut() {
+                        p.forward_key_event(
+                            kbd_focus,
+                            &event,
+                            pressed,
+                            mods,
+                            &mut self.protocol_serial,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Final per-frame sync: pointer focus can also change without any
+        // motion event (a window moved/appeared/vanished under a static
+        // cursor), so recompute once per frame after window-state changes.
+        self.sync_pointer_focus(proto_box.as_deref_mut());
+
+        self.protocol = proto_box;
+    }
+
+    /// Recompute pointer focus (topmost visible window under the cursor)
+    /// and emit protocol enter/leave events on transitions.
+    fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
+        let mut new_ptr_focus = 0u32;
+        for i in (0..self.window_count as usize).rev() {
+            let w = self.windows[i];
+            if w.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+            if self.input.hit_test_content_area(&w) {
+                new_ptr_focus = w.task_id;
+                break;
+            }
+        }
+        if new_ptr_focus == self.protocol_pointer_focus {
+            return;
+        }
+        if let Some(p) = proto {
+            if self.protocol_pointer_focus != 0 {
+                self.protocol_serial = self.protocol_serial.wrapping_add(1);
+                p.send_pointer_leave_for_task(self.protocol_pointer_focus, self.protocol_serial);
+            }
+            if new_ptr_focus != 0 {
+                self.protocol_serial = self.protocol_serial.wrapping_add(1);
+                p.send_pointer_enter_for_task(
+                    new_ptr_focus,
+                    self.protocol_serial,
+                    self.input.mouse_x,
+                    self.input.mouse_y,
+                );
+            }
+        }
+        self.protocol_pointer_focus = new_ptr_focus;
     }
 
     fn resync_windows_post_input(&mut self) {
@@ -379,7 +540,7 @@ impl WindowManager {
         target_frame_ms: u64,
     ) {
         let wm = self;
-        wm.input.update_from_raw_events();
+        wm.input.drain_events();
         wm.refresh_windows();
         // Snapshot focus *before* any input processing so we can detect
         // changes from any source (sync, mouse click, shelf, spawn) in a
@@ -402,75 +563,21 @@ impl WindowManager {
             + SHELF_BOTTOM_MARGIN
             + SHELF_DOT_DIAMETER
             + SHELF_DOT_MARGIN_Y;
-        // Temporarily take the protocol bridge out so we can pass it mutably
-        // into InputHandler methods without borrowing all of `wm`.
-        let mut proto_box = wm.protocol.take();
-        let proto_ref = proto_box.as_deref_mut();
-        wm.input.handle_mouse_events(
-            fb_info.width as i32,
-            fb_info.height as i32,
-            shelf_h,
-            &wm.windows,
-            wm.window_count,
-            &wm.shelf,
-            proto_ref,
-        );
-        wm.protocol = proto_box;
 
-        // Update resize cursor hover feedback (must run after handle_mouse_events).
+        // Dispatch the frame's input events in stream order: every button
+        // press is hit-tested at the pointer position accumulated up to
+        // that event, and every key is routed to the keyboard focus as of
+        // that moment (a click earlier in the same batch retargets the
+        // keys that follow it). Also forwards each event to the protocol
+        // clients with in-order coordinates.
+        wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
+
+        // Update resize cursor hover feedback (must run after input dispatch).
         wm.input.update_resize_cursor(&wm.windows, wm.window_count);
 
-        // Forward raw input events to protocol clients.
-        if let Some(ref mut proto) = wm.protocol {
-            // Determine pointer focus for protocol surfaces: find the topmost
-            // protocol surface under the cursor.
-            let mut new_ptr_focus: u32 = 0;
-            for i in (0..wm.window_count as usize).rev() {
-                let w = wm.windows[i];
-                if w.state == WINDOW_STATE_MINIMIZED {
-                    continue;
-                }
-                if wm.input.hit_test_content_area(&w) {
-                    new_ptr_focus = w.task_id;
-                    break;
-                }
-            }
-
-            // Send pointer enter/leave events on focus transitions.
-            if new_ptr_focus != wm.protocol_pointer_focus {
-                if wm.protocol_pointer_focus != 0 {
-                    wm.protocol_serial = wm.protocol_serial.wrapping_add(1);
-                    proto
-                        .send_pointer_leave_for_task(wm.protocol_pointer_focus, wm.protocol_serial);
-                }
-                if new_ptr_focus != 0 {
-                    wm.protocol_serial = wm.protocol_serial.wrapping_add(1);
-                    proto.send_pointer_enter_for_task(
-                        new_ptr_focus,
-                        wm.protocol_serial,
-                        wm.input.mouse_x,
-                        wm.input.mouse_y,
-                    );
-                }
-                wm.protocol_pointer_focus = new_ptr_focus;
-            }
-
-            // Forward raw events to focused protocol surfaces.
-            let raw_events = wm.input.raw_events();
-            if !raw_events.is_empty() {
-                let kbd_focus = wm.input.focused_task();
-                let mods = wm.input.modifier_state();
-                proto.forward_input_events(
-                    raw_events,
-                    new_ptr_focus,
-                    kbd_focus,
-                    wm.input.mouse_x,
-                    wm.input.mouse_y,
-                    mods,
-                    &mut wm.protocol_serial,
-                );
-            }
-        }
+        // Cursor trail + shelf + hover damage — needs the trail the input
+        // dispatch just accumulated.
+        wm.add_pointer_damage();
 
         // Compute effective cursor shape early so we can detect shape changes
         // and add damage before the render decision.
@@ -628,12 +735,22 @@ impl WindowManager {
             wm.first_frame = false;
         }
 
-        // Reap disconnected clients + flush queued events once per frame.
-        // The accept path is driven by the async accept-readiness stream, so
-        // this no longer re-accepts; it keeps the per-frame cleanup/flush that
-        // surfaces write-buffer-overflow disconnects and drains the events
-        // queued during this frame's input forwarding + frame_done emission.
+        // Parse + reap + flush once per frame.
+        //
+        // `process_requests()` here is LOAD-BEARING, not an optimisation:
+        // `cleanup_disconnected`'s close-probe does a non-blocking recv that
+        // pulls any in-flight bytes off the client socket into the Server's
+        // read buffer. That read empties the kernel-side socket, so the
+        // per-client poll-readiness stream never fires again for those
+        // bytes — without an every-frame parse they rot in the buffer
+        // forever. Observed live as a terminal whose SurfaceCommit (sent
+        // between its poll task's drain and the probe) was never processed:
+        // surface attached but never visible, window never appeared. The
+        // legacy sync loop parsed every client every frame for exactly this
+        // reason; the async per-client tasks only add latency-reduction on
+        // top of this guarantee.
         if let Some(ref mut proto) = wm.protocol {
+            proto.process_requests();
             proto.cleanup_disconnected();
             proto.flush_all();
         }
@@ -764,22 +881,36 @@ async fn compositor_async(
     // full backlog and spawns a per-client task per new connection. Runs
     // concurrently with the frame timer, so newly-connected clients are
     // serviced without waiting for a frame.
+    //
+    // The stream is re-armed if it ever ends: a multishot row can die on a
+    // transient error (arm failure or an error-terminal CQE), and the listen
+    // socket outlives any such transient. Treating stream-end as permanent
+    // silently killed ALL future accepts — clients connected into the
+    // backlog and waited forever for a greeting (observed live: terminal
+    // window never appeared while the compositor kept rendering).
     if let Some(listen_fd) = listen_fd {
         let wm_accept = wm.clone();
         slopfut::spawn(async move {
-            let mut stream = slopfut::poll_add_multishot(listen_fd, POLLIN);
-            while stream.next().await.is_some() {
-                let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
-                let n = {
-                    let mut w = wm_accept.borrow_mut();
-                    match w.protocol {
-                        Some(ref mut proto) => proto.accept_and_collect(&mut accepted),
-                        None => 0,
+            loop {
+                let mut stream = slopfut::poll_add_multishot(listen_fd, POLLIN);
+                while stream.next().await.is_some() {
+                    let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
+                    let n = {
+                        let mut w = wm_accept.borrow_mut();
+                        match w.protocol {
+                            Some(ref mut proto) => proto.accept_and_collect(&mut accepted),
+                            None => 0,
+                        }
+                    };
+                    for &(idx, fd, generation) in &accepted[..n] {
+                        spawn_client_task(wm_accept.clone(), idx, fd, generation);
                     }
-                };
-                for &(idx, fd, generation) in &accepted[..n] {
-                    spawn_client_task(wm_accept.clone(), idx, fd, generation);
                 }
+                tty::write(b"COMPOSITOR: accept stream ended; re-arming\n");
+                // Pace the re-arm so a persistently failing arm cannot
+                // become a hot loop; the per-frame sweep below covers the
+                // gap meanwhile.
+                slopfut::time::sleep_ms(50).await;
             }
         });
     }
@@ -793,6 +924,27 @@ async fn compositor_async(
     let time_origin = Instant::now();
     loop {
         let frame_start = Instant::now();
+
+        // Defensive accept sweep (belt-and-braces over the async accept
+        // task): a non-blocking accept per frame guarantees a connection
+        // queued in the backlog is greeted within one frame even if the
+        // accept-readiness stream is between re-arms. `Server::accept()`
+        // stays the sole slot allocator, so the two paths cannot
+        // double-accept a connection.
+        {
+            let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
+            let n = {
+                let mut w = wm.borrow_mut();
+                match w.protocol {
+                    Some(ref mut proto) => proto.accept_and_collect(&mut accepted),
+                    None => 0,
+                }
+            };
+            for &(idx, fd, generation) in &accepted[..n] {
+                spawn_client_task(wm.clone(), idx, fd, generation);
+            }
+        }
+
         wm.borrow_mut().render_frame(
             &mut output,
             &fb_info,

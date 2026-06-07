@@ -106,6 +106,23 @@ struct IconLayout {
     size: i32,
 }
 
+/// Full shelf geometry for one cursor position: icon layouts (with
+/// magnification), the pill rect, the separator position, and which icon
+/// the cursor is over. Computed identically by the render pass and by
+/// click hit-testing, so a click is always tested against the geometry
+/// the shelf has at THAT cursor position — never against a stale hover
+/// cache from a previous frame's draw.
+struct ShelfGeometry {
+    layouts: [IconLayout; MAX_ENTRIES],
+    pill_x: i32,
+    pill_y: i32,
+    pill_w: i32,
+    pill_h: i32,
+    separator_x: i32,
+    icons_bottom: i32,
+    hovered: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // LauncherShelf
 // ---------------------------------------------------------------------------
@@ -116,6 +133,10 @@ pub struct LauncherShelf {
     entry_count: usize,
     hovered_index: Option<usize>,
     last_bounds: DamageRect,
+    /// Screen dimensions captured at draw time so `hit_test` can compute
+    /// geometry for any cursor position without a renderer handle.
+    screen_w: u32,
+    screen_h: u32,
     /// Set when shelf entries change (app opens/closes); cleared by `take_content_dirty()`.
     content_dirty: bool,
 }
@@ -127,6 +148,8 @@ impl LauncherShelf {
             entry_count: 0,
             hovered_index: None,
             last_bounds: DamageRect::invalid(),
+            screen_w: 0,
+            screen_h: 0,
             content_dirty: false,
         }
     }
@@ -261,23 +284,17 @@ impl LauncherShelf {
     }
 
     /// Draw the shelf onto the compositing buffer.
-    pub fn draw(
-        &mut self,
-        buf: &mut DrawBuffer,
+    /// Compute the full shelf geometry (magnified icon layouts, pill rect,
+    /// separator, hovered icon) for one cursor position. Pure with respect
+    /// to shelf entries — used by both `draw` and `hit_test` so the two can
+    /// never disagree.
+    fn compute_geometry(
+        &self,
         screen_width: u32,
         screen_height: u32,
         cursor_x: i32,
         cursor_y: i32,
-        mut font: Option<&mut FontRenderer>,
-        clip: Option<DamageRect>,
-    ) {
-        if self.entry_count == 0 {
-            self.last_bounds = DamageRect::invalid();
-            return;
-        }
-
-        let clip_rect = clip.unwrap_or_else(|| full_screen_clip(screen_width, screen_height));
-
+    ) -> ShelfGeometry {
         let pinned_count = self.pinned_count();
         let running_non_pinned = self.entry_count - pinned_count;
         let has_separator = running_non_pinned > 0;
@@ -285,7 +302,6 @@ impl LauncherShelf {
         // -----------------------------------------------------------------
         // 1. Compute per-icon magnification scale (in 8.8 fixed-point).
         // -----------------------------------------------------------------
-        let mut icon_scales = [256i32; MAX_ENTRIES]; // 256 = 1.0
         let mut icon_sizes = [SHELF_ICON_SIZE; MAX_ENTRIES];
 
         // We need a first pass to find un-magnified icon centers so we can
@@ -318,7 +334,6 @@ impl LauncherShelf {
                     let d = prox - dist;
                     // scale_256 = 256 + 84 * (PROX - dist)^2 / PROX^2
                     let scale_256 = 256 + MAGNIFICATION_AMOUNT_256 * d * d / (prox * prox);
-                    icon_scales[i] = scale_256;
                     icon_sizes[i] = SHELF_ICON_SIZE * scale_256 / 256;
                 }
                 cx += SHELF_ICON_SIZE + SHELF_ICON_SPACING;
@@ -363,7 +378,7 @@ impl LauncherShelf {
         // -----------------------------------------------------------------
         // 3. Hit-test to determine hovered icon.
         // -----------------------------------------------------------------
-        self.hovered_index = None;
+        let mut hovered = None;
         for i in 0..self.entry_count {
             let l = &layouts[i];
             let left = l.center_x - l.size / 2;
@@ -372,10 +387,59 @@ impl LauncherShelf {
                 && cursor_y >= l.top_y
                 && cursor_y < icons_bottom
             {
-                self.hovered_index = Some(i);
+                hovered = Some(i);
                 break;
             }
         }
+
+        ShelfGeometry {
+            layouts,
+            pill_x,
+            pill_y,
+            pill_w,
+            pill_h,
+            separator_x,
+            icons_bottom,
+            hovered,
+        }
+    }
+
+    pub fn draw(
+        &mut self,
+        buf: &mut DrawBuffer,
+        screen_width: u32,
+        screen_height: u32,
+        cursor_x: i32,
+        cursor_y: i32,
+        mut font: Option<&mut FontRenderer>,
+        clip: Option<DamageRect>,
+    ) {
+        if self.entry_count == 0 {
+            self.last_bounds = DamageRect::invalid();
+            return;
+        }
+
+        self.screen_w = screen_width;
+        self.screen_h = screen_height;
+
+        let clip_rect = clip.unwrap_or_else(|| full_screen_clip(screen_width, screen_height));
+
+        let pinned_count = self.pinned_count();
+        let running_non_pinned = self.entry_count - pinned_count;
+        let has_separator = running_non_pinned > 0;
+
+        let geo = self.compute_geometry(screen_width, screen_height, cursor_x, cursor_y);
+        let ShelfGeometry {
+            layouts,
+            pill_x,
+            pill_y,
+            pill_w,
+            pill_h,
+            separator_x,
+            icons_bottom,
+            hovered,
+        } = geo;
+        self.hovered_index = hovered;
 
         // -----------------------------------------------------------------
         // 4. Draw the pill background.
@@ -569,20 +633,19 @@ impl LauncherShelf {
     /// Hit-test a screen coordinate against shelf icons.
     ///
     /// Returns the index of the entry under the cursor, or `None`.
+    ///
+    /// Computes the geometry at `(px, py)` directly instead of reusing the
+    /// last draw pass's hover cache: a click processed in the same frame
+    /// batch as the motion that brought the cursor here would otherwise be
+    /// tested against where the cursor was at the PREVIOUS render — a dock
+    /// icon click landing before the next draw silently fell through to
+    /// the desktop (the "T icon did not respawn the terminal" bug).
     pub fn hit_test(&self, px: i32, py: i32) -> Option<usize> {
-        if !self.last_bounds.is_valid() || self.entry_count == 0 {
+        if self.entry_count == 0 || self.screen_w == 0 || self.screen_h == 0 {
             return None;
         }
-        // Quick reject: outside the pill bounds (with some margin for dots).
-        if px < self.last_bounds.x0
-            || px > self.last_bounds.x1
-            || py < self.last_bounds.y0
-            || py > self.last_bounds.y1
-        {
-            return None;
-        }
-        // Use the cached hovered_index from the most recent draw pass.
-        self.hovered_index
+        self.compute_geometry(self.screen_w, self.screen_h, px, py)
+            .hovered
     }
 
     /// Return the bounding rectangle of the most recently drawn shelf.

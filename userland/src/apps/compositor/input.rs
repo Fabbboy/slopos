@@ -1,7 +1,7 @@
+use slopos_abi::InputEvent;
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_SUPER};
 use slopos_abi::task::TaskPriority;
 use slopos_abi::window::{CURSOR_SHAPE_DEFAULT, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING};
-use slopos_abi::{InputEvent, InputEventType};
 
 use crate::program_registry;
 use crate::syscall::{UserWindowInfo, input, process, tty};
@@ -80,7 +80,6 @@ pub struct InputHandler {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub mouse_buttons: u8,
-    mouse_buttons_prev: u8,
 
     pub dragging: bool,
     drag_task: u32,
@@ -123,10 +122,8 @@ pub struct InputHandler {
     clock_origin: Instant,
 
     local_modifier_state: u8,
-    /// Edge-triggered: buttons that fired a press event this frame.
-    mouse_down: u8,
     /// Raw event buffer for poll_batch reads from the kernel queue.
-    raw_event_buf: [InputEvent; 64],
+    pub raw_event_buf: [InputEvent; 64],
     /// Number of raw events read in the current frame.
     pub raw_event_count: usize,
 }
@@ -137,7 +134,6 @@ impl InputHandler {
             mouse_x: 0,
             mouse_y: 0,
             mouse_buttons: 0,
-            mouse_buttons_prev: 0,
             dragging: false,
             drag_task: 0,
             drag_offset_x: 0,
@@ -163,7 +159,6 @@ impl InputHandler {
             pending_close_count: 0,
             clock_origin: Instant::now(),
             local_modifier_state: 0,
-            mouse_down: 0,
             raw_event_buf: [InputEvent::default(); 64],
             raw_event_count: 0,
         }
@@ -180,49 +175,42 @@ impl InputHandler {
         self.clock_origin.elapsed().as_millis() as u64
     }
 
-    /// Drain raw input events from the kernel queue and update local state.
-    /// Replaces the old syscall-based `get_pointer_pos` / `get_button_state` /
-    /// `get_modifier_state` calls with local state accumulated from raw events.
-    pub fn update_from_raw_events(&mut self) {
+    /// Drain raw input events from the kernel queue into the frame buffer.
+    ///
+    /// State is NOT folded here: events are dispatched IN STREAM ORDER by
+    /// the main loop (`WindowManager::process_input_events`), so every
+    /// button press is hit-tested at the pointer position accumulated *up
+    /// to that event* — never at the end-of-batch position. Folding the
+    /// batch first (the old model) hit-tested presses at coordinates that
+    /// included motion *after* the press; a resize-corner grab whose drag
+    /// motion arrived in the same 16 ms batch was hit-tested at the
+    /// post-drag position and silently became a content or desktop click.
+    pub fn drain_events(&mut self) {
         self.cursor_trail_count = 0;
-        self.mouse_buttons_prev = self.mouse_buttons;
-        self.mouse_down = 0;
+        self.raw_event_count = input::poll_batch(&mut self.raw_event_buf);
+    }
 
-        let count = input::poll_batch(&mut self.raw_event_buf) as usize;
-        self.raw_event_count = count;
-
-        for i in 0..count {
-            let event = self.raw_event_buf[i];
-            match event.event_type {
-                InputEventType::PointerMotion => {
-                    let new_x = event.pointer_x();
-                    let new_y = event.pointer_y();
-                    if new_x != self.mouse_x || new_y != self.mouse_y {
-                        if self.cursor_trail_count < MAX_CURSOR_TRAIL {
-                            self.cursor_trail[self.cursor_trail_count] =
-                                (self.mouse_x, self.mouse_y);
-                            self.cursor_trail_count += 1;
-                        }
-                        self.mouse_x = new_x;
-                        self.mouse_y = new_y;
-                    }
-                }
-                InputEventType::PointerButtonPress => {
-                    let button = event.data.data0 as u8;
-                    self.mouse_buttons |= button;
-                    self.mouse_down |= button;
-                }
-                InputEventType::PointerButtonRelease => {
-                    let button = event.data.data0 as u8;
-                    self.mouse_buttons &= !button;
-                }
-                InputEventType::KeyPress | InputEventType::KeyRelease => {
-                    let scancode = event.key_scancode();
-                    let pressed = event.event_type == InputEventType::KeyPress;
-                    self.update_modifier_from_scancode(scancode, pressed);
-                }
-                _ => {}
+    /// Apply one pointer-motion event: update position + cursor trail.
+    pub fn apply_motion(&mut self, event: &InputEvent) {
+        let new_x = event.pointer_x();
+        let new_y = event.pointer_y();
+        if new_x != self.mouse_x || new_y != self.mouse_y {
+            if self.cursor_trail_count < MAX_CURSOR_TRAIL {
+                self.cursor_trail[self.cursor_trail_count] = (self.mouse_x, self.mouse_y);
+                self.cursor_trail_count += 1;
             }
+            self.mouse_x = new_x;
+            self.mouse_y = new_y;
+        }
+    }
+
+    /// Apply an in-flight drag/resize to the current pointer position.
+    /// Called per motion event while a grab is active (wlroots model).
+    pub fn apply_grab_motion(&mut self, proto: Option<&mut ProtocolBridge>) {
+        if self.dragging {
+            self.update_drag(proto);
+        } else if self.resizing {
+            self.update_resize(proto);
         }
     }
 
@@ -237,7 +225,7 @@ impl InputHandler {
     /// The modifier break codes (0x9D/0xAA/0xB6/0xB8/0xDB/0xDC) sit above
     /// the 0x80–0x97 pseudo-scancode range, so matching them cannot
     /// misread an arrow/nav pseudo-code.
-    fn update_modifier_from_scancode(&mut self, scancode: u8, pressed: bool) {
+    pub(super) fn update_modifier_from_scancode(&mut self, scancode: u8, pressed: bool) {
         // PS/2 scan code set 1 modifier make codes (+ break-code aliases).
         let bit = match scancode {
             0x2A | 0x36 | 0xAA | 0xB6 => MODIFIER_SHIFT, // Left/Right Shift
@@ -260,29 +248,6 @@ impl InputHandler {
     pub fn modifier_state(&self) -> u8 {
         self.local_modifier_state
     }
-
-    /// Access the raw events read this frame (for forwarding to protocol clients).
-    pub fn raw_events(&self) -> &[InputEvent] {
-        &self.raw_event_buf[..self.raw_event_count]
-    }
-
-    fn mouse_clicked(&self) -> bool {
-        (self.mouse_down & 0x01) != 0 && (self.mouse_buttons_prev & 0x01) == 0
-    }
-
-    fn mouse_pressed(&self) -> bool {
-        (self.mouse_buttons & 0x01) != 0
-    }
-
-    /// Update pointer focus to the topmost visible window under the cursor.
-    ///
-    /// Following the Wayland compositor pattern (wlroots `tinywl.c`), pointer
-    /// focus is tracked **continuously on every frame** -- not only on click.
-    /// This ensures the correct window already has focus by the time a PS/2
-    /// button IRQ fires, so button events are routed to the right client.
-    ///
-    // update_pointer_focus removed — pointer focus is tracked locally by the
-    // compositor; enter/leave events are sent via ProtocolBridge in the main loop.
 
     pub fn sync_keyboard_focus(
         &mut self,
@@ -323,17 +288,50 @@ impl InputHandler {
                 self.set_focused(new_focus);
             }
         }
+
+        // Keyboard input must never fall into a void while a window is
+        // visible: whenever nothing is focused, re-acquire the topmost
+        // visible window. Without this, any path that left focus at 0
+        // (historically: a mis-hit-tested desktop click) silently dropped
+        // every subsequent keystroke until the user happened to click a
+        // window again.
+        if self.focused_task == 0 {
+            for i in (0..window_count as usize).rev() {
+                if windows[i].state != WINDOW_STATE_MINIMIZED {
+                    self.set_focused(windows[i].task_id);
+                    break;
+                }
+            }
+        }
     }
 
+    /// Handle one left-button release event in stream order: end any
+    /// active drag/resize grab at the position accumulated so far.
+    pub fn on_button_release(&mut self, button: u8, proto: Option<&mut ProtocolBridge>) {
+        self.mouse_buttons &= !button;
+        if button & 0x01 == 0 {
+            return;
+        }
+        if self.dragging {
+            self.stop_drag();
+        } else if self.resizing {
+            self.stop_resize(proto);
+        }
+    }
+
+    /// Handle one button-press event in stream order, hit-testing at the
+    /// pointer position accumulated up to THIS event.
+    ///
     /// Hit-test priority chain (spec section 8):
     /// 1. system_bar::hit_test() -> consume click (no action)
     /// 2. shelf.hit_test()       -> handle shelf click
     /// 3. decorations::hit_test_signal_button() -> close/min/expand
     /// 4. decorations::hit_test_title_bar()     -> drag
     /// 5. hit_test_content_area() -> raise + focus + forward
-    /// 6. desktop -> deselect
-    pub fn handle_mouse_events(
+    /// 6. desktop -> no-op (keyboard focus is sticky; see sync_keyboard_focus)
+    pub fn on_button_press(
         &mut self,
+        button: u8,
         fb_width: i32,
         fb_height: i32,
         shelf_height: i32,
@@ -342,28 +340,20 @@ impl InputHandler {
         shelf: &LauncherShelf,
         mut proto: Option<&mut ProtocolBridge>,
     ) {
-        let clicked = self.mouse_clicked();
+        self.mouse_buttons |= button;
+        if button & 0x01 == 0 {
+            return;
+        }
 
+        // A press while a grab is active means the matching release event
+        // was lost (e.g. kernel queue overwrote it under a motion flood).
+        // The kernel saw a physical release before this press, so end the
+        // stale grab and process the press normally.
         if self.dragging {
-            if !self.mouse_pressed() {
-                self.stop_drag();
-            } else {
-                self.update_drag(proto);
-            }
-            return;
+            self.stop_drag();
         }
-
         if self.resizing {
-            if !self.mouse_pressed() {
-                self.stop_resize(proto);
-            } else {
-                self.update_resize(proto);
-            }
-            return;
-        }
-
-        if !clicked {
-            return;
+            self.stop_resize(proto.as_deref_mut());
         }
 
         // 1. System bar -- consume click, no action
@@ -526,8 +516,9 @@ impl InputHandler {
             }
         }
 
-        // 6. Desktop background -- clear focus
-        self.set_focused(0);
+        // 6. Desktop background — keyboard focus is sticky (stays on the
+        // last focused window). Clearing it here created an input black
+        // hole: every keystroke was dropped until the next window click.
     }
 
     pub fn process_pending_close_requests(
@@ -867,23 +858,21 @@ impl InputHandler {
         }
     }
 
+    /// Spawn a program from the shelf. Focus is NOT set here: the spawn
+    /// syscall returns a KERNEL task id, while window focus is keyed by
+    /// the protocol bridge's surface pseudo-ids (surface index + 1) — the
+    /// two id spaces never match. The new window's focus is acquired by
+    /// `sync_keyboard_focus`'s newly-appeared edge once the client maps
+    /// its surface, with the correct pseudo-id.
     fn spawn_program(&mut self, path: &str) {
-        if let Some(spec) = program_registry::resolve_program_path(path) {
-            let tid =
-                process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags);
-            if tid <= 0 {
-                tty::write(b"COMPOSITOR: spawn failed for program\n");
-            } else {
-                self.set_focused(tid as u32);
-            }
+        let tid = if let Some(spec) = program_registry::resolve_program_path(path) {
+            process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags)
         } else {
             // Fall back to direct path spawn with default attrs.
-            let tid = process::spawn_path_with_attrs(path.as_bytes(), TaskPriority::Normal, 0);
-            if tid <= 0 {
-                tty::write(b"COMPOSITOR: spawn failed for program\n");
-            } else {
-                self.set_focused(tid as u32);
-            }
+            process::spawn_path_with_attrs(path.as_bytes(), TaskPriority::Normal, 0)
+        };
+        if tid <= 0 {
+            tty::write(b"COMPOSITOR: spawn failed for program\n");
         }
     }
 }
