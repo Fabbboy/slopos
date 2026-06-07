@@ -10,6 +10,8 @@ use core::cmp;
 
 use crate::ring::{Ring, slopfut};
 use crate::syscall::fs;
+use slopfut::signal::SignalListener;
+use slopos_abi::signal::{SIGWINCH, sig_bit};
 use slopos_abi::syscall::{LocalFlags, POLLIN};
 
 use super::buffers;
@@ -71,12 +73,15 @@ pub fn read_command_line(tokens: &mut ParsedTokens, prompt: &[u8], prompt_colors
         buf.fill(0);
     });
 
-    // Editor terminal width, queried fresh each prompt (SIGWINCH re-query is a
-    // later refinement).  Fall back to 80 columns when no terminal is wired.
-    let cols = match fs::tiocgwinsz(STDIN_FD) {
-        Ok(ws) if ws.ws_col != 0 => ws.ws_col as usize,
-        _ => DEFAULT_COLS,
-    };
+    // Editor terminal width, queried fresh each prompt and re-queried live
+    // whenever SIGWINCH fires mid-edit (see the resize listener below).
+    let cols = query_cols();
+
+    // Resize listener: SIGWINCH arrives as an in-band ring event raced
+    // against stdin, so the editor re-wraps mid-edit instead of keeping
+    // stale geometry until the next prompt. Dropping it (end of this call)
+    // restores the signal mask before any child command runs.
+    let winch = SignalListener::new(sig_bit(SIGWINCH));
 
     // Set the slave TTY to raw mode: the shell does its own rendering / line
     // editing.  Mirrors bash/zsh's cfmakeraw() on real Linux.
@@ -93,7 +98,7 @@ pub fn read_command_line(tokens: &mut ParsedTokens, prompt: &[u8], prompt_colors
     let _ = fs::write_slice(1, b"\x1b[?2004h");
 
     let result = match Ring::setup(16) {
-        Ok(ring) => slopfut::block_on(ring, input_loop(tokens, prompt, cols)),
+        Ok(ring) => slopfut::block_on(ring, input_loop(tokens, prompt, cols, winch.as_ref())),
         Err(_) => {
             // Ring unavailable: cannot run the async editor.  Yield once and
             // re-prompt (return 0 -> caller `continue`s) rather than wedging.
@@ -102,13 +107,15 @@ pub fn read_command_line(tokens: &mut ParsedTokens, prompt: &[u8], prompt_colors
         }
     };
 
-    let _ = fs::write_slice(1, b"\x1b[?2004l");
-
-    // Restore canonical mode so child processes (nc, etc.) get line-buffered
-    // input.
+    // Restore canonical mode FIRST (ISIG back on), THEN write the
+    // bracketed-paste-off sequence: the write can block on a full output
+    // queue, and a blocking write in raw mode (ISIG off) cannot be
+    // interrupted from the keyboard — the one ordering that can wedge the
+    // shell unkillably.
     if let Some(ref t) = saved_termios {
         let _ = fs::tcsetattr(STDIN_FD, t);
     }
+    let _ = fs::write_slice(1, b"\x1b[?2004l");
 
     result
 }
@@ -320,8 +327,23 @@ fn decode_escape(p: &[u8]) -> EscMatch {
 // Editor
 // ---------------------------------------------------------------------------
 
-async fn input_loop(tokens: &mut ParsedTokens, prompt: &[u8], cols: usize) -> i32 {
+/// A long-lived `SignalListener::recv` future, re-armed only after it
+/// resolves. Holding it across `next_decoded` calls (instead of building a
+/// fresh one per wait) means losing a select race never cancels it — a
+/// completed-but-unobserved resize is reported on the next wait instead of
+/// being discarded with the dropped future.
+type WinchFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = u32> + 'a>>;
+
+async fn input_loop(
+    tokens: &mut ParsedTokens,
+    prompt: &[u8],
+    cols: usize,
+    winch: Option<&SignalListener>,
+) -> i32 {
+    let mut cols = cols;
     let mut parser = EscParser::new();
+    let mut winch_fut: Option<WinchFuture<'_>> =
+        winch.map(|w| -> WinchFuture<'_> { Box::pin(w.recv()) });
     // Decoded events not yet dispatched (one read can yield several).
     let mut queue: std::collections::VecDeque<Decoded> = std::collections::VecDeque::new();
 
@@ -340,7 +362,19 @@ async fn input_loop(tokens: &mut ParsedTokens, prompt: &[u8], cols: usize) -> i3
             let decoded = match queue.pop_front() {
                 Some(d) => d,
                 None => {
-                    next_decoded(&mut parser, &mut queue).await;
+                    if let Wake::Winch =
+                        next_decoded(&mut parser, &mut queue, winch_fut.as_mut()).await
+                    {
+                        // The resolved listener is spent: re-arm it before
+                        // anything else awaits, then refresh the width and
+                        // re-wrap the edit region under the new geometry.
+                        if let (Some(slot), Some(w)) = (winch_fut.as_mut(), winch) {
+                            *slot = Box::pin(w.recv());
+                        }
+                        cols = query_cols();
+                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        continue;
+                    }
                     match queue.pop_front() {
                         Some(d) => d,
                         None => continue,
@@ -603,37 +637,94 @@ async fn input_loop(tokens: &mut ParsedTokens, prompt: &[u8], cols: usize) -> i3
     }
 }
 
+/// Why `next_decoded` returned: stdin made progress (bytes decoded, ESC
+/// flushed, or a transient state the caller re-arms on), or the terminal
+/// was resized and the caller must re-query its width.
+enum Wake {
+    Input,
+    Winch,
+}
+
+/// Editor terminal width. Falls back to 80 columns when no terminal is
+/// wired (`tiocgwinsz` fails or reports a zero width).
+fn query_cols() -> usize {
+    match fs::tiocgwinsz(STDIN_FD) {
+        Ok(ws) if ws.ws_col != 0 => ws.ws_col as usize,
+        _ => DEFAULT_COLS,
+    }
+}
+
+/// Resolve a buffered lone ESC as a literal keypress (the disambiguation
+/// timer expired with no follow-up byte).
+fn flush_pending_escape(parser: &mut EscParser, queue: &mut std::collections::VecDeque<Decoded>) {
+    let mut out = Vec::new();
+    parser.flush_escape(&mut out);
+    for d in out {
+        queue.push_back(d);
+    }
+}
+
 /// Read the next batch of decoded events into `queue`, blocking on fd 0.
 ///
 /// A bare ESC buffered in the parser is disambiguated with a short timeout: if
-/// no follow-up byte arrives, it resolves as a literal ESC keypress.
-async fn next_decoded(parser: &mut EscParser, queue: &mut std::collections::VecDeque<Decoded>) {
+/// no follow-up byte arrives, it resolves as a literal ESC keypress.  When a
+/// resize listener is wired, it is raced as the FIRST select arm against
+/// non-consuming waits only (fd readiness / timer), and reported as
+/// [`Wake::Winch`]:
+///
+/// - first arm: a resize landing in the same reactor batch as input
+///   readiness resolves the select as Winch instead of being the dropped
+///   loser whose already-drained signal would be discarded with it;
+/// - persistent future (see [`WinchFuture`]) + non-consuming peers: losing
+///   an arm never cancels in-flight state that already consumed bytes or a
+///   signal, so neither input nor resizes can be lost to a select race.
+async fn next_decoded(
+    parser: &mut EscParser,
+    queue: &mut std::collections::VecDeque<Decoded>,
+    winch: Option<&mut WinchFuture<'_>>,
+) -> Wake {
     let buf = vec![0u8; READ_CHUNK];
 
     let result = if parser.awaiting_escape() {
-        // ESC pending: race a read against a short timeout.  If the timer
-        // wins, the ESC was a lone keypress.
-        use slopfut::Either2;
-        let read = Box::pin(slopfut::read(STDIN_FD, buf, READ_CHUNK as u32));
+        // ESC pending: wait for follow-up readiness against a short timeout.
+        // If the timer wins, the ESC was a lone keypress.
+        use slopfut::{Either2, Either3};
+        let ready = Box::pin(slopfut::poll_add(STDIN_FD, POLLIN));
         let timer = Box::pin(slopfut::time::sleep_ms(ESC_TIMEOUT_MS));
-        match slopfut::select2(read, timer).await {
-            Either2::A(r) => Some(r),
-            Either2::B(()) => {
-                let mut out = Vec::new();
-                parser.flush_escape(&mut out);
-                for d in out {
-                    queue.push_back(d);
-                }
-                None
-            }
+        let input_ready = match winch {
+            Some(w) => match slopfut::select3(w, ready, timer).await {
+                Either3::A(_) => return Wake::Winch,
+                Either3::B(_) => true,
+                Either3::C(()) => false,
+            },
+            None => match slopfut::select2(ready, timer).await {
+                Either2::A(_) => true,
+                Either2::B(()) => false,
+            },
+        };
+        if input_ready {
+            Some(slopfut::read(STDIN_FD, buf, READ_CHUNK as u32).await)
+        } else {
+            flush_pending_escape(parser, queue);
+            None
         }
     } else {
         // No pending escape: park on fd0 readiness, then read.
-        let _ = slopfut::poll_add(STDIN_FD, POLLIN).await;
-        Some(slopfut::read(STDIN_FD, buf, READ_CHUNK as u32).await)
+        use slopfut::Either2;
+        let ready = Box::pin(slopfut::poll_add(STDIN_FD, POLLIN));
+        match winch {
+            Some(w) => match slopfut::select2(w, ready).await {
+                Either2::A(_) => return Wake::Winch,
+                Either2::B(_) => Some(slopfut::read(STDIN_FD, buf, READ_CHUNK as u32).await),
+            },
+            None => {
+                let _ = ready.await;
+                Some(slopfut::read(STDIN_FD, buf, READ_CHUNK as u32).await)
+            }
+        }
     };
 
-    let Some(r) = result else { return };
+    let Some(r) = result else { return Wake::Input };
     if r.res == 0 {
         // Read of zero bytes = the PTY master hung up (the terminal closed
         // it).  End of input: exit cleanly rather than busy-looping.  A
@@ -644,7 +735,7 @@ async fn next_decoded(parser: &mut EscParser, queue: &mut std::collections::VecD
     }
     if r.res < 0 {
         // Transient read error: leave the queue empty so the caller re-arms.
-        return;
+        return Wake::Input;
     }
     let n = r.res as usize;
     let mut out = Vec::new();
@@ -652,6 +743,7 @@ async fn next_decoded(parser: &mut EscParser, queue: &mut std::collections::VecD
     for d in out {
         queue.push_back(d);
     }
+    Wake::Input
 }
 
 fn delete_char_before_cursor(len: &mut usize, cursor_pos: &mut usize) {

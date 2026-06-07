@@ -121,6 +121,14 @@ name = "signal_handler_test"
 path = "src/bin/tests/signal_handler_test.rs"
 
 [[bin]]
+name = "ctrlc_flood_test"
+path = "src/bin/tests/ctrlc_flood_test.rs"
+
+[[bin]]
+name = "sigwinch_default_test"
+path = "src/bin/tests/sigwinch_default_test.rs"
+
+[[bin]]
 name = "spin_signal_test"
 path = "src/bin/tests/spin_signal_test.rs"
 

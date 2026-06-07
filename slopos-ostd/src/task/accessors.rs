@@ -925,6 +925,44 @@ pub fn task_signal_raise<K, U>(task: *const TaskInner<K, U>, mask: u64) -> u64 {
     prev
 }
 
+/// Post `signum` to `task`, honouring its disposition at the send site.
+///
+/// This is the disposition-aware raise chokepoint every signal *send*
+/// (kill, process-group, session, parent-notify) routes through. A
+/// signal that would be discarded anyway — handler is `SIG_IGN`, or
+/// `SIG_DFL` with a default of [`SigDefault::Ignore`] — and is **not
+/// blocked** is dropped here instead of being left pending, so it
+/// never spuriously wakes a blocked task only to be consumed as a
+/// no-op at the delivery point. Blocked signals always pend
+/// regardless of disposition: a `signalfd` reader or a later-installed
+/// handler may still drain them after unblocking.
+///
+/// Returns `true` when the signal was made pending (the caller should
+/// then wake/unblock the target); `false` when it was dropped or the
+/// arguments were invalid.
+pub fn task_signal_post<K, U>(task: *const TaskInner<K, U>, signum: u8) -> bool {
+    let bit = slopos_abi::signal::sig_bit(signum);
+    if task.is_null() || bit == 0 {
+        return false;
+    }
+    let blocked = task_signal_blocked(task).unwrap_or(0);
+    if (blocked & bit) == 0 {
+        let handler = task_signal_handler(task, (signum - 1) as usize);
+        let ignored = match handler {
+            Some(h) if h == slopos_abi::signal::SIG_IGN => true,
+            Some(h) if h == slopos_abi::signal::SIG_DFL => {
+                slopos_abi::signal::sig_default_ignores(signum)
+            }
+            _ => false,
+        };
+        if ignored {
+            return false;
+        }
+    }
+    task_signal_raise(task, bit);
+    true
+}
+
 /// Read `task->load_block_reason()` via the existing `&self` method.
 #[inline]
 pub fn task_load_block_reason<K, U>(

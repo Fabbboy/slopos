@@ -158,12 +158,32 @@ pub enum SigDefault {
 }
 
 /// Return the default disposition for a signal number.
+///
+/// Follows the POSIX default-action table for the signals SlopOS
+/// defines: informational signals (`SIGCHLD`, `SIGWINCH`) are ignored
+/// by default, job-control stops map to `Stop`, `SIGCONT` maps to
+/// `Continue`, and everything else — including any future/unknown
+/// signal number — terminates the process.
 pub const fn sig_default_action(signum: u8) -> SigDefault {
     match signum {
-        SIGCHLD | SIGCONT => SigDefault::Ignore,
+        SIGCHLD | SIGWINCH => SigDefault::Ignore,
+        SIGCONT => SigDefault::Continue,
         SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => SigDefault::Stop,
         _ => SigDefault::Terminate,
     }
+}
+
+/// True when `signum`'s default disposition discards the signal
+/// outright (`Ignore`). Used by the send-time drop check: a signal
+/// that is neither blocked nor handled and whose default is `Ignore`
+/// is dropped at the raise site rather than left pending, so it never
+/// spuriously wakes a blocked task.
+///
+/// Deliberately excludes `Stop` / `Continue`: those are delivered (and
+/// currently no-op at the delivery point), so implementing real job
+/// control later does not require revisiting every raise site.
+pub const fn sig_default_ignores(signum: u8) -> bool {
+    matches!(sig_default_action(signum), SigDefault::Ignore)
 }
 
 // =============================================================================

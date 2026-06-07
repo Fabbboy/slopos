@@ -18,7 +18,7 @@ use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
-    task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_raise, task_terminate,
+    task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_post, task_terminate,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -293,8 +293,11 @@ define_syscall!(syscall_kill
             continue;
         }
 
-        let _ = task_signal_raise(target, sig_bit(signum));
-        let _ = unblock_task(target);
+        // POSIX: kill() succeeds even when the disposition discards the
+        // signal — only the wake is skipped for a send-time drop.
+        if task_signal_post(target, signum) {
+            let _ = unblock_task(target);
+        }
         signaled += 1;
     }
 

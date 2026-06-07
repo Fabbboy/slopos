@@ -7,9 +7,14 @@ use crate::sys::signalfd::{block_signals, signalfd, unblock_signals};
 
 /// Awaits delivery of signals in a mask via a signalfd. The signals are
 /// blocked on construction so they queue (drainable) instead of interrupting
-/// the reactor's waits.
+/// the reactor's waits. Dropping the listener closes the fd and unblocks the
+/// bits it newly blocked, restoring the caller's signal mask — so a listener
+/// scoped to one operation (a prompt, a download) does not leave its signals
+/// masked for the rest of the process, or for children forked afterwards.
 pub struct SignalListener {
     fd: i32,
+    /// Bits `new()` added to the process mask; `Drop` removes exactly these.
+    newly_blocked: u64,
 }
 
 impl SignalListener {
@@ -30,7 +35,7 @@ impl SignalListener {
             }
             return None;
         }
-        Some(Self { fd })
+        Some(Self { fd, newly_blocked })
     }
 
     /// Await the next signal; resolves to its number (1-based), or 0 on error.
@@ -47,7 +52,13 @@ impl SignalListener {
 
 impl Drop for SignalListener {
     fn drop(&mut self) {
+        // Close before unblocking: an undrained pending signal then takes its
+        // normal delivery path (handler or default) instead of being stranded
+        // behind a mask with no fd left to drain it.
         let _ = slopos_slibc::ffi::close(self.fd);
+        if self.newly_blocked != 0 {
+            let _ = unblock_signals(self.newly_blocked);
+        }
     }
 }
 
