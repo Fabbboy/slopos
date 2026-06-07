@@ -72,6 +72,32 @@ build, re-add the four DBGI counters in mm/src/tlb.rs
 (queue_request_for_cpu / send_shootdown_ipi_to_cpu / handle_shootdown_ipi)
 and read them post-mortem via QMP gva2gpa+xp.
 
+## Post-fix user retest (fresh build, confirmed not stale)
+
+- "SCHED: rescuing stranded READY task [..]" spams CONSTANTLY even on
+  healthy interactive boots. The wake-side enqueue loss is therefore
+  ROUTINE, not rare — the rescue sweep is acting as the system's de-facto
+  waker, and any wait without that backstop (the compositor's parked
+  block_on, exec's disk-read CompletionEvent) wedges permanently when its
+  wake is the one that gets lost.
+  OPEN QUESTION: does c068398a (pre-branch) spam the same way? Boot it and
+  grep serial for "rescuing" to learn whether this branch's sched changes
+  (idle-loop IRQ bracketing, ISR resched gating) widened the loss window
+  or merely made pre-existing loss visible. (c068398a still carries the
+  preempt panics, so expect some boots to die.)
+- The interactive freeze recurred on a FRESH build while resizing the
+  terminal SMALLER — so the earlier "pre-ICR-fix ISO" attribution is in
+  doubt. Discriminate with `just debug-bt` on the frozen state:
+  * a CPU spinning in `wait_for_acks` → the shootdown-ack loss is NOT
+    fully closed by the ICR fix; re-add the DBGI counters (below) and
+    read queued/sent/handled per CPU post-mortem.
+  * all CPUs halted, nothing spinning → the lost-wake face (victim task
+    Blocked; get its saved-context RIP via task_switch_ctx_rip_rsp dump).
+  Note the scripted 70-iteration drag stress did NOT reproduce either
+  face on the same build — the human drag pattern (or shrink-heavy
+  resizes) still differs from the harness in some way that matters;
+  consider replaying shrink-dominated drags with varied speeds.
+
 ## Prime suspects, in order
 
 Audited already (look correct in isolation): `unblock_task` cancels the
