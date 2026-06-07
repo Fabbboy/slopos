@@ -45,6 +45,33 @@ This is (at least one face of) the long-standing "boot roulette" flakiness.
   (accept → greet → CreateSurface → Attach all processed); the terminal then
   enters PTY/shell spawn and never returns to commit its first frame.
 
+## Freshest evidence (final stripped build, first boot-cycle attempt)
+
+A wedged boot died EARLIER than the terminal case: screen fully black
+(compositor's exec never completed), all CPUs idle-HLT, and the serial log
+ends with `SCHED: rescuing stranded READY task 7` (ext2-flush) repeating
+forever — the disk-flush kthread cycles wake → stranded-unlinked → rescue
+every sweep. So a *periodically sleeping kthread's wake-side enqueue is
+being lost on every cycle* (the rescue sweep is acting as its de-facto
+waker), and the disk path it serves never makes progress. Earlier
+instrumented boots showed the same lines for init/compositor
+("rescuing stranded READY task 8/9" hundreds of times) — previously
+misread as benign churn. Start here: trace ONE wake cycle of ext2-flush
+(wake_due_sleepers → wake_sleeping_task CAS → schedule_task → enqueue
+local-vs-remote-inbox → drain) and find which leg drops the enqueue while
+leaving the task Ready. The earlier DBGQ counters showed remote-inbox
+drops with `status Running/Blocked` — re-add those plus a counter on
+schedule_task's target selection.
+
+Also note: the interactive resize freeze (wait_for_acks spin) did NOT
+reproduce on the final build — 70 slow-drag iterations / 7400 broadcast
+shootdowns clean, with per-CPU queued/sent/handled counters internally
+consistent. A user-captured freeze with that exact backtrace almost
+certainly came from a pre-ICR-fix ISO; if it ever recurs on a current
+build, re-add the four DBGI counters in mm/src/tlb.rs
+(queue_request_for_cpu / send_shootdown_ipi_to_cpu / handle_shootdown_ipi)
+and read them post-mortem via QMP gva2gpa+xp.
+
 ## Prime suspects, in order
 
 Audited already (look correct in isolation): `unblock_task` cancels the
