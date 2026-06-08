@@ -86,7 +86,7 @@ pub fn try_work_steal() -> bool {
 
         if let Some(task) = try_steal_from_cpu(victim, cpu_id) {
             with_local_scheduler(|sched| {
-                sched.enqueue_local(task);
+                sched.enqueue_migrated(task);
             });
             klog_debug!("WORK_STEAL: CPU {} stole task from CPU {}", cpu_id, victim);
             return true;

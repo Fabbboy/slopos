@@ -42,14 +42,16 @@ pub fn fork_rr_counter_set(value: usize) {
 
 use super::task::{
     task_cpu_affinity, task_dec_ref, task_inc_ref, task_last_cpu, task_next_inbox_load,
-    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority, task_set_last_cpu,
-    task_status,
+    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority,
+    task_remote_inbox_try_link, task_remote_inbox_unlink, task_sched_placement_compare_exchange,
+    task_sched_placement_load, task_set_last_cpu, task_status,
 };
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
-use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
+use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, LinkError};
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
+use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::{klog_debug, klog_info};
 
 /// One slot per [`TaskPriority`] variant: `High`, `KernelIo`,
@@ -81,7 +83,13 @@ impl ReadyQueue {
     /// pop. Used during scheduler shutdown / per-CPU reinitialisation.
     fn clear_with_ref_release(&self) {
         while let Some(node) = self.list.pop() {
-            let _ = task_dec_ref(node.as_ptr());
+            let raw = node.as_ptr();
+            let _ = task_sched_placement_compare_exchange(
+                raw,
+                SchedPlacement::ReadyQueue,
+                SchedPlacement::None,
+            );
+            let _ = task_dec_ref(raw);
         }
     }
 
@@ -99,25 +107,36 @@ impl ReadyQueue {
         self.list.iter().any(|n| n.as_ptr() == task)
     }
 
-    fn enqueue(&self, task: *mut Task) -> i32 {
+    /// Link a task whose placement has already been transitioned to
+    /// `SchedPlacement::ReadyQueue`.
+    ///
+    /// Returns:
+    /// - `0` when the task was newly linked and refcounted;
+    /// - `1` when it was already linked in a ready queue;
+    /// - `-1` on invalid input or an unexpected list error.
+    fn link_preclaimed_with_status(&self, task: *mut Task) -> i32 {
         let Some(node) = NonNull::new(task) else {
             return -1;
         };
-        // Legacy ReadyQueue tolerated a re-push by no-op; mirror that
-        // here. `IntrusiveLinkedList::push` rejects an already-linked
-        // node with `AlreadyLinked`, which we treat as "already queued
-        // somewhere — leave it alone" for parity.
-        if self.list.push(node).is_err() {
-            return 0;
+        match self.list.push(node) {
+            Ok(()) => {
+                let _ = task_inc_ref(task);
+                0
+            }
+            Err(LinkError::AlreadyLinked) => 1,
+            Err(LinkError::NotPresent) => -1,
         }
-        let _ = task_inc_ref(task);
-        0
     }
 
     fn dequeue(&self) -> *mut Task {
         match self.list.pop() {
             Some(node) => {
                 let raw = node.as_ptr();
+                let _ = task_sched_placement_compare_exchange(
+                    raw,
+                    SchedPlacement::ReadyQueue,
+                    SchedPlacement::OnCpu,
+                );
                 let _ = task_dec_ref(raw);
                 raw
             }
@@ -132,6 +151,11 @@ impl ReadyQueue {
         if self.list.remove(node).is_err() {
             return -1;
         }
+        let _ = task_sched_placement_compare_exchange(
+            task,
+            SchedPlacement::ReadyQueue,
+            SchedPlacement::None,
+        );
         let _ = task_dec_ref(task);
         0
     }
@@ -141,10 +165,22 @@ impl ReadyQueue {
             return None;
         }
         let last = self.list.iter().last()?;
-        if self.list.remove(last).is_err() {
+        let raw = last.as_ptr();
+        if !task_sched_placement_compare_exchange(
+            raw,
+            SchedPlacement::ReadyQueue,
+            SchedPlacement::Migrating,
+        ) {
             return None;
         }
-        let raw = last.as_ptr();
+        if self.list.remove(last).is_err() {
+            let _ = task_sched_placement_compare_exchange(
+                raw,
+                SchedPlacement::Migrating,
+                SchedPlacement::ReadyQueue,
+            );
+            return None;
+        }
         let _ = task_dec_ref(raw);
         Some(raw)
     }
@@ -248,9 +284,84 @@ impl PriorityRunQueue {
     }
 
     pub fn enqueue_local(&self, task: *mut Task) -> i32 {
+        let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
+            SchedPlacement::Waking
+        } else {
+            SchedPlacement::None
+        };
+        match self.enqueue_local_from_placement(task, from) {
+            0 | 1 => 0,
+            _ => -1,
+        }
+    }
+
+    /// Requeue a task that this scheduler already owns as current/dispatching.
+    pub fn enqueue_from_on_cpu(&self, task: *mut Task) -> i32 {
+        match self.enqueue_local_from_placement(task, SchedPlacement::OnCpu) {
+            0 | 1 => 0,
+            _ => -1,
+        }
+    }
+
+    /// Publish a task whose wake/new-task path reserved `SchedPlacement::Waking`.
+    pub fn enqueue_waking(&self, task: *mut Task) -> i32 {
+        match self.enqueue_local_from_placement(task, SchedPlacement::Waking) {
+            0 | 1 => 0,
+            _ => -1,
+        }
+    }
+
+    /// Enqueue a task returned by the work-stealing migration handoff.
+    pub fn enqueue_migrated(&self, task: *mut Task) -> i32 {
+        match self.enqueue_local_from_placement(task, SchedPlacement::Migrating) {
+            0 | 1 => 0,
+            _ => -1,
+        }
+    }
+
+    /// Enqueue locally and preserve the inserted-vs-already-owned outcome.
+    /// See [`ReadyQueue::link_preclaimed_with_status`] for return values.
+    pub fn enqueue_local_with_status(&self, task: *mut Task) -> i32 {
+        self.enqueue_local_from_placement(task, SchedPlacement::None)
+    }
+
+    fn enqueue_local_from_placement(&self, task: *mut Task, from: SchedPlacement) -> i32 {
         if task.is_null() {
             return -1;
         }
+
+        let current = task_sched_placement_load(task);
+        if current == SchedPlacement::ReadyQueue || current == SchedPlacement::RemoteWake {
+            return 1;
+        }
+        if current == SchedPlacement::OnCpu && from != SchedPlacement::OnCpu {
+            return 1;
+        }
+        if current == SchedPlacement::Migrating && from != SchedPlacement::Migrating {
+            return 1;
+        }
+        if current == SchedPlacement::Waking && from != SchedPlacement::Waking {
+            return 1;
+        }
+        if current != from {
+            return -1;
+        }
+        if !task_sched_placement_compare_exchange(task, from, SchedPlacement::ReadyQueue) {
+            let after = task_sched_placement_load(task);
+            if after != SchedPlacement::None {
+                return 1;
+            }
+            return -1;
+        }
+
+        let result = self.enqueue_local_preclaimed(task);
+        if result < 0 {
+            let _ = task_sched_placement_compare_exchange(task, SchedPlacement::ReadyQueue, from);
+        }
+        result
+    }
+
+    fn enqueue_local_preclaimed(&self, task: *mut Task) -> i32 {
         let self_addr = self as *const _ as usize;
         if self_addr < 0xffffffff80000000 {
             klog_info!(
@@ -267,7 +378,7 @@ impl PriorityRunQueue {
         task_set_last_cpu(task, self.cpu_id() as u8);
 
         let _guard = self.queue_lock.lock();
-        self.ready_queues[idx].enqueue(task)
+        self.ready_queues[idx].link_preclaimed_with_status(task)
     }
 
     pub fn dequeue_highest_priority(&self) -> *mut Task {
@@ -393,13 +504,62 @@ impl PriorityRunQueue {
     /// This is a lock-free MPSC (multi-producer single-consumer) push.
     /// Can be called from ANY CPU safely.
     pub fn push_remote_wake(&self, task: *mut Task) {
+        let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
+            SchedPlacement::Waking
+        } else {
+            SchedPlacement::None
+        };
+        let _ = self.push_remote_wake_from_placement(task, from);
+    }
+
+    /// Publish a task whose wake/new-task path reserved `SchedPlacement::Waking`
+    /// into this CPU's remote wake inbox.
+    pub fn push_remote_wake_waking(&self, task: *mut Task) -> i32 {
+        self.push_remote_wake_from_placement(task, SchedPlacement::Waking)
+    }
+
+    fn push_remote_wake_from_placement(&self, task: *mut Task, from: SchedPlacement) -> i32 {
         let Some(node) = NonNull::new(task) else {
-            return;
+            return -1;
         };
 
-        // Acquire inbox ownership before publishing task into the lock-free list.
-        // This prevents a drain from observing the task and dropping the reference
-        // before the producer has incremented refcnt.
+        // Cross-role runnable ownership comes before the intrusive link. A
+        // task already in a local ready queue, a remote inbox, an on-CPU
+        // switch window, or a migration handoff is already scheduler-owned;
+        // duplicate wakes are no-ops. This is the single gate that prevents
+        // the historical ready-queue + remote-inbox double-placement race.
+        let current = task_sched_placement_load(task);
+        if current == SchedPlacement::ReadyQueue
+            || current == SchedPlacement::RemoteWake
+            || current == SchedPlacement::OnCpu
+            || current == SchedPlacement::Migrating
+            || (current == SchedPlacement::Waking && from != SchedPlacement::Waking)
+        {
+            return 1;
+        }
+        if current != from {
+            return -1;
+        }
+        if !task_sched_placement_compare_exchange(task, from, SchedPlacement::RemoteWake) {
+            let after = task_sched_placement_load(task);
+            if after != SchedPlacement::None {
+                return 1;
+            }
+            return -1;
+        }
+
+        // Acquire single-membership before publishing task into the lock-free
+        // stack. The inbox uses the task's role-typed RemoteWakeRole Link: a
+        // tail node has a null successor while still queued, so membership must
+        // be tracked by the link's `linked` bit just like the ready queue.
+        if !task_remote_inbox_try_link(task) {
+            let _ = task_sched_placement_compare_exchange(task, SchedPlacement::RemoteWake, from);
+            return -1;
+        }
+
+        // Take the inbox reference before publishing the node so a drain that
+        // immediately swaps the head cannot drop the last reference before the
+        // producer has finished linking it.
         task_set_last_cpu(task, self.cpu_id() as u8);
         let _ = task_inc_ref(task);
 
@@ -408,8 +568,7 @@ impl PriorityRunQueue {
             // Load current head
             let old_head = self.remote_inbox_head.load(Ordering::Acquire);
 
-            // Point our next to current head — the `next_inbox` atomic
-            // is `&self`-mutable so the borrow stays safe. `node` is a
+            // Point our RemoteWakeRole link to the current head. `node` is a
             // non-null `*mut Task` pointing at a pool-pinned Task.
             task_next_inbox_store_relaxed(node.as_ptr(), old_head);
 
@@ -423,7 +582,7 @@ impl PriorityRunQueue {
                 Ok(_) => {
                     // Success! Update count and return
                     self.inbox_count.fetch_add(1, Ordering::Relaxed);
-                    return;
+                    return 0;
                 }
                 Err(_) => {
                     // Lost race - retry
@@ -461,18 +620,45 @@ impl PriorityRunQueue {
             let next = task_next_inbox_load(current);
             task_next_inbox_store_release(current, ptr::null_mut());
 
-            let should_enqueue = task_status(current) == Some(TaskStatus::Ready);
-            if should_enqueue {
-                task_set_last_cpu(current, self.cpu_id() as u8);
-                let priority = task_priority(current).map(|p| p as usize).unwrap_or(0);
-                let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
-
-                let _guard = self.queue_lock.lock();
-                self.ready_queues[idx].enqueue(current);
-                drop(_guard);
+            if task_status(current) == Some(TaskStatus::Ready)
+                && task_sched_placement_compare_exchange(
+                    current,
+                    SchedPlacement::RemoteWake,
+                    SchedPlacement::ReadyQueue,
+                )
+            {
+                // The inbox owner transfers placement directly to its local
+                // ready queue. During this short handoff the task is
+                // scheduler-owned as ReadyQueue even before `ready_link` is
+                // linked, so a duplicate wake cannot publish a second entry.
+                task_remote_inbox_unlink(current);
+                let result = self.enqueue_local_preclaimed(current);
+                if result < 0 {
+                    let _ = task_sched_placement_compare_exchange(
+                        current,
+                        SchedPlacement::ReadyQueue,
+                        SchedPlacement::None,
+                    );
+                }
+                let _ = task_dec_ref(current);
+            } else {
+                // The task is no longer Ready, or another owner repaired an
+                // inconsistent placement. Drop the remote-inbox claim, then
+                // re-check state. If a wake raced while producers observed
+                // `RemoteWake` and therefore no-op'd, this CPU performs the
+                // enqueue now; if the producer already enqueued after the
+                // release, `enqueue_local` sees non-None placement and no-ops.
+                task_remote_inbox_unlink(current);
+                let _ = task_sched_placement_compare_exchange(
+                    current,
+                    SchedPlacement::RemoteWake,
+                    SchedPlacement::None,
+                );
+                let _ = task_dec_ref(current);
+                if task_status(current) == Some(TaskStatus::Ready) {
+                    let _ = self.enqueue_local(current);
+                }
             }
-
-            let _ = task_dec_ref(current);
 
             current = next;
         }
@@ -488,6 +674,12 @@ impl PriorityRunQueue {
         while !cursor.is_null() {
             let next = task_next_inbox_load(cursor);
             task_next_inbox_store_release(cursor, ptr::null_mut());
+            task_remote_inbox_unlink(cursor);
+            let _ = task_sched_placement_compare_exchange(
+                cursor,
+                SchedPlacement::RemoteWake,
+                SchedPlacement::None,
+            );
             let _ = task_dec_ref(cursor);
             cursor = next;
             drained = drained.saturating_add(1);
@@ -689,7 +881,12 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
         return -1;
     }
 
-    with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)).unwrap_or(-1)
+    with_cpu_scheduler(cpu_id, |sched| match task_sched_placement_load(task) {
+        SchedPlacement::Migrating => sched.enqueue_migrated(task),
+        SchedPlacement::Waking => sched.enqueue_waking(task),
+        _ => sched.enqueue_local(task),
+    })
+    .unwrap_or(-1)
 }
 
 pub fn try_steal_task_from_cpu(cpu_id: usize) -> Option<*mut Task> {

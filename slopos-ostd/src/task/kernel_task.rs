@@ -11,7 +11,7 @@
 use core::ffi::c_void;
 use core::ptr;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
@@ -30,7 +30,7 @@ use crate::sync::intrusive::Link;
 use crate::task::abi::TaskAbi;
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
-use crate::task::link_roles::{ReadyQueueRole, ZombieListRole};
+use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole, ZombieListRole};
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -175,6 +175,57 @@ impl SignalAction {
 }
 
 // =============================================================================
+// Scheduler placement — runnable ownership separate from TaskStatus
+// =============================================================================
+
+/// Scheduler-owned placement for a runnable or physically running task.
+///
+/// `TaskStatus::Ready` is not enough to prove schedulability on SMP: a task
+/// also needs exactly one scheduler owner. This byte is SlopOS's explicit
+/// equivalent of Linux's `on_rq`/`on_cpu` pair, FreeBSD's `TD_ON_RUNQ`, and
+/// seL4's queued-bit discipline.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedPlacement {
+    /// Not owned by any scheduler structure. Valid for blocked/exited tasks
+    /// and for a not-yet-published freshly-created task.
+    None = 0,
+    /// Linked in exactly one per-CPU ready queue via `ready_link`.
+    ReadyQueue = 1,
+    /// Pending in exactly one per-CPU remote wake inbox via
+    /// `remote_inbox_link`.
+    RemoteWake = 2,
+    /// Owned by a CPU as the current/next task, including the dispatch and
+    /// switch-out windows while `TaskStatus` and `on_cpu` are being updated.
+    OnCpu = 3,
+    /// Temporarily owned by the load balancer while moving between runqueues.
+    Migrating = 4,
+    /// A wake/new-task publisher has reserved scheduler ownership but has not
+    /// linked the task into its final queue/inbox yet. This closes the
+    /// Ready-with-no-owner publication window without blocking producers.
+    Waking = 5,
+}
+
+impl SchedPlacement {
+    #[inline]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[inline]
+    pub const fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::ReadyQueue,
+            2 => Self::RemoteWake,
+            3 => Self::OnCpu,
+            4 => Self::Migrating,
+            5 => Self::Waking,
+            _ => Self::None,
+        }
+    }
+}
+
+// =============================================================================
 // TaskInner — the generic kernel task control block
 // =============================================================================
 //
@@ -295,7 +346,20 @@ pub struct TaskInner<K, U> {
     pub ready_link: Link<TaskInner<K, U>, ReadyQueueRole>,
     /// Intrusive link slot for the global `ZombieList`.
     pub zombie_link: Link<TaskInner<K, U>, ZombieListRole>,
-    pub next_inbox: AtomicPtr<TaskInner<K, U>>,
+    /// Intrusive link slot for per-CPU remote wake inboxes.
+    ///
+    /// Although the inbox itself is a lock-free Treiber stack, not an
+    /// `IntrusiveLinkedList`, it has the same single-membership rule as a
+    /// runqueue: a one-element stack has a null successor while still being a
+    /// member. Using a role-typed `Link` folds the successor and membership bit
+    /// into one OSTD primitive, so duplicate remote wakes cannot self-cycle the
+    /// inbox and diagnostics can distinguish pending wake delivery from a
+    /// genuinely stranded Ready task.
+    pub remote_inbox_link: Link<TaskInner<K, U>, RemoteWakeRole>,
+    /// Explicit scheduler placement owner for runnable tasks. This is the
+    /// cross-role gate that prevents a task from being in a ready queue and a
+    /// remote wake inbox at the same time.
+    pub sched_placement: AtomicU8,
     pub refcnt: AtomicU32,
     /// Per-task user-mode register snapshot.
     pub user_ctx: UserContext,
@@ -369,7 +433,8 @@ impl<K, U> TaskInner<K, U> {
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
             zombie_link: Link::new(),
-            next_inbox: AtomicPtr::new(ptr::null_mut()),
+            remote_inbox_link: Link::new(),
+            sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
             refcnt: AtomicU32::new(0),
             user_ctx: UserContext::const_zeroed(),
             saved_user_ctx_ptr: ptr::null_mut(),
@@ -482,9 +547,24 @@ impl<K, U> TaskInner<K, U> {
         self.state.status()
     }
 
+    #[inline]
+    fn reserve_waking_if_unowned(&self) -> bool {
+        self.sched_placement
+            .compare_exchange(
+                SchedPlacement::None.as_u8(),
+                SchedPlacement::Waking.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
     /// Force-publish a new status without changing the block reason.
     #[inline]
     pub fn set_status(&self, status: TaskStatus) {
+        if status == TaskStatus::Ready {
+            let _ = self.reserve_waking_if_unowned();
+        }
         let reason = self.state.reason();
         self.state.force_set(status, reason);
     }
@@ -492,6 +572,9 @@ impl<K, U> TaskInner<K, U> {
     /// Force-publish (status, reason) atomically. Single-owner only.
     #[inline]
     pub fn force_set_state(&self, status: TaskStatus, reason: BlockReason) {
+        if status == TaskStatus::Ready {
+            let _ = self.reserve_waking_if_unowned();
+        }
         self.state.force_set(status, reason);
     }
 
@@ -501,9 +584,24 @@ impl<K, U> TaskInner<K, U> {
         if !current.can_transition_to(target) {
             return false;
         }
-        self.state
+        let reserved_waking = if target == TaskStatus::Ready {
+            self.reserve_waking_if_unowned()
+        } else {
+            false
+        };
+        let ok = self
+            .state
             .try_transition_keep_reason(current, target)
-            .is_ok()
+            .is_ok();
+        if !ok && reserved_waking {
+            let _ = self.sched_placement.compare_exchange(
+                SchedPlacement::Waking.as_u8(),
+                SchedPlacement::None.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        ok
     }
 
     /// Atomically transition from `expected` to `target`.
@@ -512,9 +610,24 @@ impl<K, U> TaskInner<K, U> {
         if !expected.can_transition_to(target) {
             return false;
         }
-        self.state
+        let reserved_waking = if target == TaskStatus::Ready {
+            self.reserve_waking_if_unowned()
+        } else {
+            false
+        };
+        let ok = self
+            .state
             .try_transition_keep_reason(expected, target)
-            .is_ok()
+            .is_ok();
+        if !ok && reserved_waking {
+            let _ = self.sched_placement.compare_exchange(
+                SchedPlacement::Waking.as_u8(),
+                SchedPlacement::None.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        ok
     }
 
     /// Block from a specific expected state, stamping the block reason
@@ -634,7 +747,8 @@ impl<K, U> TaskInner<K, U> {
         self.slot_index = preserved_slot_index;
         self.ready_link.reset();
         self.zombie_link.reset();
-        self.next_inbox = AtomicPtr::new(ptr::null_mut());
+        self.remote_inbox_link.reset();
+        self.sched_placement = AtomicU8::new(SchedPlacement::None.as_u8());
         self.refcnt = AtomicU32::new(0);
         self.signal_pending = AtomicU64::new(0);
     }
@@ -677,6 +791,12 @@ impl<K, U> crate::task::LinkProvider<ReadyQueueRole> for TaskInner<K, U> {
 impl<K, U> crate::task::LinkProvider<ZombieListRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, ZombieListRole> {
         &self.zombie_link
+    }
+}
+
+impl<K, U> crate::task::LinkProvider<RemoteWakeRole> for TaskInner<K, U> {
+    fn link(&self) -> &Link<Self, RemoteWakeRole> {
+        &self.remote_inbox_link
     }
 }
 

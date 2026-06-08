@@ -37,6 +37,7 @@ use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
+use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
@@ -54,8 +55,9 @@ use slopos_sched::scheduler::unblock_task;
 use slopos_sched::task;
 use slopos_sched::task::{
     task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
-    task_pgid, task_process_id, task_set_state, task_set_state_from_with_reason, task_sid,
-    task_signal_pending, task_status, task_terminate, task_try_transition_from,
+    task_pgid, task_process_id, task_sched_placement_store, task_set_state,
+    task_set_state_from_with_reason, task_sid, task_signal_pending, task_status, task_terminate,
+    task_try_transition_from,
 };
 
 // =============================================================================
@@ -81,6 +83,11 @@ fn park_bootstrap_on_current_cpu() {
 
 fn make_task_current(task_ptr: *mut Task) {
     assert!(!task_ptr.is_null(), "make_task_current: null task_ptr");
+    if task_status(task_ptr) == Some(TaskStatus::Blocked) {
+        let task_id = slopos_sched::task::task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
+        assert_eq!(task_set_state(task_id, TaskStatus::Ready), 0);
+    }
+    task_sched_placement_store(task_ptr, SchedPlacement::OnCpu);
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     slopos_sched::scheduler::dispatch_for_test(cpu_id, task_ptr);
 }
@@ -106,12 +113,6 @@ fn create_test_user_task() -> u32 {
         1,
         TASK_FLAG_USER_MODE,
     );
-    // Block the task immediately so the scheduler on other CPUs never picks
-    // it up.  These tests only inspect task structures — they never need the
-    // task to actually run user-mode code.
-    if id != INVALID_TASK_ID {
-        task_set_state(id, TaskStatus::Blocked);
-    }
     id
 }
 
@@ -3631,7 +3632,9 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
-    // Set up: task is `Blocked` (the wait queue's lock-held CAS already ran).
+    // Set up: task is `Blocked` at creation. Publish it Ready, then Running,
+    // before modelling the wait queue's lock-held CAS.
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
     let blocked_cas = task_set_state_from_with_reason(
         task_id,
@@ -3677,6 +3680,7 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     assert_not_null!(task_ptr);
 
     // 1. Task is Running.
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
     // 2. Wait-queue protocol commits Blocked under the queue lock.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
@@ -3708,6 +3712,7 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     assert_not_null!(task_ptr);
 
     // 1. Task starts Running (precondition for wait-queue's lock-held CAS).
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
 
     // 2. Wait-queue protocol: under the queue lock, push node + CAS.
@@ -3742,6 +3747,7 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
 
+    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
 
     // unblock_task on a Running task is a no-op — there's nothing to
@@ -3770,7 +3776,6 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     assert_not_null!(task_ptr);
 
     // Set up: task is Ready (a wake has already transitioned us off Running).
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
 
     // CAS(Running, Blocked) must fail when state is Ready.

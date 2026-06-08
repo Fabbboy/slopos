@@ -15,16 +15,16 @@ use slopos_testing::TestResult;
 
 use super::runtime::{self, IdleStackResolveError};
 use super::scheduler::{
-    self, get_scheduler_stats, schedule, schedule_new_task, schedule_task, scheduler_is_enabled,
-    scheduler_timer_tick, task_wait_for, unschedule_task,
+    self, get_scheduler_stats, publish_new_task, schedule, schedule_new_task, schedule_task,
+    scheduler_is_enabled, scheduler_timer_tick, task_wait_for, unschedule_task,
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_exit_info_is_set,
     task_find_by_id, task_get_info, task_handle, task_id_of, task_is_blocked, task_is_terminated,
-    task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count, task_resolve_handle,
-    task_set_state, task_set_state_with_reason, task_slot_index, task_status, task_terminate,
-    task_waiter_count,
+    task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count,
+    task_remote_inbox_is_linked, task_resolve_handle, task_sched_placement_load, task_set_state,
+    task_set_state_with_reason, task_slot_index, task_status, task_terminate, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -32,6 +32,7 @@ use slopos_arch::MAX_CPUS;
 use slopos_arch::arch::gdt::SegmentSelector;
 use slopos_arch::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_ostd::task::SchedPlacement;
 
 // =============================================================================
 // RAII Fixture for Scheduler Tests
@@ -57,6 +58,152 @@ impl SchedFixture {
 // =============================================================================
 
 use crate::test_fixture::dummy_task_entry;
+
+fn make_task_ready(task_id: u32) -> bool {
+    task_set_state(task_id, TaskStatus::Ready) == 0
+}
+
+fn is_published_placement(placement: SchedPlacement) -> bool {
+    matches!(
+        placement,
+        SchedPlacement::ReadyQueue
+            | SchedPlacement::RemoteWake
+            | SchedPlacement::OnCpu
+            | SchedPlacement::Migrating
+    )
+}
+
+pub fn test_raw_ready_store_reserves_waking_placement() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"ReadyRaw\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return TestResult::Fail;
+    }
+
+    if task_status(task) != Some(TaskStatus::Blocked) {
+        klog_info!("SCHED_TEST: fresh task not Blocked");
+        return TestResult::Fail;
+    }
+    if task_sched_placement_load(task) != SchedPlacement::None {
+        klog_info!("SCHED_TEST: fresh task not placement None");
+        return TestResult::Fail;
+    }
+
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: task_set_state Ready failed");
+        return TestResult::Fail;
+    }
+    if task_status(task) != Some(TaskStatus::Ready) {
+        klog_info!("SCHED_TEST: raw Ready store did not publish Ready status");
+        return TestResult::Fail;
+    }
+    if task_sched_placement_load(task) != SchedPlacement::Waking {
+        klog_info!(
+            "SCHED_TEST: raw Ready store placement {:?}, expected Waking",
+            task_sched_placement_load(task)
+        );
+        return TestResult::Fail;
+    }
+
+    let _ = scheduler::schedule_task(task);
+    let _ = task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_publish_new_task_owns_ready_publication() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"NewPublish\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return TestResult::Fail;
+    }
+    if task_status(task) != Some(TaskStatus::Blocked)
+        || task_sched_placement_load(task) != SchedPlacement::None
+    {
+        klog_info!("SCHED_TEST: new task was not born non-runnable");
+        return TestResult::Fail;
+    }
+
+    if publish_new_task(task) != 0 {
+        klog_info!("SCHED_TEST: publish_new_task failed");
+        return TestResult::Fail;
+    }
+    let placement = task_sched_placement_load(task);
+    if task_status(task) != Some(TaskStatus::Ready) || !is_published_placement(placement) {
+        klog_info!(
+            "SCHED_TEST: publish_new_task left status {:?} placement {:?}",
+            task_status(task),
+            placement
+        );
+        return TestResult::Fail;
+    }
+
+    let _ = task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"WakeNone\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return TestResult::Fail;
+    }
+    if task_status(task) != Some(TaskStatus::Blocked)
+        || task_sched_placement_load(task) != SchedPlacement::None
+    {
+        klog_info!("SCHED_TEST: wake fixture not Blocked+None");
+        return TestResult::Fail;
+    }
+
+    if scheduler::wake_blocked_task(task, task_id) != 0 {
+        klog_info!("SCHED_TEST: wake_blocked_task failed");
+        return TestResult::Fail;
+    }
+    let placement = task_sched_placement_load(task);
+    if task_status(task) != Some(TaskStatus::Ready) || !is_published_placement(placement) {
+        klog_info!(
+            "SCHED_TEST: wake_blocked_task left status {:?} placement {:?}",
+            task_status(task),
+            placement
+        );
+        return TestResult::Fail;
+    }
+
+    let _ = task_terminate(task_id);
+    TestResult::Pass
+}
 
 // =============================================================================
 // STATE MACHINE TESTS
@@ -86,8 +233,16 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
     }
 
     let initial_state = task_status(task).unwrap_or(TaskStatus::Terminated);
-    if initial_state != TaskStatus::Ready {
-        klog_info!("SCHED_TEST: Expected READY state, got {:?}", initial_state);
+    if initial_state != TaskStatus::Blocked {
+        klog_info!(
+            "SCHED_TEST: Expected initial BLOCKED state, got {:?}",
+            initial_state
+        );
+        return TestResult::Fail;
+    }
+
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: Failed to set READY state");
         return TestResult::Fail;
     }
 
@@ -124,8 +279,15 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Set to RUNNING first
-    task_set_state(task_id, TaskStatus::Running);
+    // Publish to READY, then claim RUNNING before blocking.
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: Failed to set READY state");
+        return TestResult::Fail;
+    }
+    if task_set_state(task_id, TaskStatus::Running) != 0 {
+        klog_info!("SCHED_TEST: Failed to set RUNNING state");
+        return TestResult::Fail;
+    }
 
     // Then transition to BLOCKED
     if task_set_state(task_id, TaskStatus::Blocked) != 0 {
@@ -192,9 +354,6 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
     if task_id == INVALID_TASK_ID {
         return TestResult::Fail;
     }
-
-    task_set_state(task_id, TaskStatus::Running);
-    task_set_state(task_id, TaskStatus::Blocked);
 
     let _result = task_set_state(task_id, TaskStatus::Running);
 
@@ -1239,6 +1398,11 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
         return TestResult::Fail;
     }
 
+    if !make_task_ready(task_id) {
+        klog_info!("SCHED_TEST: Failed to make empty-queue task READY");
+        return TestResult::Fail;
+    }
+
     // Schedule to empty queue
     if schedule_task(task_ptr) != 0 {
         klog_info!("SCHED_TEST: Failed to schedule task to empty queue");
@@ -1280,6 +1444,11 @@ pub fn test_schedule_duplicate_task() -> TestResult {
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     task_get_info(task_id, &mut task_ptr);
+
+    if !make_task_ready(task_id) {
+        klog_info!("SCHED_TEST: Failed to make duplicate-schedule task READY");
+        return TestResult::Fail;
+    }
 
     // Schedule once
     schedule_task(task_ptr);
@@ -1401,6 +1570,10 @@ pub fn test_priority_ordering() -> TestResult {
     task_get_info(low_id, &mut low_ptr);
     task_get_info(normal_id, &mut normal_ptr);
     task_get_info(high_id, &mut high_ptr);
+    if !make_task_ready(low_id) || !make_task_ready(normal_id) || !make_task_ready(high_id) {
+        klog_info!("SCHED_TEST: Failed to make priority tasks READY");
+        return TestResult::Fail;
+    }
 
     schedule_task(low_ptr);
     schedule_task(normal_ptr);
@@ -1438,6 +1611,10 @@ pub fn test_idle_priority_last() -> TestResult {
 
     task_get_info(idle_id, &mut idle_ptr);
     task_get_info(normal_id, &mut normal_ptr);
+    if !make_task_ready(idle_id) || !make_task_ready(normal_id) {
+        klog_info!("SCHED_TEST: Failed to make idle-priority tasks READY");
+        return TestResult::Fail;
+    }
 
     // Schedule idle first, then normal
     schedule_task(idle_ptr);
@@ -1476,6 +1653,10 @@ pub fn test_timer_tick_decrements_slice() -> TestResult {
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     task_get_info(task_id, &mut task_ptr);
+    if !make_task_ready(task_id) {
+        klog_info!("SCHED_TEST: Failed to make timer-slice task READY");
+        return TestResult::Fail;
+    }
     schedule_task(task_ptr);
 
     TestResult::Pass
@@ -1711,6 +1892,10 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
         return TestResult::Pass;
     }
 
+    if !make_task_ready(task_id) {
+        klog_info!("SCHED_TEST: Failed to make pre-init task READY");
+        return TestResult::Fail;
+    }
     crate::task::task_install_idle_affinity(task_ptr, 1u32 << cpu_id, cpu_id as u8);
 
     if schedule_task(task_ptr) != 0 {
@@ -1880,6 +2065,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
         if *id != INVALID_TASK_ID {
             let mut ptr: *mut Task = ptr::null_mut();
             if task_get_info(*id, &mut ptr) == 0 && !ptr.is_null() {
+                let _ = make_task_ready(*id);
                 schedule_task(ptr);
             }
         }
@@ -1929,6 +2115,7 @@ pub fn test_interleaved_operations() -> TestResult {
         let mut ptr1: *mut Task = ptr::null_mut();
         task_get_info(id1, &mut ptr1);
         if !ptr1.is_null() {
+            let _ = make_task_ready(id1);
             schedule_task(ptr1);
         }
 
@@ -1939,6 +2126,7 @@ pub fn test_interleaved_operations() -> TestResult {
         let mut ptr2: *mut Task = ptr::null_mut();
         task_get_info(id2, &mut ptr2);
         if !ptr2.is_null() {
+            let _ = make_task_ready(id2);
             schedule_task(ptr2);
         }
 
@@ -1974,6 +2162,11 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: Failed to set inbox test task READY");
         return TestResult::Fail;
     }
 
@@ -2025,6 +2218,80 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression: pushing the same task into a remote inbox twice must be a
+/// no-op, not a duplicate Treiber node. A duplicate node can self-cycle the
+/// inbox and make the stranded-READY rescue mistake a legitimate pending
+/// remote wake for a lost enqueue.
+pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"InboxDup\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: Failed to set duplicate inbox task READY");
+        return TestResult::Fail;
+    }
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let ready_before =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
+
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.push_remote_wake(task_ptr);
+        sched.push_remote_wake(task_ptr);
+    });
+
+    if !task_remote_inbox_is_linked(task_ptr) {
+        klog_info!("SCHED_TEST: Duplicate-push task was not marked inbox-linked");
+        return TestResult::Fail;
+    }
+
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.drain_remote_inbox();
+    });
+
+    if task_remote_inbox_is_linked(task_ptr) {
+        klog_info!("SCHED_TEST: inbox-linked bit not cleared after drain");
+        return TestResult::Fail;
+    }
+
+    let ready_after =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
+    if ready_after != ready_before.saturating_add(1) {
+        klog_info!(
+            "SCHED_TEST: duplicate inbox push queued {} tasks (before={}, after={})",
+            ready_after.saturating_sub(ready_before),
+            ready_before,
+            ready_after,
+        );
+        return TestResult::Fail;
+    }
+
+    if task_ref_count(task_ptr).unwrap_or(0) != 1 {
+        klog_info!(
+            "SCHED_TEST: duplicate inbox push leaked refcount (refcnt={})",
+            task_ref_count(task_ptr).unwrap_or(0)
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 /// Test: Multiple tasks in remote inbox
 /// Verifies FIFO ordering is preserved through inbox drain
 pub fn test_remote_inbox_multiple_tasks() -> TestResult {
@@ -2050,6 +2317,10 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
         }
 
         task_get_info(task_ids[i], &mut task_ptrs[i]);
+        if task_set_state(task_ids[i], TaskStatus::Ready) != 0 {
+            klog_info!("SCHED_TEST: Failed to set inbox task {} READY", i);
+            return TestResult::Fail;
+        }
     }
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -2107,6 +2378,11 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: Failed to set timer-drain task READY");
         return TestResult::Fail;
     }
 
@@ -2168,10 +2444,8 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
         sched.push_remote_wake(task_ptr);
     });
 
-    if task_set_state(task_id, TaskStatus::Running) != 0
-        || task_set_state(task_id, TaskStatus::Blocked) != 0
-    {
-        klog_info!("SCHED_TEST: Failed to transition task to BLOCKED before inbox drain");
+    if task_status(task_ptr) != Some(TaskStatus::Blocked) {
+        klog_info!("SCHED_TEST: inbox drop task was not initially BLOCKED");
         return TestResult::Fail;
     }
 
@@ -2256,6 +2530,10 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: Failed to set cross-CPU task READY");
         return TestResult::Fail;
     }
     // Keep last_cpu on the current CPU so the scheduler must migrate it.
@@ -2397,6 +2675,7 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
             if task_ptr.is_null() {
                 return TestResult::Fail;
             }
+            let _ = make_task_ready(id);
             let _ = schedule_task(task_ptr);
         }
         scheduler_timer_tick();
@@ -2447,7 +2726,17 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     const FAR_FUTURE: u64 = u64::MAX / 2;
 
     for round in 0..64 {
-        let _ = task_set_state(task_id, TaskStatus::Running);
+        let _ = unschedule_task(task_ptr);
+        if task_status(task_ptr) == Some(TaskStatus::Blocked) && !make_task_ready(task_id) {
+            klog_info!("SCHED_TEST: set Ready failed at round {}", round);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+        if task_set_state(task_id, TaskStatus::Running) != 0 {
+            klog_info!("SCHED_TEST: set Running failed at round {}", round);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
 
         if !super::sleep::test_insert_sleep_entry(task_id, FAR_FUTURE) {
             klog_info!("SCHED_TEST: sleep queue insert failed at round {}", round);
@@ -2652,6 +2941,10 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
         // observes a non-zero runtime delta in mark_task_terminated.
         // The state set must respect the FSM (Ready -> Running is
         // valid).
+        if !make_task_ready(child_id) {
+            klog_info!("SCHED_TEST: failed Ready transition at iter {}", i);
+            return TestResult::Fail;
+        }
         if task_set_state(child_id, TaskStatus::Running) != 0 {
             klog_info!("SCHED_TEST: failed Running transition at iter {}", i);
             return TestResult::Fail;
@@ -2971,7 +3264,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             super::per_cpu::affinity_mask_for_cpu(cpu_id),
             cpu_id as u8,
         );
-        if schedule_task(tp) != 0 {
+        if !make_task_ready(tid) || schedule_task(tp) != 0 {
             return TestResult::Fail;
         }
     }
@@ -3064,6 +3357,9 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     if task_get_info(runner_id, &mut runner_ptr) != 0 || runner_ptr.is_null() {
         return TestResult::Fail;
     }
+    if !make_task_ready(runner_id) {
+        return TestResult::Fail;
+    }
     super::scheduler::dispatch(cpu_id, runner_ptr);
 
     let load =
@@ -3151,6 +3447,9 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     if task_get_info(parent_id, &mut parent_ptr) != 0 {
         return TestResult::Fail;
     }
+    if !make_task_ready(parent_id) {
+        return TestResult::Fail;
+    }
     super::scheduler::dispatch(cpu_id, parent_ptr);
 
     // Spawn N children using schedule_new_task (the fork path).
@@ -3172,7 +3471,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
             return TestResult::Fail;
         }
         crate::task::task_set_cpu_affinity(tp, 0); // any CPU
-        if schedule_new_task(tp) != 0 {
+        if !make_task_ready(tid) || schedule_new_task(tp) != 0 {
             return TestResult::Fail;
         }
         placed_on[i] = task_last_cpu(tp).unwrap_or(0) as usize;
@@ -3877,6 +4176,18 @@ slopos_testing::stest!(
     name = test_state_transition_invalid_blocked_to_running,
     suite = sched_core
 );
+slopos_testing::stest!(
+    name = test_raw_ready_store_reserves_waking_placement,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_publish_new_task_owns_ready_publication,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_wake_blocked_task_publishes_from_none,
+    suite = sched_core
+);
 slopos_testing::stest!(name = test_pool_grow_on_demand, suite = sched_core);
 slopos_testing::stest!(name = test_rapid_create_destroy_cycle, suite = sched_core);
 slopos_testing::stest!(
@@ -3946,6 +4257,10 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_many_same_priority_tasks, suite = sched_core);
 slopos_testing::stest!(name = test_interleaved_operations, suite = sched_core);
 slopos_testing::stest!(name = test_remote_inbox_push_drain, suite = sched_core);
+slopos_testing::stest!(
+    name = test_remote_inbox_duplicate_push_is_single_membership,
+    suite = sched_core
+);
 slopos_testing::stest!(name = test_remote_inbox_multiple_tasks, suite = sched_core);
 slopos_testing::stest!(name = test_timer_tick_drains_inbox, suite = sched_core);
 slopos_testing::stest!(

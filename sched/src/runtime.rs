@@ -6,13 +6,14 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
 
 use super::per_cpu;
 use super::scheduler::{
-    run_ready_task_from_idle, schedule_new_task, set_scheduler_enabled, r#yield,
+    publish_new_task, run_ready_task_from_idle, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskPriority, reap_zombies, task_create,
-    task_get_info,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskPriority, TaskStatus, reap_zombies,
+    task_create, task_get_info, task_sched_placement_store, task_set_status,
 };
 use super::work_steal::try_work_steal;
+use slopos_ostd::task::SchedPlacement;
 
 const MAX_IDLE_CALLBACKS: usize = 4;
 
@@ -90,7 +91,7 @@ fn name_to_task_buffer(name: &str) -> [u8; super::task::TASK_NAME_MAX_LEN] {
 }
 
 /// Concrete spawner impl. Routes through the existing
-/// `task_create` + `schedule_new_task` pair, but uses typed errors
+/// `task_create` + `publish_new_task` pair, but uses typed errors
 /// instead of the legacy `INVALID_TASK_ID` sentinel.
 pub struct KernelThreadSpawnerImpl;
 
@@ -122,7 +123,7 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
         if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
             return Err(SpawnError::OutOfTaskIds);
         }
-        if schedule_new_task(task_ptr) != 0 {
+        if publish_new_task(task_ptr) != 0 {
             return Err(SpawnError::ScheduleFailed);
         }
         Ok(SpawnedTaskId::new(task_id))
@@ -288,6 +289,9 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
         per_cpu::affinity_mask_for_cpu(cpu_id),
         cpu_id as u8,
     );
+
+    task_set_status(idle_task, TaskStatus::Running);
+    task_sched_placement_store(idle_task, SchedPlacement::OnCpu);
 
     super::scheduler::install_idle_task(cpu_id, idle_task);
 

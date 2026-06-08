@@ -83,13 +83,13 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
         .unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(
         initial_state,
-        TaskStatus::Ready,
-        "new task not in READY state"
+        TaskStatus::Blocked,
+        "new task not in BLOCKED/non-runnable state"
     );
 
+    task_set_state(task_id, TaskStatus::Ready);
     task_set_state(task_id, TaskStatus::Running);
     task_set_state(task_id, TaskStatus::Blocked);
-    task_set_state(task_id, TaskStatus::Ready);
 
     task_terminate(task_id);
     TestResult::Pass

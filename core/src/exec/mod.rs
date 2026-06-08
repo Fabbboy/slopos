@@ -13,7 +13,6 @@ use slopos_ostd::KVec;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
-    TaskStatus,
 };
 use slopos_fs::fileio::{fileio_clone_table_for_spawn, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
@@ -27,11 +26,10 @@ use slopos_mm::process_vm::{
 use slopos_ostd::klog_info;
 
 use slopos_abi::task::INVALID_TASK_ID;
-use slopos_sched::scheduler::schedule_new_task;
+use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{
     TaskEntry, task_borrow, task_borrow_mut, task_entry_from_kernel_va, task_process_id,
-    task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_set_status,
-    task_user_ctx_mut,
+    task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_user_ctx_mut,
 };
 use slopos_sched::task::{task_create, task_find_by_id, task_get_info, task_terminate};
 
@@ -134,20 +132,10 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::Fault);
         }
 
-        // `task_create` publishes the slot Ready; pull it back to Blocked
-        // for the duration of the build. The ELF load below does DISK I/O —
-        // tens of milliseconds during which a Ready-but-half-built task is
-        // visible to every dispatch path (observed live: the stranded-READY
-        // rescue sweep dispatched one mid-load and it page-faulted on its
-        // own unmapped entry point). The Ready re-publication at the end of
-        // this function is the real "schedulable" edge (Linux TASK_NEW).
-        task_set_status(task_info, TaskStatus::Blocked);
-
-        // task_create (via reserve_task_slot) returns the task in Blocked
-        // state.  It stays Blocked while we write entry_point, rip, rsp,
-        // fd table, pgid, etc.  We publish as Ready only at the end.
-        // This is the Linux TASK_NEW pattern: the task is invisible to
-        // the scheduler until fully initialized.
+        // task_create() returns a non-runnable task. It stays Blocked while
+        // we perform disk I/O and write entry_point, rip, rsp, fd table, pgid,
+        // sid, and controlling_tty. publish_new_task() below is the sole
+        // schedulable edge, matching Linux's wake_up_new_task() pattern.
 
         let process_id = task_process_id(task_info).unwrap_or(INVALID_PROCESS_ID);
         let mut entry = 0u64;
@@ -246,9 +234,7 @@ pub fn spawn_program_with_attrs(
         // eventually runs this task.  This is the Linux TASK_NEW →
         // TASK_RUNNING pattern: task_create leaves the task Blocked,
         // and we make it schedulable only here.
-        task_set_status(task_info, TaskStatus::Ready);
-
-        if schedule_new_task(task_info) != 0 {
+        if publish_new_task(task_info) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
         }

@@ -51,6 +51,38 @@ impl<T, Role> Link<T, Role> {
         self.next.store(next, Ordering::Release);
     }
 
+    /// Store the successor with relaxed ordering. For lock-free intrusive
+    /// stacks, the publishing CAS on the stack head supplies the release edge;
+    /// callers that are not doing such a publish should use [`Link::store`].
+    #[inline]
+    pub fn store_relaxed(&self, next: *mut T) {
+        self.next.store(next, Ordering::Relaxed);
+    }
+
+    /// Atomically claim this link slot for membership in exactly one list/stack
+    /// of `Role`. Returns `false` if the slot was already linked.
+    #[inline]
+    pub fn try_mark_linked(&self) -> bool {
+        self.linked
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Mark this slot unlinked and clear its successor pointer.
+    #[inline]
+    pub fn mark_unlinked(&self) {
+        self.next.store(core::ptr::null_mut(), Ordering::Release);
+        self.linked.store(false, Ordering::Release);
+    }
+
+    /// Mark this slot unlinked without touching its successor pointer. This is
+    /// useful while draining a lock-free stack whose caller has already loaded
+    /// the successor and wants to preserve it until the next loop iteration.
+    #[inline]
+    pub fn mark_unlinked_keep_next(&self) {
+        self.linked.store(false, Ordering::Release);
+    }
+
     /// Restore the slot to "not linked, no successor." Used after
     /// bytewise copies (e.g. fork's `clone_from_raw`) where the link
     /// state was inherited from the source.

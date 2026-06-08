@@ -35,6 +35,19 @@ pub fn kthread_spawn_ex(
             "kthread_spawn_ex: failed to create thread '{}'",
             string::cstr_to_str_lossy(name)
         );
+        return id;
+    }
+
+    let mut task: *mut super::task::Task = core::ptr::null_mut();
+    if super::task::task_get_info(id, &mut task) != 0
+        || task.is_null()
+        || scheduler::publish_new_task(task) != 0
+    {
+        klog_info!(
+            "kthread_spawn_ex: failed to publish thread '{}'",
+            string::cstr_to_str_lossy(name)
+        );
+        return INVALID_TASK_ID;
     }
 
     id
