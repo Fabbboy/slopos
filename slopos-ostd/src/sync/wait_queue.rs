@@ -645,9 +645,7 @@ impl WaitQueue {
             let condition_ready = condition();
             let woke = node.as_ref().has_woken_load();
             if condition_ready.is_some() || woke {
-                if marked_blocked {
-                    bk.set_current_runnable();
-                }
+                bk.set_current_runnable();
                 self.unlink_if_linked(node.as_ref());
                 if let Some(r) = condition_ready {
                     return Some(r);
@@ -658,10 +656,21 @@ impl WaitQueue {
                 continue;
             }
 
-            // Step 4: neither condition nor wake — yield (state-aware).
-            if marked_blocked {
-                bk.yield_blocked_task();
+            if !marked_blocked {
+                // The CAS failed, but the condition and this iteration's wake
+                // bit do not explain it. In practice this is the Linux
+                // "wake before schedule" case: a prior wake made the current
+                // task Ready while it is still executing. Consume that wake by
+                // restoring Running and retrying; otherwise the task can run
+                // for a while as Ready and later appear stranded to the idle
+                // rescue backstop.
+                bk.set_current_runnable();
+                self.unlink_if_linked(node.as_ref());
+                continue;
             }
+
+            // Step 4: neither condition nor wake — yield (state-aware).
+            bk.yield_blocked_task();
         }
     }
 
@@ -759,18 +768,19 @@ impl WaitQueue {
             let condition_ready = condition();
             let woke = node.as_ref().has_woken_load();
             if condition_ready.is_some() || woke {
-                if marked_blocked {
-                    bk.set_current_runnable();
-                }
+                bk.set_current_runnable();
                 self.unlink_if_linked(node.as_ref());
                 if let Some(r) = condition_ready {
                     break WaitOutcome::Ready(r);
                 }
                 continue; // spurious wake — loop, deadline still applies.
             }
-            if marked_blocked {
-                bk.yield_blocked_task_with_timeout(sleep_ms);
+            if !marked_blocked {
+                bk.set_current_runnable();
+                self.unlink_if_linked(node.as_ref());
+                continue;
             }
+            bk.yield_blocked_task_with_timeout(sleep_ms);
         };
 
         // Always unlink before returning so the stack-pinned node

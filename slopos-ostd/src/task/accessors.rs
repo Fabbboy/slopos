@@ -22,7 +22,7 @@ use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::syscall::TtyIndex;
 use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus};
 
-use crate::task::kernel_task::TaskInner;
+use crate::task::kernel_task::{SchedPlacement, TaskInner};
 
 /// The child-exit event for a task id. Parents blocked in `waitpid`-style
 /// waits park on this; the task's exit path publishes it. Public so the
@@ -792,22 +792,81 @@ pub fn task_switch_ctx_ptr<K, U>(task: *const TaskInner<K, U>) -> *const crate::
     unsafe { &raw const (*task).switch_ctx }
 }
 
-/// Read `task->next_inbox` as `*mut Task` with `Acquire` ordering.
+/// Read the task's scheduler placement owner.
+#[inline]
+pub fn task_sched_placement_load<K, U>(task: *const TaskInner<K, U>) -> SchedPlacement {
+    if task.is_null() {
+        return SchedPlacement::None;
+    }
+    // SAFETY: caller pre-validated; `sched_placement` is an in-task atomic.
+    SchedPlacement::from_u8(unsafe {
+        (*task)
+            .sched_placement
+            .load(core::sync::atomic::Ordering::Acquire)
+    })
+}
+
+/// Atomically transition the scheduler placement owner.
+#[inline]
+pub fn task_sched_placement_compare_exchange<K, U>(
+    task: *const TaskInner<K, U>,
+    expected: SchedPlacement,
+    target: SchedPlacement,
+) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; `sched_placement` is an in-task atomic.
+    unsafe {
+        (*task)
+            .sched_placement
+            .compare_exchange(
+                expected.as_u8(),
+                target.as_u8(),
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+/// Force-store the scheduler placement owner. Intended for exclusive reset /
+/// recovery paths; normal scheduler publication should use
+/// [`task_sched_placement_compare_exchange`].
+#[inline]
+pub fn task_sched_placement_store<K, U>(task: *const TaskInner<K, U>, placement: SchedPlacement) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `sched_placement` is an in-task atomic.
+    unsafe {
+        (*task)
+            .sched_placement
+            .store(placement.as_u8(), core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// True when the scheduler already owns the task in a runqueue, remote inbox,
+/// dispatch/on-CPU window, or migration handoff.
+#[inline]
+pub fn task_sched_placement_is_owned<K, U>(task: *const TaskInner<K, U>) -> bool {
+    task_sched_placement_load(task) != SchedPlacement::None
+}
+
+/// Read the task's remote-inbox successor as `*mut Task` with `Acquire`
+/// ordering.
 #[inline]
 pub fn task_next_inbox_load<K, U>(task: *const TaskInner<K, U>) -> *mut TaskInner<K, U> {
     if task.is_null() {
         return core::ptr::null_mut();
     }
-    // SAFETY: caller pre-validated; `next_inbox` is `AtomicPtr<Task>`.
-    unsafe {
-        (*task)
-            .next_inbox
-            .load(core::sync::atomic::Ordering::Acquire)
-    }
+    // SAFETY: caller pre-validated; `remote_inbox_link` is an in-task `Link`.
+    unsafe { (*task).remote_inbox_link.load() }
 }
 
-/// Store `task->next_inbox` with `Relaxed` ordering. Used by the
-/// remote-inbox lock-free push (the CAS itself supplies the AcqRel barrier).
+/// Store the task's remote-inbox successor with `Relaxed` ordering. Used by the
+/// remote-inbox lock-free push (the head CAS itself supplies the AcqRel
+/// barrier).
 #[inline]
 pub fn task_next_inbox_store_relaxed<K, U>(
     task: *const TaskInner<K, U>,
@@ -816,15 +875,11 @@ pub fn task_next_inbox_store_relaxed<K, U>(
     if task.is_null() {
         return;
     }
-    // SAFETY: caller pre-validated; `next_inbox` is `AtomicPtr<Task>`.
-    unsafe {
-        (*task)
-            .next_inbox
-            .store(next, core::sync::atomic::Ordering::Relaxed)
-    };
+    // SAFETY: caller pre-validated; `remote_inbox_link` is an in-task `Link`.
+    unsafe { (*task).remote_inbox_link.store_relaxed(next) };
 }
 
-/// Store `task->next_inbox` with `Release` ordering. Used by the
+/// Store the task's remote-inbox successor with `Release` ordering. Used by the
 /// remote-inbox drain when clearing the link before re-queueing.
 #[inline]
 pub fn task_next_inbox_store_release<K, U>(
@@ -834,12 +889,46 @@ pub fn task_next_inbox_store_release<K, U>(
     if task.is_null() {
         return;
     }
-    // SAFETY: caller pre-validated; `next_inbox` is `AtomicPtr<Task>`.
-    unsafe {
-        (*task)
-            .next_inbox
-            .store(next, core::sync::atomic::Ordering::Release)
-    };
+    // SAFETY: caller pre-validated; `remote_inbox_link` is an in-task `Link`.
+    unsafe { (*task).remote_inbox_link.store(next) };
+}
+
+/// Try to claim membership in a remote wake inbox.
+///
+/// This is the remote-inbox equivalent of `ready_link`'s `linked` bit:
+/// a one-element inbox stack has a null successor while still queued, so the
+/// successor pointer alone cannot distinguish "not queued" from "queued as
+/// tail". The bit lives in the role-typed `Link<Task, RemoteWakeRole>` slot so
+/// duplicate remote wakes use the same single-membership primitive as other
+/// intrusive scheduler lists.
+#[inline]
+pub fn task_remote_inbox_try_link<K, U>(task: *const TaskInner<K, U>) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; `remote_inbox_link` is an in-task `Link`.
+    unsafe { (*task).remote_inbox_link.try_mark_linked() }
+}
+
+/// Clear remote wake inbox membership after the owner CPU has detached the
+/// task from its Treiber stack and either queued or dropped it.
+#[inline]
+pub fn task_remote_inbox_unlink<K, U>(task: *const TaskInner<K, U>) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `remote_inbox_link` is an in-task `Link`.
+    unsafe { (*task).remote_inbox_link.mark_unlinked() };
+}
+
+/// True iff the task is currently claimed by some CPU's remote wake inbox.
+#[inline]
+pub fn task_remote_inbox_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated; `remote_inbox_link` is an in-task `Link`.
+    unsafe { (*task).remote_inbox_link.is_linked() }
 }
 
 /// Read `task->tgid` (thread-group id).

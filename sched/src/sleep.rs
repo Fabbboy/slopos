@@ -6,13 +6,13 @@ use slopos_ostd::KVec;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::scheduler::{
-    commit_blocked_deschedule, is_scheduling_active, schedule, schedule_task,
-    scheduler_get_current_task,
+    commit_blocked_deschedule, consume_ready_wake_for_current, is_scheduling_active, schedule,
+    scheduler_get_current_task, wake_blocked_task,
 };
 use super::task::{
     INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
     task_is_exited, task_is_invalid, task_load_block_reason, task_set_state_from_with_reason,
-    task_set_state_with_reason, task_store_block_reason,
+    task_status, task_store_block_reason,
 };
 use slopos_kernel_services::platform;
 
@@ -267,12 +267,17 @@ fn wake_sleeping_task(task_id: u32) {
         return;
     }
 
-    if task_set_state_with_reason(task_id, TaskStatus::Ready, BlockReason::None) != 0 {
-        return;
+    // Delegate to the scheduler's single wake publisher. It handles the
+    // Linux-style `on_cpu` switch window, reserves scheduler placement before
+    // publishing Ready, and queues/inboxes exactly once.
+    let rc = wake_blocked_task(task, task_id);
+    if rc != 0 {
+        slopos_ostd::klog_info!(
+            "SCHED: sleep wake failed to publish READY task {} (rc={})",
+            task_id,
+            rc
+        );
     }
-
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    let _ = schedule_task(task);
 }
 
 /// Wake every sleeper whose deadline has passed.
@@ -394,6 +399,14 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
             BlockReason::Sleep,
         ) != 0
         {
+            // A wake can make the still-executing current task Ready before
+            // it tries to block again. Consume that wake here: restore the
+            // in-CPU state to Running and scrub any stale runqueue entry, so
+            // we do not continue executing indefinitely as Ready/unqueued.
+            if task_status(current) == Some(TaskStatus::Ready) {
+                consume_ready_wake_for_current(current);
+                return 1;
+            }
             return -1;
         }
         if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
@@ -466,6 +479,14 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
             BlockReason::Sleep,
         ) != 0
         {
+            // Same consumed-wake case as `sleep_current_task_ms`: the
+            // current task is still executing, but a prior wake has already
+            // published Ready. Convert it back to Running and retry from the
+            // caller instead of leaving a Ready current task for the rescue
+            // sweep to rediscover.
+            if task_status(current) == Some(TaskStatus::Ready) {
+                consume_ready_wake_for_current(current);
+            }
             return true;
         }
         if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {

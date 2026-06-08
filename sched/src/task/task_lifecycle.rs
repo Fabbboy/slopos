@@ -240,7 +240,11 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.on_cpu.store(false, Ordering::Release);
     task.ready_link.reset();
     task.zombie_link.reset();
-    task.next_inbox.store(ptr::null_mut(), Ordering::Release);
+    task.remote_inbox_link.reset();
+    task.sched_placement.store(
+        slopos_ostd::task::SchedPlacement::None.as_u8(),
+        Ordering::Release,
+    );
     task.refcnt.store(0, Ordering::Release);
 }
 
@@ -573,15 +577,9 @@ pub fn task_create(
             slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
-    // Transition to Ready only after context + CR3 are fully initialised.
-    // reserve_task_slot() marked the slot Blocked to prevent TOCTOU races;
-    // we atomically publish it as dispatchable only now.
-    //
-    // NOTE: callers that modify the task further (spawn_program_with_attrs)
-    // must reset to Blocked and re-publish Ready after their writes to
-    // ensure SMP visibility (Linux TASK_NEW pattern).
-    task_ref.set_status(TaskStatus::Ready);
-
+    // task_create() deliberately returns a fully initialized but non-runnable
+    // task. The sole new-task runnable edge is scheduler::publish_new_task(),
+    // which reserves scheduler placement and publishes Ready as one protocol.
     record_task_created();
 
     klog_debug!(
@@ -1036,20 +1034,11 @@ pub fn task_fork(
         parent.process_id
     );
 
-    // Mark Ready only after all child-specific fields are fully initialized,
-    // so the task is never visible as Ready with incomplete state.
-    child.set_status(TaskStatus::Ready);
-
-    // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU
-    // instead of sticking to the parent's CPU.  Wakeups from sleep will
-    // later use schedule_task() which preserves cache affinity.
-    //
-    // A failed initial enqueue must be loud: the child would sit READY on
-    // no runqueue until the stranded-READY rescue sweep picks it up.
-    if scheduler::schedule_new_task(child_task_ptr) != 0 {
-        klog_info!(
-            "fork: initial enqueue failed for task {child_task_id}; rescue sweep will recover it"
-        );
+    // Publish Ready only after all child-specific fields are fully initialized.
+    // `publish_new_task` reserves scheduler placement before setting Ready, so
+    // the child is never visible as Ready with no runqueue/inbox owner.
+    if scheduler::publish_new_task(child_task_ptr) != 0 {
+        klog_info!("fork: initial runnable publish failed for task {child_task_id}");
     }
 
     child_task_id
@@ -1275,15 +1264,11 @@ pub fn task_clone(
         parent.process_id
     );
 
-    // Mark Ready only after all child-specific fields are fully initialized.
-    child.set_status(TaskStatus::Ready);
-
-    // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU.
-    // A failed initial enqueue must be loud (see task_fork above).
-    if scheduler::schedule_new_task(child_task_ptr) != 0 {
-        klog_info!(
-            "clone: initial enqueue failed for task {child_task_id}; rescue sweep will recover it"
-        );
+    // Publish Ready only after all child-specific fields are fully initialized.
+    // `publish_new_task` reserves scheduler placement before setting Ready, so
+    // the child is never visible as Ready with no runqueue/inbox owner.
+    if scheduler::publish_new_task(child_task_ptr) != 0 {
+        klog_info!("clone: initial runnable publish failed for task {child_task_id}");
     }
 
     Ok(child_task_id)

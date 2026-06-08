@@ -22,7 +22,8 @@ pub mod task;
 pub mod test_reports;
 
 pub use exit_info::ExitInfo;
-pub use link_roles::{ReadyQueueRole, ZombieListRole};
+pub use kernel_task::SchedPlacement;
+pub use link_roles::{ReadyQueueRole, RemoteWakeRole, ZombieListRole};
 pub use state::{TaskState, TaskStateView};
 pub use test_reports::{
     PendingDrain, TestReport, TestReportRing, alloc_ring, consume_pending_drain, empty_report,

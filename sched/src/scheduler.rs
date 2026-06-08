@@ -143,11 +143,13 @@ use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_exit_info_ref,
     task_fpu_state_mut, task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_exited,
-    task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top, task_name_looks_idle,
-    task_on_cpu_load, task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority,
-    task_process_id, task_record_context_switch, task_record_yield, task_set_controlling_tty,
-    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
-    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
+    task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top,
+    task_last_run_timestamp_volatile, task_name_looks_idle, task_on_cpu_load,
+    task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
+    task_record_context_switch, task_record_yield, task_remote_inbox_is_linked,
+    task_sched_placement_compare_exchange, task_sched_placement_load, task_sched_placement_store,
+    task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
+    task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
     task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
     task_try_transition_from,
 };
@@ -167,6 +169,7 @@ fn kernel_text_range() -> (u64, u64) {
 }
 
 use core::sync::atomic::AtomicU8;
+use slopos_ostd::task::SchedPlacement;
 /// Global scheduler-enabled flag. `pub(crate)` so the
 /// `test_hermetic::SchedulerEnabledFlag` HermeticState impl can
 /// snapshot/restore it. External code should go through
@@ -328,6 +331,8 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
         // the safe move.
         return;
     }
+    let _ =
+        task_sched_placement_compare_exchange(task, SchedPlacement::None, SchedPlacement::OnCpu);
     task_set_status(task, TaskStatus::Running);
 }
 
@@ -586,6 +591,20 @@ fn mark_preempt_if_ready(cpu_id: usize) {
 /// the task currently running on `cpu`. Idle/null current always
 /// counts as lower-priority so a wake onto an idle CPU triggers an
 /// immediate reschedule on the next IRQ return.
+fn placement_is_durable_owner(placement: SchedPlacement) -> bool {
+    matches!(
+        placement,
+        SchedPlacement::ReadyQueue
+            | SchedPlacement::RemoteWake
+            | SchedPlacement::OnCpu
+            | SchedPlacement::Migrating
+    )
+}
+
+fn task_has_durable_owner(task: *mut Task) -> bool {
+    placement_is_durable_owner(task_sched_placement_load(task))
+}
+
 fn newcomer_outranks_current(cpu: usize, new: *mut Task) -> bool {
     let Some(new_prio) = task_priority(new) else {
         return false;
@@ -600,7 +619,131 @@ fn newcomer_outranks_current(cpu: usize, new: *mut Task) -> bool {
     (new_prio.as_u8()) < (current_prio.as_u8())
 }
 
-pub fn schedule_task(task: *mut Task) -> c_int {
+fn publish_ready_fallback(task: *mut Task) -> c_int {
+    if task.is_null() || !task_is_ready(task) {
+        return -1;
+    }
+
+    match task_sched_placement_load(task) {
+        SchedPlacement::ReadyQueue
+        | SchedPlacement::RemoteWake
+        | SchedPlacement::OnCpu
+        | SchedPlacement::Migrating => return 0,
+        SchedPlacement::None | SchedPlacement::Waking => {}
+    }
+
+    let current_cpu = slopos_arch::pcr::get_current_cpu();
+    if per_cpu::with_cpu_scheduler(current_cpu, |sched| sched.enqueue_local(task)) == Some(0) {
+        if newcomer_outranks_current(current_cpu, task) {
+            scheduler_request_reschedule(RescheduleReason::InterruptWake);
+        }
+        return 0;
+    }
+
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if cpu_id == current_cpu {
+            continue;
+        }
+        if per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)) == Some(0) {
+            if slopos_arch::pcr::is_cpu_online(cpu_id) {
+                send_reschedule_ipi(cpu_id);
+            }
+            return 0;
+        }
+        match task_sched_placement_load(task) {
+            SchedPlacement::ReadyQueue
+            | SchedPlacement::RemoteWake
+            | SchedPlacement::OnCpu
+            | SchedPlacement::Migrating => return 0,
+            SchedPlacement::None | SchedPlacement::Waking => {}
+        }
+    }
+
+    klog_info!(
+        "SCHED: publish fallback failed task={} status={:?} placement={:?} current_cpu={} cpu_count={}",
+        task_id_of(task).unwrap_or(INVALID_TASK_ID),
+        task_status(task),
+        task_sched_placement_load(task),
+        current_cpu,
+        cpu_count,
+    );
+    -1
+}
+
+fn publish_reserved_waking_ready(task: *mut Task, task_id: u32, context: &str) -> c_int {
+    if !task_is_ready(task) {
+        if task_sched_placement_load(task) == SchedPlacement::Waking {
+            let restore = if task_on_cpu_load(task) {
+                SchedPlacement::OnCpu
+            } else {
+                SchedPlacement::None
+            };
+            let _ = task_sched_placement_compare_exchange(task, SchedPlacement::Waking, restore);
+        }
+        return if task_is_exited(task) || task_is_invalid(task) || !task_is_ready(task) {
+            0
+        } else {
+            -1
+        };
+    }
+
+    let rc = schedule_task_from_placement(task, SchedPlacement::Waking, false);
+    if rc == 0
+        || matches!(
+            task_sched_placement_load(task),
+            SchedPlacement::ReadyQueue
+                | SchedPlacement::RemoteWake
+                | SchedPlacement::OnCpu
+                | SchedPlacement::Migrating
+        )
+    {
+        return 0;
+    }
+
+    klog_info!(
+        "SCHED: {} failed to publish READY task {} rc={} status={:?} placement={:?}",
+        context,
+        task_id,
+        rc,
+        task_status(task),
+        task_sched_placement_load(task),
+    );
+    rc
+}
+
+fn publish_ready_from_current_owner(task: *mut Task, task_id: u32, context: &str) -> c_int {
+    for _ in 0..4 {
+        match task_sched_placement_load(task) {
+            SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::Migrating => {
+                return 0;
+            }
+            SchedPlacement::Waking => return publish_reserved_waking_ready(task, task_id, context),
+            SchedPlacement::OnCpu => {
+                if task_sched_placement_compare_exchange(
+                    task,
+                    SchedPlacement::OnCpu,
+                    SchedPlacement::Waking,
+                ) {
+                    return publish_reserved_waking_ready(task, task_id, context);
+                }
+            }
+            SchedPlacement::None => {
+                if task_sched_placement_compare_exchange(
+                    task,
+                    SchedPlacement::None,
+                    SchedPlacement::Waking,
+                ) {
+                    return publish_reserved_waking_ready(task, task_id, context);
+                }
+            }
+        }
+    }
+
+    if task_has_durable_owner(task) { 0 } else { -1 }
+}
+
+fn schedule_task_from_placement(task: *mut Task, from: SchedPlacement, new_task: bool) -> c_int {
     if task.is_null() {
         return -1;
     }
@@ -612,38 +755,48 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         reset_task_quantum(task);
     }
 
-    let Some(target_cpu) = per_cpu::select_target_cpu(task) else {
-        return -1;
+    let target_cpu = if new_task {
+        per_cpu::select_target_cpu_for_new(task)
+    } else {
+        per_cpu::select_target_cpu(task)
+    };
+    let Some(target_cpu) = target_cpu else {
+        return publish_ready_fallback(task);
     };
     let current_cpu = slopos_arch::pcr::get_current_cpu();
 
     if target_cpu == current_cpu {
-        let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
+        let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| match from {
+            SchedPlacement::None => sched.enqueue_local(task),
+            SchedPlacement::Waking => sched.enqueue_waking(task),
+            SchedPlacement::OnCpu => sched.enqueue_from_on_cpu(task),
+            SchedPlacement::Migrating => sched.enqueue_migrated(task),
+            SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake => 0,
+        });
 
         if result != Some(0) {
-            return -1;
+            return publish_ready_fallback(task);
         }
         // Self-CPU reschedule: the remote-CPU path below sends an IPI;
         // for the local path we set the per-CPU preempt-pending flag so
         // `scheduler_handoff_on_trap_exit` (called from the trap-exit
-        // path / idle loop) dispatches the new task before HLT
-        // re-engages. Without this, a wake landing inside an ISR
-        // while the CPU was idle would enqueue the task but the idle
-        // loop would re-enter HLT until the next periodic tick.
-        // Specifically required for `KernelIo` tasks waking from
-        // their 1 ms sleep — they need to run on deadline regardless
-        // of whether anything else is happening on the CPU.
+        // path / idle loop) dispatches the new task before HLT re-engages.
         if newcomer_outranks_current(current_cpu, task) {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
         0
     } else {
-        let push_result = per_cpu::with_cpu_scheduler(target_cpu, |sched| {
-            sched.push_remote_wake(task);
-            0
+        let push_result = per_cpu::with_cpu_scheduler(target_cpu, |sched| match from {
+            SchedPlacement::None => {
+                sched.push_remote_wake(task);
+                0
+            }
+            SchedPlacement::Waking => sched.push_remote_wake_waking(task),
+            SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::OnCpu => 0,
+            SchedPlacement::Migrating => -1,
         });
-        if push_result != Some(0) {
-            return -1;
+        if !matches!(push_result, Some(0) | Some(1)) {
+            return publish_ready_fallback(task);
         }
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -653,6 +806,15 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         }
         0
     }
+}
+
+pub fn schedule_task(task: *mut Task) -> c_int {
+    let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
+        SchedPlacement::Waking
+    } else {
+        SchedPlacement::None
+    };
+    schedule_task_from_placement(task, from, false)
 }
 
 /// Schedule a **newly created** task (fork, spawn, exec).
@@ -665,51 +827,55 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 /// Regular wakeups from sleep/block should use [`schedule_task()`] instead,
 /// which preserves cache affinity by preferring the last CPU.
 pub fn schedule_new_task(task: *mut Task) -> c_int {
+    let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
+        SchedPlacement::Waking
+    } else {
+        SchedPlacement::None
+    };
+    schedule_task_from_placement(task, from, true)
+}
+
+/// Publish a fully-initialized new task as runnable without ever exposing
+/// `Ready + no scheduler owner`.
+///
+/// This is SlopOS's `wake_up_new_task()` equivalent: reserve scheduler
+/// placement first (`Waking`), publish `TaskStatus::Ready`, then transfer the
+/// reservation into a runqueue or remote inbox.
+pub fn publish_new_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
-    if !task_is_ready(task) {
-        return -1;
+    match task_sched_placement_load(task) {
+        SchedPlacement::None => {
+            if !task_sched_placement_compare_exchange(
+                task,
+                SchedPlacement::None,
+                SchedPlacement::Waking,
+            ) {
+                return if task_has_durable_owner(task)
+                    || task_sched_placement_load(task) == SchedPlacement::Waking
+                {
+                    0
+                } else {
+                    -1
+                };
+            }
+        }
+        SchedPlacement::Waking => {}
+        _ => {
+            return if task_has_durable_owner(task) { 0 } else { -1 };
+        }
     }
-
-    if task_time_slice_remaining(task) == Some(0) {
-        reset_task_quantum(task);
+    task_set_status(task, TaskStatus::Ready);
+    let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
+    if rc != 0 {
+        let _ = task_sched_placement_compare_exchange(
+            task,
+            SchedPlacement::Waking,
+            SchedPlacement::None,
+        );
     }
-
-    let Some(target_cpu) = per_cpu::select_target_cpu_for_new(task) else {
-        return -1;
-    };
-    let current_cpu = slopos_arch::pcr::get_current_cpu();
-
-    if target_cpu == current_cpu {
-        let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
-
-        if result != Some(0) {
-            return -1;
-        }
-        // Same self-CPU reschedule contract as `schedule_task`: a
-        // newly created task at a higher priority than the running
-        // task must trigger a preempt on the next trap-exit.
-        if newcomer_outranks_current(current_cpu, task) {
-            scheduler_request_reschedule(RescheduleReason::InterruptWake);
-        }
-        0
-    } else {
-        let push_result = per_cpu::with_cpu_scheduler(target_cpu, |sched| {
-            sched.push_remote_wake(task);
-            0
-        });
-        if push_result != Some(0) {
-            return -1;
-        }
-
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        if slopos_arch::pcr::is_cpu_online(target_cpu) {
-            send_reschedule_ipi(target_cpu);
-        }
-        0
-    }
+    rc
 }
 
 pub fn unschedule_task(task: *mut Task) -> c_int {
@@ -856,7 +1022,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     if per_cpu::should_pause_scheduler_loop(cpu_id) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            let _ = sched.enqueue_local(next_task);
+            let _ = sched.enqueue_from_on_cpu(next_task);
             sched.set_executing_task(false);
         });
         core::hint::spin_loop();
@@ -875,6 +1041,11 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     }
 
     if task_is_exited(next_task) || !task_is_ready(next_task) {
+        let _ = task_sched_placement_compare_exchange(
+            next_task,
+            SchedPlacement::OnCpu,
+            SchedPlacement::None,
+        );
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
@@ -887,7 +1058,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // spin in favour of this check + the WaitQueue lock-pair barrier.
     if task_on_cpu_load(next_task) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            let _ = sched.enqueue_local(next_task);
+            let _ = sched.enqueue_from_on_cpu(next_task);
             sched.set_executing_task(false);
         });
         return false;
@@ -898,14 +1069,19 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     let next_task_id = task_id_of(next_task).unwrap_or(INVALID_TASK_ID);
     if task_set_state(next_task_id, TaskStatus::Running) != 0 {
         // Lost the claim — but if the task is *still* Ready we hold its only
-        // queue entry (the intrusive ready-link is single-membership), so
-        // dropping the dequeue would strand it READY in no runqueue forever.
+        // scheduler placement, so dropping the dequeue would strand it READY.
         // Put it back; a claimed (Running/exited) task is the winner's
         // responsibility and is correctly dropped.
         if task_is_ready(next_task) {
             per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                let _ = sched.enqueue_local(next_task);
+                let _ = sched.enqueue_from_on_cpu(next_task);
             });
+        } else {
+            let _ = task_sched_placement_compare_exchange(
+                next_task,
+                SchedPlacement::OnCpu,
+                SchedPlacement::None,
+            );
         }
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
@@ -921,10 +1097,6 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     execute_task(cpu_id, idle_task, next_task);
 
-    // Context switch OUT is complete — the task's registers are fully saved.
-    // Clear on_cpu so schedule_task() on other CPUs can dispatch this task.
-    task_set_on_cpu(next_task, false);
-
     let timestamp = kdiag_timestamp();
     task_record_context_switch(next_task, idle_task, timestamp);
 
@@ -934,12 +1106,18 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     switch_to_kernel_address_space(idle_task);
 
     // Re-enqueue the task if it was preempted (Running) or already
-    // woken (Ready) before its yield completed. The Ready case covers
-    // the self-wakeup window: a wake from the timer ISR transitions
-    // state Blocked→Ready and routes through `enqueue_local` on this
-    // CPU; the in-progress block path then `unschedule_task`s the
-    // entry, leaving the task Ready but in no runqueue. Re-enqueueing
-    // here keeps it schedulable across the yield.
+    // woken (Ready) before its yield completed. Keep `on_cpu=true`
+    // until after any Ready task has a queue/inbox membership. This is
+    // the Linux `on_rq`/`on_cpu` ordering: a peer may observe a task as
+    // runnable while it is still completing a switch-out, but it must
+    // never observe Ready + off-CPU + unqueued. Peer dispatchers that
+    // pick such a task hit the `on_cpu` guard above and requeue it.
+    //
+    // The Ready case covers the self-wakeup window: a wake from the
+    // timer ISR transitions state Blocked→Ready and routes through
+    // `enqueue_local` on this CPU; the in-progress block path then
+    // `unschedule_task`s the entry, leaving the task Ready but in no
+    // runqueue. Re-enqueueing here keeps it schedulable across the yield.
     //
     // task_wait_for goes through WaitQueue::wait_event, which
     // performs the Running→Blocked transition while the queue is
@@ -948,8 +1126,10 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // peer's `wake_one` will find us on the queue.
     //
     // Blocked/Zombie/Terminated tasks are NOT re-enqueued — they'll
-    // be woken by their respective event paths.
-    // This runs AFTER on_cpu=false and context save, so no SMP race.
+    // be woken by their respective event paths. This runs after the
+    // context is saved but before on_cpu is cleared, so there is no
+    // Ready/off-CPU/unlinked window.
+    let mut ready_published = false;
     if !task_is_exited(next_task) {
         let already_ready = task_is_ready(next_task);
         let needs_ready_transition = task_is_running(next_task);
@@ -961,11 +1141,58 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
             false
         };
         if should_enqueue {
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                let _ = sched.enqueue_local(next_task);
-            });
+            let rc =
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_from_on_cpu(next_task))
+                    .unwrap_or(-1);
+            ready_published = rc == 0
+                || matches!(
+                    task_sched_placement_load(next_task),
+                    SchedPlacement::ReadyQueue
+                        | SchedPlacement::RemoteWake
+                        | SchedPlacement::Migrating
+                );
         }
     }
+    if !ready_published {
+        // Close the final switch-out wake race without wake-side spinning and
+        // without a Ready+None interval. If the task is Ready, transfer the
+        // current CPU's placement ownership to Waking and publish from that
+        // token. Only non-ready tasks may drop OnCpu to None.
+        if task_is_ready(next_task) {
+            let rc = publish_ready_from_current_owner(next_task, next_task_id, "finish_switch");
+            if rc != 0 {
+                klog_info!(
+                    "SCHED: finish_switch failed final READY publish id={} rc={} placement={:?}",
+                    next_task_id,
+                    rc,
+                    task_sched_placement_load(next_task),
+                );
+            }
+        } else {
+            let _ = task_sched_placement_compare_exchange(
+                next_task,
+                SchedPlacement::OnCpu,
+                SchedPlacement::None,
+            );
+            if task_is_ready(next_task) {
+                let rc = publish_ready_from_current_owner(next_task, next_task_id, "finish_switch");
+                if rc != 0 {
+                    klog_info!(
+                        "SCHED: finish_switch failed raced READY publish id={} rc={} placement={:?}",
+                        next_task_id,
+                        rc,
+                        task_sched_placement_load(next_task),
+                    );
+                }
+            }
+        }
+    }
+
+    // Context switch OUT is complete and every still-Ready task has been
+    // published to a runqueue (or was already in a remote inbox). Only now
+    // clear on_cpu so peer CPUs may claim it. Pairs with peer Acquire loads
+    // of `on_cpu`, mirroring Linux `finish_task()`.
+    task_set_on_cpu(next_task, false);
 
     // Release the dispatch reference.  If the task was re-enqueued above,
     // the queue holds its own reference so the refcnt stays > 0.  If the
@@ -1117,6 +1344,20 @@ fn assert_switch_preempt_safe() {
     }
 }
 
+/// Consume a wake that raced with the current task's block path and keep the
+/// scheduler ownership model honest.
+///
+/// The task is physically still executing on this CPU, so after absorbing the
+/// wake its placement must be `OnCpu` even if the wake briefly linked a local
+/// ready entry or a remote-inbox node. Local ready entries are removed here;
+/// stale remote-inbox nodes are harmless because the owner CPU will unlink/drop
+/// them when it drains and observes placement != `RemoteWake`.
+pub(crate) fn consume_ready_wake_for_current(current: *mut Task) {
+    task_set_status(current, TaskStatus::Running);
+    unschedule_task(current);
+    task_sched_placement_store(current, SchedPlacement::OnCpu);
+}
+
 /// Defence: at entry, `unschedule_task` strips us from every
 /// runqueue (serialised against any racing wake's `schedule_task`
 /// via the per-CPU `queue_lock`). Then re-load the task state. If
@@ -1154,8 +1395,7 @@ fn assert_switch_preempt_safe() {
 pub(crate) fn commit_blocked_deschedule(current: *mut Task) -> bool {
     unschedule_task(current);
     if !matches!(task_status(current), Some(TaskStatus::Blocked)) {
-        task_set_status(current, TaskStatus::Running);
-        unschedule_task(current);
+        consume_ready_wake_for_current(current);
         return false;
     }
     true
@@ -1247,12 +1487,10 @@ pub fn set_current_runnable() {
         // store (force_set on the underlying packed TaskState atomic),
         // so it deterministically overrides whatever transient state
         // a racing wake left behind.
-        task_set_status(current, TaskStatus::Running);
-        // Remove any runqueue presence a racing wake's
-        // `schedule_task` may have added — we are about to keep
-        // running on this CPU, the task must not also be eligible
-        // for dispatch from a ready queue.
-        unschedule_task(current);
+        // Remove any runqueue presence a racing wake may have added and
+        // restore the scheduler owner to OnCpu — we are about to keep running
+        // on this CPU, the task must not also be eligible for dispatch.
+        consume_ready_wake_for_current(current);
     });
 }
 
@@ -1361,30 +1599,132 @@ pub fn release_wait_ref(waiter_id: u32) {
     wait_ref_release(waiter_id);
 }
 
+pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
+    // Phase 5 collapsed the WillBlock state; the only blockable intermediate
+    // is `Blocked` itself. Wake-side must either observe an existing scheduler
+    // owner (ready queue / remote inbox / migration), or acquire the explicit
+    // `Waking` publication token before it publishes `TaskStatus::Ready`.
+    //
+    // Importantly, `OnCpu` is no longer treated as a sufficient Ready
+    // publication owner. It proves the task is physically executing or in a
+    // switch window, but the producer that wins `Blocked -> Ready` still owns
+    // runnable publication via `Waking`. The separate `on_cpu` bit prevents a
+    // queued still-switching task from being dispatched twice.
+    for _ in 0..8 {
+        match task_sched_placement_load(task) {
+            SchedPlacement::OnCpu => {
+                // `OnCpu` is also the dispatcher's transient claim after a
+                // ready-queue dequeue and before Ready->Running. A wake that
+                // targets an already-Ready/already-Running task is a no-op and
+                // must not steal that claim. Only a genuinely Blocked current
+                // task is converted to an explicit Waking publisher token.
+                if task_status(task) != Some(TaskStatus::Blocked) {
+                    return if task_is_exited(task) || task_is_invalid(task) {
+                        -1
+                    } else {
+                        0
+                    };
+                }
+                if !task_sched_placement_compare_exchange(
+                    task,
+                    SchedPlacement::OnCpu,
+                    SchedPlacement::Waking,
+                ) {
+                    continue;
+                }
+                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                    super::sleep::cancel_sleep(task_id);
+                    return publish_reserved_waking_ready(task, task_id, "oncpu wake");
+                }
+                let restore = if task_on_cpu_load(task) {
+                    SchedPlacement::OnCpu
+                } else {
+                    SchedPlacement::None
+                };
+                let _ =
+                    task_sched_placement_compare_exchange(task, SchedPlacement::Waking, restore);
+                return if task_is_exited(task) || task_is_invalid(task) {
+                    -1
+                } else {
+                    0
+                };
+            }
+            SchedPlacement::None => {
+                if !task_sched_placement_compare_exchange(
+                    task,
+                    SchedPlacement::None,
+                    SchedPlacement::Waking,
+                ) {
+                    continue;
+                }
+                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) != 0 {
+                    if task_is_ready(task) {
+                        return publish_reserved_waking_ready(task, task_id, "unblock_task");
+                    }
+                    let _ = task_sched_placement_compare_exchange(
+                        task,
+                        SchedPlacement::Waking,
+                        SchedPlacement::None,
+                    );
+                    return if task_is_exited(task) || task_is_invalid(task) {
+                        -1
+                    } else {
+                        0
+                    };
+                }
+                super::sleep::cancel_sleep(task_id);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                return publish_reserved_waking_ready(task, task_id, "unblock_task");
+            }
+            SchedPlacement::Waking => {
+                // `Waking` is an explicit publisher reservation. The CAS below
+                // is single-winner; duplicate wakes either see Ready already
+                // published/owned or leave the owner to finish.
+                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                    super::sleep::cancel_sleep(task_id);
+                    return publish_reserved_waking_ready(task, task_id, "waking wake");
+                }
+                if task_is_ready(task) {
+                    return publish_reserved_waking_ready(task, task_id, "waking wake");
+                }
+                return if task_is_exited(task) || task_is_invalid(task) {
+                    -1
+                } else {
+                    0
+                };
+            }
+            SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::Migrating => {
+                // Scheduler ownership already exists. If a direct state mutator
+                // or test fixture parked the task while leaving that ownership
+                // in place, the wake still performs the state CAS; the existing
+                // queue/inbox/migration owner then becomes runnable again.
+                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                    super::sleep::cancel_sleep(task_id);
+                    return 0;
+                }
+                return if task_is_exited(task) || task_is_invalid(task) {
+                    -1
+                } else {
+                    0
+                };
+            }
+        }
+    }
+
+    if task_is_exited(task) || task_is_invalid(task) {
+        -1
+    } else {
+        0
+    }
+}
+
 pub fn unblock_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
 
     let task_id = task_id_of(task).unwrap_or(INVALID_TASK_ID);
-
-    // Phase 5 collapsed the WillBlock state; the only blockable
-    // intermediate is `Blocked` itself. Wake-side just transitions
-    // Blocked → Ready; the caller's wait-queue lock-pair guarantees
-    // that the waiter committed to Blocked before we observed it.
-    if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-        super::sleep::cancel_sleep(task_id);
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        return schedule_task(task);
-    }
-
-    // Task is in some other state (Running, Ready, Zombie, Terminated) —
-    // nothing to do. A Running waker that races a Blocked→Ready CAS sees
-    // Running here; that's a benign no-op — the waiter never actually slept.
-    if task_is_exited(task) || task_is_invalid(task) {
-        return -1;
-    }
-    0
+    wake_blocked_task(task, task_id)
 }
 
 /// Unified task exit for all CPUs.
@@ -1672,11 +2012,12 @@ pub fn scheduler_timer_tick() {
 /// cooldown.
 ///
 /// A transiently Ready-and-unlinked task (mid-wake between the Ready-CAS
-/// and the enqueue, or mid-dispatch between dequeue and the Running claim)
-/// can in principle be swept up; both interleavings are benign — the
-/// intrusive ready-link is single-membership (`AlreadyLinked` push no-ops)
-/// and a queue entry for a task that has since started Running is dropped
-/// by the dispatch-claim gate.
+/// and the enqueue, mid-dispatch between dequeue and the Running claim,
+/// or pending in a remote wake inbox) can in principle be observed by the
+/// sweep. The first two windows must be short-lived; the third is now
+/// explicit state (`remote_inbox_linked`) and is not a strand at all.
+/// Therefore the rescue only fires after the same task is observed as a
+/// true candidate across multiple consecutive sweeps.
 pub(crate) fn rescue_stranded_ready_tasks() {
     // Cooldown: the sweep is a backstop, not a hot path — walking the task
     // pool (manager lock + scratch alloc) from every idle iteration on every
@@ -1696,37 +2037,65 @@ pub(crate) fn rescue_stranded_ready_tasks() {
     {
         return; // another CPU claimed this window
     }
+    let seq = RESCUE_SWEEP_SEQ
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    CURRENT_RESCUE_SWEEP.store(seq, Ordering::Relaxed);
     super::task::task_iterate_active(Some(rescue_check_task), ptr::null_mut());
 }
 
-/// Consecutive-sweep strike tracking for never-run READY tasks. A task
-/// freshly published Ready by `task_create` may legitimately be observed
-/// unlinked for a moment while its spawn path finishes building it (the
-/// spawn re-publishes and enqueues microseconds later) — but a never-run
-/// task that stays Ready and unqueued across multiple ~100 ms sweeps has
-/// lost its initial enqueue and will never recover on its own (observed
-/// live: a freshly spawned shell stranded READY with every runqueue
-/// empty, refused by the rescue 1200+ times). Slots are keyed by
-/// `task_id % N`; a collision at worst delays a rescue by one window.
+/// Consecutive-sweep strike tracking for genuinely stranded READY tasks.
+///
+/// Fresh task creation and normal wake/dispatch paths have small windows
+/// where a task is Ready, off-CPU, and not yet on a ready queue. Rescue is
+/// only safe once that observation persists across consecutive global
+/// rescue sweeps. Slots are keyed by `task_id % N`; a collision at worst
+/// delays a rescue by one window.
 const RESCUE_STRIKE_SLOTS: usize = 64;
 const RESCUE_STRIKE_THRESHOLD: u8 = 3;
+static RESCUE_SWEEP_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CURRENT_RESCUE_SWEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static RESCUE_STRIKE_IDS: [core::sync::atomic::AtomicU32; RESCUE_STRIKE_SLOTS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; RESCUE_STRIKE_SLOTS];
+static RESCUE_STRIKE_SWEEPS: [core::sync::atomic::AtomicU64; RESCUE_STRIKE_SLOTS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; RESCUE_STRIKE_SLOTS];
 static RESCUE_STRIKES: [core::sync::atomic::AtomicU8; RESCUE_STRIKE_SLOTS] =
     [const { core::sync::atomic::AtomicU8::new(0) }; RESCUE_STRIKE_SLOTS];
 
 /// Count one stranded observation of `task_id`; true once the task has
 /// been seen stranded in `RESCUE_STRIKE_THRESHOLD` consecutive sweeps.
 fn rescue_strike(task_id: u32) -> bool {
+    let seq = CURRENT_RESCUE_SWEEP.load(Ordering::Relaxed);
     let slot = task_id as usize % RESCUE_STRIKE_SLOTS;
-    if RESCUE_STRIKE_IDS[slot].swap(task_id, Ordering::Relaxed) != task_id {
+    let same_task = RESCUE_STRIKE_IDS[slot].load(Ordering::Relaxed) == task_id;
+    let prev_seq = RESCUE_STRIKE_SWEEPS[slot].load(Ordering::Relaxed);
+    let consecutive = same_task && prev_seq.saturating_add(1) == seq;
+
+    RESCUE_STRIKE_IDS[slot].store(task_id, Ordering::Relaxed);
+    RESCUE_STRIKE_SWEEPS[slot].store(seq, Ordering::Relaxed);
+
+    if !consecutive {
         RESCUE_STRIKES[slot].store(1, Ordering::Relaxed);
         return false;
     }
+
     let strikes = RESCUE_STRIKES[slot]
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     strikes >= RESCUE_STRIKE_THRESHOLD
+}
+
+fn task_is_current_on_any_cpu(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if scheduler_get_current_task_for(cpu_id) == task {
+            return true;
+        }
+    }
+    false
 }
 
 fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
@@ -1736,34 +2105,49 @@ fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
     if t.status() != TaskStatus::Ready {
         return;
     }
-    if slopos_ostd::task::accessors::task_on_cpu_load(task) {
+    if slopos_ostd::task::accessors::task_on_cpu_load(task) || task_is_current_on_any_cpu(task) {
+        return;
+    }
+    // `last_run_timestamp != 0` means the task is still accounted as the
+    // running task on some CPU. A self-wakeup can temporarily make the
+    // current task Ready before it yields back to idle; it is not stranded
+    // until the context-switch-out accounting has cleared this timestamp.
+    if task_last_run_timestamp_volatile(task).unwrap_or(0) != 0 {
         return;
     }
     if t.ready_link.is_linked() {
         return;
     }
-    // A task that has not run yet may be mid-spawn: `task_create`
-    // publishes a transient Ready before the spawn path finishes
-    // initialising it (entry point, fd table, job control) and
-    // re-publishes. Dispatching that half-built task would jump to an
-    // unloaded entry point — so a never-run task is only rescued after
-    // it has been observed stranded (Ready, unqueued, off-CPU) across
-    // several consecutive sweeps, far beyond any spawn path's build
-    // window.
-    if t.last_run_timestamp == 0 && !rescue_strike(t.task_id) {
+    if task_remote_inbox_is_linked(task) {
         return;
     }
-    klog_info!("SCHED: rescuing stranded READY task {}", t.task_id);
-    // Enqueue LOCALLY — never via `schedule_task`: its remote path
-    // (`push_remote_wake`) links through the task's `next_inbox` field, and
-    // a task that is transiently sitting in another CPU's remote-wake inbox
-    // (Ready, ready_link unlinked — indistinguishable from a strand) would
-    // have its inbox link clobbered, severing every task below it in that
-    // CPU's Treiber stack. `enqueue_local` only touches the single-
-    // membership ready_link, which is safe against every transient state:
-    // a concurrent inbox drain's own enqueue no-ops on `AlreadyLinked`.
+    let placement = task_sched_placement_load(task);
+    if placement_is_durable_owner(placement) {
+        return;
+    }
+    if !rescue_strike(t.task_id) {
+        return;
+    }
+    // Enqueue LOCALLY — never via `schedule_task`: this function is the
+    // recovery path for a task that already lost the normal enqueue, so route
+    // directly to the current CPU's ready queue. A leaked Waking reservation is
+    // completed as Waking; Ready+Waking is not a durable scheduler owner.
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        let _ = sched.enqueue_local(task);
-    });
+    let enqueue_status = per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        if placement == SchedPlacement::Waking {
+            sched.enqueue_waking(task)
+        } else {
+            sched.enqueue_local_with_status(task)
+        }
+    })
+    .unwrap_or(-1);
+    if enqueue_status == 0 {
+        klog_info!("SCHED: rescuing stranded READY task {}", t.task_id);
+    } else if enqueue_status < 0 {
+        klog_info!(
+            "SCHED: failed to rescue stranded READY task {} (enqueue_status={})",
+            t.task_id,
+            enqueue_status
+        );
+    }
 }

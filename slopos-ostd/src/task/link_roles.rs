@@ -16,3 +16,13 @@ pub enum ReadyQueueRole {}
 /// the `Task` struct (enforced by the `Linked<Role>` trait's
 /// "distinct field per role" rule).
 pub enum ZombieListRole {}
+
+/// Role tag for a per-CPU remote wake inbox entry.
+///
+/// The inbox is implemented as a lock-free Treiber stack rather than an
+/// `IntrusiveLinkedList`, but it still needs the same single-membership
+/// invariant as the ready and zombie lists. Giving it its own role-typed
+/// `Link<Task, RemoteWakeRole>` means a task cannot accidentally reuse its
+/// ready-queue link as a remote-wake link, and duplicate pushes are rejected by
+/// the link slot itself instead of by ad-hoc parallel state.
+pub enum RemoteWakeRole {}
