@@ -241,7 +241,13 @@ fn run_phase(
         }
         idx += 1;
 
+        if kind_filter == TestKind::Userland {
+            klog_info!("UTEST: starting {}::{}", desc.module, desc.name);
+        }
         let outcome = run_one(desc, cfg, idx);
+        if kind_filter == TestKind::Userland {
+            klog_info!("UTEST: finished {}::{}", desc.module, desc.name);
+        }
 
         match outcome.outcome {
             TestResult::Pass | TestResult::OverTime | TestResult::Skipped => {

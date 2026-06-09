@@ -43,7 +43,7 @@ impl core::fmt::Display for Verbosity {
 ///
 /// Globs are stored owned (`KVec<u8>`) so the parsing path can synthesise
 /// patterns (e.g. `tests.suite=foo` → `*foo*`) without juggling lifetimes.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TestConfig {
     pub enabled: bool,
     pub verbosity: Verbosity,

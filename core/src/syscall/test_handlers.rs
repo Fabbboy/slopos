@@ -4,9 +4,7 @@ use slopos_abi::Errno;
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX};
 use slopos_ostd::klog_info;
 use slopos_testing::{
-    TestRunSummary,
-    config::{TestConfig, Verbosity},
-    kernel_phase_summary, tests_request_shutdown, tests_run_userland,
+    TestRunSummary, kernel_phase_summary, tests_request_shutdown, tests_run_userland,
 };
 
 use slopos_sched::test_reports::{TestReport, alloc_ring, empty_report};
@@ -71,15 +69,8 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
 
     klog_info!("TESTS: Running userland phase (init syscall)");
 
-    let cfg = TestConfig {
-        enabled: true,
-        verbosity: Verbosity::Summary,
-        warn_ms: 0,
-        shutdown: false,
-        stacktrace_demo: false,
-        run_globs: slopos_ostd::KVec::new(),
-        skip_globs: slopos_ostd::KVec::new(),
-    };
+    let mut cfg = kernel_phase_summary::load_config();
+    cfg.shutdown = false;
 
     let mut utest_summary = TestRunSummary::default();
     let utest_rc = tests_run_userland(&cfg, &mut utest_summary);

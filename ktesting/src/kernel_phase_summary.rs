@@ -13,7 +13,9 @@
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use crate::TestRunSummary;
+use slopos_ostd::KVec;
+
+use crate::{TestConfig, TestRunSummary, Verbosity};
 
 static KERNEL_SUMMARY: SyncUnsafeCell<TestRunSummary> = SyncUnsafeCell::new(TestRunSummary {
     total: 0,
@@ -26,6 +28,16 @@ static KERNEL_SUMMARY: SyncUnsafeCell<TestRunSummary> = SyncUnsafeCell::new(Test
 });
 
 static KERNEL_RC: AtomicI32 = AtomicI32::new(0);
+
+static KERNEL_CONFIG: SyncUnsafeCell<TestConfig> = SyncUnsafeCell::new(TestConfig {
+    enabled: false,
+    verbosity: Verbosity::Summary,
+    warn_ms: 0,
+    shutdown: false,
+    stacktrace_demo: false,
+    run_globs: KVec::new(),
+    skip_globs: KVec::new(),
+});
 
 /// Whether `tests.shutdown=on` was set on the boot command line. Read by
 /// the userland-phase syscall handler to decide whether to signal QEMU exit.
@@ -40,16 +52,17 @@ static TESTS_ENABLED: AtomicBool = AtomicBool::new(false);
 ///
 /// Called once from the boot init pipeline after `tests_run_all` returns.
 /// Subsequent calls overwrite (intended for re-init scenarios in tests).
-pub fn store_kernel_phase(summary: &TestRunSummary, rc: i32, enabled: bool, shutdown: bool) {
+pub fn store_kernel_phase(summary: &TestRunSummary, rc: i32, cfg: &TestConfig) {
     // SAFETY: writers are single-threaded (the BSP boot init pipeline runs
     // sequentially); there is no concurrent reader at this point because
     // the userland phase syscall hasn't fired yet.
     unsafe {
         *KERNEL_SUMMARY.get() = *summary;
+        *KERNEL_CONFIG.get() = cfg.clone();
     }
     KERNEL_RC.store(rc, Ordering::Release);
-    TESTS_ENABLED.store(enabled, Ordering::Release);
-    SHUTDOWN_REQUESTED.store(shutdown, Ordering::Release);
+    TESTS_ENABLED.store(cfg.enabled, Ordering::Release);
+    SHUTDOWN_REQUESTED.store(cfg.shutdown, Ordering::Release);
 }
 
 pub fn load_kernel_phase() -> (TestRunSummary, i32) {
@@ -59,6 +72,11 @@ pub fn load_kernel_phase() -> (TestRunSummary, i32) {
     let summary = unsafe { *KERNEL_SUMMARY.get() };
     let rc = KERNEL_RC.load(Ordering::Acquire);
     (summary, rc)
+}
+
+pub fn load_config() -> TestConfig {
+    // SAFETY: writes are complete before userland invokes the syscall handler.
+    unsafe { (*KERNEL_CONFIG.get()).clone() }
 }
 
 pub fn tests_enabled() -> bool {

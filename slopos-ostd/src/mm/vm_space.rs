@@ -134,6 +134,9 @@ pub enum MapError {
     /// page size differs from `S` (e.g. `unmap::<Size4Kb>` on a
     /// 2 MiB leaf, or `unmap::<Size2Mb>` on a 4 KiB leaf).
     SizeMismatch,
+    /// The consumer attempted a mutating cursor operation while another
+    /// externally-held handle still had the address space borrowed.
+    ConcurrentAccess,
 }
 
 /// Read-only walking handle over `[range.start, range.end)`.
