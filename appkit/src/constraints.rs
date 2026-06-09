@@ -333,6 +333,8 @@ pub enum ImageScale {
     /// Scale to fit within constraints preserving aspect ratio.
     #[default]
     Fit,
+    /// Scale preserving aspect ratio and crop overflow to fill constraints.
+    Cover,
     /// Stretch to fill constraints.
     Fill,
     /// Display at source dimensions.

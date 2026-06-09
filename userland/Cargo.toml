@@ -34,6 +34,10 @@ name = "file_manager"
 path = "src/bin/file_manager.rs"
 
 [[bin]]
+name = "image_viewer"
+path = "src/bin/image_viewer.rs"
+
+[[bin]]
 name = "sysmon"
 path = "src/bin/sysmon.rs"
 
@@ -75,6 +79,10 @@ path = "src/bin/tests/io_capture_test.rs"
 [[bin]]
 name = "heap_allocator_test"
 path = "src/bin/tests/heap_allocator_test.rs"
+
+[[bin]]
+name = "image_test"
+path = "src/bin/tests/image_test.rs"
 
 [[bin]]
 name = "curl_recv_repro_test"
@@ -149,6 +157,7 @@ slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }
 slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
+slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-slibc = { workspace = true }

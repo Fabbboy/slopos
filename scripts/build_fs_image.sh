@@ -8,14 +8,14 @@ set -euo pipefail
 # Each binary is placed in /bin/<name> except 'init' which goes to /sbin/init.
 #
 # Environment:
-#   FS_IMAGE_SIZE - image size (default: 8M)
+#   FS_IMAGE_SIZE - image size (default: 16M)
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 shift 2
 BINS=("$@")
 
-FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-8M}"
+FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-16M}"
 
 # macOS: extend PATH to find e2fsprogs tools installed via Homebrew
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -75,6 +75,16 @@ if [ -d "$FONTS_DIR" ]; then
         debugfs -w -R "write $font /usr/share/fonts/$fname" "$IMAGE_PATH" >/dev/null
         echo "Installed font: /usr/share/fonts/$fname"
     done
+fi
+
+debugfs -w -R "mkdir /usr" "$IMAGE_PATH" >/dev/null 2>&1 || true
+debugfs -w -R "mkdir /usr/share" "$IMAGE_PATH" >/dev/null 2>&1 || true
+debugfs -w -R "mkdir /usr/share/slopos" "$IMAGE_PATH" >/dev/null 2>&1 || true
+debugfs -w -R "mkdir /usr/share/slopos/wallpapers" "$IMAGE_PATH" >/dev/null 2>&1 || true
+
+if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
+    debugfs -w -R "write ${REPO_ROOT}/assets/logo.png /usr/share/slopos/wallpapers/default.png" "$IMAGE_PATH" >/dev/null
+    echo "Installed wallpaper: /usr/share/slopos/wallpapers/default.png"
 fi
 
 # Append a block-integrity (verity) trailer so the kernel detects on-disk

@@ -85,10 +85,14 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         }
         Node::Divider => Box::new(widgets::separator::SeparatorWidget::new()),
         Node::Image {
-            width,
-            height,
+            image,
             scale,
-        } => Box::new(widgets::image::ImageWidget::new(*width, *height, *scale)),
+            sampling,
+        } => Box::new(widgets::image::ImageWidget::new(
+            image.clone(),
+            *scale,
+            *sampling,
+        )),
         Node::ScrollView {
             child,
             direction,

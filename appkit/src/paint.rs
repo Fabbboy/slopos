@@ -1,5 +1,6 @@
 use slopos_abi::draw::Color32;
 use slopos_gfx::DrawBuffer;
+use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 
 use super::constraints::Rect;
 use super::style::StyleSheet;
@@ -94,7 +95,12 @@ impl<'a> PaintContext<'a> {
 
     /// Draw text at position, clipped to the current clip rect.
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
-        let dr = self.clip.to_damage_rect();
+        let dr = slopos_abi::damage::DamageRect {
+            x0: self.clip.x,
+            y0: self.clip.y,
+            x1: self.clip.x + self.clip.width - 1,
+            y1: self.clip.y + self.clip.height - 1,
+        };
         crate::text::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
     }
 
@@ -140,6 +146,21 @@ impl<'a> PaintContext<'a> {
         self.fill_rect_blended(x, inner_y, width, inner_h, color);
         // Right
         self.fill_rect_blended(inner_x + inner_w, inner_y, width, inner_h, color);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_image(
+        &mut self,
+        bitmap: BitmapRef<'_>,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        fit: ImageFit,
+        sampling: ImageSampling,
+    ) {
+        let dr = self.clip.to_damage_rect();
+        slopos_gfx::image::draw_image_clipped(self.buffer, bitmap, x, y, w, h, fit, sampling, &dr);
     }
 
     /// Execute a closure with a tighter clip rect (intersection of current and new).

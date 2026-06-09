@@ -12,6 +12,7 @@ crate::utest!(
     name = utest_heap_allocator,
     bin = "/bin/heap_allocator_test"
 );
+crate::utest!(name = utest_image, bin = "/bin/image_test");
 crate::utest!(name = utest_fork, bin = "/bin/fork_test");
 crate::utest!(name = utest_io_capture, bin = "/bin/io_capture_test");
 crate::utest!(

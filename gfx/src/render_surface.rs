@@ -230,7 +230,7 @@ mod tests {
         {
             let mut fb = surface.frame().expect("frame failed");
             let red = fb.pixel_format().encode(Color32::new(255, 0, 0, 255));
-            fb.write_pixel(3, 5, red);
+            fb.put_pixel(3, 5, red);
         }
         let pixel = surface.pixel_at(3, 5).expect("out of bounds");
         assert_eq!(pixel.red(), 255);

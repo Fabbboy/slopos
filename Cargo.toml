@@ -10,6 +10,7 @@ members = [
   "font",
   "fs",
   "gfx",
+  "image",
   "kernel",
   "kernel-services",
   "mm",
@@ -64,6 +65,7 @@ slopos-drivers = { path = "drivers" }
 slopos-font = { path = "font" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
+slopos-image = { path = "image" }
 slopos-ostd = { path = "slopos-ostd" }
 slopos-ostd-derive = { path = "slopos-ostd-derive" }
 slopos-rt = { path = "slopos-rt" }

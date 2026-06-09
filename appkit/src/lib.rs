@@ -54,7 +54,7 @@ pub mod widgets;
 
 // === Public re-exports: primary app API ===
 pub use node::{
-    Action, App, ButtonStyle, MenuItem, MenuItemKind, Node, SortIndicator, TableColumn,
+    Action, App, ButtonStyle, ImageData, MenuItem, MenuItemKind, Node, SortIndicator, TableColumn,
     TableColumnWidth,
 };
 pub use run::run_app;
@@ -82,4 +82,5 @@ pub use slopos_windowing::{ControlFlow, WindowedApp};
 pub use slopos_windowing::{ProtocolHandle, UiSender};
 
 // === Public re-exports: render surface abstraction ===
+pub use slopos_gfx::image::ImageSampling;
 pub use slopos_gfx::{RenderError, RenderSurface};

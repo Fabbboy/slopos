@@ -189,7 +189,15 @@ impl LauncherShelf {
             ICON_MONITOR_ALPHA,
             b'M',
         );
-        self.entry_count = 3;
+        self.entries[3] = make_pinned(
+            b"Image Viewer",
+            b"/bin/image_viewer",
+            b"org.slopos.image-viewer",
+            ICON_IMAGES,
+            ICON_IMAGES_ALPHA,
+            b'I',
+        );
+        self.entry_count = 4;
     }
 
     /// Synchronize running state from the current window list.

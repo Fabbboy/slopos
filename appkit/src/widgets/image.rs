@@ -1,24 +1,27 @@
 use crate::constraints::{BoxConstraints, ImageScale, Rect, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::node::ImageData;
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use slopos_abi::damage::DamageRect;
+use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 
 pub struct ImageWidget {
     id: WidgetId,
     rect: Rect,
-    source_width: u32,
-    source_height: u32,
+    image: ImageData,
     scale: ImageScale,
+    sampling: ImageSampling,
 }
 
 impl ImageWidget {
-    pub fn new(width: u32, height: u32, scale: ImageScale) -> Self {
+    pub fn new(image: ImageData, scale: ImageScale, sampling: ImageSampling) -> Self {
         Self {
             id: next_widget_id(),
             rect: Rect::ZERO,
-            source_width: width,
-            source_height: height,
+            image,
             scale,
+            sampling,
         }
     }
 }
@@ -26,10 +29,10 @@ impl ImageWidget {
 impl Widget for ImageWidget {
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
         let size = match self.scale {
-            ImageScale::None => Size::new(self.source_width as i32, self.source_height as i32),
+            ImageScale::None => Size::new(self.image.width as i32, self.image.height as i32),
             ImageScale::Fit => {
-                let sw = self.source_width as i32;
-                let sh = self.source_height as i32;
+                let sw = self.image.width as i32;
+                let sh = self.image.height as i32;
                 if sw == 0 || sh == 0 {
                     return constraints.constrain(Size::ZERO);
                 }
@@ -41,6 +44,7 @@ impl Widget for ImageWidget {
                 let scale = scale_w.min(scale_h).min(1.0);
                 Size::new((sw as f64 * scale) as i32, (sh as f64 * scale) as i32)
             }
+            ImageScale::Cover => constraints.max_size(),
             ImageScale::Fill => constraints.max_size(),
         };
         constraints.constrain(size)
@@ -51,14 +55,35 @@ impl Widget for ImageWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        // Placeholder: fill with bg_secondary. Actual pixel blitting would
-        // require pixel data not stored in the Node for simplicity.
-        ctx.fill_rect(
+        let Some(bitmap) = BitmapRef::new(
+            self.image.width,
+            self.image.height,
+            self.image.pixels.as_ref(),
+        ) else {
+            return;
+        };
+        let fit = match self.scale {
+            ImageScale::None => ImageFit::Actual,
+            ImageScale::Fit => ImageFit::Contain,
+            ImageScale::Cover => ImageFit::Cover,
+            ImageScale::Fill => ImageFit::Stretch,
+        };
+        let clip = DamageRect {
+            x0: ctx.clip.x,
+            y0: ctx.clip.y,
+            x1: ctx.clip.x + ctx.clip.width - 1,
+            y1: ctx.clip.y + ctx.clip.height - 1,
+        };
+        slopos_gfx::image::draw_image_clipped(
+            ctx.buffer,
+            bitmap,
             self.rect.x,
             self.rect.y,
             self.rect.width,
             self.rect.height,
-            ctx.style.bg_secondary,
+            fit,
+            self.sampling,
+            &clip,
         );
     }
 

@@ -65,6 +65,14 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         gui: true,
     },
     ProgramSpec {
+        name: "image_viewer",
+        path: "/bin/image_viewer",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "View PNG images",
+        gui: true,
+    },
+    ProgramSpec {
         name: "sysmon",
         path: "/bin/sysmon",
         priority: TaskPriority::Normal,

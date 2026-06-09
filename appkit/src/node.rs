@@ -1,4 +1,6 @@
 use slopos_abi::draw::Color32;
+use slopos_gfx::image::ImageSampling;
+use std::sync::Arc;
 
 use super::constraints::{
     CrossAxisAlignment, EdgeInsets, ImageScale, Length, ScrollDirection, ScrollbarVisibility,
@@ -48,6 +50,27 @@ pub enum SortIndicator {
     Descending,
 }
 
+#[derive(Clone, Debug)]
+pub struct ImageData {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Arc<[Color32]>,
+}
+
+impl ImageData {
+    pub fn new(width: u32, height: u32, pixels: Vec<Color32>) -> Option<Self> {
+        let required = (width as usize).checked_mul(height as usize)?;
+        if width == 0 || height == 0 || pixels.len() < required {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+        })
+    }
+}
+
 /// Table column definition.
 #[derive(Clone, Debug)]
 pub struct TableColumn {
@@ -94,9 +117,9 @@ pub enum Node<M> {
     /// horizontal in VStack, vertical in HStack.
     Divider,
     Image {
-        width: u32,
-        height: u32,
+        image: ImageData,
         scale: ImageScale,
+        sampling: ImageSampling,
     },
     ProgressBar {
         value: u32,

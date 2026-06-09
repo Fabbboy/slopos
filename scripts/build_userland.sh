@@ -22,7 +22,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell terminal compositor roulette file_manager sysmon nmap ifconfig nc curl ping widget_gallery"
+BINS="init shell terminal compositor roulette file_manager image_viewer sysmon nmap ifconfig nc curl ping widget_gallery"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied
@@ -76,6 +76,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin fork_test \
         --bin io_capture_test \
         --bin heap_allocator_test \
+        --bin image_test \
         --bin curl_recv_repro_test \
         --bin curl_e2e_test \
         --bin cd_test \
@@ -104,6 +105,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/heap_allocator_test" ]; then
         cp "$RELEASE_DIR/heap_allocator_test" "$BUILD_DIR/heap_allocator_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/image_test" ]; then
+        cp "$RELEASE_DIR/image_test" "$BUILD_DIR/image_test.elf"
     fi
     if [ -f "$RELEASE_DIR/curl_recv_repro_test" ]; then
         cp "$RELEASE_DIR/curl_recv_repro_test" "$BUILD_DIR/curl_recv_repro_test.elf"
@@ -154,5 +158,5 @@ if [ "$TEST_MODE" = "--test" ]; then
         cp "$RELEASE_DIR/clipboard_test" "$BUILD_DIR/clipboard_test.elf"
     fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/ctrlc_flood_test.elf $BUILD_DIR/sigwinch_default_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf $BUILD_DIR/clipboard_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/image_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/ctrlc_flood_test.elf $BUILD_DIR/sigwinch_default_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf $BUILD_DIR/clipboard_test.elf"
 fi

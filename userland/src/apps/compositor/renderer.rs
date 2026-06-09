@@ -1,5 +1,8 @@
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
+use slopos_abi::pixel::PixelFormat;
 use slopos_font::FontRenderer;
+use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+use slopos_image::{DecodeOptions, Image};
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
@@ -13,6 +16,122 @@ use super::output::{RenderMode, WINDOW_STATE_MINIMIZED};
 use super::surface_cache::ClientSurfaceCache;
 
 const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
+const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
+
+struct WallpaperCache {
+    load_attempted: bool,
+    source: Option<Image>,
+    cache: Vec<u8>,
+    cache_width: u32,
+    cache_height: u32,
+    cache_pitch: usize,
+    cache_bpp: u8,
+    cache_format: PixelFormat,
+}
+
+impl WallpaperCache {
+    fn new() -> Self {
+        Self {
+            load_attempted: false,
+            source: None,
+            cache: Vec::new(),
+            cache_width: 0,
+            cache_height: 0,
+            cache_pitch: 0,
+            cache_bpp: 0,
+            cache_format: PixelFormat::Argb8888,
+        }
+    }
+
+    fn draw(&mut self, buf: &mut DrawBuffer, clip: &DamageRect) -> bool {
+        if !clip.is_valid() || !self.ensure_cache(buf) {
+            return false;
+        }
+        let clipped = clip.clip(buf.width() as i32, buf.height() as i32);
+        if !clipped.is_valid() {
+            return false;
+        }
+
+        let bpp = buf.bytes_pp() as usize;
+        let dst_pitch = buf.pitch();
+        let src_pitch = self.cache_pitch;
+        let row_bytes = (clipped.x1 - clipped.x0 + 1) as usize * bpp;
+        let x_byte = clipped.x0 as usize * bpp;
+        let dst_data = buf.data_mut();
+        for row in clipped.y0..=clipped.y1 {
+            let row = row as usize;
+            let src_off = row * src_pitch + x_byte;
+            let dst_off = row * dst_pitch + x_byte;
+            let src = &self.cache[src_off..src_off + row_bytes];
+            dst_data[dst_off..dst_off + row_bytes].copy_from_slice(src);
+        }
+        buf.add_damage(clipped.x0, clipped.y0, clipped.x1, clipped.y1);
+        true
+    }
+
+    fn ensure_cache(&mut self, buf: &mut DrawBuffer) -> bool {
+        if !self.load_attempted {
+            self.load_attempted = true;
+            let path =
+                std::env::var("SLOPOS_WALLPAPER").unwrap_or_else(|_| DEFAULT_WALLPAPER.into());
+            self.source = slopos_image::load_path(path, DecodeOptions::default()).ok();
+        }
+
+        let Some(source) = self.source.as_ref() else {
+            return false;
+        };
+        let width = buf.width();
+        let height = buf.height();
+        let pitch = buf.pitch();
+        let bpp = buf.bytes_pp();
+        let format = buf.pixel_format();
+        if self.cache_width == width
+            && self.cache_height == height
+            && self.cache_pitch == pitch
+            && self.cache_bpp == bpp
+            && self.cache_format == format
+            && !self.cache.is_empty()
+        {
+            return true;
+        }
+
+        let Some(size) = pitch.checked_mul(height as usize) else {
+            self.cache.clear();
+            return false;
+        };
+        self.cache.clear();
+        self.cache.resize(size, 0);
+
+        let Some(mut cache_buf) = DrawBuffer::new(&mut self.cache, width, height, pitch, bpp)
+        else {
+            self.cache.clear();
+            return false;
+        };
+        cache_buf.set_pixel_format(format);
+        cache_buf.clear_canvas(format.encode(DESKTOP_BG));
+        let Some(bitmap) = BitmapRef::new(source.width, source.height, &source.pixels) else {
+            self.cache.clear();
+            return false;
+        };
+        slopos_gfx::image::draw_image(
+            &mut cache_buf,
+            bitmap,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            ImageFit::Cover,
+            ImageSampling::Bilinear,
+        );
+
+        self.cache_width = width;
+        self.cache_height = height;
+        self.cache_pitch = pitch;
+        self.cache_bpp = bpp;
+        self.cache_format = format;
+        true
+    }
+}
 
 pub struct Renderer {
     pub output_width: u32,
@@ -21,6 +140,7 @@ pub struct Renderer {
     pub output_pitch: usize,
     ttf_font: Option<FontRenderer<'static>>,
     ttf_init_attempted: bool,
+    wallpaper: WallpaperCache,
 }
 
 impl Renderer {
@@ -32,6 +152,7 @@ impl Renderer {
             output_pitch: 0,
             ttf_font: None,
             ttf_init_attempted: false,
+            wallpaper: WallpaperCache::new(),
         }
     }
 
@@ -80,14 +201,16 @@ impl Renderer {
         if force_full {
             let full_clip = full_screen_clip(buf);
             // 1. Desktop background
-            gfx::fill_rect(
-                buf,
-                0,
-                0,
-                buf.width() as i32,
-                buf.height() as i32,
-                DESKTOP_BG,
-            );
+            if !self.draw_wallpaper(buf, &full_clip) {
+                gfx::fill_rect(
+                    buf,
+                    0,
+                    0,
+                    buf.width() as i32,
+                    buf.height() as i32,
+                    DESKTOP_BG,
+                );
+            }
 
             // 2. Windows (z-order)
             for i in 0..window_count {
@@ -194,14 +317,16 @@ impl Renderer {
         }
 
         // 1. Desktop background (clipped)
-        gfx::fill_rect(
-            buf,
-            damage.x0,
-            damage.y0,
-            damage.x1 - damage.x0 + 1,
-            damage.y1 - damage.y0 + 1,
-            DESKTOP_BG,
-        );
+        if !self.draw_wallpaper(buf, damage) {
+            gfx::fill_rect(
+                buf,
+                damage.x0,
+                damage.y0,
+                damage.x1 - damage.x0 + 1,
+                damage.y1 - damage.y0 + 1,
+                DESKTOP_BG,
+            );
+        }
 
         // 2. Windows (z-order)
         for i in 0..window_count {
@@ -305,6 +430,10 @@ impl Renderer {
             12 => self.draw_cursor_grabbing(buf, mx, my, clip),
             _ => self.draw_cursor_default(buf, mx, my, clip),
         }
+    }
+
+    fn draw_wallpaper(&mut self, buf: &mut DrawBuffer, clip: &DamageRect) -> bool {
+        self.wallpaper.draw(buf, clip)
     }
 
     fn draw_cursor_default(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {

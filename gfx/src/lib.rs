@@ -5,6 +5,7 @@ pub mod blend;
 pub mod canvas_ops;
 pub mod damage;
 pub mod draw_buffer;
+pub mod image;
 pub mod render_surface;
 
 pub use damage::{DamageTracker, InternalDamageTracker};
