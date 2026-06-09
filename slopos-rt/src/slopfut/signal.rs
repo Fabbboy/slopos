@@ -1,26 +1,27 @@
 //! Async signal handling via signalfd — signals delivered as in-band ring
 //! events, never as an out-of-band `EINTR` (Phase 1).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::signal::{NSIG, SIGINT, sig_bit};
 
 use crate::sys::signalfd::{block_signals, signalfd, unblock_signals};
 
 static SIGNAL_BLOCK_REFS: [AtomicUsize; NSIG] = [const { AtomicUsize::new(0) }; NSIG];
+static ORIGINAL_UNBLOCK_ON_DROP: AtomicU64 = AtomicU64::new(0);
 
 /// Awaits delivery of signals in a mask via a signalfd. The signals are
 /// blocked on construction so they queue (drainable) instead of interrupting
 /// the reactor's waits. Dropping the listener closes the fd and unblocks the
 /// bits it newly blocked, restoring the caller's signal mask — so a listener
 /// scoped to one operation (a prompt, a download) does not leave its signals
-/// masked for the rest of the process, or for children forked afterwards.
+/// masked for the rest of the process, or for children forked afterwards. If
+/// multiple listeners share a signal bit, the final dropped reference performs
+/// that restoration.
 pub struct SignalListener {
     fd: i32,
     /// Bits whose listener reference this instance owns.
     owned_mask: u64,
-    /// Owned bits this instance caused to become blocked at the process mask.
-    unblock_on_drop: u64,
 }
 
 impl SignalListener {
@@ -45,23 +46,22 @@ impl SignalListener {
             match block_signals(to_block) {
                 Ok(old) => old,
                 Err(_) => {
-                    release_signal_refs(owned_mask, 0);
+                    release_signal_refs(owned_mask);
                     return None;
                 }
             }
         };
         let unblock_on_drop = to_block & !old_blocked;
+        if unblock_on_drop != 0 {
+            ORIGINAL_UNBLOCK_ON_DROP.fetch_or(unblock_on_drop, Ordering::AcqRel);
+        }
 
         let fd = signalfd(mask, 0);
         if fd < 0 {
-            release_signal_refs(owned_mask, unblock_on_drop);
+            release_signal_refs(owned_mask);
             return None;
         }
-        Some(Self {
-            fd,
-            owned_mask,
-            unblock_on_drop,
-        })
+        Some(Self { fd, owned_mask })
     }
 
     /// Await the next signal; resolves to its number (1-based), or 0 on error.
@@ -82,7 +82,7 @@ impl Drop for SignalListener {
         // normal delivery path (handler or default) instead of being stranded
         // behind a mask with no fd left to drain it.
         let _ = slopos_slibc::ffi::close(self.fd);
-        release_signal_refs(self.owned_mask, self.unblock_on_drop);
+        release_signal_refs(self.owned_mask);
     }
 }
 
@@ -100,7 +100,7 @@ fn for_each_signal_bit(mut mask: u64, mut f: impl FnMut(usize, u64)) {
     }
 }
 
-fn release_signal_refs(mask: u64, unblock_mask: u64) {
+fn release_signal_refs(mask: u64) {
     let mut to_unblock = 0u64;
     for_each_signal_bit(mask, |idx, bit| {
         let counter = &SIGNAL_BLOCK_REFS[idx];
@@ -113,7 +113,7 @@ fn release_signal_refs(mask: u64, unblock_mask: u64) {
                 Ordering::Acquire,
             ) {
                 Ok(prev) => {
-                    if prev == 1 && (unblock_mask & bit) != 0 {
+                    if prev == 1 && (ORIGINAL_UNBLOCK_ON_DROP.load(Ordering::Acquire) & bit) != 0 {
                         to_unblock |= bit;
                     }
                     break;
@@ -124,6 +124,7 @@ fn release_signal_refs(mask: u64, unblock_mask: u64) {
     });
     if to_unblock != 0 {
         let _ = unblock_signals(to_unblock);
+        ORIGINAL_UNBLOCK_ON_DROP.fetch_and(!to_unblock, Ordering::AcqRel);
     }
 }
 
