@@ -19,6 +19,7 @@
 //! surface; the only OSTD-side calls survive.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_ostd::klog_info;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, RingMeta};
 use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
@@ -33,6 +34,7 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 /// legacy [`PageFlags::COW`] sits at bit 9, i.e. the low bit of
 /// `PageProperty::software`.
 const SOFTWARE_BITS_SHIFT: u32 = 9;
+const VM_SPACE_MUT_RETRY_SPINS: usize = 1_000_000;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an
 /// OSTD `PageProperty`. Round-trips through the AVL software bits
@@ -86,15 +88,29 @@ pub fn property_to_page_flags(prop: PageProperty) -> PageFlags {
     PageFlags::from_bits_truncate(bits)
 }
 
-/// Helper: borrow the inner `VmSpace` from a sole-owned `KArc<VmSpace>`.
-/// Panics if any other clone exists — the dual-write contract is that
-/// the per-process [`SpinLock<ProcessVmInner>`] holds the only ref.
+/// Helper: borrow the inner `VmSpace` for a mutating cursor operation.
+///
+/// The per-process VM lock prevents *new* `KArc<VmSpace>` clones while this
+/// helper runs, but syscall/user-copy readers may already hold short-lived
+/// clones. Wait for those transient readers to drain instead of panicking in
+/// multithreaded processes. A remaining strong/weak ref after the bounded spin
+/// means a caller is holding an address-space handle across a mutation window,
+/// which violates the dual-write external-lock contract.
 #[inline]
-fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> &mut VmSpace {
-    KArc::get_mut(vm_space).expect(
-        "dual_paging: KArc<VmSpace> must be sole-owned (no concurrent cloners) \
-         while a cursor mutation is in flight",
-    )
+fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapError> {
+    for _ in 0..VM_SPACE_MUT_RETRY_SPINS {
+        if KArc::strong_count(vm_space) == 1 && KArc::weak_count(vm_space) == 0 {
+            return KArc::get_mut(vm_space).ok_or(MapError::ConcurrentAccess);
+        }
+        core::hint::spin_loop();
+    }
+
+    klog_info!(
+        "dual_paging: VmSpace mutation blocked by refs strong={} weak={}",
+        KArc::strong_count(vm_space),
+        KArc::weak_count(vm_space)
+    );
+    Err(MapError::ConcurrentAccess)
 }
 
 /// Map a 4 KiB user page into `vm_space` at `va`, pointing at the
@@ -118,7 +134,7 @@ pub fn ostd_map_4kb_user(
     let prop = page_flags_to_property(flags);
     let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
         .map_err(|_| MapError::PathCorrupt)?;
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
     cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)
@@ -132,7 +148,7 @@ pub fn ostd_map_4kb_user(
 /// Returns `Ok(true)` if a leaf was present and unmapped, `Ok(false)`
 /// if the leaf was already absent, or an error from the cursor.
 pub fn ostd_unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
     Ok(cursor
@@ -156,7 +172,7 @@ pub fn ostd_map_ring_4kb_user(
     let prop = page_flags_to_property(flags);
     let frame = UFrame::<RingMeta>::from_in_use(Paddr::new(pa.as_u64()))
         .map_err(|_| MapError::PathCorrupt)?;
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
     cursor.map::<Size4Kb, RingMeta>(frame, prop)
@@ -170,7 +186,7 @@ pub fn ostd_unmap_ring_4kb_user(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
 ) -> Result<bool, MapError> {
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
     Ok(cursor
@@ -191,7 +207,7 @@ pub fn ostd_protect_range_4kb(
     if end.as_u64() <= start.as_u64() {
         return Ok(());
     }
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let mut cursor = vs.cursor_mut(start..end)?;
     let mut va = start.as_u64();
     while va < end.as_u64() {
@@ -228,7 +244,7 @@ pub fn ostd_mark_range_user_4kb(
     if end.as_u64() <= start.as_u64() {
         return Ok(());
     }
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let mut cursor = vs.cursor_mut(start..end)?;
     let mut va = start.as_u64();
     while va < end.as_u64() {
@@ -253,7 +269,7 @@ pub fn ostd_mark_range_user_4kb(
 /// and set the slopos COW software bit (PTE bit 9). Mirrors
 /// `paging_mark_cow`.
 pub fn ostd_mark_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<(), MapError> {
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
@@ -276,7 +292,7 @@ pub fn ostd_mark_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<(
 /// `paging_resolve_cow`'s flag mutation. Returns `Ok(true)` if a
 /// 4 KiB leaf was present and updated, `Ok(false)` otherwise.
 pub fn ostd_resolve_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
-    let vs = vm_space_get_mut(vm_space);
+    let vs = vm_space_get_mut(vm_space)?;
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;

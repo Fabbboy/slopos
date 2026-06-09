@@ -96,6 +96,8 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         (pid, tid)
     };
 
+    klog_info!("UTEST: starting '{}'", bin);
+
     let pid = match spawn_program_with_attrs(
         bin.as_bytes(),
         argv,

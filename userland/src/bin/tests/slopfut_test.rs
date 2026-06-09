@@ -187,5 +187,5 @@ const CASES: &[(&str, fn() -> bool)] = &[
 ];
 
 fn main() {
-    slopos_slibc::test_harness::run(CASES);
+    slopos_slibc::test_harness::run_with_progress("slopfut_test", CASES);
 }

@@ -411,12 +411,7 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     // (`SYSCALL_RUN_USERLAND_TESTS`, invoked from /sbin/init) can merge
     // counters and decide shutdown. Shutdown is *always* deferred to that
     // syscall so both phases run before QEMU exits.
-    kernel_phase_summary::store_kernel_phase(
-        &summary,
-        rc,
-        test_config.enabled,
-        test_config.shutdown,
-    );
+    kernel_phase_summary::store_kernel_phase(&summary, rc, &test_config);
 
     if summary.failed > 0 {
         klog_info!("TESTS: Failures detected (kernel phase)");
