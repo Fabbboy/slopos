@@ -29,7 +29,7 @@ use slopos_userland as _;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_abi::signal::{SIGINT, SIGTSTP, SIGTTIN, SIGTTOU};
+use slopos_abi::signal::{SIGINT, SIGKILL, SIGTSTP, SIGTTIN, SIGTTOU};
 use slopos_abi::syscall::{InputFlags, LocalFlags};
 use slopos_userland::syscall::{SyscallError, core as sys_core, fs, process};
 
@@ -87,6 +87,15 @@ fn reap_bounded(pid: u32) -> Option<i32> {
         sys_core::yield_now();
     }
     None
+}
+
+fn kill_and_reap(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+    let pid_u32 = pid as u32;
+    let _ = process::kill(pid_u32, SIGKILL);
+    reap_bounded(pid_u32)
 }
 
 /// Drain whatever is readable from the (non-blocking) master right now.
@@ -158,6 +167,7 @@ fn run_flood_case(install_handler: bool, noflsh: bool) -> Option<(i32, usize)> {
     // full master READ buffer must not impede it.
     if fs::write_slice(master_fd, b"\x03").is_err() {
         eprintln!("ctrlc_flood_test: writing VINTR to master failed");
+        let _ = kill_and_reap(pid);
         let _ = fs::close_fd_raw(master_fd);
         let _ = fs::close_fd_raw(slave_fd);
         return None;
@@ -165,16 +175,18 @@ fn run_flood_case(install_handler: bool, noflsh: bool) -> Option<(i32, usize)> {
 
     let code = reap_bounded(pid as u32);
     let drained = drain_master(master_fd);
-    let _ = fs::close_fd_raw(master_fd);
-    let _ = fs::close_fd_raw(slave_fd);
 
-    match code {
+    let result = match code {
         Some(code) => Some((code, drained)),
         None => {
             eprintln!("ctrlc_flood_test: child never exited — Ctrl-C was lost");
+            let _ = kill_and_reap(pid);
             None
         }
-    }
+    };
+    let _ = fs::close_fd_raw(master_fd);
+    let _ = fs::close_fd_raw(slave_fd);
+    result
 }
 
 /// Default disposition: the flooding foreground child is killed by SIGINT
@@ -285,6 +297,7 @@ fn test_ctrlc_kills_input_throttled_fg_child() -> bool {
             Err(e) if e == SyscallError::EAGAIN => break,
             Err(e) => {
                 eprintln!("ctrlc_flood_test(input): fill write failed: {e:?}");
+                let _ = kill_and_reap(pid);
                 let _ = fs::close_fd_raw(master_fd);
                 let _ = fs::close_fd_raw(slave_fd);
                 return false;
@@ -294,6 +307,7 @@ fn test_ctrlc_kills_input_throttled_fg_child() -> bool {
 
     if filled < 4096 {
         eprintln!("ctrlc_flood_test(input): filled only {filled} bytes before interrupt");
+        let _ = kill_and_reap(pid);
         let _ = fs::close_fd_raw(master_fd);
         let _ = fs::close_fd_raw(slave_fd);
         return false;
@@ -301,16 +315,15 @@ fn test_ctrlc_kills_input_throttled_fg_child() -> bool {
 
     if fs::write_slice(master_fd, b"\x03") != Ok(1) {
         eprintln!("ctrlc_flood_test(input): VINTR write failed under input throttle");
+        let _ = kill_and_reap(pid);
         let _ = fs::close_fd_raw(master_fd);
         let _ = fs::close_fd_raw(slave_fd);
         return false;
     }
 
     let code = reap_bounded(pid as u32);
-    let _ = fs::close_fd_raw(master_fd);
-    let _ = fs::close_fd_raw(slave_fd);
 
-    match code {
+    let result = match code {
         Some(code) if code == 128 + SIGINT as i32 => true,
         Some(code) => {
             eprintln!(
@@ -321,9 +334,13 @@ fn test_ctrlc_kills_input_throttled_fg_child() -> bool {
         }
         None => {
             eprintln!("ctrlc_flood_test(input): child never exited");
+            let _ = kill_and_reap(pid);
             false
         }
-    }
+    };
+    let _ = fs::close_fd_raw(master_fd);
+    let _ = fs::close_fd_raw(slave_fd);
+    result
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[

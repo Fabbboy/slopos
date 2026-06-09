@@ -1991,7 +1991,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
 pub fn test_sigchld_and_wait_interaction() -> TestResult {
     // SIGCHLD signal delivery is independent of the wait-wakeup
     // mechanism (waitpid wakes via the per-task `waiters` WaitQueue,
-    // exercised by `core/src/scheduler/sched_tests.rs`'s
+    // exercised by `sched/src/sched_tests.rs`'s
     // `test_task_wait_*`). This test's scope is the SIGCHLD
     // pending-bit propagation through the send-time disposition gate:
     // SIGCHLD's default is Ignore, so an unblocked default-disposition

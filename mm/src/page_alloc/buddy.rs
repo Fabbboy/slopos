@@ -58,6 +58,7 @@ pub(super) const PAGE_FRAME_RESERVED: u8 = 0x02;
 pub(super) const PAGE_FRAME_KERNEL: u8 = 0x03;
 pub(super) const PAGE_FRAME_DMA: u8 = 0x04;
 pub(super) const PAGE_FRAME_PCP: u8 = 0x05;
+pub(super) const PAGE_FRAME_NEVER_REUSE: u8 = 0x06;
 
 pub(super) const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 pub(super) const MAX_ORDER: u32 = 24;
@@ -910,6 +911,29 @@ impl BuddyAllocator {
         0
     }
 
+    pub fn quarantine_allocated_phys(&self, phys_addr: PhysAddr) {
+        if phys_addr.is_null() {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        let frame_num = inner.phys_to_frame(phys_addr);
+        if !inner.is_valid_frame(frame_num) {
+            return;
+        }
+        let Some(frame) = inner.frame_desc_mut(&self.frame_table, frame_num) else {
+            return;
+        };
+        if !BuddyInner::frame_state_is_allocated(frame.state) {
+            return;
+        }
+        let pages = BuddyInner::order_block_pages(frame.order as u32);
+        frame.ref_count = 0;
+        frame.flags = 0;
+        frame.next_free = INVALID_PAGE_FRAME;
+        frame.state = PAGE_FRAME_NEVER_REUSE;
+        inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
+    }
+
     /// Batch-allocate up to `out.len()` zeroed order-0 pages under a
     /// single [`PreemptGuard`]. Returns the number of slots filled.
     pub fn alloc_pcp_batch(&self, out: &mut [PhysAddr]) -> usize {
@@ -1066,7 +1090,10 @@ impl FrameAlloc for BuddyAllocator {
         // matching the pre-refactor behaviour (multi-page callers do
         // their own TLB management).
         if !phys.is_null() && count == 1 {
-            crate::mmu::luf::drain_if_reusing_frame(phys);
+            if !crate::mmu::luf::drain_if_reusing_frame(phys) {
+                self.quarantine_allocated_phys(phys);
+                return None;
+            }
         }
         if phys.is_null() { None } else { Some(phys) }
     }

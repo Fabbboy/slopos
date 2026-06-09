@@ -5,7 +5,9 @@ use slopos_ostd::string;
 
 use super::scheduler;
 use super::scheduler::task_wait_for;
-use super::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskEntry, TaskPriority, task_create};
+use super::task::{
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskEntry, TaskPriority, task_create, task_terminate,
+};
 
 pub type KthreadId = u32;
 pub fn kthread_spawn(
@@ -39,14 +41,20 @@ pub fn kthread_spawn_ex(
     }
 
     let mut task: *mut super::task::Task = core::ptr::null_mut();
-    if super::task::task_get_info(id, &mut task) != 0
-        || task.is_null()
-        || scheduler::publish_new_task(task) != 0
-    {
+    if super::task::task_get_info(id, &mut task) != 0 || task.is_null() {
+        klog_info!(
+            "kthread_spawn_ex: failed to resolve thread '{}'",
+            string::cstr_to_str_lossy(name)
+        );
+        let _ = task_terminate(id);
+        return INVALID_TASK_ID;
+    }
+    if scheduler::publish_new_task(task) != 0 {
         klog_info!(
             "kthread_spawn_ex: failed to publish thread '{}'",
             string::cstr_to_str_lossy(name)
         );
+        let _ = task_terminate(id);
         return INVALID_TASK_ID;
     }
 

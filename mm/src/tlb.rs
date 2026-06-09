@@ -56,6 +56,14 @@ const INVLPG_THRESHOLD: usize = 32;
 
 pub use slopos_arch::arch::idt::TLB_SHOOTDOWN_VECTOR;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TlbShootdownTimeout {
+    pub cpu_idx: usize,
+    pub resends: u64,
+}
+
+type TlbResult = Result<(), TlbShootdownTimeout>;
+
 // =============================================================================
 // CPU Feature Detection
 // =============================================================================
@@ -584,7 +592,7 @@ fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
     }
 }
 
-fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) {
+fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) -> TlbResult {
     // SYSCALL entry clears IF (SFMASK bit 9) so callers often arrive
     // with interrupts disabled.  Re-enable them for the spin-wait so
     // that (a) we can receive TLB IPIs from other CPUs that need our
@@ -595,7 +603,8 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
         cpu::enable_interrupts();
     }
 
-    for cpu_idx in targets {
+    let mut result = Ok(());
+    'targets: for cpu_idx in targets {
         if cpu_idx >= MAX_CPUS || cpu_idx == initiator_cpu {
             continue;
         }
@@ -625,7 +634,7 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
             // this, the panicking CPU wedges here behind a peer in its own
             // panic — the exact cross-CPU lockup the abort core dissolves.
             if slopos_ostd::panic::panic_owner_claimed() {
-                return;
+                break 'targets;
             }
             spin_count = spin_count.wrapping_add(1);
             if spin_count >= RESEND_SPIN {
@@ -640,7 +649,8 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                         cpu_idx,
                         resends
                     );
-                    break;
+                    result = Err(TlbShootdownTimeout { cpu_idx, resends });
+                    break 'targets;
                 }
                 // Re-arm: the request is still in the slot if unhandled.
                 send_shootdown_ipi_to_cpu(cpu_idx);
@@ -659,6 +669,7 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
     if !was_enabled {
         cpu::disable_interrupts();
     }
+    result
 }
 
 /// Force this CPU's shootdown ack to `true` so any outstanding initiator stops
@@ -776,9 +787,14 @@ fn broadcast_flush_request(flush_type: FlushType, start: u64, end: u64, asid: u6
     core::sync::atomic::fence(Ordering::SeqCst);
 }
 
-fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, end: u64) {
+fn targeted_flush_request(
+    process_id: u32,
+    flush_type: FlushType,
+    start: u64,
+    end: u64,
+) -> TlbResult {
     let Some(info) = process_tlb_info(process_id) else {
-        return;
+        return Ok(());
     };
 
     let flush_type = promote_remote_flush_type(flush_type, start, end);
@@ -800,7 +816,7 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
         Ok(v) => v,
         Err(_) => {
             klog_warn!("tlb: targeted_flush_request alloc failed; falling back to local");
-            return;
+            return Ok(());
         }
     };
     let mut target_count = 0usize;
@@ -821,14 +837,14 @@ fn targeted_flush_request(process_id: u32, flush_type: FlushType, start: u64, en
     }
 
     if target_count == 0 {
-        return;
+        return Ok(());
     }
 
     core::sync::atomic::fence(Ordering::SeqCst);
     for cpu_idx in targets.iter().take(target_count) {
         send_shootdown_ipi_to_cpu(*cpu_idx);
     }
-    wait_for_acks(targets[..target_count].iter().copied(), initiator);
+    wait_for_acks(targets[..target_count].iter().copied(), initiator)
 }
 
 // =============================================================================
@@ -860,7 +876,17 @@ fn online_cpus(exclude: usize) -> impl Iterator<Item = usize> + 'static {
 /// This is the primary function called after unmapping a page.
 /// On uniprocessor systems, it performs a local invlpg.
 /// On SMP systems, it broadcasts an IPI to all CPUs.
-pub fn flush_page(vaddr: VirtAddr) {
+#[inline]
+fn handle_tlb_result(result: TlbResult, context: &str) {
+    if let Err(err) = result {
+        panic!(
+            "{}: CPU {} did not ack TLB shootdown after {} re-sends",
+            context, err.cpu_idx, err.resends
+        );
+    }
+}
+
+pub fn try_flush_page(vaddr: VirtAddr) -> TlbResult {
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
@@ -875,63 +901,99 @@ pub fn flush_page(vaddr: VirtAddr) {
         // Overlap our own invlpg with the remote CPUs' handlers instead
         // of running it serially up front (Amit et al. EuroSys '20).
         flush_page_local(vaddr);
-        wait_for_acks(online_cpus(initiator), initiator);
+        wait_for_acks(online_cpus(initiator), initiator)
     } else {
         flush_page_local(vaddr);
+        Ok(())
     }
 }
 
+pub fn flush_page(vaddr: VirtAddr) {
+    handle_tlb_result(try_flush_page(vaddr), "flush_page");
+}
+
+pub fn try_flush_page_for_process(process_id: u32, vaddr: VirtAddr) -> TlbResult {
+    targeted_flush_request(process_id, FlushType::SinglePage, vaddr.as_u64(), 0)
+}
+
 pub fn flush_page_for_process(process_id: u32, vaddr: VirtAddr) {
-    targeted_flush_request(process_id, FlushType::SinglePage, vaddr.as_u64(), 0);
+    handle_tlb_result(
+        try_flush_page_for_process(process_id, vaddr),
+        "flush_page_for_process",
+    );
 }
 
 /// Flush a range of pages from all CPUs' TLBs.
 ///
 /// For small ranges, invalidates each page individually.
 /// For large ranges, performs a full TLB flush.
-pub fn flush_range(start: VirtAddr, end: VirtAddr) {
+pub fn try_flush_range(start: VirtAddr, end: VirtAddr) -> TlbResult {
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Range, start.as_u64(), end.as_u64(), 0);
         send_shootdown_ipi_per_target(online_cpus(initiator));
         flush_range_local(start, end);
-        wait_for_acks(online_cpus(initiator), initiator);
+        wait_for_acks(online_cpus(initiator), initiator)
     } else {
         flush_range_local(start, end);
+        Ok(())
     }
 }
 
+pub fn flush_range(start: VirtAddr, end: VirtAddr) {
+    handle_tlb_result(try_flush_range(start, end), "flush_range");
+}
+
+pub fn try_flush_range_for_process(process_id: u32, start: VirtAddr, end: VirtAddr) -> TlbResult {
+    targeted_flush_request(process_id, FlushType::Range, start.as_u64(), end.as_u64())
+}
+
 pub fn flush_range_for_process(process_id: u32, start: VirtAddr, end: VirtAddr) {
-    targeted_flush_request(process_id, FlushType::Range, start.as_u64(), end.as_u64());
+    handle_tlb_result(
+        try_flush_range_for_process(process_id, start, end),
+        "flush_range_for_process",
+    );
 }
 
 /// Flush the entire TLB on all CPUs.
 ///
 /// This is the most expensive operation but sometimes necessary,
 /// e.g., when changing CR3 or modifying many pages.
-pub fn flush_all() {
+pub fn try_flush_all() -> TlbResult {
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, 0);
         send_shootdown_ipi_per_target(online_cpus(initiator));
         flush_tlb_local_full();
-        wait_for_acks(online_cpus(initiator), initiator);
+        wait_for_acks(online_cpus(initiator), initiator)
     } else {
         flush_tlb_local_full();
+        Ok(())
     }
 }
 
+pub fn flush_all() {
+    handle_tlb_result(try_flush_all(), "flush_all");
+}
+
+pub fn try_flush_all_for_process(process_id: u32) -> TlbResult {
+    targeted_flush_request(process_id, FlushType::Full, 0, 0)
+}
+
 pub fn flush_all_for_process(process_id: u32) {
-    targeted_flush_request(process_id, FlushType::Full, 0, 0);
+    handle_tlb_result(
+        try_flush_all_for_process(process_id),
+        "flush_all_for_process",
+    );
 }
 
 /// Flush TLB entries for a specific address space (ASID/CR3) on all CPUs.
 ///
 /// This is useful when destroying a process - we only need to flush
 /// entries associated with that process's page tables.
-pub fn flush_asid(asid: u64) {
+pub fn try_flush_asid(asid: u64) -> TlbResult {
     let current_cr3 = cpu::read_cr3();
     let local_needs_flush = (current_cr3 & !0xFFF) == (asid & !0xFFF);
 
@@ -943,10 +1005,17 @@ pub fn flush_asid(asid: u64) {
         if local_needs_flush {
             flush_tlb_local_full();
         }
-        wait_for_acks(online_cpus(initiator), initiator);
+        wait_for_acks(online_cpus(initiator), initiator)
     } else if local_needs_flush {
         flush_tlb_local_full();
+        Ok(())
+    } else {
+        Ok(())
     }
+}
+
+pub fn flush_asid(asid: u64) {
+    handle_tlb_result(try_flush_asid(asid), "flush_asid");
 }
 
 /// Handle TLB shootdown IPI on the receiving CPU.

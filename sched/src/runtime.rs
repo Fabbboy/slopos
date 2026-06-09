@@ -10,7 +10,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskPriority, TaskStatus, reap_zombies,
-    task_create, task_get_info, task_sched_placement_store, task_set_status,
+    task_create, task_get_info, task_sched_placement_store, task_set_status, task_terminate,
 };
 use super::work_steal::try_work_steal;
 use slopos_ostd::task::SchedPlacement;
@@ -121,9 +121,11 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
         }
         let mut task_ptr: *mut Task = core::ptr::null_mut();
         if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+            let _ = task_terminate(task_id);
             return Err(SpawnError::OutOfTaskIds);
         }
         if publish_new_task(task_ptr) != 0 {
+            let _ = task_terminate(task_id);
             return Err(SpawnError::ScheduleFailed);
         }
         Ok(SpawnedTaskId::new(task_id))

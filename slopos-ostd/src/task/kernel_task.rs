@@ -548,7 +548,12 @@ impl<K, U> TaskInner<K, U> {
     }
 
     #[inline]
-    fn reserve_waking_if_unowned(&self) -> bool {
+    fn sched_placement_is_unowned(&self) -> bool {
+        self.sched_placement.load(Ordering::Acquire) == SchedPlacement::None.as_u8()
+    }
+
+    #[inline]
+    fn reserve_waking(&self) -> bool {
         self.sched_placement
             .compare_exchange(
                 SchedPlacement::None.as_u8(),
@@ -559,12 +564,19 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    #[inline]
+    fn release_waking_reservation(&self) {
+        let _ = self.sched_placement.compare_exchange(
+            SchedPlacement::Waking.as_u8(),
+            SchedPlacement::None.as_u8(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
     /// Force-publish a new status without changing the block reason.
     #[inline]
     pub fn set_status(&self, status: TaskStatus) {
-        if status == TaskStatus::Ready {
-            let _ = self.reserve_waking_if_unowned();
-        }
         let reason = self.state.reason();
         self.state.force_set(status, reason);
     }
@@ -572,9 +584,6 @@ impl<K, U> TaskInner<K, U> {
     /// Force-publish (status, reason) atomically. Single-owner only.
     #[inline]
     pub fn force_set_state(&self, status: TaskStatus, reason: BlockReason) {
-        if status == TaskStatus::Ready {
-            let _ = self.reserve_waking_if_unowned();
-        }
         self.state.force_set(status, reason);
     }
 
@@ -584,24 +593,9 @@ impl<K, U> TaskInner<K, U> {
         if !current.can_transition_to(target) {
             return false;
         }
-        let reserved_waking = if target == TaskStatus::Ready {
-            self.reserve_waking_if_unowned()
-        } else {
-            false
-        };
-        let ok = self
-            .state
+        self.state
             .try_transition_keep_reason(current, target)
-            .is_ok();
-        if !ok && reserved_waking {
-            let _ = self.sched_placement.compare_exchange(
-                SchedPlacement::Waking.as_u8(),
-                SchedPlacement::None.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-        }
-        ok
+            .is_ok()
     }
 
     /// Atomically transition from `expected` to `target`.
@@ -610,24 +604,9 @@ impl<K, U> TaskInner<K, U> {
         if !expected.can_transition_to(target) {
             return false;
         }
-        let reserved_waking = if target == TaskStatus::Ready {
-            self.reserve_waking_if_unowned()
-        } else {
-            false
-        };
-        let ok = self
-            .state
+        self.state
             .try_transition_keep_reason(expected, target)
-            .is_ok();
-        if !ok && reserved_waking {
-            let _ = self.sched_placement.compare_exchange(
-                SchedPlacement::Waking.as_u8(),
-                SchedPlacement::None.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-        }
-        ok
+            .is_ok()
     }
 
     /// Block from a specific expected state, stamping the block reason
@@ -804,6 +783,9 @@ impl<K, U> crate::task::LinkProvider<RemoteWakeRole> for TaskInner<K, U> {
 impl<K, U> crate::task::TaskOps for TaskInner<K, U> {
     #[inline]
     fn handle_mark_ready(&self) {
+        if self.sched_placement_is_unowned() {
+            let _ = self.reserve_waking();
+        }
         self.set_status(slopos_abi::task::TaskStatus::Ready);
     }
     #[inline]
@@ -832,9 +814,18 @@ impl<K, U> crate::task::TaskOps for TaskInner<K, U> {
     }
     #[inline]
     fn handle_try_cas_running(&self) -> bool {
-        self.try_transition_from(
+        let reserved_waking = if self.sched_placement_is_unowned() {
+            self.reserve_waking()
+        } else {
+            false
+        };
+        let ok = self.try_transition_from(
             slopos_abi::task::TaskStatus::Ready,
             slopos_abi::task::TaskStatus::Running,
-        )
+        );
+        if !ok && reserved_waking {
+            self.release_waking_reservation();
+        }
+        ok
     }
 }

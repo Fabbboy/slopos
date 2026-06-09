@@ -88,8 +88,13 @@ define_syscall!(syscall_input_poll_batch
             break;
         }
         let src_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes(&scratch[..count]);
+        let byte_offset = total.checked_mul(EVENT_SIZE).ok_or(Errno::EFAULT)? as u64;
+        let dst = events_out
+            .as_u64()
+            .checked_add(byte_offset)
+            .ok_or(Errno::EFAULT)?;
         let user_out = MmUserBytes::try_new(
-            events_out.as_u64() + (total * EVENT_SIZE) as u64,
+            dst,
             src_bytes.len(),
         )
         .map_err(|_| Errno::EFAULT)?;

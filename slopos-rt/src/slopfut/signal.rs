@@ -1,9 +1,13 @@
 //! Async signal handling via signalfd — signals delivered as in-band ring
 //! events, never as an out-of-band `EINTR` (Phase 1).
 
-use slopos_abi::signal::{SIGINT, sig_bit};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use slopos_abi::signal::{NSIG, SIGINT, sig_bit};
 
 use crate::sys::signalfd::{block_signals, signalfd, unblock_signals};
+
+static SIGNAL_BLOCK_REFS: [AtomicUsize; NSIG] = [const { AtomicUsize::new(0) }; NSIG];
 
 /// Awaits delivery of signals in a mask via a signalfd. The signals are
 /// blocked on construction so they queue (drainable) instead of interrupting
@@ -13,8 +17,10 @@ use crate::sys::signalfd::{block_signals, signalfd, unblock_signals};
 /// masked for the rest of the process, or for children forked afterwards.
 pub struct SignalListener {
     fd: i32,
-    /// Bits `new()` added to the process mask; `Drop` removes exactly these.
-    newly_blocked: u64,
+    /// Bits whose listener reference this instance owns.
+    owned_mask: u64,
+    /// Owned bits this instance caused to become blocked at the process mask.
+    unblock_on_drop: u64,
 }
 
 impl SignalListener {
@@ -24,18 +30,38 @@ impl SignalListener {
     /// blocked), so the signals keep their normal delivery instead of
     /// queueing forever with no fd to drain them.
     pub fn new(mask: u64) -> Option<Self> {
-        let newly_blocked = match block_signals(mask) {
-            Ok(old) => mask & !old,
-            Err(_) => 0,
+        let mut owned_mask = 0u64;
+        let mut to_block = 0u64;
+        for_each_signal_bit(mask, |idx, bit| {
+            owned_mask |= bit;
+            if SIGNAL_BLOCK_REFS[idx].fetch_add(1, Ordering::AcqRel) == 0 {
+                to_block |= bit;
+            }
+        });
+
+        let old_blocked = if to_block == 0 {
+            0
+        } else {
+            match block_signals(to_block) {
+                Ok(old) => old,
+                Err(_) => {
+                    release_signal_refs(owned_mask, 0);
+                    return None;
+                }
+            }
         };
+        let unblock_on_drop = to_block & !old_blocked;
+
         let fd = signalfd(mask, 0);
         if fd < 0 {
-            if newly_blocked != 0 {
-                let _ = unblock_signals(newly_blocked);
-            }
+            release_signal_refs(owned_mask, unblock_on_drop);
             return None;
         }
-        Some(Self { fd, newly_blocked })
+        Some(Self {
+            fd,
+            owned_mask,
+            unblock_on_drop,
+        })
     }
 
     /// Await the next signal; resolves to its number (1-based), or 0 on error.
@@ -56,9 +82,48 @@ impl Drop for SignalListener {
         // normal delivery path (handler or default) instead of being stranded
         // behind a mask with no fd left to drain it.
         let _ = slopos_slibc::ffi::close(self.fd);
-        if self.newly_blocked != 0 {
-            let _ = unblock_signals(self.newly_blocked);
+        release_signal_refs(self.owned_mask, self.unblock_on_drop);
+    }
+}
+
+fn for_each_signal_bit(mut mask: u64, mut f: impl FnMut(usize, u64)) {
+    mask &= if NSIG >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << NSIG) - 1
+    };
+    while mask != 0 {
+        let bit_index = mask.trailing_zeros() as usize;
+        let bit = 1u64 << bit_index;
+        f(bit_index, bit);
+        mask &= !bit;
+    }
+}
+
+fn release_signal_refs(mask: u64, unblock_mask: u64) {
+    let mut to_unblock = 0u64;
+    for_each_signal_bit(mask, |idx, bit| {
+        let counter = &SIGNAL_BLOCK_REFS[idx];
+        let mut current = counter.load(Ordering::Acquire);
+        while current != 0 {
+            match counter.compare_exchange(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(prev) => {
+                    if prev == 1 && (unblock_mask & bit) != 0 {
+                        to_unblock |= bit;
+                    }
+                    break;
+                }
+                Err(next) => current = next,
+            }
         }
+    });
+    if to_unblock != 0 {
+        let _ = unblock_signals(to_unblock);
     }
 }
 

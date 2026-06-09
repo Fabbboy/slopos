@@ -284,6 +284,9 @@ impl PriorityRunQueue {
     }
 
     pub fn enqueue_local(&self, task: *mut Task) -> i32 {
+        if task.is_null() {
+            return -1;
+        }
         let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
             SchedPlacement::Waking
         } else {
@@ -504,6 +507,9 @@ impl PriorityRunQueue {
     /// This is a lock-free MPSC (multi-producer single-consumer) push.
     /// Can be called from ANY CPU safely.
     pub fn push_remote_wake(&self, task: *mut Task) {
+        if task.is_null() {
+            return;
+        }
         let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
             SchedPlacement::Waking
         } else {

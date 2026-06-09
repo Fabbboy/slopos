@@ -651,8 +651,16 @@ impl LineDisc {
 
         let iflag = self.termios.input_flags();
         let lflag = self.termios.local_flags();
-        let Some(c) = self.process_iflag(byte, iflag) else {
-            return false;
+        let c = if byte == 0x00 && iflag.contains(InputFlags::BRKINT) {
+            if iflag.contains(InputFlags::IGNBRK) {
+                return false;
+            }
+            self.cc(CcIndex::Vintr)
+        } else {
+            let Some(c) = self.process_iflag(byte, iflag) else {
+                return false;
+            };
+            c
         };
 
         if lflag.contains(LocalFlags::ISIG)
