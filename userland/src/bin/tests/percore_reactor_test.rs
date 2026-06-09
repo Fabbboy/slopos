@@ -73,8 +73,8 @@ fn test_percore_roundtrip() -> bool {
         // Bootstrap: each worker registers its work-sender here once its own
         // reactor has armed the work channel. Main spins (yielding) until all
         // are present — bootstrap-only thread coordination, not the event loop.
-        let work_senders: std::sync::Arc<Mutex<Vec<cross_core::Sender<WorkMsg>>>> =
-            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let work_senders: std::sync::Arc<Mutex<Vec<Option<cross_core::Sender<WorkMsg>>>>> =
+            std::sync::Arc::new(Mutex::new((0..workers).map(|_| None).collect()));
         let ready = std::sync::Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::new();
@@ -102,8 +102,9 @@ fn test_percore_roundtrip() -> bool {
                 };
                 slopfut::block_on(ring, async move {
                     let (work_tx, mut work_rx) = cross_core::channel::<WorkMsg>();
-                    // Publish this worker's sender, then announce readiness.
-                    work_senders.lock().unwrap().push(work_tx);
+                    // Publish this worker's sender in worker-index order, then
+                    // announce readiness. Thread startup order is nondeterministic.
+                    work_senders.lock().unwrap()[worker_idx] = Some(work_tx);
                     ready.fetch_add(1, Ordering::Release);
 
                     // The first item carries this worker's pinned CPU so the
@@ -137,8 +138,17 @@ fn test_percore_roundtrip() -> bool {
         while ready.load(Ordering::Acquire) < workers {
             std::thread::yield_now();
         }
-        let senders: Vec<cross_core::Sender<WorkMsg>> =
-            core::mem::take(&mut *work_senders.lock().unwrap());
+        let senders: Vec<cross_core::Sender<WorkMsg>> = {
+            let mut slots = work_senders.lock().unwrap();
+            let mut senders = Vec::with_capacity(workers);
+            for slot in slots.iter_mut() {
+                let Some(sender) = slot.take() else {
+                    return false;
+                };
+                senders.push(sender);
+            }
+            senders
+        };
 
         // Producer: fan TOTAL_ITEMS round-robin across the workers.
         for index in 0..TOTAL_ITEMS {
