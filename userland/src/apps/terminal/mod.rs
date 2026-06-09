@@ -296,10 +296,13 @@ async fn event_loop(
                 CompositorEvent::Key(ascii, scancode) => {
                     match input::encode_key(ascii, scancode, mods) {
                         KeyAction::ToMaster(bytes) => {
+                            let action = bytes.as_bytes().to_vec();
                             if is_priority_keyboard_control(bytes.as_bytes()) {
-                                pending_writes.write_priority(master_fd, bytes.as_bytes());
-                            } else {
-                                pending_writes.enqueue_back(bytes.as_bytes());
+                                if !pending_writes.write_priority_action(master_fd, action) {
+                                    // Drop the whole control action rather than truncating it.
+                                }
+                            } else if !pending_writes.enqueue_action_back(action) {
+                                // Drop the whole key action rather than truncating it.
                             }
                             // Any keypress cancels a scrollback view.
                             if grid.viewing_history() {
@@ -444,51 +447,81 @@ async fn event_loop(
     }
 }
 
+struct QueuedWrite {
+    bytes: Vec<u8>,
+    written: usize,
+}
+
 struct MasterWriteQueue {
-    bytes: VecDeque<u8>,
+    actions: VecDeque<QueuedWrite>,
+    queued_bytes: usize,
 }
 
 impl MasterWriteQueue {
     fn new() -> Self {
         Self {
-            bytes: VecDeque::new(),
+            actions: VecDeque::new(),
+            queued_bytes: 0,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.queued_bytes == 0
     }
 
     fn remaining_capacity(&self) -> usize {
-        MASTER_WRITE_QUEUE_CAP.saturating_sub(self.bytes.len())
+        MASTER_WRITE_QUEUE_CAP.saturating_sub(self.queued_bytes)
     }
 
-    fn enqueue_back(&mut self, data: &[u8]) -> usize {
-        let n = data.len().min(self.remaining_capacity());
-        self.bytes.extend(data[..n].iter().copied());
-        n
+    fn enqueue_action_back(&mut self, data: Vec<u8>) -> bool {
+        self.enqueue_action(data, false, 0)
     }
 
-    fn enqueue_front_priority(&mut self, data: &[u8]) {
-        while self.bytes.len().saturating_add(data.len()) > MASTER_WRITE_QUEUE_CAP {
-            let _ = self.bytes.pop_back();
+    fn enqueue_action_front(&mut self, data: Vec<u8>, written: usize) -> bool {
+        self.enqueue_action(data, true, written)
+    }
+
+    fn enqueue_action(&mut self, data: Vec<u8>, front: bool, written: usize) -> bool {
+        if written > data.len() {
+            return false;
         }
-        for &byte in data.iter().rev() {
-            self.bytes.push_front(byte);
+        let remaining = data.len() - written;
+        if remaining == 0 {
+            return true;
         }
+        if remaining > self.remaining_capacity() {
+            return false;
+        }
+        let action = QueuedWrite {
+            bytes: data,
+            written,
+        };
+        if front {
+            self.actions.push_front(action);
+        } else {
+            self.actions.push_back(action);
+        }
+        self.queued_bytes += remaining;
+        true
     }
 
-    fn write_priority(&mut self, fd: i32, data: &[u8]) {
-        match fs::write_slice(fd, data) {
-            Ok(n) if n == data.len() => {}
-            Ok(n) => self.enqueue_front_priority(&data[n..]),
+    fn write_priority_action(&mut self, fd: i32, data: Vec<u8>) -> bool {
+        if data.len() > self.remaining_capacity() {
+            return false;
+        }
+        if !self.is_empty() {
+            return self.enqueue_action_front(data, 0);
+        }
+        match fs::write_slice(fd, &data) {
+            Ok(n) if n == data.len() => true,
+            Ok(n) => self.enqueue_action_front(data, n),
             Err(e) if e == crate::syscall::SyscallError::EAGAIN => {
-                self.enqueue_front_priority(data);
+                self.enqueue_action_front(data, 0)
             }
             Err(e) => {
                 let msg = std::format!("terminal: priority write error {e:?}\n");
                 let _ = tty::write(msg.as_bytes());
-                self.enqueue_front_priority(data);
+                self.enqueue_action_front(data, 0)
             }
         }
     }
@@ -496,27 +529,31 @@ impl MasterWriteQueue {
     fn drain(&mut self, fd: i32, budget: usize) {
         let mut written_total = 0usize;
         loop {
-            let (front, _) = self.bytes.as_slices();
-            if front.is_empty() {
+            let Some(action) = self.actions.front_mut() else {
                 break;
-            }
+            };
             let limit = budget.saturating_sub(written_total);
             if limit == 0 {
                 break;
             }
-            match fs::write_slice(fd, &front[..front.len().min(limit)]) {
+            let remaining = &action.bytes[action.written..];
+            let chunk_len = remaining.len().min(limit);
+            match fs::write_slice(fd, &remaining[..chunk_len]) {
                 Ok(0) => break,
                 Ok(n) => {
                     written_total += n;
-                    for _ in 0..n {
-                        let _ = self.bytes.pop_front();
+                    action.written += n;
+                    self.queued_bytes = self.queued_bytes.saturating_sub(n);
+                    if action.written == action.bytes.len() {
+                        let _ = self.actions.pop_front();
                     }
                 }
                 Err(e) if e == crate::syscall::SyscallError::EAGAIN => break,
                 Err(e) => {
                     let msg = std::format!("terminal: queued write error {e:?}\n");
                     let _ = tty::write(msg.as_bytes());
-                    self.bytes.clear();
+                    self.actions.clear();
+                    self.queued_bytes = 0;
                     break;
                 }
             }
@@ -623,7 +660,7 @@ fn write_paste(
     }
     // Sanitizing never grows the payload (it only drops/normalizes bytes).
     let mut clean = std::vec![0u8; data.len()];
-    let mut n = input::sanitize_paste(data, &mut clean);
+    let n = input::sanitize_paste(data, &mut clean);
     if n == 0 {
         return;
     }
@@ -632,20 +669,20 @@ fn write_paste(
     } else {
         0
     };
-    let capacity = pending_writes.remaining_capacity();
-    if capacity <= markers_len {
+    let action_len = n.saturating_add(markers_len);
+    if action_len == 0 || action_len > pending_writes.remaining_capacity() {
         return;
     }
-    n = n.min(capacity - markers_len);
-    if n == 0 {
-        return;
-    }
+    let mut action = Vec::with_capacity(action_len);
     if bracketed {
-        pending_writes.enqueue_back(b"\x1b[200~");
+        action.extend_from_slice(b"\x1b[200~");
     }
-    pending_writes.enqueue_back(&clean[..n]);
+    action.extend_from_slice(&clean[..n]);
     if bracketed {
-        pending_writes.enqueue_back(b"\x1b[201~");
+        action.extend_from_slice(b"\x1b[201~");
+    }
+    if !pending_writes.enqueue_action_back(action) {
+        // Drop the whole paste action rather than truncating it.
     }
     pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 }

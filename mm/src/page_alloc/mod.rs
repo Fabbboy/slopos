@@ -99,7 +99,10 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
 pub fn __alloc_page_frame_raw(flags: u32) -> PhysAddr {
     let phys = BUDDY_ALLOCATOR.alloc_raw(1, flags);
     if !phys.is_null() {
-        crate::mmu::luf::drain_if_reusing_frame(phys);
+        if !crate::mmu::luf::drain_if_reusing_frame(phys) {
+            BUDDY_ALLOCATOR.quarantine_allocated_phys(phys);
+            return PhysAddr::NULL;
+        }
     }
     phys
 }

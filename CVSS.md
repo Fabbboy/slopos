@@ -25,11 +25,10 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 ### SLOPOS-2026-0006
 - Title: ext2 inode/group descriptor size trust can panic on out-of-bounds slicing
 - Status: open
-- Confidence: 70 (evidence 35, exploitability 15 — depends on whether SlopOS mounts untrusted images, reproducibility 20) — below the 80 threshold for a guaranteed CVSS-scored issue; the score below is an estimate carried from the original triage.
+- Confidence: 70 (evidence 35, exploitability 15 — depends on whether SlopOS mounts untrusted images, reproducibility 20) — below the 80 threshold for a guaranteed CVSS-scored issue.
 - Evidence: untrusted on-disk `inode_size` / derived offsets used in slice indexing without validating `within + size <= block_size`. `fs/src/ext2/ondisk.rs` (`Inode::parse`, `GroupDesc::parse`, `effective_inode_size` clamps `inode_size == 0` up to 128 but does not bound it from above against `block_size`) and the inode-table offset math in `fs/src/ext2/inode.rs` / `fs/src/ext2/mod.rs`.
 - Impact: malformed-image-triggered out-of-bounds slice index. Because `fs/` is `#![forbid(unsafe_code)]`, this is a bounded-slice **panic** (DoS), never memory unsafety/UB.
-- CVSS vector: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H`
-- Base score: `6.1` (Medium)
+- CVSS vector/score: not assigned because confidence is below 80.
 - Remediation (proposed): validate `effective_inode_size() as u32 <= block_size` and bound each `within + size` against the containing block before slicing.
 
 ## Relevant NVD CVE Analogs (fetched)

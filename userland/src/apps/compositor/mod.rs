@@ -312,7 +312,7 @@ impl WindowManager {
                 }
                 InputEventType::PointerButtonPress => {
                     let button = event.data.data0 as u8;
-                    self.input.on_button_press(
+                    let should_forward = self.input.on_button_press(
                         button,
                         fb_width,
                         fb_height,
@@ -322,7 +322,7 @@ impl WindowManager {
                         &self.shelf,
                         proto_box.as_deref_mut(),
                     );
-                    if self.protocol_pointer_focus != 0 {
+                    if should_forward && self.protocol_pointer_focus != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
                             p.send_pointer_button_for_task(
@@ -337,9 +337,10 @@ impl WindowManager {
                 }
                 InputEventType::PointerButtonRelease => {
                     let button = event.data.data0 as u8;
-                    self.input
+                    let should_forward = self
+                        .input
                         .on_button_release(button, proto_box.as_deref_mut());
-                    if self.protocol_pointer_focus != 0 {
+                    if should_forward && self.protocol_pointer_focus != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
                             p.send_pointer_button_for_task(

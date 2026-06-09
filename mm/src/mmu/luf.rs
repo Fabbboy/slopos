@@ -216,9 +216,9 @@ static DRAIN_LOCK: PreemptMutex<()> = PreemptMutex::new((), LOCK_LEVEL_ALLOCATOR
 /// Must not be called from the owning CPU's own ring — the local
 /// self-drain path (`drain_if_reusing_frame`) handles that before we
 /// get here.
-pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
+pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) -> bool {
     if cpu_mask == 0 || phys.is_null() {
-        return;
+        return true;
     }
 
     // Exclude our own CPU — its ring was already scanned synchronously
@@ -231,12 +231,12 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
         cpu_mask
     };
     if remote_mask == 0 {
-        return;
+        return true;
     }
 
     let pending = remote_mask.count_ones();
     if pending == 0 {
-        return;
+        return true;
     }
 
     // Acquire `DRAIN_LOCK` via a try-lock loop that **re-enables IRQs
@@ -329,6 +329,7 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
     const MAX_RESENDS: u64 = 256;
     let mut spin: u64 = 0;
     let mut resends: u64 = 0;
+    let mut drain_ok = true;
     loop {
         let acked = DRAIN_REQUEST.acked_mask.load(Ordering::Acquire);
         if acked & remote_mask == remote_mask {
@@ -346,6 +347,7 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
                     acked,
                     remote_mask
                 );
+                drain_ok = false;
                 break;
             }
             let missing = sendable_mask & !acked;
@@ -368,6 +370,7 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) {
     if !was_enabled {
         slopos_arch::cpu::disable_interrupts();
     }
+    drain_ok
 }
 
 /// Remote IPI handler. Reads the shared drain request, scans this
@@ -531,9 +534,9 @@ pub fn drain_local() {
 ///
 /// Preserves the invariant that no CPU retains a TLB entry pointing
 /// at a frame the allocator has just reassigned.
-pub fn drain_if_reusing_frame(phys: PhysAddr) {
+pub fn drain_if_reusing_frame(phys: PhysAddr) -> bool {
     if phys.is_null() {
-        return;
+        return true;
     }
     let cpu = slopos_arch::pcr::get_current_cpu();
 
@@ -564,8 +567,9 @@ pub fn drain_if_reusing_frame(phys: PhysAddr) {
     // other CPU might still hold a stale translation.
     let remote_mask = nonempty_mask_snapshot();
     if remote_mask != 0 {
-        drain_by_phys_cross_cpu(phys, remote_mask);
+        return drain_by_phys_cross_cpu(phys, remote_mask);
     }
+    true
 }
 
 /// Threshold-drain poll. Safe to call from a timer-tick bottom half.

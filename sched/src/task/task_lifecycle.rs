@@ -1039,6 +1039,8 @@ pub fn task_fork(
     // the child is never visible as Ready with no runqueue/inbox owner.
     if scheduler::publish_new_task(child_task_ptr) != 0 {
         klog_info!("fork: initial runnable publish failed for task {child_task_id}");
+        let _ = task_terminate(child_task_id);
+        return INVALID_TASK_ID;
     }
 
     child_task_id
@@ -1269,6 +1271,8 @@ pub fn task_clone(
     // the child is never visible as Ready with no runqueue/inbox owner.
     if scheduler::publish_new_task(child_task_ptr) != 0 {
         klog_info!("clone: initial runnable publish failed for task {child_task_id}");
+        let _ = task_terminate(child_task_id);
+        return Err(ERRNO_EAGAIN);
     }
 
     Ok(child_task_id)

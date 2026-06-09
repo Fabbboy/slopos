@@ -23,7 +23,7 @@ The READY bit alone is never a scheduling proof. `SchedPlacement` is the schedul
 
 ## Rust/framekernel encoding
 
-The kernel crates remain `#![forbid(unsafe_code)]`; the trusted OSTD crate owns the unsafe intrusive-list machinery. We use that to encode membership roles:
+The kernel crates remain `#![forbid(unsafe_code)]` outside the documented exemptions (`kernel/src/main.rs` and `hermetic/src/macros.rs`); the trusted OSTD crate owns the unsafe intrusive-list machinery. We use that to encode membership roles:
 
 - `ready_link: Link<Task, ReadyQueueRole>` — ready-queue membership.
 - `remote_inbox_link: Link<Task, RemoteWakeRole>` — remote-wake inbox membership.

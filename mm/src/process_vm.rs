@@ -3,7 +3,7 @@ use core::ptr;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
@@ -171,14 +171,18 @@ fn map_user_range(
         let phys = alloc_kernel_page();
         if phys.is_null() {
             klog_info!("map_user_range: Physical allocation failed");
-            rollback_range(vm_space, current, start_addr, &mut mapped);
+            if let Err(err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
+                klog_info!("map_user_range: rollback failed: {:?}", err);
+            }
             write_optional_u32(pages_mapped_out, 0);
             return -1;
         }
         if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(current), phys, map_flags) {
             klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
             free_page_frame(phys);
-            rollback_range(vm_space, current, start_addr, &mut mapped);
+            if let Err(rollback_err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
+                klog_info!("map_user_range: rollback failed: {:?}", rollback_err);
+            }
             write_optional_u32(pages_mapped_out, 0);
             return -1;
         }
@@ -237,24 +241,33 @@ fn rollback_range(
     mut current: u64,
     start_addr: u64,
     mapped: &mut u32,
-) {
+) -> Result<(), MapError> {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
-        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(current));
+        ostd_unmap_4kb_user(vm_space, VirtAddr::new(current))?;
         *mapped -= 1;
     }
     let _ = start_addr;
+    Ok(())
 }
 
-fn unmap_user_range(vm_space: &mut KArc<VmSpace>, start_addr: u64, end_addr: u64) {
+fn unmap_user_range(
+    vm_space: &mut KArc<VmSpace>,
+    start_addr: u64,
+    end_addr: u64,
+) -> Result<u32, MapError> {
     if end_addr <= start_addr {
-        return;
+        return Ok(0);
     }
     let mut addr = start_addr;
+    let mut unmapped = 0u32;
     while addr < end_addr {
-        let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr));
+        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
+            unmapped += 1;
+        }
         addr += PAGE_SIZE_4KB;
     }
+    Ok(unmapped)
 }
 
 /// Lock-free read of a naturally-aligned field of `ProcessVm`.
@@ -607,9 +620,13 @@ fn prot_to_region(prot: u64) -> VmaRegion {
     }
 }
 
-fn unmap_and_free_range_inner(inner: &mut ProcessVm, start: u64, end: u64) -> u32 {
+fn unmap_and_free_range_inner(
+    inner: &mut ProcessVm,
+    start: u64,
+    end: u64,
+) -> Result<u32, MapError> {
     if !vma_range_valid(start, end) {
-        return 0;
+        return Ok(0);
     }
     let vm_space = inner
         .vm_space
@@ -618,13 +635,12 @@ fn unmap_and_free_range_inner(inner: &mut ProcessVm, start: u64, end: u64) -> u3
     let mut freed = 0u32;
     let mut addr = start;
     while addr < end {
-        match ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
-            Ok(true) => freed += 1,
-            _ => {}
+        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
+            freed += 1;
         }
         addr += PAGE_SIZE_4KB;
     }
-    freed
+    Ok(freed)
 }
 
 /// Tear down the per-process VM bookkeeping: flush every CPU's TLB
@@ -654,20 +670,25 @@ fn teardown_inner_mappings(inner: &mut ProcessVm) {
 /// Unmap and free pages in a range. The OSTD `cursor.unmap` returns a
 /// `UFrame` whose Drop decrements META_SLOTS — when the count reaches
 /// zero the registered allocator deallocs the underlying buddy frame.
-fn unmap_and_free_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, end: u64) -> u32 {
+fn unmap_and_free_range_dir(
+    vm_space: &mut KArc<VmSpace>,
+    pid: u32,
+    start: u64,
+    end: u64,
+) -> Result<u32, MapError> {
     if !vma_range_valid(start, end) {
-        return 0;
+        return Ok(0);
     }
     let mut freed = 0u32;
     let mut addr = start;
     while addr < end {
-        if let Ok(true) = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
+        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
             freed += 1;
         }
         addr += PAGE_SIZE_4KB;
     }
     let _ = pid;
-    freed
+    Ok(freed)
 }
 
 /// Unmap a SlopRing mapping range. Each page's PTE holds an
@@ -677,16 +698,19 @@ fn unmap_and_free_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, 
 /// neither "free" (the ring object owns the lifecycle) nor "nofree"
 /// (the PTE genuinely held a ref that must be released). Returns the
 /// number of pages unmapped.
-fn unmap_ring_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, end: u64) -> u32 {
+fn unmap_ring_range_dir(
+    vm_space: &mut KArc<VmSpace>,
+    pid: u32,
+    start: u64,
+    end: u64,
+) -> Result<u32, MapError> {
     if !vma_range_valid(start, end) {
-        return 0;
+        return Ok(0);
     }
     let mut unmapped = 0u32;
     let mut addr = start;
     while addr < end {
-        if let Ok(true) =
-            crate::dual_paging::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr))
-        {
+        if crate::dual_paging::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr))? {
             unmapped += 1;
         }
         addr += PAGE_SIZE_4KB;
@@ -699,20 +723,25 @@ fn unmap_ring_range_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, end:
     if unmapped > 0 && pid != INVALID_PROCESS_ID {
         tlb::flush_all_for_process(pid);
     }
-    unmapped
+    Ok(unmapped)
 }
 
 /// Unmap pages WITHOUT freeing the physical frames. Used for shared
 /// memfd mappings where the memfd object owns the page lifecycle.
 /// Returns the number of pages unmapped (for total_pages accounting).
-fn unmap_range_nofree_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, end: u64) -> u32 {
+fn unmap_range_nofree_dir(
+    vm_space: &mut KArc<VmSpace>,
+    pid: u32,
+    start: u64,
+    end: u64,
+) -> Result<u32, MapError> {
     if !vma_range_valid(start, end) {
-        return 0;
+        return Ok(0);
     }
     let mut unmapped = 0u32;
     let mut addr = start;
     while addr < end {
-        if let Ok(true) = ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
+        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
             unmapped += 1;
         }
         addr += PAGE_SIZE_4KB;
@@ -723,7 +752,36 @@ fn unmap_range_nofree_dir(vm_space: &mut KArc<VmSpace>, pid: u32, start: u64, en
     if unmapped > 0 && pid != INVALID_PROCESS_ID {
         tlb::flush_all_for_process(pid);
     }
-    unmapped
+    Ok(unmapped)
+}
+
+type VmaOverlap = (u64, u64, VmaRegion);
+
+fn collect_overlapping_vmas(inner: &ProcessVm, start: u64, end: u64) -> KVec<VmaOverlap> {
+    KVec::from_iter_fallible(
+        inner
+            .vma_map
+            .iter()
+            .filter(move |(s, e, _)| *s < end && *e > start)
+            .map(move |(s, e, region)| (s.max(start), e.min(end), region.clone())),
+    )
+    .expect("collect_overlapping_vmas: overlap alloc")
+}
+
+fn unmap_region_range_dir(
+    vm_space: &mut KArc<VmSpace>,
+    pid: u32,
+    start: u64,
+    end: u64,
+    region: &VmaRegion,
+) -> Result<u32, MapError> {
+    if region.is_ring() {
+        unmap_ring_range_dir(vm_space, pid, start, end)
+    } else if region.is_shared() {
+        unmap_range_nofree_dir(vm_space, pid, start, end)
+    } else {
+        unmap_and_free_range_dir(vm_space, pid, start, end)
+    }
 }
 
 // ELF structures for relocation parsing.
@@ -1144,7 +1202,8 @@ fn load_segments_and_tls(
             .vm_space
             .as_mut()
             .expect("load_segments_and_tls: vm_space present for live pid");
-        unmap_existing_code_region(page_dir, vm_space_ref, code_base);
+        unmap_existing_code_region(page_dir, vm_space_ref, code_base)
+            .map_err(|_| ElfError::NullPointer)?;
     }
 
     let mut section_mappings = slopos_ostd::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
@@ -1270,13 +1329,14 @@ fn unmap_existing_code_region(
     page_dir: *mut ProcessPageDir,
     vm_space: &mut KArc<VmSpace>,
     code_base: u64,
-) {
+) -> Result<(), MapError> {
     // Unmap exactly the code region [code_start, data_start).  The old
     // implementation used wrong arithmetic that extended 1 MB below and
     // above the actual region, potentially unmapping unrelated pages.
     let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
-    unmap_user_range(vm_space, code_base, data_start);
+    unmap_user_range(vm_space, code_base, data_start)?;
     let _ = page_dir;
+    Ok(())
 }
 
 /// Read a `u8` from the user-VA space identified by `vm_space`.
@@ -1389,12 +1449,13 @@ fn load_segment_pages(
         let existing_phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
         let phys = if !existing_phys.is_null() {
             if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
-                let _ = ostd_mark_range_user_4kb(
+                ostd_mark_range_user_4kb(
                     vm_space,
                     VirtAddr::new(dst),
                     VirtAddr::new(dst + PAGE_SIZE_4KB),
                     true,
-                );
+                )
+                .map_err(|_| ElfError::NullPointer)?;
             }
             existing_phys
         } else {
@@ -1840,7 +1901,13 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
         return -1;
     }
 
-    let freed = unmap_and_free_range_inner(&mut *proc, start, end);
+    let freed = match unmap_and_free_range_inner(&mut *proc, start, end) {
+        Ok(freed) => freed,
+        Err(err) => {
+            klog_info!("process_vm_free: unmap failed: {:?}", err);
+            return -1;
+        }
+    };
 
     proc.vma_map
         .remove_range(start, end, |_overlap_start, _overlap_end, _region| {
@@ -1949,7 +2016,10 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
         .vm_space
         .as_mut()
         .expect("process_vm_reset_stack: vm_space present for live pid");
-    unmap_user_range(vm_space_ref, stack_start, stack_end);
+    if let Err(err) = unmap_user_range(vm_space_ref, stack_start, stack_end) {
+        klog_info!("process_vm_reset_stack: unmap failed: {:?}", err);
+        return -1;
+    }
 
     let stack_page_flags = VmaRegion {
         protection: Protection::RW,
@@ -2044,7 +2114,13 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         let start_addr = aligned_brk;
         let end_addr = proc.heap_end;
 
-        let freed = unmap_and_free_range_inner(&mut *proc, start_addr, end_addr);
+        let freed = match unmap_and_free_range_inner(&mut *proc, start_addr, end_addr) {
+            Ok(freed) => freed,
+            Err(err) => {
+                klog_info!("process_vm_brk: shrink unmap failed: {:?}", err);
+                return 0;
+            }
+        };
         proc.vma_map
             .remove_range(start_addr, end_addr, |_, _, _| {});
 
@@ -2179,7 +2255,13 @@ pub fn process_vm_map_ring(process_id: u32, paddrs: &[PhysAddr]) -> u64 {
             klog_info!("process_vm_map_ring: cursor map failed: {:?}", err);
             for j in 0..i {
                 let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
-                let _ = ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(rv));
+                if let Err(rollback_err) = ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(rv)) {
+                    klog_info!(
+                        "process_vm_map_ring: rollback unmap failed: {:?}",
+                        rollback_err
+                    );
+                    return 0;
+                }
             }
             return 0;
         }
@@ -2291,19 +2373,34 @@ fn process_vm_mmap_inner(
             .take()
             .expect("process_vm_mmap MAP_FIXED: vm_space present for live pid");
 
-        // Remove all overlapping VMAs in the fixed range.
+        let overlaps = collect_overlapping_vmas(inner, addr_hint, end_addr);
+        let mut total_freed = 0u32;
+        for (overlap_start, overlap_end, region) in overlaps.iter() {
+            let freed = match unmap_region_range_dir(
+                &mut vm_space_taken,
+                pid,
+                *overlap_start,
+                *overlap_end,
+                region,
+            ) {
+                Ok(freed) => freed,
+                Err(err) => {
+                    klog_info!("process_vm_mmap MAP_FIXED: overlap unmap failed: {:?}", err);
+                    inner.vm_space = Some(vm_space_taken);
+                    return 0;
+                }
+            };
+            total_freed = total_freed.saturating_add(freed);
+            if region.is_shared() && !region.memfd_handle().is_none() {
+                crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
+            }
+        }
+
+        // Remove all overlapping VMAs in the fixed range after OSTD unmaps succeeded.
         inner
             .vma_map
-            .remove_range(addr_hint, end_addr, |overlap_start, overlap_end, region| {
-                let freed = if region.is_ring() {
-                    unmap_ring_range_dir(&mut vm_space_taken, pid, overlap_start, overlap_end)
-                } else if region.is_shared() {
-                    unmap_range_nofree_dir(&mut vm_space_taken, pid, overlap_start, overlap_end)
-                } else {
-                    unmap_and_free_range_dir(&mut vm_space_taken, pid, overlap_start, overlap_end)
-                };
-                inner.total_pages = inner.total_pages.saturating_sub(freed);
-            });
+            .remove_range(addr_hint, end_addr, |_, _, _| {});
+        inner.total_pages = inner.total_pages.saturating_sub(total_freed);
 
         inner.vm_space = Some(vm_space_taken);
 
@@ -2361,7 +2458,15 @@ fn process_vm_mmap_inner(
                 klog_info!("process_vm_mmap shared: OSTD cursor map failed: {:?}", err);
                 for j in 0..i {
                     let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
-                    let _ = ostd_unmap_4kb_user(vm_space_for_shared, VirtAddr::new(rv));
+                    if let Err(rollback_err) =
+                        ostd_unmap_4kb_user(vm_space_for_shared, VirtAddr::new(rv))
+                    {
+                        klog_info!(
+                            "process_vm_mmap shared: rollback unmap failed: {:?}",
+                            rollback_err
+                        );
+                        return 0;
+                    }
                 }
                 return 0;
             }
@@ -2434,32 +2539,31 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
         .take()
         .expect("process_vm_munmap: vm_space present for live pid");
 
-    // Remove range, unmapping pages and handling shared memfd bookkeeping.
+    // Unmap first, then remove VMA metadata only after OSTD accepted every page.
     let mut total_freed = 0u32;
-    inner
-        .vma_map
-        .remove_range(addr, end, |overlap_start, overlap_end, region| {
-            let freed = if region.is_ring() {
-                // SlopRing: release the PTE's RingMeta ref; the ring
-                // object retains its own ref so the frame survives.
-                unmap_ring_range_dir(&mut vm_space_taken, process_id, overlap_start, overlap_end)
-            } else if region.is_shared() {
-                // Shared: unmap PTEs but do NOT free physical pages
-                unmap_range_nofree_dir(&mut vm_space_taken, process_id, overlap_start, overlap_end)
-            } else {
-                // Anonymous: unmap and free as before
-                unmap_and_free_range_dir(
-                    &mut vm_space_taken,
-                    process_id,
-                    overlap_start,
-                    overlap_end,
-                )
-            };
-            total_freed += freed;
-            if region.is_shared() && !region.memfd_handle().is_none() {
-                crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
+    let overlaps = collect_overlapping_vmas(inner, addr, end);
+    for (overlap_start, overlap_end, region) in overlaps.iter() {
+        let freed = match unmap_region_range_dir(
+            &mut vm_space_taken,
+            process_id,
+            *overlap_start,
+            *overlap_end,
+            region,
+        ) {
+            Ok(freed) => freed,
+            Err(err) => {
+                klog_info!("process_vm_munmap: unmap failed: {:?}", err);
+                inner.vm_space = Some(vm_space_taken);
+                return -1;
             }
-        });
+        };
+        total_freed = total_freed.saturating_add(freed);
+        if region.is_shared() && !region.memfd_handle().is_none() {
+            crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
+        }
+    }
+
+    inner.vma_map.remove_range(addr, end, |_, _, _| {});
 
     inner.vm_space = Some(vm_space_taken);
     inner.total_pages = inner.total_pages.saturating_sub(total_freed);
@@ -2499,28 +2603,36 @@ pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -
     }
 
     let new_prot = prot_to_region(prot);
+    let old_protection;
+    let new_page_flags;
+    {
+        let (_vma_start, _vma_end, region) = match proc.vma_map.find_covering_mut(addr, end) {
+            Some(v) => v,
+            None => {
+                klog_info!("process_vm_mprotect: Range not covered by VMA");
+                return -1;
+            }
+        };
 
-    let (_vma_start, _vma_end, region) = match proc.vma_map.find_covering_mut(addr, end) {
-        Some(v) => v,
-        None => {
-            klog_info!("process_vm_mprotect: Range not covered by VMA");
-            return -1;
-        }
-    };
-
-    // Update the region's protection bits, preserving other fields.
-    region.protection = new_prot.protection;
-
-    // Convert updated region to page flags for the PTE update.
-    let new_page_flags = region.to_page_flags();
+        old_protection = region.protection;
+        region.protection = new_prot.protection;
+        new_page_flags = region.to_page_flags();
+    }
 
     if let Some(vm_space) = proc.vm_space.as_mut() {
-        let _ = ostd_protect_range_4kb(
+        if let Err(err) = ostd_protect_range_4kb(
             vm_space,
             VirtAddr::new(addr),
             VirtAddr::new(end),
             new_page_flags,
-        );
+        ) {
+            klog_info!("process_vm_mprotect: OSTD protect failed: {:?}", err);
+            if let Some((_vma_start, _vma_end, region)) = proc.vma_map.find_covering_mut(addr, end)
+            {
+                region.protection = old_protection;
+            }
+            return -1;
+        }
     }
 
     0
@@ -2599,7 +2711,13 @@ fn clone_cow_snapshot_parent(
                             && flags.contains(PageFlags::USER)
                             && flags.contains(PageFlags::WRITABLE)
                         {
-                            let _ = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr);
+                            if let Err(err) = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr) {
+                                klog_info!(
+                                    "process_vm_clone_cow: parent COW mark failed: {:?}",
+                                    err
+                                );
+                                return None;
+                            }
                         }
                     }
                 }

@@ -86,7 +86,11 @@ fn resolve_multi_ref(
     // this was the last reference the OSTD allocator path frees it,
     // otherwise other processes still hold their own mappings) and
     // install the freshly-allocated copy.
-    let _ = ostd_unmap_4kb_user(vm_space, aligned_vaddr);
+    if let Err(err) = ostd_unmap_4kb_user(vm_space, aligned_vaddr) {
+        slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD unmap failed: {:?}", err);
+        free_page_frame(new_phys);
+        return Err(MmError::MappingFailed);
+    }
     if let Err(err) = ostd_map_4kb_user(vm_space, aligned_vaddr, new_phys, new_flags.bits()) {
         slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD remap failed: {:?}", err);
         free_page_frame(new_phys);

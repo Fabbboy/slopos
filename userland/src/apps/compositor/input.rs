@@ -307,16 +307,19 @@ impl InputHandler {
 
     /// Handle one left-button release event in stream order: end any
     /// active drag/resize grab at the position accumulated so far.
-    pub fn on_button_release(&mut self, button: u8, proto: Option<&mut ProtocolBridge>) {
+    pub fn on_button_release(&mut self, button: u8, proto: Option<&mut ProtocolBridge>) -> bool {
         self.mouse_buttons &= !button;
         if button & 0x01 == 0 {
-            return;
+            return true;
         }
         if self.dragging {
             self.stop_drag();
+            return false;
         } else if self.resizing {
             self.stop_resize(proto);
+            return false;
         }
+        true
     }
 
     /// Handle one button-press event in stream order, hit-testing at the
@@ -339,10 +342,10 @@ impl InputHandler {
         window_count: u32,
         shelf: &LauncherShelf,
         mut proto: Option<&mut ProtocolBridge>,
-    ) {
+    ) -> bool {
         self.mouse_buttons |= button;
         if button & 0x01 == 0 {
-            return;
+            return true;
         }
 
         // A press while a grab is active means the matching release event
@@ -358,13 +361,13 @@ impl InputHandler {
 
         // 1. System bar -- consume click, no action
         if SystemBar::hit_test(self.mouse_x, self.mouse_y) {
-            return;
+            return false;
         }
 
         // 2. Shelf click
         if let Some(idx) = shelf.hit_test(self.mouse_x, self.mouse_y) {
             self.handle_shelf_click(idx, shelf, windows, window_count, &mut proto);
-            return;
+            return false;
         }
 
         // 3-4. Window decorations and content (top-to-bottom z-order)
@@ -390,7 +393,7 @@ impl InputHandler {
                         p.raise_window(window.task_id);
                     }
                     self.set_focused(window.task_id);
-                    return;
+                    return false;
                 }
             }
 
@@ -477,7 +480,7 @@ impl InputHandler {
                     }
                     _ => {}
                 }
-                return;
+                return false;
             }
 
             // 4. Title bar (drag)
@@ -493,7 +496,7 @@ impl InputHandler {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                return;
+                return false;
             }
 
             // 5. Content area
@@ -506,19 +509,20 @@ impl InputHandler {
                         p.raise_window(window.task_id);
                     }
                     self.set_focused(window.task_id);
-                    return;
+                    return false;
                 }
                 if let Some(ref mut p) = proto {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                return;
+                return true;
             }
         }
 
         // 6. Desktop background — keyboard focus is sticky (stays on the
         // last focused window). Clearing it here created an input black
         // hole: every keystroke was dropped until the next window click.
+        false
     }
 
     pub fn process_pending_close_requests(

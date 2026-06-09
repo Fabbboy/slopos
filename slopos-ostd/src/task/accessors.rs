@@ -1034,6 +1034,9 @@ pub fn task_signal_post<K, U>(task: *const TaskInner<K, U>, signum: u8) -> bool 
     if task.is_null() || bit == 0 {
         return false;
     }
+    if task_signal_pending(task) & bit != 0 {
+        return false;
+    }
     let blocked = task_signal_blocked(task).unwrap_or(0);
     if (blocked & bit) == 0 {
         let handler = task_signal_handler(task, (signum - 1) as usize);

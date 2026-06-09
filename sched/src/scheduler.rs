@@ -866,6 +866,7 @@ pub fn publish_new_task(task: *mut Task) -> c_int {
             return if task_has_durable_owner(task) { 0 } else { -1 };
         }
     }
+    let previous_status = task_status(task).unwrap_or(TaskStatus::Blocked);
     task_set_status(task, TaskStatus::Ready);
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
     if rc != 0 {
@@ -874,6 +875,7 @@ pub fn publish_new_task(task: *mut Task) -> c_int {
             SchedPlacement::Waking,
             SchedPlacement::None,
         );
+        task_set_status(task, previous_status);
     }
     rc
 }

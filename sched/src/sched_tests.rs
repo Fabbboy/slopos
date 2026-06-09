@@ -73,7 +73,7 @@ fn is_published_placement(placement: SchedPlacement) -> bool {
     )
 }
 
-pub fn test_raw_ready_store_reserves_waking_placement() -> TestResult {
+pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
@@ -108,15 +108,25 @@ pub fn test_raw_ready_store_reserves_waking_placement() -> TestResult {
         klog_info!("SCHED_TEST: raw Ready store did not publish Ready status");
         return TestResult::Fail;
     }
-    if task_sched_placement_load(task) != SchedPlacement::Waking {
+    if task_sched_placement_load(task) != SchedPlacement::None {
         klog_info!(
-            "SCHED_TEST: raw Ready store placement {:?}, expected Waking",
+            "SCHED_TEST: raw Ready store placement {:?}, expected None",
             task_sched_placement_load(task)
         );
         return TestResult::Fail;
     }
 
-    let _ = scheduler::schedule_task(task);
+    if scheduler::schedule_task(task) != 0 {
+        klog_info!("SCHED_TEST: explicit Ready publish failed");
+        return TestResult::Fail;
+    }
+    if !is_published_placement(task_sched_placement_load(task)) {
+        klog_info!(
+            "SCHED_TEST: explicit Ready publish left placement {:?}",
+            task_sched_placement_load(task)
+        );
+        return TestResult::Fail;
+    }
     let _ = task_terminate(task_id);
     TestResult::Pass
 }
@@ -2065,7 +2075,11 @@ pub fn test_many_same_priority_tasks() -> TestResult {
         if *id != INVALID_TASK_ID {
             let mut ptr: *mut Task = ptr::null_mut();
             if task_get_info(*id, &mut ptr) == 0 && !ptr.is_null() {
-                let _ = make_task_ready(*id);
+                assert!(
+                    make_task_ready(*id),
+                    "make_task_ready failed for id {:?}",
+                    id
+                );
                 schedule_task(ptr);
             }
         }
@@ -2115,7 +2129,11 @@ pub fn test_interleaved_operations() -> TestResult {
         let mut ptr1: *mut Task = ptr::null_mut();
         task_get_info(id1, &mut ptr1);
         if !ptr1.is_null() {
-            let _ = make_task_ready(id1);
+            assert!(
+                make_task_ready(id1),
+                "make_task_ready failed for id {:?}",
+                id1
+            );
             schedule_task(ptr1);
         }
 
@@ -2126,7 +2144,11 @@ pub fn test_interleaved_operations() -> TestResult {
         let mut ptr2: *mut Task = ptr::null_mut();
         task_get_info(id2, &mut ptr2);
         if !ptr2.is_null() {
-            let _ = make_task_ready(id2);
+            assert!(
+                make_task_ready(id2),
+                "make_task_ready failed for id {:?}",
+                id2
+            );
             schedule_task(ptr2);
         }
 
@@ -2675,7 +2697,13 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
             if task_ptr.is_null() {
                 return TestResult::Fail;
             }
-            let _ = make_task_ready(id);
+            if task_status(task_ptr) != Some(TaskStatus::Ready) {
+                assert!(
+                    make_task_ready(id),
+                    "make_task_ready failed for id {:?}",
+                    id
+                );
+            }
             let _ = schedule_task(task_ptr);
         }
         scheduler_timer_tick();
@@ -4177,7 +4205,7 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(
-    name = test_raw_ready_store_reserves_waking_placement,
+    name = test_raw_ready_store_does_not_reserve_waking_placement,
     suite = sched_core
 );
 slopos_testing::stest!(
