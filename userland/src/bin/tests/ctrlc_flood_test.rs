@@ -30,8 +30,8 @@ use slopos_userland as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::signal::{SIGINT, SIGTSTP, SIGTTIN, SIGTTOU};
-use slopos_abi::syscall::LocalFlags;
-use slopos_userland::syscall::{core as sys_core, fs, process};
+use slopos_abi::syscall::{InputFlags, LocalFlags};
+use slopos_userland::syscall::{SyscallError, core as sys_core, fs, process};
 
 /// One flood chunk; small enough that the child performs many writes (and
 /// is virtually guaranteed to sit blocked mid-`write()` when 0x03 lands).
@@ -43,6 +43,7 @@ const REAP_SPINS: usize = 50_000;
 /// Yields granted for the child to set up, start flooding, fill the master
 /// read buffer, and block in `write()` before the interrupt is sent.
 const FLOOD_SPINS: usize = 500;
+const INPUT_FILL_CHUNK: &[u8] = &[b'x'; 512];
 
 static GOT_SIGINT: AtomicBool = AtomicBool::new(false);
 
@@ -234,6 +235,97 @@ fn test_ctrlc_kills_flooding_fg_child_noflsh() -> bool {
     true
 }
 
+/// Input-throttle regression: a full slave input queue must not block VINTR.
+///
+/// The child owns the slave foreground process group but deliberately does not
+/// read. The parent fills the slave input path through the master until
+/// ordinary writes hit EAGAIN, then writes one Ctrl-C. The kernel must admit
+/// that priority byte through the throttled PTY and deliver SIGINT to the child.
+fn test_ctrlc_kills_input_throttled_fg_child() -> bool {
+    let (master_fd, slave_fd) = match open_pair() {
+        Some(pair) => pair,
+        None => {
+            eprintln!("ctrlc_flood_test(input): openpty/fd setup failed");
+            return false;
+        }
+    };
+
+    let _ = fs::set_fd_nonblocking(master_fd);
+    if let Ok(mut t) = fs::tcgetattr(slave_fd) {
+        t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::NOFLSH);
+        t.c_lflag |= LocalFlags::ISIG;
+        t.c_iflag = InputFlags::empty();
+        let _ = fs::tcsetattr(slave_fd, &t);
+    }
+
+    let pid = process::fork();
+    if pid == 0 {
+        child_become_fg(slave_fd);
+        let _ = process::default_signal(SIGINT);
+        loop {
+            sys_core::yield_now();
+        }
+    }
+    if pid < 0 {
+        eprintln!("ctrlc_flood_test(input): fork failed");
+        let _ = fs::close_fd_raw(master_fd);
+        let _ = fs::close_fd_raw(slave_fd);
+        return false;
+    }
+
+    for _ in 0..FLOOD_SPINS {
+        sys_core::yield_now();
+    }
+
+    let mut filled = 0usize;
+    for _ in 0..64 {
+        match fs::write_slice(master_fd, INPUT_FILL_CHUNK) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e == SyscallError::EAGAIN => break,
+            Err(e) => {
+                eprintln!("ctrlc_flood_test(input): fill write failed: {e:?}");
+                let _ = fs::close_fd_raw(master_fd);
+                let _ = fs::close_fd_raw(slave_fd);
+                return false;
+            }
+        }
+    }
+
+    if filled < 4096 {
+        eprintln!("ctrlc_flood_test(input): filled only {filled} bytes before interrupt");
+        let _ = fs::close_fd_raw(master_fd);
+        let _ = fs::close_fd_raw(slave_fd);
+        return false;
+    }
+
+    if fs::write_slice(master_fd, b"\x03") != Ok(1) {
+        eprintln!("ctrlc_flood_test(input): VINTR write failed under input throttle");
+        let _ = fs::close_fd_raw(master_fd);
+        let _ = fs::close_fd_raw(slave_fd);
+        return false;
+    }
+
+    let code = reap_bounded(pid as u32);
+    let _ = fs::close_fd_raw(master_fd);
+    let _ = fs::close_fd_raw(slave_fd);
+
+    match code {
+        Some(code) if code == 128 + SIGINT as i32 => true,
+        Some(code) => {
+            eprintln!(
+                "ctrlc_flood_test(input): expected exit {}, got {code}",
+                128 + SIGINT as i32
+            );
+            false
+        }
+        None => {
+            eprintln!("ctrlc_flood_test(input): child never exited");
+            false
+        }
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "ctrlc_kills_flooding_fg_child",
@@ -246,6 +338,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "ctrlc_kills_flooding_fg_child_noflsh",
         test_ctrlc_kills_flooding_fg_child_noflsh,
+    ),
+    (
+        "ctrlc_kills_input_throttled_fg_child",
+        test_ctrlc_kills_input_throttled_fg_child,
     ),
 ];
 

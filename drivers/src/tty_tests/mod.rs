@@ -793,6 +793,22 @@ slopos_testing::stest!(
     name = test_bugfix_nonblock_write_unthrottled_pty,
     suite = tty
 );
+slopos_testing::stest!(
+    name = test_priority_vintr_throttled_nonblock_flushes_and_unthrottles,
+    suite = tty
+);
+slopos_testing::stest!(
+    name = test_priority_vintr_throttled_noflsh_preserves_throttle,
+    suite = tty
+);
+slopos_testing::stest!(
+    name = test_master_write_throttled_ordinary_direct_rejected,
+    suite = tty
+);
+slopos_testing::stest!(
+    name = test_literal_next_vintr_does_not_bypass_throttle,
+    suite = tty
+);
 slopos_testing::stest!(name = test_bugfix_rawdisc_input_full, suite = tty);
 slopos_testing::stest!(name = test_bugfix_slave_write_stops_on_full, suite = tty);
 slopos_testing::stest!(name = test_bugfix_linedisc_input_full, suite = tty);

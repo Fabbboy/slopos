@@ -771,6 +771,165 @@ pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     }
 }
 
+fn throttled_priority_setup(
+    noflsh: bool,
+) -> Option<(TtyIndex, TtyIndex, slopos_abi::syscall::UserTermios)> {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+
+    let (master, slave, saved) = packet_mode_setup_pty()?;
+    let mut t = saved;
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    t.c_lflag |= LocalFlags::ISIG;
+    t.c_lflag.set(LocalFlags::NOFLSH, noflsh);
+    t.c_iflag = InputFlags::empty();
+    tty::set_termios(slave, &t).ok()?;
+
+    for _ in 0..(THROTTLE_HIGH_WATER + 1) {
+        tty::push_input(slave, b'A');
+    }
+
+    Some((master, slave, saved))
+}
+
+fn pty_master_peer(master: TtyIndex) -> Option<PtyPeerHandle> {
+    let guard = TTY_SLOTS[master.0 as usize].lock();
+    match guard.as_ref()?.driver {
+        TtyDriverKind::PtyMaster { ref peer } => Some(*peer),
+        _ => None,
+    }
+}
+
+pub fn test_priority_vintr_throttled_nonblock_flushes_and_unthrottles() -> TestResult {
+    let Some((master, slave, saved)) = throttled_priority_setup(false) else {
+        klog_info!("TTY_TEST: BUG - throttled priority setup failed");
+        return TestResult::Fail;
+    };
+
+    let result = tty::write(master, b"\x03Z", true);
+    let available = tty::bytes_available(slave).unwrap_or(usize::MAX);
+    let throttled = {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
+    };
+
+    packet_mode_teardown_pty(master, slave, &saved);
+
+    if result != Ok(1) {
+        klog_info!(
+            "TTY_TEST: BUG - throttled VINTR write returned {:?}, want Ok(1)",
+            result
+        );
+        return TestResult::Fail;
+    }
+    if available != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - VINTR flush left {} input bytes; trailing ordinary byte may have passed",
+            available
+        );
+        return TestResult::Fail;
+    }
+    if throttled {
+        klog_info!("TTY_TEST: BUG - VINTR flush did not clear THROTTLED");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_priority_vintr_throttled_noflsh_preserves_throttle() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+
+    let Some((master, slave, saved)) = throttled_priority_setup(true) else {
+        klog_info!("TTY_TEST: BUG - throttled NOFLSH setup failed");
+        return TestResult::Fail;
+    };
+
+    let result = tty::write(master, b"\x03Z", true);
+    let available = tty::bytes_available(slave).unwrap_or(0);
+    let throttled = {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(false)
+    };
+
+    packet_mode_teardown_pty(master, slave, &saved);
+
+    if result != Ok(1) {
+        klog_info!(
+            "TTY_TEST: BUG - throttled NOFLSH VINTR write returned {:?}, want Ok(1)",
+            result
+        );
+        return TestResult::Fail;
+    }
+    if available != THROTTLE_HIGH_WATER + 1 {
+        klog_info!(
+            "TTY_TEST: BUG - NOFLSH should preserve input, got {} bytes",
+            available
+        );
+        return TestResult::Fail;
+    }
+    if !throttled {
+        klog_info!("TTY_TEST: BUG - NOFLSH VINTR should leave THROTTLED set");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_master_write_throttled_ordinary_direct_rejected() -> TestResult {
+    let Some((master, slave, saved)) = throttled_priority_setup(false) else {
+        klog_info!("TTY_TEST: BUG - throttled ordinary setup failed");
+        return TestResult::Fail;
+    };
+    let Some(peer) = pty_master_peer(master) else {
+        packet_mode_teardown_pty(master, slave, &saved);
+        klog_info!("TTY_TEST: BUG - failed to resolve PTY master peer");
+        return TestResult::Fail;
+    };
+
+    let accepted = crate::tty::pty::master_write(peer, b"x");
+    packet_mode_teardown_pty(master, slave, &saved);
+
+    if accepted != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - direct ordinary master_write under throttle accepted {} bytes",
+            accepted
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_literal_next_vintr_does_not_bypass_throttle() -> TestResult {
+    let Some((master, slave, saved)) = throttled_priority_setup(false) else {
+        klog_info!("TTY_TEST: BUG - throttled literal-next setup failed");
+        return TestResult::Fail;
+    };
+
+    let mut t = tty::get_termios(slave).unwrap();
+    t.c_lflag |= LocalFlags::IEXTEN;
+    tty::set_termios(slave, &t).unwrap();
+    let vlnext = t.c_cc[CcIndex::Vlnext.as_usize()];
+    tty::push_input(slave, vlnext);
+
+    let result = tty::write(master, b"\x03", true);
+    packet_mode_teardown_pty(master, slave, &saved);
+
+    if result != Err(TtyError::WouldBlock) {
+        klog_info!(
+            "TTY_TEST: BUG - literal-next VINTR should remain ordinary under throttle, got {:?}",
+            result
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 /// BUG 4: RawDisc input_full prevents silent overflow.  When the master's
 /// raw buffer is full, slave_write should stop accepting bytes instead of
 /// silently dropping them.
@@ -2961,6 +3120,22 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_bugfix_nonblock_write_unthrottled_pty,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_priority_vintr_throttled_nonblock_flushes_and_unthrottles,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_priority_vintr_throttled_noflsh_preserves_throttle,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_master_write_throttled_ordinary_direct_rejected,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_literal_next_vintr_does_not_bypass_throttle,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(

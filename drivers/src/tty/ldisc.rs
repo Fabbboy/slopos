@@ -635,6 +635,43 @@ impl LineDisc {
         self.no_room
     }
 
+    /// Returns true when `byte` would be consumed as terminal control input
+    /// before ordinary buffering.
+    ///
+    /// PTY back-pressure uses this as an admission check: a throttled slave may
+    /// still receive one byte if the line discipline would turn it into a
+    /// foreground-process-group signal or IXON flow-control state change.
+    pub(crate) fn priority_control_input(&self, byte: u8) -> bool {
+        if !self.termios.control_flags().contains(ControlFlags::CREAD) {
+            return false;
+        }
+        if self.pending_reprint || self.literal_next {
+            return false;
+        }
+
+        let iflag = self.termios.input_flags();
+        let lflag = self.termios.local_flags();
+        let Some(c) = self.process_iflag(byte, iflag) else {
+            return false;
+        };
+
+        if lflag.contains(LocalFlags::ISIG)
+            && (self.cc_matches(CcIndex::Vintr, c)
+                || self.cc_matches(CcIndex::Vquit, c)
+                || self.cc_matches(CcIndex::Vsusp, c))
+        {
+            return true;
+        }
+
+        if iflag.contains(InputFlags::IXON)
+            && (self.cc_matches(CcIndex::Vstart, c) || self.cc_matches(CcIndex::Vstop, c))
+        {
+            return true;
+        }
+
+        false
+    }
+
     /// Returns the cumulative count of bytes
     /// dropped due to cooked buffer overflow.
     pub fn overflow_count(&self) -> u32 {
@@ -843,11 +880,11 @@ impl LineDisc {
 
         // 3. Signal generation (ISIG).
         if lflag.contains(LocalFlags::ISIG) {
-            let sig = if c == self.cc(CcIndex::Vintr) {
+            let sig = if self.cc_matches(CcIndex::Vintr, c) {
                 Some(SIGINT)
-            } else if c == self.cc(CcIndex::Vquit) {
+            } else if self.cc_matches(CcIndex::Vquit, c) {
                 Some(SIGQUIT)
-            } else if c == self.cc(CcIndex::Vsusp) {
+            } else if self.cc_matches(CcIndex::Vsusp, c) {
                 Some(SIGTSTP)
             } else {
                 None
@@ -863,11 +900,11 @@ impl LineDisc {
 
         // 4. Flow control (IXON).
         if iflag.contains(InputFlags::IXON) {
-            if c == self.cc(CcIndex::Vstop) {
+            if self.cc_matches(CcIndex::Vstop, c) {
                 self.stopped = true;
                 return InputAction::None;
             }
-            if c == self.cc(CcIndex::Vstart) {
+            if self.cc_matches(CcIndex::Vstart, c) {
                 self.stopped = false;
                 return InputAction::None;
             }
@@ -1581,6 +1618,12 @@ impl LineDisc {
         self.termios.c_cc[idx.as_usize()]
     }
 
+    /// Returns true when an enabled control-character slot matches `c`.
+    fn cc_matches(&self, idx: CcIndex, c: u8) -> bool {
+        let cc = self.cc(idx);
+        cc != POSIX_VDISABLE && c == cc
+    }
+
     /// Returns `true` if `c` matches an enabled VEOL or VEOL2
     /// control character.  A value of `POSIX_VDISABLE` (0) means disabled.
     fn is_veol(&self, c: u8) -> bool {
@@ -1878,6 +1921,11 @@ impl RawDisc {
         self.overflow_count
     }
 
+    /// Raw disciplines never consume terminal-generated control input.
+    pub(crate) fn priority_control_input(&self, _byte: u8) -> bool {
+        false
+    }
+
     /// Check and clear no-room recovery condition.
     pub fn check_no_room_recovery(&mut self) -> bool {
         if self.no_room && self.buf.count() <= THROTTLE_LOW_WATER {
@@ -2163,6 +2211,14 @@ impl LdiscKind {
         match self {
             LdiscKind::NTty(inner) => inner.input_full(),
             LdiscKind::Raw(inner) => inner.input_full(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn priority_control_input(&self, byte: u8) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.priority_control_input(byte),
+            LdiscKind::Raw(inner) => inner.priority_control_input(byte),
         }
     }
 
