@@ -268,6 +268,10 @@ fn overlay_region(
             if split_region(store, idx, cursor).is_err() {
                 return -1;
             }
+            let idx = find_region_index(store, cursor);
+            if idx >= store.count {
+                return -1;
+            }
             let i = idx as usize;
             let region_end = store.regions[i].phys_base + store.regions[i].length;
             let apply_end = if aligned_end < region_end {
