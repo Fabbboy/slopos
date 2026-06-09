@@ -16,6 +16,7 @@ pub mod input;
 mod render;
 mod surface;
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use slopos_abi::task::TaskPriority;
@@ -32,6 +33,12 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Read buffer drained from the PTY master per loop turn.
 const MASTER_READ_CHUNK: usize = 1024;
+/// Output bytes to consume per loop turn before returning to compositor input.
+const MASTER_READ_BUDGET: usize = 4 * 1024;
+/// Bounded terminal-local input backlog for nonblocking PTY-master writes.
+const MASTER_WRITE_QUEUE_CAP: usize = 64 * 1024;
+/// Queued input bytes to write per loop turn before returning to events/output.
+const MASTER_WRITE_BUDGET: usize = 4 * 1024;
 
 pub fn terminal_user_main() {
     use slopos_windowing::connection;
@@ -268,6 +275,7 @@ async fn event_loop(
     let mut mods: u8 = 0;
     let mut cursor_on = true;
     let mut last_blink = Instant::now();
+    let mut pending_writes = MasterWriteQueue::new();
     // Destination memfd handed to the compositor between a PasteReady and its
     // PasteResult (the receiver-provides-the-buffer paste handshake).
     let mut pending_paste: Option<ShmBuffer> = None;
@@ -288,23 +296,10 @@ async fn event_loop(
                 CompositorEvent::Key(ascii, scancode) => {
                     match input::encode_key(ascii, scancode, mods) {
                         KeyAction::ToMaster(bytes) => {
-                            // The master fd is non-blocking: a failed or short
-                            // write here LOSES the keystroke. Surface it on the
-                            // serial mirror instead of dropping silently.
-                            match fs::write_slice(master_fd, bytes.as_bytes()) {
-                                Ok(n) if n == bytes.as_bytes().len() => {}
-                                Ok(n) => {
-                                    let msg = std::format!(
-                                        "TERM: key write short {}/{}\n",
-                                        n,
-                                        bytes.as_bytes().len()
-                                    );
-                                    let _ = tty::write(msg.as_bytes());
-                                }
-                                Err(e) => {
-                                    let msg = std::format!("TERM: key write failed {e:?}\n");
-                                    let _ = tty::write(msg.as_bytes());
-                                }
+                            if is_priority_keyboard_control(bytes.as_bytes()) {
+                                pending_writes.write_priority(master_fd, bytes.as_bytes());
+                            } else {
+                                pending_writes.enqueue_back(bytes.as_bytes());
                             }
                             // Any keypress cancels a scrollback view.
                             if grid.viewing_history() {
@@ -402,12 +397,19 @@ async fn event_loop(
                     // The destination memfd now holds `len` clipboard bytes.
                     if let Some(dst) = pending_paste.take() {
                         let n = (len as usize).min(dst.size());
-                        write_paste(master_fd, &dst.as_slice()[..n], grid.bracketed_paste());
+                        write_paste(
+                            master_fd,
+                            &mut pending_writes,
+                            &dst.as_slice()[..n],
+                            grid.bracketed_paste(),
+                        );
                     }
                 }
                 CompositorEvent::Ignored => {}
             }
         }
+
+        pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 
         // --- Drain the PTY master (read until WouldBlock). ---
         match drain_master(master_fd, grid) {
@@ -431,10 +433,99 @@ async fn event_loop(
         }
         let blink_ms = (BLINK_INTERVAL - elapsed).as_millis().max(1) as u64;
         let comp = slopfut::poll_add(compositor_fd, POLLIN);
-        let mst = slopfut::poll_add(master_fd, POLLIN);
+        let master_mask = if pending_writes.is_empty() {
+            POLLIN
+        } else {
+            POLLIN | slopos_abi::syscall::POLLOUT
+        };
+        let mst = slopfut::poll_add(master_fd, master_mask);
         let blink = Box::pin(slopfut::time::sleep_ms(blink_ms));
         let _ = slopfut::select3(comp, mst, blink).await;
     }
+}
+
+struct MasterWriteQueue {
+    bytes: VecDeque<u8>,
+}
+
+impl MasterWriteQueue {
+    fn new() -> Self {
+        Self {
+            bytes: VecDeque::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn remaining_capacity(&self) -> usize {
+        MASTER_WRITE_QUEUE_CAP.saturating_sub(self.bytes.len())
+    }
+
+    fn enqueue_back(&mut self, data: &[u8]) -> usize {
+        let n = data.len().min(self.remaining_capacity());
+        self.bytes.extend(data[..n].iter().copied());
+        n
+    }
+
+    fn enqueue_front_priority(&mut self, data: &[u8]) {
+        while self.bytes.len().saturating_add(data.len()) > MASTER_WRITE_QUEUE_CAP {
+            let _ = self.bytes.pop_back();
+        }
+        for &byte in data.iter().rev() {
+            self.bytes.push_front(byte);
+        }
+    }
+
+    fn write_priority(&mut self, fd: i32, data: &[u8]) {
+        match fs::write_slice(fd, data) {
+            Ok(n) if n == data.len() => {}
+            Ok(n) => self.enqueue_front_priority(&data[n..]),
+            Err(e) if e == crate::syscall::SyscallError::EAGAIN => {
+                self.enqueue_front_priority(data);
+            }
+            Err(e) => {
+                let msg = std::format!("terminal: priority write error {e:?}\n");
+                let _ = tty::write(msg.as_bytes());
+                self.enqueue_front_priority(data);
+            }
+        }
+    }
+
+    fn drain(&mut self, fd: i32, budget: usize) {
+        let mut written_total = 0usize;
+        loop {
+            let (front, _) = self.bytes.as_slices();
+            if front.is_empty() {
+                break;
+            }
+            let limit = budget.saturating_sub(written_total);
+            if limit == 0 {
+                break;
+            }
+            match fs::write_slice(fd, &front[..front.len().min(limit)]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    written_total += n;
+                    for _ in 0..n {
+                        let _ = self.bytes.pop_front();
+                    }
+                }
+                Err(e) if e == crate::syscall::SyscallError::EAGAIN => break,
+                Err(e) => {
+                    let msg = std::format!("terminal: queued write error {e:?}\n");
+                    let _ = tty::write(msg.as_bytes());
+                    self.bytes.clear();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn is_priority_keyboard_control(bytes: &[u8]) -> bool {
+    matches!(bytes, [0x03] | [0x1C] | [0x1A] | [0x11] | [0x13])
 }
 
 enum MasterDrain {
@@ -449,6 +540,7 @@ enum MasterDrain {
 fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     let mut buf = [0u8; MASTER_READ_CHUNK];
     let mut got_any = false;
+    let mut total = 0usize;
     loop {
         match fs::read_slice(master_fd, &mut buf) {
             Ok(0) => {
@@ -457,10 +549,14 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
             }
             Ok(n) => {
                 got_any = true;
+                total += n;
                 // Serial-debug mirror (single call site).
                 let _ = tty::write(&buf[..n]);
                 for &b in &buf[..n] {
                     grid.process_byte(b);
+                }
+                if total >= MASTER_READ_BUDGET {
+                    return MasterDrain::Data;
                 }
                 if n < buf.len() {
                     // Short read: likely drained. Loop once more to confirm
@@ -516,21 +612,40 @@ fn copy_selection(
 /// line editor does; a raw `cat` must not see the markers). The payload is
 /// sanitized first — no control byte survives, so the bracket cannot be
 /// escaped and a clipboard can never type Ctrl+C (see `sanitize_paste`).
-fn write_paste(master_fd: i32, data: &[u8], bracketed: bool) {
+fn write_paste(
+    master_fd: i32,
+    pending_writes: &mut MasterWriteQueue,
+    data: &[u8],
+    bracketed: bool,
+) {
     if data.is_empty() {
         return;
     }
     // Sanitizing never grows the payload (it only drops/normalizes bytes).
     let mut clean = std::vec![0u8; data.len()];
-    let n = input::sanitize_paste(data, &mut clean);
+    let mut n = input::sanitize_paste(data, &mut clean);
+    if n == 0 {
+        return;
+    }
+    let markers_len = if bracketed {
+        b"\x1b[200~".len() + b"\x1b[201~".len()
+    } else {
+        0
+    };
+    let capacity = pending_writes.remaining_capacity();
+    if capacity <= markers_len {
+        return;
+    }
+    n = n.min(capacity - markers_len);
     if n == 0 {
         return;
     }
     if bracketed {
-        let _ = fs::write_slice(master_fd, b"\x1b[200~");
+        pending_writes.enqueue_back(b"\x1b[200~");
     }
-    let _ = fs::write_slice(master_fd, &clean[..n]);
+    pending_writes.enqueue_back(&clean[..n]);
     if bracketed {
-        let _ = fs::write_slice(master_fd, b"\x1b[201~");
+        pending_writes.enqueue_back(b"\x1b[201~");
     }
+    pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 }

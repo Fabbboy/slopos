@@ -277,7 +277,39 @@ pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     if !validate_peer(&peer) {
         return 0;
     }
+    if data.is_empty() {
+        return 0;
+    }
     let slave_slot = peer.idx.0 as usize;
+
+    // Check throttle once before starting.  When the slave is throttled,
+    // ordinary input remains back-pressured, but one ldisc-priority control
+    // byte (VINTR/VQUIT/VSUSP under ISIG, VSTART/VSTOP under IXON) may still
+    // enter so job-control signals cannot be stuck behind user input.
+    let allow_single_priority = {
+        let guard = TTY_SLOTS[slave_slot].lock();
+        let Some(tty) = guard.as_ref() else {
+            return 0;
+        };
+        if tty.flags.contains(TtyFlags::THROTTLED) {
+            if tty.flags.contains(TtyFlags::HUNG_UP) || tty.flags.contains(TtyFlags::PEER_CLOSED) {
+                return 0;
+            }
+            if tty.ldisc.priority_control_input(data[0]) {
+                true
+            } else {
+                return 0;
+            }
+        } else {
+            false
+        }
+    };
+
+    if allow_single_priority {
+        let event = InputEvent::normal(data[0]);
+        super::push_input_batch(peer.idx, core::slice::from_ref(&event));
+        return 1;
+    }
 
     // Check throttle once before starting — if already throttled, return
     // a zero-length short write immediately.

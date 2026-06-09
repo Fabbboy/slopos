@@ -192,15 +192,22 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             deferred.add_signal(tty.session.fg_pgrp_raw(), sig);
             // A signal char discards the foreground job's pending I/O
             // unless NOFLSH is set. The line discipline already flushed
-            // its input queues; the output side is flushed below, after
-            // this lock drops. The signal is posted (and its wake fires)
-            // ahead of the output-event wakes in `deferred.execute()`, so
-            // a writer blocked on the flushed queue observes its pending
-            // signal the moment its wait predicate re-runs.
+            // its input queues; clear input throttle here as part of the
+            // same flush, then flush the output side below after this lock
+            // drops. The signal is posted (and its wake fires) ahead of the
+            // output-event wakes in `deferred.execute()`, so a writer blocked
+            // on the flushed queue observes its pending signal the moment
+            // its wait predicate re-runs.
             if flush {
                 if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                    signal_flush_master = Some(peer.idx.0 as usize);
-                    deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHWRITE);
+                    let master_slot = peer.idx.0 as usize;
+                    tty.flags.remove(TtyFlags::THROTTLED);
+                    signal_flush_master = Some(master_slot);
+                    deferred.add_packet_event(
+                        idx,
+                        slopos_abi::syscall::TIOCPKT_FLUSHREAD
+                            | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
+                    );
                 }
             }
         }
@@ -627,25 +634,47 @@ fn check_write_foreground(slot: usize) -> Result<(), TtyError> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteAdmission {
+    Normal,
+    PriorityControlOnly,
+}
+
 fn wait_for_write_ready(
     slot: usize,
     peer_slave_slot: Option<usize>,
     peer_master_slot: Option<usize>,
     nonblock: bool,
-) -> Result<(), TtyError> {
+    next_priority_byte: Option<u8>,
+) -> Result<WriteAdmission, TtyError> {
+    let mut admission = WriteAdmission::Normal;
+
     if let Some(peer_slot) = peer_slave_slot {
         if nonblock {
             let guard = TTY_SLOTS[peer_slot].lock();
-            let is_throttled = match guard.as_ref() {
+            let blocked_by_throttle = match guard.as_ref() {
                 Some(tty) => {
-                    tty.flags.contains(TtyFlags::THROTTLED)
+                    let throttled = tty.flags.contains(TtyFlags::THROTTLED)
                         && !tty.flags.contains(TtyFlags::HUNG_UP)
-                        && !tty.flags.contains(TtyFlags::PEER_CLOSED)
+                        && !tty.flags.contains(TtyFlags::PEER_CLOSED);
+                    if throttled {
+                        let priority = next_priority_byte
+                            .map(|byte| tty.ldisc.priority_control_input(byte))
+                            .unwrap_or(false);
+                        if priority {
+                            admission = WriteAdmission::PriorityControlOnly;
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
                 }
                 None => false,
             };
             drop(guard);
-            if is_throttled {
+            if blocked_by_throttle {
                 return Err(TtyError::WouldBlock);
             }
         } else {
@@ -659,12 +688,28 @@ fn wait_for_write_ready(
                         !tty.flags.contains(TtyFlags::THROTTLED)
                             || tty.flags.contains(TtyFlags::HUNG_UP)
                             || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                            || next_priority_byte
+                                .map(|byte| tty.ldisc.priority_control_input(byte))
+                                .unwrap_or(false)
                     }
                     None => true,
                 }
             });
             if has_pending_signal() {
                 return Err(TtyError::Restart);
+            }
+
+            let guard = TTY_SLOTS[peer_slot].lock();
+            if let Some(tty) = guard.as_ref() {
+                if tty.flags.contains(TtyFlags::THROTTLED)
+                    && !tty.flags.contains(TtyFlags::HUNG_UP)
+                    && !tty.flags.contains(TtyFlags::PEER_CLOSED)
+                    && next_priority_byte
+                        .map(|byte| tty.ldisc.priority_control_input(byte))
+                        .unwrap_or(false)
+                {
+                    admission = WriteAdmission::PriorityControlOnly;
+                }
             }
         }
 
@@ -748,7 +793,7 @@ fn wait_for_write_ready(
         }
     }
 
-    Ok(())
+    Ok(admission)
 }
 
 // ---------------------------------------------------------------------------
@@ -813,9 +858,22 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     };
     let mut pos = 0;
     while pos < data.len() {
-        if let Err(err) = wait_for_write_ready(slot, peer_slave_slot, peer_master_slot, nonblock) {
-            return if pos > 0 { Ok(pos) } else { Err(err) };
-        }
+        let next_priority_byte = peer_slave_slot.map(|_| data[pos]);
+        let admission = match wait_for_write_ready(
+            slot,
+            peer_slave_slot,
+            peer_master_slot,
+            nonblock,
+            next_priority_byte,
+        ) {
+            Ok(admission) => admission,
+            Err(err) => return if pos > 0 { Ok(pos) } else { Err(err) },
+        };
+        let input_limit = if admission == WriteAdmission::PriorityControlOnly {
+            pos + 1
+        } else {
+            data.len()
+        };
 
         let mut out_buf = [0u8; OUT_BUF_CAP];
         let mut out_len = 0;
@@ -831,7 +889,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             driver_id = tty.driver.id();
             tty.ldisc.clear_flusho();
 
-            while pos < data.len() {
+            while pos < input_limit {
                 match tty.ldisc.process_output_byte(data[pos]) {
                     OutputAction::Emit { buf, len } => {
                         for i in 0..len as usize {
@@ -870,6 +928,9 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             break;
         }
         BUS.publish(tty_output_event(slot));
+        if admission == WriteAdmission::PriorityControlOnly {
+            return Ok(pos);
+        }
     }
 
     Ok(pos)
