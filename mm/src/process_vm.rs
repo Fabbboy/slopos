@@ -658,10 +658,8 @@ fn teardown_inner_mappings(inner: &mut ProcessVm) {
     if pid != INVALID_PROCESS_ID {
         tlb::flush_all_for_process(pid);
     }
-    inner.vma_map.drain(|_start, _end, region| {
-        if region.is_shared() && !region.memfd_handle().is_none() {
-            crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
-        }
+    inner.vma_map.drain(|start, end, region| {
+        dec_removed_shared_mapcount(start, end, region);
     });
     inner.total_pages = 0;
     inner.heap_end = inner.heap_start;
@@ -675,20 +673,22 @@ fn unmap_and_free_range_dir(
     pid: u32,
     start: u64,
     end: u64,
-) -> Result<u32, MapError> {
+) -> Result<UnmapProgress, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(unmap_progress(start, 0));
     }
     let mut freed = 0u32;
     let mut addr = start;
     while addr < end {
-        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
-            freed += 1;
+        match ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
+            Ok(true) => freed += 1,
+            Ok(false) => {}
+            Err(err) => return Err(unmap_region_error(err, addr, freed)),
         }
         addr += PAGE_SIZE_4KB;
     }
     let _ = pid;
-    Ok(freed)
+    Ok(unmap_progress(end, freed))
 }
 
 /// Unmap a SlopRing mapping range. Each page's PTE holds an
@@ -703,15 +703,22 @@ fn unmap_ring_range_dir(
     pid: u32,
     start: u64,
     end: u64,
-) -> Result<u32, MapError> {
+) -> Result<UnmapProgress, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(unmap_progress(start, 0));
     }
     let mut unmapped = 0u32;
     let mut addr = start;
     while addr < end {
-        if crate::dual_paging::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr))? {
-            unmapped += 1;
+        match crate::dual_paging::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr)) {
+            Ok(true) => unmapped += 1,
+            Ok(false) => {}
+            Err(err) => {
+                if unmapped > 0 && pid != INVALID_PROCESS_ID {
+                    tlb::flush_all_for_process(pid);
+                }
+                return Err(unmap_region_error(err, addr, unmapped));
+            }
         }
         addr += PAGE_SIZE_4KB;
     }
@@ -723,7 +730,7 @@ fn unmap_ring_range_dir(
     if unmapped > 0 && pid != INVALID_PROCESS_ID {
         tlb::flush_all_for_process(pid);
     }
-    Ok(unmapped)
+    Ok(unmap_progress(end, unmapped))
 }
 
 /// Unmap pages WITHOUT freeing the physical frames. Used for shared
@@ -734,15 +741,22 @@ fn unmap_range_nofree_dir(
     pid: u32,
     start: u64,
     end: u64,
-) -> Result<u32, MapError> {
+) -> Result<UnmapProgress, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(unmap_progress(start, 0));
     }
     let mut unmapped = 0u32;
     let mut addr = start;
     while addr < end {
-        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
-            unmapped += 1;
+        match ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
+            Ok(true) => unmapped += 1,
+            Ok(false) => {}
+            Err(err) => {
+                if unmapped > 0 && pid != INVALID_PROCESS_ID {
+                    tlb::flush_all_for_process(pid);
+                }
+                return Err(unmap_region_error(err, addr, unmapped));
+            }
         }
         addr += PAGE_SIZE_4KB;
     }
@@ -752,12 +766,54 @@ fn unmap_range_nofree_dir(
     if unmapped > 0 && pid != INVALID_PROCESS_ID {
         tlb::flush_all_for_process(pid);
     }
-    Ok(unmapped)
+    Ok(unmap_progress(end, unmapped))
 }
 
 type VmaOverlap = (u64, u64, VmaRegion);
 
-fn collect_overlapping_vmas(inner: &ProcessVm, start: u64, end: u64) -> KVec<VmaOverlap> {
+#[derive(Clone, Copy)]
+struct UnmapProgress {
+    processed_end: u64,
+    unmapped_pages: u32,
+}
+
+struct UnmapRegionError {
+    err: MapError,
+    progress: UnmapProgress,
+}
+
+fn unmap_progress(processed_end: u64, unmapped_pages: u32) -> UnmapProgress {
+    UnmapProgress {
+        processed_end,
+        unmapped_pages,
+    }
+}
+
+fn unmap_region_error(err: MapError, processed_end: u64, unmapped_pages: u32) -> UnmapRegionError {
+    UnmapRegionError {
+        err,
+        progress: unmap_progress(processed_end, unmapped_pages),
+    }
+}
+
+fn vma_page_count(start: u64, end: u64) -> u32 {
+    ((end - start) / PAGE_SIZE_4KB) as u32
+}
+
+fn dec_removed_shared_mapcount(start: u64, end: u64, region: &VmaRegion) {
+    if region.is_shared() && !region.memfd_handle().is_none() {
+        crate::memfd::memfd_dec_mapcount_by(
+            region.memfd_handle().as_usize(),
+            vma_page_count(start, end),
+        );
+    }
+}
+
+fn collect_overlapping_vmas(
+    inner: &ProcessVm,
+    start: u64,
+    end: u64,
+) -> Result<KVec<VmaOverlap>, ()> {
     KVec::from_iter_fallible(
         inner
             .vma_map
@@ -765,7 +821,7 @@ fn collect_overlapping_vmas(inner: &ProcessVm, start: u64, end: u64) -> KVec<Vma
             .filter(move |(s, e, _)| *s < end && *e > start)
             .map(move |(s, e, region)| (s.max(start), e.min(end), region.clone())),
     )
-    .expect("collect_overlapping_vmas: overlap alloc")
+    .map_err(|_| ())
 }
 
 fn unmap_region_range_dir(
@@ -774,7 +830,7 @@ fn unmap_region_range_dir(
     start: u64,
     end: u64,
     region: &VmaRegion,
-) -> Result<u32, MapError> {
+) -> Result<UnmapProgress, UnmapRegionError> {
     if region.is_ring() {
         unmap_ring_range_dir(vm_space, pid, start, end)
     } else if region.is_shared() {
@@ -2368,38 +2424,57 @@ fn process_vm_mmap_inner(
         let end_addr = addr_hint + size;
         let inner = &mut *proc;
         let pid = inner.process_id;
+        let overlaps = match collect_overlapping_vmas(inner, addr_hint, end_addr) {
+            Ok(overlaps) => overlaps,
+            Err(_) => {
+                klog_info!("process_vm_mmap MAP_FIXED: overlap allocation failed");
+                return 0;
+            }
+        };
         let mut vm_space_taken = inner
             .vm_space
             .take()
             .expect("process_vm_mmap MAP_FIXED: vm_space present for live pid");
 
-        let overlaps = collect_overlapping_vmas(inner, addr_hint, end_addr);
         let mut total_freed = 0u32;
         for (overlap_start, overlap_end, region) in overlaps.iter() {
-            let freed = match unmap_region_range_dir(
+            let progress = match unmap_region_range_dir(
                 &mut vm_space_taken,
                 pid,
                 *overlap_start,
                 *overlap_end,
                 region,
             ) {
-                Ok(freed) => freed,
+                Ok(progress) => progress,
                 Err(err) => {
-                    klog_info!("process_vm_mmap MAP_FIXED: overlap unmap failed: {:?}", err);
+                    let total_unmapped = total_freed.saturating_add(err.progress.unmapped_pages);
+                    if err.progress.processed_end > addr_hint {
+                        inner.vma_map.remove_range(
+                            addr_hint,
+                            err.progress.processed_end,
+                            |removed_start, removed_end, region| {
+                                dec_removed_shared_mapcount(removed_start, removed_end, region);
+                            },
+                        );
+                        inner.total_pages = inner.total_pages.saturating_sub(total_unmapped);
+                    }
+                    klog_info!(
+                        "process_vm_mmap MAP_FIXED: overlap unmap failed: {:?}",
+                        err.err
+                    );
                     inner.vm_space = Some(vm_space_taken);
                     return 0;
                 }
             };
-            total_freed = total_freed.saturating_add(freed);
-            if region.is_shared() && !region.memfd_handle().is_none() {
-                crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
-            }
+            total_freed = total_freed.saturating_add(progress.unmapped_pages);
         }
 
         // Remove all overlapping VMAs in the fixed range after OSTD unmaps succeeded.
         inner
             .vma_map
-            .remove_range(addr_hint, end_addr, |_, _, _| {});
+            .remove_range(addr_hint, end_addr, |removed_start, removed_end, region| {
+                dec_removed_shared_mapcount(removed_start, removed_end, region);
+            });
         inner.total_pages = inner.total_pages.saturating_sub(total_freed);
 
         inner.vm_space = Some(vm_space_taken);
@@ -2478,7 +2553,7 @@ fn process_vm_mmap_inner(
         inner.total_pages += page_count;
 
         // Tell the memfd about this mapping
-        crate::memfd::memfd_inc_mapcount(memfd_handle.as_usize());
+        crate::memfd::memfd_inc_mapcount_by(memfd_handle.as_usize(), page_count);
 
         start_addr
     } else {
@@ -2534,36 +2609,54 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
         }
     }
 
+    // Unmap first, then remove VMA metadata only after OSTD accepted every page.
+    let mut total_freed = 0u32;
+    let overlaps = match collect_overlapping_vmas(inner, addr, end) {
+        Ok(overlaps) => overlaps,
+        Err(_) => {
+            klog_info!("process_vm_munmap: overlap allocation failed");
+            return -1;
+        }
+    };
     let mut vm_space_taken = inner
         .vm_space
         .take()
         .expect("process_vm_munmap: vm_space present for live pid");
 
-    // Unmap first, then remove VMA metadata only after OSTD accepted every page.
-    let mut total_freed = 0u32;
-    let overlaps = collect_overlapping_vmas(inner, addr, end);
     for (overlap_start, overlap_end, region) in overlaps.iter() {
-        let freed = match unmap_region_range_dir(
+        let progress = match unmap_region_range_dir(
             &mut vm_space_taken,
             process_id,
             *overlap_start,
             *overlap_end,
             region,
         ) {
-            Ok(freed) => freed,
+            Ok(progress) => progress,
             Err(err) => {
-                klog_info!("process_vm_munmap: unmap failed: {:?}", err);
+                let total_unmapped = total_freed.saturating_add(err.progress.unmapped_pages);
+                if err.progress.processed_end > addr {
+                    inner.vma_map.remove_range(
+                        addr,
+                        err.progress.processed_end,
+                        |removed_start, removed_end, region| {
+                            dec_removed_shared_mapcount(removed_start, removed_end, region);
+                        },
+                    );
+                    inner.total_pages = inner.total_pages.saturating_sub(total_unmapped);
+                }
+                klog_info!("process_vm_munmap: unmap failed: {:?}", err.err);
                 inner.vm_space = Some(vm_space_taken);
                 return -1;
             }
         };
-        total_freed = total_freed.saturating_add(freed);
-        if region.is_shared() && !region.memfd_handle().is_none() {
-            crate::memfd::memfd_dec_mapcount(region.memfd_handle().as_usize());
-        }
+        total_freed = total_freed.saturating_add(progress.unmapped_pages);
     }
 
-    inner.vma_map.remove_range(addr, end, |_, _, _| {});
+    inner
+        .vma_map
+        .remove_range(addr, end, |removed_start, removed_end, region| {
+            dec_removed_shared_mapcount(removed_start, removed_end, region);
+        });
 
     inner.vm_space = Some(vm_space_taken);
     inner.total_pages = inner.total_pages.saturating_sub(total_freed);
@@ -2974,6 +3067,15 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             };
 
             child.vma_map.insert(vma_start, vma_end, child_region);
+            if is_shared_vma {
+                let memfd_handle = parent_region.memfd_handle();
+                if !memfd_handle.is_none() {
+                    crate::memfd::memfd_inc_mapcount_by(
+                        memfd_handle.as_usize(),
+                        vma_page_count(vma_start, vma_end),
+                    );
+                }
+            }
 
             // Pull a mutable handle to the child's OSTD VmSpace once
             // per VMA. The child slot lock above is the sole owner of
@@ -2995,14 +3097,6 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
                 Ok(n) => cow_pages += n,
                 Err(()) => {
                     clone_failed = true;
-                }
-            }
-
-            if is_shared_vma && !clone_failed {
-                // Increment memfd map_count for the child's mapping
-                let memfd_handle = parent_region.memfd_handle();
-                if !memfd_handle.is_none() {
-                    crate::memfd::memfd_inc_mapcount(memfd_handle.as_usize());
                 }
             }
 

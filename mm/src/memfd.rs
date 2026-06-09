@@ -105,7 +105,7 @@ struct MemfdObject {
     format: PixelFormat,
     /// Number of open fd references (dup, fork, SCM_RIGHTS all increment).
     refcount: u32,
-    /// Number of active mmap regions pointing to this memfd's pages.
+    /// Number of active mapped pages pointing to this memfd's pages.
     /// Pages are freed only when refcount == 0 AND map_count == 0.
     map_count: u32,
     /// Whether this slot is in use.
@@ -327,21 +327,37 @@ pub fn memfd_get_info(handle: usize) -> Option<(PhysAddr, usize, u32)> {
     Some((obj.phys_addr, obj.size, obj.pages))
 }
 
-/// Increment map_count (called by mmap for shared mappings).
+/// Increment map_count by one mapped page.
 pub fn memfd_inc_mapcount(handle: usize) {
+    memfd_inc_mapcount_by(handle, 1);
+}
+
+/// Increment map_count by `count` mapped pages.
+pub fn memfd_inc_mapcount_by(handle: usize, count: u32) {
+    if count == 0 {
+        return;
+    }
     let h = MemfdHandle::from_usize(handle);
     let mut reg = MEMFD_REGISTRY.lock();
     if let Some(slot) = validate_handle(&reg, h) {
-        reg.slots[slot].map_count += 1;
+        reg.slots[slot].map_count = reg.slots[slot].map_count.saturating_add(count);
     }
 }
 
-/// Decrement map_count (called by munmap / process exit).
+/// Decrement map_count by one mapped page.
 pub fn memfd_dec_mapcount(handle: usize) {
+    memfd_dec_mapcount_by(handle, 1);
+}
+
+/// Decrement map_count by `count` mapped pages.
+pub fn memfd_dec_mapcount_by(handle: usize, count: u32) {
+    if count == 0 {
+        return;
+    }
     let h = MemfdHandle::from_usize(handle);
     let mut reg = MEMFD_REGISTRY.lock();
     if let Some(slot) = validate_handle(&reg, h) {
-        reg.slots[slot].map_count = reg.slots[slot].map_count.saturating_sub(1);
+        reg.slots[slot].map_count = reg.slots[slot].map_count.saturating_sub(count);
         try_cleanup(&mut reg, slot);
     }
 }
