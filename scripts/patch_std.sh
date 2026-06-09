@@ -12,6 +12,34 @@ RUST_CHANNEL="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REP
 SYSROOT="$(rustc +"$RUST_CHANNEL" --print sysroot 2>/dev/null || rustc --print sysroot)"
 STD_SYS="$SYSROOT/lib/rustlib/src/rust/library/std/src/sys"
 
+sed_in_place() {
+    local file="${@: -1}"
+    sed -i.bak "$@"
+    rm -f "$file.bak"
+}
+
+perl_in_place() {
+    local script="$1"
+    local file="$2"
+    perl -0777 -i.bak -pe "$script" "$file"
+    rm -f "$file.bak"
+}
+
+slopos_before_no_threads() {
+    local file="$1"
+    awk '
+        /mod no_threads;/ { done = 1; exit found ? 0 : 1 }
+        /target_os = "slopos"/ { found = 1 }
+        END { if (!done) exit found ? 0 : 1 }
+    ' "$file"
+}
+
+remove_slopos_before_no_threads() {
+    local file="$1"
+    perl -i.bak -ne 'if (!$seen && /^\s*target_os = "slopos",$/) { next } print; $seen = 1 if /mod no_threads;/' "$file"
+    rm -f "$file.bak"
+}
+
 if [ ! -d "$STD_SYS" ]; then
     echo "ERROR: Rust std source not found at $STD_SYS"
     echo "Run: rustup component add rust-src"
@@ -72,8 +100,9 @@ patch_cfg_select() {
     fi
 
     # Insert slopos arm before the `_ =>` fallback
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod '"$module_name"';\
         pub use '"$module_name"'::'"$use_clause"';\
     }
@@ -89,14 +118,16 @@ add_to_futex_arm() {
         return
     fi
     # Add target_os = "slopos" after target_os = "hermit" in the futex arm
-    sed -i 's/target_os = "hermit",/target_os = "hermit",\n        target_os = "slopos",/' "$file"
+    sed_in_place 's/target_os = "hermit",/target_os = "hermit",\
+        target_os = "slopos",/' "$file"
     echo "  Patched $file (futex arm)"
 }
 
 # 3a. PAL routing
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/pal/mod.rs" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use self::slopos::*;\
     }
@@ -106,9 +137,10 @@ fi
 
 # 3b. Alloc routing (no fallback — insert after the last zkvm entry)
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/alloc/mod.rs" 2>/dev/null; then
-    sed -i '/target_os = "zkvm" => {/{
+    sed_in_place '/target_os = "zkvm" => {/{
 N;N
-a\    target_os = "slopos" => {\
+a\
+    target_os = "slopos" => {\
         mod slopos;\
     }
 }' "$STD_SYS/alloc/mod.rs"
@@ -120,8 +152,9 @@ patch_cfg_select "$STD_SYS/stdio/mod.rs" "slopos" "*"
 
 # Time uses `use ... as imp;` pattern (pub use imp::{...} outside cfg_select!)
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/time/mod.rs" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         use slopos as imp;\
     }
@@ -131,8 +164,9 @@ fi
 
 # Thread needs specific exports
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/thread/mod.rs" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::{Thread, available_parallelism, sleep, yield_now, DEFAULT_MIN_STACK_SIZE};\
         #[expect(dead_code)]\
@@ -145,8 +179,9 @@ fi
 
 # Args routing
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/args/mod.rs" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::*;\
     }
@@ -159,8 +194,9 @@ patch_cfg_select "$STD_SYS/env/mod.rs" "slopos" "*"
 
 # Pipe routing
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/pipe/mod.rs" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::{Pipe, pipe};\
     }
@@ -170,8 +206,9 @@ fi
 
 # Random routing (has `_ => {}` not `_ => { mod unsupported; }`)
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/random/mod.rs" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {}$/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {}$/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::fill_bytes;\
     }
@@ -182,8 +219,9 @@ fi
 # FS routing (if fs/slopos.rs exists)
 if [ -f "$STD_SYS/fs/slopos.rs" ]; then
     if ! grep -q 'target_os = "slopos"' "$STD_SYS/fs/mod.rs" 2>/dev/null; then
-        sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+        sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         use slopos as imp;\
     }
@@ -195,8 +233,9 @@ fi
 # Process routing (if process/slopos.rs exists)
 if [ -f "$STD_SYS/process/slopos.rs" ]; then
     if ! grep -q 'target_os = "slopos"' "$STD_SYS/process/mod.rs" 2>/dev/null; then
-        sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+        sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         use slopos as imp;\
     }
@@ -215,7 +254,7 @@ add_to_futex_arm "$STD_SYS/sync/thread_parking/mod.rs"
 # 3e. env_consts.rs — match only the standalone #[else] (not the one inside macro def)
 ENV_CONSTS="$STD_SYS/env_consts.rs"
 if ! grep -q 'target_os = "slopos"' "$ENV_CONSTS" 2>/dev/null; then
-    sed -i '/^#\[else\]$/i\
+    sed_in_place '/^#\[else\]$/i\
 #[cfg(target_os = "slopos")]\
 pub mod os {\
     pub const FAMILY: \&str = "";\
@@ -245,13 +284,16 @@ TL_MOD="$STD_SYS/thread_local/mod.rs"
 # revisions of this script routed slopos there; leaving it in place would
 # collapse every OS thread onto one process-global cell and silently mask the
 # native (FS_BASE) arm — mirrors the io/error legacy-strip below.
-if sed -n '0,/mod no_threads;/p' "$TL_MOD" | grep -q 'target_os = "slopos"'; then
-    sed -i '0,/mod no_threads;/{/^[[:space:]]*target_os = "slopos",$/d}' "$TL_MOD"
+if slopos_before_no_threads "$TL_MOD"; then
+    remove_slopos_before_no_threads "$TL_MOD"
     echo "  Removed stale slopos entry from no_threads storage arm in thread_local/mod.rs"
 fi
 if ! grep -q 'target_os = "slopos"' "$TL_MOD" 2>/dev/null; then
     # Add slopos to the guard hermit/xous no-op arm (hermit immediately followed by xous)
-    sed -i '/target_os = "hermit",/{n;s/target_os = "xous",/target_os = "xous",\n            target_os = "slopos",/}' "$TL_MOD"
+    sed_in_place '/target_os = "hermit",/,/target_os = "xous",/{
+/target_os = "xous",/a\
+            target_os = "slopos",
+}' "$TL_MOD"
     echo "  Patched thread_local/mod.rs"
 fi
 
@@ -272,14 +314,15 @@ echo "  Copied io/error/slopos.rs"
 # generic fallback arm — leaving it in place would dead-code the new
 # dedicated arm because cfg_select! picks the first matching branch.
 if grep -q '^[[:space:]]*target_os = "slopos",$' "$IO_ERROR" 2>/dev/null; then
-    sed -i '/^[[:space:]]*target_os = "slopos",$/d' "$IO_ERROR"
+    sed_in_place '/^[[:space:]]*target_os = "slopos",$/d' "$IO_ERROR"
     echo "  Removed legacy slopos entry from generic fallback in io/error/mod.rs"
 fi
 
 # Insert a dedicated slopos arm. Anchor before the existing motor
 # arm so it lands at the top of the cfg_select! and wins.
 if ! grep -q '^[[:space:]]*target_os = "slopos" => {' "$IO_ERROR" 2>/dev/null; then
-    sed -i '/^[[:space:]]*target_os = "motor" => {$/i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*target_os = "motor" => {$/i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::*;\
     }' "$IO_ERROR"
@@ -291,8 +334,9 @@ fi
 #     unrelated unique_thread_exit cfg_select.
 EXIT_RS="$STD_SYS/exit.rs"
 if [ -f "$EXIT_RS" ] && ! grep -q 'target_os = "slopos"' "$EXIT_RS" 2>/dev/null; then
-    sed -i '/crate::os::xous::ffi::exit/,/^[[:space:]]*}$/{
-        /^[[:space:]]*}$/a\        target_os = "slopos" => {\
+    sed_in_place '/crate::os::xous::ffi::exit/,/^[[:space:]]*}$/{
+        /^[[:space:]]*}$/a\
+        target_os = "slopos" => {\
             crate::sys::pal::os::exit(code)\
         }
     }' "$EXIT_RS"
@@ -308,8 +352,9 @@ fi
 # Patch connection/socket/mod.rs — add slopos arm before `_ => {}`
 SOCK_MOD="$STD_SYS/net/connection/socket/mod.rs"
 if [ -f "$SOCK_MOD" ] && ! grep -q 'target_os = "slopos"' "$SOCK_MOD" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {}$/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {}$/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::*;\
     }
@@ -320,8 +365,9 @@ fi
 # Patch connection/mod.rs — add slopos to the socket-based arm
 CONN_MOD="$STD_SYS/net/connection/mod.rs"
 if [ -f "$CONN_MOD" ] && ! grep -q 'target_os = "slopos"' "$CONN_MOD" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod socket;\
         pub use socket::*;\
     }
@@ -332,8 +378,9 @@ fi
 # Patch hostname/mod.rs — use unsupported (returns error, acceptable)
 HOST_MOD="$STD_SYS/net/hostname/mod.rs"
 if [ -f "$HOST_MOD" ] && ! grep -q 'target_os = "slopos"' "$HOST_MOD" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod unsupported;\
         pub use unsupported::hostname;\
     }
@@ -349,8 +396,9 @@ fi
 
 FD_MOD="$STD_SYS/fd/mod.rs"
 if [ -f "$FD_MOD" ] && ! grep -q 'target_os = "slopos"' "$FD_MOD" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {}$/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {}$/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         pub use slopos::*;\
     }
@@ -370,28 +418,47 @@ patch_os_fd() {
     local OWNED="$STD_OS/fd/owned.rs"
 
     # -- os/mod.rs: add slopos to os::fd gate --
-    sed -i 's/target_os = "motor",/target_os = "motor",\n    target_os = "slopos",/' "$OS_MOD"
+    if ! grep -q 'target_os = "slopos"' "$OS_MOD" 2>/dev/null; then
+        sed_in_place 's/target_os = "motor",/target_os = "motor",\
+    target_os = "slopos",/' "$OS_MOD"
+    fi
 
     # -- raw.rs: RawFd = i32 for slopos --
     # Widen the hermit|motor arm to include slopos
-    sed -i 's/any(target_os = "hermit", target_os = "motor")/any(target_os = "hermit", target_os = "motor", target_os = "slopos")/' "$RAW"
+    if ! grep -q 'any(target_os = "hermit", target_os = "motor", target_os = "slopos")' "$RAW" 2>/dev/null; then
+        sed_in_place 's/any(target_os = "hermit", target_os = "motor")/any(target_os = "hermit", target_os = "motor", target_os = "slopos")/' "$RAW"
+    fi
     # Exclude slopos from the raw::c_int arm and the os::raw import
-    sed -i 's/all(not(target_os = "hermit"), not(target_os = "motor"))/all(not(target_os = "hermit"), not(target_os = "motor"), not(target_os = "slopos"))/' "$RAW"
+    if ! grep -q 'all(not(target_os = "hermit"), not(target_os = "motor"), not(target_os = "slopos"))' "$RAW" 2>/dev/null; then
+        sed_in_place 's/all(not(target_os = "hermit"), not(target_os = "motor"))/all(not(target_os = "hermit"), not(target_os = "motor"), not(target_os = "slopos"))/' "$RAW"
+    fi
     # Add slopos to the motor OwnedFd import (NOT the moto_rt::libc import)
-    sed -i '/#\[cfg(target_os = "motor")\]/{N;/OwnedFd/s/cfg(target_os = "motor")/cfg(any(target_os = "motor", target_os = "slopos"))/}' "$RAW"
+    if ! grep -q '#\[cfg(any(target_os = "motor", target_os = "slopos"))\]' "$RAW" 2>/dev/null; then
+        perl_in_place 's/#\[cfg\(target_os = "motor"\)\]\nuse super::owned::OwnedFd;/#[cfg(any(target_os = "motor", target_os = "slopos"))]\nuse super::owned::OwnedFd;/' "$RAW"
+    fi
     # Replace libc stdio constants with slopos-safe cfg-gated versions
-    sed -i 's/libc::STDIN_FILENO/#[cfg(target_os = "slopos")] { 0 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDIN_FILENO }/' "$RAW"
-    sed -i 's/libc::STDOUT_FILENO/#[cfg(target_os = "slopos")] { 1 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDOUT_FILENO }/' "$RAW"
-    sed -i 's/libc::STDERR_FILENO/#[cfg(target_os = "slopos")] { 2 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDERR_FILENO }/' "$RAW"
+    if ! grep -q '#\[cfg(target_os = "slopos")\] { 0 }' "$RAW" 2>/dev/null; then
+        perl_in_place 's/libc::STDIN_FILENO/#[cfg(target_os = "slopos")] { 0 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDIN_FILENO }/g' "$RAW"
+    fi
+    if ! grep -q '#\[cfg(target_os = "slopos")\] { 1 }' "$RAW" 2>/dev/null; then
+        perl_in_place 's/libc::STDOUT_FILENO/#[cfg(target_os = "slopos")] { 1 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDOUT_FILENO }/g' "$RAW"
+    fi
+    if ! grep -q '#\[cfg(target_os = "slopos")\] { 2 }' "$RAW" 2>/dev/null; then
+        perl_in_place 's/libc::STDERR_FILENO/#[cfg(target_os = "slopos")] { 2 }\n        #[cfg(not(target_os = "slopos"))] { libc::STDERR_FILENO }/g' "$RAW"
+    fi
 
     # -- owned.rs: try_clone_to_owned + Drop for slopos --
     # 1) Exclude slopos from the libc-based try_clone_to_owned and cvt import
     #    (both cfg blocks contain "target_os = "trusty"," so this adds slopos to both)
-    sed -i 's/target_os = "trusty",/target_os = "trusty",\n        target_os = "slopos",/' "$OWNED"
+    if ! grep -q 'target_os = "slopos"' "$OWNED" 2>/dev/null; then
+        sed_in_place 's/target_os = "trusty",/target_os = "trusty",\
+        target_os = "slopos",/' "$OWNED"
+    fi
 
     # 2) Add slopos try_clone_to_owned block after motor's
     #    Anchor on map_motor_error (unique to motor impl), find its closing }, append after
-    sed -i '/map_motor_error/,/^    }/{
+    if ! grep -q 'fn dup(fd: i32) -> i32' "$OWNED" 2>/dev/null; then
+        sed_in_place '/map_motor_error/,/^    }/{
         /^    }/a\
 \
     #[cfg(target_os = "slopos")]\
@@ -402,28 +469,31 @@ patch_os_fd() {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })\
     }
     }' "$OWNED"
+    fi
 
     # 3) Patch Drop: exclude slopos from the #[cfg(not(target_os = "hermit"))] close block
     #    and add a slopos close block
-    sed -i 's/#\[cfg(not(target_os = "hermit"))\]/#[cfg(not(any(target_os = "hermit", target_os = "slopos")))]/' "$OWNED"
+    if ! grep -q 'not(any(target_os = "hermit", target_os = "slopos"))' "$OWNED" 2>/dev/null; then
+        sed_in_place 's/#\[cfg(not(target_os = "hermit"))\]/#[cfg(not(any(target_os = "hermit", target_os = "slopos")))]/' "$OWNED"
+    fi
     # Add slopos close block after the hermit close
-    sed -i '/hermit_abi::close(self.fd.as_inner());/a\
+    if ! grep -q 'fn close(fd: i32) -> i32' "$OWNED" 2>/dev/null; then
+        sed_in_place '/hermit_abi::close(self.fd.as_inner());/a\
             #[cfg(target_os = "slopos")]\
             {\
                 unsafe extern "C" { fn close(fd: i32) -> i32; }\
                 let _ = unsafe { close(self.fd.as_inner()) };\
             }' "$OWNED"
+    fi
 
     # 4) Exclude slopos from the cvt import (we have our own cvt signature)
     # The gate is: #[cfg(not(any(target_arch = "wasm32", target_env = "sgx", target_os = "hermit", target_os = "trusty", target_os = "motor")))]
     # We already added slopos to this list via step 1 (same cfg block)
 
-    echo "  Patched os/mod.rs, os/fd/raw.rs, os/fd/owned.rs"
+    echo "  Checked os/mod.rs, os/fd/raw.rs, os/fd/owned.rs"
 }
 
-if ! grep -q 'target_os = "slopos"' "$STD_OS/mod.rs" 2>/dev/null; then
-    patch_os_fd
-fi
+patch_os_fd
 
 # 3l. Path/cwd routing (sys/paths) — wire std::env::{current_dir,
 # set_current_dir, temp_dir} through SlopOS getcwd/chdir.
@@ -441,8 +511,9 @@ fi
 
 PATHS_MOD="$STD_SYS/paths/mod.rs"
 if [ -f "$PATHS_MOD" ] && ! grep -q 'target_os = "slopos"' "$PATHS_MOD" 2>/dev/null; then
-    sed -i '/^[[:space:]]*_ => {/{
-i\    target_os = "slopos" => {\
+    sed_in_place '/^[[:space:]]*_ => {/{
+i\
+    target_os = "slopos" => {\
         mod slopos;\
         #[expect(dead_code)]\
         mod unsupported;\
@@ -497,7 +568,7 @@ check_thread_local_native() {
     fi
     # Negative: the first cfg_select! arm (the no_threads storage arm, which
     # ends at `mod no_threads;`) must NOT mention slopos.
-    if sed -n '0,/mod no_threads;/p' "$file" | grep -q 'target_os = "slopos"'; then
+    if slopos_before_no_threads "$file"; then
         echo "  STALE PATCH: thread_local/mod.rs routes slopos into the no_threads storage arm"
         echo "    file  : $file"
         echo "    expected slopos to fall through to the native (FS_BASE) arm"
