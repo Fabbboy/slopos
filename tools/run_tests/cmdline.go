@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -94,8 +95,8 @@ func parseArgs(argv []string) (*Args, error) {
 	fs := flag.NewFlagSet("run_tests", flag.ContinueOnError)
 	a := &Args{
 		ColorMode:   "auto",
-		TimeoutSecs: 900,
-		SilenceSecs: 120,
+		TimeoutSecs: envIntDefault("RUN_TESTS_TIMEOUT_SECS", 900),
+		SilenceSecs: envIntDefault("RUN_TESTS_SILENCE_SECS", 120),
 		WarnMs:      500,
 	}
 	var filters, skips stringSlice
@@ -108,8 +109,8 @@ func parseArgs(argv []string) (*Args, error) {
 	fs.StringVar(&a.JsonPath, "json", "", "Append one JSON event per line to PATH.")
 	fs.StringVar(&a.ColorMode, "color", "auto", "Colour mode: auto|always|never.")
 	fs.BoolVar(&a.NoColor, "no-color", false, "Alias for --color=never.")
-	fs.IntVar(&a.TimeoutSecs, "timeout-secs", 900, "Wall-clock guard for the whole run; 0 disables.")
-	fs.IntVar(&a.SilenceSecs, "silence-secs", 120, "Abort if QEMU stdout is silent for this long; 0 disables.")
+	fs.IntVar(&a.TimeoutSecs, "timeout-secs", a.TimeoutSecs, "Wall-clock guard for the whole run; 0 disables. Defaults to RUN_TESTS_TIMEOUT_SECS or 900.")
+	fs.IntVar(&a.SilenceSecs, "silence-secs", a.SilenceSecs, "Abort if QEMU stdout is silent for this long; 0 disables. Defaults to RUN_TESTS_SILENCE_SECS or 120.")
 	fs.IntVar(&a.WarnMs, "warn-ms", 500, "Mark tests slower than this as OVER_TIME.")
 	fs.StringVar(&a.Iso, "iso", "", "Test ISO path.")
 	fs.StringVar(&a.FsImage, "fs-image", "", "Test fs image path.")
@@ -177,4 +178,16 @@ func assembleTestCmdline(base string, filters, skips []string, verbosity, extra 
 		parts = append(parts, extra)
 	}
 	return strings.Join(parts, " ")
+}
+
+func envIntDefault(name string, fallback int) int {
+	raw, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	return value
 }

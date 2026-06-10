@@ -465,7 +465,7 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 	// "TIMED OUT" banner. With summary verbosity (the CI default) klog
 	// is otherwise suppressed entirely, leaving us blind to where the
 	// kernel was when it wedged.
-	if (summary.TimedOut || summary.UserAborted || summary.Truncated) &&
+	if (summary.TimedOut || summary.UserAborted || summary.Truncated || summary.HarnessError != nil) &&
 		len(summary.AbortKlogTail) > 0 {
 		r.println(Paint(
 			fmt.Sprintf("klog tail (last %d non-KTAP lines before abort):",
@@ -528,6 +528,8 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 				total, nPhases, plural, passed, failed, skipped, overTime),
 			ansiYellow, r.Colour,
 		))
+	case summary.HarnessError != nil:
+		r.println(Paint(*summary.HarnessError, ansiRedBold, r.Colour))
 	case failed == 0 && !summary.Truncated:
 		r.println(Paint(
 			fmt.Sprintf("%d tests across %d phase%s  →  "+

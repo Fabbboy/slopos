@@ -95,6 +95,7 @@ OVMF_VARS="${OVMF_DIR}/OVMF_VARS.fd"
 BOOT_LOG_TIMEOUT="${BOOT_LOG_TIMEOUT:-15}"
 LOG_FILE="${LOG_FILE:-test_output.log}"
 LOG_FILE_RAW="${LOG_FILE}.raw"
+SCRATCH_CLEANUP=""
 
 # ── Validate SMP ─────────────────────────────────────────────────────────────
 if [ "$QEMU_SMP" -lt 1 ]; then
@@ -117,7 +118,7 @@ fi
 
 # ── Create runtime OVMF_VARS copy ────────────────────────────────────────────
 OVMF_VARS_RUNTIME="$(mktemp "${OVMF_DIR}/OVMF_VARS.runtime.XXXXXX.fd")"
-cleanup() { rm -f "$OVMF_VARS_RUNTIME"; }
+cleanup() { rm -f "$OVMF_VARS_RUNTIME" ${SCRATCH_CLEANUP:+"$SCRATCH_CLEANUP"}; }
 trap cleanup EXIT INT TERM
 cp "$OVMF_VARS" "$OVMF_VARS_RUNTIME"
 
@@ -171,10 +172,17 @@ case "$MODE" in
         # backend is wired to COM1.
         DISPLAY_ARGS=(-display none)
         EXTRA_ARGS=(-device "isa-debug-exit,iobase=0xf4,iosize=0x01" -no-reboot)
-        SCRATCH_IMG="${SCRATCH_IMG:-${REPO_ROOT}/builddir/scratch-disk.img}"
-        mkdir -p "$(dirname "$SCRATCH_IMG")"
+        if [ -n "${SCRATCH_IMG:-}" ]; then
+            mkdir -p "$(dirname "$SCRATCH_IMG")"
+            # Explicit debugging override: keep the historical path contract,
+            # but still start each run from a fresh raw disk.
+            rm -f "$SCRATCH_IMG"
+        else
+            mkdir -p "${REPO_ROOT}/builddir"
+            SCRATCH_IMG="$(mktemp "${REPO_ROOT}/builddir/scratch-disk.XXXXXX.img")"
+            SCRATCH_CLEANUP="$SCRATCH_IMG"
+        fi
         # Fresh, blank 8 MiB raw scratch each run (no filesystem; raw-sector tests only).
-        rm -f "$SCRATCH_IMG"
         truncate -s 8M "$SCRATCH_IMG"
         SCRATCH_ARGS=(
             -drive "file=$SCRATCH_IMG,if=none,id=virtio-disk1,format=raw"
@@ -313,8 +321,8 @@ case "$MODE" in
         sleep 0.2
         kill "$tail_pid" 2>/dev/null
         wait "$tail_pid" 2>/dev/null || true
+        cleanup
         trap - EXIT INT TERM
-        rm -f "$OVMF_VARS_RUNTIME"
 
         sed 's/\x1b\[[^a-zA-Z]*[a-zA-Z]//g' "$LOG_FILE_RAW" > "$LOG_FILE"
         rm -f "$LOG_FILE_RAW"
@@ -331,8 +339,8 @@ case "$MODE" in
         "$QEMU_BIN" "${QEMU_ARGS[@]}"
         status=$?
         set -e
+        cleanup
         trap - EXIT INT TERM
-        rm -f "$OVMF_VARS_RUNTIME"
         if [ $status -eq 1 ]; then
             echo "Tests passed."
         elif [ $status -eq 3 ]; then

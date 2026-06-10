@@ -91,9 +91,9 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	// Silence watchdog. lastLine is the monotonic time of the last byte
-	// received from QEMU. Watcher goroutine polls it and trips when the
-	// pipe goes dead longer than SilenceSec.
+	// Silence watchdog. lastLine is the monotonic time of the last complete
+	// line received from QEMU. Watcher goroutine polls it and trips when
+	// the parsed line stream goes dead longer than SilenceSec.
 	var lastLine atomic.Int64
 	lastLine.Store(time.Now().UnixNano())
 	silenceCtx, silenceCancel := context.WithCancel(context.Background())

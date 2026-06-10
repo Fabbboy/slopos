@@ -64,6 +64,7 @@ define_syscall!(syscall_test_report
 
 define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
     if !kernel_phase_summary::tests_enabled() {
+        klog_info!("TESTS: run_userland_tests ignored; kernel phase not enabled");
         return Ok(());
     }
 

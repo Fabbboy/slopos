@@ -49,6 +49,9 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
 boot_cmdline     := env("BOOT_CMDLINE", "tests=off")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip"
+test_timeout_secs := env("TEST_TIMEOUT_SECS", "900")
+test_silence_secs := env("TEST_SILENCE_SECS", "120")
+test_harness_args := "--timeout-secs " + test_timeout_secs + " --silence-secs " + test_silence_secs
 # `TEST_CMDLINE=…` env override lets `builddir/run_tests` thread filter
 # / verbosity flags into the ISO at build time. Mirrors `BOOT_CMDLINE` for
 # the non-test path.
@@ -262,31 +265,31 @@ _build-run-tests:
 
 [doc("Run the SlopOS test harness — live progress bar, per-failure detail, FILTER='glob' supported")]
 test FILTER='': _build-run-tests
-    {{build_dir}}/run_tests --filter "{{FILTER}}"
+    {{build_dir}}/run_tests {{test_harness_args}} --filter "{{FILTER}}"
 
 [doc("Re-run only the tests that failed on the previous `just test` invocation.")]
 test-rerun-failed: _build-run-tests
-    {{build_dir}}/run_tests --rerun-failed
+    {{build_dir}}/run_tests {{test_harness_args}} --rerun-failed
 
 [doc("Same as `just test` but dump captured klog of every test (not only failures).")]
 test-verbose FILTER='': _build-run-tests
-    {{build_dir}}/run_tests --verbose --filter "{{FILTER}}"
+    {{build_dir}}/run_tests {{test_harness_args}} --verbose --filter "{{FILTER}}"
 
 [doc("Suppress per-test output; render only failures + summary.")]
 test-quiet FILTER='': _build-run-tests
-    {{build_dir}}/run_tests --quiet --filter "{{FILTER}}"
+    {{build_dir}}/run_tests {{test_harness_args}} --quiet --filter "{{FILTER}}"
 
 [doc("Passthrough QEMU stdout verbatim — KTAP and klog interleaved. Last-resort debugging.")]
 test-raw: _build-run-tests
-    {{build_dir}}/run_tests --raw
+    {{build_dir}}/run_tests {{test_harness_args}} --raw
 
 [doc("Append one JSON event per line to PATH (machine-consumable).")]
 test-json PATH: _build-run-tests
-    {{build_dir}}/run_tests --json "{{PATH}}"
+    {{build_dir}}/run_tests {{test_harness_args}} --json "{{PATH}}"
 
 [doc("Skip the kernel-side test phase; run only the Phase 3 userland tests.")]
 test-userland-only: _iso-tests-userland-only _build-run-tests
-    {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
+    {{build_dir}}/run_tests {{test_harness_args}} --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
 [doc("Run host-side unit tests: abi, gfx, font, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:

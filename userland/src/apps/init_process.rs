@@ -40,8 +40,6 @@ fn spawn_service(name: &str) -> i32 {
 }
 
 pub fn init_user_main() {
-    upgrade_console_font();
-
     let mut info = UserSysInfo::default();
     let info_ok = sys_core::sys_info(&mut info) == 0;
     let skip_roulette = info_ok && (info.boot_flags & BOOT_FLAG_ROULETTE_SKIP) != 0;
@@ -49,7 +47,11 @@ pub fn init_user_main() {
 
     if tests_enabled {
         // Drive the kernel-side userland-test phase from this task's
-        // context. The syscall handler walks the `.test_registry`,
+        // context before doing any interactive-session setup. Font atlas
+        // loading/rasterization is useful for a real desktop boot, but it
+        // is pure overhead for `just test` and can leave the host harness
+        // silent long enough to trip short CI watchdogs on slower QEMU
+        // backends. The syscall handler walks the `.test_registry`,
         // spawns each utest binary, blocks on its exit via
         // `task_wait_for`, drains its `SYSCALL_TEST_REPORT` ring, emits
         // KTAP, merges with the kernel-phase summary, and triggers the
@@ -62,6 +64,8 @@ pub fn init_user_main() {
             sys_core::exit_with_code(0);
         }
     }
+
+    upgrade_console_font();
 
     if !skip_roulette {
         let roulette_tid = spawn_service("roulette");

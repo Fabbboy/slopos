@@ -83,6 +83,7 @@ type RunSummary struct {
 	TimedOut          bool
 	SilenceHit        bool
 	QemuStatus        *int
+	HarnessError      *string
 	// AbortKlogTail is the parser's rolling window of recent non-KTAP
 	// klog lines, snapshotted at finalize time when the run aborted
 	// (timeout / silence / truncation). Populated by main; rendered by
@@ -235,6 +236,10 @@ func (r *RunRecorder) Record(ev Event) {
 func (r *RunRecorder) Finalize(qemuStatus *int) {
 	r.Summary.FinishedMonotonic = time.Now()
 	r.Summary.QemuStatus = qemuStatus
+	if len(r.Summary.Phases) == 0 {
+		reason := "NO KTAP output: QEMU exited before the kernel test harness announced a phase"
+		r.Summary.HarnessError = &reason
+	}
 	for _, p := range r.Summary.Phases {
 		observed := len(p.Tests)
 		if p.PlanN != nil && observed < *p.PlanN && p.BailReason == nil {

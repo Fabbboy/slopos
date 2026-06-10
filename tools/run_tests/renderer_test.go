@@ -61,6 +61,24 @@ func TestRendererTimeoutDumpsKlogTail(t *testing.T) {
 	}
 }
 
+func TestRendererNoKtapRunIsHarnessError(t *testing.T) {
+	rec := NewRecorder()
+	status := 0
+	rec.Finalize(&status)
+
+	if rec.Summary.HarnessError == nil {
+		t.Fatalf("expected harness error for run with no KTAP phases")
+	}
+
+	var buf bytes.Buffer
+	r := NewBarRenderer(&buf, "summary", false, 0, false, 100)
+	r.Finalize(rec.Summary)
+	out := buf.String()
+	if !strings.Contains(out, "NO KTAP output") {
+		t.Errorf("missing no-KTAP diagnostic: %q", out)
+	}
+}
+
 // Smoke test: green run renders summary line, no failure block.
 func TestRendererGreenRunSummary(t *testing.T) {
 	lines := []string{
