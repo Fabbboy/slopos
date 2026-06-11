@@ -133,11 +133,11 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
         !crate::cpu::x86_64::interrupts::are_interrupts_enabled(),
         "switch_context called with interrupts enabled"
     );
-    // SAFETY: the production preempt backend is registered (and the BSP
-    // PCR installed) before the scheduler performs any switch, so
-    // `current_pcr()` resolves this CPU's region.
-    let pcr_ref = unsafe { pcr::current_pcr() };
-    let live = pcr_ref.preempt_count.load(Ordering::Relaxed);
+    // Single-instruction gs-relative count accesses: with IRQs off
+    // (asserted above) the pointer-based form would also be correct,
+    // but the gs ops keep every preempt-count touch in the kernel
+    // migration-atomic by construction.
+    let live = pcr::preempt_count_get();
     if !prev.is_null() {
         // SAFETY: caller guarantees `prev` is a valid, exclusively-owned
         // context for the duration of the switch.
@@ -147,7 +147,7 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
     }
     // SAFETY: caller guarantees `next` is a valid context.
     let restored = unsafe { (*next).preempt_count } as u32;
-    pcr_ref.preempt_count.store(restored, Ordering::Relaxed);
+    pcr::preempt_count_set(restored);
 
     // `switch_registers` has a safe signature (its preconditions match
     // ours and are documented on its own item); forward the swap.

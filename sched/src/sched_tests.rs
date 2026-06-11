@@ -32,6 +32,7 @@ use slopos_arch::MAX_CPUS;
 use slopos_arch::arch::gdt::SegmentSelector;
 use slopos_arch::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, PreemptGuard, SpinLock};
 use slopos_ostd::task::SchedPlacement;
 
 // =============================================================================
@@ -4628,3 +4629,115 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_kernel_io_token_constructs, suite = sched_core);
+
+// =============================================================================
+// Per-CPU preempt accounting (single-instruction gs-relative ops)
+// =============================================================================
+//
+// Regression coverage for the migration TOCTOU class: the old
+// pointer-then-RMW preempt accounting let an IRQ-driven migration land
+// an increment on the previous CPU's count (leaked +1 there, underflow
+// panic here). The accounting is now single-instruction gs-relative;
+// these tests pin the guard semantics and soak the exact acquisition
+// shape that used to corrupt — guard churn at the preemptible baseline
+// with the timer free to preempt and migrate the task mid-loop.
+
+fn test_preempt_guard_nesting_balances() -> TestResult {
+    let baseline = slopos_ostd::sync::preempt_count();
+    let outer = slopos_ostd::sync::PreemptGuard::new();
+    if slopos_ostd::sync::preempt_count() != baseline + 1 {
+        klog_info!("SCHED_TEST: outer guard did not raise count by 1");
+        return TestResult::Fail;
+    }
+    let inner = slopos_ostd::sync::PreemptGuard::new();
+    if slopos_ostd::sync::preempt_count() != baseline + 2 {
+        klog_info!("SCHED_TEST: inner guard did not raise count by 1");
+        return TestResult::Fail;
+    }
+    drop(inner);
+    if slopos_ostd::sync::preempt_count() != baseline + 1 {
+        klog_info!("SCHED_TEST: inner drop did not lower count by 1");
+        return TestResult::Fail;
+    }
+    drop(outer);
+    if slopos_ostd::sync::preempt_count() != baseline {
+        klog_info!("SCHED_TEST: outer drop did not restore baseline");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+fn test_preempt_reschedule_pending_deferred_not_lost() -> TestResult {
+    // With IRQs disabled nothing else can mutate this CPU's pending
+    // flag, and the guard-drop deferred callback is gated off (it
+    // requires the IRQs-enabled baseline) — so a guard dropped with
+    // the flag set must LEAVE it set for the trap-exit handoff.
+    let ok = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
+        PreemptGuard::clear_reschedule_pending();
+        let guard = PreemptGuard::new();
+        PreemptGuard::set_reschedule_pending();
+        if !PreemptGuard::is_reschedule_pending() {
+            klog_info!("SCHED_TEST: pending flag not observed after set");
+            return false;
+        }
+        drop(guard);
+        if !PreemptGuard::is_reschedule_pending() {
+            klog_info!("SCHED_TEST: IRQs-off guard drop consumed pending flag");
+            return false;
+        }
+        PreemptGuard::clear_reschedule_pending();
+        if PreemptGuard::is_reschedule_pending() {
+            klog_info!("SCHED_TEST: pending flag survived clear");
+            return false;
+        }
+        true
+    });
+    if ok {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+fn test_preempt_count_balanced_under_guard_churn() -> TestResult {
+    static CHURN_LOCK: SpinLock<u64> = SpinLock::new(0, LOCK_LEVEL_RESOURCE);
+
+    let baseline = slopos_ostd::sync::preempt_count();
+    for i in 0..20_000u32 {
+        // Bare guard churn: the acquisition shape that used to race
+        // IRQ-driven migration.
+        let guard = slopos_ostd::sync::PreemptGuard::new();
+        core::hint::black_box(&guard);
+        drop(guard);
+
+        // SpinLock churn: guard + cli + critical section, the exact
+        // panicking path (poll_reg_take's lock/unlock).
+        let mut slot = CHURN_LOCK.lock();
+        *slot = slot.wrapping_add(1);
+        drop(slot);
+
+        // Invite the timer to preempt (and the stealer to migrate)
+        // the task between iterations.
+        if i % 1024 == 0 {
+            scheduler::yield_();
+        }
+    }
+    if slopos_ostd::sync::preempt_count() != baseline {
+        klog_info!("SCHED_TEST: preempt count drifted across guard churn");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_preempt_guard_nesting_balances,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_preempt_reschedule_pending_deferred_not_lost,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_preempt_count_balanced_under_guard_churn,
+    suite = sched_core
+);

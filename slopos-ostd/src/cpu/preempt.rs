@@ -155,24 +155,15 @@ pub static DEFAULT_PCR_PREEMPT: PcrPreemptBackend = PcrPreemptBackend;
 impl PreemptBackend for PcrPreemptBackend {
     #[inline]
     fn enter(&self) {
-        // SAFETY: `register_preempt_backend` is only invoked after
-        // `pcr.install()` has run on the BSP, so `current_pcr()`
-        // returns a valid `&'static ProcessorControlRegion`.
-        unsafe {
-            crate::cpu::x86_64::pcr::current_pcr()
-                .preempt_count
-                .fetch_add(1, Ordering::AcqRel);
-        }
+        // Single-instruction gs-relative increment — migration-atomic,
+        // same rationale as `PreemptGuard::new` (both families account
+        // against the same per-CPU field).
+        crate::cpu::x86_64::pcr::preempt_count_inc();
     }
 
     #[inline]
     fn leave(&self) {
-        // SAFETY: only the current CPU's PCR atomic field is touched.
-        let prev = unsafe {
-            crate::cpu::x86_64::pcr::current_pcr()
-                .preempt_count
-                .fetch_sub(1, Ordering::AcqRel)
-        };
+        let prev = crate::cpu::x86_64::pcr::preempt_count_dec_fetch_prev();
         // Always-on (not debug-only): an unmatched backend decrement
         // wraps the unsigned count to ~u32::MAX silently and primes a
         // later, context-free `PreemptGuard::drop` underflow. Fail here,
@@ -182,11 +173,7 @@ impl PreemptBackend for PcrPreemptBackend {
 
     #[inline]
     fn count(&self) -> u32 {
-        unsafe {
-            crate::cpu::x86_64::pcr::current_pcr()
-                .preempt_count
-                .load(Ordering::Acquire)
-        }
+        crate::cpu::x86_64::pcr::preempt_count_get()
     }
 }
 
@@ -360,10 +347,20 @@ pub struct PreemptGuard {
 impl PreemptGuard {
     #[inline]
     pub fn new() -> Self {
-        // SAFETY: Only accessing atomic fields on the current CPU's PCR.
-        unsafe { pcr::current_pcr() }
-            .preempt_count
-            .fetch_add(1, Ordering::Relaxed);
+        // Single-instruction gs-relative increment (migration-atomic).
+        //
+        // This guard is constructed at the preemptible baseline
+        // (count == 0, IRQs on — the head of every `SpinLock::lock`).
+        // Resolving the PCR pointer and incrementing through it as two
+        // separate steps opens a preemption window between them: an
+        // IRQ-driven reschedule can migrate the task after the pointer
+        // fetch, so the increment lands on the PREVIOUS CPU's count.
+        // That CPU then never preempts again (its count never returns
+        // to zero — stranded READY tasks), while this CPU's count
+        // stays 0 and the matching drop underflows. A single
+        // gs-relative RMW has no such window: interrupts are only
+        // recognised at instruction boundaries.
+        pcr::preempt_count_inc();
         Self {
             _marker: PhantomData,
         }
@@ -371,44 +368,27 @@ impl PreemptGuard {
 
     #[inline]
     pub fn is_active() -> bool {
-        // SAFETY: Reading atomic field on the current CPU's PCR.
-        unsafe { pcr::current_pcr() }
-            .preempt_count
-            .load(Ordering::Relaxed)
-            > 0
+        pcr::preempt_count_get() > 0
     }
 
     #[inline]
     pub fn count() -> u32 {
-        // SAFETY: Reading atomic field on the current CPU's PCR.
-        unsafe { pcr::current_pcr() }
-            .preempt_count
-            .load(Ordering::Relaxed)
+        pcr::preempt_count_get()
     }
 
     #[inline]
     pub fn set_reschedule_pending() {
-        // SAFETY: Writing atomic field on the current CPU's PCR.
-        unsafe { pcr::current_pcr() }
-            .reschedule_pending
-            .store(1, Ordering::Release);
+        pcr::reschedule_pending_set();
     }
 
     #[inline]
     pub fn is_reschedule_pending() -> bool {
-        // SAFETY: Reading atomic field on the current CPU's PCR.
-        unsafe { pcr::current_pcr() }
-            .reschedule_pending
-            .load(Ordering::Acquire)
-            != 0
+        pcr::reschedule_pending_get() != 0
     }
 
     #[inline]
     pub fn clear_reschedule_pending() {
-        // SAFETY: Writing atomic field on the current CPU's PCR.
-        unsafe { pcr::current_pcr() }
-            .reschedule_pending
-            .store(0, Ordering::Release);
+        pcr::reschedule_pending_clear();
     }
 }
 
@@ -421,9 +401,13 @@ impl Default for PreemptGuard {
 impl Drop for PreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: Only accessing atomic fields on the current CPU's PCR.
-        let pcr = unsafe { pcr::current_pcr() };
-        let prev = pcr.preempt_count.fetch_sub(1, Ordering::Release);
+        // Single-instruction gs-relative decrement (migration-atomic,
+        // see `new`). While the count is non-zero the task is pinned
+        // to its CPU — preemption is gated on `is_active` and blocking
+        // with a guard held panics in `assert_switch_preempt_safe` —
+        // so this decrement always executes on the same CPU as the
+        // matching increment.
+        let prev = pcr::preempt_count_dec_fetch_prev();
         // Always-on: a `prev == 0` here is a real accounting bug (an
         // unbalanced guard, or a count corrupted elsewhere). Panic at the
         // decrement rather than letting the unsigned wrap propagate.
@@ -448,9 +432,21 @@ impl Drop for PreemptGuard {
         //   correct boundary (`scheduler_handoff_on_trap_exit`), so the
         //   reschedule is deferred, not lost. `reschedule_pending` is
         //   deliberately left set on this path.
+        //
+        // Once `prev == 1` lands the count at zero the task is
+        // preemptible again, so a migration may slip in before the
+        // pending check below. That is benign by the same argument as
+        // Linux's `preempt_enable()`: the migrating IRQ's own trap-exit
+        // handoff consumes the OLD CPU's pending flag before switching,
+        // and the gs-relative check below targets whichever CPU this
+        // task is executing on now — whose pending flag it, as that
+        // CPU's current task, is the right party to act on. The cheap
+        // load gates the (implicitly locked) `xchg` take so the common
+        // no-pending unlock path stays a plain read.
         if prev == 1
             && crate::cpu::x86_64::interrupts::are_interrupts_enabled()
-            && pcr.reschedule_pending.swap(0, Ordering::AcqRel) != 0
+            && pcr::reschedule_pending_get() != 0
+            && pcr::reschedule_pending_take() != 0
         {
             let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
             if !fn_ptr.is_null() {

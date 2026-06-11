@@ -223,6 +223,9 @@ const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, kernel_rsp) == 16);
     assert!(core::mem::offset_of!(ProcessorControlRegion, cpu_id) == 24);
     assert!(core::mem::offset_of!(ProcessorControlRegion, apic_id) == 28);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, preempt_count) == 32);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, reschedule_pending) == 60);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, syscall_pid) == 88);
     assert!(core::mem::offset_of!(ProcessorControlRegion, current_task) == 40);
     assert!(core::mem::offset_of!(ProcessorControlRegion, idle_task) == 48);
     assert!(core::mem::offset_of!(ProcessorControlRegion, user_ctx_ptr) == 96);
@@ -427,6 +430,14 @@ pub mod offsets {
     pub const CPU_ID: usize = 24;
     /// Offset of apic_id field (hardware APIC ID).
     pub const APIC_ID: usize = 28;
+    /// Offset of the `preempt_count` field (`AtomicU32`). Consumed as a
+    /// `const` operand by the single-instruction per-CPU ops below
+    /// (`preempt_count_inc` and friends) so the count is always
+    /// manipulated on the CPU executing the instruction.
+    pub const PREEMPT_COUNT: usize = 32;
+    /// Offset of the `reschedule_pending` field (`AtomicU32`). Consumed
+    /// as a `const` operand by the single-instruction per-CPU ops.
+    pub const RESCHEDULE_PENDING: usize = 60;
     /// Offset of the `current_task` field (`AtomicPtr<()>`).
     /// Consumed by `__safestack_pointer_address` as a `const` operand
     /// to locate the running task's `unsafe_stack_sp` via
@@ -435,6 +446,10 @@ pub mod offsets {
     /// Offset of the `idle_task` field (`AtomicPtr<()>`).  Read by
     /// the scheduler's idle-resolve paths.
     pub const IDLE_TASK: usize = 48;
+    /// Offset of the `syscall_pid` field (`AtomicU32`). Consumed as a
+    /// `const` operand by the single-instruction accessors so user
+    /// pointer validation always reads the executing CPU's value.
+    pub const SYSCALL_PID: usize = 88;
     /// Offset of the `user_ctx_ptr` field (`AtomicPtr<UserContext>`).
     /// Read by `__ostd_user_return` to write user state back into the
     /// active `UserContext`.
@@ -802,6 +817,160 @@ pub unsafe fn current_pcr_mut() -> &'static mut ProcessorControlRegion {
     &mut *ptr
 }
 
+// ==================== SINGLE-INSTRUCTION PER-CPU OPS ====================
+//
+// Migration-atomic accessors for per-CPU PCR scalars (the Linux
+// `this_cpu_*` discipline, e.g. `incl %gs:__preempt_count`).
+//
+// [`current_pcr`] materialises the PCR *pointer* and lets the caller
+// dereference it later. In preemptible context (preempt_count == 0,
+// IRQs on — the head of every `SpinLock::lock`) an IRQ-driven
+// reschedule can migrate the task BETWEEN the pointer fetch and the
+// access, landing the access on the previous CPU's PCR. For the
+// preempt count that split is fatal: the increment lands on the old
+// CPU — which then never preempts again (stranded READY tasks) —
+// while the new CPU's count stays 0, so the matching guard drop
+// underflows. Each accessor below compiles to a SINGLE gs-relative
+// instruction, which the CPU executes atomically with respect to
+// interrupts: there is no window in which "this CPU" can change
+// between resolving the address and performing the access.
+//
+// No `lock` prefix on `add`/`xadd` (and none needed): these fields
+// are written only by their owning CPU — the preempt guards and
+// `switch_context` run on the CPU they account, and
+// `reschedule_pending` is set either locally or by the
+// reschedule-IPI handler executing on the target CPU. Cross-CPU
+// readers (diagnostics) tolerate stale snapshots. x86-TSO plus the
+// `asm!` blocks' implicit compiler barrier provide all the ordering
+// the previous `Ordering::Acquire`/`Release` atomics provided for
+// this CPU-local data.
+//
+// GS_BASE must point at a valid PCR when any of these run — the same
+// precondition `current_pcr` documents; both the BSP and AP entry
+// trampolines install GS_BASE before any instrumented Rust executes.
+
+/// Increment this CPU's preempt count by one (single instruction).
+#[inline(always)]
+pub(crate) fn preempt_count_inc() {
+    // SAFETY: single gs-relative RMW on this CPU's PCR field; GS_BASE
+    // is installed by the entry trampolines before any caller runs.
+    unsafe {
+        core::arch::asm!(
+            "add dword ptr gs:[{off}], 1",
+            off = const offsets::PREEMPT_COUNT,
+            options(nostack),
+        );
+    }
+}
+
+/// Decrement this CPU's preempt count by one and return the
+/// pre-decrement value (single `xadd` instruction).
+#[inline(always)]
+pub(crate) fn preempt_count_dec_fetch_prev() -> u32 {
+    let prev: u32;
+    // SAFETY: single gs-relative RMW on this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "xadd dword ptr gs:[{off}], {prev:e}",
+            off = const offsets::PREEMPT_COUNT,
+            prev = inout(reg) u32::MAX => prev,
+            options(nostack),
+        );
+    }
+    prev
+}
+
+/// Read this CPU's preempt count (single load).
+#[inline(always)]
+pub(crate) fn preempt_count_get() -> u32 {
+    let count: u32;
+    // SAFETY: single gs-relative load from this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov {count:e}, gs:[{off}]",
+            off = const offsets::PREEMPT_COUNT,
+            count = out(reg) count,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    count
+}
+
+/// Overwrite this CPU's preempt count (single store). Only the
+/// context-switch count swap may use this, with IRQs disabled.
+#[inline(always)]
+pub(crate) fn preempt_count_set(count: u32) {
+    // SAFETY: single gs-relative store to this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov gs:[{off}], {count:e}",
+            off = const offsets::PREEMPT_COUNT,
+            count = in(reg) count,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Set this CPU's deferred-reschedule flag (single store).
+#[inline(always)]
+pub(crate) fn reschedule_pending_set() {
+    // SAFETY: single gs-relative store to this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov dword ptr gs:[{off}], 1",
+            off = const offsets::RESCHEDULE_PENDING,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Clear this CPU's deferred-reschedule flag (single store).
+#[inline(always)]
+pub(crate) fn reschedule_pending_clear() {
+    // SAFETY: single gs-relative store to this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov dword ptr gs:[{off}], 0",
+            off = const offsets::RESCHEDULE_PENDING,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Read this CPU's deferred-reschedule flag (single load).
+#[inline(always)]
+pub(crate) fn reschedule_pending_get() -> u32 {
+    let pending: u32;
+    // SAFETY: single gs-relative load from this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov {pending:e}, gs:[{off}]",
+            off = const offsets::RESCHEDULE_PENDING,
+            pending = out(reg) pending,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    pending
+}
+
+/// Atomically read-and-clear this CPU's deferred-reschedule flag
+/// (single `xchg` instruction — implicitly locked, so a same-instant
+/// set from a local IRQ is either observed or preserved, never lost).
+#[inline(always)]
+pub(crate) fn reschedule_pending_take() -> u32 {
+    let pending: u32;
+    // SAFETY: single gs-relative RMW on this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "xchg dword ptr gs:[{off}], {pending:e}",
+            off = const offsets::RESCHEDULE_PENDING,
+            pending = inout(reg) 0u32 => pending,
+            options(nostack, preserves_flags),
+        );
+    }
+    pending
+}
+
 // ==================== PCR LOOKUP BY CPU ID ====================
 
 /// Get a PCR by CPU ID.
@@ -1049,49 +1218,96 @@ pub fn is_cpu_online(cpu_id: usize) -> bool {
 // These operate on the *current* CPU's PCR via GS_BASE.
 
 /// Set the current task pointer for this CPU.
+///
+/// Single gs-relative store: migration-atomic (see the
+/// single-instruction per-CPU ops block above) — the pointer can
+/// never land in a PCR the writing task has been migrated away from.
 #[inline]
 pub fn set_current_task(task: *mut ()) {
     if !GS_BASE_SET.is_set() {
         return;
     }
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // store to this CPU's PCR field.
     unsafe {
-        current_pcr().current_task.store(task, Ordering::Release);
+        core::arch::asm!(
+            "mov gs:[{off}], {task}",
+            off = const offsets::CURRENT_TASK,
+            task = in(reg) task,
+            options(nostack, preserves_flags),
+        );
     }
 }
 
 /// Get the current task pointer for this CPU.
+///
+/// Single gs-relative load: a preemptible caller that is migrated
+/// mid-call still reads the PCR of the CPU executing the instruction
+/// — which, post-migration, holds *this* task again — never a stale
+/// pointer into the previous CPU's PCR.
 #[inline]
 pub fn get_current_task() -> *mut () {
     if !GS_BASE_SET.is_set() {
         return ptr::null_mut();
     }
-    unsafe { current_pcr().current_task.load(Ordering::Acquire) }
+    let task: *mut ();
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // load from this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov {task}, gs:[{off}]",
+            off = const offsets::CURRENT_TASK,
+            task = out(reg) task,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    task
 }
 
 /// Read the current CPU's `syscall_pid` atomically. Returns
 /// `u32::MAX` (`INVALID_PROCESS_ID` sentinel) if GS_BASE has not yet
 /// been installed on this CPU. Folds the single `unsafe` deref of the
 /// PCR pointer interior to OSTD so kernel-half copy / mm helpers stay
-/// in safe Rust.
+/// in safe Rust. Single gs-relative load (migration-atomic): user
+/// pointer validation must see the pid the *executing* CPU's
+/// dispatcher installed, never a stale neighbour-CPU value.
 #[inline]
 pub fn current_syscall_pid() -> u32 {
     if !GS_BASE_SET.is_set() {
         return u32::MAX;
     }
-    // SAFETY: GS_BASE is installed (checked above), so `current_pcr()`
-    // returns a valid 'static reference.
-    unsafe { current_pcr().syscall_pid.load(Ordering::Acquire) }
+    let pid: u32;
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // load from this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov {pid:e}, gs:[{off}]",
+            off = const offsets::SYSCALL_PID,
+            pid = out(reg) pid,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    pid
 }
 
 /// Store `pid` into the current CPU's `syscall_pid`. No-op until the
 /// PCR is installed. Counterpart of [`current_syscall_pid`].
+/// Single gs-relative store (migration-atomic).
 #[inline]
 pub fn set_current_syscall_pid(pid: u32) {
     if !GS_BASE_SET.is_set() {
         return;
     }
-    // SAFETY: GS_BASE is installed (checked above).
-    unsafe { current_pcr().syscall_pid.store(pid, Ordering::Release) };
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // store to this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov gs:[{off}], {pid:e}",
+            off = const offsets::SYSCALL_PID,
+            pid = in(reg) pid,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 /// Set the idle-task pointer for `cpu_id`.
