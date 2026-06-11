@@ -224,7 +224,7 @@ debug-monitor:
 # Record a failing test run once, then replay it under GDB with reverse-continue
 # and reverse watchpoints — the practical way to find "who corrupted this byte?"
 # for load-dependent kernel bugs. Requires TCG + smp=1 (icount constraints), so
-# this cannot capture SMP-only races. See docs/debugging.md.
+# this cannot capture SMP-only races. See the public debugging docs.
 
 # Kernel tests incompatible with the deterministic icount environment (they
 # assert wall-clock timer calibration, which instruction-counted time breaks)

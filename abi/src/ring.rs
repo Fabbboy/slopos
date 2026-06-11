@@ -1,9 +1,9 @@
 //! SlopRing — io_uring-style submission/completion ring ABI.
 //!
 //! Single source of truth for the wire format shared between the kernel
-//! `ring/` crate and the userland `slibc-ring/` runtime. See
-//! `docs/SLOPRING.md` for the full design; this module pins the
-//! `#[repr(C)]` layout (§ 4) and the opcode / flag constants (§ 12).
+//! `ring` crate and the userland SlopRing runtime. The public SlopRing docs
+//! describe the design; this module pins the `#[repr(C)]` layout and the opcode
+//! and flag constants.
 //!
 //! Nothing here is `unsafe` or kernel-only: it is plain POD definitions
 //! both sides agree on, exactly like [`crate::syscall::numbers`].

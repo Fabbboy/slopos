@@ -9,7 +9,7 @@ import (
 
 // JsonlSink emits one compact JSON object per line, machine-consumable
 // downstream (CI dashboards, JUnit converters, test-history regression
-// detectors). Schema is documented in `docs/test_output.md` §10.
+// detectors). Schema is documented in the public KTAP docs.
 type JsonlSink struct {
 	path string
 	f    *os.File

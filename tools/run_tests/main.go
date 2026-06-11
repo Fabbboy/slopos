@@ -4,7 +4,7 @@
 // output line-by-line, and renders a developer-friendly progress bar
 // plus per-failure detail blocks.
 //
-// Wire format documented in `docs/test_output.md`. Replaces the earlier
+// Wire format documented in the public KTAP docs. Replaces the earlier
 // `scripts/run_tests.py` Phase 4 prototype 1:1 — same flags, same UX,
 // same JSONL event schema, same exit-code policy.
 package main

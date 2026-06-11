@@ -1,6 +1,6 @@
 // Package main — KTAP wire-format regexes and constants.
 //
-// Wire format documented in `docs/test_output.md`. The kernel emits each
+// Wire format documented in the public KTAP docs. The kernel emits each
 // line with a literal `KTAP\t` prefix; everything below operates on the
 // post-prefix tail. Patterns mirror the Python wrapper (Phase 4) byte-for-
 // byte so the differential JSONL diff in Phase 5N comes out empty.

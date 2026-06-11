@@ -3,7 +3,7 @@
 
 //! SlopRing — io_uring-style submission/completion ring (kernel side).
 //!
-//! See `docs/SLOPRING.md` for the full design. This crate is a
+//! The public SlopRing docs describe the full design. This crate is a
 //! `#![forbid(unsafe_code)]` non-OSTD kernel crate that hosts the SQ/CQ
 //! snapshot logic, opcode dispatch, the in-flight table, and the
 //! per-ring serialization lock. All memory access to ring pages goes

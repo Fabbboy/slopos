@@ -3,7 +3,7 @@ name = "slopos-ring"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SlopRing: io_uring-style submission/completion ring (kernel side). See docs/SLOPRING.md."
+description = "SlopRing: io_uring-style submission/completion ring (kernel side)."
 
 [lints]
 workspace = true
