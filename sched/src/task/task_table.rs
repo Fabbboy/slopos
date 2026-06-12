@@ -890,12 +890,57 @@ fn dump_one_task(task: *mut Task, _context: *mut c_void) {
     let Some(t) = super::task_borrow(task) else {
         return;
     };
+    // Scheduler-state fields make a lost wake diagnosable from the dump
+    // alone: a task stuck `Blocked` shows its block reason and that no
+    // scheduler owner exists; a stranded `Ready` shows placement/queue
+    // ownership without a runqueue (the rescue-sweep class).
+    let reason = slopos_ostd::task::accessors::task_load_block_reason(task as *const Task);
+    let placement = slopos_ostd::task::accessors::task_sched_placement_load(task as *const Task);
+    let on_cpu = slopos_ostd::task::accessors::task_on_cpu_load(task as *const Task);
+    let last_run =
+        slopos_ostd::task::accessors::task_last_run_timestamp(task as *const Task).unwrap_or(0);
     klog_info!(
-        "SYSRQ: task {:>3} '{}' status={:?} pgid={} sid={}",
+        "SYSRQ: task {:>3} '{}' status={:?} reason={:?} placement={:?} on_cpu={} pid={} pgid={} sid={} last_run={}",
         t.task_id,
         bytes_as_str(&t.name),
         t.status(),
+        reason,
+        placement,
+        on_cpu,
+        t.process_id,
         t.pgid,
-        t.sid
+        t.sid,
+        last_run,
     );
+    // For a parked task, walk its saved kernel call chain so a lost wake is
+    // diagnosable from the dump alone: the frames name the exact blocking
+    // primitive (wait queue / sleep / blk completion) the task is stuck in.
+    if t.status() == TaskStatus::Blocked {
+        let (ctx_rip, ctx_rsp) =
+            slopos_ostd::task::accessors::task_switch_ctx_rip_rsp(task as *const Task)
+                .unwrap_or((0, 0));
+        let ctx_rbp =
+            slopos_ostd::task::accessors::task_switch_ctx_rbp(task as *const Task).unwrap_or(0);
+        klog_info!(
+            "SYSRQ:   parked at rip=0x{:x} rsp=0x{:x} rbp=0x{:x}",
+            ctx_rip,
+            ctx_rsp,
+            ctx_rbp
+        );
+        if ctx_rbp != 0 {
+            let mut entries: [slopos_ostd::stacktrace::StacktraceEntry; 12] =
+                [slopos_ostd::stacktrace::StacktraceEntry {
+                    frame_pointer: 0,
+                    return_address: 0,
+                }; 12];
+            let captured = slopos_ostd::stacktrace::stacktrace_capture_from(
+                ctx_rbp,
+                entries.as_mut_ptr(),
+                entries.len() as core::ffi::c_int,
+            );
+            for entry in entries.iter().take(captured.max(0) as usize) {
+                klog_info!("SYSRQ:   frame rip=0x{:x}", entry.return_address);
+            }
+        }
+    }
 }

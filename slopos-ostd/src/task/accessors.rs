@@ -749,6 +749,22 @@ pub fn task_exit_info_ref<'a, K, U>(
     Some(unsafe { &(*task).exit_info })
 }
 
+/// Read `task->switch_ctx.rbp` via `read_unaligned`. The saved frame
+/// pointer of a descheduled task — the anchor for walking its parked
+/// call chain in diagnostics (SysRq task dump).
+#[inline]
+pub fn task_switch_ctx_rbp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; addr_of! produces a valid pointer
+    // into the in-Task crate::task::TaskContext; read_unaligned is safe.
+    unsafe {
+        let ctx = core::ptr::addr_of!((*task).switch_ctx);
+        Some(core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rbp)))
+    }
+}
+
 /// Read `task->switch_ctx.(rip, rsp)` as `(u64, u64)` via
 /// `read_unaligned`. Mirrors the legacy idiom in `scheduler.rs`.
 #[inline]

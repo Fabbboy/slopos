@@ -151,7 +151,7 @@ pub(crate) fn terminate_user_task(
 
 pub(crate) fn panic_with_frame(message: &str, frame: *mut InterruptFrame) {
     if let Some(frame_ref) = InterruptFrame::from_ptr(frame) {
-        set_panic_cpu_state(frame_ref.rip, frame_ref.rsp);
+        set_panic_cpu_state(frame_ref.rip, frame_ref.rsp, frame_ref.rbp);
     }
     panic!("{}", message);
 }

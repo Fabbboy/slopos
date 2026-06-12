@@ -15,6 +15,11 @@ use crate::shutdown::execute_kernel;
 
 static PANIC_RIP: AtomicU64 = AtomicU64::new(0);
 static PANIC_RSP: AtomicU64 = AtomicU64::new(0);
+/// RBP of the *interrupted* context (from the trap frame) when the panic
+/// originates in an exception handler. The backtrace walker prefers this
+/// over `PANIC_ORIG_RBP` so a kernel-mode fault prints the faulting call
+/// chain instead of the panic machinery's own frames.
+static PANIC_FRAME_RBP: AtomicU64 = AtomicU64::new(0);
 static PANIC_HAS_CPU_STATE: StateFlag = StateFlag::new();
 const PANIC_BACKTRACE_MAX: usize = 16;
 
@@ -37,10 +42,13 @@ static PANIC_ORIG_RBP: AtomicU64 = AtomicU64::new(0);
 const PEER_STOP_SPIN_BUDGET: u64 = 50_000_000;
 
 /// Set CPU state from an interrupt frame to be included in panic diagnostics.
+/// `rbp` is the interrupted context's frame pointer; the panic backtrace
+/// walks it so the report shows the faulting call chain.
 #[inline]
-pub fn set_panic_cpu_state(rip: u64, rsp: u64) {
+pub fn set_panic_cpu_state(rip: u64, rsp: u64, rbp: u64) {
     PANIC_RIP.store(rip, Ordering::SeqCst);
     PANIC_RSP.store(rsp, Ordering::SeqCst);
+    PANIC_FRAME_RBP.store(rbp, Ordering::SeqCst);
     PANIC_HAS_CPU_STATE.set_active();
 }
 
@@ -92,10 +100,14 @@ pub fn panic_abort_raw(msg: &'static str) -> ! {
 }
 
 fn panic_dump_backtrace() {
-    // Walk from the stashed pre-switch RBP (the interrupted call chain) when
-    // available; fall back to the current RBP on the caught/recovery path.
+    // Prefer the trap frame's RBP (the faulting context) when an exception
+    // path stashed one; then the pre-switch RBP (the panicking call chain);
+    // finally the live RBP on the caught/recovery path.
+    let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
-    let rbp = if stashed != 0 {
+    let rbp = if frame_rbp != 0 {
+        frame_rbp
+    } else if stashed != 0 {
         stashed
     } else {
         cpu::read_rbp()
