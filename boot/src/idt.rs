@@ -646,6 +646,17 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(frame)
         .expect("try_handle_page_fault: null frame ptr");
 
+    // Fault-recoverable kernel probe read (diagnostic walkers). Checked
+    // before the IST guard-fault classifier: a probe deliberately reads
+    // addresses it cannot prove mapped — including stack guard pages —
+    // and a hit there is the probe failing, not a stack overflow. The
+    // RIP-range match is exact, so this cannot mask a real fault.
+    if !in_user(frame_ref) && slopos_ostd::arch::x86_64::kernel_ptr::is_probe_read_ip(frame_ref.rip)
+    {
+        frame_ref.rip = slopos_ostd::arch::x86_64::kernel_ptr::probe_read_fault_ip();
+        return true;
+    }
+
     if ist_stacks::ist_guard_fault(fault_addr).is_some() {
         return false;
     }

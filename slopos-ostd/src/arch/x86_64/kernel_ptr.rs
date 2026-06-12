@@ -71,27 +71,83 @@ pub const fn is_canonical_kernel(addr: u64, align: u64, extra: u64) -> bool {
     (end >> 47) == CANONICAL_KERNEL_HIGH_BITS
 }
 
-/// Read an aligned `u64` from a canonical kernel address with
-/// `read_volatile`. Returns `None` if the address fails the canonical-
-/// kernel + 8-byte-aligned + 8-byte-headroom check.
+// ---------------------------------------------------------------------------
+// Fault-recoverable kernel probe read (Linux `probe_kernel_read` analogue).
+//
+// Diagnostic walkers (the NMI-watchdog backtrace, the SysRq parked-task
+// stack walk, panic-time frame chases) must read kernel addresses they
+// cannot prove are mapped — a canonical address can still be a stack
+// guard page or a freed region. The probe routes the load through a
+// known RIP range; the page-fault handler recognises a kernel-mode
+// fault inside `__ostd_probe_read_start..end` and redirects RIP to
+// `__ostd_probe_read_fault`, which reports failure instead of letting
+// the diagnostic itself escalate into a panic (the secondary-panic
+// class observed live: the watchdog's rbp chase faulting on an
+// unmapped page and burying the original lockup diagnosis).
+// ---------------------------------------------------------------------------
+
+core::arch::global_asm!(
+    ".global __ostd_probe_read_u64",
+    ".global __ostd_probe_read_start",
+    ".global __ostd_probe_read_end",
+    ".global __ostd_probe_read_fault",
+    "__ostd_probe_read_u64:",
+    "__ostd_probe_read_start:",
+    "    mov rax, [rdi]",
+    "__ostd_probe_read_end:",
+    "    mov [rsi], rax",
+    "    mov eax, 1",
+    "    ret",
+    "__ostd_probe_read_fault:",
+    "    xor eax, eax",
+    "    ret",
+);
+
+unsafe extern "C" {
+    fn __ostd_probe_read_u64(addr: *const u64, out: *mut u64) -> u64;
+    fn __ostd_probe_read_start();
+    fn __ostd_probe_read_end();
+    fn __ostd_probe_read_fault();
+}
+
+/// Returns `true` if `rip` falls within the probe-read load region. The
+/// page-fault handler queries this on kernel-mode faults and redirects
+/// RIP to [`probe_read_fault_ip`] on a match.
+#[inline]
+pub fn is_probe_read_ip(rip: u64) -> bool {
+    let start = __ostd_probe_read_start as *const () as u64;
+    let end = __ostd_probe_read_end as *const () as u64;
+    rip >= start && rip < end
+}
+
+/// RIP the page-fault handler rewrites to when [`is_probe_read_ip`]
+/// matches — the probe's failure tail.
+#[inline]
+pub fn probe_read_fault_ip() -> u64 {
+    __ostd_probe_read_fault as *const () as u64
+}
+
+/// Read an aligned `u64` from a canonical kernel address, tolerating
+/// unmapped pages. Returns `None` if the address fails the canonical-
+/// kernel + 8-byte-aligned + 8-byte-headroom check, **or** if the read
+/// page-faults (the handler redirects the probe to its failure tail).
 ///
-/// Designed for NMI-context frame-pointer chase loops where the
-/// pre-validation cuts off the common fault classes (null /
-/// user-half / unaligned / canonical wrap) before issuing the read.
-///
-/// Best-effort only — a read into an unmapped kernel page still
-/// faults; callers in IST context accept that risk in exchange for
-/// the diagnostic value.
+/// Designed for NMI-context frame-pointer chase loops and parked-task
+/// stack walks: the pre-validation cuts off the cheap fault classes
+/// (null / user-half / unaligned / canonical wrap), and the
+/// fault-recoverable probe absorbs the rest (guard pages, freed
+/// stacks), so a diagnostic can never escalate into a secondary panic.
 #[inline]
 pub fn read_volatile_canonical_kernel_u64(addr: u64) -> Option<u64> {
     if !is_canonical_kernel(addr, 8, 8) {
         return None;
     }
-    let ptr = addr as *const u64;
-    // SAFETY: address validated canonical-kernel + 8-byte-aligned +
-    // has 8 bytes of canonical headroom. Caller accepts the residual
-    // unmapped-page fault risk (panic/NMI diagnostic only).
-    Some(unsafe { core::ptr::read_volatile(ptr) })
+    let mut out = 0u64;
+    // SAFETY: the probe load is fault-recoverable by construction (the
+    // #PF handler redirects a fault inside the probe's RIP range to the
+    // failure tail); `out` is a live stack slot.
+    let ok = unsafe { __ostd_probe_read_u64(addr as *const u64, &mut out) };
+    if ok != 0 { Some(out) } else { None }
 }
 
 /// Read an unaligned `u64` from a raw pointer with `read_unaligned`.

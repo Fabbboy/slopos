@@ -54,29 +54,41 @@ pub fn stacktrace_capture_from(
             break;
         }
 
-        unsafe {
-            let frame = rbp as *const u64;
-            let next_rbp = core::ptr::read_unaligned(frame);
-            let return_address = core::ptr::read_unaligned(frame.add(1));
+        // Fault-recoverable probes: a canonical frame pointer can still
+        // reference an unmapped page (stack guard, freed stack). The probe
+        // truncates the walk instead of letting a diagnostic fault.
+        let Some(next_rbp) =
+            crate::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64(rbp)
+        else {
+            break;
+        };
+        let Some(return_address) =
+            crate::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64(ret_slot)
+        else {
+            break;
+        };
 
+        // SAFETY: `entries` + `count < max_entries` bounds were validated
+        // by the caller contract at function entry.
+        unsafe {
             let entry_ptr = entries.add(count);
             (*entry_ptr).frame_pointer = rbp;
             (*entry_ptr).return_address = return_address;
-            count += 1;
-
-            // Zero terminates the frame chain.
-            if next_rbp == 0 {
-                break;
-            }
-            if !is_kernel_address(next_rbp) {
-                break;
-            }
-            if !basic_sanity_check(rbp, next_rbp) {
-                break;
-            }
-
-            rbp = next_rbp;
         }
+        count += 1;
+
+        // Zero terminates the frame chain.
+        if next_rbp == 0 {
+            break;
+        }
+        if !is_kernel_address(next_rbp) {
+            break;
+        }
+        if !basic_sanity_check(rbp, next_rbp) {
+            break;
+        }
+
+        rbp = next_rbp;
     }
 
     count as c_int
