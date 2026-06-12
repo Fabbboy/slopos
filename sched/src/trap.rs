@@ -5,7 +5,10 @@ use slopos_ostd::sync::PreemptGuard;
 use super::scheduler::{
     is_scheduling_active, schedule_from_trap_exit, scheduler_get_current_task, scheduler_timer_tick,
 };
-use super::task::{TASK_FLAG_USER_MODE, Task, task_has_flag, task_save_from_interrupt_frame};
+use super::task::{
+    TASK_FLAG_USER_MODE, Task, TaskStatus, task_has_flag, task_save_from_interrupt_frame,
+    task_status,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RescheduleReason {
@@ -86,6 +89,19 @@ pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {
     }
 
     if !PreemptGuard::is_reschedule_pending() {
+        return;
+    }
+
+    // SM_PREEMPT discipline, IRQ-exit flavour (see
+    // `deferred_reschedule_callback` for the full rationale): an IRQ that
+    // lands between a wait primitive's `Running → Blocked` commit and its
+    // voluntary yield must not deschedule the task from the trap exit —
+    // doing so parks it before the condition recheck ran or a timeout was
+    // armed, losing any wake that fired in the gap. Leave the pending flag
+    // set; the task's own `schedule()` follows within the protocol and a
+    // later trap exit re-checks the flag once a Running task is current.
+    let current = scheduler_get_current_task();
+    if !current.is_null() && matches!(task_status(current), Some(TaskStatus::Blocked)) {
         return;
     }
 

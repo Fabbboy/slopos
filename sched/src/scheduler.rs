@@ -1801,6 +1801,22 @@ fn deferred_reschedule_callback() {
         return;
     }
 
+    // SM_PREEMPT discipline (Linux `__schedule(SM_PREEMPT)`): an
+    // involuntary reschedule must never park a task that has committed
+    // `Running → Blocked` but is still executing its blocking protocol.
+    // Every wait primitive CASes to Blocked under its queue lock and only
+    // afterwards re-checks the condition / arms its sleep timeout / calls
+    // the voluntary yield — and the queue guard's drop lands exactly here
+    // when a reschedule went pending during the locked section. Switching
+    // away at that point deschedules the task with no wake armed: a
+    // producer whose event landed in the gap finds no waiter to wake and
+    // no timeout exists yet, so the task is parked forever (the exec-time
+    // blk-read hang). The task's own voluntary `schedule()` is at most a
+    // few instructions away; skipping the preemption here costs nothing.
+    if matches!(task_status(current), Some(TaskStatus::Blocked)) {
+        return;
+    }
+
     schedule();
 }
 
