@@ -378,6 +378,25 @@ pub fn held_lock_count() -> u32 {
     unsafe { (*HELD[cpu].0.0.get()).depth }
 }
 
+/// Copy the addresses of the locks currently held on the calling CPU
+/// into `out`, innermost-last. Returns how many entries were written.
+/// Advisory (same benign-race caveat as [`held_lock_count`]); intended
+/// for diagnostics such as the TLB ack-wait lock-discipline check.
+pub fn held_lock_addrs(out: &mut [u64]) -> usize {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let cpu = get_current_cpu();
+    // SAFETY: per-CPU slot; reads race only with this CPU's own
+    // push/pop, and a torn snapshot is acceptable for diagnostics.
+    let stack = unsafe { &*HELD[cpu].0.0.get() };
+    let n = (stack.depth as usize).min(out.len());
+    for (i, slot) in out.iter_mut().enumerate().take(n) {
+        *slot = stack.entries[i].lock_addr as u64;
+    }
+    n
+}
+
 /// Record that the current CPU acquired a lock.
 ///
 /// # Safety

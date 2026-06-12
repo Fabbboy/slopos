@@ -47,7 +47,8 @@ pub use kernel_sync::{
 };
 pub use lock_tracking::{
     LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LOCK_LEVEL_SCHEDULER,
-    LOCK_LEVEL_UNORDERED, enable_lock_tracking, held_lock_count, poison_unlock_all_held,
+    LOCK_LEVEL_UNORDERED, enable_lock_tracking, held_lock_addrs, held_lock_count,
+    poison_unlock_all_held,
 };
 pub use mutex::{Mutex, MutexGuard};
 pub use once_lock::OnceLock;
@@ -61,6 +62,7 @@ pub use rcu::{
 pub use seqlock::{SeqLock, SeqLockWriteGuard};
 pub use spin::{
     IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard, PreemptMutex, PreemptMutexGuard,
+    register_spin_relax_hook,
 };
 pub use spin::{SpinLock, SpinLockGuard};
 pub use wait_node::WaitNode;

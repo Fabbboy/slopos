@@ -593,16 +593,18 @@ fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
 }
 
 fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) -> TlbResult {
-    // SYSCALL entry clears IF (SFMASK bit 9) so callers often arrive
-    // with interrupts disabled.  Re-enable them for the spin-wait so
-    // that (a) we can receive TLB IPIs from other CPUs that need our
-    // ack, and (b) mouse/keyboard/timer IRQs keep firing.  The syscall
-    // path holds NO_PREEMPT, so no context switch will occur.
-    let was_enabled = cpu::are_interrupts_enabled();
-    if !was_enabled {
-        cpu::enable_interrupts();
-    }
-
+    // Interrupt-flag discipline: this wait runs with whatever IF state the
+    // caller established and NEVER force-enables interrupts. Callers
+    // legitimately hold IRQ-disabling SpinLocks across a flush (the COW
+    // path's flush-before-reuse ordering, munmap under the VM lock);
+    // force-enabling IF inside that window would break the lock's
+    // IRQ-safety contract (an IRQ-exit path that takes the same lock on
+    // this CPU would self-deadlock). Deadlock freedom is instead provided
+    // by polling: every spin iteration services OUR own pending shootdown
+    // queue (`service_local_shootdown_queue`), and every contended
+    // SpinLock waiter kernel-wide does the same via the OSTD spin relax
+    // hook — so the target of our wait can always ack, even if it is
+    // spinning IRQs-off on a lock we hold.
     let mut result = Ok(());
     'targets: for cpu_idx in targets {
         if cpu_idx >= MAX_CPUS || cpu_idx == initiator_cpu {
@@ -623,7 +625,7 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
         // is a harmless no-op. This converts a lost IPI from an unbounded
         // hang into a few-millisecond recovery.
         const RESEND_SPIN: u64 = 1_000_000;
-        const MAX_RESENDS: u64 = 256; // bounded recovery (~sub-second) before declaring the CPU dead
+        const MAX_RESENDS: u64 = 256; // bounded recovery (~seconds) before declaring the CPU dead
         let mut spin_count: u64 = 0;
         let mut resends: u64 = 0;
         while !TLB_STATE.cpu_state[cpu_idx].ack.load(Ordering::Acquire) {
@@ -636,19 +638,44 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
             if slopos_ostd::panic::panic_owner_claimed() {
                 break 'targets;
             }
+            // Stay ack-capable while we wait (see the IF-discipline note
+            // above): drain our own pending shootdown request so a peer
+            // initiator spinning on us completes.
+            service_local_shootdown_queue();
             spin_count = spin_count.wrapping_add(1);
             if spin_count >= RESEND_SPIN {
                 spin_count = 0;
                 resends += 1;
                 if resends > MAX_RESENDS {
-                    // The target genuinely never acked across thousands of
-                    // re-sends — surface it as a fault rather than hang the
-                    // initiator (which still holds the VM lock) forever.
+                    // The target ignored thousands of re-sent IPIs across
+                    // several seconds. With the relax hook in place a CPU
+                    // spinning on ANY SpinLock still acks, so this means
+                    // the target is genuinely wedged (IRQs-off loop outside
+                    // a tracked lock, or hardware-level lost). NMI it so
+                    // its own watchdog handler dumps the wedged context —
+                    // the diagnosis would otherwise be unrecoverable — then
+                    // surface the fault to the caller.
                     klog_warn!(
                         "TLB: CPU {} never acked shootdown after {} re-sends; giving up",
                         cpu_idx,
                         resends
                     );
+                    let mut held = [0u64; 8];
+                    let n = slopos_ostd::sync::held_lock_addrs(&mut held);
+                    if n > 0 {
+                        klog_warn!(
+                            "TLB: initiator CPU {} held {} lock(s) during the wait: {:#x} {:#x} {:#x} {:#x}",
+                            initiator_cpu,
+                            n,
+                            held[0],
+                            held[1],
+                            held[2],
+                            held[3],
+                        );
+                    }
+                    if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu_idx) {
+                        slopos_arch::pcr::send_nmi_to_cpu(apic_id);
+                    }
                     result = Err(TlbShootdownTimeout { cpu_idx, resends });
                     break 'targets;
                 }
@@ -666,10 +693,61 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
         // See the file-level race description.
     }
 
-    if !was_enabled {
-        cpu::disable_interrupts();
-    }
     result
+}
+
+/// Poll-service this CPU's pending shootdown request, if any. The lock-free
+/// `ack` fast path makes this cheap enough for spin loops: a single Acquire
+/// load when nothing is pending. Registered as the OSTD contended-spin
+/// relax hook at [`init`] and polled by [`wait_for_acks`], so a CPU that is
+/// busy-waiting — on any SpinLock, or on its own shootdown acks — still
+/// acknowledges incoming shootdowns. This is what makes it safe to issue a
+/// remote flush while holding an IRQ-disabling lock (e.g. the COW path's
+/// flush under the per-process VM lock): the peer spinning on that lock
+/// services us from inside its spin.
+pub fn service_local_shootdown_queue() {
+    let cpu_idx = slopos_arch::pcr::get_current_cpu();
+    if cpu_idx >= MAX_CPUS {
+        return;
+    }
+    let slot = &TLB_STATE.cpu_state[cpu_idx];
+    if slot.ack.load(Ordering::Acquire) {
+        return; // nothing pending
+    }
+    // try_lock, NOT lock: this runs from inside contended-spin loops —
+    // including the spin in `handle_shootdown_ipi`'s own queue.lock()
+    // when the real IPI handler races a remote initiator's push. A
+    // blocking lock here would take a second ticket on the same ticket
+    // lock beneath the outer acquisition's unserved ticket and deadlock
+    // this CPU against itself (observed live as a watchdog-NMI'd CPU
+    // wedged in service_local_shootdown_queue → handle_shootdown_ipi →
+    // SpinLock::lock). If the queue is busy, the holder is a brief push
+    // or our own outer frame; skip and let the next relax iteration
+    // retry.
+    let Some(mut queue) = slot.queue.try_lock() else {
+        return;
+    };
+    let (op, asid) = queue.take();
+    slot.ack.store(true, Ordering::Release);
+    drop(queue);
+
+    // Same ASID filter + flush dispatch as `handle_shootdown_ipi` (the
+    // early-ack argument holds: the flush completes synchronously below,
+    // before this CPU resumes the work it was spinning on).
+    if asid != 0 {
+        let local_cr3 = cpu::read_cr3();
+        if (local_cr3 & !0xFFF) != (asid & !0xFFF) {
+            return;
+        }
+    }
+    match op {
+        PendingFlush::None => {}
+        PendingFlush::SinglePage { start } => flush_page_local(VirtAddr::new(start)),
+        PendingFlush::Range { start, end } => {
+            flush_range_local(VirtAddr::new(start), VirtAddr::new(end))
+        }
+        PendingFlush::Full => flush_tlb_local_full(),
+    }
 }
 
 /// Force this CPU's shootdown ack to `true` so any outstanding initiator stops
@@ -856,6 +934,12 @@ fn targeted_flush_request(
 pub fn init() {
     detect_features();
     TLB_STATE.online_cpus.set(0);
+    // Make every contended SpinLock spin in the kernel ack-capable: a
+    // waiter spinning IRQs-off polls + services its own shootdown queue
+    // between PAUSE rounds, so a flush initiator holding the contended
+    // lock can always collect this CPU's ack (the lock-vs-shootdown
+    // cross-CPU deadlock class).
+    slopos_ostd::sync::register_spin_relax_hook(service_local_shootdown_queue);
     klog_info!("TLB: Subsystem initialized");
 }
 

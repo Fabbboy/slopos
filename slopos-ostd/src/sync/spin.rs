@@ -20,11 +20,70 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
+use core::sync::atomic::AtomicUsize;
+
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64 as cpu;
 use crate::mm::AllocError;
 use crate::mm::init::{Init, init_from_closure};
 use crate::sync::lock_tracking;
+
+// =============================================================================
+// Contended-spin relax hook
+// =============================================================================
+//
+// A `SpinLock` waiter spins with interrupts disabled, so it cannot service
+// a TLB-shootdown IPI while it waits. If the lock holder is itself waiting
+// for this CPU's shootdown ack (e.g. a munmap/COW path flushing remote TLBs
+// while holding a per-process VM lock), the two CPUs deadlock: the holder
+// waits for an ack the spinner can never deliver. The relax hook closes
+// this class structurally — the TLB subsystem registers a callback that
+// polls and services this CPU's pending shootdown queue, and every
+// IRQs-off contended spin invokes it between PAUSE rounds. A waiter can
+// therefore always ack, regardless of which lock it is spinning on.
+// (The paravirt-Linux analogue: make lock waits productive instead of
+// demanding the holder release first.)
+
+/// Registered relax callback, encoded as a `fn()` address. 0 = none.
+static SPIN_RELAX_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Per-CPU re-entrancy latch: the hook itself takes a (TLB queue) SpinLock;
+/// a contended acquire inside the hook must spin plainly rather than
+/// recurse into the hook without bound.
+static SPIN_RELAX_IN_HOOK: [AtomicBool; crate::cpu::x86_64::pcr::MAX_CPUS] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; crate::cpu::x86_64::pcr::MAX_CPUS]
+};
+
+/// Register the contended-spin relax callback. One-shot at boot (the TLB
+/// subsystem's init); later calls overwrite, which is harmless — the slot
+/// is only ever set to the same function.
+pub fn register_spin_relax_hook(hook: fn()) {
+    SPIN_RELAX_HOOK.store(hook as usize, Ordering::Release);
+}
+
+/// Fire the relax hook once, with per-CPU re-entrancy suppression. Called
+/// from IRQs-off contended spin loops; the hook must be safe in that
+/// context (the TLB service path only takes its own per-CPU queue lock and
+/// issues local INVLPG/CR3 flushes).
+#[inline]
+fn spin_relax_fire() {
+    let raw = SPIN_RELAX_HOOK.load(Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    let cpu_id = crate::cpu::x86_64::pcr::get_current_cpu();
+    if cpu_id >= SPIN_RELAX_IN_HOOK.len() {
+        return;
+    }
+    if SPIN_RELAX_IN_HOOK[cpu_id].swap(true, Ordering::Relaxed) {
+        return; // already servicing on this CPU — plain spin
+    }
+    if let Some(hook) = crate::util::fn_ptr::fn_ptr_decode_opt::<fn()>(raw as *mut ()) {
+        hook();
+    }
+    SPIN_RELAX_IN_HOOK[cpu_id].store(false, Ordering::Relaxed);
+}
 
 /// Ticket-lock mutex that disables interrupts AND preemption while held.
 /// Essential for kernel data accessed from both normal and interrupt contexts.
@@ -221,6 +280,10 @@ impl<T> SpinLock<T> {
             if serving == my_ticket {
                 break;
             }
+            // We spin with IRQs masked; service any pending TLB shootdown
+            // so a lock holder waiting for this CPU's ack can make progress
+            // (see the relax-hook block comment above).
+            spin_relax_fire();
             let distance = my_ticket.wrapping_sub(serving) as u32;
             for _ in 0..distance.min(64) {
                 spin_loop();
@@ -515,6 +578,8 @@ impl<T> IrqRwLock<T> {
                     };
                 }
             }
+            // IRQs-off spin: keep servicing pending TLB shootdowns.
+            spin_relax_fire();
             spin_loop();
         }
     }
@@ -582,6 +647,8 @@ impl<T> IrqRwLock<T> {
                     _preempt: preempt,
                 };
             }
+            // IRQs-off spin: keep servicing pending TLB shootdowns.
+            spin_relax_fire();
             spin_loop();
         }
     }
