@@ -25,7 +25,7 @@ own doc-comments — not duplicated here.
 
 | Module | Proof file | Proves |
 |---|---|---|
-| `slopos_ostd::mm::frame` | `proofs/frame_refcount.rs` | `Frame<M>` ref-count: no double-free, no use-after-free, `ref_count > 0` ⇒ allocated (I1–I3) |
+| `slopos_ostd::mm::frame` | `proofs/frame_refcount.rs` | `Frame<M>` ref-count: no double-free, no use-after-free, `ref_count > 0` ⇒ allocated, free-listed ⇒ slot reset-before-free (I1–I4) |
 | `slopos_ostd::mm::slab` | `proofs/slab_lifetime.rs` | `HeapSlot` lifetime: a slot can't outlive its slab (Inv. 9); a cell fits any in-range type (Inv. 10) |
 | `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap, user leaves are insensitive `UFrame`s (Inv. 4 + 5) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |

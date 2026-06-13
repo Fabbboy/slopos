@@ -20,11 +20,13 @@ toolchain over each one and fails on any unverified obligation.
   into `slopos-ostd` (Verus emits a normal build for the kernel) so
   `just build` + `just test` still pass.
 
-`frame_refcount.rs` (Phase 3B) is the first proof to land: 9 obligations
+`frame_refcount.rs` (Phase 3B) is the first proof to land: 10 obligations
 machine-checking the `Frame<M>` reference-count invariants (I1 allocated-
-while-referenced, I2 release-exactly-once, I3 no clone/drop use-after-free)
-plus a load-bearing witness that the broken `fetch_add(1)` clone violates
-them.
+while-referenced, I2 release-exactly-once, I3 no clone/drop use-after-free,
+I4 free-listed ⇒ slot reset-before-free) plus two load-bearing witnesses:
+the broken `fetch_add(1)` clone violates I1–I3, and the pre-fix
+free-before-reset `Drop` ordering violates I4 (the SMP `from_unused` /
+`PathCorrupt` bug).
 
 `slab_lifetime.rs` (Phase 3C) is the second: 11 obligations machine-checking
 the slab object lifecycle — Inv. 9 (a slot cannot outlive its parent slab:

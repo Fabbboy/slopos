@@ -5,7 +5,7 @@
 //! indexed by `paddr / PAGE_SIZE`). The metadata is type-erased into
 //! `MetaSlot::storage` (a fixed byte buffer sized for `MAX_META_SIZE`)
 //! and dispatched through a per-`M` `MetaVtable` carrying the
-//! `drop_in_place` and `on_drop` callbacks.
+//! `drop_in_place` and `returns_frame` callbacks.
 //!
 //! Synchronisation goes through the slot's atomic fields. The `state`
 //! field gates exclusive access to `storage`; `ref_count` pairs
@@ -61,10 +61,19 @@ pub const MAX_META_ALIGN: usize = 8;
 
 const PAGE_SIZE: usize = 4096;
 
-/// Slot is unoccupied. `vtable` is null; `storage` is uninitialised.
-pub(crate) const META_STATE_UNUSED: u8 = 0;
-/// Slot holds a fully-initialised `M`. `vtable` and `storage` are valid.
-pub(crate) const META_STATE_TYPED: u8 = 1;
+/// `ref_count` sentinel: the slot is free and claimable by
+/// [`Frame::from_unused`]. NOT zero — [`init_meta_slots`] seeds every
+/// slot to this, so a freshly-zeroed slot (`0`) is `BUSY`, never `UNUSED`.
+pub(crate) const REF_COUNT_UNUSED: u32 = u32::MAX;
+/// `ref_count` transient: a slot is being constructed (`from_unused`)
+/// or destructed (`Drop`/`into_phys_release`). The owning operation holds
+/// the slot exclusively — `from_unused` retries and `from_in_use` refuses
+/// while a slot reads `BUSY`. Chosen as `0` so `Drop`'s `fetch_sub(1)`
+/// from the last live ref (`1`) lands here automatically.
+pub(crate) const REF_COUNT_BUSY: u32 = 0;
+/// Largest live reference count. Values above this are reserved for the
+/// sentinels; `from_in_use` refuses to bump past it (overflow guard).
+pub(crate) const REF_COUNT_MAX: u32 = i32::MAX as u32;
 
 // ---------------------------------------------------------------------------
 // MetaSlot: per-physical-frame typed-metadata cell.
@@ -82,15 +91,16 @@ pub(crate) struct MetaStorage(pub(crate) [u8; MAX_META_SIZE]);
 /// rely on the field address.
 #[repr(C, align(8))]
 pub struct MetaSlot {
-    /// Reference count. 0 ⇒ slot is `UNUSED`.
+    /// The slot's whole lifecycle state machine, folded into one atomic:
+    /// [`REF_COUNT_UNUSED`] = free/claimable, [`REF_COUNT_BUSY`] =
+    /// transient construct/destruct (exclusively owned), `1..=`
+    /// [`REF_COUNT_MAX`] = that many live `Frame` handles.
     pub(crate) ref_count: AtomicU32,
-    /// `META_STATE_*`. Tracks slot lifecycle.
-    pub(crate) state: AtomicU8,
-    _pad0: [u8; 3],
     /// Pointer to the static `MetaVtable` for the inhabiting `M`.
-    /// Null when `state == UNUSED`.
+    /// Null while the slot is `UNUSED`.
     pub(crate) vtable: AtomicPtr<MetaVtable>,
-    /// Type-erased storage for `M`. Only valid when `state == TYPED`.
+    /// Type-erased storage for `M`. Only valid while the slot is live
+    /// (`ref_count` in `1..=REF_COUNT_MAX`).
     pub(crate) storage: UnsafeCell<MaybeUninit<MetaStorage>>,
 }
 
@@ -118,9 +128,7 @@ impl MetaSlot {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new_unused() -> Self {
         Self {
-            ref_count: AtomicU32::new(0),
-            state: AtomicU8::new(META_STATE_UNUSED),
-            _pad0: [0; 3],
+            ref_count: AtomicU32::new(REF_COUNT_UNUSED),
             vtable: AtomicPtr::new(core::ptr::null_mut()),
             storage: UnsafeCell::new(MaybeUninit::uninit()),
         }
@@ -137,30 +145,32 @@ impl MetaSlot {
 pub struct MetaVtable {
     /// Run `core::ptr::drop_in_place::<M>` on the storage payload.
     pub(crate) drop_in_place: unsafe fn(*mut u8),
-    /// Run [`AnyFrameMeta::on_drop`] on the storage payload.
-    pub(crate) on_drop: unsafe fn(*mut u8, Paddr),
+    /// Query [`AnyFrameMeta::returns_frame_on_last_drop`] on the live
+    /// payload. A side-effect-free read: the `Frame` lifecycle uses it to
+    /// decide whether to hand the backing page back to the allocator, and
+    /// runs that free itself *after* the slot is reset to UNUSED. The
+    /// query MUST NOT free the page (see the `Drop` impl's ordering).
+    pub(crate) returns_frame: unsafe fn(*const u8) -> bool,
 }
 
 // SAFETY: the dispatched function pointers `drop_in_place` and
-// `on_drop` only act on storage owned by the surrounding `MetaSlot`,
-// and synchronisation is through the slot's atomics.
+// `returns_frame` only act on storage owned by the surrounding
+// `MetaSlot`, and synchronisation is through the slot's atomics.
 unsafe impl Sync for MetaVtable {}
 
 unsafe fn drop_in_place_for<M: AnyFrameMeta>(payload: *mut u8) {
     // SAFETY: caller (`Drop for Frame<M>`) holds the only remaining
-    // ref and has just transitioned the slot out of TYPED, so we
+    // ref and has just transitioned the slot to BUSY, so we
     // have exclusive access to the M payload at `payload`.
     unsafe {
         core::ptr::drop_in_place(payload as *mut M);
     }
 }
 
-unsafe fn on_drop_for<M: AnyFrameMeta>(payload: *mut u8, paddr: Paddr) {
+unsafe fn returns_frame_for<M: AnyFrameMeta>(payload: *const u8) -> bool {
     // SAFETY: same as `drop_in_place_for` — exclusive access to a
-    // valid M payload at `payload`.
-    unsafe {
-        (*(payload as *mut M)).on_drop(paddr);
-    }
+    // valid M payload at `payload`; this only reads it.
+    unsafe { (*(payload as *const M)).returns_frame_on_last_drop() }
 }
 
 trait HasVtable {
@@ -170,7 +180,7 @@ trait HasVtable {
 impl<M: AnyFrameMeta> HasVtable for M {
     const VTABLE: &'static MetaVtable = &MetaVtable {
         drop_in_place: drop_in_place_for::<M>,
-        on_drop: on_drop_for::<M>,
+        returns_frame: returns_frame_for::<M>,
     };
 }
 
@@ -186,14 +196,29 @@ fn vtable_for<M: AnyFrameMeta>() -> &'static MetaVtable {
 /// # Safety
 ///
 /// Implementor's [`SIZE`](Self::SIZE) and [`ALIGN`](Self::ALIGN)
-/// associated constants must match `Self`. [`on_drop`](Self::on_drop)
-/// runs after the last `Frame<Self>` reference is released and
-/// before the underlying physical frame is returned to the allocator.
+/// associated constants must match `Self`.
 pub unsafe trait AnyFrameMeta: Send + Sync + Sized + 'static {
     const SIZE: usize = size_of::<Self>();
     const ALIGN: usize = align_of::<Self>();
 
-    fn on_drop(&mut self, paddr: Paddr);
+    /// Whether dropping the last `Frame<Self>` for a slot should return
+    /// its backing physical page to the registered [`FrameAlloc`].
+    ///
+    /// This is a **pure query** on the live payload, evaluated by the
+    /// `Frame` lifecycle *before* the payload is dropped. It MUST NOT free
+    /// the page itself: the lifecycle owns the free and runs it only after
+    /// the slot has been reset to UNUSED, so a free-listed page is never
+    /// observable with a still-TYPED slot (the ordering `from_unused`
+    /// relies on — see `Frame`'s `Drop` impl).
+    ///
+    /// Most metas own their page and return it (the `true` default).
+    /// Override to `false` for frames whose page is owned elsewhere — the
+    /// statically-borrowed kernel-master page table
+    /// ([`PageTableMeta::static_borrowed`]) and externally-managed DMA
+    /// segments.
+    fn returns_frame_on_last_drop(&self) -> bool {
+        true
+    }
 }
 
 /// Compile-time check that an `M` fits in a [`MetaSlot`]'s inline
@@ -217,14 +242,10 @@ pub(crate) const fn assert_meta_fits<M: AnyFrameMeta>() {
 #[derive(Default)]
 pub struct KernelMeta;
 
-// SAFETY: ZST has no representation invariants. `on_drop` returns
-// the underlying physical frame to the allocator — required so
+// SAFETY: ZST has no representation invariants. Owns its page, so it
+// takes the default `returns_frame_on_last_drop == true` — required so
 // `Frame<KernelMeta>` does not leak the page on its last Drop.
-unsafe impl AnyFrameMeta for KernelMeta {
-    fn on_drop(&mut self, paddr: Paddr) {
-        return_frame_to_allocator(paddr);
-    }
-}
+unsafe impl AnyFrameMeta for KernelMeta {}
 const _: () = assert_meta_fits::<KernelMeta>();
 
 /// Page-table frame metadata. `level` is the architectural level
@@ -238,13 +259,12 @@ pub struct PageTableMeta {
     pub static_borrowed: bool,
 }
 
-// SAFETY: fields are plain data. `on_drop` returns the page-table
-// frame to the allocator unless the meta declares `static_borrowed`.
+// SAFETY: fields are plain data. The page-table frame returns to the
+// allocator on last Drop unless the meta declares `static_borrowed` (the
+// bootloader-owned kernel-master PML4), which must never be freed.
 unsafe impl AnyFrameMeta for PageTableMeta {
-    fn on_drop(&mut self, paddr: Paddr) {
-        if !self.static_borrowed {
-            return_frame_to_allocator(paddr);
-        }
+    fn returns_frame_on_last_drop(&self) -> bool {
+        !self.static_borrowed
     }
 }
 const _: () = assert_meta_fits::<PageTableMeta>();
@@ -254,14 +274,10 @@ const _: () = assert_meta_fits::<PageTableMeta>();
 #[derive(Default)]
 pub struct AnonymousMeta;
 
-// SAFETY: ZST has no representation invariants. `on_drop` returns
-// the underlying physical frame to the allocator — required so
+// SAFETY: ZST has no representation invariants. Owns its page, so it
+// takes the default `returns_frame_on_last_drop == true` — required so
 // `UFrame<AnonymousMeta>` does not leak the page on its last Drop.
-unsafe impl AnyFrameMeta for AnonymousMeta {
-    fn on_drop(&mut self, paddr: Paddr) {
-        return_frame_to_allocator(paddr);
-    }
-}
+unsafe impl AnyFrameMeta for AnonymousMeta {}
 const _: () = assert_meta_fits::<AnonymousMeta>();
 
 /// Page-cache frame metadata. One slot per cached page of file or
@@ -292,14 +308,10 @@ pub struct PageCacheMeta {
 }
 
 // SAFETY: payload is two atomics with no cross-field invariants
-// beyond `Atomic*`'s own contract. `on_drop` returns the underlying
-// physical frame to the registered allocator — required so the
+// beyond `Atomic*`'s own contract. Owns its page, so it takes the
+// default `returns_frame_on_last_drop == true` — required so the
 // `Frame<PageCacheMeta>` does not leak the page on its last Drop.
-unsafe impl AnyFrameMeta for PageCacheMeta {
-    fn on_drop(&mut self, paddr: Paddr) {
-        return_frame_to_allocator(paddr);
-    }
-}
+unsafe impl AnyFrameMeta for PageCacheMeta {}
 const _: () = assert_meta_fits::<PageCacheMeta>();
 
 /// Network packet-buffer frame metadata. One slot per pre-allocated
@@ -319,14 +331,10 @@ pub struct PacketMeta {
 }
 
 // SAFETY: payload is a single atomic with no cross-field invariant
-// beyond `AtomicU64`'s own contract. `on_drop` returns the underlying
-// physical frame to the registered allocator so a `Frame<PacketMeta>`
+// beyond `AtomicU64`'s own contract. Owns its page, so it takes the
+// default `returns_frame_on_last_drop == true` so a `Frame<PacketMeta>`
 // does not leak the page on its last Drop.
-unsafe impl AnyFrameMeta for PacketMeta {
-    fn on_drop(&mut self, paddr: Paddr) {
-        return_frame_to_allocator(paddr);
-    }
-}
+unsafe impl AnyFrameMeta for PacketMeta {}
 const _: () = assert_meta_fits::<PacketMeta>();
 
 /// Frame metadata for a SlopRing shared-memory region page (SLOPRING
@@ -351,14 +359,10 @@ pub struct RingMeta {
 }
 
 // SAFETY: payload is a single atomic with no cross-field invariant
-// beyond `AtomicU64`'s own contract. `on_drop` returns the underlying
-// physical frame to the registered allocator so a `Frame<RingMeta>`
+// beyond `AtomicU64`'s own contract. Owns its page, so it takes the
+// default `returns_frame_on_last_drop == true` so a `Frame<RingMeta>`
 // does not leak the page on its last Drop.
-unsafe impl AnyFrameMeta for RingMeta {
-    fn on_drop(&mut self, paddr: Paddr) {
-        return_frame_to_allocator(paddr);
-    }
-}
+unsafe impl AnyFrameMeta for RingMeta {}
 const _: () = assert_meta_fits::<RingMeta>();
 
 /// Helper: dealloc `paddr` (one page) via the registered allocator.
@@ -392,6 +396,21 @@ static META_SLOTS: MetaSlotsRegion = MetaSlotsRegion {
 /// system cannot express, so the `# Safety` block survives as an
 /// inline contract on the unsafe deref below.
 pub fn init_meta_slots<'brand>(_token: &BspToken<'brand>, slots: *mut MetaSlot, len: usize) {
+    // Seed every slot to UNUSED. The production caller hands us zeroed
+    // pages, and zero is `REF_COUNT_BUSY`, not `UNUSED` — without this the
+    // first `from_unused` on any frame would observe BUSY and spin forever.
+    // SAFETY: the caller certified `[slots, slots + len)` is a valid,
+    // exclusively-owned `[MetaSlot]` for the kernel's static lifetime; this
+    // runs BSP-only (witnessed by `_token`) before any other CPU or any
+    // `Frame` operation can observe the array, so the relaxed stores are
+    // published by the `Release` `base.swap` below.
+    for i in 0..len {
+        unsafe {
+            (*slots.add(i))
+                .ref_count
+                .store(REF_COUNT_UNUSED, Ordering::Relaxed);
+        }
+    }
     let prev = META_SLOTS.base.swap(slots, Ordering::AcqRel);
     assert!(
         prev.is_null(),
@@ -436,8 +455,10 @@ pub(crate) fn meta_slot_for(paddr: Paddr) -> Option<&'static MetaSlot> {
 ///
 /// Cloning is via [`Frame::from_in_use`] (ref-count bump, returns a
 /// new `Frame<M>` for the same physical page). Dropping the last
-/// `Frame<M>` runs `M::on_drop`, drops the inline `M`, and returns
-/// the underlying physical frame to the registered allocator.
+/// `Frame<M>` drops the inline `M`, resets the slot to UNUSED, and —
+/// when `M::returns_frame_on_last_drop()` is `true` — returns the
+/// underlying physical frame to the registered allocator (in that order;
+/// see the `Drop` impl).
 pub struct Frame<M: AnyFrameMeta, S: init_state::InitState = init_state::Zeroed> {
     ptr: *const MetaSlot,
     _marker: PhantomData<(M, S)>,
@@ -500,7 +521,7 @@ pub enum FrameError {
     /// `META_SLOTS` not initialised.
     NotInitialised,
     /// Slot was not in the expected state (e.g. `from_unused` on a
-    /// slot already TYPED, or `from_in_use` on an UNUSED slot).
+    /// live slot, or `from_in_use` on an UNUSED/BUSY one).
     StateMismatch,
 }
 
@@ -511,11 +532,11 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// Returns [`FrameError::NotInitialised`] when [`init_meta_slots`]
     /// has not yet been called, [`FrameError::OutOfRange`] when
     /// `paddr` does not have a slot, and [`FrameError::StateMismatch`]
-    /// when the slot is already TYPED.
+    /// when the slot is already live.
     ///
     /// **Soundness invariant (Inv. 1, Asterinas paper §4.3).** This is
     /// the framekernel's single entry point for claiming a physical
-    /// frame as a typed `Frame<M>`. The atomic UNUSED→TYPED state
+    /// frame as a typed `Frame<M>`. The atomic UNUSED→BUSY→live `ref_count`
     /// transition below means at most one `Frame<M>` exists for any
     /// given `paddr` at any time; together with the contract on
     /// `FrameAlloc::alloc` (registered via
@@ -538,21 +559,36 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
                 });
             }
         };
-        slot.state
-            .compare_exchange(
-                META_STATE_UNUSED,
-                META_STATE_TYPED,
-                Ordering::AcqRel,
+        // Claim the slot UNUSED -> BUSY. BUSY is the transient state a
+        // concurrent construct/destruct of the *same* paddr holds; spin
+        // while we observe it and retry, then claim. (In practice a
+        // dropping frame's BUSY window is unreachable here — the page is
+        // not returned to the allocator until after the slot is UNUSED, so
+        // nobody is handed this paddr mid-teardown — but the interlock makes
+        // the claim sound regardless of the free-vs-reset ordering.) A live
+        // count is a genuine StateMismatch. The Acquire pairs with the
+        // final `Release` store of UNUSED in `Drop`, so on a successful
+        // claim the prior occupant's `drop_in_place` has happened-before our
+        // `storage` write below.
+        loop {
+            match slot.ref_count.compare_exchange_weak(
+                REF_COUNT_UNUSED,
+                REF_COUNT_BUSY,
                 Ordering::Acquire,
-            )
-            .map_err(|_| FrameError::StateMismatch)?;
-        // SAFETY: the CAS above transitioned the slot from UNUSED to
-        // TYPED, so we hold exclusive access to `storage` until we
-        // publish the slot via the ref_count store below. This is the
-        // moment OSTD trusts Inv. 1: the caller has certified that
-        // `paddr` came from currently-unused memory (via the
-        // registered FrameAlloc), so no other live `Frame<M'>` aliases
-        // the bytes we are about to write.
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(REF_COUNT_UNUSED) => {} // spurious weak failure — retry
+                Err(REF_COUNT_BUSY) => core::hint::spin_loop(),
+                Err(_) => return Err(FrameError::StateMismatch),
+            }
+        }
+        // SAFETY: the CAS above transitioned the slot UNUSED -> BUSY, so we
+        // hold it exclusively until we publish the live `ref_count` below.
+        // This is the moment OSTD trusts Inv. 1: the caller has certified
+        // that `paddr` came from currently-unused memory (via the registered
+        // FrameAlloc), so no other live `Frame<M'>` aliases the bytes we are
+        // about to write.
         unsafe {
             let storage = slot.storage.get() as *mut M;
             core::ptr::write(storage, meta);
@@ -569,30 +605,24 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     }
 
     /// Borrow an already-live frame, bumping its ref-count by one.
-    /// The caller's `paddr` must point to a slot currently in the
-    /// `TYPED` state with the same `M`; mismatches return
+    /// The caller's `paddr` must point to a live slot (`ref_count` in
+    /// `1..=REF_COUNT_MAX`) with the same `M`; mismatches return
     /// [`FrameError::StateMismatch`].
     pub fn from_in_use(paddr: Paddr) -> Result<Self, FrameError> {
         let slot = meta_slot_for(paddr).ok_or(FrameError::OutOfRange)?;
-        // Advisory pre-checks: reject early if the slot is clearly
-        // not what the caller expects. The authoritative gate is the
-        // CAS-loop below — it is the only way to make
-        // "state is TYPED with our M, AND ref_count > 0" observable
-        // atomically.
-        if slot.state.load(Ordering::Acquire) != META_STATE_TYPED {
-            return Err(FrameError::StateMismatch);
-        }
+        // Advisory pre-check: reject early on a type mismatch. The
+        // authoritative gate is the `fetch_update` below — the only way to
+        // observe "live with our `M` AND bump" atomically.
         let expected_vt = vtable_for::<M>() as *const _ as *mut MetaVtable;
         if slot.vtable.load(Ordering::Acquire) != expected_vt {
             return Err(FrameError::StateMismatch);
         }
-        // Conditional increment — succeed only if ref_count > 0. This
-        // closes the resurrect-during-teardown race: `Drop` decrements
-        // ref_count to 0 (frame.rs:890) BEFORE storing META_STATE_UNUSED
-        // (frame.rs:905). A plain `fetch_add(1)` would bump 0→1 in that
-        // window and revive a slot whose `on_drop`/`drop_in_place` is
-        // already running, leaving the slot with the wrong vtable or a
-        // half-destroyed `M`. The CAS-loop refuses to bump from 0.
+        // Conditional increment — succeed only from a *live* count. `Drop`'s
+        // `fetch_sub(1)` from the last ref lands the slot at `BUSY` (0)
+        // before it tears the slot down; an unconditional `fetch_add(1)`
+        // would bump it and revive a slot whose `drop_in_place` is already
+        // running (the wrong vtable / a half-destroyed `M`). Refusing
+        // `BUSY`/`UNUSED`/overflow forbids that.
         //
         // VERIFIED: `verification/proofs/frame_refcount.rs` proves this
         // conditional bump preserves the slot invariant on every reachable
@@ -601,7 +631,11 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
         // the single line the use-after-free proof (I3) leans on.
         slot.ref_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
-                if prev == 0 { None } else { Some(prev + 1) }
+                if prev == REF_COUNT_BUSY || prev == REF_COUNT_UNUSED || prev >= REF_COUNT_MAX {
+                    None
+                } else {
+                    Some(prev + 1)
+                }
             })
             .map_err(|_| FrameError::StateMismatch)?;
         Ok(Self {
@@ -620,26 +654,37 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
 
     pub fn reference_count(&self) -> u32 {
         // SAFETY: `ptr` was obtained from a live MetaSlot when this
-        // `Frame` was constructed; the ref-count is at least 1 for
-        // the lifetime of `self`.
-        unsafe { (*self.ptr).ref_count.load(Ordering::Acquire) }
+        // `Frame` was constructed; the ref-count is in `1..=REF_COUNT_MAX`
+        // for the lifetime of `self` (so never a sentinel here).
+        let rc = unsafe { (*self.ptr).ref_count.load(Ordering::Acquire) };
+        live_ref_count(rc)
+    }
+}
+
+/// Map a raw `ref_count` to a caller-facing live count: the `UNUSED` and
+/// `BUSY` sentinels both report `0` (no live owner).
+#[inline]
+fn live_ref_count(raw: u32) -> u32 {
+    match raw {
+        REF_COUNT_UNUSED | REF_COUNT_BUSY => 0,
+        n => n,
     }
 }
 
 /// Peek at the META_SLOTS refcount for `paddr` without constructing
 /// a `Frame<M>` (no inc / dec). Returns `0` for paddrs whose slot is
-/// UNUSED or out of range. Used by COW resolution in slopos-mm to
+/// UNUSED, BUSY, or out of range. Used by COW resolution in slopos-mm to
 /// decide single- vs multi-owner without disturbing the count.
 pub fn reference_count_at(paddr: Paddr) -> u32 {
     let Some(slot) = meta_slot_for(paddr) else {
         return 0;
     };
-    slot.ref_count.load(Ordering::Acquire)
+    live_ref_count(slot.ref_count.load(Ordering::Acquire))
 }
 
 impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     pub fn borrow(&self) -> &M {
-        // SAFETY: the slot is `TYPED` for the lifetime of `self`
+        // SAFETY: the slot is live for the lifetime of `self`
         // (ref_count ≥ 1 guarantees no Drop has fired); `storage`
         // contains a valid `M` placed by `from_unused`. The pointer
         // cast is sound because `M::ALIGN ≤ MAX_META_ALIGN` and
@@ -696,12 +741,13 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
                 FrameError::OutOfRange
             }
         })?;
-        if slot.state.load(Ordering::Acquire) != META_STATE_TYPED {
-            return Err(FrameError::StateMismatch);
+        match slot.ref_count.load(Ordering::Acquire) {
+            REF_COUNT_UNUSED | REF_COUNT_BUSY => return Err(FrameError::StateMismatch),
+            _ => {}
         }
-        // SAFETY: caller's contract above. The slot is `TYPED` and
-        // exactly one ref is outstanding (leaked); the new `Frame`
-        // takes ownership of that ref without bumping the count.
+        // SAFETY: caller's contract above. The slot is live and exactly
+        // one ref is outstanding (leaked); the new `Frame` takes ownership
+        // of that ref without bumping the count.
         Ok(Self {
             ptr: slot as *const MetaSlot,
             _marker: PhantomData,
@@ -876,7 +922,7 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
     }
 
     /// Consume the handle and return the physical address without
-    /// dropping the underlying ref. The slot stays `TYPED` with one
+    /// dropping the underlying ref. The slot stays live with one
     /// outstanding ref; the caller is responsible for either re-wrapping
     /// it via [`Frame::from_raw_at`] or releasing the page another way.
     #[inline]
@@ -919,21 +965,17 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
     /// allocator.
     pub unsafe fn into_phys_release(self) -> Paddr {
         let paddr = self.paddr();
-        // SAFETY: caller has asserted (above invariant) that `self`
-        // is the sole `Frame` handle for the slot, so its ref_count
-        // must equal 1. The debug_assert traps test-time misuse —
-        // e.g. a `from_in_use`-aliased handle reaching this path —
-        // before we zero the ref_count and desync the slot. The slot
-        // is `TYPED` for `self`'s lifetime. Steps:
-        //   1. Drop the inline `M` payload via the vtable's
-        //      `drop_in_place`.
-        //   2. Skip `on_drop` so the page is NOT returned to the
-        //      allocator; the caller takes ownership.
-        //   3. Reset `state` to `UNUSED` and `vtable` to null so a
-        //      future `from_unused` for this paddr succeeds.
-        //   4. Reset `ref_count` to 0 — `from_unused` writes 1 on
-        //      install, so leaving any non-zero residual would
-        //      desync the slot.
+        // SAFETY: caller has asserted (above invariant) that `self` is the
+        // sole `Frame` handle for the slot, so its ref_count must equal 1.
+        // The debug_assert traps test-time misuse — e.g. a `from_in_use`-
+        // aliased handle reaching this path. Steps:
+        //   1. Move the slot to `BUSY` so a concurrent `from_in_use`
+        //      refuses and `from_unused` retries while we tear down.
+        //   2. Drop the inline `M` payload via the vtable's `drop_in_place`.
+        //   3. Do NOT return the page to the allocator (unlike `Drop`); the
+        //      caller takes ownership of the raw paddr.
+        //   4. Null the vtable and publish `ref_count = UNUSED` so a future
+        //      `from_unused` for this paddr succeeds.
         unsafe {
             let slot = &*self.ptr;
             debug_assert_eq!(
@@ -942,12 +984,12 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
                 "into_phys_release: ref_count != 1; aliased handle exists \
                  (typestate alone does not guarantee uniqueness — see SAFETY note)"
             );
+            slot.ref_count.store(REF_COUNT_BUSY, Ordering::Release);
             let vt = slot.vtable.load(Ordering::Acquire);
             let storage = slot.storage.get() as *mut u8;
             ((*vt).drop_in_place)(storage);
             slot.vtable.store(core::ptr::null_mut(), Ordering::Release);
-            slot.state.store(META_STATE_UNUSED, Ordering::Release);
-            slot.ref_count.store(0, Ordering::Release);
+            slot.ref_count.store(REF_COUNT_UNUSED, Ordering::Release);
         }
         // Skip Drop entirely — we just hand-released the slot above.
         core::mem::forget(self);
@@ -1136,7 +1178,7 @@ impl<S: init_state::InitState> Frame<PageCacheMeta, S> {
     /// mapping. The borrow's lifetime is the caller's borrow of `self`.
     pub fn as_bytes(&self) -> &[u8] {
         let p = self.virt_addr_u64() as *const u8;
-        // SAFETY: the slot is `TYPED` and ref_count >= 1 for `&self`,
+        // SAFETY: the slot is live (ref_count >= 1) for `&self`,
         // so the HHDM mapping is live for the returned borrow's
         // lifetime. The 4 KiB range fits a single physical frame.
         // Shared `&[u8]` from a shared `&Frame` is consistent with
@@ -1225,7 +1267,7 @@ impl<S: init_state::InitState> Frame<PacketMeta, S> {
     /// mapping. The borrow's lifetime is the caller's borrow of `self`.
     pub fn as_bytes(&self) -> &[u8] {
         let p = self.virt_addr_u64() as *const u8;
-        // SAFETY: the slot is `TYPED` and ref_count >= 1 for `&self`,
+        // SAFETY: the slot is live (ref_count >= 1) for `&self`,
         // so the HHDM mapping is live for the returned borrow's
         // lifetime. The 4 KiB range fits a single physical frame.
         unsafe { core::slice::from_raw_parts(p, crate::mm::page_table::PAGE_SIZE_4KB as usize) }
@@ -1250,8 +1292,10 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as
         // `ref_count > 0`, which is true while this `Frame` is alive.
         let slot = unsafe { &*self.ptr };
-        // Release on the decrement; Acquire fence on the last-ref
-        // path; pairs with `from_in_use`'s AcqRel add.
+        // Release on the decrement; Acquire fence on the last-ref path.
+        // `fetch_sub(1)` from the last live ref (1) lands the slot at `BUSY`
+        // (0): we now own it exclusively for teardown — `from_unused`
+        // retries and `from_in_use` refuses while it reads BUSY.
         if slot.ref_count.fetch_sub(1, Ordering::Release) != 1 {
             return;
         }
@@ -1259,15 +1303,27 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
         let vt = slot.vtable.load(Ordering::Acquire);
         let storage = slot.storage.get() as *mut u8;
         let paddr = self.paddr();
-        // SAFETY: we hold the only remaining reference; `vtable`
-        // points to the static `MetaVtable` for the `M` that was
-        // installed by `from_unused`; `storage` holds a valid `M`.
+        // Publish the slot as UNUSED before returning the page, so a
+        // free-listed paddr always has a claimable slot. Order:
+        //   1. Snapshot the return-the-page decision while the payload is
+        //      live (`PageTableMeta` reads `self.static_borrowed`).
+        //   2. Drop the inline `M`. The slot is BUSY, so this is the only
+        //      handle: exclusive access.
+        //   3. Publish the slot UNUSED (vtable null, then `ref_count`). The
+        //      page is still ours, so no `from_unused` for this paddr races.
+        //   4. Return the page. Later `from_unused` on it observes UNUSED.
+        // SAFETY: sole remaining reference; `vtable` is the static
+        // `MetaVtable` for the installed `M`; `storage` holds a valid `M`
+        // until `drop_in_place`.
+        let return_page = unsafe { ((*vt).returns_frame)(storage as *const u8) };
         unsafe {
-            ((*vt).on_drop)(storage, paddr);
             ((*vt).drop_in_place)(storage);
         }
         slot.vtable.store(core::ptr::null_mut(), Ordering::Release);
-        slot.state.store(META_STATE_UNUSED, Ordering::Release);
+        slot.ref_count.store(REF_COUNT_UNUSED, Ordering::Release);
+        if return_page {
+            return_frame_to_allocator(paddr);
+        }
     }
 }
 

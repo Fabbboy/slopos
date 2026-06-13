@@ -1167,9 +1167,9 @@ fn recursively_reclaim_subtree(table_phys: Paddr, level: PageTableLevel) {
         let child = pte.address();
         if pte.is_huge() {
             // Huge user-half leaf (2 MiB at level Two, 1 GiB at
-            // level Three). Reclaim the leaked META_SLOTS ref —
-            // `Frame::on_drop` then dispatches to the registered
-            // `FrameAlloc::dealloc`. NOTE: today's `Frame<M>` carries
+            // level Three). Reclaim the leaked META_SLOTS ref — the
+            // `Frame` Drop resets the slot and then dispatches to the
+            // registered `FrameAlloc::dealloc`. NOTE: today's `Frame<M>` carries
             // no per-page size, so `dealloc` is invoked with
             // `size_pages = 1`; the trailing pages of the huge region
             // are returned to the buddy allocator only when the

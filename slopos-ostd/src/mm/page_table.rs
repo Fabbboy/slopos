@@ -558,8 +558,8 @@ pub(crate) unsafe fn reclaim_leaked_frame(phys: Paddr) {
     // owned by the (now-cleared) parent PTE. The `PageTableMeta`
     // type parameter on `from_raw` is `PhantomData` only — at Drop
     // time the slot's stored vtable performs the correct
-    // `drop_in_place` and `on_drop` calls for whatever `M` was
-    // originally installed.
+    // `drop_in_place` and `returns_frame` dispatch for whatever `M`
+    // was originally installed.
     let frame: Frame<PageTableMeta> = unsafe { Frame::from_raw(slot_ptr) };
     drop(frame);
 }

@@ -39,7 +39,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 
-use crate::mm::frame::{AnyFrameMeta, FrameAllocOptions, Paddr};
+use crate::mm::frame::{AnyFrameMeta, FrameAllocOptions};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::pod::Pod;
 use crate::mm::uframe::{AnyUFrameMeta, UFrameError, USegment};
@@ -100,10 +100,14 @@ impl From<UFrameError> for DmaError {
 #[derive(Debug, Default)]
 pub struct DmaCoherentMeta;
 
-// SAFETY: ZST has no representation invariants; `on_drop` is a nop.
-// The frame is returned to the allocator by `Frame::Drop`.
+// SAFETY: ZST has no representation invariants. A DMA segment frame's page
+// is owned by the segment, not the per-frame lifecycle, so
+// `returns_frame_on_last_drop` is `false`: the last drop resets the slot
+// but does not return the page to the allocator.
 unsafe impl AnyFrameMeta for DmaCoherentMeta {
-    fn on_drop(&mut self, _paddr: Paddr) {}
+    fn returns_frame_on_last_drop(&self) -> bool {
+        false
+    }
 }
 
 // SAFETY: DMA pages are by definition peripheral-tampered, so the
@@ -115,9 +119,12 @@ unsafe impl AnyUFrameMeta for DmaCoherentMeta {}
 #[derive(Debug, Default)]
 pub struct DmaStreamMeta;
 
-// SAFETY: as `DmaCoherentMeta`.
+// SAFETY: as `DmaCoherentMeta` — the segment owns the page, so the
+// per-frame lifecycle does not return it to the allocator.
 unsafe impl AnyFrameMeta for DmaStreamMeta {
-    fn on_drop(&mut self, _paddr: Paddr) {}
+    fn returns_frame_on_last_drop(&self) -> bool {
+        false
+    }
 }
 
 // SAFETY: as `DmaCoherentMeta`.
