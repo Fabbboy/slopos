@@ -20,14 +20,19 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
+#[cfg(target_os = "none")]
 use crate::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
 // ---------------------------------------------------------------------------
 // Capture ring
 // ---------------------------------------------------------------------------
 
+// The capture ring lives only on the kernel target — host builds no-op
+// `capture`/`ring_copy_tail`, so the ring + its `SpinLock` are absent there.
+#[cfg(target_os = "none")]
 const RING_SIZE: usize = 64 * 1024;
 
+#[cfg(target_os = "none")]
 struct Ring {
     buf: [u8; RING_SIZE],
     /// Total bytes ever written (monotonic). The live data is the last
@@ -35,6 +40,7 @@ struct Ring {
     written: u64,
 }
 
+#[cfg(target_os = "none")]
 static RING: SpinLock<Ring> = SpinLock::new(
     Ring {
         buf: [0u8; RING_SIZE],
@@ -53,6 +59,7 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// serial write funnels through. Uses `try_lock`, so a contended ring (another
 /// CPU mid-append, or a panic writer) simply drops this fragment rather than
 /// blocking.
+#[cfg(target_os = "none")]
 pub fn capture(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
@@ -69,6 +76,12 @@ pub fn capture(bytes: &[u8]) {
     SEQ.store(ring.written, Ordering::Relaxed);
 }
 
+/// Host builds (unit tests / KernMiri) have no framebuffer ring; capture is
+/// a no-op so the serial path doesn't take the kernel `SpinLock`, whose
+/// gs-relative preempt asm the host cannot execute.
+#[cfg(not(target_os = "none"))]
+pub fn capture(_bytes: &[u8]) {}
+
 /// Total bytes ever captured — a lock-free change detector for the renderer.
 pub fn ring_seq() -> u64 {
     SEQ.load(Ordering::Relaxed)
@@ -76,6 +89,7 @@ pub fn ring_seq() -> u64 {
 
 /// Copy the most-recent bytes into `out` in chronological order. Returns the
 /// number copied, or `0` if the ring lock is momentarily contended.
+#[cfg(target_os = "none")]
 pub fn ring_copy_tail(out: &mut [u8]) -> usize {
     let ring = match RING.try_lock() {
         Some(r) => r,
@@ -88,6 +102,12 @@ pub fn ring_copy_tail(out: &mut [u8]) -> usize {
         *slot = ring.buf[((start + i as u64) % RING_SIZE as u64) as usize];
     }
     n
+}
+
+/// Host stub: no framebuffer ring to read back. See [`capture`].
+#[cfg(not(target_os = "none"))]
+pub fn ring_copy_tail(_out: &mut [u8]) -> usize {
+    0
 }
 
 // ---------------------------------------------------------------------------
