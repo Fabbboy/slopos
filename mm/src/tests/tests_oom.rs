@@ -442,33 +442,6 @@ pub fn test_process_heap_expansion_oom() -> TestResult {
     pass!()
 }
 
-pub fn test_refcount_during_oom() -> TestResult {
-    use crate::page_alloc::{page_frame_get_ref, page_frame_inc_ref};
-
-    let phys = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
-    if phys.is_null() {
-        return pass!();
-    }
-
-    for _ in 0..5 {
-        page_frame_inc_ref(phys);
-    }
-
-    let ref_count = page_frame_get_ref(phys);
-    if ref_count != 6 {
-        for _ in 0..6 {
-            free_page_frame(phys);
-        }
-        return fail!("ref count should be 6, got {}", ref_count);
-    }
-
-    for _ in 0..6 {
-        free_page_frame(phys);
-    }
-
-    pass!()
-}
-
 slopos_testing::stest!(name = test_page_alloc_until_oom, suite = oom);
 slopos_testing::stest!(name = test_page_alloc_fragmentation_oom, suite = oom);
 slopos_testing::stest!(name = test_dma_allocation_exhaustion, suite = oom);
@@ -481,4 +454,3 @@ slopos_testing::stest!(name = test_kzalloc_zeroed_under_pressure, suite = oom);
 slopos_testing::stest!(name = test_alloc_free_cycles_no_leak, suite = oom);
 slopos_testing::stest!(name = test_multiorder_alloc_failure, suite = oom);
 slopos_testing::stest!(name = test_process_heap_expansion_oom, suite = oom);
-slopos_testing::stest!(name = test_refcount_during_oom, suite = oom);

@@ -198,21 +198,6 @@ pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
     BUDDY_ALLOCATOR.frame_is_tracked(phys_addr) as c_int
 }
 
-pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
-    BUDDY_ALLOCATOR.frame_can_free(phys_addr) as c_int
-}
-
-pub fn page_frame_inc_ref(phys_addr: PhysAddr) -> c_int {
-    match BUDDY_ALLOCATOR.frame_inc_ref(phys_addr) {
-        Some(n) => n as c_int,
-        None => -1,
-    }
-}
-
-pub fn page_frame_get_ref(phys_addr: PhysAddr) -> u32 {
-    BUDDY_ALLOCATOR.frame_get_ref(phys_addr)
-}
-
 pub fn page_allocator_paint_all(value: u8) {
     BUDDY_ALLOCATOR.paint_all(value);
 }

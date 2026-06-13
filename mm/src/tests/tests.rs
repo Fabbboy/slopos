@@ -14,7 +14,6 @@ use slopos_testing::{assert_not_null, assert_test, fail, pass};
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{
     alloc_kernel_page, alloc_kernel_pages, free_page_frame, get_page_allocator_stats,
-    page_frame_get_ref, page_frame_inc_ref,
 };
 use crate::paging::virt_to_phys;
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -30,16 +29,6 @@ pub fn test_page_alloc_single() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate single page");
     assert_test!(phys.as_u64() != 0, "allocated address is zero");
-
-    let ref_count = page_frame_get_ref(phys);
-    if ref_count == 0 {
-        free_page_frame(phys);
-        return fail!(
-            "ref count should be non-zero after alloc, got {}",
-            ref_count
-        );
-    }
-
     free_page_frame(phys);
     pass!()
 }
@@ -101,38 +90,6 @@ pub fn test_page_alloc_zeroed() -> TestResult {
         }
     }
 
-    free_page_frame(phys);
-    pass!()
-}
-
-/// Test 5: Reference count increment and decrement
-pub fn test_page_alloc_refcount() -> TestResult {
-    let phys = alloc_kernel_page();
-    assert_not_null!(phys.as_u64() as *const u8, "alloc for refcount test");
-
-    let ref1 = page_frame_get_ref(phys);
-    if ref1 != 1 {
-        free_page_frame(phys);
-        return fail!("initial refcount should be 1, got {}", ref1);
-    }
-
-    let new_ref = page_frame_inc_ref(phys);
-    if new_ref != 2 {
-        free_page_frame(phys);
-        free_page_frame(phys);
-        return fail!("refcount after inc should be 2, got {}", new_ref);
-    }
-
-    // First free should just decrement
-    free_page_frame(phys);
-
-    let ref_after = page_frame_get_ref(phys);
-    if ref_after != 1 {
-        free_page_frame(phys);
-        return fail!("refcount after first free should be 1, got {}", ref_after);
-    }
-
-    // Second free should actually free
     free_page_frame(phys);
     pass!()
 }
@@ -1787,7 +1744,6 @@ stest!(name = test_page_alloc_single, suite = page_alloc);
 stest!(name = test_page_alloc_multi_order, suite = page_alloc);
 stest!(name = test_page_alloc_free_cycle, suite = page_alloc);
 stest!(name = test_page_alloc_zeroed, suite = page_alloc);
-stest!(name = test_page_alloc_refcount, suite = page_alloc);
 stest!(
     name = test_pinned_io_slices_len_and_keepalive,
     suite = page_alloc

@@ -97,7 +97,6 @@ impl Lifecycle {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(super) struct PageFrame {
-    pub(super) ref_count: u32,
     pub(super) state: u8,
     pub(super) flags: u8,
     pub(super) order: u16,
@@ -199,7 +198,6 @@ impl BuddyInner {
             frame.order = order as u16;
             frame.state = PAGE_FRAME_FREE;
             frame.flags = 0;
-            frame.ref_count = 0;
             self.free_lists[order as usize] = frame_num;
         }
     }
@@ -338,7 +336,6 @@ impl BuddyInner {
             }
 
             if let Some(desc) = self.frame_desc_mut(table, block) {
-                desc.ref_count = 1;
                 desc.flags = flags as u8;
                 desc.order = order as u16;
                 desc.state = Self::page_state_for_flags(flags);
@@ -377,7 +374,6 @@ impl BuddyInner {
             }
             if let Some(desc) = self.frame_desc_mut(table, frame_num) {
                 if desc.state == PAGE_FRAME_PCP {
-                    desc.ref_count = 0;
                     desc.flags = 0;
                     desc.state = PAGE_FRAME_FREE;
                     self.allocated_frames = self.allocated_frames.saturating_sub(1);
@@ -567,7 +563,6 @@ impl BuddyAllocator {
 
         for i in 0..max_frames {
             if let Some(frame) = inner.frame_desc_mut(&self.frame_table, i) {
-                frame.ref_count = 0;
                 frame.state = PAGE_FRAME_RESERVED;
                 frame.flags = 0;
                 frame.order = 0;
@@ -666,44 +661,6 @@ impl BuddyAllocator {
         let inner = self.inner.lock();
         let frame_num = inner.phys_to_frame(phys_addr);
         inner.is_valid_frame(frame_num)
-    }
-
-    pub fn frame_can_free(&self, phys_addr: PhysAddr) -> bool {
-        let inner = self.inner.lock();
-        let frame_num = inner.phys_to_frame(phys_addr);
-        if !inner.is_valid_frame(frame_num) {
-            return false;
-        }
-        let Some(frame) = inner.frame_desc_mut(&self.frame_table, frame_num) else {
-            return false;
-        };
-        BuddyInner::frame_state_is_allocated(frame.state)
-    }
-
-    pub fn frame_inc_ref(&self, phys_addr: PhysAddr) -> Option<u32> {
-        let inner = self.inner.lock();
-        let frame_num = inner.phys_to_frame(phys_addr);
-        if !inner.is_valid_frame(frame_num) {
-            return None;
-        }
-        let frame = inner.frame_desc_mut(&self.frame_table, frame_num)?;
-        if !BuddyInner::frame_state_is_allocated(frame.state) {
-            return None;
-        }
-        frame.ref_count = frame.ref_count.saturating_add(1);
-        Some(frame.ref_count)
-    }
-
-    pub fn frame_get_ref(&self, phys_addr: PhysAddr) -> u32 {
-        let inner = self.inner.lock();
-        let frame_num = inner.phys_to_frame(phys_addr);
-        if !inner.is_valid_frame(frame_num) {
-            return 0;
-        }
-        match inner.frame_desc_mut(&self.frame_table, frame_num) {
-            Some(frame) => frame.ref_count,
-            None => 0,
-        }
     }
 
     /// Paint every tracked frame's contents with `value`. Used by
@@ -857,10 +814,6 @@ impl BuddyAllocator {
         if frame.state == PAGE_FRAME_PCP {
             return 0;
         }
-        if frame.ref_count > 1 {
-            frame.ref_count -= 1;
-            return 0;
-        }
 
         let order = frame.order as u32;
         let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
@@ -870,7 +823,6 @@ impl BuddyAllocator {
                 if cache.count < pcp::PCP_HIGH_WATERMARK {
                     if let Some(desc) = inner.frame_desc_mut(&self.frame_table, frame_num) {
                         desc.state = PAGE_FRAME_PCP;
-                        desc.ref_count = 0;
                         desc.next_free = INVALID_PAGE_FRAME;
                     }
                     cache.stack[cache.count as usize] = frame_num;
@@ -902,7 +854,6 @@ impl BuddyAllocator {
 
         if let Some(frame) = inner.frame_desc_mut(&self.frame_table, frame_num) {
             let pages = BuddyInner::order_block_pages(order);
-            frame.ref_count = 0;
             frame.flags = 0;
             frame.state = PAGE_FRAME_FREE;
             inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
@@ -927,7 +878,6 @@ impl BuddyAllocator {
             return;
         }
         let pages = BuddyInner::order_block_pages(frame.order as u32);
-        frame.ref_count = 0;
         frame.flags = 0;
         frame.next_free = INVALID_PAGE_FRAME;
         frame.state = PAGE_FRAME_NEVER_REUSE;
@@ -1022,7 +972,6 @@ impl BuddyAllocator {
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         self.frame_desc_lockfree(frame_num, |desc| {
             desc.state = PAGE_FRAME_ALLOCATED;
-            desc.ref_count = 1;
             desc.next_free = INVALID_PAGE_FRAME;
         });
         frame_num
@@ -1049,7 +998,6 @@ impl BuddyAllocator {
                 let frame_num = batch[i];
                 if let Some(desc) = inner.frame_desc_mut(table, frame_num) {
                     desc.state = PAGE_FRAME_PCP;
-                    desc.ref_count = 0;
                     desc.next_free = INVALID_PAGE_FRAME;
                 }
             }

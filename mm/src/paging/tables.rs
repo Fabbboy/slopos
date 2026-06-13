@@ -23,7 +23,7 @@ use slopos_ostd::{klog_debug, klog_info};
 use super::walker::PageTableWalker;
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
-use crate::page_alloc::{alloc_kernel_page, free_page_frame, page_frame_can_free};
+use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 
 use crate::tlb;
@@ -413,7 +413,7 @@ fn map_page_in_directory(
     let was_present = pt_entry.is_present();
     if was_present {
         let old_phys = pt_entry.address();
-        if !old_phys.is_null() && page_frame_can_free(old_phys) != 0 {
+        if !old_phys.is_null() {
             free_page_frame(old_phys);
         }
     }
@@ -467,9 +467,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         };
         if pdpt_empty {
             pml4_entry.clear();
-            if page_frame_can_free(pml4_entry_phys) != 0 {
-                free_page_frame(pml4_entry_phys);
-            }
+            free_page_frame(pml4_entry_phys);
         }
         return phys;
     }
@@ -509,9 +507,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         };
         if pt_empty {
             pd_entry.clear();
-            if page_frame_can_free(pd_entry_phys) != 0 {
-                free_page_frame(pd_entry_phys);
-            }
+            free_page_frame(pd_entry_phys);
         }
     }
 
@@ -521,9 +517,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
     };
     if pd_empty {
         pdpt_entry.clear();
-        if page_frame_can_free(pdpt_entry_phys) != 0 {
-            free_page_frame(pdpt_entry_phys);
-        }
+        free_page_frame(pdpt_entry_phys);
     }
 
     let pdpt_empty = {
@@ -532,9 +526,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
     };
     if pdpt_empty {
         pml4_entry.clear();
-        if page_frame_can_free(pml4_entry_phys) != 0 {
-            free_page_frame(pml4_entry_phys);
-        }
+        free_page_frame(pml4_entry_phys);
     }
 
     unmapped_phys
