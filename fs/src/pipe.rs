@@ -29,9 +29,10 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 pub(crate) use slopos_abi::event::MAX_PIPES;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
 
-/// Bits reserved for the slot index in the packed handle encoding.
+/// Bits reserved for the slot index in the packed handle encoding; the
+/// remaining bits hold the generation (see [`Handle::pack`]). 8 bits cover
+/// MAX_PIPES (≤ 256) slots.
 const SLOT_BITS: u32 = 8;
-const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1; // 0xFF — covers MAX_PIPES (≤ 256) slots
 
 // ---------------------------------------------------------------------------
 // PipeHandle — packed, FD-facing handle for pipe kernel objects
@@ -56,8 +57,7 @@ impl PipeHandle {
 
     /// Pack an internal [`Handle`] into the FD-facing encoding.
     pub(crate) fn pack(h: Handle<Pipe>) -> Self {
-        let generation = h.generation() & (u64::MAX >> SLOT_BITS);
-        Self((generation << SLOT_BITS) | (h.slot() as u64 & SLOT_MASK))
+        Self(h.pack(SLOT_BITS) as u64)
     }
 
     /// Rebuild the internal [`Handle`], or `None` if this is the sentinel
@@ -66,16 +66,16 @@ impl PipeHandle {
         if self == Self::INVALID {
             return None;
         }
-        let slot = (self.0 & SLOT_MASK) as u32;
-        if slot as usize >= MAX_PIPES {
+        let h = Handle::unpack(self.0 as usize, SLOT_BITS);
+        if h.slot() as usize >= MAX_PIPES {
             return None;
         }
-        Some(Handle::from_parts(slot, self.0 >> SLOT_BITS))
+        Some(h)
     }
 
     /// The slot index — also the event-bus key for this pipe.
     pub(crate) fn slot(self) -> usize {
-        (self.0 & SLOT_MASK) as usize
+        Handle::<Pipe>::unpack(self.0 as usize, SLOT_BITS).slot() as usize
     }
 
     /// Convert to `usize` for storage in `OpenFile::handle`.

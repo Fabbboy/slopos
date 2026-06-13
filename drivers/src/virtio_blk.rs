@@ -2,6 +2,7 @@ use core::mem::size_of;
 
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex};
 use slopos_ostd::KArc;
+use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
 use slopos_ostd::sync::wait_queue::WaitOutcome;
@@ -748,28 +749,12 @@ impl RequestBuffers {
 // ============================================================================
 
 const MAX_BLK_DEVICES: usize = 8;
-const SLOT_BITS: u32 = 8;
-const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
 
-/// Opaque, unforgeable handle to a registered virtio-blk device. Encodes a
-/// slot index plus a generation counter (mirroring `MemfdHandle`) so a stale
-/// handle fails validation instead of aliasing a different device. The only
-/// constructor is private to this module.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct DevHandle(u32);
-
-impl DevHandle {
-    fn new(slot: usize, generation: u32) -> Self {
-        DevHandle((generation << SLOT_BITS) | (slot as u32 & SLOT_MASK))
-    }
-    fn slot(self) -> usize {
-        (self.0 & SLOT_MASK) as usize
-    }
-    fn generation(self) -> u32 {
-        self.0 >> SLOT_BITS
-    }
-}
+/// Opaque, unforgeable handle to a registered virtio-blk device: a
+/// generation-checked [`Handle`] over the registry's [`DevState`] slots, so a
+/// stale handle fails validation instead of aliasing a different device. Held
+/// purely in-kernel (never packed into an fd), so no encoding is needed.
+pub type DevHandle = Handle<DevState>;
 
 /// Error from acquiring an exclusive write capability on a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -780,108 +765,62 @@ pub enum BlkClaimError {
     AlreadyClaimed,
 }
 
-struct DevSlot {
-    inner: Option<KArc<VirtioBlkInner>>,
-    generation: u32,
+/// One registered block device. Slot index and generation are owned by the
+/// [`HandleTable`]; this carries the device state plus its capability bits.
+/// Public as the type parameter of [`DevHandle`]; its fields stay private.
+pub struct DevState {
+    inner: KArc<VirtioBlkInner>,
+    /// Stable probe-order index (disk0 = first probed). Devices are never
+    /// removed, so this equals the device's position in registration order.
     index: u16,
+    /// Whether a [`BlockWriteToken`] currently holds the exclusive write claim.
     write_claimed: bool,
 }
 
-impl DevSlot {
-    const fn empty() -> Self {
-        Self {
-            inner: None,
-            generation: 0,
-            index: 0,
-            write_claimed: false,
-        }
-    }
-}
+static BLK_REGISTRY: SpinLock<Option<HandleTable<DevState>>> =
+    SpinLock::new(None, LOCK_LEVEL_REGISTRY);
 
-struct BlkRegistry {
-    slots: [DevSlot; MAX_BLK_DEVICES],
-    next_generation: u32,
-    probe_order_next: u16,
-}
-
-impl BlkRegistry {
-    const fn new() -> Self {
-        const EMPTY: DevSlot = DevSlot::empty();
-        Self {
-            slots: [EMPTY; MAX_BLK_DEVICES],
-            // Generation 0 is reserved as "none" so a zeroed handle is invalid.
-            next_generation: 1,
-            probe_order_next: 0,
-        }
-    }
-}
-
-static BLK_REGISTRY: SpinLock<BlkRegistry> = SpinLock::new(BlkRegistry::new(), LOCK_LEVEL_REGISTRY);
-
-/// Validate a handle against the live registry, returning its slot index.
-fn validate(reg: &BlkRegistry, handle: DevHandle) -> Option<usize> {
-    let slot = handle.slot();
-    if slot >= MAX_BLK_DEVICES || handle.generation() == 0 {
-        return None;
-    }
-    let s = &reg.slots[slot];
-    if s.inner.is_some() && s.generation == handle.generation() {
-        Some(slot)
-    } else {
-        None
-    }
+fn with_registry<R>(f: impl FnOnce(&mut HandleTable<DevState>) -> R) -> R {
+    let mut guard = BLK_REGISTRY.lock();
+    let table = guard.get_or_insert_with(|| {
+        HandleTable::with_fixed_capacity(MAX_BLK_DEVICES).expect("blk registry alloc")
+    });
+    f(table)
 }
 
 /// Register a freshly-probed device. Assigns the next probe-order index
-/// (disk0, disk1, …) and a fresh generation, returning the index. Called
-/// once per device from `virtio_blk_probe` while the PCI `ENUM_STATE` lock
-/// is held; the only nesting is `ENUM_STATE -> BLK_REGISTRY` (never the
-/// reverse), so no cycle. Callers reach the device afterwards via
-/// [`blk_device_by_index`].
+/// (disk0, disk1, …) — devices are never removed, so the live count is the
+/// next index — and returns it. Called once per device from
+/// `virtio_blk_probe` while the PCI `ENUM_STATE` lock is held; the only
+/// nesting is `ENUM_STATE -> BLK_REGISTRY` (never the reverse), so no cycle.
+/// Callers reach the device afterwards via [`blk_device_by_index`].
 fn register_device(inner: KArc<VirtioBlkInner>) -> Option<BlockDeviceIndex> {
-    let mut reg = BLK_REGISTRY.lock();
-    let free = (0..MAX_BLK_DEVICES).find(|&s| reg.slots[s].inner.is_none())?;
-    let generation = reg.next_generation;
-    let index = reg.probe_order_next;
-    reg.next_generation = reg.next_generation.wrapping_add(1);
-    if reg.next_generation == 0 {
-        reg.next_generation = 1;
-    }
-    reg.probe_order_next = reg.probe_order_next.wrapping_add(1);
-    reg.slots[free] = DevSlot {
-        inner: Some(inner),
-        generation,
-        index,
-        write_claimed: false,
-    };
-    Some(BlockDeviceIndex(index))
+    with_registry(|t| {
+        let index = t.len() as u16;
+        t.insert(DevState {
+            inner,
+            index,
+            write_claimed: false,
+        })
+        .ok()
+        .map(|_| BlockDeviceIndex(index))
+    })
 }
 
 /// Clone the device's owned state out from under the registry lock, so the
 /// (potentially blocking) I/O path never runs while holding the registry.
 fn clone_inner(handle: DevHandle) -> Option<KArc<VirtioBlkInner>> {
-    let reg = BLK_REGISTRY.lock();
-    let slot = validate(&reg, handle)?;
-    reg.slots[slot].inner.clone()
+    with_registry(|t| t.get(handle).map(|s| s.inner.clone()).ok())
 }
 
 /// Number of claimed virtio-blk devices.
 pub fn blk_device_count() -> usize {
-    let reg = BLK_REGISTRY.lock();
-    reg.slots.iter().filter(|s| s.inner.is_some()).count()
+    with_registry(|t| t.len())
 }
 
 /// Look a device up by stable probe-order index (disk0 = first probed).
 pub fn blk_device_by_index(index: BlockDeviceIndex) -> Option<DevHandle> {
-    let reg = BLK_REGISTRY.lock();
-    (0..MAX_BLK_DEVICES).find_map(|slot| {
-        let s = &reg.slots[slot];
-        if s.inner.is_some() && s.index == index.0 {
-            Some(DevHandle::new(slot, s.generation))
-        } else {
-            None
-        }
-    })
+    with_registry(|t| t.iter().find(|(_, s)| s.index == index.0).map(|(h, _)| h))
 }
 
 /// Read-only block access through a borrowed handle (no exclusivity needed).
@@ -908,19 +847,15 @@ pub fn blk_msix_state(handle: DevHandle) -> Option<VirtioMsixState> {
 /// [`BlockWriteToken`]; a second `open_writer` on the same device returns
 /// [`BlkClaimError::AlreadyClaimed`] until the first token is dropped.
 pub fn open_writer(handle: DevHandle) -> Result<BlockWriteToken, BlkClaimError> {
-    let mut reg = BLK_REGISTRY.lock();
-    let slot = validate(&reg, handle).ok_or(BlkClaimError::Stale)?;
-    if reg.slots[slot].write_claimed {
-        return Err(BlkClaimError::AlreadyClaimed);
-    }
-    // `validate` already proved `inner.is_some()` under this same guard, so
-    // this is provably `Some`; match defensively rather than panic on a
-    // registry path.
-    let Some(inner) = reg.slots[slot].inner.clone() else {
-        return Err(BlkClaimError::Stale);
-    };
-    reg.slots[slot].write_claimed = true;
-    Ok(BlockWriteToken { handle, inner })
+    with_registry(|t| match t.get_mut(handle) {
+        Ok(s) if s.write_claimed => Err(BlkClaimError::AlreadyClaimed),
+        Ok(s) => {
+            let inner = s.inner.clone();
+            s.write_claimed = true;
+            Ok(BlockWriteToken { handle, inner })
+        }
+        Err(_) => Err(BlkClaimError::Stale),
+    })
 }
 
 /// Owned, exclusive read+write capability for one block device. Implements
@@ -963,10 +898,11 @@ impl BlockDevice for BlockWriteToken {
 
 impl Drop for BlockWriteToken {
     fn drop(&mut self) {
-        let mut reg = BLK_REGISTRY.lock();
-        if let Some(slot) = validate(&reg, self.handle) {
-            reg.slots[slot].write_claimed = false;
-        }
+        with_registry(|t| {
+            if let Ok(s) = t.get_mut(self.handle) {
+                s.write_claimed = false;
+            }
+        });
     }
 }
 

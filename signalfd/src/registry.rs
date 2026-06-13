@@ -15,8 +15,9 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 /// Maximum concurrent signalfds system-wide (fixed-capacity table).
 const MAX_SIGNALFDS: usize = 256;
 
+/// Slot-index bit width in the packed fd handle; the remaining bits hold the
+/// generation (see [`Handle::pack`]).
 const SLOT_BITS: u32 = 12;
-const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 
 /// Immutable per-signalfd state: which task's signals to watch, and the
 /// subscribed mask. `Copy` so lookups hand back a value, not a borrow.
@@ -29,17 +30,6 @@ pub struct SignalfdState {
 static REGISTRY: SpinLock<Option<HandleTable<SignalfdState>>> =
     SpinLock::new(None, LOCK_LEVEL_REGISTRY);
 
-fn pack(h: Handle<SignalfdState>) -> usize {
-    (((h.generation() & ((1 << 52) - 1)) << SLOT_BITS) | (h.slot() as u64 & SLOT_MASK)) as usize
-}
-
-fn unpack(raw: usize) -> Handle<SignalfdState> {
-    let raw = raw as u64;
-    let slot = (raw & SLOT_MASK) as u32;
-    let generation = raw >> SLOT_BITS;
-    Handle::from_parts(slot, generation)
-}
-
 fn with_registry<R>(f: impl FnOnce(&mut HandleTable<SignalfdState>) -> R) -> R {
     let mut guard = REGISTRY.lock();
     let table = guard.get_or_insert_with(|| {
@@ -51,18 +41,18 @@ fn with_registry<R>(f: impl FnOnce(&mut HandleTable<SignalfdState>) -> R) -> R {
 /// Insert fresh signalfd state; returns the packed fd-handle, or `None` if
 /// the registry is full.
 pub fn insert(state: SignalfdState) -> Option<usize> {
-    with_registry(|t| t.insert(state).ok().map(pack))
+    with_registry(|t| t.insert(state).ok().map(|h| h.pack(SLOT_BITS)))
 }
 
 /// Resolve a packed fd handle to its (copied) state, or `None` if stale.
 pub fn get(raw_handle: usize) -> Option<SignalfdState> {
-    let h = unpack(raw_handle);
+    let h = Handle::unpack(raw_handle, SLOT_BITS);
     with_registry(|t| t.get(h).copied().ok())
 }
 
 /// Remove a signalfd from the table (last fd closed). No-op on a stale handle.
 pub fn remove(raw_handle: usize) {
-    let h = unpack(raw_handle);
+    let h = Handle::unpack(raw_handle, SLOT_BITS);
     with_registry(|t| {
         let _ = t.remove(h);
     });

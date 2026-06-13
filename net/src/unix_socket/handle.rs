@@ -1,58 +1,56 @@
 //! Type-safe handle for AF_UNIX socket kernel objects.
 
-use super::MAX_UNIX_SOCKETS;
+use slopos_ostd::handle::Handle;
 
-/// Bits used for the slot index in the handle encoding.
+use super::MAX_UNIX_SOCKETS;
+use super::slot::UnixSlot;
+
+/// Slot-index bit width in the packed fd handle; the remaining bits hold the
+/// generation (see [`Handle::pack`]). 8 bits cover MAX_UNIX_SOCKETS slots.
 pub(super) const SLOT_BITS: u32 = 8;
-/// Mask for the slot-index portion of the encoded handle (supports up to 256 slots).
-pub(super) const SLOT_MASK: usize = (1 << SLOT_BITS) - 1;
 
 /// Opaque handle identifying an AF_UNIX socket slot.
 ///
-/// Encodes a slot index and the slot's generation counter so that stale
-/// handles (from a closed socket whose slot was recycled) are reliably
-/// rejected.
-///
-/// The encoding is `(generation << SLOT_BITS) | slot_index`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[repr(transparent)]
-pub struct SocketHandle(u32);
+/// Wraps a generation-checked [`Handle`] over the registry's [`UnixSlot`]
+/// table, so a handle left over from a closed socket whose slot was recycled
+/// fails validation rather than aliasing the recycled socket. Packed into the
+/// open-file `handle: usize` via [`Handle::pack`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SocketHandle(Handle<UnixSlot>);
 
 impl SocketHandle {
-    pub(crate) fn new(slot: usize, generation: u32) -> Self {
-        Self(((generation as usize) << SLOT_BITS | (slot & SLOT_MASK)) as u32)
+    /// Wrap a freshly-minted table handle.
+    pub(super) fn from_handle(h: Handle<UnixSlot>) -> Self {
+        Self(h)
     }
 
-    /// Extract the raw slot index.  Private — only `validate_socket_handle`
-    /// should use this (it IS the generation check).
-    pub(super) fn raw_slot(self) -> usize {
-        (self.0 as usize) & SLOT_MASK
+    /// The underlying table handle. Resolving it against the registry table
+    /// validates the generation, so a stale handle yields a typed miss.
+    pub(super) fn handle(self) -> Handle<UnixSlot> {
+        self.0
     }
 
-    /// Slot index used to key the socket's `KernelEvent::UnixSocket` queue.
-    ///
-    /// This performs a **bounds check** against `MAX_UNIX_SOCKETS` but does
-    /// **not** validate the generation counter.  Safe as an event key
-    /// because the event bus's backing queue is a fixed-size static —
-    /// keying a recycled slot's queue is harmless (spurious wakeups are
-    /// tolerated).  All slot *data* access must go through
-    /// `validate_socket_handle`.
+    /// Raw slot index — used to key the socket's event-bus queue and to wake
+    /// a peer. Bounds- but **not** generation-checked; all slot *data* access
+    /// must go through the table (which validates the generation).
+    pub(super) fn slot(self) -> usize {
+        self.0.slot() as usize
+    }
+
+    /// Slot index for event-bus keying, or `None` if out of range. Keying a
+    /// recycled slot's queue is harmless (spurious wakeups are tolerated).
     pub(crate) fn slot_for_wq(self) -> Option<usize> {
-        let i = (self.0 as usize) & SLOT_MASK;
+        let i = self.slot();
         if i < MAX_UNIX_SOCKETS { Some(i) } else { None }
     }
 
-    pub(super) fn generation(self) -> u32 {
-        (self.0 as usize >> SLOT_BITS) as u32
-    }
-
-    /// Convert to usize for storage in OpenFileEntry.handle.
+    /// Pack into the `usize` stored in the open-file entry.
     pub fn as_usize(self) -> usize {
-        self.0 as usize
+        self.0.pack(SLOT_BITS)
     }
 
-    /// Reconstruct from usize stored in OpenFileEntry.handle.
+    /// Reconstruct from the `usize` stored in the open-file entry.
     pub fn from_usize(v: usize) -> Self {
-        Self(v as u32)
+        Self(Handle::unpack(v, SLOT_BITS))
     }
 }

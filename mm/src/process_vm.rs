@@ -811,11 +811,8 @@ fn vma_page_count(start: u64, end: u64) -> u32 {
 }
 
 fn dec_removed_shared_mapcount(start: u64, end: u64, region: &VmaRegion) {
-    if region.is_shared() && !region.memfd_handle().is_none() {
-        crate::memfd::memfd_dec_mapcount_by(
-            region.memfd_handle().as_usize(),
-            vma_page_count(start, end),
-        );
+    if let Some(handle) = region.memfd_handle() {
+        crate::memfd::memfd_dec_mapcount_by(handle, vma_page_count(start, end));
     }
 }
 
@@ -2245,18 +2242,12 @@ pub fn process_vm_mmap(
     offset: u64,
 ) -> u64 {
     process_vm_mmap_inner(
-        process_id,
-        addr_hint,
-        length,
-        prot,
-        flags_val,
-        fd,
-        offset,
-        crate::memfd::MemfdHandle::NONE,
+        process_id, addr_hint, length, prot, flags_val, fd, offset, None,
     )
 }
 
-/// Extended mmap with optional memfd handle for shared mappings.
+/// Extended mmap for shared mappings. `memfd_raw` is the packed memfd handle
+/// from the fd's `OpenFile.handle` (resolved by the syscall handler).
 pub fn process_vm_mmap_shared(
     process_id: u32,
     addr_hint: u64,
@@ -2264,7 +2255,7 @@ pub fn process_vm_mmap_shared(
     prot: u64,
     flags_val: u64,
     offset: u64,
-    memfd_handle: crate::memfd::MemfdHandle,
+    memfd_raw: usize,
 ) -> u64 {
     process_vm_mmap_inner(
         process_id,
@@ -2274,7 +2265,7 @@ pub fn process_vm_mmap_shared(
         flags_val,
         -1,
         offset,
-        memfd_handle,
+        Some(crate::memfd::handle_from_raw(memfd_raw)),
     )
 }
 
@@ -2362,7 +2353,7 @@ fn process_vm_mmap_inner(
     flags_val: u64,
     fd: i64,
     offset: u64,
-    memfd_handle: crate::memfd::MemfdHandle,
+    memfd_handle: Option<crate::memfd::MemfdHandle>,
 ) -> u64 {
     use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
     use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED};
@@ -2404,7 +2395,7 @@ fn process_vm_mmap_inner(
 
     // For shared mappings, validate the memfd and get physical pages
     let shared_info = if is_shared {
-        let Some((phys, memfd_size, pages)) = crate::memfd::memfd_get_info(memfd_handle.as_usize())
+        let Some((phys, memfd_size, pages)) = memfd_handle.and_then(crate::memfd::memfd_get_info)
         else {
             klog_info!("process_vm_mmap: invalid or unsized memfd_handle");
             return 0;
@@ -2520,6 +2511,10 @@ fn process_vm_mmap_inner(
         // -- Shared memfd path: eagerly map the memfd's physical pages --
         use slopos_abi::syscall::PROT_WRITE;
 
+        // `shared_info` is Some only on the MAP_SHARED path, whose validation
+        // above proved a memfd handle is present.
+        let memfd_handle = memfd_handle.expect("shared mapping requires a memfd handle");
+
         let shared_region = VmaRegion {
             protection: Protection {
                 read: prot_to_region(prot).protection.read,
@@ -2578,7 +2573,7 @@ fn process_vm_mmap_inner(
         inner.total_pages += page_count;
 
         // Tell the memfd about this mapping
-        crate::memfd::memfd_inc_mapcount_by(memfd_handle.as_usize(), page_count);
+        crate::memfd::memfd_inc_mapcount_by(memfd_handle, page_count);
 
         start_addr
     } else {
@@ -3095,14 +3090,11 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             };
 
             child.vma_map.insert(vma_start, vma_end, child_region);
-            if is_shared_vma {
-                let memfd_handle = parent_region.memfd_handle();
-                if !memfd_handle.is_none() {
-                    crate::memfd::memfd_inc_mapcount_by(
-                        memfd_handle.as_usize(),
-                        vma_page_count(vma_start, vma_end),
-                    );
-                }
+            if let Some(memfd_handle) = parent_region.memfd_handle() {
+                crate::memfd::memfd_inc_mapcount_by(
+                    memfd_handle,
+                    vma_page_count(vma_start, vma_end),
+                );
             }
 
             // Pull a mutable handle to the child's OSTD VmSpace once

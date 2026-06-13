@@ -1,17 +1,15 @@
 //! Per-slot AF_UNIX socket state, encoded as a typestate enum.
 //!
-//! Stage D collapses the previous field bag into a [`SlotState`]
-//! enum.  Each variant carries exactly the data that is meaningful in
-//! that state — the bind path appears only in `Bound`/`Listening`, the
-//! backlog only in `Listening`, the pair handle only in `Connected`.
-//! The compiler enforces these invariants: there is no way to read
-//! a path off a freshly-created slot or to reach a buffer from an
-//! unconnected socket.
+//! Each variant carries exactly the data that is meaningful in that state —
+//! the bind path appears only in `Bound`/`Listening`, the backlog only in
+//! `Listening`, the pair handle only in `Connected`.  The compiler enforces
+//! these invariants: there is no way to read a path off a freshly-created
+//! slot or to reach a buffer from an unconnected socket.
 //!
-//! `generation` and `nonblocking` are the only cross-state fields:
-//! generation persists across transitions so stale handles can be
-//! detected, and nonblocking is a socket-level option that survives
-//! state changes.
+//! Slot occupancy and the generation counter are owned by the registry's
+//! `HandleTable` (a free slot is simply absent from the table; `remove` bumps
+//! its generation). `nonblocking` is the only cross-state field — a
+//! socket-level option that survives state changes.
 
 use super::handle::SocketHandle;
 use super::pair::{PairHandle, PairSide};
@@ -31,9 +29,9 @@ pub(super) const MAX_BACKLOG: usize = 32;
 /// SlotState::Bound { path }` etc. — so the previous variant's data
 /// drops automatically.
 pub(super) enum SlotState {
-    /// Slot is unallocated.  Allocator scans for this variant.
-    Free,
-    /// `unix_create()` succeeded; socket has no address and no peer.
+    /// `unix_create()` succeeded; socket has no address and no peer. Also the
+    /// neutral placeholder while a state transition moves data out of the
+    /// previous variant.
     Created,
     /// `unix_bind()` succeeded.
     Bound {
@@ -57,40 +55,18 @@ pub(super) enum SlotState {
 
 pub(super) struct UnixSlot {
     pub(super) state: SlotState,
-    /// Monotonically increasing generation counter.  Bumped on every
-    /// transition into `Free` so stale `SocketHandle`s never validate
-    /// against a recycled slot.
-    pub(super) generation: u32,
     /// Non-blocking mode (socket-level option, persists across
     /// state transitions).
     pub(super) nonblocking: bool,
 }
 
 impl UnixSlot {
-    pub(super) const fn new() -> Self {
+    /// A freshly-created, unbound socket. Inserted into the registry table by
+    /// `unix_create`, which mints the generation-checked handle.
+    pub(super) fn created() -> Self {
         Self {
-            state: SlotState::Free,
-            generation: 0,
+            state: SlotState::Created,
             nonblocking: false,
         }
-    }
-
-    /// Transition to `Free`.  Bumps the generation counter so any
-    /// outstanding [`SocketHandle`]s referencing this slot become
-    /// stale and fail validation.
-    ///
-    /// Caller responsibilities (compiler-enforced for the pair handle,
-    /// debug-asserted otherwise):
-    ///
-    /// - The current state must not still be holding a pair reference
-    ///   — `unix_close` must have called `pairs.release(...)` first.
-    pub(super) fn transition_to_free(&mut self) {
-        debug_assert!(
-            !matches!(self.state, SlotState::Connected { .. }),
-            "transition_to_free called while still Connected — pair leak"
-        );
-        self.state = SlotState::Free;
-        self.generation = self.generation.wrapping_add(1);
-        self.nonblocking = false;
     }
 }

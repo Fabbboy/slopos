@@ -37,6 +37,7 @@ mod slot;
 
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
+use slopos_ostd::handle::HandleTable;
 use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBTreeMap, KVec, KVecDeque};
 
@@ -64,7 +65,7 @@ fn unix_ev(slot: usize) -> KernelEvent {
 // ---------------------------------------------------------------------------
 
 struct UnixSocketState {
-    slots: [UnixSlot; MAX_UNIX_SOCKETS],
+    slots: HandleTable<UnixSlot>,
     pairs: PairTable,
 }
 
@@ -73,7 +74,7 @@ struct UnixSocketState {
 impl UnixSocketState {
     const fn new() -> Self {
         Self {
-            slots: [const { UnixSlot::new() }; MAX_UNIX_SOCKETS],
+            slots: HandleTable::new(),
             pairs: PairTable::new(),
         }
     }
@@ -82,37 +83,22 @@ impl UnixSocketState {
 static UNIX_STATE: SpinLock<UnixSocketState> =
     SpinLock::new(UnixSocketState::new(), LOCK_LEVEL_REGISTRY);
 
-/// Validate a socket handle against the current state, returning the slot
-/// index if the handle is non-Free and the generation matches.
-fn validate_socket_handle(state: &UnixSocketState, handle: SocketHandle) -> Option<usize> {
-    let i = handle.raw_slot();
-    if i >= MAX_UNIX_SOCKETS {
-        return None;
-    }
-    let slot = &state.slots[i];
-    if matches!(slot.state, SlotState::Free) {
-        return None;
-    }
-    if slot.generation != handle.generation() {
-        return None;
-    }
-    Some(i)
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Allocate a new AF_UNIX socket slot. Returns a [`SocketHandle`] or `None`.
+/// Allocate a new AF_UNIX socket slot. Returns a [`SocketHandle`], or `None`
+/// when the system-wide cap is reached.
 pub fn unix_create() -> Option<SocketHandle> {
     let mut state = UNIX_STATE.lock();
-    for (idx, slot) in state.slots.iter_mut().enumerate() {
-        if matches!(slot.state, SlotState::Free) {
-            slot.state = SlotState::Created;
-            return Some(SocketHandle::new(idx, slot.generation));
-        }
+    if state.slots.len() >= MAX_UNIX_SOCKETS {
+        return None;
     }
-    None
+    state
+        .slots
+        .insert(UnixSlot::created())
+        .ok()
+        .map(SocketHandle::from_handle)
 }
 
 /// Bind a socket to an abstract namespace path.
@@ -131,16 +117,16 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
     }
 
     let mut state = UNIX_STATE.lock();
-    let Some(i) = validate_socket_handle(&state, handle) else {
-        return -9; // EBADF
-    };
-    if !matches!(state.slots[i].state, SlotState::Created) {
-        return -22; // EINVAL — must be Created
+    let h = handle.handle();
+    match state.slots.get(h) {
+        Ok(slot) if matches!(slot.state, SlotState::Created) => {}
+        Ok(_) => return -22, // EINVAL — must be Created
+        Err(_) => return -9, // EBADF
     }
 
-    // Check for duplicate path.
-    for (j, other) in state.slots.iter().enumerate() {
-        if j == i {
+    // Check for duplicate path among other sockets.
+    for (other_h, other) in state.slots.iter() {
+        if other_h == h {
             continue;
         }
         let other_path: &[u8] = match &other.state {
@@ -153,7 +139,9 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
         }
     }
 
-    state.slots[i].state = SlotState::Bound { path: owned_path };
+    if let Ok(slot) = state.slots.get_mut(h) {
+        slot.state = SlotState::Bound { path: owned_path };
+    }
     0
 }
 
@@ -166,13 +154,13 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
     };
 
     let mut state = UNIX_STATE.lock();
-    let Some(i) = validate_socket_handle(&state, handle) else {
+    let Ok(slot) = state.slots.get_mut(handle.handle()) else {
         return -9;
     };
-    let slot = &mut state.slots[i];
 
-    // Take ownership of the existing path by swapping the variant out.
-    let path = match core::mem::replace(&mut slot.state, SlotState::Free) {
+    // Take ownership of the existing path by swapping in the neutral
+    // placeholder.
+    let path = match core::mem::replace(&mut slot.state, SlotState::Created) {
         SlotState::Bound { path } => path,
         other => {
             // Not Bound — restore and reject.
@@ -195,11 +183,10 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
     loop {
         let (nonblocking, got) = {
             let mut state = UNIX_STATE.lock();
-            let Some(i) = validate_socket_handle(&state, handle) else {
+            let Ok(slot) = state.slots.get_mut(handle.handle()) else {
                 return Err(-9);
             };
-            let nb = state.slots[i].nonblocking;
-            let slot = &mut state.slots[i];
+            let nb = slot.nonblocking;
             let accepted = match &mut slot.state {
                 SlotState::Listening { backlog, .. } => backlog.pop_front(),
                 _ => return Err(-22), // EINVAL
@@ -217,11 +204,12 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
 
         BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
             let state = UNIX_STATE.lock();
-            let slot = &state.slots[wq_idx];
-            match &slot.state {
-                SlotState::Free => true, // slot reused — bail out
-                SlotState::Listening { backlog, .. } => !backlog.is_empty(),
-                _ => true, // state changed unexpectedly — bail out
+            match state.slots.get(handle.handle()) {
+                Err(_) => true, // slot reused/gone — bail out
+                Ok(slot) => match &slot.state {
+                    SlotState::Listening { backlog, .. } => !backlog.is_empty(),
+                    _ => true, // state changed unexpectedly — bail out
+                },
             }
         });
     }
@@ -239,21 +227,21 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     }
 
     let mut state = UNIX_STATE.lock();
-    let Some(i) = validate_socket_handle(&state, handle) else {
-        return -9;
-    };
+    let h_a = handle.handle();
 
     // Caller must be Created or Bound (not Connected, Listening, etc.).
-    match state.slots[i].state {
-        SlotState::Created | SlotState::Bound { .. } => (),
-        SlotState::Connected { .. } => return -106, // EISCONN
-        SlotState::Listening { .. } => return -95,  // EOPNOTSUPP
-        SlotState::Free => return -9,
+    match state.slots.get(h_a) {
+        Ok(slot) => match slot.state {
+            SlotState::Created | SlotState::Bound { .. } => {}
+            SlotState::Connected { .. } => return -106, // EISCONN
+            SlotState::Listening { .. } => return -95,  // EOPNOTSUPP
+        },
+        Err(_) => return -9,
     }
 
     // Find the listener and verify backlog has space.
-    let mut listener_idx = None;
-    for (j, slot) in state.slots.iter().enumerate() {
+    let mut listener = None;
+    for (lh, slot) in state.slots.iter() {
         if let SlotState::Listening {
             path: listener_path,
             backlog,
@@ -263,25 +251,19 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
                 if backlog.len() >= MAX_BACKLOG {
                     return -11; // EAGAIN — backlog full
                 }
-                listener_idx = Some(j);
+                listener = Some(lh);
                 break;
             }
         }
     }
-    let listener_idx = match listener_idx {
-        Some(li) => li,
-        None => return -111, // ECONNREFUSED
+    let Some(h_listener) = listener else {
+        return -111; // ECONNREFUSED
     };
 
-    // Allocate a free slot for the accepted side (side B).
-    let b_idx = match state
-        .slots
-        .iter()
-        .position(|s| matches!(s.state, SlotState::Free))
-    {
-        Some(idx) => idx,
-        None => return -23, // ENFILE — no free slots
-    };
+    // Reserve room for the accepted side (side B) before committing.
+    if state.slots.len() >= MAX_UNIX_SOCKETS {
+        return -23; // ENFILE — no free slots
+    }
 
     // Allocate a pair entry; this is where the 16 KiB×2 FIFO heap allocations happen.
     let pair_handle = match state.pairs.allocate() {
@@ -290,33 +272,46 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         Err(_) => return -12,   // ENOMEM
     };
 
-    let a_handle = SocketHandle::new(i, state.slots[i].generation);
-    let b_handle = SocketHandle::new(b_idx, state.slots[b_idx].generation);
+    let Ok(h_b) = state.slots.insert(UnixSlot::created()) else {
+        // Capacity was checked above; release the just-allocated pair rather
+        // than leak it if the insert nonetheless fails.
+        state.pairs.release(pair_handle);
+        return -23;
+    };
+    let a_handle = SocketHandle::from_handle(h_a);
+    let b_handle = SocketHandle::from_handle(h_b);
 
     // Set up caller (side A).
-    state.slots[i].state = SlotState::Connected {
-        pair: pair_handle,
-        side: PairSide::A,
-        peer: b_handle,
-        peer_closed: false,
-    };
-
-    // Set up accepted side (side B).
-    state.slots[b_idx].state = SlotState::Connected {
-        pair: pair_handle,
-        side: PairSide::B,
-        peer: a_handle,
-        peer_closed: false,
-    };
-
-    // Enqueue B in the listener's backlog.
-    if let SlotState::Listening { backlog, .. } = &mut state.slots[listener_idx].state {
-        // Pre-reserved at unix_listen, so push_back never realloc'd.
-        backlog
-            .push_back(b_handle)
-            .expect("backlog pre-reserved at listen");
+    if let Ok(slot) = state.slots.get_mut(h_a) {
+        slot.state = SlotState::Connected {
+            pair: pair_handle,
+            side: PairSide::A,
+            peer: b_handle,
+            peer_closed: false,
+        };
     }
 
+    // Set up accepted side (side B).
+    if let Ok(slot) = state.slots.get_mut(h_b) {
+        slot.state = SlotState::Connected {
+            pair: pair_handle,
+            side: PairSide::B,
+            peer: a_handle,
+            peer_closed: false,
+        };
+    }
+
+    // Enqueue B in the listener's backlog.
+    if let Ok(slot) = state.slots.get_mut(h_listener) {
+        if let SlotState::Listening { backlog, .. } = &mut slot.state {
+            // Pre-reserved at unix_listen, so push_back never realloc'd.
+            backlog
+                .push_back(b_handle)
+                .expect("backlog pre-reserved at listen");
+        }
+    }
+
+    let listener_idx = h_listener.slot() as usize;
     drop(state);
     BUS.publish(unix_ev(listener_idx));
 
@@ -342,25 +337,23 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return -9;
     };
-    let slot_gen = handle.generation();
 
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
-            let Some(i) = validate_socket_handle(&state, handle) else {
-                return -107;
-            };
-            let nonblocking = state.slots[i].nonblocking;
-
-            let (pair_handle, side, peer_idx, peer_closed) = match state.slots[i].state {
-                SlotState::Connected {
-                    pair,
-                    side,
-                    peer,
-                    peer_closed,
-                } => (pair, side, peer.raw_slot(), peer_closed),
-                _ => return -107,
-            };
+            let (nonblocking, pair_handle, side, peer_idx, peer_closed) =
+                match state.slots.get(handle.handle()) {
+                    Ok(slot) => match slot.state {
+                        SlotState::Connected {
+                            pair,
+                            side,
+                            peer,
+                            peer_closed,
+                        } => (slot.nonblocking, pair, side, peer.slot(), peer_closed),
+                        _ => return -107,
+                    },
+                    Err(_) => return -107,
+                };
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
@@ -387,26 +380,25 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
             Err(false) => {
                 BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
-                    let slot = &state.slots[wq_idx];
-                    if slot.generation != slot_gen {
-                        return true;
-                    }
-                    match slot.state {
-                        SlotState::Connected {
-                            pair,
-                            side,
-                            peer_closed,
-                            ..
-                        } => {
-                            if peer_closed {
-                                return true;
+                    match state.slots.get(handle.handle()) {
+                        Err(_) => true, // slot reused/gone — bail out
+                        Ok(slot) => match slot.state {
+                            SlotState::Connected {
+                                pair,
+                                side,
+                                peer_closed,
+                                ..
+                            } => {
+                                if peer_closed {
+                                    return true;
+                                }
+                                match state.pairs.get(pair) {
+                                    Some(p) => !p.recv_fifo_ref(side).is_empty(),
+                                    None => true,
+                                }
                             }
-                            match state.pairs.get(pair) {
-                                Some(p) => !p.recv_fifo_ref(side).is_empty(),
-                                None => true,
-                            }
-                        }
-                        _ => true,
+                            _ => true,
+                        },
                     }
                 });
             }
@@ -425,25 +417,23 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
     let Some(wq_idx) = handle.slot_for_wq() else {
         return -9;
     };
-    let slot_gen = handle.generation();
 
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
-            let Some(i) = validate_socket_handle(&state, handle) else {
-                return -107;
-            };
-            let nonblocking = state.slots[i].nonblocking;
-
-            let (pair_handle, side, peer_idx, peer_closed) = match state.slots[i].state {
-                SlotState::Connected {
-                    pair,
-                    side,
-                    peer,
-                    peer_closed,
-                } => (pair, side, peer.raw_slot(), peer_closed),
-                _ => return -107,
-            };
+            let (nonblocking, pair_handle, side, peer_idx, peer_closed) =
+                match state.slots.get(handle.handle()) {
+                    Ok(slot) => match slot.state {
+                        SlotState::Connected {
+                            pair,
+                            side,
+                            peer,
+                            peer_closed,
+                        } => (slot.nonblocking, pair, side, peer.slot(), peer_closed),
+                        _ => return -107,
+                    },
+                    Err(_) => return -107,
+                };
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
@@ -470,26 +460,25 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
             Err(false) => {
                 BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
-                    let slot = &state.slots[wq_idx];
-                    if slot.generation != slot_gen {
-                        return true;
-                    }
-                    match slot.state {
-                        SlotState::Connected {
-                            pair,
-                            side,
-                            peer_closed,
-                            ..
-                        } => {
-                            if peer_closed {
-                                return true;
+                    match state.slots.get(handle.handle()) {
+                        Err(_) => true, // slot reused/gone — bail out
+                        Ok(slot) => match slot.state {
+                            SlotState::Connected {
+                                pair,
+                                side,
+                                peer_closed,
+                                ..
+                            } => {
+                                if peer_closed {
+                                    return true;
+                                }
+                                match state.pairs.get(pair) {
+                                    Some(p) => !p.recv_fifo_ref(side).is_empty(),
+                                    None => true,
+                                }
                             }
-                            match state.pairs.get(pair) {
-                                Some(p) => !p.recv_fifo_ref(side).is_empty(),
-                                None => true,
-                            }
-                        }
-                        _ => true,
+                            _ => true,
+                        },
                     }
                 });
             }
@@ -557,38 +546,35 @@ pub fn unix_sendmsg(
         release_inflight(inflight_fds, fd_count);
         return -9; // EBADF
     };
-    let slot_gen = handle.generation();
 
     loop {
         let result = {
             let mut state = UNIX_STATE.lock();
-            let Some(i) = validate_socket_handle(&state, handle) else {
-                drop(state);
-                release_inflight(inflight_fds, fd_count);
-                return -107; // ENOTCONN
+            let conn = match state.slots.get(handle.handle()) {
+                Ok(slot) => match slot.state {
+                    SlotState::Connected {
+                        pair,
+                        side,
+                        peer,
+                        peer_closed,
+                    } => Ok((slot.nonblocking, pair, side, peer.slot(), peer_closed)),
+                    _ => Err(-107), // ENOTCONN
+                },
+                Err(_) => Err(-107),
             };
-            let nonblocking = state.slots[i].nonblocking;
-
-            let (pair_handle, side, peer_idx) = match state.slots[i].state {
-                SlotState::Connected {
-                    pair,
-                    side,
-                    peer,
-                    peer_closed,
-                } => {
-                    if peer_closed {
-                        drop(state);
-                        release_inflight(inflight_fds, fd_count);
-                        return -32; // EPIPE
-                    }
-                    (pair, side, peer.raw_slot())
-                }
-                _ => {
+            let (nonblocking, pair_handle, side, peer_idx, peer_closed) = match conn {
+                Ok(t) => t,
+                Err(e) => {
                     drop(state);
                     release_inflight(inflight_fds, fd_count);
-                    return -107;
+                    return e;
                 }
             };
+            if peer_closed {
+                drop(state);
+                release_inflight(inflight_fds, fd_count);
+                return -32; // EPIPE
+            }
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
@@ -665,26 +651,25 @@ pub fn unix_sendmsg(
                 inflight_park(task_id, inflight_fds, fd_count);
                 BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
-                    let slot = &state.slots[wq_idx];
-                    if slot.generation != slot_gen {
-                        return true; // slot reused
-                    }
-                    match slot.state {
-                        SlotState::Connected {
-                            pair,
-                            side,
-                            peer_closed,
-                            ..
-                        } => {
-                            if peer_closed {
-                                return true;
+                    match state.slots.get(handle.handle()) {
+                        Err(_) => true, // slot reused/gone — bail out
+                        Ok(slot) => match slot.state {
+                            SlotState::Connected {
+                                pair,
+                                side,
+                                peer_closed,
+                                ..
+                            } => {
+                                if peer_closed {
+                                    return true;
+                                }
+                                match state.pairs.get(pair) {
+                                    Some(p) => p.send_fifo_ref(side).has_space(),
+                                    None => true,
+                                }
                             }
-                            match state.pairs.get(pair) {
-                                Some(p) => p.send_fifo_ref(side).has_space(),
-                                None => true,
-                            }
-                        }
-                        _ => true, // state diverged — bail out
+                            _ => true, // state diverged — bail out
+                        },
                     }
                 });
                 inflight_unpark(task_id);
@@ -703,23 +688,22 @@ pub fn unix_sendmsg(
 pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmReader<'_>) -> i32 {
     let (n, peer_idx) = {
         let mut state = UNIX_STATE.lock();
-        let Some(i) = validate_socket_handle(&state, handle) else {
-            return -107; // ENOTCONN
-        };
-
-        let (pair_handle, side, peer_idx) = match state.slots[i].state {
-            SlotState::Connected {
-                pair,
-                side,
-                peer,
-                peer_closed,
-            } => {
-                if peer_closed {
-                    return -32; // EPIPE
+        let (pair_handle, side, peer_idx) = match state.slots.get(handle.handle()) {
+            Ok(slot) => match slot.state {
+                SlotState::Connected {
+                    pair,
+                    side,
+                    peer,
+                    peer_closed,
+                } => {
+                    if peer_closed {
+                        return -32; // EPIPE
+                    }
+                    (pair, side, peer.slot())
                 }
-                (pair, side, peer.raw_slot())
-            }
-            _ => return -107,
+                _ => return -107,
+            },
+            Err(_) => return -107, // ENOTCONN
         };
 
         let pair = match state.pairs.get_mut(pair_handle) {
@@ -855,17 +839,22 @@ pub fn unix_recvmsg(
     let mut received_fds = 0usize;
     {
         let mut state = UNIX_STATE.lock();
-        if let Some(i) = validate_socket_handle(&state, handle) {
-            if let SlotState::Connected { pair, side, .. } = state.slots[i].state {
-                if let Some(pair_ref) = state.pairs.get_mut(pair) {
-                    let anc = pair_ref.recv_anc(side);
-                    for fd in anc.drain() {
-                        if received_fds < max_fds {
-                            out_fds[received_fds] = (fd.handle, fd.ops);
-                            received_fds += 1;
-                        } else {
-                            fd.ops.release(fd.handle);
-                        }
+        let conn = match state.slots.get(handle.handle()) {
+            Ok(slot) => match slot.state {
+                SlotState::Connected { pair, side, .. } => Some((pair, side)),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        if let Some((pair, side)) = conn {
+            if let Some(pair_ref) = state.pairs.get_mut(pair) {
+                let anc = pair_ref.recv_anc(side);
+                for fd in anc.drain() {
+                    if received_fds < max_fds {
+                        out_fds[received_fds] = (fd.handle, fd.ops);
+                        received_fds += 1;
+                    } else {
+                        fd.ops.release(fd.handle);
                     }
                 }
             }
@@ -890,17 +879,22 @@ pub fn unix_recvmsg_into(
     let mut received_fds = 0usize;
     {
         let mut state = UNIX_STATE.lock();
-        if let Some(i) = validate_socket_handle(&state, handle) {
-            if let SlotState::Connected { pair, side, .. } = state.slots[i].state {
-                if let Some(pair_ref) = state.pairs.get_mut(pair) {
-                    let anc = pair_ref.recv_anc(side);
-                    for fd in anc.drain() {
-                        if received_fds < max_fds {
-                            out_fds[received_fds] = (fd.handle, fd.ops);
-                            received_fds += 1;
-                        } else {
-                            fd.ops.release(fd.handle);
-                        }
+        let conn = match state.slots.get(handle.handle()) {
+            Ok(slot) => match slot.state {
+                SlotState::Connected { pair, side, .. } => Some((pair, side)),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        if let Some((pair, side)) = conn {
+            if let Some(pair_ref) = state.pairs.get_mut(pair) {
+                let anc = pair_ref.recv_anc(side);
+                for fd in anc.drain() {
+                    if received_fds < max_fds {
+                        out_fds[received_fds] = (fd.handle, fd.ops);
+                        received_fds += 1;
+                    } else {
+                        fd.ops.release(fd.handle);
                     }
                 }
             }
@@ -928,75 +922,63 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
 
     {
         let mut state = UNIX_STATE.lock();
-        let Some(i) = validate_socket_handle(&state, handle) else {
+        let UnixSocketState { slots, pairs } = &mut *state;
+
+        // Remove the closing slot, taking ownership of its state (the table
+        // bumps the slot's generation, so any leftover handle goes stale).
+        let Ok(closed) = slots.remove(handle.handle()) else {
             return -9;
         };
 
-        // Take the closing slot's state out so we can move-match it; we
-        // restore something explicit afterwards (Free).
-        let old_state = core::mem::replace(&mut state.slots[i].state, SlotState::Free);
-
-        match old_state {
+        match closed.state {
             SlotState::Connected { pair, peer, .. } => {
-                let peer_idx = peer.raw_slot();
-                if peer_idx < MAX_UNIX_SOCKETS && peer_idx != i {
+                // Mark the peer's half closed; a removed/recycled peer slot
+                // resolves to a typed miss and is skipped.
+                if let Ok(peer_slot) = slots.get_mut(peer.handle()) {
                     if let SlotState::Connected {
                         peer_closed: ref mut pc,
                         ..
-                    } = state.slots[peer_idx].state
+                    } = peer_slot.state
                     {
                         *pc = true;
                     }
                 }
-                wake_peer = Some(peer_idx);
-                state.pairs.release(pair);
+                wake_peer = Some(peer.slot());
+                pairs.release(pair);
             }
-            SlotState::Listening { ref backlog, .. } => {
+            SlotState::Listening { backlog, .. } => {
                 was_listener = true;
                 // Each entry is a side-B handle whose slot is in
-                // SlotState::Connected.  Tear those down too.
+                // SlotState::Connected.  Tear those down too, notifying each
+                // one's side-A peer.
                 for h in backlog.iter().copied() {
-                    let b_idx = h.raw_slot();
-                    if b_idx >= MAX_UNIX_SOCKETS {
+                    let Ok(b_old) = slots.remove(h.handle()) else {
                         continue;
-                    }
-                    // Validate generation against the slot before tearing it down.
-                    if state.slots[b_idx].generation != h.generation() {
-                        continue;
-                    }
-                    let b_old = core::mem::replace(&mut state.slots[b_idx].state, SlotState::Free);
+                    };
                     if let SlotState::Connected {
                         pair: b_pair,
                         peer: b_peer,
                         ..
-                    } = b_old
+                    } = b_old.state
                     {
-                        let a_idx = b_peer.raw_slot();
-                        if a_idx < MAX_UNIX_SOCKETS
-                            && state.slots[a_idx].generation == b_peer.generation()
-                        {
+                        if let Ok(a_slot) = slots.get_mut(b_peer.handle()) {
                             if let SlotState::Connected {
                                 peer_closed: ref mut pc,
                                 ..
-                            } = state.slots[a_idx].state
+                            } = a_slot.state
                             {
                                 *pc = true;
                             }
-                            backlog_a_peers[backlog_wake_count] = a_idx;
+                            backlog_a_peers[backlog_wake_count] = b_peer.slot();
                             backlog_wake_count += 1;
                         }
-                        state.pairs.release(b_pair);
+                        pairs.release(b_pair);
                     }
-                    // The B slot's state is already Free; bump generation.
-                    state.slots[b_idx].generation = state.slots[b_idx].generation.wrapping_add(1);
-                    state.slots[b_idx].nonblocking = false;
                 }
             }
-            // Free / Created / Bound — nothing extra to release.
+            // Created / Bound — nothing extra to release.
             _ => {}
         }
-
-        state.slots[i].transition_to_free();
     }
 
     if let Some(peer) = wake_peer {
@@ -1020,8 +1002,10 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
 /// Compute the POLL* bitmask of currently ready events.  Shared
 /// between `unix_poll_events` and `unix_poll_fused` so both views
 /// stay in lockstep.
-fn compute_revents(state: &UnixSocketState, slot_idx: usize, requested: u16) -> u16 {
-    let slot = &state.slots[slot_idx];
+fn compute_revents(state: &UnixSocketState, handle: SocketHandle, requested: u16) -> u16 {
+    let Ok(slot) = state.slots.get(handle.handle()) else {
+        return 0;
+    };
     match slot.state {
         SlotState::Listening { ref backlog, .. } => {
             if !backlog.is_empty() && (requested & POLLIN) != 0 {
@@ -1060,10 +1044,7 @@ fn compute_revents(state: &UnixSocketState, slot_idx: usize, requested: u16) -> 
 /// Return POLL* bitmask of currently ready events for a Unix socket.
 pub fn unix_poll_events(handle: SocketHandle, requested: u16) -> u16 {
     let state = UNIX_STATE.lock();
-    let Some(i) = validate_socket_handle(&state, handle) else {
-        return 0;
-    };
-    compute_revents(&state, i, requested)
+    compute_revents(&state, handle, requested)
 }
 
 /// Fused poll: register on wait queue THEN check readiness.
@@ -1076,10 +1057,10 @@ pub fn unix_poll_fused(handle: SocketHandle, requested: u16) -> (u16, bool) {
 
     let revents = {
         let state = UNIX_STATE.lock();
-        let Some(i) = validate_socket_handle(&state, handle) else {
+        if !state.slots.contains(handle.handle()) {
             return (0, false);
-        };
-        compute_revents(&state, i, requested)
+        }
+        compute_revents(&state, handle, requested)
     };
 
     (revents, registered)
@@ -1104,10 +1085,10 @@ pub fn unix_poll_unregister(handle: SocketHandle) {
 /// Set or clear non-blocking mode on a Unix socket.
 pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
     let mut state = UNIX_STATE.lock();
-    let Some(i) = validate_socket_handle(&state, handle) else {
+    let Ok(slot) = state.slots.get_mut(handle.handle()) else {
         return -9;
     };
-    state.slots[i].nonblocking = nonblocking;
+    slot.nonblocking = nonblocking;
     0
 }
 
@@ -1116,15 +1097,14 @@ pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
 /// listener's original mode after a forced-nonblocking probe.
 pub fn unix_is_nonblocking(handle: SocketHandle) -> Option<bool> {
     let state = UNIX_STATE.lock();
-    let i = validate_socket_handle(&state, handle)?;
-    Some(state.slots[i].nonblocking)
+    state.slots.get(handle.handle()).ok().map(|s| s.nonblocking)
 }
 
 /// Return the bound path for a Unix socket, if any.
 pub fn unix_get_local_path(handle: SocketHandle) -> Option<[u8; UNIX_PATH_MAX]> {
     let state = UNIX_STATE.lock();
-    let i = validate_socket_handle(&state, handle)?;
-    let path: &[u8] = match &state.slots[i].state {
+    let slot = state.slots.get(handle.handle()).ok()?;
+    let path: &[u8] = match &slot.state {
         SlotState::Bound { path } => path.as_slice(),
         SlotState::Listening { path, .. } => path.as_slice(),
         _ => return None,
@@ -1140,10 +1120,10 @@ pub fn unix_get_local_path(handle: SocketHandle) -> Option<[u8; UNIX_PATH_MAX]> 
 /// Return the path length of the bound address for a Unix socket.
 pub fn unix_get_local_path_len(handle: SocketHandle) -> usize {
     let state = UNIX_STATE.lock();
-    let Some(i) = validate_socket_handle(&state, handle) else {
+    let Ok(slot) = state.slots.get(handle.handle()) else {
         return 0;
     };
-    match &state.slots[i].state {
+    match &slot.state {
         SlotState::Bound { path } => path.len(),
         SlotState::Listening { path, .. } => path.len(),
         _ => 0,
@@ -1153,16 +1133,11 @@ pub fn unix_get_local_path_len(handle: SocketHandle) -> usize {
 /// Return the bound path of the peer for a connected Unix socket.
 pub fn unix_get_peer_path(handle: SocketHandle) -> Option<([u8; UNIX_PATH_MAX], usize)> {
     let state = UNIX_STATE.lock();
-    let i = validate_socket_handle(&state, handle)?;
-    let peer = match state.slots[i].state {
+    let peer = match state.slots.get(handle.handle()).ok()?.state {
         SlotState::Connected { peer, .. } => peer,
         _ => return None,
     };
-    let peer_idx = peer.raw_slot();
-    if peer_idx >= MAX_UNIX_SOCKETS || state.slots[peer_idx].generation != peer.generation() {
-        return None;
-    }
-    let peer_path: &[u8] = match &state.slots[peer_idx].state {
+    let peer_path: &[u8] = match &state.slots.get(peer.handle()).ok()?.state {
         SlotState::Bound { path } => path.as_slice(),
         SlotState::Listening { path, .. } => path.as_slice(),
         _ => return Some(([0u8; UNIX_PATH_MAX], 0)),

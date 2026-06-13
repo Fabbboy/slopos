@@ -35,7 +35,7 @@ define_syscall!(syscall_mmap
             prot,
             flags,
             offset,
-            slopos_mm::memfd::MemfdHandle::from_usize(handle),
+            handle,
         );
         if result == 0 {
             return Err(Errno::ENOMEM);

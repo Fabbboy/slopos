@@ -26,7 +26,6 @@ const MAX_RINGS: usize = 256;
 /// generation, which increments by one per slot reuse and so never
 /// wraps in any realistic uptime.
 const SLOT_BITS: u32 = 12;
-const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 
 /// One registry slot: a reference-counted, individually-locked ring
 /// (SLOPRING § 6.3, § 9). The per-ring lock is the per-ring serialization
@@ -55,20 +54,6 @@ type RingSlot = KArc<Mutex<Ring>>;
 /// with the enter path (per-ring lock → `FILEIO_SLOT`).
 static REGISTRY: SpinLock<Option<HandleTable<RingSlot>>> = SpinLock::new(None, LOCK_LEVEL_REGISTRY);
 
-/// Pack a [`Handle<Ring>`] into the `usize` stored in the fd's open-file
-/// handle field. Lossless for slot < 4096 and generation < 2^52.
-fn pack(h: Handle<RingSlot>) -> usize {
-    (((h.generation() & ((1 << 52) - 1)) << SLOT_BITS) | (h.slot() as u64 & SLOT_MASK)) as usize
-}
-
-/// Inverse of [`pack`].
-fn unpack(raw: usize) -> Handle<RingSlot> {
-    let raw = raw as u64;
-    let slot = (raw & SLOT_MASK) as u32;
-    let generation = raw >> SLOT_BITS;
-    Handle::from_parts(slot, generation)
-}
-
 fn with_registry<R>(f: impl FnOnce(&mut HandleTable<RingSlot>) -> R) -> R {
     let mut guard = REGISTRY.lock();
     let table = guard.get_or_insert_with(|| {
@@ -82,7 +67,7 @@ fn with_registry<R>(f: impl FnOnce(&mut HandleTable<RingSlot>) -> R) -> R {
 /// the ring alive). Callers then take the per-ring lock outside the
 /// table lock, which is the load-bearing decoupling.
 fn slot_for(raw_handle: usize) -> Result<RingSlot, HandleError> {
-    let h = unpack(raw_handle);
+    let h = Handle::unpack(raw_handle, SLOT_BITS);
     with_registry(|t| t.get(h).map(|a| a.clone()))
 }
 
@@ -90,7 +75,7 @@ fn slot_for(raw_handle: usize) -> Result<RingSlot, HandleError> {
 /// if the registry is full or the per-ring allocation fails.
 pub fn insert(ring: Ring) -> Option<usize> {
     let slot = KArc::try_new(Mutex::new(ring)).ok()?;
-    with_registry(|t| t.insert(slot).ok().map(pack))
+    with_registry(|t| t.insert(slot).ok().map(|h| h.pack(SLOT_BITS)))
 }
 
 /// Run `f` with a mutable borrow of the ring named by the packed fd
@@ -119,7 +104,7 @@ pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result
 /// user PTE still mapped holds its own ref, so frames survive until the
 /// mapping is torn down too. Safe to call on a stale handle (no-op).
 pub fn remove(raw_handle: usize) {
-    let h = unpack(raw_handle);
+    let h = Handle::unpack(raw_handle, SLOT_BITS);
     with_registry(|t| {
         let _ = t.remove(h);
     });

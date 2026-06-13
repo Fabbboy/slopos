@@ -145,10 +145,10 @@ impl VmaRegion {
         matches!(self.backing, RegionBacking::Ring)
     }
 
-    pub fn memfd_handle(&self) -> MemfdHandle {
+    pub fn memfd_handle(&self) -> Option<MemfdHandle> {
         match &self.backing {
-            RegionBacking::SharedMemfd { handle } => *handle,
-            _ => MemfdHandle::NONE,
+            RegionBacking::SharedMemfd { handle } => Some(*handle),
+            _ => None,
         }
     }
 

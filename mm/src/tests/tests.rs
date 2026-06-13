@@ -1044,27 +1044,29 @@ pub fn test_memfd_invalid_handle() -> TestResult {
 
 pub fn test_memfd_mapcount() -> TestResult {
     let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let h = memfd::handle_from_raw(handle);
     memfd::memfd_ftruncate(handle, 4096);
-    memfd::memfd_inc_mapcount(handle);
-    memfd::memfd_inc_mapcount(handle);
+    memfd::memfd_inc_mapcount_by(h, 1);
+    memfd::memfd_inc_mapcount_by(h, 1);
     // Release fd ref — should NOT free pages because map_count > 0
     memfd::memfd_release(handle);
     // Dec mapcounts
-    memfd::memfd_dec_mapcount(handle);
-    memfd::memfd_dec_mapcount(handle);
+    memfd::memfd_dec_mapcount_by(h, 1);
+    memfd::memfd_dec_mapcount_by(h, 1);
     // Now both refcount=0 and map_count=0, pages should be freed
     pass!()
 }
 
 pub fn test_memfd_get_info() -> TestResult {
     let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let h = memfd::handle_from_raw(handle);
     // Before ftruncate, get_info should return None
     assert_test!(
-        memfd::memfd_get_info(handle).is_none(),
+        memfd::memfd_get_info(h).is_none(),
         "unsized memfd should return None"
     );
     memfd::memfd_ftruncate(handle, 8192);
-    let info = memfd::memfd_get_info(handle);
+    let info = memfd::memfd_get_info(h);
     assert_test!(info.is_some(), "sized memfd should return Some");
     if let Some((phys, size, pages)) = info {
         assert_test!(!phys.is_null(), "phys non-null");

@@ -74,6 +74,30 @@ impl<T> Handle<T> {
     pub const fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// Pack into a `usize` for storage in a width-limited field (e.g. the
+    /// open-file `handle: usize` shared by every file backend). The low
+    /// `slot_bits` hold the slot index; the rest hold the generation.
+    ///
+    /// Lossless while `slot < 2^slot_bits` and
+    /// `generation < 2^(64 - slot_bits)`; a slot table capped well below
+    /// `2^slot_bits` (the usual case) leaves an ample generation space, so a
+    /// recycled slot is always detectable as stale after [`unpack`](Self::unpack).
+    #[inline]
+    pub const fn pack(self, slot_bits: u32) -> usize {
+        let slot_mask = (1u64 << slot_bits) - 1;
+        (((self.generation & (u64::MAX >> slot_bits)) << slot_bits)
+            | (self.slot as u64 & slot_mask)) as usize
+    }
+
+    /// Inverse of [`pack`](Self::pack). Forging a handle is harmless — the
+    /// [`HandleTable`] validates slot and generation on every access.
+    #[inline]
+    pub const fn unpack(raw: usize, slot_bits: u32) -> Self {
+        let raw = raw as u64;
+        let slot_mask = (1u64 << slot_bits) - 1;
+        Self::from_parts((raw & slot_mask) as u32, raw >> slot_bits)
+    }
 }
 
 // Hand-written trait impls (rather than `#[derive]`) so the bounds stay
@@ -448,5 +472,26 @@ mod tests {
         // High-water stays at its peak; iteration finds nothing live.
         assert_eq!(t.high_water(), 2);
         assert_eq!(t.iter().count(), 0);
+    }
+
+    #[test]
+    fn pack_unpack_roundtrip() {
+        for &slot_bits in &[8u32, 10, 12] {
+            for &(slot, generation) in &[(0u32, 0u64), (1, 5), (200, 1_000_000)] {
+                let h = Handle::<u32>::from_parts(slot, generation);
+                let round = Handle::<u32>::unpack(h.pack(slot_bits), slot_bits);
+                assert_eq!(round.slot(), slot);
+                assert_eq!(round.generation(), generation);
+            }
+        }
+    }
+
+    #[test]
+    fn pack_low_bits_are_slot() {
+        // The slot must occupy exactly the low `slot_bits` of the encoding.
+        let h = Handle::<u32>::from_parts(0xAB, 0x3);
+        let raw = h.pack(8) as u64;
+        assert_eq!(raw & 0xFF, 0xAB);
+        assert_eq!(raw >> 8, 0x3);
     }
 }
