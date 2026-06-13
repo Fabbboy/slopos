@@ -29,6 +29,7 @@ pub mod cpu;
 pub mod dev;
 pub mod dma;
 pub mod early_console;
+pub mod fblog;
 pub mod ffi;
 pub mod handle;
 pub mod io;

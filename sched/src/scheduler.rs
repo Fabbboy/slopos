@@ -1934,6 +1934,14 @@ pub fn scheduler_timer_tick() {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
+    // Drive the on-screen kernel-log (fblog) renderer from CPU 0's tick — a
+    // single relaxed atomic load unless the framebuffer log console is shown.
+    // Tick-driven so it renders even when userland (or the scheduler's own
+    // dispatch) is wedged, which is exactly when it's needed.
+    if cpu_id == 0 {
+        slopos_ostd::fblog::on_timer_tick();
+    }
+
     // NMI watchdog: record that this CPU is alive before touching any lock.
     WATCHDOG_TICKS[cpu_id].store(
         slopos_kernel_services::clock::get_timer_ticks(),

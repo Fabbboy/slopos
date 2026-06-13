@@ -1356,7 +1356,7 @@ impl VConsoleState {
     }
 
     fn render_cell_direct_to_fb(&self, row: u16, col: u16, cell: &Cell) {
-        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) {
+        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) || slopos_ostd::fblog::is_active() {
             return;
         }
         let Some(fb) = self.fb else { return };
@@ -1440,7 +1440,7 @@ impl VConsoleState {
     }
 
     pub(crate) fn render_cell_to_fb(&self, row: u16, col: u16) {
-        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) {
+        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) || slopos_ostd::fblog::is_active() {
             return;
         }
         let Some(fb) = self.fb else {
@@ -1497,7 +1497,7 @@ impl VConsoleState {
         }
         // Compositor owns the framebuffer — keep dirty bits so they can be
         // flushed on compositor_release_fb(), but don't touch the hardware.
-        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) {
+        if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) || slopos_ostd::fblog::is_active() {
             return;
         }
         let dirty = self.dirty_rows;

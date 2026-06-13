@@ -112,6 +112,11 @@ pub fn write_byte(b: u8) {
 /// `\r` is preceded by the existing `\r`, not by a duplicate).
 #[inline]
 pub fn write_bytes(slice: &[u8]) {
+    // Mirror the full serial stream into the framebuffer-log capture ring.
+    // This is the single sink all serial output funnels through (kernel klog
+    // and userland TTY alike), so the on-screen log matches the wire.
+    crate::fblog::capture(slice);
+
     let mut last_was_cr = false;
     for &b in slice {
         if b == b'\n' && !last_was_cr {

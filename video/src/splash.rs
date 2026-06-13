@@ -158,6 +158,14 @@ fn draw_text(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, color: Color
 }
 
 pub fn splash_show_boot_screen() -> GraphicsResult<()> {
+    // Yield to the on-screen kernel log: while fblog is shown, the splash must
+    // not paint over it. Track state but skip drawing (boot keeps going).
+    if slopos_ostd::fblog::is_active() {
+        let mut state = STATE.lock();
+        state.active = true;
+        state.progress = 0;
+        return Ok(());
+    }
     ensure_framebuffer_ready()?;
     let mut ctx = GraphicsContext::new()?;
 
@@ -213,6 +221,12 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
 }
 
 pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<()> {
+    // Skip drawing while the on-screen kernel log is shown so the splash
+    // doesn't fight the log. The boot still progresses; the splash just isn't
+    // painted (and repaints on the next progress report once the log is gone).
+    if slopos_ostd::fblog::is_active() {
+        return Ok(());
+    }
     ensure_framebuffer_ready()?;
 
     let mut ctx = GraphicsContext::new()?;
@@ -280,6 +294,9 @@ pub fn splash_finish() -> GraphicsResult<()> {
 }
 
 pub fn splash_clear() -> GraphicsResult<()> {
+    if slopos_ostd::fblog::is_active() {
+        return Ok(());
+    }
     ensure_framebuffer_ready()?;
     let mut ctx = GraphicsContext::new()?;
     let bg_px = ctx.pixel_format().encode(SPLASH_BG_COLOR);

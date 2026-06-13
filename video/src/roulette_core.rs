@@ -489,11 +489,22 @@ fn render_wheel_frame<T: Canvas>(
 ) {
     let region = layout.radius + 80;
 
-    if !params.clear_background && *last_pointer_angle >= 0 {
+    // Pause before painting if the kernel log is shown (ESC). On resume the log
+    // covered the whole screen, so fully repaint this frame rather than do an
+    // incremental (region-only) update that would leave log fragments behind.
+    let force = fblog_pause_before_draw();
+    if force {
+        canvas_ops::fill_rect(ctx, 0, 0, screen_w, screen_h, BG_COLOR);
+        *last_pointer_angle = -1;
+    }
+    let clear_background = params.clear_background || force;
+    let draw_wheel = params.draw_wheel || force;
+
+    if !clear_background && *last_pointer_angle >= 0 {
         draw_pointer_ticks(ctx, cx, cy, layout, *last_pointer_angle, BG_COLOR);
     }
 
-    if params.clear_background {
+    if clear_background {
         let mut rx = cx - region;
         let mut ry = cy - region;
         let mut rw = region * 2;
@@ -515,7 +526,7 @@ fn render_wheel_frame<T: Canvas>(
         canvas_ops::fill_rect(ctx, rx, ry, rw, rh, BG_COLOR);
     }
 
-    if params.draw_wheel {
+    if draw_wheel {
         draw_roulette_wheel(
             ctx,
             cx,
@@ -570,6 +581,11 @@ fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i
     };
 
     for tick in 0..16i32 {
+        // Pause before painting if the kernel log is shown (ESC); on resume the
+        // log covered the whole screen, so repaint the background first.
+        if fblog_pause_before_draw() {
+            canvas_ops::fill_rect(ctx, 0, 0, screen_w, screen_h, BG_COLOR);
+        }
         draw_panel(
             ctx,
             panel_x,
@@ -609,14 +625,30 @@ fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i
         );
         draw_text_centered(ctx, center_x, panel_y + 132, detail, TEXT_COLOR);
 
-        ctx.flush();
-        hpet::delay_ms(90);
+        flush_and_sleep(ctx, 90);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Flush-and-sleep helper
 // ---------------------------------------------------------------------------
+
+/// Pause the wheel while the on-screen kernel log is shown via an ESC peek.
+///
+/// Called BEFORE each wheel draw so the wheel never paints over the log (no
+/// bleed for the log renderer to chase). ESC only PEEKS: the wheel freezes
+/// here and resumes when the log is dismissed, then resolves its real outcome —
+/// a loss still reboots, so ESC can't bypass the Wheel of Fate gate. Returns
+/// `true` if it paused, so the caller fully repaints on resume.
+fn fblog_pause_before_draw() -> bool {
+    if !slopos_ostd::fblog::is_active() {
+        return false;
+    }
+    while slopos_ostd::fblog::is_active() {
+        hpet::delay_ms(50);
+    }
+    true
+}
 
 fn flush_and_sleep(ctx: &GraphicsContext, ms: u32) {
     ctx.flush();

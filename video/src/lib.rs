@@ -14,6 +14,7 @@ use slopos_kernel_services::syscall_services::video::{
 use slopos_ostd::{klog_info, klog_warn};
 use slopos_sched::task::register_task_resource_cleanup_hook;
 
+pub mod fblog;
 pub mod framebuffer;
 pub mod graphics;
 pub mod kernel_font;
@@ -71,6 +72,10 @@ pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
 
     // Initialise the font subsystem (atlas + renderer) before any rendering.
     kernel_font::init();
+
+    // Register the on-screen kernel-log (fblog) renderer with the ostd core.
+    // Inert until the `fblog=` cmdline knob (or ESC) activates it.
+    fblog::init();
 
     if let Some(fb) = fb_to_use {
         klog_info!(

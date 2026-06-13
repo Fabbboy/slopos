@@ -256,10 +256,24 @@ pub fn fb_flip_from_shm_damage(
     damage: *const slopos_abi::damage::DamageRect,
     damage_count: u32,
 ) -> c_int {
+    // While the on-screen kernel log owns the screen, drop the compositor's
+    // frame so the log isn't overwritten. The compositor keeps rendering to
+    // its memfd; presentation resumes the moment the log is dismissed.
+    if slopos_ostd::fblog::is_active() {
+        return 0;
+    }
+
     // On first compositor flip, take framebuffer ownership from the vconsole.
     if !COMPOSITOR_FB_ACQUIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
         slopos_drivers::tty::vconsole::compositor_acquire_fb();
+        // The desktop is now presenting: boot is over, so ESC stops toggling
+        // the kernel log and is handed back to userland applications.
+        slopos_ostd::fblog::notify_desktop_presented();
     }
+
+    // If the kernel log was just dismissed it painted the whole screen, so this
+    // present must be full-screen to erase it rather than a damage-only update.
+    let force_full = slopos_ostd::fblog::take_force_full_present();
 
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
@@ -279,7 +293,7 @@ pub fn fb_flip_from_shm_damage(
 
     let shm_ptr = shm_virt as *const u8;
 
-    if damage.is_null() || damage_count == 0 {
+    if force_full || damage.is_null() || damage_count == 0 {
         let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
             return -1;
         };

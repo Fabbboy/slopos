@@ -249,6 +249,16 @@ pub fn handle_scancode(scancode: u8) {
     let was_extended = state.extended_code;
     state.extended_code = false;
 
+    // fblog debug console: ESC (non-extended make code 0x01) toggles the
+    // on-screen kernel log during boot — handed back to userland once the
+    // desktop is up (see fblog::handle_esc_press). Consume the key only while
+    // fblog owns it. `handle_esc_press` is a pure atomic flip (the redraw
+    // happens on the next timer tick), so it is safe to call while the keyboard
+    // state lock is held.
+    if !was_extended && is_press && make_code == 0x01 && slopos_ostd::fblog::handle_esc_press() {
+        return;
+    }
+
     // Modifier keys: update state and route the event (no character to deliver).
     // Route the MAKE code, not the raw scancode: a release arrives as the
     // break code (make | 0x80), which no downstream modifier tracker matches
