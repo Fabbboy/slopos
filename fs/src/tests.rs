@@ -1,8 +1,10 @@
 use slopos_abi::fs::UserFsEntry;
+use slopos_ostd::KVec;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
+use crate::cpio::{CpioError, for_each_cpio_entry};
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs};
 use crate::vfs::{
@@ -1039,3 +1041,142 @@ slopos_testing::stest!(name = test_ext2_writeback_is_deferred_until_sync);
 slopos_testing::stest!(name = test_ext2_cache_reuse_within_handle);
 slopos_testing::stest!(name = test_ext2_path_resolution_not_found);
 slopos_testing::stest!(name = test_ext2_remove_path_not_file);
+
+// --- initramfs cpio (newc) parser -----------------------------------------
+
+const T_S_IFMT: u32 = 0o170000;
+const T_S_IFDIR: u32 = 0o040000;
+const T_S_IFREG: u32 = 0o100000;
+
+fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    a == b
+}
+
+fn cpio_push_hex8(out: &mut KVec<u8>, val: u32) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    for i in (0..8).rev() {
+        let nib = ((val >> (i * 4)) & 0xf) as usize;
+        out.push(DIGITS[nib]).expect("cpio test alloc");
+    }
+}
+
+fn cpio_pad4(out: &mut KVec<u8>) {
+    while out.len() % 4 != 0 {
+        out.push(0).expect("cpio test alloc");
+    }
+}
+
+/// Append one `newc` record (header + NUL-terminated name + padded data).
+fn cpio_emit(out: &mut KVec<u8>, name: &[u8], mode: u32, data: &[u8]) {
+    for &b in b"070701" {
+        out.push(b).expect("cpio test alloc");
+    }
+    cpio_push_hex8(out, 0); // ino
+    cpio_push_hex8(out, mode);
+    cpio_push_hex8(out, 0); // uid
+    cpio_push_hex8(out, 0); // gid
+    cpio_push_hex8(out, 1); // nlink
+    cpio_push_hex8(out, 0); // mtime
+    cpio_push_hex8(out, data.len() as u32);
+    cpio_push_hex8(out, 0); // devmajor
+    cpio_push_hex8(out, 0); // devminor
+    cpio_push_hex8(out, 0); // rdevmajor
+    cpio_push_hex8(out, 0); // rdevminor
+    cpio_push_hex8(out, (name.len() + 1) as u32);
+    cpio_push_hex8(out, 0); // check
+    for &b in name {
+        out.push(b).expect("cpio test alloc");
+    }
+    out.push(0).expect("cpio test alloc"); // name NUL
+    cpio_pad4(out);
+    for &b in data {
+        out.push(b).expect("cpio test alloc");
+    }
+    cpio_pad4(out);
+}
+
+fn cpio_sample() -> KVec<u8> {
+    let mut ar = KVec::new();
+    cpio_emit(&mut ar, b"sbin", T_S_IFDIR | 0o755, b"");
+    cpio_emit(&mut ar, b"sbin/init", T_S_IFREG | 0o755, b"hello");
+    cpio_emit(&mut ar, b"TRAILER!!!", 0, b"");
+    ar
+}
+
+pub fn test_cpio_parse_basic() -> TestResult {
+    klog_info!("CPIO_TEST: basic parse");
+    let ar = cpio_sample();
+
+    let mut idx = 0usize;
+    let mut ok = true;
+    let result = for_each_cpio_entry(&ar, |entry| {
+        match idx {
+            0 => {
+                if !bytes_eq(entry.path, b"sbin")
+                    || entry.mode & T_S_IFMT != T_S_IFDIR
+                    || !entry.data.is_empty()
+                {
+                    ok = false;
+                }
+            }
+            1 => {
+                if !bytes_eq(entry.path, b"sbin/init")
+                    || entry.mode & T_S_IFMT != T_S_IFREG
+                    || entry.mode & 0o111 == 0
+                    || !bytes_eq(entry.data, b"hello")
+                {
+                    ok = false;
+                }
+            }
+            _ => ok = false,
+        }
+        idx += 1;
+        Ok(())
+    });
+
+    if result != Ok(2) || idx != 2 || !ok {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_cpio_truncated_header() -> TestResult {
+    klog_info!("CPIO_TEST: truncated header rejected");
+    let ar = cpio_sample();
+    // A header is 110 bytes; 50 bytes can't hold one.
+    let res = for_each_cpio_entry(&ar[..50], |_| Ok(()));
+    if res == Err(CpioError::Truncated) {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+pub fn test_cpio_bad_magic() -> TestResult {
+    klog_info!("CPIO_TEST: bad magic rejected");
+    let mut ar = cpio_sample();
+    ar[0] = b'X';
+    let res = for_each_cpio_entry(&ar, |_| Ok(()));
+    if res == Err(CpioError::BadMagic) {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+pub fn test_cpio_truncated_data() -> TestResult {
+    klog_info!("CPIO_TEST: truncated data rejected");
+    let ar = cpio_sample();
+    // Chop the archive mid-way so the second record's data runs past the end.
+    let res = for_each_cpio_entry(&ar[..ar.len() - 8], |_| Ok(()));
+    if matches!(res, Err(CpioError::Truncated)) {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+slopos_testing::stest!(name = test_cpio_parse_basic);
+slopos_testing::stest!(name = test_cpio_truncated_header);
+slopos_testing::stest!(name = test_cpio_bad_magic);
+slopos_testing::stest!(name = test_cpio_truncated_data);

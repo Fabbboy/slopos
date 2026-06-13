@@ -3,10 +3,13 @@ use slopos_ostd::KVec;
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-const MAX_INODES: usize = 64;
 const RAMFS_MAX_FILE_SIZE: usize = 16 * 1024 * 1024; // 16 MB per file
 use crate::MAX_NAME_LEN;
-const MAX_DIR_ENTRIES: usize = 32;
+/// Soft ceiling on the number of inodes a single ramfs instance may hold. The
+/// inode pool grows on demand (so a real root filesystem is not capped at a
+/// handful of files), but this bound keeps a malformed or hostile initramfs
+/// from exhausting kernel memory. It comfortably exceeds any real root.
+const RAMFS_MAX_INODES: usize = 4096;
 
 const ROOT_INODE: InodeId = 1;
 
@@ -31,8 +34,7 @@ struct RamInode {
     in_use: bool,
     file_type: FileType,
     data: KVec<u8>,
-    dir_entries: [DirEntry; MAX_DIR_ENTRIES],
-    dir_entry_count: usize,
+    dir_entries: KVec<DirEntry>,
     parent: InodeId,
     mode: u16,
     nlink: u32,
@@ -44,8 +46,7 @@ impl RamInode {
             in_use: false,
             file_type: FileType::Regular,
             data: KVec::new(),
-            dir_entries: [DirEntry::empty(); MAX_DIR_ENTRIES],
-            dir_entry_count: 0,
+            dir_entries: KVec::new(),
             parent: 0,
             mode: 0o644,
             nlink: 1,
@@ -57,8 +58,8 @@ impl RamInode {
         self.file_type = FileType::Regular;
         self.data.clear();
         self.data.shrink_to_fit();
-        self.dir_entries = [DirEntry::empty(); MAX_DIR_ENTRIES];
-        self.dir_entry_count = 0;
+        self.dir_entries.clear();
+        self.dir_entries.shrink_to_fit();
         self.parent = 0;
         self.mode = 0o644;
         self.nlink = 1;
@@ -68,38 +69,35 @@ impl RamInode {
         self.data.len()
     }
 
-    fn add_dir_entry(&mut self, name: &[u8], inode: InodeId) -> VfsResult<()> {
-        if self.dir_entry_count >= MAX_DIR_ENTRIES {
-            return Err(VfsError::NoSpace);
-        }
+    fn dir_entry_count(&self) -> usize {
+        self.dir_entries.len()
+    }
 
-        for i in 0..self.dir_entry_count {
-            let entry = &self.dir_entries[i];
-            if entry.name_len == name.len() && &entry.name[..name.len()] == name {
+    fn add_dir_entry(&mut self, name: &[u8], inode: InodeId) -> VfsResult<()> {
+        for entry in self.dir_entries.iter() {
+            if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
                 return Err(VfsError::AlreadyExists);
             }
         }
 
-        let entry = &mut self.dir_entries[self.dir_entry_count];
+        let mut entry = DirEntry::empty();
         let len = name.len().min(MAX_NAME_LEN);
         entry.name[..len].copy_from_slice(&name[..len]);
         entry.name_len = len;
         entry.inode = inode;
-        self.dir_entry_count += 1;
+        self.dir_entries
+            .push(entry)
+            .map_err(|_| VfsError::NoSpace)?;
 
         Ok(())
     }
 
     fn remove_dir_entry(&mut self, name: &[u8]) -> VfsResult<InodeId> {
-        for i in 0..self.dir_entry_count {
+        for i in 0..self.dir_entries.len() {
             let entry = &self.dir_entries[i];
-            if entry.name_len == name.len() && &entry.name[..name.len()] == name {
+            if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
                 let inode = entry.inode;
-                if i < self.dir_entry_count - 1 {
-                    self.dir_entries[i] = self.dir_entries[self.dir_entry_count - 1];
-                }
-                self.dir_entries[self.dir_entry_count - 1] = DirEntry::empty();
-                self.dir_entry_count -= 1;
+                self.dir_entries.swap_remove(i);
                 return Ok(inode);
             }
         }
@@ -107,9 +105,8 @@ impl RamInode {
     }
 
     fn lookup(&self, name: &[u8]) -> VfsResult<InodeId> {
-        for i in 0..self.dir_entry_count {
-            let entry = &self.dir_entries[i];
-            if entry.name_len == name.len() && &entry.name[..name.len()] == name {
+        for entry in self.dir_entries.iter() {
+            if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
                 return Ok(entry.inode);
             }
         }
@@ -119,19 +116,13 @@ impl RamInode {
 
 struct RamFsInner {
     inodes: KVec<RamInode>,
-    next_inode: InodeId,
     initialized: bool,
 }
 
 impl RamFsInner {
     fn new() -> Self {
-        let mut inodes = KVec::with_capacity(MAX_INODES).expect("ramfs: alloc");
-        for _ in 0..MAX_INODES {
-            inodes.push(RamInode::new()).expect("ramfs: alloc");
-        }
         let mut inner = Self {
-            inodes,
-            next_inode: ROOT_INODE + 1,
+            inodes: KVec::new(),
             initialized: false,
         };
         inner.ensure_initialized();
@@ -142,11 +133,9 @@ impl RamFsInner {
         if self.initialized {
             return;
         }
-        if self.inodes.is_empty() {
-            // Deferred allocation for const-constructed instances
-            for _ in 0..MAX_INODES {
-                self.inodes.push(RamInode::new()).expect("ramfs: alloc");
-            }
+        // Index 0 is a reserved sentinel; inode ids start at ROOT_INODE (1).
+        while self.inodes.len() <= ROOT_INODE as usize {
+            self.inodes.push(RamInode::new()).expect("ramfs: alloc");
         }
         self.initialized = true;
 
@@ -162,23 +151,25 @@ impl RamFsInner {
     }
 
     fn alloc_inode(&mut self) -> VfsResult<InodeId> {
-        for _ in 0..MAX_INODES {
-            let id = self.next_inode;
-            self.next_inode = if self.next_inode as usize >= MAX_INODES - 1 {
-                ROOT_INODE + 1
-            } else {
-                self.next_inode + 1
-            };
-
-            if (id as usize) < MAX_INODES && !self.inodes[id as usize].in_use {
-                return Ok(id);
+        // Reuse a freed slot if one exists (skip the index-0 sentinel and root).
+        for id in (ROOT_INODE as usize + 1)..self.inodes.len() {
+            if !self.inodes[id].in_use {
+                return Ok(id as InodeId);
             }
         }
-        Err(VfsError::NoSpace)
+        // Otherwise grow the pool, bounded by the soft ceiling.
+        if self.inodes.len() >= RAMFS_MAX_INODES {
+            return Err(VfsError::NoSpace);
+        }
+        let id = self.inodes.len();
+        self.inodes
+            .push(RamInode::new())
+            .map_err(|_| VfsError::NoSpace)?;
+        Ok(id as InodeId)
     }
 
     fn get_inode(&self, id: InodeId) -> VfsResult<&RamInode> {
-        if id as usize >= MAX_INODES {
+        if id as usize >= self.inodes.len() {
             return Err(VfsError::NotFound);
         }
         let inode = &self.inodes[id as usize];
@@ -189,7 +180,7 @@ impl RamFsInner {
     }
 
     fn get_inode_mut(&mut self, id: InodeId) -> VfsResult<&mut RamInode> {
-        if id as usize >= MAX_INODES {
+        if id as usize >= self.inodes.len() {
             return Err(VfsError::NotFound);
         }
         let inode = &mut self.inodes[id as usize];
@@ -218,7 +209,6 @@ impl RamFs {
             inner: SpinLock::new(
                 RamFsInner {
                     inodes: KVec::new(),
-                    next_inode: ROOT_INODE + 1,
                     initialized: false,
                 },
                 LOCK_LEVEL_RESOURCE,
@@ -355,7 +345,7 @@ impl FileSystem for RamFs {
                 new_inode.in_use = true;
                 new_inode.file_type = file_type;
                 new_inode.data.clear();
-                new_inode.dir_entry_count = 0;
+                new_inode.dir_entries.clear();
                 new_inode.parent = parent;
 
                 match file_type {
@@ -394,7 +384,7 @@ impl FileSystem for RamFs {
 
             let is_dir = {
                 let target = inner.get_inode(target_id)?;
-                if target.file_type == FileType::Directory && target.dir_entry_count > 2 {
+                if target.file_type == FileType::Directory && target.dir_entry_count() > 2 {
                     return Err(VfsError::NotEmpty);
                 }
                 target.file_type == FileType::Directory
@@ -426,7 +416,7 @@ impl FileSystem for RamFs {
             }
 
             let mut count = 0;
-            for i in offset..ram_inode.dir_entry_count {
+            for i in offset..ram_inode.dir_entries.len() {
                 let entry = &ram_inode.dir_entries[i];
                 let entry_inode = match inner.get_inode(entry.inode) {
                     Ok(n) => n,
@@ -503,7 +493,7 @@ impl FileSystem for RamFs {
             let is_dir = inner.get_inode(target_inode)?.file_type == FileType::Directory;
             if is_dir {
                 let target_node = inner.get_inode_mut(target_inode)?;
-                for i in 0..target_node.dir_entry_count {
+                for i in 0..target_node.dir_entries.len() {
                     if target_node.dir_entries[i].name_len == 2
                         && target_node.dir_entries[i].name[0] == b'.'
                         && target_node.dir_entries[i].name[1] == b'.'
@@ -523,6 +513,14 @@ impl FileSystem for RamFs {
                 }
             }
 
+            Ok(())
+        })
+    }
+
+    fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
+        self.with_inner_mut(|inner| {
+            let ram_inode = inner.get_inode_mut(inode)?;
+            ram_inode.mode = mode & 0o7777;
             Ok(())
         })
     }

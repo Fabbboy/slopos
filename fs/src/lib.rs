@@ -5,6 +5,7 @@ pub const MAX_PATH_LEN: usize = 256;
 pub const MAX_NAME_LEN: usize = 32;
 
 pub mod blockdev;
+pub mod cpio;
 pub mod devfs;
 pub mod ext2;
 pub mod ext2_vfs;
@@ -23,6 +24,7 @@ pub mod tests;
 extern crate std;
 
 pub use blockdev::*;
+pub use cpio::{CpioError, unpack_cpio_into_root};
 pub use devfs::DevFs;
 pub use ext2::*;
 pub use ext2_vfs::{

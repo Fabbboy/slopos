@@ -320,6 +320,16 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
+    /// Set the permission/type bits of an inode.
+    ///
+    /// Used by the initramfs loader to restore the executable bit on unpacked
+    /// binaries (the `create` path defaults regular files to `0o644`). Defaults
+    /// to a no-op for filesystems that don't carry mutable mode bits.
+    fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
+        let _ = (inode, mode);
+        Ok(())
+    }
+
     /// Sync filesystem metadata and data to backing store.
     fn sync(&self) -> VfsResult<()> {
         // Default: no-op for in-memory filesystems

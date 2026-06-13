@@ -55,6 +55,15 @@ if [ -n "$CMDLINE" ]; then
     printf '    cmdline: %s\n' "$CMDLINE" >> "$ISO_ROOT/boot/limine.conf"
 fi
 
+# Stage the initramfs as a Limine module and reference it from the boot entry.
+# Done dynamically (rather than statically in limine.conf) so an ISO built
+# without an initramfs never points Limine at a missing module.
+if [ -n "${INITRAMFS_FILE:-}" ] && [ -f "${INITRAMFS_FILE}" ]; then
+    cp "${INITRAMFS_FILE}" "$ISO_ROOT/boot/initramfs.cpio"
+    printf '    module_path: boot():/boot/initramfs.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
+    printf '    module_string: initramfs\n' >> "$ISO_ROOT/boot/limine.conf"
+fi
+
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_ROOT/boot/"
 cp "$LIMINE_DIR/limine-bios-cd.bin" "$ISO_ROOT/boot/"
 cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_ROOT/boot/"

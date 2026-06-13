@@ -18,6 +18,8 @@ fs_image_dir     := "fs/assets"
 fs_image         := fs_image_dir / "ext2.img"
 fs_image_tests   := fs_image_dir / "ext2-tests.img"
 fs_image_size    := env("FS_IMAGE_SIZE", "16M")
+initramfs        := build_dir / "initramfs.cpio"
+initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
 # ── ISO outputs ──────────────────────────────────────────────────────────────
 
@@ -48,7 +50,7 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
 boot_cmdline     := env("BOOT_CMDLINE", "tests=off")
-test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip"
+test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=auto"
 # `TEST_CMDLINE=…` env override lets `builddir/run_tests` thread filter
 # / verbosity flags into the ISO at build time. Mirrors `BOOT_CMDLINE` for
 # the non-test path.
@@ -94,6 +96,14 @@ _fs-image-tests: _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size}} \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
+# ── Initramfs (RAM-resident root) ────────────────────────────────────────────
+
+_initramfs: _build-userland
+    scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
+
+_initramfs-tests: _build-userland-tests
+    scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
+
 # ── Kernel ───────────────────────────────────────────────────────────────────
 
 [doc("Build the kernel (implies fs-image)")]
@@ -105,26 +115,26 @@ build: _fs-image
 # ── ISO images ───────────────────────────────────────────────────────────────
 
 [doc("Build default ISO")]
-iso: build
-    LIMINE_DIR={{limine_dir}} \
+iso: build _initramfs
+    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso}}" "{{build_dir}}"
 
-_iso-notests: build
-    LIMINE_DIR={{limine_dir}} \
+_iso-notests: build _initramfs
+    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_notests}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
-_iso-tests: _fs-image-tests
+_iso-tests: _fs-image-tests _initramfs-tests
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
             "slopos-testing/qemu-exit kernel/tests"
-    LIMINE_DIR={{limine_dir}} \
+    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
@@ -135,12 +145,12 @@ _iso-tests: _fs-image-tests
 # phase (driven by /sbin/init's `SYSCALL_RUN_USERLAND_TESTS`) is the
 # only thing exercised. Useful for isolating userland-test regressions
 # from kernel-test interactions.
-_iso-tests-userland-only: _fs-image-tests
+_iso-tests-userland-only: _fs-image-tests _initramfs-tests
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
             "slopos-testing/qemu-exit kernel/tests"
-    LIMINE_DIR={{limine_dir}} \
+    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
@@ -183,6 +193,22 @@ boot-headless:
 
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
+
+[doc("Prove RAM-only boot: boot the ISO with NO disk attached; assert /sbin/init comes up from the initramfs (the real-hardware path)")]
+boot-ramonly:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
+    just _qemu-boot "logged" "0" {{iso_notests}} {{fs_image}} "BOOT_LOG_TIMEOUT=25 LOG_FILE={{log_file}} QEMU_NO_ROOT_DISK=1"
+    echo "──────── RAM-only boot: key serial lines ────────"
+    grep -E "ROOTFS:|USERLAND: launched|VFS:|ext2" "{{log_file}}" || true
+    echo "─────────────────────────────────────────────────"
+    if grep -q "USERLAND: launched /sbin/init" "{{log_file}}"; then
+        echo "PASS: /sbin/init launched from initramfs with no disk attached"
+    else
+        echo "FAIL: /sbin/init did not launch — full log in {{log_file}}" >&2
+        exit 1
+    fi
 
 # ── Live-debug attach to a running kernel ────────────────────────────────────
 # `boot-debug` enables QEMU's GDB stub on TCP :1234 and a monitor socket at
@@ -400,4 +426,4 @@ clean:
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean
     rm -rf {{build_dir}} {{iso}} {{iso_notests}} {{iso_tests}} {{log_file}}
-    rm -f {{fs_image}} {{fs_image_tests}}
+    rm -f {{fs_image}} {{fs_image_tests}} {{initramfs}} {{initramfs_tests}}

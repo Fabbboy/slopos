@@ -117,6 +117,11 @@ pub fn vfs_mkdir(path: &[u8]) -> VfsResult<()> {
     Ok(())
 }
 
+pub fn vfs_set_mode(path: &[u8], mode: u16) -> VfsResult<()> {
+    let resolved = resolve_path(path)?;
+    resolved.fs.set_mode(resolved.inode, mode)
+}
+
 pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
     let (parent, name) = resolve_parent(path)?;
     parent.fs.unlink(parent.inode, name)

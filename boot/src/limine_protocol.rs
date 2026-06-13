@@ -38,7 +38,7 @@ use limine::{
     BaseRevision, memmap,
     request::{
         BootloaderInfoRequest, ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest,
-        HhdmRequest, MemmapRequest, MpRequest, MpResponse, RsdpRequest,
+        HhdmRequest, MemmapRequest, ModulesRequest, MpRequest, MpResponse, RsdpRequest,
     },
 };
 
@@ -100,6 +100,11 @@ slopos_ostd::link_section_static! {
     #[used]
     section = ".limine_requests";
     static MP_REQUEST: MpRequest = MpRequest::new(0);
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
 }
 slopos_ostd::link_section_static! {
     #[used]
@@ -353,6 +358,24 @@ pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
         kernel_virt_base: info.kernel_virt_base,
         rsdp_address: info.rsdp_phys_addr,
     }
+}
+
+/// Bytes of the initramfs module loaded by Limine, if present.
+///
+/// The initramfs is a `newc` cpio archive declared in `limine.conf` with
+/// `module_string: initramfs`; Limine maps it into the HHDM and exposes it via
+/// the modules response. The returned slice borrows the bootloader-published
+/// module memory, which Limine keeps mapped for the kernel's lifetime, so it is
+/// `'static`. The `limine` crate owns the only `unsafe` here (`File::data`);
+/// this crate stays `#![forbid(unsafe_code)]`.
+pub fn initramfs() -> Option<&'static [u8]> {
+    let response = MODULES_REQUEST.response()?;
+    let modules = response.modules();
+    modules
+        .iter()
+        .find(|module| module.cmdline() == "initramfs")
+        .or_else(|| modules.first())
+        .map(|module| module.data())
 }
 
 pub fn get_framebuffer_info(

@@ -264,6 +264,21 @@ else
     DEBUG_ARGS=(-monitor none)
 fi
 
+# Root-fs disk (virtio-disk0). Omitted when QEMU_NO_ROOT_DISK=1 to prove the
+# kernel boots purely from the Limine initramfs with no storage device
+# attached — the real-hardware scenario. Otherwise it is the ext2 image the
+# kernel mounts at /mnt (secondary) once the RAM root is up.
+ROOT_DISK_ARGS=()
+if [[ ! "${QEMU_NO_ROOT_DISK:-0}" =~ ^(1|true|on|yes)$ ]]; then
+    ROOT_DISK_ARGS=(
+        -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
+        -object "iothread,id=iot0"
+        -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
+    )
+else
+    echo "QEMU_NO_ROOT_DISK=1 → booting RAM-only (no virtio-disk0 attached)"
+fi
+
 # ── Assemble common QEMU arguments ──────────────────────────────────────────
 QEMU_ARGS=(
     -machine "q35,accel=$QEMU_ACCEL"
@@ -275,9 +290,7 @@ QEMU_ARGS=(
     -device "ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3"
     -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
     -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
-    -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
-    -object "iothread,id=iot0"
-    -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
+    "${ROOT_DISK_ARGS[@]}"
     "${SCRATCH_ARGS[@]}"
     -netdev "user,id=slopnet0,dns=1.1.1.1${NET_HOSTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"

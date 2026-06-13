@@ -555,6 +555,17 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_TESTS_ENABLED);
         boot_info(b"Boot option: userland test mode enabled\0");
     }
+
+    // Root filesystem backing: `root=initramfs` forces the RAM-resident root,
+    // `root=virtio` forces the ext2 disk, and the default (`root=auto`) uses the
+    // initramfs when Limine loaded a module and falls back to the disk.
+    if cmdline.contains("root=initramfs") {
+        crate::boot_services::set_root_mode(crate::boot_services::ROOT_INITRAMFS);
+        boot_info(b"Boot option: root=initramfs\0");
+    } else if cmdline.contains("root=virtio") {
+        crate::boot_services::set_root_mode(crate::boot_services::ROOT_VIRTIO);
+        boot_info(b"Boot option: root=virtio\0");
+    }
 }
 
 boot_init!(
