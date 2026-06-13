@@ -118,6 +118,18 @@ fn halt() -> ! {
 
     slopos_ostd::cpu::x86_64::core::halt_loop();
 }
+fn reboot_via_cf9() {
+    ostd_power::cf9_reset_pulse(|| hpet::delay_ms(1));
+}
+
+/// Recoverable platform resets, tried in order of increasing reach. Each
+/// returns only if it did not reset the machine, so the next is attempted;
+/// the terminal triple fault (resets every sane x86) is the final fallback.
+const REBOOT_METHODS: &[(&str, fn())] = &[
+    ("PS/2 keyboard controller", ostd_power::ps2_reset_pulse),
+    ("PCH 0xCF9 reset register", reboot_via_cf9),
+];
+
 pub fn kernel_reboot(reason: *const c_char) -> ! {
     ensure_kernel_page_dir();
     cpu::disable_interrupts();
@@ -129,14 +141,15 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();
-
-    klog_info!("Rebooting via keyboard controller...");
-
     hpet::delay_ms(50);
-    ostd_power::ps2_reset_pulse();
 
-    klog_info!("Keyboard reset failed, attempting triple fault...");
+    for &(method, reset) in REBOOT_METHODS {
+        klog_info!("Rebooting via {}", method);
+        reset();
+        hpet::delay_ms(50);
+    }
 
+    klog_info!("Firmware reset ignored; forcing triple fault");
     slopos_ostd::cpu::x86_64::core::trigger_triple_fault();
 }
 pub fn execute_kernel() {

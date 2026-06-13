@@ -65,3 +65,32 @@ pub fn ps2_reset_pulse() {
     // centralised here.
     unsafe { ps2_cmd.write(0xFE) };
 }
+
+/// PCH reset-control register (`RST_CNT`): the modern x86 reset, wired to
+/// the platform `RESET#`. The reset is edge-triggered by raising `RST_CPU`
+/// after arming, so it is driven as a two-step arm-then-fire with a settle
+/// in between (Linux's `BOOT_CF9` sequence).
+mod rst_cnt {
+    pub const PORT: u16 = 0xCF9;
+    pub const RST_CPU: u8 = 1 << 1;
+    pub const SYS_RST: u8 = 1 << 2; // 1 = hard reset
+}
+
+/// Reset the platform via the PCH `0xCF9` register — the path for USB-only
+/// or UEFI machines where [`ps2_reset_pulse`] is a no-op and a triple fault
+/// is ignored. Returns only if the platform did not reset. `settle` is run
+/// between arm and fire (≈50 µs suffices).
+pub fn cf9_reset_pulse(settle: impl Fn()) {
+    use rst_cnt::*;
+    let Ok(reg) = IoPortRegistry::reserve::<u8>(PORT) else {
+        return;
+    };
+    // SAFETY: registered PCH reset-control register; the read is
+    // side-effect-free and the two writes are its documented reset edge.
+    unsafe {
+        let base = reg.read() & !(RST_CPU | SYS_RST);
+        reg.write(base | RST_CPU);
+        settle();
+        reg.write(base | RST_CPU | SYS_RST);
+    }
+}
