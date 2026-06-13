@@ -334,6 +334,7 @@ check-framekernel:
     scripts/check_no_kernel_async.sh
     scripts/check_alloc_dep.sh
     scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
+    scripts/check_kernel_softfloat.sh {{build_dir}}/kernel.elf
     scripts/check_wait_predicate_purity.sh
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri

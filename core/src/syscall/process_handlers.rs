@@ -326,6 +326,22 @@ define_syscall!(syscall_exec
             regs.r10 = 0;
             regs.r11 = 0;
             uc.set_regs(regs);
+
+            // The new image must start with a clean FPU/vector file — never
+            // leak the previous program's XMM/YMM contents. Reset the stored
+            // state AND load the default into the CPU under IRQ-off, so a
+            // context switch can't re-save the old image's live registers
+            // over the reset before the new image runs.
+            let task = ctx.task_ptr();
+            let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
+            slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+                if let Some(t) = slopos_sched::task::task_borrow_mut(task) {
+                    slopos_ostd::task::accessors::task_reset_fpu_state(t);
+                }
+                if let Some(fpu) = slopos_ostd::task::accessors::task_fpu_state_mut(task) {
+                    fpu.restore_to_cpu(xcr0);
+                }
+            });
             SyscallResult::NoReturn
         }
         Err(e) => SyscallResult::Err(Errno::from_raw(e as i32).unwrap_or(Errno::EINVAL)),

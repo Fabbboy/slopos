@@ -81,11 +81,15 @@ fi
 # Kernel allocation + stack-frame invariant gates.
 "$SCRIPT_DIR/check_alloc_dep.sh"
 
-# The stack-sizes gate applies to the production kernel only. Test builds
-# (`kernel/tests` feature) compile in per-subsystem regression
-# tests whose large stack frames are irrelevant to the real kernel image.
+# The stack-sizes and soft-float gates apply to the production kernel only.
+# Test builds (`kernel/tests` feature) compile in per-subsystem regression
+# tests whose large stack frames are irrelevant to the real kernel image,
+# and `test_support/cpu_state.rs` carries deliberate XMM/AVX asm for the
+# xsave conformance tests.
 if [[ "$FEATURES" != *"kernel/tests"* ]]; then
     "$SCRIPT_DIR/check_stack_sizes.sh" "$BUILD_DIR/kernel.elf"
+    "$SCRIPT_DIR/check_kernel_softfloat.sh" "$BUILD_DIR/kernel.elf"
 else
     echo "check_stack_sizes: skipped (kernel/tests feature enabled)"
+    echo "check_kernel_softfloat: skipped (kernel/tests feature enabled)"
 fi

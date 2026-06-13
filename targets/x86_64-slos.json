@@ -7,7 +7,7 @@
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
   "executables": true,
-  "features": "-mmx,+xsave",
+  "features": "-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2,+soft-float,+xsave",
   "has-rpath": false,
   "linker": "rust-lld",
   "linker-flavor": "ld.lld",
@@ -19,6 +19,7 @@
     "ld.lld": ["-Tlink.ld"]
   },
   "relocation-model": "static",
+  "rustc-abi": "x86-softfloat",
   "stack-probes": {
     "kind": "none"
   },

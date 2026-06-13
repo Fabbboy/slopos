@@ -7,9 +7,13 @@ use slopos_abi::signal::{
     SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
-use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr as MmUserPtr;
+use slopos_mm::user_copy::{
+    copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
+};
+use slopos_mm::user_ptr::{UserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::irq::InterruptFrame;
+use slopos_ostd::task::FPU_STATE_SIZE;
+use slopos_ostd::task::accessors::task_fpu_state_mut;
 use slopos_ostd::user::context::{
     USER_RFLAGS_FORCED, USER_RFLAGS_PERMITTED, UserContext, UserRegs,
 };
@@ -318,6 +322,54 @@ fn read_signal_frame(rsp: u64) -> Option<SignalFrame> {
     copy_from_user(ptr).ok()
 }
 
+/// The FPU/vector save area sits immediately after the `SignalFrame` on
+/// the user stack; delivery writes it and sigreturn reads it back from
+/// the same offset. (The `SignalFrame` ABI is unchanged — this area is
+/// kernel-internal and the userland restorer never touches it.)
+#[inline]
+fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
+    sigframe_addr.wrapping_add(core::mem::size_of::<SignalFrame>() as u64)
+}
+
+/// Save the interrupted task's live FPU/SSE/AVX state into its user
+/// signal frame so sigreturn can restore it — a handler that touches the
+/// vector registers must not corrupt the interrupted code's state. The
+/// kernel is `+soft-float` and has not touched the vector file since
+/// entry, so the live CPU state is still the interrupted user's. Returns
+/// false on a user-copy fault.
+fn save_fpu_to_sigframe(task: *mut Task, sigframe_addr: u64) -> bool {
+    let Some(fpu) = task_fpu_state_mut(task) else {
+        return false;
+    };
+    fpu.save_current(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
+    let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
+        return false;
+    };
+    copy_bytes_to_user(bytes, &fpu.data).is_ok()
+}
+
+/// Restore the FPU/vector state saved by [`save_fpu_to_sigframe`]. The
+/// copy-in and `xrstor` run under an IRQ-off critical section so a
+/// context switch cannot overwrite the task's `fpu_state` slot between
+/// the two steps (the scheduler also saves/restores that same slot).
+/// Returns false on a user-copy fault, leaving the prior FPU state.
+fn restore_fpu_from_sigframe(task: *mut Task, sigframe_addr: u64) -> bool {
+    let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
+        return false;
+    };
+    let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        let Some(fpu) = task_fpu_state_mut(task) else {
+            return false;
+        };
+        if copy_bytes_from_user(bytes, &mut fpu.data).is_err() {
+            return false;
+        }
+        fpu.restore_to_cpu(xcr0);
+        true
+    })
+}
+
 define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     let task_ref = match ctx.task_mut() {
         Some(t) => t,
@@ -356,6 +408,10 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     regs.rip = sigframe.rip;
     regs.rflags_user_subset = sigframe.rflags;
     ctx.user_ctx_mut().set_regs(regs);
+
+    // Restore the FPU/vector state saved at delivery (best-effort: a
+    // faulted save area leaves the current vector registers in place).
+    let _ = restore_fpu_from_sigframe(ctx.task_ptr(), rsp);
 
     // sigreturn fully replaced the user-mode register state — the
     // dispatcher must not overwrite RAX after we return.
@@ -504,8 +560,17 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
 
     let regs_snapshot = regs.snapshot();
 
-    let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
-    let frame_addr = regs_snapshot.rsp.wrapping_sub(total_size) & !0xF;
+    // Frame = [restorer ptr (8)] [SignalFrame] [FPU/vector save area].
+    //
+    // The restorer pointer at `frame_addr` doubles as the handler's
+    // return address, so entering the handler is ABI-equivalent to a
+    // `call`: SysV requires `(rsp + 8) % 16 == 0` at a function's first
+    // instruction, i.e. `frame_addr % 16 == 8`. Aligning `frame_addr`
+    // to 16 (the obvious choice) leaves the handler's stack misaligned
+    // by 8, so any aligned vector spill (`vmovaps [rsp], …`) the handler
+    // emits faults with #GP. Subtract 8 after the 16-byte floor.
+    let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64 + FPU_STATE_SIZE as u64;
+    let frame_addr = (regs_snapshot.rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
 
     let restorer_ptr = match MmUserPtr::<u64>::try_new(frame_addr) {
         Ok(p) => p,
@@ -553,6 +618,12 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
     };
 
     if copy_to_user(sigframe_ptr, &sigframe).is_err() {
+        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+        return;
+    }
+
+    // Preserve the interrupted task's vector state across the handler.
+    if !save_fpu_to_sigframe(task, sigframe_addr) {
         task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
     }

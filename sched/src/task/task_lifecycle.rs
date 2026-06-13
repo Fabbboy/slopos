@@ -904,6 +904,24 @@ pub fn task_shutdown_all() -> c_int {
     result
 }
 
+/// Flush the parent's live FPU/vector registers into its `fpu_state`
+/// slot before a fork/clone copies that slot into the child. Without
+/// this the child inherits the parent's last context-switch snapshot
+/// rather than its register state at the `fork()`/`clone()` call site.
+///
+/// `save_current` captures the *current CPU's* vector file, so this is
+/// gated on the parent being the running task — the fork/clone
+/// self-syscall contract. If it ever isn't current, the scheduler's own
+/// switch-out already holds a correct snapshot and we skip the flush.
+fn flush_live_fpu_for_clone(parent_task: *mut Task) {
+    if parent_task != scheduler::scheduler_get_current_task() {
+        return;
+    }
+    if let Some(fpu) = slopos_ostd::task::accessors::task_fpu_state_mut(parent_task) {
+        fpu.save_current(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
+    }
+}
+
 pub fn task_fork(
     parent_task: *mut Task,
     parent_user_ctx: *const slopos_ostd::user::context::UserContext,
@@ -912,6 +930,8 @@ pub fn task_fork(
         klog_info!("task_fork: null parent task");
         return INVALID_TASK_ID;
     }
+
+    flush_live_fpu_for_clone(parent_task);
 
     let Some(parent) = task_borrow(parent_task) else {
         return INVALID_TASK_ID;
@@ -1060,6 +1080,8 @@ pub fn task_clone(
     if parent_task.is_null() {
         return Err(ERRNO_EINVAL);
     }
+
+    flush_live_fpu_for_clone(parent_task);
 
     let Some(parent) = task_borrow(parent_task) else {
         return Err(ERRNO_EINVAL);

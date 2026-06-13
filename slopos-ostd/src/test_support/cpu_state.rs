@@ -5,66 +5,54 @@
 //! folded into one safe `pub fn` here. The test files become a
 //! sequence of `let readback = cpu_state::...(...);` calls.
 
-use core::arch::x86_64::{__m128i, _mm_set_epi64x, _mm_storeu_si128};
-
 /// 128-bit XMM register payload.
 pub type Xmm128 = [u64; 2];
 
 /// Load `pattern` into XMM0 via an intermediate XMM register, then
 /// read XMM0 back. Round-trip verifies that the XMM register file
 /// preserves a 128-bit value across two `movdqa` hops.
+///
+/// The kernel is built `+soft-float` (no `sse` target feature), so the
+/// `xmm_reg` operand class is unavailable here; this routes the payload
+/// through memory with explicitly named registers, whose instruction
+/// text the assembler accepts without the feature.
 #[inline]
 pub fn xmm0_roundtrip(pattern: Xmm128) -> Xmm128 {
-    // SAFETY: `_mm_set_epi64x` is a pure SIMD-register constructor.
-    let pat = unsafe { _mm_set_epi64x(pattern[1] as i64, pattern[0] as i64) };
-    let readback: __m128i;
-    // SAFETY: two-step move through an unnamed scratch XMM register;
-    // no memory operands; no flag effects.
+    let mut readback: Xmm128 = [0; 2];
+    // SAFETY: load 16 bytes from `pattern` into xmm1, hop to xmm0 and
+    // back through xmm1, then store 16 bytes to `readback`. Both buffers
+    // are owned, 16 bytes, and the named XMM registers are clobbered.
     unsafe {
         core::arch::asm!(
-            "movdqa {tmp}, {src}",
-            "movdqa xmm0, {tmp}",
-            tmp = out(xmm_reg) _,
-            src = in(xmm_reg) pat,
-        );
-        core::arch::asm!(
-            "movdqa {dst}, xmm0",
-            dst = out(xmm_reg) readback,
+            "movdqu xmm1, [{src}]",
+            "movdqa xmm0, xmm1",
+            "movdqa xmm1, xmm0",
+            "movdqu [{dst}], xmm1",
+            src = in(reg) pattern.as_ptr(),
+            dst = in(reg) readback.as_mut_ptr(),
+            out("xmm0") _,
+            out("xmm1") _,
         );
     }
-    xmm_to_u64x2(readback)
+    readback
 }
 
 /// Direct XMM1 round-trip: load `pattern` into XMM1, copy back into
 /// `dst`, and store the result as `[u64; 2]`.
 #[inline]
 pub fn xmm1_roundtrip(pattern: Xmm128) -> Xmm128 {
+    let mut readback: Xmm128 = [0; 2];
     // SAFETY: see xmm0_roundtrip.
-    let pat = unsafe { _mm_set_epi64x(pattern[1] as i64, pattern[0] as i64) };
-    let readback: __m128i;
-    // SAFETY: single-step move; no memory or flag side-effects.
     unsafe {
         core::arch::asm!(
-            "movdqa xmm1, {src}",
-            "movdqa {dst}, xmm1",
-            src = in(xmm_reg) pat,
-            dst = out(xmm_reg) readback,
+            "movdqu xmm1, [{src}]",
+            "movdqu [{dst}], xmm1",
+            src = in(reg) pattern.as_ptr(),
+            dst = in(reg) readback.as_mut_ptr(),
+            out("xmm1") _,
         );
     }
-    xmm_to_u64x2(readback)
-}
-
-/// Pack a `__m128i` into two `u64`s (lower, upper).
-#[inline]
-fn xmm_to_u64x2(v: __m128i) -> Xmm128 {
-    let mut bytes = [0u8; 16];
-    // SAFETY: `_mm_storeu_si128` writes 16 bytes into `bytes`.
-    unsafe {
-        _mm_storeu_si128(bytes.as_mut_ptr() as *mut __m128i, v);
-    }
-    let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    [lo, hi]
+    readback
 }
 
 /// Load `N` 128-bit patterns into XMM0..XMM(N-1), run xsave64,

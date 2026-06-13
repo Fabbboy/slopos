@@ -1710,9 +1710,12 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     assert_eq_test!(frame.rdx, 0, "RDX not zeroed");
 
     // The handler RSP points at the restorer word; the SignalFrame
-    // begins at RSP + 8.
-    let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
-    let expected_frame_addr = original_rsp.wrapping_sub(total_size) & !0xF;
+    // begins at RSP + 8, followed by the FPU/vector save area. The frame
+    // is aligned so the handler enters with `rsp % 16 == 8` (SysV ABI:
+    // `(rsp + 8) % 16 == 0` at a function's entry point).
+    let total_size =
+        8 + core::mem::size_of::<SignalFrame>() as u64 + slopos_ostd::task::FPU_STATE_SIZE as u64;
+    let expected_frame_addr = (original_rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
     assert_eq_test!(frame.rsp, expected_frame_addr, "handler RSP mismatch");
 
     let restorer_on_stack: u64 = match user_copy_in(pid, frame.rsp) {
