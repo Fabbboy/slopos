@@ -229,25 +229,28 @@ impl BinArray {
         }
     }
 
-    pub unsafe fn count_mmap_chunks(&self) -> usize {
-        let mut count = 0;
-        for idx in 0..BIN_COUNT {
-            let mut current = self.bins[idx].head;
-            if current.is_null() {
+    /// Size of the largest chunk across all bins and the unsorted list.
+    pub unsafe fn largest_chunk_size(&self) -> usize {
+        let mut largest = 0;
+        let heads = self
+            .bins
+            .iter()
+            .map(|bin| bin.head)
+            .chain(core::iter::once(self.unsorted.head));
+        for head in heads {
+            if head.is_null() {
                 continue;
             }
-            let head = current;
+            let mut current = head;
             loop {
-                if unsafe { chunk::is_mmap(current) } {
-                    count += 1;
-                }
+                largest = largest.max(unsafe { chunk::size(current) });
                 current = unsafe { chunk::fd(current) };
                 if current == head {
                     break;
                 }
             }
         }
-        count
+        largest
     }
 }
 

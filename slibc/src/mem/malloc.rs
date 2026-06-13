@@ -8,9 +8,9 @@ pub const ALIGNMENT: usize = chunk::ALIGNMENT;
 
 #[derive(Clone, Copy, Debug)]
 pub struct HeapStats {
-    pub heap_size: usize,  // total brk heap
-    pub wilderness: usize, // top chunk free space
-    pub mmap_count: usize, // active mmap allocations
+    pub arena_size: usize,   // total address space in arena segments
+    pub largest_free: usize, // largest binned free chunk
+    pub direct_count: usize, // live direct (whole-mapping) allocations
 }
 
 pub fn alloc(size: usize) -> *mut c_void {
@@ -60,13 +60,10 @@ pub unsafe extern "C" fn malloc_usable_size_ffi(ptr: *mut u8) -> usize {
 
 pub fn heap_stats() -> HeapStats {
     let guard = ALLOCATOR.lock();
-    let heap_size = guard.heap_size();
-    let wilderness = guard.wilderness_size();
-    let mmap_count = guard.count_mmap_chunks();
 
     HeapStats {
-        heap_size,
-        wilderness,
-        mmap_count,
+        arena_size: guard.arena_size(),
+        largest_free: guard.largest_free_chunk(),
+        direct_count: guard.direct_region_count(),
     }
 }

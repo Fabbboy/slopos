@@ -1,3 +1,20 @@
+//! Segment-based dlmalloc over anonymous mmap.
+//!
+//! The arena is a set of independently mmap'd segments; there is no
+//! program break and no contiguous-heap assumption. Each segment is
+//! laid out as `[lead pad | chunks ... | fence]`: the lead pad places
+//! the first chunk so its data is 16-byte aligned, and the fence is a
+//! size-0 pseudo chunk header whose PREV_IN_USE bit tracks the last
+//! real chunk. A fence fails every chunk validity check, so merging
+//! and frees can never walk across a segment boundary — even when the
+//! kernel's first-fit gap finder places two segments back to back.
+//!
+//! Allocations at or above `mmap_threshold` (and all over-aligned
+//! `memalign` requests) get a dedicated mapping, tracked in a registry
+//! of nodes that live in arena chunks — never inside the registered
+//! mapping itself — so neither a buffer overrun nor a forged header
+//! can aim `munmap` at an unrelated mapping.
+
 use core::cell::SyncUnsafeCell;
 use core::cmp;
 use core::ffi::c_void;
@@ -14,16 +31,25 @@ use slopos_abi::syscall::{
 use super::bins::{self, BIN_COUNT, BinArray, LARGE_BIN_COUNT, SMALL_BIN_COUNT};
 use super::chunk::{self, ChunkPtr};
 use crate::pal::raw::{syscall2, syscall6};
-use crate::pal::syscall::sys_brk;
 
-const INITIAL_HEAP_SIZE: usize = 64 * 1024;
-const EXTEND_MIN_SIZE: usize = 64 * 1024;
 const PAGE_SIZE: usize = 4096;
-const SHRINK_THRESHOLD: usize = 256 * 1024;
-const MIN_WILDERNESS: usize = 64 * 1024;
-const HEAP_EDGE_PAD: usize = chunk::HEADER_SIZE;
-const MMAP_SUFFIX_PAD: usize = chunk::HEADER_SIZE;
 const UNSORTED_DRAIN_LIMIT: usize = 10;
+
+/// Address-space floor for a fresh arena segment. The kernel maps
+/// anonymous pages lazily, so an untouched tail costs no RAM.
+const SEGMENT_MIN_LEN: usize = 1024 * 1024;
+/// Ceiling keeping every chunk size comfortably inside the u32 size
+/// field of the chunk header.
+const SEGMENT_MAX_LEN: usize = 256 * 1024 * 1024;
+const MAX_SEGMENTS: usize = 32;
+
+/// Alignment spacer at a segment base: the first chunk header sits at
+/// `base + 8` so its data (`chunk + 8`) lands 16-byte aligned.
+const SEGMENT_LEAD_PAD: usize = chunk::HEADER_SIZE;
+const SEGMENT_FENCE_LEN: usize = chunk::HEADER_SIZE;
+const SEGMENT_OVERHEAD: usize = SEGMENT_LEAD_PAD + SEGMENT_FENCE_LEN;
+
+const MMAP_SUFFIX_PAD: usize = chunk::HEADER_SIZE;
 
 #[repr(transparent)]
 struct SyncDlMalloc(DlMalloc);
@@ -88,12 +114,59 @@ impl Drop for DlMallocGuard<'_> {
 
 pub static ALLOCATOR: AllocatorHandle = AllocatorHandle::new();
 
+#[derive(Clone, Copy)]
+struct Segment {
+    base: *mut u8,
+    len: usize,
+}
+
+impl Segment {
+    const EMPTY: Self = Self {
+        base: ptr::null_mut(),
+        len: 0,
+    };
+
+    #[inline]
+    fn first_chunk(&self) -> ChunkPtr {
+        unsafe { self.base.add(SEGMENT_LEAD_PAD) }
+    }
+
+    #[inline]
+    fn fence(&self) -> ChunkPtr {
+        unsafe { self.base.add(self.len - SEGMENT_FENCE_LEN) }
+    }
+
+    #[inline]
+    fn spanning_chunk_size(&self) -> usize {
+        self.len - SEGMENT_OVERHEAD
+    }
+
+    /// Whether `chunk_ptr` is a plausible chunk position: inside
+    /// `[first_chunk, fence)` and on the 16-byte chunk grid.
+    #[inline]
+    fn contains_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
+        let addr = chunk_ptr as usize;
+        let first = self.first_chunk() as usize;
+        let fence = self.fence() as usize;
+        addr >= first && addr < fence && (addr - first) & (chunk::ALIGNMENT - 1) == 0
+    }
+}
+
+/// Registry node for one direct (whole-mapping) allocation. Nodes live
+/// in arena chunks, never inside the registered mapping, so user
+/// buffer overruns cannot reach registry metadata.
+struct DirectRegion {
+    base: *mut u8,
+    len: usize,
+    chunk: ChunkPtr,
+    next: *mut DirectRegion,
+}
+
 pub struct DlMalloc {
     bins: BinArray,
-    top: ChunkPtr,
-    top_size: usize,
-    heap_start: *mut u8,
-    heap_end: *mut u8,
+    segments: [Segment; MAX_SEGMENTS],
+    segment_count: usize,
+    direct_head: *mut DirectRegion,
     mmap_threshold: usize,
 }
 
@@ -101,10 +174,9 @@ impl DlMalloc {
     pub const fn new() -> Self {
         Self {
             bins: BinArray::new(),
-            top: ptr::null_mut(),
-            top_size: 0,
-            heap_start: ptr::null_mut(),
-            heap_end: ptr::null_mut(),
+            segments: [Segment::EMPTY; MAX_SEGMENTS],
+            segment_count: 0,
+            direct_head: ptr::null_mut(),
             mmap_threshold: 128 * 1024,
         }
     }
@@ -119,48 +191,18 @@ impl DlMalloc {
         };
 
         if request_size >= self.mmap_threshold {
-            return self.alloc_mmap(request_size);
+            return self
+                .alloc_direct(request_size, chunk::ALIGNMENT)
+                .cast::<c_void>();
         }
 
-        self.init();
-        if self.top.is_null() {
-            return ptr::null_mut();
+        let from_arena = self.arena_alloc(request_size);
+        if !from_arena.is_null() {
+            return from_arena;
         }
 
-        if let Some(bin_idx) = bins::size_to_small_bin(request_size)
-            && !self.bins.is_empty(bin_idx)
-        {
-            let chunk_ptr = unsafe { self.bins.pop_front(bin_idx) };
-            if !chunk_ptr.is_null() {
-                return unsafe { self.allocate_from_chunk(chunk_ptr, request_size) };
-            }
-        }
-
-        let unsorted_match = unsafe { self.drain_unsorted(request_size) };
-        if !unsorted_match.is_null() {
-            return unsorted_match;
-        }
-
-        if let Some(bin_idx) = bins::size_to_small_bin(request_size)
-            && let Some(found_idx) = self.bins.first_nonempty_from(bin_idx)
-            && found_idx < SMALL_BIN_COUNT
-        {
-            let chunk_ptr = unsafe { self.bins.pop_front(found_idx) };
-            if !chunk_ptr.is_null() {
-                return unsafe { self.allocate_from_chunk(chunk_ptr, request_size) };
-            }
-        }
-
-        let large_fit = unsafe { self.find_large_fit(request_size) };
-        if !large_fit.is_null() {
-            return unsafe { self.allocate_from_chunk(large_fit, request_size) };
-        }
-
-        if self.ensure_top_capacity(request_size) {
-            return unsafe { self.allocate_from_top(request_size) };
-        }
-
-        self.alloc_mmap(request_size)
+        self.alloc_direct(request_size, chunk::ALIGNMENT)
+            .cast::<c_void>()
     }
 
     pub fn dealloc(&mut self, ptr: *mut c_void) {
@@ -169,22 +211,17 @@ impl DlMalloc {
         }
 
         let chunk_ptr = unsafe { chunk::from_data_ptr(ptr.cast::<u8>()) };
-        if unsafe { chunk::is_mmap(chunk_ptr) } {
-            if unsafe { self.is_valid_mmap_chunk(chunk_ptr) } {
-                unsafe {
-                    self.dealloc_mmap(chunk_ptr);
-                }
+        // Validate before any header read: segment membership bounds
+        // arena reads, and the direct registry compares pointer values
+        // only. An unrecognized pointer is ignored outright.
+        if unsafe { self.is_allocated_heap_chunk(chunk_ptr) } {
+            unsafe {
+                self.release_chunk(chunk_ptr);
             }
             return;
         }
 
-        if !unsafe { self.is_allocated_heap_chunk(chunk_ptr) } {
-            return;
-        }
-
-        unsafe {
-            self.release_chunk(chunk_ptr);
-        }
+        let _ = unsafe { self.release_direct(chunk_ptr) };
     }
 
     pub fn realloc(&mut self, ptr: *mut c_void, new_size: usize) -> *mut c_void {
@@ -198,12 +235,8 @@ impl DlMalloc {
         }
 
         let chunk_ptr = unsafe { chunk::from_data_ptr(ptr.cast::<u8>()) };
-        let is_mmap = unsafe { chunk::is_mmap(chunk_ptr) };
-        if is_mmap {
-            if !unsafe { self.is_valid_mmap_chunk(chunk_ptr) } {
-                return ptr::null_mut();
-            }
-        } else if !unsafe { self.is_allocated_heap_chunk(chunk_ptr) } {
+        let in_arena = unsafe { self.is_allocated_heap_chunk(chunk_ptr) };
+        if !in_arena && self.find_direct(chunk_ptr).is_null() {
             return ptr::null_mut();
         }
 
@@ -213,7 +246,7 @@ impl DlMalloc {
 
         let old_size = unsafe { chunk::size(chunk_ptr) };
         if old_size >= request_size {
-            if !is_mmap && old_size.saturating_sub(request_size) >= chunk::MIN_CHUNK_SIZE {
+            if in_arena && old_size.saturating_sub(request_size) >= chunk::MIN_CHUNK_SIZE {
                 unsafe {
                     self.shrink_in_place(chunk_ptr, request_size);
                 }
@@ -221,18 +254,9 @@ impl DlMalloc {
             return ptr;
         }
 
-        if !is_mmap {
+        if in_arena {
             let next = unsafe { chunk::next_physical(chunk_ptr) };
-            if next == self.top {
-                let needed = request_size
-                    .saturating_add(chunk::MIN_CHUNK_SIZE)
-                    .saturating_sub(old_size.saturating_add(self.top_size));
-                if self.ensure_top_capacity(request_size) || (needed == 0 && self.top_size != 0) {
-                    return unsafe { self.grow_into_top(chunk_ptr, request_size) };
-                }
-            }
-
-            if next != self.top && unsafe { self.is_free_chunk(next) } {
+            if unsafe { self.is_free_chunk(next) } {
                 let combined = old_size.saturating_add(unsafe { chunk::size(next) });
                 if combined >= request_size {
                     unsafe {
@@ -274,7 +298,7 @@ impl DlMalloc {
             return ptr::null_mut();
         };
 
-        self.alloc_mmap_aligned(request_size, alignment)
+        self.alloc_direct(request_size, alignment)
     }
 
     pub fn malloc_usable_size(&mut self, ptr: *mut u8) -> usize {
@@ -283,134 +307,133 @@ impl DlMalloc {
         }
 
         let chunk_ptr = unsafe { chunk::from_data_ptr(ptr) };
-        if unsafe { chunk::is_mmap(chunk_ptr) } {
-            if unsafe { self.is_valid_mmap_chunk(chunk_ptr) } {
-                return unsafe { chunk::usable_size(chunk_ptr) };
-            }
-            return 0;
-        }
-
-        if unsafe { self.is_allocated_heap_chunk(chunk_ptr) } {
+        if unsafe { self.is_allocated_heap_chunk(chunk_ptr) }
+            || !self.find_direct(chunk_ptr).is_null()
+        {
             unsafe { chunk::usable_size(chunk_ptr) }
         } else {
             0
         }
     }
 
-    fn init(&mut self) {
-        if !self.heap_start.is_null() {
-            return;
-        }
+    // ── Arena (segment) allocation ───────────────────────────────────────
 
-        let current_brk = sys_brk(ptr::null_mut()).cast::<u8>();
-        if current_brk.is_null() || current_brk as usize == usize::MAX {
-            return;
-        }
-
-        let Some(new_brk_addr) = (current_brk as usize).checked_add(INITIAL_HEAP_SIZE) else {
-            return;
-        };
-        let new_brk = new_brk_addr as *mut c_void;
-        let result = sys_brk(new_brk).cast::<u8>();
-        if result != new_brk.cast::<u8>() {
-            return;
-        }
-
-        let first_chunk = unsafe { current_brk.add(HEAP_EDGE_PAD) };
-        let top_size = INITIAL_HEAP_SIZE.saturating_sub(HEAP_EDGE_PAD * 2);
-        if top_size < chunk::MIN_CHUNK_SIZE || u32::try_from(top_size).is_err() {
-            return;
-        }
-
-        self.heap_start = current_brk;
-        self.heap_end = result;
-        self.top = first_chunk;
-        self.top_size = top_size;
-
-        unsafe {
-            chunk::set_prev_size(self.top, 0);
-            chunk::set_size_flags(self.top, self.top_size, chunk::PREV_IN_USE);
-            chunk::write_footer(self.top);
-        }
-    }
-
-    fn ensure_top_capacity(&mut self, request_size: usize) -> bool {
-        if self.top_size >= request_size.saturating_add(chunk::MIN_CHUNK_SIZE) {
-            return true;
-        }
-
-        let needed = request_size
-            .saturating_add(chunk::MIN_CHUNK_SIZE)
-            .saturating_sub(self.top_size);
-        self.extend_heap(needed)
-    }
-
-    fn extend_heap(&mut self, min_extra: usize) -> bool {
-        if self.top.is_null() {
-            self.init();
-        }
-        if self.top.is_null() {
-            return false;
-        }
-
-        let extend_size = align_up_usize(min_extra.max(EXTEND_MIN_SIZE), chunk::ALIGNMENT);
-        if extend_size == 0 {
-            return false;
-        }
-
-        let Some(new_brk_addr) = (self.heap_end as usize).checked_add(extend_size) else {
-            return false;
-        };
-        let new_brk = new_brk_addr as *mut c_void;
-        let result = sys_brk(new_brk).cast::<u8>();
-        if result != new_brk.cast::<u8>() {
-            return false;
-        }
-
-        let Some(new_top_size) = self.top_size.checked_add(extend_size) else {
-            return false;
-        };
-        if u32::try_from(new_top_size).is_err() {
-            return false;
-        }
-
-        self.heap_end = result;
-        self.top_size = new_top_size;
-        unsafe {
-            let flags = chunk::flags(self.top) & chunk::PREV_IN_USE;
-            chunk::set_size_flags(self.top, self.top_size, flags);
-            chunk::write_footer(self.top);
-        }
-        true
-    }
-
-    fn try_shrink_heap(&mut self) {
-        if self.top_size <= SHRINK_THRESHOLD || self.top.is_null() {
-            return;
-        }
-        let release = (self.top_size - MIN_WILDERNESS) & !(PAGE_SIZE - 1);
-        if release < PAGE_SIZE {
-            return;
-        }
-        let new_end = unsafe { self.top.add(self.top_size - release) };
-        let result = sys_brk(new_end.cast::<c_void>()).cast::<u8>();
-        if result == new_end {
-            self.heap_end = new_end;
-            self.top_size -= release;
-            let flags = unsafe { chunk::flags(self.top) } & chunk::PREV_IN_USE;
-            unsafe {
-                chunk::set_size_flags(self.top, self.top_size, flags);
-                chunk::write_footer(self.top);
+    fn arena_alloc(&mut self, request_size: usize) -> *mut c_void {
+        if let Some(bin_idx) = bins::size_to_small_bin(request_size)
+            && !self.bins.is_empty(bin_idx)
+        {
+            let chunk_ptr = unsafe { self.bins.pop_front(bin_idx) };
+            if !chunk_ptr.is_null() {
+                return unsafe { self.allocate_from_chunk(chunk_ptr, request_size) };
             }
         }
+
+        let unsorted_match = unsafe { self.drain_unsorted(request_size) };
+        if !unsorted_match.is_null() {
+            return unsorted_match;
+        }
+
+        if let Some(bin_idx) = bins::size_to_small_bin(request_size)
+            && let Some(found_idx) = self.bins.first_nonempty_from(bin_idx)
+            && found_idx < SMALL_BIN_COUNT
+        {
+            let chunk_ptr = unsafe { self.bins.pop_front(found_idx) };
+            if !chunk_ptr.is_null() {
+                return unsafe { self.allocate_from_chunk(chunk_ptr, request_size) };
+            }
+        }
+
+        let large_fit = unsafe { self.find_large_fit(request_size) };
+        if !large_fit.is_null() {
+            return unsafe { self.allocate_from_chunk(large_fit, request_size) };
+        }
+
+        let fresh = self.allocate_segment(request_size);
+        if fresh.is_null() {
+            return ptr::null_mut();
+        }
+        unsafe { self.allocate_from_chunk(fresh, request_size) }
     }
 
-    fn alloc_mmap(&mut self, request_size: usize) -> *mut c_void {
-        self.alloc_mmap_aligned(request_size, chunk::ALIGNMENT)
-            .cast::<c_void>()
+    /// Map a fresh arena segment sized to serve `request_size`, format
+    /// it as one spanning free chunk guarded by the end fence, and
+    /// record it. Returns the spanning chunk (not yet binned) or null.
+    ///
+    /// Segments grow geometrically (at least half the existing arena),
+    /// so the fixed table cannot fill before the address space does.
+    fn allocate_segment(&mut self, request_size: usize) -> ChunkPtr {
+        if self.segment_count >= MAX_SEGMENTS {
+            return ptr::null_mut();
+        }
+
+        let Some(needed) = request_size.checked_add(SEGMENT_OVERHEAD) else {
+            return ptr::null_mut();
+        };
+        let arena_total: usize = self.segments[..self.segment_count]
+            .iter()
+            .map(|s| s.len)
+            .sum();
+        let target = needed
+            .max(SEGMENT_MIN_LEN)
+            .max(arena_total / 2)
+            .min(SEGMENT_MAX_LEN)
+            .max(needed);
+        let len = align_up_usize(target, PAGE_SIZE);
+        if len < needed {
+            return ptr::null_mut();
+        }
+
+        let seg = Segment {
+            base: Self::mmap_anon(len),
+            len,
+        };
+        if seg.base.is_null() {
+            return ptr::null_mut();
+        }
+
+        let first = seg.first_chunk();
+        let chunk_size = seg.spanning_chunk_size();
+        if !Self::is_valid_chunk_size(chunk_size) || u32::try_from(chunk_size).is_err() {
+            Self::munmap(seg.base, seg.len);
+            return ptr::null_mut();
+        }
+
+        unsafe {
+            chunk::set_prev_size(first, 0);
+            chunk::set_size_flags(first, chunk_size, chunk::PREV_IN_USE);
+            chunk::write_footer(first);
+            let fence = seg.fence();
+            chunk::set_prev_size(fence, chunk_size);
+            chunk::set_size_flags(fence, 0, 0);
+        }
+
+        self.segments[self.segment_count] = seg;
+        self.segment_count += 1;
+        first
     }
 
-    fn alloc_mmap_aligned(&mut self, request_size: usize, alignment: usize) -> *mut u8 {
+    #[inline]
+    fn containing_segment(&self, chunk_ptr: ChunkPtr) -> Option<usize> {
+        (0..self.segment_count).find(|&i| self.segments[i].contains_chunk(chunk_ptr))
+    }
+
+    /// A spanning free chunk releases its whole segment back to the
+    /// kernel, except the last default-sized segment, which stays
+    /// resident as the warm arena so a free/alloc cycle does not
+    /// thrash mmap/munmap.
+    fn should_release_segment(&self, idx: usize) -> bool {
+        self.segment_count > 1 || self.segments[idx].len > SEGMENT_MIN_LEN
+    }
+
+    fn remove_segment(&mut self, idx: usize) {
+        self.segment_count -= 1;
+        self.segments[idx] = self.segments[self.segment_count];
+        self.segments[self.segment_count] = Segment::EMPTY;
+    }
+
+    // ── Direct (whole-mapping) allocation ────────────────────────────────
+
+    fn alloc_direct(&mut self, request_size: usize, alignment: usize) -> *mut u8 {
         let Some(len_request) = request_size
             .checked_add(alignment)
             .and_then(|value| value.checked_add(MMAP_SUFFIX_PAD))
@@ -422,61 +445,98 @@ impl DlMalloc {
             return ptr::null_mut();
         }
 
-        let ret = unsafe {
-            syscall6(
-                SYSCALL_MMAP,
-                0,
-                mapping_len as u64,
-                PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS,
-                (-1i64) as u64,
-                0,
-            )
+        let base = Self::mmap_anon(mapping_len);
+        if base.is_null() {
+            return ptr::null_mut();
+        }
+
+        let aligned_data =
+            align_up_usize(unsafe { base.add(chunk::HEADER_SIZE) } as usize, alignment);
+        let chunk_ptr = (aligned_data - chunk::HEADER_SIZE) as ChunkPtr;
+        let offset = (chunk_ptr as usize).saturating_sub(base as usize);
+        let chunk_size = mapping_len
+            .saturating_sub(offset)
+            .saturating_sub(MMAP_SUFFIX_PAD);
+        if offset < chunk::HEADER_SIZE
+            || chunk_size < request_size
+            || !Self::is_valid_chunk_size(chunk_size)
+            || u32::try_from(offset).is_err()
+            || u32::try_from(chunk_size).is_err()
+        {
+            Self::munmap(base, mapping_len);
+            return ptr::null_mut();
+        }
+
+        let node = self.alloc_registry_node();
+        if node.is_null() {
+            Self::munmap(base, mapping_len);
+            return ptr::null_mut();
+        }
+
+        unsafe {
+            chunk::set_prev_size(chunk_ptr, offset);
+            chunk::set_size_flags(
+                chunk_ptr,
+                chunk_size,
+                chunk::PREV_IN_USE | chunk::MMAP_CHUNK,
+            );
+            node.write(DirectRegion {
+                base,
+                len: mapping_len,
+                chunk: chunk_ptr,
+                next: self.direct_head,
+            });
+        }
+        self.direct_head = node;
+
+        aligned_data as *mut u8
+    }
+
+    fn alloc_registry_node(&mut self) -> *mut DirectRegion {
+        let Some(request_size) = Self::request_size(size_of::<DirectRegion>()) else {
+            return ptr::null_mut();
         };
+        self.arena_alloc(request_size).cast::<DirectRegion>()
+    }
 
-        match crate::demux(ret) {
-            Ok(addr) => {
-                let base = addr as *mut u8;
-                let aligned_data =
-                    align_up_usize(unsafe { base.add(chunk::HEADER_SIZE) } as usize, alignment);
-                let chunk_ptr = (aligned_data - chunk::HEADER_SIZE) as ChunkPtr;
-                let offset = (chunk_ptr as usize).saturating_sub(base as usize);
-                let chunk_size = mapping_len
-                    .saturating_sub(offset)
-                    .saturating_sub(MMAP_SUFFIX_PAD);
-                if offset < HEAP_EDGE_PAD
-                    || chunk_size < request_size
-                    || chunk_size < chunk::MIN_CHUNK_SIZE
-                    || chunk_size & (chunk::ALIGNMENT - 1) != 0
-                    || u32::try_from(offset).is_err()
-                    || u32::try_from(chunk_size).is_err()
-                {
-                    let _ = unsafe { syscall2(SYSCALL_MUNMAP, base as u64, mapping_len as u64) };
-                    return ptr::null_mut();
-                }
-
-                unsafe {
-                    chunk::set_prev_size(chunk_ptr, offset);
-                    chunk::set_size_flags(
-                        chunk_ptr,
-                        chunk_size,
-                        chunk::PREV_IN_USE | chunk::MMAP_CHUNK,
-                    );
-                }
-                aligned_data as *mut u8
+    fn find_direct(&self, chunk_ptr: ChunkPtr) -> *mut DirectRegion {
+        let mut cur = self.direct_head;
+        while !cur.is_null() {
+            if unsafe { (*cur).chunk } == chunk_ptr {
+                return cur;
             }
-            Err(_) => ptr::null_mut(),
+            cur = unsafe { (*cur).next };
+        }
+        ptr::null_mut()
+    }
+
+    /// Unmap the direct mapping registered for `chunk_ptr` and free its
+    /// registry node. The registry is the source of truth: a pointer
+    /// without a node is ignored, so a forged or corrupted header can
+    /// never aim `munmap` at an unrelated mapping.
+    unsafe fn release_direct(&mut self, chunk_ptr: ChunkPtr) -> bool {
+        let mut link: *mut *mut DirectRegion = &mut self.direct_head;
+        loop {
+            let cur = unsafe { *link };
+            if cur.is_null() {
+                return false;
+            }
+            if unsafe { (*cur).chunk } == chunk_ptr {
+                let DirectRegion {
+                    base, len, next, ..
+                } = unsafe { cur.read() };
+                unsafe {
+                    *link = next;
+                    self.release_chunk(chunk::from_data_ptr(cur.cast::<u8>()));
+                }
+                Self::munmap(base, len);
+                return true;
+            }
+            link = unsafe { &mut (*cur).next };
         }
     }
 
-    unsafe fn dealloc_mmap(&mut self, chunk_ptr: ChunkPtr) {
-        let offset = unsafe { chunk::prev_size(chunk_ptr) };
-        let total = unsafe { chunk::size(chunk_ptr) }
-            .saturating_add(offset)
-            .saturating_add(MMAP_SUFFIX_PAD);
-        let base = unsafe { chunk_ptr.sub(offset) };
-        let _ = unsafe { syscall2(SYSCALL_MUNMAP, base as u64, total as u64) };
-    }
+    // ── Chunk carving and recycling ──────────────────────────────────────
 
     unsafe fn allocate_from_chunk(
         &mut self,
@@ -505,27 +565,6 @@ impl DlMalloc {
         }
 
         unsafe { chunk::data_ptr(chunk_ptr).cast::<c_void>() }
-    }
-
-    unsafe fn allocate_from_top(&mut self, request_size: usize) -> *mut c_void {
-        let old_top = self.top;
-        let old_top_size = self.top_size;
-        let prev_flags = unsafe { chunk::flags(old_top) } & chunk::PREV_IN_USE;
-
-        let new_top = unsafe { old_top.add(request_size) };
-        let new_top_size = old_top_size.saturating_sub(request_size);
-        debug_assert!(new_top_size >= chunk::MIN_CHUNK_SIZE);
-
-        self.top = new_top;
-        self.top_size = new_top_size;
-
-        unsafe {
-            chunk::set_size_flags(old_top, request_size, prev_flags);
-            chunk::set_prev_size(new_top, request_size);
-            chunk::set_size_flags(new_top, new_top_size, chunk::PREV_IN_USE);
-            chunk::write_footer(new_top);
-            chunk::data_ptr(old_top).cast::<c_void>()
-        }
     }
 
     unsafe fn drain_unsorted(&mut self, request_size: usize) -> *mut c_void {
@@ -597,7 +636,7 @@ impl DlMalloc {
         let mut merged_size = unsafe { chunk::size(chunk_ptr) };
 
         let next = unsafe { chunk::next_physical(merged) };
-        if next != self.top && unsafe { self.is_free_chunk(next) } {
+        if unsafe { self.is_free_chunk(next) } {
             unsafe {
                 self.bins.remove(next);
             }
@@ -606,11 +645,18 @@ impl DlMalloc {
 
         if !unsafe { chunk::is_prev_in_use(merged) } {
             let prev = unsafe { chunk::prev_physical(merged) };
-            unsafe {
-                self.bins.remove(prev);
+            // Merge backward only if prev's own size agrees with the
+            // prev_size that led here — a corrupted neighbor header is
+            // leaked, never merged.
+            if self.containing_segment(prev).is_some()
+                && unsafe { chunk::next_physical(prev) } == merged
+            {
+                unsafe {
+                    self.bins.remove(prev);
+                }
+                merged_size = merged_size.saturating_add(unsafe { chunk::size(prev) });
+                merged = prev;
             }
-            merged_size = merged_size.saturating_add(unsafe { chunk::size(prev) });
-            merged = prev;
         }
 
         let merged_flags = unsafe { chunk::flags(merged) } & chunk::PREV_IN_USE;
@@ -618,15 +664,16 @@ impl DlMalloc {
             chunk::set_size_flags(merged, merged_size, merged_flags);
         }
 
-        if unsafe { chunk::next_physical(merged) } == self.top {
-            self.top = merged;
-            self.top_size = self.top_size.saturating_add(merged_size);
-            unsafe {
-                chunk::set_size_flags(self.top, self.top_size, merged_flags);
-                chunk::write_footer(self.top);
+        if let Some(idx) = self.containing_segment(merged) {
+            let seg = self.segments[idx];
+            if merged == seg.first_chunk()
+                && merged_size == seg.spanning_chunk_size()
+                && self.should_release_segment(idx)
+            {
+                self.remove_segment(idx);
+                Self::munmap(seg.base, seg.len);
+                return;
             }
-            self.try_shrink_heap();
-            return;
         }
 
         unsafe {
@@ -647,29 +694,6 @@ impl DlMalloc {
             chunk::set_prev_size(tail, request_size);
             chunk::set_size_flags(tail, tail_size, chunk::PREV_IN_USE);
             self.release_chunk(tail);
-        }
-    }
-
-    unsafe fn grow_into_top(&mut self, chunk_ptr: ChunkPtr, request_size: usize) -> *mut c_void {
-        let old_size = unsafe { chunk::size(chunk_ptr) };
-        let total = old_size.saturating_add(self.top_size);
-        if total < request_size.saturating_add(chunk::MIN_CHUNK_SIZE) {
-            return ptr::null_mut();
-        }
-
-        let new_top = unsafe { chunk_ptr.add(request_size) };
-        let new_top_size = total.saturating_sub(request_size);
-        let prev_flags = unsafe { chunk::flags(chunk_ptr) } & chunk::PREV_IN_USE;
-
-        self.top = new_top;
-        self.top_size = new_top_size;
-
-        unsafe {
-            chunk::set_size_flags(chunk_ptr, request_size, prev_flags);
-            chunk::set_prev_size(new_top, request_size);
-            chunk::set_size_flags(new_top, new_top_size, chunk::PREV_IN_USE);
-            chunk::write_footer(new_top);
-            chunk::data_ptr(chunk_ptr).cast::<c_void>()
         }
     }
 
@@ -700,12 +724,11 @@ impl DlMalloc {
         unsafe { chunk::data_ptr(chunk_ptr).cast::<c_void>() }
     }
 
+    /// Record `chunk_ptr`'s size and in-use state in its physical
+    /// successor's header. The successor is always writable: it is
+    /// either a real chunk header or the segment fence.
     unsafe fn set_successor_state(&self, chunk_ptr: ChunkPtr, prev_in_use: bool) {
         let next = unsafe { chunk::next_physical(chunk_ptr) };
-        if (next as usize) > (self.top as usize) {
-            return;
-        }
-
         let size = unsafe { chunk::size(chunk_ptr) };
         unsafe {
             chunk::set_prev_size(next, size);
@@ -713,25 +736,13 @@ impl DlMalloc {
         }
     }
 
+    /// A chunk is free iff its successor's PREV_IN_USE bit is clear.
+    /// Fences (size 0) and out-of-grid pointers fail the segment and
+    /// size checks, so merging never crosses a segment boundary.
     unsafe fn is_free_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
-        if chunk_ptr.is_null() {
+        let Some(idx) = self.containing_segment(chunk_ptr) else {
             return false;
-        }
-        if chunk_ptr == self.top {
-            return true;
-        }
-
-        let next = unsafe { chunk::next_physical(chunk_ptr) };
-        if (next as usize) > (self.top as usize) {
-            return false;
-        }
-        !unsafe { chunk::is_prev_in_use(next) }
-    }
-
-    unsafe fn is_allocated_heap_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
-        if !unsafe { self.chunk_in_heap(chunk_ptr) } {
-            return false;
-        }
+        };
 
         let size = unsafe { chunk::size(chunk_ptr) };
         if !Self::is_valid_chunk_size(size) {
@@ -739,32 +750,51 @@ impl DlMalloc {
         }
 
         let next = unsafe { chunk::next_physical(chunk_ptr) };
-        if (next as usize) > (self.top as usize) {
+        if (next as usize) > (self.segments[idx].fence() as usize) {
+            return false;
+        }
+        !unsafe { chunk::is_prev_in_use(next) }
+    }
+
+    unsafe fn is_allocated_heap_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
+        let Some(idx) = self.containing_segment(chunk_ptr) else {
+            return false;
+        };
+
+        let size = unsafe { chunk::size(chunk_ptr) };
+        if !Self::is_valid_chunk_size(size) {
             return false;
         }
 
+        let next = unsafe { chunk::next_physical(chunk_ptr) };
+        if (next as usize) > (self.segments[idx].fence() as usize) {
+            return false;
+        }
         unsafe { chunk::is_prev_in_use(next) }
     }
 
-    unsafe fn is_valid_mmap_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
-        if chunk_ptr.is_null() || !unsafe { chunk::is_mmap(chunk_ptr) } {
-            return false;
-        }
+    // ── Plumbing ─────────────────────────────────────────────────────────
 
-        let size = unsafe { chunk::size(chunk_ptr) };
-        let offset = unsafe { chunk::prev_size(chunk_ptr) };
-        Self::is_valid_chunk_size(size)
-            && offset >= HEAP_EDGE_PAD
-            && (size.saturating_add(offset).saturating_add(MMAP_SUFFIX_PAD) & (PAGE_SIZE - 1) == 0)
+    fn mmap_anon(len: usize) -> *mut u8 {
+        let ret = unsafe {
+            syscall6(
+                SYSCALL_MMAP,
+                0,
+                len as u64,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                (-1i64) as u64,
+                0,
+            )
+        };
+        match crate::demux(ret) {
+            Ok(addr) => addr as *mut u8,
+            Err(_) => ptr::null_mut(),
+        }
     }
 
-    unsafe fn chunk_in_heap(&self, chunk_ptr: ChunkPtr) -> bool {
-        if self.top.is_null() {
-            return false;
-        }
-        let heap_base = unsafe { self.heap_start.add(HEAP_EDGE_PAD) } as usize;
-        let chunk_addr = chunk_ptr as usize;
-        chunk_addr >= heap_base && chunk_addr < self.top as usize
+    fn munmap(base: *mut u8, len: usize) {
+        let _ = unsafe { syscall2(SYSCALL_MUNMAP, base as u64, len as u64) };
     }
 
     fn request_size(size: usize) -> Option<usize> {
@@ -787,20 +817,30 @@ impl DlMalloc {
         size >= chunk::MIN_CHUNK_SIZE && size & (chunk::ALIGNMENT - 1) == 0
     }
 
-    pub fn heap_size(&self) -> usize {
-        if self.heap_start.is_null() {
-            0
-        } else {
-            (self.heap_end as usize).saturating_sub(self.heap_start as usize)
+    // ── Diagnostics ──────────────────────────────────────────────────────
+
+    /// Total address space held by arena segments.
+    pub fn arena_size(&self) -> usize {
+        self.segments[..self.segment_count]
+            .iter()
+            .map(|s| s.len)
+            .sum()
+    }
+
+    /// Size of the largest binned free chunk.
+    pub fn largest_free_chunk(&self) -> usize {
+        unsafe { self.bins.largest_chunk_size() }
+    }
+
+    /// Number of live direct (whole-mapping) allocations.
+    pub fn direct_region_count(&self) -> usize {
+        let mut count = 0;
+        let mut cur = self.direct_head;
+        while !cur.is_null() {
+            count += 1;
+            cur = unsafe { (*cur).next };
         }
-    }
-
-    pub fn wilderness_size(&self) -> usize {
-        self.top_size
-    }
-
-    pub fn count_mmap_chunks(&self) -> usize {
-        unsafe { self.bins.count_mmap_chunks() }
+        count
     }
 }
 

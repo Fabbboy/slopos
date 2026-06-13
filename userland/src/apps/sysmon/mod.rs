@@ -415,16 +415,16 @@ impl SysmonApp {
         children.push(label("HEAP"));
         let stats = heap_stats();
         children.push(kv_row(
-            "Heap size",
-            &format_bytes_mib(stats.heap_size as u64),
+            "Arena size",
+            &format_bytes_mib(stats.arena_size as u64),
         ));
         children.push(kv_row(
-            "Wilderness",
-            &format_bytes_mib(stats.wilderness as u64),
+            "Largest free",
+            &format_bytes_mib(stats.largest_free as u64),
         ));
         children.push(kv_row(
-            "Mmap allocs",
-            &format_number(stats.mmap_count as u64),
+            "Direct allocs",
+            &format_number(stats.direct_count as u64),
         ));
         children.push(Node::Divider);
 
