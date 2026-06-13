@@ -696,6 +696,36 @@ impl<K, U> TaskInner<K, U> {
         matches!(self.status(), TaskStatus::Zombie | TaskStatus::Terminated)
     }
 
+    /// Reset the per-run "runtime" bookkeeping on a slot being (re)activated:
+    /// clears timing, exit/fault disposition, fate tokens, scheduler
+    /// placement, the intrusive scheduler links, and the refcount, and stamps
+    /// a fresh creation timestamp.
+    ///
+    /// Drives both the task-create path (after a fresh slot is reserved) and
+    /// the fork path (after the child slot is bulk-copied from its parent), so
+    /// a recycled or cloned slot always starts from neutral runtime state. The
+    /// owning crate holds exclusive `&mut self` access at every call site.
+    pub fn reset_runtime_state(&mut self) {
+        self.time_slice_remaining = self.time_slice;
+        self.total_runtime = 0;
+        self.creation_time = crate::kdiag_timestamp();
+        self.yield_count = 0;
+        self.last_run_timestamp = 0;
+        self.exit_reason = TaskExitReason::None;
+        self.fault_reason = TaskFaultReason::None;
+        self.exit_code = 0;
+        self.fate_token = 0;
+        self.fate_value = 0;
+        self.fate_pending = 0;
+        self.on_cpu.store(false, Ordering::Release);
+        self.ready_link.reset();
+        self.zombie_link.reset();
+        self.remote_inbox_link.reset();
+        self.sched_placement
+            .store(SchedPlacement::None.as_u8(), Ordering::Release);
+        self.refcnt.store(0, Ordering::Release);
+    }
+
     /// Bulk-copy task state using `ptr::copy_nonoverlapping`, then reset
     /// linkage, refcount, and owned resources.
     ///

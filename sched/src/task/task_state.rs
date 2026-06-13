@@ -1,6 +1,6 @@
 use core::ffi::c_int;
 
-use super::task_accessors::{task_borrow, task_status};
+use super::task_accessors::task_borrow;
 use super::task_table::task_find_by_id;
 use super::{BlockReason, Task, TaskStatus};
 
@@ -80,54 +80,5 @@ pub fn task_set_state_from_with_reason(
     match new_status {
         TaskStatus::Blocked => transition_to_c_int(task_ref.block_from(expected, reason)),
         _ => transition_to_c_int(task_ref.try_transition_from(expected, new_status)),
-    }
-}
-
-pub fn task_get_state(task: *const Task) -> TaskStatus {
-    task_status(task).unwrap_or(TaskStatus::Invalid)
-}
-
-pub fn task_is_ready(task: *const Task) -> bool {
-    task_get_state(task) == TaskStatus::Ready
-}
-
-pub fn task_is_running(task: *const Task) -> bool {
-    task_get_state(task) == TaskStatus::Running
-}
-
-pub fn task_is_blocked(task: *const Task) -> bool {
-    task_get_state(task) == TaskStatus::Blocked
-}
-
-pub fn task_is_terminated(task: *const Task) -> bool {
-    task_get_state(task) == TaskStatus::Terminated
-}
-
-pub fn task_is_zombie(task: *const Task) -> bool {
-    task_get_state(task) == TaskStatus::Zombie
-}
-
-/// `Zombie` or `Terminated` — task has exited and is no longer schedulable.
-/// Use this anywhere a "task has stopped running" check is needed; reserve
-/// `task_is_terminated` for the strict, reapable variant.
-pub fn task_is_exited(task: *const Task) -> bool {
-    matches!(
-        task_get_state(task),
-        TaskStatus::Zombie | TaskStatus::Terminated
-    )
-}
-
-pub fn task_is_invalid(task: *const Task) -> bool {
-    task_get_state(task) == TaskStatus::Invalid
-}
-
-pub fn task_state_to_string(status: TaskStatus) -> &'static str {
-    match status {
-        TaskStatus::Invalid => "invalid",
-        TaskStatus::Ready => "ready",
-        TaskStatus::Running => "running",
-        TaskStatus::Blocked => "blocked",
-        TaskStatus::Terminated => "terminated",
-        TaskStatus::Zombie => "zombie",
     }
 }

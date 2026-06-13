@@ -13,7 +13,7 @@ use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 
 use super::scheduler::save_task_context_from_interrupt_frame;
 use super::task::{
-    MAX_TASKS, task_create, task_find_by_id, task_get_info, task_get_state, task_set_state,
+    MAX_TASKS, task_create, task_find_by_id, task_get_info, task_set_state, task_status,
     task_terminate,
 };
 use super::task_struct::TaskContext;
@@ -89,11 +89,11 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
     );
 
     task_set_state(task_id, TaskStatus::Ready);
-    assert_eq_test!(task_get_state(task_ptr), TaskStatus::Ready);
+    assert_eq_test!(task_status(task_ptr), Some(TaskStatus::Ready));
     task_set_state(task_id, TaskStatus::Running);
-    assert_eq_test!(task_get_state(task_ptr), TaskStatus::Running);
+    assert_eq_test!(task_status(task_ptr), Some(TaskStatus::Running));
     task_set_state(task_id, TaskStatus::Blocked);
-    assert_eq_test!(task_get_state(task_ptr), TaskStatus::Blocked);
+    assert_eq_test!(task_status(task_ptr), Some(TaskStatus::Blocked));
 
     task_terminate(task_id);
     TestResult::Pass

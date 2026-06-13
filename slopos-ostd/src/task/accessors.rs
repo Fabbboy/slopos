@@ -45,59 +45,224 @@ pub fn signal_pending_event(task_id: u32) -> KernelEvent {
     }
 }
 
-/// Read the task's stable `task_id`.
-#[inline]
-pub fn task_id_of<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u32.
-    Some(unsafe { (*task).task_id })
+// ===========================================================================
+// Generated accessors.
+//
+// Most pointer accessors share one of a handful of byte-identical shapes:
+// null-check then a single scalar field read/write, or null-check then a
+// single `&self` method call. They are generated from the tables that follow
+// so the unsafe deref pattern is written — and audited — exactly once per
+// shape rather than once per field. Accessors with non-trivial bodies
+// (atomics with explicit ordering, intrusive-link ops, register marshalling,
+// reborrows, signal logic) stay hand-written further down this file.
+// ===========================================================================
+
+/// Generate `Option<T>` getters that null-check then read one naturally
+/// aligned scalar field. `None` on a null pointer.
+macro_rules! task_scalar_getters {
+    ($( $(#[$meta:meta])* $name:ident -> $ty:ty = $field:ident ),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[inline]
+        pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<$ty> {
+            if task.is_null() {
+                return None;
+            }
+            // SAFETY: caller pre-validated the pointer; the field is a
+            // naturally-aligned scalar, so the read is sound and tear-free.
+            Some(unsafe { (*task).$field })
+        }
+    )+};
 }
 
-/// Set the task's `parent_task_id` field. The pointer-validity check
-/// and the `task_id`-to-pointer lookup live on the kernel-side shim
-/// (which is the only caller of this writer); we just expose the
-/// naturally-aligned u32 store here so the unsafe deref lives inside
-/// OSTD.
-#[inline]
-pub fn task_set_parent_task_id<K, U>(task: *mut TaskInner<K, U>, parent_task_id: u32) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: lock-free write of a naturally-aligned u32; consumers
-    // tolerate stale-vs-fresh reads of this field.
-    unsafe { (*task).parent_task_id = parent_task_id };
+/// Generate setters that null-check then write one naturally aligned scalar
+/// field. No-op on a null pointer.
+macro_rules! task_scalar_setters {
+    ($( $(#[$meta:meta])* $name:ident = $field:ident : $ty:ty ),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[inline]
+        pub fn $name<K, U>(task: *mut TaskInner<K, U>, value: $ty) {
+            if task.is_null() {
+                return;
+            }
+            // SAFETY: caller pre-validated the pointer; the field is a
+            // naturally-aligned scalar single-writer store.
+            unsafe { (*task).$field = value };
+        }
+    )+};
 }
 
-/// Read the task's `process_id`.
-#[inline]
-pub fn task_process_id<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u32.
-    Some(unsafe { (*task).process_id })
+/// Generate `Option<T>` getters that null-check then call a `&self` method
+/// (typically an internally-atomic load). `None` on a null pointer.
+macro_rules! task_method_getters {
+    ($( $(#[$meta:meta])* $name:ident -> $ty:ty = $method:ident ),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[inline]
+        pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<$ty> {
+            if task.is_null() {
+                return None;
+            }
+            // SAFETY: caller pre-validated the pointer; the method takes
+            // `&self` and performs any atomics internally.
+            Some(unsafe { (*task).$method() })
+        }
+    )+};
 }
 
-/// Read the task's `flags` bitfield.
-#[inline]
-pub fn task_flags<K, U>(task: *const TaskInner<K, U>) -> Option<u16> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u16.
-    Some(unsafe { (*task).flags })
+/// Generate `Option<u64>` getters that read a `TaskContext` register field
+/// with `read_unaligned` (the saved context is not guaranteed aligned).
+macro_rules! task_context_getters {
+    ($( $(#[$meta:meta])* $name:ident = $field:ident ),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[inline]
+        pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
+            if task.is_null() {
+                return None;
+            }
+            // SAFETY: caller pre-validated the pointer; addr_of! yields a
+            // valid pointer into the in-Task context and read_unaligned is
+            // sound regardless of that field's alignment.
+            Some(unsafe {
+                core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.$field))
+            })
+        }
+    )+};
 }
 
-/// Read the task's user-mode `entry_point` virtual address.
+/// Generate `bool` state predicates that null-check (returning `false`) then
+/// call a `&self` predicate method on the task.
+macro_rules! task_state_predicates {
+    ($( $(#[$meta:meta])* $name:ident = $method:ident ),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[inline]
+        pub fn $name<K, U>(task: *const TaskInner<K, U>) -> bool {
+            if task.is_null() {
+                return false;
+            }
+            // SAFETY: caller pre-validated the pointer; the predicate takes
+            // `&self` and reads the status atomically.
+            unsafe { (*task).$method() }
+        }
+    )+};
+}
+
+task_scalar_getters! {
+    /// Read the task's stable `task_id`.
+    task_id_of -> u32 = task_id,
+    /// Read the task's `process_id`.
+    task_process_id -> u32 = process_id,
+    /// Read the task's `flags` bitfield.
+    task_flags -> u16 = flags,
+    /// Read the task's user-mode `entry_point` virtual address.
+    task_entry_point -> u64 = entry_point,
+    /// Read `task->cpu_affinity`.
+    task_cpu_affinity -> u32 = cpu_affinity,
+    /// Read `task->pgid` (process-group id).
+    task_pgid -> u32 = pgid,
+    /// Read `task->time_slice`.
+    task_time_slice -> u64 = time_slice,
+    /// Read `task->time_slice_remaining`.
+    task_time_slice_remaining -> u64 = time_slice_remaining,
+    /// Read `task->priority`. The field is a `Copy` enum stored in a single
+    /// naturally-aligned byte slot.
+    task_priority -> TaskPriority = priority,
+    /// Read `task->sid` (session id).
+    task_sid -> u32 = sid,
+    /// Read `task->kernel_stack_top` directly (the dispatcher hot path needs
+    /// only `top` for TSS RSP0 programming).
+    task_kernel_stack_top -> u64 = kernel_stack_top,
+    /// Read `task->fs_base`.
+    task_fs_base -> u64 = fs_base,
+    /// Read `task->slot_index`.
+    task_slot_index -> u32 = slot_index,
+    /// Read `task->last_cpu`.
+    task_last_cpu -> u8 = last_cpu,
+    /// Read `task->tgid` (thread-group id).
+    task_tgid -> u32 = tgid,
+    /// Read `task->parent_task_id`.
+    task_parent_task_id -> u32 = parent_task_id,
+    /// Read `task->clear_child_tid` (futex-on-exit user-mode address).
+    task_clear_child_tid -> u64 = clear_child_tid,
+    /// Read `task->stack_pointer`.
+    task_stack_pointer -> u64 = stack_pointer,
+    /// Read `task->stack_base`.
+    task_stack_base -> u64 = stack_base,
+    /// Read `task->stack_size`.
+    task_stack_size -> u64 = stack_size,
+    /// Plain (non-volatile) read of `task->last_run_timestamp`. Used by
+    /// callers that don't need ordering across the context-switch boundary.
+    task_last_run_timestamp -> u64 = last_run_timestamp,
+    /// Read `task->signal_blocked` (`SigSet = u64`).
+    task_signal_blocked -> slopos_abi::signal::SigSet = signal_blocked,
+}
+
+task_scalar_setters! {
+    /// Set the task's `parent_task_id` field. The pointer-validity check and
+    /// `task_id`-to-pointer lookup live on the kernel-side shim (the only
+    /// caller of this writer); this just exposes the store inside OSTD.
+    task_set_parent_task_id = parent_task_id: u32,
+    /// Stamp `task->entry_point` when re-targeting a task at a freshly-loaded
+    /// ELF entry (exec path).
+    task_set_entry_point = entry_point: u64,
+    /// Stamp `task->fs_base` (TLS thread pointer).
+    task_set_fs_base = fs_base: u64,
+    /// Stamp `task->cpu_affinity`.
+    task_set_cpu_affinity = cpu_affinity: u32,
+    /// Stamp `task->time_slice`.
+    task_set_time_slice = time_slice: u64,
+    /// Stamp `task->time_slice_remaining`.
+    task_set_time_slice_remaining = time_slice_remaining: u64,
+    /// Stamp `task->last_cpu` (set when the scheduler enqueues the task onto a
+    /// particular CPU's run queue or remote-wake inbox).
+    task_set_last_cpu = last_cpu: u8,
+    /// Stamp `task->clear_child_tid`.
+    task_set_clear_child_tid = clear_child_tid: u64,
+    /// Stamp `task->last_run_timestamp`.
+    task_set_last_run_timestamp = last_run_timestamp: u64,
+    /// Stamp `task->kernel_stack_top`. Used by tests that simulate a missing
+    /// kernel-stack-top error path.
+    task_set_kernel_stack_top = kernel_stack_top: u64,
+}
+
+task_method_getters! {
+    /// Read the task's atomic status (`Ready`, `Running`, `Blocked`, …).
+    task_status -> TaskStatus = status,
+    /// Read `task->refcnt`.
+    task_ref_count -> u32 = ref_count,
+    /// Read the task's current block reason via the `&self` method.
+    task_load_block_reason -> slopos_abi::task::BlockReason = load_block_reason,
+}
+
+task_context_getters! {
+    /// Read the task's saved CR3 from its `TaskContext`.
+    task_context_cr3 = cr3,
+    /// Read the task's saved instruction pointer from its `TaskContext`.
+    task_context_rip = rip,
+    /// Read the task's saved stack pointer from its `TaskContext`.
+    task_context_rsp = rsp,
+}
+
+task_state_predicates! {
+    /// True iff the task is in the `Ready` state (null pointer → `false`).
+    task_is_ready = is_ready,
+    /// True iff the task is in the `Running` state (null pointer → `false`).
+    task_is_running = is_running,
+    /// True iff the task is in the `Blocked` state (null pointer → `false`).
+    task_is_blocked = is_blocked,
+    /// True iff the task is in the `Terminated` state (null pointer → `false`).
+    task_is_terminated = is_terminated,
+    /// `Zombie` or `Terminated` — the task has exited and is no longer
+    /// schedulable. Use this anywhere a "task has stopped running" check is
+    /// needed; reserve `task_is_terminated` for the strict, reapable variant.
+    task_is_exited = is_exited,
+}
+
+/// True iff the task pointer is null **or** the task is in the `Invalid`
+/// state (an unallocated / fully-reset pool slot). Preserves the historical
+/// `task_get_state(...) == Invalid` semantics where a null pointer collapsed
+/// to `Invalid`.
 #[inline]
-pub fn task_entry_point<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u64.
-    Some(unsafe { (*task).entry_point })
+pub fn task_is_invalid<K, U>(task: *const TaskInner<K, U>) -> bool {
+    task_status(task).map_or(true, |s| s == TaskStatus::Invalid)
 }
 
 /// Read the task's kernel-stack `(base, top)` pair.
@@ -110,39 +275,6 @@ pub fn task_kernel_stack_bounds<K, U>(task: *const TaskInner<K, U>) -> Option<(u
     let base = unsafe { (*task).kernel_stack_base };
     let top = unsafe { (*task).kernel_stack_top };
     Some((base, top))
-}
-
-/// Read the task's saved CR3 from its `TaskContext`. Uses
-/// [`core::ptr::read_unaligned`] for parity with existing callers.
-#[inline]
-pub fn task_context_cr3<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; addr_of! produces a valid pointer
-    // to the cr3 field; read_unaligned is safe regardless of the
-    // surrounding context's alignment.
-    Some(unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.cr3)) })
-}
-
-/// Read the task's saved instruction pointer from its `TaskContext`.
-#[inline]
-pub fn task_context_rip<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; read_unaligned is safe.
-    Some(unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.rip)) })
-}
-
-/// Read the task's saved stack pointer from its `TaskContext`.
-#[inline]
-pub fn task_context_rsp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; read_unaligned is safe.
-    Some(unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.rsp)) })
 }
 
 /// Borrow the raw task-name byte array. The bytes are 0-padded; the
@@ -172,31 +304,6 @@ pub fn task_set_unsafe_stack_sp<K, U>(task: *mut TaskInner<K, U>, sp: u64) {
     // races on this field.
     unsafe {
         (*task).abi.unsafe_stack_sp = sp;
-    }
-}
-
-/// Stamp `task->entry_point` with `entry`. Used by the exec path
-/// when re-targeting an existing task at a freshly-loaded ELF entry.
-#[inline]
-pub fn task_set_entry_point<K, U>(task: *mut TaskInner<K, U>, entry: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).entry_point = entry;
-    }
-}
-
-/// Stamp `task->fs_base` with `fs_base` (TLS thread pointer).
-#[inline]
-pub fn task_set_fs_base<K, U>(task: *mut TaskInner<K, U>, fs_base: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).fs_base = fs_base;
     }
 }
 
@@ -241,38 +348,6 @@ pub fn task_user_ctx_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut
     // SAFETY: caller pre-validated; `user_ctx` is an in-Task field
     // whose pin-stability matches the rest of the Task struct.
     Some(unsafe { &mut (*task).user_ctx })
-}
-
-/// Read `task->cpu_affinity`.
-#[inline]
-pub fn task_cpu_affinity<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u32.
-    Some(unsafe { (*task).cpu_affinity })
-}
-
-/// Stamp `task->cpu_affinity`.
-#[inline]
-pub fn task_set_cpu_affinity<K, U>(task: *mut TaskInner<K, U>, mask: u32) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u32.
-    unsafe {
-        (*task).cpu_affinity = mask;
-    }
-}
-
-/// Read `task->pgid` (process-group id).
-#[inline]
-pub fn task_pgid<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u32.
-    Some(unsafe { (*task).pgid })
 }
 
 /// Reborrow `*const Task` as `&Task`. Used by callers that need a
@@ -324,54 +399,6 @@ pub fn task_record_user_fault_exit<K, U>(
     }
 }
 
-// Scheduler-hot-path accessors. Each absorbs one
-// `unsafe { (*task).<field> }` per-field access pattern formerly
-// scattered across `core/src/scheduler/{scheduler,per_cpu,task/*}.rs`.
-
-/// Read `task->time_slice`.
-#[inline]
-pub fn task_time_slice<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).time_slice })
-}
-
-/// Stamp `task->time_slice`.
-#[inline]
-pub fn task_set_time_slice<K, U>(task: *mut TaskInner<K, U>, slice: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).time_slice = slice;
-    }
-}
-
-/// Read `task->time_slice_remaining`.
-#[inline]
-pub fn task_time_slice_remaining<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).time_slice_remaining })
-}
-
-/// Stamp `task->time_slice_remaining`.
-#[inline]
-pub fn task_set_time_slice_remaining<K, U>(task: *mut TaskInner<K, U>, remaining: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).time_slice_remaining = remaining;
-    }
-}
-
 /// Bump `task->refcnt`. Returns the post-increment count, mirroring
 /// `Task::inc_ref`. Returns `None` for null pointers.
 #[inline]
@@ -397,17 +424,6 @@ pub fn task_dec_ref<K, U>(task: *mut TaskInner<K, U>) -> Option<bool> {
     Some(unsafe { (*task).dec_ref() })
 }
 
-/// Read `task->refcnt`.
-#[inline]
-pub fn task_ref_count<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `ref_count` takes `&self` and
-    // performs an atomic load internally.
-    Some(unsafe { (*task).ref_count() })
-}
-
 /// Reborrow `task->fpu_state` as `&mut FpuState`. The returned
 /// borrow's lifetime is bounded by the caller's borrow of `task`.
 #[inline]
@@ -418,54 +434,6 @@ pub fn task_fpu_state_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mu
     // SAFETY: caller pre-validated; `fpu_state` is an in-Task field
     // whose pin-stability matches the rest of the Task struct.
     Some(unsafe { &mut (*task).fpu_state })
-}
-
-/// Read `task->priority`. The field is a copy-`Copy` enum stored as
-/// a `u8` discriminant inside a one-byte slot; reading it through
-/// the pointer is naturally aligned and atomic on x86_64.
-#[inline]
-pub fn task_priority<K, U>(task: *const TaskInner<K, U>) -> Option<TaskPriority> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u8.
-    Some(unsafe { (*task).priority })
-}
-
-/// Stamp `task->last_cpu`. The field is updated by the scheduler
-/// when a task is enqueued onto a particular CPU's run queue or
-/// remote-wake inbox.
-#[inline]
-pub fn task_set_last_cpu<K, U>(task: *mut TaskInner<K, U>, cpu_id: u8) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is a single byte; the
-    // owning queue's lock orders this against the dispatcher read.
-    unsafe {
-        (*task).last_cpu = cpu_id;
-    }
-}
-
-/// Read the task's atomic status (`Ready`, `Running`, `Blocked`, …).
-#[inline]
-pub fn task_status<K, U>(task: *const TaskInner<K, U>) -> Option<TaskStatus> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `status` is a `&self` method
-    // that performs an atomic load internally.
-    Some(unsafe { (*task).status() })
-}
-
-/// Read `task->sid` (session id).
-#[inline]
-pub fn task_sid<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u32.
-    Some(unsafe { (*task).sid })
 }
 
 /// Read `task->controlling_tty`.
@@ -493,33 +461,11 @@ pub fn task_set_controlling_tty<K, U>(task: *mut TaskInner<K, U>, tty: Option<Tt
     true
 }
 
-/// Read `task->kernel_stack_top` directly. The full
-/// `task_kernel_stack_bounds` accessor returns `(base, top)`; the
-/// dispatcher hot path only needs `top` for TSS RSP0 programming.
-#[inline]
-pub fn task_kernel_stack_top<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).kernel_stack_top })
-}
-
 /// Read `task->flags`. (`task_flags` already exists as `u16`; this
 /// helper exposes a typed bit-test the scheduler uses.)
 #[inline]
 pub fn task_has_flag<K, U>(task: *const TaskInner<K, U>, flag: u16) -> bool {
     task_flags(task).is_some_and(|f| (f & flag) != 0)
-}
-
-/// Read `task->fs_base`.
-#[inline]
-pub fn task_fs_base<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).fs_base })
 }
 
 /// Read `task->name[..]` and probe whether the first 5 bytes
@@ -662,26 +608,6 @@ pub fn task_waiter_count<K, U>(task: *const TaskInner<K, U>) -> usize {
         Some(id) => BUS.waiter_count(child_exit_event(id)),
         None => 0,
     }
-}
-
-/// Read `task->slot_index`.
-#[inline]
-pub fn task_slot_index<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `slot_index` is a `u32` field.
-    Some(unsafe { (*task).slot_index })
-}
-
-/// Read `task->last_cpu`.
-#[inline]
-pub fn task_last_cpu<K, U>(task: *const TaskInner<K, U>) -> Option<u8> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `last_cpu` is a `u8` field.
-    Some(unsafe { (*task).last_cpu })
 }
 
 /// Read `task->context.rflags`.
@@ -947,26 +873,6 @@ pub fn task_remote_inbox_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
     unsafe { (*task).remote_inbox_link.is_linked() }
 }
 
-/// Read `task->tgid` (thread-group id).
-#[inline]
-pub fn task_tgid<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u32.
-    Some(unsafe { (*task).tgid })
-}
-
-/// Read `task->parent_task_id`.
-#[inline]
-pub fn task_parent_task_id<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u32.
-    Some(unsafe { (*task).parent_task_id })
-}
-
 /// Read `task->task_id` without any pool-validity gate. Mirrors
 /// [`task_id_of`] but skips the null-check.
 #[inline]
@@ -1071,18 +977,6 @@ pub fn task_signal_post<K, U>(task: *const TaskInner<K, U>, signum: u8) -> bool 
     true
 }
 
-/// Read `task->load_block_reason()` via the existing `&self` method.
-#[inline]
-pub fn task_load_block_reason<K, U>(
-    task: *const TaskInner<K, U>,
-) -> Option<slopos_abi::task::BlockReason> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `load_block_reason` is `&self`.
-    Some(unsafe { (*task).load_block_reason() })
-}
-
 /// Drive `task->store_block_reason(reason)` via the existing `&self`
 /// method (atomic store internally).
 #[inline]
@@ -1109,18 +1003,6 @@ pub fn task_yield_count_inc<K, U>(task: *mut TaskInner<K, U>) {
     }
 }
 
-/// Stamp `task->last_run_timestamp`.
-#[inline]
-pub fn task_set_last_run_timestamp<K, U>(task: *mut TaskInner<K, U>, timestamp: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).last_run_timestamp = timestamp;
-    }
-}
-
 /// Read `task->last_run_timestamp` via `read_volatile` to defeat
 /// compiler reordering across the context-switch boundary.
 #[inline]
@@ -1130,18 +1012,6 @@ pub fn task_last_run_timestamp_volatile<K, U>(task: *const TaskInner<K, U>) -> O
     }
     // SAFETY: caller pre-validated; field is naturally-aligned u64.
     Some(unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*task).last_run_timestamp)) })
-}
-
-/// Plain (non-volatile) read of `task->last_run_timestamp`. Used by
-/// callers that don't need ordering across the context-switch boundary
-/// (e.g. work-stealing heuristic).
-#[inline]
-pub fn task_last_run_timestamp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).last_run_timestamp })
 }
 
 /// Bump `task->total_runtime` by `delta`, saturating.
@@ -1176,28 +1046,6 @@ pub fn task_clear_controlling_tty_for<K, U>(
         }
     }
     false
-}
-
-/// Read `task->clear_child_tid` (futex-on-exit user-mode address).
-#[inline]
-pub fn task_clear_child_tid<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).clear_child_tid })
-}
-
-/// Stamp `task->clear_child_tid`.
-#[inline]
-pub fn task_set_clear_child_tid<K, U>(task: *mut TaskInner<K, U>, tid: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).clear_child_tid = tid;
-    }
 }
 
 /// Run `f` against `task->user_ctx` borrowed as `&UserContext`.
@@ -1251,48 +1099,6 @@ pub fn task_pcr_round_trip_swap<K, U>(prev: *mut TaskInner<K, U>, next: *mut Tas
             );
         }
     }
-}
-
-/// Read `task->stack_pointer`.
-#[inline]
-pub fn task_stack_pointer<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).stack_pointer })
-}
-
-/// Read `task->stack_base`.
-#[inline]
-pub fn task_stack_base<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).stack_base })
-}
-
-/// Read `task->stack_size`.
-#[inline]
-pub fn task_stack_size<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { (*task).stack_size })
-}
-
-/// Read `task->signal_blocked` (`SigSet = u64`).
-#[inline]
-pub fn task_signal_blocked<K, U>(
-    task: *const TaskInner<K, U>,
-) -> Option<slopos_abi::signal::SigSet> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; field is a naturally-aligned u64.
-    Some(unsafe { (*task).signal_blocked })
 }
 
 /// Read `task->signal_actions[idx].handler` if `idx` is in range.
@@ -1403,19 +1209,6 @@ pub fn task_save_from_interrupt_frame<K, U>(
         if mark_user_started {
             (*task).user_started = 1;
         }
-    }
-}
-
-/// Stamp `task->kernel_stack_top`. Used by tests that simulate a
-/// missing kernel-stack-top error path.
-#[inline]
-pub fn task_set_kernel_stack_top<K, U>(task: *mut TaskInner<K, U>, top: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).kernel_stack_top = top;
     }
 }
 

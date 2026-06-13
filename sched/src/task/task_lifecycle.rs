@@ -1,6 +1,5 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
-use core::sync::atomic::Ordering;
 
 use slopos_arch::cpu;
 use slopos_ostd::kdiag_timestamp;
@@ -19,8 +18,8 @@ use super::task_table::{
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus, task_borrow,
-    task_borrow_mut, task_id_of, task_name_bytes, task_status,
+    TaskContext, TaskEntry, TaskExitReason, TaskPriority, TaskStatus, task_borrow, task_borrow_mut,
+    task_id_of, task_name_bytes, task_status,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -223,29 +222,6 @@ fn cleanup_task_create_resources(
     ProcessResourceLease::cleanup_owned_process(process_id, true, true);
     drop(kernel_stack);
     drop(unsafe_stack);
-}
-
-fn reset_task_runtime_fields(task: &mut Task) {
-    task.time_slice_remaining = task.time_slice;
-    task.total_runtime = 0;
-    task.creation_time = kdiag_timestamp();
-    task.yield_count = 0;
-    task.last_run_timestamp = 0;
-    task.exit_reason = TaskExitReason::None;
-    task.fault_reason = TaskFaultReason::None;
-    task.exit_code = 0;
-    task.fate_token = 0;
-    task.fate_value = 0;
-    task.fate_pending = 0;
-    task.on_cpu.store(false, Ordering::Release);
-    task.ready_link.reset();
-    task.zombie_link.reset();
-    task.remote_inbox_link.reset();
-    task.sched_placement.store(
-        slopos_ostd::task::SchedPlacement::None.as_u8(),
-        Ordering::Release,
-    );
-    task.refcnt.store(0, Ordering::Release);
 }
 
 enum TaskProcessCleanupMode {
@@ -561,7 +537,7 @@ pub fn task_create(
     task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
-    reset_task_runtime_fields(task_ref);
+    task_ref.reset_runtime_state();
     task_ref.user_started = 0;
     task_ref.context_from_user = 0;
 
@@ -1035,7 +1011,7 @@ pub fn task_fork(
         child.context.cr3 = slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
     }
 
-    reset_task_runtime_fields(child);
+    child.reset_runtime_state();
     let _ = child_process.disarm();
     // Transfer ownership of the kernel stack into the task slot.  The
     // `Drop` on this handle will only run when the task's slot is
@@ -1238,7 +1214,7 @@ pub fn task_clone(
         }
     }
 
-    reset_task_runtime_fields(child);
+    child.reset_runtime_state();
     if !share_vm {
         let _ = child_process.disarm();
     }
