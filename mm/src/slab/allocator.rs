@@ -15,8 +15,8 @@
 //!
 //! ## Verification (Inv. 9)
 //!
-//! Once [`SlabAllocator::grow_one`] claims a page from the buddy it links
-//! it on the class's partial list and never returns it — there is no
+//! Once [`SlabAllocator::build_slab_page`] claims a page from the buddy the
+//! caller links it on the class's partial list and never returns it — there is no
 //! `free_kernel_page` on the steady-state alloc/dealloc path, so a cell
 //! handed out by [`SlabAllocator::alloc_one`] can never outlive its page.
 //! `verification/proofs/slab_lifetime.rs` machine-checks the stronger
@@ -127,13 +127,33 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             }
         }
 
-        // Slow path: take the class lock and pop directly from a slab
-        // page's free-list.
+        // Slow path: pop directly from an existing slab page's free-list
+        // under the class lock.
+        {
+            let state = self.inner.lock();
+            if let Some(ptr) = self.pop_from_existing_slabs(&*state) {
+                self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
+                self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
+                return Some(ptr);
+            }
+        }
+        // Every existing slab is full. Build a fresh page WITHOUT holding
+        // the class lock: `build_slab_page` -> buddy alloc may perform a
+        // cross-CPU LUF/TLB drain that waits for peer IPI acks, and holding
+        // the IRQ-off `SpinLock<SlabClassState>` across it deadlocks (a peer
+        // spinning on this same lock can't service the ack IPI). Then link
+        // it and pop from it under the lock.
+        let new_slab = self.build_slab_page()?;
         let state = self.inner.lock();
-        let ptr = self.pop_from_slabs(&*state)?;
+        self.link_slab_at_head(&*state, new_slab);
+        let obj = RawLink::<SlabHeader>::with_mut_at(Some(new_slab), |slab| {
+            slab.free_count = slab.free_count.saturating_sub(1);
+            slab.free_list.pop_front()
+        })
+        .flatten()?;
         self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
         self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
-        Some(ptr)
+        Some(obj)
     }
 
     /// Return an object. Magazine first, then slab page free-list.
@@ -194,8 +214,11 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
     fn refill_magazine(&self, mag: &mut Magazine) {
         let batch = MAGAZINE_CAPACITY / 2;
         let state = self.inner.lock();
+        // Best-effort: drain existing partial slabs only. If none are
+        // available the magazine stays partial and the caller falls to the
+        // slow path, which grows a fresh page outside this lock.
         for _ in 0..batch {
-            let Some(ptr) = self.pop_from_slabs(&*state) else {
+            let Some(ptr) = self.pop_from_existing_slabs(&*state) else {
                 break;
             };
             if !mag.push(ptr) {
@@ -216,9 +239,12 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         }
     }
 
-    /// Pop one object from the partial-slab list under the class
-    /// lock. Grows a fresh slab page if every linked slab is full.
-    fn pop_from_slabs(&self, state: &SlabClassState) -> Option<NonNull<u8>> {
+    /// Pop one object from an existing partial slab under the class lock.
+    /// Returns `None` if every linked slab is full — the caller grows a
+    /// fresh page OUTSIDE the lock (`build_slab_page`) and links it via
+    /// `link_slab_at_head`, so the buddy allocation never runs under the
+    /// IRQ-off class lock.
+    fn pop_from_existing_slabs(&self, state: &SlabClassState) -> Option<NonNull<u8>> {
         let mut current = state.slabs.load();
         while let Some(slab_nn) = current {
             let outcome = RawLink::<SlabHeader>::with_mut_at(Some(slab_nn), |slab| {
@@ -256,16 +282,8 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 None => return None,
             }
         }
-        // No partial slab — grow a new one.
-        let new_slab = self.grow_one(state)?;
-        // `state` already a `&SlabClassState`; nothing further to do.
-        // Recurse once — guaranteed to succeed because the new slab is
-        // empty (i.e. all objects free).
-        RawLink::<SlabHeader>::with_mut_at(Some(new_slab), |slab| {
-            slab.free_count = slab.free_count.saturating_sub(1);
-            slab.free_list.pop_front()
-        })
-        .flatten()
+        // No partial slab — the caller grows one outside the class lock.
+        None
     }
 
     /// Push `ptr` onto the owning slab page's free-list. Returns
@@ -324,10 +342,17 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         matches!(outcome, Some(true))
     }
 
-    /// Grow a fresh slab page, link it at the head of the partial
-    /// list, and return it. Stamps the page header (magic, size,
-    /// class_idx) and builds the in-page free-list.
-    fn grow_one(&self, state: &SlabClassState) -> Option<NonNull<SlabHeader>> {
+    /// Build a fresh slab page WITHOUT taking the class lock. Allocates a
+    /// backing page from the buddy (which may perform a cross-CPU LUF/TLB
+    /// drain that waits for peer IPI acks — see `crate::mmu::luf`), stamps
+    /// the header (magic, size, class_idx) and builds the in-page
+    /// free-list. The returned slab is NOT yet linked into the class list;
+    /// the caller links it under the lock via [`Self::link_slab_at_head`].
+    /// Keeping the buddy allocation off the class lock is load-bearing:
+    /// holding the IRQ-off `SpinLock<SlabClassState>` across the cross-CPU
+    /// drain deadlocks (a peer spinning on this same lock can't service the
+    /// ack IPI).
+    fn build_slab_page(&self) -> Option<NonNull<SlabHeader>> {
         let (slab_base, _paddr) = alloc_slab_page()?;
         let start = SlabHeader::object_start_offset();
         if start >= PAGE_SIZE_4KB as usize {
@@ -351,7 +376,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         }
 
         let header_nn = slab_base.cast::<SlabHeader>();
-        let prev_head = state.slabs.load();
         RawLink::<SlabHeader>::with_mut_at(Some(header_nn), |h| {
             h.magic = SLAB_MAGIC;
             h.object_size = SIZE as u32;
@@ -359,12 +383,11 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             h.free_count = total_count as u16;
             h.class_idx = self.class_idx;
             h._pad = [0; 3];
+            // Not yet linked; `link_slab_at_head` stores the real `next`.
             h.next = RawLink::null();
-            h.next.store(prev_head);
             h.free_list = chain;
         });
 
-        state.slabs.store(Some(header_nn));
         slab_page_count_inc();
         self.stats
             .total_objects
@@ -373,6 +396,16 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             .free_objects
             .fetch_add(total_count as u32, Ordering::Relaxed);
         Some(header_nn)
+    }
+
+    /// Link an already-built slab page at the head of the class's partial
+    /// list. Must be called under the class lock (`state` witnesses it).
+    fn link_slab_at_head(&self, state: &SlabClassState, header: NonNull<SlabHeader>) {
+        let prev_head = state.slabs.load();
+        RawLink::<SlabHeader>::with_mut_at(Some(header), |h| {
+            h.next.store(prev_head);
+        });
+        state.slabs.store(Some(header));
     }
 }
 

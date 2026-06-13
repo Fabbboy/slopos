@@ -237,7 +237,7 @@ pub(crate) fn free_kernel_page(base: NonNull<u8>) {
 // ---------------------------------------------------------------------------
 
 /// Total slab pages currently held by the slab tier. Incremented when
-/// `SlabAllocator::grow_one` claims a fresh page from the buddy.
+/// `SlabAllocator::build_slab_page` claims a fresh page from the buddy.
 pub(crate) static SLAB_PAGE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Total large-alloc regions currently in flight.
