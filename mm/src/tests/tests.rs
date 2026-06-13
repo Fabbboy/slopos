@@ -1493,6 +1493,62 @@ pub fn test_process_vm_brk_expansion() -> TestResult {
     pass!()
 }
 
+pub fn test_process_vm_brk_byte_granular() -> TestResult {
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("create VM");
+    };
+
+    use crate::process_vm::process_vm_brk;
+
+    let base = process_vm_brk(vm.pid, 0);
+    assert_test!(base != 0, "initial brk is 0");
+    assert_test!(
+        base & (PAGE_SIZE_4KB - 1) == 0,
+        "initial brk not page-aligned"
+    );
+
+    let big = base + 64 * PAGE_SIZE_4KB;
+    assert_test!(process_vm_brk(vm.pid, big) == big, "aligned grow not exact");
+
+    // The allocator top-trim shape: an unaligned break a few bytes shy
+    // of a page boundary. The kernel must echo the byte value back
+    // verbatim (the caller's success check is exact equality) while
+    // keeping the partial tail page mapped.
+    let trimmed = base + 16 * PAGE_SIZE_4KB - 8;
+    assert_test!(
+        process_vm_brk(vm.pid, trimmed) == trimmed,
+        "unaligned shrink did not return the requested break"
+    );
+    assert_test!(
+        process_vm_brk(vm.pid, 0) == trimmed,
+        "break not persisted byte-granular"
+    );
+
+    let tail_page = trimmed & !(PAGE_SIZE_4KB - 1);
+    assert_test!(
+        !vm.virt_to_phys(tail_page).is_null(),
+        "partial tail page below the break got unmapped"
+    );
+    assert_test!(
+        vm.virt_to_phys(tail_page + PAGE_SIZE_4KB).is_null(),
+        "page above the rounded break still mapped after shrink"
+    );
+
+    // Regrow across the partial page: the post-trim allocation path
+    // that faulted while grow/shrink handshakes were desynced.
+    let regrown = base + 32 * PAGE_SIZE_4KB + 24;
+    assert_test!(
+        process_vm_brk(vm.pid, regrown) == regrown,
+        "unaligned regrow did not return the requested break"
+    );
+    assert_test!(
+        !vm.virt_to_phys(regrown & !(PAGE_SIZE_4KB - 1)).is_null(),
+        "page under the regrown break not mapped"
+    );
+
+    pass!()
+}
+
 pub fn test_cow_page_isolation() -> TestResult {
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
@@ -1795,6 +1851,7 @@ stest!(
 );
 stest!(name = test_process_vm_alloc_and_access, suite = process_vm);
 stest!(name = test_process_vm_brk_expansion, suite = process_vm);
+stest!(name = test_process_vm_brk_byte_granular, suite = process_vm);
 stest!(name = test_cow_page_isolation, suite = process_vm);
 stest!(name = test_cow_fault_handling, suite = process_vm);
 stest!(name = test_multiple_process_vms, suite = process_vm);

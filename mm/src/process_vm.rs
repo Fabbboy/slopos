@@ -59,7 +59,14 @@ pub struct ProcessVm {
     code_start: u64,
     data_start: u64,
     heap_start: u64,
+    /// Page-aligned end of the mapped heap extent. Always equals
+    /// `heap_break` rounded up to the next page boundary.
     heap_end: u64,
+    /// Byte-granular program break as last set via `process_vm_brk`
+    /// (Linux `brk` semantics). Userland allocators do an
+    /// exact-equality handshake on this value, so it must be returned
+    /// verbatim — never page-rounded.
+    heap_break: u64,
     stack_start: u64,
     stack_end: u64,
     total_pages: u32,
@@ -78,6 +85,7 @@ impl ProcessVm {
             data_start: 0,
             heap_start: 0,
             heap_end: 0,
+            heap_break: 0,
             stack_start: 0,
             stack_end: 0,
             total_pages: 0,
@@ -98,6 +106,7 @@ impl ProcessVm {
         self.data_start = 0;
         self.heap_start = 0;
         self.heap_end = 0;
+        self.heap_break = 0;
         self.stack_start = 0;
         self.stack_end = 0;
         self.total_pages = 0;
@@ -663,6 +672,7 @@ fn teardown_inner_mappings(inner: &mut ProcessVm) {
     });
     inner.total_pages = 0;
     inner.heap_end = inner.heap_start;
+    inner.heap_break = inner.heap_start;
 }
 
 /// Unmap and free pages in a range. The OSTD `cursor.unmap` returns a
@@ -1698,6 +1708,7 @@ pub fn create_process_vm() -> u32 {
         proc.data_start = layout.data_start;
         proc.heap_start = layout.heap_start;
         proc.heap_end = layout.heap_start;
+        proc.heap_break = layout.heap_start;
         proc.stack_start = layout.stack_top - layout.stack_size;
         proc.stack_end = layout.stack_top;
         proc.total_pages = 1;
@@ -1929,6 +1940,7 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
     }
 
     proc.heap_end = end_addr;
+    proc.heap_break = end_addr;
     start_addr
 }
 
@@ -1973,6 +1985,7 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     proc.total_pages = proc.total_pages.saturating_sub(freed);
     if proc.heap_end == end && end > proc.heap_start {
         proc.heap_end = start;
+        proc.heap_break = start;
     }
 
     0
@@ -2106,6 +2119,17 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
     0
 }
 
+/// Set the process program break (Linux `brk` semantics).
+///
+/// The break is byte-granular: a successful call returns exactly
+/// `new_brk`, a query (`new_brk == 0`) or out-of-range request returns
+/// the current break unchanged, and a hard mapping failure returns 0.
+/// Userland allocators rely on the exact-equality handshake
+/// (`brk(x) == x` means the break moved, anything else means it did
+/// not) — returning a page-rounded value here desyncs their heap
+/// bookkeeping from the real mapping and turns the next allocation
+/// into a wild write. Page granularity is internal only: the mapped
+/// extent tracks `round_up_4k(heap_break)` in `heap_end`.
 pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     let slot = match find_slot_for_pid(process_id) {
         Some(s) => s,
@@ -2117,21 +2141,21 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     }
 
     if new_brk == 0 {
-        return proc.heap_end;
+        return proc.heap_break;
     }
 
-    let aligned_brk = match new_brk.checked_add(PAGE_SIZE_4KB - 1) {
+    if new_brk < proc.heap_start || new_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
+        return proc.heap_break;
+    }
+
+    let new_end = match new_brk.checked_add(PAGE_SIZE_4KB - 1) {
         Some(v) => v & !(PAGE_SIZE_4KB - 1),
-        None => return proc.heap_end,
+        None => return proc.heap_break,
     };
 
-    if aligned_brk < proc.heap_start || aligned_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
-        return proc.heap_end;
-    }
-
-    if aligned_brk > proc.heap_end {
+    if new_end > proc.heap_end {
         let start_addr = proc.heap_end;
-        let end_addr = aligned_brk;
+        let end_addr = new_end;
         let heap_region = VmaRegion {
             protection: Protection::RW,
             backing: RegionBacking::Anonymous,
@@ -2165,9 +2189,9 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
             return 0;
         }
         proc.total_pages += pages_mapped;
-        proc.heap_end = aligned_brk;
-    } else if aligned_brk < proc.heap_end {
-        let start_addr = aligned_brk;
+        proc.heap_end = new_end;
+    } else if new_end < proc.heap_end {
+        let start_addr = new_end;
         let end_addr = proc.heap_end;
 
         let freed = match unmap_and_free_range_inner(&mut *proc, start_addr, end_addr) {
@@ -2181,10 +2205,11 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
             .remove_range(start_addr, end_addr, |_, _, _| {});
 
         proc.total_pages = proc.total_pages.saturating_sub(freed);
-        proc.heap_end = aligned_brk;
+        proc.heap_end = new_end;
     }
 
-    proc.heap_end
+    proc.heap_break = new_brk;
+    proc.heap_break
 }
 
 // =============================================================================
@@ -2759,7 +2784,7 @@ type CloneVmaEntry = (u64, u64, VmaRegion, KVec<ClonePageSnapshot>);
 fn clone_cow_snapshot_parent(
     parent_slot: usize,
     parent_id: u32,
-) -> Option<(u64, u64, u64, u64, u64, u64, u32, KVec<CloneVmaEntry>)> {
+) -> Option<(u64, u64, u64, u64, u64, u64, u64, u32, KVec<CloneVmaEntry>)> {
     let mut guard = PROCESS_VMS[parent_slot].lock();
     if guard.process_id != parent_id || guard.page_dir.is_null() {
         klog_info!("process_vm_clone_cow: Parent has no page directory");
@@ -2826,6 +2851,7 @@ fn clone_cow_snapshot_parent(
         guard.data_start,
         guard.heap_start,
         guard.heap_end,
+        guard.heap_break,
         guard.stack_start,
         guard.stack_end,
         guard.flags,
@@ -2916,6 +2942,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         parent_data_start,
         parent_heap_start,
         parent_heap_end,
+        parent_heap_break,
         parent_stack_start,
         parent_stack_end,
         parent_flags,
@@ -3038,6 +3065,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         child.data_start = parent_data_start;
         child.heap_start = parent_heap_start;
         child.heap_end = parent_heap_end;
+        child.heap_break = parent_heap_break;
         child.stack_start = parent_stack_start;
         child.stack_end = parent_stack_end;
         child.total_pages = 0;
