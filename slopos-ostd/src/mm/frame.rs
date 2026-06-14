@@ -5,7 +5,8 @@
 //! indexed by `paddr / PAGE_SIZE`). The metadata is type-erased into
 //! `MetaSlot::storage` (a fixed byte buffer sized for `MAX_META_SIZE`)
 //! and dispatched through a per-`M` `MetaVtable` carrying the
-//! `drop_in_place` and `returns_frame` callbacks.
+//! `drop_in_place` / `returns_frame` callbacks and the type's canonical
+//! [`core::any::TypeId`] (the cross-crate-stable type-identity key).
 //!
 //! Synchronisation goes through the slot's atomic fields. The `state`
 //! field gates exclusive access to `storage`; `ref_count` pairs
@@ -36,6 +37,7 @@
 //! the atomic protocol below must keep `frame_refcount.rs` in sync (see
 //! `verification/STATUS.md`).
 
+use core::any::TypeId;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::mem::{MaybeUninit, align_of, size_of};
@@ -96,8 +98,15 @@ pub struct MetaSlot {
     /// transient construct/destruct (exclusively owned), `1..=`
     /// [`REF_COUNT_MAX`] = that many live `Frame` handles.
     pub(crate) ref_count: AtomicU32,
-    /// Pointer to the static `MetaVtable` for the inhabiting `M`.
-    /// Null while the slot is `UNUSED`.
+    /// Pointer to the `MetaVtable` for the inhabiting `M`. The vtable carries
+    /// both the `Drop`-dispatch callbacks and the type's canonical
+    /// [`core::any::TypeId`]. Its *pointer* is never compared for identity
+    /// (a `const`-promoted vtable static has no unique address across crates
+    /// / codegen units — in release `-Zshare-generics` is off, so each crate
+    /// inlines its own copy; comparing those addresses falsely reported a
+    /// live `RingMeta` slot as a type mismatch and wedged desktop bring-up).
+    /// Type identity reads the `TypeId` *value* it carries — see
+    /// [`Frame::from_in_use`]. Null while the slot is `UNUSED`.
     pub(crate) vtable: AtomicPtr<MetaVtable>,
     /// Type-erased storage for `M`. Only valid while the slot is live
     /// (`ref_count` in `1..=REF_COUNT_MAX`).
@@ -139,9 +148,20 @@ impl MetaSlot {
 // MetaVtable: type-erased dispatch for Drop.
 // ---------------------------------------------------------------------------
 
-/// Per-`M` dispatch table installed by [`Frame::from_unused`]. The
-/// vtable lives in static memory (one per concrete `M` via the
-/// associated-const pattern in [`HasVtable`]).
+/// Per-`M` dispatch table installed by [`Frame::from_unused`]. Carries the
+/// type-erased `Drop`-dispatch callbacks (`drop_in_place` / `returns_frame`)
+/// and the type's canonical [`TypeId`].
+///
+/// Built via the associated-const pattern in [`HasVtable`]. Because that is a
+/// `const` (not a `static`), its `&`-promoted referent has internal linkage
+/// and **no guaranteed unique address across crates / codegen units** — so a
+/// `MetaVtable` *pointer* must NEVER be compared for identity to decide a
+/// slot's type. Instead, type identity reads the [`TypeId`] *value* this
+/// table carries: `TypeId::of::<M>()` is identical in every crate by language
+/// guarantee, regardless of which crate's vtable copy a slot happens to hold.
+/// This mirrors Asterinas's `ostd`, which likewise stores its `DynMetadata`
+/// vtable for dispatch only and decides type identity via `core::any::TypeId`
+/// (`Any::is`), never by comparing the vtable pointer.
 pub struct MetaVtable {
     /// Run `core::ptr::drop_in_place::<M>` on the storage payload.
     pub(crate) drop_in_place: unsafe fn(*mut u8),
@@ -151,11 +171,19 @@ pub struct MetaVtable {
     /// runs that free itself *after* the slot is reset to UNUSED. The
     /// query MUST NOT free the page (see the `Drop` impl's ordering).
     pub(crate) returns_frame: unsafe fn(*const u8) -> bool,
+    /// The canonical [`TypeId`] of `M`. A value, not a pointer — identical
+    /// across all crates/codegen units, so it is the sound cross-crate
+    /// type-identity key (`from_in_use` compares this against
+    /// `TypeId::of::<M>()`). Returned through a function pointer rather than
+    /// stored inline so it needs no const-eval of `TypeId::of` and matches
+    /// the other dispatch entries.
+    pub(crate) type_id: fn() -> TypeId,
 }
 
-// SAFETY: the dispatched function pointers `drop_in_place` and
-// `returns_frame` only act on storage owned by the surrounding
-// `MetaSlot`, and synchronisation is through the slot's atomics.
+// SAFETY: the dispatched function pointers `drop_in_place`,
+// `returns_frame`, and `type_id` only act on storage owned by the
+// surrounding `MetaSlot` (or return a compile-time constant), and
+// synchronisation is through the slot's atomics.
 unsafe impl Sync for MetaVtable {}
 
 unsafe fn drop_in_place_for<M: AnyFrameMeta>(payload: *mut u8) {
@@ -173,6 +201,13 @@ unsafe fn returns_frame_for<M: AnyFrameMeta>(payload: *const u8) -> bool {
     unsafe { (*(payload as *const M)).returns_frame_on_last_drop() }
 }
 
+/// Returns the canonical [`TypeId`] of `M`. Stored as a fn pointer in each
+/// `MetaVtable` so the *value* (which is identical across crates) is the
+/// type-identity key, never the vtable's address.
+fn type_id_of<M: AnyFrameMeta>() -> TypeId {
+    TypeId::of::<M>()
+}
+
 trait HasVtable {
     const VTABLE: &'static MetaVtable;
 }
@@ -181,9 +216,15 @@ impl<M: AnyFrameMeta> HasVtable for M {
     const VTABLE: &'static MetaVtable = &MetaVtable {
         drop_in_place: drop_in_place_for::<M>,
         returns_frame: returns_frame_for::<M>,
+        type_id: type_id_of::<M>,
     };
 }
 
+/// The dispatch vtable for `M`. The returned pointer is safe to **call
+/// through** from any crate, but its address is NOT stable across crates (it
+/// is a `const`-promoted internal static — see [`MetaVtable`]). For type
+/// identity compare the `TypeId` *value* it carries (`(*vt).type_id)()`),
+/// never this pointer.
 #[inline]
 fn vtable_for<M: AnyFrameMeta>() -> &'static MetaVtable {
     <M as HasVtable>::VTABLE
@@ -399,6 +440,8 @@ pub fn init_meta_slots<'brand>(_token: &BspToken<'brand>, slots: *mut MetaSlot, 
     // Seed every slot to UNUSED. The production caller hands us zeroed
     // pages, and zero is `REF_COUNT_BUSY`, not `UNUSED` — without this the
     // first `from_unused` on any frame would observe BUSY and spin forever.
+    // The vtable needs no seeding: zeroed = null = "no type", correct for an
+    // unused slot.
     // SAFETY: the caller certified `[slots, slots + len)` is a valid,
     // exclusively-owned `[MetaSlot]` for the kernel's static lifetime; this
     // runs BSP-only (witnessed by `_token`) before any other CPU or any
@@ -593,6 +636,10 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
             let storage = slot.storage.get() as *mut M;
             core::ptr::write(storage, meta);
         }
+        // Publish the dispatch+identity vtable before the live ref_count. The
+        // `Acquire` load of `vtable` in `from_in_use` pairs with this
+        // `Release` store, so a matching type implies this `storage` write is
+        // visible.
         slot.vtable.store(
             vtable_for::<M>() as *const _ as *mut MetaVtable,
             Ordering::Release,
@@ -610,11 +657,32 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// [`FrameError::StateMismatch`].
     pub fn from_in_use(paddr: Paddr) -> Result<Self, FrameError> {
         let slot = meta_slot_for(paddr).ok_or(FrameError::OutOfRange)?;
-        // Advisory pre-check: reject early on a type mismatch. The
-        // authoritative gate is the `fetch_update` below — the only way to
-        // observe "live with our `M` AND bump" atomically.
-        let expected_vt = vtable_for::<M>() as *const _ as *mut MetaVtable;
-        if slot.vtable.load(Ordering::Acquire) != expected_vt {
+        // Type-identity gate: the slot must already hold an `M`. We compare
+        // the `TypeId` *value* the slot's vtable carries against
+        // `TypeId::of::<M>()` — NOT the vtable *pointer*. A `const`-promoted
+        // vtable static has no unique cross-crate address (release builds
+        // disable `-Zshare-generics`, so the `mm` crate's `vtable_for::<M>()`
+        // and the slopos-ostd copy stored by `from_unused` differ); the old
+        // pointer compare therefore spuriously rejected live `RingMeta` slots
+        // and wedged desktop bring-up. `TypeId::of::<M>()` is identical in
+        // every crate by language guarantee, so the value check is sound
+        // across the `mm`/`slopos-ostd` boundary (this is how Asterinas's
+        // `ostd` does it — vtable for dispatch, `TypeId` for identity).
+        //
+        // The `Acquire` load pairs with `from_unused`'s `Release` vtable
+        // store. A null vtable means the slot is `UNUSED` (no `M`) → reject
+        // before dereferencing. The bump below is the atomic "live AND
+        // increment"; reading the type first is sound because the caller
+        // holds an existing ref (the `from_in_use` contract), so the slot
+        // cannot be torn down and re-typed between this load and the bump.
+        let vt = slot.vtable.load(Ordering::Acquire);
+        if vt.is_null() {
+            return Err(FrameError::StateMismatch);
+        }
+        // SAFETY: `vt` is non-null, so it points at the `'static` `MetaVtable`
+        // a `from_unused` published for this slot; reading its `type_id` fn
+        // pointer and calling it returns a compile-time-constant `TypeId`.
+        if unsafe { ((*vt).type_id)() } != TypeId::of::<M>() {
             return Err(FrameError::StateMismatch);
         }
         // Conditional increment — succeed only from a *live* count. `Drop`'s
@@ -685,14 +753,14 @@ pub fn reference_count_at(paddr: Paddr) -> u32 {
 // ---------------------------------------------------------------------------
 // Read-only slot diagnostics.
 //
-// Classify a frame's `MetaSlot` (decode the stored vtable into a concrete
-// meta kind) and report META_SLOTS coverage, for error-path logging where a
-// caller otherwise sees only an opaque error. Read-only (Acquire loads, no
-// mutation), so sound to call from any context.
+// Classify a frame's `MetaSlot` (decode the `TypeId` its vtable carries into
+// a concrete meta kind) and report META_SLOTS coverage, for error-path
+// logging where a caller otherwise sees only an opaque error. Read-only
+// (Acquire loads, no mutation), so sound to call from any context.
 // ---------------------------------------------------------------------------
 
 /// Which built-in [`AnyFrameMeta`] a [`MetaSlot`] currently holds, decoded
-/// from its stored vtable pointer (for live slots) or its `ref_count`
+/// from the [`TypeId`] its vtable carries (for live slots) or its `ref_count`
 /// sentinel (for free / transient slots).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotMetaKind {
@@ -707,9 +775,11 @@ pub enum SlotMetaKind {
     PageCache,
     Packet,
     Ring,
-    /// Live (non-sentinel `ref_count`) but the stored vtable matches none of
-    /// the known built-in meta vtables — a sign of slot corruption.
-    UnknownVtable,
+    DmaCoherent,
+    DmaStream,
+    /// Live (non-sentinel `ref_count`) but the vtable's `TypeId` matches none
+    /// of the known built-in metas — a sign of slot corruption.
+    Unknown,
 }
 
 /// Read-only snapshot of a physical frame's [`MetaSlot`] for diagnostics.
@@ -729,24 +799,37 @@ pub struct SlotSnapshot {
     pub kind: SlotMetaKind,
 }
 
-fn classify_vtable(vt: *const MetaVtable) -> SlotMetaKind {
+/// Decode the [`TypeId`] a slot's vtable carries into a diagnostic
+/// [`SlotMetaKind`]. Compares `TypeId` *values* (crate-stable), so it agrees
+/// with `from_in_use`'s identity gate — unlike the old vtable-pointer
+/// classifier, which compared addresses and could disagree across crates.
+fn classify_vtable_typeid(vt: *const MetaVtable) -> SlotMetaKind {
+    use crate::mm::dma::{DmaCoherentMeta, DmaStreamMeta};
     if vt.is_null() {
-        return SlotMetaKind::UnknownVtable;
+        return SlotMetaKind::Unknown;
     }
-    if core::ptr::eq(vt, vtable_for::<KernelMeta>()) {
+    // SAFETY: a non-null vtable points at the `'static` `MetaVtable` a
+    // `from_unused` published; calling its `type_id` fn returns a
+    // compile-time-constant `TypeId` value.
+    let tid = unsafe { ((*vt).type_id)() };
+    if tid == TypeId::of::<KernelMeta>() {
         SlotMetaKind::Kernel
-    } else if core::ptr::eq(vt, vtable_for::<PageTableMeta>()) {
+    } else if tid == TypeId::of::<PageTableMeta>() {
         SlotMetaKind::PageTable
-    } else if core::ptr::eq(vt, vtable_for::<AnonymousMeta>()) {
+    } else if tid == TypeId::of::<AnonymousMeta>() {
         SlotMetaKind::Anonymous
-    } else if core::ptr::eq(vt, vtable_for::<PageCacheMeta>()) {
+    } else if tid == TypeId::of::<PageCacheMeta>() {
         SlotMetaKind::PageCache
-    } else if core::ptr::eq(vt, vtable_for::<PacketMeta>()) {
+    } else if tid == TypeId::of::<PacketMeta>() {
         SlotMetaKind::Packet
-    } else if core::ptr::eq(vt, vtable_for::<RingMeta>()) {
+    } else if tid == TypeId::of::<RingMeta>() {
         SlotMetaKind::Ring
+    } else if tid == TypeId::of::<DmaCoherentMeta>() {
+        SlotMetaKind::DmaCoherent
+    } else if tid == TypeId::of::<DmaStreamMeta>() {
+        SlotMetaKind::DmaStream
     } else {
-        SlotMetaKind::UnknownVtable
+        SlotMetaKind::Unknown
     }
 }
 
@@ -759,7 +842,7 @@ pub fn slot_snapshot(paddr: Paddr) -> SlotSnapshot {
             initialised: false,
             raw_ref_count: 0,
             vtable_addr: 0,
-            kind: SlotMetaKind::UnknownVtable,
+            kind: SlotMetaKind::Unknown,
         };
     }
     let Some(slot) = meta_slot_for(paddr) else {
@@ -768,7 +851,7 @@ pub fn slot_snapshot(paddr: Paddr) -> SlotSnapshot {
             initialised: true,
             raw_ref_count: 0,
             vtable_addr: 0,
-            kind: SlotMetaKind::UnknownVtable,
+            kind: SlotMetaKind::Unknown,
         };
     };
     let rc = slot.ref_count.load(Ordering::Acquire);
@@ -776,7 +859,7 @@ pub fn slot_snapshot(paddr: Paddr) -> SlotSnapshot {
     let kind = match rc {
         REF_COUNT_UNUSED => SlotMetaKind::Unused,
         REF_COUNT_BUSY => SlotMetaKind::Busy,
-        _ => classify_vtable(vt),
+        _ => classify_vtable_typeid(vt),
     };
     SlotSnapshot {
         in_range: true,
@@ -1531,5 +1614,36 @@ mod tests {
     fn packet_meta_atomics_default_to_zero() {
         let m = PacketMeta::default();
         assert_eq!(m.reserved.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn vtables_carry_distinct_canonical_type_ids() {
+        // The type-identity gate in `from_in_use` compares the `TypeId` value
+        // each builtin's vtable carries. `TypeId::of::<M>()` is unique per
+        // type by language guarantee, so two metas can never collide — this
+        // test documents that and checks the vtable plumbing returns the
+        // canonical value (not, say, the same fn for every M).
+        let ids = [
+            (vtable_for::<KernelMeta>().type_id)(),
+            (vtable_for::<PageTableMeta>().type_id)(),
+            (vtable_for::<AnonymousMeta>().type_id)(),
+            (vtable_for::<PageCacheMeta>().type_id)(),
+            (vtable_for::<PacketMeta>().type_id)(),
+            (vtable_for::<RingMeta>().type_id)(),
+        ];
+        let expected = [
+            TypeId::of::<KernelMeta>(),
+            TypeId::of::<PageTableMeta>(),
+            TypeId::of::<AnonymousMeta>(),
+            TypeId::of::<PageCacheMeta>(),
+            TypeId::of::<PacketMeta>(),
+            TypeId::of::<RingMeta>(),
+        ];
+        for (i, (got, want)) in ids.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, want, "vtable {i} carries the wrong TypeId");
+            for other in &ids[i + 1..] {
+                assert_ne!(got, other, "two builtins share a TypeId (impossible)");
+            }
+        }
     }
 }
