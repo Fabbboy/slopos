@@ -409,6 +409,12 @@ fn step_down(
 ) -> Result<StepOutcome, WalkError> {
     if parent.is_present() {
         if parent_level == PageTableLevel::Four && parent.is_huge() {
+            crate::klog_warn!(
+                "page_table: PML4 entry marked HUGE (architecturally impossible) \
+                 addr=0x{:x} raw=0x{:x} -> PathCorrupt",
+                parent.address().as_u64(),
+                parent.read(),
+            );
             return Err(WalkError::PathCorrupt);
         }
         if mode == WalkMode::Create && user_mapping && !parent.flags().contains(PteFlags::USER) {
@@ -428,21 +434,50 @@ fn step_down(
 
     // Create: allocate a fresh, zeroed intermediate.
     let alloc = current_frame_allocator().ok_or(WalkError::AllocUninitialised)?;
-    let new_phys = alloc
-        .alloc(FrameAllocOptions::single().zeroed())
-        .ok_or(WalkError::AllocFailed)?;
+    let new_phys = match alloc.alloc(FrameAllocOptions::single().zeroed()) {
+        Some(p) => p,
+        None => {
+            crate::klog_warn!(
+                "page_table: intermediate alloc returned NULL (parent_level={:?}) -> AllocFailed",
+                parent_level,
+            );
+            return Err(WalkError::AllocFailed);
+        }
+    };
 
     let level = parent_level
         .next_lower()
         .expect("step_down called with leaf parent level");
-    let frame = Frame::<PageTableMeta>::from_unused(
+    let frame = match Frame::<PageTableMeta>::from_unused(
         new_phys,
         PageTableMeta {
             level: level as u8,
             static_borrowed: false,
         },
-    )
-    .map_err(|_| WalkError::PathCorrupt)?;
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            // from_unused fails when `new_phys`'s MetaSlot is not claimable —
+            // a page on the buddy free list whose slot is still typed.
+            // `slot_kind` names the subsystem that still owns it.
+            let snap = crate::mm::frame::slot_snapshot(new_phys);
+            crate::klog_warn!(
+                "page_table: intermediate from_unused FAILED phys=0x{:x} parent_level={:?} \
+                 frame_err={:?} slot_kind={:?} raw_rc=0x{:x} vtable=0x{:x} -> PathCorrupt \
+                 (buddy handed a paddr whose MetaSlot is not UNUSED)",
+                new_phys.as_u64(),
+                parent_level,
+                e,
+                snap.kind,
+                snap.raw_ref_count,
+                snap.vtable_addr,
+            );
+            // Leak `new_phys` rather than return it: if its slot is still
+            // owned, that owner's Drop frees the page, so deallocating here
+            // would double-free.
+            return Err(WalkError::PathCorrupt);
+        }
+    };
     // Leak the typed handle into the parent PTE — the page-table
     // frame is now "owned by" the parent slot. Reclaimed on unmap
     // via `reclaim_table_frame`.
@@ -479,7 +514,18 @@ fn split_pdpt_huge(pdpt_entry: Pte) -> Result<(), WalkError> {
             static_borrowed: false,
         },
     )
-    .map_err(|_| WalkError::PathCorrupt)?;
+    .map_err(|e| {
+        let snap = crate::mm::frame::slot_snapshot(pd_phys);
+        crate::klog_warn!(
+            "page_table: split_pdpt_huge from_unused FAILED phys=0x{:x} frame_err={:?} \
+             slot_kind={:?} raw_rc=0x{:x} -> PathCorrupt",
+            pd_phys.as_u64(),
+            e,
+            snap.kind,
+            snap.raw_ref_count,
+        );
+        WalkError::PathCorrupt
+    })?;
     let _ = frame.into_raw();
 
     pdpt_entry.set(pd_phys, table_flags_from_leaf(huge_flags));
@@ -510,7 +556,18 @@ fn split_pd_huge(pd_entry: Pte) -> Result<(), WalkError> {
             static_borrowed: false,
         },
     )
-    .map_err(|_| WalkError::PathCorrupt)?;
+    .map_err(|e| {
+        let snap = crate::mm::frame::slot_snapshot(pt_phys);
+        crate::klog_warn!(
+            "page_table: split_pd_huge from_unused FAILED phys=0x{:x} frame_err={:?} \
+             slot_kind={:?} raw_rc=0x{:x} -> PathCorrupt",
+            pt_phys.as_u64(),
+            e,
+            snap.kind,
+            snap.raw_ref_count,
+        );
+        WalkError::PathCorrupt
+    })?;
     let _ = frame.into_raw();
 
     pd_entry.set(pt_phys, table_flags_from_leaf(huge_flags));

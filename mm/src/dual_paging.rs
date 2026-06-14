@@ -19,7 +19,6 @@
 //! surface; the only OSTD-side calls survive.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_ostd::klog_info;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, RingMeta};
 use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
@@ -27,6 +26,7 @@ use slopos_ostd::mm::page_size::Size4Kb;
 use slopos_ostd::mm::page_table::PteFlags;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
+use slopos_ostd::{klog_info, klog_warn};
 
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
@@ -132,8 +132,27 @@ pub fn ostd_map_4kb_user(
     flags: u64,
 ) -> Result<(), MapError> {
     let prop = page_flags_to_property(flags);
-    let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
-        .map_err(|_| MapError::PathCorrupt)?;
+    let pa_ostd = Paddr::new(pa.as_u64());
+    let frame = match UFrame::<AnonymousMeta>::wrap_user_paddr(pa_ostd) {
+        Ok(f) => f,
+        Err(e) => {
+            let snap = slopos_ostd::mm::frame::slot_snapshot(pa_ostd);
+            let (slots, max_pa, inited) = slopos_ostd::mm::frame::meta_slots_coverage();
+            klog_warn!(
+                "USERMAP: wrap_user_paddr(Anon) FAILED pa=0x{:x} va=0x{:x} frame_err={:?} \
+                 slot_kind={:?} raw_rc=0x{:x} | META_SLOTS inited={} slots={} max_pa=0x{:x}",
+                pa.as_u64(),
+                va.as_u64(),
+                e,
+                snap.kind,
+                snap.raw_ref_count,
+                inited,
+                slots,
+                max_pa,
+            );
+            return Err(MapError::PathCorrupt);
+        }
+    };
     let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
@@ -170,12 +189,48 @@ pub fn ostd_map_ring_4kb_user(
     flags: u64,
 ) -> Result<(), MapError> {
     let prop = page_flags_to_property(flags);
-    let frame = UFrame::<RingMeta>::from_in_use(Paddr::new(pa.as_u64()))
-        .map_err(|_| MapError::PathCorrupt)?;
+    let pa_ostd = Paddr::new(pa.as_u64());
+    // from_in_use fails when the RingMeta slot at `pa` is not live; logged
+    // distinctly from a cursor.map failure since both surface as PathCorrupt.
+    let frame = match UFrame::<RingMeta>::from_in_use(pa_ostd) {
+        Ok(f) => f,
+        Err(e) => {
+            let snap = slopos_ostd::mm::frame::slot_snapshot(pa_ostd);
+            let (slots, max_pa, inited) = slopos_ostd::mm::frame::meta_slots_coverage();
+            klog_warn!(
+                "RINGMAP: from_in_use(RingMeta) FAILED pa=0x{:x} va=0x{:x} frame_err={:?} \
+                 slot_kind={:?} raw_rc=0x{:x} vtable=0x{:x} | META_SLOTS inited={} \
+                 slots={} max_pa=0x{:x}",
+                pa.as_u64(),
+                va.as_u64(),
+                e,
+                snap.kind,
+                snap.raw_ref_count,
+                snap.vtable_addr,
+                inited,
+                slots,
+                max_pa,
+            );
+            return Err(MapError::PathCorrupt);
+        }
+    };
     let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
-    cursor.map::<Size4Kb, RingMeta>(frame, prop)
+    // cursor.map fails inside the page-table walk; record the vaddr/paddr
+    // (the OSTD page-table layer logs the per-frame detail).
+    match cursor.map::<Size4Kb, RingMeta>(frame, prop) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            klog_warn!(
+                "RINGMAP: cursor.map(RingMeta) FAILED pa=0x{:x} va=0x{:x} map_err={:?}",
+                pa.as_u64(),
+                va.as_u64(),
+                e,
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Unmap a 4 KiB SlopRing page from `vm_space` at `va`. The returned

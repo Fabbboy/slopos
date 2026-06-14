@@ -804,12 +804,26 @@ impl<'a> CursorMut<'a> {
         else {
             // Create mode never returns NotPresent — it would have
             // allocated. Treat as corruption.
+            crate::klog_warn!(
+                "vm_space::map: walk(Create) returned non-leaf va=0x{:x} target_level={:?} \
+                 outcome={:?} -> PathCorrupt",
+                self.cur.as_u64(),
+                S::LEVEL,
+                outcome,
+            );
             return Err(MapError::PathCorrupt);
         };
         if leaf_level != S::LEVEL {
             // walk_to_leaf in Create mode splits any blocking huge
             // page on the way down; reaching here with a wrong level
             // means corruption.
+            crate::klog_warn!(
+                "vm_space::map: leaf level mismatch va=0x{:x} got={:?} want={:?} \
+                 (blocking huge page not split) -> PathCorrupt",
+                self.cur.as_u64(),
+                leaf_level,
+                S::LEVEL,
+            );
             return Err(MapError::PathCorrupt);
         }
 

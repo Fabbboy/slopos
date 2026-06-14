@@ -682,6 +682,122 @@ pub fn reference_count_at(paddr: Paddr) -> u32 {
     live_ref_count(slot.ref_count.load(Ordering::Acquire))
 }
 
+// ---------------------------------------------------------------------------
+// Read-only slot diagnostics.
+//
+// Classify a frame's `MetaSlot` (decode the stored vtable into a concrete
+// meta kind) and report META_SLOTS coverage, for error-path logging where a
+// caller otherwise sees only an opaque error. Read-only (Acquire loads, no
+// mutation), so sound to call from any context.
+// ---------------------------------------------------------------------------
+
+/// Which built-in [`AnyFrameMeta`] a [`MetaSlot`] currently holds, decoded
+/// from its stored vtable pointer (for live slots) or its `ref_count`
+/// sentinel (for free / transient slots).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotMetaKind {
+    /// `ref_count == REF_COUNT_UNUSED`: free and claimable by `from_unused`.
+    Unused,
+    /// `ref_count == REF_COUNT_BUSY`: a transient construct/destruct window
+    /// (some other CPU owns the slot exclusively right now).
+    Busy,
+    Kernel,
+    PageTable,
+    Anonymous,
+    PageCache,
+    Packet,
+    Ring,
+    /// Live (non-sentinel `ref_count`) but the stored vtable matches none of
+    /// the known built-in meta vtables — a sign of slot corruption.
+    UnknownVtable,
+}
+
+/// Read-only snapshot of a physical frame's [`MetaSlot`] for diagnostics.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotSnapshot {
+    /// `false` when `paddr` lies outside the installed META_SLOTS array
+    /// (the constructor would have returned [`FrameError::OutOfRange`]).
+    pub in_range: bool,
+    /// `false` when [`init_meta_slots`] has not run yet
+    /// ([`FrameError::NotInitialised`]).
+    pub initialised: bool,
+    /// The raw `ref_count` word, sentinels included.
+    pub raw_ref_count: u32,
+    /// The stored vtable pointer as an integer (`0` == null).
+    pub vtable_addr: usize,
+    /// The decoded metadata kind.
+    pub kind: SlotMetaKind,
+}
+
+fn classify_vtable(vt: *const MetaVtable) -> SlotMetaKind {
+    if vt.is_null() {
+        return SlotMetaKind::UnknownVtable;
+    }
+    if core::ptr::eq(vt, vtable_for::<KernelMeta>()) {
+        SlotMetaKind::Kernel
+    } else if core::ptr::eq(vt, vtable_for::<PageTableMeta>()) {
+        SlotMetaKind::PageTable
+    } else if core::ptr::eq(vt, vtable_for::<AnonymousMeta>()) {
+        SlotMetaKind::Anonymous
+    } else if core::ptr::eq(vt, vtable_for::<PageCacheMeta>()) {
+        SlotMetaKind::PageCache
+    } else if core::ptr::eq(vt, vtable_for::<PacketMeta>()) {
+        SlotMetaKind::Packet
+    } else if core::ptr::eq(vt, vtable_for::<RingMeta>()) {
+        SlotMetaKind::Ring
+    } else {
+        SlotMetaKind::UnknownVtable
+    }
+}
+
+/// Capture a read-only [`SlotSnapshot`] for `paddr`. Cheap; intended for
+/// cold diagnostic paths only.
+pub fn slot_snapshot(paddr: Paddr) -> SlotSnapshot {
+    if META_SLOTS.base.load(Ordering::Acquire).is_null() {
+        return SlotSnapshot {
+            in_range: false,
+            initialised: false,
+            raw_ref_count: 0,
+            vtable_addr: 0,
+            kind: SlotMetaKind::UnknownVtable,
+        };
+    }
+    let Some(slot) = meta_slot_for(paddr) else {
+        return SlotSnapshot {
+            in_range: false,
+            initialised: true,
+            raw_ref_count: 0,
+            vtable_addr: 0,
+            kind: SlotMetaKind::UnknownVtable,
+        };
+    };
+    let rc = slot.ref_count.load(Ordering::Acquire);
+    let vt = slot.vtable.load(Ordering::Acquire);
+    let kind = match rc {
+        REF_COUNT_UNUSED => SlotMetaKind::Unused,
+        REF_COUNT_BUSY => SlotMetaKind::Busy,
+        _ => classify_vtable(vt),
+    };
+    SlotSnapshot {
+        in_range: true,
+        initialised: true,
+        raw_ref_count: rc,
+        vtable_addr: vt as usize,
+        kind,
+    }
+}
+
+/// META_SLOTS coverage: `(len_slots, max_paddr_exclusive, initialised)`. Any
+/// `paddr >= max_paddr_exclusive` has no slot, so the frame constructors
+/// return [`FrameError::OutOfRange`] for it.
+pub fn meta_slots_coverage() -> (usize, u64, bool) {
+    if META_SLOTS.base.load(Ordering::Acquire).is_null() {
+        return (0, 0, false);
+    }
+    let len = META_SLOTS.len.load(Ordering::Acquire);
+    (len, (len as u64) * (PAGE_SIZE as u64), true)
+}
+
 impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     pub fn borrow(&self) -> &M {
         // SAFETY: the slot is live for the lifetime of `self`
