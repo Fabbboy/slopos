@@ -29,12 +29,17 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::cpu::preempt;
 use crate::sync::BspToken;
 
-// Inline the OSTD-side IDT entry-point asm stubs. Gated on x86_64 +
-// kernel build (i.e. not host unit tests): the stubs reference Rust
-// symbols `common_exception_handler` / `isr_iret_frame_corrupt` that
-// only exist in the kernel link, plus the `msi_vector_table` rodata
-// array consumed by `install_default_handlers`.
-#[cfg(all(target_arch = "x86_64", not(test)))]
+// Inline the OSTD-side IDT entry-point asm stubs. Gated on the *kernel
+// target* (`target_os = "none"`), NOT `not(test)`: the stubs reference Rust
+// symbols `common_exception_handler` / `isr_iret_frame_corrupt` that only
+// exist in the final kernel link (boot crate). `not(test)` would still
+// compile this asm into host *integration*-test binaries (which link the
+// non-`test` lib), where those externs are undefined — it only linked there
+// by `--gc-sections` luck, which varies by linker version. `target_os =
+// "none"` is true only in the kernel build, excluding every host build
+// deterministically. Includes the `msi_vector_table` rodata array consumed
+// by `install_default_handlers`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("asm/handlers.s"), options(att_syntax));
 
 // ---------------------------------------------------------------------------
@@ -333,7 +338,10 @@ impl Default for IdtBuilder {
 // install_default_handlers — wire OSTD's asm stubs into the IDT.
 // ---------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "x86_64", not(test)))]
+// Gated on the kernel target (matching the `handlers.s` global_asm above):
+// this references the asm's `isr*` / `msi_vector_table` symbols, so it must
+// compile only where that asm does — never in a host build.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 impl IdtBuilder {
     /// Install the OSTD-supplied default exception, syscall-trap, IPI,
     /// LAPIC-timer, IRQ, and MSI gates. The asm stubs live in
