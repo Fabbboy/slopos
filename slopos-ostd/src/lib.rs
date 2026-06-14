@@ -49,6 +49,7 @@ pub mod sync;
 pub mod task;
 pub mod test_support;
 pub mod tx_reclaim;
+pub mod uefi;
 pub mod user;
 pub mod util;
 pub mod wl_currency;

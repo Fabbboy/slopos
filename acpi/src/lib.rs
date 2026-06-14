@@ -10,6 +10,8 @@
 //! - [`madt`]: MADT (Multiple APIC Description Table) entry iteration.
 //! - [`hpet`]: HPET (High Precision Event Timer) table parsing.
 //! - [`mcfg`]: MCFG (PCI Express ECAM configuration space) table parsing.
+//! - [`fadt`]: FADT power-management registers + DSDT `\_S5` decode
+//!   (shutdown / reboot).
 //!
 //! # Usage
 //!
@@ -32,6 +34,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod fadt;
 pub mod hpet;
 pub mod madt;
 pub mod mcfg;

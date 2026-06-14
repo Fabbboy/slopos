@@ -89,6 +89,48 @@ impl AcpiTables {
         None
     }
 
+    /// Call `f` with the raw bytes (header + payload, checksum **not**
+    /// validated) of every table in the root whose 4-byte signature
+    /// matches `signature`, returning the first `Some(..)` `f` produces.
+    ///
+    /// Unlike [`find_table`](Self::find_table) this visits *all* matches,
+    /// not just the first — needed because a platform can ship several
+    /// SSDTs and the `\_S5` sleep object may live in any of them. Prefers
+    /// the XSDT (64-bit entries) when present, else the RSDT.
+    pub fn find_map_raw<T>(
+        &self,
+        signature: &[u8; 4],
+        mut f: impl FnMut(&'static [u8]) -> Option<T>,
+    ) -> Option<T> {
+        let (root_phys, entry_size) = if self.revision >= 2 && self.xsdt_phys != 0 {
+            (self.xsdt_phys, mem::size_of::<u64>())
+        } else if self.rsdt_phys != 0 {
+            (self.rsdt_phys as u64, mem::size_of::<u32>())
+        } else {
+            return None;
+        };
+        let root = load_table(root_phys)?;
+        let payload = root.payload();
+        let entry_count = payload.len() / entry_size;
+        for i in 0..entry_count {
+            let off = i * entry_size;
+            let phys = if entry_size == 8 {
+                read_packed::<u64>(payload, off)?
+            } else {
+                read_packed::<u32>(payload, off)? as u64
+            };
+            let Some(bytes) = table_bytes_at(phys) else {
+                continue;
+            };
+            if bytes.len() >= 4 && &bytes[0..4] == signature {
+                if let Some(result) = f(bytes) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
     /// Walk an XSDT/RSDT root table, looking for `signature` among
     /// its entries.
     fn scan_root(
@@ -116,6 +158,26 @@ impl AcpiTables {
         }
         None
     }
+}
+
+/// Borrow the full bytes (header + payload) of the SDT at `phys`
+/// *without* checksum validation.
+///
+/// Probes the SDT header to read its declared length, then re-borrows
+/// that many bytes. Used for the DSDT — its AML body is scanned for the
+/// `\_S5` sleep package, and some firmware ships a DSDT with a stale
+/// checksum that [`AcpiTable::from_bytes`] would (correctly) reject.
+pub fn table_bytes_at(phys: u64) -> Option<&'static [u8]> {
+    let header_size = mem::size_of::<SdtHeader>();
+    let header_bytes = acpi_region_bytes(phys, header_size)?;
+    if header_bytes.len() < header_size {
+        return None;
+    }
+    let length = read_packed::<u32>(header_bytes, 4)? as usize;
+    if length < header_size {
+        return None;
+    }
+    acpi_region_bytes(phys, length)
 }
 
 /// Load a checksum-validated table at a physical address.

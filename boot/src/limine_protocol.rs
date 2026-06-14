@@ -37,8 +37,9 @@ use core::{
 use limine::{
     BaseRevision, memmap,
     request::{
-        BootloaderInfoRequest, ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest,
-        HhdmRequest, MemmapRequest, ModulesRequest, MpRequest, MpResponse, RsdpRequest,
+        BootloaderInfoRequest, EfiMemmapRequest, EfiRequest, ExecutableAddressRequest,
+        ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest,
+        MpRequest, MpResponse, RsdpRequest,
     },
 };
 
@@ -105,6 +106,16 @@ slopos_ostd::link_section_static! {
     #[used]
     section = ".limine_requests";
     static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static EFI_REQUEST: EfiRequest = EfiRequest::new();
+}
+slopos_ostd::link_section_static! {
+    #[used]
+    section = ".limine_requests";
+    static EFI_MEMMAP_REQUEST: EfiMemmapRequest = EfiMemmapRequest::new();
 }
 slopos_ostd::link_section_static! {
     #[used]
@@ -457,6 +468,25 @@ pub fn get_rsdp_phys_address() -> u64 {
     } else {
         addr
     }
+}
+
+/// Virtual address of the `EFI_SYSTEM_TABLE`, or `0` when the platform
+/// was not booted via UEFI (BIOS / no EFI response). With base revision 6
+/// Limine returns this as an HHDM-virtual pointer; the EFI runtime regions
+/// it points into are mapped by [`crate::uefi_runtime`].
+pub fn efi_system_table_addr() -> u64 {
+    match EFI_REQUEST.response() {
+        Some(resp) => resp.address as u64,
+        None => 0,
+    }
+}
+
+/// Borrow the raw UEFI memory-map blob and its per-descriptor stride
+/// (`desc_size`), or `None` when not booted via UEFI. Must be consumed
+/// early in boot: the array can live in bootloader-reclaimable memory.
+pub fn efi_memmap() -> Option<(&'static [u8], usize)> {
+    let resp = EFI_MEMMAP_REQUEST.response()?;
+    Some((resp.memmap(), resp.desc_size as usize))
 }
 
 pub fn get_rsdp_address() -> *const c_void {

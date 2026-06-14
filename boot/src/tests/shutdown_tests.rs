@@ -526,6 +526,139 @@ pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
     TestResult::Pass
 }
 
+// =============================================================================
+// ACPI FADT / DSDT _S5 Parser Tests (pure, synthetic tables)
+// =============================================================================
+
+use slopos_acpi::fadt::{ACPI_ADDR_SPACE_IO, Fadt, find_s5_sleep_types};
+
+fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+fn put_u64(buf: &mut [u8], off: usize, v: u64) {
+    buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+/// A modern (ACPI 6.x, 276-byte) FADT with legacy I/O PM1 ports and an
+/// I/O-space reset register parses into the expected fields.
+pub fn test_fadt_parse_legacy_io_ports() -> TestResult {
+    let mut buf = [0u8; 276];
+    buf[0..4].copy_from_slice(b"FACP");
+    put_u32(&mut buf, 4, 276); // length
+    buf[8] = 6; // revision
+    put_u32(&mut buf, 48, 0xB2); // SMI_CMD
+    buf[52] = 0xA1; // ACPI_ENABLE
+    put_u32(&mut buf, 64, 0x404); // PM1a_CNT_BLK
+    put_u32(&mut buf, 68, 0); // PM1b_CNT_BLK (single block)
+    put_u32(&mut buf, 112, 1 << 10); // FLAGS: RESET_REG_SUP
+    buf[116] = ACPI_ADDR_SPACE_IO; // RESET_REG.address_space_id
+    put_u64(&mut buf, 120, 0xCF9); // RESET_REG.address
+    buf[128] = 0x06; // RESET_VALUE
+    // X_ control blocks left zero -> legacy fallback.
+
+    let fadt = Fadt::parse(&buf).expect("FADT should parse");
+    assert_eq_test!(fadt.pm1a_cnt_port, 0x404, "pm1a port");
+    assert_eq_test!(fadt.pm1b_cnt_port, 0, "pm1b absent");
+    assert_eq_test!(fadt.smi_cmd, 0xB2, "smi_cmd");
+    assert_eq_test!(fadt.acpi_enable, 0xA1, "acpi_enable");
+    let (reg, val) = fadt.reset.expect("reset register present");
+    assert_eq_test!(reg.address_space_id, ACPI_ADDR_SPACE_IO, "reset space");
+    assert_eq_test!(reg.address, 0xCF9, "reset address");
+    assert_eq_test!(val, 0x06, "reset value");
+    TestResult::Pass
+}
+
+/// The 64-bit extended (`X_`) PM1a control block is preferred over the
+/// legacy 32-bit field when it names a non-zero I/O register.
+pub fn test_fadt_prefers_extended_io_port() -> TestResult {
+    let mut buf = [0u8; 276];
+    buf[0..4].copy_from_slice(b"FACP");
+    put_u32(&mut buf, 4, 276);
+    buf[8] = 6;
+    put_u32(&mut buf, 64, 0x404); // legacy PM1a
+    buf[172] = ACPI_ADDR_SPACE_IO; // X_PM1a_CNT_BLK.address_space_id
+    put_u64(&mut buf, 176, 0x1804); // X_PM1a_CNT_BLK.address
+
+    let fadt = Fadt::parse(&buf).expect("FADT should parse");
+    assert_eq_test!(fadt.pm1a_cnt_port, 0x1804, "should prefer extended port");
+    TestResult::Pass
+}
+
+/// RESET_REG is ignored unless the FADT flags advertise `RESET_REG_SUP`.
+pub fn test_fadt_no_reset_when_flag_clear() -> TestResult {
+    let mut buf = [0u8; 276];
+    buf[0..4].copy_from_slice(b"FACP");
+    buf[8] = 6;
+    put_u32(&mut buf, 64, 0x404);
+    put_u32(&mut buf, 112, 0); // FLAGS: RESET_REG_SUP clear
+    buf[116] = ACPI_ADDR_SPACE_IO;
+    put_u64(&mut buf, 120, 0xCF9);
+    buf[128] = 0x06;
+
+    let fadt = Fadt::parse(&buf).expect("FADT should parse");
+    assert_test!(fadt.reset.is_none(), "reset absent when flag clear");
+    TestResult::Pass
+}
+
+/// A short (ACPI 1.0, 116-byte) FADT yields PM1 ports but no reset reg.
+pub fn test_fadt_short_table_no_reset() -> TestResult {
+    let mut buf = [0u8; 116];
+    buf[0..4].copy_from_slice(b"FACP");
+    buf[8] = 1; // revision 1
+    put_u32(&mut buf, 64, 0x404);
+    put_u32(&mut buf, 68, 0x408);
+
+    let fadt = Fadt::parse(&buf).expect("FADT should parse");
+    assert_eq_test!(fadt.pm1a_cnt_port, 0x404, "pm1a port");
+    assert_eq_test!(fadt.pm1b_cnt_port, 0x408, "pm1b port");
+    assert_test!(fadt.reset.is_none(), "no reset reg in 1.0 FADT");
+    TestResult::Pass
+}
+
+/// `\_S5` with `BytePrefix`-tagged sleep types decodes both elements.
+pub fn test_find_s5_byteprefix() -> TestResult {
+    let aml = [
+        0x08, 0x5F, 0x53, 0x35, 0x5F, // NameOp "_S5_"
+        0x12, 0x06, 0x02, // PackageOp, PkgLength, NumElements=2
+        0x0A, 0x05, // BytePrefix 5 -> SLP_TYPa
+        0x0A, 0x07, // BytePrefix 7 -> SLP_TYPb
+    ];
+    let (a, b) = find_s5_sleep_types(&aml).expect("should find _S5");
+    assert_eq_test!(a, 5, "SLP_TYPa");
+    assert_eq_test!(b, 7, "SLP_TYPb");
+    TestResult::Pass
+}
+
+/// QEMU-style `\_S5 = Package(){Zero, Zero, ...}` through a root-prefixed
+/// name decodes to sleep type 0 (matching the legacy `0x2000` poke).
+pub fn test_find_s5_zero_ops_root_prefixed() -> TestResult {
+    let aml = [
+        0x08, 0x5C, 0x5F, 0x53, 0x35, 0x5F, // NameOp '\' "_S5_"
+        0x12, 0x06, 0x04, // PackageOp, PkgLength, NumElements=4
+        0x00, 0x00, 0x00, 0x00, // Zero x4
+    ];
+    let (a, b) = find_s5_sleep_types(&aml).expect("should find _S5");
+    assert_eq_test!(a, 0, "SLP_TYPa");
+    assert_eq_test!(b, 0, "SLP_TYPb");
+    TestResult::Pass
+}
+
+/// No `\_S5` object present -> `None` (caller keeps reset usable, skips S5).
+pub fn test_find_s5_absent() -> TestResult {
+    // `_S4_` (suspend-to-disk), not `_S5_`.
+    let aml = [0x08, 0x5F, 0x53, 0x34, 0x5F, 0x12, 0x06, 0x02, 0x00, 0x00];
+    assert_test!(find_s5_sleep_types(&aml).is_none(), "must not find _S5");
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_fadt_parse_legacy_io_ports, suite = shutdown);
+slopos_testing::stest!(name = test_fadt_prefers_extended_io_port, suite = shutdown);
+slopos_testing::stest!(name = test_fadt_no_reset_when_flag_clear, suite = shutdown);
+slopos_testing::stest!(name = test_fadt_short_table_no_reset, suite = shutdown);
+slopos_testing::stest!(name = test_find_s5_byteprefix, suite = shutdown);
+slopos_testing::stest!(name = test_find_s5_zero_ops_root_prefixed, suite = shutdown);
+slopos_testing::stest!(name = test_find_s5_absent, suite = shutdown);
+
 slopos_testing::stest!(name = test_stateflag_lifecycle, suite = shutdown);
 slopos_testing::stest!(name = test_stateflag_take, suite = shutdown);
 slopos_testing::stest!(name = test_stateflag_independence, suite = shutdown);

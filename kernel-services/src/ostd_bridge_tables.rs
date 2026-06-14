@@ -70,6 +70,14 @@ pub static PORT_RANGES: &[PortRange] = &[
         start: 0x4004,
         end: 0x4006,
     },
+    // PCH reset-control register (RST_CNT) at 0xCF9: the architecturally-
+    // fixed modern x86 reset port, wired to the platform RESET#. Read is
+    // insensitive; written only by the reboot path. Belt-and-braces
+    // alongside the firmware-described FADT RESET_REG.
+    PortRange {
+        start: 0xCF9,
+        end: 0xCFA,
+    },
 ];
 
 pub static RESERVED_VECTORS: &[u8] = &[

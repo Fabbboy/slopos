@@ -23,6 +23,7 @@ test-hooks = ["slopos-core/test-hooks", "slopos-mm/test-hooks", "slopos-drivers/
 [dependencies]
 limine = { workspace = true }
 slopos-abi = { workspace = true }
+slopos-acpi = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
 slopos-kernel-services = { workspace = true }

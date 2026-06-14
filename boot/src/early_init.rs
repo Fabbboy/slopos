@@ -711,6 +711,11 @@ pub fn kernel_main_impl() {
         }
         slopos_hermetic::return_after_boot(boot_ctx);
         serial::write_line("BOOT: boot init complete");
+
+        // Map UEFI runtime-services regions into the kernel page table
+        // while the EFI memory map is still live, so firmware `ResetSystem`
+        // stays callable at shutdown. No-op on a BIOS boot.
+        crate::uefi_runtime::map_runtime_regions(boot_get_hhdm_offset());
     });
 
     if klog::is_enabled_level(KlogLevel::Info) {

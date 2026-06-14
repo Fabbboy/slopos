@@ -11,9 +11,14 @@ static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
 static SERIAL_DRAINED: StateFlag = StateFlag::new();
 static FS_SYNCED: StateFlag = StateFlag::new();
 
+use slopos_acpi::fadt::PowerConfig;
+use slopos_acpi::tables::AcpiTables;
+use slopos_ostd::uefi::{self, EfiResetType};
+
 use slopos_drivers::apic;
 use slopos_drivers::hpet;
 use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
+use slopos_kernel_services::platform;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
@@ -34,7 +39,71 @@ fn ensure_kernel_page_dir() {
     // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
     activate_post_user_fault();
 }
+/// Parse the FADT (+ DSDT `\_S5`) for the platform's power-management
+/// registers. Parsed on demand (pure HHDM reads) rather than cached, since
+/// the firmware tables live for the kernel's lifetime and shutdown is rare.
+fn acpi_power_config() -> Option<PowerConfig> {
+    if !platform::is_rsdp_available() {
+        return None;
+    }
+    let tables = AcpiTables::from_phys(platform::get_rsdp_phys())?;
+    PowerConfig::from_tables(&tables)
+}
+
+/// Request firmware power-off / reset via UEFI Runtime Services
+/// `ResetSystem` — the most reliable path on modern UEFI hardware, where
+/// the firmware performs the chipset-correct sequence internally. No-op on
+/// a BIOS boot (no system table). Returns if the firmware ignored it.
+fn try_uefi_reset(reset_type: EfiResetType) {
+    let system_table = crate::limine_protocol::efi_system_table_addr();
+    if system_table != 0 {
+        klog_info!(
+            "UEFI ResetSystem: type={:?} system_table={:#x}",
+            reset_type,
+            system_table
+        );
+        uefi::reset_system(system_table, reset_type);
+    }
+}
+
+fn reboot_via_uefi() {
+    try_uefi_reset(EfiResetType::Cold);
+}
+
 fn poweroff_hardware() {
+    // First choice: firmware power-off via UEFI ResetSystem(Shutdown).
+    // Falls through on a BIOS boot or if the firmware does not support it.
+    try_uefi_reset(EfiResetType::Shutdown);
+
+    // Fallback: ACPI S5 (soft-off) via the FADT PM1 control registers with
+    // the DSDT/SSDT `\_S5` sleep type.
+    match acpi_power_config() {
+        Some(cfg) => {
+            klog_info!(
+                "ACPI poweroff: pm1a={:#x} pm1b={:#x} slp_a={:?} slp_b={:?}",
+                cfg.pm1a_cnt_port,
+                cfg.pm1b_cnt_port,
+                cfg.slp_typ_a,
+                cfg.slp_typ_b
+            );
+            ostd_power::acpi_enable_if_needed(
+                cfg.pm1a_cnt_port,
+                cfg.smi_cmd,
+                cfg.acpi_enable,
+                || hpet::delay_ms(1),
+            );
+            if let Some(slp_a) = cfg.slp_typ_a {
+                let slp_b = cfg.slp_typ_b.unwrap_or(slp_a);
+                ostd_power::acpi_s5_poweroff(cfg.pm1a_cnt_port, cfg.pm1b_cnt_port, slp_a, slp_b);
+            } else {
+                klog_info!("ACPI poweroff: no \\_S5 sleep type found; using fallback ports");
+            }
+        }
+        None => klog_info!("ACPI poweroff: FADT unavailable; using fallback ports"),
+    }
+
+    // Fallback: the hypervisor-specific ACPI PM1A_CNT ports (QEMU 0x604,
+    // Bochs 0xB004, VirtualBox 0x4004). Harmless no-ops on bare metal.
     ostd_power::acpi_poweroff_broadcast();
 }
 pub fn kernel_quiesce_interrupts() {
@@ -122,12 +191,32 @@ fn reboot_via_cf9() {
     ostd_power::cf9_reset_pulse(|| hpet::delay_ms(1));
 }
 
-/// Recoverable platform resets, tried in order of increasing reach. Each
-/// returns only if it did not reset the machine, so the next is attempted;
-/// the terminal triple fault (resets every sane x86) is the final fallback.
+/// Issue the firmware-advertised ACPI reset (FADT `RESET_REG`) when the
+/// platform provides one (on Intel PCH this is typically the `0xCF9` port).
+/// Returns if no reset register is advertised or the platform ignored it.
+fn reboot_via_acpi() {
+    if let Some((reg, value)) = acpi_power_config().and_then(|c| c.reset) {
+        klog_info!(
+            "ACPI reset: space={} addr={:#x} value={:#x}",
+            reg.address_space_id,
+            reg.address,
+            value
+        );
+        ostd_power::acpi_reset(reg.address_space_id, reg.address, value);
+    } else {
+        klog_info!("ACPI reset: FADT advertises no RESET_REG");
+    }
+}
+
+/// Recoverable platform resets, tried in order of decreasing likelihood
+/// on modern hardware. Each returns only if it did not reset the machine,
+/// so the next is attempted; the terminal triple fault (resets every sane
+/// x86 — but notably *not* every UEFI platform) is the final fallback.
 const REBOOT_METHODS: &[(&str, fn())] = &[
-    ("PS/2 keyboard controller", ostd_power::ps2_reset_pulse),
+    ("UEFI ResetSystem", reboot_via_uefi),
+    ("ACPI RESET_REG", reboot_via_acpi),
     ("PCH 0xCF9 reset register", reboot_via_cf9),
+    ("PS/2 keyboard controller", ostd_power::ps2_reset_pulse),
 ];
 
 pub fn kernel_reboot(reason: *const c_char) -> ! {

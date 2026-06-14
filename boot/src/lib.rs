@@ -20,6 +20,7 @@ pub mod shutdown;
 pub mod smp;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
+pub mod uefi_runtime;
 pub mod user_fault;
 
 pub use early_init::{
