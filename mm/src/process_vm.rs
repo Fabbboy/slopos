@@ -3,6 +3,8 @@ use core::ptr;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError};
 use slopos_ostd::mm::KArc;
+use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -2066,54 +2068,112 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
         Some(s) => s,
         None => return -1,
     };
-    let mut guard = PROCESS_VMS[slot].lock();
-    if guard.process_id != process_id {
+
+    // Size the frame gather from the stack extent BEFORE taking the
+    // per-process lock: allocating under that IRQs-off lock can itself
+    // trigger a cross-CPU drain — the deadlock class this restructure
+    // removes.
+    let (stack_start, stack_end) = slot_read_lock_free(&PROCESS_VMS[slot], |inner| {
+        (inner.stack_start, inner.stack_end)
+    });
+    if stack_end <= stack_start {
         return -1;
     }
-    let page_dir = guard.page_dir;
-    let stack_start = guard.stack_start;
-    let stack_end = guard.stack_end;
+    let page_count = ((stack_end - stack_start) / PAGE_SIZE_4KB) as usize;
 
-    if page_dir.is_null() || stack_end <= stack_start {
-        return -1;
-    }
+    // Hold every unmapped frame until the cross-CPU shootdown completes,
+    // so a freed frame can't be reused while a peer CPU still caches a
+    // stale translation. The shootdown then runs AFTER the lock is
+    // dropped, with interrupts enabled — never the synchronous broadcast
+    // under the IRQs-off per-process lock that wedges a CPU on a
+    // non-acking peer.
+    let mut gathered: KVec<UFrame<AnonymousMeta>> = match KVec::with_capacity(page_count) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
 
-    let vm_space_ref = guard
-        .vm_space
-        .as_mut()
-        .expect("process_vm_reset_stack: vm_space present for live pid");
-    if let Err(err) = unmap_user_range(vm_space_ref, stack_start, stack_end) {
-        klog_info!("process_vm_reset_stack: unmap failed: {:?}", err);
-        return -1;
-    }
+    let result = {
+        let mut guard = PROCESS_VMS[slot].lock();
+        if guard.process_id != process_id || guard.page_dir.is_null() {
+            -1
+        } else {
+            let vm_space_ref = guard
+                .vm_space
+                .as_mut()
+                .expect("process_vm_reset_stack: vm_space present for live pid");
 
-    let stack_page_flags = VmaRegion {
-        protection: Protection::RW,
-        backing: RegionBacking::Anonymous,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Stack,
-    }
-    .to_page_flags();
-    let mut pages: u32 = 0;
-    let vm_space_ref = guard
-        .vm_space
-        .as_mut()
-        .expect("process_vm_reset_stack: vm_space still present after unmap");
-    if map_user_range(
-        vm_space_ref,
-        stack_start,
-        stack_end,
-        stack_page_flags.bits(),
-        &mut pages,
-    ) != 0
-    {
-        return -1;
-    }
-    let _ = page_dir;
+            // Gather-unmap the old stack: suppress the per-page LUF
+            // cross-CPU deferral (the cursor still invalidates locally),
+            // collecting the freed frames so none is released yet.
+            crate::mmu::luf::suppress_cross_cpu_drain();
+            let mut addr = stack_start;
+            let mut ok = true;
+            while addr < stack_end {
+                match crate::dual_paging::ostd_unmap_4kb_user_take(
+                    vm_space_ref,
+                    VirtAddr::new(addr),
+                ) {
+                    Ok(Some(frame)) => {
+                        if gathered.push(frame).is_err() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        klog_info!("process_vm_reset_stack: unmap failed: {:?}", err);
+                        ok = false;
+                        break;
+                    }
+                }
+                addr += PAGE_SIZE_4KB;
+            }
+            crate::mmu::luf::unsuppress_cross_cpu_drain();
 
-    0
+            if !ok {
+                -1
+            } else {
+                let stack_page_flags = VmaRegion {
+                    protection: Protection::RW,
+                    backing: RegionBacking::Anonymous,
+                    lazy: false,
+                    cow: false,
+                    user: true,
+                    purpose: RegionPurpose::Stack,
+                }
+                .to_page_flags();
+                let mut pages: u32 = 0;
+                let vm_space_ref = guard
+                    .vm_space
+                    .as_mut()
+                    .expect("process_vm_reset_stack: vm_space still present after unmap");
+                if map_user_range(
+                    vm_space_ref,
+                    stack_start,
+                    stack_end,
+                    stack_page_flags.bits(),
+                    &mut pages,
+                ) != 0
+                {
+                    -1
+                } else {
+                    0
+                }
+            }
+        }
+        // per-process lock released here
+    };
+
+    // Cross-CPU shootdown of the old mappings, lock-free with interrupts
+    // enabled. A never-scheduled address space has an empty per-process
+    // cpumask, so this sends zero IPIs; a live one targets exactly the
+    // CPUs that loaded it.
+    tlb::flush_all_for_process(process_id);
+
+    // The old frames are now safe to release.
+    drop(gathered);
+
+    result
 }
 
 /// Set the process program break (Linux `brk` semantics).

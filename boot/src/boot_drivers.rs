@@ -268,6 +268,13 @@ fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
 }
 
 fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    // Honour `tp.off` (disables the LPSS I²C probe + touchpad bring-up)
+    // before driver probe runs.
+    let tp_off = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
+        .map(|s| s.contains("tp.off"))
+        .unwrap_or(false);
+    slopos_drivers::i2c::set_lpss_disabled(tp_off);
+
     // register the loopback device BEFORE any physical NIC so it
     // gets DevIndex(0) by convention.  This must happen before pci_init()
     // triggers VirtIO-net probe.
@@ -326,6 +333,24 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
             sync_mouse_bounds(xe_fb);
         }
     }
+}
+
+fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    if slopos_drivers::i2c::lpss_disabled() {
+        return;
+    }
+    let rsdp_phys = limine_protocol::get_rsdp_phys_address();
+    if rsdp_phys == 0 {
+        return;
+    }
+    let (width, height) = limine_protocol::boot_info()
+        .framebuffer
+        .map(|fb| (fb.info.width, fb.info.height))
+        .unwrap_or((0, 0));
+    let debug = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
+        .map(|s| s.contains("tp.debug"))
+        .unwrap_or(false);
+    slopos_drivers::touchpad::init(rsdp_phys, width, height, debug);
 }
 
 use slopos_testing::config_from_cmdline;
@@ -557,6 +582,13 @@ crate::boot_init!(
     b"pci\0",
     boot_step_pci_init_fn,
     flags = boot_init_priority(80)
+);
+crate::boot_init!(
+    BOOT_STEP_TOUCHPAD_INIT,
+    drivers,
+    b"touchpad\0",
+    boot_step_touchpad_init_fn,
+    flags = boot_init_priority(82)
 );
 crate::boot_init!(
     BOOT_STEP_RUN_TESTS,

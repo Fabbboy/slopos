@@ -316,6 +316,10 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
         }
     }
 
+    // Surface the locked-up CPU's RIP/RSP/RBP on the panic screen (not just
+    // the serial log) so the wedge site is visible without a serial console.
+    crate::panic::set_panic_cpu_state(frame.rip, frame.rsp, frame.rbp);
+
     // Force-release all tracked locks so other CPUs can make progress.
     slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
 

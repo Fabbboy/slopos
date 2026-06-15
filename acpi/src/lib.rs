@@ -34,6 +34,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod aml;
 pub mod fadt;
 pub mod hpet;
 pub mod madt;

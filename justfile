@@ -114,13 +114,13 @@ build: _fs-image
 
 # ── ISO images ───────────────────────────────────────────────────────────────
 
-[doc("Build default ISO")]
+[doc("Build default ISO (honors BOOT_CMDLINE, e.g. BOOT_CMDLINE='tests=off tp.debug=on')")]
 iso: build _initramfs
     LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
-        scripts/build_iso.sh "{{iso}}" "{{build_dir}}"
+        scripts/build_iso.sh "{{iso}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
 _iso-notests: build _initramfs
     LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \

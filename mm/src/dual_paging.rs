@@ -175,6 +175,24 @@ pub fn ostd_unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result
         .map(|opt| opt.is_some())?)
 }
 
+/// Unmap a 4 KiB user leaf and RETURN its frame instead of letting it
+/// drop (and free) inline. The caller holds the returned [`UFrame`]
+/// until after a cross-CPU TLB shootdown of the range, so a freed frame
+/// can't be reused while a peer CPU still caches a stale translation.
+/// The cursor performs the local invalidation; pair with
+/// [`crate::mmu::luf::suppress_cross_cpu_drain`] to skip the per-page
+/// cross-CPU deferral and issue a single explicit shootdown after the
+/// lock drops.
+pub fn ostd_unmap_4kb_user_take(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+) -> Result<Option<UFrame<AnonymousMeta>>, MapError> {
+    let vs = vm_space_get_mut(vm_space)?;
+    let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let mut cursor = vs.cursor_mut(range)?;
+    cursor.unmap::<Size4Kb, AnonymousMeta>()
+}
+
 /// Map a 4 KiB SlopRing page (`Frame<RingMeta>`) into `vm_space` at
 /// `va`. The `RingMeta` slot at `pa` must already be live (the ring
 /// object holds the first ref); this bumps it via `from_in_use` and

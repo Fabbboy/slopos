@@ -45,8 +45,10 @@ pub fn display_panic_screen(
     rip: Option<u64>,
     rsp: Option<u64>,
     cr0: u64,
+    cr2: u64,
     cr3: u64,
     cr4: u64,
+    backtrace: &[u64],
 ) -> bool {
     if framebuffer::snapshot().is_none() {
         return false;
@@ -154,10 +156,44 @@ pub fn display_panic_screen(
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR0: \0", cr0);
     y += char_height + 4;
 
+    draw_register_line(&mut ctx, &atlas, 60, y, b"CR2: \0", cr2);
+    y += char_height + 4;
+
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR3: \0", cr3);
     y += char_height + 4;
 
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR4: \0", cr4);
+    y += char_height + 4;
+
+    // Backtrace (most recent call first) — frame-pointer return addresses
+    // of the wedged/faulting call chain, so the call site is visible on
+    // the panic screen without a serial console.
+    if !backtrace.is_empty() {
+        y += char_height;
+        atlas.draw_bytes(
+            &mut ctx,
+            40,
+            y,
+            b"Backtrace:\0",
+            PANIC_HEADER_COLOR,
+            PANIC_BG_COLOR,
+        );
+        y += char_height + 8;
+        for (i, &ra) in backtrace.iter().enumerate() {
+            let label: &[u8] = match i {
+                0 => b"#0:  \0",
+                1 => b"#1:  \0",
+                2 => b"#2:  \0",
+                3 => b"#3:  \0",
+                4 => b"#4:  \0",
+                5 => b"#5:  \0",
+                6 => b"#6:  \0",
+                _ => b"#7:  \0",
+            };
+            draw_register_line(&mut ctx, &atlas, 60, y, label, ra);
+            y += char_height + 4;
+        }
+    }
 
     // Prompt at bottom
     let prompt = b"Press ENTER to shutdown\0";

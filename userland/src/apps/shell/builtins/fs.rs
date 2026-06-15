@@ -1,7 +1,6 @@
 //! File system builtin commands: ls, cat, write, mkdir, rm, cd, pwd,
 //! stat, touch, cp, mv, head, tail, wc, hexdump, tee, diff.
 
-use core::cmp;
 use core::option::Option;
 use core::option::Option::{None, Some};
 use core::result::Result::{Err, Ok};
@@ -169,25 +168,28 @@ pub fn cmd_cat(argc: i32, argv: &[&[u8]]) -> i32 {
                 }
             };
 
-            let mut tmp = [0u8; SHELL_IO_MAX + 1];
-            let r = match file.read(&mut tmp[..SHELL_IO_MAX]) {
-                Ok(n) => n,
-                Err(_) => {
-                    shell_write_idx(b"cat: read error\n", COLOR_ERROR_RED);
-                    return 1;
+            // Stream the whole file to EOF (large files like /dev/kmsg
+            // exceed one buffer, and the interesting bytes may be at the end).
+            let mut tmp = [0u8; SHELL_IO_MAX];
+            let mut last_byte = b'\n';
+            loop {
+                let r = match file.read(&mut tmp) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        shell_write_idx(b"cat: read error\n", COLOR_ERROR_RED);
+                        return 1;
+                    }
+                };
+                if r == 0 {
+                    break;
                 }
-            };
-            let len = cmp::min(r, tmp.len() - 1);
-            tmp[len] = 0;
-            if len == 0 {
-                return 0;
+                last_byte = tmp[r - 1];
+                if !shell_write(&tmp[..r]) {
+                    break;
+                }
             }
-            shell_write(&tmp[..len]);
-            if tmp[len - 1] != b'\n' {
+            if last_byte != b'\n' {
                 shell_write(NL.as_bytes());
-            }
-            if r == SHELL_IO_MAX {
-                shell_write(b"[truncated]\n");
             }
             0
         });

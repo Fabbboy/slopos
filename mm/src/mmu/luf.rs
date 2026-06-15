@@ -1,8 +1,8 @@
 //! Lazy Unmap Flush (LUF) — per-CPU deferred TLB shootdowns.
 //!
-//! Based on Byungchul Park's Linux LUF patch series (2024). Instead of
-//! issuing a synchronous IPI shootdown the moment a page is unmapped,
-//! we queue the pending invalidation on the initiating CPU. The queue
+//! Instead of issuing a synchronous IPI shootdown the moment a page is
+//! unmapped, we queue the pending invalidation on the initiating CPU.
+//! The queue
 //! drains in three ways:
 //!
 //!   1. **Threshold** — when the queue fills up, a single batched
@@ -21,7 +21,7 @@
 //! a flush, it only defers it.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::pcr::MAX_CPUS;
@@ -153,9 +153,9 @@ pub fn nonempty_mask_snapshot() -> u64 {
 
 /// Shared drain request, serialised by `DRAIN_LOCK` below. Remote CPUs
 /// read `target_phys`, scan their ring, ack, then optionally drain if
-/// they hit. Amit-style early ACK applies — remotes bump `ack` before
-/// the INVPCID retires so the initiator can proceed as soon as all
-/// targets have observed the request.
+/// they hit. Early ACK: remotes bump `ack` before the INVPCID retires
+/// so the initiator can proceed as soon as all targets have observed
+/// the request.
 #[repr(C, align(64))]
 struct LufDrainRequest {
     target_phys: AtomicU64,
@@ -443,6 +443,42 @@ fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
     nonempty_mask_clear(cpu);
 }
 
+/// Per-CPU suppression of cross-CPU unmap deferral. While set on a CPU,
+/// [`queue_unmap`] performs only the local invalidation and does not
+/// queue an entry. Used by gathered bulk unmaps (e.g. exec-time stack
+/// reset) that hold every freed frame and issue a single explicit
+/// shootdown AFTER dropping their locks — so no synchronous broadcast
+/// ever runs under an IRQs-off lock.
+static SUPPRESS_CROSS_CPU: [AtomicBool; MAX_CPUS] = {
+    const F: AtomicBool = AtomicBool::new(false);
+    [F; MAX_CPUS]
+};
+
+/// Begin suppressing cross-CPU unmap deferral on the current CPU. Must
+/// be paired with [`unsuppress_cross_cpu_drain`]; the caller is then
+/// responsible for the explicit cross-CPU shootdown of the unmapped
+/// range, performed with the freed frames still held.
+pub fn suppress_cross_cpu_drain() {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    if cpu < MAX_CPUS {
+        SUPPRESS_CROSS_CPU[cpu].store(true, Ordering::Release);
+    }
+}
+
+/// Stop suppressing cross-CPU unmap deferral on the current CPU.
+pub fn unsuppress_cross_cpu_drain() {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    if cpu < MAX_CPUS {
+        SUPPRESS_CROSS_CPU[cpu].store(false, Ordering::Release);
+    }
+}
+
+#[inline]
+fn cross_cpu_drain_suppressed() -> bool {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    cpu < MAX_CPUS && SUPPRESS_CROSS_CPU[cpu].load(Ordering::Acquire)
+}
+
 /// Queue a TLB flush for `(vaddr, phys)` belonging to `ctx_id` / `pcid`
 /// on the calling CPU.
 ///
@@ -472,6 +508,13 @@ pub fn queue_unmap(vaddr: VirtAddr, phys: PhysAddr, ctx_id: MmContextId, pcid: u
     // that targets the exact PCID slot regardless of current CR3.
     let _ = pcid;
     slopos_arch::cpu::tlb::invlpg(vaddr.as_u64());
+
+    // Gathered bulk unmap in progress: the local invalidation above is
+    // all that's needed here. The caller holds the freed frames and
+    // issues one explicit cross-CPU shootdown after dropping its locks.
+    if cross_cpu_drain_suppressed() {
+        return;
+    }
 
     let cpu = slopos_arch::pcr::get_current_cpu();
     let Some(state) = state_for(cpu) else {

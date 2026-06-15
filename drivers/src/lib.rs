@@ -4,6 +4,7 @@
 
 pub mod apic;
 pub mod hpet;
+pub mod i2c;
 pub mod input_event;
 pub mod ioapic;
 pub mod irq;
@@ -21,6 +22,7 @@ pub mod ps2;
 pub mod random;
 pub mod serial;
 pub mod syscall_services_init;
+pub mod touchpad;
 pub mod tty;
 pub mod tty_file_ops;
 #[cfg(feature = "test-hooks")]

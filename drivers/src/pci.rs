@@ -1,5 +1,5 @@
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
 use slopos_acpi::mcfg::{Mcfg, McfgEntry};
@@ -103,6 +103,39 @@ impl PciEnumState {
 static PCI_INIT: InitFlag = InitFlag::new();
 static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
+
+/// Bump-allocator cursor for assigning MMIO regions to PCI BARs the firmware
+/// left unassigned. Anchored at enumeration to the top of the highest
+/// firmware-assigned MMIO BAR; `0` = no anchor available.
+static MMIO_ALLOC_CURSOR: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate a free physical MMIO region of `size` bytes (size-aligned) for
+/// a PCI BAR the firmware left unassigned (`base == 0`).
+///
+/// The region is placed just above the highest MMIO BAR the firmware *did*
+/// assign, so it lands inside the same host-bridge MMIO aperture and the
+/// device decodes it. Lock-free: it is called from within driver probe,
+/// which already holds `ENUM_STATE`. Returns `None` if no anchor exists.
+pub fn pci_alloc_mmio(size: u64) -> Option<u64> {
+    if size == 0 {
+        return None;
+    }
+    let align = size.max(0x1000);
+    loop {
+        let cur = MMIO_ALLOC_CURSOR.load(Ordering::Acquire);
+        if cur == 0 {
+            return None;
+        }
+        let base = (cur.checked_add(align - 1)?) & !(align - 1);
+        let next = base.checked_add(size)?;
+        if MMIO_ALLOC_CURSOR
+            .compare_exchange(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(base);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Link-section-driven driver registry.
@@ -664,7 +697,7 @@ fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
 
     if is_io {
         let base = (original & !0x3) as u64;
-        let size = (!((size_mask as u64) | 0xFFFF_FFFF_FFFF_0003) + 1) as u64;
+        let size = (!(size_mask & !0x3)).wrapping_add(1) as u32 as u64;
         PciBarInfo {
             base,
             size,
@@ -675,14 +708,31 @@ fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
     } else {
         let is_64bit = ((original >> 1) & 0x3) == 2;
         let is_prefetchable = ((original >> 3) & 1) != 0;
-        let base_low = (original & !0xF) as u64;
-        let base_high = if is_64bit && bar_idx < 5 {
-            pci_config_read32(bus, device, function, bar_offset + 4) as u64
+        let original_high = if is_64bit && bar_idx < 5 {
+            pci_config_read32(bus, device, function, bar_offset + 4)
         } else {
             0
         };
+        let size_mask_high = if is_64bit && bar_idx < 5 {
+            pci_config_write32(bus, device, function, bar_offset, 0xFFFF_FFFF);
+            pci_config_write32(bus, device, function, bar_offset + 4, 0xFFFF_FFFF);
+            let high = pci_config_read32(bus, device, function, bar_offset + 4);
+            pci_config_write32(bus, device, function, bar_offset + 4, original_high);
+            pci_config_write32(bus, device, function, bar_offset, original);
+            high
+        } else {
+            0
+        };
+        let base_low = (original & !0xF) as u64;
+        let base_high = original_high as u64;
         let base = base_low | (base_high << 32);
-        let size = (!((size_mask as u64) | 0xF) + 1) as u64;
+        let size_mask = (size_mask & !0xF) as u64 | ((size_mask_high as u64) << 32);
+        let size_bits = if is_64bit && bar_idx < 5 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        };
+        let size = (!size_mask).wrapping_add(1) & size_bits;
         PciBarInfo {
             base,
             size,
@@ -1084,6 +1134,19 @@ pub fn pci_init() {
             }
         }
     }
+
+    // Anchor the unassigned-BAR allocator above the highest firmware-assigned
+    // MMIO BAR while the state lock is already held here, so allocation during
+    // driver probe (which holds this same lock) needs no lock of its own.
+    let mut mmio_top = 0u64;
+    for dev in &state.devices[..state.device_count] {
+        for bar in &dev.bars {
+            if bar.is_io == 0 && bar.base != 0 {
+                mmio_top = mmio_top.max(bar.base.saturating_add(bar.size));
+            }
+        }
+    }
+    MMIO_ALLOC_CURSOR.store(mmio_top, Ordering::Release);
 
     let count = state.device_count;
     DEVICE_COUNT_CACHE.store(count, Ordering::Release);

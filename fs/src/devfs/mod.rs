@@ -5,6 +5,7 @@ const NULL_INODE: InodeId = 2;
 const ZERO_INODE: InodeId = 3;
 const RANDOM_INODE: InodeId = 4;
 const CONSOLE_INODE: InodeId = 5;
+const KMSG_INODE: InodeId = 6;
 
 use crate::MAX_NAME_LEN;
 
@@ -40,11 +41,13 @@ impl DeviceEntry {
     }
 }
 
-static DEVICES: [DeviceEntry; 4] = [
+static DEVICES: [DeviceEntry; 5] = [
     DeviceEntry::new(b"null", NULL_INODE, 1, 3),
     DeviceEntry::new(b"zero", ZERO_INODE, 1, 5),
     DeviceEntry::new(b"random", RANDOM_INODE, 1, 8),
     DeviceEntry::new(b"console", CONSOLE_INODE, 5, 1),
+    // Kernel log ring buffer, readable from userland (major 1, minor 11).
+    DeviceEntry::new(b"kmsg", KMSG_INODE, 1, 11),
 ];
 
 pub struct DevFs;
@@ -102,9 +105,13 @@ impl FileSystem for DevFs {
         Err(VfsError::NotFound)
     }
 
-    fn read(&self, inode: InodeId, _offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
         match inode {
             NULL_INODE => Ok(0),
+
+            // Kernel log: serve the in-memory ring buffer by offset so a
+            // plain `cat /dev/kmsg` streams the whole log to EOF.
+            KMSG_INODE => Ok(slopos_ostd::klog::klog_read(offset as usize, buf)),
 
             ZERO_INODE => {
                 buf.fill(0);
@@ -134,7 +141,9 @@ impl FileSystem for DevFs {
 
     fn write(&self, inode: InodeId, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
         match inode {
-            NULL_INODE | ZERO_INODE => Ok(buf.len()),
+            // kmsg is read-only from userland; accept+discard writes so a
+            // stray redirect doesn't error.
+            NULL_INODE | ZERO_INODE | KMSG_INODE => Ok(buf.len()),
 
             // Accept and discard writes to /dev/random (entropy injection is
             // not meaningful with a properly-seeded CSPRNG).

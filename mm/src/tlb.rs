@@ -509,6 +509,14 @@ fn flush_tlb_local_full() {
     cpu::flush_tlb_all();
 }
 
+/// Flush this CPU's entire TLB locally (no IPI). Used by an AP joining
+/// the shootdown-target set to discard any stale translation cached
+/// while it was not yet a target, before it runs any task.
+#[inline]
+pub fn flush_local_all() {
+    flush_tlb_local_full();
+}
+
 #[inline]
 fn flush_page_local(vaddr: VirtAddr) {
     cpu::invlpg(vaddr.as_u64());

@@ -269,6 +269,14 @@ pub extern "sysv64" fn task_entry_trampoline() {
         // Move argument to first parameter register.
         "mov rdi, r13",
 
+        // Enter the task body with interrupts enabled. The context switch
+        // restores RFLAGS with IF cleared (the dispatch runs IRQs-off to
+        // protect the register/preempt-count swap), so a fresh kernel
+        // thread must re-enable them here — a non-blocking poll loop would
+        // otherwise run IRQs-off forever, deaf to timer ticks and
+        // TLB-shootdown IPIs.
+        "sti",
+
         // Call the task entry function.
         "call r12",
 

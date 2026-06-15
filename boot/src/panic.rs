@@ -99,6 +99,38 @@ pub fn panic_abort_raw(msg: &'static str) -> ! {
     cpu::halt_loop()
 }
 
+/// Capture the panicking call chain's return addresses into `out`,
+/// returning the count. Mirrors `panic_dump_backtrace`'s RBP preference
+/// so the on-screen backtrace matches the serial one.
+fn panic_capture_backtrace(out: &mut [u64]) -> usize {
+    let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
+    let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
+    let rbp = if frame_rbp != 0 {
+        frame_rbp
+    } else if stashed != 0 {
+        stashed
+    } else {
+        cpu::read_rbp()
+    };
+    let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
+        frame_pointer: 0,
+        return_address: 0,
+    }; PANIC_BACKTRACE_MAX];
+    let captured = stacktrace::stacktrace_capture_from(
+        rbp,
+        entries.as_mut_ptr(),
+        PANIC_BACKTRACE_MAX as c_int,
+    );
+    if captured <= 0 {
+        return 0;
+    }
+    let n = (captured as usize).min(out.len());
+    for (slot, entry) in out[..n].iter_mut().zip(entries.iter()) {
+        *slot = entry.return_address;
+    }
+    n
+}
+
 fn panic_dump_backtrace() {
     // Prefer the trap frame's RBP (the faulting context) when an exception
     // path stashed one; then the pre-switch RBP (the panicking call chain);
@@ -251,6 +283,7 @@ extern "sysv64" fn emergency_report() -> ! {
     let (extra_rip, extra_rsp) = take_panic_cpu_state();
     let display_rsp = extra_rsp.unwrap_or_else(|| PANIC_ORIG_RSP.load(Ordering::SeqCst));
     let cr0 = cpu::read_cr0();
+    let cr2 = cpu::read_cr2();
     let cr3 = cpu::read_cr3();
     let cr4 = cpu::read_cr4();
 
@@ -276,6 +309,12 @@ extern "sysv64" fn emergency_report() -> ! {
         panic_serial_write(hex_buf.format_labeled("CR0", cr0));
     }
     {
+        // CR2 = faulting linear address on a #PF; invaluable for diagnosing
+        // bad-pointer derefs on bare metal.
+        let mut hex_buf = HexBuffer::new();
+        panic_serial_write(hex_buf.format_labeled("CR2", cr2));
+    }
+    {
         let mut hex_buf = HexBuffer::new();
         panic_serial_write(hex_buf.format_labeled("CR3", cr3));
     }
@@ -295,13 +334,18 @@ extern "sysv64" fn emergency_report() -> ! {
         slopos_testing::tests_request_shutdown(1);
     }
 
+    let mut bt = [0u64; 8];
+    let bt_n = panic_capture_backtrace(&mut bt);
+
     if panic_screen::display_panic_screen(
         Some(message_str),
         extra_rip,
         Some(display_rsp),
         cr0,
+        cr2,
         cr3,
         cr4,
+        &bt[..bt_n],
     ) {
         panic_serial_write("Press ENTER to shutdown...");
         poll_wait_enter();

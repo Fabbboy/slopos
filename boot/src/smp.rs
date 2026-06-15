@@ -88,8 +88,6 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
 
         let apic_id = apic::get_id();
 
-        tlb::notify_cpu_online_id(cpu_idx);
-
         pcr::ApPcrHandle::init(ap_token, apic_id).init_gdt_and_install();
 
         // APs have per-CPU TSS structures; re-bind IST pointers after installing
@@ -107,15 +105,26 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
         // IPIs could arrive and touch uninitialised per-CPU scheduler state.
         init_scheduler_for_ap(cpu_idx);
 
-        // Signal the BSP that this AP is fully initialised.
-        AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
-
-        klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
-
         // AP LAPIC timer is started later by deferred_start_ap_timer() in the
         // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
         // Interrupts are enabled here only after all per-CPU state is ready.
         cpu::enable_interrupts();
+
+        // An AP must be able to *service* a TLB shootdown IPI (interrupts
+        // enabled, IDT loaded) before any initiator may *target* it.
+        // Joining the shootdown set before enabling interrupts leaves a
+        // window where it is a target that can never ack — and a stalled
+        // AP would stay that way, wedging the initiator forever. Discard
+        // any stale kernel translation, then join the set.
+        tlb::flush_local_all();
+        tlb::notify_cpu_online_id(cpu_idx);
+
+        // Signal the BSP that this AP is a live, ack-capable shootdown
+        // target. The BSP's bounded wait must not release until this
+        // point, so it never proceeds with a half-joined AP in the set.
+        AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
+
+        klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
     });
 
     enter_scheduler(cpu_idx);

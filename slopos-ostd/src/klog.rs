@@ -30,6 +30,8 @@ use core::ffi::c_int;
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
+use crate::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
+
 // ---------------------------------------------------------------------------
 // Log levels
 // ---------------------------------------------------------------------------
@@ -109,6 +111,98 @@ fn dispatch(args: fmt::Arguments<'_>) {
 }
 
 // ---------------------------------------------------------------------------
+// In-memory log ring buffer (userland-readable via /dev/kmsg)
+//
+// Every emitted log line is also captured here so it can be read back from
+// userland, which is the only log sink available with no serial console.
+//
+// The ring engages only once a real backend is registered (after the serial
+// driver and the per-CPU record are up), so it never touches a `SpinLock`
+// during early single-threaded boot. Writers use `try_lock` and skip on
+// contention — a dropped line is preferable to a stall in a path that runs
+// from IRQ context.
+// ---------------------------------------------------------------------------
+
+const KLOG_RING_SIZE: usize = 64 * 1024;
+
+struct KlogRing {
+    buf: [u8; KLOG_RING_SIZE],
+    /// Next write index.
+    head: usize,
+    /// Number of valid bytes (saturates at `KLOG_RING_SIZE`).
+    len: usize,
+}
+
+impl KlogRing {
+    const fn new() -> Self {
+        Self {
+            buf: [0; KLOG_RING_SIZE],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, b: u8) {
+        self.buf[self.head] = b;
+        self.head = (self.head + 1) % KLOG_RING_SIZE;
+        if self.len < KLOG_RING_SIZE {
+            self.len += 1;
+        }
+    }
+
+    /// Copy logical bytes `[offset ..]` (offset 0 = oldest retained byte)
+    /// into `out`, returning the count. `0` means end-of-log.
+    fn read_at(&self, offset: usize, out: &mut [u8]) -> usize {
+        if offset >= self.len {
+            return 0;
+        }
+        // Oldest logical byte sits at index 0 until the ring wraps, then at
+        // `head`.
+        let start = if self.len < KLOG_RING_SIZE {
+            0
+        } else {
+            self.head
+        };
+        let n = (self.len - offset).min(out.len());
+        for (i, slot) in out.iter_mut().take(n).enumerate() {
+            *slot = self.buf[(start + offset + i) % KLOG_RING_SIZE];
+        }
+        n
+    }
+}
+
+static KLOG_RING: SpinLock<KlogRing> = SpinLock::new(KlogRing::new(), LOCK_LEVEL_UNORDERED);
+
+struct RingWriter<'a>(&'a mut KlogRing);
+
+impl fmt::Write for RingWriter<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            self.0.push(b);
+        }
+        Ok(())
+    }
+}
+
+/// Capture one log line into the ring (text + trailing newline). No-op
+/// until a backend is registered (keeps early boot lock-free).
+fn ring_capture(args: fmt::Arguments<'_>) {
+    if BACKEND.load(Ordering::Acquire).is_null() {
+        return;
+    }
+    if let Some(mut ring) = KLOG_RING.try_lock() {
+        let _ = fmt::write(&mut RingWriter(&mut ring), args);
+        ring.push(b'\n');
+    }
+}
+
+/// Read buffered kernel log bytes starting at logical `offset` into `out`,
+/// returning the number copied (`0` = end-of-log). Backs `/dev/kmsg`.
+pub fn klog_read(offset: usize, out: &mut [u8]) -> usize {
+    KLOG_RING.lock().read_at(offset, out)
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -177,6 +271,7 @@ pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
     if !is_enabled(level) {
         return;
     }
+    ring_capture(args);
     dispatch(args);
 }
 
