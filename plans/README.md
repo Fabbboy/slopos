@@ -17,6 +17,7 @@ completed phases, or obsolete test counts.
 | `FRAMEKERNEL_PLAN.md` | Historical implementation plan; public verification docs are now in `slopos-docs` |
 | `KNOWN_ISSUES.md` | Working notes; verify before using as source of truth |
 | `LEGACY_MODERNIZATION_PLAN.md` | Historical unless refreshed; contains old path references |
+| `microtransactions.md` | Proposed: kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `RAW_PTR_TO_KARC_MIGRATION.md` | Working migration notes |
 | `WILLBLOCK_SCHEDULER_STATUS.md` | Historical scheduler status notes |
 | `desktop-ui.md` | UI working notes |
