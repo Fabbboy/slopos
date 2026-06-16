@@ -209,6 +209,12 @@ pub fn encode_key(ascii: u8, scancode: u8, mods: u8) -> KeyAction {
         match ascii {
             KEY_PAGE_UP => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
             KEY_PAGE_DOWN => return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES),
+            // TEMPORARY bare-metal scrollback keys: many legacy/emulated PS/2
+            // keyboards don't deliver Page Up/Down (E0-prefixed) reliably, so
+            // bind `]`/`\` as plain-ASCII scroll up/down. These shadow the
+            // literal characters in the terminal — remove once PgUp/PgDn work.
+            b']' => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
+            b'\\' => return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES),
             KEY_UP => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[A")),
             KEY_DOWN => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[B")),
             KEY_LEFT => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[D")),

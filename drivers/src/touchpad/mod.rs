@@ -4,8 +4,13 @@
 //! ([`crate::i2c`]), the HID-over-I²C transport ([`i2c_hid`]), the report
 //! parser ([`report`]), and the gesture engine ([`gesture`]). [`init`] is
 //! called once from a boot step; it discovers the touchpad, brings it up,
-//! and spawns a polling thread that feeds pointer events to the
-//! compositor.
+//! and feeds pointer events to the compositor.
+//!
+//! Input is interrupt-driven when the device's GpioInt can be wired through
+//! the PCH pinctrl controller ([`crate::pinctrl`]): a kthread parks on an
+//! IRQ-armed waker and drains reports only when the device signals. It falls
+//! back to a descheduling polling thread when the GPIO interrupt can't be
+//! wired — no GpioInt, unsupported pad/SoC, or `tp.poll`.
 //!
 //! Everything is failure-tolerant: with no I²C-HID touchpad present,
 //! discovery returns nothing and the subsystem stays dormant.
@@ -14,15 +19,17 @@ pub mod gesture;
 pub mod i2c_hid;
 pub mod report;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use slopos_acpi::aml::{self, HhdmHost};
+use slopos_acpi::aml::{self, AcpiI2cHid, HhdmHost};
 use slopos_acpi::tables::AcpiTables;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
+use slopos_ostd::sync::kernel_io_task::{Deadline, KernelIoToken, yield_with_deadline};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock, WaitQueue};
 use slopos_ostd::{KArc, klog_info, klog_warn};
 
 use crate::hpet;
 use crate::i2c::{self, I2cBus};
+use crate::pinctrl;
 use gesture::{Contact, Frame, GestureEngine, MAX_CONTACTS};
 use i2c_hid::I2cHid;
 use report::{
@@ -30,10 +37,8 @@ use report::{
     USAGE_CONTACT_ID, USAGE_TIP_SWITCH, USAGE_X, USAGE_Y,
 };
 
-/// Poll interval for the (interrupt-less) input read loop.
+/// Poll interval for the fallback (interrupt-less) input read loop.
 const POLL_MS: u32 = 8;
-/// Scheduler priority for the poll thread (mid-band).
-const POLL_PRIORITY: u8 = 100;
 
 struct TouchpadRuntime {
     hid: I2cHid,
@@ -48,7 +53,7 @@ static TOUCHPAD: OnceLock<TouchpadRuntime> = OnceLock::new();
 /// `rsdp_phys` is the ACPI RSDP physical address; `width`/`height` are the
 /// framebuffer dimensions for cursor bounds; `debug` enables verbose
 /// bring-up tracing (`tp.debug=on`).
-pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool) {
+pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bool) {
     let Some(tables) = AcpiTables::from_phys(rsdp_phys) else {
         return;
     };
@@ -127,9 +132,175 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool) {
     };
     TOUCHPAD.call_once(move || rt);
 
-    match slopos_ostd::task::spawn("touchpad-poll", poll_thread, POLL_PRIORITY) {
+    // Prefer interrupt-driven input (the device's GpioInt wired through the
+    // PCH pinctrl controller); fall back to polling if the GPIO interrupt
+    // can't be wired (no GpioInt, unsupported pad/SoC, or `tp.poll`).
+    if try_interrupt_mode(&found, force_poll) {
+        return;
+    }
+    match slopos_ostd::spawn_kernel_io!("touchpad-poll", poll_thread) {
         Ok(_) => klog_info!("touchpad: ready (polling every {}ms)", POLL_MS),
         Err(e) => klog_warn!("touchpad: failed to spawn poll thread: {:?}", e),
+    }
+}
+
+/// IO-APIC line the Intel PCH GPIO controller (`INTC1055`) funnels pad
+/// interrupts onto on Alder Lake-P. Architectural for this PCH; the `_CRS`
+/// that would name it (`SGIR`) is in an OperationRegion the narrow AML reader
+/// can't resolve (see [`crate::pinctrl`]).
+const GPIO_DEFAULT_GSI: u32 = 14;
+
+/// IRQ-armed waker: the GPIO ISR signals it, the drain thread parks on it.
+/// `WaitQueue::wake_*` is IRQ-safe; the armed flag closes the wake/park race.
+struct TouchpadWaker {
+    armed: AtomicBool,
+    wq: WaitQueue,
+}
+
+impl TouchpadWaker {
+    const fn new() -> Self {
+        Self {
+            armed: AtomicBool::new(false),
+            wq: WaitQueue::new(),
+        }
+    }
+    /// IRQ-context: arm the edge and wake the drain thread.
+    fn arm_and_wake(&self) {
+        self.armed.store(true, Ordering::Release);
+        let _ = self.wq.wake_all();
+    }
+    /// Park until armed; consumes one edge.
+    fn wait(&self) {
+        self.wq.wait_event(|| {
+            self.armed
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        });
+    }
+}
+
+static TOUCHPAD_WAKER: TouchpadWaker = TouchpadWaker::new();
+
+/// Attempt to bring up interrupt-driven input. Returns `true` if engaged.
+fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
+    if force_poll {
+        return false;
+    }
+    let Some(line) = found.gpio_int_pin else {
+        return false;
+    };
+    // Configure the touchpad's GpioInt pad in the PCH pinctrl controller. The
+    // controller's MMIO base is an architectural SoC constant validated against
+    // the silicon inside `init_for_pad` (see `crate::pinctrl`).
+    let Some(pin) = pinctrl::init_for_pad(line, found.gpio_int_edge, found.gpio_int_active_low)
+    else {
+        klog_warn!(
+            "touchpad: pinctrl setup failed for GpioInt {}; polling",
+            line
+        );
+        return false;
+    };
+
+    // Intel GPIO controller cascade parent: level-triggered, active-low.
+    if !register_cascade(GPIO_DEFAULT_GSI, false, true) {
+        klog_warn!(
+            "touchpad: GSI {} cascade wiring failed; polling",
+            GPIO_DEFAULT_GSI
+        );
+        return false;
+    }
+    if let Err(e) = slopos_ostd::spawn_kernel_io!("touchpad-irq", irq_thread) {
+        klog_warn!("touchpad: failed to spawn irq thread: {:?}; polling", e);
+        return false;
+    }
+    pinctrl::pad_irq_unmask();
+    klog_info!(
+        "touchpad: interrupt-driven (pin {}, GSI {}, padcfg0={:#010x})",
+        pin,
+        GPIO_DEFAULT_GSI,
+        pinctrl::padcfg0_snapshot().unwrap_or(0)
+    );
+    true
+}
+
+/// Program the IO-APIC route for the GPIO controller's cascade GSI and
+/// register the demux ISR. Leaks the line+handle (kernel-lifetime
+/// registration). Returns `false` on any failure.
+fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
+    use crate::ioapic::regs::{
+        IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
+        IOAPIC_FLAG_POLARITY_HIGH, IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_EDGE,
+        IOAPIC_FLAG_TRIGGER_LEVEL,
+    };
+    use slopos_ostd::irq::{IrqAllocator, IrqContext};
+
+    if !crate::apic::is_enabled() || crate::ioapic::is_ready() == 0 {
+        return false;
+    }
+    let line = match IrqAllocator::alloc() {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    let vector = line.vector();
+    let lapic_id = crate::apic::get_id() as u8;
+    let mut flags = IOAPIC_FLAG_DELIVERY_FIXED | IOAPIC_FLAG_DEST_PHYSICAL | IOAPIC_FLAG_MASK;
+    flags |= if edge {
+        IOAPIC_FLAG_TRIGGER_EDGE
+    } else {
+        IOAPIC_FLAG_TRIGGER_LEVEL
+    };
+    flags |= if active_low {
+        IOAPIC_FLAG_POLARITY_LOW
+    } else {
+        IOAPIC_FLAG_POLARITY_HIGH
+    };
+    if crate::ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
+        return false;
+    }
+    let handle = match line.register_callback(|_ctx: &IrqContext<'_>| {
+        if pinctrl::service_pending() {
+            TOUCHPAD_WAKER.arm_and_wake();
+        }
+        crate::apic::send_eoi();
+    }) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    // Order matters for the borrow checker: forget the handle (ending its
+    // borrow of `line`) before forgetting the line.
+    core::mem::forget(handle);
+    core::mem::forget(line);
+    crate::ioapic::unmask_gsi(gsi);
+    true
+}
+
+/// Interrupt drain thread: park until the GPIO ISR signals, read every
+/// pending input report (which de-asserts the device's DRDY line), then
+/// re-enable the pad interrupt.
+fn irq_thread(_token: KernelIoToken<'static>) {
+    let mut buf = [0u8; 256];
+    loop {
+        TOUCHPAD_WAKER.wait();
+        if let Some(rt) = TOUCHPAD.get() {
+            loop {
+                match rt.hid.read_input_report(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        if let Some(frame) = extract_frame(&rt.format, &buf[..n]) {
+                            let ts = timestamp_ms();
+                            rt.gesture.lock().process(&frame, ts);
+                        }
+                    }
+                    Ok(_) => break,
+                    Err(e) => {
+                        if rt.debug && poll_log_ok() {
+                            klog_warn!("touchpad: irq read error {:?}", e);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        pinctrl::pad_irq_unmask();
     }
 }
 
@@ -154,7 +325,7 @@ fn poll_log_ok() -> bool {
 
 /// The polling thread: read one input report, decode it, run the gesture
 /// engine, sleep, repeat.
-fn poll_thread() {
+fn poll_thread(token: KernelIoToken<'static>) {
     let mut buf = [0u8; 256];
     loop {
         if let Some(rt) = TOUCHPAD.get() {
@@ -175,7 +346,11 @@ fn poll_thread() {
                 }
             }
         }
-        hpet::delay_ms(POLL_MS);
+        // Deschedule (timer-armed wake) between polls instead of busy-waiting
+        // on the HPET — a non-blocking spin loop pins a core and floods the
+        // scheduler with churn. Interim until the device's GpioInt is wired
+        // and this becomes an interrupt-driven `Deadline::Indefinite` wait.
+        yield_with_deadline(&token, Deadline::AtMs(POLL_MS));
     }
 }
 
@@ -290,3 +465,53 @@ fn read_bits(data: &[u8], bit_offset: u32, bit_size: u32) -> u32 {
 fn timestamp_ms() -> u64 {
     hpet::nanoseconds(hpet::read_counter()) / 1_000_000
 }
+
+// --- AML evaluator test ------------------------------------------------------
+//
+// A touchpad's GpioInt pin is patched into its resource buffer by `_INI` via a
+// method chain (`pin = (enc & 0xFFFF) + PADTABLE[group][col]`). This exercises
+// that exact shape: method call, `And`/`Add` with targets, and a two-level
+// `Package` index.
+
+/// AML host for the evaluator test: no `SystemMemory` fields are read, so this
+/// never gets called.
+struct ZeroHost;
+impl slopos_acpi::aml::AmlHost for ZeroHost {
+    fn read_phys(&self, _phys: u64, out: &mut [u8]) {
+        for b in out.iter_mut() {
+            *b = 0;
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn test_aml_method_package_eval() -> slopos_testing::TestResult {
+    // Name (GPLT, Package(2){ Package(2){0x10,0xA0}, Package(2){0x30,0x40} })
+    // Method (GINF, 2) { Return (DerefOf(DerefOf(GPLT[Arg0])[Arg1])) }
+    // Method (GTST, 1) { Return (Add(And(Arg0, 0x0F), GINF(1, 1))) }
+    // Method (GPLT, 0) { Return (Zero) }  — a same-named method the package
+    //   must win over (a flat namespace would otherwise call it → 0).
+    // GTST(0x35) = (0x35 & 0x0F) + GPLT[1][1] = 5 + 0x40 = 69.
+    #[rustfmt::skip]
+    let aml: [u8; 72] = [
+        // Name(GPLT, Package{...})
+        0x08, 0x47, 0x50, 0x4C, 0x54, // Name "GPLT"
+        0x12, 0x10, 0x02, // Package, len 16, 2 elements
+        0x12, 0x06, 0x02, 0x0a, 0x10, 0x0a, 0xa0, // {0x10, 0xA0}
+        0x12, 0x06, 0x02, 0x0a, 0x30, 0x0a, 0x40, // {0x30, 0x40}
+        // Method(GINF, 2) { Return(DerefOf(DerefOf(GPLT[Arg0])[Arg1])) }
+        0x14, 0x13, 0x47, 0x49, 0x4E, 0x46, 0x02, // Method "GINF", argc 2
+        0xa4, 0x83, 0x88, 0x83, 0x88, 0x47, 0x50, 0x4C, 0x54, 0x68, 0x00, 0x69, 0x00,
+        // Method(GTST, 1) { Return(Add(And(Arg0,0x0F), GINF(1,1))) }
+        0x14, 0x14, 0x47, 0x54, 0x53, 0x54, 0x01, // Method "GTST", argc 1
+        0xa4, 0x72, 0x7b, 0x68, 0x0a, 0x0f, 0x00, 0x47, 0x49, 0x4E, 0x46, 0x01, 0x01, 0x00,
+        // Method(GPLT, 0) { Return(Zero) } — name collision with the package
+        0x14, 0x08, 0x47, 0x50, 0x4C, 0x54, 0x00, 0xa4, 0x00,
+    ];
+    match slopos_acpi::aml::eval_method_u64_for_test(&aml, &ZeroHost, b"GTST", &[0x35]) {
+        Some(69) => slopos_testing::TestResult::Pass,
+        _ => slopos_testing::TestResult::Fail,
+    }
+}
+
+slopos_testing::stest!(name = test_aml_method_package_eval, suite = touchpad);

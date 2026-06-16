@@ -94,6 +94,14 @@ pub struct AcpiI2cHid {
     pub hid_desc_reg: u16,
     /// Bus speed in Hz.
     pub speed_hz: u32,
+    /// GpioInt pin number from the device's `_CRS` (the controller-global
+    /// GPIO line), if it declares one. `None` ⇒ no GPIO interrupt
+    /// (driver falls back to polling).
+    pub gpio_int_pin: Option<u16>,
+    /// GpioInt trigger: `true` = edge, `false` = level.
+    pub gpio_int_edge: bool,
+    /// GpioInt polarity: `true` = active-low.
+    pub gpio_int_active_low: bool,
 }
 
 /// EISA-packed id for `"PNP0C50"` (the generic I²C-HID `_CID`).
@@ -140,6 +148,20 @@ pub fn scan_blobs(
     }
     idx.resolve_fields();
 
+    if debug {
+        klog_info!(
+            "aml: idx methods={} bodies={} names={} | GPCL={} GNUM={} GINF={} GNMB={} GGRP={}",
+            idx.methods.len(),
+            idx.method_bodies.len(),
+            idx.names.len(),
+            idx.names.get(&nameseg_key(b"GPCL")).is_some(),
+            idx.method_bodies.get(&nameseg_key(b"GNUM")).is_some(),
+            idx.method_bodies.get(&nameseg_key(b"GINF")).is_some(),
+            idx.method_bodies.get(&nameseg_key(b"GNMB")).is_some(),
+            idx.method_bodies.get(&nameseg_key(b"GGRP")).is_some(),
+        );
+    }
+
     // Find candidate devices in the DSDT and process the first I²C-HID one.
     let devices = collect_devices(dsdt_aml);
     let mut candidates = 0usize;
@@ -171,6 +193,11 @@ pub fn scan_blobs(
 
 struct Index {
     methods: KBTreeMap<u32, u8>,
+    /// Method name → body term-list range (for evaluating calls).
+    method_bodies: KBTreeMap<u32, Range>,
+    /// Global `Name` → the position of its data object (for resolving
+    /// `Package` tables like a GPIO pad-info array).
+    names: KBTreeMap<u32, usize>,
     regions: KBTreeMap<u32, (u8, u64)>,
     fields: KBTreeMap<u32, FieldLoc>,
     pending: KVec<(u32, u32, u32, u32)>, // (region_seg, field_seg, bit_off, bit_width)
@@ -180,6 +207,8 @@ impl Index {
     fn new() -> Self {
         Self {
             methods: KBTreeMap::new(),
+            method_bodies: KBTreeMap::new(),
+            names: KBTreeMap::new(),
             regions: KBTreeMap::new(),
             fields: KBTreeMap::new(),
             pending: KVec::new(),
@@ -206,11 +235,18 @@ impl Index {
 struct IndexVisitor<'a>(&'a mut Index);
 
 impl Visitor for IndexVisitor<'_> {
-    fn method(&mut self, seg: [u8; 4], argc: u8, _body: Range) {
-        self.0.methods.insert(nameseg_key(&seg), argc);
+    fn method(&mut self, seg: [u8; 4], argc: u8, body: Range) {
+        let key = nameseg_key(&seg);
+        self.0.methods.insert(key, argc);
+        self.0.method_bodies.insert(key, body);
     }
     fn external_method(&mut self, seg: [u8; 4], argc: u8) {
         self.0.methods.entry(nameseg_key(&seg)).or_insert(argc);
+    }
+    fn name(&mut self, seg: [u8; 4], value: Range) {
+        // First occurrence wins; we only resolve uniquely-named global
+        // tables (e.g. a GPIO pad-info `Package`).
+        self.0.names.entry(nameseg_key(&seg)).or_insert(value.start);
     }
     fn op_region(&mut self, seg: [u8; 4], space: u8, base: u64, _len: u64) {
         self.0.regions.insert(nameseg_key(&seg), (space, base));
@@ -315,7 +351,14 @@ fn process_device(
     host: &dyn AmlHost,
     debug: bool,
 ) -> Option<AcpiI2cHid> {
-    let mut interp = Interp::new(aml, &idx.fields, &idx.methods, host);
+    let mut interp = Interp::new(
+        aml,
+        &idx.fields,
+        &idx.methods,
+        &idx.method_bodies,
+        &idx.names,
+        host,
+    );
     if debug {
         klog_info!(
             "aml: I2C-HID candidate (names={}, overlays={}, _STA={}, _INI={})",
@@ -355,7 +398,19 @@ fn process_device(
         interp.run(ini.start, ini.end);
     }
 
-    // Find the buffer holding an I²C serial-bus descriptor (now patched).
+    if debug {
+        let gpcl = interp.resolve_pkg_len_for_test(b"GPCL");
+        let ginf = interp.invoke_for_test(b"GINF", &[8, 8]);
+        let gnum = interp.invoke_for_test(b"GNUM", &[0x0908_0011]);
+        klog_info!(
+            "aml: GPCL_pkg_len={:?} GINF(8,8)={:?} GNUM(0x09080011)={:?} (expect 18 / 160 / 177)",
+            gpcl,
+            ginf,
+            gnum
+        );
+    }
+
+    // Find the buffer holding an I²C serial-bus descriptor (patched by `_INI`).
     let mut found_i2c: Option<resource::I2cResource> = None;
     for (_seg, val) in interp.locals.iter() {
         if let AmlVal::Buf(b) = val {
@@ -386,12 +441,51 @@ fn process_device(
         .filter(|&v| v != 0)
         .unwrap_or(0x0001);
 
+    // GpioInt connection (interrupt pin + polarity), if the device declares
+    // one in the same resource templates. Drives the interrupt-driven path;
+    // its absence makes the touchpad fall back to polling.
+    let mut gpio: Option<resource::GpioIntResource> = None;
+    for (_seg, val) in interp.locals.iter() {
+        if let AmlVal::Buf(b) = val {
+            if let Some(g) = resource::parse_gpio_int(b.as_slice()) {
+                gpio = Some(g);
+                break;
+            }
+        }
+    }
+
     Some(AcpiI2cHid {
         controller_index,
         slave_addr: i2c.slave_addr,
         hid_desc_reg,
         speed_hz: i2c.speed_hz,
+        gpio_int_pin: gpio.as_ref().map(|g| g.pin),
+        gpio_int_edge: gpio.as_ref().map(|g| g.edge).unwrap_or(false),
+        gpio_int_active_low: gpio.as_ref().map(|g| g.active_low).unwrap_or(true),
     })
+}
+
+/// Test-only: index `aml`, then invoke `method(args)` and return the integer
+/// it returns. Exercises the method-call / arithmetic / package machinery.
+#[doc(hidden)]
+pub fn eval_method_u64_for_test(
+    aml: &[u8],
+    host: &dyn AmlHost,
+    method: &[u8; 4],
+    args: &[u64],
+) -> Option<u64> {
+    let mut idx = Index::new();
+    index_blob(aml, &mut idx);
+    idx.resolve_fields();
+    let mut interp = Interp::new(
+        aml,
+        &idx.fields,
+        &idx.methods,
+        &idx.method_bodies,
+        &idx.names,
+        host,
+    );
+    interp.invoke_for_test(method, args)
 }
 
 // ---------------------------------------------------------------------------

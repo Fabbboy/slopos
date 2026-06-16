@@ -13,6 +13,8 @@ pub enum AmlVal {
     Str(KVec<u8>),
     /// Byte buffer (e.g. a `ResourceTemplate`).
     Buf(KVec<u8>),
+    /// Package (ordered list of values, e.g. a GPIO pad-info table).
+    Package(KVec<AmlVal>),
     /// Declared but unset.
     Uninit,
 }
@@ -33,6 +35,15 @@ impl AmlVal {
             AmlVal::Int(v) => AmlVal::Int(*v),
             AmlVal::Str(s) => AmlVal::Str(clone_bytes(s)),
             AmlVal::Buf(b) => AmlVal::Buf(clone_bytes(b)),
+            AmlVal::Package(elems) => {
+                let mut out = KVec::new();
+                for e in elems.iter() {
+                    if out.push(e.clone_val()).is_err() {
+                        break;
+                    }
+                }
+                AmlVal::Package(out)
+            }
             AmlVal::Uninit => AmlVal::Uninit,
         }
     }

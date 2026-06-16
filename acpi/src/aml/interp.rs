@@ -1,15 +1,15 @@
 //! A tightly-scoped AML method evaluator.
 //!
-//! This is *not* a general AML interpreter. It executes a single device's
-//! `_INI` method against that device's local objects (its `Name`s and
-//! `Create*Field` overlays) plus the global `SystemMemory` `Field`s the
-//! method reads. Calls to methods outside the device (e.g. GPIO-library
-//! helpers) are stubbed to `0`; their results only feed the GpioInt pin
-//! number, which the polled path ignores.
+//! Not a general AML interpreter. It runs a single device's `_STA`/`_INI`
+//! against that device's local objects (its `Name`s and `Create*Field`
+//! overlays) and the globals they reach: `SystemMemory` fields, `Name` tables
+//! (`Package`s), and helper methods. It evaluates the integer arithmetic and
+//! package indexing those helpers use (method calls, `Arg`/`Local`, `Add`/
+//! `And`/shifts, `Index`/`DerefOf`).
 //!
 //! After `_INI` runs, the caller re-reads the device's resource-template
-//! buffer (which `_INI` has patched with the I²C slave address) to obtain
-//! the address — no per-machine constants.
+//! buffer — which `_INI` has patched with the I²C slave address and the
+//! GpioInt pin — with no per-machine constants.
 
 use slopos_ostd::{KBTreeMap, KVec};
 
@@ -35,6 +35,17 @@ pub struct FieldLoc {
     pub bit_width: u32,
 }
 
+/// A method-call activation: its arguments and locals (integers only — the
+/// resource methods on this path do integer arithmetic and package indexing).
+#[derive(Clone, Copy)]
+struct Frame {
+    args: [u64; 7],
+    locals: [u64; 8],
+}
+
+/// Maximum method-call nesting.
+const MAX_CALL_DEPTH: usize = 16;
+
 /// Evaluator over a single device's `_INI`.
 pub struct Interp<'a> {
     aml: &'a [u8],
@@ -46,9 +57,15 @@ pub struct Interp<'a> {
     fields: &'a KBTreeMap<u32, FieldLoc>,
     /// Method name → declared arg count (for parsing invocations).
     methods: &'a KBTreeMap<u32, u8>,
+    /// Method name → body range (for evaluating calls).
+    method_bodies: &'a KBTreeMap<u32, Range>,
+    /// Global `Name` → its data-object position (for `Package` tables).
+    names: &'a KBTreeMap<u32, usize>,
     host: &'a dyn AmlHost,
     returned: bool,
     ret_value: Option<AmlVal>,
+    /// Active call frames (Arg/Local storage).
+    frames: KVec<Frame>,
     /// Recursion / iteration guard.
     budget: u32,
 }
@@ -58,6 +75,8 @@ impl<'a> Interp<'a> {
         aml: &'a [u8],
         fields: &'a KBTreeMap<u32, FieldLoc>,
         methods: &'a KBTreeMap<u32, u8>,
+        method_bodies: &'a KBTreeMap<u32, Range>,
+        names: &'a KBTreeMap<u32, usize>,
         host: &'a dyn AmlHost,
     ) -> Self {
         Self {
@@ -66,11 +85,92 @@ impl<'a> Interp<'a> {
             overlays: KBTreeMap::new(),
             fields,
             methods,
+            method_bodies,
+            names,
             host,
             returned: false,
             ret_value: None,
+            frames: KVec::new(),
             budget: 100_000,
         }
+    }
+
+    /// Test-only: resolve a global `Name` and, if it's a `Package`, return its
+    /// element count (else `None`). Confirms package-table resolution.
+    #[doc(hidden)]
+    pub fn resolve_pkg_len_for_test(&mut self, name: &[u8; 4]) -> Option<usize> {
+        let &pos = self.names.get(&nameseg_key(name))?;
+        match self.eval(pos)?.0 {
+            AmlVal::Package(elems) => Some(elems.len()),
+            _ => None,
+        }
+    }
+
+    /// Test-only: invoke a method by name with integer args, returning the
+    /// integer it returns.
+    #[doc(hidden)]
+    pub fn invoke_for_test(&mut self, method: &[u8; 4], args: &[u64]) -> Option<u64> {
+        let &body = self.method_bodies.get(&nameseg_key(method))?;
+        let mut a = [0u64; 7];
+        for (slot, &v) in a.iter_mut().zip(args.iter()).take(7) {
+            *slot = v;
+        }
+        Some(self.call(body, a).as_int())
+    }
+
+    fn arg(&self, i: usize) -> u64 {
+        match self.frames.last() {
+            Some(f) if i < 7 => f.args[i],
+            _ => 0,
+        }
+    }
+
+    fn local(&self, i: usize) -> u64 {
+        match self.frames.last() {
+            Some(f) if i < 8 => f.locals[i],
+            _ => 0,
+        }
+    }
+
+    fn set_local(&mut self, i: usize, v: u64) {
+        if let Some(f) = self.frames.last_mut() {
+            if i < 8 {
+                f.locals[i] = v;
+            }
+        }
+    }
+
+    fn set_arg(&mut self, i: usize, v: u64) {
+        if let Some(f) = self.frames.last_mut() {
+            if i < 7 {
+                f.args[i] = v;
+            }
+        }
+    }
+
+    /// Invoke a method body with `args` bound, returning its `Return` value
+    /// (or `Int(0)`). Saves/restores the caller's return latch so nested calls
+    /// don't clobber it.
+    fn call(&mut self, body: Range, args: [u64; 7]) -> AmlVal {
+        if self.frames.len() >= MAX_CALL_DEPTH
+            || self
+                .frames
+                .push(Frame {
+                    args,
+                    locals: [0; 8],
+                })
+                .is_err()
+        {
+            return AmlVal::Int(0);
+        }
+        let saved_returned = core::mem::replace(&mut self.returned, false);
+        let saved_ret = self.ret_value.take();
+        self.exec_list(body.start, body.end);
+        let result = self.ret_value.take().unwrap_or(AmlVal::Int(0));
+        self.returned = saved_returned;
+        self.ret_value = saved_ret;
+        self.frames.pop();
+        result
     }
 
     fn tick(&mut self) -> bool {
@@ -87,7 +187,18 @@ impl<'a> Interp<'a> {
     pub fn run(&mut self, start: usize, end: usize) -> Option<AmlVal> {
         self.returned = false;
         self.ret_value = None;
+        // Base frame so any top-level Local/Arg references resolve.
+        let pushed = self
+            .frames
+            .push(Frame {
+                args: [0; 7],
+                locals: [0; 8],
+            })
+            .is_ok();
         self.exec_list(start, end);
+        if pushed {
+            self.frames.pop();
+        }
         self.ret_value.take()
     }
 
@@ -109,13 +220,26 @@ impl<'a> Interp<'a> {
         let op = *self.aml.get(p)?;
         match op {
             0x70 => {
-                // Store(Source, Target)
+                // Store(Source, Target) — Target may be a Local/Arg or a Name.
                 let (val, q) = self.eval(p + 1)?;
-                let (target, q2) = name_string(self.aml, q)?;
-                if let Some(seg) = target {
-                    self.store(nameseg_key(&seg), val);
+                let tb = *self.aml.get(q)?;
+                match tb {
+                    0x60..=0x67 => {
+                        self.set_local((tb - 0x60) as usize, val.as_int());
+                        Some(q + 1)
+                    }
+                    0x68..=0x6e => {
+                        self.set_arg((tb - 0x68) as usize, val.as_int());
+                        Some(q + 1)
+                    }
+                    _ => {
+                        let (target, q2) = name_string(self.aml, q)?;
+                        if let Some(seg) = target {
+                            self.store(nameseg_key(&seg), val);
+                        }
+                        Some(q2)
+                    }
                 }
-                Some(q2)
             }
             0xa0 => {
                 // If(Predicate) { ... }
@@ -220,14 +344,21 @@ impl<'a> Interp<'a> {
                 let (v, q) = self.eval(p + 1)?;
                 Some((AmlVal::Int((v.as_int() == 0) as u64), q))
             }
-            0x7b => self.binary(p, |a, b| a & b), // And
-            0x7d => self.binary(p, |a, b| a | b), // Or
-            0x79 => self.binary(p, |a, b| a.wrapping_shl(b as u32)), // ShiftLeft
-            0x7a => self.binary(p, |a, b| a.wrapping_shr(b as u32)), // ShiftRight
-            0x99 => self.eval(p + 1),             // ToInteger(x) — pass-through for our ints
-            // Arg0..6 / Local0..7 — stubbed to 0 (we don't run arg-taking methods).
-            0x68..=0x6e => Some((AmlVal::Int(0), p + 1)),
-            0x60..=0x67 => Some((AmlVal::Int(0), p + 1)),
+            // Bitwise / arithmetic ops carry a Target operand after the two
+            // sources; `binary_t` evaluates it and applies the result.
+            0x7b => self.binary_t(p, |a, b| a & b), // And
+            0x7d => self.binary_t(p, |a, b| a | b), // Or
+            0x79 => self.binary_t(p, |a, b| a.wrapping_shl(b as u32)), // ShiftLeft
+            0x7a => self.binary_t(p, |a, b| a.wrapping_shr(b as u32)), // ShiftRight
+            0x72 => self.binary_t(p, |a, b| a.wrapping_add(b)), // Add
+            0x74 => self.binary_t(p, |a, b| a.wrapping_sub(b)), // Subtract
+            0x77 => self.binary_t(p, |a, b| a.wrapping_mul(b)), // Multiply
+            0x99 => self.eval(p + 1),               // ToInteger(x) — pass-through for our ints
+            0x83 => self.eval(p + 1),               // DerefOf(x) — Index already yields the value
+            0x88 => self.eval_index(p),             // Index(source, index, target)
+            OP_PACKAGE | OP_VAR_PACKAGE => self.eval_package(p),
+            0x68..=0x6e => Some((AmlVal::Int(self.arg((op - 0x68) as usize)), p + 1)),
+            0x60..=0x67 => Some((AmlVal::Int(self.local((op - 0x60) as usize)), p + 1)),
             OP_ROOT_CHAR | OP_PARENT_CHAR | OP_DUAL_NAME | OP_MULTI_NAME => self.eval_name(p),
             b if is_lead_name_char_pub(b) => self.eval_name(p),
             _ => None,
@@ -240,30 +371,161 @@ impl<'a> Interp<'a> {
         Some((AmlVal::Int(f(a.as_int(), b.as_int())), q2))
     }
 
-    /// Resolve a NameString in value position: a method call, a field
-    /// read, or a local value.
+    /// Like [`binary`](Self::binary) but for ops that carry a Target operand
+    /// (And/Or/Add/…): evaluate it and apply the result.
+    fn binary_t(&mut self, p: usize, f: impl Fn(u64, u64) -> u64) -> Option<(AmlVal, usize)> {
+        let (a, q) = self.eval(p + 1)?;
+        let (b, q2) = self.eval(q)?;
+        let res = f(a.as_int(), b.as_int());
+        let q3 = self.consume_target(q2, res)?;
+        Some((AmlVal::Int(res), q3))
+    }
+
+    /// Parse a Target operand and store `res` into it (null/Local/Arg/Name).
+    fn consume_target(&mut self, q: usize, res: u64) -> Option<usize> {
+        let tb = *self.aml.get(q)?;
+        match tb {
+            0x00 => Some(q + 1), // NullName
+            0x60..=0x67 => {
+                self.set_local((tb - 0x60) as usize, res);
+                Some(q + 1)
+            }
+            0x68..=0x6e => {
+                self.set_arg((tb - 0x68) as usize, res);
+                Some(q + 1)
+            }
+            b if is_lead_name_char_pub(b)
+                || b == OP_ROOT_CHAR
+                || b == OP_PARENT_CHAR
+                || b == OP_DUAL_NAME
+                || b == OP_MULTI_NAME =>
+            {
+                let (target, q2) = name_string(self.aml, q)?;
+                if let Some(seg) = target {
+                    self.store(nameseg_key(&seg), AmlVal::Int(res));
+                }
+                Some(q2)
+            }
+            _ => None,
+        }
+    }
+
+    /// Skip a Target operand without applying a value (the `Index`
+    /// ObjectReference destination, which this evaluator doesn't model).
+    fn skip_target(&self, q: usize) -> Option<usize> {
+        let tb = *self.aml.get(q)?;
+        match tb {
+            0x00 | 0x60..=0x6e => Some(q + 1),
+            b if is_lead_name_char_pub(b)
+                || b == OP_ROOT_CHAR
+                || b == OP_PARENT_CHAR
+                || b == OP_DUAL_NAME
+                || b == OP_MULTI_NAME =>
+            {
+                let (_t, q2) = name_string(self.aml, q)?;
+                Some(q2)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Index(Source, Index, Target)` → `Source[Index]` by value.
+    fn eval_index(&mut self, p: usize) -> Option<(AmlVal, usize)> {
+        let (src, q) = self.eval(p + 1)?;
+        let (idx, q2) = self.eval(q)?;
+        let q3 = self.skip_target(q2)?;
+        let i = idx.as_int() as usize;
+        let elem = match &src {
+            AmlVal::Package(elems) => elems
+                .get(i)
+                .map(|e| e.clone_val())
+                .unwrap_or(AmlVal::Int(0)),
+            AmlVal::Buf(b) => AmlVal::Int(*b.get(i).unwrap_or(&0) as u64),
+            _ => AmlVal::Int(0),
+        };
+        Some((elem, q3))
+    }
+
+    /// `Package`/`VarPackage` → an ordered list of evaluated elements.
+    fn eval_package(&mut self, p: usize) -> Option<(AmlVal, usize)> {
+        let (total, after_len) = pkg_length(self.aml, p + 1)?;
+        let pkg_end = (p + 1) + total;
+        // NumElements: a ByteData for `Package` (0x12), a TermArg for
+        // `VarPackage` (0x13).
+        let mut q = if *self.aml.get(p)? == OP_PACKAGE {
+            after_len + 1
+        } else {
+            self.eval(after_len)?.1
+        };
+        let mut elems = KVec::new();
+        while q < pkg_end {
+            if !self.tick() {
+                break;
+            }
+            let (v, nq) = self.eval(q)?;
+            if nq <= q {
+                break;
+            }
+            let _ = elems.push(v);
+            q = nq;
+        }
+        Some((AmlVal::Package(elems), pkg_end))
+    }
+
+    /// Resolve a NameString in value position: a device-local value, a field
+    /// read, a global `Name`, or a method call. Resolution is by object kind
+    /// (the namespace here is flat, so it can't scope-resolve a name that two
+    /// scopes define differently).
     fn eval_name(&mut self, p: usize) -> Option<(AmlVal, usize)> {
         let (seg, mut q) = name_string(self.aml, p)?;
         let key = match seg {
             Some(s) => nameseg_key(&s),
             None => return Some((AmlVal::Int(0), q)),
         };
-        if let Some(&argc) = self.methods.get(&key) {
-            // Method invocation: consume `argc` arguments, return 0.
-            for _ in 0..argc {
-                let (_a, nq) = self.eval(q)?;
-                q = nq;
-            }
-            return Some((AmlVal::Int(0), q));
+        // Device-local objects (the resource buffers `_INI` patches) win.
+        if let Some(v) = self.locals.get(&key) {
+            return Some((v.clone_val(), q));
         }
         if let Some(&floc) = self.fields.get(&key) {
             return Some((AmlVal::Int(self.read_field(&floc)), q));
         }
-        if let Some(v) = self.locals.get(&key) {
-            return Some((v.clone_val(), q));
+        // A `Package`/`Buffer` global `Name` preempts a same-named method: a
+        // value-position reference (e.g. `Index` into a pad-info table) wants
+        // the data object, not a method invocation.
+        if let Some(&pos) = self.names.get(&key) {
+            if matches!(
+                self.aml.get(pos),
+                Some(&OP_PACKAGE) | Some(&OP_VAR_PACKAGE) | Some(&OP_BUFFER)
+            ) {
+                if let Some((v, _)) = self.eval(pos) {
+                    return Some((v, q));
+                }
+            }
         }
-        // Unknown name (e.g. a global integer like OSYS we don't track):
-        // treat as 0. No args consumed.
+        if let Some(&argc) = self.methods.get(&key) {
+            // Method invocation: evaluate `argc` arguments, then run the body
+            // (if indexed; an `External` method with no body returns 0).
+            let mut args = [0u64; 7];
+            for (i, slot) in args.iter_mut().enumerate().take(argc as usize) {
+                let (a, nq) = self.eval(q)?;
+                q = nq;
+                if i < 7 {
+                    *slot = a.as_int();
+                }
+            }
+            let ret = match self.method_bodies.get(&key) {
+                Some(&body) => self.call(body, args),
+                None => AmlVal::Int(0),
+            };
+            return Some((ret, q));
+        }
+        // A scalar global `Name`, or an untracked name (e.g. `OSYS`): its data
+        // object, else `0`.
+        if let Some(&pos) = self.names.get(&key) {
+            if let Some((v, _)) = self.eval(pos) {
+                return Some((v, q));
+            }
+        }
         Some((AmlVal::Int(0), q))
     }
 

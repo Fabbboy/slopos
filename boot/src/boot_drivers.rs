@@ -347,10 +347,11 @@ fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         .framebuffer
         .map(|fb| (fb.info.width, fb.info.height))
         .unwrap_or((0, 0));
-    let debug = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
-        .map(|s| s.contains("tp.debug"))
-        .unwrap_or(false);
-    slopos_drivers::touchpad::init(rsdp_phys, width, height, debug);
+    let cmdline = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
+    let debug = cmdline.map(|s| s.contains("tp.debug")).unwrap_or(false);
+    // `tp.poll` forces the polling path instead of interrupt-driven input.
+    let force_poll = cmdline.map(|s| s.contains("tp.poll")).unwrap_or(false);
+    slopos_drivers::touchpad::init(rsdp_phys, width, height, debug, force_poll);
 }
 
 use slopos_testing::config_from_cmdline;
