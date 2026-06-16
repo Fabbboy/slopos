@@ -39,7 +39,18 @@ trap 'rm -rf "$TMP"' EXIT
 curl -L --fail --progress-bar "$LIMINE_URL" -o "$TMP/limine-binary.tar.xz"
 
 if [ -n "$LIMINE_TARBALL_SHA256" ]; then
-    echo "${LIMINE_TARBALL_SHA256}  ${TMP}/limine-binary.tar.xz" | sha256sum -c - >&2
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "${LIMINE_TARBALL_SHA256}  ${TMP}/limine-binary.tar.xz" | sha256sum -c - >&2
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "$TMP/limine-binary.tar.xz" | cut -d' ' -f1)"
+        if [ "$actual" != "$LIMINE_TARBALL_SHA256" ]; then
+            echo "Limine checksum mismatch: expected $LIMINE_TARBALL_SHA256, got $actual" >&2
+            exit 1
+        fi
+    else
+        echo "No SHA-256 tool found (need sha256sum or shasum)" >&2
+        exit 1
+    fi
 fi
 
 # The tarball unpacks into a single top-level `limine-binary/` directory; flatten

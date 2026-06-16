@@ -49,28 +49,26 @@ rm -f "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
 
 KERNEL_RELEASE="${KERNEL_RELEASE:-0}"
 
-FEATURE_ARGS=()
+CARGO_ARGS=(
+    +"$RUST_CHANNEL" build
+    -Zbuild-std=core,alloc
+    -Zbuild-std-features=compiler-builtins-mem
+    -Zunstable-options
+    --target "$RUST_TARGET"
+    --package kernel
+    --bin kernel
+)
 if [ -n "$FEATURES" ]; then
-    FEATURE_ARGS=(--features "$FEATURES")
+    CARGO_ARGS+=(--features "$FEATURES")
 fi
-
-PROFILE_ARGS=()
 if [ "$KERNEL_RELEASE" = "1" ]; then
-    PROFILE_ARGS=(--release)
+    CARGO_ARGS+=(--release)
 fi
+CARGO_ARGS+=(--artifact-dir "$BUILD_DIR")
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS -Zunstable-options -Zemit-stack-sizes" \
-$CARGO +"$RUST_CHANNEL" build \
-    -Zbuild-std=core,alloc \
-    -Zbuild-std-features=compiler-builtins-mem \
-    -Zunstable-options \
-    --target "$RUST_TARGET" \
-    --package kernel \
-    --bin kernel \
-    "${FEATURE_ARGS[@]}" \
-    "${PROFILE_ARGS[@]}" \
-    --artifact-dir "$BUILD_DIR"
+"$CARGO" "${CARGO_ARGS[@]}"
 
 if [ -f "$BUILD_DIR/kernel" ]; then
     if [ ! -e "$BUILD_DIR/kernel.elf" ] || [ ! "$BUILD_DIR/kernel" -ef "$BUILD_DIR/kernel.elf" ]; then

@@ -96,6 +96,51 @@ BOOT_LOG_TIMEOUT="${BOOT_LOG_TIMEOUT:-15}"
 LOG_FILE="${LOG_FILE:-test_output.log}"
 LOG_FILE_RAW="${LOG_FILE}.raw"
 
+run_with_timeout() {
+    local seconds="$1"
+    shift
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${seconds}s" "$@"
+        return $?
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "${seconds}s" "$@"
+        return $?
+    fi
+
+    local timeout_dir marker
+    timeout_dir="$(mktemp -d)"
+    marker="${timeout_dir}/timed_out"
+
+    "$@" &
+    local child_pid=$!
+    (
+        sleep "$seconds"
+        if kill -0 "$child_pid" 2>/dev/null; then
+            touch "$marker"
+            kill -TERM "$child_pid" 2>/dev/null || true
+            sleep 2
+            kill -KILL "$child_pid" 2>/dev/null || true
+        fi
+    ) &
+    local watchdog_pid=$!
+
+    wait "$child_pid"
+    local status=$?
+
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+
+    if [ -f "$marker" ]; then
+        rm -rf "$timeout_dir"
+        return 124
+    fi
+
+    rm -rf "$timeout_dir"
+    return "$status"
+}
+
 # ── Validate SMP ─────────────────────────────────────────────────────────────
 if [ "$QEMU_SMP" -lt 1 ]; then
     echo "QEMU_SMP must be >= 1" >&2
@@ -151,13 +196,13 @@ fi
 # ── Resolve display, serial, and extra args per mode ─────────────────────────
 DISPLAY_ARGS=(-display none)
 SERIAL_ARGS=(-serial stdio)
-USB_ARGS=()
-EXTRA_ARGS=()
+ADD_ISA_EXIT=0
+ADD_NO_REBOOT=0
 # Disposable scratch block device (virtio-disk1) attached only for the test
 # harness. Destructive block-device tests target THIS device, never the live
 # root-fs image (virtio-disk0) — so a buggy test cannot corrupt an on-disk
 # binary (the nightly-2026-05-25 io_capture incident). Recreated blank each run.
-SCRATCH_ARGS=()
+ADD_SCRATCH_DISK=0
 
 case "$MODE" in
     test)
@@ -170,20 +215,18 @@ case "$MODE" in
         # `-display none` instead so only the explicit `-serial stdio`
         # backend is wired to COM1.
         DISPLAY_ARGS=(-display none)
-        EXTRA_ARGS=(-device "isa-debug-exit,iobase=0xf4,iosize=0x01" -no-reboot)
+        ADD_ISA_EXIT=1
+        ADD_NO_REBOOT=1
         SCRATCH_IMG="${SCRATCH_IMG:-${REPO_ROOT}/builddir/scratch-disk.img}"
         mkdir -p "$(dirname "$SCRATCH_IMG")"
         # Fresh, blank 8 MiB raw scratch each run (no filesystem; raw-sector tests only).
         rm -f "$SCRATCH_IMG"
         truncate -s 8M "$SCRATCH_IMG"
-        SCRATCH_ARGS=(
-            -drive "file=$SCRATCH_IMG,if=none,id=virtio-disk1,format=raw"
-            -device "virtio-blk-pci,drive=virtio-disk1,disable-legacy=on"
-        )
+        ADD_SCRATCH_DISK=1
         ;;
     interactive|logged)
         if [ "$QEMU_ENABLE_ISA_EXIT" != "0" ]; then
-            EXTRA_ARGS=(-device "isa-debug-exit,iobase=0xf4,iosize=0x01")
+            ADD_ISA_EXIT=1
         fi
         if [ "$VIDEO" != "0" ]; then
             if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then
@@ -221,17 +264,22 @@ vgamem_mb=$p
 VIDEO_ARGS=(-vga none -device "VGA,edid=on,xres=${fb_width},yres=${fb_height},vgamem_mb=${vgamem_mb}")
 
 # Handle optional PCI devices
-PCI_ARGS=()
+HAVE_PCI_ARGS=0
 if [ -n "$QEMU_PCI_DEVICES" ]; then
     # Split space-separated PCI device strings into array elements
+    HAVE_PCI_ARGS=1
     read -ra PCI_ARGS <<< "$QEMU_PCI_DEVICES"
 fi
 
 # ── Network port forwarding ────────────────────────────────────────────────
 NET_HOSTFWD=""
 if [[ "$NET" =~ ^(1|true|on|yes)$ ]]; then
-    IFS=',' read -ra _ports <<< "$NET_PORTS"
-    for _p in "${_ports[@]}"; do
+    if [ -z "$NET_PORTS" ]; then
+        echo "NET_PORTS must not be empty when NET is enabled" >&2
+        exit 1
+    fi
+    IFS=',' read -ra NET_PORT_ARRAY <<< "$NET_PORTS"
+    for _p in "${NET_PORT_ARRAY[@]}"; do
         if [[ "$_p" == *:* ]]; then
             # host:guest format
             _host="${_p%%:*}"
@@ -253,7 +301,6 @@ fi
 #
 #   Monitor:  socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
 #   GDB:      gdb builddir/kernel.elf -ex "target remote :1234"
-DEBUG_ARGS=()
 if [ "${QEMU_DEBUG:-0}" != "0" ]; then
     rm -f /tmp/slopos-monitor.sock
     DEBUG_ARGS=(
@@ -268,15 +315,11 @@ fi
 # kernel boots purely from the Limine initramfs with no storage device
 # attached — the real-hardware scenario. Otherwise it is the ext2 image the
 # kernel mounts at /mnt (secondary) once the RAM root is up.
-ROOT_DISK_ARGS=()
 if [[ ! "${QEMU_NO_ROOT_DISK:-0}" =~ ^(1|true|on|yes)$ ]]; then
-    ROOT_DISK_ARGS=(
-        -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
-        -object "iothread,id=iot0"
-        -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
-    )
+    ADD_ROOT_DISK=1
 else
     echo "QEMU_NO_ROOT_DISK=1 → booting RAM-only (no virtio-disk0 attached)"
+    ADD_ROOT_DISK=0
 fi
 
 # ── Assemble common QEMU arguments ──────────────────────────────────────────
@@ -290,8 +333,21 @@ QEMU_ARGS=(
     -device "ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3"
     -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
     -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
-    "${ROOT_DISK_ARGS[@]}"
-    "${SCRATCH_ARGS[@]}"
+)
+if [ "$ADD_ROOT_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
+        -object "iothread,id=iot0"
+        -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
+    )
+fi
+if [ "$ADD_SCRATCH_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -drive "file=$SCRATCH_IMG,if=none,id=virtio-disk1,format=raw"
+        -device "virtio-blk-pci,drive=virtio-disk1,disable-legacy=on"
+    )
+fi
+QEMU_ARGS+=(
     -netdev "user,id=slopnet0,dns=1.1.1.1${NET_HOSTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
@@ -299,10 +355,16 @@ QEMU_ARGS=(
     "${DEBUG_ARGS[@]}"
     "${DISPLAY_ARGS[@]}"
     "${VIDEO_ARGS[@]}"
-    "${USB_ARGS[@]}"
-    "${EXTRA_ARGS[@]}"
-    "${PCI_ARGS[@]}"
 )
+if [ "$ADD_ISA_EXIT" = "1" ]; then
+    QEMU_ARGS+=(-device "isa-debug-exit,iobase=0xf4,iosize=0x01")
+fi
+if [ "$ADD_NO_REBOOT" = "1" ]; then
+    QEMU_ARGS+=(-no-reboot)
+fi
+if [ "$HAVE_PCI_ARGS" = "1" ]; then
+    QEMU_ARGS+=("${PCI_ARGS[@]}")
+fi
 
 # ── Launch QEMU ──────────────────────────────────────────────────────────────
 case "$MODE" in
@@ -319,7 +381,7 @@ case "$MODE" in
         trap 'kill "$tail_pid" 2>/dev/null; wait "$tail_pid" 2>/dev/null || true; rm -f "$OVMF_VARS_RUNTIME" "$LOG_FILE_RAW"' EXIT INT TERM
 
         set +e
-        timeout "${BOOT_LOG_TIMEOUT}s" "$QEMU_BIN" "${QEMU_ARGS[@]}"
+        run_with_timeout "$BOOT_LOG_TIMEOUT" "$QEMU_BIN" "${QEMU_ARGS[@]}"
         status=$?
         set -e
 

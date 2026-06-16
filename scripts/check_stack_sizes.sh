@@ -55,32 +55,56 @@ fi
 #   }
 #
 # Emit size<TAB>function pairs for everything exceeding the threshold.
-mapfile -t offenders < <(
-    "$READOBJ" --stack-sizes "$ELF" \
+# Use a temp file instead of Bash 4 `mapfile`, and parse hex without GNU awk's
+# `strtonum`, so this gate also runs on macOS's stock Bash 3.2 and awk.
+offenders_file="$(mktemp)"
+trap 'rm -f "$offenders_file"' EXIT
+"$READOBJ" --stack-sizes "$ELF" \
     | awk -v t="$THRESHOLD" '
+        function hex_digit(c) {
+            c = tolower(c);
+            return index("0123456789abcdef", c) - 1;
+        }
+        function hex_to_dec(s,    i, d, value) {
+            sub(/^0[xX]/, "", s);
+            value = 0;
+            for (i = 1; i <= length(s); i++) {
+                d = hex_digit(substr(s, i, 1));
+                if (d < 0) {
+                    return -1;
+                }
+                value = value * 16 + d;
+            }
+            return value;
+        }
         /Functions:/ {
-            gsub(/.*\[/, ""); gsub(/\].*/, "");
             fns = $0;
+            sub(/.*\[/, "", fns);
+            sub(/\].*/, "", fns);
         }
         /Size:/ {
-            s = $2; sub(/^0x/, "", s);
-            v = strtonum("0x" s);
-            if (v > t) {
+            size = hex_to_dec($2);
+            if (size > t) {
                 n = split(fns, a, /, */);
-                for (i = 1; i <= n; i++) printf "%d\t%s\n", v, a[i];
+                for (i = 1; i <= n; i++) {
+                    if (a[i] != "") {
+                        printf "%d\t%s\n", size, a[i];
+                    }
+                }
             }
         }' \
-    | sort -rn
-)
+    | sort -rn > "$offenders_file"
 
-if [ "${#offenders[@]}" -gt 0 ]; then
+offender_count="$(wc -l < "$offenders_file" | tr -d '[:space:]')"
+
+if [ "$offender_count" -gt 0 ]; then
     printf 'check_stack_sizes: %d function(s) exceed STACK_SIZE_THRESHOLD=%s bytes:\n' \
-        "${#offenders[@]}" "$THRESHOLD" >&2
-    for line in "${offenders[@]}"; do
+        "$offender_count" "$THRESHOLD" >&2
+    while IFS= read -r line; do
         size="${line%%$'\t'*}"
         fn="${line#*$'\t'}"
         printf '  %10d B  %s\n' "$size" "$fn" >&2
-    done
+    done < "$offenders_file"
     echo >&2
     echo "  (decode names with: cargo install rustfilt; <name> | rustfilt)" >&2
     exit 1
