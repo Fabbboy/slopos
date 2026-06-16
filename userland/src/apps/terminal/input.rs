@@ -7,6 +7,7 @@
 
 pub use slopos_terminal_core::input::*;
 
+use slopos_abi::input::POINTER_AXIS_VERTICAL;
 use slopos_protocol::types::Event as ProtocolEvent;
 
 /// Translate a raw protocol event into a terminal-facing `CompositorEvent`.
@@ -36,6 +37,15 @@ pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
         },
         ProtocolEvent::Configure { width, height, .. } => {
             CompositorEvent::Resize(*width as i32, *height as i32)
+        }
+        ProtocolEvent::PointerAxis { axis, value, .. } => {
+            // Only the vertical wheel/touchpad axis pages the scrollback;
+            // horizontal scroll has no meaning for the terminal grid.
+            if *axis == POINTER_AXIS_VERTICAL {
+                CompositorEvent::Scroll(*value)
+            } else {
+                CompositorEvent::Ignored
+            }
         }
         ProtocolEvent::Close { .. } => CompositorEvent::Close,
         ProtocolEvent::PasteReady { len } => CompositorEvent::PasteReady(*len),

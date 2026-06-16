@@ -30,6 +30,10 @@ const MOUSE_LEFT: u8 = 0x01;
 /// Number of scrollback lines a single Shift+PgUp / Shift+PgDn moves.
 const SCROLLBACK_PAGE_LINES: usize = 10;
 
+/// Scrollback lines moved per mouse-wheel / touchpad notch (a value120 axis
+/// delta of ±120). Three lines per notch is the common terminal default.
+const SCROLLBACK_WHEEL_LINES: i32 = 3;
+
 /// What the event loop should do after a compositor key event.
 pub enum KeyAction {
     /// Write these bytes to the PTY master.
@@ -259,6 +263,9 @@ pub enum CompositorEvent {
         pressed: bool,
         code: u8,
     },
+    /// Mouse-wheel / touchpad scroll on the vertical axis, carrying the raw
+    /// value120 delta (±120 = one notch). Resolve it with [`wheel_scroll_lines`].
+    Scroll(i32),
     /// The compositor reports the clipboard holds this many bytes; the app
     /// should provide a destination memfd of that size (0 = empty, no-op).
     PasteReady(u32),
@@ -266,6 +273,16 @@ pub enum CompositorEvent {
     /// valid clipboard bytes, ready to write to the PTY master.
     PasteResult(u32),
     Ignored,
+}
+
+/// Resolve a pointer-axis (mouse-wheel / touchpad) value120 delta into a signed
+/// number of scrollback lines: negative scrolls up into history, positive
+/// scrolls back down toward live output. The sign matches the rest of the
+/// system's axis convention (see appkit's scroll view), so the terminal scrolls
+/// the same direction as every other app. value120 units are ±120 per notch;
+/// sub-notch deltas round toward zero (the drivers only ever emit whole notches).
+pub fn wheel_scroll_lines(value_v120: i32) -> i32 {
+    (value_v120 / 120) * SCROLLBACK_WHEEL_LINES
 }
 
 /// Update pointer-driven selection from a button/motion change. Returns true
@@ -518,6 +535,19 @@ mod tests {
             encode_key(KEY_PAGE_DOWN, 0, 0),
             KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES)
         ));
+    }
+
+    #[test]
+    fn wheel_axis_resolves_to_signed_scrollback_lines() {
+        // Negative value120 (one notch up) scrolls up into history; positive
+        // scrolls back down toward live output. Matches appkit's axis sign so
+        // the terminal scrolls the same direction as every other app.
+        assert_eq!(wheel_scroll_lines(-120), -SCROLLBACK_WHEEL_LINES);
+        assert_eq!(wheel_scroll_lines(120), SCROLLBACK_WHEEL_LINES);
+        // Multiple notches accumulate; sub-notch deltas round toward zero.
+        assert_eq!(wheel_scroll_lines(-240), -2 * SCROLLBACK_WHEEL_LINES);
+        assert_eq!(wheel_scroll_lines(0), 0);
+        assert_eq!(wheel_scroll_lines(60), 0);
     }
 
     #[test]

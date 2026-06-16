@@ -367,6 +367,16 @@ async fn event_loop(
                 CompositorEvent::PointerLeave => {
                     ptr.has_focus = false;
                 }
+                CompositorEvent::Scroll(value_v120) => {
+                    let lines = input::wheel_scroll_lines(value_v120);
+                    if lines < 0 {
+                        grid.scroll_view_up((-lines) as usize);
+                        want_render = true;
+                    } else if lines > 0 {
+                        grid.scroll_view_down(lines as usize);
+                        want_render = true;
+                    }
+                }
                 CompositorEvent::PointerButton { pressed, code } => {
                     if pressed {
                         ptr.button_state |= code;
