@@ -49,6 +49,8 @@ fn reserve_rejects_unregistered_port() {
     let _g = setup();
     let r: Result<IoPort<u8>, IoPortError> = IoPortRegistry::reserve(0x20);
     assert_eq!(r.unwrap_err(), IoPortError::NotReserved);
+    let r: Result<IoPort<u8>, IoPortError> = IoPortRegistry::reserve(0xA0);
+    assert_eq!(r.unwrap_err(), IoPortError::NotReserved);
     let r: Result<IoPort<u8>, IoPortError> = IoPortRegistry::reserve(0x400);
     assert_eq!(r.unwrap_err(), IoPortError::NotReserved);
 }

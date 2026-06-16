@@ -111,8 +111,6 @@ pub fn init<'b>(token: &slopos_ostd::sync::BspToken<'b>) -> i32 {
     write_register(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED);
     write_register(LAPIC_LVT_PERFCNT, LAPIC_LVT_MASKED);
 
-    write_register(LAPIC_LVT_LINT0, LAPIC_LVT_DELIVERY_MODE_EXTINT);
-
     write_register(LAPIC_ESR, 0);
     write_register(LAPIC_ESR, 0);
 

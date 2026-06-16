@@ -14,13 +14,15 @@ use crate::idt::{idt_init, idt_load};
 use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
 use crate::smp::smp_init;
+use slopos_acpi::madt::Madt;
+use slopos_acpi::tables::AcpiTables;
 #[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
 use slopos_drivers::{
     apic, hpet, ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
-    pic::pic_quiesce_disable,
 };
+use slopos_kernel_services::platform;
 use slopos_mm::tlb;
 
 fn sync_mouse_bounds(display: Option<slopos_abi::FramebufferData>) {
@@ -159,12 +161,35 @@ fn boot_step_apic_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
         panic!("SlopOS requires a Local APIC - legacy PIC is gone");
     }
 
-    klog_debug!("Initializing Local APIC...");
-    if apic::init(&ctx.bsp_token()) != 0 {
-        panic!("Local APIC initialization failed");
+    let token = ctx.bsp_token();
+
+    if platform::is_rsdp_available() {
+        match AcpiTables::from_phys(platform::get_rsdp_phys()).and_then(|tables| {
+            Madt::from_tables(&tables).map(|madt| madt.has_pcat_compat_dual_8259())
+        }) {
+            Some(true) => {
+                slopos_ostd::io::init_and_disable_legacy_8259(&token);
+                klog_info!("PIC: ACPI PCAT_COMPAT set; legacy dual 8259 initialized and masked");
+            }
+            Some(false) => {
+                klog_debug!("PIC: ACPI PCAT_COMPAT clear; no legacy 8259 disable needed");
+            }
+            None => {
+                klog_info!(
+                    "PIC: MADT unavailable during APIC setup; IOAPIC setup will enforce APIC platform"
+                );
+            }
+        }
+    } else {
+        klog_info!(
+            "PIC: RSDP unavailable during APIC setup; IOAPIC setup will enforce APIC platform"
+        );
     }
 
-    pic_quiesce_disable();
+    klog_debug!("Initializing Local APIC...");
+    if apic::init(&token) != 0 {
+        panic!("Local APIC initialization failed");
+    }
 
     tlb::register_ipi_sender(apic::send_ipi_all_excluding_self);
     tlb::init();

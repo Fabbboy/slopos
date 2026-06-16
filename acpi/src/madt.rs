@@ -10,6 +10,12 @@ const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 const MADT_ENTRY_IOAPIC: u8 = 1;
 const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
 
+/// MADT Flags bit 0: PC-AT-compatible dual-8259 PIC present.
+///
+/// ACPI 6.5 §5.2.12 says the 8259 vectors must be disabled (masked)
+/// when enabling ACPI APIC operation if this bit is set.
+pub const MADT_FLAG_PCAT_COMPAT: u32 = 1 << 0;
+
 /// Offset of the first variable-length entry within the MADT payload
 /// (after `lapic_address: u32` + `flags: u32`).
 const MADT_ENTRIES_OFFSET: usize = 8;
@@ -125,11 +131,26 @@ impl Madt {
             klog_info!("ACPI: MADT not found");
             return None;
         };
+        Self::from_table(table)
+    }
+
+    pub fn from_table(table: AcpiTable<'static>) -> Option<Self> {
+        if table.signature() != *MADT_SIGNATURE {
+            return None;
+        }
         if table.payload().len() < MADT_ENTRIES_OFFSET {
             klog_info!("ACPI: MADT too short");
             return None;
         }
         Some(Self { table })
+    }
+
+    pub fn flags(&self) -> u32 {
+        read_packed::<u32>(self.table.payload(), 4).unwrap_or(0)
+    }
+
+    pub fn has_pcat_compat_dual_8259(&self) -> bool {
+        self.flags() & MADT_FLAG_PCAT_COMPAT != 0
     }
 
     pub fn entries(&self) -> MadtEntries<'_> {

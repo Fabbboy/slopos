@@ -1,52 +1,70 @@
-//! Safe legacy 8259 PIC port window.
+//! Internal legacy 8259 PIC lifecycle.
 //!
-//! SlopOS does not route IRQs through the PIC (IOAPIC mandatory) — the
-//! only operation we perform on the PIC is the boot-time "mask all and
-//! send EOI" quiesce so the legacy chip does not deliver spurious
-//! interrupts. This window exposes that single sequence as a safe
-//! method.
+//! The 8259 pair is a sensitive system interrupt controller.  SlopOS
+//! never routes IRQs through it; when ACPI MADT `PCAT_COMPAT` reports a
+//! PC-AT-compatible dual 8259 setup, boot performs the mandatory
+//! init-and-mask sequence here while switching to APIC/IOAPIC operation.
+//! No client-visible port handle or driver API is exposed for the PIC.
 
-use crate::io::port::IoPort;
+use crate::io::raw_port::{Port, io_wait};
+use crate::sync::{BspToken, InitFlag};
 
-const PIC_EOI: u8 = 0x20;
+const MASTER_CMD: Port<u8> = Port::new(0x20);
+const MASTER_DATA: Port<u8> = Port::new(0x21);
+const SLAVE_CMD: Port<u8> = Port::new(0xA0);
+const SLAVE_DATA: Port<u8> = Port::new(0xA1);
 
-/// Typed handle to the master+slave 8259 PIC pair.
-#[derive(Clone, Copy)]
-pub struct Pic {
-    pic1_cmd: IoPort<u8>,
-    pic1_data: IoPort<u8>,
-    pic2_cmd: IoPort<u8>,
-    pic2_data: IoPort<u8>,
-}
+const ICW1_INIT: u8 = 0x10;
+const ICW1_EXPECT_ICW4: u8 = 0x01;
+const ICW4_8086_MODE: u8 = 0x01;
 
-impl Pic {
-    #[inline]
-    pub const fn new(
-        pic1_cmd: IoPort<u8>,
-        pic1_data: IoPort<u8>,
-        pic2_cmd: IoPort<u8>,
-        pic2_data: IoPort<u8>,
-    ) -> Self {
-        Self {
-            pic1_cmd,
-            pic1_data,
-            pic2_cmd,
-            pic2_data,
-        }
+const MASTER_VECTOR_OFFSET: u8 = 0x20;
+const SLAVE_VECTOR_OFFSET: u8 = 0x28;
+const MASTER_HAS_SLAVE_ON_IRQ2: u8 = 1 << 2;
+const SLAVE_CASCADE_ID: u8 = 2;
+const MASK_ALL_IRQS: u8 = 0xFF;
+
+static LEGACY_8259_DISABLED: InitFlag = InitFlag::new();
+
+/// Initialize the legacy dual 8259 pair into a known state and mask all IRQs.
+///
+/// ACPI requires this when MADT `PCAT_COMPAT` is set and the OS enables
+/// ACPI APIC operation.  The `BspToken` keeps the operation pinned to
+/// the BSP boot-init phase; the sequence is idempotent for repeated
+/// init paths and tests.
+pub fn init_and_disable_legacy_8259<'brand>(_token: &BspToken<'brand>) {
+    if !LEGACY_8259_DISABLED.claim() {
+        return;
     }
 
-    /// Mask every line on both PICs and send a non-specific EOI to
-    /// each. After this call the legacy 8259 pair is silent.
-    #[inline]
-    pub fn quiesce_disable(&self) {
-        // SAFETY: masking all lines and EOI-ing both PICs is the
-        // documented "disable" sequence; no other interrupt path
-        // depends on either PIC.
-        unsafe {
-            self.pic1_data.write(0xFF);
-            self.pic2_data.write(0xFF);
-            self.pic1_cmd.write(PIC_EOI);
-            self.pic2_cmd.write(PIC_EOI);
-        }
+    // SAFETY: These are the architected 8259 command/data ports.  The
+    // sequence fully reinitializes the master/slave pair, remaps them
+    // away from CPU exception vectors, and masks every IRQ line.  No
+    // SlopOS interrupt path depends on PIC delivery after this point.
+    unsafe {
+        MASTER_CMD.write(ICW1_INIT | ICW1_EXPECT_ICW4);
+        io_wait();
+        SLAVE_CMD.write(ICW1_INIT | ICW1_EXPECT_ICW4);
+        io_wait();
+
+        MASTER_DATA.write(MASTER_VECTOR_OFFSET);
+        io_wait();
+        SLAVE_DATA.write(SLAVE_VECTOR_OFFSET);
+        io_wait();
+
+        MASTER_DATA.write(MASTER_HAS_SLAVE_ON_IRQ2);
+        io_wait();
+        SLAVE_DATA.write(SLAVE_CASCADE_ID);
+        io_wait();
+
+        MASTER_DATA.write(ICW4_8086_MODE);
+        io_wait();
+        SLAVE_DATA.write(ICW4_8086_MODE);
+        io_wait();
+
+        MASTER_DATA.write(MASK_ALL_IRQS);
+        io_wait();
+        SLAVE_DATA.write(MASK_ALL_IRQS);
+        io_wait();
     }
 }

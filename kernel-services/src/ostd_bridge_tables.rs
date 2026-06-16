@@ -29,10 +29,6 @@ pub static MMIO_RANGES: &[PhysRange] = &[PhysRange {
 
 pub static PORT_RANGES: &[PortRange] = &[
     PortRange {
-        start: 0x20,
-        end: 0x22,
-    },
-    PortRange {
         start: 0x40,
         end: 0x44,
     },
@@ -43,10 +39,6 @@ pub static PORT_RANGES: &[PortRange] = &[
     PortRange {
         start: 0x70,
         end: 0x72,
-    },
-    PortRange {
-        start: 0xA0,
-        end: 0xA2,
     },
     PortRange {
         start: 0x501,

@@ -103,6 +103,7 @@ source_offenders="$(
     cd "$REPO_ROOT"
     printf '%s' "$filtered" | while IFS= read -r file; do
         [ -z "$file" ] && continue
+        [ -f "$file" ] || continue
         awk -v fname="$file" '
             BEGIN { n = 0 }
             {

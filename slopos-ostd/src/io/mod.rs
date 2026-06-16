@@ -1,4 +1,4 @@
-pub mod pic;
+mod pic;
 pub mod pit;
 pub mod port;
 pub mod port_consts;
@@ -7,7 +7,7 @@ pub mod ps2;
 pub mod raw_port;
 pub mod uart;
 
-pub use pic::Pic;
+pub use pic::init_and_disable_legacy_8259;
 pub use pit::Pit;
 pub use port::{
     IoPort, IoPortError, IoPortRegistry, PortAccessible, PortRange, io_wait,

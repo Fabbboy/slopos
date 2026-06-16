@@ -102,6 +102,7 @@ source_offenders="$(
       | grep -Ev '^(userland|terminal-core|slibc|slop-protocol|ktesting|image|slopos-ostd)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       | while IFS= read -r file; do
+            [ -f "$file" ] || continue
             awk '
                 BEGIN { bad = 0; n = 0 }
                 {

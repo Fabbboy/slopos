@@ -25,7 +25,7 @@
 
 ## 1. Executive Summary
 
-SlopOS has a remarkably modern foundation — Limine boot, APIC/IOAPIC interrupts, SYSCALL/SYSRET, buddy+slab allocators, higher-half kernel, 4-level paging with NX, SMP TLB shootdown, and proper Ring 0/3 separation. The legacy 8259 PIC has already been sacrificed to the Wheel of Fate.
+SlopOS has a remarkably modern foundation — Limine boot, APIC/IOAPIC interrupts, SYSCALL/SYSRET, buddy+slab allocators, higher-half kernel, 4-level paging with NX, SMP TLB shootdown, and proper Ring 0/3 separation. The legacy 8259 PIC has been removed from driver/client ownership; OSTD retains only the ACPI-required boot-time init-disable primitive.
 
 However, several subsystems still rely on hardware designs from the 1980s–1990s:
 
@@ -61,7 +61,7 @@ Phases 0–2 are self-contained kernel changes. Phase 3–4 build on each other.
 | Component | Implementation | Files |
 |---|---|---|
 | Boot | Limine v8.7.0 | `limine.conf`, `boot/src/limine_protocol.rs` |
-| Interrupts | LAPIC + IOAPIC (PIC removed) | `drivers/src/apic/`, `drivers/src/ioapic/` |
+| Interrupts | LAPIC + IOAPIC (PIC driver removed; OSTD boot-disables dual 8259 when ACPI requires it) | `drivers/src/apic/`, `drivers/src/ioapic/`, `slopos-ostd/src/io/pic.rs` |
 | Syscalls | SYSCALL/SYSRET | `core/src/syscall/`, `boot/src/gdt.rs` |
 | Memory | Buddy + slab + per-CPU cache | `mm/src/page_alloc.rs`, `mm/src/kernel_heap.rs` |
 | Paging | 4-level, NX, higher-half | `mm/src/paging/`, `link.ld` |
@@ -89,7 +89,7 @@ Phases 0–2 are self-contained kernel changes. Phase 3–4 build on each other.
 
 - **PS/2**: QEMU q35 emulates PS/2 natively. No practical replacement without USB/xHCI (Phase 7). Keep.
 - **Serial UART 16550**: Industry standard for kernel debug. Every modern Rust kernel uses it. Keep.
-- **`pic_quiesce_disable()`**: 14-line function that masks the 8259 PIC during shutdown. Harmless. Keep or inline.
+- **8259 PIC lifecycle**: not a driver surface. OSTD owns the boot-only ACPI `PCAT_COMPAT` init-disable path; runtime interrupt routing stays LAPIC + IOAPIC/MSI/MSI-X.
 
 ---
 
@@ -1372,10 +1372,18 @@ Replaces PS/2 as the input mechanism and enables USB mass storage, USB networkin
 
 ### 7E: `pic.rs` Cleanup
 
-- [ ] **7E.1** Inline `pic_quiesce_disable()` into `boot/src/shutdown.rs`
-- [ ] **7E.2** Delete `drivers/src/pic.rs` entirely
-- [ ] **7E.3** Remove `pub mod pic;` from `drivers/src/lib.rs`
-- [ ] **7E.4** The legacy 8259 PIC path is now truly gone — not even a stub remains
+Framekernel/Asterinas interpretation: the 8259 PIC is a **sensitive
+system interrupt controller**, not a driver-owned device.  ACPI MADT
+`PCAT_COMPAT` reports whether a PC-AT-compatible dual-8259 setup exists;
+when present, ACPI requires those vectors to be disabled (masked) while
+enabling APIC operation.  SlopOS therefore keeps exactly one OSTD-owned,
+boot-only init-disable primitive and removes all driver/public PIC
+ownership.
+
+- [x] **7E.1** Move the 8259 init-disable lifecycle into OSTD behind a BSP-token boot primitive
+- [x] **7E.2** Delete `drivers/src/pic.rs` entirely
+- [x] **7E.3** Remove `pub mod pic;` from `drivers/src/lib.rs`
+- [x] **7E.4** Remove PIC ports from the client `IoPortRegistry` allowlist; PIC access is OSTD-internal only
 
 ---
 

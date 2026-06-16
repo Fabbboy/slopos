@@ -16,7 +16,6 @@ pub mod msi_common;
 pub mod msix;
 pub mod pci;
 pub mod pci_defs;
-pub mod pic;
 pub mod pinctrl;
 pub mod pit;
 pub mod ps2;

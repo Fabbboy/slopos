@@ -161,7 +161,7 @@ if [ ! -f "$ISO" ]; then
 fi
 
 # ── Create runtime OVMF_VARS copy ────────────────────────────────────────────
-OVMF_VARS_RUNTIME="$(mktemp "${OVMF_DIR}/OVMF_VARS.runtime.XXXXXX.fd")"
+OVMF_VARS_RUNTIME="$(mktemp "${OVMF_DIR}/OVMF_VARS.runtime.XXXXXX")"
 cleanup() { rm -f "$OVMF_VARS_RUNTIME"; }
 trap cleanup EXIT INT TERM
 cp "$OVMF_VARS" "$OVMF_VARS_RUNTIME"

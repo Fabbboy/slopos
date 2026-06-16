@@ -35,7 +35,6 @@ pub(crate) const LAPIC_TIMER_DCR: u32 = 0x3E0;
 
 pub(crate) const LAPIC_SPURIOUS_ENABLE: u32 = 1 << 8;
 pub(crate) const LAPIC_LVT_MASKED: u32 = 1 << 16;
-pub(crate) const LAPIC_LVT_DELIVERY_MODE_EXTINT: u32 = 0x7 << 8;
 
 // =============================================================================
 // Timer Configuration

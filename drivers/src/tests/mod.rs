@@ -4,6 +4,7 @@
 pub mod apic_timer_tests;
 pub mod ecam_tests;
 pub mod hpet_tests;
+pub mod madt_tests;
 pub mod msix_tests;
 pub mod pci_cap_tests;
 pub mod virtio_completion_tests;
