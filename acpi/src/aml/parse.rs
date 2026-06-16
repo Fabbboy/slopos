@@ -175,6 +175,9 @@ pub fn skip_term_arg(aml: &[u8], p: usize) -> Option<usize> {
     let op = *aml.get(p)?;
     match op {
         OP_ZERO | OP_ONE | OP_ONES => Some(p + 1),
+        // LocalN (0x60..=0x67) / ArgN (0x68..=0x6e) reference: a single opcode
+        // byte. Appears e.g. as the dynamic base of an `OperationRegion`.
+        0x60..=0x6e => Some(p + 1),
         OP_BYTE_PREFIX => Some(p + 2),
         OP_WORD_PREFIX => Some(p + 3),
         OP_DWORD_PREFIX => Some(p + 5),
@@ -573,6 +576,46 @@ struct WalkDepthGuard;
 impl Drop for WalkDepthGuard {
     fn drop(&mut self) {
         WALK_DEPTH.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A do-nothing [`Visitor`]: records nothing and never descends. Used to
+/// reuse the structural walkers purely for their end-position arithmetic.
+struct NopVisitor;
+impl Visitor for NopVisitor {
+    fn enter_device(&mut self, _seg: [u8; 4], _body: Range) -> bool {
+        false
+    }
+}
+
+/// Advance past one statement (`TermObj`) the evaluator does not execute: a
+/// namespace declaration (`Name`/`Alias`/`Create*Field`, or an extended-op
+/// `OperationRegion`/`Field`/…) or a value-less control op. Returns the
+/// position after it, or `None` if the term cannot be structurally bounded.
+///
+/// The executor's fallback for a statement it can't evaluate as an expression,
+/// keeping a method body live across a declaration the narrow I²C-HID
+/// evaluator can't model (e.g. a dynamic GPIO `OperationRegion`).
+pub fn skip_statement(aml: &[u8], p: usize) -> Option<usize> {
+    let op = *aml.get(p)?;
+    let mut nop = NopVisitor;
+    let end = aml.len();
+    match op {
+        OP_NAME => walk_name(aml, p, &mut nop),
+        OP_ALIAS => skip_alias(aml, p),
+        OP_SCOPE => walk_scope(aml, p, end, &mut nop),
+        OP_METHOD => walk_method(aml, p, end, &mut nop),
+        OP_EXTERNAL => walk_external(aml, p, &mut nop),
+        OP_CREATE_DWORD_FIELD
+        | OP_CREATE_WORD_FIELD
+        | OP_CREATE_BYTE_FIELD
+        | OP_CREATE_QWORD_FIELD
+        | OP_CREATE_BIT_FIELD => walk_create_field(aml, p, op, &mut nop),
+        OP_EXT_PREFIX => walk_ext(aml, p, end, &mut nop),
+        OP_NOOP => Some(p + 1),
+        0xa5 => Some(p + 1), // Break
+        0x9f => Some(p + 1), // Continue
+        _ => None,
     }
 }
 

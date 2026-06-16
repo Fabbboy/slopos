@@ -27,13 +27,8 @@ use crate::syscall::{ShmBuffer, fs, process, tty};
 use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, PointerState, Selection};
 
-/// Fallback geometry used only if the compositor doesn't report a display
-/// size; normally the window is sized to [`WINDOW_FILL_PERCENT`] of the
-/// actual screen (see [`terminal_user_main`]).
 const WINDOW_WIDTH: i32 = 640;
 const WINDOW_HEIGHT: i32 = 480;
-/// Fraction of the display the terminal window fills on each axis.
-const WINDOW_FILL_PERCENT: i32 = 80;
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Read buffer drained from the PTY master per loop turn.
@@ -59,25 +54,7 @@ pub fn terminal_user_main() {
     let handle = connection::connect().expect("compositor not running");
     surface::init_handle(handle.clone());
 
-    // Size the window to WINDOW_FILL_PERCENT of the compositor's reported
-    // display, falling back to the fixed geometry if it isn't known yet.
-    let (win_w, win_h) = {
-        let client = handle.borrow_client();
-        let (dw, dh) = (
-            client.display_width() as i32,
-            client.display_height() as i32,
-        );
-        if dw > 0 && dh > 0 {
-            (
-                dw * WINDOW_FILL_PERCENT / 100,
-                dh * WINDOW_FILL_PERCENT / 100,
-            )
-        } else {
-            (WINDOW_WIDTH, WINDOW_HEIGHT)
-        }
-    };
-
-    if !surface::init(win_w, win_h) {
+    if !surface::init(WINDOW_WIDTH, WINDOW_HEIGHT) {
         panic!("terminal: surface init failed");
     }
     surface::set_title("Terminal");
@@ -138,8 +115,8 @@ pub fn terminal_user_main() {
     // sane TERM size immediately (a Configure later re-pushes the real one).
     let cw = crate::gfx::font::cell_width().max(1);
     let ch = crate::gfx::font::cell_height().max(1);
-    let cols = (win_w / cw).clamp(1, grid::MAX_COLS as i32) as u16;
-    let rows = (win_h / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
+    let cols = (WINDOW_WIDTH / cw).clamp(1, grid::MAX_COLS as i32) as u16;
+    let rows = (WINDOW_HEIGHT / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
     push_winsize(master_fd, rows, cols);
 
     // Spawn the shell with the slave as its fd 0/1/2 by transiently dup2'ing

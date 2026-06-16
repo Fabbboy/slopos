@@ -215,7 +215,19 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Execute one statement, returning the position after it.
+    /// Execute one statement (an AML `TermObj` in statement position),
+    /// returning the position after it.
+    ///
+    /// A statement is one of three `TermObj` kinds, all handled here:
+    /// * **Type1** — control flow with no value (`If`/`Else`/`While`/`Return`/
+    ///   `Noop`).
+    /// * **Type2** — an expression legal as a statement, run for its side
+    ///   effect with the value discarded: a `Store`, a method call, or an
+    ///   arithmetic/bitwise op writing its `Target` operand (ASL `Local = expr`
+    ///   compiles to `Op(.., Target)`).
+    /// * **NamedObj** — a declaration (`OperationRegion`/`Field`/`Create*Field`/
+    ///   `Name`). Dynamic regions are beyond this evaluator, so the declaration
+    ///   is structurally skipped and execution continues.
     fn exec_stmt(&mut self, p: usize, end: usize) -> Option<usize> {
         let op = *self.aml.get(p)?;
         match op {
@@ -280,17 +292,13 @@ impl<'a> Interp<'a> {
                 Some(q)
             }
             0xa3 => Some(p + 1), // Noop
-            b if is_lead_name_char_pub(b)
-                || b == OP_ROOT_CHAR
-                || b == OP_PARENT_CHAR
-                || b == OP_DUAL_NAME
-                || b == OP_MULTI_NAME =>
-            {
-                // A bare method-invocation statement (result discarded).
-                let (_v, q) = self.eval(p)?;
-                Some(q)
-            }
-            _ => None,
+            // Type2 expression (arithmetic/bitwise op writing its Target, or a
+            // method call): evaluate for the side effect, discard the value.
+            // A declaration this evaluator can't model is structurally skipped.
+            _ => match self.eval(p) {
+                Some((_v, q)) if q > p => Some(q),
+                _ => skip_statement(self.aml, p),
+            },
         }
     }
 

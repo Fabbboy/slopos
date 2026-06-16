@@ -515,3 +515,62 @@ pub fn test_aml_method_package_eval() -> slopos_testing::TestResult {
 }
 
 slopos_testing::stest!(name = test_aml_method_package_eval, suite = touchpad);
+
+// A method body whose *first* statement is a Type2 op writing its Target —
+// ASL `Local0 = (Arg0 & 0xFF0000) >> 0x10`, which iasl folds into a bare
+// `ShiftRight(And(..), .., Local0)` — must execute and reach its `Return`, not
+// stop at a leading non-`Store`/control-flow opcode.
+//
+// This is the Intel GPIO pin computation `GNUM(enc) = GNMB(enc) +
+// GINF(GGRP(enc), col)`, where `GGRP` leads with that `ShiftRight`; if it
+// returns 0 the package index collapses to the wrong row. The bytes mirror the
+// real `GGRP`/`GNMB`/`GINF`/`GNUM`.
+#[doc(hidden)]
+pub fn test_aml_target_op_statement() -> slopos_testing::TestResult {
+    // Name(GPCL, Package(2){ Package(2){0xAA,0x11}, Package(2){0xBB,0xA0} })
+    //   GPCL[0][1]=0x11 (the wrong row), GPCL[1][1]=0xA0=160 (the right one).
+    // Method(GINF,2) { Return(DerefOf(DerefOf(GPCL[Arg0])[Arg1])) }
+    // Method(GGRP,1) { ShiftRight(And(Arg0,0x00FF0000),0x10,Local0); Return(Local0) }
+    // Method(GNMB,1) { Return(And(Arg0,0xFFFF)) }
+    // Method(GNUM,1) { Local0=GNMB(Arg0); Local1=GGRP(Arg0);
+    //                  Return(GINF(Local1, One) + Local0) }
+    // enc=0x00010005 → GGRP=1, GNMB=5 → GNUM = GPCL[1][1] + 5 = 160 + 5 = 165.
+    // (Pre-fix: GGRP=0 → GPCL[0][1]+5 = 0x11+5 = 22.)
+    #[rustfmt::skip]
+    let aml = [
+        // Name(GPCL, Package{ {0xAA,0x11}, {0xBB,0xA0} })
+        0x08, 0x47, 0x50, 0x43, 0x4C,
+        0x12, 0x10, 0x02,
+        0x12, 0x06, 0x02, 0x0a, 0xAA, 0x0a, 0x11,
+        0x12, 0x06, 0x02, 0x0a, 0xBB, 0x0a, 0xA0,
+        // Method(GINF, 2) { Return(DerefOf(DerefOf(GPCL[Arg0])[Arg1])) }
+        0x14, 0x13, 0x47, 0x49, 0x4E, 0x46, 0x02,
+        0xa4, 0x83, 0x88, 0x83, 0x88, 0x47, 0x50, 0x43, 0x4C, 0x68, 0x00, 0x69, 0x00,
+        // Method(GGRP, 1) { ShiftRight(And(Arg0,0x00FF0000),0x10,Local0); Return(Local0) }
+        0x14, 0x14, 0x47, 0x47, 0x52, 0x50, 0x01,
+        0x7a, 0x7b, 0x68, 0x0c, 0x00, 0x00, 0xff, 0x00, 0x00, 0x0a, 0x10, 0x60,
+        0xa4, 0x60,
+        // Method(GNMB, 1) { Return(And(Arg0, 0xFFFF)) }
+        0x14, 0x0d, 0x47, 0x4E, 0x4D, 0x42, 0x01,
+        0xa4, 0x7b, 0x68, 0x0b, 0xff, 0xff, 0x00,
+        // Method(GNUM, 1) { Local0=GNMB(Arg0); Local1=GGRP(Arg0);
+        //                   Return(GINF(Local1, One) + Local0) }
+        0x14, 0x1e, 0x47, 0x4E, 0x55, 0x4D, 0x01,
+        0x70, 0x47, 0x4E, 0x4D, 0x42, 0x68, 0x60,
+        0x70, 0x47, 0x47, 0x52, 0x50, 0x68, 0x61,
+        0xa4, 0x72, 0x47, 0x49, 0x4E, 0x46, 0x61, 0x01, 0x60, 0x00,
+    ];
+    // GGRP alone: the leading Target-op statement executes (→ 1).
+    if slopos_acpi::aml::eval_method_u64_for_test(&aml, &ZeroHost, b"GGRP", &[0x0001_0005])
+        != Some(1)
+    {
+        return slopos_testing::TestResult::Fail;
+    }
+    // GNUM: the same resolved through a nested call → GpioInt pin.
+    match slopos_acpi::aml::eval_method_u64_for_test(&aml, &ZeroHost, b"GNUM", &[0x0001_0005]) {
+        Some(165) => slopos_testing::TestResult::Pass,
+        _ => slopos_testing::TestResult::Fail,
+    }
+}
+
+slopos_testing::stest!(name = test_aml_target_op_statement, suite = touchpad);
