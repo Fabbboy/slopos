@@ -8,5 +8,6 @@ pub mod madt_tests;
 pub mod msix_tests;
 pub mod pci_cap_tests;
 pub mod virtio_completion_tests;
+pub mod virtio_gpu_tests;
 pub mod virtio_msix_tests;
 pub mod virtio_net_tests;

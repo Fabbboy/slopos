@@ -32,7 +32,8 @@ impl GraphicsContext {
     /// Invokes the registered flush callback (e.g. the Xe driver's scanout
     /// trigger). Returns 0 on success or if no callback is registered.
     pub fn flush(&self) -> c_int {
-        framebuffer::framebuffer_flush()
+        // Kernel-side draws (splash / roulette / fblog) present the whole frame.
+        framebuffer::framebuffer_flush(core::ptr::null(), 0)
     }
 }
 

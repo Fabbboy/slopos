@@ -26,7 +26,18 @@ slopos_service_core::define_service! {
         get_display_info() -> Option<DisplayInfo>;
         @no_wrapper fb_flip(phys_addr: PhysAddr, size: usize, damage: *const DamageRect, damage_count: u32) -> c_int;
         @no_wrapper roulette_draw(fate: u32) -> VideoResult;
+        hw_cursor_available() -> bool;
+        @no_wrapper cursor_set_image(image: *const u8, len: usize, hot_x: u32, hot_y: u32) -> bool;
+        cursor_move(x: u32, y: u32) -> bool;
+        set_display_mode(width: u32, height: u32) -> bool;
     }
+}
+
+/// Upload a hardware-cursor image (validated kernel buffer) with its hotspot.
+/// Returns `true` on success.
+#[inline(always)]
+pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> bool {
+    (video_services().cursor_set_image)(image.as_ptr(), image.len(), hot_x, hot_y)
 }
 
 #[inline(always)]

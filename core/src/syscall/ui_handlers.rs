@@ -12,6 +12,7 @@ use slopos_sched::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fa
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
+use slopos_ostd::KVec;
 
 use crate::syscall::args::{UserBytes, UserPtr};
 use crate::syscall::result::SyscallResult;
@@ -291,6 +292,55 @@ define_syscall!(syscall_fb_flip
         return Err(Errno::EINVAL);
     }
     video::set_compositor_task_id(ctx.task_id().unwrap_or(0));
+    Ok(())
+});
+
+define_syscall!(syscall_cursor_set_image
+    (ctx, image_ptr: u64, len: u64, hotspot: u64)
+    requires(compositor)
+    -> Result<(), Errno>
+{
+    // virtio-gpu hardware cursors are at most 64×64 BGRA.
+    const CURSOR_MAX_BYTES: usize = 64 * 64 * 4;
+    let len = len as usize;
+    if len == 0 || len > CURSOR_MAX_BYTES {
+        return Err(Errno::EINVAL);
+    }
+    // Heap-staged (16 KiB exceeds the kernel stack frame budget): copy the
+    // compositor's image into a kernel buffer (SMAP-safe) before handing it to
+    // the GPU backend.
+    let mut buf = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
+    let user = MmUserBytes::try_new(image_ptr, len).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_from_user(user, &mut buf[..]).map_err(|_| Errno::EFAULT)?;
+    let hot_x = ((hotspot >> 16) & 0xFFFF) as u32;
+    let hot_y = (hotspot & 0xFFFF) as u32;
+    if !video::cursor_set_image(&buf[..], hot_x, hot_y) {
+        return Err(Errno::EINVAL);
+    }
+    Ok(())
+});
+
+define_syscall!(syscall_cursor_move
+    (ctx, pos: u32)
+    requires(compositor)
+    -> Result<(), Errno>
+{
+    let x = (pos >> 16) & 0xFFFF;
+    let y = pos & 0xFFFF;
+    if !video::cursor_move(x, y) {
+        return Err(Errno::EINVAL);
+    }
+    Ok(())
+});
+
+define_syscall!(syscall_set_display_mode
+    (ctx, width: u32, height: u32)
+    requires(compositor)
+    -> Result<(), Errno>
+{
+    if !video::set_display_mode(width, height) {
+        return Err(Errno::EINVAL);
+    }
     Ok(())
 });
 

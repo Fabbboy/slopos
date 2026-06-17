@@ -253,15 +253,85 @@ case "$MODE" in
         ;;
 esac
 
-# Calculate VRAM needed for the requested resolution (2x headroom for firmware overhead)
-fb_vram_bytes=$((fb_width * fb_height * 4 * 2))
-vgamem_mb=$(( (fb_vram_bytes + 1048575) / 1048576 ))
-if [ "$vgamem_mb" -lt 16 ]; then vgamem_mb=16; fi
-# Round up to next power of 2 (QEMU requirement)
-p=1; while [ "$p" -lt "$vgamem_mb" ]; do p=$((p * 2)); done
-vgamem_mb=$p
+# ── Display device selection ─────────────────────────────────────────────────
+# GPU selects the emulated display adapter SlopOS drives:
+#   virtio-vga (default) — virtio-gpu plus a VGA-compatible linear framebuffer.
+#                          The firmware framebuffer is present from power-on, so
+#                          the boot console (splash + ESC log) is live through
+#                          early boot; the kernel driver then upgrades scanout
+#                          to virtio-gpu (the image is copied across).
+#   virtio-gpu-pci       — pure virtio-gpu; NO early framebuffer (OVMF's GOP for
+#                          it dies at ExitBootServices), so nothing renders on
+#                          screen until the driver probes at PCI init.
+#   vga                  — plain stdvga (passive framebuffer only). Pair with
+#                          BOOT_CMDLINE='video=framebuffer'.
+# A device the kernel can't instantiate falls back to stdvga (still an early
+# framebuffer). Applies to every mode, including headless test.
+GPU="${GPU:-virtio-vga}"
 
-VIDEO_ARGS=(-vga none -device "VGA,edid=on,xres=${fb_width},yres=${fb_height},vgamem_mb=${vgamem_mb}")
+# Plain stdvga (passive framebuffer): VRAM sized to the resolution (2x
+# headroom) and rounded up to a power of two as QEMU's stdvga requires.
+stdvga_args() {
+    local fb_vram_bytes vgamem_mb p
+    fb_vram_bytes=$((fb_width * fb_height * 4 * 2))
+    vgamem_mb=$(( (fb_vram_bytes + 1048575) / 1048576 ))
+    if [ "$vgamem_mb" -lt 16 ]; then vgamem_mb=16; fi
+    p=1; while [ "$p" -lt "$vgamem_mb" ]; do p=$((p * 2)); done
+    vgamem_mb=$p
+    VIDEO_ARGS=(-vga none -device "VGA,edid=on,xres=${fb_width},yres=${fb_height},vgamem_mb=${vgamem_mb}")
+}
+
+# True only if the named display device both EXISTS and INITIALIZES without
+# crashing. A grep of `-device help` is not enough: a virtio-gpu PCI module
+# installed without its base `virtio-gpu-device` module is listed but segfaults
+# at instance_init (the child type is unregistered). Spin up a paused throwaway
+# VM (`-S` halts before guest code, after device realize) and check it survives.
+gpu_device_usable() {
+    local dev="$1"
+    "$QEMU_BIN" -device help 2>/dev/null | grep -q "\"$dev\"" || return 1
+    "$QEMU_BIN" -machine q35 -nodefaults -no-user-config -display none \
+        -serial null -S -device "$dev" >/dev/null 2>&1 &
+    local pid=$!
+    sleep 0.5
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        return 0
+    fi
+    wait "$pid" 2>/dev/null
+    return 1
+}
+
+# Build VIDEO_ARGS for a virtio display device, falling back to stdvga (the
+# kernel then sees no virtio-gpu PCI device and stays on the passive
+# framebuffer) when this QEMU lacks or can't instantiate it.
+virtio_display_args() {
+    local dev="$1"
+    if gpu_device_usable "$dev"; then
+        VIDEO_ARGS=(-vga none -device "${dev},edid=on,xres=${fb_width},yres=${fb_height}")
+    else
+        echo "warning: this QEMU can't instantiate '${dev}' (missing or broken module);" >&2
+        echo "         falling back to stdvga. SlopOS runs on the passive framebuffer." >&2
+        echo "         On Arch/CachyOS: pacman -S qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-pci" >&2
+        stdvga_args
+    fi
+}
+
+case "$GPU" in
+    vga|std|stdvga)
+        stdvga_args
+        ;;
+    virtio-vga)
+        virtio_display_args "virtio-vga"
+        ;;
+    virtio-gpu-pci|virtio|virtio-gpu)
+        virtio_display_args "virtio-gpu-pci"
+        ;;
+    *)
+        echo "Unknown GPU=$GPU (expected: virtio-gpu-pci, virtio-vga, vga)" >&2
+        exit 1
+        ;;
+esac
 
 # Handle optional PCI devices
 HAVE_PCI_ARGS=0

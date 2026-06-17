@@ -1,9 +1,6 @@
-#[cfg(feature = "xe-gpu")]
-use core::ffi::c_char;
-
 use slopos_hermetic::{BootCtx, BspInit};
 use slopos_ostd::klog::{self, KlogLevel};
-use slopos_ostd::{klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info, klog_warn};
 use slopos_testing::{
     TestRunSummary, kernel_phase_summary, tests_reset_panic_state, tests_run_all,
 };
@@ -41,30 +38,22 @@ fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
-#[cfg(feature = "xe-gpu")]
-fn cmdline_contains(cmdline: *const c_char, needle: &str) -> bool {
-    let Some(haystack) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(cmdline) else {
-        return false;
-    };
-    let needle = needle.as_bytes();
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return false;
-    }
-
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
+/// Select the display backend from the kernel cmdline.
+///
+/// Defaults to virtio-gpu (the QEMU path's proper scanout). `video=framebuffer`
+/// forces the passive firmware framebuffer; `video=xe` selects the Intel Xe
+/// backend (only when compiled in).
 fn boot_video_backend() -> video::VideoBackend {
-    #[cfg(feature = "xe-gpu")]
-    {
-        let cmdline = boot_get_cmdline();
-        if cmdline_contains(cmdline, "video=xe") {
+    if let Some(cmdline) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline()) {
+        #[cfg(feature = "xe-gpu")]
+        if cmdline.contains("video=xe") {
             return video::VideoBackend::Xe;
         }
+        if cmdline.contains("video=framebuffer") {
+            return video::VideoBackend::Framebuffer;
+        }
     }
-    video::VideoBackend::Framebuffer
+    video::VideoBackend::VirtioGpu
 }
 
 fn apply_serial_mirror_cmdline() {
@@ -316,6 +305,11 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // in `drivers/src/virtio_*.rs`); the linker delivers a contiguous
     // `[PciDriverEntry]` array to `pci_probe_drivers()` below.
     pci_init();
+    // Gate the virtio-gpu probe BEFORE enumeration: the probe resets the
+    // device (tearing down the firmware scanout the passive backend is
+    // presenting), so only let it claim the device when virtio-gpu is the
+    // chosen backend. Otherwise the firmware framebuffer stays intact.
+    slopos_drivers::virtio_gpu::set_enabled(boot_video_backend() == video::VideoBackend::VirtioGpu);
     pci_probe_drivers();
     #[cfg(feature = "xe-gpu")]
     if boot_video_backend() == video::VideoBackend::Xe {
@@ -342,6 +336,59 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     } else {
         klog_debug!("PCI: No GPU-class device discovered during enumeration");
+    }
+
+    // virtio-gpu takeover: bring up the scanout resource, copy the firmware
+    // framebuffer across, and re-point the framebuffer state at the GPU-visible
+    // backing so compositor flips land there and present via
+    // TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
+    if boot_video_backend() == video::VideoBackend::VirtioGpu
+        && slopos_drivers::virtio_gpu::is_present()
+    {
+        let boot_fb =
+            limine_protocol::boot_info()
+                .framebuffer
+                .map(|bf| slopos_abi::FramebufferData {
+                    address: *bf.address,
+                    info: bf.info,
+                });
+        match slopos_drivers::virtio_gpu::framebuffer_init(boot_fb) {
+            Some(gpu_fb)
+                if video::adopt_virtio_gpu_scanout(
+                    gpu_fb,
+                    slopos_drivers::virtio_gpu::virtio_gpu_flush,
+                ) =>
+            {
+                if let (Some(base), Some(info)) = (
+                    video::framebuffer::get_fb_base_ptr(),
+                    video::framebuffer::get_display_info(),
+                ) {
+                    slopos_drivers::tty::vconsole::register_framebuffer(
+                        base,
+                        info.pitch,
+                        info.width,
+                        info.height,
+                        info.bytes_per_pixel(),
+                    );
+                }
+                // Expose the hardware cursor + runtime mode-set to the video
+                // service layer (compositor reaches these via syscalls).
+                video::register_gpu_control(
+                    slopos_drivers::virtio_gpu::hw_cursor_available,
+                    slopos_drivers::virtio_gpu::cursor_set_image_raw,
+                    slopos_drivers::virtio_gpu::cursor_move,
+                    slopos_drivers::virtio_gpu::set_mode,
+                );
+                sync_mouse_bounds(Some(gpu_fb));
+                // Repaint the boot console on the new scanout: with an early
+                // framebuffer `setup_scanout` already copied the image across,
+                // and without one this is where the splash first appears.
+                video::show_splash();
+            }
+            _ => {
+                klog_warn!("virtio-gpu: scanout setup failed; passive framebuffer remains active");
+            }
+        }
     }
 
     #[cfg(feature = "xe-gpu")]

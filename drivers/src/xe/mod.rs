@@ -261,7 +261,10 @@ pub fn xe_framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<Framebuff
     })
 }
 
-pub fn xe_flush() -> i32 {
+/// Framebuffer flush callback. Xe scans out the kernel framebuffer directly
+/// (it *is* the GPU-mapped surface), so a present is just re-arming the plane
+/// surface address — the damage region is irrelevant and ignored.
+pub fn xe_flush(_damage: *const slopos_abi::damage::DamageRect, _count: u32) -> i32 {
     let (present, ready, mmio, ggtt_addr) = {
         let dev = XE_DEVICE.lock();
         (

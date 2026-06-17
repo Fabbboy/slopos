@@ -18,6 +18,13 @@ use super::surface_cache::ClientSurfaceCache;
 const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
 const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
 
+/// Hardware cursor overlay dimensions (virtio-gpu mandates 64×64).
+pub const HW_CURSOR_DIM: u32 = 64;
+/// Uniform hotspot offset used when rasterizing any cursor shape into the
+/// hardware overlay. Each cursor shape draws its click-point at this reference,
+/// so the overlay's hotspot lands on the pointer position for every shape.
+pub const HW_CURSOR_HOTSPOT: u32 = 20;
+
 struct WallpaperCache {
     load_attempted: bool,
     source: Option<Image>,
@@ -195,6 +202,7 @@ impl Renderer {
         uptime_secs: u64,
         force_full: bool,
         damage_regions: &[DamageRect],
+        hw_cursor: bool,
     ) -> RenderMode {
         self.ensure_font();
 
@@ -262,8 +270,10 @@ impl Renderer {
                 Some(full_clip),
             );
 
-            // 5. Cursor
-            self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, &full_clip);
+            // 5. Cursor (skipped when the hardware overlay owns the pointer)
+            if !hw_cursor {
+                self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, &full_clip);
+            }
             RenderMode::Full
         } else if damage_regions.is_empty() {
             RenderMode::Partial
@@ -285,10 +295,12 @@ impl Renderer {
                     uptime_secs,
                 );
             }
-            let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
-            for rect in damage_regions {
-                if intersect_rect(rect, &cursor_rect).is_some() {
-                    self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
+            if !hw_cursor {
+                let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
+                for rect in damage_regions {
+                    if intersect_rect(rect, &cursor_rect).is_some() {
+                        self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
+                    }
                 }
             }
             RenderMode::Partial
@@ -410,6 +422,39 @@ impl Renderer {
         }
 
         // Cursor is drawn once after all partial regions (see render()).
+    }
+
+    /// Rasterize `cursor_shape` into a 64×64 BGRA hardware-cursor image.
+    /// `out` must be `HW_CURSOR_DIM * HW_CURSOR_DIM * 4` bytes; it is filled
+    /// with a transparent background and the cursor drawn at the hotspot
+    /// reference so the overlay tracks the pointer correctly.
+    pub fn render_cursor_image(&self, cursor_shape: u8, out: &mut [u8]) {
+        for b in out.iter_mut() {
+            *b = 0; // transparent (alpha 0)
+        }
+        let Some(mut buf) = DrawBuffer::new(
+            out,
+            HW_CURSOR_DIM,
+            HW_CURSOR_DIM,
+            (HW_CURSOR_DIM * 4) as usize,
+            4,
+        ) else {
+            return;
+        };
+        buf.set_pixel_format(PixelFormat::Argb8888);
+        let clip = DamageRect {
+            x0: 0,
+            y0: 0,
+            x1: HW_CURSOR_DIM as i32 - 1,
+            y1: HW_CURSOR_DIM as i32 - 1,
+        };
+        self.draw_cursor(
+            &mut buf,
+            HW_CURSOR_HOTSPOT as i32,
+            HW_CURSOR_HOTSPOT as i32,
+            cursor_shape,
+            &clip,
+        );
     }
 
     fn draw_cursor(

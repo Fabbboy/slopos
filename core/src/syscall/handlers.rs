@@ -42,10 +42,10 @@ use crate::syscall::signal::{
 pub use crate::syscall::signalfd_handlers::syscall_signalfd;
 pub use crate::syscall::test_handlers::{syscall_run_userland_tests, syscall_test_report};
 pub use crate::syscall::ui_handlers::{
-    syscall_clipboard_copy, syscall_clipboard_paste, syscall_fb_flip, syscall_fb_info,
-    syscall_getrandom, syscall_input_poll_batch, syscall_open_tty_fd, syscall_openpty,
-    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin, syscall_tty_read,
-    syscall_tty_write,
+    syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
+    syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
+    syscall_open_tty_fd, syscall_openpty, syscall_roulette_draw, syscall_roulette_result,
+    syscall_roulette_spin, syscall_set_display_mode, syscall_tty_read, syscall_tty_write,
 };
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -135,6 +135,9 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
 
     // Compositor framebuffer
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
+    [SYSCALL_CURSOR_SET_IMAGE]    => syscall_cursor_set_image,    "cursor_set_image";
+    [SYSCALL_CURSOR_MOVE]         => syscall_cursor_move,         "cursor_move";
+    [SYSCALL_SET_DISPLAY_MODE]    => syscall_set_display_mode,    "set_display_mode";
 
     // Input
     [SYSCALL_INPUT_POLL_BATCH]           => syscall_input_poll_batch,           "input_poll_batch";

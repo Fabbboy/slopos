@@ -163,13 +163,15 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     if slopos_ostd::fblog::is_active() {
         let mut state = STATE.lock();
         state.active = true;
-        state.progress = 0;
         return Ok(());
     }
     ensure_framebuffer_ready()?;
     let mut ctx = GraphicsContext::new()?;
 
     let mut state = STATE.lock();
+    // Repaint the full screen (logo + bar) at the current progress, so a
+    // backend upgrade keeps the bar where the boot has reached.
+    let progress = state.progress;
     let bg_px = ctx.pixel_format().encode(SPLASH_BG_COLOR);
     ctx.clear_canvas(bg_px);
 
@@ -212,11 +214,10 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.progress_y,
         layout.progress_w,
         layout.progress_h,
-        0,
+        progress,
     );
 
     state.active = true;
-    state.progress = 0;
     Ok(())
 }
 
@@ -268,6 +269,9 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
         layout.progress_h,
         progress,
     );
+    // Present the update: a no-op on a directly-scanned-out framebuffer, but on
+    // a GPU backend the draw only reaches the screen once flushed.
+    framebuffer::framebuffer_flush(core::ptr::null(), 0);
     Ok(())
 }
 

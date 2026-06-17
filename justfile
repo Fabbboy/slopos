@@ -45,6 +45,8 @@ qemu_fb_auto        := env("QEMU_FB_AUTO", "1")
 qemu_fb_auto_policy := env("QEMU_FB_AUTO_POLICY", "primary")
 qemu_fb_auto_output := env("QEMU_FB_AUTO_OUTPUT", "")
 qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
+# Emulated display adapter: virtio-vga (default), virtio-gpu-pci, or vga.
+gpu                 := env("GPU", "virtio-vga")
 
 # ── Boot / Test cmdlines ────────────────────────────────────────────────────
 
@@ -167,6 +169,7 @@ _qemu-boot mode video iso fs_image *extra_env:
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
     QEMU_GTK_ZOOM_TO_FIT={{qemu_gtk_zoom}} \
+    GPU={{gpu}} \
     OVMF_DIR={{ovmf_dir}} \
     {{extra_env}} \
         scripts/qemu_run.sh "{{mode}}" "{{iso}}" "{{fs_image}}"

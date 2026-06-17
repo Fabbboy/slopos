@@ -804,11 +804,25 @@ pub const RING_UNREGISTER_PBUF_RING: u32 = 3;
 /// `ring_register` op: unregister the fixed/registered buffer set.
 pub const RING_UNREGISTER_BUFFERS: u32 = 4;
 
-pub const SYSCALL_TABLE_SIZE: usize = 162;
+/// Upload a 64×64 BGRA hardware-cursor image to the display backend.
+/// `cursor_set_image(image_ptr: *const u8, len: usize, hotspot: u32)` where
+/// `hotspot` packs `(hot_x << 16) | hot_y`. Compositor-only.
+pub const SYSCALL_CURSOR_SET_IMAGE: u64 = 162;
+
+/// Move the hardware cursor to absolute display coords.
+/// `cursor_move(pos: u32)` where `pos` packs `(x << 16) | y`. Compositor-only.
+pub const SYSCALL_CURSOR_MOVE: u64 = 163;
+
+/// Runtime display mode-set. `set_display_mode(width: u32, height: u32)`.
+/// Compositor-only; returns 0 on success.
+pub const SYSCALL_SET_DISPLAY_MODE: u64 = 164;
+
+pub const SYSCALL_TABLE_SIZE: usize = 165;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_RING_REGISTER as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SET_DISPLAY_MODE as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

@@ -58,6 +58,16 @@ struct WindowManager {
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
     prev_uptime_secs: u64,
     prev_cursor_shape: u8,
+    /// Hardware-cursor state: `None` = not yet probed, `Some(true)` = the
+    /// virtio-gpu overlay owns the pointer (software cursor suppressed),
+    /// `Some(false)` = unavailable (software cursor in use).
+    hw_cursor: Option<bool>,
+    /// Cursor shape last uploaded to the hardware overlay (`-1` = none).
+    hw_cursor_shape: i32,
+    /// Last position sent to the hardware cursor (`i32::MIN` = never), so we
+    /// only issue a (blocking) move when the pointer actually moved.
+    hw_cursor_last_x: i32,
+    hw_cursor_last_y: i32,
 }
 
 impl WindowManager {
@@ -85,6 +95,45 @@ impl WindowManager {
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             prev_uptime_secs: u64::MAX, // force first-frame clock damage
             prev_cursor_shape: 0,
+            hw_cursor: None,
+            hw_cursor_shape: -1,
+            hw_cursor_last_x: i32::MIN,
+            hw_cursor_last_y: i32::MIN,
+        }
+    }
+
+    /// Drive the virtio-gpu hardware cursor. Probes it lazily, (re)uploads the
+    /// cursor image when the shape changes, and reports whether the hardware
+    /// overlay owns the pointer (so the renderer skips compositing it into the
+    /// frame). Without a virtio-gpu device the first upload fails and the
+    /// software cursor is used for the rest of the session.
+    fn update_hw_cursor(&mut self, shape: u8) -> bool {
+        match self.hw_cursor {
+            Some(false) => return false,
+            Some(true) if self.hw_cursor_shape == shape as i32 => return true,
+            _ => {}
+        }
+        const N: usize = (renderer::HW_CURSOR_DIM * renderer::HW_CURSOR_DIM * 4) as usize;
+        let mut pixels = [0u8; N];
+        self.renderer.render_cursor_image(shape, &mut pixels);
+        let ok = window::cursor_set_image(
+            &pixels,
+            renderer::HW_CURSOR_HOTSPOT,
+            renderer::HW_CURSOR_HOTSPOT,
+        ) == 0;
+        if ok {
+            self.hw_cursor = Some(true);
+            self.hw_cursor_shape = shape as i32;
+            return true;
+        }
+        // First probe failure means no hardware cursor: use software. A failed
+        // re-upload after activation keeps the last good overlay shape (stay on
+        // hardware) so the overlay and a software cursor never show together.
+        if self.hw_cursor.is_none() {
+            self.hw_cursor = Some(false);
+            false
+        } else {
+            true
         }
     }
 
@@ -605,6 +654,22 @@ impl WindowManager {
             wm.prev_cursor_shape = cursor_shape;
         }
 
+        // Hardware cursor (virtio-gpu overlay): upload the image on shape
+        // change and reposition it when the pointer moves. When active, the
+        // renderer omits the software cursor; without a virtio-gpu device the
+        // overlay calls are no-ops and the software cursor is composited.
+        let hw_cursor = wm.update_hw_cursor(cursor_shape);
+        if hw_cursor
+            && (wm.input.mouse_x != wm.hw_cursor_last_x || wm.input.mouse_y != wm.hw_cursor_last_y)
+        {
+            let _ = window::cursor_move(
+                wm.input.mouse_x.max(0) as u32,
+                wm.input.mouse_y.max(0) as u32,
+            );
+            wm.hw_cursor_last_x = wm.input.mouse_x;
+            wm.hw_cursor_last_y = wm.input.mouse_y;
+        }
+
         // After all input: if focus moved, damage both the old and new
         // title bars.  No flags to manage — just compare the snapshot.
         let focus_after = wm.input.focused_task();
@@ -682,6 +747,7 @@ impl WindowManager {
                     uptime_secs,
                     force_full,
                     &damage_snapshot[..damage_count],
+                    hw_cursor,
                 );
             }
 

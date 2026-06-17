@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
@@ -75,7 +76,11 @@ impl FramebufferState {
 
 static FRAMEBUFFER: SpinLock<FramebufferState> =
     SpinLock::new(FramebufferState::new(), LOCK_LEVEL_RESOURCE);
-static FRAMEBUFFER_FLUSH: SpinLock<Option<fn() -> c_int>> =
+/// Backend present hook. Receives the damaged region (or `(null, 0)` for a
+/// full-frame present) so a GPU backend can scope its transfer/flush.
+type FlushCallback = fn(*const DamageRect, u32) -> c_int;
+
+static FRAMEBUFFER_FLUSH: SpinLock<Option<FlushCallback>> =
     SpinLock::new(None, LOCK_LEVEL_RESOURCE);
 
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
@@ -171,14 +176,23 @@ pub(crate) fn snapshot() -> Option<FbState> {
     FRAMEBUFFER.lock().fb
 }
 
-pub fn register_flush_callback(callback: fn() -> c_int) {
+pub fn register_flush_callback(callback: FlushCallback) {
     let mut guard = FRAMEBUFFER_FLUSH.lock();
     *guard = Some(callback);
 }
 
-pub fn framebuffer_flush() -> c_int {
-    let guard = FRAMEBUFFER_FLUSH.lock();
-    if let Some(cb) = *guard { cb() } else { 0 }
+/// Present the (optionally damage-scoped) frame through the registered backend.
+///
+/// The callback pointer is copied out and the lock released **before** the
+/// callback runs: the virtio-gpu backend blocks on GPU command completion
+/// inside the callback, which must never happen while holding this
+/// IRQ-disabling `SpinLock` (the GPU IRQ could then never be serviced).
+pub fn framebuffer_flush(damage: *const DamageRect, damage_count: u32) -> c_int {
+    let cb = *FRAMEBUFFER_FLUSH.lock();
+    match cb {
+        Some(cb) => cb(damage, damage_count),
+        None => 0,
+    }
 }
 
 fn copy_rect_from_shm(
@@ -300,7 +314,7 @@ pub fn fb_flip_from_shm_damage(
         // Source and destination have been validated and are
         // non-overlapping.
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
-        return framebuffer_flush();
+        return framebuffer_flush(core::ptr::null(), 0);
     }
 
     let max_regions = slopos_abi::damage::MAX_DAMAGE_REGIONS as u32;
@@ -319,6 +333,6 @@ pub fn fb_flip_from_shm_damage(
             // partial presentation is better than no presentation.
         }
     }
-    let flush = framebuffer_flush();
+    let flush = framebuffer_flush(regions.as_ptr(), region_count as u32);
     if any_failed { -1 } else { flush }
 }

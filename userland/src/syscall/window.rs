@@ -1,7 +1,7 @@
 //! Window and surface management syscalls.
 
 use super::numbers::*;
-use super::raw::{syscall1, syscall3};
+use super::raw::{syscall1, syscall2, syscall3};
 use slopos_abi::DisplayInfo;
 use slopos_abi::damage::DamageRect;
 
@@ -30,4 +30,33 @@ pub fn fb_flip_damage(memfd_fd: u32, damage: &[DamageRect]) -> i64 {
             damage.len() as u64,
         ) as i64
     }
+}
+
+/// Upload a 64×64 BGRA hardware-cursor image. `hot_x`/`hot_y` are the hotspot
+/// offset within the image. Returns 0 on success, negative if no hardware
+/// cursor is available (caller should fall back to software compositing).
+#[inline(always)]
+pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> i64 {
+    let hotspot = ((hot_x & 0xFFFF) << 16) | (hot_y & 0xFFFF);
+    unsafe {
+        syscall3(
+            SYSCALL_CURSOR_SET_IMAGE,
+            image.as_ptr() as u64,
+            image.len() as u64,
+            hotspot as u64,
+        ) as i64
+    }
+}
+
+/// Move the hardware cursor to absolute display coordinates.
+#[inline(always)]
+pub fn cursor_move(x: u32, y: u32) -> i64 {
+    let pos = ((x & 0xFFFF) << 16) | (y & 0xFFFF);
+    unsafe { syscall1(SYSCALL_CURSOR_MOVE, pos as u64) as i64 }
+}
+
+/// Request a runtime display-mode (resolution) change.
+#[inline(always)]
+pub fn set_display_mode(width: u32, height: u32) -> i64 {
+    unsafe { syscall2(SYSCALL_SET_DISPLAY_MODE, width as u64, height as u64) as i64 }
 }

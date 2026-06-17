@@ -29,6 +29,7 @@ pub mod tty_file_ops;
 pub mod tty_tests;
 pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_gpu;
 pub mod virtio_net;
 #[cfg(feature = "xe-gpu")]
 pub mod xe;
