@@ -466,19 +466,29 @@ pub fn mm_region_highest_usable_frame() -> u64 {
     })
 }
 
-/// Returns the highest frame index seen across **any** memory-map region
-/// (Usable, Reserved, KernelAndModules, Bootloader-Reclaimable,
-/// AcpiReclaimable, AcpiNvs, BadMemory, …). The OSTD `META_SLOTS` array
-/// must cover every paddr the kernel might wrap with `Frame<M>` —
-/// including the kernel image, the bootloader-allocated PML4, and any
-/// framebuffer / ACPI region that gets mapped via cursor. The "usable"
-/// variant above is too narrow for that.
-pub fn mm_region_highest_frame_seen() -> u64 {
+/// `true` for device MMIO apertures (framebuffer, Local APIC, …): regions
+/// that alias a physical address but are not RAM. They never become a
+/// managed [`Frame<M>`](slopos_ostd::mm::Frame), and such a BAR can sit
+/// high in the 64-bit address space, so they must not extend a RAM bound.
+fn region_is_device_mmio(region: &MmRegion) -> bool {
+    region.flags & MM_RESERVATION_FLAG_MMIO != 0
+        || matches!(region.type_, MmReservationType::Framebuffer)
+}
+
+/// Highest frame index backed by RAM: every region the kernel may wrap as a
+/// [`Frame<M>`](slopos_ostd::mm::Frame) — usable memory, the kernel image,
+/// ACPI reclaimable/NVS, and bootloader-allocated page tables. Device MMIO
+/// is excluded (see [`region_is_device_mmio`]).
+///
+/// Bounds the dense, frame-indexed `META_SLOTS` array (one slot per frame in
+/// `0..=highest`). A high MMIO aperture would stretch the array across the
+/// intervening hole, costing gibibytes of metadata for untracked memory.
+pub fn mm_region_highest_ram_frame() -> u64 {
     with_store(|store| {
         let mut highest = 0u64;
         for i in 0..store.count as usize {
             let region = &store.regions[i];
-            if region.length == 0 {
+            if region.length == 0 || region_is_device_mmio(region) {
                 continue;
             }
             let end = region.phys_base.saturating_add(region.length - 1);

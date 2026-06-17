@@ -20,7 +20,7 @@ use slopos_ostd::mm::frame::{MAX_META_ALIGN, MAX_META_SIZE, MetaSlot, init_meta_
 use slopos_ostd::sync::BspToken;
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::memory_reservations::mm_region_highest_frame_seen;
+use crate::memory_reservations::mm_region_highest_ram_frame;
 use crate::page_alloc::__alloc_page_frames_raw;
 use crate::paging_defs::PAGE_SIZE_4KB;
 
@@ -35,10 +35,10 @@ const _: () = assert!(
     "KernelMeta exceeds MAX_META_ALIGN"
 );
 
-/// Allocate one [`MetaSlot`] per usable physical 4 KiB frame and
-/// install the slice via [`init_meta_slots`]. Must run after the
-/// buddy allocator + HHDM are live (Memory phase priority ≥ 10) and
-/// before any `Frame<M>` is constructed.
+/// Allocate one [`MetaSlot`] per RAM 4 KiB frame and install the slice
+/// via [`init_meta_slots`]. Must run after the buddy allocator + HHDM
+/// are live (Memory phase priority ≥ 10) and before any `Frame<M>` is
+/// constructed.
 ///
 /// The `&BspToken<'brand>` witness binds the call to the BSP-init
 /// scope opened by `slopos_ostd::sync::run_bsp_init` and is forwarded
@@ -46,15 +46,14 @@ const _: () = assert!(
 /// registration).
 ///
 /// Returns the number of slots installed, or `0` if there is nothing
-/// to install (no usable memory or the buddy returned NULL).
+/// to install (no RAM or the buddy returned NULL).
 pub fn install_meta_slots<'brand>(token: &BspToken<'brand>) -> usize {
-    // Cover every frame in the memory map — `Usable` is too narrow
-    // (the kernel PML4 and other bootloader-allocated frames live
-    // in `KernelAndModules` / `BootloaderReclaimable` / `Reserved`
-    // regions). Any of those can become a `Frame<PageTableMeta>`
-    // ref-counted handle later (e.g. `KERNEL_VM_SPACE::wrap_existing`
-    // wraps the kernel master PML4 — its slot must exist).
-    let highest_frame = mm_region_highest_frame_seen();
+    // One `MetaSlot` per RAM frame. `Usable` is too narrow: the master PML4
+    // and other bootloader-allocated frames live in reclaimable /
+    // firmware-reserved RAM yet are wrapped as `Frame<PageTableMeta>`, so
+    // their slots must exist. Device MMIO is excluded — those paddrs are
+    // never wrapped and resolve to an out-of-range error.
+    let highest_frame = mm_region_highest_ram_frame();
     if highest_frame == 0 {
         return 0;
     }
