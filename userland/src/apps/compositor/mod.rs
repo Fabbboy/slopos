@@ -444,20 +444,18 @@ impl WindowManager {
         self.protocol = proto_box;
     }
 
-    /// Recompute pointer focus (topmost visible window under the cursor)
-    /// and emit protocol enter/leave events on transitions.
+    /// Recompute pointer focus and emit protocol enter/leave events on
+    /// transitions. A client holds the pointer only while the cursor is over
+    /// its content; decorations and the desktop belong to the compositor, so a
+    /// non-`Content` hit drops focus to none.
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
-        let mut new_ptr_focus = 0u32;
-        for i in (0..self.window_count as usize).rev() {
-            let w = self.windows[i];
-            if w.state == WINDOW_STATE_MINIMIZED {
-                continue;
-            }
-            if self.input.hit_test_content_area(&w) {
-                new_ptr_focus = w.task_id;
-                break;
-            }
-        }
+        let hit = self
+            .input
+            .resolve_cursor_hit(&self.windows, self.window_count, &self.shelf);
+        let new_ptr_focus = match hit.part {
+            input::CursorPart::Content => hit.task_id,
+            _ => 0,
+        };
         if new_ptr_focus == self.protocol_pointer_focus {
             return;
         }
@@ -467,7 +465,9 @@ impl WindowManager {
                 p.send_pointer_leave_for_task(self.protocol_pointer_focus, self.protocol_serial);
             }
             if new_ptr_focus != 0 {
-                self.protocol_serial = self.protocol_serial.wrapping_add(1);
+                // Serial 0 is the "never entered" sentinel the cursor gate
+                // rejects, so an enter must never carry it.
+                self.protocol_serial = self.protocol_serial.wrapping_add(1).max(1);
                 p.send_pointer_enter_for_task(
                     new_ptr_focus,
                     self.protocol_serial,
@@ -622,30 +622,20 @@ impl WindowManager {
         // clients with in-order coordinates.
         wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
 
-        // Update resize cursor hover feedback (must run after input dispatch).
-        wm.input.update_resize_cursor(&wm.windows, wm.window_count);
-
         // Cursor trail + shelf + hover damage — needs the trail the input
         // dispatch just accumulated.
         wm.add_pointer_damage();
 
-        // Compute effective cursor shape early so we can detect shape changes
-        // and add damage before the render decision.
-        let cursor_shape = if wm.input.compositor_cursor_override != 0 {
-            wm.input.compositor_cursor_override
-        } else {
-            let mut shape = 0u8;
-            for i in (0..wm.window_count as usize).rev() {
-                if wm.windows[i].state == WINDOW_STATE_MINIMIZED {
-                    continue;
-                }
-                if wm.input.hit_test_content_area(&wm.windows[i]) {
-                    shape = wm.windows[i].cursor_shape;
-                    break;
-                }
-            }
-            shape
-        };
+        // Resolve what the pointer is over once; the cursor shape and the
+        // signal-button hover both read this single hit, against this window
+        // snapshot, before the post-input resync can reorder the array.
+        let cursor_hit = wm
+            .input
+            .resolve_cursor_hit(&wm.windows, wm.window_count, &wm.shelf);
+        let cursor_shape = wm.input.cursor_shape_for(&cursor_hit, &wm.windows);
+        let signal_hovered_task =
+            wm.input
+                .signal_hovered_task(&cursor_hit, &wm.windows, wm.input.focused_task());
 
         // When cursor shape changes, damage the cursor position so the old
         // shape gets erased and the new one gets drawn.
@@ -720,15 +710,6 @@ impl WindowManager {
                 // Determine the active app name for the system bar.
                 let active_app_name =
                     active_window_title(&wm.windows, wm.window_count, wm.input.focused_task());
-
-                // Compute per-window signal group hover state.
-                let signal_hovered_task = signal_hovered_task_id(
-                    &wm.windows,
-                    wm.window_count,
-                    wm.input.focused_task(),
-                    wm.input.mouse_x,
-                    wm.input.mouse_y,
-                );
 
                 mode = wm.renderer.render(
                     &mut buf,
@@ -1110,29 +1091,4 @@ fn active_window_title(
         }
     }
     ""
-}
-
-/// Return the task_id of the focused window whose signal group is hovered,
-/// or 0 if no signal group is hovered.
-fn signal_hovered_task_id(
-    windows: &[UserWindowInfo; MAX_WINDOWS],
-    count: u32,
-    focused_task: u32,
-    mx: i32,
-    my: i32,
-) -> u32 {
-    if focused_task == 0 {
-        return 0;
-    }
-    for i in (0..count as usize).rev() {
-        let w = &windows[i];
-        if w.task_id == focused_task && w.state != WINDOW_STATE_MINIMIZED {
-            let frame_y = w.y - TITLE_BAR_HEIGHT;
-            if decorations::hit_test_signal_group(w.x, frame_y, mx, my) {
-                return w.task_id;
-            }
-            break;
-        }
-    }
-    0
 }

@@ -21,6 +21,10 @@ pub struct Client {
     pub capabilities: u64,
     /// Monotonically increasing ID counter for client-assigned object IDs.
     next_id: u32,
+    /// Serial of the most recent `Event::PointerEnter`, tracked by
+    /// `poll_event` and echoed in `SetCursorShape` to prove the cursor request
+    /// belongs to the current pointer focus.
+    last_pointer_enter_serial: u32,
 }
 
 impl Client {
@@ -75,6 +79,7 @@ impl Client {
             output: OutputInfo::default(),
             capabilities,
             next_id: 1,
+            last_pointer_enter_serial: 0,
         })
     }
 
@@ -216,8 +221,15 @@ impl Client {
 
     // -- Cursor -----------------------------------------------------------
 
+    /// Request a cursor shape for `surface`. The last pointer-enter serial is
+    /// attached automatically so the compositor honors the request only while
+    /// this client holds the pointer.
     pub fn set_cursor_shape(&mut self, surface: SurfaceId, shape: u8) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::SetCursorShape { surface, shape })
+        self.conn.send(&Request::SetCursorShape {
+            surface,
+            serial: self.last_pointer_enter_serial,
+            shape,
+        })
     }
 
     // -- Clipboard --------------------------------------------------------
@@ -288,6 +300,22 @@ impl Client {
     /// cached display geometry. Subsequent ones are returned to the caller.
     pub fn poll_event(&mut self) -> Result<Option<Event>, ProtocolError> {
         match self.conn.recv::<Event>()? {
+            Some(Event::PointerEnter {
+                surface,
+                serial,
+                x,
+                y,
+            }) => {
+                // Remember the focus serial so a later `set_cursor_shape` can
+                // prove it responds to this enter.
+                self.last_pointer_enter_serial = serial;
+                Ok(Some(Event::PointerEnter {
+                    surface,
+                    serial,
+                    x,
+                    y,
+                }))
+            }
             Some(Event::OutputInfo {
                 width,
                 height,

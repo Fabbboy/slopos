@@ -89,16 +89,6 @@ pub fn hit_test_signal_group(window_x: i32, window_y: i32, px: i32, py: i32) -> 
     px >= gx && px < gx + theme::SIGNAL_GROUP_W && py >= gy && py < gy + theme::SIGNAL_GROUP_H
 }
 
-/// Returns `true` if `(px, py)` is inside the title bar but outside the
-/// signal-button group.
-pub fn hit_test_title_bar(window_x: i32, window_y: i32, window_w: u32, px: i32, py: i32) -> bool {
-    let in_bar = px >= window_x
-        && px < window_x + window_w as i32
-        && py >= window_y
-        && py < window_y + theme::TITLE_BAR_HEIGHT;
-    in_bar && !hit_test_signal_group(window_x, window_y, px, py)
-}
-
 /// Detect if `(px, py)` is in a resize grab zone around the window.
 ///
 /// The grab zone is the shadow region outside the window frame (content +

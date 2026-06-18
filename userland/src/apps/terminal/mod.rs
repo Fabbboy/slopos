@@ -59,7 +59,8 @@ pub fn terminal_user_main() {
     }
     surface::set_title("Terminal");
     surface::set_app_id("org.slopos.terminal");
-    surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
+    // The I-beam cursor is set on each pointer-enter (see the event loop),
+    // where a live focus serial is available to authorize the request.
 
     // Open the PTY pair and a real fd for the master (never the index-based
     // tty_read/tty_write, which hardcode non-blocking and bypass fd tracking).
@@ -356,6 +357,11 @@ async fn event_loop(
                     return ExitReason::Closed;
                 }
                 CompositorEvent::PointerMotion(x, y) | CompositorEvent::PointerEnter(x, y) => {
+                    // Set the I-beam on enter, when the focus serial that
+                    // authorizes the cursor request is current.
+                    if matches!(evt, slopos_protocol::types::Event::PointerEnter { .. }) {
+                        surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
+                    }
                     ptr.last_x = x;
                     ptr.last_y = y;
                     ptr.has_focus = true;

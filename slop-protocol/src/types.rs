@@ -195,8 +195,13 @@ pub enum Request {
     },
 
     // -- Cursor -----------------------------------------------------------
+    /// Request a cursor shape for `surface`. `serial` must match the surface's
+    /// most recent [`Event::PointerEnter`]; the compositor ignores the request
+    /// unless the surface holds the pointer with that serial, so only the
+    /// surface under the pointer can change the cursor.
     SetCursorShape {
         surface: SurfaceId,
+        serial: u32,
         shape: u8,
     },
 
@@ -279,8 +284,11 @@ pub enum Event {
     },
 
     // -- Pointer ----------------------------------------------------------
+    /// Pointer entered `surface`. `serial` identifies this focus grant; the
+    /// client echoes it in [`Request::SetCursorShape`] to set the cursor.
     PointerEnter {
         surface: SurfaceId,
+        serial: u32,
         x: i32,
         y: i32,
     },

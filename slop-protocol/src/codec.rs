@@ -277,9 +277,14 @@ impl Encode for Request {
                 let p = put_u8(buf, 0, REQ_ACK_CONFIGURE)?;
                 put_u32(buf, p, *serial)
             }
-            Request::SetCursorShape { surface, shape } => {
+            Request::SetCursorShape {
+                surface,
+                serial,
+                shape,
+            } => {
                 let p = put_u8(buf, 0, REQ_SET_CURSOR_SHAPE)?;
                 let p = put_u32(buf, p, surface.raw())?;
+                let p = put_u32(buf, p, *serial)?;
                 put_u8(buf, p, *shape)
             }
             Request::ClipboardCopy { len, .. } => {
@@ -454,10 +459,12 @@ impl Decode for Request {
             }
             REQ_SET_CURSOR_SHAPE => {
                 let (surface, p) = get_u32(buf, p)?;
+                let (serial, p) = get_u32(buf, p)?;
                 let (shape, p) = get_u8(buf, p)?;
                 Ok((
                     Request::SetCursorShape {
                         surface: SurfaceId::from_raw(surface),
+                        serial,
                         shape,
                     },
                     p,
@@ -560,9 +567,15 @@ impl Encode for Event {
                 let p = put_u8(buf, 0, EVT_CLOSE)?;
                 put_u32(buf, p, toplevel.raw())
             }
-            Event::PointerEnter { surface, x, y } => {
+            Event::PointerEnter {
+                surface,
+                serial,
+                x,
+                y,
+            } => {
                 let p = put_u8(buf, 0, EVT_POINTER_ENTER)?;
                 let p = put_u32(buf, p, surface.raw())?;
+                let p = put_u32(buf, p, *serial)?;
                 let p = put_i32(buf, p, *x)?;
                 put_i32(buf, p, *y)
             }
@@ -714,11 +727,13 @@ impl Decode for Event {
             }
             EVT_POINTER_ENTER => {
                 let (surface, p) = get_u32(buf, p)?;
+                let (serial, p) = get_u32(buf, p)?;
                 let (x, p) = get_i32(buf, p)?;
                 let (y, p) = get_i32(buf, p)?;
                 Ok((
                     Event::PointerEnter {
                         surface: SurfaceId::from_raw(surface),
+                        serial,
                         x,
                         y,
                     },

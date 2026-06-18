@@ -1,7 +1,6 @@
 use slopos_abi::InputEvent;
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_SUPER};
 use slopos_abi::task::TaskPriority;
-use slopos_abi::window::{CURSOR_SHAPE_DEFAULT, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING};
 
 use crate::program_registry;
 use crate::syscall::{UserWindowInfo, input, process, tty};
@@ -76,6 +75,57 @@ impl ResizeEdge {
     }
 }
 
+/// What the pointer is over, resolved by a single top-of-z-order walk that
+/// stops at the first hit. Cursor shape, pointer focus, hover feedback, and
+/// click routing all derive from this one answer, so they always agree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CursorPart {
+    /// The top system bar (compositor UI).
+    SystemBar,
+    /// A launcher entry on the shelf/dock (carries its index).
+    Shelf(usize),
+    /// A window's resize grab zone (carries the edge).
+    ResizeEdge(ResizeEdge),
+    /// A window's signal button: 0 = close, 1 = minimize, 2 = expand.
+    SignalButton(u8),
+    /// A window's draggable title bar (the frame strip minus the buttons).
+    TitleBar,
+    /// A window's client content area.
+    Content,
+    /// Empty desktop background.
+    Desktop,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CursorHit {
+    pub part: CursorPart,
+    /// Index into the window array for window parts; `usize::MAX` otherwise.
+    pub window_idx: usize,
+    /// Task id of the hit window, or 0 for non-window parts.
+    pub task_id: u32,
+}
+
+impl CursorHit {
+    fn ui(part: CursorPart) -> Self {
+        Self {
+            part,
+            window_idx: usize::MAX,
+            task_id: 0,
+        }
+    }
+    fn window(part: CursorPart, idx: usize, task_id: u32) -> Self {
+        Self {
+            part,
+            window_idx: idx,
+            task_id,
+        }
+    }
+    /// True when the hit landed on a window (vs. system bar / shelf / desktop).
+    pub fn is_window(self) -> bool {
+        self.window_idx != usize::MAX
+    }
+}
+
 pub struct InputHandler {
     pub mouse_x: i32,
     pub mouse_y: i32,
@@ -98,10 +148,6 @@ pub struct InputHandler {
     resize_grab_mouse_y: i32,
     /// Timestamp of last configure event sent during resize (for throttling).
     resize_last_configure_ms: u64,
-
-    /// Compositor-side cursor shape override for resize hover feedback.
-    /// Non-zero overrides the per-window cursor_shape in the render path.
-    pub compositor_cursor_override: u8,
 
     /// Pre-maximize geometry for restore: (task_id, x, y, w, h).
     restore_geometry: [(u32, i32, i32, u32, u32); MAX_WINDOWS],
@@ -148,7 +194,6 @@ impl InputHandler {
             resize_grab_mouse_x: 0,
             resize_grab_mouse_y: 0,
             resize_last_configure_ms: 0,
-            compositor_cursor_override: 0,
             restore_geometry: [(0, 0, 0, 0, 0); MAX_WINDOWS],
             focused_task: 0,
             needs_full_redraw: false,
@@ -325,13 +370,11 @@ impl InputHandler {
     /// Handle one button-press event in stream order, hit-testing at the
     /// pointer position accumulated up to THIS event.
     ///
-    /// Hit-test priority chain (spec section 8):
-    /// 1. system_bar::hit_test() -> consume click (no action)
-    /// 2. shelf.hit_test()       -> handle shelf click
-    /// 3. decorations::hit_test_signal_button() -> close/min/expand
-    /// 4. decorations::hit_test_title_bar()     -> drag
-    /// 5. hit_test_content_area() -> raise + focus + forward
-    /// 6. desktop -> no-op (keyboard focus is sticky; see sync_keyboard_focus)
+    /// Routing comes straight from `resolve_cursor_hit` — the same topmost
+    /// walk that drives the cursor shape and pointer focus — so a click always
+    /// lands on whatever the cursor is visually over. Returns `true` only for
+    /// a plain content click (forward it to the client); every other part is
+    /// consumed by the compositor.
     pub fn on_button_press(
         &mut self,
         button: u8,
@@ -359,150 +402,49 @@ impl InputHandler {
             self.stop_resize(proto.as_deref_mut());
         }
 
-        // 1. System bar -- consume click, no action
-        if SystemBar::hit_test(self.mouse_x, self.mouse_y) {
-            return false;
-        }
-
-        // 2. Shelf click
-        if let Some(idx) = shelf.hit_test(self.mouse_x, self.mouse_y) {
-            self.handle_shelf_click(idx, shelf, windows, window_count, &mut proto);
-            return false;
-        }
-
-        // 3-4. Window decorations and content (top-to-bottom z-order)
-        for i in (0..window_count as usize).rev() {
-            let window = windows[i];
-            if window.state == WINDOW_STATE_MINIMIZED {
-                continue;
+        let hit = self.resolve_cursor_hit(windows, window_count, shelf);
+        match hit.part {
+            // System bar consumes the click (no action).
+            CursorPart::SystemBar => false,
+            CursorPart::Shelf(idx) => {
+                self.handle_shelf_click(idx, shelf, windows, window_count, &mut proto);
+                false
             }
-
-            // Resize edges (shadow grab zone) — skip for maximized windows
-            if window.state != 2 {
-                let edge = decorations::hit_test_resize_edge(
-                    window.x,
-                    window.y,
-                    window.effective_width(),
-                    window.effective_height(),
-                    self.mouse_x,
-                    self.mouse_y,
+            CursorPart::ResizeEdge(edge) => {
+                let window = windows[hit.window_idx];
+                self.start_resize(&window, edge);
+                if let Some(ref mut p) = proto {
+                    p.raise_window(window.task_id);
+                }
+                self.set_focused(window.task_id);
+                false
+            }
+            CursorPart::SignalButton(btn) => {
+                let window = windows[hit.window_idx];
+                self.handle_signal_button(
+                    btn,
+                    &window,
+                    fb_width,
+                    fb_height,
+                    shelf_height,
+                    windows,
+                    window_count,
+                    &mut proto,
                 );
-                if !edge.is_none() {
-                    self.start_resize(&window, edge);
-                    if let Some(ref mut p) = proto {
-                        p.raise_window(window.task_id);
-                    }
-                    self.set_focused(window.task_id);
-                    return false;
-                }
+                false
             }
-
-            // Frame top (title bar) is above the kernel's window.y.
-            let frame_y = window.y - TITLE_BAR_HEIGHT;
-
-            // 3. Signal buttons (close/minimize/expand)
-            if let Some(button_id) =
-                decorations::hit_test_signal_button(window.x, frame_y, self.mouse_x, self.mouse_y)
-            {
-                match button_id {
-                    0 => {
-                        // Close
-                        self.request_window_close(
-                            window.task_id,
-                            windows,
-                            window_count,
-                            &mut proto,
-                        );
-                    }
-                    1 => {
-                        // Minimize
-                        if let Some(ref mut p) = proto {
-                            p.set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
-                        }
-                    }
-                    2 => {
-                        // Expand — toggle maximize/restore
-                        const WINDOW_STATE_MAXIMIZED: u8 = 2;
-                        if window.state == WINDOW_STATE_MAXIMIZED {
-                            // Restore saved geometry
-                            if let Some(geo) =
-                                self.restore_geometry.iter().find(|g| g.0 == window.task_id)
-                            {
-                                if let Some(ref mut p) = proto {
-                                    p.set_window_position(window.task_id, geo.1, geo.2);
-                                    p.set_window_size(window.task_id, geo.3, geo.4);
-                                    p.send_configure_for_task(
-                                        window.task_id,
-                                        geo.3,
-                                        geo.4,
-                                        slopos_protocol::toplevel_state::ACTIVATED,
-                                    );
-                                }
-                            }
-                            if let Some(ref mut p) = proto {
-                                p.set_window_state(window.task_id, WINDOW_STATE_NORMAL);
-                            }
-                        } else {
-                            // Save current geometry for restore
-                            if let Some(slot) = self
-                                .restore_geometry
-                                .iter_mut()
-                                .find(|g| g.0 == 0 || g.0 == window.task_id)
-                            {
-                                *slot = (
-                                    window.task_id,
-                                    window.x,
-                                    window.y,
-                                    window.effective_width(),
-                                    window.effective_height(),
-                                );
-                            }
-                            // Maximize: fill screen between system bar and shelf
-                            let max_y = SYSTEM_BAR_HEIGHT + TITLE_BAR_HEIGHT;
-                            let max_w = fb_width as u32;
-                            let max_h =
-                                (fb_height - SYSTEM_BAR_HEIGHT - TITLE_BAR_HEIGHT - shelf_height)
-                                    as u32;
-                            if let Some(ref mut p) = proto {
-                                p.set_window_position(window.task_id, 0, max_y);
-                                p.set_window_size(window.task_id, max_w, max_h);
-                                p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
-                                p.send_configure_for_task(
-                                    window.task_id,
-                                    max_w,
-                                    max_h,
-                                    slopos_protocol::toplevel_state::ACTIVATED
-                                        | slopos_protocol::toplevel_state::MAXIMIZED,
-                                );
-                            }
-                        }
-                        self.needs_full_redraw = true;
-                    }
-                    _ => {}
-                }
-                return false;
-            }
-
-            // 4. Title bar (drag)
-            if decorations::hit_test_title_bar(
-                window.x,
-                frame_y,
-                window.effective_width(),
-                self.mouse_x,
-                self.mouse_y,
-            ) {
+            CursorPart::TitleBar => {
+                let window = windows[hit.window_idx];
                 self.start_drag(&window);
                 if let Some(ref mut p) = proto {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                return false;
+                false
             }
-
-            // 5. Content area
-            if self.hit_test_content_area(&window) {
-                // Super+LMB on content: interactive move (wlroots/Sway pattern).
-                // The modifier check uses local state from raw events.
+            CursorPart::Content => {
+                let window = windows[hit.window_idx];
+                // Super+LMB on content moves a non-maximized window.
                 if self.local_modifier_state & MODIFIER_SUPER != 0 && window.state != 2 {
                     self.start_drag(&window);
                     if let Some(ref mut p) = proto {
@@ -515,14 +457,97 @@ impl InputHandler {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                return true;
+                true
             }
+            // Desktop background consumes the click; keyboard focus stays on
+            // the last focused window so keystrokes are never dropped.
+            CursorPart::Desktop => false,
         }
+    }
 
-        // 6. Desktop background — keyboard focus is sticky (stays on the
-        // last focused window). Clearing it here created an input black
-        // hole: every keystroke was dropped until the next window click.
-        false
+    /// Act on a click of one of the three title-bar signal buttons:
+    /// 0 = close, 1 = minimize, 2 = expand (toggle maximize/restore).
+    #[allow(clippy::too_many_arguments)]
+    fn handle_signal_button(
+        &mut self,
+        button_id: u8,
+        window: &UserWindowInfo,
+        fb_width: i32,
+        fb_height: i32,
+        shelf_height: i32,
+        windows: &[UserWindowInfo; MAX_WINDOWS],
+        window_count: u32,
+        proto: &mut Option<&mut ProtocolBridge>,
+    ) {
+        match button_id {
+            0 => {
+                // Close
+                self.request_window_close(window.task_id, windows, window_count, proto);
+            }
+            1 => {
+                // Minimize
+                if let Some(p) = proto.as_deref_mut() {
+                    p.set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
+                }
+            }
+            2 => {
+                // Expand — toggle maximize/restore
+                const WINDOW_STATE_MAXIMIZED: u8 = 2;
+                if window.state == WINDOW_STATE_MAXIMIZED {
+                    // Restore saved geometry
+                    if let Some(geo) = self.restore_geometry.iter().find(|g| g.0 == window.task_id)
+                    {
+                        if let Some(p) = proto.as_deref_mut() {
+                            p.set_window_position(window.task_id, geo.1, geo.2);
+                            p.set_window_size(window.task_id, geo.3, geo.4);
+                            p.send_configure_for_task(
+                                window.task_id,
+                                geo.3,
+                                geo.4,
+                                slopos_protocol::toplevel_state::ACTIVATED,
+                            );
+                        }
+                    }
+                    if let Some(p) = proto.as_deref_mut() {
+                        p.set_window_state(window.task_id, WINDOW_STATE_NORMAL);
+                    }
+                } else {
+                    // Save current geometry for restore
+                    if let Some(slot) = self
+                        .restore_geometry
+                        .iter_mut()
+                        .find(|g| g.0 == 0 || g.0 == window.task_id)
+                    {
+                        *slot = (
+                            window.task_id,
+                            window.x,
+                            window.y,
+                            window.effective_width(),
+                            window.effective_height(),
+                        );
+                    }
+                    // Maximize: fill screen between system bar and shelf
+                    let max_y = SYSTEM_BAR_HEIGHT + TITLE_BAR_HEIGHT;
+                    let max_w = fb_width as u32;
+                    let max_h =
+                        (fb_height - SYSTEM_BAR_HEIGHT - TITLE_BAR_HEIGHT - shelf_height) as u32;
+                    if let Some(p) = proto.as_deref_mut() {
+                        p.set_window_position(window.task_id, 0, max_y);
+                        p.set_window_size(window.task_id, max_w, max_h);
+                        p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
+                        p.send_configure_for_task(
+                            window.task_id,
+                            max_w,
+                            max_h,
+                            slopos_protocol::toplevel_state::ACTIVATED
+                                | slopos_protocol::toplevel_state::MAXIMIZED,
+                        );
+                    }
+                }
+                self.needs_full_redraw = true;
+            }
+            _ => {}
+        }
     }
 
     pub fn process_pending_close_requests(
@@ -566,6 +591,18 @@ impl InputHandler {
             && self.mouse_y < window.y + window.effective_height() as i32
     }
 
+    /// Hit-test the full window frame: the client content area plus the title
+    /// bar decorations that sit `TITLE_BAR_HEIGHT` above `window.y`. Used for
+    /// occlusion-aware cursor-shape selection so a top window's frame hides
+    /// whatever sits beneath it.
+    pub fn hit_test_frame_area(&self, window: &UserWindowInfo) -> bool {
+        let frame_y = window.y - TITLE_BAR_HEIGHT;
+        self.mouse_x >= window.x
+            && self.mouse_x < window.x + window.effective_width() as i32
+            && self.mouse_y >= frame_y
+            && self.mouse_y < window.y + window.effective_height() as i32
+    }
+
     /// Single entry-point for all focus changes (KWin `activateClient`
     /// pattern).  The field is private so every mutation is forced through
     /// here at compile time.  With the protocol migration, keyboard focus
@@ -580,13 +617,11 @@ impl InputHandler {
         self.drag_task = window.task_id;
         self.drag_offset_x = self.mouse_x - window.x;
         self.drag_offset_y = self.mouse_y - window.y;
-        self.compositor_cursor_override = CURSOR_SHAPE_GRABBING;
     }
 
     fn stop_drag(&mut self) {
         self.dragging = false;
         self.drag_task = 0;
-        self.compositor_cursor_override = CURSOR_SHAPE_DEFAULT;
     }
 
     fn update_drag(&mut self, proto: Option<&mut ProtocolBridge>) {
@@ -706,21 +741,29 @@ impl InputHandler {
         self.resizing = false;
         self.resize_task = 0;
         self.resize_edges = ResizeEdge::NONE;
-        self.compositor_cursor_override = CURSOR_SHAPE_DEFAULT;
     }
 
-    /// Update the compositor cursor override for resize hover feedback.
-    /// Called every frame; sets the cursor shape when hovering a resize zone.
-    pub fn update_resize_cursor(
-        &mut self,
+    /// Resolve what the pointer is over, top of z-order first, stopping at the
+    /// first hit. The single source of truth for cursor-shape selection,
+    /// pointer focus, hover feedback, and click routing. A window's whole
+    /// frame — content *and* decorations — occludes everything beneath it, so
+    /// the walk never falls through to a lower window once inside a frame.
+    pub fn resolve_cursor_hit(
+        &self,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
-    ) {
-        if self.dragging || self.resizing {
-            return;
-        }
+        shelf: &LauncherShelf,
+    ) -> CursorHit {
+        let (mx, my) = (self.mouse_x, self.mouse_y);
 
-        self.compositor_cursor_override = CURSOR_SHAPE_DEFAULT;
+        // Compositor chrome wins over windows: the system bar is a top strip
+        // and the shelf is a bottom dock, both drawn above all windows.
+        if SystemBar::hit_test(mx, my) {
+            return CursorHit::ui(CursorPart::SystemBar);
+        }
+        if let Some(idx) = shelf.hit_test(mx, my) {
+            return CursorHit::ui(CursorPart::Shelf(idx));
+        }
 
         for i in (0..window_count as usize).rev() {
             let w = windows[i];
@@ -728,43 +771,84 @@ impl InputHandler {
                 continue;
             }
 
-            // Skip resize cursor for maximized windows
+            // Resize grab zone (shadow around the frame) — never for a
+            // maximized window (state 2).
             if w.state != 2 {
                 let edge = decorations::hit_test_resize_edge(
                     w.x,
                     w.y,
                     w.effective_width(),
                     w.effective_height(),
-                    self.mouse_x,
-                    self.mouse_y,
+                    mx,
+                    my,
                 );
                 if !edge.is_none() {
-                    self.compositor_cursor_override = edge.cursor_shape();
-                    return;
+                    return CursorHit::window(CursorPart::ResizeEdge(edge), i, w.task_id);
                 }
             }
 
-            // If inside this window, stop searching (z-order priority)
             let frame_y = w.y - TITLE_BAR_HEIGHT;
-            if self.mouse_x >= w.x
-                && self.mouse_x < w.x + w.effective_width() as i32
-                && self.mouse_y >= frame_y
-                && self.mouse_y < w.y + w.effective_height() as i32
-            {
-                // Title bar hover → open hand (grab) for non-maximized windows
-                if w.state != 2
-                    && decorations::hit_test_title_bar(
-                        w.x,
-                        frame_y,
-                        w.effective_width(),
-                        self.mouse_x,
-                        self.mouse_y,
-                    )
-                {
-                    self.compositor_cursor_override = CURSOR_SHAPE_GRAB;
-                }
-                return;
+
+            // Signal buttons sit highest within the title bar.
+            if let Some(btn) = decorations::hit_test_signal_button(w.x, frame_y, mx, my) {
+                return CursorHit::window(CursorPart::SignalButton(btn), i, w.task_id);
             }
+            // Client content area.
+            if self.hit_test_content_area(&w) {
+                return CursorHit::window(CursorPart::Content, i, w.task_id);
+            }
+            // Anything else inside the frame is the draggable title bar (the
+            // strip above the content, minus the buttons). This stops the walk
+            // so a lower window's content can never claim the pointer here.
+            if self.hit_test_frame_area(&w) {
+                return CursorHit::window(CursorPart::TitleBar, i, w.task_id);
+            }
+        }
+
+        CursorHit::ui(CursorPart::Desktop)
+    }
+
+    /// Effective cursor shape for the current frame, derived from an active
+    /// grab or the resolved hit.
+    pub fn cursor_shape_for(&self, hit: &CursorHit, windows: &[UserWindowInfo; MAX_WINDOWS]) -> u8 {
+        use slopos_abi::window::*;
+        if self.dragging {
+            return CURSOR_SHAPE_GRABBING;
+        }
+        if self.resizing {
+            return self.resize_edges.cursor_shape();
+        }
+        match hit.part {
+            CursorPart::ResizeEdge(edge) => edge.cursor_shape(),
+            CursorPart::TitleBar => CURSOR_SHAPE_GRAB,
+            // The client owns the cursor only over its own content; decorations
+            // and the desktop are the compositor's.
+            CursorPart::Content => windows[hit.window_idx].cursor_shape,
+            CursorPart::SignalButton(_)
+            | CursorPart::SystemBar
+            | CursorPart::Shelf(_)
+            | CursorPart::Desktop => CURSOR_SHAPE_DEFAULT,
+        }
+    }
+
+    /// Task id whose signal-button cluster should reveal its glyphs: the
+    /// focused window when the pointer is over its signal group. Gated by the
+    /// resolved topmost hit so an occluded window never lights up.
+    pub fn signal_hovered_task(
+        &self,
+        hit: &CursorHit,
+        windows: &[UserWindowInfo; MAX_WINDOWS],
+        focused_task: u32,
+    ) -> u32 {
+        if focused_task == 0 || !hit.is_window() || hit.task_id != focused_task {
+            return 0;
+        }
+        let w = &windows[hit.window_idx];
+        let frame_y = w.y - TITLE_BAR_HEIGHT;
+        if decorations::hit_test_signal_group(w.x, frame_y, self.mouse_x, self.mouse_y) {
+            hit.task_id
+        } else {
+            0
         }
     }
 

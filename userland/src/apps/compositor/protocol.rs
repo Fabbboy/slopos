@@ -75,6 +75,12 @@ struct ProtocolSurface {
     title: [u8; MAX_STRING_LEN],
     app_id: [u8; MAX_STRING_LEN],
     cursor_shape: u8,
+    /// Serial of the last pointer-enter sent to this surface, and whether the
+    /// pointer is currently inside it. Together they gate `SetCursorShape`: a
+    /// request is honored only when it carries this serial and the surface
+    /// still holds the pointer.
+    last_enter_serial: u32,
+    has_pointer: bool,
 }
 
 impl ProtocolSurface {
@@ -111,6 +117,8 @@ impl ProtocolSurface {
             title: [0u8; MAX_STRING_LEN],
             app_id: [0u8; MAX_STRING_LEN],
             cursor_shape: 0,
+            last_enter_serial: 0,
+            has_pointer: false,
         }
     }
 }
@@ -375,8 +383,12 @@ impl ProtocolBridge {
             Request::AckConfigure { serial } => {
                 self.handle_ack_configure(client_idx, serial);
             }
-            Request::SetCursorShape { surface, shape } => {
-                self.handle_set_cursor_shape(client_idx, surface, shape as u32);
+            Request::SetCursorShape {
+                surface,
+                serial,
+                shape,
+            } => {
+                self.handle_set_cursor_shape(client_idx, surface, serial, shape);
             }
             Request::InteractiveMove { toplevel, serial } => {
                 self.handle_interactive_move(client_idx, toplevel, serial);
@@ -513,9 +525,22 @@ impl ProtocolBridge {
         }
     }
 
-    fn handle_set_cursor_shape(&mut self, client_idx: usize, surface_id: SurfaceId, shape: u32) {
+    /// Set a surface's cursor shape, honored only when the request carries the
+    /// surface's most recent enter serial *and* the pointer is still inside it.
+    /// A stale serial or a surface without the pointer is ignored, so no
+    /// surface can influence the cursor unless the pointer is over it.
+    fn handle_set_cursor_shape(
+        &mut self,
+        client_idx: usize,
+        surface_id: SurfaceId,
+        serial: u32,
+        shape: u8,
+    ) {
         if let Some(idx) = self.find_surface(client_idx, surface_id) {
-            self.surfaces[idx].cursor_shape = shape as u8;
+            let s = &mut self.surfaces[idx];
+            if s.has_pointer && serial != 0 && serial == s.last_enter_serial {
+                s.cursor_shape = shape;
+            }
         }
     }
 
@@ -748,32 +773,39 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::Close { toplevel });
     }
 
-    /// Send pointer enter event.
-    pub fn send_pointer_enter(&mut self, surface_idx: usize, _serial: u32, x: i32, y: i32) {
-        let surface = match self.surfaces.get(surface_idx) {
+    /// Send pointer enter event. Records `serial` as the surface's current
+    /// focus serial (and marks it as holding the pointer) so a subsequent
+    /// `SetCursorShape` carrying that serial is accepted.
+    pub fn send_pointer_enter(&mut self, surface_idx: usize, serial: u32, x: i32, y: i32) {
+        let surface = match self.surfaces.get_mut(surface_idx) {
             Some(s) if s.active => s,
             _ => return,
         };
 
+        surface.last_enter_serial = serial;
+        surface.has_pointer = true;
         let client_idx = surface.client_idx;
         let surface_id = surface.surface_id;
         let _ = self.server.queue_event(
             client_idx,
             &Event::PointerEnter {
                 surface: surface_id,
+                serial,
                 x,
                 y,
             },
         );
     }
 
-    /// Send pointer leave event.
+    /// Send pointer leave event. Clears the pointer-hold flag so any further
+    /// `SetCursorShape` from this surface is rejected until it is re-entered.
     pub fn send_pointer_leave(&mut self, surface_idx: usize, _serial: u32) {
-        let surface = match self.surfaces.get(surface_idx) {
+        let surface = match self.surfaces.get_mut(surface_idx) {
             Some(s) if s.active => s,
             _ => return,
         };
 
+        surface.has_pointer = false;
         let client_idx = surface.client_idx;
         let surface_id = surface.surface_id;
         let _ = self.server.queue_event(
