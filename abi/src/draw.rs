@@ -131,6 +131,21 @@ pub trait Canvas {
     /// Callers must ensure `byte_offset` is within buffer bounds.
     fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel);
 
+    /// The active scissor (clip) rectangle in buffer-local pixel coordinates.
+    ///
+    /// When `Some`, every drawing primitive must confine its writes to this
+    /// rectangle in addition to the buffer bounds. The default is `None` (no
+    /// scissor): correct for write-through surfaces such as the kernel MMIO
+    /// framebuffer, which always paint their full target. Buffer-backed
+    /// surfaces that perform partial-region repaints (the compositor's
+    /// `DrawBuffer`) override this so solid fills, glyph blits, and
+    /// anti-aliased lines and circles are all confined to the region being
+    /// repainted — without each call site having to thread a clip rect.
+    #[inline]
+    fn scissor(&self) -> Option<crate::damage::DamageRect> {
+        None
+    }
+
     #[inline]
     fn clip_row_span(&self, row: i32, x0: i32, x1: i32) -> Option<(usize, usize, usize)> {
         clip_row_span_bounds(self.width(), self.height(), row, x0, x1)

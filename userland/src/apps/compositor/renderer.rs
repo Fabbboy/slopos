@@ -328,6 +328,14 @@ impl Renderer {
             return;
         }
 
+        // Confine every primitive drawn for this region to the damage rect.
+        // Decorations (title text, signal buttons), the shelf, and the system
+        // bar draw their full geometry; the scissor clips them to the region
+        // being repainted so a window's chrome can never spill over a window
+        // stacked above it. Background and content blits are already clamped to
+        // `damage` directly; the scissor is redundant but harmless for them.
+        buf.set_scissor(Some(*damage));
+
         // 1. Desktop background (clipped)
         if !self.draw_wallpaper(buf, damage) {
             gfx::fill_rect(
@@ -420,6 +428,8 @@ impl Renderer {
                 Some(*damage),
             );
         }
+
+        buf.set_scissor(None);
 
         // Cursor is drawn once after all partial regions (see render()).
     }

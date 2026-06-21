@@ -133,6 +133,11 @@ pub fn put_pixel_coverage<T: Canvas>(target: &mut T, x: i32, y: i32, color: Colo
     if x < 0 || y < 0 || x >= target.width() as i32 || y >= target.height() as i32 {
         return;
     }
+    if let Some(s) = target.scissor() {
+        if !s.contains(x, y) {
+            return;
+        }
+    }
 
     let bpp = target.bytes_per_pixel() as usize;
     let off = (y as usize) * target.pitch_bytes() + (x as usize) * bpp;
@@ -168,10 +173,19 @@ pub fn fill_rect_blended<T: Canvas>(
 
     let buf_w = target.width() as i32;
     let buf_h = target.height() as i32;
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + w - 1).min(buf_w - 1);
-    let y1 = (y + h - 1).min(buf_h - 1);
+    let mut x0 = x.max(0);
+    let mut y0 = y.max(0);
+    let mut x1 = (x + w - 1).min(buf_w - 1);
+    let mut y1 = (y + h - 1).min(buf_h - 1);
+    // The blended (read-modify-write) path below writes pixels directly, so it
+    // must honor the scissor itself; the opaque path routes through
+    // `fill_rect_encoded`/`clip_row_span` which already does.
+    if let Some(s) = target.scissor() {
+        x0 = x0.max(s.x0);
+        y0 = y0.max(s.y0);
+        x1 = x1.min(s.x1);
+        y1 = y1.min(s.y1);
+    }
     if x0 > x1 || y0 > y1 {
         return None;
     }
