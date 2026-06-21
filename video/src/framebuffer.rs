@@ -184,9 +184,10 @@ pub fn register_flush_callback(callback: FlushCallback) {
 /// Present the (optionally damage-scoped) frame through the registered backend.
 ///
 /// The callback pointer is copied out and the lock released **before** the
-/// callback runs: the virtio-gpu backend blocks on GPU command completion
-/// inside the callback, which must never happen while holding this
-/// IRQ-disabling `SpinLock` (the GPU IRQ could then never be serviced).
+/// callback runs: the backend may touch its own device locks / submit GPU
+/// commands, which must not happen while holding this IRQ-disabling `SpinLock`.
+/// Returns the backend's present-result code (see [`PRESENT_SHOWN`] /
+/// [`PRESENT_SUPPRESSED`]).
 pub fn framebuffer_flush(damage: *const DamageRect, damage_count: u32) -> c_int {
     let cb = *FRAMEBUFFER_FLUSH.lock();
     match cb {
@@ -264,6 +265,15 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     fb_flip_from_shm_damage(shm_phys, size, core::ptr::null(), 0)
 }
 
+/// Present-result codes returned to the compositor via the fb_flip syscall.
+/// `0` (`PRESENT_SHOWN`) = the frame reached the scanout. `PRESENT_SUPPRESSED`
+/// (positive) = the frame was deliberately not shown (the kernel log owns the
+/// screen, or a prior present is still in flight). Negative = a hard failure.
+/// The compositor keeps a frame's damage pending on any nonzero result, so a
+/// suppressed or failed frame is retried rather than cleared as if shown.
+pub const PRESENT_SHOWN: c_int = 0;
+pub const PRESENT_SUPPRESSED: c_int = 1;
+
 pub fn fb_flip_from_shm_damage(
     shm_phys: PhysAddr,
     size: usize,
@@ -271,10 +281,11 @@ pub fn fb_flip_from_shm_damage(
     damage_count: u32,
 ) -> c_int {
     // While the on-screen kernel log owns the screen, drop the compositor's
-    // frame so the log isn't overwritten. The compositor keeps rendering to
-    // its memfd; presentation resumes the moment the log is dismissed.
+    // frame so the log isn't overwritten. The compositor keeps rendering to its
+    // memfd; presentation resumes the moment the log is dismissed. Reported as
+    // suppressed so the compositor keeps the frame's damage pending.
     if slopos_ostd::fblog::is_active() {
-        return 0;
+        return PRESENT_SUPPRESSED;
     }
 
     // On first compositor flip, take framebuffer ownership from the vconsole.

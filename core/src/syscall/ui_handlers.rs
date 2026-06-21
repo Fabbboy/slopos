@@ -252,7 +252,7 @@ define_syscall!(syscall_open_tty_fd
 define_syscall!(syscall_fb_flip
     (ctx, fd: i64, damage_ptr: u64, damage_count: u64)
     requires(compositor)
-    -> Result<(), Errno>
+    -> Result<u64, Errno>
 {
     let fd = fd as i32;
     let damage_count = damage_count as usize;
@@ -288,11 +288,14 @@ define_syscall!(syscall_fb_flip
         core::ptr::null()
     };
     let rc = video::fb_flip_from_shm(phys_addr, size, damage_ptr_ffi, damage_region_count);
-    if rc != 0 {
+    if rc < 0 {
         return Err(Errno::EINVAL);
     }
     video::set_compositor_task_id(ctx.task_id().unwrap_or(0));
-    Ok(())
+    // 0 = shown, 1 = suppressed (kernel log owns the screen, or a prior present
+    // is still in flight). The compositor treats any nonzero result as "not
+    // shown" and keeps the frame's damage pending for retry.
+    Ok(rc as u64)
 });
 
 define_syscall!(syscall_cursor_set_image

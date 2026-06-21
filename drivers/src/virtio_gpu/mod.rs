@@ -917,7 +917,10 @@ impl VirtioGpuInner {
         // Reclaim a previous present's chains (also marks blocking slots).
         st.control.harvest();
         if st.control.present_busy {
-            return 0;
+            // A prior present is still in flight: this frame's transfer/flush was
+            // not submitted. Report suppression (1) so the compositor keeps the
+            // damage pending and retries next frame.
+            return 1;
         }
         if st.control.present_page.is_none() {
             return -1;
@@ -970,8 +973,12 @@ impl VirtioGpuInner {
                 &st.control.q,
                 st.control.index,
             );
+            0
+        } else {
+            // Descriptors exhausted / queue not ready: the frame was not
+            // submitted. Report failure so the compositor keeps damage pending.
+            -1
         }
-        0
     }
 
     /// Runtime mode-set: bring up a new scanout at `w`×`h` before unref'ing the
