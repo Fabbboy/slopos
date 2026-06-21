@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlopOS Driver-Framework BASE — Implementation-Ready Plan</title>
+<style>
+  :root{
+    --bg:#fbfcfd; --fg:#1c2530; --muted:#5b6b7b; --line:#dde3ea; --card:#ffffff;
+    --accent:#1f6feb; --accent-soft:#eaf2ff; --code-bg:#0f1722; --code-fg:#d7e0ea;
+    --keep:#1a7f4b; --keep-bg:#e3f6ec; --build:#1f6feb; --build-bg:#e7f0ff;
+    --refine:#a15c00; --refine-bg:#fdf0db; --wire:#6f42c1; --wire-bg:#f1ebfb;
+    --future:#5b6b7b; --future-bg:#eef1f4; --warn:#b3261e; --warn-bg:#fdeceb;
+    --eff:#0b6b6b; --eff-bg:#e0f5f5;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6; font-size:16px;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{display:flex; gap:0; align-items:flex-start; max-width:1320px; margin:0 auto}
+  nav.toc{
+    position:sticky; top:0; align-self:flex-start; width:280px; min-width:280px;
+    height:100vh; overflow-y:auto; padding:24px 18px 60px; border-right:1px solid var(--line);
+    background:var(--card); font-size:14px;
+  }
+  nav.toc h2{font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px}
+  nav.toc ol{list-style:none; margin:0; padding:0}
+  nav.toc li{margin:2px 0}
+  nav.toc a{display:block; padding:3px 8px; border-radius:6px; color:var(--fg)}
+  nav.toc a:hover{background:var(--accent-soft); text-decoration:none}
+  nav.toc .sub{padding-left:14px; font-size:13px; color:var(--muted)}
+  main{flex:1 1 auto; min-width:0; padding:34px 46px 120px; max-width:1000px}
+  h1{font-size:30px; line-height:1.25; margin:0 0 6px}
+  h2{font-size:23px; margin:46px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--line)}
+  h3{font-size:18px; margin:28px 0 8px}
+  h4{font-size:15px; margin:18px 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em}
+  p{margin:10px 0}
+  .lede{font-size:17px; color:#33414f}
+  code, .mono{font-family:"SF Mono",SFMono-Regular,ui-monospace,Menlo,Consolas,"Liberation Mono",monospace}
+  :not(pre)>code{background:#eef1f5; color:#0d3b66; padding:1px 5px; border-radius:4px; font-size:.88em}
+  .fileref{background:#f0f3f7; color:#5a3e00; padding:1px 5px; border-radius:4px; font-size:.85em; white-space:nowrap}
+  pre{
+    background:var(--code-bg); color:var(--code-fg); padding:16px 18px; border-radius:10px;
+    overflow-x:auto; font-size:13px; line-height:1.5; margin:14px 0; border:1px solid #1d2a3a;
+  }
+  pre code{font-family:inherit; background:none; color:inherit; padding:0}
+  table{border-collapse:collapse; width:100%; margin:16px 0; font-size:14px}
+  th,td{border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top}
+  th{background:#f3f6f9; font-weight:600}
+  tbody tr:nth-child(even){background:#fafcfe}
+  .badge{display:inline-block; font-size:11px; font-weight:700; letter-spacing:.03em;
+    padding:2px 8px; border-radius:999px; white-space:nowrap; text-transform:uppercase}
+  .b-keep{color:var(--keep); background:var(--keep-bg)}
+  .b-build{color:var(--build); background:var(--build-bg)}
+  .b-refine{color:var(--refine); background:var(--refine-bg)}
+  .b-wire{color:var(--wire); background:var(--wire-bg)}
+  .b-future{color:var(--future); background:var(--future-bg)}
+  .b-eff{color:var(--eff); background:var(--eff-bg)}
+  .phase{
+    background:var(--card); border:1px solid var(--line); border-left:5px solid var(--accent);
+    border-radius:12px; padding:20px 24px; margin:24px 0; box-shadow:0 1px 3px rgba(20,40,70,.05)
+  }
+  .phase.p1{border-left-color:#1f6feb}
+  .phase.p2{border-left-color:#1a7f4b}
+  .phase.p3{border-left-color:#a15c00}
+  .phase.p4{border-left-color:#6f42c1}
+  .phase.p5{border-left-color:#5b6b7b}
+  .phase h3{margin-top:0; display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+  .metarow{display:flex; flex-wrap:wrap; gap:10px 26px; margin:8px 0 14px; font-size:13.5px; color:var(--muted)}
+  .metarow b{color:var(--fg)}
+  .tasklist{list-style:none; padding:0; margin:8px 0}
+  .tasklist li{margin:7px 0; padding-left:2px}
+  .tasklist .badge{margin-right:8px; vertical-align:1px}
+  .note{background:var(--accent-soft); border:1px solid #cfe0ff; border-radius:9px; padding:12px 16px; margin:16px 0}
+  .warn{background:var(--warn-bg); border:1px solid #f5c6c2; border-radius:9px; padding:12px 16px; margin:16px 0}
+  .warn b{color:var(--warn)}
+  .callout{border-left:4px solid var(--accent); background:#f6f9fd; padding:10px 16px; margin:14px 0; border-radius:0 8px 8px 0}
+  ul.tight, ol.tight{margin:8px 0; padding-left:22px}
+  ul.tight li, ol.tight li{margin:4px 0}
+  .legend{display:flex; flex-wrap:wrap; gap:12px; margin:10px 0 6px}
+  .legend span{font-size:12.5px; color:var(--muted)}
+  hr.soft{border:none; border-top:1px solid var(--line); margin:36px 0}
+  .small{font-size:13px; color:var(--muted)}
+  header.title{border-bottom:2px solid var(--line); padding-bottom:18px; margin-bottom:8px}
+  .pill-row{margin:10px 0}
+  .pill-row .badge{margin-right:6px}
+  footer{margin-top:60px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:13px}
+  @media (max-width:1080px){
+    .wrap{flex-direction:column}
+    nav.toc{position:static; width:100%; min-width:0; height:auto; border-right:none; border-bottom:1px solid var(--line)}
+    main{padding:24px 18px 80px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="toc" aria-label="Table of contents">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#purpose">1. Purpose &amp; Scope</a></li>
+    <li><a href="#principles">2. Principles &amp; Constraints</a></li>
+    <li><a href="#keepbuild">3. Current State: Keep vs Build</a></li>
+    <li><a href="#target">4. Target Base Architecture</a></li>
+    <li><a href="#phaseoverview">5. Phase Overview &amp; Dependencies</a></li>
+    <li><a href="#phase1" class="sub">Phase 1 — Singleton-Resource Arbiter</a></li>
+    <li><a href="#phase2" class="sub">Phase 2 — Match-Tables + Binding</a></li>
+    <li><a href="#phase3" class="sub">Phase 3 — devres + DMA wiring</a></li>
+    <li><a href="#phase4" class="sub">Phase 4 — Unified Bus model</a></li>
+    <li><a href="#phase5" class="sub">Phase 5+ — Deferred/hotplug/unbind</a></li>
+    <li><a href="#newdriver">6. Writing a New Driver</a></li>
+    <li><a href="#risks">7. Open Questions &amp; Risks</a></li>
+    <li><a href="#order">8. Recommended Execution Order</a></li>
+  </ol>
+  <h2>Status Legend</h2>
+  <div class="legend">
+    <span><span class="badge b-keep">KEEP</span> already refined</span>
+    <span><span class="badge b-build">BUILD</span> new</span>
+    <span><span class="badge b-refine">REFINE</span> rework existing</span>
+    <span><span class="badge b-wire">WIRE</span> connect dead code</span>
+    <span><span class="badge b-future">FUTURE</span> deferred</span>
+  </div>
+</nav>
+
+<main>
+<header class="title">
+  <h1>SlopOS Driver-Framework BASE</h1>
+  <p class="lede">An implementation-ready, phase-organized plan for the reusable <strong>foundations</strong> that make adding any future driver trivial and correct — declarative match-tables, device&#8596;driver binding, probe priority, a singleton-resource arbiter, managed-resource (devres) vending, DMA base wiring, and a unified Bus model. The motivating consumer (the Intel <code>xe</code> GPU) becomes "just another driver"; its display/GGTT/forcewake internals are out of scope here.</p>
+  <div class="pill-row">
+    <span class="badge b-build">BUILD</span>
+    <span class="badge b-refine">REFINE</span>
+    <span class="badge b-wire">WIRE</span>
+    <span class="badge b-keep">KEEP</span>
+    <span class="badge b-future">FUTURE</span>
+  </div>
+  <p class="small">Produced by multi-agent research (four parallel design passes, audited against the live <code>develop</code> tree and reconciled). Siblings: <a href="driver-framework.md">plans/driver-framework.md</a> (the approved framework <em>model</em> &mdash; this doc deepens its §3/§5/§7) and <a href="xe-driver-roadmap.md">plans/xe-driver-roadmap.md</a> (the <code>xe</code> driver <em>internals</em>). A companion deliverable for the arbiter alone lives at <a href="singleton-resource-arbiter.html">plans/singleton-resource-arbiter.html</a>.</p>
+</header>
+
+<section id="purpose">
+<h2>1. Purpose &amp; Scope</h2>
+<p>Today a new PCI driver self-registers via a <code>#[repr(C)]</code> link-section static (<span class="fileref">drivers/src/pci.rs:171-192</span>, gathered by <span class="fileref">link.ld:74-78</span>), but the probe loop (<span class="fileref">drivers/src/pci.rs:1173-1195</span>) has <em>no ownership model</em>: every matcher probes every matching device, nothing records "device N is owned by driver X", and the GPU smuggles arbitration into <code>matches()</code> via a global <code>GPU_ENABLED</code> atomic. This document specifies the base that turns that loop into a world-class registry and gives <code>probe()</code> a safe capability handle for hardware resources.</p>
+<p><strong>In scope (the base):</strong> the singleton-resource arbiter, declarative <code>id_table</code> matching, device&#8596;driver binding/claim with split-lock discipline, probe priority, the <code>BoundDevice</code>/devres managed-resource layer, wiring the dead <code>DmaCoherent</code> path with an identity IOMMU mapper, lifting MSI-X into a shared driver-core, the unified <code>Bus</code> trait, and the crate/file convention.</p>
+<p><strong>Out of scope:</strong> the <code>xe</code> driver's internals (GGTT, forcewake, display mode programming) — owned by <a href="xe-driver-roadmap.md">plans/xe-driver-roadmap.md</a>. <code>xe</code> appears here only as the worked example proving the base is "right".</p>
+</section>
+
+<section id="principles">
+<h2>2. Principles &amp; Constraints</h2>
+<p>Every design decision below is bounded by SlopOS's framekernel discipline. These are not guidelines — they are CI-enforced invariants the implementation must satisfy.</p>
+<ul class="tight">
+  <li><strong>Unsafe only in <code>slopos-ostd</code>.</strong> The driver crate is <code>#![forbid(unsafe_code)]</code>. <em>Every</em> new primitive a driver touches — the <code>Bus</code> trait, <code>BoundDevice</code>, <code>Devres</code>, the arbiter, the match-tables, the rewritten probe loop — is pure-safe Rust over ostd primitives (<code>KBox</code>/<code>KVec</code>/<code>KBTreeMap</code>/<code>SpinLock</code>/<code>IrqAllocator</code>/<code>DmaCoherent</code>/<code>IoMem</code>). The one small ostd addition (an <code>OwnedIrq</code> RAII pair) keeps its own unsafe internal. <code>scripts/check_unsafe_outside_ostd.sh</code> stays green.</li>
+  <li><strong>2&nbsp;KiB per-function stack-frame gate.</strong> The probe loop must <em>never</em> copy the <code>[PciDeviceInfo; PCI_MAX_DEVICES]</code> array onto a frame (<span class="fileref">pci.rs:1174-1178</span>). All owned binding state is built off-stack via <code>KBox::try_init(T::init_&hellip;())</code>; only a single <code>PciDeviceInfo</code> (tens of bytes) or a fat-pointer <code>Binding</code> (~24&nbsp;B) ever crosses a frame. <code>scripts/check_stack_sizes.sh</code> is re-run on <span class="fileref">builddir/kernel.elf</span> after each phase.</li>
+  <li><strong>Soft-float.</strong> Matching, binding, and arbitration are integer/pointer math and fn-pointer dispatch — zero XMM/YMM. <code>scripts/check_kernel_softfloat.sh</code> is unaffected.</li>
+  <li><strong>Link-section registration is sacred.</strong> <code>.driver_registry</code> (<span class="fileref">link.ld:74-78</span>) stays <code>KEEP</code>'d; entries grow fields but remain <code>#[repr(C)]</code> rodata. Adding a driver stays purely additive — no central list, no init-order dependency, no global mutable vector.</li>
+  <li><strong>No heap alloc under an IRQ-off cli-lock.</strong> The buddy allocator's LUF reuse path does a hidden cross-CPU TLB drain; allocating under a held cli-lock risks the slab-across-LUF-drain deadlock. The split-lock design ensures <code>probe()</code> (and its heap-allocating <code>attach</code>) run with neither <code>ENUM_STATE</code> nor the claim lock held.</li>
+  <li><strong>QEMU-testability via virtio.</strong> The <em>entire base</em> is exercisable under <code>just test</code> on q35 with virtio-blk/net/gpu: binding, dup-claim prevention, priority ordering, deferred-probe, devres teardown, the arbiter, and <code>DmaCoherent</code>-on-identity-mapper. Only <code>xe</code>'s display internals need real Intel HW. Test-only dummy drivers are <code>cfg(tests=on)</code>-gated and registered from a tests-side helper (see <a href="#phase2">Phase 2 → "Test-driver registration mechanism"</a>) so they never land in a shipped <code>.driver_registry</code>.</li>
+</ul>
+</section>
+
+<section id="keepbuild">
+<h2>3. Current State: Keep vs Build</h2>
+<p>Classification of each aspect of the existing infrastructure, with file:line evidence verified against the tree.</p>
+<table>
+  <thead><tr><th style="width:23%">Aspect</th><th style="width:13%">Status</th><th style="width:30%">Evidence</th><th>Disposition</th></tr></thead>
+  <tbody>
+    <tr><td>Link-section PCI registry</td><td><span class="badge b-keep">KEEP</span></td><td><span class="fileref">pci.rs:150-192</span>; <span class="fileref">link.ld:74-78</span></td><td>Zero-alloc, init-order-free, type-safe fn-ptrs. The kernel of the new model; grow the entry payload, don't replace the mechanism.</td></tr>
+    <tr><td><code>matches</code>/<code>probe</code> split</td><td><span class="badge b-refine">REFINE</span></td><td><span class="fileref">pci.rs:76-82</span></td><td>Right shape (cheap filter vs. expensive init), but <code>matches</code> purity is violated (reads <code>GPU_ENABLED</code>/<code>lpss_disabled</code>). Replace the hand-written fn with a declarative <code>match_table</code>; keep an optional imperative fallback.</td></tr>
+    <tr><td>Typed <code>PciProbeError</code></td><td><span class="badge b-refine">REFINE</span></td><td><span class="fileref">pci.rs:52-63</span> (variants); <span class="fileref">pci.rs:82</span> (probe sig)</td><td>The variant set <code>{Mismatch, OutOfMemory, DeviceFault, Unsupported}</code> is already good — but this row seeds a <em>signature</em> change, not just an enum addition. In Phases 2/3 the probe <code>Ok</code> type changes from <code>()</code> to <code>ProbeOutcome::{Bound, Declined}</code> and the probe arg changes from <code>&amp;PciDeviceInfo</code> to <code>&amp;mut BoundDevice</code>; a <code>Deferred</code> error variant is added. Keep <code>pub use ProbeError as PciProbeError;</code> so existing call sites compile.</td></tr>
+    <tr><td>Probe loop ownership</td><td><span class="badge b-build">BUILD</span></td><td><span class="fileref">pci.rs:1173-1195</span></td><td>Drivers-outer &times; devices-inner, no claim record, O(drivers&times;devices). Rewrite to device-outer, priority-ordered candidates, split-lock claim recording.</td></tr>
+    <tr><td>Declarative <code>id_table</code> index</td><td><span class="badge b-build">BUILD</span></td><td>(none — matching is code today)</td><td>Add <code>PciMatch</code> enum + a boot-built <code>(vendor,device)</code>/<code>(class,subclass)</code> index for O(1) candidate lookup.</td></tr>
+    <tr><td>Probe priority</td><td><span class="badge b-build">BUILD</span></td><td><span class="fileref">pci.rs:1180</span> (link order only)</td><td>Add an explicit priority field, sorted once; specific beats generic deterministically.</td></tr>
+    <tr><td>Display singleton arbitration</td><td><span class="badge b-build">BUILD</span></td><td><span class="fileref">virtio_gpu/mod.rs:89,92,1362</span>; <span class="fileref">boot_drivers.rs:308-410</span>; <span class="fileref">video/src/framebuffer.rs:83,179</span></td><td>No abstraction for "many drivers compete for one scanout". Build the <code>SingletonResource</code>/<code>ScanoutProvider</code> arbiter; delete <code>VideoBackend</code>/<code>set_enabled</code>/manual <code>xe_probe</code>.</td></tr>
+    <tr><td>Managed resources (devres)</td><td><span class="badge b-build">BUILD</span></td><td><span class="fileref">pci.rs:79-82</span> ("on failure it must release them" — manual)</td><td>Build the <code>BoundDevice</code> capability + <code>Devres</code> LIFO bag; auto-release on probe-fail/unbind.</td></tr>
+    <tr><td><code>DmaCoherent</code> / <code>IommuMapper</code></td><td><span class="badge b-wire">WIRE</span></td><td><span class="fileref">slopos-ostd/src/mm/dma.rs:160</span> (<code>register_iommu_mapper</code>, zero callers), <span class="fileref">slopos-ostd/src/mm/dma.rs:224</span> (<code>alloc</code> always <code>NotInitialised</code>)</td><td>Genuinely dead. Wire a default identity/passthrough mapper at boot so it gains a live caller for new drivers; do <em>not</em> migrate the working virtio raw-phys path.</td></tr>
+    <tr><td>Shared MSI/MSI-X plumbing</td><td><span class="badge b-refine">REFINE</span></td><td><span class="fileref">drivers/src/virtio/pci.rs:186</span> (<code>try_setup_msix</code>); <span class="fileref">drivers/src/msix.rs:357</span> (<code>msix_configure</code>); <span class="fileref">drivers/src/msi.rs</span>; <span class="fileref">drivers/src/msi_common.rs</span></td><td>The MSI-X <em>setup orchestration</em> (allocate&rarr;configure&rarr;register&rarr;enable) is currently virtio-private even though the per-cap primitives (<code>msix_configure</code>, <code>msi_configure</code>) and the shared LAPIC message format (<code>msi_common.rs</code>) already live crate-wide. Build <code>driver_core::msi</code> as a <em>thin orchestrator over the existing</em> <code>msix.rs</code>/<code>msi.rs</code>/<code>msi_common.rs</code> — do NOT add a third overlapping MSI abstraction; virtio becomes a thin adapter.</td></tr>
+    <tr><td>ostd <code>IrqAllocator</code> / <code>IrqLine</code></td><td><span class="badge b-keep">KEEP</span></td><td><span class="fileref">slopos-ostd/src/irq/line.rs:385</span></td><td>Clean RAII vector allocation. Add only <code>register_callback_owned -&gt; OwnedIrq</code> to replace the virtio <code>mem::forget</code> dance.</td></tr>
+    <tr><td>ostd <code>IoMem</code> / <code>MmioRegion</code></td><td><span class="badge b-keep">KEEP</span></td><td><span class="fileref">slopos-ostd/src/io</span>, <span class="fileref">slopos-ostd/src/pci</span></td><td>BAR-window primitive. Wrap behind <code>BoundDevice::map_bar</code>; note IoMem has no Drop today (VA leak only, the future recyclable-VA seam).</td></tr>
+    <tr><td>Ordered platform init (<code>boot_init!</code>)</td><td><span class="badge b-keep">KEEP</span></td><td><span class="fileref">boot/src/boot_drivers.rs</span>; <span class="fileref">link.ld:56-60</span></td><td>Keep for the ~12 true platform steps; narrow its scope (stop using it for device drivers like the priority-82 touchpad).</td></tr>
+    <tr><td>Unified Bus / platform registry</td><td><span class="badge b-build">BUILD</span> <span class="badge b-future">FUTURE</span></td><td><span class="fileref">slopos-ostd/src/dev/mod.rs</span> (only <code>FromRawPtr</code> today)</td><td>Build a <code>Bus</code> trait (PCI first); gate the <code>platform_driver!</code>/ACPI registry on a concrete second platform device.</td></tr>
+    <tr><td>Deferred-probe / hotplug / unbind</td><td><span class="badge b-future">FUTURE</span></td><td><span class="fileref">pci.rs:1173</span> (one-shot)</td><td>Design the substrate now (Deferred outcome, slot built for unbind drop order); full fixpoint queue + <code>remove</code> deferred to Phase 5.</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="target">
+<h2>4. Target Base Architecture</h2>
+<p>Two layers. The <strong>ostd trust domain</strong> owns all <code>unsafe</code> and exposes a safe device model (Bus trait, BoundDevice/devres, the arbiter primitive). The <strong>driver crate</strong> declares tables and writes typed probes, reaching hardware only through the capability handle. The arbiter lives <em>below</em> <code>video</code> (in <code>kernel-services</code>) and stores only provider-supplied fn-pointers, so no dependency edge inverts.</p>
+<pre><code>                      slopos-ostd   (TRUST DOMAIN — the only unsafe)
+ +----------------------------------------------------------------------------+
+ |  dev::Bus trait     dev::BoundDevice          Resource vending (Devres):   |
+ |   |- PCI  (ECAM)     |- info: &amp;PciDeviceInfo    |- Mmio   (BAR  -&gt; IoMem)   |
+ |   |- Platform/ACPI   |- res:  &amp;mut Devres       |- IrqBinding (OwnedIrq)  |
+ |   '- (I2C/USB later)  (LIFO KBox&lt;dyn Res&gt; bag)  '- Dma  (DmaCoherent+mapper)|
+ |                                                                            |
+ |  irq::OwnedIrq (line+handle, correct drop order)                          |
+ |  mm::dma::IdentityMapper  (iova == phys; wires DmaCoherent live)          |
+ +----------------------------------------------------------------------------+
+        ^ link-section registration (.driver_registry / .platform_registry)
+        | matching is DATA (id_table index); binding RECORDS ownership by index
+ +------+---------------------------------------------------------------------+
+ |  kernel-services  (#![forbid(unsafe_code)])  — BELOW video                 |
+ |   SingletonResource&lt;P&gt;  (two-phase claim/commit, evict via prior provider) |
+ |     specialised as  SCANOUT: SingletonResource&lt;ScanoutProvider&gt;            |
+ |     stores/calls ONLY fn-ptrs -> names no video/drivers symbol            |
+ +----------------------------------------------------------------------------+
+        ^ providers supply their own install/evict fn-ptrs
+ +------+---------------------------------------------------------------------+
+ |  slopos-drivers  (#![forbid(unsafe_code)])                                 |
+ |   pci_driver!{ match_table, priority, probe -&gt; Result&lt;ProbeOutcome, _&gt; }    |
+ |   driver_core::msi::setup_interrupts  (orchestrates msix.rs/msi.rs)        |
+ |   GPU drivers register their OWN ScanoutProvider{ install, evict }         |
+ |   probe() reaches MMIO/DMA/IRQ ONLY through &amp;mut BoundDevice               |
+ +----------------------------------------------------------------------------+</code></pre>
+<div class="callout">
+<strong>Core types at a glance.</strong>
+<ul class="tight">
+  <li><code>Bus</code> trait (ostd): associated <code>Device</code>/<code>MatchKey</code>/<code>DriverEntry</code> types + <code>drivers()</code>/<code>device_count()</code>/<code>matches()</code>/<code>priority()</code>/<code>probe()</code>. PCI first; platform/ACPI second (gated). One generic <code>probe_bus&lt;B&gt;</code> matchmaker drives all buses.</li>
+  <li><code>PciDriverEntry</code> (link-section static): grows <code>match_table: &amp;'static [PciMatch]</code>, <code>priority: u8</code>, an optional imperative <code>fallback</code>, and <code>probe -&gt; Result&lt;ProbeOutcome, ProbeError&gt;</code>.</li>
+  <li><code>BoundDevice</code>/<code>Devres</code>: the capability handed to probe; vends RAII <code>Mmio</code>/<code>IrqBinding</code>/<code>Dma</code>, all released on probe-failure (and future unbind).</li>
+  <li><code>SingletonResource&lt;P&gt;</code> &rarr; <code>ScanoutProvider</code>: claim-by-priority reservation <em>before</em> any destructive reset; eviction through the displaced provider's own <code>evict</code> fn.</li>
+</ul>
+</div>
+</section>
+
+<section id="phaseoverview">
+<h2>5. Phase Overview &amp; Dependencies</h2>
+<p>The natural base sequence. Phase 1 unblocks the <code>xe</code> deflag's display handoff; Phase 2 is the load-bearing scaling foundation; Phase 3 ships the leak-fix and wires DMA; Phase 4 is gated on a second platform device; Phase 5+ is future-additive precisely because 1&ndash;3 designed for it.</p>
+<pre><code>  Phase 1                Phase 2                Phase 3              Phase 4            Phase 5+
+  Arbiter        --&gt;     Match-tables    --&gt;    devres +     --&gt;    Unified Bus  --&gt;   Deferred/hotplug
+  (scanout)              + binding/claim        DMA wiring          (PCI+ACPI)         /unbind/more buses
+     |                       |                      |                    ^                   ^
+     | unblocks xe deflag    | one-driver-per-dev   | leak-free probe    | needs binding     | needs binding +
+     | display handoff       | O(1) match           | + DmaCoherent live | + BoundDevice     | devres + arbiter
+     |                       | priority             | + MSI-X lifted     | (gated on 2nd dev)| (additive)
+     '--- can ship before ---'                      '-- couples to ------'
+          Phase 2 (arbiter      Phase 2's split-lock is a HARD prereq      Phase 4 reuses
+          is a standalone       for Phase 3 attach() running lock-free     probe_bus&lt;B&gt; verbatim
+          static, not the
+          registry)</code></pre>
+<table>
+  <thead><tr><th>Phase</th><th>Goal</th><th>Effort</th><th>Risk</th><th>Unblocks</th><th>Testability</th></tr></thead>
+  <tbody>
+    <tr><td><b>1</b></td><td>Singleton-resource arbiter (scanout claim/evict)</td><td><span class="badge b-eff">L</span></td><td>Med</td><td><code>xe</code> deflag display handoff; any future GPU; reusable for console/RTC singletons</td><td>High (virtio-gpu path live-verifies)</td></tr>
+    <tr><td><b>2</b></td><td>Declarative match-tables + binding/claim + priority</td><td><span class="badge b-eff">L</span></td><td>Med</td><td>One-driver-per-device; O(1) match; specific-beats-generic; deferred substrate</td><td>High (dummy matchers on virtio)</td></tr>
+    <tr><td><b>3</b></td><td>devres/BoundDevice + identity DMA mapper + MSI-X lift</td><td><span class="badge b-eff">M</span></td><td>Low-Med</td><td>Leak-free probe; unbind has a place to run; <code>DmaCoherent</code> usable; non-virtio MSI-X</td><td>High (devres LIFO + DMA tests)</td></tr>
+    <tr><td><b>4</b></td><td>Unified Bus model (PCI + gated platform/ACPI)</td><td><span class="badge b-eff">XL</span></td><td>Med</td><td>Declarative platform binding; removes hand-wiring; new-driver template</td><td>Partial (PS/2 yes; I2C-HID HW-only)</td></tr>
+    <tr><td><b>5+</b></td><td>Deferred-probe queue, hotplug, unbind, more buses</td><td><span class="badge b-eff">XL</span></td><td>Low now</td><td>Removable HW; runtime rescan; restartable drivers; VT-d isolation</td><td>Low under QEMU; design-review-gated</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ============================ PHASE 1 ============================ -->
+<section id="phase1">
+<div class="phase p1">
+<h3>Phase 1 &mdash; Singleton-Resource Arbiter <span class="badge b-build">BUILD</span></h3>
+<div class="metarow">
+  <span><b>Effort:</b> <span class="badge b-eff">L</span></span>
+  <span><b>Risk:</b> Med</span>
+  <span><b>Location:</b> <span class="fileref">kernel-services/src/syscall_services/scanout.rs</span></span>
+  <span><b>Lock level:</b> <code>LOCK_LEVEL_RESOURCE</code> (=1)</span>
+</div>
+
+<h4>Goal</h4>
+<p>A generic <code>SingletonResource&lt;P&gt;</code> fn-pointer registry (specialised as <code>ScanoutProvider</code>) that lets multiple GPU drivers register as plain <code>pci_driver!</code>s while exactly one owns the display. Claim-by-priority with a <strong>reservation taken before any destructive device reset</strong>, eviction through the displaced provider's own <code>evict</code> fn. This deletes <code>VideoBackend</code>, <code>set_enabled</code>/<code>GPU_ENABLED</code>, <code>adopt_virtio_gpu_scanout</code>'s caller-conditionals, and the manual <code>xe_probe</code>; it collapses <span class="fileref">boot_drivers.rs:308-407</span> to <code>pci_init(); pci_probe_drivers();</code>.</p>
+
+<h4>What it unblocks</h4>
+<p>The <code>xe</code> deflag's display handoff (the actual blocker), correct multi-GPU, and a reusable primitive for any future singleton resource (boot-console, RTC). Ships <em>before</em> Phase 2 because the arbiter is a standalone static, not part of the registry rewrite.</p>
+
+<h4>Tasks</h4>
+<ul class="tasklist">
+  <li><span class="badge b-build">BUILD</span> <code>SingletonResource&lt;P: Copy + 'static&gt;</code> generic two-phase state machine (reserve &rarr; commit) in <code>kernel-services</code> (which already depends on service-core/karch/abi/ostd and names neither <code>video</code> nor <code>drivers</code>; both already depend on it).</li>
+  <li><span class="badge b-build">BUILD</span> <code>ScanoutProvider</code>/<code>InstallCtx</code>/<code>GpuControlFns</code> specialisation + <code>static SCANOUT</code> + the priority ladder (single source of truth).</li>
+  <li><span class="badge b-refine">REFINE</span> <code>video::init</code> registers the firmware framebuffer as the default provider (<code>flush = None</code>/direct-write, <code>evict = {}</code>) at priority 0; move <code>adopt_virtio_gpu_scanout</code>'s body into a reusable provider <code>install</code> helper; delete the <code>VideoBackend</code> enum and the <code>#[cfg(xe-gpu)]</code> arms.</li>
+  <li><span class="badge b-refine">REFINE</span> <code>virtio_gpu</code>: add <code>virtio_gpu_probe</code> (claim/commit) + <code>virtio_gpu_install</code>/<code>virtio_gpu_evict</code>; delete <code>GPU_ENABLED</code>/<code>set_enabled</code> (<span class="fileref">virtio_gpu/mod.rs:89,92</span>); make <code>matches()</code> pure.</li>
+  <li><span class="badge b-refine">REFINE</span> collapse <span class="fileref">boot_drivers.rs:308-407</span> &rarr; <code>pci_init(); pci_probe_drivers();</code>; drop the <code>boot_video_backend</code> plumbing.</li>
+  <li><span class="badge b-keep">KEEP</span> <code>register_flush_callback</code>/<code>FRAMEBUFFER_FLUSH</code> (<span class="fileref">video/src/framebuffer.rs:81-84,179</span>) — now called only from provider install bodies; no behavioural change.</li>
+  <li><span class="badge b-refine">REFINE</span> remove <code>pci_get_primary_gpu</code>/<code>PciGpuInfo</code> (<span class="fileref">pci.rs:21-41,898-902</span>) once probes take <code>&amp;PciDeviceInfo</code> directly.</li>
+</ul>
+
+<h4>API sketch</h4>
+<pre><code>// kernel-services/src/syscall_services/scanout.rs
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaimOutcome { Won, Lost, LostTie }
+
+pub struct SingletonResource&lt;P: Copy + 'static&gt; { /* SpinLock&lt;ArbiterState&lt;P&gt;&gt;, name */ }
+
+impl&lt;P: Copy + 'static&gt; SingletonResource&lt;P&gt; {
+    pub const fn new(name: &amp;'static str) -&gt; Self;
+    // PHASE A: pure-priority reservation, touches NO hardware, lock released on return.
+    pub fn claim(&amp;'static self, priority: i32) -&gt; ClaimOutcome;
+    // PHASE B: winner commits after its reset+init succeeds; evicts displaced owner
+    //          via the OLD provider's evict fn (callback run AFTER lock dropped).
+    pub fn commit_install(&amp;'static self, new: P, priority: i32,
+                          evict_with: impl FnOnce(Option&lt;P&gt;));
+    pub fn abort_claim(&amp;'static self);          // winner whose reset FAILED
+    pub fn current(&amp;'static self) -&gt; Option&lt;P&gt;;
+}
+
+#[derive(Clone, Copy)]
+pub struct ScanoutProvider {
+    pub id: ScanoutId,
+    pub priority: i32,
+    pub install: fn(ctx: &amp;InstallCtx) -&gt; bool, // body = boot_drivers.rs:357-386
+    pub evict:   fn(),                          // firmware = no-op
+}
+pub enum ScanoutId { FirmwareFb, VirtioGpu, IntelXe }
+
+pub struct InstallCtx {                          // passed BY REFERENCE (2 KiB gate)
+    pub fb: slopos_abi::FramebufferData,         // small Copy: *mut u8 + DisplayInfo
+    pub flush: fn(*const slopos_abi::damage::DamageRect, u32) -&gt; core::ffi::c_int,
+    pub gpu_control: Option&lt;GpuControlFns&gt;,
+}
+
+pub static SCANOUT: SingletonResource&lt;ScanoutProvider&gt; = SingletonResource::new("scanout");
+
+// single-source-of-truth priority ladder
+pub const PRIO_FIRMWARE_FB: i32 = 0;       // passive default, always losable
+pub const PRIO_VIRTIO_GPU:  i32 = 30;
+pub const PRIO_INTEL_XE:    i32 = 50;
+pub const PRIO_CMDLINE_HINT_BUMP: i32 = 100; // `video=xe` folds into priority, never a gate</code></pre>
+
+<h4>Algorithm (claim protocol, driver-probe side)</h4>
+<pre><code>1. Pure matches() passed (vendor/class) — NO GPU_ENABLED read anymore.
+2. RESERVE: let prio = base + cmdline_hint_bump(); match SCANOUT.claim(prio):
+   - Won            -&gt; proceed.
+   - Lost / LostTie -&gt; log, return Ok(Declined) WITHOUT touching hardware.
+                       (the literal "losers stay passive" guarantee)
+3. WON path only: do the destructive reset + scanout-resource create.
+   - On reset/init failure: SCANOUT.abort_claim() (restores prior owner) + return Err(DeviceFault).
+4. COMMIT: build InstallCtx (fb backing, flush fn, GpuControlFns) and the provider me.
+   SCANOUT.commit_install(me, prio, |displaced| if let Some(p)=displaced { (p.evict)() });
+   -&gt; records new owner, clears reservation, evicts displaced via ITS evict fn.
+      Lock is DROPPED before evict.
+5. (me.install)(&amp;ctx): runs the boot_drivers.rs:357-386 body — init_with_display_info,
+   register_flush_callback, register_gpu_control, vconsole::register_framebuffer,
+   sync_mouse_bounds, show_splash. Lock already dropped (GPU install blocks on completion).</code></pre>
+<p class="small"><strong>Firmware default:</strong> <code>video::init</code> calls <code>claim(PRIO_FIRMWARE_FB)</code> (wins the empty arbiter) then <code>commit_install(firmware, 0, |_|{})</code>; firmware install is a no-op (already direct-write), firmware evict is empty. <strong>Eviction model:</strong> firmware&rarr;GPU is a provider-<em>swap</em> (install the flush where there was None + re-point fb/vconsole/gpu_control/mouse/splash), not a callback-removal. The symmetric GPU&rarr;GPU uninstall/reinstall is deferred to Phase 5.</p>
+
+<h4>Framekernel notes</h4>
+<ul class="tight">
+  <li>Zero new unsafe — pure fn-pointer plumbing in <code>kernel-services</code> (already <code>#![forbid(unsafe_code)]</code>). NOT placed in ostd <code>dev</code> (would inflate tcb-ratio for zero unsafe).</li>
+  <li>The arbiter <code>SpinLock</code> is taken only for the brief reserve/commit window and <strong>released before</strong> any device reset, evict, or install body runs — mirroring the <code>framebuffer_flush</code> lock-drop at <span class="fileref">framebuffer.rs:184-197</span> and the slab-across-LUF-drain lesson. Non-reentrant: the arbiter never re-locks itself from inside a callback.</li>
+  <li><strong>2&nbsp;KiB stack gate on the commit path.</strong> <code>InstallCtx</code> is passed by reference; <code>ScanoutProvider</code> is ~40&nbsp;B of Copy fn-ptrs. <code>slopos_abi::FramebufferData</code> is just a <code>*mut u8</code> + a <code>DisplayInfo</code> (a handful of integers — small Copy, verified <span class="fileref">abi/src/display.rs:94</span>), so building <code>InstallCtx</code> at step 4 does not bloat the probe frame. Re-run <code>check_stack_sizes.sh</code> on <em>both</em> <code>pci_probe_drivers</code> <strong>and the commit/install path</strong> (the install body re-points splash/vconsole and could grow); if it ever approaches the gate, hold <code>fb</code> as <code>&amp;FramebufferData</code> or build <code>InstallCtx</code> off-stack.</li>
+  <li>No heap under the lock (providers are inline Copy tables in the static). Registration is a plain static, not link-section-gathered, so no shipped-image leak concern for the arbiter itself.</li>
+</ul>
+
+<h4>Files touched</h4>
+<table>
+  <thead><tr><th>Path</th><th>Change</th></tr></thead>
+  <tbody>
+    <tr><td><span class="fileref">kernel-services/src/syscall_services/scanout.rs</span></td><td><span class="badge b-build">BUILD</span> NEW — <code>SingletonResource&lt;P&gt;</code> + <code>ScanoutProvider</code>/<code>InstallCtx</code>/<code>GpuControlFns</code> + <code>static SCANOUT</code> + priority ladder.</td></tr>
+    <tr><td><span class="fileref">kernel-services/src/syscall_services/mod.rs</span></td><td><span class="badge b-refine">REFINE</span> add <code>pub mod scanout;</code>.</td></tr>
+    <tr><td><span class="fileref">video/src/lib.rs</span></td><td><span class="badge b-refine">REFINE</span> register firmware provider as default in <code>init()</code>; move <code>adopt_virtio_gpu_scanout</code> body into a reusable install helper; delete <code>VideoBackend</code> + <code>#[cfg(xe-gpu)]</code> arms.</td></tr>
+    <tr><td><span class="fileref">video/src/framebuffer.rs</span></td><td><span class="badge b-keep">KEEP</span> <code>register_flush_callback</code>/<code>FRAMEBUFFER_FLUSH</code> — now called only from provider install bodies.</td></tr>
+    <tr><td><span class="fileref">drivers/src/virtio_gpu/mod.rs</span></td><td><span class="badge b-refine">REFINE</span> add probe(claim/commit) + install/evict; delete <code>GPU_ENABLED</code>/<code>set_enabled</code>; pure <code>matches()</code>.</td></tr>
+    <tr><td><span class="fileref">boot/src/boot_drivers.rs</span></td><td><span class="badge b-refine">REFINE</span> delete the scanout dance :308-407 &rarr; <code>pci_init(); pci_probe_drivers();</code>; drop backend plumbing.</td></tr>
+    <tr><td><span class="fileref">drivers/src/pci.rs</span></td><td><span class="badge b-refine">REFINE</span> remove <code>pci_get_primary_gpu</code>/<code>PciGpuInfo</code> once probes take <code>&amp;PciDeviceInfo</code>.</td></tr>
+  </tbody>
+</table>
+
+<h4>Testability <span class="badge b-eff">High</span></h4>
+<ul class="tight">
+  <li>Live integration: <code>just boot</code> on the virtio-gpu q35 path — virtio-gpu wins arbitration vs. the firmware default, install re-points scanout, splash + compositor present; current behaviour now routed through the arbiter.</li>
+  <li>Unit (<code>cfg(tests=on)</code>, against a throwaway <code>SingletonResource::new("test")</code> with dummy providers): (1) priority decides; (2) equal priority &rarr; LostTie, first committed keeps it; (3) <code>abort_claim</code> restores prior owner; (4) reserve-before-reset — a loser's <code>install</code> is NEVER invoked; (5) eviction calls the <em>displaced</em> provider's <code>evict</code> exactly once (counter in dummy).</li>
+</ul>
+
+<h4>Risks</h4>
+<ul class="tight">
+  <li>Touches the boot scanout handoff (<span class="fileref">boot_drivers.rs:357-386</span>) and compositor fb acquisition (<code>COMPOSITOR_FB_ACQUIRED</code>) — eviction must re-point splash + vconsole or the boot console disappears on takeover.</li>
+  <li>commit-then-install is only safe because firmware evict is a no-op (direct-write); a GPU&rarr;GPU re-claim would have a present-goes-nowhere window — explicitly deferred.</li>
+  <li>Moving <code>adopt_virtio_gpu_scanout</code>'s body must preserve the <code>is_video_initialized()</code> double-register guard inside <code>adopt_virtio_gpu_scanout</code> (<span class="fileref">video/src/lib.rs:206+</span>) so <code>VIDEO_SERVICES</code> isn't registered twice.</li>
+</ul>
+</div>
+</section>
+
+<!-- ============================ PHASE 2 ============================ -->
+<section id="phase2">
+<div class="phase p2">
+<h3>Phase 2 &mdash; Declarative Match-Tables + Binding/Claim + Priority <span class="badge b-build">BUILD</span> <span class="badge b-refine">REFINE</span></h3>
+<div class="metarow">
+  <span><b>Effort:</b> <span class="badge b-eff">L</span></span>
+  <span><b>Risk:</b> Med</span>
+  <span><b>Location:</b> <span class="fileref">drivers/src/pci.rs</span></span>
+  <span><b>Locks:</b> <code>ENUM_STATE</code> (REGISTRY=2) + <code>CLAIMED_BY</code> (RESOURCE=1)</span>
+</div>
+
+<h4>Goal</h4>
+<p>Turn the "every matcher probes every matching device, no ownership record, O(drivers&times;devices)" loop (<span class="fileref">pci.rs:1173-1195</span>) into a world-class registry: drivers declare a const <code>&amp;[PciMatch]</code> table + <code>priority</code>; a boot-built index gives O(1) candidate lookup; <code>probe</code> returns <code>Result&lt;ProbeOutcome, ProbeError&gt;</code> with the owned device state built off-stack via <code>KBox::try_init</code>; the <strong>registry (not probe)</strong> records the claim by index into a separately-locked <code>claimed_by</code> table <em>after</em> probe returns <code>Ok</code>; the scan skips claimed devices and offers each device to drivers in priority order so specific beats generic.</p>
+
+<h4>What it unblocks</h4>
+<p>One-driver-per-device mutual exclusion; O(1) match at scale ("thousands of drivers"); specific-beats-generic ordering; the deferred-probe substrate. This is the #1 scaling base and a hard prerequisite for Phase 3's lock-free <code>attach</code>.</p>
+
+<h4>Tasks</h4>
+<ul class="tasklist">
+  <li><span class="badge b-build">BUILD</span> <code>PciMatch</code> enum + <code>PCI_ANY_*</code> sentinels (const-constructible, <code>#[repr(C)]</code>-embeddable so a <code>&amp;'static [PciMatch]</code> lives in rodata behind the entry).</li>
+  <li><span class="badge b-refine">REFINE</span> grow <code>PciDriverEntry</code>: <code>match_table</code>, optional pure <code>fallback</code>, <code>priority: u8</code>, and <code>probe -&gt; Result&lt;ProbeOutcome, ProbeError&gt;</code>.</li>
+  <li><span class="badge b-build">BUILD</span> <code>MatchIndex</code> (a function-local <code>by_vd: KBTreeMap&lt;u32, KVec&lt;u16&gt;&gt;</code> / <code>by_cs: KBTreeMap&lt;u16, KVec&lt;u16&gt;&gt;</code> / <code>catch_all</code>), built once from <code>driver_registry_iter()</code>, buckets sorted by (priority, link-index).</li>
+  <li><span class="badge b-build">BUILD</span> split <code>ENUM_STATE</code>: device table stays at <code>LOCK_LEVEL_REGISTRY</code> (=2); a separate <code>static CLAIMED_BY: SpinLock&lt;ClaimTable&gt;</code> at <code>LOCK_LEVEL_RESOURCE</code> (=1) holds per-device <code>ClaimSlot { Unclaimed, Claimed(Binding) }</code>.</li>
+  <li><span class="badge b-build">BUILD</span> <code>pci_device_at(i) -&gt; Option&lt;PciDeviceInfo&gt;</code> single-element accessor (one struct copy, lock released) — the key trick that lets probe run lock-free without copying the array.</li>
+  <li><span class="badge b-refine">REFINE</span> rewrite <code>pci_probe_drivers</code>: device-outer, priority-ordered candidates, split-lock claim, bounded deferred pass.</li>
+  <li><span class="badge b-refine">REFINE</span> add <code>ProbeError::Deferred</code> + the <code>ProbeOutcome::{Bound, Declined}</code> distinction; keep <code>pub use ProbeError as PciProbeError;</code> so existing call sites compile.</li>
+  <li><span class="badge b-refine">REFINE</span> convert virtio_blk/net/gpu + i2c-lpss + xe <code>matches()</code> to declarative tables (kills the global-state reads, makes <code>matches</code> pure).</li>
+  <li><span class="badge b-refine">REFINE</span> extend the <code>pci_driver!</code> macro with <code>match_table</code>/<code>fallback</code>/<code>priority</code> arms (<code>fallback</code> defaults <code>None</code>, <code>priority</code> defaults to a documented mid value 128).</li>
+</ul>
+
+<h4>API sketch</h4>
+<pre><code>#[repr(C)] #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PciMatch {
+    VendorDevice  { vendor: u16, device: u16 },   // common, indexable case
+    VendorClass   { vendor: u16, class: u8 },      // e.g. intel-xe: any 0x8086 DISPLAY
+    ClassSubclass { class: u8, subclass: u8 },     // generic fallback drivers
+    ClassOnly     { class: u8 },                    // broadest generic
+}
+impl PciMatch {
+    pub const fn matches(&amp;self, d: &amp;PciDeviceInfo) -&gt; bool { /* field compares */ }
+    const fn vd_key(&amp;self) -&gt; Option&lt;u32&gt; { /* VendorDevice =&gt; (v&lt;&lt;16)|dev */ }
+    const fn cs_key(&amp;self) -&gt; Option&lt;u16&gt; { /* class-shaped arms */ }
+}
+
+#[repr(C)]
+pub struct PciDriverEntry {
+    pub name:        &amp;'static str,
+    pub match_table: &amp;'static [PciMatch],          // declarative id_table
+    pub fallback:    Option&lt;fn(&amp;PciDeviceInfo) -&gt; bool&gt;, // pure imperative escape hatch
+    pub priority:    u8,                            // lower binds first: specific &lt; generic
+    pub probe:       fn(&amp;mut BoundDevice&lt;'_&gt;) -&gt; Result&lt;ProbeOutcome, ProbeError&gt;,
+}
+
+pub struct Binding { name: &amp;'static str, state: KBox&lt;dyn DriverInstance&gt; }
+pub trait DriverInstance: Send + Sync { /* fn remove(&amp;mut self){} in Phase 5 */ }
+
+pub enum ProbeOutcome {
+    Bound(Binding),  // driver took ownership; registry records the claim by index
+    Declined,        // matched but deliberately did not bind (lost arbitration / passive)
+}
+pub enum ProbeError { Mismatch, OutOfMemory, DeviceFault, Unsupported, Deferred }
+// pub use ProbeError as PciProbeError;  // keeps existing call sites compiling
+
+// LOCK_LEVEL_RESOURCE = 1, LOCK_LEVEL_REGISTRY = 2  (slopos-ostd/src/sync/lock_graph.rs:99-100)
+static CLAIMED_BY: SpinLock&lt;ClaimTable&gt; =
+    SpinLock::new(ClaimTable::new(), LOCK_LEVEL_RESOURCE); // RESOURCE(1) &lt; REGISTRY(2)</code></pre>
+
+<h4>Test-driver registration mechanism</h4>
+<p>The plan repeatedly asserts that <code>cfg(tests=on)</code> dummy drivers never ship in <code>.driver_registry</code>. They cannot be ordinary <code>pci_driver!</code> link-section statics, because those live in the production <code>.driver_registry</code> section gathered by <span class="fileref">link.ld:74-78</span> (KEEP'd, no cfg gating). Two mechanisms satisfy the guarantee — pick <strong>(A)</strong> for the first cut:</p>
+<ul class="tight">
+  <li><strong>(A) Runtime side-table, registered from a tests-side helper (recommended).</strong> <code>pci_probe_drivers</code> already builds <code>MatchIndex</code> by walking the registry; add a tiny <code>#[cfg(tests=on)]</code> <code>register_test_driver(&amp;'static PciDriverEntry)</code> that pushes into a <code>static TEST_DRIVERS: SpinLock&lt;KVec&lt;&amp;'static PciDriverEntry&gt;&gt;</code>. <code>MatchIndex::build</code> folds <code>TEST_DRIVERS</code> in only under <code>cfg(tests=on)</code>. The dummy <code>PciDriverEntry</code> statics still live in normal rodata (not in any link section), so a release build that never calls the helper gathers nothing extra. This mirrors how <code>stest!</code> bodies are pure functions while the <em>harness</em> drives them.</li>
+  <li><strong>(B) A separate gated link section</strong> mirroring the existing <code>.test_registry</code> bracket (<span class="fileref">link.ld:80-83</span>, <code>__start_test_registry</code>/<code>__stop_test_registry</code>, used by <code>ktesting</code>'s <code>stest!</code> — see <span class="fileref">ktesting/src/registry.rs:3-46</span>). A new <code>.test_driver_registry</code> section would let dummy drivers self-register the same way, but it adds a second linker bracket and is only included by the <code>tests=on</code> kernel image. Keep this in reserve; (A) needs no <code>link.ld</code> change.</li>
+</ul>
+<p class="small">Either way the dummy <code>PciDriverEntry</code> is built behind <code>#[cfg(tests=on)]</code> and is unreferenced in a shipped build, so it does not enter the production <code>.driver_registry</code>.</p>
+
+<h4>Algorithm (rewritten <code>pci_probe_drivers</code> — split-lock, priority-ordered)</h4>
+<pre><code>1. BUILD INDEX (once, off the device lock):
+   let idx = MatchIndex::build()?;     // walks driver_registry_iter() ONCE (+ TEST_DRIVERS if tests=on)
+   for entry e at link index i, for m in e.match_table:
+       insert i into by_vd[m.vd_key()] / by_cs[m.cs_key()];
+       if m is ClassOnly OR e.fallback.is_some(): push i into catch_all.
+   sort every bucket by (entry.priority, link-index) ascending  (lower binds first).
+   // by_vd/by_cs/catch_all are ostd collections in a function-local — built once, dropped at fn end.
+
+2. PROBE LOOP (device-outer, candidates-inner — inverted from today):
+   for dev_idx in 0..device_count:
+     if CLAIMED_BY.lock().slots[dev_idx].is_claimed(): continue;   // one driver per device
+     let dev = pci_device_at(dev_idx)?;                            // single-element copy, ENUM_STATE RELEASED
+     let mut cands: KVec&lt;u16&gt; = KVec::new();
+     idx.candidates_for(&amp;dev, &amp;mut cands);                         // priority-sorted, dedup'd
+     for &amp;drv_i in &amp;cands:
+       let e = &amp;idx.entries[drv_i];
+       if !e.match_table_matches(&amp;dev) &amp;&amp; !e.fallback.map_or(false, |f| f(&amp;dev)): continue;
+       let mut bound = BoundDevice::new(&amp;dev, &amp;mut slot.devres);   // Phase 3 capability
+       match (e.probe)(&amp;mut bound) {                               // NO lock held here
+         Ok(Bound(binding)) =&gt; {
+             CLAIMED_BY.lock().slots[dev_idx] = Claimed(binding);  // registry records, post-Ok
+             break;                                                // device bound; stop offering it
+         }
+         Ok(Declined)        =&gt; continue;                          // try next, lower-priority driver
+         Err(Deferred)       =&gt; push (drv_i, dev_idx) onto DEFERRED local; continue;
+         Err(other)          =&gt; klog the typed reason; continue;
+       }
+
+3. DEFERRED FIXPOINT (substrate; full queue is Phase 5): one bounded retry pass (N=1)
+   re-runs step-2 body for each still-Unclaimed (drv_i, dev_idx). The (drv_i,dev_idx)
+   worklist shape is forward-compatible with the Phase-5 retry-to-fixpoint queue.
+
+LOCK DISCIPLINE (resolves the §3.1 hazard):
+ - SlopOS lock "levels" are ADVISORY RANK HINTS under a cycle-detection (lockdep-style)
+   model, NOT a strict numeric gate. The real invariant is "the acquisition graph stays
+   acyclic". (lock_graph.rs:99-100: LOCK_LEVEL_RESOURCE=1, LOCK_LEVEL_REGISTRY=2.)
+ - ENUM_STATE (REGISTRY, level 2): guards ONLY the read-only device table. Taken briefly
+   inside pci_device_at() for a single-element copy. NEVER held across probe.
+ - CLAIMED_BY (RESOURCE, level 1): guards ONLY the binding slots. Taken for is_claimed()
+   and the single-slot Claimed write. NEVER held across probe.
+ - The two locks are NEVER NESTED: pci_device_at() releases ENUM_STATE before CLAIMED_BY
+   is taken (and vice versa). No edge is ever added between them -&gt; acyclic graph, the
+   cycle detector stays satisfied regardless of which level number is larger.
+ - probe() runs lock-free: today's reentrancy deadlock is structurally GONE.</code></pre>
+
+<h4>Framekernel notes</h4>
+<ul class="tight">
+  <li>Zero new unsafe; <code>PciMatch</code>/<code>MatchIndex</code>/<code>ClaimTable</code>/the rewritten loop are safe Rust over ostd collections. Link-section emission stays via <code>link_section_static!</code>.</li>
+  <li>2&nbsp;KiB gate: the binding's owned <code>T</code> is built inside <code>probe()</code> via <code>KBox::try_init(T::init_&hellip;())</code>; the registry only moves a <code>Binding</code> (~24&nbsp;B) and copies one <code>PciDeviceInfo</code> at a time via <code>pci_device_at</code>. <code>candidates_for</code> writes into a caller-provided <code>KVec</code> (heap). Re-run <code>check_stack_sizes.sh</code> after the rewrite; clear the <code>cands</code> KVec per device instead of reallocating.</li>
+  <li>Lock discipline: probe runs with NEITHER lock held — structurally eliminating the non-reentrant re-lock deadlock. The two single-purpose locks are acquired strictly one-at-a-time and never nested, so the cycle detector never sees an edge between them.</li>
+  <li>Building <code>MatchIndex</code> allocates at boot; the drivers phase runs after mm init, so heap is up. Fallback if marginal: a linear priority-sorted scan (still correct, just O(drivers&times;devices)).</li>
+  <li><strong>Boot-time, BSP-only.</strong> <code>pci_probe_drivers</code> runs once at boot priority 80, on the BSP, before APs take device-binding work. The split-lock case above is therefore single-writer for the first scan. The Phase-5 deferred-fixpoint/hotplug rescans can run post-SMP-online; <code>probe_bus</code> is written to be SMP-reentrant for that future (both locks are real <code>SpinLock</code>s; the never-nested rule holds under contention), but the <em>initial</em> bring-up does not rely on it.</li>
+</ul>
+
+<h4>Files touched</h4>
+<table>
+  <thead><tr><th>Path</th><th>Change</th></tr></thead>
+  <tbody>
+    <tr><td><span class="fileref">drivers/src/pci.rs</span></td><td><span class="badge b-build">BUILD</span> <code>PciMatch</code> + grown <code>PciDriverEntry</code> + <code>ProbeOutcome</code>/<code>Binding</code>/<code>DriverInstance</code> + <code>MatchIndex</code> + <code>ClaimTable</code>/<code>CLAIMED_BY</code> + <code>pci_device_at</code> + (tests=on) <code>register_test_driver</code>; rewrite <code>pci_probe_drivers</code>; extend the macro.</td></tr>
+    <tr><td><span class="fileref">drivers/src/virtio/pci.rs</span></td><td><span class="badge b-refine">REFINE</span> migrate virtio registrations to <code>match_table</code> + probe returning <code>Ok(Bound(KBox::try_init(&hellip;)))</code>; drop the <code>GPU_ENABLED</code> read.</td></tr>
+    <tr><td><span class="fileref">drivers/src/lib.rs</span></td><td><span class="badge b-refine">REFINE</span> re-export <code>PciMatch</code>/<code>ProbeOutcome</code>/<code>Binding</code>/<code>ProbeError</code> for driver authors.</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/sync/lock_graph.rs</span></td><td><span class="badge b-keep">KEEP</span> <code>LOCK_LEVEL_RESOURCE</code> (1) and <code>LOCK_LEVEL_REGISTRY</code> (2) both exist at :99-100 (re-exported from <span class="fileref">sync/mod.rs:49</span>) — no new level needed; advisory ranks under cycle detection.</td></tr>
+    <tr><td><span class="fileref">drivers/src/pci_defs.rs</span></td><td><span class="badge b-keep">KEEP</span> <code>PciDeviceInfo</code> already carries vendor/device/class/subclass; no struct change.</td></tr>
+  </tbody>
+</table>
+
+<h4>Testability <span class="badge b-eff">High</span></h4>
+<ul class="tight">
+  <li><strong>Binding:</strong> a <code>cfg(tests=on)</code> dummy driver matching virtio-blk, priority low, probe returns <code>Bound</code>; assert exactly one <code>Binding</code> occupies the slot. The test entry is registered via the <code>register_test_driver</code> side-table (mechanism A above) so it never ships in <code>.driver_registry</code>.</li>
+  <li><strong>Dup-claim prevention:</strong> DUMMY_A (prio 10, Bound) + DUMMY_B (prio 20, probe asserts it is never called for that device) — assert the device is skipped once Claimed.</li>
+  <li><strong>Priority / specific-beats-generic:</strong> DUMMY_SPECIFIC(VendorDevice, prio 10, Declined) + DUMMY_GENERIC(ClassOnly, prio 200, Bound) — assert specific is offered first (Declined), then generic Binds.</li>
+  <li><strong>Deferred substrate:</strong> DUMMY_DEFER returns Deferred round 1, Bound round 2 — assert it ends Bound.</li>
+  <li><strong>Index correctness:</strong> unit-test <code>MatchIndex::build</code> + <code>candidates_for</code> over a synthetic slice (runs in-QEMU as an <code>stest!</code>): priority-sorted, dedup'd, each candidate exactly once.</li>
+  <li><strong>Stack gate:</strong> after build, confirm <code>pci_probe_drivers</code> + <code>MatchIndex::build</code> stay &lt; 2048&nbsp;B.</li>
+</ul>
+
+<h4>Risks</h4>
+<ul class="tight">
+  <li><code>candidates_for</code> must dedup driver indices — a driver with both a <code>VendorDevice</code> and a <code>VendorClass</code> arm would otherwise probe twice. Dedup in the sorted merge or via a small seen-set.</li>
+  <li>The probe return-type change touches every existing <code>pci_driver!</code> probe fn (wrap success as <code>Ok(Bound(&hellip;))</code>, change the arg to <code>&amp;mut BoundDevice</code>) — mechanical but wide across virtio_blk/net/gpu/i2c-lpss/xe.</li>
+  <li><code>KBox&lt;dyn DriverInstance&gt;</code> introduces a vtable per binding. Given the MetaSlot vtable-identity footgun, consider an opaque <code>KBox&lt;()&gt;</code> + typed <code>remove</code> fn-pointer instead of <code>dyn</code> — flagged for the implementer (the slot type is registry-local and changeable).</li>
+</ul>
+</div>
+</section>
+
+<!-- ============================ PHASE 3 ============================ -->
+<section id="phase3">
+<div class="phase p3">
+<h3>Phase 3 &mdash; Managed Resources (devres) + DMA Base Wiring + MSI-X Lift <span class="badge b-build">BUILD</span> <span class="badge b-wire">WIRE</span></h3>
+<div class="metarow">
+  <span><b>Effort:</b> <span class="badge b-eff">M</span></span>
+  <span><b>Risk:</b> Low-Med</span>
+  <span><b>Couples to:</b> Phase 2 split-lock (hard prereq)</span>
+</div>
+
+<h4>Goal</h4>
+<p>Give <code>probe()</code> a single safe <code>BoundDevice</code> capability that vends RAII <code>Mmio</code>/<code>IrqBinding</code>/<code>Dma</code> resources, all auto-released on probe-failure (and on future unbind), with zero unsafe in the driver crate. Wire a default identity/passthrough <code>IommuMapper</code> at boot so <code>DmaCoherent</code> gains its first live caller for <em>new</em> drivers — without migrating the working virtio raw-phys data path. Lift the MSI-X <em>setup orchestration</em> out of virtio into a shared <code>driver_core::msi</code> that <em>reuses the existing</em> <span class="fileref">drivers/src/msix.rs</span>/<span class="fileref">drivers/src/msi.rs</span>/<span class="fileref">drivers/src/msi_common.rs</span> primitives so a non-virtio GPU gets MSI-X the same way. Preserve framekernel default-deny (Inv. 6) for everyone who doesn't opt in.</p>
+
+<h4>What it unblocks</h4>
+<p>Leak-free probe teardown (no hand-rolled <code>free_page_frame</code> at each error site); a place for unbind to run; <code>DmaCoherent</code> usable by any new driver; the first non-virtio MSI-X driver.</p>
+
+<h4>Tasks</h4>
+<ul class="tasklist">
+  <li><span class="badge b-build">BUILD</span> <code>slopos-ostd::dev::Devres</code> — a LIFO-ordered, type-erased owned-resource bag (<code>KVec&lt;KBox&lt;dyn ResourceObject&gt;&gt;</code>) whose Drop drops attached resources in reverse attach order.</li>
+  <li><span class="badge b-build">BUILD</span> <code>slopos-ostd::dev::BoundDevice</code> capability — vends <code>map_bar</code>/<code>msix_table</code>/<code>request_msix</code>/<code>alloc_dma_coherent</code>/<code>alloc_dma_stream</code>, each acquiring via an ostd primitive then <code>res.attach()</code>.</li>
+  <li><span class="badge b-build">BUILD</span> <code>IrqLine::register_callback_owned(self, F) -&gt; OwnedIrq</code> — pairs the line + handle with a manual Drop (handle then line) to replace the virtio <code>mem::forget</code> dance.</li>
+  <li><span class="badge b-wire">WIRE</span> <code>IdentityMapper</code> (iova == phys, unmap no-op) + <code>register_identity_dma_mapper(&amp;BspToken)</code> from a <code>boot_init!</code> step at priority ~78 (after memory@30, before pci_init@80).</li>
+  <li><span class="badge b-refine">REFINE</span> move the MSI-X allocate&rarr;configure&rarr;register&rarr;enable <em>orchestration</em> from <span class="fileref">virtio/pci.rs</span> into <code>driver_core::msi::setup_msix</code>/<code>setup_interrupts</code> as a thin layer over the existing <code>msix_configure</code> (<span class="fileref">msix.rs:357</span>) / <code>msi_configure</code> (<span class="fileref">msi.rs:166</span>) and shared LAPIC format (<span class="fileref">msi_common.rs</span>); virtio's <code>try_setup_msix</code> becomes a thin adapter preserving <code>VirtioMsixState</code>'s shape. <strong>Do not introduce a third MSI abstraction.</strong></li>
+</ul>
+
+<h4>API sketch</h4>
+<pre><code>// slopos-ostd/src/dev/devres.rs — type-erased LIFO owned-resource bag
+pub trait ResourceObject: Send + Sync + 'static {}
+impl&lt;T: Send + Sync + 'static&gt; ResourceObject for T {}
+
+pub struct Devres { cells: KVec&lt;KBox&lt;dyn ResourceObject&gt;&gt; }
+impl Devres {
+    pub fn new() -&gt; Self;
+    /// Attach an owned resource; returns a borrowed view valid for &amp;self.
+    pub fn attach&lt;T: Send + Sync + 'static&gt;(&amp;mut self, res: T) -&gt; Result&lt;&amp;T, DevresError&gt;;
+}
+impl Drop for Devres { fn drop(&amp;mut self) { /* KVec drops cells LIFO */ } }
+
+// slopos-ostd/src/dev/bound.rs — the capability handed to probe (SAFE wrapper)
+pub struct BoundDevice&lt;'d&gt; { info: &amp;'d PciDeviceInfo, res: &amp;'d mut Devres }
+impl&lt;'d&gt; BoundDevice&lt;'d&gt; {
+    pub fn info(&amp;self) -&gt; &amp;PciDeviceInfo;
+    pub fn map_bar(&amp;mut self, bar: u8, offset: u32, len: usize) -&gt; Result&lt;Mmio&lt;'_&gt;, BoundError&gt;;
+    // Discover + map the device's MSI-X capability/table from its BARs. The driver
+    // does NOT supply a free `table` variable — request_msix is self-sufficient given
+    // &amp;mut self; entry_idx selects the vector slot.
+    pub fn msix_table(&amp;mut self) -&gt; Result&lt;&amp;MsixTable, BoundError&gt;;
+    pub fn request_msix&lt;F&gt;(&amp;mut self, entry_idx: u16, handler: F)
+        -&gt; Result&lt;&amp;IrqBinding, BoundError&gt;
+        where F: Fn(&amp;IrqContext&lt;'_&gt;) + Send + Sync + 'static;
+    pub fn alloc_dma_coherent(&amp;mut self, npages: usize) -&gt; Result&lt;&amp;DmaCoherent, BoundError&gt;;
+    pub fn alloc_dma_stream(&amp;mut self, npages: usize, dir: DmaDirection)
+        -&gt; Result&lt;&amp;DmaStream, BoundError&gt;;
+}
+
+// slopos-ostd/src/mm/dma.rs — gives DmaCoherent its first live caller.
+// IdentityMapper + register_identity_dma_mapper live ALONGSIDE the existing
+// register_iommu_mapper (dma.rs:160) and current_iommu_mapper.
+struct IdentityMapper;
+impl IommuMapper for IdentityMapper {
+    fn map(&amp;self, phys: PhysAddr, _size: usize, _dir: DmaDirection) -&gt; Result&lt;u64, DmaError&gt; {
+        Ok(phys.as_u64())            // identity: IOVA == phys
+    }
+    fn unmap(&amp;self, _iova: u64, _size: usize) {}   // nothing to tear down
+}
+
+// The existing one-shot entry point requires a `&'static &'static dyn IommuMapper`
+// storage slot and asserts no double-register (dma.rs:160-170):
+//   pub fn register_iommu_mapper&lt;'brand&gt;(
+//       _token: &amp;BspToken&lt;'brand&gt;,
+//       slot: &amp;'static &amp;'static dyn IommuMapper,
+//   ) { /* swap; assert prev.is_null() at dma.rs:168 */ }
+//
+// So the identity wrapper owns its own promoted statics and forwards:
+static IDENTITY: IdentityMapper = IdentityMapper;
+static IDENTITY_SLOT: &amp;'static dyn IommuMapper = &amp;IDENTITY;
+pub fn register_identity_dma_mapper&lt;'brand&gt;(token: &amp;BspToken&lt;'brand&gt;) {
+    register_iommu_mapper(token, &amp;IDENTITY_SLOT);   // single seam; double-register asserts (dma.rs:168)
+}</code></pre>
+
+<h4>Algorithm (resource lifecycle)</h4>
+<pre><code>1. Registry creates a per-device binding slot containing an empty Devres (in the Phase-2
+   split-out claimed_by table, NOT on the probe-loop stack).
+2. Registry builds BoundDevice { info: &amp;devices[idx], res: &amp;mut slot.devres } and calls probe.
+3. Each vend call does ONE fallible acquisition then res.attach(resource):
+   a. attach heap-boxes via KBox::try_new (resource rvalue never bloats probe's frame),
+      unsizes to KBox&lt;dyn ResourceObject&gt;, pushes the cell, returns a &amp;T reborrow.
+   b. On try_new/try_push failure the resource's own Drop runs immediately -&gt; no leak.
+4. PROBE-FAILURE: probe returns Err. Registry drops the slot's Devres. KVec drops cells LIFO:
+   DmaCoherent.unmap -&gt; IrqBinding(handle then line) -&gt; IoMem(no-op today). Device stays offerable.
+5. PROBE-SUCCESS: registry moves Binding AND the populated Devres into the claimed_by slot.
+   Store Binding ABOVE Devres so on a FUTURE unbind the driver Drop (quiesce: mask IRQs,
+   stop queues) runs BEFORE DmaCoherent.unmap races in-flight DMA.
+
+IDENTITY MAPPER &amp; DEFAULT-DENY:
+6. A boot_init! step at ~prio 78 calls register_identity_dma_mapper(token); from there
+   current_iommu_mapper() returns Some and DmaCoherent::alloc no longer hits NotInitialised
+   (was the always-taken branch at dma.rs:224).
+7. Default-deny PRESERVED: (a) registered exactly ONCE — register_iommu_mapper's existing
+   assert at dma.rs:168 (`assert!(prev.is_null(), "...called twice")`) IS the single-seam
+   guarantee; (b) a driver that never calls alloc_dma_* touches no DMA. The mapper turns
+   "no policy (hard deny)" into "passthrough policy" (QEMU has no HW to deny against). A future
+   VT-d mapper swaps the slot's IommuMapper at the SAME single seam.
+8. NON-MIGRATION of virtio: under identity-mapping iova==phys -&gt; zero runtime difference; we do
+   NOT route virtio queues through DmaCoherent (churn + regression risk on the only working path).
+   New drivers opt in; virtio is left alone until a real VT-d driver justifies it.</code></pre>
+
+<h4>Framekernel notes</h4>
+<ul class="tight">
+  <li>All unsafe stays in ostd. <code>Devres::attach</code>'s type-erasure is an unsizing coercion (safe, no <code>unsafe</code>); the <code>&amp;T</code> reborrow uses the existing <code>dev::FromRawPtr</code>. The identity mapper's map/unmap are pure arithmetic. The driver crate touches hardware only through <code>BoundDevice</code>.</li>
+  <li>New ostd primitive <code>OwnedIrq</code>: drops the <strong>handle (clear dispatch) strictly before the line (free vector)</strong> — the correct order, encapsulated, no <code>forget</code>.</li>
+  <li>2&nbsp;KiB gate: <code>BoundDevice</code> is two references (~16&nbsp;B); every resource is heap-boxed inside <code>attach</code>; <code>Devres</code> lives in the registry slot, not on the loop stack.</li>
+  <li><strong>Lock coupling to Phase 2:</strong> <code>attach</code> calls <code>KBox::try_new</code> (heap). Per the slab-across-LUF-drain rule, this must NOT run under an IRQ-off cli-lock. The Phase-2 split-lock already removes <code>ENUM_STATE</code> from the probe critical section; extend that so the heap-allocating <code>attach</code> also runs lock-free. Probe must never re-lock <code>ENUM_STATE</code>.</li>
+</ul>
+
+<h4>Files touched</h4>
+<table>
+  <thead><tr><th>Path</th><th>Change</th></tr></thead>
+  <tbody>
+    <tr><td><span class="fileref">slopos-ostd/src/dev/devres.rs</span></td><td><span class="badge b-build">BUILD</span> NEW — Devres bag, ResourceObject blanket trait, attach(), LIFO Drop, DevresError.</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/dev/bound.rs</span></td><td><span class="badge b-build">BUILD</span> NEW — BoundDevice + Mmio/IrqBinding/BoundError; map_bar/msix_table/request_msix/alloc_dma_* vend methods.</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/dev/mod.rs</span></td><td><span class="badge b-refine">REFINE</span> re-export devres + bound; keep FromRawPtr (used by attach's reborrow).</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/irq/line.rs</span></td><td><span class="badge b-build">BUILD</span> OwnedIrq + IrqLine::register_callback_owned (encapsulates the forget ordering).</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/mm/dma.rs</span></td><td><span class="badge b-wire">WIRE</span> add IdentityMapper + IDENTITY/IDENTITY_SLOT statics + register_identity_dma_mapper forwarding to the existing register_iommu_mapper(:160).</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/mm/mod.rs</span></td><td><span class="badge b-refine">REFINE</span> <code>pub use dma::register_identity_dma_mapper</code>.</td></tr>
+    <tr><td><span class="fileref">boot/src/boot_drivers.rs</span></td><td><span class="badge b-wire">WIRE</span> boot_init! step at ~prio 78 calling register_identity_dma_mapper(token).</td></tr>
+    <tr><td><span class="fileref">drivers/src/driver_core/msi.rs</span></td><td><span class="badge b-build">BUILD</span> NEW — setup_msix/setup_interrupts orchestration over the existing msix.rs/msi.rs/msi_common.rs; generic over BoundDevice + handler; attaches OwnedIrq to Devres.</td></tr>
+    <tr><td><span class="fileref">drivers/src/driver_core/mod.rs</span></td><td><span class="badge b-build">BUILD</span> NEW module re-exporting msi; future home for shared registry/Bus seams.</td></tr>
+    <tr><td><span class="fileref">drivers/src/virtio/pci.rs</span></td><td><span class="badge b-refine">REFINE</span> reduce try_setup_msix/try_setup_msi/setup_interrupts to thin adapters; drop the per-queue mem::forget leak.</td></tr>
+    <tr><td><span class="fileref">drivers/src/pci.rs</span></td><td><span class="badge b-refine">REFINE</span> binding slot stores <code>BindingSlot{binding, devres}</code> (Binding above Devres); probe receives <code>&amp;mut BoundDevice</code>; on Err drop devres, on Ok keep it.</td></tr>
+  </tbody>
+</table>
+
+<h4>Testability <span class="badge b-eff">High</span></h4>
+<ul class="tight">
+  <li><strong>devres LIFO release:</strong> a <code>tests=on</code> dummy driver map_bar + alloc_dma_coherent + request_msix on a real virtio device, then returns Err — assert (a) the IRQ vector returns to <code>IrqAllocator</code>, (b) DMA frames freed (free-count delta == 0), (c) no double-free.</li>
+  <li><strong>devres success + drop order:</strong> probe returns Ok; assert the vector is NOT re-allocatable; then simulated-unbind drops the slot and a sentinel resource proves Binding-before-Devres ordering.</li>
+  <li><strong>identity mapper:</strong> <code>DmaCoherent::alloc(2)</code> returns Ok with <code>iova() == phys_base()</code>; with the mapper reset (<code>reset_for_test</code>) it returns <code>NotInitialised</code> (proves default-deny still holds before wiring).</li>
+  <li><strong>MSI-X lift equivalence:</strong> existing virtio-blk/net/gpu interrupt-delivery tests must pass unchanged (the adapter keeps <code>VirtioMsixState</code> identical) — the behavior-preserving regression guard.</li>
+</ul>
+
+<h4>Risks</h4>
+<ul class="tight">
+  <li><code>IoMem</code> has NO Drop today (window persists kernel-lifetime). <code>map_bar</code>'s <code>Mmio</code> cannot actually unmap the VA on probe-failure — devres releases the IoMem <em>cell</em> (handle), not the VA mapping, until ostd grows recyclable-VA unmap. VA leak only, no UAF; do not claim full BAR-VA reclaim in Phase 3. <strong>Bound the leak:</strong> the Phase-2 deferred pass is N=1 and the Phase-5 fixpoint must cap total retries per (driver,device) — a driver that maps a BAR then fails on every retry would otherwise leak one BAR-VA window per attempt. Until recyclable-VA exists, prefer <code>map_bar</code> <em>after</em> the steps most likely to defer, and treat the retry cap as the VA-leak bound.</li>
+  <li>Heap alloc inside <code>attach</code> under any IRQ-off lock would risk the slab-across-LUF-drain deadlock — couples Phase 3 to the Phase 2 split-lock.</li>
+  <li>Getting <code>OwnedIrq</code>'s manual Drop order wrong (line before handle) reintroduces a use-after-free in IRQ dispatch.</li>
+  <li>Loudly document the virtio non-migration at the queue-alloc site so a future "tidy unification" doesn't regress the only working data path.</li>
+</ul>
+</div>
+</section>
+
+<!-- ============================ PHASE 4 ============================ -->
+<section id="phase4">
+<div class="phase p4">
+<h3>Phase 4 &mdash; Unified Bus/Device Model (PCI + gated Platform/ACPI) <span class="badge b-build">BUILD</span> <span class="badge b-future">FUTURE</span></h3>
+<div class="metarow">
+  <span><b>Effort:</b> <span class="badge b-eff">XL</span></span>
+  <span><b>Risk:</b> Med</span>
+  <span><b>Gate:</b> a concrete second platform device (GPIO/SPI/USB or a deferred-probe parent-bus edge)</span>
+</div>
+
+<h4>Goal</h4>
+<p>Unify PCI and a future ACPI-matched <code>platform_driver!</code> at the <em>concept</em> level under one <code>Bus</code> trait in ostd — without merging link sections or inverting any crate dependency edge. One generic <code>probe_bus&lt;B&gt;</code> matchmaker drives both. This makes the new-driver developer template (Section 6) bus-agnostic and proves the base is "right" by having <code>xe</code> register like everything else.</p>
+
+<h4>What it unblocks</h4>
+<p>Declarative platform/ACPI device binding; removal of hand-wired boot steps for device drivers (e.g. the magic priority-82 touchpad); scaling to many platform devices. Gated on a concrete second consumer — until then the explicit-priority <code>boot_init!</code> mechanism already handles the actual device count (deliberate YAGNI line).</p>
+
+<h4>Tasks</h4>
+<ul class="tasklist">
+  <li><span class="badge b-build">BUILD</span> <code>slopos-ostd::dev::Bus</code> trait (associated <code>Device</code>/<code>MatchKey</code>/<code>DriverEntry</code> + <code>NAME</code>/<code>drivers</code>/<code>device_count</code>/<code>matches</code>/<code>priority</code>/<code>probe</code>).</li>
+  <li><span class="badge b-build">BUILD</span> generic <code>probe_bus&lt;B&gt;</code> matchmaker + <code>ClaimTable</code> (separate-locked claimed_by per (bus,idx) + deferred queue) + <code>priority_order</code> — replacing the PCI-specific loop with a reusable one.</li>
+  <li><span class="badge b-refine">REFINE</span> <code>impl Bus for PciBus</code> over the Phase-2 <code>PciDriverEntry</code>/<code>PciMatch</code> (PCI becomes the first instance of the generic loop).</li>
+  <li><span class="badge b-future">FUTURE</span> add a gated <code>.platform_registry</code> section to <span class="fileref">link.ld</span> mirroring <code>.driver_registry</code> (74-78); <code>PlatformDriverEntry</code> + <code>AcpiId</code> + <code>impl Bus for PlatformBus</code> matched on <code>_HID</code>/<code>_CID</code> via the existing focused DSDT/AML walker in <code>slopos-acpi</code>.</li>
+  <li><span class="badge b-future">FUTURE</span> migrate the PS/2 / I2C-HID touchpad off the priority-82 <code>boot_init!</code> step onto deferred-probe; keep <code>boot_init!</code> for the ~12 true platform steps.</li>
+</ul>
+
+<h4>API sketch</h4>
+<pre><code>// slopos-ostd/src/dev/bus.rs — the unifying abstraction (pure-safe glue)
+pub trait Bus: 'static {
+    type Device: Copy + 'static;        // e.g. PciDeviceInfo
+    type MatchKey: 'static;             // e.g. PciMatch (const-constructible)
+    type DriverEntry: 'static;          // e.g. PciDriverEntry (#[repr(C)] link-section static)
+    const NAME: &amp;'static str;           // "pci" / "platform"
+    fn drivers() -&gt; &amp;'static [Self::DriverEntry];
+    fn device_count() -&gt; usize;                              // index-by-usize; NEVER copy the array
+    fn matches(e: &amp;Self::DriverEntry, idx: usize) -&gt; bool;   // pure data
+    fn priority(e: &amp;Self::DriverEntry) -&gt; i32;
+    fn probe(e: &amp;Self::DriverEntry, idx: usize) -&gt; Result&lt;Binding, ProbeOutcome&gt;;
+}
+
+// slopos-ostd/src/dev/bind.rs — ONE bus-agnostic matchmaker.
+// BSP-only at boot; SMP-reentrant for the Phase-5 hotplug rescan (the ClaimTable
+// locks are real SpinLocks acquired one-at-a-time, never nested across buses).
+pub fn probe_bus&lt;B: Bus&gt;(claims: &amp;ClaimTable) {
+    let order = priority_order::&lt;B&gt;();          // KVec&lt;u16&gt; of entry indices, sorted once
+    for &amp;ei in order.iter() {
+        let e = &amp;B::drivers()[ei as usize];
+        for idx in 0..B::device_count() {
+            if claims.is_claimed(B::NAME, idx) { continue; }   // one driver per device
+            if !B::matches(e, idx)            { continue; }
+            match B::probe(e, idx) {
+                Ok(b)                       =&gt; claims.record(B::NAME, idx, b),  // by index, POST-probe
+                Err(ProbeOutcome::Declined) =&gt; {}                              // arbiter loss: stay passive
+                Err(ProbeOutcome::Deferred) =&gt; claims.defer(B::NAME, ei, idx), // future fixpoint
+                Err(ProbeOutcome::Failed(why)) =&gt; klog_warn!(..),
+            }
+        }
+    }
+}</code></pre>
+
+<h4>Framekernel notes</h4>
+<ul class="tight">
+  <li>The <code>Bus</code> trait, <code>probe_bus</code>, and the macros are pure-safe glue; all unsafe lives in the ostd primitives <code>BoundDevice</code> wraps (<code>MmioRegion</code>, <code>IrqAllocator::alloc</code>, <code>DmaCoherent::alloc</code>).</li>
+  <li>Link sections stay <strong>separate</strong> (not merged) so each bus carries its own <code>#[repr(C)]</code> entry type without a tagged union; the gated <code>.platform_registry</code> mirrors <code>.driver_registry</code> with its own <code>__start_</code>/<code>__stop_</code> brackets.</li>
+  <li>DCE note: <code>#[used]</code> defeats intra-crate DCE but does NOT force an rlib member to link; a future per-subsystem crate split needs <code>KEEP</code> + <code>-u&lt;sym&gt;</code>/<code>--whole-archive</code> per driver archive (the Asterinas/RfL idiom). Sequencing question: introduce <code>Bus</code> in Phase 2 (its first payoff is binding/claim) or Phase 4 — this plan recommends folding the generic <code>probe_bus&lt;B&gt;</code> shape in at Phase 4 once PCI's binding is proven.</li>
+</ul>
+
+<h4>Files touched</h4>
+<table>
+  <thead><tr><th>Path</th><th>Change</th></tr></thead>
+  <tbody>
+    <tr><td><span class="fileref">slopos-ostd/src/dev/bus.rs</span></td><td><span class="badge b-build">BUILD</span> NEW — Bus trait.</td></tr>
+    <tr><td><span class="fileref">slopos-ostd/src/dev/bind.rs</span></td><td><span class="badge b-build">BUILD</span> NEW — probe_bus + ClaimTable + ProbeOutcome + priority_order.</td></tr>
+    <tr><td><span class="fileref">drivers/src/pci.rs</span></td><td><span class="badge b-refine">REFINE</span> <code>impl Bus for PciBus</code>; route <code>pci_probe_drivers</code> through <code>probe_bus::&lt;PciBus&gt;</code>.</td></tr>
+    <tr><td><span class="fileref">link.ld</span></td><td><span class="badge b-future">FUTURE</span> GATED — add <code>.platform_registry</code> with start/stop brackets, mirroring :74-78.</td></tr>
+    <tr><td><span class="fileref">drivers/src/platform.rs</span></td><td><span class="badge b-future">FUTURE</span> GATED — PlatformDriverEntry + AcpiId + <code>impl Bus for PlatformBus</code> + <code>platform_driver!</code> macro; touchpad migrates off boot_init!.</td></tr>
+  </tbody>
+</table>
+
+<h4>Testability <span class="badge b-eff">Partial</span></h4>
+<p>The BASE machinery (Bus trait, probe_bus, ClaimTable) is fully QEMU-testable via the existing virtio path. PS/2 is QEMU-testable; the I2C-HID touchpad is HW-only. ACPI matching depends on the existing focused DSDT/AML walker correctly surfacing <code>_HID</code>/<code>_CID</code>.</p>
+
+<h4>Risks</h4>
+<ul class="tight">
+  <li>ACPI matching depends on <code>slopos-acpi</code>'s focused DSDT/AML walker; the touchpad deferred-probe parent-bus edge must actually resolve or the touchpad never binds.</li>
+  <li>Cross-crate split risk (if ever pursued): a per-subsystem rlib nobody names is silently DCE-dropped &rarr; driver disabled with NO error; requires <code>-u</code>/<code>--whole-archive</code> force-link.</li>
+</ul>
+</div>
+</section>
+
+<!-- ============================ PHASE 5 ============================ -->
+<section id="phase5">
+<div class="phase p5">
+<h3>Phase 5+ &mdash; Deferred-Probe Queue, Hotplug, Unbind, More Buses <span class="badge b-future">FUTURE</span></h3>
+<div class="metarow">
+  <span><b>Effort:</b> <span class="badge b-eff">XL</span></span>
+  <span><b>Risk:</b> Low now (additive on §1&ndash;3 foundations)</span>
+</div>
+<h4>Goal &amp; tasks</h4>
+<p>Everything here is future-additive precisely because Phases 1&ndash;3 designed for it. No work now; the contracts exist.</p>
+<ul class="tasklist">
+  <li><span class="badge b-future">FUTURE</span> Retry-to-fixpoint deferred-probe queue (the Phase-2 bounded N=1 pass generalises; the <code>(drv_i, dev_idx)</code> worklist shape is already forward-compatible). Must carry a per-(driver,device) retry cap so the IoMem-has-no-Drop VA leak is bounded (one BAR-VA window per failed attempt — see Phase 3 risks).</li>
+  <li><span class="badge b-future">FUTURE</span> <code>remove</code> fn on the binding (the slot already stores Binding above Devres so driver-quiesce-then-resource-release drop order is correct).</li>
+  <li><span class="badge b-future">FUTURE</span> Hot-add/rescan + mid-session GPU&rarr;GPU scanout re-claim: add a <code>quiesce</code> fn-pointer to <code>ScanoutProvider</code> + compositor-park coordination (the two-phase claim/commit API makes this additive). These rescans run post-SMP-online, so <code>probe_bus</code>'s SMP-reentrant lock discipline (never-nested claim locks) becomes load-bearing here, not at first boot.</li>
+  <li><span class="badge b-future">FUTURE</span> USB / PCIe-hotplug buses via the same <code>Bus</code> trait.</li>
+  <li><span class="badge b-future">FUTURE</span> Opportunistic virtio&rarr;<code>DmaCoherent</code> migration if/when a real VT-d mapper justifies the churn (the identity-mapper seam at <span class="fileref">slopos-ostd/src/mm/dma.rs:160</span> is the swap point).</li>
+</ul>
+<div class="note"><strong>Why this is cheap later:</strong> binding (§3.1), devres (§3.6), the arbiter's two-phase API, and the Deferred outcome are the prerequisites. Designing them now keeps hotplug an additive step rather than a rewrite. Mid-session re-claim is design-review-gated — confirm no mid-session re-claim exists before building hotplug, since <code>COMPOSITOR_FB_ACQUIRED</code> assumes one scanout for the compositor's lifetime.</div>
+</div>
+</section>
+
+<!-- ============================ NEW DRIVER ============================ -->
+<section id="newdriver">
+<h2>6. Writing a New Driver (the payoff)</h2>
+<p>The whole base exists to make this trivial. After Phases 2&ndash;3, a complete PCI driver is one file plus one <code>pub mod</code> line. No feature flag, no manual boot wiring, no special-casing — the registry records ownership, devres releases resources on any early-return, and the arbiter handles singleton resources.</p>
+
+<h4>The minimal template — entire driver in <code>drivers/src/foo.rs</code></h4>
+<pre><code>use slopos_ostd::dev::BoundDevice;
+use slopos_ostd::mm::heap::KBox;
+use crate::pci::{Binding, PciMatch, ProbeError, ProbeOutcome};
+
+struct FooState { /* regs, irq binding handle, ring buffers... */ }
+impl crate::pci::DriverInstance for FooState {}
+
+fn foo_probe(dev: &amp;mut BoundDevice&lt;'_&gt;) -&gt; Result&lt;ProbeOutcome, ProbeError&gt; {
+    let regs = dev.map_bar(0, 0, 0x1000).map_err(|_| ProbeError::Unsupported)?;
+    // request_msix is self-sufficient: it discovers + maps the MSI-X table from the
+    // device's BARs internally. The driver passes only the entry index + handler —
+    // there is NO free `table` variable to construct.
+    let _irq = dev.request_msix(0, |_ctx| { /* IRQ handler */ })
+                  .map_err(|_| ProbeError::Unsupported)?;
+    // owned state built OFF-STACK via KBox::try_init (2 KiB gate safe):
+    let state = KBox::try_init(FooState::init(regs))
+        .map_err(|_| ProbeError::OutOfMemory)?;
+    // resources auto-release on ANY `?` early-return above (devres LIFO drop);
+    // on Ok the registry records the claim by index, post-return.
+    Ok(ProbeOutcome::Bound(Binding::owning("foo-nic", state)))
+}
+
+crate::pci_driver! {
+    pub static FOO_DRIVER = {
+        name:        "foo-nic",
+        match_table: &amp;[PciMatch::VendorDevice { vendor: 0x1af4, device: 0x1000 }],
+        priority:    128,           // mid; lower binds before a generic fallback
+        probe:       foo_probe,
+    };
+}</code></pre>
+<p>Then one line in <span class="fileref">drivers/src/lib.rs</span>: <code>pub mod foo;</code>. That is the complete driver. The linker gathers <code>FOO_DRIVER</code> into <code>.driver_registry</code>; <code>pci_probe_drivers</code> finds it via the boot-built index, offers it the matching device in priority order, and records the binding.</p>
+<p class="small">If a driver needs the MSI-X table for multiple entries or wants to inspect it first, call <code>let table = dev.msix_table()?;</code> once and pass <code>entry_idx</code> per vector — but the common case above never touches a <code>table</code> binding directly.</p>
+
+<h4>The <code>xe</code> worked example — "just another driver"</h4>
+<p><code>xe</code> proves the base is right: after the deflag it is a single <span class="fileref">drivers/src/xe.rs</span> (the 5-file directory collapses in, register constants become an inner <code>mod regs</code>), with no <code>xe-gpu</code> feature, no manual <code>xe_probe</code> in boot, no <code>VideoBackend::Xe</code>. Its only extra step over <code>foo</code> is that, being a GPU, it claims the scanout singleton:</p>
+<pre><code>fn xe_probe(dev: &amp;mut BoundDevice&lt;'_&gt;) -&gt; Result&lt;ProbeOutcome, ProbeError&gt; {
+    // 1. RESERVE the scanout on PRIORITY ALONE — before any destructive reset.
+    let prio = PRIO_INTEL_XE + cmdline_hint_bump();   // `video=xe` folds into priority
+    match SCANOUT.claim(prio) {
+        ClaimOutcome::Won =&gt; {}                          // proceed
+        // 2. Lost -&gt; stay passive; firmware framebuffer keeps the display. NO hardware touched.
+        _ =&gt; return Ok(ProbeOutcome::Declined),
+    }
+    // 3. WON: map BARs, do xe-roadmap internals (GGTT/forcewake/mode-set — out of scope here).
+    let regs = dev.map_bar(0, 0, XE_MMIO_LEN).map_err(|_| ProbeError::Unsupported)?;
+    let state = KBox::try_init(XeState::init(regs)).map_err(|_| ProbeError::OutOfMemory)?;
+    // 4. COMMIT + install: evict the displaced (firmware) provider via ITS evict fn.
+    SCANOUT.commit_install(XE_SCANOUT_PROVIDER, prio,
+        |displaced| if let Some(p) = displaced { (p.evict)() });
+    Ok(ProbeOutcome::Bound(Binding::owning("intel-xe", state)))
+}
+
+crate::pci_driver! {
+    pub static XE_DRIVER = {
+        name:        "intel-xe",
+        match_table: &amp;[PciMatch::VendorClass { vendor: 0x8086, class: PCI_CLASS_DISPLAY }],
+        priority:    50,            // beats a future generic VGA fallback
+        probe:       xe_probe,
+    };
+}</code></pre>
+<p>Both GPUs (virtio-gpu, xe) are now plain <code>pci_driver!</code>s. <code>set_enabled</code>/<code>GPU_ENABLED</code> and the boot scanout dance are gone; <span class="fileref">boot_drivers.rs:308-410</span> collapses to <code>pci_init(); pci_probe_drivers();</code>. The reserve-before-reset protocol means a losing GPU never tears down the firmware scanout it can't restore.</p>
+</section>
+
+<!-- ============================ RISKS ============================ -->
+<section id="risks">
+<h2>7. Open Questions &amp; Risks</h2>
+
+<h3>Cross-cutting open questions</h3>
+<table>
+  <thead><tr><th style="width:24%">Question</th><th>Recommendation</th></tr></thead>
+  <tbody>
+    <tr><td>Arbiter genericity</td><td>Ship a thin generic <code>SingletonResource&lt;P&gt;</code> with scanout as the sole specialisation now (near-zero cost; pays off at the first boot-console/RTC singleton). Below <code>video</code>, naming no <code>video</code>/<code>drivers</code> symbol. <strong>Resolved.</strong></td></tr>
+    <tr><td>Binding storage</td><td>Typed owned state (zero-cost, RfL probe-returns-Self) in Phase 2; revisit trait-object at Phase-5 unbind. Given the MetaSlot vtable-identity footgun, prefer an opaque <code>KBox&lt;()&gt;</code> + typed <code>remove</code> fn-ptr over <code>dyn</code> if the vtable concerns the implementer. The slot type is registry-local and changeable.</td></tr>
+    <tr><td>DMA mapper</td><td>Wire the identity/passthrough mapper now (gives <code>DmaCoherent</code> a live caller for new drivers) but do NOT migrate the working virtio raw-phys path. New drivers opt in; virtio migrates only when a VT-d driver justifies it. The single swap seam is <code>register_iommu_mapper</code> at <span class="fileref">slopos-ostd/src/mm/dma.rs:160</span>.</td></tr>
+    <tr><td>priority width</td><td><code>u8</code> ascending (lower = earlier), default 128 when omitted — matching the <code>boot_init!</code> integer-priority idiom. Document the default.</td></tr>
+    <tr><td>MSI-X module shape</td><td>Build <code>driver_core::msi</code> as orchestration ONLY, over the existing <code>msix.rs</code> + <code>msi.rs</code> + <code>msi_common.rs</code>. Do not create a third MSI abstraction — virtio's adapter and a future GPU both call the same <code>setup_interrupts</code>. <strong>Resolved.</strong></td></tr>
+    <tr><td>Crate split</td><td>Single <code>slopos-drivers</code> crate now (lowest friction). Per-subsystem crates remain viable via <code>KEEP</code> + <code>-u</code>/<code>--whole-archive</code> — not blocked by DCE. Revisit when compile time hurts. Collapse <code>xe/</code> &rarr; <code>xe.rs</code>.</td></tr>
+    <tr><td>Phase-4 trigger</td><td>Gate <code>platform_driver!</code> on the first driver needing a deferred-probe parent-bus dependency (the thing the magic priority-82 integer currently fakes).</td></tr>
+  </tbody>
+</table>
+
+<h3>Top risks</h3>
+<div class="warn">
+<ul class="tight">
+  <li><b>Boot scanout handoff (Phase 1).</b> Touches <span class="fileref">boot_drivers.rs:357-386</span> and <code>COMPOSITOR_FB_ACQUIRED</code>; eviction must re-point splash/vconsole/GpuControl/mouse-bounds or the boot console disappears on takeover. Reserve-before-reset must be honored by every GPU provider.</li>
+  <li><b>Lock-ordering reasoning (Phase 2).</b> The split-lock safety case rests on an <em>acyclic acquisition graph</em>, not on a numeric level gate: <code>LOCK_LEVEL_RESOURCE</code> is <strong>1</strong> and <code>LOCK_LEVEL_REGISTRY</code> is <strong>2</strong> (<span class="fileref">slopos-ostd/src/sync/lock_graph.rs:99-100</span>), so RESOURCE &lt; REGISTRY numerically — but the levels are advisory rank hints under cycle detection. The real invariant is that <code>pci_device_at</code> releases <code>ENUM_STATE</code> before <code>CLAIMED_BY</code> is taken and the two are never nested. A regression that re-locks <code>ENUM_STATE</code> inside probe deadlocks (non-reentrant SpinLock); copying the device array out blows the 2&nbsp;KiB gate. The split-lock + <code>pci_device_at</code> single-element copy are the load-bearing mitigations.</li>
+  <li><b>devres arena lifetime (Phase 3).</b> If the arena drops at the wrong time, live MMIO/IRQ resources are released out from under a bound driver &rarr; UAF/spurious unmap. <code>OwnedIrq</code> drop order (handle before line) is critical. Heap alloc in <code>attach</code> must run lock-free (couples to Phase 2). <code>IoMem</code> has no Drop yet, so repeated defer-then-fail leaks one BAR-VA window per attempt — cap the retries.</li>
+  <li><b>DMA non-migration (Phase 3).</b> A future "tidy unification" routing virtio through <code>DmaCoherent</code> would regress the only working data path — loudly document the decision at the virtio queue-alloc site.</li>
+  <li><b>ACPI / cross-crate (Phase 4+).</b> ACPI matching depends on the focused DSDT/AML walker; a per-subsystem rlib nobody names is silently DCE-dropped (needs force-link).</li>
+</ul>
+</div>
+</section>
+
+<!-- ============================ ORDER ============================ -->
+<section id="order">
+<h2>8. Recommended Execution Order</h2>
+<ol class="tight">
+  <li><strong>Phase 1 first (arbiter).</strong> It is a standalone static, not part of the registry rewrite, and it directly unblocks the <code>xe</code> deflag's display handoff. The virtio-gpu path live-verifies it. Ships independently.</li>
+  <li><strong>Phase 2 next (match-tables + binding).</strong> The #1 scaling foundation and a hard prerequisite for Phase 3's lock-free <code>attach</code>. Land the split-lock discipline under an explicit "never-nested, acyclic graph" contract (RESOURCE=1 and REGISTRY=2 are advisory ranks, not the gate).</li>
+  <li><strong>Phase 3 (devres + DMA wiring + MSI-X lift).</strong> The real leak-fix win; wire the DMA base via the existing <span class="fileref">dma.rs:160</span> seam but leave the virtio data path alone; orchestrate MSI-X over the existing <code>msix.rs</code>/<code>msi.rs</code>/<code>msi_common.rs</code>.</li>
+  <li><strong>Phase 4 gated</strong> on a concrete second platform device; introduce the generic <code>Bus</code>/<code>probe_bus&lt;B&gt;</code> once PCI's binding is proven.</li>
+  <li><strong>Phase 5+ future-additive.</strong> Deferred-probe fixpoint, hotplug, unbind, more buses, opportunistic DMA migration — all enabled by the foundations laid in 1&ndash;3.</li>
+</ol>
+<p>Throughout: keep one <code>slopos-drivers</code> crate, collapse <code>xe/</code> to <code>xe.rs</code>, re-run <code>check_stack_sizes.sh</code> / <code>check_unsafe_outside_ostd.sh</code> / <code>check_kernel_softfloat.sh</code> after each phase, and gate every test-only dummy driver behind <code>cfg(tests=on)</code> registered from a tests-side helper (the <code>register_test_driver</code> side-table) so it never ships in <code>.driver_registry</code>.</p>
+</section>
+
+<footer>
+  <p>SlopOS driver-framework BASE — foundations only. This document deepens <a href="driver-framework.md">plans/driver-framework.md</a> §3/§5/§7 into an implementation-ready phased plan; <code>xe</code> internals are owned by <a href="xe-driver-roadmap.md">plans/xe-driver-roadmap.md</a>. All code listings are HTML-escaped; the document is self-contained and renders offline. Lock-level, DMA-mapper, and probe-signature facts verified against the live <code>develop</code> tree (lock_graph.rs:99-100; mm/dma.rs:160-170,224; pci.rs:52-82).</p>
+</footer>
+</main>
+</div>
+</body>
+</html>
