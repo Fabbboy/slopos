@@ -189,6 +189,7 @@ const EVT_MODIFIERS: u8 = 14;
 const EVT_PASTE_RESULT: u8 = 15;
 const EVT_ERROR: u8 = 16;
 const EVT_PASTE_READY: u8 = 17;
+const EVT_BUFFER_RELEASE: u8 = 18;
 
 // -- Encode for Request ---------------------------------------------------
 
@@ -205,16 +206,18 @@ impl Encode for Request {
             }
             Request::SurfaceAttach {
                 surface,
-                shm_token,
+                buffer_id,
                 width,
                 height,
+                has_fd,
                 buffer_fd: _,
             } => {
                 let p = put_u8(buf, 0, REQ_SURFACE_ATTACH)?;
                 let p = put_u32(buf, p, surface.raw())?;
-                let p = put_u32(buf, p, *shm_token)?;
+                let p = put_u32(buf, p, *buffer_id)?;
                 let p = put_u32(buf, p, *width)?;
-                put_u32(buf, p, *height)
+                let p = put_u32(buf, p, *height)?;
+                put_bool(buf, p, *has_fd)
             }
             Request::SurfaceDamage {
                 surface,
@@ -338,16 +341,20 @@ impl Decode for Request {
             }
             REQ_SURFACE_ATTACH => {
                 let (surface, p) = get_u32(buf, p)?;
-                let (shm_token, p) = get_u32(buf, p)?;
+                let (buffer_id, p) = get_u32(buf, p)?;
                 let (width, p) = get_u32(buf, p)?;
                 let (height, p) = get_u32(buf, p)?;
-                let buffer_fd = fds.take();
+                let (has_fd, p) = get_bool(buf, p)?;
+                // Pop the ancillary fd ONLY for an fd-bearing attach, so a no-fd
+                // re-select cannot steal a later message's SCM_RIGHTS fd.
+                let buffer_fd = if has_fd { fds.take() } else { None };
                 Ok((
                     Request::SurfaceAttach {
                         surface: SurfaceId::from_raw(surface),
-                        shm_token,
+                        buffer_id,
                         width,
                         height,
+                        has_fd,
                         buffer_fd,
                     },
                     p,
@@ -646,6 +653,11 @@ impl Encode for Event {
                 let p = put_u32(buf, p, *object_id)?;
                 put_u32(buf, p, *code)
             }
+            Event::BufferRelease { surface, buffer_id } => {
+                let p = put_u8(buf, 0, EVT_BUFFER_RELEASE)?;
+                let p = put_u32(buf, p, surface.raw())?;
+                put_u32(buf, p, *buffer_id)
+            }
         }
     }
 }
@@ -827,6 +839,17 @@ impl Decode for Event {
                 let (object_id, p) = get_u32(buf, p)?;
                 let (code, p) = get_u32(buf, p)?;
                 Ok((Event::Error { object_id, code }, p))
+            }
+            EVT_BUFFER_RELEASE => {
+                let (surface, p) = get_u32(buf, p)?;
+                let (buffer_id, p) = get_u32(buf, p)?;
+                Ok((
+                    Event::BufferRelease {
+                        surface: SurfaceId::from_raw(surface),
+                        buffer_id,
+                    },
+                    p,
+                ))
             }
             _ => Err(ProtocolError::MalformedMessage),
         }

@@ -203,7 +203,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 tree::paint_tree(root.as_ref(), &mut ctx);
                 overlays.paint(&mut ctx);
             }
-            win.renderer().present();
+            win.renderer_mut().present();
             needs_repaint = false;
         }
 

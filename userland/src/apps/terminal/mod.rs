@@ -293,6 +293,13 @@ async fn event_loop(
                 Ok(Some(evt)) => evt,
                 _ => break,
             };
+            // The terminal polls the socket directly, so it routes buffer
+            // releases to its renderer itself; otherwise both buffers stay in
+            // flight and the surface falls back to single-buffer updates.
+            if let slopos_protocol::types::Event::BufferRelease { buffer_id, .. } = &evt {
+                surface::release_buffer(*buffer_id);
+                continue;
+            }
             match input::classify(&evt) {
                 CompositorEvent::Key(ascii, scancode) => {
                     match input::encode_key(ascii, scancode, mods) {

@@ -109,10 +109,15 @@ pub fn resize(new_width: u32, new_height: u32) -> bool {
     with_renderer(|renderer| renderer.resize(new_width, new_height).is_ok()).unwrap_or(false)
 }
 
+/// Mark a double-buffer slot reusable after the compositor releases it.
+pub fn release_buffer(buffer_id: u32) {
+    with_renderer(|renderer| renderer.release_buffer(buffer_id));
+}
+
 pub fn present() {
     RENDERER.with(|r| {
-        let r = r.borrow();
-        if let Some(renderer) = r.as_ref() {
+        let mut r = r.borrow_mut();
+        if let Some(renderer) = r.as_mut() {
             renderer.present();
         }
     });

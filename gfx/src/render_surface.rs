@@ -34,10 +34,10 @@ pub trait RenderSurface {
     fn frame(&mut self) -> Option<DrawBuffer<'_>>;
 
     /// Present the completed frame (full surface damage).
-    fn present(&self);
+    fn present(&mut self);
 
     /// Present a sub-region of the frame.
-    fn present_region(&self, x: i32, y: i32, w: i32, h: i32);
+    fn present_region(&mut self, x: i32, y: i32, w: i32, h: i32);
 
     /// Resize the backing buffer to new dimensions.
     ///
@@ -156,11 +156,11 @@ impl RenderSurface for HeadlessSurface {
         Some(buf)
     }
 
-    fn present(&self) {
+    fn present(&mut self) {
         // No-op — headless surfaces have no display to present to.
     }
 
-    fn present_region(&self, _x: i32, _y: i32, _w: i32, _h: i32) {
+    fn present_region(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {
         // No-op.
     }
 
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn headless_present_does_not_panic() {
-        let surface = HeadlessSurface::new(4, 4, PixelFormat::Argb8888).expect("create failed");
+        let mut surface = HeadlessSurface::new(4, 4, PixelFormat::Argb8888).expect("create failed");
         surface.present();
         surface.present_region(0, 0, 2, 2);
     }

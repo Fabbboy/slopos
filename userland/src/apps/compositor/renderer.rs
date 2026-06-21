@@ -10,9 +10,9 @@ use crate::theme::*;
 
 use super::decorations;
 use super::dock::LauncherShelf;
-use super::hover::HoverRegistry;
 use super::menu_bar::SystemBar;
-use super::output::{RenderMode, WINDOW_STATE_MINIMIZED};
+use super::output::WINDOW_STATE_MINIMIZED;
+use super::region::Region;
 use super::surface_cache::ClientSurfaceCache;
 
 const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
@@ -183,6 +183,17 @@ impl Renderer {
         self.output_pitch = pitch;
     }
 
+    /// Composite one frame into `buf`, repainting exactly the damaged,
+    /// non-occluded pixels in z-order.
+    ///
+    /// Walking windows front-to-back, each opaque content box is carved out of
+    /// the still-exposed region, yielding per window the damaged pixels it owns,
+    /// where its shadow may fall, and the background remainder no opaque window
+    /// covers. A window's decorations are confined to that exposed region and its
+    /// shadow to a separate shadow-availability region; both already exclude every
+    /// higher window, so a lower window's chrome can never paint over a window
+    /// stacked above it. `frame_damage` is the precise, disjoint region to
+    /// repaint; a full-output region drives a full redraw.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -194,244 +205,162 @@ impl Renderer {
         mouse_x: i32,
         mouse_y: i32,
         cursor_shape: u8,
-        _hover: &HoverRegistry,
         surface_cache: &mut ClientSurfaceCache,
         system_bar: &mut SystemBar,
         shelf: &mut LauncherShelf,
         active_app_name: &str,
         uptime_secs: u64,
-        force_full: bool,
-        damage_regions: &[DamageRect],
+        frame_damage: &Region,
         hw_cursor: bool,
-    ) -> RenderMode {
+    ) {
         self.ensure_font();
 
-        if force_full {
-            let full_clip = full_screen_clip(buf);
-            // 1. Desktop background
-            if !self.draw_wallpaper(buf, &full_clip) {
-                gfx::fill_rect(
-                    buf,
-                    0,
-                    0,
-                    buf.width() as i32,
-                    buf.height() as i32,
-                    DESKTOP_BG,
-                );
-            }
-
-            // 2. Windows (z-order)
-            for i in 0..window_count {
-                let window = windows[i];
-                if window.state == WINDOW_STATE_MINIMIZED {
-                    continue;
-                }
-                // 2a. Shadow
-                self.draw_window_shadow(buf, &window, &full_clip);
-                // 2b. Content (window.y is the content top from the kernel)
-                self.draw_window_content(buf, &window, &full_clip, surface_cache);
-                // 2c. Decorations (title bar is above window.y)
-                let focused = window.task_id == focused_task;
-                let sig_hovered = window.task_id == signal_hovered_task;
-                let title = title_to_str(&window.title);
-                let frame_y = window.y - TITLE_BAR_HEIGHT;
-                decorations::draw_window_decorations(
-                    buf,
-                    window.x,
-                    frame_y,
-                    window.effective_width(),
-                    window.effective_height(),
-                    title,
-                    focused,
-                    sig_hovered,
-                    self.ttf_font.as_mut(),
-                    Some(full_clip),
-                );
-            }
-
-            // 3. Shelf (dock)
-            shelf.draw(
-                buf,
-                self.output_width,
-                self.output_height,
-                mouse_x,
-                mouse_y,
-                self.ttf_font.as_mut(),
-                Some(full_clip),
-            );
-
-            // 4. System bar (top)
-            system_bar.draw(
-                buf,
-                self.output_width,
-                active_app_name,
-                uptime_secs,
-                self.ttf_font.as_mut(),
-                Some(full_clip),
-            );
-
-            // 5. Cursor (skipped when the hardware overlay owns the pointer)
-            if !hw_cursor {
-                self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, &full_clip);
-            }
-            RenderMode::Full
-        } else if damage_regions.is_empty() {
-            RenderMode::Partial
-        } else {
-            for rect in damage_regions {
-                self.draw_partial_region(
-                    buf,
-                    rect,
-                    windows,
-                    window_count,
-                    focused_task,
-                    signal_hovered_task,
-                    mouse_x,
-                    mouse_y,
-                    surface_cache,
-                    system_bar,
-                    shelf,
-                    active_app_name,
-                    uptime_secs,
-                );
-            }
-            if !hw_cursor {
-                let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
-                for rect in damage_regions {
-                    if intersect_rect(rect, &cursor_rect).is_some() {
-                        self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
-                    }
-                }
-            }
-            RenderMode::Partial
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_partial_region(
-        &mut self,
-        buf: &mut DrawBuffer,
-        damage: &DamageRect,
-        windows: &[UserWindowInfo],
-        window_count: usize,
-        focused_task: u32,
-        signal_hovered_task: u32,
-        mouse_x: i32,
-        mouse_y: i32,
-        surface_cache: &mut ClientSurfaceCache,
-        system_bar: &mut SystemBar,
-        shelf: &mut LauncherShelf,
-        active_app_name: &str,
-        uptime_secs: u64,
-    ) {
-        if !damage.is_valid() {
+        let output_rect = full_screen_clip(buf);
+        // Clip damage to the output; the region is already disjoint so blended
+        // primitives (shadows) never touch a pixel twice.
+        let frame_damage = frame_damage.intersect_rect(&output_rect);
+        if frame_damage.is_empty() {
             return;
         }
 
-        // Confine every primitive drawn for this region to the damage rect.
-        // Decorations (title text, signal buttons), the shelf, and the system
-        // bar draw their full geometry; the scissor clips them to the region
-        // being repainted so a window's chrome can never spill over a window
-        // stacked above it. Background and content blits are already clamped to
-        // `damage` directly; the scissor is redundant but harmless for them.
-        buf.set_scissor(Some(*damage));
-
-        // 1. Desktop background (clipped)
-        if !self.draw_wallpaper(buf, damage) {
-            gfx::fill_rect(
-                buf,
-                damage.x0,
-                damage.y0,
-                damage.x1 - damage.x0 + 1,
-                damage.y1 - damage.y0 + 1,
-                DESKTOP_BG,
-            );
+        // ── Occlusion pass (front-to-back) ──────────────────────────────────
+        let mut order: Vec<usize> = Vec::with_capacity(window_count);
+        for i in 0..window_count {
+            if windows[i].state != WINDOW_STATE_MINIMIZED {
+                order.push(i);
+            }
         }
 
-        // 2. Windows (z-order)
-        for i in 0..window_count {
-            let window = windows[i];
-            if window.state == WINDOW_STATE_MINIMIZED {
-                continue;
-            }
+        // Two independent occlusion accumulators, both walked top→bottom:
+        //  - `exposed`: damaged pixels not yet covered by an opaque content box,
+        //    used for content/decoration visibility and the background remainder.
+        //  - `shadow_avail`: damaged pixels no higher window has already claimed
+        //    a shadow (or frame footprint) over. Each window's shadow region is a
+        //    translucent black blend, so to avoid double-darkening shared gap
+        //    pixels the topmost window owns them; subtracting each window's full
+        //    shadow box keeps every `shadow_vis` mutually disjoint AND keeps a
+        //    lower shadow off a higher window's content (its box ⊇ its content).
+        let mut exposed = frame_damage.clone();
+        let mut shadow_avail = frame_damage.clone();
+        let mut content_vis: Vec<Region> = Vec::with_capacity(order.len());
+        let mut shadow_vis: Vec<Region> = Vec::with_capacity(order.len());
+        content_vis.resize(order.len(), Region::new());
+        shadow_vis.resize(order.len(), Region::new());
 
-            if intersect_rect(damage, &shadow_bounds(&window)).is_some() {
-                self.draw_window_shadow(buf, &window, damage);
-            }
+        for k in (0..order.len()).rev() {
+            let w = &windows[order[k]];
+            let fbox = frame_box(w);
+            let cbox = content_box(w);
+            let sbox = shadow_bounds(w);
 
-            let ew = window.effective_width() as i32;
-            let eh = window.effective_height() as i32;
-            let content_rect = DamageRect {
-                x0: window.x,
-                y0: window.y,
-                x1: window.x + ew - 1,
-                y1: window.y + eh - 1,
-            };
-            if intersect_rect(damage, &content_rect).is_some() {
-                self.draw_window_content(buf, &window, damage, surface_cache);
-            }
+            // Content + decoration area still visible (not under higher opaque
+            // content).
+            content_vis[k] = exposed.intersect_rect(&fbox);
+            // Shadow halo this window owns, minus its own opaque content (which
+            // overwrites it — avoids the seam double-darken).
+            let mut sv = shadow_avail.intersect_rect(&sbox);
+            sv.subtract(&cbox);
+            shadow_vis[k] = sv;
 
-            let frame_y = window.y - TITLE_BAR_HEIGHT;
-            let title_rect = DamageRect {
-                x0: window.x,
-                y0: frame_y,
-                x1: window.x + ew - 1,
-                y1: window.y - 1,
-            };
-            if intersect_rect(damage, &title_rect).is_some() {
-                let focused = window.task_id == focused_task;
-                let sig_hovered = window.task_id == signal_hovered_task;
-                let title = title_to_str(&window.title);
-                decorations::draw_window_decorations(
+            // This window claims its whole shadow/frame footprint, and its opaque
+            // content occludes everything strictly below it.
+            shadow_avail.subtract(&sbox);
+            exposed.subtract(&cbox);
+        }
+        let background_visible = exposed;
+
+        // ── Paint ───────────────────────────────────────────────────────────
+        // 1. Desktop background, only where no opaque window covers it.
+        for rect in background_visible.rects() {
+            if !self.draw_wallpaper(buf, rect) {
+                gfx::fill_rect(
                     buf,
-                    window.x,
-                    frame_y,
-                    window.effective_width(),
-                    window.effective_height(),
-                    title,
-                    focused,
-                    sig_hovered,
-                    self.ttf_font.as_mut(),
-                    Some(*damage),
+                    rect.x0,
+                    rect.y0,
+                    rect.x1 - rect.x0 + 1,
+                    rect.y1 - rect.y0 + 1,
+                    DESKTOP_BG,
                 );
             }
         }
 
-        // 3. Shelf (dock) -- always repaint if damage intersects shelf bounds
-        let shelf_bounds = shelf.bounds();
-        if shelf_bounds.is_valid() && intersect_rect(damage, &shelf_bounds).is_some() {
-            shelf.draw(
-                buf,
-                self.output_width,
-                self.output_height,
-                mouse_x,
-                mouse_y,
-                self.ttf_font.as_mut(),
-                Some(*damage),
-            );
+        // 2. Windows bottom→top: shadow, then content + decorations, each
+        //    clipped to its occlusion-masked visible region.
+        for k in 0..order.len() {
+            let w = windows[order[k]];
+            for rect in shadow_vis[k].rects() {
+                self.draw_window_shadow(buf, &w, rect);
+            }
+            if content_vis[k].is_empty() {
+                continue;
+            }
+            let focused = w.task_id == focused_task;
+            let sig_hovered = w.task_id == signal_hovered_task;
+            let title = title_to_str(&w.title);
+            let frame_y = w.y - TITLE_BAR_HEIGHT;
+            for rect in content_vis[k].rects() {
+                buf.set_scissor(Some(*rect));
+                self.draw_window_content(buf, &w, rect, surface_cache);
+                decorations::draw_window_decorations(
+                    buf,
+                    w.x,
+                    frame_y,
+                    w.effective_width(),
+                    w.effective_height(),
+                    title,
+                    focused,
+                    sig_hovered,
+                    self.ttf_font.as_mut(),
+                    Some(*rect),
+                );
+                buf.set_scissor(None);
+            }
         }
 
-        // 4. System bar (top)
+        // 3. Shelf (dock) + 4. system bar: always-on-top chrome. Each self-clips
+        //    to the passed rect (the dock early-returns when empty), so drawing
+        //    them per damaged rect paints their portion once across the disjoint
+        //    region. The dock is drawn unconditionally because its bounds are
+        //    only known after it has drawn.
         let bar_rect = DamageRect {
             x0: 0,
             y0: 0,
             x1: buf.width() as i32 - 1,
             y1: SYSTEM_BAR_HEIGHT,
         };
-        if intersect_rect(damage, &bar_rect).is_some() {
-            system_bar.draw(
+        for rect in frame_damage.rects() {
+            buf.set_scissor(Some(*rect));
+            shelf.draw(
                 buf,
                 self.output_width,
-                active_app_name,
-                uptime_secs,
+                self.output_height,
+                mouse_x,
+                mouse_y,
                 self.ttf_font.as_mut(),
-                Some(*damage),
+                Some(*rect),
             );
+            if intersect_rect(rect, &bar_rect).is_some() {
+                system_bar.draw(
+                    buf,
+                    self.output_width,
+                    active_app_name,
+                    uptime_secs,
+                    self.ttf_font.as_mut(),
+                    Some(*rect),
+                );
+            }
+            buf.set_scissor(None);
         }
 
-        buf.set_scissor(None);
-
-        // Cursor is drawn once after all partial regions (see render()).
+        // 5. Software cursor (skipped when the hardware overlay owns the pointer).
+        if !hw_cursor {
+            let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
+            for rect in frame_damage.rects() {
+                if intersect_rect(rect, &cursor_rect).is_some() {
+                    self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
+                }
+            }
+        }
     }
 
     /// Rasterize `cursor_shape` into a 64×64 BGRA hardware-cursor image.
@@ -887,6 +816,8 @@ impl Renderer {
 
         let cache_index = match surface_cache.get_or_create_index(
             window.task_id,
+            window.buffer_generation,
+            window.buffer_id,
             window.shm_token,
             buffer_size,
         ) {
@@ -1080,6 +1011,35 @@ fn shadow_bounds(window: &UserWindowInfo) -> DamageRect {
         y0: sy - SHADOW_SPREAD,
         x1: sx + ww - 1 + SHADOW_SPREAD,
         y1: sy + wh - 1 + SHADOW_SPREAD,
+    }
+}
+
+/// The opaque content area of a window (below the title bar). Composited by
+/// overwrite, so it is the window's occluder box: everything strictly below it
+/// in z-order is hidden here.
+fn content_box(window: &UserWindowInfo) -> DamageRect {
+    let ew = window.effective_width() as i32;
+    let eh = window.effective_height() as i32;
+    DamageRect {
+        x0: window.x,
+        y0: window.y,
+        x1: window.x + ew - 1,
+        y1: window.y + eh - 1,
+    }
+}
+
+/// The full window frame: title bar (above `window.y`) plus content area. Used
+/// to bound where a window's content and decorations may paint. The title bar
+/// is deliberately NOT treated as opaque (its rounded corners let the backdrop
+/// show through), so only [`content_box`] is subtracted during occlusion.
+fn frame_box(window: &UserWindowInfo) -> DamageRect {
+    let ew = window.effective_width() as i32;
+    let eh = window.effective_height() as i32;
+    DamageRect {
+        x0: window.x,
+        y0: window.y - TITLE_BAR_HEIGHT,
+        x1: window.x + ew - 1,
+        y1: window.y + eh - 1,
     }
 }
 

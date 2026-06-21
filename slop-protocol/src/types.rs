@@ -145,12 +145,19 @@ pub enum Request {
     },
     SurfaceAttach {
         surface: SurfaceId,
-        shm_token: u32,
+        /// Client-assigned buffer slot (0 or 1 for double-buffering). The fd is
+        /// sent via SCM_RIGHTS only the first time a slot is used; subsequent
+        /// attaches re-select an already-registered buffer by id, with no fd.
+        buffer_id: u32,
         width: u32,
         height: u32,
+        /// Whether this attach carries an SCM_RIGHTS fd. Encoded explicitly so the
+        /// decoder pops the ancillary fd FIFO only for fd-bearing attaches; a
+        /// no-fd re-select must never pop a later message's fd.
+        has_fd: bool,
         /// File descriptor received via SCM_RIGHTS (memfd-backed buffer).
-        /// `None` when the attach was decoded from a message without an
-        /// accompanying fd, or on the send side before transmission.
+        /// `None` when re-selecting an already-registered buffer slot, or on the
+        /// send side before transmission.
         buffer_fd: Option<OwnedFd>,
     },
     SurfaceDamage {
@@ -267,6 +274,14 @@ pub enum Event {
     FrameDone {
         surface: SurfaceId,
         timestamp_ms: u32,
+    },
+
+    /// A buffer slot the compositor has finished compositing from and the client
+    /// may draw into again. Sent when a newer buffer for the surface is
+    /// committed, so the client never overwrites a buffer still being read.
+    BufferRelease {
+        surface: SurfaceId,
+        buffer_id: u32,
     },
 
     // -- Toplevel ---------------------------------------------------------

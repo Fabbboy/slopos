@@ -148,17 +148,36 @@ impl Window {
     /// Poll protocol events from the compositor socket.
     ///
     /// Returns the number of events written (always <= `buf.len()`).
+    ///
+    /// `BufferRelease` events are consumed internally — they drive the
+    /// double-buffer reuse bookkeeping in [`SoftSurface`] and are never surfaced
+    /// to the application.
     pub fn poll_protocol_events(&mut self, buf: &mut [ProtocolEvent]) -> usize {
-        let mut client = self.handle.borrow_client();
+        // Buffer releases are collected and applied after the client borrow is
+        // dropped, so the renderer (a sibling field) can be borrowed mutably.
+        let mut released = [0u32; 8];
+        let mut released_n = 0usize;
         let mut count = 0;
-        while count < buf.len() {
-            match client.poll_event() {
-                Ok(Some(evt)) => {
-                    buf[count] = evt;
-                    count += 1;
+        {
+            let mut client = self.handle.borrow_client();
+            while count < buf.len() {
+                match client.poll_event() {
+                    Ok(Some(ProtocolEvent::BufferRelease { buffer_id, .. })) => {
+                        if released_n < released.len() {
+                            released[released_n] = buffer_id;
+                            released_n += 1;
+                        }
+                    }
+                    Ok(Some(evt)) => {
+                        buf[count] = evt;
+                        count += 1;
+                    }
+                    _ => break,
                 }
-                _ => break,
             }
+        }
+        for &buffer_id in &released[..released_n] {
+            self.renderer.release_buffer(buffer_id);
         }
         count
     }

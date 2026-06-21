@@ -102,27 +102,14 @@ impl Client {
         Ok(SurfaceId::from_raw(id))
     }
 
-    pub fn surface_attach(
+    /// Register a memfd-backed buffer in slot `buffer_id`, passing the fd via
+    /// SCM_RIGHTS. Sent the first time each double-buffer slot is used; the
+    /// compositor maps and remembers it. Re-selecting an already-registered
+    /// slot uses [`surface_select_buffer`](Self::surface_select_buffer) (no fd).
+    pub fn surface_attach_buffer(
         &mut self,
         surface: SurfaceId,
-        shm_token: u32,
-        width: u32,
-        height: u32,
-    ) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::SurfaceAttach {
-            surface,
-            shm_token,
-            width,
-            height,
-            buffer_fd: None,
-        })
-    }
-
-    /// Attach a memfd-backed buffer to a surface, passing the fd via SCM_RIGHTS.
-    /// The shm_token field is set to 0 (ignored by the compositor — fd is authoritative).
-    pub fn surface_attach_fd(
-        &mut self,
-        surface: SurfaceId,
+        buffer_id: u32,
         memfd_fd: i32,
         width: u32,
         height: u32,
@@ -130,13 +117,34 @@ impl Client {
         self.conn.send_with_fd(
             &Request::SurfaceAttach {
                 surface,
-                shm_token: 0, // Placeholder — compositor uses the received fd
+                buffer_id,
                 width,
                 height,
+                has_fd: true,
                 buffer_fd: None, // fd travels via SCM_RIGHTS ancillary data, not in struct
             },
             memfd_fd,
         )
+    }
+
+    /// Re-select an already-registered buffer slot for the next commit, without
+    /// re-sending the fd. The compositor reuses the mapping it kept when the
+    /// slot was first registered via [`surface_attach_buffer`].
+    pub fn surface_select_buffer(
+        &mut self,
+        surface: SurfaceId,
+        buffer_id: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ProtocolError> {
+        self.conn.send(&Request::SurfaceAttach {
+            surface,
+            buffer_id,
+            width,
+            height,
+            has_fd: false,
+            buffer_fd: None,
+        })
     }
 
     pub fn surface_damage(

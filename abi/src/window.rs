@@ -64,8 +64,17 @@ pub struct WindowInfo {
     pub state: u8,
     pub damage_count: u8,
     pub cursor_shape: u8,
-    pub _padding: u8,
+    /// Currently-committed double-buffer slot (0 or 1). Pairs with `shm_token`
+    /// (the slot's fd) so the compositor's surface cache keys buffers by the
+    /// stable slot id rather than the recyclable fd number.
+    pub buffer_id: u8,
     pub shm_token: u32,
+    /// Monotonic surface-incarnation id. `task_id` is a recyclable surface-slot
+    /// index, so it alone cannot distinguish a destroyed surface from the next
+    /// one to reuse its slot; the cache folds this generation into its key so a
+    /// recycled `(task_id, buffer_id)` can never alias the prior surface's
+    /// (possibly another client's) mapping.
+    pub buffer_generation: u32,
     pub damage_regions: [DamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [u8; 32],
     pub app_id: AppId,
@@ -153,8 +162,9 @@ impl Default for WindowInfo {
             state: 0,
             damage_count: 0,
             cursor_shape: 0,
-            _padding: 0,
+            buffer_id: 0,
             shm_token: 0,
+            buffer_generation: 0,
             damage_regions: [DamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
             title: [0; 32],
             app_id: AppId::EMPTY,

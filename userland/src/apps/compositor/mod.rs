@@ -5,16 +5,19 @@ mod input;
 pub mod menu_bar;
 mod output;
 pub mod protocol;
+mod region;
 mod renderer;
 mod surface_cache;
 
-use crate::gfx::{DamageRect, DamageTracker};
+use crate::gfx::DamageRect;
 use crate::ring::{Ring, slopfut};
 use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, tty, window};
 use crate::theme::*;
+use region::Region;
 use slopos_abi::syscall::POLLIN;
 use slopos_protocol::server::MAX_CLIENTS;
 use std::time::Instant;
+use std::vec::Vec;
 
 use hover::HoverRegistry;
 use input::InputHandler;
@@ -51,10 +54,22 @@ struct WindowManager {
     protocol_pointer_focus: u32,
 
     first_frame: bool,
-    output_damage: DamageTracker,
-    /// Unfulfilled damage from a failed fb_flip — carried forward until
-    /// successfully presented (Wayland buffer-age pattern).
-    pending_damage: DamageTracker,
+    /// This frame's accumulated, disjoint damage region.
+    output_damage: Region,
+    /// Force a full-output redraw this frame (first frame, new window, mode
+    /// change). Tracked separately from `output_damage` so the region itself
+    /// stays a precise rect set.
+    force_full_redraw: bool,
+    /// Damage from a present that did NOT reach the screen (failed flip, or the
+    /// kernel suppressed it) — carried forward until actually shown.
+    pending_damage: Region,
+    /// A suppressed/failed *full* present to retry next frame.
+    pending_full: bool,
+    /// Surfaces whose committed content damage was folded into this frame's
+    /// `output_damage` (by `task_id`). Only these are cleared after a present
+    /// that actually reached the screen — a commit that landed after the
+    /// snapshot keeps its dirty flag and is exported next frame.
+    frame_dirty_surfaces: Vec<u32>,
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
     prev_uptime_secs: u64,
     prev_cursor_shape: u8,
@@ -90,8 +105,11 @@ impl WindowManager {
             protocol_serial: 0,
             protocol_pointer_focus: 0,
             first_frame: true,
-            output_damage: DamageTracker::new(),
-            pending_damage: DamageTracker::new(),
+            output_damage: Region::new(),
+            force_full_redraw: false,
+            pending_damage: Region::new(),
+            pending_full: false,
+            frame_dirty_surfaces: Vec::new(),
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             prev_uptime_secs: u64::MAX, // force first-frame clock damage
             prev_cursor_shape: 0,
@@ -162,37 +180,44 @@ impl WindowManager {
             .sync_running_apps(&self.windows, self.window_count);
 
         self.output_damage.clear();
+        self.frame_dirty_surfaces.clear();
 
-        // Carry forward unfulfilled damage from a previous failed flip.
-        if self.pending_damage.is_dirty() {
-            for rect in self.pending_damage.regions() {
-                self.output_damage
-                    .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
-            }
-            if self.pending_damage.is_full_damage() {
-                self.output_damage.set_full_damage();
-            }
-            self.pending_damage.clear();
+        // Carry forward damage from a present that never reached the screen
+        // (failed flip, or the kernel suppressed it).
+        if self.pending_full {
+            self.force_full_redraw = true;
+            self.pending_full = false;
+        }
+        if !self.pending_damage.is_empty() {
+            let pending = core::mem::take(&mut self.pending_damage);
+            self.output_damage.push_region(&pending);
         }
 
         for i in 0..self.window_count as usize {
             let window = self.windows[i];
             let curr_bounds = WindowBounds::from_window(&window);
 
-            let prev_bounds = self.find_prev_bounds_in(&saved_bounds, window.task_id);
+            // Look up where this window was last frame: its geometry AND its
+            // z-rank (array index = stacking position, since `get_windows`
+            // returns the windows bottom-to-top).
+            let prev = self.find_prev_index(window.task_id);
 
-            if let Some(old) = prev_bounds {
-                if old.x != curr_bounds.x
+            if let Some(prev_idx) = prev {
+                let old = saved_bounds[prev_idx];
+                let geometry_changed = old.x != curr_bounds.x
                     || old.y != curr_bounds.y
                     || old.width != curr_bounds.width
                     || old.height != curr_bounds.height
-                    || old.visible != curr_bounds.visible
-                {
+                    || old.visible != curr_bounds.visible;
+                // A pure restack (raise/lower) changes no geometry but changes
+                // occlusion, so the covered/revealed area must be repainted.
+                let restacked = prev_idx != i;
+                if geometry_changed || restacked {
                     self.add_bounds_damage(&old);
                     self.add_bounds_damage(&curr_bounds);
                 }
             } else if curr_bounds.visible {
-                self.input.needs_full_redraw = true;
+                self.force_full_redraw = true;
             }
 
             self.prev_window_bounds[i] = curr_bounds;
@@ -203,6 +228,7 @@ impl WindowManager {
 
             if window.is_dirty() {
                 self.add_window_damage(&window);
+                self.frame_dirty_surfaces.push(window.task_id);
             }
         }
 
@@ -298,17 +324,11 @@ impl WindowManager {
         }
     }
 
-    fn find_prev_bounds_in(
-        &self,
-        bounds: &[WindowBounds; MAX_WINDOWS],
-        task_id: u32,
-    ) -> Option<WindowBounds> {
-        for i in 0..self.prev_window_count as usize {
-            if self.prev_windows[i].task_id == task_id {
-                return Some(bounds[i]);
-            }
-        }
-        None
+    /// The index this `task_id` held in the previous frame's z-ordered window
+    /// list, or `None` if it was not present. The index doubles as the window's
+    /// previous stacking rank (bottom = 0), so the caller can detect restacks.
+    fn find_prev_index(&self, task_id: u32) -> Option<usize> {
+        (0..self.prev_window_count as usize).find(|&i| self.prev_windows[i].task_id == task_id)
     }
 
     fn window_exists(&self, task_id: u32) -> bool {
@@ -502,17 +522,24 @@ impl WindowManager {
         for i in 0..self.window_count as usize {
             let curr_bounds = WindowBounds::from_window(&self.windows[i]);
             let task_id = self.windows[i].task_id;
-            let prev = pre_windows[..pre_count]
+            // Find this window's pre-input z-rank (array index = stacking rank).
+            let prev_idx = pre_windows[..pre_count]
                 .iter()
-                .position(|w| w.task_id == task_id)
-                .map(|j| pre_bounds[j]);
-            if let Some(p) = prev {
-                if p.x != curr_bounds.x
+                .position(|w| w.task_id == task_id);
+            if let Some(j) = prev_idx {
+                let p = pre_bounds[j];
+                let geometry_changed = p.x != curr_bounds.x
                     || p.y != curr_bounds.y
                     || p.width != curr_bounds.width
                     || p.height != curr_bounds.height
-                    || p.visible != curr_bounds.visible
-                {
+                    || p.visible != curr_bounds.visible;
+                // A raise/lower happens during input processing, so a restack is
+                // only visible here, in the post-input re-fetch: a window's
+                // pre-input rank `j` differs from its post-input rank `i`. Every
+                // window whose rank shifted (the raised one and any it passed)
+                // gets its bounds damaged, repainting the full overlap region.
+                let restacked = j != i;
+                if geometry_changed || restacked {
                     self.add_bounds_damage(&p);
                     self.add_bounds_damage(&curr_bounds);
                 }
@@ -570,7 +597,10 @@ impl WindowManager {
     }
 
     fn needs_redraw(&self) -> bool {
-        self.first_frame || self.input.needs_full_redraw || self.output_damage.is_dirty()
+        self.first_frame
+            || self.input.needs_full_redraw
+            || self.force_full_redraw
+            || !self.output_damage.is_empty()
     }
 
     /// Run one frame: gather input, refresh window state, render+present if
@@ -687,22 +717,24 @@ impl WindowManager {
         }
 
         if wm.needs_redraw() {
-            let force_full =
-                wm.first_frame || wm.input.needs_full_redraw || wm.output_damage.is_full_damage();
+            let force_full = wm.first_frame || wm.input.needs_full_redraw || wm.force_full_redraw;
 
-            let mut mode = RenderMode::Full;
-            let mut damage_snapshot = [DamageRect::invalid(); 8];
-            let mut damage_count = 0usize;
+            // The precise, disjoint region to repaint this frame.
+            let frame_damage = if force_full {
+                Region::full(output.width, output.height)
+            } else {
+                wm.output_damage.clone()
+            };
+            let mode = if force_full {
+                RenderMode::Full
+            } else {
+                RenderMode::Partial
+            };
 
-            if !force_full {
-                for rect in wm.output_damage.regions() {
-                    if damage_count >= damage_snapshot.len() {
-                        break;
-                    }
-                    damage_snapshot[damage_count] = *rect;
-                    damage_count += 1;
-                }
-            }
+            // A coalesced SUPERSET of the painted region for the kernel flip
+            // (never fewer pixels than were repainted), so the back-buffer →
+            // scanout copy always covers everything that changed.
+            let (damage_arr, damage_n) = frame_damage.to_bounded::<MAX_OUTPUT_DAMAGE_REGIONS>();
 
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
@@ -711,7 +743,7 @@ impl WindowManager {
                 let active_app_name =
                     active_window_title(&wm.windows, wm.window_count, wm.input.focused_task());
 
-                mode = wm.renderer.render(
+                wm.renderer.render(
                     &mut buf,
                     &wm.windows,
                     wm.window_count as usize,
@@ -720,22 +752,21 @@ impl WindowManager {
                     wm.input.mouse_x,
                     wm.input.mouse_y,
                     cursor_shape,
-                    &wm.hover_registry,
                     &mut wm.surface_cache,
                     &mut wm.system_bar,
                     &mut wm.shelf,
                     active_app_name,
                     uptime_secs,
-                    force_full,
-                    &damage_snapshot[..damage_count],
+                    &frame_damage,
                     hw_cursor,
                 );
             }
 
-            let damage_slice = if mode == RenderMode::Partial {
-                &damage_snapshot[..damage_count]
-            } else {
+            // A full redraw presents the whole buffer (empty damage = full flip).
+            let damage_slice: &[DamageRect] = if force_full {
                 &[]
+            } else {
+                &damage_arr[..damage_n]
             };
 
             let flip_result = output.present(damage_slice);
@@ -750,21 +781,22 @@ impl WindowManager {
             if flip_result {
                 let present_time = time_origin.elapsed().as_millis() as u64;
 
-                // Send frame_done events to protocol clients.
+                // Only surfaces whose committed content actually reached the
+                // screen this frame are cleared; a commit that landed after the
+                // snapshot keeps its dirty flag and is exported next frame.
+                let presented = core::mem::take(&mut wm.frame_dirty_surfaces);
                 if let Some(ref mut proto) = wm.protocol {
                     proto.mark_frames_done(present_time);
-                    proto.clear_dirty();
+                    proto.clear_presented(&presented);
                 }
             } else {
-                // Flip failed — save damage for retry on next frame.
-                // The back buffer is correct; the framebuffer is stale.
-                if mode == RenderMode::Full {
-                    wm.pending_damage.set_full_damage();
+                // Present never reached the screen — carry the damage forward so
+                // it is repainted and re-flushed next frame. Surfaces stay dirty
+                // (not cleared) so their content is not lost.
+                if force_full {
+                    wm.pending_full = true;
                 } else {
-                    for rect in &damage_snapshot[..damage_count] {
-                        wm.pending_damage
-                            .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
-                    }
+                    wm.pending_damage.push_region(&frame_damage);
                 }
             }
 
@@ -780,6 +812,7 @@ impl WindowManager {
             metrics.record(mode, copied, frame_time, target_frame_ms, flip_result);
 
             wm.input.needs_full_redraw = false;
+            wm.force_full_redraw = false;
             wm.first_frame = false;
         }
 
@@ -859,6 +892,13 @@ pub fn compositor_user_main() {
 }
 
 const TARGET_FRAME_MS: u64 = 16;
+
+/// Maximum rect count handed to the kernel flip per frame. The precise damage
+/// region is coalesced down to this many bounding rects (a superset of what was
+/// painted) so the back-buffer → scanout copy stays bounded while still covering
+/// every changed pixel. MUST match the kernel's per-flip damage capacity: the
+/// kernel drops rects beyond it, which would leave painted pixels un-scanned-out.
+const MAX_OUTPUT_DAMAGE_REGIONS: usize = slopos_abi::damage::MAX_DAMAGE_REGIONS;
 
 /// Maximum new connections drained from the listen backlog in one accept wake.
 const ACCEPT_BATCH: usize = MAX_CLIENTS;
@@ -1003,7 +1043,18 @@ async fn compositor_async(
             frame_start,
             TARGET_FRAME_MS,
         );
-        slopfut::time::sleep_ms(TARGET_FRAME_MS).await;
+
+        // Deadline pacing: sleep only the remainder of this frame's budget so the
+        // cadence stays ~TARGET_FRAME_MS regardless of how long the frame's work
+        // took. A frame that overran its budget yields once and runs the next
+        // immediately.
+        let elapsed = frame_start.elapsed().as_millis() as u64;
+        let remaining = TARGET_FRAME_MS.saturating_sub(elapsed);
+        if remaining > 0 {
+            slopfut::time::sleep_ms(remaining).await;
+        } else {
+            slopfut::yield_now().await;
+        }
     }
 }
 

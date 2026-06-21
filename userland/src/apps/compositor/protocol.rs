@@ -24,6 +24,31 @@ const MAX_SURFACES: usize = 32;
 const MAX_PENDING_DAMAGE: usize = 8;
 const MAX_CHILDREN: usize = 8;
 
+/// Client double-buffer slots per surface.
+const MAX_SURFACE_BUFFERS: usize = 2;
+/// `current_buffer` sentinel: no buffer has been committed yet.
+const NO_BUFFER: u8 = u8::MAX;
+
+/// One client-registered buffer slot. The bridge owns `fd` for the slot's
+/// lifetime and closes it on teardown and re-registration; the renderer's
+/// surface cache only borrows a read-only mapping of it.
+#[derive(Copy, Clone)]
+struct SurfaceBuffer {
+    fd: i32,
+    width: u32,
+    height: u32,
+    registered: bool,
+}
+
+impl SurfaceBuffer {
+    const EMPTY: Self = Self {
+        fd: -1,
+        width: 0,
+        height: 0,
+        registered: false,
+    };
+}
+
 /// Surface role assigned via get_toplevel.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
@@ -42,11 +67,18 @@ struct ProtocolSurface {
     client_idx: usize,
     surface_id: SurfaceId,
     toplevel_id: ToplevelId,
+    /// Current buffer's fd (= `buffers[current_buffer].fd`), threaded to the
+    /// renderer via `WindowInfo.shm_token`. 0 when nothing is committed.
     shm_token: u32,
     width: u32,
     height: u32,
     frame_width: u32,
     frame_height: u32,
+    // Double-buffering: registered buffer slots, the slot the next commit will
+    // apply, and the slot currently being composited.
+    buffers: [SurfaceBuffer; MAX_SURFACE_BUFFERS],
+    pending_buffer: u8,
+    current_buffer: u8,
     // Damage tracking
     pending_damage: [DamageRect; MAX_PENDING_DAMAGE],
     pending_damage_count: u8,
@@ -59,6 +91,10 @@ struct ProtocolSurface {
     z_order: u32,
     visible: bool,
     window_state: u8,
+    /// Monotonic incarnation id assigned at creation. Distinguishes a recycled
+    /// surface slot (same `task_id`) from an earlier surface in that slot, so the
+    /// renderer's buffer cache can never alias a stale mapping.
+    generation: u32,
     // Frame callback
     frame_callback_pending: bool,
     last_present_time_ms: u64,
@@ -95,6 +131,9 @@ impl ProtocolSurface {
             height: 0,
             frame_width: 0,
             frame_height: 0,
+            buffers: [SurfaceBuffer::EMPTY; MAX_SURFACE_BUFFERS],
+            pending_buffer: 0,
+            current_buffer: NO_BUFFER,
             pending_damage: [DamageRect::invalid(); MAX_PENDING_DAMAGE],
             pending_damage_count: 0,
             committed_damage: [DamageRect::invalid(); MAX_PENDING_DAMAGE],
@@ -105,6 +144,7 @@ impl ProtocolSurface {
             z_order: 0,
             visible: false,
             window_state: 0,
+            generation: 0,
             frame_callback_pending: false,
             last_present_time_ms: 0,
             role: SurfaceRole::None,
@@ -136,6 +176,8 @@ pub struct ProtocolBridge {
     server: Server,
     surfaces: [ProtocolSurface; MAX_SURFACES],
     next_z_order: u32,
+    /// Monotonic source for `ProtocolSurface.generation` (never reused).
+    next_surface_gen: u32,
     clipboard: Clipboard,
     /// Display dimensions passed to new clients on accept.
     display_width: u32,
@@ -169,6 +211,7 @@ impl ProtocolBridge {
             server,
             surfaces: [const { ProtocolSurface::empty() }; MAX_SURFACES],
             next_z_order: 1,
+            next_surface_gen: 1,
             clipboard: Clipboard {
                 source: None,
                 len: 0,
@@ -326,21 +369,17 @@ impl ProtocolBridge {
             }
             Request::SurfaceAttach {
                 surface,
-                shm_token: _,
+                buffer_id,
                 width,
                 height,
+                has_fd: _,
                 buffer_fd,
             } => {
-                // The memfd fd is now decoded inline as part of the Request.
-                if let Some(fd) = buffer_fd {
-                    self.handle_surface_attach(
-                        client_idx,
-                        surface,
-                        fd.into_raw() as u32,
-                        width,
-                        height,
-                    );
-                }
+                // An fd is present only when first registering a buffer slot;
+                // re-selecting an already-registered slot carries no fd (the
+                // decoder leaves `buffer_fd` None for the latter).
+                let fd = buffer_fd.map(|f| f.into_raw());
+                self.handle_surface_attach(client_idx, surface, buffer_id, fd, width, height);
             }
             Request::SurfaceDamage {
                 surface,
@@ -447,21 +486,54 @@ impl ProtocolBridge {
         self.surfaces[slot].surface_id = new_id;
         self.surfaces[slot].z_order = self.next_z_order;
         self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
+        // Stamp a fresh incarnation id so the renderer's buffer cache never
+        // reuses a prior surface's mapping for this recycled slot.
+        self.surfaces[slot].generation = self.next_surface_gen;
+        self.next_surface_gen = self.next_surface_gen.wrapping_add(1).max(1);
     }
 
+    /// Register or re-select a double-buffer slot for `surface`'s next commit.
+    ///
+    /// `fd` is `Some` only the first time a slot is used (the memfd received via
+    /// SCM_RIGHTS); thereafter the client re-selects the slot by id with no fd
+    /// and the stored fd is reused. The bridge owns every stored fd; an fd that
+    /// cannot be parked (no such surface / bad slot) is closed here to avoid a
+    /// leak.
     fn handle_surface_attach(
         &mut self,
         client_idx: usize,
         surface_id: SurfaceId,
-        shm_token: u32,
+        buffer_id: u32,
+        fd: Option<i32>,
         width: u32,
         height: u32,
     ) {
-        if let Some(idx) = self.find_surface(client_idx, surface_id) {
-            self.surfaces[idx].shm_token = shm_token;
-            self.surfaces[idx].width = width;
-            self.surfaces[idx].height = height;
+        let bid = buffer_id as usize;
+        let idx = match self.find_surface(client_idx, surface_id) {
+            Some(i) if bid < MAX_SURFACE_BUFFERS => i,
+            _ => {
+                if let Some(fd) = fd {
+                    crate::syscall::memory::close(fd);
+                }
+                return;
+            }
+        };
+
+        let surface = &mut self.surfaces[idx];
+        surface.pending_buffer = buffer_id as u8;
+        let slot = &mut surface.buffers[bid];
+        if let Some(new_fd) = fd {
+            // The bridge owns every buffer fd for the slot's lifetime (the cache
+            // only borrows a mapping). On re-registration (e.g. resize) close the
+            // fd this slot held before overwriting it, or it leaks.
+            if slot.registered && slot.fd >= 0 && slot.fd != new_fd {
+                crate::syscall::memory::close(slot.fd);
+            }
+            slot.fd = new_fd;
+            slot.registered = true;
         }
+        slot.width = width;
+        slot.height = height;
     }
 
     fn handle_surface_damage(
@@ -500,16 +572,49 @@ impl ProtocolBridge {
     }
 
     fn handle_surface_commit(&mut self, client_idx: usize, surface_id: SurfaceId) {
-        if let Some(idx) = self.find_surface(client_idx, surface_id) {
+        let Some(idx) = self.find_surface(client_idx, surface_id) else {
+            return;
+        };
+
+        // Apply the pending buffer slot; the slot it replaces is released back to
+        // the client so it can draw into it again.
+        let release_prev = {
             let surface = &mut self.surfaces[idx];
+            let prev = surface.current_buffer;
+            let pend = surface.pending_buffer;
+            surface.current_buffer = pend;
+
+            let slot = surface.buffers[pend as usize];
+            if slot.registered {
+                surface.shm_token = slot.fd as u32;
+                surface.width = slot.width;
+                surface.height = slot.height;
+                if surface.width > 0 && surface.height > 0 {
+                    surface.visible = true;
+                }
+            }
+
             surface.committed_damage = surface.pending_damage;
             surface.committed_damage_count = surface.pending_damage_count;
             surface.pending_damage = [DamageRect::invalid(); MAX_PENDING_DAMAGE];
             surface.pending_damage_count = 0;
             surface.dirty = true;
-            if surface.shm_token != 0 && surface.width > 0 && surface.height > 0 {
-                surface.visible = true;
+
+            if prev != NO_BUFFER && prev != pend {
+                Some(prev)
+            } else {
+                None
             }
+        };
+
+        if let Some(prev) = release_prev {
+            let _ = self.server.queue_event(
+                client_idx,
+                &Event::BufferRelease {
+                    surface: surface_id,
+                    buffer_id: prev as u32,
+                },
+            );
         }
     }
 
@@ -1044,6 +1149,12 @@ impl ProtocolBridge {
             info.height = s.height;
             info.state = s.window_state;
             info.shm_token = s.shm_token;
+            info.buffer_id = if s.current_buffer == NO_BUFFER {
+                0
+            } else {
+                s.current_buffer
+            };
+            info.buffer_generation = s.generation;
             info.cursor_shape = s.cursor_shape;
             info.frame_width = s.frame_width;
             info.frame_height = s.frame_height;
@@ -1070,12 +1181,18 @@ impl ProtocolBridge {
         write_count as u32
     }
 
-    /// Clear dirty flags on all surfaces after rendering.
-    pub fn clear_dirty(&mut self) {
-        for s in &mut self.surfaces {
-            if s.active {
-                s.dirty = false;
-                s.committed_damage_count = 0;
+    /// Clear dirty + committed damage ONLY for the surfaces whose content
+    /// actually reached the screen this frame, identified by `task_id` (= the
+    /// surface slot index + 1, as minted by [`get_windows`]).
+    ///
+    /// A `SurfaceCommit` that landed after this frame's window snapshot is NOT
+    /// in `presented_task_ids`, so it keeps its dirty flag and is exported on the
+    /// next frame rather than being cleared before it is shown.
+    pub fn clear_presented(&mut self, presented_task_ids: &[u32]) {
+        for &task_id in presented_task_ids {
+            if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+                self.surfaces[idx].dirty = false;
+                self.surfaces[idx].committed_damage_count = 0;
             }
         }
     }
@@ -1269,6 +1386,16 @@ impl ProtocolBridge {
             if let Some(child_idx) = children_snapshot[j] {
                 self.destroy_surface(child_idx);
             }
+        }
+
+        // The bridge owns every registered buffer fd, so it must close them here.
+        // A MAP_SHARED mapping the cache may still hold stays valid after the fd
+        // is closed.
+        for slot in &mut self.surfaces[idx].buffers {
+            if slot.registered && slot.fd >= 0 {
+                crate::syscall::memory::close(slot.fd);
+            }
+            *slot = SurfaceBuffer::EMPTY;
         }
 
         self.surfaces[idx] = ProtocolSurface::empty();

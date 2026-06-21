@@ -83,15 +83,33 @@ impl Drop for ShmBuffer {
 }
 
 /// Read-only mapping of a memfd received via SCM_RIGHTS (compositor side).
+///
+/// When `owns_fd` is true the mapping closes the fd on drop (sole-owner case,
+/// e.g. the clipboard). When false it only `munmap`s and leaves the fd to its
+/// owner (borrow case, e.g. a surface buffer the protocol bridge owns). A
+/// `MAP_SHARED` mapping stays valid after its fd is closed, so a borrowed mapping
+/// outliving the fd is safe.
 pub struct CachedShmMapping {
     fd: i32,
     vaddr: u64,
     size: usize,
+    owns_fd: bool,
 }
 
 impl CachedShmMapping {
-    /// Map a memfd fd read-only via mmap(MAP_SHARED).
+    /// Map a memfd fd read-only via mmap(MAP_SHARED), taking ownership of the
+    /// fd (closed on drop). Use when the mapping is the sole fd owner.
     pub fn map_readonly_fd(fd: i32, size: usize) -> Option<Self> {
+        Self::map_readonly_inner(fd, size, true)
+    }
+
+    /// Map a memfd fd read-only WITHOUT taking ownership of the fd — only the
+    /// mapping is released on drop; the fd stays open for its owner to close.
+    pub fn map_readonly_fd_borrowed(fd: i32, size: usize) -> Option<Self> {
+        Self::map_readonly_inner(fd, size, false)
+    }
+
+    fn map_readonly_inner(fd: i32, size: usize, owns_fd: bool) -> Option<Self> {
         if fd < 0 || size == 0 {
             return None;
         }
@@ -101,11 +119,16 @@ impl CachedShmMapping {
             return None;
         }
 
-        Some(Self { fd, vaddr, size })
+        Some(Self {
+            fd,
+            vaddr,
+            size,
+            owns_fd,
+        })
     }
 
     /// Map a received memfd fd read/write via mmap(MAP_SHARED), e.g. a paste
-    /// destination buffer the compositor copies the clipboard into.
+    /// destination buffer the compositor copies the clipboard into. Owns the fd.
     pub fn map_writable_fd(fd: i32, size: usize) -> Option<Self> {
         if fd < 0 || size == 0 {
             return None;
@@ -123,7 +146,12 @@ impl CachedShmMapping {
             return None;
         }
 
-        Some(Self { fd, vaddr, size })
+        Some(Self {
+            fd,
+            vaddr,
+            size,
+            owns_fd: true,
+        })
     }
 
     #[inline]
@@ -159,6 +187,8 @@ impl CachedShmMapping {
 impl Drop for CachedShmMapping {
     fn drop(&mut self) {
         memory::munmap(self.vaddr, self.size as u64);
-        memory::close(self.fd);
+        if self.owns_fd {
+            memory::close(self.fd);
+        }
     }
 }
