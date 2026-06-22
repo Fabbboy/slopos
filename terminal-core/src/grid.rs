@@ -120,6 +120,17 @@ impl Cell {
     }
 }
 
+/// Reserve `buf`'s capacity straight to `max` the first time it would grow past
+/// what it already holds, so a run of incremental `resize`s (a terminal resize
+/// drag) reallocates at most once over the buffer's life instead of every step.
+/// The backing is lazy — reserving address space faults in no pages — so only
+/// the live (`len`-sized) region costs physical memory.
+fn reserve_to_max<T>(buf: &mut Vec<T>, max: usize) {
+    if buf.capacity() < max {
+        buf.reserve_exact(max.saturating_sub(buf.len()));
+    }
+}
+
 /// Flat row-major `Cell` buffer.
 pub struct CellGrid {
     cells: Vec<Cell>,
@@ -134,6 +145,10 @@ impl CellGrid {
         }
     }
 
+    /// Re-shape to `rows`×`cols`, blanking the whole grid. The capacity grows
+    /// at most once (to the maximum grid), so reusing one `CellGrid` across a
+    /// resize drag never reallocates after that — `len` still tracks the live
+    /// area, so every other method stays bound to the logical grid.
     pub fn allocate(&mut self, rows: usize, cols: usize) {
         let total = rows.saturating_mul(cols);
         if total == 0 {
@@ -141,6 +156,7 @@ impl CellGrid {
             self.cols = 0;
             return;
         }
+        reserve_to_max(&mut self.cells, MAX_ROWS * MAX_COLS);
         self.cells.clear();
         self.cells.resize(total, Cell::blank());
         self.cols = cols;
@@ -258,11 +274,30 @@ impl ScrollbackBuf {
         };
         Self {
             buf,
-            cols,
+            cols: cols.min(MAX_COLS),
             head: 0,
             count: 0,
             view_offset: 0,
         }
+    }
+
+    /// Re-stride the ring to `cols` and drop history. A width change cannot
+    /// reflow fixed-width rows, so history is discarded; the retained cells
+    /// stay unread because resetting `count` gates every reader and `push_row`
+    /// fully overwrites a row before `get_row` can serve it. The backing only
+    /// ever grows — and jumps straight to its `MAX_COLS` ceiling the first time
+    /// it must — so a resize drag never reallocates this multi-megabyte ring.
+    fn reset_for_width(&mut self, cols: usize) {
+        let cols = cols.min(MAX_COLS);
+        let needed = SCROLLBACK_LINES.saturating_mul(cols);
+        if self.buf.len() < needed {
+            reserve_to_max(&mut self.buf, SCROLLBACK_LINES * MAX_COLS);
+            self.buf.resize(needed, Cell::blank());
+        }
+        self.cols = cols;
+        self.head = 0;
+        self.count = 0;
+        self.view_offset = 0;
     }
 
     fn push_row(&mut self, cells: &CellGrid, row: usize, cols: usize) {
@@ -323,6 +358,10 @@ pub struct TerminalGrid {
     pub rows: u16,
     pub cols: u16,
     cells: CellGrid,
+    /// Pooled grid swapped in on resize so the live screen and alt buffers are
+    /// re-shaped by reusing one extra allocation instead of allocating a fresh
+    /// grid per resize step (a drag fires one resize per cell-width crossed).
+    resize_scratch: CellGrid,
     parser: VtParser,
     cursor_attrs: CursorAttributes,
     saved_cursor_row: u16,
@@ -366,6 +405,7 @@ impl TerminalGrid {
             rows,
             cols,
             cells,
+            resize_scratch: CellGrid::empty(),
             parser: VtParser::new(),
             cursor_attrs: CursorAttributes::default_attrs(),
             saved_cursor_row: 0,
@@ -559,20 +599,25 @@ impl TerminalGrid {
             }
         }
 
-        let mut new_cells = CellGrid::empty();
-        new_cells.allocate(rows as usize, cols as usize);
         let copy_rows = (self.rows.min(rows)) as usize;
         let copy_cols = (self.cols.min(cols)) as usize;
-        new_cells.copy_from(&self.cells, copy_rows, copy_cols);
 
-        let mut new_alt = CellGrid::empty();
-        new_alt.allocate(rows as usize, cols as usize);
-        new_alt.copy_from(&self.alt_cells, copy_rows, copy_cols);
+        // Re-shape both grids by reusing the pooled scratch: `allocate` blanks
+        // it to the new size, `copy_from` carries the overlap forward, and the
+        // swap installs it while parking the old backing in the pool for the
+        // next resize. No grid is allocated per resize step.
+        self.resize_scratch.allocate(rows as usize, cols as usize);
+        self.resize_scratch
+            .copy_from(&self.cells, copy_rows, copy_cols);
+        core::mem::swap(&mut self.cells, &mut self.resize_scratch);
 
-        self.cells = new_cells;
-        self.alt_cells = new_alt;
+        self.resize_scratch.allocate(rows as usize, cols as usize);
+        self.resize_scratch
+            .copy_from(&self.alt_cells, copy_rows, copy_cols);
+        core::mem::swap(&mut self.alt_cells, &mut self.resize_scratch);
+
         if self.scrollback.cols != cols as usize {
-            self.scrollback = ScrollbackBuf::new(cols as usize);
+            self.scrollback.reset_for_width(cols as usize);
         }
         self.rows = rows;
         self.cols = cols;
@@ -1442,6 +1487,78 @@ mod tests {
         // Nothing from the alt screen may appear in history.
         g.scroll_view_up(1);
         assert!(!g.viewing_history());
+    }
+
+    #[test]
+    fn width_resize_grows_scrollback_at_most_once() {
+        // A drag re-strides the ring for every cell-width step. The backing
+        // grows once to its ceiling and is reused thereafter, so no step past
+        // the widest point reallocates this multi-megabyte ring.
+        let mut g = TerminalGrid::new(24, 80);
+        assert_eq!(g.scrollback.buf.len(), SCROLLBACK_LINES * 80);
+        // Reach the maximum width, then capture the now-ceiling backing.
+        g.resize(24, MAX_COLS as u16);
+        assert_eq!(g.scrollback.buf.len(), SCROLLBACK_LINES * MAX_COLS);
+        let cap = g.scrollback.buf.capacity();
+        let ptr = g.scrollback.buf.as_ptr();
+        for cols in (10..=MAX_COLS as u16).chain((10..=MAX_COLS as u16).rev()) {
+            g.resize(24, cols);
+            assert_eq!(g.scrollback.cols, cols as usize);
+            assert_eq!(
+                g.scrollback.buf.capacity(),
+                cap,
+                "post-ceiling resize reallocated the scrollback ring"
+            );
+            assert_eq!(
+                g.scrollback.buf.as_ptr(),
+                ptr,
+                "post-ceiling resize moved the scrollback backing"
+            );
+        }
+        // The re-strided ring still records history: scroll a marker off the
+        // 24-row grid and read it back.
+        feed(&mut g, b"\x1b[H top");
+        feed(&mut g, &[b'\r', b'\n'].repeat(24));
+        g.scroll_view_up(1);
+        assert!(g.viewing_history());
+        assert_eq!(char::from_u32(g.visible_cell(0, 1).glyph()).unwrap(), 't');
+        assert_eq!(char::from_u32(g.visible_cell(0, 2).glyph()).unwrap(), 'o');
+        assert_eq!(char::from_u32(g.visible_cell(0, 3).glyph()).unwrap(), 'p');
+    }
+
+    #[test]
+    fn resize_drag_does_not_reallocate_cell_grids() {
+        // The screen and alt grids are re-shaped by reusing pooled backings, so
+        // a drag never reallocates them either (the residual churn class). Once
+        // every backing has reached the ceiling capacity it must stay put.
+        let mut g = TerminalGrid::new(100, 240);
+        feed(&mut g, b"anchor");
+        // Warm every pooled backing to its ceiling capacity.
+        g.resize(40, 100);
+        g.resize(100, 240);
+        let max = MAX_ROWS * MAX_COLS;
+        let caps = |g: &TerminalGrid| {
+            (
+                g.cells.cells.capacity(),
+                g.alt_cells.cells.capacity(),
+                g.resize_scratch.cells.capacity(),
+            )
+        };
+        assert_eq!(caps(&g), (max, max, max));
+        for rows in (10..=100u16).step_by(7) {
+            for cols in (10..=240u16).step_by(11) {
+                g.resize(rows, cols);
+                assert_eq!(
+                    caps(&g),
+                    (max, max, max),
+                    "resize reallocated a cell grid at {rows}x{cols}"
+                );
+            }
+        }
+        // Content within the overlap survives the churn.
+        g.resize(100, 240);
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(glyph_at(&g, 0, 5), 'r');
     }
 
     #[test]
