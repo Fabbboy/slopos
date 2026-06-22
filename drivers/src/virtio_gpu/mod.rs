@@ -22,7 +22,6 @@ mod protocol;
 
 use core::ffi::c_int;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
@@ -37,6 +36,10 @@ use slopos_ostd::sync::wait_queue::WaitOutcome;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::util::ptr_buf;
 use slopos_ostd::{klog_info, klog_warn, write_field, write_init_field};
+
+use slopos_kernel_services::syscall_services::scanout::{
+    self, ClaimOutcome, GpuControlFns, InstallCtx, ScanoutId, ScanoutProvider,
+};
 
 use crate::pci::{PciDeviceInfo, PciProbeError};
 use crate::virtio::{
@@ -82,16 +85,6 @@ const PRESENT_FLUSH_CMD: usize = 2048;
 const PRESENT_FLUSH_RESP: usize = 3072;
 /// Sentinel for an empty present-chain head slot.
 const PRESENT_NONE: u16 = u16::MAX;
-
-/// When false, `virtio_gpu_matches` declines the device so the probe never
-/// resets it, leaving the firmware framebuffer intact for the passive backend.
-/// Boot clears this for the `video=framebuffer` and `video=xe` backends.
-static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
-
-/// Enable/disable virtio-gpu probing. Must be called before `pci_probe_drivers`.
-pub fn set_enabled(enabled: bool) {
-    GPU_ENABLED.store(enabled, Ordering::Relaxed);
-}
 
 // ============================================================================
 // Per-queue request tracking
@@ -1310,12 +1303,6 @@ pub fn is_present() -> bool {
     VIRTIO_GPU.lock().is_some()
 }
 
-/// Bring up the scanout framebuffer (called by boot after probe). Returns the
-/// CPU-visible framebuffer the compositor should draw into.
-pub fn framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<FramebufferData> {
-    current_device()?.setup_scanout(boot_fb)
-}
-
 /// Flush callback registered with the video framebuffer layer.
 pub fn virtio_gpu_flush(damage: *const DamageRect, count: u32) -> c_int {
     match current_device() {
@@ -1360,9 +1347,6 @@ pub fn cursor_move(x: u32, y: u32) -> bool {
 }
 
 fn virtio_gpu_matches(info: &PciDeviceInfo) -> bool {
-    if !GPU_ENABLED.load(Ordering::Relaxed) {
-        return false;
-    }
     if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
     }
@@ -1377,7 +1361,72 @@ fn read_num_scanouts(caps: &VirtioMmioCaps) -> u32 {
     }
 }
 
+/// Eviction hook: GPU→GPU re-claim (uninstall + reinstall) is deferred, so a
+/// displaced virtio-gpu has nothing to do here yet.
+fn virtio_gpu_evict() {}
+
 fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+    // Reserve the scanout before the destructive device reset. If a
+    // higher-priority provider already owns it, stay passive and touch nothing.
+    match scanout::SCANOUT.claim(scanout::PRIO_VIRTIO_GPU) {
+        ClaimOutcome::Won => {}
+        ClaimOutcome::Lost | ClaimOutcome::LostTie => {
+            klog_info!("virtio-gpu: lost scanout arbitration; staying passive");
+            return Ok(());
+        }
+    }
+
+    if let Err(err) = virtio_gpu_bring_up(info) {
+        scanout::SCANOUT.abort_claim();
+        return Err(err);
+    }
+
+    // Create the scanout resource (blocking GPU commands — safe because the PCI
+    // probe loop runs lock-free with IRQs enabled), seeded from the current
+    // firmware framebuffer.
+    let Some(gpu_fb) =
+        current_device().and_then(|d| d.setup_scanout(scanout::current_framebuffer()))
+    else {
+        scanout::SCANOUT.abort_claim();
+        return Err(PciProbeError::DeviceFault);
+    };
+
+    // Commit ownership (evicting any displaced provider via its own hook), then
+    // install the scanout front-end through the video-registered installer.
+    scanout::SCANOUT.commit_install(
+        ScanoutProvider {
+            id: ScanoutId::VirtioGpu,
+            priority: scanout::PRIO_VIRTIO_GPU,
+            evict: virtio_gpu_evict,
+        },
+        scanout::PRIO_VIRTIO_GPU,
+        |displaced| {
+            if let Some(p) = displaced {
+                (p.evict)();
+            }
+        },
+    );
+
+    let ctx = InstallCtx {
+        fb: gpu_fb,
+        flush: Some(virtio_gpu_flush),
+        gpu_control: Some(GpuControlFns {
+            available: hw_cursor_available,
+            set_image: cursor_set_image_raw,
+            move_cursor: cursor_move,
+            set_mode,
+        }),
+    };
+    if !scanout::run_scanout_install(&ctx) {
+        klog_warn!("virtio-gpu: scanout install failed");
+        return Err(PciProbeError::DeviceFault);
+    }
+    Ok(())
+}
+
+/// Reset and initialise the device (bus-master, capabilities, feature
+/// negotiation, interrupts, virtqueues) and publish it as the live device.
+fn virtio_gpu_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
     klog_info!(
         "virtio-gpu: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,

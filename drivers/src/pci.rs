@@ -1,4 +1,3 @@
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
@@ -15,34 +14,6 @@ use slopos_ostd::{KVec, Pod};
 pub use crate::pci_defs::*;
 
 const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
-
-#[repr(C)]
-#[derive(Clone)]
-pub struct PciGpuInfo {
-    pub present: c_int,
-    pub device: PciDeviceInfo,
-    pub mmio_phys_base: u64,
-    pub mmio_region: MmioRegion,
-    pub mmio_size: u64,
-}
-
-impl PciGpuInfo {
-    pub const fn zeroed() -> Self {
-        Self {
-            present: 0,
-            device: PciDeviceInfo::zeroed(),
-            mmio_phys_base: 0,
-            mmio_region: MmioRegion::empty(),
-            mmio_size: 0,
-        }
-    }
-}
-
-impl Default for PciGpuInfo {
-    fn default() -> Self {
-        Self::zeroed()
-    }
-}
 
 /// Reason a PCI probe rejected a candidate device.
 ///
@@ -86,7 +57,6 @@ struct PciEnumState {
     bus_visited: [u8; PCI_MAX_BUSES],
     devices: [PciDeviceInfo; PCI_MAX_DEVICES],
     device_count: usize,
-    primary_gpu: PciGpuInfo,
 }
 
 impl PciEnumState {
@@ -95,7 +65,6 @@ impl PciEnumState {
             bus_visited: [0; PCI_MAX_BUSES],
             devices: [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES],
             device_count: 0,
-            primary_gpu: PciGpuInfo::zeroed(),
         }
     }
 }
@@ -892,30 +861,6 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
 
     pci_log_device_summary(&info);
 
-    if class == 0x03 && subclass == 0x00 {
-        for bar in &bars {
-            if bar.is_io == 0 && bar.base != 0 && bar.size != 0 {
-                if state.primary_gpu.present == 0 {
-                    state.primary_gpu.present = 1;
-                    state.primary_gpu.device = info;
-                    state.primary_gpu.mmio_phys_base = bar.base;
-                    state.primary_gpu.mmio_size = bar.size;
-
-                    let phys = PhysAddr::new(bar.base);
-                    state.primary_gpu.mmio_region =
-                        MmioRegion::map(phys, bar.size as usize).unwrap_or_else(MmioRegion::empty);
-                    klog_info!(
-                        "PCI: Selected display-class GPU candidate at MMIO phys=0x{:x} size=0x{:x} virt=0x{:x}",
-                        bar.base,
-                        bar.size,
-                        state.primary_gpu.mmio_region.virt_base()
-                    );
-                }
-                break;
-            }
-        }
-    }
-
     if header_type == 1 {
         let secondary = pci_get_secondary_bus(bus, device, function);
         pci_scan_bus_inner(state, secondary);
@@ -1122,7 +1067,6 @@ pub fn pci_init() {
     let mut state = ENUM_STATE.lock();
     state.device_count = 0;
     state.bus_visited = [0; PCI_MAX_BUSES];
-    state.primary_gpu = PciGpuInfo::zeroed();
 
     pci_scan_bus_inner(&mut state, 0);
 
@@ -1166,25 +1110,24 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
     }
 }
 
-pub fn pci_get_primary_gpu() -> PciGpuInfo {
-    ENUM_STATE.lock().primary_gpu.clone()
-}
-
 pub fn pci_probe_drivers() {
-    // Hold the enum-state lock during iteration: copying the full
-    // `[PciDeviceInfo; PCI_MAX_DEVICES]` array onto the local frame
-    // would blow the 2 KiB framekernel stack-size gate. `pci_probe_drivers`
-    // is called exactly once from the boot sequence (priority 80 in
-    // the drivers phase) so contention is impossible by construction.
-    let state = ENUM_STATE.lock();
+    // Probe lock-free: copy each device out via `pci_get_device` (the enum-state
+    // lock is released per device) rather than holding `ENUM_STATE` across the
+    // loop. Copying the whole `[PciDeviceInfo; PCI_MAX_DEVICES]` array would blow
+    // the 2 KiB stack-size gate, but a single `PciDeviceInfo` is small. Crucially,
+    // probes must NOT run under the IRQ-disabling `ENUM_STATE` lock: a GPU probe
+    // submits commands and blocks on completion IRQs, which can only fire with
+    // interrupts enabled.
     for entry in driver_registry_iter() {
         klog_info!("PCI: Probing driver {}", entry.name);
-        for dev_idx in 0..state.device_count {
-            let dev = &state.devices[dev_idx];
-            if !(entry.matches)(dev) {
+        for dev_idx in 0.. {
+            let Some(dev) = pci_get_device(dev_idx) else {
+                break;
+            };
+            if !(entry.matches)(&dev) {
                 continue;
             }
-            match (entry.probe)(dev) {
+            match (entry.probe)(&dev) {
                 Ok(()) => {}
                 Err(err) => {
                     klog_info!("PCI: {} probe rejected device: {:?}", entry.name, err);

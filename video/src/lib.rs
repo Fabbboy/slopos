@@ -6,8 +6,9 @@ use slopos_abi::FramebufferData;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
-#[cfg(feature = "xe-gpu")]
-use slopos_drivers::xe;
+use slopos_kernel_services::syscall_services::scanout::{
+    self, InstallCtx, ScanoutId, ScanoutProvider,
+};
 use slopos_kernel_services::syscall_services::video::{
     VideoServices, compositor_task_id, is_video_initialized, register_video_services,
     set_compositor_task_id,
@@ -23,18 +24,6 @@ pub mod kernel_font;
 pub mod panic_screen;
 pub mod roulette_core;
 pub mod splash;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VideoBackend {
-    Framebuffer,
-    /// virtio-gpu 2D scanout (default on the QEMU path). The device is probed
-    /// during PCI init; the scanout is adopted via
-    /// [`adopt_virtio_gpu_scanout`] after the passive framebuffer brought up
-    /// the boot splash.
-    VirtioGpu,
-    #[cfg(feature = "xe-gpu")]
-    Xe,
-}
 
 fn video_fb_flip(
     shm_phys: PhysAddr,
@@ -137,15 +126,15 @@ fn task_cleanup_callback(task_id: u32) {
 // Initialization
 // =============================================================================
 
-pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
+/// Bring up the video subsystem and register the firmware framebuffer as the
+/// default scanout provider.
+///
+/// `firmware_priority` is the arbitration priority the firmware backing claims
+/// at: normally [`scanout::PRIO_FIRMWARE_FB`], but boot lifts it above every GPU
+/// (via [`scanout::PRIO_CMDLINE_HINT_BUMP`]) when the cmdline forces the passive
+/// framebuffer, so later GPU probes lose arbitration and never reset the device.
+pub fn init(framebuffer: Option<FramebufferData>, firmware_priority: i32) {
     register_task_resource_cleanup_hook(task_cleanup_callback);
-
-    #[cfg(feature = "xe-gpu")]
-    if _backend == VideoBackend::Xe {
-        framebuffer::register_flush_callback(xe::xe_flush);
-    }
-
-    let fb_to_use = framebuffer;
 
     // Initialise the font subsystem (atlas + renderer) before any rendering.
     kernel_font::init();
@@ -154,7 +143,11 @@ pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
     // Inert until the `fblog=` cmdline knob (or ESC) activates it.
     fblog::init();
 
-    if let Some(fb) = fb_to_use {
+    // Expose the scanout install logic to the arbiter so GPU drivers can adopt a
+    // scanout without naming a `video` symbol.
+    scanout::register_scanout_installer(install_scanout_provider);
+
+    if let Some(fb) = framebuffer {
         klog_info!(
             "Framebuffer online: {}x{} pitch {} bpp {}",
             fb.info.width,
@@ -163,13 +156,25 @@ pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
             fb.info.bytes_per_pixel() * 8
         );
 
-        if framebuffer::init_with_display_info(fb.address, &fb.info) != 0 {
+        // Claim and commit the firmware framebuffer as the default scanout owner
+        // before any GPU is probed, then install it.
+        scanout::SCANOUT.claim(firmware_priority);
+        scanout::SCANOUT.commit_install(
+            ScanoutProvider {
+                id: ScanoutId::FirmwareFb,
+                priority: firmware_priority,
+                evict: firmware_evict,
+            },
+            firmware_priority,
+            |_| {},
+        );
+        if !install_scanout_provider(&InstallCtx {
+            fb,
+            flush: None,
+            gpu_control: None,
+        }) {
             klog_warn!("Framebuffer init failed; skipping banner paint.");
-            return;
         }
-
-        register_video_services(&VIDEO_SERVICES);
-        show_splash();
     } else {
         klog_warn!("No framebuffer provided; skipping video init.");
     }
@@ -195,35 +200,68 @@ pub fn show_splash() {
     framebuffer::framebuffer_flush(core::ptr::null(), 0);
 }
 
-/// Switch the active framebuffer to a virtio-gpu scanout backing and route
-/// presents through its flush callback.
+/// Eviction hook for the firmware framebuffer: nothing to tear down (it is a
+/// passive direct-write backing).
+fn firmware_evict() {}
+
+/// Adopt a scanout backing and wire the front-end to it. The single install path
+/// for every provider: the firmware framebuffer (`flush`/`gpu_control` both
+/// `None`, a passive direct-write backing) and GPU scanouts alike.
 ///
-/// Called by boot at PCI init once the virtio-gpu driver has created its
-/// scanout resource. Re-points the framebuffer state at the GPU-visible
-/// backing `fb.address` (so the compositor's `fb_flip` copies land there) and
-/// registers `flush`, whose job is to `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`
-/// on each present. Returns `true` on success.
-pub fn adopt_virtio_gpu_scanout(
-    fb: FramebufferData,
-    flush: fn(*const DamageRect, u32) -> c_int,
-) -> bool {
-    if framebuffer::init_with_display_info(fb.address, &fb.info) != 0 {
-        klog_warn!("virtio-gpu: framebuffer adoption failed; staying on passive backend");
+/// Registered with the arbiter via [`scanout::register_scanout_installer`] so GPU
+/// drivers in `slopos-drivers` can drive it through a fn-pointer. Re-points the
+/// framebuffer state at `ctx.fb.address` (so the compositor's `fb_flip` copies
+/// land there), routes presents through `ctx.flush` when present, re-registers
+/// the vconsole on the new backing, exposes the hardware cursor / mode-set, syncs
+/// the mouse bounds, and repaints the boot console. Returns `true` on success.
+fn install_scanout_provider(ctx: &InstallCtx) -> bool {
+    if framebuffer::init_with_display_info(ctx.fb.address, &ctx.fb.info) != 0 {
+        klog_warn!("scanout: framebuffer adoption failed; staying on previous backend");
         return false;
     }
-    framebuffer::register_flush_callback(flush);
-    // The passive `init` already registered the table when it had an early
-    // framebuffer; register here only if it was skipped (no early framebuffer).
-    // `VIDEO_SERVICES` carries every field either way.
+
+    if let Some(flush) = ctx.flush {
+        framebuffer::register_flush_callback(flush);
+    }
+
+    // The early firmware install already registered the table; register here only
+    // if it was skipped (no early framebuffer). `VIDEO_SERVICES` carries every
+    // field either way.
     if !is_video_initialized() {
         register_video_services(&VIDEO_SERVICES);
     }
+
+    if let (Some(base), Some(info)) = (
+        framebuffer::get_fb_base_ptr(),
+        framebuffer::get_display_info(),
+    ) {
+        slopos_drivers::tty::vconsole::register_framebuffer(
+            base,
+            info.pitch,
+            info.width,
+            info.height,
+            info.bytes_per_pixel(),
+        );
+    }
+
+    if let Some(g) = ctx.gpu_control {
+        register_gpu_control(g.available, g.set_image, g.move_cursor, g.set_mode);
+    }
+
+    let width = ctx.fb.info.width as i32;
+    let height = ctx.fb.info.height as i32;
+    if width > 0 && height > 0 {
+        slopos_drivers::mouse::set_bounds(width, height);
+    }
+
+    scanout::set_current_framebuffer(ctx.fb);
     klog_info!(
-        "virtio-gpu: scanout adopted {}x{} pitch {}",
-        fb.info.width,
-        fb.info.height,
-        fb.info.pitch,
+        "scanout: adopted {}x{} pitch {}",
+        ctx.fb.info.width,
+        ctx.fb.info.height,
+        ctx.fb.info.pitch,
     );
+    show_splash();
     true
 }
 

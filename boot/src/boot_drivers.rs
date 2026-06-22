@@ -1,6 +1,6 @@
 use slopos_hermetic::{BootCtx, BspInit};
 use slopos_ostd::klog::{self, KlogLevel};
-use slopos_ostd::{klog_debug, klog_info, klog_warn};
+use slopos_ostd::{klog_debug, klog_info};
 use slopos_testing::{
     TestRunSummary, kernel_phase_summary, tests_reset_panic_state, tests_run_all,
 };
@@ -13,47 +13,31 @@ use crate::limine_protocol;
 use crate::smp::smp_init;
 use slopos_acpi::madt::Madt;
 use slopos_acpi::tables::AcpiTables;
-#[cfg(feature = "xe-gpu")]
-use slopos_drivers::xe;
 use slopos_drivers::{
     apic, hpet, ioapic,
-    pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
+    pci::{pci_init, pci_probe_drivers},
 };
 use slopos_kernel_services::platform;
+use slopos_kernel_services::syscall_services::scanout;
 use slopos_mm::tlb;
-
-fn sync_mouse_bounds(display: Option<slopos_abi::FramebufferData>) {
-    let Some(display) = display else {
-        return;
-    };
-
-    let width = display.info.width as i32;
-    let height = display.info.height as i32;
-    if width > 0 && height > 0 {
-        slopos_drivers::mouse::set_bounds(width, height);
-    }
-}
 
 fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
-/// Select the display backend from the kernel cmdline.
+/// The scanout arbitration priority the firmware framebuffer claims at.
 ///
-/// Defaults to virtio-gpu (the QEMU path's proper scanout). `video=framebuffer`
-/// forces the passive firmware framebuffer; `video=xe` selects the Intel Xe
-/// backend (only when compiled in).
-fn boot_video_backend() -> video::VideoBackend {
+/// Normally [`scanout::PRIO_FIRMWARE_FB`] (the lowest, always-losable rank) so
+/// any GPU driver wins the display. `video=framebuffer` lifts it above every GPU
+/// via [`scanout::PRIO_CMDLINE_HINT_BUMP`], so GPU probes lose arbitration and
+/// the passive firmware framebuffer stays up without gating any `matches`.
+fn boot_firmware_priority() -> i32 {
     if let Some(cmdline) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline()) {
-        #[cfg(feature = "xe-gpu")]
-        if cmdline.contains("video=xe") {
-            return video::VideoBackend::Xe;
-        }
         if cmdline.contains("video=framebuffer") {
-            return video::VideoBackend::Framebuffer;
+            return scanout::PRIO_FIRMWARE_FB + scanout::PRIO_CMDLINE_HINT_BUMP;
         }
     }
-    video::VideoBackend::VirtioGpu
+    scanout::PRIO_FIRMWARE_FB
 }
 
 fn apply_serial_mirror_cmdline() {
@@ -118,30 +102,15 @@ fn boot_step_timer_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
             "WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)"
         );
     }
-    let backend = boot_video_backend();
-    #[cfg(feature = "xe-gpu")]
-    if backend == video::VideoBackend::Xe {
-        klog_info!("BOOT: deferring video init until PCI for GPU backend");
-        return;
-    }
     let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
         address: *bf.address,
         info: bf.info,
     });
-    video::init(fb, backend);
-    if let (Some(base), Some(info)) = (
-        video::framebuffer::get_fb_base_ptr(),
-        video::framebuffer::get_display_info(),
-    ) {
-        slopos_drivers::tty::vconsole::register_framebuffer(
-            base,
-            info.pitch,
-            info.width,
-            info.height,
-            info.bytes_per_pixel(),
-        );
-    }
-    sync_mouse_bounds(fb);
+    // Bring up the firmware framebuffer as the default scanout provider. The
+    // vconsole + mouse-bounds wiring lives inside `video::init`'s install path
+    // (shared with GPU adoption); GPU drivers later claim the scanout via the
+    // arbiter during `pci_probe_drivers`.
+    video::init(fb, boot_firmware_priority());
 }
 
 fn boot_step_apic_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
@@ -300,111 +269,15 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_net::xdp::init();
 
     klog_debug!("Enumerating PCI devices...");
-    // Driver registration happens at link time via the
-    // `.driver_registry` section (see `crate::pci_driver!` invocations
-    // in `drivers/src/virtio_*.rs`); the linker delivers a contiguous
-    // `[PciDriverEntry]` array to `pci_probe_drivers()` below.
+    // Driver registration happens at link time via the `.driver_registry`
+    // section (see `crate::pci_driver!` invocations in the driver modules); the
+    // linker delivers a contiguous `[PciDriverEntry]` array to
+    // `pci_probe_drivers()`. GPU drivers claim the display scanout through the
+    // singleton-resource arbiter during their own probe, so no backend-specific
+    // handoff is needed here.
     pci_init();
-    // Gate the virtio-gpu probe BEFORE enumeration: the probe resets the
-    // device (tearing down the firmware scanout the passive backend is
-    // presenting), so only let it claim the device when virtio-gpu is the
-    // chosen backend. Otherwise the firmware framebuffer stays intact.
-    slopos_drivers::virtio_gpu::set_enabled(boot_video_backend() == video::VideoBackend::VirtioGpu);
     pci_probe_drivers();
-    #[cfg(feature = "xe-gpu")]
-    if boot_video_backend() == video::VideoBackend::Xe {
-        xe::xe_probe();
-    }
-
     klog_debug!("PCI subsystem initialized.");
-    let gpu = pci_get_primary_gpu();
-    if gpu.present != 0 {
-        klog_debug!(
-            "PCI: Primary GPU detected (bus {}, device {}, function {})",
-            gpu.device.bus,
-            gpu.device.device,
-            gpu.device.function
-        );
-        if gpu.mmio_region.is_mapped() {
-            klog_debug!(
-                "PCI: GPU MMIO virtual base {:#x}, size {:#x}",
-                gpu.mmio_region.virt_base(),
-                gpu.mmio_size
-            );
-        } else {
-            klog_info!("PCI: WARNING GPU MMIO mapping unavailable");
-        }
-    } else {
-        klog_debug!("PCI: No GPU-class device discovered during enumeration");
-    }
-
-    // virtio-gpu takeover: bring up the scanout resource, copy the firmware
-    // framebuffer across, and re-point the framebuffer state at the GPU-visible
-    // backing so compositor flips land there and present via
-    // TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
-    if boot_video_backend() == video::VideoBackend::VirtioGpu
-        && slopos_drivers::virtio_gpu::is_present()
-    {
-        let boot_fb =
-            limine_protocol::boot_info()
-                .framebuffer
-                .map(|bf| slopos_abi::FramebufferData {
-                    address: *bf.address,
-                    info: bf.info,
-                });
-        match slopos_drivers::virtio_gpu::framebuffer_init(boot_fb) {
-            Some(gpu_fb)
-                if video::adopt_virtio_gpu_scanout(
-                    gpu_fb,
-                    slopos_drivers::virtio_gpu::virtio_gpu_flush,
-                ) =>
-            {
-                if let (Some(base), Some(info)) = (
-                    video::framebuffer::get_fb_base_ptr(),
-                    video::framebuffer::get_display_info(),
-                ) {
-                    slopos_drivers::tty::vconsole::register_framebuffer(
-                        base,
-                        info.pitch,
-                        info.width,
-                        info.height,
-                        info.bytes_per_pixel(),
-                    );
-                }
-                // Expose the hardware cursor + runtime mode-set to the video
-                // service layer (compositor reaches these via syscalls).
-                video::register_gpu_control(
-                    slopos_drivers::virtio_gpu::hw_cursor_available,
-                    slopos_drivers::virtio_gpu::cursor_set_image_raw,
-                    slopos_drivers::virtio_gpu::cursor_move,
-                    slopos_drivers::virtio_gpu::set_mode,
-                );
-                sync_mouse_bounds(Some(gpu_fb));
-                // Repaint the boot console on the new scanout: with an early
-                // framebuffer `setup_scanout` already copied the image across,
-                // and without one this is where the splash first appears.
-                video::show_splash();
-            }
-            _ => {
-                klog_warn!("virtio-gpu: scanout setup failed; passive framebuffer remains active");
-            }
-        }
-    }
-
-    #[cfg(feature = "xe-gpu")]
-    {
-        let backend = boot_video_backend();
-        if backend == video::VideoBackend::Xe {
-            let boot_fb = limine_protocol::boot_info().framebuffer;
-            let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
-                address: *bf.address,
-                info: bf.info,
-            });
-            let xe_fb = xe::xe_framebuffer_init(fb);
-            video::init(xe_fb, backend);
-            sync_mouse_bounds(xe_fb);
-        }
-    }
 }
 
 fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {

@@ -243,7 +243,7 @@
 <table>
   <thead><tr><th>Phase</th><th>Goal</th><th>Effort</th><th>Risk</th><th>Unblocks</th><th>Testability</th></tr></thead>
   <tbody>
-    <tr><td><b>1</b></td><td>Singleton-resource arbiter (scanout claim/evict)</td><td><span class="badge b-eff">L</span></td><td>Med</td><td><code>xe</code> deflag display handoff; any future GPU; reusable for console/RTC singletons</td><td>High (virtio-gpu path live-verifies)</td></tr>
+    <tr><td><b>1</b> <span class="badge b-keep">✓ DONE</span></td><td>Singleton-resource arbiter (scanout claim/evict)</td><td><span class="badge b-eff">L</span></td><td>Med</td><td><code>xe</code> deflag display handoff; any future GPU; reusable for console/RTC singletons</td><td>High (virtio-gpu path live-verifies)</td></tr>
     <tr><td><b>2</b></td><td>Declarative match-tables + binding/claim + priority</td><td><span class="badge b-eff">L</span></td><td>Med</td><td>One-driver-per-device; O(1) match; specific-beats-generic; deferred substrate</td><td>High (dummy matchers on virtio)</td></tr>
     <tr><td><b>3</b></td><td>devres/BoundDevice + identity DMA mapper + MSI-X lift</td><td><span class="badge b-eff">M</span></td><td>Low-Med</td><td>Leak-free probe; unbind has a place to run; <code>DmaCoherent</code> usable; non-virtio MSI-X</td><td>High (devres LIFO + DMA tests)</td></tr>
     <tr><td><b>4</b></td><td>Unified Bus model (PCI + gated platform/ACPI)</td><td><span class="badge b-eff">XL</span></td><td>Med</td><td>Declarative platform binding; removes hand-wiring; new-driver template</td><td>Partial (PS/2 yes; I2C-HID HW-only)</td></tr>
@@ -255,13 +255,15 @@
 <!-- ============================ PHASE 1 ============================ -->
 <section id="phase1">
 <div class="phase p1">
-<h3>Phase 1 &mdash; Singleton-Resource Arbiter <span class="badge b-build">BUILD</span></h3>
+<h3>Phase 1 &mdash; Singleton-Resource Arbiter <span class="badge b-build">BUILD</span> <span class="badge b-keep">✓ DONE</span></h3>
 <div class="metarow">
   <span><b>Effort:</b> <span class="badge b-eff">L</span></span>
   <span><b>Risk:</b> Med</span>
   <span><b>Location:</b> <span class="fileref">kernel-services/src/syscall_services/scanout.rs</span></span>
   <span><b>Lock level:</b> <code>LOCK_LEVEL_RESOURCE</code> (=1)</span>
 </div>
+
+<div class="note"><strong>Implemented.</strong> The arbiter (<span class="fileref">kernel-services/src/syscall_services/scanout.rs</span>) and both GPU providers are live: firmware commits at priority 0, virtio-gpu wins (priority 30) and installs through the video-registered installer, and <code>video=framebuffer</code> bumps firmware to priority 100 so virtio-gpu declines without resetting the device. <code>VideoBackend</code>, <code>GPU_ENABLED</code>/<code>set_enabled</code>, <code>adopt_virtio_gpu_scanout</code>, <code>pci_get_primary_gpu</code>/<code>PciGpuInfo</code> are gone; boot collapses to <code>pci_init(); pci_probe_drivers();</code>. As-built deltas from the sketch below: (1) per the worked decision, <code>xe</code> became a participating feature-gated <code>pci_driver!</code> claiming priority 50 (so <code>pci_get_primary_gpu</code> could be fully removed), and a latent <code>!Send</code> bug in <code>XeFramebuffer</code> was fixed; (2) <code>pci_probe_drivers</code> now probes <em>lock-free</em> via the existing <code>pci_get_device</code> single-element copy — required so the blocking <code>setup_scanout</code> in the probe runs with IRQs enabled (it previously ran from boot, outside <code>ENUM_STATE</code>); (3) the install body is a single <code>video</code>-side helper shared by firmware and GPU, reached through a registered fn-pointer (the <code>drivers&nbsp;&#8594;&nbsp;video</code> edge is forbidden). 5 arbiter unit tests (<span class="fileref">drivers/src/tests/scanout_arbiter.rs</span>) plus the full <code>just test</code> suite (2593 pass) are green; live-verified on the virtio-gpu q35 path.</div>
 
 <h4>Goal</h4>
 <p>A generic <code>SingletonResource&lt;P&gt;</code> fn-pointer registry (specialised as <code>ScanoutProvider</code>) that lets multiple GPU drivers register as plain <code>pci_driver!</code>s while exactly one owns the display. Claim-by-priority with a <strong>reservation taken before any destructive device reset</strong>, eviction through the displaced provider's own <code>evict</code> fn. This deletes <code>VideoBackend</code>, <code>set_enabled</code>/<code>GPU_ENABLED</code>, <code>adopt_virtio_gpu_scanout</code>'s caller-conditionals, and the manual <code>xe_probe</code>; it collapses <span class="fileref">boot_drivers.rs:308-407</span> to <code>pci_init(); pci_probe_drivers();</code>.</p>
