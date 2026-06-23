@@ -9,7 +9,7 @@ use slopos_ostd::sync::wait_queue::WaitOutcome;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::{klog_debug, klog_info, write_field, write_init_field};
 
-use crate::pci::{PciDeviceInfo, PciProbeError};
+use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     VirtioMsixState,
@@ -906,13 +906,6 @@ impl Drop for BlockWriteToken {
     }
 }
 
-fn virtio_blk_matches(info: &PciDeviceInfo) -> bool {
-    if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
-        return false;
-    }
-    info.device_id == VIRTIO_BLK_DEVICE_ID_LEGACY || info.device_id == VIRTIO_BLK_DEVICE_ID_MODERN
-}
-
 fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     if !caps.has_device_cfg() {
         return 0;
@@ -922,7 +915,7 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     lo | (hi << 32)
 }
 
-fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
     klog_info!(
         "virtio-blk: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -1024,13 +1017,22 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         irq_mode,
     );
 
-    Ok(())
+    Ok(ProbeOutcome::Bound)
 }
 
 crate::pci_driver! {
     pub static VIRTIO_BLK_DRIVER = {
         name: "virtio-blk",
-        matches: virtio_blk_matches,
+        match_table: &[
+            PciMatch::VendorDevice {
+                vendor: PCI_VENDOR_ID_VIRTIO,
+                device: VIRTIO_BLK_DEVICE_ID_LEGACY,
+            },
+            PciMatch::VendorDevice {
+                vendor: PCI_VENDOR_ID_VIRTIO,
+                device: VIRTIO_BLK_DEVICE_ID_MODERN,
+            },
+        ],
         probe: virtio_blk_probe,
     };
 }

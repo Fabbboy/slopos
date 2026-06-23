@@ -15,8 +15,8 @@ use super::designware::{DesignWareI2c, I2cError};
 use super::{I2cBus, register_bus};
 use crate::hpet;
 use crate::pci::{
-    PciProbeError, pci_alloc_mmio, pci_config_read16, pci_config_read32, pci_config_write16,
-    pci_config_write32, pci_find_capability,
+    PciProbeError, ProbeOutcome, pci_alloc_mmio, pci_config_read16, pci_config_read32,
+    pci_config_write16, pci_config_write32, pci_find_capability,
 };
 use crate::pci_defs::PciDeviceInfo;
 use crate::pci_defs::{PCI_BAR0_OFFSET, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
@@ -83,7 +83,7 @@ fn lpss_i2c_matches(info: &PciDeviceInfo) -> bool {
         && LPSS_I2C_PCI_DEVICES.contains(&info.device)
 }
 
-fn lpss_i2c_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+fn lpss_i2c_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
     let bar = info.bars[0];
     if bar.is_io != 0 || bar.size == 0 {
         return Err(PciProbeError::Unsupported);
@@ -159,13 +159,17 @@ fn lpss_i2c_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         info.vendor_id,
         info.device_id
     );
-    Ok(())
+    Ok(ProbeOutcome::Bound)
 }
 
 crate::pci_driver! {
     pub static LPSS_I2C_DRIVER = {
         name: "i2c-lpss-designware",
-        matches: lpss_i2c_matches,
+        // The match needs a cmdline gate and a device-slot list that no
+        // declarative rule can express, so the whole predicate lives in the
+        // imperative fallback.
+        match_table: &[],
+        fallback: Some(lpss_i2c_matches),
         probe: lpss_i2c_probe,
     };
 }

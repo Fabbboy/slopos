@@ -12,7 +12,7 @@ use slopos_kernel_services::syscall_services::scanout::{
     self, ClaimOutcome, InstallCtx, ScanoutId, ScanoutProvider,
 };
 
-use crate::pci::{PciDeviceInfo, PciProbeError};
+use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
 use crate::pci_defs::PCI_CLASS_DISPLAY;
 
 mod display;
@@ -86,10 +86,6 @@ impl XeFramebuffer {
 
 static XE_DEVICE: SpinLock<XeDevice> = SpinLock::new(XeDevice::empty(), LOCK_LEVEL_RESOURCE);
 
-const fn xe_matches(info: &PciDeviceInfo) -> bool {
-    info.vendor_id == PCI_VENDOR_INTEL && info.class_code == PCI_CLASS_DISPLAY
-}
-
 /// First memory-mapped BAR (Intel GTTMMADR is BAR0): the GPU register window.
 fn xe_mmio_bar(info: &PciDeviceInfo) -> Option<(u64, u64)> {
     for bar in &info.bars {
@@ -104,14 +100,14 @@ fn xe_mmio_bar(info: &PciDeviceInfo) -> Option<(u64, u64)> {
 /// to do here yet.
 fn xe_evict() {}
 
-fn xe_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+fn xe_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
     // Reserve the scanout before touching the device. If a higher-priority
     // provider already owns it, stay passive and touch nothing.
     match scanout::SCANOUT.claim(scanout::PRIO_INTEL_XE) {
         ClaimOutcome::Won => {}
         ClaimOutcome::Lost | ClaimOutcome::LostTie => {
             klog_info!("XE: lost scanout arbitration; staying passive");
-            return Ok(());
+            return Ok(ProbeOutcome::Declined);
         }
     }
 
@@ -151,7 +147,7 @@ fn xe_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         klog_warn!("XE: scanout install failed");
         return Err(PciProbeError::DeviceFault);
     }
-    Ok(())
+    Ok(ProbeOutcome::Bound)
 }
 
 /// Map the GPU MMIO window, enable forcewake, identify the GPU, and publish it.
@@ -321,7 +317,10 @@ pub fn xe_flush(_damage: *const slopos_abi::damage::DamageRect, _count: u32) -> 
 crate::pci_driver! {
     pub static XE_DRIVER = {
         name: "intel-xe",
-        matches: xe_matches,
+        match_table: &[PciMatch::VendorClass {
+            vendor: PCI_VENDOR_INTEL,
+            class: PCI_CLASS_DISPLAY,
+        }],
         probe: xe_probe,
     };
 }

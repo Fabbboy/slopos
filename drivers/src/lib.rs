@@ -34,5 +34,6 @@ pub mod virtio_net;
 #[cfg(feature = "xe-gpu")]
 pub mod xe;
 
+pub use pci::{PciMatch, PciProbeError, ProbeOutcome};
 pub use ps2::keyboard;
 pub use ps2::mouse;

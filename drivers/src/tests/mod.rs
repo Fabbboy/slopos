@@ -6,6 +6,7 @@ pub mod ecam_tests;
 pub mod hpet_tests;
 pub mod madt_tests;
 pub mod msix_tests;
+pub mod pci_binding;
 pub mod pci_cap_tests;
 pub mod scanout_arbiter;
 pub mod virtio_completion_tests;

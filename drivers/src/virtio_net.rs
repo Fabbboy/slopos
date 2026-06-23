@@ -13,7 +13,7 @@ use slopos_net as net;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
-use crate::pci::{PciDeviceInfo, PciProbeError};
+use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
     VirtioMmioCaps, VirtioMsixState,
@@ -404,13 +404,6 @@ pub fn sniff_packet_for_members(frame: &[u8]) {
 // =============================================================================
 // Device configuration helpers
 // =============================================================================
-
-fn virtio_net_matches(info: &PciDeviceInfo) -> bool {
-    if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
-        return false;
-    }
-    info.device_id == VIRTIO_NET_DEVICE_ID_LEGACY || info.device_id == VIRTIO_NET_DEVICE_ID_MODERN
-}
 
 fn read_mac(caps: &VirtioMmioCaps, negotiated_features: u64) -> [u8; 6] {
     if (negotiated_features & VIRTIO_NET_F_MAC) == 0
@@ -1538,10 +1531,10 @@ fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
     true
 }
 
-fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+fn virtio_net_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
     if !DEVICE_CLAIMED.claim() {
-        klog_debug!("virtio-net: already claimed");
-        return Err(PciProbeError::Mismatch);
+        klog_debug!("virtio-net: already own a NIC; declining additional device");
+        return Ok(ProbeOutcome::Declined);
     }
 
     klog_info!(
@@ -1729,7 +1722,7 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         irq_mode,
     );
 
-    Ok(())
+    Ok(ProbeOutcome::Bound)
 }
 // =============================================================================
 // Driver registration & public API
@@ -1738,7 +1731,16 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
 crate::pci_driver! {
     pub static VIRTIO_NET_DRIVER = {
         name: "virtio-net",
-        matches: virtio_net_matches,
+        match_table: &[
+            PciMatch::VendorDevice {
+                vendor: PCI_VENDOR_ID_VIRTIO,
+                device: VIRTIO_NET_DEVICE_ID_LEGACY,
+            },
+            PciMatch::VendorDevice {
+                vendor: PCI_VENDOR_ID_VIRTIO,
+                device: VIRTIO_NET_DEVICE_ID_MODERN,
+            },
+        ],
         probe: virtio_net_probe,
     };
 }

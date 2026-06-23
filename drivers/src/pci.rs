@@ -6,10 +6,9 @@ use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_ostd::klog_info;
 use slopos_ostd::pci::{Bdf, EcamConfigSpace};
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
-use slopos_ostd::{KVec, Pod};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
+use slopos_ostd::{AllocError, KBTreeMap, KVec, Pod, klog_info, klog_warn};
 
 pub use crate::pci_defs::*;
 
@@ -31,6 +30,102 @@ pub enum PciProbeError {
     DeviceFault,
     /// A required capability (e.g., MSI-X) is unavailable on the device.
     Unsupported,
+    /// The driver matched and would bind, but a dependency is not ready yet;
+    /// the registry retries it in a later bounded pass. The substrate for a
+    /// full deferred-probe fixpoint queue.
+    Deferred,
+}
+
+/// One declarative match rule in a driver's `match_table`. A driver matches a
+/// device when **any** rule in its table matches (or its imperative `fallback`
+/// returns `true`). Lives in rodata behind a `&'static [PciMatch]`, so adding a
+/// driver stays a purely additive link-section static.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PciMatch {
+    /// The common, directly-indexable case: an exact vendor+device pair.
+    VendorDevice { vendor: u16, device: u16 },
+    /// Any device from `vendor` in `class` (e.g. any Intel display controller).
+    VendorClass { vendor: u16, class: u8 },
+    /// A generic driver for a class+subclass, regardless of vendor.
+    ClassSubclass { class: u8, subclass: u8 },
+    /// The broadest generic: any device in `class`.
+    ClassOnly { class: u8 },
+}
+
+impl PciMatch {
+    /// Whether this rule matches `d`.
+    pub const fn matches(&self, d: &PciDeviceInfo) -> bool {
+        match *self {
+            PciMatch::VendorDevice { vendor, device } => {
+                d.vendor_id == vendor && d.device_id == device
+            }
+            PciMatch::VendorClass { vendor, class } => {
+                d.vendor_id == vendor && d.class_code == class
+            }
+            PciMatch::ClassSubclass { class, subclass } => {
+                d.class_code == class && d.subclass == subclass
+            }
+            PciMatch::ClassOnly { class } => d.class_code == class,
+        }
+    }
+
+    /// The `(vendor << 16) | device` index key for the exact-pair case.
+    const fn vd_key(&self) -> Option<u32> {
+        match *self {
+            PciMatch::VendorDevice { vendor, device } => {
+                Some(((vendor as u32) << 16) | device as u32)
+            }
+            _ => None,
+        }
+    }
+
+    /// The class index key for every class-shaped rule. The full predicate
+    /// (vendor / subclass) is still verified by [`PciMatch::matches`]; the
+    /// index only narrows candidates.
+    const fn cs_key(&self) -> Option<u16> {
+        match *self {
+            PciMatch::VendorClass { class, .. }
+            | PciMatch::ClassSubclass { class, .. }
+            | PciMatch::ClassOnly { class } => Some(class as u16),
+            PciMatch::VendorDevice { .. } => None,
+        }
+    }
+}
+
+/// What a probe did with a device it matched.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeOutcome {
+    /// The driver took ownership of the device; the registry records the claim
+    /// by device index so no other driver is offered it.
+    Bound,
+    /// The driver matched but deliberately did not bind (e.g. it lost an
+    /// arbitration and stays passive, or it already owns an equivalent
+    /// device). Lower-priority candidates are still offered the device.
+    Declined,
+}
+
+/// Registry record of a driver's successful claim on a device, stored in the
+/// per-device claim slot once its probe returns [`ProbeOutcome::Bound`].
+///
+/// Phase-2 drivers keep their state in their own module statics, so the binding
+/// only records the owning driver's name. The type is registry-local so later
+/// phases can grow it (the device's managed-resource bag, an unbind hook)
+/// without touching driver code.
+pub struct Binding {
+    name: &'static str,
+}
+
+impl Binding {
+    /// The owning driver's name.
+    pub const fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+
+    /// The owning driver's name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
 }
 
 /// Static, link-section-resident PCI driver descriptor.
@@ -44,13 +139,28 @@ pub enum PciProbeError {
 pub struct PciDriverEntry {
     /// Human-readable driver name. Logged on registration and probe.
     pub name: &'static str,
-    /// Initial device match: returns `true` when this driver is
-    /// willing to claim the candidate device.
-    pub matches: fn(&PciDeviceInfo) -> bool,
-    /// Probe the matched device; on success the driver retains
-    /// ownership of any allocated resources, on failure it must
-    /// release them and the registry moves on to the next candidate.
-    pub probe: fn(&PciDeviceInfo) -> Result<(), PciProbeError>,
+    /// Declarative match rules: the driver matches when any rule matches.
+    /// Indexed at boot for O(1) candidate lookup.
+    pub match_table: &'static [PciMatch],
+    /// Imperative escape hatch for predicates a `match_table` cannot express
+    /// (a cmdline gate, a device-slot constraint). A driver matches when the
+    /// table matches **or** the fallback returns `true`.
+    pub fallback: Option<fn(&PciDeviceInfo) -> bool>,
+    /// Bind order, ascending: a lower value binds first, so a specific driver
+    /// can beat a generic one for the same device. Defaults to a documented
+    /// mid value (128) via the [`crate::pci_driver!`] macro.
+    pub priority: u8,
+    /// Probe the matched device. On `Ok(Bound)` the registry records the claim;
+    /// on `Ok(Declined)` it offers the device to the next candidate; on `Err`
+    /// it logs the typed reason (and retries once on `Deferred`).
+    pub probe: fn(&PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>,
+}
+
+impl PciDriverEntry {
+    /// Whether this driver matches `dev` (any table rule, or the fallback).
+    fn entry_matches(&self, dev: &PciDeviceInfo) -> bool {
+        self.match_table.iter().any(|m| m.matches(dev)) || self.fallback.map_or(false, |f| f(dev))
+    }
 }
 
 struct PciEnumState {
@@ -133,17 +243,44 @@ pub fn driver_registry_iter() -> impl Iterator<Item = &'static PciDriverEntry> {
     .iter()
 }
 
+/// Pick a supplied optional macro field or fall back to its default.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __pci_driver_opt {
+    (, $default:expr) => {
+        $default
+    };
+    ($val:expr, $default:expr) => {
+        $val
+    };
+}
+
 /// Declarative wrapper around `link_section_static!` for emitting a
 /// [`PciDriverEntry`] into the `.driver_registry` link section. Each
 /// driver crate uses this macro exactly once per driver; the linker
 /// gathers all expansions into a single contiguous array.
+///
+/// `match_table` is required; `fallback` (default `None`) and `priority`
+/// (default `128`, the documented mid value — lower binds first) are optional:
+///
+/// ```ignore
+/// pci_driver! {
+///     pub static FOO_DRIVER = {
+///         name: "foo",
+///         match_table: &[PciMatch::VendorDevice { vendor: 0x1af4, device: 0x1042 }],
+///         probe: foo_probe,
+///     };
+/// }
+/// ```
 #[macro_export]
 macro_rules! pci_driver {
     (
         $(#[$attr:meta])*
         $vis:vis static $name:ident = {
             name: $drv_name:expr,
-            matches: $matches:path,
+            match_table: $match_table:expr,
+            $(fallback: $fallback:expr,)?
+            $(priority: $priority:expr,)?
             probe: $probe:path $(,)?
         };
     ) => {
@@ -153,7 +290,9 @@ macro_rules! pci_driver {
             section = ".driver_registry";
             $vis static $name: $crate::pci::PciDriverEntry = $crate::pci::PciDriverEntry {
                 name: $drv_name,
-                matches: $matches,
+                match_table: $match_table,
+                fallback: $crate::__pci_driver_opt!($($fallback)?, None),
+                priority: $crate::__pci_driver_opt!($($priority)?, 128),
                 probe: $probe,
             };
         }
@@ -1110,27 +1249,305 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
     }
 }
 
-pub fn pci_probe_drivers() {
-    // Probe lock-free: copy each device out via `pci_get_device` (the enum-state
-    // lock is released per device) rather than holding `ENUM_STATE` across the
-    // loop. Copying the whole `[PciDeviceInfo; PCI_MAX_DEVICES]` array would blow
-    // the 2 KiB stack-size gate, but a single `PciDeviceInfo` is small. Crucially,
-    // probes must NOT run under the IRQ-disabling `ENUM_STATE` lock: a GPU probe
-    // submits commands and blocks on completion IRQs, which can only fire with
-    // interrupts enabled.
-    for entry in driver_registry_iter() {
-        klog_info!("PCI: Probing driver {}", entry.name);
-        for dev_idx in 0.. {
-            let Some(dev) = pci_get_device(dev_idx) else {
-                break;
-            };
-            if !(entry.matches)(&dev) {
+/// The name of the driver that has claimed device `dev_idx`, if any. Reads the
+/// per-device claim table populated by [`pci_probe_drivers`].
+pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
+    match CLAIMED_BY.lock().slots.get(dev_idx) {
+        Some(ClaimSlot::Claimed(binding)) => Some(binding.name()),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Match index, claim table, and the priority-ordered matchmaker.
+//
+// The boot probe runs device-outer, candidates-inner: each device is offered
+// to its matching drivers in (priority, link-index) order until one binds, and
+// the registry records the claim by device index so no second driver is offered
+// a claimed device. Matching is data (the `MatchIndex`), not a per-driver loop.
+//
+// Lock discipline: `ENUM_STATE` (REGISTRY) guards only the device table and is
+// taken briefly inside `pci_get_device` for a single-element copy; `CLAIMED_BY`
+// (RESOURCE) guards only the claim slots. The two are never nested and `probe`
+// runs with neither held, so probes that block on IRQs and allocate stay safe.
+// ---------------------------------------------------------------------------
+
+/// `(vendor << 16) | device` key for the exact-pair index.
+const fn vd_key_of(dev: &PciDeviceInfo) -> u32 {
+    ((dev.vendor_id as u32) << 16) | dev.device_id as u32
+}
+
+/// Boot-built index over the driver registry giving O(1) candidate lookup.
+///
+/// `entries` is the flattened driver set (the link-section registry, with any
+/// test drivers appended); the buckets hold link indices into it.
+pub(crate) struct MatchIndex {
+    entries: KVec<&'static PciDriverEntry>,
+    by_vd: KBTreeMap<u32, KVec<u16>>,
+    by_cs: KBTreeMap<u16, KVec<u16>>,
+    catch_all: KVec<u16>,
+}
+
+impl MatchIndex {
+    /// Build over the live link-section registry.
+    fn build() -> Result<Self, AllocError> {
+        let mut entries = KVec::new();
+        for e in driver_registry_iter() {
+            entries.push(e)?;
+        }
+        Self::build_from(entries)
+    }
+
+    /// Build over an explicit driver set (shared by [`Self::build`] and the
+    /// in-QEMU unit tests, which pass synthetic drivers).
+    pub(crate) fn build_from(entries: KVec<&'static PciDriverEntry>) -> Result<Self, AllocError> {
+        let mut idx = MatchIndex {
+            entries,
+            by_vd: KBTreeMap::new(),
+            by_cs: KBTreeMap::new(),
+            catch_all: KVec::new(),
+        };
+        for i in 0..idx.entries.len() {
+            let e = idx.entries[i];
+            let li = i as u16;
+            for m in e.match_table {
+                if let Some(k) = m.vd_key() {
+                    idx.by_vd.entry(k).or_default().push(li)?;
+                }
+                if let Some(k) = m.cs_key() {
+                    idx.by_cs.entry(k).or_default().push(li)?;
+                }
+            }
+            // A fallback is an arbitrary predicate, so its driver must be
+            // offered every device and verified per-device.
+            if e.fallback.is_some() {
+                idx.catch_all.push(li)?;
+            }
+        }
+        Ok(idx)
+    }
+
+    pub(crate) fn entry(&self, li: u16) -> &'static PciDriverEntry {
+        self.entries[li as usize]
+    }
+
+    /// Collect the candidate driver indices for `dev` into `out`, deduplicated
+    /// and sorted by (priority, link-index) ascending — specific beats generic.
+    pub(crate) fn candidates_for(
+        &self,
+        dev: &PciDeviceInfo,
+        out: &mut KVec<u16>,
+    ) -> Result<(), AllocError> {
+        out.clear();
+        if let Some(bucket) = self.by_vd.get(&vd_key_of(dev)) {
+            for &li in bucket.iter() {
+                push_unique(out, li)?;
+            }
+        }
+        if let Some(bucket) = self.by_cs.get(&(dev.class_code as u16)) {
+            for &li in bucket.iter() {
+                push_unique(out, li)?;
+            }
+        }
+        for &li in self.catch_all.iter() {
+            push_unique(out, li)?;
+        }
+        out.sort_unstable_by(|&a, &b| {
+            let pa = self.entries[a as usize].priority;
+            let pb = self.entries[b as usize].priority;
+            pa.cmp(&pb).then(a.cmp(&b))
+        });
+        Ok(())
+    }
+}
+
+/// Append `li` to `out` unless it is already present (a driver with two
+/// matching rules must only probe a device once).
+fn push_unique(out: &mut KVec<u16>, li: u16) -> Result<(), AllocError> {
+    if !out.contains(&li) {
+        out.push(li)?;
+    }
+    Ok(())
+}
+
+/// Per-device ownership slot.
+enum ClaimSlot {
+    Unclaimed,
+    Claimed(Binding),
+}
+
+/// Records which driver owns each enumerated device, indexed by device index.
+struct ClaimTable {
+    slots: [ClaimSlot; PCI_MAX_DEVICES],
+}
+
+impl ClaimTable {
+    const fn new() -> Self {
+        Self {
+            slots: [const { ClaimSlot::Unclaimed }; PCI_MAX_DEVICES],
+        }
+    }
+
+    fn is_claimed(&self, dev_idx: usize) -> bool {
+        matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed(_)))
+    }
+
+    fn claim(&mut self, dev_idx: usize, binding: Binding) {
+        if dev_idx < self.slots.len() {
+            self.slots[dev_idx] = ClaimSlot::Claimed(binding);
+        }
+    }
+}
+
+// RESOURCE(1) < REGISTRY(2): never nested with `ENUM_STATE`, so the lock graph
+// stays acyclic regardless of which numeric level is larger.
+static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(ClaimTable::new(), LOCK_LEVEL_RESOURCE);
+
+/// Records device claims for the matchmaker, abstracting the live `CLAIMED_BY`
+/// static (boot) from a heap-backed map (unit tests) so the matchmaker core is
+/// exercisable over synthetic devices without a per-call `[ClaimSlot; 256]`.
+pub(crate) trait ClaimSink {
+    fn is_claimed(&self, dev_idx: usize) -> bool;
+    fn record(&self, dev_idx: usize, name: &'static str);
+}
+
+/// The live per-device claim table.
+struct GlobalClaims;
+
+impl ClaimSink for GlobalClaims {
+    fn is_claimed(&self, dev_idx: usize) -> bool {
+        CLAIMED_BY.lock().is_claimed(dev_idx)
+    }
+
+    fn record(&self, dev_idx: usize, name: &'static str) {
+        CLAIMED_BY.lock().claim(dev_idx, Binding::new(name));
+    }
+}
+
+/// Offer each device to its candidate drivers in priority order, recording the
+/// first that binds, then run one bounded deferred-retry pass.
+///
+/// The device set is supplied by `get_device` and claims go through `claims`,
+/// so the boot path passes [`pci_get_device`]/[`GlobalClaims`] while unit tests
+/// pass synthetic devices and a local sink. `probe` runs with neither lock
+/// held. Boot is BSP-only and single-writer, so the claim re-check across the
+/// lock-free probe is a forward-compatibility seam for Phase-5 SMP rescans, not
+/// a correctness requirement today.
+pub(crate) fn matchmake(
+    idx: &MatchIndex,
+    device_count: usize,
+    get_device: &dyn Fn(usize) -> Option<PciDeviceInfo>,
+    claims: &dyn ClaimSink,
+) -> Result<(), AllocError> {
+    let mut cands: KVec<u16> = KVec::new();
+    // (driver link-index, device index) worklist; the shape is forward-
+    // compatible with a Phase-5 retry-to-fixpoint queue.
+    let mut deferred: KVec<(u16, usize)> = KVec::new();
+
+    for dev_idx in 0..device_count {
+        if claims.is_claimed(dev_idx) {
+            continue;
+        }
+        let Some(dev) = get_device(dev_idx) else {
+            continue;
+        };
+        idx.candidates_for(&dev, &mut cands)?;
+        for k in 0..cands.len() {
+            let li = cands[k];
+            let e = idx.entry(li);
+            if !e.entry_matches(&dev) {
                 continue;
             }
-            match (entry.probe)(&dev) {
-                Ok(()) => {}
+            match (e.probe)(&dev) {
+                Ok(ProbeOutcome::Bound) => {
+                    claims.record(dev_idx, e.name);
+                    break;
+                }
+                Ok(ProbeOutcome::Declined) => continue,
+                Err(PciProbeError::Deferred) => {
+                    deferred.push((li, dev_idx))?;
+                    continue;
+                }
+                Err(other) => {
+                    klog_info!("PCI: {} declined device {}: {:?}", e.name, dev_idx, other);
+                    continue;
+                }
+            }
+        }
+    }
+
+    // One bounded deferred-retry pass (the full fixpoint queue is Phase 5).
+    for n in 0..deferred.len() {
+        let (li, dev_idx) = deferred[n];
+        if claims.is_claimed(dev_idx) {
+            continue;
+        }
+        let Some(dev) = get_device(dev_idx) else {
+            continue;
+        };
+        let e = idx.entry(li);
+        if !e.entry_matches(&dev) {
+            continue;
+        }
+        match (e.probe)(&dev) {
+            Ok(ProbeOutcome::Bound) => claims.record(dev_idx, e.name),
+            Ok(ProbeOutcome::Declined) => {}
+            Err(err) => {
+                klog_info!(
+                    "PCI: {} gave up on device {} after deferral: {:?}",
+                    e.name,
+                    dev_idx,
+                    err
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Match every enumerated PCI device to a driver and bind exactly one per
+/// device, in priority order. Runs once at boot on the BSP.
+pub fn pci_probe_drivers() {
+    let idx = match MatchIndex::build() {
+        Ok(idx) => idx,
+        Err(_) => {
+            klog_warn!("PCI: match index build failed (OOM); using linear fallback");
+            pci_probe_drivers_fallback();
+            return;
+        }
+    };
+    let device_count = pci_get_device_count();
+    if matchmake(&idx, device_count, &|i| pci_get_device(i), &GlobalClaims).is_err() {
+        klog_warn!("PCI: matchmaker ran out of memory; some devices may be unbound");
+    }
+}
+
+/// Allocation-free probe used only when [`MatchIndex::build`] cannot allocate.
+/// Device-outer, drivers in link order (no priority sort), one driver per
+/// device. Correct but unordered — the boot heap makes this path unreachable in
+/// practice.
+fn pci_probe_drivers_fallback() {
+    let device_count = pci_get_device_count();
+    for dev_idx in 0..device_count {
+        if GlobalClaims.is_claimed(dev_idx) {
+            continue;
+        }
+        let Some(dev) = pci_get_device(dev_idx) else {
+            continue;
+        };
+        for e in driver_registry_iter() {
+            if !e.entry_matches(&dev) {
+                continue;
+            }
+            match (e.probe)(&dev) {
+                Ok(ProbeOutcome::Bound) => {
+                    GlobalClaims.record(dev_idx, e.name);
+                    break;
+                }
+                Ok(ProbeOutcome::Declined) => continue,
                 Err(err) => {
-                    klog_info!("PCI: {} probe rejected device: {:?}", entry.name, err);
+                    klog_info!("PCI: {} declined device {}: {:?}", e.name, dev_idx, err);
+                    continue;
                 }
             }
         }

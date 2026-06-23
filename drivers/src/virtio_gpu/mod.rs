@@ -41,7 +41,7 @@ use slopos_kernel_services::syscall_services::scanout::{
     self, ClaimOutcome, GpuControlFns, InstallCtx, ScanoutId, ScanoutProvider,
 };
 
-use crate::pci::{PciDeviceInfo, PciProbeError};
+use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     VirtioMsixState,
@@ -1346,13 +1346,6 @@ pub fn cursor_move(x: u32, y: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn virtio_gpu_matches(info: &PciDeviceInfo) -> bool {
-    if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
-        return false;
-    }
-    info.device_id == VIRTIO_GPU_ID_LEGACY || info.device_id == VIRTIO_GPU_ID_MODERN
-}
-
 fn read_num_scanouts(caps: &VirtioMmioCaps) -> u32 {
     if caps.has_device_cfg() {
         caps.device_cfg.read::<u32>(VIRTIO_GPU_CFG_NUM_SCANOUTS)
@@ -1365,14 +1358,14 @@ fn read_num_scanouts(caps: &VirtioMmioCaps) -> u32 {
 /// displaced virtio-gpu has nothing to do here yet.
 fn virtio_gpu_evict() {}
 
-fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
     // Reserve the scanout before the destructive device reset. If a
     // higher-priority provider already owns it, stay passive and touch nothing.
     match scanout::SCANOUT.claim(scanout::PRIO_VIRTIO_GPU) {
         ClaimOutcome::Won => {}
         ClaimOutcome::Lost | ClaimOutcome::LostTie => {
             klog_info!("virtio-gpu: lost scanout arbitration; staying passive");
-            return Ok(());
+            return Ok(ProbeOutcome::Declined);
         }
     }
 
@@ -1421,7 +1414,7 @@ fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         klog_warn!("virtio-gpu: scanout install failed");
         return Err(PciProbeError::DeviceFault);
     }
-    Ok(())
+    Ok(ProbeOutcome::Bound)
 }
 
 /// Reset and initialise the device (bus-master, capabilities, feature
@@ -1519,7 +1512,16 @@ fn virtio_gpu_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
 crate::pci_driver! {
     pub static VIRTIO_GPU_DRIVER = {
         name: "virtio-gpu",
-        matches: virtio_gpu_matches,
+        match_table: &[
+            PciMatch::VendorDevice {
+                vendor: PCI_VENDOR_ID_VIRTIO,
+                device: VIRTIO_GPU_ID_LEGACY,
+            },
+            PciMatch::VendorDevice {
+                vendor: PCI_VENDOR_ID_VIRTIO,
+                device: VIRTIO_GPU_ID_MODERN,
+            },
+        ],
         probe: virtio_gpu_probe,
     };
 }
