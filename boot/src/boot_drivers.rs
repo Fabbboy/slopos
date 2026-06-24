@@ -250,6 +250,15 @@ fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("OSTD: KernelIoToken yield backend registered (sched/runtime)");
 }
 
+fn boot_step_identity_dma_fn(ctx: &mut BootCtx<'_, BspInit>) {
+    // Wire the passthrough IOMMU mapper before any driver probes DMA, so
+    // `DmaCoherent`/`DmaStream` have a live mapper (IOVA == phys on platforms
+    // with no IOMMU policy to enforce). A future VT-d mapper swaps in at the
+    // same single seam. Drivers that never allocate DMA are unaffected.
+    slopos_ostd::mm::register_identity_dma_mapper(&ctx.bsp_token());
+    klog_debug!("OSTD: identity DMA mapper registered (IOVA == phys)");
+}
+
 fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // Honour `tp.off` (disables the LPSS I²C probe + touchpad bring-up)
     // before driver probe runs.
@@ -521,6 +530,13 @@ crate::boot_init!(
     b"register kernel-thread spawner with OSTD\0",
     boot_step_register_spawner_fn,
     flags = boot_init_priority(75)
+);
+crate::boot_init!(
+    BOOT_STEP_IDENTITY_DMA,
+    drivers,
+    b"identity dma mapper\0",
+    boot_step_identity_dma_fn,
+    flags = boot_init_priority(78)
 );
 crate::boot_init!(
     BOOT_STEP_PCI_INIT,

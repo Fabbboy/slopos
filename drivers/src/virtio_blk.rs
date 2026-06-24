@@ -9,7 +9,8 @@ use slopos_ostd::sync::wait_queue::WaitOutcome;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::{klog_debug, klog_info, write_field, write_init_field};
 
-use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
+use crate::driver_core::bound::BoundDevice;
+use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     VirtioMsixState,
@@ -915,7 +916,8 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     lo | (hi << 32)
 }
 
-fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
+fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
+    let info = *bound.info();
     klog_info!(
         "virtio-blk: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -925,9 +927,9 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>
         info.function
     );
 
-    enable_bus_master(info);
+    enable_bus_master(&info);
 
-    let caps = parse_capabilities(info);
+    let caps = parse_capabilities(&info);
 
     klog_debug!(
         "virtio-blk: caps common={} notify={} device={}",
@@ -960,7 +962,7 @@ fn virtio_blk_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>
     // The handler is a per-device closure that harvests this device's own
     // used ring and wakes its parked waiters — no global IRQ sink.
     let inner_for_irq = inner.clone();
-    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 1, move |_q: u8| {
+    let (irq_mode, msix_state) = setup_interrupts(bound, &caps, 1, move |_q: u8| {
         inner_for_irq.handle_queue_irq();
     })
     .unwrap_or_else(|msg| {

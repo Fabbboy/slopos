@@ -235,6 +235,11 @@ pub fn setup_queue_into(
     let size = device_max_size.min(max_size);
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_SIZE, size);
 
+    // The virtqueue rings use raw-physical frames published straight to the
+    // device — deliberately NOT routed through `DmaCoherent`/the IOMMU mapper.
+    // Under the boot identity mapper IOVA == phys, so the abstraction would buy
+    // nothing here while churning the only proven data path. A future real VT-d
+    // mapper is the only reason to revisit this; do not "unify" it before then.
     let Some(desc_frame) = OwnedPageFrame::alloc_zeroed() else {
         return false;
     };

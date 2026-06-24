@@ -41,7 +41,8 @@ use slopos_kernel_services::syscall_services::scanout::{
     self, ClaimOutcome, GpuControlFns, InstallCtx, ScanoutId, ScanoutProvider,
 };
 
-use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
+use crate::driver_core::bound::BoundDevice;
+use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     VirtioMsixState,
@@ -1358,7 +1359,7 @@ fn read_num_scanouts(caps: &VirtioMmioCaps) -> u32 {
 /// displaced virtio-gpu has nothing to do here yet.
 fn virtio_gpu_evict() {}
 
-fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
+fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
     // Reserve the scanout before the destructive device reset. If a
     // higher-priority provider already owns it, stay passive and touch nothing.
     match scanout::SCANOUT.claim(scanout::PRIO_VIRTIO_GPU) {
@@ -1369,7 +1370,7 @@ fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>
         }
     }
 
-    if let Err(err) = virtio_gpu_bring_up(info) {
+    if let Err(err) = virtio_gpu_bring_up(bound) {
         scanout::SCANOUT.abort_claim();
         return Err(err);
     }
@@ -1419,7 +1420,8 @@ fn virtio_gpu_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>
 
 /// Reset and initialise the device (bus-master, capabilities, feature
 /// negotiation, interrupts, virtqueues) and publish it as the live device.
-fn virtio_gpu_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
+fn virtio_gpu_bring_up(bound: &mut BoundDevice<'_>) -> Result<(), PciProbeError> {
+    let info = *bound.info();
     klog_info!(
         "virtio-gpu: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -1429,9 +1431,9 @@ fn virtio_gpu_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         info.function
     );
 
-    enable_bus_master(info);
+    enable_bus_master(&info);
 
-    let caps = parse_capabilities(info);
+    let caps = parse_capabilities(&info);
     if !caps.has_common_cfg() {
         klog_warn!("virtio-gpu: missing common cfg");
         return Err(PciProbeError::Unsupported);
@@ -1451,7 +1453,7 @@ fn virtio_gpu_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
 
     // Control queue = 0, cursor queue = 1.
     let inner_for_irq = inner.clone();
-    let (irq_mode, msix_state) = match setup_interrupts(info, &caps, 2, move |q: u8| {
+    let (irq_mode, msix_state) = match setup_interrupts(bound, &caps, 2, move |q: u8| {
         inner_for_irq.handle_queue_irq(q)
     }) {
         Ok(v) => v,

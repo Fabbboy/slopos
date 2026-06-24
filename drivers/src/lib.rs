@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod apic;
+pub mod driver_core;
 pub mod hpet;
 pub mod i2c;
 pub mod input_event;
@@ -34,6 +35,7 @@ pub mod virtio_net;
 #[cfg(feature = "xe-gpu")]
 pub mod xe;
 
+pub use driver_core::{BoundDevice, BoundError};
 pub use pci::{PciMatch, PciProbeError, ProbeOutcome};
 pub use ps2::keyboard;
 pub use ps2::mouse;

@@ -190,6 +190,49 @@ pub fn reset_for_test() {
 }
 
 // ---------------------------------------------------------------------------
+// Identity (passthrough) mapper.
+// ---------------------------------------------------------------------------
+
+/// Passthrough mapper: IOVA == physical address, unmap is a no-op.
+///
+/// On platforms with no IOMMU policy to enforce (e.g. QEMU `q35` without
+/// VT-d), this turns "no mapper registered → hard deny" into "passthrough
+/// policy", giving `DmaCoherent` / `DmaStream` their first live mapper. A
+/// future VT-d mapper swaps in at the same single seam
+/// ([`register_iommu_mapper`]).
+struct IdentityMapper;
+
+impl IommuMapper for IdentityMapper {
+    fn map(&self, phys: PhysAddr, _size: usize, _direction: DmaDirection) -> Result<u64, DmaError> {
+        Ok(phys.as_u64())
+    }
+
+    fn unmap(&self, _iova: u64, _size: usize) {}
+}
+
+static IDENTITY: IdentityMapper = IdentityMapper;
+static IDENTITY_SLOT: &dyn IommuMapper = &IDENTITY;
+
+/// Wire the passthrough [`IdentityMapper`] as the kernel's IOMMU mapper.
+///
+/// Forwards to the single [`register_iommu_mapper`] seam, so the same
+/// once-only / default-deny guarantees apply (its `assert!(prev.is_null())`
+/// rejects a second registration). Default-deny is preserved: a driver that
+/// never allocates DMA touches no mapping, and the slot can only be set once.
+pub fn register_identity_dma_mapper<'brand>(token: &BspToken<'brand>) {
+    register_iommu_mapper(token, &IDENTITY_SLOT);
+}
+
+/// Test-only identity-mapper registration that bypasses the `BspToken` and
+/// the double-register assert, so a test can restore the global mapper after
+/// [`reset_for_test`] without re-minting the one-shot BSP token.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn register_identity_dma_mapper_for_test() {
+    let raw = &IDENTITY_SLOT as *const &'static dyn IommuMapper as *mut ();
+    IOMMU_MAPPER.inner.store(raw, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
 // DmaCoherent.
 // ---------------------------------------------------------------------------
 

@@ -31,5 +31,5 @@ pub use idt::{
 pub use interrupt_frame::InterruptFrame;
 pub use line::{
     ALLOC_VECTOR_BASE, ALLOC_VECTOR_END, CallbackHandle, IrqAllocator, IrqContext, IrqError,
-    IrqLine, dispatch, register_irq_reserved, shutdown,
+    IrqLine, OwnedIrq, dispatch, register_irq_reserved, shutdown,
 };

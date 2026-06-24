@@ -1,11 +1,12 @@
 //! VirtIO PCI capability parsing, device initialization, and MSI-X/MSI setup
 
-use crate::msi::{self, MsiCapability};
+use crate::driver_core::bound::BoundDevice;
+use crate::driver_core::msi::{self as core_msi, IrqMechanism};
 use crate::msix;
 use crate::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_ostd::{klog_debug, klog_info};
+use slopos_ostd::klog_info;
 
 use crate::pci::{
     PciDeviceInfo, pci_config_read8, pci_config_read16, pci_config_read32, pci_config_write16,
@@ -163,217 +164,81 @@ pub fn set_driver_ok(caps: &VirtioMmioCaps) {
 // MSI-X / MSI Interrupt Setup
 // =============================================================================
 
-/// Attempt to set up MSI-X for a VirtIO device.
+/// Set up the best available interrupt mechanism for a VirtIO device.
 ///
-/// Allocates one IDT vector per queue and programs the MSI-X table so each
-/// virtqueue fires its own interrupt.  The caller passes the allocated vectors
-/// to [`queue::setup_queue`] via the `msix_vector` parameter.
+/// Thin adapter over the shared `driver_core::msi` orchestration: that lifts
+/// the allocate → configure → register dance over the existing
+/// [`crate::msix`] / `crate::msi` primitives and attaches each vector's owned
+/// IRQ binding to the device's [`BoundDevice`] resource bag (so a failed probe
+/// releases them — no `mem::forget` leak). This adapter adds only the
+/// virtio-specific finishing touches: silencing the config-change MSI-X vector
+/// and enabling MSI-X on the PCI function, then re-wrapping into the
+/// [`VirtioMsixState`] shape callers already consume.
 ///
-/// The config-change MSI-X entry is intentionally not configured (set to
-/// [`VIRTIO_MSI_NO_VECTOR`]): config changes are rare and the polling drivers
-/// do not depend on them.
+/// Tries MSI-X first (per-queue vectors), then MSI (single shared vector).
 ///
 /// # VirtIO initialisation ordering
 ///
-/// This function must be called **after** feature negotiation and **before**
-/// [`set_driver_ok`].  The returned vectors are written to
-/// `queue_msix_vector` during [`queue::setup_queue`], which must also happen
-/// before `DRIVER_OK`.
+/// Must be called **after** feature negotiation and **before**
+/// [`set_driver_ok`]; the returned vectors are written into the queues during
+/// queue setup, which must also precede `DRIVER_OK`. The config-change MSI-X
+/// entry is intentionally left at [`VIRTIO_MSI_NO_VECTOR`].
 ///
-/// Returns `None` if the device has no MSI-X capability, the table cannot be
-/// mapped, or vector allocation fails.  Partial allocations are cleaned up
-/// automatically.
-pub fn try_setup_msix<H: Fn(u8) + Clone + Send + Sync + 'static>(
-    info: &PciDeviceInfo,
-    caps: &VirtioMmioCaps,
-    num_queues: u8,
-    handler: H,
-) -> Option<VirtioMsixState> {
-    let cap_offset = info.msix_cap_offset?;
-    let nq = (num_queues as usize).min(MAX_MSIX_QUEUES);
-    if nq == 0 {
-        return None;
-    }
-
-    // 1. Parse MSI-X capability.
-    let cap = msix::msix_read_capability(info.bus, info.device, info.function, cap_offset);
-    if (cap.table_size as usize) < nq {
-        klog_debug!(
-            "virtio-msix: device {}:{}.{} has only {} MSI-X entries, need {}",
-            info.bus,
-            info.device,
-            info.function,
-            cap.table_size,
-            nq,
-        );
-        return None;
-    }
-
-    // 2. Map the MSI-X table + PBA.
-    let table = match msix::msix_map_table(info, &cap) {
-        Ok(t) => t,
-        Err(e) => {
-            klog_debug!("virtio-msix: table map failed: {:?}", e);
-            return None;
-        }
-    };
-
-    // 3. Allocate IDT vectors via OSTD, register the per-queue dispatch
-    //    closure, and program the MSI-X table entries.
-    //
-    //    Lifecycle: the IrqLine + CallbackHandle pair is leaked once registered
-    //    (drivers are bound for the kernel's lifetime — there is no per-device
-    //    teardown path). `mem::forget(handle)` happens before `mem::forget(line)`
-    //    so the borrow checker sees the handle's borrow on `line` end first.
-    let apic_id: u8 = 0; // target BSP
-    let mut queue_vectors = [0u8; MAX_MSIX_QUEUES];
-    for i in 0..nq {
-        let line = match slopos_ostd::irq::IrqAllocator::alloc() {
-            Ok(l) => l,
-            Err(_) => {
-                klog_debug!("virtio-msix: vector allocation exhausted at queue {}", i);
-                // Previously-claimed lines for this device leak (intentional —
-                // see "Lifecycle" note above); they remain in OSTD's bitmap and
-                // dispatch table forever, which is correct for failed device
-                // probes since the device cannot be re-probed in the current
-                // SlopOS model.
-                return None;
-            }
-        };
-        let vector = line.vector();
-
-        if let Err(e) = msix::msix_configure(&table, i as u16, vector, apic_id) {
-            klog_debug!("virtio-msix: configure entry {} failed: {:?}", i, e);
-            // `line` drops here and releases the bitmap bit (no callback was
-            // registered, so the dispatch slot was never populated).
-            return None;
-        }
-
-        let queue_idx = i as u8;
-        let h = handler.clone();
-        let handle = match line.register_callback(move |_ctx| {
-            h(queue_idx);
-        }) {
-            Ok(h) => h,
-            Err(_) => {
-                klog_debug!("virtio-msix: register_callback failed at queue {}", i);
-                return None;
-            }
-        };
-        // Order matters: forget handle first (ends the borrow on `line`),
-        // then forget line.
-        core::mem::forget(handle);
-        core::mem::forget(line);
-
-        queue_vectors[i] = vector;
-    }
-
-    // 4. Tell the device we are NOT using a config-change MSI-X vector.
-    if caps.has_common_cfg() {
-        caps.common_cfg
-            .write::<u16>(COMMON_CFG_MSIX_CONFIG, VIRTIO_MSI_NO_VECTOR);
-    }
-
-    // 5. Enable MSI-X on the PCI function.
-    msix::msix_enable(info.bus, info.device, info.function, &cap);
-
-    klog_info!(
-        "virtio-msix: {}:{}.{} enabled, {} queue vectors",
-        info.bus,
-        info.device,
-        info.function,
-        nq,
-    );
-
-    Some(VirtioMsixState {
-        cap,
-        table,
-        queue_vectors,
-        num_queues: nq as u8,
-    })
-}
-
-/// Attempt to set up MSI (non-X) for a VirtIO device.
-///
-/// Allocates a single IDT vector shared across all queues, registers the
-/// dispatch closure (called with `queue_idx = 0` since MSI is shared), and
-/// programs the MSI capability.  MSI-X should be preferred when available;
-/// this is the fallback.
-///
-/// Returns the allocated capability + vector pair, or `None` if the device
-/// has no MSI capability or vector allocation fails.
-pub fn try_setup_msi<H: Fn(u8) + Clone + Send + Sync + 'static>(
-    info: &PciDeviceInfo,
-    handler: H,
-) -> Option<(MsiCapability, u8)> {
-    let cap_offset = info.msi_cap_offset?;
-    let cap = msi::msi_read_capability(info.bus, info.device, info.function, cap_offset);
-
-    let line = slopos_ostd::irq::IrqAllocator::alloc().ok()?;
-    let vector = line.vector();
-
-    if let Err(_e) = msi::msi_configure(
-        info.bus,
-        info.device,
-        info.function,
-        &cap,
-        vector,
-        0, // target BSP
-    ) {
-        // `line` drops, releasing the bitmap bit.
-        return None;
-    }
-
-    let h = handler;
-    let handle = match line.register_callback(move |_ctx| {
-        h(0);
-    }) {
-        Ok(h) => h,
-        Err(_) => {
-            klog_debug!("virtio-msi: register_callback failed");
-            return None;
-        }
-    };
-    core::mem::forget(handle);
-    core::mem::forget(line);
-
-    klog_info!(
-        "virtio-msi: {}:{}.{} enabled, vector 0x{:02x}",
-        info.bus,
-        info.device,
-        info.function,
-        vector,
-    );
-
-    Some((cap, vector))
-}
-
-/// Set up the best available interrupt mechanism for a VirtIO device.
-///
-/// Tries MSI-X first (per-queue vectors), then MSI (single shared vector).
-/// Returns `Err` if neither mechanism is available — VirtIO modern devices
-/// on QEMU q35 always have MSI-X, so this indicates a configuration or
+/// Returns `Err` if the device has neither MSI-X nor MSI — VirtIO modern
+/// devices on QEMU q35 always have MSI-X, so this indicates a configuration or
 /// hardware problem.
 pub fn setup_interrupts<H: Fn(u8) + Clone + Send + Sync + 'static>(
-    info: &PciDeviceInfo,
+    bound: &mut BoundDevice<'_>,
     caps: &VirtioMmioCaps,
     num_queues: u8,
     handler: H,
 ) -> Result<(InterruptMode, Option<VirtioMsixState>), &'static str> {
-    // Prefer MSI-X — per-queue vectors.
-    if let Some(msix_state) = try_setup_msix(info, caps, num_queues, handler.clone()) {
-        return Ok((
-            InterruptMode::Msix {
-                num_queues: msix_state.num_queues,
-            },
-            Some(msix_state),
-        ));
+    let info = *bound.info();
+    let nq = (num_queues as usize).min(MAX_MSIX_QUEUES);
+    if nq == 0 {
+        return Err("virtio: zero queues requested for interrupt setup");
     }
 
-    // Fallback: MSI — single shared vector.
-    if let Some((_cap, vector)) = try_setup_msi(info, handler) {
-        return Ok((InterruptMode::Msi { vector }, None));
+    let mut queue_vectors = [0u8; MAX_MSIX_QUEUES];
+    match core_msi::setup_interrupts(bound, nq, &mut queue_vectors, handler) {
+        Some(IrqMechanism::Msix { cap, table }) => {
+            // Tell the device we are NOT using a config-change MSI-X vector.
+            if caps.has_common_cfg() {
+                caps.common_cfg
+                    .write::<u16>(COMMON_CFG_MSIX_CONFIG, VIRTIO_MSI_NO_VECTOR);
+            }
+            // Enable MSI-X on the PCI function.
+            msix::msix_enable(info.bus, info.device, info.function, &cap);
+            klog_info!(
+                "virtio-msix: {}:{}.{} enabled, {} queue vectors",
+                info.bus,
+                info.device,
+                info.function,
+                nq,
+            );
+            Ok((
+                InterruptMode::Msix {
+                    num_queues: nq as u8,
+                },
+                Some(VirtioMsixState {
+                    cap,
+                    table,
+                    queue_vectors,
+                    num_queues: nq as u8,
+                }),
+            ))
+        }
+        // MSI is enabled inside `msi_configure`; nothing virtio-specific to add.
+        Some(IrqMechanism::Msi { vector, .. }) => {
+            klog_info!(
+                "virtio-msi: {}:{}.{} enabled, vector 0x{:02x}",
+                info.bus,
+                info.device,
+                info.function,
+                vector,
+            );
+            Ok((InterruptMode::Msi { vector }, None))
+        }
+        None => Err("virtio: device has neither MSI-X nor MSI — cannot configure interrupts"),
     }
-
-    Err("virtio: device has neither MSI-X nor MSI — cannot configure interrupts")
 }

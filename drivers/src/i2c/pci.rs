@@ -13,6 +13,7 @@ use slopos_ostd::{klog_info, klog_warn};
 
 use super::designware::{DesignWareI2c, I2cError};
 use super::{I2cBus, register_bus};
+use crate::driver_core::bound::BoundDevice;
 use crate::hpet;
 use crate::pci::{
     PciProbeError, ProbeOutcome, pci_alloc_mmio, pci_config_read16, pci_config_read32,
@@ -83,7 +84,8 @@ fn lpss_i2c_matches(info: &PciDeviceInfo) -> bool {
         && LPSS_I2C_PCI_DEVICES.contains(&info.device)
 }
 
-fn lpss_i2c_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
+fn lpss_i2c_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
+    let info = *bound.info();
     let bar = info.bars[0];
     if bar.is_io != 0 || bar.size == 0 {
         return Err(PciProbeError::Unsupported);
@@ -91,7 +93,7 @@ fn lpss_i2c_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
 
     // Power the function up to D0 BEFORE touching its BAR — LPSS boots in
     // D3hot and won't decode MMIO otherwise.
-    set_power_d0(info);
+    set_power_d0(&info);
 
     // Firmware may leave the LPSS BAR unassigned (base == 0); assign a free
     // MMIO region and program the BAR.
@@ -99,7 +101,7 @@ fn lpss_i2c_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
         bar.base
     } else {
         let assigned = pci_alloc_mmio(bar.size).ok_or(PciProbeError::Unsupported)?;
-        program_bar0(info, assigned, bar.is_64bit != 0);
+        program_bar0(&info, assigned, bar.is_64bit != 0);
         klog_info!(
             "i2c-lpss: assigned BAR0 {:#x} (size {:#x}) at {:02x}:{:02x}.{}",
             assigned,

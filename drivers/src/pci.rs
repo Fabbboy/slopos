@@ -6,9 +6,12 @@ use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_ostd::dev::Devres;
 use slopos_ostd::pci::{Bdf, EcamConfigSpace};
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{AllocError, KBTreeMap, KVec, Pod, klog_info, klog_warn};
+
+use crate::driver_core::bound::BoundDevice;
 
 pub use crate::pci_defs::*;
 
@@ -150,10 +153,12 @@ pub struct PciDriverEntry {
     /// can beat a generic one for the same device. Defaults to a documented
     /// mid value (128) via the [`crate::pci_driver!`] macro.
     pub priority: u8,
-    /// Probe the matched device. On `Ok(Bound)` the registry records the claim;
-    /// on `Ok(Declined)` it offers the device to the next candidate; on `Err`
-    /// it logs the typed reason (and retries once on `Deferred`).
-    pub probe: fn(&PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>,
+    /// Probe the matched device. The driver acquires every resource through
+    /// the [`BoundDevice`] capability, so a failed probe releases them
+    /// automatically. On `Ok(Bound)` the registry records the claim; on
+    /// `Ok(Declined)` it offers the device to the next candidate; on `Err` it
+    /// logs the typed reason (and retries once on `Deferred`).
+    pub probe: fn(&mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError>,
 }
 
 impl PciDriverEntry {
@@ -1253,7 +1258,7 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
 /// per-device claim table populated by [`pci_probe_drivers`].
 pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
     match CLAIMED_BY.lock().slots.get(dev_idx) {
-        Some(ClaimSlot::Claimed(binding)) => Some(binding.name()),
+        Some(ClaimSlot::Claimed { binding, .. }) => Some(binding.name()),
         _ => None,
     }
 }
@@ -1371,9 +1376,21 @@ fn push_unique(out: &mut KVec<u16>, li: u16) -> Result<(), AllocError> {
 }
 
 /// Per-device ownership slot.
+///
+/// A claimed slot owns the device's managed-resource bag alongside the
+/// binding. The binding is listed first so it drops first: a future unbind
+/// quiesces the driver before the bag releases the resources a late interrupt
+/// could still touch.
 enum ClaimSlot {
     Unclaimed,
-    Claimed(Binding),
+    Claimed {
+        binding: Binding,
+        // Owned for its `Drop`: holds the device's acquired resources alive for
+        // the binding's lifetime and releases them when the slot is torn down.
+        // Read by a future unbind path; until then it is live purely as RAII.
+        #[allow(dead_code)]
+        devres: Devres,
+    },
 }
 
 /// Records which driver owns each enumerated device, indexed by device index.
@@ -1389,12 +1406,15 @@ impl ClaimTable {
     }
 
     fn is_claimed(&self, dev_idx: usize) -> bool {
-        matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed(_)))
+        matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed { .. }))
     }
 
-    fn claim(&mut self, dev_idx: usize, binding: Binding) {
+    /// Record a claim, taking ownership of the populated resource bag. Moving
+    /// the bag is allocation-free (just its `KVec` header), so this is safe
+    /// under the `CLAIMED_BY` lock.
+    fn claim(&mut self, dev_idx: usize, binding: Binding, devres: Devres) {
         if dev_idx < self.slots.len() {
-            self.slots[dev_idx] = ClaimSlot::Claimed(binding);
+            self.slots[dev_idx] = ClaimSlot::Claimed { binding, devres };
         }
     }
 }
@@ -1408,7 +1428,7 @@ static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(ClaimTable::new(), LOCK_
 /// exercisable over synthetic devices without a per-call `[ClaimSlot; 256]`.
 pub(crate) trait ClaimSink {
     fn is_claimed(&self, dev_idx: usize) -> bool;
-    fn record(&self, dev_idx: usize, name: &'static str);
+    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
 }
 
 /// The live per-device claim table.
@@ -1419,8 +1439,8 @@ impl ClaimSink for GlobalClaims {
         CLAIMED_BY.lock().is_claimed(dev_idx)
     }
 
-    fn record(&self, dev_idx: usize, name: &'static str) {
-        CLAIMED_BY.lock().claim(dev_idx, Binding::new(name));
+    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres) {
+        CLAIMED_BY.lock().claim(dev_idx, Binding::new(name), devres);
     }
 }
 
@@ -1458,9 +1478,17 @@ pub(crate) fn matchmake(
             if !e.entry_matches(&dev) {
                 continue;
             }
-            match (e.probe)(&dev) {
+            // The bag is a stack local (its ~24-byte header; resource payloads
+            // are heap-boxed inside `attach`). On `Bound` it moves into the
+            // claim slot; on any other outcome it drops here, releasing every
+            // resource the probe acquired in reverse order. Probe runs with
+            // neither lock held, so its heap-allocating `attach` calls are safe.
+            let mut devres = Devres::new();
+            let mut bound = BoundDevice::new(&dev, &mut devres);
+            match (e.probe)(&mut bound) {
                 Ok(ProbeOutcome::Bound) => {
-                    claims.record(dev_idx, e.name);
+                    drop(bound);
+                    claims.record(dev_idx, e.name, devres);
                     break;
                 }
                 Ok(ProbeOutcome::Declined) => continue,
@@ -1489,8 +1517,13 @@ pub(crate) fn matchmake(
         if !e.entry_matches(&dev) {
             continue;
         }
-        match (e.probe)(&dev) {
-            Ok(ProbeOutcome::Bound) => claims.record(dev_idx, e.name),
+        let mut devres = Devres::new();
+        let mut bound = BoundDevice::new(&dev, &mut devres);
+        match (e.probe)(&mut bound) {
+            Ok(ProbeOutcome::Bound) => {
+                drop(bound);
+                claims.record(dev_idx, e.name, devres);
+            }
             Ok(ProbeOutcome::Declined) => {}
             Err(err) => {
                 klog_info!(
@@ -1539,9 +1572,12 @@ fn pci_probe_drivers_fallback() {
             if !e.entry_matches(&dev) {
                 continue;
             }
-            match (e.probe)(&dev) {
+            let mut devres = Devres::new();
+            let mut bound = BoundDevice::new(&dev, &mut devres);
+            match (e.probe)(&mut bound) {
                 Ok(ProbeOutcome::Bound) => {
-                    GlobalClaims.record(dev_idx, e.name);
+                    drop(bound);
+                    GlobalClaims.record(dev_idx, e.name, devres);
                     break;
                 }
                 Ok(ProbeOutcome::Declined) => continue,

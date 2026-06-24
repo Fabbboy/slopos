@@ -2,6 +2,7 @@
 // The parent lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
 
 pub mod apic_timer_tests;
+pub mod devres_tests;
 pub mod ecam_tests;
 pub mod hpet_tests;
 pub mod madt_tests;

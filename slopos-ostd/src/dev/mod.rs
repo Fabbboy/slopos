@@ -5,9 +5,15 @@
 //! example being a kernel-static `AtomicPtr<DeviceHandle>` whose
 //! load is reborrowed as `&DeviceHandle` for the data plane.
 //!
-//! The single primitive currently exposed is the [`FromRawPtr`]
-//! extension trait, which provides a null-safe `&Self` reborrow
-//! parallel to [`crate::irq::interrupt_frame::InterruptFrame::from_ptr`].
+//! Alongside the [`FromRawPtr`] extension trait (a null-safe `&Self`
+//! reborrow parallel to
+//! [`crate::irq::interrupt_frame::InterruptFrame::from_ptr`]), this module
+//! hosts [`Devres`] — the LIFO managed-resource bag a driver's probe uses to
+//! acquire MMIO/IRQ/DMA resources that auto-release on failure or unbind.
+
+pub mod devres;
+
+pub use devres::{Devres, DevresError, ResourceObject};
 
 /// Null-safe `&Self` reborrow over a raw pointer.
 ///

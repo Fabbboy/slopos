@@ -298,12 +298,13 @@ pub enum InterruptMode {
     },
 }
 
-/// Per-device MSI-X state produced by [`pci::try_setup_msix`].
+/// Per-device MSI-X state produced by [`pci::setup_interrupts`].
 ///
-/// Stores the mapped MSI-X table, the allocated IDT vectors for each
-/// virtqueue, and the overall enable state.  Callers must keep this alive
-/// for the lifetime of the device because it owns the MMIO mappings and
-/// the vector allocations.
+/// Stores the mapped MSI-X table, the allocated IDT vector numbers for each
+/// virtqueue, and the capability. Callers keep this alive for the device
+/// lifetime because it owns the table's MMIO mapping. The vectors' owned IRQ
+/// bindings live in the device's resource bag (not here), so this stays
+/// `Clone`.
 #[derive(Clone)]
 pub struct VirtioMsixState {
     /// Parsed MSI-X capability from PCI config space.

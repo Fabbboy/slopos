@@ -442,10 +442,13 @@ impl IrqLine {
         self.vector
     }
 
-    /// Install a callback for this line's vector. Returns a handle
-    /// that, on drop, deregisters the callback. The handle borrows
-    /// `self` so it cannot outlive the line.
-    pub fn register_callback<'a, F>(&'a self, handler: F) -> Result<CallbackHandle<'a>, IrqError>
+    /// Publish `handler` into this line's dispatch slot. Shared body of
+    /// [`register_callback`](Self::register_callback) and
+    /// [`register_callback_owned`](Self::register_callback_owned); the
+    /// only difference between those two is the receipt they return
+    /// (borrowed handle vs. owned line), so the slot-population CAS lives
+    /// here once.
+    fn install<F>(&self, handler: F) -> Result<(), IrqError>
     where
         F: Fn(&IrqContext<'_>) + Send + Sync + 'static,
     {
@@ -459,10 +462,7 @@ impl IrqLine {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => Ok(CallbackHandle {
-                vector: self.vector,
-                _phantom: PhantomData,
-            }),
+            Ok(_) => Ok(()),
             Err(_) => {
                 // SAFETY: we never published `raw`.
                 unsafe {
@@ -471,6 +471,54 @@ impl IrqLine {
                 Err(IrqError::AlreadyRegistered)
             }
         }
+    }
+
+    /// Install a callback for this line's vector. Returns a handle
+    /// that, on drop, deregisters the callback. The handle borrows
+    /// `self` so it cannot outlive the line.
+    pub fn register_callback<'a, F>(&'a self, handler: F) -> Result<CallbackHandle<'a>, IrqError>
+    where
+        F: Fn(&IrqContext<'_>) + Send + Sync + 'static,
+    {
+        self.install(handler)?;
+        Ok(CallbackHandle {
+            vector: self.vector,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Install a callback and fold the line + its registration into a
+    /// single owned [`OwnedIrq`]. Consumes `self`, so there is no
+    /// outstanding borrow to juggle: the resource can be stored, moved,
+    /// or attached to a [`crate::dev::Devres`] bag, and releases both the
+    /// dispatch slot and the vector when dropped (in that order). This
+    /// is the leak-free replacement for the `register_callback` +
+    /// `mem::forget(handle); mem::forget(line)` pattern.
+    pub fn register_callback_owned<F>(self, handler: F) -> Result<OwnedIrq, IrqError>
+    where
+        F: Fn(&IrqContext<'_>) + Send + Sync + 'static,
+    {
+        self.install(handler)?;
+        Ok(OwnedIrq { line: self })
+    }
+}
+
+/// A vector with an installed callback, owned as one RAII unit.
+///
+/// Holds the [`IrqLine`] by value; the dispatch slot is populated for
+/// the lifetime of this value. Dropping it runs [`IrqLine`]'s `Drop`,
+/// which clears the dispatch slot (releasing the boxed closure) *before*
+/// freeing the vector bit — the correct handle-before-line teardown
+/// order, with no `mem::forget` and no self-referential borrow.
+pub struct OwnedIrq {
+    line: IrqLine,
+}
+
+impl OwnedIrq {
+    /// Vector number this binding owns (in 32..224).
+    #[inline]
+    pub fn vector(&self) -> u8 {
+        self.line.vector()
     }
 }
 

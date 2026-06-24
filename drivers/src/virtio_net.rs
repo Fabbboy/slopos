@@ -13,7 +13,8 @@ use slopos_net as net;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
-use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
+use crate::driver_core::bound::BoundDevice;
+use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
     VirtioMmioCaps, VirtioMsixState,
@@ -1531,12 +1532,13 @@ fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
     true
 }
 
-fn virtio_net_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
+fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-net: already own a NIC; declining additional device");
         return Ok(ProbeOutcome::Declined);
     }
 
+    let info = *bound.info();
     klog_info!(
         "virtio-net: probing {:04x}:{:04x} at {:02x}:{:02x}.{}",
         info.vendor_id,
@@ -1546,9 +1548,9 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>
         info.function
     );
 
-    enable_bus_master(info);
+    enable_bus_master(&info);
 
-    let caps = parse_capabilities(info);
+    let caps = parse_capabilities(&info);
     klog_debug!(
         "virtio-net: caps common={} notify={} device={}",
         caps.has_common_cfg(),
@@ -1586,7 +1588,7 @@ fn virtio_net_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError>
     // setup_interrupts allocates the IDT vectors via OSTD's IrqAllocator,
     // registers per-queue closures that call virtio_net_irq_handler, and
     // programs the device's MSI-X/MSI capability.
-    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 2, virtio_net_irq_handler)
+    let (irq_mode, msix_state) = setup_interrupts(bound, &caps, 2, virtio_net_irq_handler)
         .unwrap_or_else(|msg| {
             panic!(
                 "virtio-net: {}:{}.{} {}",

@@ -12,6 +12,7 @@ use slopos_kernel_services::syscall_services::scanout::{
     self, ClaimOutcome, InstallCtx, ScanoutId, ScanoutProvider,
 };
 
+use crate::driver_core::bound::BoundDevice;
 use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
 use crate::pci_defs::PCI_CLASS_DISPLAY;
 
@@ -100,7 +101,7 @@ fn xe_mmio_bar(info: &PciDeviceInfo) -> Option<(u64, u64)> {
 /// to do here yet.
 fn xe_evict() {}
 
-fn xe_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
+fn xe_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
     // Reserve the scanout before touching the device. If a higher-priority
     // provider already owns it, stay passive and touch nothing.
     match scanout::SCANOUT.claim(scanout::PRIO_INTEL_XE) {
@@ -111,7 +112,7 @@ fn xe_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
         }
     }
 
-    if let Err(err) = xe_bring_up(info) {
+    if let Err(err) = xe_bring_up(bound) {
         scanout::SCANOUT.abort_claim();
         return Err(err);
     }
@@ -151,8 +152,9 @@ fn xe_probe(info: &PciDeviceInfo) -> Result<ProbeOutcome, PciProbeError> {
 }
 
 /// Map the GPU MMIO window, enable forcewake, identify the GPU, and publish it.
-fn xe_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
-    let Some((mmio_phys, mmio_size)) = xe_mmio_bar(info) else {
+fn xe_bring_up(bound: &mut BoundDevice<'_>) -> Result<(), PciProbeError> {
+    let info = *bound.info();
+    let Some((mmio_phys, mmio_size)) = xe_mmio_bar(&info) else {
         klog_warn!("XE: no MMIO BAR present");
         return Err(PciProbeError::Unsupported);
     };
@@ -183,7 +185,7 @@ fn xe_bring_up(info: &PciDeviceInfo) -> Result<(), PciProbeError> {
         let mut dev = XE_DEVICE.lock();
         *dev = XeDevice {
             present: true,
-            device: *info,
+            device: info,
             mmio: mmio_region,
             mmio_size,
             gmd_id,
