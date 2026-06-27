@@ -14,9 +14,6 @@ crate-type = ["rlib"]
 test = false
 doctest = false
 
-[features]
-xe-gpu = ["slopos-drivers/xe-gpu"]
-
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-arch = { workspace = true }

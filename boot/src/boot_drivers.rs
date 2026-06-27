@@ -285,6 +285,15 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // singleton-resource arbiter during their own probe, so no backend-specific
     // handoff is needed here.
     pci_init();
+
+    // Parse the `xe.*` knobs and hand them to the xe driver before its probe
+    // runs, so it sees the boot configuration. The driver is always compiled in
+    // and only binds when a matching Intel display device is present; with no
+    // `xe.*` knobs it stays passive on the firmware framebuffer.
+    let xe_cmdline =
+        slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline()).unwrap_or("");
+    slopos_drivers::xe::set_config(slopos_drivers::xe_logic::cmdline::parse(xe_cmdline));
+
     pci_probe_drivers();
     klog_debug!("PCI subsystem initialized.");
 }

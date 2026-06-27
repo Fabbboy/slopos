@@ -14,3 +14,4 @@ pub mod virtio_completion_tests;
 pub mod virtio_gpu_tests;
 pub mod virtio_msix_tests;
 pub mod virtio_net_tests;
+pub mod xe_logic_tests;

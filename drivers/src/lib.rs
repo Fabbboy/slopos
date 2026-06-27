@@ -32,8 +32,8 @@ pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_gpu;
 pub mod virtio_net;
-#[cfg(feature = "xe-gpu")]
 pub mod xe;
+pub mod xe_logic;
 
 pub use driver_core::{BoundDevice, BoundError};
 pub use pci::{PciMatch, PciProbeError, ProbeOutcome};

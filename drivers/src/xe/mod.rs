@@ -1,319 +1,113 @@
-#![allow(unsafe_op_in_unsafe_fn)]
+//! Hardware-sequencing half of the Intel xe display driver.
+//!
+//! This module owns the device-facing work the pure [`crate::xe_logic`] layer
+//! deliberately avoids: PCI binding, BAR0 mapping, reading live display
+//! registers, and inheriting the firmware modeset to re-point the active plane at
+//! our own linear framebuffer. The read-only diagnostics identify the silicon,
+//! map the GTTMMADR register window, and decode what the firmware programmed. The
+//! repoint wiring lives in [`repoint`] and the supporting [`snapshot`], [`pipe`],
+//! [`plane`], [`ggtt`], and [`watchdog`] modules; this module maps the register
+//! window once and hands a shared handle to [`repoint::run`]. When the driver
+//! binds to a matching device it drives scanout by default — it inherits the
+//! firmware modeset, repoints the active plane, and layers the hardware cursor
+//! ([`cursor`]) and tear-free present ([`present`]) on top. `xe.modeset=off` is
+//! the `nomodeset` escape that keeps the firmware framebuffer untouched. The only
+//! automatic fallback is the watchdog rollback inside [`repoint`]: if a repoint
+//! does not keep the panel scanning, the firmware framebuffer is restored. All
+//! claim/commit and snapshot/rollback logic lives in [`repoint`]; none of it
+//! leaks into this dispatch.
 
-use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
-use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_mm::page_alloc::{alloc_kernel_pages, free_page_frame};
-use slopos_mm::paging_defs::PAGE_SIZE_4KB;
+mod cursor;
+mod ddb;
+mod diag;
+mod fb_mem;
+mod ggtt;
+mod mmio_map;
+mod pipe;
+mod plane;
+mod present;
+mod repoint;
+mod snapshot;
+mod watchdog;
+
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{align_up_u64, klog_info, klog_warn};
-
-use slopos_kernel_services::syscall_services::scanout::{
-    self, ClaimOutcome, InstallCtx, ScanoutId, ScanoutProvider,
-};
 
 use crate::driver_core::bound::BoundDevice;
-use crate::pci::{PciDeviceInfo, PciMatch, PciProbeError, ProbeOutcome};
+use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::pci_defs::PCI_CLASS_DISPLAY;
+use crate::xe_logic::cmdline::XeConfig;
+use crate::xe_logic::platform::{self, PCI_VENDOR_INTEL};
 
-mod display;
-mod forcewake;
-mod ggtt;
-mod regs;
+/// Command-line configuration parsed by boot before probe runs. `None` until
+/// [`set_config`] installs the parsed knobs; readers fall back to the defaults.
+static XE_CONFIG: SpinLock<Option<XeConfig>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
 
-const PCI_VENDOR_INTEL: u16 = 0x8086;
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct XeDevice {
-    present: bool,
-    device: PciDeviceInfo,
-    mmio: MmioRegion,
-    mmio_size: u64,
-    gmd_id: u32,
-    ggtt: ggtt::XeGgtt,
-    ggtt_ready: bool,
-    fb: XeFramebuffer,
+/// Install the boot-parsed `xe.*` configuration. Called once from the PCI-init
+/// boot step before driver probe so [`xe_probe`] can read it back.
+pub fn set_config(cfg: XeConfig) {
+    *XE_CONFIG.lock() = Some(cfg);
 }
 
-impl XeDevice {
-    const fn empty() -> Self {
-        Self {
-            present: false,
-            device: PciDeviceInfo::zeroed(),
-            mmio: MmioRegion::empty(),
-            mmio_size: 0,
-            gmd_id: 0,
-            ggtt: ggtt::XeGgtt::empty(),
-            ggtt_ready: false,
-            fb: XeFramebuffer::empty(),
-        }
-    }
+/// The active configuration, or the defaults if boot never set one.
+fn config() -> XeConfig {
+    let guard = XE_CONFIG.lock();
+    guard.unwrap_or_default()
 }
 
-#[derive(Copy, Clone)]
-#[allow(dead_code)]
-struct XeFramebuffer {
-    ready: bool,
-    phys: PhysAddr,
-    /// HHDM virtual address of the backing, as an integer so `XeDevice` stays
-    /// `Send` (a raw pointer would make the `XE_DEVICE` static non-`Sync`).
-    virt: u64,
-    ggtt_addr: u64,
-    size: u64,
-    width: u32,
-    height: u32,
-    pitch: u32,
-    format: PixelFormat,
-}
-
-impl XeFramebuffer {
-    const fn empty() -> Self {
-        Self {
-            ready: false,
-            phys: PhysAddr::NULL,
-            virt: 0,
-            ggtt_addr: 0,
-            size: 0,
-            width: 0,
-            height: 0,
-            pitch: 0,
-            format: PixelFormat::Argb8888,
-        }
-    }
-}
-
-// Safety: Access to this state is synchronized through `XE_DEVICE` SpinLock.
-
-static XE_DEVICE: SpinLock<XeDevice> = SpinLock::new(XeDevice::empty(), LOCK_LEVEL_RESOURCE);
-
-/// First memory-mapped BAR (Intel GTTMMADR is BAR0): the GPU register window.
-fn xe_mmio_bar(info: &PciDeviceInfo) -> Option<(u64, u64)> {
-    for bar in &info.bars {
-        if bar.is_io == 0 && bar.base != 0 && bar.size != 0 {
-            return Some((bar.base, bar.size));
-        }
-    }
-    None
-}
-
-/// Eviction hook: GPU→GPU re-claim is deferred, so a displaced xe has nothing
-/// to do here yet.
-fn xe_evict() {}
-
+/// PCI probe entry: identify the platform, then drive the display.
+///
+/// On a recognised device the driver inherits the firmware modeset and takes
+/// over scanout via [`repoint::run`] — that is the default, no knob required.
+/// `xe.modeset=off` is the `nomodeset` escape: the driver maps the register
+/// window, optionally dumps diagnostics, and stays on the firmware framebuffer
+/// without writing a single display register. `xe.diag=on` adds verbose logging
+/// either way. The register window is mapped at most once and shared with
+/// [`diag::dump`] and [`repoint::run`].
 fn xe_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
-    // Reserve the scanout before touching the device. If a higher-priority
-    // provider already owns it, stay passive and touch nothing.
-    match scanout::SCANOUT.claim(scanout::PRIO_INTEL_XE) {
-        ClaimOutcome::Won => {}
-        ClaimOutcome::Lost | ClaimOutcome::LostTie => {
-            klog_info!("XE: lost scanout arbitration; staying passive");
+    let info = *bound.info();
+    let cfg = config();
+
+    // `xe.force_did` overrides the real PCI Device ID for platform matching;
+    // unset means trust the device's own ID.
+    let did = cfg.force_did.unwrap_or(info.device_id);
+    let Some(platform) = platform::identify(info.vendor_id, did) else {
+        klog_info!("XE: unrecognised display device 0x{:04x}; declining", did);
+        return Ok(ProbeOutcome::Declined);
+    };
+
+    klog_info!("XE: matched {} (did 0x{:04x})", platform.name, did);
+
+    // With modesetting disabled and no diagnostics requested there is nothing to
+    // do: leave the firmware framebuffer alone and map nothing.
+    if !cfg.modeset && !cfg.diag {
+        klog_info!("XE: xe.modeset=off; firmware framebuffer retained");
+        return Ok(ProbeOutcome::Declined);
+    }
+
+    let mmio = match mmio_map::map_gttmmadr(bound) {
+        Ok(mmio) => mmio,
+        Err(_) => {
+            klog_info!("XE: GTTMMADR map failed; cannot drive display, declining");
             return Ok(ProbeOutcome::Declined);
         }
-    }
-
-    if let Err(err) = xe_bring_up(bound) {
-        scanout::SCANOUT.abort_claim();
-        return Err(err);
-    }
-
-    // Allocate the xe-owned scanout, sized to match the current firmware
-    // framebuffer, and program the display plane.
-    let Some(xe_fb) = scanout::current_framebuffer().and_then(xe_setup_framebuffer) else {
-        klog_warn!("XE: framebuffer setup failed");
-        scanout::SCANOUT.abort_claim();
-        return Err(PciProbeError::DeviceFault);
     };
 
-    scanout::SCANOUT.commit_install(
-        ScanoutProvider {
-            id: ScanoutId::IntelXe,
-            priority: scanout::PRIO_INTEL_XE,
-            evict: xe_evict,
-        },
-        scanout::PRIO_INTEL_XE,
-        |displaced| {
-            if let Some(p) = displaced {
-                (p.evict)();
-            }
-        },
-    );
-
-    let ctx = InstallCtx {
-        fb: xe_fb,
-        flush: Some(xe_flush),
-        gpu_control: None,
-    };
-    if !scanout::run_scanout_install(&ctx) {
-        klog_warn!("XE: scanout install failed");
-        return Err(PciProbeError::DeviceFault);
-    }
-    Ok(ProbeOutcome::Bound)
-}
-
-/// Map the GPU MMIO window, enable forcewake, identify the GPU, and publish it.
-fn xe_bring_up(bound: &mut BoundDevice<'_>) -> Result<(), PciProbeError> {
-    let info = *bound.info();
-    let Some((mmio_phys, mmio_size)) = xe_mmio_bar(&info) else {
-        klog_warn!("XE: no MMIO BAR present");
-        return Err(PciProbeError::Unsupported);
-    };
-
-    let mmio_region = MmioRegion::map(PhysAddr::new(mmio_phys), mmio_size as usize)
-        .unwrap_or_else(MmioRegion::empty);
-    if !mmio_region.is_mapped() {
-        klog_warn!("XE: GPU MMIO mapping unavailable");
-        return Err(PciProbeError::DeviceFault);
+    if cfg.diag {
+        diag::dump(&mmio, &info, platform);
     }
 
-    if !forcewake::forcewake_render_on(&mmio_region) {
-        klog_warn!("XE: forcewake render domain failed");
-        return Err(PciProbeError::DeviceFault);
+    // `nomodeset` escape: diagnostics were emitted (if asked), but we write no
+    // display register and leave the firmware scanout driving the panel.
+    if !cfg.modeset {
+        klog_info!("XE: xe.modeset=off; diagnostics only, firmware framebuffer retained");
+        return Ok(ProbeOutcome::Declined);
     }
 
-    let gmd_id = mmio_region.read::<u32>(regs::GMD_ID);
-    if gmd_id == u32::MAX {
-        klog_warn!("XE: GMD_ID read failed (0xFFFFFFFF)");
-        return Err(PciProbeError::DeviceFault);
-    }
-
-    let arch = regs::reg_field_get(regs::GMD_ID_ARCH_MASK, gmd_id);
-    let rel = regs::reg_field_get(regs::GMD_ID_RELEASE_MASK, gmd_id);
-    let rev = regs::reg_field_get(regs::GMD_ID_REVID_MASK, gmd_id);
-
-    {
-        let mut dev = XE_DEVICE.lock();
-        *dev = XeDevice {
-            present: true,
-            device: info,
-            mmio: mmio_region,
-            mmio_size,
-            gmd_id,
-            ggtt: ggtt::XeGgtt::empty(),
-            ggtt_ready: false,
-            fb: XeFramebuffer::empty(),
-        };
-    }
-
-    klog_info!(
-        "XE: Probe ok (did=0x{:04x}) gmd_id=0x{:08x} arch={} rel={} rev={}",
-        info.device_id,
-        gmd_id,
-        arch,
-        rel,
-        rev
-    );
-    Ok(())
-}
-
-/// Allocate the xe-owned framebuffer, map it through the GGTT, and program the
-/// primary display plane, sized to match `seed`. Returns the GPU-visible
-/// framebuffer, or `None` on any failure (the caller aborts the scanout claim).
-fn xe_setup_framebuffer(seed: FramebufferData) -> Option<FramebufferData> {
-    let width = seed.info.width;
-    let height = seed.info.height;
-    if width == 0 || height == 0 {
-        klog_warn!("XE: Invalid seed framebuffer dimensions");
-        return None;
-    }
-
-    let pitch = align_up_u64(width as u64 * 4, regs::PLANE_STRIDE_ALIGN as u64) as u32;
-    let size = pitch as u64 * height as u64;
-    let size_aligned = align_up_u64(size, PAGE_SIZE_4KB);
-    let pages = (size_aligned / PAGE_SIZE_4KB) as u32;
-    if pages == 0 {
-        klog_warn!("XE: Framebuffer size invalid for allocation");
-        return None;
-    }
-
-    let phys = alloc_kernel_pages(pages);
-    if phys.is_null() {
-        klog_warn!("XE: Failed to allocate framebuffer pages");
-        return None;
-    }
-    let Some(virt) = phys.to_virt_checked() else {
-        klog_warn!("XE: Failed to map framebuffer pages into HHDM");
-        let _ = free_page_frame(phys);
-        return None;
-    };
-
-    let (mmio, ggtt_addr) = {
-        let mut dev = XE_DEVICE.lock();
-        let mmio = dev.mmio.clone();
-
-        if !dev.ggtt_ready {
-            let Some(ggtt) = ggtt::xe_ggtt_init(&mmio) else {
-                klog_warn!("XE: GGTT init failed");
-                let _ = free_page_frame(phys);
-                return None;
-            };
-            dev.ggtt = ggtt;
-            dev.ggtt_ready = true;
-        }
-
-        let Some(start_entry) = ggtt::xe_ggtt_alloc(&mut dev.ggtt, pages, 16) else {
-            klog_warn!("XE: GGTT allocation failed");
-            let _ = free_page_frame(phys);
-            return None;
-        };
-
-        if !ggtt::xe_ggtt_map(&dev.ggtt, start_entry, phys, pages) {
-            klog_warn!("XE: GGTT mapping failed");
-            let _ = free_page_frame(phys);
-            return None;
-        }
-
-        (mmio, start_entry as u64 * PAGE_SIZE_4KB)
-    };
-
-    if !display::xe_display_program_primary(&mmio, ggtt_addr, width, height, pitch) {
-        klog_warn!("XE: Display plane programming failed");
-        let _ = free_page_frame(phys);
-        return None;
-    }
-
-    {
-        let mut dev = XE_DEVICE.lock();
-        dev.fb = XeFramebuffer {
-            ready: true,
-            phys,
-            virt: virt.as_u64(),
-            ggtt_addr,
-            size,
-            width,
-            height,
-            pitch,
-            format: PixelFormat::Xrgb8888,
-        };
-    }
-
-    Some(FramebufferData {
-        address: virt.as_mut_ptr::<u8>(),
-        info: DisplayInfo::new(width, height, pitch, PixelFormat::Xrgb8888),
-    })
-}
-
-/// Framebuffer flush callback. Xe scans out the kernel framebuffer directly
-/// (it *is* the GPU-mapped surface), so a present is just re-arming the plane
-/// surface address — the damage region is irrelevant and ignored.
-pub fn xe_flush(_damage: *const slopos_abi::damage::DamageRect, _count: u32) -> i32 {
-    let (present, ready, mmio, ggtt_addr) = {
-        let dev = XE_DEVICE.lock();
-        (
-            dev.present,
-            dev.fb.ready,
-            dev.mmio.clone(),
-            dev.fb.ggtt_addr,
-        )
-    };
-    if !present || !ready {
-        return -1;
-    }
-    if display::xe_display_flush(&mmio, ggtt_addr) {
-        0
-    } else {
-        -1
-    }
+    // Drive the display: inherit the firmware modeset and take over scanout. The
+    // claim/commit, snapshot/rollback, cursor, and present logic all live in
+    // `repoint::run`, which restores the firmware framebuffer on any failure.
+    repoint::run(&mmio, cfg, platform)
 }
 
 crate::pci_driver! {
