@@ -65,7 +65,7 @@ boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 # ── Userland binaries ───────────────────────────────────────────────────────
 
 userland_bins      := "init shell terminal compositor roulette file_manager image_viewer sysmon nmap ifconfig nc curl ping"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test spin_signal_test terminal_grid_test clipboard_test"
+test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test clipboard_test"
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Recipes

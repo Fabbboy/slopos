@@ -750,6 +750,57 @@ pub fn reference_count_at(paddr: Paddr) -> u32 {
     live_ref_count(slot.ref_count.load(Ordering::Acquire))
 }
 
+/// Claim an owning [`AnonymousMeta`] reference on a freshly-allocated,
+/// currently-unused page, leaking that ref so the caller owns it purely
+/// by `paddr`. Pair every successful call with exactly one
+/// [`release_owned_anon_page`].
+///
+/// Returns `false` if the slot is not claimable (not `UNUSED`) — i.e.
+/// the allocator handed out a frame some other owner still holds. The
+/// caller must treat that as an allocation failure rather than aliasing
+/// a live frame.
+///
+/// This is the SlopRing single-owner pattern applied to fd-backed shared
+/// memory: the owning object (memfd) holds one ref per backing page for
+/// its whole lifetime, every `mmap` adds a ref via
+/// [`Frame::from_in_use`], and the page returns to the allocator exactly
+/// once — when the last of {owning ref, every mapping} drops. It removes
+/// the second, MetaSlot-bypassing free path that a raw allocator-level
+/// free would create.
+pub fn claim_owned_anon_page(paddr: Paddr) -> bool {
+    match Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta) {
+        Ok(frame) => {
+            // Leak the ref into bare `paddr` ownership; `from_raw_at`
+            // reclaims it in `release_owned_anon_page`.
+            let _ = frame.into_raw();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Release an owning reference previously claimed by
+/// [`claim_owned_anon_page`] for `paddr`. Drops exactly one ref; when it
+/// was the last (all mappings already unmapped) the page returns to the
+/// registered allocator through [`Frame::drop`], which republishes the
+/// `MetaSlot` as `UNUSED` first — so a freed page never carries a stale
+/// live `MetaSlot` into the free list.
+///
+/// Returns `false` if the slot was not live (already released / never
+/// claimed) — a caller bug worth logging, never a silent retry.
+pub fn release_owned_anon_page(paddr: Paddr) -> bool {
+    // SAFETY: `claim_owned_anon_page` leaked exactly one `AnonymousMeta`
+    // ref for `paddr` via `into_raw` and the caller (the memfd registry,
+    // under its lock) releases it at most once; the meta type matches.
+    match unsafe { Frame::<AnonymousMeta>::from_raw_at(paddr) } {
+        Ok(frame) => {
+            drop(frame);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Read-only slot diagnostics.
 //

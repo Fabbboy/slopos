@@ -1,5 +1,5 @@
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_ostd::{klog_debug, klog_info};
+use slopos_ostd::klog_info;
 
 use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::{cow, demand, process_vm};
@@ -24,24 +24,12 @@ pub fn try_resolve_user_fault(
     .unwrap_or(false);
 
     if is_cow {
-        klog_debug!(
-            "PF: COW fault task {} (pid {}) at cr2=0x{:x} err=0x{:x}",
-            task_id,
-            process_id,
-            fault_addr,
-            error_code
-        );
         let result = process_vm::process_vm_with_dual_paging(process_id, |_pd, vs| {
             cow::handle_cow_fault(vs, fault_addr)
         });
 
         match result {
             Some(Ok(())) => {
-                klog_debug!(
-                    "PF: COW resolved for task {} at cr2=0x{:x}",
-                    task_id,
-                    fault_addr
-                );
                 return true;
             }
             Some(Err(_)) | None => {

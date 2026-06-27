@@ -91,6 +91,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin sigwinch_default_test \
         --bin ctrlc_flood_test \
         --bin pty_flow_test \
+        --bin mm_stress_test \
         --bin spin_signal_test \
         --bin terminal_grid_test \
         --bin clipboard_test \
@@ -149,6 +150,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/pty_flow_test" ]; then
         cp "$RELEASE_DIR/pty_flow_test" "$BUILD_DIR/pty_flow_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/mm_stress_test" ]; then
+        cp "$RELEASE_DIR/mm_stress_test" "$BUILD_DIR/mm_stress_test.elf"
+    fi
     if [ -f "$RELEASE_DIR/sigwinch_default_test" ]; then
         cp "$RELEASE_DIR/sigwinch_default_test" "$BUILD_DIR/sigwinch_default_test.elf"
     fi
@@ -162,5 +166,5 @@ if [ "$TEST_MODE" = "--test" ]; then
         cp "$RELEASE_DIR/clipboard_test" "$BUILD_DIR/clipboard_test.elf"
     fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/image_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/ctrlc_flood_test.elf $BUILD_DIR/pty_flow_test.elf $BUILD_DIR/sigwinch_default_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf $BUILD_DIR/clipboard_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/image_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/ctrlc_flood_test.elf $BUILD_DIR/pty_flow_test.elf $BUILD_DIR/mm_stress_test.elf $BUILD_DIR/sigwinch_default_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf $BUILD_DIR/clipboard_test.elf"
 fi

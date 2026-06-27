@@ -745,9 +745,14 @@ fn unmap_ring_range_dir(
     Ok(unmap_progress(end, unmapped))
 }
 
-/// Unmap pages WITHOUT freeing the physical frames. Used for shared
-/// memfd mappings where the memfd object owns the page lifecycle.
-/// Returns the number of pages unmapped (for total_pages accounting).
+/// Unmap shared-memfd pages. Each `ostd_unmap_4kb_user` drops this
+/// mapping's MetaSlot ref, but the page is NOT freed here: the memfd
+/// object holds its own owning ref (claimed in `memfd_ftruncate`), so
+/// the count stays ≥ 1 until the memfd itself is released. The page
+/// returns to the buddy exactly once, when the last of {memfd owning
+/// ref, every mapping} drops — never via a raw allocator free that
+/// would bypass the MetaSlot. Returns the number of pages unmapped
+/// (for total_pages accounting).
 fn unmap_range_nofree_dir(
     vm_space: &mut KArc<VmSpace>,
     pid: u32,
@@ -2917,9 +2922,12 @@ fn clone_cow_snapshot_parent(
 /// Per-VMA inner walk for shared (memfd) regions in `process_vm_clone_cow`.
 /// Maps the parent's existing physical pages (captured in `snapshot`)
 /// directly into the child's OSTD VmSpace, inheriting the parent's
-/// permissions verbatim. No COW marker, no ref count bump (memfd owns
-/// the pages). Returns the number of pages mapped, or `Err(())` on
-/// the first failure.
+/// permissions verbatim. No COW marker — the child shares the same
+/// memfd pages. Each child mapping DOES take a MetaSlot ref (the
+/// `from_in_use` inside `ostd_map_4kb_user`), layered on top of the
+/// memfd object's own owning ref; the page frees only when the memfd
+/// and every mapping have dropped their ref. Returns the number of
+/// pages mapped, or `Err(())` on the first failure.
 #[inline(never)]
 fn clone_cow_walk_shared_vma(
     child_vm_space: &mut KArc<VmSpace>,

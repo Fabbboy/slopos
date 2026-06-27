@@ -18,6 +18,7 @@ use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::klog_debug;
+use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::page_alloc::{alloc_kernel_pages, free_page_frame};
@@ -127,11 +128,22 @@ fn try_cleanup(table: &mut HandleTable<MemfdObject>, handle: MemfdHandle) {
     if !phys.is_null() && pages > 0 {
         for i in 0..pages {
             let page_addr = PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB);
-            free_page_frame(page_addr);
+            // Release the memfd's owning MetaSlot ref (claimed in
+            // `memfd_ftruncate`). `map_count == 0` here means every mapping
+            // ref is already gone, so this is the last ref: `Frame::drop`
+            // republishes the slot UNUSED and returns the page to the buddy.
+            // NEVER raw `free_page_frame` here — that would bypass the
+            // MetaSlot and dump a still-live `Anonymous` frame into the free
+            // list (the resize-time PathCorrupt double-owner bug).
+            if !release_owned_anon_page(page_addr) {
+                klog_debug!(
+                    "memfd: cleanup slot={} page {} not live on release (desync)",
+                    slot,
+                    i
+                );
+            }
         }
     }
-
-    klog_debug!("memfd: cleanup slot={} pages={}", slot, pages);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +165,6 @@ pub fn memfd_create(_flags: u32) -> Option<(usize, &'static dyn FileOps)> {
         .ok()
         .map(|h| h.pack(SLOT_BITS))
     })?;
-    klog_debug!("memfd: create handle={:#x}", raw);
     Some((raw, &MEMFD_FILE_OPS))
 }
 
@@ -174,6 +185,36 @@ pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
         return -12; // ENOMEM
     }
 
+    // Claim one owning MetaSlot ref per backing page so the memfd is the
+    // SINGLE owner of these pages (SlopRing model). `mmap(MAP_SHARED)` then
+    // adds a ref per mapping via `from_in_use`, and the page returns to the
+    // buddy exactly once — when the last of {this owning ref, every
+    // mapping} drops via `Frame::drop`. Without this, the first mapping's
+    // `from_unused` would own the only MetaSlot ref and a later
+    // `munmap`/exit would free the page out from under the still-open memfd
+    // (the double-owner PathCorrupt). A claim failure means the buddy
+    // handed back a non-UNUSED frame (an upstream desync); roll back and
+    // surface ENOMEM rather than alias a live frame.
+    let mut claimed = 0u32;
+    while claimed < page_count {
+        let page_addr = PhysAddr::new(phys.as_u64() + (claimed as u64) * PAGE_SIZE_4KB);
+        if !claim_owned_anon_page(page_addr) {
+            break;
+        }
+        claimed += 1;
+    }
+    if claimed != page_count {
+        // Release the refs we did claim (each frees its page properly), then
+        // raw-free the still-UNUSED tail starting at the page that failed.
+        for i in 0..claimed {
+            release_owned_anon_page(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
+        }
+        for i in claimed..page_count {
+            free_page_frame(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
+        }
+        return -12; // ENOMEM
+    }
+
     let slot = h.slot() as usize;
     let rc = with_registry(|t| match t.get_mut(h) {
         Ok(obj) if obj.size == 0 => {
@@ -191,16 +232,12 @@ pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
         Err(_) => -9, // EBADF — stale/invalid
     });
 
-    if rc == 0 {
-        klog_debug!(
-            "memfd: ftruncate slot={} size={} pages={}",
-            slot,
-            aligned_size,
-            page_count
-        );
-    } else {
+    if rc != 0 {
+        // Registry update failed after we claimed the owning refs above —
+        // release them (each frees its page through `Frame::drop`), never
+        // raw-free a page whose MetaSlot we now own.
         for i in 0..page_count {
-            free_page_frame(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
+            release_owned_anon_page(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
         }
     }
     rc
