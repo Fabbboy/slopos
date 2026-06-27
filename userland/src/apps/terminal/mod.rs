@@ -350,12 +350,23 @@ async fn event_loop(
                         let ch = crate::gfx::font::cell_height().max(1);
                         let cols = (w / cw).clamp(1, grid::MAX_COLS as i32) as u16;
                         let rows = (h / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
-                        grid.resize(rows, cols);
-                        // Resize rebuilds the buffers (and drops scrollback on
-                        // a width change), so any anchored selection is no
-                        // longer meaningful — clear it rather than copy stale
-                        // coordinates.
-                        selection.clear();
+                        // A width change reflows scrollback (rejoining wrapped
+                        // lines and re-wrapping at the new width); pass the
+                        // selection endpoints so the grid remaps them through
+                        // the reflow and a copy survives the resize. A height
+                        // change leaves the absolute line numbering — and so the
+                        // selection — valid, untouched.
+                        let mut pts = selection.endpoints();
+                        let outcome = grid.resize(rows, cols, &mut pts);
+                        if outcome.reflowed && selection.is_active() {
+                            match (pts[0], pts[1]) {
+                                (Some(a), Some(h)) => selection.set_endpoints(a, h),
+                                // An endpoint's content was evicted from the
+                                // re-wrapped history: clear rather than copy a
+                                // stale range.
+                                _ => selection.clear(),
+                            }
+                        }
                         push_winsize(master_fd, rows, cols);
                         want_render = true;
                     }

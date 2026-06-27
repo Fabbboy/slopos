@@ -118,6 +118,14 @@ impl Cell {
             self.codepoint
         }
     }
+
+    /// A default-styled space — what a hard-break row's trailing run trims to
+    /// during reflow. SGR-colored blanks (non-default bg) are *not* blank, so a
+    /// painted trailing region survives a width change.
+    #[inline]
+    pub fn is_blank(&self) -> bool {
+        self.glyph() == b' ' as u32 && self.attrs == CellAttributes::default_colors()
+    }
 }
 
 /// Reserve `buf`'s capacity straight to `max` the first time it would grow past
@@ -131,9 +139,17 @@ fn reserve_to_max<T>(buf: &mut Vec<T>, max: usize) {
     }
 }
 
-/// Flat row-major `Cell` buffer.
+/// Flat row-major `Cell` buffer with a per-row soft-wrap bit.
+///
+/// `wrapped[r] == true` means physical row `r` was filled by autowrap and
+/// continues into row `r + 1` (a soft wrap); `false` is a hard line break.
+/// The bit lives here, parallel to the cells, so every row-moving primitive
+/// (`row_copy`, `copy_from`, `clear_all`, `clear_row`) carries or clears it in
+/// lockstep with the content — the alt-screen save/restore and the height
+/// resize path then maintain wrap state for free through the same machinery.
 pub struct CellGrid {
     cells: Vec<Cell>,
+    wrapped: Vec<bool>,
     cols: usize,
 }
 
@@ -141,24 +157,30 @@ impl CellGrid {
     pub fn empty() -> Self {
         Self {
             cells: Vec::new(),
+            wrapped: Vec::new(),
             cols: 0,
         }
     }
 
-    /// Re-shape to `rows`×`cols`, blanking the whole grid. The capacity grows
-    /// at most once (to the maximum grid), so reusing one `CellGrid` across a
-    /// resize drag never reallocates after that — `len` still tracks the live
-    /// area, so every other method stays bound to the logical grid.
+    /// Re-shape to `rows`×`cols`, blanking the whole grid (and clearing every
+    /// wrap bit). Both backings grow at most once (to the maximum grid), so
+    /// reusing one `CellGrid` across a resize drag never reallocates after
+    /// that — `len` still tracks the live area, so every other method stays
+    /// bound to the logical grid.
     pub fn allocate(&mut self, rows: usize, cols: usize) {
         let total = rows.saturating_mul(cols);
         if total == 0 {
             self.cells.clear();
+            self.wrapped.clear();
             self.cols = 0;
             return;
         }
         reserve_to_max(&mut self.cells, MAX_ROWS * MAX_COLS);
+        reserve_to_max(&mut self.wrapped, MAX_ROWS);
         self.cells.clear();
         self.cells.resize(total, Cell::blank());
+        self.wrapped.clear();
+        self.wrapped.resize(rows, false);
         self.cols = cols;
     }
 
@@ -176,6 +198,41 @@ impl CellGrid {
         }
     }
 
+    /// The `cols`-wide cell slice backing `row`, or an empty slice when out of
+    /// range. The reflow pass reads source rows through this.
+    #[inline]
+    pub fn row(&self, row: usize) -> &[Cell] {
+        let start = row * self.cols;
+        let end = start + self.cols;
+        self.cells.get(start..end).unwrap_or(&[])
+    }
+
+    /// Overwrite `row`'s cells from `src` (truncated/padded to the grid width).
+    pub fn set_row(&mut self, row: usize, src: &[Cell]) {
+        let start = row * self.cols;
+        let end = start + self.cols;
+        if end > self.cells.len() {
+            return;
+        }
+        let n = src.len().min(self.cols);
+        self.cells[start..start + n].copy_from_slice(&src[..n]);
+        for slot in self.cells[start + n..end].iter_mut() {
+            *slot = Cell::blank();
+        }
+    }
+
+    #[inline]
+    pub fn wrapped(&self, row: usize) -> bool {
+        self.wrapped.get(row).copied().unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn set_wrapped(&mut self, row: usize, wrapped: bool) {
+        if let Some(slot) = self.wrapped.get_mut(row) {
+            *slot = wrapped;
+        }
+    }
+
     fn row_copy(&mut self, dst_row: usize, src_row: usize, n_cols: usize) {
         let n = n_cols.min(self.cols);
         let src = src_row * self.cols;
@@ -183,6 +240,21 @@ impl CellGrid {
         if src + n <= self.cells.len() && dst + n <= self.cells.len() {
             self.cells.copy_within(src..src + n, dst);
         }
+        let w = self.wrapped(src_row);
+        self.set_wrapped(dst_row, w);
+    }
+
+    /// Blank every cell of `row` to `fill` and clear its wrap bit (a blanked
+    /// row is a hard break). The single sink for "this row is now empty".
+    fn clear_row(&mut self, row: usize, fill: Cell) {
+        let start = row * self.cols;
+        let end = start + self.cols;
+        if end <= self.cells.len() {
+            for slot in self.cells[start..end].iter_mut() {
+                *slot = fill;
+            }
+        }
+        self.set_wrapped(row, false);
     }
 
     fn copy_from(&mut self, other: &CellGrid, rows: usize, cols: usize) {
@@ -190,12 +262,16 @@ impl CellGrid {
             for c in 0..cols {
                 self.set(r, c, other.get(r, c));
             }
+            self.set_wrapped(r, other.wrapped(r));
         }
     }
 
     fn clear_all(&mut self) {
         for cell in self.cells.iter_mut() {
             *cell = Cell::blank();
+        }
+        for w in self.wrapped.iter_mut() {
+            *w = false;
         }
     }
 }
@@ -258,6 +334,11 @@ impl CursorAttributes {
 
 struct ScrollbackBuf {
     buf: Vec<Cell>,
+    /// Per-ring-slot soft-wrap bit, aligned to `head`/`count` exactly like
+    /// `buf`. A history row whose bit is set continues into the row below it
+    /// (or into live row 0 for the newest entry); reflow walks these to rejoin
+    /// logical lines across a width change.
+    wrap: Vec<bool>,
     cols: usize,
     head: usize,
     count: usize,
@@ -274,6 +355,7 @@ impl ScrollbackBuf {
         };
         Self {
             buf,
+            wrap: vec![false; SCROLLBACK_LINES],
             cols: cols.min(MAX_COLS),
             head: 0,
             count: 0,
@@ -281,13 +363,24 @@ impl ScrollbackBuf {
         }
     }
 
-    /// Re-stride the ring to `cols` and drop history. A width change cannot
-    /// reflow fixed-width rows, so history is discarded; the retained cells
-    /// stay unread because resetting `count` gates every reader and `push_row`
-    /// fully overwrites a row before `get_row` can serve it. The backing only
-    /// ever grows — and jumps straight to its `MAX_COLS` ceiling the first time
-    /// it must — so a resize drag never reallocates this multi-megabyte ring.
-    fn reset_for_width(&mut self, cols: usize) {
+    /// An empty ring with no backing — used for the pooled `reflow_scratch`,
+    /// which lazily allocates to its width on the first reflow.
+    fn empty() -> Self {
+        Self {
+            buf: Vec::new(),
+            wrap: vec![false; SCROLLBACK_LINES],
+            cols: 0,
+            head: 0,
+            count: 0,
+            view_offset: 0,
+        }
+    }
+
+    /// Reset to an empty ring strided for `cols`, growing the backing straight
+    /// to its `MAX_COLS` ceiling the first time it must. Unlike the old
+    /// `reset_for_width`, this is only ever called on the *scratch* ring the
+    /// reflow pass builds into — the live ring's history is never discarded.
+    fn clear_to_width(&mut self, cols: usize) {
         let cols = cols.min(MAX_COLS);
         let needed = SCROLLBACK_LINES.saturating_mul(cols);
         if self.buf.len() < needed {
@@ -300,8 +393,10 @@ impl ScrollbackBuf {
         self.view_offset = 0;
     }
 
-    fn push_row(&mut self, cells: &CellGrid, row: usize, cols: usize) {
-        if self.buf.is_empty() || cols == 0 || self.cols == 0 {
+    /// Append `src` (truncated/padded to the ring width) as the newest row,
+    /// carrying its soft-wrap bit; evicts the oldest row once full.
+    fn push_slice(&mut self, src: &[Cell], wrapped: bool) {
+        if self.buf.is_empty() || self.cols == 0 {
             return;
         }
         let start = self.head * self.cols;
@@ -309,20 +404,23 @@ impl ScrollbackBuf {
         if end > self.buf.len() {
             return;
         }
-        let n = cols.min(self.cols);
-        for c in 0..n {
-            self.buf[start + c] = cells.get(row, c);
-        }
+        let n = src.len().min(self.cols);
+        self.buf[start..start + n].copy_from_slice(&src[..n]);
         for slot in self.buf[start + n..end].iter_mut() {
             *slot = Cell::blank();
         }
+        self.wrap[self.head] = wrapped;
         self.head = (self.head + 1) % SCROLLBACK_LINES;
         if self.count < SCROLLBACK_LINES {
             self.count += 1;
         }
     }
 
-    fn get_row(&self, offset_from_bottom: usize) -> Option<&[Cell]> {
+    fn push_row(&mut self, cells: &CellGrid, row: usize, wrapped: bool) {
+        self.push_slice(cells.row(row), wrapped);
+    }
+
+    fn get_row(&self, offset_from_bottom: usize) -> Option<(&[Cell], bool)> {
         if offset_from_bottom == 0 || offset_from_bottom > self.count || self.cols == 0 {
             return None;
         }
@@ -332,7 +430,33 @@ impl ScrollbackBuf {
         if end > self.buf.len() {
             return None;
         }
-        Some(&self.buf[start..end])
+        Some((&self.buf[start..end], self.wrap[idx]))
+    }
+
+    /// True when the newest row is an all-blank hard break — the trailing-trim
+    /// predicate the reflow partition uses to keep the prompt at the bottom.
+    fn newest_is_blank_hard_break(&self) -> bool {
+        match self.get_row(1) {
+            Some((cells, wrapped)) => !wrapped && cells.iter().all(|c| c.is_blank()),
+            None => false,
+        }
+    }
+
+    /// Drop the newest row (used by reflow trailing-blank trimming).
+    fn pop_newest(&mut self) {
+        if self.count == 0 {
+            return;
+        }
+        self.head = (self.head + SCROLLBACK_LINES - 1) % SCROLLBACK_LINES;
+        self.count -= 1;
+    }
+
+    /// Drop the newest `n` rows without reading them (the reflow partition
+    /// peels these into the live screen, so they leave the history).
+    fn drop_newest(&mut self, n: usize) {
+        let n = n.min(self.count);
+        self.head = (self.head + SCROLLBACK_LINES - n) % SCROLLBACK_LINES;
+        self.count -= n;
     }
 
     fn scroll_up(&mut self, lines: usize) {
@@ -345,6 +469,190 @@ impl ScrollbackBuf {
 
     fn reset_view(&mut self) {
         self.view_offset = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Width reflow
+// ---------------------------------------------------------------------------
+
+/// Result of a [`TerminalGrid::resize`]: whether a width reflow occurred, so
+/// the caller knows to apply the in-place anchor remap to its selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResizeOutcome {
+    pub reflowed: bool,
+}
+
+/// Number of cells up to and including the last non-blank cell of a row — the
+/// logical length of a hard-break row (trailing default-blank cells trimmed;
+/// SGR-colored blanks are non-blank and so survive).
+fn trimmed_len(row: &[Cell]) -> usize {
+    let mut n = row.len();
+    while n > 0 && row[n - 1].is_blank() {
+        n -= 1;
+    }
+    n
+}
+
+/// Up to one cursor (index 0) plus the caller's selection endpoints.
+const MAX_TRACK: usize = 4;
+
+/// A content point (absolute line + column) tracked through the reflow pass so
+/// its new physical position can be recovered after the grid is re-wrapped.
+#[derive(Clone, Copy)]
+struct TrackPt {
+    abs: u64,
+    col: usize,
+    active: bool,
+    recorded: Option<(usize, usize)>,
+}
+
+impl TrackPt {
+    const NONE: Self = Self {
+        abs: 0,
+        col: 0,
+        active: false,
+        recorded: None,
+    };
+}
+
+/// The streaming join-then-re-split engine. Source rows are fed oldest→newest;
+/// each soft-wrapped run is concatenated into a logical line and re-emitted at
+/// `new_cols`, with rows pushed into the destination ring as they fill. Tracked
+/// points (cursor + selection) record their new (emitted_row, col) the instant
+/// the matching source cell is written, so the cursor stays on its character
+/// and selections survive the reflow without arithmetic that wide chars break.
+struct Reflow<'a> {
+    dst: &'a mut ScrollbackBuf,
+    new_cols: usize,
+    row_buf: [Cell; MAX_COLS],
+    dst_col: usize,
+    emitted: usize,
+    points: [TrackPt; MAX_TRACK],
+}
+
+impl<'a> Reflow<'a> {
+    fn new(dst: &'a mut ScrollbackBuf, new_cols: usize) -> Self {
+        Self {
+            dst,
+            new_cols,
+            row_buf: [Cell::blank(); MAX_COLS],
+            dst_col: 0,
+            emitted: 0,
+            points: [TrackPt::NONE; MAX_TRACK],
+        }
+    }
+
+    fn track(&mut self, idx: usize, abs: u64, col: usize) {
+        if idx < MAX_TRACK {
+            self.points[idx] = TrackPt {
+                abs,
+                col,
+                active: true,
+                recorded: None,
+            };
+        }
+    }
+
+    fn points_recorded(&self) -> [Option<(usize, usize)>; MAX_TRACK] {
+        let mut out = [None; MAX_TRACK];
+        for (slot, pt) in out.iter_mut().zip(self.points.iter()) {
+            *slot = pt.recorded;
+        }
+        out
+    }
+
+    /// Record any tracked point sitting exactly at source `(abs, col)` at the
+    /// current output position.
+    fn record_at(&mut self, abs: u64, src_col: usize) {
+        let pos = (self.emitted, self.dst_col);
+        for p in self.points.iter_mut() {
+            if p.active && p.recorded.is_none() && p.abs == abs && p.col == src_col {
+                p.recorded = Some(pos);
+            }
+        }
+    }
+
+    /// Record tracked points in the trailing blank region of a row (a cursor at
+    /// or beyond the line's content end) at the current output position.
+    fn record_tail(&mut self, abs: u64, src_len: usize) {
+        let pos = (self.emitted, self.dst_col);
+        for p in self.points.iter_mut() {
+            if p.active && p.recorded.is_none() && p.abs == abs && p.col >= src_len {
+                p.recorded = Some(pos);
+            }
+        }
+    }
+
+    fn put(&mut self, cell: Cell) {
+        if self.dst_col < self.new_cols {
+            self.row_buf[self.dst_col] = cell;
+            self.dst_col += 1;
+        }
+    }
+
+    fn pad_to_width(&mut self) {
+        for c in self.dst_col..self.new_cols {
+            self.row_buf[c] = Cell::blank();
+        }
+    }
+
+    fn emit(&mut self, wrapped: bool) {
+        self.dst.push_slice(&self.row_buf[..self.new_cols], wrapped);
+        self.emitted += 1;
+        self.dst_col = 0;
+    }
+
+    fn feed_row(&mut self, src: &[Cell], src_wrapped: bool, abs: u64) {
+        // A soft-wrapped row is full by construction; a hard-break row trims
+        // its trailing blanks to find the logical content length.
+        let src_len = if src_wrapped {
+            src.len()
+        } else {
+            trimmed_len(src)
+        };
+        let mut c = 0;
+        while c < src_len {
+            let cell = src[c];
+            let cp = cell.codepoint;
+            if cp == CONTINUATION_CODEPOINT {
+                // Sentinel rides its lead; never emitted on its own.
+                c += 1;
+                continue;
+            }
+            let w = if is_double_width(cp) { 2 } else { 1 };
+            // A wide glyph may not straddle the new right margin: wrap early.
+            if w == 2 && self.dst_col + 2 > self.new_cols {
+                self.pad_to_width();
+                self.emit(true);
+            }
+            self.record_at(abs, c);
+            self.put(cell);
+            if w == 2 {
+                self.put(Cell {
+                    codepoint: CONTINUATION_CODEPOINT,
+                    attrs: cell.attrs,
+                });
+            }
+            c += w;
+            if self.dst_col >= self.new_cols {
+                self.emit(true);
+            }
+        }
+        self.record_tail(abs, src_len);
+        if !src_wrapped {
+            self.pad_to_width();
+            self.emit(false);
+        }
+    }
+
+    /// Emit a dangling partial row (a final soft-wrapped run with no hard break)
+    /// as a hard break so its content is not lost.
+    fn flush_tail(&mut self) {
+        if self.dst_col > 0 {
+            self.pad_to_width();
+            self.emit(false);
+        }
     }
 }
 
@@ -377,6 +685,13 @@ pub struct TerminalGrid {
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: ScrollbackBuf,
+    /// Pooled second scrollback ring the width-reflow pass builds into, then
+    /// swaps with `scrollback` (a pointer move, no multi-MB copy). Reading the
+    /// old ring while writing a distinct one is what makes a width *shrink*
+    /// safe (more output rows than input rows would otherwise overrun unread
+    /// history). Ceiling-sized once via `reserve_to_max`, so a resize drag
+    /// never reallocates it.
+    reflow_scratch: ScrollbackBuf,
     /// Count of lines ever evicted into scrollback. This is the absolute line
     /// number of live screen row 0, giving every line (history + live) a
     /// stable identity that survives scrolling — selections anchor to it so a
@@ -420,6 +735,7 @@ impl TerminalGrid {
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             scrollback: ScrollbackBuf::new(cols as usize),
+            reflow_scratch: ScrollbackBuf::empty(),
             total_scrolled: 0,
             wrap_pending: false,
             dirty: true,
@@ -442,7 +758,7 @@ impl TerminalGrid {
         if row < sb_lines {
             // Rows above the live region show scrollback history.
             let sb_offset = self.scrollback.view_offset - row;
-            if let Some(sb_row) = self.scrollback.get_row(sb_offset) {
+            if let Some((sb_row, _)) = self.scrollback.get_row(sb_offset) {
                 return sb_row.get(col).copied().unwrap_or_else(Cell::blank);
             }
             return Cell::blank();
@@ -504,7 +820,7 @@ impl TerminalGrid {
         } else {
             let k = (self.total_scrolled - abs_line) as usize;
             match self.scrollback.get_row(k) {
-                Some(r) => r.get(col).copied().unwrap_or_else(Cell::blank),
+                Some((r, _)) => r.get(col).copied().unwrap_or_else(Cell::blank),
                 None => Cell::blank(),
             }
         }
@@ -540,21 +856,55 @@ impl TerminalGrid {
     // Resize
     // -----------------------------------------------------------------------
 
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    /// Resize the grid to `rows`×`cols`.
+    ///
+    /// `anchors` are width-invariant content points (the app's selection
+    /// endpoints) remapped in place so a copy survives the reflow; an endpoint
+    /// whose content was evicted from history becomes `None`. Pass an empty
+    /// slice when there is no selection. The returned [`ResizeOutcome`] tells
+    /// the caller whether a width reflow happened (so it can apply the remap).
+    ///
+    /// A width change rejoins soft-wrapped rows into logical lines and re-wraps
+    /// them at the new width (`reflow_width`); a height-only change keeps the
+    /// cheaper shift/clip path, since no wrap point moves.
+    pub fn resize(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        anchors: &mut [Option<(u64, usize)>],
+    ) -> ResizeOutcome {
         let rows = rows.clamp(1, MAX_ROWS as u16);
         let cols = cols.clamp(1, MAX_COLS as u16);
         if rows == self.rows && cols == self.cols {
-            return;
+            return ResizeOutcome { reflowed: false };
         }
+        // The deferred-wrap state belongs to the cursor at the old right
+        // margin; snapshot it before clearing so reflow can re-derive it.
+        let past_eol = self.wrap_pending;
         self.wrap_pending = false;
 
-        // Height shrink anchors the cursor, not the top: when the new bottom
-        // would cut the primary cursor off, the displaced top rows scroll
-        // into history and the screen shifts up so the cursor's line stays
-        // on screen. A top-aligned clip would teleport the physical cursor
-        // away from the line an application (e.g. a shell line editor) is
-        // tracking, corrupting every relative-cursor redraw that follows.
-        // The alt screen has no history; its cursor is clamped below.
+        if cols == self.cols {
+            self.resize_height_only(rows);
+            self.dirty = true;
+            return ResizeOutcome { reflowed: false };
+        }
+
+        self.reflow_width(rows, cols, past_eol, anchors);
+        self.dirty = true;
+        ResizeOutcome { reflowed: true }
+    }
+
+    /// Width-unchanged resize. No wrap point moves, so the live grid and alt
+    /// buffer are re-shaped by the pooled scratch (which carries each row's
+    /// wrap bit through `copy_from`) and the scrollback ring — history and the
+    /// absolute line numbering — stays valid. Height shrink anchors the
+    /// cursor's line on screen by scrolling displaced top rows into history,
+    /// rather than top-aligned clipping that would teleport the cursor away
+    /// from the line a shell line editor is tracking.
+    fn resize_height_only(&mut self, rows: u16) {
+        let old_rows = self.rows as usize;
+        let cols = self.cols as usize;
+
         let primary_cursor_row = if self.in_alt_screen {
             self.alt_screen_cursor_row
         } else {
@@ -566,21 +916,14 @@ impl TerminalGrid {
             0
         };
         if shift > 0 {
-            let old_rows = self.rows as usize;
-            let old_cols = self.cols as usize;
-            // While in the alt screen, `cells` holds the alt content and the
-            // saved primary screen lives in `alt_cells` (copy-on-enter) —
-            // the shift must follow the primary buffer either way.
             let primary = if self.in_alt_screen {
                 &self.alt_cells
             } else {
                 &self.cells
             };
             for r in 0..shift {
-                // Pushed at the old width; a simultaneous width change
-                // resets the ring below, matching the existing
-                // width-change-drops-scrollback behavior.
-                self.scrollback.push_row(primary, r, old_cols);
+                let wrapped = primary.wrapped(r);
+                self.scrollback.push_row(primary, r, wrapped);
                 self.total_scrolled = self.total_scrolled.wrapping_add(1);
             }
             self.scrollback.reset_view();
@@ -590,7 +933,7 @@ impl TerminalGrid {
                 &mut self.cells
             };
             for dst in 0..(old_rows - shift) {
-                primary.row_copy(dst, dst + shift, old_cols);
+                primary.row_copy(dst, dst + shift, cols);
             }
             if self.in_alt_screen {
                 self.alt_screen_cursor_row -= shift as u16;
@@ -599,44 +942,218 @@ impl TerminalGrid {
             }
         }
 
-        let copy_rows = (self.rows.min(rows)) as usize;
-        let copy_cols = (self.cols.min(cols)) as usize;
+        let copy_rows = old_rows.min(rows as usize);
 
-        // Re-shape both grids by reusing the pooled scratch: `allocate` blanks
-        // it to the new size, `copy_from` carries the overlap forward, and the
-        // swap installs it while parking the old backing in the pool for the
-        // next resize. No grid is allocated per resize step.
-        self.resize_scratch.allocate(rows as usize, cols as usize);
-        self.resize_scratch
-            .copy_from(&self.cells, copy_rows, copy_cols);
+        self.resize_scratch.allocate(rows as usize, cols);
+        self.resize_scratch.copy_from(&self.cells, copy_rows, cols);
         core::mem::swap(&mut self.cells, &mut self.resize_scratch);
 
-        self.resize_scratch.allocate(rows as usize, cols as usize);
+        self.resize_scratch.allocate(rows as usize, cols);
         self.resize_scratch
-            .copy_from(&self.alt_cells, copy_rows, copy_cols);
+            .copy_from(&self.alt_cells, copy_rows, cols);
         core::mem::swap(&mut self.alt_cells, &mut self.resize_scratch);
 
-        if self.scrollback.cols != cols as usize {
-            self.scrollback.reset_for_width(cols as usize);
-        }
         self.rows = rows;
-        self.cols = cols;
         self.scroll_top = 0;
         self.scroll_bottom = rows.saturating_sub(1);
+        self.clamp_cursors();
+    }
+
+    /// Width-change resize: rejoin soft-wrapped rows into logical lines and
+    /// re-wrap at the new width, preserving (re-wrapped) scrollback history.
+    fn reflow_width(
+        &mut self,
+        new_rows: u16,
+        new_cols: u16,
+        past_eol: bool,
+        anchors: &mut [Option<(u64, usize)>],
+    ) {
+        let new_rows = new_rows as usize;
+        let new_cols = new_cols as usize;
+        let old_rows = self.rows as usize;
+        let old_total = self.total_scrolled;
+
+        // The history-bearing primary buffer is `cells` normally, `alt_cells`
+        // while in the alt screen (where `cells` is the active alt content,
+        // which never reflows). The reflowed cursor is that buffer's cursor.
+        let in_alt = self.in_alt_screen;
+        let cur_row = if in_alt {
+            self.alt_screen_cursor_row as usize
+        } else {
+            self.cursor_row as usize
+        };
+        let cur_col = if in_alt {
+            self.alt_screen_cursor_col as usize
+        } else {
+            self.cursor_col as usize
+        };
+        let cursor_abs = old_total.wrapping_add(cur_row as u64);
+        // A deferred-wrap cursor sits visually on the filled last column, but
+        // its logical position is one past it (the next write would wrap). Track
+        // that one-past column so a wider reflow advances the cursor off the old
+        // margin instead of pinning it to the last glyph (or, for a wide char,
+        // its continuation cell).
+        let cursor_track_col = if past_eol { cur_col + 1 } else { cur_col };
+
+        // ---- streaming join-then-re-split into the pooled scratch ring ----
+        self.reflow_scratch.clear_to_width(new_cols);
+        let (recorded, emitted) = {
+            let mut rf = Reflow::new(&mut self.reflow_scratch, new_cols);
+            rf.track(0, cursor_abs, cursor_track_col);
+            for (i, a) in anchors.iter().enumerate() {
+                if let Some((line, col)) = *a {
+                    rf.track(i + 1, line, col);
+                }
+            }
+
+            // Source rows oldest -> newest: scrollback offsets [count..=1],
+            // then the live primary rows.
+            let count = self.scrollback.count;
+            for k in (1..=count).rev() {
+                if let Some((slice, wrapped)) = self.scrollback.get_row(k) {
+                    rf.feed_row(slice, wrapped, old_total.wrapping_sub(k as u64));
+                }
+            }
+            for r in 0..old_rows {
+                let (slice, wrapped) = if in_alt {
+                    (self.alt_cells.row(r), self.alt_cells.wrapped(r))
+                } else {
+                    (self.cells.row(r), self.cells.wrapped(r))
+                };
+                rf.feed_row(slice, wrapped, old_total.wrapping_add(r as u64));
+            }
+            rf.flush_tail();
+            (rf.points_recorded(), rf.emitted)
+        };
+
+        // Trailing-blank trim (bottom gravity): drop empty hard-break rows from
+        // the newest end so the prompt sits at the bottom, but never above the
+        // cursor's emitted row.
+        let cursor_emit_row = recorded[0].map(|(r, _)| r).unwrap_or(0);
+        let mut emitted_eff = emitted;
+        while emitted_eff > cursor_emit_row + 1 && self.reflow_scratch.newest_is_blank_hard_break()
+        {
+            self.reflow_scratch.pop_newest();
+            emitted_eff -= 1;
+        }
+
+        // Install the reflowed ring; the old one parks in the pool for reuse.
+        core::mem::swap(&mut self.scrollback, &mut self.reflow_scratch);
+        self.scrollback.view_offset = 0;
+
+        let c_count = self.scrollback.count;
+        let live_n = c_count.min(new_rows);
+        let first_live = emitted_eff - live_n; // emission index of live row 0
+        // new absolute line of an emitted row `er`: er + (c_count - emitted_eff).
+        let renumber = c_count as i128 - emitted_eff as i128;
+
+        // Reshape the non-history (alt) buffer by clip/clamp via the scratch.
+        let copy_rows = old_rows.min(new_rows);
+        let copy_cols = (self.cols as usize).min(new_cols);
+        if in_alt {
+            self.resize_scratch.allocate(new_rows, new_cols);
+            self.resize_scratch
+                .copy_from(&self.cells, copy_rows, copy_cols);
+            core::mem::swap(&mut self.cells, &mut self.resize_scratch);
+        } else {
+            self.resize_scratch.allocate(new_rows, new_cols);
+            self.resize_scratch
+                .copy_from(&self.alt_cells, copy_rows, copy_cols);
+            core::mem::swap(&mut self.alt_cells, &mut self.resize_scratch);
+        }
+
+        // Reshape + fill the history-bearing buffer from the reflowed ring's
+        // newest `live_n` rows (oldest live at top), blanking the remainder.
+        if in_alt {
+            self.alt_cells.allocate(new_rows, new_cols);
+        } else {
+            self.cells.allocate(new_rows, new_cols);
+        }
+        {
+            let sb = &self.scrollback;
+            let hist = if in_alt {
+                &mut self.alt_cells
+            } else {
+                &mut self.cells
+            };
+            for i in 0..live_n {
+                let offset = live_n - i;
+                if let Some((slice, wrapped)) = sb.get_row(offset) {
+                    hist.set_row(i, slice);
+                    hist.set_wrapped(i, wrapped);
+                }
+            }
+        }
+        self.scrollback.drop_newest(live_n);
+        self.total_scrolled = self.scrollback.count as u64;
+
+        // Resolve the cursor from its tracked emission position. Re-derive the
+        // deferred wrap only when the cursor landed exactly at the new right
+        // margin at the end of its line (its content wrapped to a fresh row).
+        let (mut cer, mut ccol) = recorded[0].unwrap_or((first_live, 0));
+        let mut cursor_wrap = false;
+        if past_eol && ccol == 0 && cer > 0 {
+            cer -= 1;
+            ccol = new_cols - 1;
+            cursor_wrap = true;
+        }
+        let cursor_row = cer.saturating_sub(first_live).min(new_rows - 1) as u16;
+        let cursor_col = ccol.min(new_cols - 1) as u16;
+        if in_alt {
+            self.alt_screen_cursor_row = cursor_row;
+            self.alt_screen_cursor_col = cursor_col;
+        } else {
+            self.cursor_row = cursor_row;
+            self.cursor_col = cursor_col;
+        }
+        self.wrap_pending = cursor_wrap;
+
+        // Remap the caller's selection anchors. An endpoint whose content was
+        // evicted (or already off-history before the reflow) becomes `None`.
+        for (i, a) in anchors.iter_mut().enumerate() {
+            if a.is_none() {
+                continue;
+            }
+            match recorded.get(i + 1).copied().flatten() {
+                Some((er, col)) => {
+                    let nb = er as i128 + renumber;
+                    *a = if nb < 0 {
+                        None
+                    } else {
+                        Some((nb as u64, col.min(new_cols - 1)))
+                    };
+                }
+                None => *a = None,
+            }
+        }
+
+        self.rows = new_rows as u16;
+        self.cols = new_cols as u16;
+        self.scroll_top = 0;
+        self.scroll_bottom = (new_rows as u16).saturating_sub(1);
+        self.clamp_cursors();
+    }
+
+    fn clamp_cursors(&mut self) {
         if self.cursor_col >= self.cols {
             self.cursor_col = self.cols.saturating_sub(1);
         }
         if self.cursor_row >= self.rows {
             self.cursor_row = self.rows.saturating_sub(1);
         }
-        // The parked cursor of the inactive screen obeys the same bounds.
         if self.alt_screen_cursor_col >= self.cols {
             self.alt_screen_cursor_col = self.cols.saturating_sub(1);
         }
         if self.alt_screen_cursor_row >= self.rows {
             self.alt_screen_cursor_row = self.rows.saturating_sub(1);
         }
-        self.dirty = true;
+        // The DECSC-saved cursor obeys the new bounds too.
+        if self.saved_cursor_col >= self.cols {
+            self.saved_cursor_col = self.cols.saturating_sub(1);
+        }
+        if self.saved_cursor_row >= self.rows {
+            self.saved_cursor_row = self.rows.saturating_sub(1);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -691,10 +1208,13 @@ impl TerminalGrid {
             return;
         }
 
-        // Commit a pending wrap before placing the next char.
+        // Commit a pending wrap before placing the next char. The row the
+        // cursor is leaving was filled to the margin and continues here, so
+        // mark it soft-wrapped (carried down by any scroll the advance causes).
         if self.wrap_pending {
             self.wrap_pending = false;
             if self.parser.auto_wrap {
+                self.cells.set_wrapped(self.cursor_row as usize, true);
                 self.cursor_col = 0;
                 self.advance_row();
             }
@@ -703,8 +1223,10 @@ impl TerminalGrid {
         let wide = is_double_width(cp);
 
         // A wide char that cannot fit in the remaining columns wraps early
-        // (autowrap) — there is no half-cell placement.
+        // (autowrap) — there is no half-cell placement. That early wrap is also
+        // a soft continuation of the current row.
         if wide && self.cursor_col + 2 > self.cols && self.parser.auto_wrap {
+            self.cells.set_wrapped(self.cursor_row as usize, true);
             self.cursor_col = 0;
             self.advance_row();
         }
@@ -852,6 +1374,8 @@ impl TerminalGrid {
                     for c in cc..cols {
                         self.cells.set(cr, c, clear_cell);
                     }
+                    // Trailing run cleared: the row no longer soft-wraps.
+                    self.cells.set_wrapped(cr, false);
                 }
                 for r in (cr + 1)..rows {
                     self.clear_row_with_attr(r, clear_cell.attrs);
@@ -891,6 +1415,8 @@ impl TerminalGrid {
                 for c in cc..cols {
                     self.cells.set(cr, c, clear_cell);
                 }
+                // Trailing run cleared: the row no longer soft-wraps.
+                self.cells.set_wrapped(cr, false);
             }
             EraseMode::ToStart => {
                 let end = if cc < cols { cc + 1 } else { cols };
@@ -934,9 +1460,7 @@ impl TerminalGrid {
         }
         for r in sr_top..sr_top + shift {
             if r <= sr_bottom {
-                for c in 0..cols {
-                    self.cells.set(r, c, Cell::blank());
-                }
+                self.cells.clear_row(r, Cell::blank());
             }
         }
     }
@@ -1082,9 +1606,7 @@ impl TerminalGrid {
         }
         for r in cur..cur + shift {
             if r <= sr_bottom {
-                for c in 0..cols {
-                    self.cells.set(r, c, Cell::blank());
-                }
+                self.cells.clear_row(r, Cell::blank());
             }
         }
     }
@@ -1104,9 +1626,7 @@ impl TerminalGrid {
             if src <= sr_bottom {
                 self.cells.row_copy(row, src, cols);
             } else {
-                for c in 0..cols {
-                    self.cells.set(row, c, Cell::blank());
-                }
+                self.cells.clear_row(row, Cell::blank());
             }
         }
     }
@@ -1204,14 +1724,11 @@ impl TerminalGrid {
         if row >= self.rows as usize {
             return;
         }
-        let cols = self.cols as usize;
         let clear_cell = Cell {
             codepoint: b' ' as u32,
             attrs: attr,
         };
-        for c in 0..cols {
-            self.cells.set(row, c, clear_cell);
-        }
+        self.cells.clear_row(row, clear_cell);
     }
 
     fn scroll_up(&mut self) {
@@ -1226,7 +1743,10 @@ impl TerminalGrid {
         // alt screen) feeds the scrollback history — matches the kernel.
         let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
         if full_screen && !self.in_alt_screen {
-            self.scrollback.push_row(&self.cells, sr_top, cols);
+            // Carry the evicted row's soft-wrap bit so a line that straddles the
+            // live/history boundary can be rejoined by a later width reflow.
+            let wrapped = self.cells.wrapped(sr_top);
+            self.scrollback.push_row(&self.cells, sr_top, wrapped);
             self.scrollback.reset_view();
             // A line just became history: advance the absolute line origin so
             // selection anchors keep naming the same content.
@@ -1236,9 +1756,7 @@ impl TerminalGrid {
         for row in (sr_top + 1)..=sr_bottom {
             self.cells.row_copy(row - 1, row, cols);
         }
-        for c in 0..cols {
-            self.cells.set(sr_bottom, c, Cell::blank());
-        }
+        self.cells.clear_row(sr_bottom, Cell::blank());
     }
 }
 
@@ -1397,7 +1915,7 @@ mod tests {
     fn resize_preserves_content() {
         let mut g = TerminalGrid::new(5, 10);
         feed(&mut g, b"hello");
-        g.resize(8, 20);
+        g.resize(8, 20, &mut []);
         assert_eq!(glyph_at(&g, 0, 0), 'h');
         assert_eq!(glyph_at(&g, 0, 4), 'o');
         assert_eq!(g.rows, 8);
@@ -1410,7 +1928,7 @@ mod tests {
         // Five rows of content, cursor resting on the bottom row.
         feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
         assert_eq!(g.cursor_row, 4);
-        g.resize(3, 10);
+        g.resize(3, 10, &mut []);
         // The cursor's line stays on screen at the new bottom; the two
         // displaced top rows scrolled into history instead of being clipped.
         assert_eq!(g.cursor_row, 2);
@@ -1425,7 +1943,7 @@ mod tests {
         let mut g = TerminalGrid::new(5, 10);
         feed(&mut g, b"a\r\nb");
         assert_eq!(g.cursor_row, 1);
-        g.resize(3, 10);
+        g.resize(3, 10, &mut []);
         // Cursor already fits: plain top-aligned clip, nothing scrolled.
         assert_eq!(g.cursor_row, 1);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
@@ -1440,7 +1958,7 @@ mod tests {
         // and move its cursor to the bottom too.
         feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
         feed(&mut g, b"\x1b[?1049h\x1b[5;1HALT");
-        g.resize(3, 10);
+        g.resize(3, 10, &mut []);
         // Alt screen has no history: its cursor clamps.
         assert_eq!(g.cursor_row, 2);
         // Leaving alt restores a bottom-anchored main screen whose saved
@@ -1490,40 +2008,149 @@ mod tests {
     }
 
     #[test]
-    fn width_resize_grows_scrollback_at_most_once() {
-        // A drag re-strides the ring for every cell-width step. The backing
-        // grows once to its ceiling and is reused thereafter, so no step past
-        // the widest point reallocates this multi-megabyte ring.
+    fn width_resize_never_reallocates_scrollback_ring() {
+        // A width drag reflows into a pooled second ring and pointer-swaps, so
+        // the two ceiling-sized backings ping-pong. Once both have reached the
+        // ceiling capacity, no further width step may reallocate either — the
+        // multi-megabyte ring is allocated at most twice over the grid's life.
         let mut g = TerminalGrid::new(24, 80);
-        assert_eq!(g.scrollback.buf.len(), SCROLLBACK_LINES * 80);
-        // Reach the maximum width, then capture the now-ceiling backing.
-        g.resize(24, MAX_COLS as u16);
-        assert_eq!(g.scrollback.buf.len(), SCROLLBACK_LINES * MAX_COLS);
-        let cap = g.scrollback.buf.capacity();
-        let ptr = g.scrollback.buf.as_ptr();
+        let ceiling = SCROLLBACK_LINES * MAX_COLS;
+        // Warm BOTH pooled backings to the ceiling: each reaches it the first
+        // time it is reflowed into at a width wide enough to need more than its
+        // initial backing (the second backing starts at the new(80) size, so it
+        // only grows when reflowed at cols > 80).
+        g.resize(24, MAX_COLS as u16, &mut []);
+        let ptr_a = g.scrollback.buf.as_ptr();
+        g.resize(24, 120, &mut []);
+        let ptr_b = g.scrollback.buf.as_ptr();
+        assert_ne!(ptr_a, ptr_b, "expected two distinct pooled backings");
         for cols in (10..=MAX_COLS as u16).chain((10..=MAX_COLS as u16).rev()) {
-            g.resize(24, cols);
+            g.resize(24, cols, &mut []);
             assert_eq!(g.scrollback.cols, cols as usize);
             assert_eq!(
                 g.scrollback.buf.capacity(),
-                cap,
-                "post-ceiling resize reallocated the scrollback ring"
+                ceiling,
+                "width resize reallocated the scrollback ring at cols={cols}"
             );
-            assert_eq!(
-                g.scrollback.buf.as_ptr(),
-                ptr,
-                "post-ceiling resize moved the scrollback backing"
+            let ptr = g.scrollback.buf.as_ptr();
+            assert!(
+                ptr == ptr_a || ptr == ptr_b,
+                "width resize allocated a fresh backing at cols={cols}"
             );
         }
-        // The re-strided ring still records history: scroll a marker off the
-        // 24-row grid and read it back.
+    }
+
+    #[test]
+    fn width_reflow_preserves_history() {
+        // The anti-`reset_for_width` test: scrollback content must survive a
+        // width change (re-wrapped), not be discarded.
+        let mut g = TerminalGrid::new(24, 80);
+        // Push a marked line into history, then change width.
         feed(&mut g, b"\x1b[H top");
         feed(&mut g, &[b'\r', b'\n'].repeat(24));
+        g.resize(24, 100, &mut []);
         g.scroll_view_up(1);
         assert!(g.viewing_history());
         assert_eq!(char::from_u32(g.visible_cell(0, 1).glyph()).unwrap(), 't');
         assert_eq!(char::from_u32(g.visible_cell(0, 2).glyph()).unwrap(), 'o');
         assert_eq!(char::from_u32(g.visible_cell(0, 3).glyph()).unwrap(), 'p');
+    }
+
+    #[test]
+    fn reflow_joins_wrapped_then_resplits() {
+        let mut g = TerminalGrid::new(4, 5);
+        // 12 chars at width 5 autowrap into 3 rows: "abcde"|"fghij"|"kl".
+        feed(&mut g, b"abcdefghijkl");
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(glyph_at(&g, 1, 0), 'f');
+        assert_eq!(glyph_at(&g, 2, 0), 'k');
+        // Grow to width 20: the wrapped run rejoins into a single row.
+        g.resize(4, 20, &mut []);
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(glyph_at(&g, 0, 11), 'l');
+        assert_eq!(glyph_at(&g, 0, 12), ' ');
+        // Shrink back to width 5: re-split into the same 3 rows.
+        g.resize(4, 5, &mut []);
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(glyph_at(&g, 1, 0), 'f');
+        assert_eq!(glyph_at(&g, 2, 0), 'k');
+        assert_eq!(glyph_at(&g, 2, 1), 'l');
+    }
+
+    #[test]
+    fn selection_anchor_survives_width_reflow() {
+        let mut g = TerminalGrid::new(4, 5);
+        feed(&mut g, b"abcdefghijkl"); // 3 wrapped rows at width 5
+        // Anchor 'g': at width 5 it is live row 1 col 1 -> absolute line 1.
+        let mut anchors = [Some((1u64, 1usize)), None];
+        g.resize(4, 20, &mut anchors);
+        // Joined at width 20, 'g' is logical offset 6 on row 0 -> abs line 0.
+        assert_eq!(anchors[0], Some((0, 6)));
+        let (line, col) = anchors[0].unwrap();
+        assert_eq!(char::from_u32(g.abs_cell(line, col).glyph()).unwrap(), 'g');
+    }
+
+    #[test]
+    fn cursor_stays_on_char_after_reflow() {
+        // The alacritty PR#7873 regression guard: shrink-then-grow must restore
+        // the cursor to its character, not saturate to (0, 0).
+        let mut g = TerminalGrid::new(4, 20);
+        feed(&mut g, b"hello world");
+        assert_eq!((g.cursor_row, g.cursor_col), (0, 11));
+        g.resize(4, 5, &mut []);
+        g.resize(4, 20, &mut []);
+        assert_eq!((g.cursor_row, g.cursor_col), (0, 11));
+    }
+
+    #[test]
+    fn wide_char_not_split_at_new_margin() {
+        let mut g = TerminalGrid::new(3, 4);
+        // 'a' + wide 'あ' (U+3042, 2 cells) + 'b'.
+        feed(&mut g, "aあb".as_bytes());
+        // Shrink so the wide glyph cannot fit after 'a' in the 1 remaining col:
+        // it early-wraps to the next row as an intact lead+continuation pair.
+        g.resize(3, 2, &mut []);
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(g.cells.get(1, 0).codepoint, 0x3042);
+        assert_eq!(g.cells.get(1, 1).codepoint, CONTINUATION_CODEPOINT);
+    }
+
+    #[test]
+    fn empty_logical_line_survives_reflow() {
+        let mut g = TerminalGrid::new(5, 10);
+        // Two non-blank lines separated by an intentional blank line.
+        feed(&mut g, b"alpha\r\n\r\nbeta");
+        g.resize(5, 6, &mut []);
+        // The blank middle line is preserved, not collapsed.
+        assert_eq!(glyph_at(&g, 0, 0), 'a');
+        assert_eq!(glyph_at(&g, 1, 0), ' ');
+        assert_eq!(glyph_at(&g, 2, 0), 'b');
+    }
+
+    #[test]
+    fn straddling_wrap_rejoins_after_eviction() {
+        // A line longer than the screen, printed at the bottom row, has its head
+        // evicted into history mid-wrap. The carried wrap bit must let a later
+        // width change rejoin it across the history/live boundary.
+        let mut g = TerminalGrid::new(2, 5);
+        // Fill row 0, then a 12-char line whose wrapped head scrolls into
+        // history while its tail stays live.
+        feed(&mut g, b"top\r\nabcdefghijkl");
+        // Grow wide enough to rejoin the whole logical line onto one row.
+        g.resize(2, 20, &mut []);
+        g.scroll_view_up(5);
+        // Somewhere in the visible history+live the rejoined line reads in order.
+        let mut found = false;
+        for row in 0..2 {
+            if char::from_u32(g.visible_cell(row, 0).glyph()).unwrap_or('?') == 'a' {
+                let s: alloc::string::String = (0..12)
+                    .map(|c| char::from_u32(g.visible_cell(row, c).glyph()).unwrap_or('?'))
+                    .collect();
+                assert_eq!(s, "abcdefghijkl");
+                found = true;
+            }
+        }
+        assert!(found, "rejoined line not found after reflow");
     }
 
     #[test]
@@ -1534,8 +2161,8 @@ mod tests {
         let mut g = TerminalGrid::new(100, 240);
         feed(&mut g, b"anchor");
         // Warm every pooled backing to its ceiling capacity.
-        g.resize(40, 100);
-        g.resize(100, 240);
+        g.resize(40, 100, &mut []);
+        g.resize(100, 240, &mut []);
         let max = MAX_ROWS * MAX_COLS;
         let caps = |g: &TerminalGrid| {
             (
@@ -1547,7 +2174,7 @@ mod tests {
         assert_eq!(caps(&g), (max, max, max));
         for rows in (10..=100u16).step_by(7) {
             for cols in (10..=240u16).step_by(11) {
-                g.resize(rows, cols);
+                g.resize(rows, cols, &mut []);
                 assert_eq!(
                     caps(&g),
                     (max, max, max),
@@ -1556,7 +2183,7 @@ mod tests {
             }
         }
         // Content within the overlap survives the churn.
-        g.resize(100, 240);
+        g.resize(100, 240, &mut []);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 0, 5), 'r');
     }

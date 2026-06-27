@@ -121,6 +121,32 @@ impl Selection {
         self.active && self.anchor != self.head
     }
 
+    /// The active selection endpoints as `(line, col)` content points for
+    /// [`TerminalGrid::resize`](crate::grid::TerminalGrid::resize)'s anchor
+    /// remap, or `[None; 2]` when inactive.
+    pub fn endpoints(&self) -> [Option<(u64, usize)>; 2] {
+        if self.is_active() {
+            [
+                Some((self.anchor.line, self.anchor.col)),
+                Some((self.head.line, self.head.col)),
+            ]
+        } else {
+            [None, None]
+        }
+    }
+
+    /// Re-seat the endpoints from content points remapped by a width reflow.
+    pub fn set_endpoints(&mut self, anchor: (u64, usize), head: (u64, usize)) {
+        self.anchor = Anchor {
+            line: anchor.0,
+            col: anchor.1,
+        };
+        self.head = Anchor {
+            line: head.0,
+            col: head.1,
+        };
+    }
+
     /// Ordered `(lo, hi)` anchors with `hi` exclusive at cell granularity, or
     /// `None` when inactive. Ordering is lexicographic on `(line, col)`.
     pub fn ordered(&self) -> Option<(Anchor, Anchor)> {
