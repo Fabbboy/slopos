@@ -39,6 +39,7 @@ crate::utest!(
     bin = "/bin/signal_handler_test"
 );
 crate::utest!(name = utest_ctrlc_flood, bin = "/bin/ctrlc_flood_test");
+crate::utest!(name = utest_pty_flow, bin = "/bin/pty_flow_test");
 crate::utest!(
     name = utest_sigwinch_default,
     bin = "/bin/sigwinch_default_test"

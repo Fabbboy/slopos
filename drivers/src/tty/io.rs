@@ -297,8 +297,30 @@ pub(crate) fn background_read_surface(nonblock: bool) -> TtyError {
     }
 }
 
-fn drain_and_recover(tty: &mut Tty, slot: usize, deferred: &mut PostLockWork) -> bool {
+/// React to a read having consumed bytes: clear throttle / no-room state and
+/// wake whichever peer was blocked on this TTY being full.
+///
+/// `master_was_full` is the PTY master's `input_full()` state captured *before*
+/// the read. Reading a PTY master frees space in its `RawDisc` buffer, but a
+/// slave writer (e.g. a flooding `cat`) blocked in `wait_for_write_ready`'s
+/// `peer_master` arm parks on `tty_output_event(<this master slot>)` until
+/// `!input_full()`. No other read-path wake covers that direction — the master
+/// never enters the `THROTTLED`/`no_room` states the arms below key on — so
+/// without this, large slave output stalled until an unrelated master write (a
+/// keystroke) happened to publish the event. Wake those writers on the
+/// full→not-full edge here.
+fn drain_and_recover(
+    tty: &mut Tty,
+    slot: usize,
+    master_was_full: bool,
+    deferred: &mut PostLockWork,
+) -> bool {
     let mut woke_peers = false;
+
+    if master_was_full && matches!(tty.driver, TtyDriverKind::PtyMaster { .. }) {
+        deferred.wake_output_and_poll(slot);
+        woke_peers = true;
+    }
 
     if tty.flags.contains(TtyFlags::THROTTLED)
         && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
@@ -343,6 +365,7 @@ fn try_read_packet_mode(
         return None;
     }
 
+    let was_full = tty.ldisc.input_full();
     let got = tty.ldisc.read(&mut buf[1..]);
     if got == 0 {
         return None;
@@ -353,7 +376,7 @@ fn try_read_packet_mode(
     if let Some(xon) = tty.ldisc.ixoff_check_xon() {
         deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
     }
-    let _ = drain_and_recover(tty, slot, deferred);
+    let _ = drain_and_recover(tty, slot, was_full, deferred);
     Some(Ok(1 + got))
 }
 
@@ -456,13 +479,14 @@ pub fn read_with_attach(
                     return result;
                 }
             } else {
+                let was_full = tty.ldisc.input_full();
                 let got = tty.ldisc.read(&mut buf[total..]);
                 total = total.saturating_add(got);
                 if got > 0 {
                     if let Some(xon) = tty.ldisc.ixoff_check_xon() {
                         deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
                     }
-                    let _ = drain_and_recover(tty, slot, &mut deferred);
+                    let _ = drain_and_recover(tty, slot, was_full, &mut deferred);
                 }
             }
 

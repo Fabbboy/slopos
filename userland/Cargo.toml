@@ -133,6 +133,10 @@ name = "ctrlc_flood_test"
 path = "src/bin/tests/ctrlc_flood_test.rs"
 
 [[bin]]
+name = "pty_flow_test"
+path = "src/bin/tests/pty_flow_test.rs"
+
+[[bin]]
 name = "sigwinch_default_test"
 path = "src/bin/tests/sigwinch_default_test.rs"
 
