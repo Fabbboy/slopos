@@ -20,6 +20,12 @@ pub const MODIFIER_CTRL: u8 = 1 << 1;
 pub const MODIFIER_ALT: u8 = 1 << 2;
 pub const MODIFIER_SUPER: u8 = 1 << 3;
 pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
+/// Num Lock active. Carried in the key-event modifier snapshot so a layout-
+/// independent consumer can resolve keypad keys (digit vs navigation) without
+/// re-tracking lock state.
+pub const MODIFIER_NUM_LOCK: u8 = 1 << 5;
+/// Scroll Lock active.
+pub const MODIFIER_SCROLL_LOCK: u8 = 1 << 6;
 
 /// Key-event flag bits, carried in `data0[8:16]` of a key `InputEvent`.
 ///

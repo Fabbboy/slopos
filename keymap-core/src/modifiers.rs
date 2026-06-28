@@ -7,7 +7,8 @@
 
 use slopos_abi::input::keycode::*;
 use slopos_abi::input::{
-    MODIFIER_ALT, MODIFIER_CAPS_LOCK, MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_SUPER,
+    MODIFIER_ALT, MODIFIER_CAPS_LOCK, MODIFIER_CTRL, MODIFIER_NUM_LOCK, MODIFIER_SCROLL_LOCK,
+    MODIFIER_SHIFT, MODIFIER_SUPER,
 };
 
 use crate::keymap::{Locks, Mods};
@@ -162,6 +163,12 @@ impl ModTracker {
         if self.caps {
             mods |= MODIFIER_CAPS_LOCK;
         }
+        if self.num {
+            mods |= MODIFIER_NUM_LOCK;
+        }
+        if self.scroll {
+            mods |= MODIFIER_SCROLL_LOCK;
+        }
         let mut locks = 0u8;
         if self.caps {
             locks |= LOCK_CAPS;
@@ -180,6 +187,28 @@ impl Default for ModTracker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Reconstruct [`Mods`] + [`Locks`] from an ABI `MODIFIER_*` snapshot byte (the
+/// modifier field of a key `InputEvent`).
+///
+/// Lets a downstream consumer (e.g. a GUI toolkit) re-run the shared [`Layout`]
+/// off a forwarded key event without tracking modifier/lock state itself.
+///
+/// [`Layout`]: crate::keymap::Layout
+pub fn mods_locks_from_raw(raw: u8) -> (Mods, Locks) {
+    let mods = Mods {
+        shift: raw & MODIFIER_SHIFT != 0,
+        ctrl: raw & MODIFIER_CTRL != 0,
+        alt: raw & MODIFIER_ALT != 0,
+        meta: raw & MODIFIER_SUPER != 0,
+    };
+    let locks = Locks {
+        caps: raw & MODIFIER_CAPS_LOCK != 0,
+        num: raw & MODIFIER_NUM_LOCK != 0,
+        scroll: raw & MODIFIER_SCROLL_LOCK != 0,
+    };
+    (mods, locks)
 }
 
 #[cfg(test)]

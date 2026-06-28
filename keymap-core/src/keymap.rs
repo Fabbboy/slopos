@@ -91,6 +91,114 @@ impl Layout for UsQwerty {
     }
 }
 
+/// A key's classification for a GUI toolkit: a named action key, a printable
+/// character, or nothing. Distinct from [`KeyOutcome`] in that the toolkit
+/// policy treats Enter/Tab/Space/Backspace/Escape as *named* keys (so widgets
+/// can act on them) and never folds Ctrl into the character (so Ctrl+A still
+/// classifies as `'a'` for shortcut matching).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiKey {
+    Named(NamedKey),
+    Char(char),
+    None,
+}
+
+/// The printable character a key produces under `mods`/`locks`, **ignoring
+/// Ctrl/Alt** (so Ctrl+A still yields `'a'`). Returns `None` for keys that
+/// produce only a named action (navigation, function, lock). Keypad keys yield
+/// their digit only when in digit mode (`num XOR shift`); operators and
+/// KP-Enter are unconditional.
+pub fn char_for(usage: u16, mods: Mods, locks: Locks) -> Option<char> {
+    if (KEY_A..=KEY_Z).contains(&usage) {
+        let base = b'a' + (usage - KEY_A) as u8;
+        let upper = mods.shift ^ locks.caps;
+        let ch = if upper { base - 0x20 } else { base };
+        return Some(ch as char);
+    }
+    if let Some((normal, shifted)) = number_row(usage) {
+        return Some((if mods.shift { shifted } else { normal }) as char);
+    }
+    if let Some((normal, shifted)) = punctuation(usage) {
+        return Some((if mods.shift { shifted } else { normal }) as char);
+    }
+    match usage {
+        KEY_ENTER | KEY_KP_ENTER => return Some('\n'),
+        KEY_TAB => return Some('\t'),
+        KEY_SPACE => return Some(' '),
+        KEY_BACKSPACE => return Some('\u{08}'),
+        KEY_ESC => return Some('\u{1b}'),
+        KEY_KP_SLASH => return Some('/'),
+        KEY_KP_ASTERISK => return Some('*'),
+        KEY_KP_MINUS => return Some('-'),
+        KEY_KP_PLUS => return Some('+'),
+        _ => {}
+    }
+    if locks.num ^ mods.shift {
+        let digit = match usage {
+            KEY_KP_0 => b'0',
+            KEY_KP_1 => b'1',
+            KEY_KP_2 => b'2',
+            KEY_KP_3 => b'3',
+            KEY_KP_4 => b'4',
+            KEY_KP_5 => b'5',
+            KEY_KP_6 => b'6',
+            KEY_KP_7 => b'7',
+            KEY_KP_8 => b'8',
+            KEY_KP_9 => b'9',
+            KEY_KP_DOT => b'.',
+            _ => return None,
+        };
+        return Some(digit as char);
+    }
+    None
+}
+
+/// The named (non-text) key a usage produces under `mods`/`locks`, including
+/// Num-Lock-off keypad navigation. Returns `None` for purely text-producing
+/// keys (handle those via [`char_for`]).
+pub fn named_for(usage: u16, mods: Mods, locks: Locks) -> Option<NamedKey> {
+    if !(locks.num ^ mods.shift) {
+        let nav = match usage {
+            KEY_KP_0 => Some(NamedKey::Insert),
+            KEY_KP_1 => Some(NamedKey::End),
+            KEY_KP_2 => Some(NamedKey::Down),
+            KEY_KP_3 => Some(NamedKey::PageDown),
+            KEY_KP_4 => Some(NamedKey::Left),
+            KEY_KP_6 => Some(NamedKey::Right),
+            KEY_KP_7 => Some(NamedKey::Home),
+            KEY_KP_8 => Some(NamedKey::Up),
+            KEY_KP_9 => Some(NamedKey::PageUp),
+            KEY_KP_DOT => Some(NamedKey::Delete),
+            _ => None,
+        };
+        if nav.is_some() {
+            return nav;
+        }
+    }
+    named_key(usage)
+}
+
+/// Classify a key for a GUI toolkit. Named-key policy (Enter/Tab/Space/
+/// Backspace/Escape + navigation/function/lock + Num-Lock-off keypad nav) wins;
+/// otherwise a Ctrl-independent printable character; otherwise nothing.
+pub fn ui_classify(usage: u16, mods: Mods, locks: Locks) -> UiKey {
+    match usage {
+        KEY_ENTER | KEY_KP_ENTER => return UiKey::Named(NamedKey::Enter),
+        KEY_TAB => return UiKey::Named(NamedKey::Tab),
+        KEY_BACKSPACE => return UiKey::Named(NamedKey::Backspace),
+        KEY_ESC => return UiKey::Named(NamedKey::Escape),
+        KEY_SPACE => return UiKey::Named(NamedKey::Space),
+        _ => {}
+    }
+    if let Some(named) = named_for(usage, mods, locks) {
+        return UiKey::Named(named);
+    }
+    if let Some(c) = char_for(usage, mods, locks) {
+        return UiKey::Char(c);
+    }
+    UiKey::None
+}
+
 /// Number-row `(unshifted, shifted)` for US-QWERTY.
 fn number_row(usage: u16) -> Option<(u8, u8)> {
     Some(match usage {
@@ -335,6 +443,66 @@ mod tests {
         assert_eq!(text(km.map(KEY_KP_ASTERISK, NONE, NUM_OFF)), b'*' as u32);
         assert_eq!(text(km.map(KEY_KP_SLASH, NONE, NUM_OFF)), b'/' as u32);
         assert_eq!(text(km.map(KEY_KP_ENTER, NONE, NUM_OFF)), '\n' as u32);
+    }
+
+    // --- GUI-toolkit classification (char_for / named_for / ui_classify) ---
+
+    #[test]
+    fn char_for_ignores_ctrl() {
+        // Ctrl+A is still 'a' here (the layout's Ctrl→control-code transform is
+        // a kernel/TTY concern, not a GUI-shortcut one).
+        assert_eq!(char_for(KEY_A, CTRL, NUM_ON), Some('a'));
+        assert_eq!(char_for(KEY_A, SHIFT, NUM_ON), Some('A'));
+        assert_eq!(char_for(KEY_1, SHIFT, NUM_ON), Some('!'));
+    }
+
+    #[test]
+    fn ui_classify_control_keys_are_named() {
+        assert_eq!(
+            ui_classify(KEY_ENTER, NONE, NUM_ON),
+            UiKey::Named(NamedKey::Enter)
+        );
+        assert_eq!(
+            ui_classify(KEY_TAB, NONE, NUM_ON),
+            UiKey::Named(NamedKey::Tab)
+        );
+        assert_eq!(
+            ui_classify(KEY_SPACE, NONE, NUM_ON),
+            UiKey::Named(NamedKey::Space)
+        );
+        assert_eq!(
+            ui_classify(KEY_BACKSPACE, NONE, NUM_ON),
+            UiKey::Named(NamedKey::Backspace)
+        );
+        assert_eq!(
+            ui_classify(KEY_ESC, NONE, NUM_ON),
+            UiKey::Named(NamedKey::Escape)
+        );
+    }
+
+    #[test]
+    fn ui_classify_ctrl_a_is_char() {
+        // The select-all shortcut path: Ctrl+A classifies as the character 'a'.
+        assert_eq!(ui_classify(KEY_A, CTRL, NUM_ON), UiKey::Char('a'));
+        assert_eq!(ui_classify(KEY_A, NONE, NUM_ON), UiKey::Char('a'));
+        assert_eq!(ui_classify(KEY_A, SHIFT, NUM_ON), UiKey::Char('A'));
+    }
+
+    #[test]
+    fn ui_classify_keypad_follows_numlock() {
+        // Num Lock ON → digit character; OFF → navigation named key.
+        assert_eq!(ui_classify(KEY_KP_7, NONE, NUM_ON), UiKey::Char('7'));
+        assert_eq!(
+            ui_classify(KEY_KP_7, NONE, NUM_OFF),
+            UiKey::Named(NamedKey::Home)
+        );
+        assert_eq!(ui_classify(KEY_KP_5, NONE, NUM_OFF), UiKey::None);
+    }
+
+    #[test]
+    fn ui_classify_modifiers_are_none() {
+        assert_eq!(ui_classify(KEY_LEFTCTRL, NONE, NUM_ON), UiKey::None);
+        assert_eq!(ui_classify(KEY_LEFTSHIFT, NONE, NUM_ON), UiKey::None);
     }
 
     #[test]

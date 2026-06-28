@@ -23,8 +23,12 @@ pub mod modifiers;
 pub mod repeat;
 pub mod scancode_set1;
 
-pub use keymap::{KeyOutcome, Layout, Locks, Mods, UsQwerty};
-pub use modifiers::{LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, ModSnapshot, ModTracker};
+pub use keymap::{
+    KeyOutcome, Layout, Locks, Mods, UiKey, UsQwerty, char_for, named_for, ui_classify,
+};
+pub use modifiers::{
+    LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, ModSnapshot, ModTracker, mods_locks_from_raw,
+};
 pub use repeat::{KeyRepeat, REPEAT_DELAY_MS, REPEAT_INTERVAL_MS};
 pub use scancode_set1::{DecodeStep, Set1Decoder};
 
