@@ -65,6 +65,13 @@ fn boot_step_idt_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
 
 fn boot_step_irq_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Configuring IRQ dispatcher...");
+    // `i8042.legacy` selects the hardcoded PS/2 bring-up in `irq::init`; the
+    // default binds the i8042 through the platform bus during the probe. Set
+    // before `irq::init` so both paths observe one value.
+    let legacy_i8042 = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
+        .map(|s| s.contains("i8042.legacy"))
+        .unwrap_or(false);
+    slopos_drivers::ps2::set_legacy_mode(legacy_i8042);
     slopos_drivers::irq::init();
     slopos_drivers::tty::init();
     apply_serial_mirror_cmdline();
@@ -296,6 +303,16 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 
     pci_probe_drivers();
     klog_debug!("PCI subsystem initialized.");
+
+    // Enumerate + bind non-PCI ACPI platform devices (e.g. the i8042 keyboard
+    // at PNP0303). Runs after PCI so any controller dependencies are claimed.
+    let rsdp_phys = limine_protocol::get_rsdp_phys_address();
+    if rsdp_phys != 0 {
+        let pdbg = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
+            .map(|s| s.contains("platform.debug"))
+            .unwrap_or(false);
+        slopos_drivers::platform_bus::probe_drivers(rsdp_phys, pdbg);
+    }
 }
 
 fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {

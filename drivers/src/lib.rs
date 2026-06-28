@@ -19,6 +19,7 @@ pub mod pci;
 pub mod pci_defs;
 pub mod pinctrl;
 pub mod pit;
+pub mod platform_bus;
 pub mod ps2;
 pub mod random;
 pub mod serial;

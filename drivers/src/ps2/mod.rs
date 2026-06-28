@@ -45,11 +45,64 @@
 //! | 7   | PARE | Parity error |
 pub mod keyboard;
 pub mod mouse;
+pub mod platform;
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use slopos_arch::cpu;
+use slopos_kernel_services::driver_runtime::{
+    LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, irq_increment_keyboard_events,
+};
 use slopos_ostd::io::Ps2Regs;
 use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::sync::OnceLock;
 use slopos_ostd::{klog_debug, klog_info, klog_warn};
+
+/// `i8042.legacy` escape hatch. When set, [`crate::irq::init`] runs the
+/// hardcoded PS/2 bring-up at boot and the platform-bus i8042 driver declines.
+/// Default (`false`) binds the i8042 through the platform bus during the probe.
+static LEGACY_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Select the legacy hardcoded i8042 bring-up path (`i8042.legacy` cmdline).
+pub fn set_legacy_mode(on: bool) {
+    LEGACY_MODE.store(on, Ordering::Release);
+}
+
+/// Whether the legacy hardcoded i8042 bring-up path is selected.
+pub fn legacy_mode() -> bool {
+    LEGACY_MODE.load(Ordering::Acquire)
+}
+
+/// Dispatch one PS/2 controller IRQ: read the pending byte and route it to the
+/// keyboard or mouse handler.
+///
+/// Shared by both bring-up paths — the legacy [`crate::irq::register_legacy_irq`]
+/// closures and the platform-bus i8042 driver's `request_legacy_irq` handlers.
+/// `irq_line` selects keyboard vs mouse; for an unexpected line the controller's
+/// AUX status bit disambiguates.
+pub fn dispatch_irq(irq_line: u8) {
+    let status = read_status();
+    if status & STATUS_OUTPUT_FULL == 0 {
+        return;
+    }
+    let data = read_data_nowait();
+    match irq_line {
+        LEGACY_IRQ_KEYBOARD => {
+            irq_increment_keyboard_events();
+            keyboard::handle_scancode(data);
+        }
+        LEGACY_IRQ_MOUSE => {
+            mouse::handle_irq(data);
+        }
+        _ => {
+            if status & STATUS_MOUSE_DATA != 0 {
+                mouse::handle_irq(data);
+            } else {
+                irq_increment_keyboard_events();
+                keyboard::handle_scancode(data);
+            }
+        }
+    }
+}
 
 static PORTS: OnceLock<Ps2Regs> = OnceLock::new();
 
@@ -300,6 +353,31 @@ pub fn read_aux_data() -> Option<u8> {
         cpu::pause();
     }
     None
+}
+
+/// Quick, bounded probe for an attached PS/2 AUX (mouse) device.
+///
+/// Resets the AUX device and requires an ACK (0xFA). On success, drains the
+/// device's post-reset self-test (0xAA) + device-id bytes so a subsequent
+/// [`mouse::init`] ACK exchange starts from a clean output buffer. Returns
+/// whether a mouse responded.
+///
+/// Used by the platform-bus i8042 driver to skip mouse bring-up entirely on
+/// machines with no PS/2 pointing device (e.g. the I²C-HID-only Lenovo laptop),
+/// where `mouse::init`'s many AUX round-trips would otherwise each time out and
+/// stall the boot. Expects `init_controller()` to have already run (AUX port
+/// enabled, clean config with IRQs off).
+pub fn aux_reset_probe() -> bool {
+    write_aux(DEV_CMD_RESET);
+    if !matches!(read_aux_data(), Some(DEV_ACK)) {
+        return false;
+    }
+    // A real mouse follows its reset ACK with 0xAA (self-test pass) then a
+    // device-id byte; drain both so they are not mistaken for a command ACK.
+    let _ = read_aux_data();
+    let _ = read_aux_data();
+    flush();
+    true
 }
 
 /// Send a command to the mouse and wait for ACK (0xFA) via the AUX path.

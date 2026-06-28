@@ -4,5 +4,7 @@
 
 pub mod bound;
 pub mod msi;
+pub mod platform_bound;
 
 pub use bound::{BoundDevice, BoundError};
+pub use platform_bound::BoundPlatformDevice;

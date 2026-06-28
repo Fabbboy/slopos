@@ -77,6 +77,12 @@ SECTIONS
     __stop_driver_registry = .;
   } :rodata
 
+  .platform_driver_registry ALIGN(8) : {
+    __start_platform_driver_registry = .;
+    KEEP(*(.platform_driver_registry))
+    __stop_platform_driver_registry = .;
+  } :rodata
+
   .test_registry ALIGN(8) : {
     __start_test_registry = .;
     KEEP(*(.test_registry))

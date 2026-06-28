@@ -15,6 +15,7 @@
 use slopos_abi::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::dev::Devres;
+use slopos_ostd::io::port::IoPortError;
 use slopos_ostd::irq::{IrqAllocator, IrqContext, IrqError};
 use slopos_ostd::mm::{DmaCoherent, DmaDirection, DmaError, DmaStream, IoMem};
 
@@ -29,6 +30,9 @@ pub enum BoundError {
     Dma(DmaError),
     /// An IRQ vector could not be allocated or its callback installed.
     Irq(IrqError),
+    /// An I/O port could not be reserved (not on the certified-insensitive list,
+    /// or already held).
+    IoPort(IoPortError),
     /// The requested BAR index does not exist, is an I/O (not memory) BAR, or
     /// the firmware left it unassigned.
     NoSuchBar,

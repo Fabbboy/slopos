@@ -4,8 +4,8 @@ use crate::ioapic::regs::{
 };
 use slopos_arch::cpu;
 use slopos_kernel_services::driver_runtime::{
-    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, irq_enable_line,
-    irq_increment_keyboard_events, irq_init, irq_is_masked, irq_set_route,
+    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, irq_enable_line, irq_init,
+    irq_is_masked, irq_set_route,
 };
 use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext};
 use slopos_ostd::klog_info;
@@ -17,31 +17,6 @@ use crate::{apic, ioapic, ps2};
 // (vector LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch —
 // see boot/src/idt.rs.  HPET + LAPIC are mandatory.
 
-fn ps2_handle(irq_line: u8) {
-    let status = ps2::read_status();
-    if status & ps2::STATUS_OUTPUT_FULL == 0 {
-        return;
-    }
-    let data = ps2::read_data_nowait();
-    match irq_line {
-        LEGACY_IRQ_KEYBOARD => {
-            irq_increment_keyboard_events();
-            ps2::keyboard::handle_scancode(data);
-        }
-        LEGACY_IRQ_MOUSE => {
-            ps2::mouse::handle_irq(data);
-        }
-        _ => {
-            if status & ps2::STATUS_MOUSE_DATA != 0 {
-                ps2::mouse::handle_irq(data);
-            } else {
-                irq_increment_keyboard_events();
-                ps2::keyboard::handle_scancode(data);
-            }
-        }
-    }
-}
-
 /// Reserve the IDT vector for a hardware-pinned legacy IRQ line, register
 /// the PS/2 dispatch closure, leak both handles so the registration
 /// persists for the kernel's lifetime, and unmask the IOAPIC route so
@@ -51,6 +26,10 @@ fn ps2_handle(irq_line: u8) {
 /// (matching the default `FLAG_MASKED` state in `core::irq`'s book-keeping).
 /// Without the `irq_enable_line` call below the OSTD callback is wired but
 /// the IOAPIC keeps the line gated, so PS/2 input never reaches us.
+///
+/// Used only by the `i8042.legacy` escape-hatch bring-up below; the default
+/// path wires the PS/2 IRQs through the platform-bus i8042 driver's
+/// `request_legacy_irq` (see `crate::ps2::platform`).
 fn register_legacy_irq(irq_line: u8) {
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq_line);
     let line = match IrqAllocator::reserve_specific(vector) {
@@ -61,7 +40,7 @@ fn register_legacy_irq(irq_line: u8) {
         }
     };
     let handle = match line.register_callback(move |_ctx: &IrqContext<'_>| {
-        ps2_handle(irq_line);
+        ps2::dispatch_irq(irq_line);
     }) {
         Ok(h) => h,
         Err(e) => {
@@ -84,7 +63,7 @@ fn register_legacy_irq(irq_line: u8) {
     irq_enable_line(irq_line);
 }
 
-fn program_ioapic_route(irq_line: u8) {
+pub(crate) fn program_ioapic_route(irq_line: u8) {
     if irq_line as usize >= IRQ_LINES {
         return;
     }
@@ -145,9 +124,15 @@ fn setup_ioapic_routes() {
     }
 
     // PIT timer route removed — scheduler ticks come from the per-CPU LAPIC timer.
-    program_ioapic_route(LEGACY_IRQ_KEYBOARD);
-    program_ioapic_route(LEGACY_IRQ_MOUSE);
     program_ioapic_route(LEGACY_IRQ_COM1);
+
+    // The default path leaves the PS/2 lines masked here; the platform-bus
+    // i8042 driver programs + unmasks them when it binds (priority-80 PCI
+    // probe). The legacy escape hatch routes them up front instead.
+    if ps2::legacy_mode() {
+        program_ioapic_route(LEGACY_IRQ_KEYBOARD);
+        program_ioapic_route(LEGACY_IRQ_MOUSE);
+    }
 }
 
 pub fn init() {
@@ -155,21 +140,27 @@ pub fn init() {
 
     setup_ioapic_routes();
 
-    // Full PS/2 controller init: disable ports, flush, self-test, clean config
-    ps2::init_controller();
+    // PS/2 bring-up. The default path defers to the platform-bus i8042 driver
+    // (`crate::ps2::platform`), which enumerates `PNP0303` via ACPI and claims
+    // 0x60/0x64 + IRQ 1 with devres ownership during the probe. The
+    // `i8042.legacy` escape hatch runs the hardcoded bring-up here instead.
+    if ps2::legacy_mode() {
+        // Full PS/2 controller init: disable ports, flush, self-test, clean config
+        ps2::init_controller();
 
-    // Device-level init (controller is ready, IRQs still off)
-    ps2::keyboard::init();
-    ps2::mouse::init();
+        // Device-level init (controller is ready, IRQs still off)
+        ps2::keyboard::init();
+        ps2::mouse::init();
 
-    // Final flush before enabling IRQs to drain any stray init response bytes
-    ps2::flush();
-    // Enable IRQs in the controller config byte now that devices are ready
-    ps2::enable_irqs();
+        // Final flush before enabling IRQs to drain any stray init response bytes
+        ps2::flush();
+        // Enable IRQs in the controller config byte now that devices are ready
+        ps2::enable_irqs();
 
-    // LAPIC timer handler lives in boot/src/idt.rs (per-CPU, not via IOAPIC).
-    register_legacy_irq(LEGACY_IRQ_KEYBOARD);
-    register_legacy_irq(LEGACY_IRQ_MOUSE);
+        // LAPIC timer handler lives in boot/src/idt.rs (per-CPU, not via IOAPIC).
+        register_legacy_irq(LEGACY_IRQ_KEYBOARD);
+        register_legacy_irq(LEGACY_IRQ_MOUSE);
+    }
 
     cpu::enable_interrupts();
 }
