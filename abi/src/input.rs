@@ -1,5 +1,7 @@
 //! Input event types (Wayland-style per-task input queues)
 
+pub mod keycode;
+
 /// Maximum number of tasks that can have input queues
 pub const MAX_INPUT_TASKS: usize = 32;
 
@@ -18,6 +20,17 @@ pub const MODIFIER_CTRL: u8 = 1 << 1;
 pub const MODIFIER_ALT: u8 = 1 << 2;
 pub const MODIFIER_SUPER: u8 = 1 << 3;
 pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
+
+/// Key-event flag bits, carried in `data0[8:16]` of a key `InputEvent`.
+///
+/// Set when the event carries the canonical (HID keycode + text codepoint)
+/// payload in addition to the legacy `(scancode, ascii)` bytes. Older consumers
+/// that only read `key_scancode()`/`key_ascii()` ignore these and keep working.
+pub const KEY_FLAG_HAS_CANONICAL: u8 = 1 << 0;
+/// This press is an auto-repeat, not a fresh physical key-down.
+pub const KEY_FLAG_IS_REPEAT: u8 = 1 << 1;
+/// The key came from the numeric keypad block.
+pub const KEY_FLAG_FROM_KEYPAD: u8 = 1 << 2;
 
 /// Axis identifiers for PointerAxis events (Wayland wl_pointer.axis convention)
 pub const POINTER_AXIS_VERTICAL: u32 = 0;
@@ -92,7 +105,19 @@ impl InputEventType {
 
 /// Input event data (union-like structure)
 ///
-/// For key events: data0 contains scancode in low 16 bits, ASCII in high 16 bits
+/// For key events the two 32-bit words are bit-packed (low→high):
+/// ```text
+///   data0[ 0: 8]  set-1 scancode (legacy)      -- key_scancode()
+///   data0[ 8:16]  KEY_FLAG_* flags             -- key_flags()
+///   data0[16:24]  ascii byte (legacy)          -- key_ascii()
+///   data0[24:32]  MODIFIER_* snapshot          -- key_modifiers()
+///   data1[ 0:16]  canonical HID usage keycode  -- key_keycode()
+///   data1[16:32]  text codepoint (BMP; 0=none) -- key_codepoint()
+/// ```
+/// The legacy `scancode`/`ascii` byte positions are unchanged, so consumers
+/// that only call `key_scancode()`/`key_ascii()` are unaffected by the added
+/// fields.
+///
 /// For pointer motion: data0 is x coordinate, data1 is y coordinate
 /// For pointer button: data0 contains button code
 /// For close request: data0/data1 are zero
@@ -129,16 +154,41 @@ impl Default for InputEvent {
 }
 
 impl InputEvent {
-    /// Create a key event
+    /// Create a key event carrying only `(scancode, ascii)`; the canonical
+    /// keycode/codepoint/modifier/flag fields are zero-filled. Prefer
+    /// [`key_full`](Self::key_full), which also carries the HID keycode and
+    /// text codepoint.
     pub fn key(event_type: InputEventType, scancode: u8, ascii: u8, timestamp_ms: u64) -> Self {
+        Self::key_full(event_type, scancode, ascii, 0, 0, 0, 0, timestamp_ms)
+    }
+
+    /// Create a fully-populated key event.
+    ///
+    /// `keycode` is a canonical HID Keyboard/Keypad usage (see
+    /// [`keycode`](self::keycode)); `codepoint` is the produced Unicode scalar
+    /// (BMP only — the high 16 bits are truncated); `modifiers` is a
+    /// `MODIFIER_*` snapshot; `flags` is a `KEY_FLAG_*` bitset.
+    #[allow(clippy::too_many_arguments)]
+    pub fn key_full(
+        event_type: InputEventType,
+        scancode: u8,
+        ascii: u8,
+        keycode: u16,
+        codepoint: u32,
+        modifiers: u8,
+        flags: u8,
+        timestamp_ms: u64,
+    ) -> Self {
+        let data0 = (scancode as u32)
+            | ((flags as u32) << 8)
+            | ((ascii as u32) << 16)
+            | ((modifiers as u32) << 24);
+        let data1 = (keycode as u32) | ((codepoint & 0xFFFF) << 16);
         Self {
             event_type,
             _padding: [0; 3],
             timestamp_ms,
-            data: InputEventData {
-                data0: (scancode as u32) | ((ascii as u32) << 16),
-                data1: 0,
-            },
+            data: InputEventData { data0, data1 },
         }
     }
 
@@ -254,6 +304,51 @@ impl InputEvent {
         ((self.data.data0 >> 16) & 0xFF) as u8
     }
 
+    /// Extract the `KEY_FLAG_*` bitset from a key event.
+    #[inline]
+    pub fn key_flags(&self) -> u8 {
+        ((self.data.data0 >> 8) & 0xFF) as u8
+    }
+
+    /// Extract the `MODIFIER_*` snapshot captured when the key event was produced.
+    #[inline]
+    pub fn key_modifiers(&self) -> u8 {
+        ((self.data.data0 >> 24) & 0xFF) as u8
+    }
+
+    /// Extract the canonical HID usage keycode (0 = none / legacy event).
+    #[inline]
+    pub fn key_keycode(&self) -> u16 {
+        (self.data.data1 & 0xFFFF) as u16
+    }
+
+    /// Extract the produced text codepoint. Falls back to the legacy `ascii`
+    /// byte when the canonical codepoint field is empty, so legacy and canonical
+    /// events both yield a usable character.
+    #[inline]
+    pub fn key_codepoint(&self) -> u32 {
+        let cp = (self.data.data1 >> 16) & 0xFFFF;
+        if cp != 0 { cp } else { self.key_ascii() as u32 }
+    }
+
+    /// True if this event carries the canonical keycode/codepoint payload.
+    #[inline]
+    pub fn key_has_canonical(&self) -> bool {
+        self.key_flags() & KEY_FLAG_HAS_CANONICAL != 0
+    }
+
+    /// True if this press is an auto-repeat rather than a fresh key-down.
+    #[inline]
+    pub fn key_is_repeat(&self) -> bool {
+        self.key_flags() & KEY_FLAG_IS_REPEAT != 0
+    }
+
+    /// True if the key originated from the numeric keypad block.
+    #[inline]
+    pub fn key_from_keypad(&self) -> bool {
+        self.key_flags() & KEY_FLAG_FROM_KEYPAD != 0
+    }
+
     /// Extract X coordinate from pointer event
     #[inline]
     pub fn pointer_x(&self) -> i32 {
@@ -282,5 +377,84 @@ impl InputEvent {
     #[inline]
     pub fn configure_height(&self) -> u32 {
         self.data.data1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keycode::*;
+    use super::*;
+
+    #[test]
+    fn legacy_key_zero_fills_new_fields() {
+        // Legacy layout: scancode in the low byte, ascii in byte 2, the
+        // canonical fields zero.
+        let e = InputEvent::key(InputEventType::KeyPress, 0x1E, b'a', 42);
+        assert_eq!(e.key_scancode(), 0x1E);
+        assert_eq!(e.key_ascii(), b'a');
+        assert_eq!(e.data.data0, 0x1E | ((b'a' as u32) << 16));
+        assert_eq!(e.data.data1, 0);
+        // New accessors read as empty.
+        assert_eq!(e.key_flags(), 0);
+        assert_eq!(e.key_modifiers(), 0);
+        assert_eq!(e.key_keycode(), 0);
+        assert!(!e.key_has_canonical());
+        assert!(!e.key_is_repeat());
+        assert!(!e.key_from_keypad());
+        // codepoint falls back to the ascii byte when the canonical field is 0.
+        assert_eq!(e.key_codepoint(), b'a' as u32);
+    }
+
+    #[test]
+    fn full_key_round_trips_all_fields() {
+        let flags = KEY_FLAG_HAS_CANONICAL | KEY_FLAG_FROM_KEYPAD;
+        let mods = MODIFIER_SHIFT | MODIFIER_CTRL;
+        let e = InputEvent::key_full(
+            InputEventType::KeyPress,
+            0x4F,     // set-1 scancode (KP 1 with numlock)
+            b'1',     // legacy ascii
+            KEY_KP_1, // canonical HID usage
+            '1' as u32,
+            mods,
+            flags,
+            1000,
+        );
+        assert_eq!(e.key_scancode(), 0x4F);
+        assert_eq!(e.key_ascii(), b'1');
+        assert_eq!(e.key_flags(), flags);
+        assert_eq!(e.key_modifiers(), mods);
+        assert_eq!(e.key_keycode(), KEY_KP_1);
+        assert_eq!(e.key_codepoint(), '1' as u32);
+        assert!(e.key_has_canonical());
+        assert!(e.key_from_keypad());
+        assert!(!e.key_is_repeat());
+    }
+
+    #[test]
+    fn codepoint_prefers_canonical_over_ascii() {
+        // Non-ASCII codepoint with no legacy ascii byte.
+        let e = InputEvent::key_full(
+            InputEventType::KeyPress,
+            0x10,
+            0, // ascii 0 (legacy can't represent this char)
+            KEY_Q,
+            0x00E9, // 'é'
+            0,
+            KEY_FLAG_HAS_CANONICAL,
+            0,
+        );
+        assert_eq!(e.key_codepoint(), 0x00E9);
+        assert_eq!(e.key_ascii(), 0);
+    }
+
+    #[test]
+    fn keycode_classifiers() {
+        assert!(is_modifier(KEY_LEFTCTRL));
+        assert!(is_modifier(KEY_RIGHTMETA));
+        assert!(!is_modifier(KEY_A));
+        assert!(is_keypad(KEY_KP_0));
+        assert!(is_keypad(KEY_KP_SLASH));
+        assert!(!is_keypad(KEY_NUMLOCK)); // NumLock is not a keypad text key
+        assert!(!is_keypad(KEY_HOME));
     }
 }
