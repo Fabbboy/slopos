@@ -1,9 +1,6 @@
 use super::constraints::{BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, Rect, Size};
-use super::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, WidgetEvent, hit_test,
-};
+use super::event::{EventPhase, EventResponse, MessageSink, WidgetEvent, hit_test};
 use super::focus::FocusManager;
-use super::input::Keymap;
 use super::layout::{HStackWidget, PaddingWidget, SpacerWidget, VStackWidget};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
@@ -331,43 +328,8 @@ fn test_focus_scope() {
 }
 
 // ---------------------------------------------------------------------------
-// Keymap tests
-// ---------------------------------------------------------------------------
-
-fn test_keymap_basic() {
-    let km = Keymap::us_qwerty();
-    let no_mod = Modifiers::default();
-    // 'a' is scancode 0x1E.
-    assert_eq!(km.translate(0x1E, &no_mod), Key::Char('a'));
-    // 'z' is scancode 0x2C.
-    assert_eq!(km.translate(0x2C, &no_mod), Key::Char('z'));
-    // '1' is scancode 0x02.
-    assert_eq!(km.translate(0x02, &no_mod), Key::Char('1'));
-}
-
-fn test_keymap_shift() {
-    let km = Keymap::us_qwerty();
-    let shift = Modifiers {
-        shift: true,
-        ..Modifiers::default()
-    };
-    // Shift + 'a' = 'A'.
-    assert_eq!(km.translate(0x1E, &shift), Key::Char('A'));
-    // Shift + '1' = '!'.
-    assert_eq!(km.translate(0x02, &shift), Key::Char('!'));
-    // Shift + '[' = '{'.
-    assert_eq!(km.translate(0x1A, &shift), Key::Char('{'));
-}
-
-fn test_keymap_special() {
-    let km = Keymap::us_qwerty();
-    let no_mod = Modifiers::default();
-    assert_eq!(km.translate(0x1C, &no_mod), Key::Named(NamedKey::Enter));
-    assert_eq!(km.translate(0x0E, &no_mod), Key::Named(NamedKey::Backspace));
-    assert_eq!(km.translate(0x01, &no_mod), Key::Named(NamedKey::Escape));
-    assert_eq!(km.translate(0x39, &no_mod), Key::Named(NamedKey::Space));
-    assert_eq!(km.translate(0x0F, &no_mod), Key::Named(NamedKey::Tab));
-}
+// Keymap tests moved to `slopos-keymap-core` (the single home of layout logic);
+// run them with `cargo test -p slopos-keymap-core`.
 
 // ---------------------------------------------------------------------------
 // Hit test
@@ -454,9 +416,6 @@ pub fn run_all_tests() -> bool {
         ("focus_prev", test_focus_prev),
         ("focus_wrap", test_focus_wrap),
         ("focus_scope", test_focus_scope),
-        ("keymap_basic", test_keymap_basic),
-        ("keymap_shift", test_keymap_shift),
-        ("keymap_special", test_keymap_special),
         ("hit_test_leaf", test_hit_test_leaf),
         ("hit_test_miss", test_hit_test_miss),
         ("edge_insets_symmetric", test_edge_insets_symmetric),
@@ -553,18 +512,6 @@ mod cfg_tests {
     #[test]
     fn focus_scope() {
         test_focus_scope();
-    }
-    #[test]
-    fn keymap_basic() {
-        test_keymap_basic();
-    }
-    #[test]
-    fn keymap_shift() {
-        test_keymap_shift();
-    }
-    #[test]
-    fn keymap_special() {
-        test_keymap_special();
     }
     #[test]
     fn hit_test_leaf() {

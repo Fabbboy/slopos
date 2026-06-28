@@ -31,35 +31,10 @@ impl Modifiers {
 }
 
 /// Named (non-character) keys.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum NamedKey {
-    Backspace,
-    Delete,
-    Tab,
-    Enter,
-    Escape,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Space,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-}
+///
+/// Re-exported from the canonical ABI keycode vocabulary (shared with the
+/// kernel via `keymap-core`) so the named-key set is defined in one place.
+pub use slopos_keymap_core::keycode::NamedKey;
 
 /// Key produced by the keymap.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

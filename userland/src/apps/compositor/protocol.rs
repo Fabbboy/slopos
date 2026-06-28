@@ -974,6 +974,7 @@ impl ProtocolBridge {
     }
 
     /// Send keyboard key event.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_key(
         &mut self,
         surface_idx: usize,
@@ -981,6 +982,9 @@ impl ProtocolBridge {
         time: u32,
         scancode: u32,
         ascii: u32,
+        keycode: u32,
+        codepoint: u32,
+        modifiers: u32,
         state: u32,
     ) {
         let surface = match self.surfaces.get(surface_idx) {
@@ -996,6 +1000,9 @@ impl ProtocolBridge {
                 time,
                 scancode,
                 ascii,
+                keycode,
+                codepoint,
+                modifiers,
                 pressed: state != 0,
             },
         );
@@ -1051,6 +1058,9 @@ impl ProtocolBridge {
             time,
             event.key_scancode() as u32,
             event.key_ascii() as u32,
+            event.key_keycode() as u32,
+            event.key_codepoint(),
+            modifier_state as u32,
             pressed as u32,
         );
     }

@@ -27,10 +27,19 @@ pub enum Event {
     KeyPress {
         scancode: u8,
         ascii: u8,
+        /// Canonical layout-independent keycode (USB HID usage).
+        keycode: u16,
+        /// Final text codepoint after layout + modifiers (0 = no text).
+        codepoint: u32,
+        /// `MODIFIER_*` snapshot at the time of the event.
+        modifiers: u8,
     },
     KeyRelease {
         scancode: u8,
         ascii: u8,
+        keycode: u16,
+        codepoint: u32,
+        modifiers: u8,
     },
     CloseRequest,
     Configure {
@@ -71,20 +80,31 @@ impl Event {
             ProtocolEvent::Key {
                 scancode,
                 ascii,
+                keycode,
+                codepoint,
+                modifiers,
                 pressed,
                 ..
             } => {
                 let sc = u8::try_from(*scancode).ok()?;
                 let a = u8::try_from(*ascii).ok()?;
+                let kc = u16::try_from(*keycode).unwrap_or(0);
+                let m = u8::try_from(*modifiers).unwrap_or(0);
                 if *pressed {
                     Some(Event::KeyPress {
                         scancode: sc,
                         ascii: a,
+                        keycode: kc,
+                        codepoint: *codepoint,
+                        modifiers: m,
                     })
                 } else {
                     Some(Event::KeyRelease {
                         scancode: sc,
                         ascii: a,
+                        keycode: kc,
+                        codepoint: *codepoint,
+                        modifiers: m,
                     })
                 }
             }

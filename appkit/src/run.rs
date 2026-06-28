@@ -11,7 +11,7 @@ use slopos_windowing::{EVENT_BUF_LEN, Window};
 
 use super::event::{self, HitTestResult, MessageSink, WidgetEvent};
 use super::focus::FocusManager;
-use super::input::{Keymap, translate_event};
+use super::input::translate_event;
 use super::node::{Action, App};
 use super::overlay::OverlayManager;
 use super::paint::PaintContext;
@@ -38,10 +38,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         win.set_app_id(id);
     }
     let style = StyleSheet::dark();
-    let keymap = Keymap::us_qwerty();
     let mut focus = FocusManager::new();
     let mut overlays = OverlayManager::new();
-    let mut modifiers = super::event::Modifiers::default();
 
     // Build initial widget tree.
     let node = app.view();
@@ -78,7 +76,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 None => continue,
             };
             win.track_pointer(&ev);
-            update_modifiers(&ev, &mut modifiers);
 
             match &ev {
                 Event::CloseRequest => std::process::exit(0),
@@ -94,7 +91,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 _ => {}
             }
 
-            let widget_event = match translate_event(&ev, &keymap, &modifiers) {
+            let widget_event = match translate_event(&ev) {
                 Some(e) => e,
                 None => continue,
             };
@@ -279,22 +276,6 @@ fn fill_pointer_pos(mut event: WidgetEvent, px: i32, py: i32) -> WidgetEvent {
         _ => {}
     }
     event
-}
-
-fn update_modifiers(ev: &Event, mods: &mut super::event::Modifiers) {
-    match ev {
-        Event::KeyPress { scancode, .. } | Event::KeyRelease { scancode, .. } => {
-            let pressed = matches!(ev, Event::KeyPress { .. });
-            match *scancode {
-                0x2A | 0x36 => mods.shift = pressed,
-                0x1D => mods.ctrl = pressed,
-                0x38 => mods.alt = pressed,
-                0x3A if pressed => mods.caps_lock = !mods.caps_lock,
-                _ => {}
-            }
-        }
-        _ => {}
-    }
 }
 
 fn find_focus_policy(widget: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {

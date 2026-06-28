@@ -20,6 +20,7 @@ alloc = ["slopos-gfx/alloc", "slopos-windowing/alloc"]
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-keymap-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-protocol = { workspace = true }

@@ -436,12 +436,12 @@ impl WindowManager {
                 }
                 InputEventType::KeyPress | InputEventType::KeyRelease => {
                     let pressed = event.event_type == InputEventType::KeyPress;
-                    self.input
-                        .update_modifier_from_scancode(event.key_scancode(), pressed);
+                    // Adopt the kernel's authoritative per-event modifier snapshot.
+                    let mods = event.key_modifiers();
+                    self.input.set_modifier_state(mods);
                     // Route to the keyboard focus AS OF THIS EVENT: a click
                     // earlier in the batch already retargeted focused_task.
                     let kbd_focus = self.input.focused_task();
-                    let mods = self.input.modifier_state();
                     if let Some(p) = proto_box.as_deref_mut() {
                         p.forward_key_event(
                             kbd_focus,

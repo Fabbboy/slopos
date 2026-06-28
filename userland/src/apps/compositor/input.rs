@@ -1,5 +1,5 @@
 use slopos_abi::InputEvent;
-use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_SUPER};
+use slopos_abi::input::MODIFIER_SUPER;
 use slopos_abi::task::TaskPriority;
 
 use crate::program_registry;
@@ -259,39 +259,10 @@ impl InputHandler {
         }
     }
 
-    /// Update local modifier state from a raw scancode.
-    ///
-    /// The kernel routes make codes (press/release rides the event type),
-    /// but break codes (make | 0x80) are also accepted defensively: a
-    /// modifier release that slipped through with its raw break code must
-    /// still clear the bit, or the modifier sticks for the rest of the
-    /// session and silently reclassifies every chord (a stuck SHIFT turns
-    /// Ctrl+C into the Ctrl+Shift+C copy chord — no SIGINT ever again).
-    /// The modifier break codes (0x9D/0xAA/0xB6/0xB8/0xDB/0xDC) sit above
-    /// the 0x80–0x97 pseudo-scancode range, so matching them cannot
-    /// misread an arrow/nav pseudo-code.
-    pub(super) fn update_modifier_from_scancode(&mut self, scancode: u8, pressed: bool) {
-        // PS/2 scan code set 1 modifier make codes (+ break-code aliases).
-        let bit = match scancode {
-            0x2A | 0x36 | 0xAA | 0xB6 => MODIFIER_SHIFT, // Left/Right Shift
-            0x1D | 0x9D => MODIFIER_CTRL,                // Left Ctrl
-            0x38 | 0xB8 => MODIFIER_ALT,                 // Left Alt
-            0x5B | 0x5C | 0xDB | 0xDC => MODIFIER_SUPER, // Left/Right Super
-            _ => return,
-        };
-        // A break code is a release regardless of the event type it rode in
-        // on; modifier make codes are all < 0x80, so the high bit is an
-        // unambiguous release marker here.
-        if pressed && scancode < 0x80 {
-            self.local_modifier_state |= bit;
-        } else {
-            self.local_modifier_state &= !bit;
-        }
-    }
-
-    /// Return the locally tracked modifier state.
-    pub fn modifier_state(&self) -> u8 {
-        self.local_modifier_state
+    /// Store the kernel's authoritative modifier snapshot (`MODIFIER_*`) for
+    /// local use (e.g. the Super-drag check) and forwarding to clients.
+    pub(super) fn set_modifier_state(&mut self, mods: u8) {
+        self.local_modifier_state = mods;
     }
 
     pub fn sync_keyboard_focus(

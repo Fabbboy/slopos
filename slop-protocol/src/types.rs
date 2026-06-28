@@ -1,11 +1,7 @@
 //! Core protocol types: Request, Event, ProtocolError, OutputInfo.
-//!
-//! Protocol version 2 -- version handshake, capability discovery,
-//! configure/ack semantics, explicit frame callbacks, input serials,
-//! and interactive move/resize.
 
 /// Current wire protocol version.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Compile-time-safe surface identifier.
 ///
@@ -337,8 +333,18 @@ pub enum Event {
     Key {
         serial: u32,
         time: u32,
+        /// Legacy PS/2 set-1 make code (low 7 bits). Preserved for consumers
+        /// that decode it directly (terminal, image viewer).
         scancode: u32,
+        /// Legacy single-byte text/pseudo-code (nav keys use 0x80..=0x88).
         ascii: u32,
+        /// Canonical layout-independent keycode (USB HID usage).
+        keycode: u32,
+        /// Final text codepoint after layout + modifiers (0 = no text).
+        codepoint: u32,
+        /// `MODIFIER_*` snapshot at the time of the event, so a client can
+        /// resolve the key without tracking modifier/lock state itself.
+        modifiers: u32,
         pressed: bool,
     },
     Modifiers {

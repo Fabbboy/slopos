@@ -627,6 +627,9 @@ impl Encode for Event {
                 time,
                 scancode,
                 ascii,
+                keycode,
+                codepoint,
+                modifiers,
                 pressed,
             } => {
                 let p = put_u8(buf, 0, EVT_KEY)?;
@@ -634,6 +637,9 @@ impl Encode for Event {
                 let p = put_u32(buf, p, *time)?;
                 let p = put_u32(buf, p, *scancode)?;
                 let p = put_u32(buf, p, *ascii)?;
+                let p = put_u32(buf, p, *keycode)?;
+                let p = put_u32(buf, p, *codepoint)?;
+                let p = put_u32(buf, p, *modifiers)?;
                 put_bool(buf, p, *pressed)
             }
             Event::Modifiers { mods } => {
@@ -811,6 +817,9 @@ impl Decode for Event {
                 let (time, p) = get_u32(buf, p)?;
                 let (scancode, p) = get_u32(buf, p)?;
                 let (ascii, p) = get_u32(buf, p)?;
+                let (keycode, p) = get_u32(buf, p)?;
+                let (codepoint, p) = get_u32(buf, p)?;
+                let (modifiers, p) = get_u32(buf, p)?;
                 let (pressed, p) = get_bool(buf, p)?;
                 Ok((
                     Event::Key {
@@ -818,6 +827,9 @@ impl Decode for Event {
                         time,
                         scancode,
                         ascii,
+                        keycode,
+                        codepoint,
+                        modifiers,
                         pressed,
                     },
                     p,
