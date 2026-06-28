@@ -24,6 +24,7 @@ members = [
   "slibc",
   "userland",
   "terminal-core",
+  "keymap-core",
   "video",
   "vt",
   "windowing",
@@ -80,6 +81,7 @@ slopos-signalfd = { path = "signalfd" }
 slopos-slibc = { path = "slibc" }
 slopos-userland = { path = "userland" }
 slopos-terminal-core = { path = "terminal-core" }
+slopos-keymap-core = { path = "keymap-core" }
 slopos-protocol = { path = "slop-protocol" }
 slopos-video = { path = "video" }
 slopos-vt = { path = "vt" }

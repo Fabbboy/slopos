@@ -1,0 +1,18 @@
+[package]
+name = "slopos-keymap-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Layout-independent keyboard keycode + keymap core (HID usages), host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
