@@ -1,0 +1,175 @@
+//! Keyboard adapter integration tests: synthetic scancodes → focused task's
+//! input queue, asserting the canonical `(keycode, codepoint, modifiers)`
+//! payload alongside the legacy `(scancode, ascii)` bytes.
+//!
+//! The pure decode/keymap logic is covered exhaustively by the host-testable
+//! `keymap-core` crate; these tests verify the kernel glue end-to-end through
+//! `handle_scancode` → `input_route_key_full` → the per-task queue, including
+//! the **numeric-keypad fix** (KP digits now decode and produce text).
+
+use slopos_abi::input::{InputEventType, KEY_FLAG_FROM_KEYPAD, MODIFIER_SHIFT};
+use slopos_keymap_core::keycode;
+use slopos_testing::{TestResult, fail, pass};
+
+use crate::input_event::{input_cleanup_task, input_poll, input_set_keyboard_focus};
+use crate::ps2::keyboard::{handle_scancode, reset_state_for_test};
+
+const DUMMY_TASK: u32 = 9001;
+
+/// Reset keyboard state, claim keyboard focus for the dummy task, and drain any
+/// stale events.
+fn setup() {
+    reset_state_for_test();
+    input_cleanup_task(DUMMY_TASK);
+    input_set_keyboard_focus(DUMMY_TASK);
+    while input_poll(DUMMY_TASK).is_some() {}
+}
+
+/// Release focus, free the queue slot, and reset keyboard state so nothing
+/// leaks into other tests or the live keyboard handler.
+fn teardown() {
+    input_set_keyboard_focus(0);
+    input_cleanup_task(DUMMY_TASK);
+    reset_state_for_test();
+}
+
+/// KP7 (set-1 0x47) decodes, and with Num Lock on (the default) produces the
+/// digit '7'.
+pub fn test_keypad_numlock_digit() -> TestResult {
+    setup();
+    handle_scancode(0x47); // KP7 make code
+    let ev = input_poll(DUMMY_TASK);
+    teardown();
+
+    let ev = match ev {
+        Some(e) => e,
+        None => return fail!("keypad 7 produced no event (the original bug)"),
+    };
+    if ev.key_keycode() != keycode::KEY_KP_7 {
+        return fail!("keypad 7 decoded to the wrong canonical keycode");
+    }
+    if ev.key_codepoint() != b'7' as u32 {
+        return fail!("keypad 7 did not produce digit '7' with Num Lock on");
+    }
+    if ev.key_ascii() != b'7' {
+        return fail!("keypad 7 legacy ascii is not '7'");
+    }
+    if ev.key_flags() & KEY_FLAG_FROM_KEYPAD == 0 {
+        return fail!("keypad 7 missing FROM_KEYPAD flag");
+    }
+    pass!()
+}
+
+/// A plain letter carries the canonical keycode + codepoint and the legacy
+/// ascii byte.
+pub fn test_letter_canonical_payload() -> TestResult {
+    setup();
+    handle_scancode(0x1E); // 'a' make code
+    let ev = input_poll(DUMMY_TASK);
+    teardown();
+
+    let ev = match ev {
+        Some(e) => e,
+        None => return fail!("letter 'a' produced no event"),
+    };
+    if ev.key_keycode() != keycode::KEY_A {
+        return fail!("letter 'a' wrong canonical keycode");
+    }
+    if ev.key_codepoint() != b'a' as u32 || ev.key_ascii() != b'a' {
+        return fail!("letter 'a' wrong codepoint/ascii");
+    }
+    pass!()
+}
+
+/// Shift makes the letter uppercase and the event carries the Shift modifier
+/// snapshot.
+pub fn test_shift_letter_uppercase_and_modifier() -> TestResult {
+    setup();
+    handle_scancode(0x2A); // Left Shift press
+    handle_scancode(0x1E); // 'a' -> 'A'
+    let _shift_ev = input_poll(DUMMY_TASK); // shift press event
+    let ev = input_poll(DUMMY_TASK); // the 'A' event
+    teardown();
+
+    let ev = match ev {
+        Some(e) => e,
+        None => return fail!("shift+'a' produced no letter event"),
+    };
+    if ev.key_keycode() != keycode::KEY_A {
+        return fail!("shift+'a' wrong keycode");
+    }
+    if ev.key_codepoint() != b'A' as u32 || ev.key_ascii() != b'A' {
+        return fail!("shift+'a' did not produce uppercase 'A'");
+    }
+    if ev.key_modifiers() & MODIFIER_SHIFT == 0 {
+        return fail!("shift+'a' missing Shift in modifier snapshot");
+    }
+    pass!()
+}
+
+/// An extended arrow key decodes to the canonical KEY_UP and still carries the
+/// legacy 0x82 pseudo-code the terminal/shell expect.
+pub fn test_extended_arrow_legacy_and_canonical() -> TestResult {
+    setup();
+    handle_scancode(0xE0); // extended prefix
+    handle_scancode(0x48); // Up arrow
+    let ev = input_poll(DUMMY_TASK);
+    teardown();
+
+    let ev = match ev {
+        Some(e) => e,
+        None => return fail!("Up arrow produced no event"),
+    };
+    if ev.key_keycode() != keycode::KEY_UP {
+        return fail!("Up arrow wrong canonical keycode");
+    }
+    if ev.key_ascii() != 0x82 {
+        return fail!("Up arrow legacy pseudo-code is not 0x82");
+    }
+    pass!()
+}
+
+/// Releases now produce a KeyRelease event that carries the canonical keycode
+/// but no text (legacy ascii 0) — consumers that ignore releases are unaffected.
+pub fn test_press_then_release_events() -> TestResult {
+    setup();
+    handle_scancode(0x1E); // 'a' press
+    handle_scancode(0x9E); // 'a' release
+    let press = input_poll(DUMMY_TASK);
+    let release = input_poll(DUMMY_TASK);
+    teardown();
+
+    let press = match press {
+        Some(e) => e,
+        None => return fail!("missing press event"),
+    };
+    if press.event_type != InputEventType::KeyPress || press.key_codepoint() != b'a' as u32 {
+        return fail!("press event malformed");
+    }
+    let release = match release {
+        Some(e) => e,
+        None => return fail!("missing release event"),
+    };
+    if release.event_type != InputEventType::KeyRelease {
+        return fail!("expected KeyRelease");
+    }
+    if release.key_keycode() != keycode::KEY_A {
+        return fail!("release missing canonical keycode");
+    }
+    if release.key_ascii() != 0 {
+        return fail!("release should carry no text byte");
+    }
+    pass!()
+}
+
+slopos_testing::stest!(name = test_keypad_numlock_digit, suite = keyboard);
+slopos_testing::stest!(name = test_letter_canonical_payload, suite = keyboard);
+slopos_testing::stest!(
+    name = test_shift_letter_uppercase_and_modifier,
+    suite = keyboard
+);
+slopos_testing::stest!(
+    name = test_extended_arrow_legacy_and_canonical,
+    suite = keyboard
+);
+slopos_testing::stest!(name = test_press_then_release_events, suite = keyboard);

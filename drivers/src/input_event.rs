@@ -346,7 +346,24 @@ pub fn input_get_modifier_state() -> u8 {
 // Public API - Event Routing (Called from IRQ handlers)
 // =============================================================================
 
-pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_ms: u64) {
+/// Route a fully-populated key event to the focused task / compositor.
+///
+/// Carries both the legacy `(scancode, ascii)` bytes and the canonical
+/// `(keycode, codepoint, modifiers, flags)` payload (see
+/// [`slopos_abi::input::InputEvent::key_full`]). The keyboard driver builds all
+/// fields from `keymap-core`; older consumers that read only
+/// `key_scancode()`/`key_ascii()` are unaffected.
+#[allow(clippy::too_many_arguments)]
+pub fn input_route_key_full(
+    scancode: u8,
+    ascii: u8,
+    keycode: u16,
+    codepoint: u32,
+    modifiers: u8,
+    flags: u8,
+    pressed: bool,
+    timestamp_ms: u64,
+) {
     let state = FOCUS.read();
 
     let target = if state.compositor_task_id != 0 {
@@ -369,7 +386,16 @@ pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_m
         };
         push_event(
             slot,
-            InputEvent::key(event_type, scancode, ascii, timestamp_ms),
+            InputEvent::key_full(
+                event_type,
+                scancode,
+                ascii,
+                keycode,
+                codepoint,
+                modifiers,
+                flags,
+                timestamp_ms,
+            ),
         );
     }
 }
