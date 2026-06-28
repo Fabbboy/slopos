@@ -17,6 +17,38 @@ pub struct I2cResource {
     pub controller: KVec<u8>,
 }
 
+/// Parsed I/O-port resource descriptor (small tag 0x08 `IO`, or 0x09 `FixedIO`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoPortResource {
+    /// Base I/O port (the descriptor's range minimum).
+    pub base: u16,
+    /// Number of ports the window covers.
+    pub len: u8,
+}
+
+/// Parsed IRQ resource descriptor (small tag 0x04).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrqResource {
+    /// Bitmask of IRQ lines this descriptor can use (bit `n` = IRQ `n`).
+    pub irq_mask: u16,
+    /// `true` = edge triggered, `false` = level.
+    pub edge: bool,
+    /// `true` = active-low / falling.
+    pub active_low: bool,
+}
+
+impl IrqResource {
+    /// The lowest IRQ line in the mask (the single line in a fixed descriptor
+    /// like the keyboard's `IRQ {1}`), if any bit is set.
+    pub fn first_line(&self) -> Option<u8> {
+        if self.irq_mask == 0 {
+            None
+        } else {
+            Some(self.irq_mask.trailing_zeros() as u8)
+        }
+    }
+}
+
 /// Parsed GpioInt connection descriptor.
 pub struct GpioIntResource {
     /// First pin number in the descriptor's pin table.
@@ -33,6 +65,90 @@ const TAG_END: u8 = 0x79;
 const LARGE_TYPE_GPIO: u8 = 0x0c;
 const LARGE_TYPE_SERIAL_BUS: u8 = 0x0e;
 const SERIAL_BUS_TYPE_I2C: u8 = 0x01;
+
+// Small resource descriptor "names" (bits 6:3 of the tag byte).
+const SMALL_TYPE_IRQ: u8 = 0x04;
+const SMALL_TYPE_IO: u8 = 0x08;
+const SMALL_TYPE_FIXED_IO: u8 = 0x09;
+
+/// Collect every I/O-port descriptor (`IO` / `FixedIO`) in a `_CRS`/`_PRS`
+/// resource template buffer, in order.
+pub fn parse_io_ports(buf: &[u8]) -> KVec<IoPortResource> {
+    let mut out = KVec::new();
+    each_small(buf, |typ, body, len| {
+        match typ {
+            // I/O Port Descriptor: info(1), min(2), max(2), align(1), length(1).
+            SMALL_TYPE_IO if len >= 7 => {
+                let base = u16::from_le_bytes([buf[body + 1], buf[body + 2]]);
+                let length = buf[body + 6];
+                let _ = out.push(IoPortResource { base, len: length });
+            }
+            // Fixed Location I/O Port Descriptor: base(2), length(1).
+            SMALL_TYPE_FIXED_IO if len >= 3 => {
+                let base = u16::from_le_bytes([buf[body], buf[body + 1]]);
+                let length = buf[body + 2];
+                let _ = out.push(IoPortResource { base, len: length });
+            }
+            _ => {}
+        }
+    });
+    out
+}
+
+/// Collect every IRQ descriptor (small tag 0x04) in a resource template buffer.
+pub fn parse_irqs(buf: &[u8]) -> KVec<IrqResource> {
+    let mut out = KVec::new();
+    each_small(buf, |typ, body, len| {
+        if typ == SMALL_TYPE_IRQ && len >= 2 {
+            let irq_mask = u16::from_le_bytes([buf[body], buf[body + 1]]);
+            // Optional 3rd "IRQ Information" byte: bit0 = edge(1)/level(0),
+            // bit3 = active-low(1)/active-high(0). Absent ⇒ ISA default
+            // (edge, active-high).
+            let (edge, active_low) = if len >= 3 {
+                let info = buf[body + 2];
+                (info & 0x01 != 0, info & 0x08 != 0)
+            } else {
+                (true, false)
+            };
+            let _ = out.push(IrqResource {
+                irq_mask,
+                edge,
+                active_low,
+            });
+        }
+    });
+    out
+}
+
+/// Iterate small resource descriptors, calling `f(type, body_start, body_len)`
+/// for each. Large descriptors are skipped; iteration stops at the End tag or
+/// the first malformed/truncated descriptor.
+fn each_small(buf: &[u8], mut f: impl FnMut(u8, usize, usize)) {
+    let mut p = 0usize;
+    while p < buf.len() {
+        let tag = buf[p];
+        if tag == TAG_END {
+            break;
+        }
+        if tag & 0x80 == 0 {
+            // Small descriptor: bits 6:3 = type, bits 2:0 = body length.
+            let len = (tag & 0x07) as usize;
+            let typ = (tag >> 3) & 0x0f;
+            let body = p + 1;
+            if body + len > buf.len() {
+                break;
+            }
+            f(typ, body, len);
+            p = body + len;
+        } else {
+            // Large descriptor: 2-byte length follows the tag.
+            let Some(&lo) = buf.get(p + 1) else { break };
+            let Some(&hi) = buf.get(p + 2) else { break };
+            let len = u16::from_le_bytes([lo, hi]) as usize;
+            p += 3 + len;
+        }
+    }
+}
 
 /// Find and parse the first I²C serial-bus descriptor in `buf`.
 pub fn parse_i2c(buf: &[u8]) -> Option<I2cResource> {

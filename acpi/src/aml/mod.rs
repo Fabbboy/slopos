@@ -531,6 +531,270 @@ fn value_is_pnp0c50(aml: &[u8], pos: usize) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Generic ACPI platform-device discovery (by _HID/_CID), for the platform bus.
+// ---------------------------------------------------------------------------
+
+/// A discovered ACPI platform device's presence + decoded `_CRS` resources.
+///
+/// Returned by [`find_device_by_ids`] for non-PCI devices the platform bus
+/// binds (e.g. the i8042 keyboard at `PNP0303`). `present` is `None` when the
+/// device has no `_STA` or its `_STA` could not be evaluated (commonly because
+/// it gates on an Embedded-Controller field the narrow interpreter cannot read,
+/// as the Lenovo keyboard's `P2MK` does) — callers must not treat that as
+/// "absent".
+pub struct AcpiPlatformDevice {
+    /// `_STA` bit 0: `Some(true/false)` if evaluated, `None` if unknown.
+    pub present: Option<bool>,
+    /// I/O-port windows from `_CRS`, in order.
+    pub io_ports: KVec<resource::IoPortResource>,
+    /// IRQ descriptors from `_CRS`, in order.
+    pub irqs: KVec<resource::IrqResource>,
+}
+
+/// Convenience over [`find_device_by_ids`] that extracts the DSDT + SSDT AML
+/// bodies from a validated [`AcpiTables`] (mirrors [`scan_i2c_hid`]). Used by
+/// the platform bus to discover non-PCI devices at boot.
+pub fn find_acpi_platform_device(
+    tables: &AcpiTables,
+    host: &dyn AmlHost,
+    ids: &[&[u8]],
+    debug: bool,
+) -> Option<AcpiPlatformDevice> {
+    let facp = tables.find_table(b"FACP")?;
+    let fadt = Fadt::parse(facp.raw())?;
+    let dsdt = tables::table_bytes_at(fadt.dsdt_phys)?;
+    let dsdt_aml = dsdt.get(HEADER_LEN..)?;
+
+    let mut ssdts: KVec<&[u8]> = KVec::new();
+    tables.find_map_raw(b"SSDT", |bytes| {
+        if let Some(aml) = bytes.get(HEADER_LEN..) {
+            let _ = ssdts.push(aml);
+        }
+        None::<()>
+    });
+
+    find_device_by_ids(dsdt_aml, ssdts.as_slice(), host, ids, debug)
+}
+
+/// Find the first DSDT device whose `_HID` or `_CID` matches any id in `ids`
+/// (each a 7-byte EISA id like `b"PNP0303"`), and decode its presence + `_CRS`
+/// I/O/IRQ resources. Returns `None` if no matching device exists.
+///
+/// Like [`scan_blobs`] this never panics; a DSDT it cannot fully parse yields
+/// `None` (or empty resource lists) and the caller proceeds.
+pub fn find_device_by_ids(
+    dsdt_aml: &[u8],
+    ssdts: &[&[u8]],
+    host: &dyn AmlHost,
+    ids: &[&[u8]],
+    debug: bool,
+) -> Option<AcpiPlatformDevice> {
+    let mut idx = Index::new();
+    index_blob(dsdt_aml, &mut idx);
+    for ssdt in ssdts {
+        index_blob(ssdt, &mut idx);
+    }
+    idx.resolve_fields();
+
+    let devices = collect_devices(dsdt_aml);
+    for dev in devices.iter() {
+        let members = collect_platform_members(dsdt_aml, *dev, ids);
+        if !members.matched {
+            continue;
+        }
+        if debug {
+            klog_info!(
+                "aml: matched platform device (_STA={}, _CRS_name={}, _CRS_method={})",
+                members.sta.is_some(),
+                members.crs_name.is_some(),
+                members.crs_method.is_some(),
+            );
+        }
+        return Some(process_platform_device(dsdt_aml, &members, &idx, host));
+    }
+    None
+}
+
+struct PlatformMembers<'a> {
+    aml: &'a [u8],
+    ids: &'a [&'a [u8]],
+    matched: bool,
+    sta: Option<Range>,
+    ini: Option<Range>,
+    crs_name: Option<Range>,
+    crs_method: Option<Range>,
+    names: KVec<(u32, Range)>,
+    overlays: KVec<(u32, Overlay)>,
+}
+
+impl Visitor for PlatformMembers<'_> {
+    fn name(&mut self, seg: [u8; 4], value: Range) {
+        let key = nameseg_key(&seg);
+        if (key == nameseg_key(b"_CID") || key == nameseg_key(b"_HID"))
+            && value_matches_any_id(self.aml, value.start, self.ids)
+        {
+            self.matched = true;
+        }
+        if key == nameseg_key(b"_CRS") {
+            self.crs_name = Some(value);
+        }
+        let _ = self.names.push((key, value));
+    }
+    fn method(&mut self, seg: [u8; 4], _argc: u8, body: Range) {
+        let key = nameseg_key(&seg);
+        if key == nameseg_key(b"_STA") {
+            self.sta = Some(body);
+        } else if key == nameseg_key(b"_INI") {
+            self.ini = Some(body);
+        } else if key == nameseg_key(b"_CRS") {
+            self.crs_method = Some(body);
+        }
+    }
+    fn create_field(&mut self, source: [u8; 4], byte_index: u64, width_bytes: u8, name: [u8; 4]) {
+        let _ = self.overlays.push((
+            nameseg_key(&name),
+            Overlay {
+                source: nameseg_key(&source),
+                byte_index,
+                width: width_bytes,
+            },
+        ));
+    }
+    fn enter_device(&mut self, _seg: [u8; 4], _body: Range) -> bool {
+        false // direct members only
+    }
+}
+
+fn collect_platform_members<'a>(
+    aml: &'a [u8],
+    dev: Range,
+    ids: &'a [&'a [u8]],
+) -> PlatformMembers<'a> {
+    let mut m = PlatformMembers {
+        aml,
+        ids,
+        matched: false,
+        sta: None,
+        ini: None,
+        crs_name: None,
+        crs_method: None,
+        names: KVec::new(),
+        overlays: KVec::new(),
+    };
+    walk_terms(aml, dev.start, dev.end, &mut m);
+    m
+}
+
+fn process_platform_device(
+    aml: &[u8],
+    members: &PlatformMembers<'_>,
+    idx: &Index,
+    host: &dyn AmlHost,
+) -> AcpiPlatformDevice {
+    let mut interp = Interp::new(
+        aml,
+        &idx.fields,
+        &idx.methods,
+        &idx.method_bodies,
+        &idx.names,
+        host,
+    );
+    for &(seg, range) in members.names.iter() {
+        if let Some(val) = parse_value(aml, range.start) {
+            interp.locals.insert(seg, val);
+        }
+    }
+    for &(seg, ov) in members.overlays.iter() {
+        interp.overlays.insert(seg, ov);
+    }
+
+    // Presence: evaluate _STA if present. Unevaluable (EC-gated) ⇒ None.
+    let present = match members.sta {
+        None => None,
+        Some(body) => interp
+            .run(body.start, body.end)
+            .map(|v| v.as_int() & 0x01 != 0),
+    };
+
+    // Configure: run _INI (may patch the resource template).
+    if let Some(ini) = members.ini {
+        interp.run(ini.start, ini.end);
+    }
+
+    // Resolve the _CRS resource template: a Name's Buffer, or a method's return.
+    let crs_val = if let Some(crs) = members.crs_name {
+        parse_value(aml, crs.start)
+    } else if let Some(crs) = members.crs_method {
+        interp.run(crs.start, crs.end)
+    } else {
+        None
+    };
+
+    let (io_ports, irqs) = match crs_val {
+        Some(AmlVal::Buf(b)) => (
+            resource::parse_io_ports(b.as_slice()),
+            resource::parse_irqs(b.as_slice()),
+        ),
+        _ => (KVec::new(), KVec::new()),
+    };
+
+    AcpiPlatformDevice {
+        present,
+        io_ports,
+        irqs,
+    }
+}
+
+/// True if the data object at `pos` matches any 7-byte EISA id in `ids`,
+/// whether stored as a string or an EISA-packed integer.
+fn value_matches_any_id(aml: &[u8], pos: usize, ids: &[&[u8]]) -> bool {
+    match parse_value(aml, pos) {
+        Some(AmlVal::Str(s)) => ids.iter().any(|id| s.as_slice() == *id),
+        Some(AmlVal::Int(v)) => ids
+            .iter()
+            .any(|id| eisa_pack(id).map(|p| p as u64) == Some(v)),
+        _ => false,
+    }
+}
+
+/// Pack a 7-character EISA/PNP id (`b"PNP0303"`) into its compressed DWORD form
+/// (matching the value an `EisaId(...)` term encodes in AML). Returns `None`
+/// for a malformed id.
+#[doc(hidden)]
+pub fn eisa_pack(id: &[u8]) -> Option<u32> {
+    if id.len() != 7 {
+        return None;
+    }
+    let letter = |b: u8| -> Option<u8> {
+        if b.is_ascii_uppercase() {
+            Some(b - 0x40) // 'A' => 1
+        } else {
+            None
+        }
+    };
+    let hex = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        }
+    };
+    let c1 = letter(id[0])?;
+    let c2 = letter(id[1])?;
+    let c3 = letter(id[2])?;
+    let d1 = hex(id[3])?;
+    let d2 = hex(id[4])?;
+    let d3 = hex(id[5])?;
+    let d4 = hex(id[6])?;
+    let b0 = (c1 << 2) | (c2 >> 3);
+    let b1 = ((c2 & 0x07) << 5) | c3;
+    let b2 = (d1 << 4) | d2;
+    let b3 = (d3 << 4) | d4;
+    Some((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24))
+}
+
 /// Parse `\_SB.PC00.I2Cn` (or similar) → `n`. Looks for the `I2C` token
 /// followed by a single decimal digit.
 fn controller_index_from_path(path: &[u8]) -> Option<u8> {

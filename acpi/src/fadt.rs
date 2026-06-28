@@ -25,7 +25,12 @@ const OFF_ACPI_ENABLE: usize = 52;
 const OFF_PM1A_CNT_BLK: usize = 64;
 const OFF_PM1B_CNT_BLK: usize = 68;
 const OFF_DSDT: usize = 40;
+/// IA-PC Boot Architecture Flags (`u16`, ACPI 2.0+; absent on ACPI 1.0 FADTs).
+const OFF_IAPC_BOOT_ARCH: usize = 109;
 const OFF_FLAGS: usize = 112;
+
+/// IAPC_BOOT_ARCH bit 1: the platform has an i8042 (PS/2) controller.
+const IAPC_BOOT_ARCH_8042: u16 = 1 << 1;
 const OFF_RESET_REG: usize = 116; // 12-byte GAS
 const OFF_RESET_VALUE: usize = 128;
 const OFF_X_DSDT: usize = 140;
@@ -80,6 +85,8 @@ pub struct Fadt {
     pub reset: Option<(Gas, u8)>,
     /// Physical address of the DSDT (`X_DSDT` preferred when present).
     pub dsdt_phys: u64,
+    /// IA-PC Boot Architecture Flags (`0` on ACPI 1.0 FADTs that lack the field).
+    pub iapc_boot_arch: u16,
 }
 
 impl Fadt {
@@ -133,6 +140,14 @@ impl Fadt {
             None
         };
 
+        // IA-PC Boot Architecture Flags: ACPI 2.0+ (revision >= 2) and the
+        // table must be long enough to carry the field. Absent ⇒ 0 ("unknown").
+        let iapc_boot_arch = if revision >= 2 && bytes.len() >= OFF_IAPC_BOOT_ARCH + 2 {
+            read_packed::<u16>(bytes, OFF_IAPC_BOOT_ARCH).unwrap_or(0)
+        } else {
+            0
+        };
+
         Some(Fadt {
             pm1a_cnt_port,
             pm1b_cnt_port,
@@ -140,7 +155,15 @@ impl Fadt {
             acpi_enable,
             reset,
             dsdt_phys,
+            iapc_boot_arch,
         })
+    }
+
+    /// Whether the FADT advertises an i8042 (PS/2) controller
+    /// (IAPC_BOOT_ARCH bit 1). `false` on ACPI 1.0 FADTs that lack the field —
+    /// callers should treat that as "unknown" and fall back to a DSDT node check.
+    pub fn has_8042(&self) -> bool {
+        self.iapc_boot_arch & IAPC_BOOT_ARCH_8042 != 0
     }
 }
 
