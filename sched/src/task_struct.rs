@@ -89,17 +89,3 @@ pub fn validate_fpu_state_size() {
         FPU_STATE_SIZE,
     );
 }
-
-// =============================================================================
-// Typestate-encoded task lifecycle handles (Phase 8)
-// =============================================================================
-
-/// Re-exported state markers (`Created`, `Runnable`, `Running`,
-/// `Blocked`, `Zombie`, `Reaped`).
-pub use slopos_ostd::task::task_state;
-
-/// Affine, exclusively-owned handle to a `Task`.
-pub type OwnedTask<S> = slopos_ostd::task::OwnedTaskHandle<Task, S>;
-
-/// Shared, refcounted handle to a `Task`.
-pub type SharedTask<S> = slopos_ostd::task::SharedTaskHandle<Task, S>;

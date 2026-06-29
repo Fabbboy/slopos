@@ -547,33 +547,6 @@ impl<K, U> TaskInner<K, U> {
         self.state.status()
     }
 
-    #[inline]
-    fn sched_placement_is_unowned(&self) -> bool {
-        self.sched_placement.load(Ordering::Acquire) == SchedPlacement::None.as_u8()
-    }
-
-    #[inline]
-    fn reserve_waking(&self) -> bool {
-        self.sched_placement
-            .compare_exchange(
-                SchedPlacement::None.as_u8(),
-                SchedPlacement::Waking.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    #[inline]
-    fn release_waking_reservation(&self) {
-        let _ = self.sched_placement.compare_exchange(
-            SchedPlacement::Waking.as_u8(),
-            SchedPlacement::None.as_u8(),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
     /// Force-publish a new status without changing the block reason.
     #[inline]
     pub fn set_status(&self, status: TaskStatus) {
@@ -806,56 +779,5 @@ impl<K, U> crate::task::LinkProvider<ZombieListRole> for TaskInner<K, U> {
 impl<K, U> crate::task::LinkProvider<RemoteWakeRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, RemoteWakeRole> {
         &self.remote_inbox_link
-    }
-}
-
-// `TaskOps` plug for the OSTD-side typestate handles.
-impl<K, U> crate::task::TaskOps for TaskInner<K, U> {
-    #[inline]
-    fn handle_mark_ready(&self) {
-        if self.sched_placement_is_unowned() {
-            let _ = self.reserve_waking();
-        }
-        self.set_status(slopos_abi::task::TaskStatus::Ready);
-    }
-    #[inline]
-    fn handle_mark_terminated(&self) {
-        self.set_status(slopos_abi::task::TaskStatus::Terminated);
-    }
-    #[inline]
-    fn handle_mark_blocked(&self) {
-        self.set_status(slopos_abi::task::TaskStatus::Blocked);
-    }
-    #[inline]
-    fn handle_inc_ref(&self) {
-        TaskInner::inc_ref(self);
-    }
-    #[inline]
-    fn handle_dec_ref(&self) -> bool {
-        TaskInner::dec_ref(self)
-    }
-    #[inline]
-    fn handle_ref_count(&self) -> u32 {
-        TaskInner::ref_count(self)
-    }
-    #[inline]
-    fn handle_status_is_ready(&self) -> bool {
-        self.status() == slopos_abi::task::TaskStatus::Ready
-    }
-    #[inline]
-    fn handle_try_cas_running(&self) -> bool {
-        let reserved_waking = if self.sched_placement_is_unowned() {
-            self.reserve_waking()
-        } else {
-            false
-        };
-        let ok = self.try_transition_from(
-            slopos_abi::task::TaskStatus::Ready,
-            slopos_abi::task::TaskStatus::Running,
-        );
-        if !ok && reserved_waking {
-            self.release_waking_reservation();
-        }
-        ok
     }
 }

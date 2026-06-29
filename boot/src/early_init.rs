@@ -688,12 +688,8 @@ pub fn kernel_main_impl() {
             token,
             &slopos_ostd::user::mode::DEFAULT_USER_MODE_BACKEND,
         );
-        slopos_ostd::task::register_task_runtime_backend(
-            token,
-            &slopos_ostd::task::DEFAULT_TASK_RUNTIME_BACKEND,
-        );
         slopos_kernel_services::platform::console_puts(
-            b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode/task_runtime tables\n",
+            b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode tables\n",
         );
 
         // Inlined `slopos_mm::io_mem_mapper_shim::register_with_ostd`.

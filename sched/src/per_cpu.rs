@@ -722,21 +722,13 @@ impl PriorityRunQueue {
 
 use slopos_ostd::sync::CacheAligned;
 use slopos_ostd::sync::cpu_local::CpuLocal;
-use slopos_ostd::task::scheduler::{RunQueue, Scheduler, TaskRef};
 
 /// The global preemptive priority scheduler. Owns one
 /// [`PriorityRunQueue`] per CPU through [`CpuLocal`], which guarantees
-/// per-slot pinning and cache-line alignment.
-///
-/// Implements [`slopos_ostd::task::Scheduler`] so OSTD has a typed
-/// handle to the kernel's scheduler. The kernel's rich preemptive
-/// surface (block, unblock, sleep, `schedule_task`, …) lives as free
-/// functions in [`crate::scheduler`] and operates on raw `*mut Task`
-/// with manual refcount accounting; the [`Scheduler`] / [`RunQueue`]
-/// trait bodies here are dormant — they exist so OSTD-side consumers
-/// can talk to whichever scheduler is registered without depending on
-/// `slopos-sched` directly, but no such consumer drives scheduling
-/// through them today.
+/// per-slot pinning and cache-line alignment. The preemptive surface
+/// (block, unblock, sleep, `schedule_task`, …) lives as free functions
+/// in [`crate::scheduler`] and operates on raw `*mut Task` with manual
+/// refcount accounting.
 pub struct PriorityScheduler {
     runqueues: CpuLocal<PriorityRunQueue>,
     pub enabled: AtomicBool,
@@ -761,70 +753,8 @@ impl PriorityScheduler {
     }
 }
 
-impl Scheduler for PriorityScheduler {
-    fn enqueue(&self, _task: TaskRef) {
-        // See struct docs: trait dispatch is dormant. Reaching here
-        // means a new OSTD-side consumer started driving scheduling
-        // through the trait — wire it up to `crate::scheduler` then.
-        unreachable!(
-            "PriorityScheduler::enqueue (trait method) is not a live dispatch \
-             path; the kernel's scheduling driver goes through \
-             crate::scheduler::schedule_task."
-        );
-    }
-
-    fn local_rq_with(&self, f: &mut dyn FnMut(&mut dyn RunQueue)) {
-        // The per-CPU `PriorityRunQueue` is interior-mutable, so the
-        // outer `&mut` borrow on the trait method maps onto a shared
-        // `&` borrow on the run queue. `CpuLocal::get_mut` returns a
-        // `CpuPinnedMut<'_>` that holds a `PreemptGuard` for the
-        // duration of the closure, matching the trait's critical-
-        // section contract.
-        let mut pinned = self.runqueues.get_mut();
-        let rq: &mut PriorityRunQueue = &mut *pinned;
-        f(rq as &mut dyn RunQueue);
-    }
-}
-
-impl RunQueue for PriorityRunQueue {
-    fn update_curr(&mut self) {
-        // Per-tick bookkeeping. The kernel's hot path calls
-        // `scheduler_handle_timer_interrupt` (in scheduler.rs) which
-        // does the heavy lifting; this trait method exists so OSTD-
-        // side tick consumers can also bump the per-CPU counter.
-        self.total_ticks.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn pick_next(&mut self) -> Option<TaskRef> {
-        // Nothing on the run queue is wrapped in a `TaskRef` today;
-        // see struct docs. The kernel's scheduling driver pops tasks
-        // via the rich `crate::scheduler` API and the trait dispatch
-        // path is dormant.
-        None
-    }
-
-    fn dequeue_curr(&mut self) -> Option<TaskRef> {
-        // The "currently running" task is tracked in the per-CPU PCR
-        // (`pcr.current_task`), not on the run queue, so there is
-        // nothing to remove at this layer. Block/exit transitions go
-        // through scheduler.rs.
-        None
-    }
-}
-
 /// The global preemptive scheduler instance.
 pub static PRIORITY_SCHEDULER: PriorityScheduler = PriorityScheduler::new();
-
-/// `&'static &'static dyn Scheduler` handle for the OSTD registration
-/// hook. Boot calls
-/// [`slopos_ostd::task::register_scheduler`] with this handle.
-static PRIORITY_SCHEDULER_DYN: &dyn Scheduler = &PRIORITY_SCHEDULER;
-
-/// Boot wiring entry point — pass the returned handle to
-/// [`slopos_ostd::task::register_scheduler`].
-pub fn scheduler_handle() -> &'static &'static dyn Scheduler {
-    &PRIORITY_SCHEDULER_DYN
-}
 
 /// Bounds-checked accessor over the per-CPU run queues. Thin
 /// delegate to [`PriorityScheduler::runqueue_for`].

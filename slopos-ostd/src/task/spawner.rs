@@ -6,7 +6,6 @@
 //! any driver init step runs.
 //!
 //! One-shot init pattern matches
-//! [`crate::task::scheduler_registry::register_scheduler`] and
 //! [`crate::mm::frame_alloc::register_frame_allocator`]: an `AtomicPtr`
 //! AcqRel-swapped against null, with a panic on double-init.
 
