@@ -698,13 +698,14 @@ pub static EPHEMERAL_PORTS: slopos_ostd::sync::SpinLock<EphemeralPortAllocator> 
 
 use core::cmp;
 
+use slopos_abi::KernelErrno;
 use slopos_abi::event::{KernelEvent, SocketSlot};
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
-    ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_ECONNRESET,
-    ERRNO_EDESTADDRREQ, ERRNO_EFAULT, ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO,
-    ERRNO_EISCONN, ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
-    ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
+    ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ, ERRNO_EFAULT,
+    ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO, ERRNO_EISCONN, ERRNO_ENOMEM,
+    ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR,
+    POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_ostd::sync::BUS;
 
@@ -752,17 +753,7 @@ fn errno_i32(errno: u64) -> i32 {
 }
 
 fn map_tcp_err(err: TcpError) -> i32 {
-    match err {
-        TcpError::NotFound => errno_i32(ERRNO_ENOTSOCK),
-        TcpError::InvalidState => errno_i32(ERRNO_ENOTCONN),
-        TcpError::AddrInUse => errno_i32(ERRNO_EADDRINUSE),
-        TcpError::TableFull => errno_i32(ERRNO_ENOMEM),
-        TcpError::ConnectionRefused => errno_i32(ERRNO_ECONNREFUSED),
-        TcpError::ConnectionReset => errno_i32(ERRNO_ECONNRESET),
-        TcpError::TimedOut => errno_i32(ERRNO_EAGAIN),
-        TcpError::InvalidSegment => errno_i32(ERRNO_EINVAL),
-        TcpError::OutOfMemory => errno_i32(ERRNO_ENOMEM),
-    }
+    err.to_errno()
 }
 
 fn map_tcp_err_i64(err: TcpError) -> i64 {
@@ -770,18 +761,7 @@ fn map_tcp_err_i64(err: TcpError) -> i64 {
 }
 
 fn map_net_err(err: NetError) -> i32 {
-    match err {
-        NetError::AddressInUse => errno_i32(ERRNO_EADDRINUSE),
-        NetError::AddressFamilyNotSupported => errno_i32(ERRNO_EAFNOSUPPORT),
-        NetError::WouldBlock => errno_i32(ERRNO_EAGAIN),
-        NetError::NotConnected => errno_i32(ERRNO_ENOTCONN),
-        NetError::AlreadyConnected => errno_i32(ERRNO_EISCONN),
-        NetError::ProtocolNotSupported => errno_i32(ERRNO_EPROTONOSUPPORT),
-        NetError::NetworkUnreachable | NetError::HostUnreachable => errno_i32(ERRNO_ENETUNREACH),
-        NetError::NoBufferSpace => errno_i32(ERRNO_ENOMEM),
-        NetError::Shutdown => errno_i32(ERRNO_EPIPE),
-        _ => errno_i32(ERRNO_EINVAL),
-    }
+    err.to_errno()
 }
 
 fn alloc_ephemeral_port() -> Option<Port> {
