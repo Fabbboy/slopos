@@ -10,14 +10,7 @@ use slopos_fs::fileio::{
 use slopos_mm::user_copy::copy_to_user;
 
 use crate::syscall::args::{Fd, UserPtr};
-
-fn errno_from_neg(rc: i32) -> Errno {
-    Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
-}
-
-fn errno_from_neg64(rc: i64) -> Errno {
-    Errno::from_raw(rc as i32).unwrap_or(Errno::EINVAL)
-}
+use crate::syscall::common::{errno_from_neg, errno_from_neg64};
 
 define_syscall!(syscall_dup
     (ctx, fd: Fd)

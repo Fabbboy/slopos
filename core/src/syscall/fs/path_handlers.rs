@@ -13,11 +13,7 @@ use slopos_ostd::KVec;
 use slopos_ostd::util::byte_view::pod_slice_as_bytes;
 
 use crate::syscall::args::{Fd, UserBytes, UserCStr, UserPtr};
-use crate::syscall::common::USER_PATH_MAX;
-
-fn errno_from_neg(rc: i32) -> Errno {
-    Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
-}
+use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
 
 define_syscall!(syscall_fs_open
     (ctx, path: UserCStr<USER_PATH_MAX>, flags: u32)

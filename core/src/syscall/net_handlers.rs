@@ -11,14 +11,7 @@ use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
-
-fn errno_from_neg(rc: i32) -> Errno {
-    Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
-}
-
-fn errno_from_neg64(rc: i64) -> Errno {
-    Errno::from_raw(rc as i32).unwrap_or(Errno::EINVAL)
-}
+use crate::syscall::common::{errno_from_neg, errno_from_neg64};
 
 fn rc_i32_to_unit(rc: i32) -> Result<(), Errno> {
     if rc < 0 {

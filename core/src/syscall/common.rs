@@ -8,6 +8,7 @@
 
 use core::ffi::{c_char, c_int};
 
+use slopos_abi::Errno;
 use slopos_ostd::sync::KernelSync;
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
@@ -18,6 +19,18 @@ use crate::syscall::result::SyscallResult;
 
 pub const USER_IO_MAX_BYTES: usize = 512;
 pub use slopos_abi::fs::USER_PATH_MAX;
+
+/// Convert a C-style negative return code into an [`Errno`], clamping
+/// values outside the valid errno range to `EINVAL`.
+pub fn errno_from_neg(rc: i32) -> Errno {
+    Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
+}
+
+/// 64-bit variant of [`errno_from_neg`] for handlers whose backend
+/// returns an `i64` status.
+pub fn errno_from_neg64(rc: i64) -> Errno {
+    Errno::from_raw(rc as i32).unwrap_or(Errno::EINVAL)
+}
 
 pub type SyscallHandler = fn(&SyscallContext) -> SyscallResult;
 
